@@ -5,12 +5,12 @@
 
 import type {
   BsvNetwork,
-  MessageBus,
   PluginLogger,
   WocRequestOptions,
   WocStasService,
   WocStasTokenEntry
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import { WOC_MSG, type WocStasListTokensPayload } from "./wocMessages.js";
 

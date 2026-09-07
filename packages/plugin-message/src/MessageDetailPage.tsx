@@ -10,7 +10,8 @@
 // WebRTC 会话快照是实时状态，保留为本地订阅。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCapability, useCurrentPath, useI18n, usePluginHost, useResource, useResourceSelector, router } from "@keymaster/runtime";
+import { useCapability, useResource, useResourceSelector } from "webloom-framework/react";
+import { useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
 import { EmptyState, TextArea } from "@keymaster/ui";
 import { WEBRTC_SERVICE_CAPABILITY, type KeyspaceService, type WebrtcHistoryItem, type WebrtcMessageService, type WebrtcSessionSnapshot } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";

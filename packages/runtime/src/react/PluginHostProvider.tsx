@@ -4,7 +4,9 @@
 // 硬切换 001：host 进入运行期可卸载，host.version 变化要触发订阅者重渲染。
 
 import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
-import type { PluginHost } from "../createPluginHost.js";
+import { PluginHostProvider as WebLoomPluginHostProvider } from "webloom-framework/react";
+import type { PluginHost } from "../pluginHostContract.js";
+import { getWebLoomHost } from "../pluginHostContract.js";
 
 export const PluginHostContext = createContext<PluginHost | undefined>(undefined);
 
@@ -24,7 +26,11 @@ export function PluginHostProvider({ host, children }: PluginHostProviderProps) 
   }, [host]);
   // version 仅作为"key 变化"挂在这里，不再通过 context 暴露（避免误用）。
   void version;
-  return <PluginHostContext.Provider value={host}>{children}</PluginHostContext.Provider>;
+  return (
+    <WebLoomPluginHostProvider host={getWebLoomHost(host)}>
+      <PluginHostContext.Provider value={host}>{children}</PluginHostContext.Provider>
+    </WebLoomPluginHostProvider>
+  );
 }
 
 export function usePluginHost(): PluginHost {

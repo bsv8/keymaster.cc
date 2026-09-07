@@ -13,7 +13,8 @@
 //     是稳定枚举（`WebrtcBlockReason`），UI 直接 `t(key)` 拿展示文案。
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
+import { useCapability, useResource } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { PageHeader } from "@keymaster/ui";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import { WEBRTC_CALLS_ENABLED, WEBRTC_SERVICE_CAPABILITY } from "./constants.js";

@@ -9,7 +9,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import type { KeyRef, VaultService } from "@keymaster/contracts";
 import { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
 

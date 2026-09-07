@@ -18,7 +18,7 @@
 // 而不是 sleep 等待，避免时序敏感。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createMessageBus } from "@keymaster/runtime";
+import { createMessageBus } from "webloom-framework";
 import { createWocService } from "./wocService.js";
 
 interface FetchCall {

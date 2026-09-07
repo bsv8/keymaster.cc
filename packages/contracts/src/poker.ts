@@ -21,7 +21,7 @@
 //   - 该契约只承载类型，不放实现；实现位于 packages/plugin-poker。
 
 import type { KeyIdentity } from "./keyspace.js";
-import type { MessageBus } from "./messageBus.js";
+import type { MessageBus } from "webloom-framework";
 import type { I18nPluginResources } from "./i18n.js";
 
 /** poker 服务 capability key；plugin-poker 通过 ctx.provide 注册，宿主消费。 */

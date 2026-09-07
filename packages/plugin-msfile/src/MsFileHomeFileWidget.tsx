@@ -23,12 +23,11 @@ import {
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
 import {
   AppLink,
-  useCapability,
   useI18n,
   usePluginHost,
-  useResourceSelector,
   useRuntimeStatus,
 } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";

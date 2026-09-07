@@ -21,7 +21,6 @@
 // 硬切换 003 收尾：短公钥属于 UI 显示格式，不在 Vault 记录中持有；
 // UI 需要展示时按 publicKeyHex 现算。
 
-import type { MessageBus } from "@keymaster/runtime";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, serialize as keyholdSerialize, unlock as keyholdUnlock, recommendedParameters as keyholdRecommendedParameters, type Document as KeyHoldDocument } from "keyhold";
 import { reportFatalError } from "@keymaster/runtime";
 import {
@@ -38,6 +37,7 @@ import {
   type CoordinatorCommandResult
 } from "@keymaster/contracts";
 import type { VaultSessionState } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   aesGcmKeyFromRawBits,
   assertWebCryptoAvailable,

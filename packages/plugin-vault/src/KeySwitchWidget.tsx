@@ -27,7 +27,8 @@
 
 import { useState } from "react";
 import { ChevronDown, KeyRound, Check } from "lucide-react";
-import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";

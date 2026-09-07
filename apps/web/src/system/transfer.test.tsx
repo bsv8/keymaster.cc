@@ -44,6 +44,9 @@ vi.mock("@keymaster/runtime", () => ({
     resourceStore: {},
     i18n: { text: (value: string | { fallback: string }) => typeof value === "string" ? value : value.fallback }
   }),
+}));
+
+vi.mock("webloom-framework/react", () => ({
   useResourceSelector: (_store: unknown, resourceId: string) => {
     if (resourceId === "transfer.offers") return mocks.offers;
     if (resourceId === "transfer.active-key") return { activePublicKeyHex: OWNER };

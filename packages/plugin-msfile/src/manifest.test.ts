@@ -4,8 +4,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionCoordinatorClient } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
-import { createPluginHost } from "@keymaster/runtime";
-import { msfilePlugin } from "./manifest.js";
+import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
+import { msfilePlugin, msfileSetup } from "./manifest.js";
 
 const TEST_OWNER = `02${"11".repeat(32)}`;
 
@@ -36,6 +36,11 @@ describe("msfilePlugin manifest", () => {
         bucketGeneration: 1,
       },
       coordinatorForPlugin: () => coordinator(),
+      runtimeUnitImplementationRegistry: {
+        get: (pluginId, unitId) => pluginId === msfilePlugin.id && unitId === msfilePlugin.units?.[0]?.id
+          ? msfileSetup
+          : undefined,
+      },
       storageBindingAuthority: {
         openOwnerAppStore: async ({ declaration }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
           ...declaration,

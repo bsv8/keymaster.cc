@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { AssetRegistry, AssetSummary, BsvNetwork, I18nText, KeyIdentity, TokenRegistry } from "@keymaster/contracts";
-import { useCapability, useCurrentPath, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useCurrentPath, useI18n, usePluginHost } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
 import type { HoldingRowsResult } from "./assets/holdingsFlow.js";
 

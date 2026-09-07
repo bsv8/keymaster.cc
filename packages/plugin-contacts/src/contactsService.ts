@@ -16,10 +16,10 @@ import type {
   ContactsService,
   KeyValueStore,
   KeyspaceService,
-  MessageBus,
   ChannelRuntime,
   JSONValue
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { newPing } from "bsv8-channel-protocol/ping";
 import { createContactsRepository, type ContactsRepositoryHandle } from "./storage/contactsRepository.js";
 

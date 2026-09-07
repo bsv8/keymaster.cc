@@ -18,8 +18,11 @@
 // 详情页；侧栏仅消费 business.registry 的新设置入口。
 
 import { describe, expect, it } from "vitest";
-import { createPluginHost, type PluginHost } from "./createPluginHost.js";
-import type { PluginContext, PluginManifest } from "@keymaster/contracts";
+import { createTestPluginHost as createPluginHost } from "./testing/createTestPluginHost.js";
+import type { PluginHost } from "./pluginHostContract.js";
+import type { PluginContext } from "@keymaster/contracts";
+import type { TestPluginManifest } from "./testing/createTestPluginHost.js";
+type PluginManifest = TestPluginManifest;
 import type { RouteRegistry } from "./registries/routeRegistry.js";
 import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 

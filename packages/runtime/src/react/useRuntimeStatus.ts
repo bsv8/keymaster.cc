@@ -3,7 +3,7 @@
 // 设计缘由：App 组件需要根据 booting / locked / unlocked 决定渲染哪个 shell。
 
 import { useEffect, useState } from "react";
-import { useCapability } from "./useCapability.js";
+import { useCapability } from "webloom-framework/react";
 import type { VaultService, VaultStatus } from "@keymaster/contracts";
 
 export interface RuntimeStatus {

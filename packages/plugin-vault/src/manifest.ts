@@ -23,8 +23,8 @@ import type {
   BusinessFeatureRegistry,
   CommandRegistry,
   I18nPluginResources,
-  MessageBus,
   PluginManifest,
+  PluginSetup,
   RouteRegistry,
   SettingsRegistry,
   TopbarRegistry
@@ -39,6 +39,7 @@ import type {
   , CoordinatorVaultStatus
   , KeyspaceService
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { KEYSPACE_SERVICE_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, defineRuntimeUnitProvidedContracts, type VaultLocalSecretService, type VaultCoordinatorControl } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
@@ -410,7 +411,7 @@ const vaultResources: I18nPluginResources = {
   }
 };
 
-export const vaultPlugin: PluginManifest = {
+const vaultPluginDefinition = {
   id: "vault",
   name: "Vault",
   description: "本地密码 Vault，管理私钥加解密、内存会话与 active key 状态。",
@@ -624,4 +625,7 @@ export const vaultPlugin: PluginManifest = {
       service.dispose?.();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: vaultSetup, ...vaultPlugin } = vaultPluginDefinition;
+export { vaultSetup, vaultPlugin };

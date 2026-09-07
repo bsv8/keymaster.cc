@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { sha256 } from "@noble/hashes/sha256";
-import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
+import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type KeyspaceService, type P2pkhCoordinatorControl, type ResourceRegistry, type SessionCoordinatorClient } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhTransactionFact } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";

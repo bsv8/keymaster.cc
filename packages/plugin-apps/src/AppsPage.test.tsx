@@ -26,7 +26,7 @@ import {
   type KeyspaceService,
   type ProtocolService
 } from "@keymaster/contracts";
-import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { AppsPage } from "./AppsPage.js";
 import { appsPlugin } from "./manifest.js";
 

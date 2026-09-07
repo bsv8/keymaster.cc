@@ -17,7 +17,8 @@
 
 import React, { useEffect, useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import {
   formatShortPublicKey,
   POKER_SERVICE_CAPABILITY,

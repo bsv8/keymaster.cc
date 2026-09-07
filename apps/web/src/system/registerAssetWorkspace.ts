@@ -18,7 +18,7 @@ import type {
   TransferRegistry
 } from "@keymaster/contracts";
 import { ASSET_DATA_NOTIFIER_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
-import { registerOwnedResource, router, type PluginHost } from "@keymaster/runtime";
+import { registerKeymasterOwnedResource, router, type PluginHost } from "@keymaster/runtime";
 import { AssetsPage, AssetDetailRedirect, AssetsHomeWidget } from "./assets.js";
 import { loadAllHoldings, type HoldingRowsResult as HoldingsLoadResult } from "./assets/holdingsFlow.js";
 import { CollectiblesPage, CollectibleDetailPage } from "./collectibles.js";
@@ -276,7 +276,7 @@ function registerWorkspaceResource<T, TArgs extends readonly string[]>(
   registry: ResourceRegistry,
   definition: ResourceDefinition<T, TArgs>,
 ): void {
-  registerOwnedResource(registry, "asset-workspace", definition);
+  registerKeymasterOwnedResource(registry, "asset-workspace", definition);
 }
 
 function registerAssetsWorkspace(host: PluginHost): void {

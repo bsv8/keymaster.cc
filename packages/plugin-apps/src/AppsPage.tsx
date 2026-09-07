@@ -15,7 +15,8 @@
 //     `LaunchAppViewErrorCode` 类型 + 错误文案维护。
 
 import { useState } from "react";
-import { useCapability, useI18n, navigateTo } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n, navigateTo } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
 import {
   LaunchAppViewError,

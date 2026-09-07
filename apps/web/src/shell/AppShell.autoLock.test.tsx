@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   KeyspaceService,

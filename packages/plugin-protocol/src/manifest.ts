@@ -29,6 +29,7 @@ import type {
   KeyspaceService,
   PluginContext,
   PluginManifest,
+  PluginSetup,
   VaultService,
   ResourceRegistry,
   VaultStatus,
@@ -434,7 +435,7 @@ const protocolResources: I18nPluginResources = {
   }
 };
 
-export const protocolPlugin: PluginManifest = {
+const protocolPluginDefinition = {
   id: PROTOCOL_PLUGIN_ID,
   name: "Protocol",
   description: "对外协议 V1：identity.get / intent.sign / cipher.encrypt / cipher.decrypt + p2pkh.transfer + feepool.prepare / feepool.commit。",
@@ -638,4 +639,7 @@ export const protocolPlugin: PluginManifest = {
         }
       };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: protocolSetup, ...protocolPlugin } = protocolPluginDefinition;
+export { protocolSetup, protocolPlugin };

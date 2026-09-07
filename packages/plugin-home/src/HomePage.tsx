@@ -3,7 +3,8 @@
 // 插件只声明业务 space，空间到布局的映射属于 runtime 产品规则。
 
 import { PageHeader } from "@keymaster/ui";
-import { countRender, useCapability, useI18n } from "@keymaster/runtime";
+import { countRender, useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import type { HomeRegistry, HomeWidget } from "@keymaster/contracts";
 import { BusinessHomePage } from "./BusinessHomePage.js";
 import { HomeActions } from "./HomeActions.js";

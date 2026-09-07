@@ -17,7 +17,8 @@
 // 由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
 // service 内部 storage 监听回灌。
 
-import type { KeyspaceService, MessageBus, TransferOffer, TransferOfferStatus, TransferProvider } from "@keymaster/contracts";
+import type { KeyspaceService, TransferOffer, TransferOfferStatus, TransferProvider } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import type { P2pkhAssetId, P2pkhService, P2pkhSyncStatus } from "./p2pkhContracts.js";
 import { P2PKH_ASSETS } from "./p2pkhContracts.js";
 import { P2pkhTransferWidget } from "./widgets/P2pkhTransferWidget.js";

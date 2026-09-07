@@ -19,8 +19,8 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
-import type { MessageBus } from "@keymaster/runtime";
 import type { BackgroundService, KeyIdentity, OwnerAppStore } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { createKeyspaceService } from "./keyspaceService.js";
 import { createVaultService } from "./vaultService.js";
 import { disposeVaultKeyRepository, vaultKeyRepository, type VaultKeyRecord } from "./storage/vaultKeyRepository.js";

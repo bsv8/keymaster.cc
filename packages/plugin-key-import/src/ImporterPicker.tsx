@@ -4,7 +4,8 @@
 //
 // 硬切换 003：name / description 是 I18nText，渲染时通过 host.i18n.text() 解析。
 
-import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { ImporterRegistry, KeyImporter } from "@keymaster/contracts";
 
 export interface ImporterPickerProps {

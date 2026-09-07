@@ -13,13 +13,14 @@ import type {
   ContactsService,
   I18nPluginResources,
   KeyspaceService,
-  MessageBus,
   SessionCoordinatorClient,
   PluginManifest,
+  PluginSetup,
   ResourceRegistry,
   RouteRegistry,
   Contact
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import {
   KEYSPACE_SERVICE_CAPABILITY,
@@ -180,7 +181,7 @@ export const contactsResources: I18nPluginResources = {
   }
 };
 
-export const contactsPlugin: PluginManifest = {
+const contactsPluginDefinition = {
   id: "contacts",
   name: "Contacts",
   description: "联系人管理（按 key namespace 隔离，身份字段为 publicKeyHex）。",
@@ -362,4 +363,7 @@ export const contactsPlugin: PluginManifest = {
       service.dispose?.();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: contactsSetup, ...contactsPlugin } = contactsPluginDefinition;
+export { contactsSetup, contactsPlugin };

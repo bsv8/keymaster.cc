@@ -30,7 +30,6 @@
 //     不再跑逐把 key backfill。unlock 阶段一次性 AAD 升级由
 //     vaultService 内部完成，keyspace 不再背 prefix "失败但勉强保留"。
 
-import type { MessageBus } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   BackgroundService,
@@ -40,6 +39,7 @@ import type {
   KeyspaceService,
   PluginLogger
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   EVENT_ACTIVE_KEY_CHANGED,
   EVENT_KEYSPACE_INITIALIZATION

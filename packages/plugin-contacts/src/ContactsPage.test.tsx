@@ -8,9 +8,10 @@ import type {
   ContactPresenceMap,
   KeyspaceService,
   PluginManifest,
+  PluginSetup,
   ResourceRegistry
 } from "@keymaster/contracts";
-import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { ContactsPage } from "./ContactsPage.js";
 import { contactsResources } from "./manifest.js";
 
@@ -76,19 +77,27 @@ describe("ContactsPage public-key actions", () => {
   });
 
   it("shows Message only while message is enabled, while Transfer remains after its owner is removed", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [contactsResources] });
+    const setups = new Map<string, PluginSetup>();
+    const host = createPluginHost({
+      disableConfigPersistence: true,
+      initialI18nResources: [contactsResources],
+      runtimeUnitImplementationRegistry: { get: (pluginId) => setups.get(pluginId) },
+    });
     host.provide("keyspace.service", keyspace());
     host.provide("contacts.service", contacts());
-    const actionPlugin = (id: string, actionId: string, label: string, order: number): PluginManifest => ({
-      id, name: id,
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, displayGroup: "business" },
-      dependencies: [{ capability: "contacts.public-key-action.registry", reason: "register contact action" }],
-      setup(ctx) {
+    const actionPlugin = (id: string, actionId: string, label: string, order: number): PluginManifest => {
+      const setup: PluginSetup = (ctx) => {
         ctx.get<import("@keymaster/contracts").ContactPublicKeyActionRegistry>("contacts.public-key-action.registry").register({
           id: actionId, label, order, run: () => undefined
         });
-      }
-    });
+      };
+      setups.set(id, setup);
+      return {
+        id, name: id,
+        meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, displayGroup: "business" },
+        dependencies: [{ capability: "contacts.public-key-action.registry", reason: "register contact action" }],
+      };
+    };
     await host.register(actionPlugin("transfer", "transfer.to-contact", "Transfer", 10));
     await host.register(actionPlugin("message", "message.to-contact", "Message", 20));
     const resources = host.capabilities.get<ResourceRegistry>("resource.registry");

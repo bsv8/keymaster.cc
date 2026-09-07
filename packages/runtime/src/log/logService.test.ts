@@ -17,10 +17,11 @@ import {
   type LogConfig,
   type LogEntry,
   type KeyValueStore,
-  type PluginContext,
-  type PluginManifest
+  type PluginContext
 } from "@keymaster/contracts";
-import { createPluginHost } from "../createPluginHost.js";
+import { createTestPluginHost as createPluginHost } from "../testing/createTestPluginHost.js";
+import type { TestPluginManifest } from "../testing/createTestPluginHost.js";
+type PluginManifest = TestPluginManifest;
 import { configureLogRepository, disposeLogRepository, putEntry } from "./logRepository.js";
 import { createLogService as createRuntimeLogService, type CreateLogServiceOptions, type LogServiceHandle } from "./logService.js";
 

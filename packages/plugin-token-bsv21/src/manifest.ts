@@ -21,8 +21,8 @@ import type {
   BusinessFeatureRegistry,
   I18nPluginResources,
   KeyspaceService,
-  MessageBus,
   PluginManifest,
+  PluginSetup,
   ProtectedOutpointRegistry,
   TokenRegistry,
   VaultService,
@@ -31,6 +31,7 @@ import type {
   WocService,
   WocBsv21Service
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   BACKGROUND_REGISTRY_CAPABILITY,
@@ -152,7 +153,7 @@ const bsv21Resources: I18nPluginResources = {
   }
 };
 
-export const bsv21TokenPlugin: PluginManifest = {
+const bsv21TokenPluginDefinition = {
   id: "token-bsv21",
   name: "BSV-21 tokens",
   description: "BSV-21 fungible token provider：通过 snapshot K-V 读取当前 active key 的 BSV-21 持仓，注入 token.registry。",
@@ -324,4 +325,7 @@ export const bsv21TokenPlugin: PluginManifest = {
       void transferService;
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: bsv21TokenSetup, ...bsv21TokenPlugin } = bsv21TokenPluginDefinition;
+export { bsv21TokenSetup, bsv21TokenPlugin };

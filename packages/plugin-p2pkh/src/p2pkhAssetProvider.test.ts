@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { KeyspaceService, MessageBus } from "@keymaster/contracts";
+import type { KeyspaceService } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import type { P2pkhLocalTransaction, P2pkhService } from "./p2pkhContracts.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 

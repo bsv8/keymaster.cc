@@ -30,7 +30,6 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useCapability: <T,>(_key: string): T => state.service as unknown as T,
   useI18n: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       let value = String(options?.defaultValue ?? key);
@@ -38,10 +37,14 @@ vi.mock("@keymaster/runtime", () => ({
     },
   }),
   usePluginHost: () => ({ resourceStore: {} }),
-  useResourceSelector: <T,>(_store: unknown, id: string, _args: readonly string[], _selector: unknown): T =>
-    (id === "msfile.status" ? state.status : state.lifecycle) as unknown as T,
   useRuntimeStatus: () => ({ vault: state.vault }),
   AppLink: ({ children }: { children?: unknown }) => children,
+}));
+
+vi.mock("webloom-framework/react", () => ({
+  useCapability: <T,>(_key: string): T => state.service as unknown as T,
+  useResourceSelector: <T,>(_store: unknown, id: string, _args: readonly string[], _selector: unknown): T =>
+    (id === "msfile.status" ? state.status : state.lifecycle) as unknown as T
 }));
 
 function bytesFromHex(hex: string): Uint8Array {

@@ -1,4 +1,5 @@
-import type { KeyspaceService, KeyValueStore, MessageBus, P2pkhProviderRegistry } from "@keymaster/contracts";
+import type { KeyspaceService, KeyValueStore, P2pkhProviderRegistry } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { createP2pkhTransactionSync } from "./p2pkhTransactionSync.js";
 import { createP2pkhStateRepository, openP2pkhStateRepository, P2PKH_REPOSITORY_VERSION, P2PKH_STORAGE_ID } from "./storage/p2pkhStateRepository.js";
 

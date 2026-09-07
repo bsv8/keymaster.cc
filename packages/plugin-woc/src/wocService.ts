@@ -16,7 +16,6 @@
 
 import type {
   BsvNetwork,
-  MessageBus,
   PluginLogger,
   WocBalanceResponse,
   WocBroadcastResult,
@@ -29,6 +28,7 @@ import type {
   WocUnconfirmedHistory,
   WocUtxoResponse
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import type { KeyValueStore } from "@keymaster/contracts";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import { createWocActor, type WocActorHandle } from "./wocActor.js";

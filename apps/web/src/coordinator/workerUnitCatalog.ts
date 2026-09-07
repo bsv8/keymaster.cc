@@ -5,7 +5,8 @@
 // 运行单元，taskId 和最终 I/O 审计入口则把实际执行边界连接起来。
 
 import type { FinalIoAuditOperation } from "./finalIoAudit.js";
-import type { PluginLifetime, PluginManifest } from "@keymaster/contracts";
+import type { PluginManifest } from "@keymaster/contracts";
+import type { PluginLifetime } from "webloom-framework";
 import {
   BUILTIN_PLUGIN_PRODUCT_IDS,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,

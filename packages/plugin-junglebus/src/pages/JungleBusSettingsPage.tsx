@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl } from "@keymaster/contracts";
 import { DEFAULT_JUNGLEBUS_CONFIG } from "../jungleBusClient.js";
 

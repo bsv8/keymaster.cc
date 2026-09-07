@@ -8,6 +8,7 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
+    "webloom-framework": "0.1.0",
     "@keymaster/ui": "*",
     "@noble/hashes": "^1.4.0"
   }

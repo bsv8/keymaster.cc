@@ -5,7 +5,7 @@
 // 硬切换 012（施工单 001）：名称从 "JSON File" 改为 "JSON"，因为 importer
 // 已经同时支持 JSON 文件与 JSON 文本；继续叫 "JSON File" 会和实际能力冲突。
 
-import type { I18nPluginResources, ImporterRegistry, PluginManifest } from "@keymaster/contracts";
+import type { I18nPluginResources, ImporterRegistry, PluginManifest, PluginSetup } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { jsonFileImporter } from "./jsonFileImporter.js";
 
@@ -29,7 +29,7 @@ const jsonFileResources: I18nPluginResources = {
   }
 };
 
-export const jsonFileImporterPlugin: PluginManifest = {
+const jsonFileImporterPluginDefinition = {
   id: "importer-json-file",
   name: "JSON Importer",
   description: "从钱包 JSON 导出文件 / JSON 文本中提取私钥。",
@@ -56,4 +56,7 @@ export const jsonFileImporterPlugin: PluginManifest = {
       // no-op
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: jsonFileImporterSetup, ...jsonFileImporterPlugin } = jsonFileImporterPluginDefinition;
+export { jsonFileImporterSetup, jsonFileImporterPlugin };

@@ -6,7 +6,7 @@ import {
   KEYSPACE_SERVICE_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
-import type { I18nPluginResources, PluginManifest } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup } from "@keymaster/contracts";
 import { HomePage } from "./HomePage.js";
 
 /** 首页 i18n 资源。设计缘由：route / menu label 走 I18nText，
@@ -113,7 +113,7 @@ const homeResources: I18nPluginResources = {
   }
 };
 
-export const homePlugin: PluginManifest = {
+const homePluginDefinition = {
   id: "home",
   name: "Home",
   description: "首页容器。",
@@ -153,4 +153,7 @@ export const homePlugin: PluginManifest = {
   }],
   i18n: homeResources,
   setup() {}
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: homeSetup, ...homePlugin } = homePluginDefinition;
+export { homeSetup, homePlugin };

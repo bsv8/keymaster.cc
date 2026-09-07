@@ -1,4 +1,4 @@
-import type { BreadcrumbProvider, BreadcrumbRegistry, I18nPluginResources, PluginManifest, SystemSettingsRegistry, P2pkhCoordinatorControl } from "@keymaster/contracts";
+import type { BreadcrumbProvider, BreadcrumbRegistry, I18nPluginResources, PluginManifest, PluginSetup, SystemSettingsRegistry, P2pkhCoordinatorControl } from "@keymaster/contracts";
 import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { JungleBusSettingsPage } from "./pages/JungleBusSettingsPage.js";
 
@@ -10,7 +10,7 @@ export const jungleBusResources: I18nPluginResources = {
   }
 };
 
-export const jungleBusPlugin: PluginManifest = {
+const jungleBusPluginDefinition = {
   id: "junglebus", name: "JungleBus", description: "Confirmed transaction sync provider; no broadcast or subscription capability.",
   meta: { kind: "platform", startup: "optional", bootstrapStage: "owner-apps-ready", defaultEnabled: true, canDisable: true, displayGroup: "platform" },
   units: [{
@@ -43,4 +43,7 @@ export const jungleBusPlugin: PluginManifest = {
     breadcrumbs.register(provider);
     return () => { void coordinator.p2pkhProviderConfigUpdate("junglebus", { enabled: false }); };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: jungleBusSetup, ...jungleBusPlugin } = jungleBusPluginDefinition;
+export { jungleBusSetup, jungleBusPlugin };

@@ -11,7 +11,8 @@
 //     这套共享 class，业务专属细节走 poker-home-widget* 修饰类。
 
 import React from "react";
-import { countRender, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { countRender, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import {
   formatShortPublicKey,
   type PokerConnectionStatus,

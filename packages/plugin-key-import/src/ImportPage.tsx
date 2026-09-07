@@ -27,14 +27,15 @@
 
 import { useEffect, useReducer } from "react";
 import { Button, EmptyState, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type {
   ImporterRegistry,
   KeyImportResult,
   KeyImporter,
-  MessageBus,
   VaultService
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { ImporterPicker } from "./ImporterPicker.js";
 import { persistImport } from "./importFlow.js";
 import {

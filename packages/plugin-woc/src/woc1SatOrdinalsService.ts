@@ -10,13 +10,13 @@
 
 import type {
   BsvNetwork,
-  MessageBus,
   PluginLogger,
   Woc1SatOrdinalsContent,
   Woc1SatOrdinalsInscription,
   Woc1SatOrdinalsService,
   WocRequestOptions
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import { WOC_MSG, type Woc1SatContentPayload, type Woc1SatOutpointPayload, type WocTxOutputScriptPayload } from "./wocMessages.js";
 

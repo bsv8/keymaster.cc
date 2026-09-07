@@ -5,7 +5,7 @@
 // 硬切换 003：WIF 短码字面量稳定，name 走 string（不再走 I18nText）；
 // 但提供 i18n 资源覆盖 importer 名称/描述，方便设置/历史页展示。
 
-import type { I18nPluginResources, ImporterRegistry, PluginManifest } from "@keymaster/contracts";
+import type { I18nPluginResources, ImporterRegistry, PluginManifest, PluginSetup } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { wifImporter } from "./wifImporter.js";
 
@@ -27,7 +27,7 @@ const wifResources: I18nPluginResources = {
   }
 };
 
-export const wifImporterPlugin: PluginManifest = {
+const wifImporterPluginDefinition = {
   id: "importer-wif",
   name: "WIF Importer",
   description: "支持 WIF 文本私钥导入。",
@@ -55,4 +55,7 @@ export const wifImporterPlugin: PluginManifest = {
       // host owner 回收时会 unregister importer；这里 no-op。
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: wifImporterSetup, ...wifImporterPlugin } = wifImporterPluginDefinition;
+export { wifImporterSetup, wifImporterPlugin };

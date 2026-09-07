@@ -8,7 +8,8 @@
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { AssetDataNotifier, CoordinatorValueResult, MessageBus, PluginLogger, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
+import type { AssetDataNotifier, CoordinatorValueResult, PluginLogger, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
   P2pkhKeyResource,

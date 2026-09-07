@@ -3,6 +3,7 @@
 
 export {
   bsvPricePlugin,
+  bsvPriceSetup,
   BSV_PRICE_PLUGIN_ID,
   BSV_PRICE_SERVICE_CAPABILITY
 } from "./manifest.js";

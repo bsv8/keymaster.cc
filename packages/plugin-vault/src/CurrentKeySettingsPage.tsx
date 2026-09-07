@@ -2,12 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
 import {
   router,
-  useCapability,
   useI18n,
   useLocale,
   usePluginHost,
-  useResourceSelector
 } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type { PasskeyProtection, VaultService } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";

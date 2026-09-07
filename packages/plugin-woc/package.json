@@ -9,6 +9,7 @@
     "@noble/hashes": "^1.4.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "@keymaster/ui": "*"
+    "@keymaster/ui": "*",
+    "webloom-framework": "0.1.0"
   }
 }

@@ -8,6 +8,7 @@ import type {
   BackgroundTaskSnapshot,
   I18nPluginResources,
   PluginManifest,
+  PluginSetup,
   ResourceRegistry,
   SystemSettingsRegistry,
   TopbarRegistry,
@@ -104,7 +105,7 @@ const backgroundResources: I18nPluginResources = {
   }
 };
 
-export const backgroundPlugin: PluginManifest = {
+const backgroundPluginDefinition = {
   id: "background",
   name: "Background",
   description: "通用后台任务平台：注册、调度、去重、Topbar 托盘。",
@@ -225,4 +226,7 @@ export const backgroundPlugin: PluginManifest = {
       (service as BackgroundService & { dispose?: () => void }).dispose?.();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: backgroundSetup, ...backgroundPlugin } = backgroundPluginDefinition;
+export { backgroundSetup, backgroundPlugin };

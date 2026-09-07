@@ -18,8 +18,8 @@ import type {
   CollectibleRegistry,
   I18nPluginResources,
   KeyspaceService,
-  MessageBus,
   PluginManifest,
+  PluginSetup,
   ProtectedOutpointRegistry,
   RouteRegistry,
   CollectibleTransferRegistry,
@@ -27,6 +27,7 @@ import type {
   WocService,
   Woc1SatOrdinalsService
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   BACKGROUND_REGISTRY_CAPABILITY,
@@ -129,7 +130,7 @@ const oneSatResources: I18nPluginResources = {
   }
 };
 
-export const oneSatOrdinalsCollectiblePlugin: PluginManifest = {
+const oneSatOrdinalsCollectiblePluginDefinition = {
   id: "collectible-1satordinals",
   name: "1Sat Ordinals",
   description: "1Sat Ordinals collectible provider：通过当前 active key 的 P2PKH 未花费 UTXO 反查 WOC 1Sat endpoint，把命中的 outpoint 注入 collectible.registry。",
@@ -279,4 +280,7 @@ export const oneSatOrdinalsCollectiblePlugin: PluginManifest = {
       void transferHandler;
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: oneSatOrdinalsCollectibleSetup, ...oneSatOrdinalsCollectiblePlugin } = oneSatOrdinalsCollectiblePluginDefinition;
+export { oneSatOrdinalsCollectibleSetup, oneSatOrdinalsCollectiblePlugin };

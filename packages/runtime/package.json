@@ -5,11 +5,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./messageBus": "./src/messageBus.ts",
     "./storage": "./src/storage/inMemoryKeyValueStore.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@keymaster/contracts": "*"
+    "@keymaster/contracts": "*",
+    "webloom-framework": "0.1.0"
   }
 }

@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import type { ActiveKeyState, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
-import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
+import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import type { PluginHost } from "@keymaster/runtime";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { contactsResources } from "./manifest.js";

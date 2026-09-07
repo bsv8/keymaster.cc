@@ -8,6 +8,7 @@ import type {
   I18nPluginResources,
   PluginContext,
   PluginManifest,
+  PluginSetup,
   ResourceRegistry,
   SatSubscriptionAdminService,
   SatSubscriptionSpiService,
@@ -131,7 +132,7 @@ const resources: I18nPluginResources = {
   }
 };
 
-export const satSubscriptionPlugin: PluginManifest = {
+const satSubscriptionPluginDefinition = {
   id: SAT_SUBSCRIPTION_PLUGIN_ID,
   name: "SatSubscription",
   description: "SSP multi-supplier subscriptions and SPI management.",
@@ -248,4 +249,7 @@ export const satSubscriptionPlugin: PluginManifest = {
       status.unregister(statusId);
     });
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: satSubscriptionSetup, ...satSubscriptionPlugin } = satSubscriptionPluginDefinition;
+export { satSubscriptionSetup, satSubscriptionPlugin };

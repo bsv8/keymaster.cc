@@ -29,6 +29,9 @@ vi.mock("@keymaster/runtime", () => ({
       text: (value: { fallback?: string } | string) => typeof value === "string" ? value : value.fallback ?? ""
     }
   }),
+}));
+
+vi.mock("webloom-framework/react", () => ({
   useCapability: (capability: string) => {
     if (capability === "collectible.registry") {
       return mocks.collectibles;

@@ -34,11 +34,6 @@ import type {
   ContactPresenceMap,
   CoordinatorWorkerUnitStateEvent,
   StorageBootstrapState,
-  PluginIntentCommand,
-  PluginIntentSnapshot,
-  PluginIntentSubmissionResult,
-  RemoteServiceBridge,
-  RemoteServicePortControlMessage,
 } from "@keymaster/contracts";
 import { COORDINATOR_SERVICE_PROTOCOL_VERSION } from "@keymaster/contracts";
 import type {
@@ -49,7 +44,17 @@ import type {
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { readStorageBootstrap } from "@keymaster/platform-storage/coordinator/bootstrap";
-import { createMessagePortServiceTransport, createServiceBridge } from "@keymaster/runtime";
+import {
+  createMessagePortServiceTransport,
+  createServiceBridge,
+  type RemoteServiceBridge,
+  type RemoteServiceHandshake,
+  type RemoteServiceSnapshot,
+  type PluginIntentCommand,
+  type PluginIntentSnapshot,
+  type PluginIntentSubmissionResult,
+} from "webloom-framework";
+import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 
 // ============================================================
 // 1. Client Types
@@ -484,7 +489,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.disposeServiceBridge("Coordinator service bridge replaced");
     const channel = new MessageChannel();
     const servicePort = channel.port1;
-    const transport = createMessagePortServiceTransport({ port: servicePort });
+    const transport = createMessagePortServiceTransport({
+      port: servicePort,
+      codec: keymasterRemoteServiceMessageCodec,
+    });
     const bridge = createServiceBridge({
       protocolVersion: COORDINATOR_SERVICE_PROTOCOL_VERSION,
       transport,
@@ -493,28 +501,30 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     servicePort.start();
     this.servicePort = servicePort;
     this.serviceTransport = transport;
+    // WebLoom 的通用 Reference 将 Keymaster 的 owner/session 字段收进
+    // attributes；这里保留旧 wire 对象原样传输，不增加字段、不改变协议。
     this.serviceBridge = bridge;
     // port2 只在 hello 中转移给 Coordinator；页面永远不再直接持有 Provider 端口。
     return channel.port2;
   }
 
   private readonly handleServiceBridgeMessage = (event: MessageEvent): void => {
-    const data = event.data as Partial<RemoteServicePortControlMessage> | undefined;
-    if (!data || typeof data !== "object" || typeof data.type !== "string") return;
-    if (data.type === "keymaster.remote-service.handshake" && "handshake" in data && data.handshake) {
-      this.serviceBridge?.handshake(data.handshake);
+    const data = keymasterRemoteServiceMessageCodec.decode(event.data);
+    if (!data) return;
+    if (data.type === keymasterRemoteServiceMessageCodec.type("handshake") && data.handshake) {
+      this.serviceBridge?.handshake(data.handshake as RemoteServiceHandshake);
       return;
     }
-    if (data.type === "keymaster.remote-service.snapshot" && "snapshot" in data && data.snapshot) {
-      this.serviceBridge?.applySnapshot(data.snapshot);
+    if (data.type === keymasterRemoteServiceMessageCodec.type("snapshot") && data.snapshot) {
+      this.serviceBridge?.applySnapshot(data.snapshot as RemoteServiceSnapshot);
       return;
     }
-    if (data.type === "keymaster.remote-service.invalidate") {
-      this.serviceBridge?.invalidate(data.reason);
+    if (data.type === keymasterRemoteServiceMessageCodec.type("invalidate")) {
+      this.serviceBridge?.invalidate("reason" in data && typeof data.reason === "string" ? data.reason : undefined);
       return;
     }
-    if (data.type === "keymaster.remote-service.disconnect") {
-      this.serviceBridge?.disconnect(data.reason);
+    if (data.type === keymasterRemoteServiceMessageCodec.type("disconnect")) {
+      this.serviceBridge?.disconnect("reason" in data && typeof data.reason === "string" ? data.reason : undefined);
     }
   };
 

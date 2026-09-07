@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController.js";
-import { useCapability, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { usePluginHost } from "@keymaster/runtime";
 import type { StorageRuntimeController } from "@keymaster/contracts";
 import { StorageOnboardingPage } from "./StorageOnboardingPage.js";
 

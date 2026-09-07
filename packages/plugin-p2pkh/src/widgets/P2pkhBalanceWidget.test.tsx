@@ -8,7 +8,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
+import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import type { ActiveKeyState, KeyspaceService, ResourceRegistry } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import type { P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";

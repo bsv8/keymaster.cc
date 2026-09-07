@@ -17,6 +17,7 @@ import type {
   I18nPluginResources,
   KeyspaceService,
   PluginManifest,
+  PluginSetup,
   ResourceRegistry
 } from "@keymaster/contracts";
 import {
@@ -154,7 +155,7 @@ const bsvPriceResources: I18nPluginResources = {
  *     隐式注入路径，避免"`globalThis.__PRICECAST_PUBLISHER_PUBKEY__`
  *     被忽略谁知道写了什么"这类部署歧义。
  */
-export const bsvPricePlugin: PluginManifest = {
+const bsvPricePluginDefinition = {
   id: BSV_PRICE_PLUGIN_ID,
   name: "BSV Price",
   description:
@@ -324,4 +325,8 @@ export const bsvPricePlugin: PluginManifest = {
       service.dispose();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: bsvPriceSetup, ...bsvPricePlugin } = bsvPricePluginDefinition;
+
+export { bsvPricePlugin, bsvPriceSetup };

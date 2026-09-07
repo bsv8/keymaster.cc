@@ -26,14 +26,7 @@ vi.mock("@keymaster/runtime", async () => {
     await vi.importActual<typeof import("@keymaster/runtime")>("@keymaster/runtime");
   return {
     ...actual,
-    useCapability: <T,>(_key: string): T =>
-      activeTestService.service as unknown as T,
     usePluginHost: () => ({ resourceStore: {} }),
-    useResource: () => {
-      const service = activeTestService.service;
-      const snapshot = useSyncExternalStore(service.subscribe, service.snapshot, service.snapshot);
-      return { data: snapshot };
-    },
     useI18n: () => ({
       t: (_key: string, opts?: { defaultValue?: string }) =>
         opts?.defaultValue ?? _key,
@@ -48,6 +41,16 @@ vi.mock("@keymaster/runtime", async () => {
     })
   };
 });
+
+vi.mock("webloom-framework/react", () => ({
+  useCapability: <T,>(_key: string): T =>
+    activeTestService.service as unknown as T,
+  useResource: () => {
+    const service = activeTestService.service;
+    const snapshot = useSyncExternalStore(service.subscribe, service.snapshot, service.snapshot);
+    return { data: snapshot };
+  }
+}));
 
 function createSnapshot(partial: Partial<WebrtcSessionSnapshot>): WebrtcSessionSnapshot {
   return {

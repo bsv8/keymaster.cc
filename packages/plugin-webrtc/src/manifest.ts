@@ -13,6 +13,7 @@ import type {
   ContactsService,
   ChannelRuntimeFactory,
   PluginManifest,
+  PluginSetup,
   NoticeRegistry,
   SystemSettingsRegistry
   ,ResourceRegistry
@@ -184,7 +185,7 @@ const webrtcResources: I18nPluginResources = {
 /**
  * WebRTC 业务插件 manifest。
  */
-export const webrtcPlugin: PluginManifest = {
+const webrtcPluginDefinition = {
   id: WEBRTC_PLUGIN_ID,
   name: "WebRTC",
   description:
@@ -332,4 +333,8 @@ export const webrtcPlugin: PluginManifest = {
       await service.dispose();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: webrtcSetup, ...webrtcPlugin } = webrtcPluginDefinition;
+
+export { webrtcPlugin, webrtcSetup };

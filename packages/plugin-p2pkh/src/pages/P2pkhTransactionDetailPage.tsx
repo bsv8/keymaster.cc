@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader, formatSats } from "@keymaster/ui";
-import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import type { P2pkhGlobalSettings, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionFact } from "../p2pkhContracts.js";
 import { formatLocalTime, inputAmount, listPath, parseStoredTransaction, readPage, readTransactionId, readTransactionNetwork, readTransactionSource, readTransactionSubmissionId } from "./p2pkhTransactionView.js";
 import { type WalletSnapshot } from "./P2pkhWalletPage.js";

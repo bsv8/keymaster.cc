@@ -8,7 +8,7 @@
 //   - useLocale() 返回当前语言；formatSats / Intl 调用方使用。
 
 import { useCallback, useMemo, useSyncExternalStore } from "react";
-import { useCapability } from "./useCapability.js";
+import { useCapability } from "webloom-framework/react";
 import type {
   I18nService,
   I18nText,

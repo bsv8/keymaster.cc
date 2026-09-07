@@ -15,6 +15,7 @@ import type {
   BreadcrumbRegistry,
   I18nPluginResources,
   PluginManifest,
+  PluginSetup,
   SystemSettingsRegistry
 } from "@keymaster/contracts";
 import { LOG_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -241,7 +242,7 @@ const settingsResources: I18nPluginResources = {
   }
 };
 
-export const settingsPlugin: PluginManifest = {
+const settingsPluginDefinition = {
   id: "settings",
   name: "Settings",
   description: "系统级设置页：语言、插件管理。",
@@ -376,4 +377,7 @@ export const settingsPlugin: PluginManifest = {
       // no-op
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: settingsSetup, ...settingsPlugin } = settingsPluginDefinition;
+export { settingsSetup, settingsPlugin };

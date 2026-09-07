@@ -12,7 +12,8 @@ import {
   SYSTEM_STORAGE_DECLARATIONS,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
 } from "@keymaster/contracts";
-import type { RemoteServiceBridge, VaultCoordinatorControl } from "@keymaster/contracts";
+import type { VaultCoordinatorControl } from "@keymaster/contracts";
+import type { RemoteServiceBridge } from "webloom-framework";
 import { createStorageBindingAuthority, requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
 import { createSessionCryptoEngine } from "@keymaster/plugin-vault";
 import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";

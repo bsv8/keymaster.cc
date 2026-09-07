@@ -30,12 +30,12 @@ import type {
   KeyIdentity,
   KeyspaceService,
   KeyValueStore,
-  MessageBus,
   PluginLogger,
   PokerService,
   PokerSessionKeyState,
   VaultService
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { createKeyValueSettingsStore, type KeyValueSettingsStore } from "@keymaster/runtime";
 import {
   POKER_BROWSER_PROTOCOL_VERSION,
@@ -89,7 +89,7 @@ export interface PokerServiceDeps {
 /**
  * createPokerService 构造 PokerService 实例。
  *
- * 设计缘由：plugin-poker 的 manifest.setup 阶段调用本函数；service 不
+ * 设计缘由：plugin-poker 的插件装配阶段调用本函数；service 不
  * 与 React / 路由耦合，单独可单测。
  */
 export function createPokerService(deps: PokerServiceDeps): PokerService & { ready(): Promise<void> } {

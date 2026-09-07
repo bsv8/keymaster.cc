@@ -16,16 +16,16 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
+import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import type {
   KeyImporter,
   KeyImportInput,
   KeyImportResult,
   VaultService,
   VaultStatus,
-  MessageBus,
   ImporterRegistry
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { FirstTimeImportWizard } from "./FirstTimeImportWizard.js";
 import { keyImportResources } from "@keymaster/plugin-key-import/manifest";
 import { SHELL_RESOURCES } from "../i18n/resources";

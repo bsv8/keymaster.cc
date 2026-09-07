@@ -11,7 +11,6 @@
 
 import type {
   BsvNetwork,
-  MessageBus,
   PluginLogger,
   WocBsv21BalanceResponse,
   WocBsv21TokenDetail,
@@ -20,6 +19,7 @@ import type {
   WocBsv21TokenMeta,
   WocRequestOptions
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import {
   WOC_MSG,

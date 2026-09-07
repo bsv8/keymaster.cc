@@ -10,7 +10,7 @@ import type {
   SessionCoordinatorClient
 } from "@keymaster/contracts";
 import type { SessionStateMirror } from "./sessionStateMirror.js";
-import type { MessageBus } from "@keymaster/runtime";
+import type { MessageBus } from "webloom-framework";
 
 type CoordinatorClientLike = Pick<SessionCoordinatorClient, "backgroundCancelByKey" | "vaultOperation">;
 export type KeyspaceCoordinatorHandle = KeyspaceService;

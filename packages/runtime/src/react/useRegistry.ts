@@ -11,7 +11,7 @@
 // 不再假定"host 挂载后不变"。
 
 import { useMemo } from "react";
-import type { PluginHost } from "../createPluginHost.js";
+import type { PluginHost } from "../pluginHostContract.js";
 import { usePluginHost, useHostVersion } from "./PluginHostProvider.js";
 
 export function useRegistry<T>(selector: (host: PluginHost) => T): T {

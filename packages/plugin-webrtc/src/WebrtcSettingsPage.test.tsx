@@ -79,8 +79,6 @@ vi.mock("@keymaster/runtime", async () => {
     await vi.importActual<typeof import("@keymaster/runtime")>("@keymaster/runtime");
   return {
     ...actual,
-    useCapability: <T,>(_key: string): T =>
-      activeTestService.service as unknown as T,
     useI18n: () => ({
       t: (_key: string, opts?: { defaultValue?: string }) =>
         opts?.defaultValue ?? _key,
@@ -95,6 +93,11 @@ vi.mock("@keymaster/runtime", async () => {
     })
   };
 });
+
+vi.mock("webloom-framework/react", () => ({
+  useCapability: <T,>(_key: string): T =>
+    activeTestService.service as unknown as T
+}));
 
 describe("WebrtcSettingsPage", () => {
   beforeEach(() => {

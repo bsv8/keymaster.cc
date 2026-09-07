@@ -8,7 +8,7 @@
 // 硬切换 004：移除 `createPokerIdentityBinding` 旧导出（绑定概念已删除）。
 // pokerGlobalConfig / pokerSessionKey 作为内部模块，不在公开面暴露。
 
-export { pokerPlugin, POKER_SERVICE_CAPABILITY } from "./manifest.js";
+export { pokerPlugin, pokerSetup, POKER_SERVICE_CAPABILITY } from "./manifest.js";
 export { createPokerService } from "./pokerService.js";
 export type {
   PokerService,

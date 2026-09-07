@@ -13,18 +13,18 @@
 //   - 我们不能跨包边界 import plugin-importer-json-file，所以这里直接造
 //     一个最小的 JSON importer 用于 ImportPage 测试。
 
-import { createPluginHost } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import type {
   I18nPluginResources,
   ImporterRegistry,
   KeyImporter,
   KeyImportInput,
   KeyImportResult,
-  MessageBus,
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
-import { keyImportResources } from "../manifest.js";
+import type { MessageBus } from "webloom-framework";
+import { keyImportResources, keyImportSetup } from "../manifest.js";
 
 export interface TestHostOptions {
   /** 额外的 importer 注册到 importer.registry。 */
@@ -77,7 +77,10 @@ function makeTestJsonImporter(): KeyImporter {
 export function createTestHost(opts: TestHostOptions = {}): TestHostHandle {
   const host = createPluginHost({
     disableConfigPersistence: true,
-    initialI18nResources: [keyImportResources]
+    initialI18nResources: [keyImportResources],
+    runtimeUnitImplementationRegistry: {
+      get: (pluginId) => pluginId === "key-import" ? keyImportSetup : undefined,
+    },
   });
   const vault = makeStubVault(opts.vaultStatus ?? "unlocked");
   host.capabilities.provide<VaultService>("vault.service", vault);

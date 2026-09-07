@@ -20,7 +20,8 @@
 //     由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
 //     service 内部 storage 监听回灌。
 
-import type { AssetActivity, AssetProvider, AssetSummary, AssetStatus, KeyspaceService, MessageBus } from "@keymaster/contracts";
+import type { AssetActivity, AssetProvider, AssetSummary, AssetStatus, KeyspaceService } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
   P2pkhService,

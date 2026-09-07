@@ -13,9 +13,12 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useCapability: <T,>(_key: string): T => state.service as unknown as T,
   useI18n: () => ({ t: (key: string) => key }),
-  usePluginHost: () => ({ resourceStore: {} }),
+  usePluginHost: () => ({ resourceStore: {} })
+}));
+
+vi.mock("webloom-framework/react", () => ({
+  useCapability: <T,>(_key: string): T => state.service as unknown as T,
   useResourceSelector: () => state.resource
 }));
 

@@ -15,7 +15,8 @@ import type {
   SatSpiCurrencyBalance
 } from "@keymaster/contracts";
 import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 
 function emptyDraft(): SatSupplierConfigV1 {

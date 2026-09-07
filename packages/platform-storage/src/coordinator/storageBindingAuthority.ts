@@ -9,9 +9,8 @@ import type {
   KeyValueStore,
   KeyValueValue,
   PluginStorageDeclaration,
-  RemoteServiceBridge,
-  RemoteServiceProxy
 } from "@keymaster/contracts";
+import type { RemoteServiceBridge, RemoteServiceProxy } from "webloom-framework";
 import { COORDINATOR_OWNER_STORAGE_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import type { CoordinatorOwnerStorageData, CoordinatorPlatformStorageData, StorageBindingAuthority, StorageBindingCoordinatorClient, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 

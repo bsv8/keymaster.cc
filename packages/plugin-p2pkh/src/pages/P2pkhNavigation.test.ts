@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { createPluginHost } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import type { BusinessFeatureRegistry, RouteRegistry } from "@keymaster/contracts";
 import { registerP2pkhNavigation } from "./P2pkhNavigation.js";
 

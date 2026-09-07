@@ -11,19 +11,17 @@
 //     client，也不维护消息传输状态。
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import {
-  createPluginHost,
-  StartupCapabilityError,
-  StartupPluginError,
-  type PluginHost
-} from "./createPluginHost.js";
-import { CHANNEL_RUNTIME_CAPABILITY, type ChannelRuntime, type ChannelRuntimeFactory, type KeyValueStore, type PluginContext, type PluginIntentCoordinator, type PluginManifest, type ResourceRegistry } from "@keymaster/contracts";
+import { createTestPluginHost as createPluginHost } from "./testing/createTestPluginHost.js";
+import type { PluginHost } from "./pluginHostContract.js";
+import { StartupCapabilityError, StartupPluginError, type PluginIntentCoordinator } from "webloom-framework";
+import { CHANNEL_RUNTIME_CAPABILITY, type ChannelRuntime, type ChannelRuntimeFactory, type KeyValueStore, type PluginContext, type ResourceRegistry } from "@keymaster/contracts";
+import type { TestPluginManifest } from "./testing/createTestPluginHost.js";
+type PluginManifest = TestPluginManifest;
 import type { RouteRegistry } from "./registries/routeRegistry.js";
 import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 import { createInMemoryKeyValueStore } from "./storage/inMemoryKeyValueStore.js";
-import { createPluginIntentController } from "./lifecycle/pluginIntentController.js";
-import { createRuntimeUnitImplementationRegistry } from "./lifecycle/runtimeUnitImplementationRegistry.js";
+import { createPluginIntentController, createRuntimeUnitImplementationRegistry } from "webloom-framework";
 
 interface RegistryViews {
   routes: { ids: string[] };
@@ -513,9 +511,6 @@ describe("createPluginHost - lifecycle", () => {
         lifetime: "owner-session",
         provides: ["intent.product"],
       }],
-      setup() {
-        throw new Error("product-level setup must not run when a unit is selected");
-      },
     });
     expect(host.state("intent-product")).toMatchObject({ kind: "registered", lifecycleState: "disabled", desiredEnabled: false });
 
@@ -667,10 +662,12 @@ describe("createPluginHost - lifecycle", () => {
         expect(ctx.permissions).toEqual(["storage.read"]);
         expect(ctx.permissionLease.binding.instanceId).toBe(ctx.instanceId);
         expect(ctx.permissionLease.binding.pluginId).toBe(ctx.pluginId);
-        expect(ctx.permissionLease.binding.ownerPublicKeyHex).toBe("02" + "22".repeat(32));
-        expect(ctx.permissionLease.binding.sessionEpoch).toBe("owner-session:1");
-        expect(ctx.permissionLease.binding.bucketGeneration).toBe(7);
-        expect(ctx.permissionLease.binding.authorizationRevision).toBe(3);
+        expect(ctx.permissionLease.binding.attributes).toMatchObject({
+          ownerPublicKeyHex: "02" + "22".repeat(32),
+          sessionEpoch: "owner-session:1",
+          bucketGeneration: 7,
+          authorizationRevision: 3,
+        });
       },
     });
     expect(lease.has("storage.read")).toBe(true);

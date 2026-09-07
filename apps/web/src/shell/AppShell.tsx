@@ -29,7 +29,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { countRender, useCapability, useCurrentPath, useI18n, useOptionalCapability, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
+import { countRender, useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
+import { useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   InitialActivationNotice,

@@ -16,7 +16,8 @@
 
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus } from "@keymaster/contracts";
 import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, APPLICATION_BOOTSTRAP_RESOURCE_ID } from "@keymaster/contracts";
-import { useHasCapability, useI18n, useOptionalCapability, usePluginHost, useResourceSelector, useRuntimeStatus } from "@keymaster/runtime";
+import { useHasCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
 import { StorageOnboardingPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
 import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
 import { LockedShell } from "./shell/LockedShell.js";

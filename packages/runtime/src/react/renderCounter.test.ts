@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countRender, getRenderCount, resetRenderCounters } from "./renderCounter.js";
+import { countRender, getRenderCount, resetRenderCounters } from "webloom-framework/react";
 
 describe("renderCounter", () => {
   it("counts and resets test renders", () => {

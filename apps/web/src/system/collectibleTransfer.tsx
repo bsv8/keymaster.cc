@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CollectibleDetail, CollectibleProvider, CollectibleRef, CollectibleRegistry, CollectibleTransferHandler, CollectibleTransferRegistry } from "@keymaster/contracts";
-import { useCapability, useCurrentPath, useI18n, usePluginHost } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useCurrentPath, useI18n, usePluginHost } from "@keymaster/runtime";
 import { EmptyState, PageHeader } from "@keymaster/ui";
 
 function readQuery(name: string): string {

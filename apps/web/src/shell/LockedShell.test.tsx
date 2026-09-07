@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
 import { registerShellResources } from "./shellResources.js";

@@ -72,14 +72,9 @@ import type {
   ActiveKeyCrypto,
   StorageSecretEnvelope,
   StorageBootstrapState,
-  PluginIntentController,
-  PluginIntentSnapshot,
   PluginIntentStateEvent,
-  RemoteServiceReference,
-  RemoteServiceSnapshot,
-  UpgradeGate,
-  UpgradeIoLease,
-  UpgradeSession,
+  KeymasterRemoteServiceReference as RemoteServiceReference,
+  KeymasterRemoteServiceSnapshot as RemoteServiceSnapshot,
   CoordinatorAuthorityRecovery,
 } from "@keymaster/contracts";
 import { SYSTEM_STORAGE_DECLARATIONS, deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
@@ -104,9 +99,22 @@ import { vaultKeyRepository, configureVaultKeyRepository, type VaultMetaRecord, 
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
-import { createMessageBus } from "@keymaster/runtime/messageBus";
+import {
+  createMessageBus,
+  createMessagePortServiceProvider,
+  createPluginIntentController,
+  createUpgradeGate,
+  type MessagePortServiceCallInput,
+  type MessagePortServiceProvider,
+  type RemoteServicePortCallMessage,
+  type PluginIntentController,
+  type PluginIntentSnapshot,
+  type UpgradeGate,
+  type UpgradeIoLease,
+  type UpgradeSession,
+} from "webloom-framework";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
-import { createMessagePortServiceProvider, createPluginIntentController, createUpgradeGate, type MessagePortServiceProvider } from "@keymaster/runtime";
+import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 import { createFinalIoAudit, type FinalIoAuditOperation } from "./coordinator/finalIoAudit.js";
 import {
   assertCoordinatorWorkerUnitCatalog,
@@ -3885,7 +3893,7 @@ async function refreshCoordinatorServiceEndpoint(endpoint: CoordinatorServiceEnd
     snapshotRevision: revision,
     baseline: false,
     services,
-  } satisfies RemoteServiceSnapshot);
+  } as unknown as import("webloom-framework").RemoteServiceSnapshot);
 }
 
 function requestCoordinatorServiceRefresh(): void {
@@ -3902,7 +3910,7 @@ function requestCoordinatorServiceRefresh(): void {
 
 async function assertCoordinatorServiceCallCurrent(
   clientId: string,
-  message: import("@keymaster/runtime").RemoteServicePortCallMessage,
+  message: RemoteServicePortCallMessage,
   signal?: AbortSignal,
 ): Promise<{ endpoint: CoordinatorServiceEndpoint; reference: RemoteServiceReference }> {
   if (signal?.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
@@ -3914,7 +3922,9 @@ async function assertCoordinatorServiceCallCurrent(
     throw serviceBoundaryError("service.reference_stale", "Coordinator service connection is stale");
   }
   const reference = endpoint.references.get(message.reference.capabilityId);
-  if (!reference || !sameRemoteServiceReference(reference, message.reference) || reference.status !== "ready") {
+  if (!reference
+    || !sameRemoteServiceReference(reference, message.reference as unknown as RemoteServiceReference)
+    || reference.status !== "ready") {
     throw serviceBoundaryError("service.reference_stale", "Coordinator service reference is stale");
   }
   const serverGrantId = endpoint.grants.get(reference.capabilityId);
@@ -3965,7 +3975,7 @@ async function assertCoordinatorServiceGenerationCurrent(reference: RemoteServic
 
 async function executeCoordinatorServiceCall(
   clientId: string,
-  input: import("@keymaster/runtime").MessagePortServiceCallInput
+  input: MessagePortServiceCallInput
 ): Promise<unknown> {
   if (input.signal.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
   const { reference } = await assertCoordinatorServiceCallCurrent(clientId, input.message, input.signal);
@@ -4025,13 +4035,17 @@ function installCoordinatorServiceEndpoint(clientId: string, servicePort: Messag
   };
   endpoint.provider = createMessagePortServiceProvider({
     port: servicePort,
+    codec: keymasterRemoteServiceMessageCodec,
     handshake: {
       connectionId,
       authorityInstanceId: coordinatorAuthorityInstanceId,
       protocolVersion: COORDINATOR_SERVICE_PROTOCOL_VERSION,
     },
-    snapshot: initialSnapshot,
-    handleCall: (input) => executeCoordinatorServiceCall(clientId, input),
+    snapshot: initialSnapshot as unknown as import("webloom-framework").RemoteServiceSnapshot,
+    handleCall: (input) => executeCoordinatorServiceCall(
+      clientId,
+      input as unknown as MessagePortServiceCallInput,
+    ),
   });
   connectedPort.serviceEndpoint = endpoint;
   requestCoordinatorServiceRefresh();

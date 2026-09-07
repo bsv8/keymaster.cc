@@ -7,7 +7,8 @@
 //   - modal 只收集输入，不直接调用 protocol service。
 
 import { useEffect, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import { Button, Modal, Select, TextInput } from "@keymaster/ui";
 import { formatShortPublicKey, type KeyIdentity, type KeyspaceService } from "@keymaster/contracts";
 import type { AppCatalogEntry } from "./catalog.js";

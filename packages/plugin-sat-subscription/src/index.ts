@@ -2,6 +2,7 @@
 
 export {
   satSubscriptionPlugin,
+  satSubscriptionSetup,
   SAT_SUBSCRIPTION_ROUTE_PATH,
   SAT_SUBSCRIPTION_PLUGIN_ID
 } from "./manifest.js";

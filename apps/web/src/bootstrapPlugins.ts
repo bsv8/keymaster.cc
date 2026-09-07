@@ -39,16 +39,18 @@ import {
   type WindowP2pCoordinatorControl,
   type ProtocolCoordinatorControl,
   type ContactsCoordinatorControl,
-  type PluginIntentCoordinator,
-  type PluginIntentSnapshot,
   type PluginPermission,
-  type RemoteServiceBridge,
   type RuntimeIdentityTransition,
 } from "@keymaster/contracts";
+import type {
+  PluginIntentCoordinator,
+  PluginIntentSnapshot,
+  RemoteServiceBridge,
+} from "webloom-framework";
 import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_OWNER_STORAGE_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
 import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
-import { createPluginHost, type PluginHost } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
 import { bsvPriceConfig } from "./pluginConfigs.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
@@ -578,10 +580,9 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // Coordinator Worker 单元状态由唯一远程快照提供；Host 只负责把它
     // 合并到产品页，不在 Window 侧猜测或伪造后台状态。
     runtimeUnitSnapshots: () => coordinatorClient.getBootstrapSnapshot().coordinatorWorkerUnits ?? [],
-    // 生产 Window Host 只从当前环境实现注册表取得 setup；manifest 上的
-    // product-level setup 仅由迁移适配器集中登记，不能在 Host 内隐式回退。
+    // 生产 Window Host 只从当前环境实现注册表取得 setup；静态 manifest
+    // 不携带可执行函数，缺少实现时直接保持 fail-closed。
     runtimeUnitImplementationRegistry,
-    requireRuntimeUnitImplementationRegistry: true,
     // 本页面 Host 明确是 Window 执行环境。未来多单元产品没有 Window
     // 单元时会 fail closed，不会把 Worker capability 当作本地能力。
     execution: "window",

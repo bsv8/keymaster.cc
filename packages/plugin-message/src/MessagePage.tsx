@@ -12,7 +12,8 @@
 // 跨标签同步、请求去重、失效批处理由 resource 处理。
 
 import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { useCapability, useI18n, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost, router } from "@keymaster/runtime";
 import type { Contact, KeyspaceService } from "@keymaster/contracts";
 import { Button, EmptyState, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import type { MessageService } from "./messageService.js";

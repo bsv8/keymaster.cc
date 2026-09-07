@@ -1,5 +1,6 @@
 import type { CollectibleTransferHandler, CollectibleTransferWidgetProps } from "@keymaster/contracts";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import { Button, TextInput } from "@keymaster/ui";
 import { useEffect, useMemo, useState } from "react";
 import { ORDINAL_TRANSFER_SERVICE_CAPABILITY, type OrdinalTransferService, type OrdinalTransferPreview } from "./ordinalTransferService.js";

@@ -18,8 +18,8 @@ import type {
   ChannelRuntime,
   ChannelSubscriptionSetResult,
 } from "@keymaster/contracts";
-import type { LifecycleScope } from "@keymaster/contracts";
-import { LifecycleScopeRevokedError } from "@keymaster/contracts";
+import type { LifecycleScope } from "webloom-framework";
+import { LifecycleScopeRevokedError } from "webloom-framework";
 
 interface LinkedSignal {
   signal: AbortSignal;

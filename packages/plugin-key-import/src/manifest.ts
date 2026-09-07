@@ -9,7 +9,7 @@
 // 向导，调 `vault.createVaultWithImportedKey` 一次性建 Vault + 落首 Key
 // + 切 active。不允许在 uninitialized 状态下进入此工作区。
 
-import type { I18nPluginResources, PluginManifest, VaultSettingsRegistry } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup, VaultSettingsRegistry } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { KeyImportSection } from "./ImportPage.js";
 
@@ -120,7 +120,7 @@ export const keyImportResources: I18nPluginResources = {
   }
 };
 
-export const keyImportPlugin: PluginManifest = {
+const keyImportPluginDefinition = {
   id: "key-import",
   name: "Key Import",
   description: "统一导入平台：选择 importer、解析、调用 vault。",
@@ -163,4 +163,7 @@ export const keyImportPlugin: PluginManifest = {
       // no-op
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: keyImportSetup, ...keyImportPlugin } = keyImportPluginDefinition;
+export { keyImportSetup, keyImportPlugin };

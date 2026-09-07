@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SessionCoordinatorClient } from "@keymaster/contracts";
-import { vaultPlugin, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
-import { createPluginHost } from "@keymaster/runtime";
+import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
+import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { createCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
 
 class HubPort {
@@ -38,7 +38,16 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client: SessionCoordinatorClient = createCoordinatorClient({ clientId: "vault-assembly" });
       await client.connect();
 
-      const host = createPluginHost({ execution: "window", disableConfigPersistence: true, coordinatorForPlugin: () => client });
+      const host = createPluginHost({
+        execution: "window",
+        disableConfigPersistence: true,
+        coordinatorForPlugin: () => client,
+        runtimeUnitImplementationRegistry: {
+          get: (pluginId, unitId) => pluginId === vaultPlugin.id && unitId === vaultPlugin.units?.[0]?.id
+            ? vaultSetup
+            : undefined,
+        },
+      });
       await host.register(vaultPlugin);
 
       expect(host.state("vault").kind).toBe("enabled");

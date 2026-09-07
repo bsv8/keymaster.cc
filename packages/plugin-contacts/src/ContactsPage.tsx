@@ -8,7 +8,8 @@
 
 import { useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { AppLink, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { AppLink, useI18n, usePluginHost } from "@keymaster/runtime";
 import { formatShortPublicKey, type Contact, type ContactPresenceMap, type ContactsService } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";

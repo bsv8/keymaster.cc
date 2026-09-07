@@ -18,8 +18,8 @@ import type {
   I18nPluginResources,
   KeyspaceService,
   KeyIdentity,
-  MessageBus,
   PluginManifest,
+  PluginSetup,
   ResourceRegistry,
   RouteRegistry,
   ProtectedOutpointRegistry,
@@ -29,6 +29,7 @@ import type {
   P2pkhProviderRegistrySnapshot
   , P2pkhCoordinatorControl
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
@@ -606,7 +607,7 @@ export const p2pkhResources: I18nPluginResources = {
   }
 };
 
-export const p2pkhPlugin: PluginManifest = {
+const p2pkhPluginDefinition = {
   id: "p2pkh",
   name: "P2PKH",
   description: "BSV P2PKH 资产实现：由 Coordinator 统一调度确认交易同步，保留旧协议 spend 的 WOC broadcaster。",
@@ -1048,4 +1049,7 @@ export const p2pkhPlugin: PluginManifest = {
       service.dispose?.();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: p2pkhSetup, ...p2pkhPlugin } = p2pkhPluginDefinition;
+export { p2pkhSetup, p2pkhPlugin };

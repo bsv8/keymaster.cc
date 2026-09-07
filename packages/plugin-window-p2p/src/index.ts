@@ -1,4 +1,4 @@
-export { windowP2pPlugin } from "./manifest.js";
+export { windowP2pPlugin, windowP2pSetup } from "./manifest.js";
 export { createWindowP2pLaneRegistry, type WindowP2pLaneRegistry } from "./laneRegistry.js";
 export { installWindowP2pExecutor, WindowP2pExecutor } from "./windowExecutor.js";
 export { KeymasterWindowP2pIdentitySigner } from "./identitySigner.js";

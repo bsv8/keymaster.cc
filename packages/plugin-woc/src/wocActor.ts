@@ -19,8 +19,6 @@
 
 import type {
   BsvNetwork,
-  Message,
-  MessageBus,
   PluginLogger,
   WocBalanceResponse,
   WocBroadcastResult,
@@ -33,6 +31,7 @@ import type {
   WocUtxoResponse,
   WocBsv21TokenDetail
 } from "@keymaster/contracts";
+import type { Message, MessageBus } from "webloom-framework";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import type { KeyValueStore } from "@keymaster/contracts";
 import { createKeyValueSettingsStore } from "@keymaster/runtime";

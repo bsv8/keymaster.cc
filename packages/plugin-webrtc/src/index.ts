@@ -12,7 +12,8 @@
 // `apps/web/src/styles/plugins.css` 显式 `@import` 引入。
 
 export {
-  webrtcPlugin
+  webrtcPlugin,
+  webrtcSetup
 } from "./manifest.js";
 export {
   WebrtcPage

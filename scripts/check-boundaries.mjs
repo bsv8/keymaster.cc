@@ -153,6 +153,103 @@ for (const file of walk(runtimeSrc)) {
   }
 }
 
+/**
+ * WebLoom 拆分边界（施工单 001 / KM-003）。
+ *
+ * Keymaster 只通过已发布的 `webloom-framework` 公共入口消费框架；源码不得
+ * 绕过 exports 直接依赖框架的 src/dist。正式发布前由 release gate 继续检查
+ * 依赖版本和 lockfile，避免本地路径误带进业务代码。
+ */
+const removedRuntimeFiles = [
+  "capabilityRegistry.ts",
+  "createPluginHost.ts",
+  "messageBus.ts",
+  "pluginGraph.ts",
+  "pluginOwnership.ts",
+  "lifecycle/messagePortServiceProvider.ts",
+  "lifecycle/messagePortServiceTransport.ts",
+  "lifecycle/permissionLease.ts",
+  "lifecycle/permissionVerifier.ts",
+  "lifecycle/pluginIntentController.ts",
+  "lifecycle/resourceScope.ts",
+  "lifecycle/runtimeUnitImplementationRegistry.ts",
+  "lifecycle/scopedMessageBus.ts",
+  "lifecycle/scopedRegistry.ts",
+  "lifecycle/serviceBridge.ts",
+  "lifecycle/taskScheduler.ts",
+  "lifecycle/upgradeGate.ts",
+  "resources/resourceRegistry.ts",
+  "resources/resourceStore.ts",
+  "react/renderCounter.ts",
+  "react/useCapability.ts",
+  "react/useResource.ts",
+  "react/useResourceSelector.ts",
+];
+for (const relativePath of removedRuntimeFiles) {
+  const file = join(runtimeSrc, relativePath);
+  if (existsSync(file)) recordViolation(file, "generic WebLoom implementation must not be duplicated in @keymaster/runtime");
+}
+
+const webLoomConsumerRoots = [
+  join(root, "apps", "web"),
+  ...readdirSync(packagesDir)
+    .filter((name) => existsSync(join(packagesDir, name, "src")))
+    .map((name) => join(packagesDir, name)),
+];
+function packageJsonForSource(file) {
+  const relativePath = relative(root, file).split(sep);
+  if (relativePath[0] === "apps" && relativePath[1]) return join(root, "apps", relativePath[1], "package.json");
+  if (relativePath[0] === "packages" && relativePath[1]) return join(root, "packages", relativePath[1], "package.json");
+  return undefined;
+}
+const webLoomPackageName = "webloom-framework";
+const legacyWebLoomImport = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']webloom(?:["']|\/)/u;
+const webLoomDeepImport = new RegExp(
+  String.raw`(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']${webLoomPackageName}\/(?!react["']|testing["'])`,
+  "u",
+);
+const webLoomPublicImport = new RegExp(
+  String.raw`(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']${webLoomPackageName}(?:["']|\/(?:react|testing)["'])`,
+  "u",
+);
+for (const consumerRoot of webLoomConsumerRoots) {
+  const source = join(consumerRoot, "src");
+  if (!existsSync(source)) continue;
+  const consumerPackageJson = join(consumerRoot, "package.json");
+  if (existsSync(consumerPackageJson)) {
+    const packageData = JSON.parse(readFileSync(consumerPackageJson, "utf8"));
+    const dependencySections = [packageData.dependencies, packageData.devDependencies, packageData.peerDependencies];
+    if (dependencySections.some((section) => section && Object.hasOwn(section, "webloom"))) {
+      recordViolation(consumerPackageJson, "must not declare the legacy webloom dependency; use webloom-framework");
+    }
+  }
+  for (const file of walk(source)) {
+    const text = readFileSync(file, "utf8");
+    if (legacyWebLoomImport.test(text)) {
+      recordViolation(file, "must not import the legacy webloom package; use webloom-framework");
+    }
+    // 公共入口只有 webloom-framework、webloom-framework/react、webloom-framework/testing；禁止接触内部文件。
+    if (webLoomDeepImport.test(text)) {
+      recordViolation(file, "must import WebLoom through public exports, not webloom-framework/src, webloom-framework/dist, or another private subpath");
+    }
+    if (/\/home\/david\/Workspaces\/WebLoom|(?:\.\.?\/)+WebLoom\/(?:src|dist)/.test(text)) {
+      recordViolation(file, "must not reference the local WebLoom source tree");
+    }
+    if (webLoomPublicImport.test(text)) {
+      const packageJson = packageJsonForSource(file);
+      if (!packageJson || !existsSync(packageJson)) {
+        recordViolation(file, "WebLoom consumer package.json is missing");
+      } else {
+        const packageData = JSON.parse(readFileSync(packageJson, "utf8"));
+        const declared = packageData.dependencies?.[webLoomPackageName]
+          ?? packageData.devDependencies?.[webLoomPackageName]
+          ?? packageData.peerDependencies?.[webLoomPackageName];
+        if (!declared) recordViolation(file, "direct WebLoom import requires an explicit webloom-framework dependency");
+      }
+    }
+  }
+}
+
 /** 检查 apps/web shell 不 import plugin-background。 */
 const shellDir = join(root, "apps", "web", "src", "shell");
 for (const file of walk(shellDir)) {

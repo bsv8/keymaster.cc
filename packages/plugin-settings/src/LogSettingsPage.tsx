@@ -25,7 +25,7 @@ import {
   type LogQuery,
   type LogService
 } from "@keymaster/contracts";
-import { useCapability } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
 
 const LEVELS: ReadonlyArray<LogLevel> = ["debug", "info", "warn", "error"];
 

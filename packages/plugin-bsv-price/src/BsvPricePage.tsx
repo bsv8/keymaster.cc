@@ -11,7 +11,8 @@
 //   - **不**展示历史 / 图表 / 告警。
 
 import React from "react";
-import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
+import { useCapability, useResource } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type {
   BsvPriceService,
   BsvPriceServiceSnapshot

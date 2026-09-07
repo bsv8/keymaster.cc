@@ -1,4 +1,4 @@
-export { storagePlatformPlugin, STORAGE_PLATFORM_PLUGIN_ID } from "./manifest.js";
+export { storagePlatformPlugin, storagePlatformSetup, STORAGE_PLATFORM_PLUGIN_ID } from "./manifest.js";
 export { StorageProfileEditor } from "./ui/StorageProfileEditor.js";
 export { StorageOnboardingPage } from "./ui/StorageOnboardingPage.js";
 export { StorageUnavailableGuard } from "./ui/StorageUnavailableGuard.js";

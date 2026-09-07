@@ -12,7 +12,7 @@
 // 样式入口：本插件自带 `src/styles.css`；装配层在
 // `apps/web/src/styles/plugins.css` 显式 `@import` 引入。
 
-export { messagePlatformPlugin, MESSAGE_PLUGIN_ID } from "./manifest.js";
+export { messagePlatformPlugin, messageSetup, MESSAGE_PLUGIN_ID } from "./manifest.js";
 export { MessagePage } from "./MessagePage.js";
 export { MessageDetailPage } from "./MessageDetailPage.js";
 export { createMessageService, type MessageService } from "./messageService.js";

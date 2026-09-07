@@ -21,15 +21,18 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
+  useI18n: () => ({
+    t: (_key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? ""
+  }),
+  usePluginHost: () => ({ resourceStore: { invalidate: vi.fn(() => { state.invalidated += 1; }) } })
+}));
+
+vi.mock("webloom-framework/react", () => ({
   useCapability: <T,>(key: string): T => {
     if (key === "sat-subscription.service") return state.admin as unknown as T;
     if (key === "sat-subscription.spi.service") return state.spi as unknown as T;
     throw new Error(`unexpected capability: ${key}`);
   },
-  useI18n: () => ({
-    t: (_key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? ""
-  }),
-  usePluginHost: () => ({ resourceStore: { invalidate: vi.fn(() => { state.invalidated += 1; }) } }),
   useResourceSelector: <T,>(
     _store: unknown,
     _id: string,

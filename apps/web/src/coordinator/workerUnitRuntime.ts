@@ -6,9 +6,9 @@
 
 import type {
   CoordinatorWorkerUnitSnapshot,
-  PluginLifetime,
   SessionEpoch,
 } from "@keymaster/contracts";
+import type { PluginLifetime } from "webloom-framework";
 import {
   COORDINATOR_WORKER_UNIT_CATALOG,
   type CoordinatorWorkerUnitDescriptor,

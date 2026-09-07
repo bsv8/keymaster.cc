@@ -58,7 +58,7 @@ vi.mock("./stasTokenProvider.js", () => ({
   })),
 }));
 
-import { stasTokenPlugin } from "./manifest.js";
+import { stasTokenSetup } from "./manifest.js";
 
 // --- messageBus mock ---
 const messageBusHandlers = new Map<string, (...args: unknown[]) => void>();
@@ -134,7 +134,7 @@ describe("stasTokenPlugin manifest", () => {
 
   it("vault.unlocked 不直接触发 token-stas.sync", async () => {
     const { ctx, trigger } = createMockCtx();
-    stasTokenPlugin.setup!(ctx as never);
+    stasTokenSetup(ctx as never);
 
     emitMessageBus("vault.unlocked");
 
@@ -148,7 +148,7 @@ describe("stasTokenPlugin manifest", () => {
   it("p2pkh resource 事件触发 token-stas.sync（无 snapshot → first-sync）", async () => {
     mockDbListResult = [];
     const { ctx, trigger } = createMockCtx();
-    stasTokenPlugin.setup!(ctx as never);
+    stasTokenSetup(ctx as never);
 
     dataNotifierListeners.forEach((h) => h({
       providerId: "p2pkh",
@@ -164,7 +164,7 @@ describe("stasTokenPlugin manifest", () => {
   it("p2pkh resource 事件触发 token-stas.sync（有 snapshot → p2pkh.resources-ready）", async () => {
     mockDbListResult = [{ symbol: "TOK", network: "main", address: "addr1" }];
     const { ctx, trigger } = createMockCtx();
-    stasTokenPlugin.setup!(ctx as never);
+    stasTokenSetup(ctx as never);
 
     dataNotifierListeners.forEach((h) => h({
       providerId: "p2pkh",
@@ -179,7 +179,7 @@ describe("stasTokenPlugin manifest", () => {
 
   it("p2pkh resource 事件不匹配 active key 时不触发", async () => {
     const { ctx, trigger } = createMockCtx();
-    stasTokenPlugin.setup!(ctx as never);
+    stasTokenSetup(ctx as never);
 
     dataNotifierListeners.forEach((h) => h({
       providerId: "p2pkh",
@@ -194,7 +194,7 @@ describe("stasTokenPlugin manifest", () => {
 
   it("dispose 后事件不再触发", () => {
     const { ctx, trigger } = createMockCtx();
-    const dispose = stasTokenPlugin.setup!(ctx as never) as unknown as (() => void) | undefined;
+    const dispose = stasTokenSetup(ctx as never) as unknown as (() => void) | undefined;
 
     // 先确认 vault.unlocked 不触发（新行为）
     emitMessageBus("vault.unlocked");

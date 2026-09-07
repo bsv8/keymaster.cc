@@ -1,5 +1,5 @@
 // packages/plugin-collectible-1satordinals/src/index.ts
-export { oneSatOrdinalsCollectiblePlugin } from "./manifest.js";
+export { oneSatOrdinalsCollectiblePlugin, oneSatOrdinalsCollectibleSetup } from "./manifest.js";
 export { buildOrdinalP2pkhScript, encodeOrdinalEnvelope, decodeOrdinalEnvelope } from "./ordinalScript.js";
 export { createOrdinalMintHistoryRepository } from "./storage/ordinalMintHistoryRepository.js";
 export { createOrdinalMintService } from "./ordinalMintService.js";

@@ -31,14 +31,17 @@ const runtimeState = vi.hoisted(() => ({
 
 vi.mock("@keymaster/runtime", () => ({
   usePluginHost: () => ({ resourceStore: {} }),
-  useHasCapability: () => true,
-  useOptionalCapability: () => undefined,
-  useResourceSelector: (_store: unknown, _id: string, _args: readonly string[], selector: (snapshot: { data?: unknown }) => unknown) => selector({ data: runtimeState.bootstrap }),
   useRuntimeStatus: () => ({ vault: runtimeState.vault, ready: runtimeState.ready }),
   useI18n: () => ({
     t: (key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? key,
     language: () => "en"
   })
+}));
+
+vi.mock("webloom-framework/react", () => ({
+  useHasCapability: () => true,
+  useOptionalCapability: () => undefined,
+  useResourceSelector: (_store: unknown, _id: string, _args: readonly string[], selector: (snapshot: { data?: unknown }) => unknown) => selector({ data: runtimeState.bootstrap })
 }));
 
 vi.mock("@keymaster/platform-storage", () => ({

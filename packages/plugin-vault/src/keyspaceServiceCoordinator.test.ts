@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
 import type { SessionStateEvent } from "@keymaster/contracts";
-import { createMessageBus } from "@keymaster/runtime";
+import { createMessageBus } from "webloom-framework";
 
 describe("createKeyspaceServiceCoordinator", () => {
   it("initializes from the Coordinator bootstrap snapshot", () => {

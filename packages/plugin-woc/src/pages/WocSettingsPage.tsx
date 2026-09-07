@@ -6,7 +6,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n, useLocale } from "@keymaster/runtime";
 import { WOC_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
 import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } from "../wocSettings.js";
 

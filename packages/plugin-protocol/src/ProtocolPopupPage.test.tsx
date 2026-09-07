@@ -38,10 +38,21 @@ function renderTemplate(template: string, values?: Record<string, unknown>): str
 }
 
 vi.mock("@keymaster/runtime", () => ({
+  usePluginHost: () => ({ resourceStore: { invalidate: () => undefined } }),
+  useI18n: () => ({
+    t: (key: string, values?: { defaultValue?: string; seconds?: number }) => {
+      const tmpl = values?.defaultValue ?? key;
+      // 用模板占位符替换模拟 i18n 资源行为：让"已挂资源但缺占位符"
+      // 这条路径能够被覆盖到。
+      return renderTemplate(tmpl, values);
+    },
+    language: () => "en"
+  })
+}));
+
+vi.mock("webloom-framework/react", () => ({
   useCapability: (key: string) => {
-    if (key === PROTOCOL_SERVICE_CAPABILITY) {
-      return currentService;
-    }
+    if (key === PROTOCOL_SERVICE_CAPABILITY) return currentService;
     if (key === "vault.service") {
       return {
         status: () => runtimeState.vault,
@@ -54,9 +65,7 @@ vi.mock("@keymaster/runtime", () => ({
     }
     return undefined;
   },
-  // MSFile 审批区默认关闭（无 msfile.service capability）。
   useHasCapability: (key: string) => key !== "msfile.service",
-  usePluginHost: () => ({ resourceStore: { invalidate: () => undefined } }),
   useResource: (_store: unknown, definitionId: string) => {
     const revision = useRef(0);
     const cached = useRef<{ revision: number; value: { data: unknown } } | undefined>(undefined);
@@ -64,34 +73,42 @@ vi.mock("@keymaster/runtime", () => ({
       if (!currentService) return () => undefined;
       if (definitionId === "protocol.state") {
         let initialNotifications = 2;
-        const notify = () => { if (initialNotifications > 0) { initialNotifications -= 1; return; } revision.current += 1; callback(); };
+        const notify = () => {
+          if (initialNotifications > 0) {
+            initialNotifications -= 1;
+            return;
+          }
+          revision.current += 1;
+          callback();
+        };
         const a = currentService.subscribe(notify);
         const b = currentService.subscribeFeed(notify);
         return () => { a(); b(); };
       }
       let initialNotification = true;
-      return currentService.subscribe(() => { if (initialNotification) { initialNotification = false; return; } revision.current += 1; callback(); });
+      return currentService.subscribe(() => {
+        if (initialNotification) {
+          initialNotification = false;
+          return;
+        }
+        revision.current += 1;
+        callback();
+      });
     };
     const getSnapshot = () => {
       if (cached.current?.revision === revision.current) return cached.current.value;
       let value: { data: unknown } = { data: undefined };
-      if (currentService && definitionId === "protocol.state") value = { data: { snapshot: currentService.snapshot(), feed: currentService.feedSnapshot() } };
-      else if (currentService && definitionId === "protocol.app-bootstrap") value = { data: { waiting: currentService.appClientWaitingForReady(), timedOut: currentService.appClientConnectTimedOut() } };
+      if (currentService && definitionId === "protocol.state") {
+        value = { data: { snapshot: currentService.snapshot(), feed: currentService.feedSnapshot() } };
+      } else if (currentService && definitionId === "protocol.app-bootstrap") {
+        value = { data: { waiting: currentService.appClientWaitingForReady(), timedOut: currentService.appClientConnectTimedOut() } };
+      }
       cached.current = { revision: revision.current, value };
       return value;
     };
     return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   },
-  useResourceSelector: (_store: unknown, _definitionId: string, _args: readonly string[], selector: (snapshot: { data: unknown }) => unknown) => selector({ data: runtimeState.vault }),
-  useI18n: () => ({
-    t: (key: string, values?: { defaultValue?: string; seconds?: number }) => {
-      const tmpl = values?.defaultValue ?? key;
-      // 用模板占位符替换模拟 i18n 资源行为：让"已挂资源但缺占位符"
-      // 这条路径能够被覆盖到。
-      return renderTemplate(tmpl, values);
-    },
-    language: () => "en"
-  })
+  useResourceSelector: (_store: unknown, _definitionId: string, _args: readonly string[], selector: (snapshot: { data: unknown }) => unknown) => selector({ data: runtimeState.vault })
 }));
 
 let currentService: ProtocolService | null = null;

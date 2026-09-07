@@ -8,7 +8,8 @@
 // 跨标签同步、请求去重、失效批处理由 resource 处理。
 
 import { formatSats } from "@keymaster/ui";
-import { countRender, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { countRender, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus } from "../p2pkhContracts.js";
 
 const DEFAULT_BALANCES: { bsv: P2pkhBalance | null; bsvtest: P2pkhBalance | null } = { bsv: null, bsvtest: null };

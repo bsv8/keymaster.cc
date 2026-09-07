@@ -24,7 +24,8 @@
 //   - 文案中文；错误 message 原样显示英文。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCapability, useHasCapability, useI18n, usePluginHost, useResource, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useHasCapability, useResource, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { formatShortPublicKey, PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import type {
   ProtocolConnectAuthSnapshot,

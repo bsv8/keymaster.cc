@@ -22,7 +22,6 @@ import type {
   HomeRegistry,
   I18nPluginResources,
   KeyspaceService,
-  MessageBus,
   PluginManifest,
   RouteRegistry,
   ResourceRegistry,
@@ -31,8 +30,10 @@ import type {
   PokerSessionKeyState,
   PokerSettings,
   PokerTable,
+  PluginSetup,
   VaultService
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY, POKER_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { POKER_SETTINGS_PATH } from "./constants.js";
@@ -252,7 +253,7 @@ const pokerResources: I18nPluginResources = {
   }
 };
 
-export const pokerPlugin: PluginManifest = {
+const pokerPluginDefinition = {
   id: "poker",
   name: "Poker",
   description: "Browser-native peer poker over bsv-poker protocol, served by an external poker-proxy.",
@@ -427,4 +428,8 @@ export const pokerPlugin: PluginManifest = {
       }
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: pokerSetup, ...pokerPlugin } = pokerPluginDefinition;
+
+export { pokerPlugin, pokerSetup };

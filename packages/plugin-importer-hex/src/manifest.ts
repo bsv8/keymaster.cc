@@ -2,7 +2,7 @@
 // 注册 HEX importer。
 // 设计缘由：importer 插件不写 vault、不注册菜单/页面。
 
-import type { I18nPluginResources, ImporterRegistry, PluginManifest } from "@keymaster/contracts";
+import type { I18nPluginResources, ImporterRegistry, PluginManifest, PluginSetup } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { hexImporter } from "./hexImporter.js";
 
@@ -22,7 +22,7 @@ const hexResources: I18nPluginResources = {
   }
 };
 
-export const hexImporterPlugin: PluginManifest = {
+const hexImporterPluginDefinition = {
   id: "importer-hex",
   name: "Hex Importer",
   description: "支持 32 字节 hex 私钥导入。",
@@ -49,4 +49,7 @@ export const hexImporterPlugin: PluginManifest = {
       // no-op
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: hexImporterSetup, ...hexImporterPlugin } = hexImporterPluginDefinition;
+export { hexImporterSetup, hexImporterPlugin };

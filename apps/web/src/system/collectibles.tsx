@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { BusinessFeatureRegistry, BsvNetwork, CollectibleRegistry, CollectibleSummary, CollectibleTransferRegistry, I18nText } from "@keymaster/contracts";
-import { useCapability, useCurrentPath, useI18n, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
 
 function labelOf(value: string | I18nText): string {

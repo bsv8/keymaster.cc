@@ -7,7 +7,8 @@
 
 import { useMemo } from "react";
 import type { PluginGraph, PluginState, PluginReverseDep } from "@keymaster/contracts";
-import type { PluginHost } from "../createPluginHost.js";
+import type { PluginIntentSubmissionResult } from "webloom-framework";
+import type { PluginHost } from "../pluginHostContract.js";
 import { usePluginHost, useHostVersion } from "./PluginHostProvider.js";
 
 export interface UsePluginRuntime {
@@ -17,7 +18,7 @@ export interface UsePluginRuntime {
   enable(id: string): Promise<void>;
   disable(id: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   /** 提交产品级绝对启停意图；accepted 只表示意图已持久化。 */
-  submitIntent(id: string, desiredEnabled: boolean): Promise<import("@keymaster/contracts").PluginIntentSubmissionResult>;
+  submitIntent(id: string, desiredEnabled: boolean): Promise<PluginIntentSubmissionResult>;
   unregister(id: string): Promise<void>;
   version(): number;
   manifests(): string[];

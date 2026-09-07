@@ -6,7 +6,8 @@
 //   - 展示文本用 name + 短公钥；
 //   - 允许 transfer / message 等消费方只拿身份，不拿地址投影。
 
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { Select } from "@keymaster/ui";
 import { formatShortPublicKey, type Contact } from "@keymaster/contracts";
 

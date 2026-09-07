@@ -1,4 +1,4 @@
-import type { I18nPluginResources, PluginManifest, ResourceRegistry, StorageRuntimeController, SystemSettingsRegistry, StorageCoordinatorControl } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, StorageRuntimeController, SystemSettingsRegistry, StorageCoordinatorControl } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { StorageProfileEditor } from "./ui/StorageProfileEditor.js";
@@ -102,7 +102,7 @@ Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
   "storage.settings.statusReconfiguring": "正在重新配置"
 });
 
-export const storagePlatformPlugin: PluginManifest = {
+const storagePlatformPluginDefinition = {
   id: STORAGE_PLATFORM_PLUGIN_ID,
   name: "Storage",
   description: "隔离的 Connect S3-compatible object storage capability.",
@@ -142,4 +142,8 @@ export const storagePlatformPlugin: PluginManifest = {
     settings.register({ id: settingsId, group: { id: "storage", label: { key: "storage.settings.group", fallback: "S3 Storage" }, order: 60 }, label: { key: "storage.settings.provider", fallback: "Provider" }, component: StorageProfileEditor, order: 10 });
     return () => { try { settings.unregister(settingsId); } catch { /* already reclaimed */ } resources.unregister(resourceId); service.dispose(); };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: storagePlatformSetup, ...storagePlatformPlugin } = storagePlatformPluginDefinition;
+
+export { storagePlatformPlugin, storagePlatformSetup };

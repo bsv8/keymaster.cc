@@ -2,14 +2,11 @@
 // 运行时包统一导出。
 // 设计缘由：业务组件只 import 这个入口，不直接 deep import 内部模块。
 
-// 重新导出 MessageBus 类型，让 plugin-vault 等包可以
-// `import type { MessageBus } from "@keymaster/runtime"`。
-export type { MessageBus } from "@keymaster/contracts";
-export * from "./createPluginHost.js";
-export * from "./capabilityRegistry.js";
-export * from "./messageBus.js";
-export * from "./pluginGraph.js";
-export * from "./pluginOwnership.js";
+// Keymaster 的唯一生产 Host 装配入口：通用生命周期由 WebLoom 创建，
+// 这里仅组合 Keymaster Registry、Storage、i18n、日志和 Coordinator。
+export * from "./keymasterHostAdapter.js";
+export type { PluginHost, CreatePluginHostOptions } from "./pluginHostContract.js";
+export { bindWebLoomHost, getWebLoomHost } from "./pluginHostContract.js";
 export * from "./pluginConfigStore.js";
 export * from "./pluginConfigStoreContract.js";
 export * from "./keyValueSettingsStore.js";
@@ -30,16 +27,12 @@ export * from "./registries/topbarRegistry.js";
 export * from "./registries/noticeRegistry.js";
 export * from "./navigate.js";
 export * from "./react/PluginHostProvider.js";
-export * from "./react/useCapability.js";
 export * from "./react/useRegistry.js";
 export * from "./react/useRuntimeStatus.js";
 export * from "./react/useI18n.js";
-export * from "./react/renderCounter.js";
 export * from "./react/useCurrentPath.js";
 export * from "./react/usePluginRuntime.js";
 export * from "./react/AppLink.js";
-export * from "./react/useResource.js";
-export * from "./react/useResourceSelector.js";
 export * from "./i18n/i18nStore.js";
 export * from "./i18n/languageMap.js";
 export * from "./i18n/createI18nService.js";
@@ -48,20 +41,7 @@ export * from "./i18n/createI18nService.js";
 // 装配和测试夹具使用，K-V 层不外暴露。
 export * from "./log/logService.js";
 export * from "./storage/inMemoryKeyValueStore.js";
-export * from "./lifecycle/resourceScope.js";
-export { registerOwnedResource } from "./resources/resourceRegistry.js";
-export * from "./lifecycle/scopedMessageBus.js";
 export * from "./lifecycle/scopedChannelRuntime.js";
-export * from "./lifecycle/permissionLease.js";
-export * from "./lifecycle/permissionVerifier.js";
-export * from "./lifecycle/serviceBridge.js";
-export * from "./lifecycle/messagePortServiceTransport.js";
-export * from "./lifecycle/messagePortServiceProvider.js";
-export * from "./lifecycle/pluginIntentController.js";
-export * from "./lifecycle/taskScheduler.js";
-export * from "./lifecycle/scopedRegistry.js";
-export * from "./lifecycle/upgradeGate.js";
-export * from "./lifecycle/runtimeUnitImplementationRegistry.js";
 
 // 施工单 2026-06-30 001：全局 fatal store。apps/web 与 plugin-vault 等
 // 都通过本入口上报 / 订阅 fatal 错误。`resetFatalErrorForTest` 与

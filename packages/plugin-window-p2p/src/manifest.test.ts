@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
-import { createPluginHost } from "@keymaster/runtime";
-import { windowP2pPlugin } from "./manifest.js";
+import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
+import { windowP2pPlugin, windowP2pSetup } from "./manifest.js";
 
 vi.mock("./windowExecutor.js", () => ({
   installWindowP2pExecutor: vi.fn(() => () => undefined)
@@ -24,7 +24,11 @@ describe("windowP2pPlugin manifest", () => {
     const host = createPluginHost({ execution: "window", disableConfigPersistence: true, coordinatorForPlugin: () => ({
       getBootstrapSnapshot: () => ({ vaultStatus: "locked", sessionEpoch: "test" }),
       subscribeTopic: () => () => undefined
-    }) });
+    }), runtimeUnitImplementationRegistry: {
+      get: (pluginId, unitId) => pluginId === windowP2pPlugin.id && unitId === windowP2pPlugin.units?.[0]?.id
+        ? windowP2pSetup
+        : undefined,
+    } });
     await host.register(windowP2pPlugin);
 
     expect(host.capabilities.has(WINDOW_P2P_EXECUTOR_CAPABILITY)).toBe(true);

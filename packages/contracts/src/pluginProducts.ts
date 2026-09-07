@@ -4,7 +4,7 @@
 // 只能接受清单中的产品意图；未来如果开放第三方插件，必须另建可信注册
 // 流程，不能把任意字符串直接加入这里或绕过 Worker 校验。
 
-import type { PluginExecution, PluginLifetime } from "./lifecycle.js";
+import type { PluginExecution, PluginLifetime } from "webloom-framework";
 
 /**
  * 当前 Web 发行版允许用户启停的产品级 pluginId。

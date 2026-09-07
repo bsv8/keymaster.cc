@@ -2,7 +2,7 @@
 // MSFile 插件清单：提供 `msfile.service`（页面侧 proxy）与 /settings/system
 // 的 MSFile group。设置真值、K-V 与网络都在 Coordinator SharedWorker。
 
-import type { I18nPluginResources, PluginManifest, PluginContext, ResourceRegistry, RouteRegistry, WindowP2pExecutorLaneRegistry } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup, PluginContext, ResourceRegistry, RouteRegistry, WindowP2pExecutorLaneRegistry } from "@keymaster/contracts";
 import {
   type BusinessFeatureRegistry,
   type KeyspaceService,
@@ -293,7 +293,7 @@ const resources: I18nPluginResources = {
 
 export const msfileResources = resources;
 
-export const msfilePlugin: PluginManifest = {
+const msfilePluginDefinition = {
   id: MSFILE_PLUGIN_ID,
   name: "MSFile",
   description: "MSFile Proxy V1 客户端能力：多供应商 Stat/Read、价格授权与供应商配置。",
@@ -465,4 +465,7 @@ export const msfilePlugin: PluginManifest = {
       service.dispose();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: msfileSetup, ...msfilePlugin } = msfilePluginDefinition;
+export { msfileSetup, msfilePlugin };

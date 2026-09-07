@@ -28,7 +28,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import {
   PROTOCOL_SERVICE_CAPABILITY,
   type ProtocolOriginSettingsRecord,

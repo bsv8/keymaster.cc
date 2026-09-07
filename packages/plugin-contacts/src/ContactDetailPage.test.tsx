@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import type { ActiveKeyState, Contact, ContactPresenceMap, KeyspaceService, ResourceRegistry } from "@keymaster/contracts";
-import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { ContactDetailPage } from "./ContactDetailPage.js";
 import { contactsResources } from "./manifest.js";
 

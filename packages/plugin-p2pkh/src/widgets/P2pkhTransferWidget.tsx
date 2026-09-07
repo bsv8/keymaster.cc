@@ -12,7 +12,8 @@
 //
 import { useEffect, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
 import type { KeyIdentity, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhFeeRateTier, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";

@@ -7,9 +7,10 @@
 //   3. 正常注册不会被误判成超时。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PluginManifest, SessionCoordinatorClient } from "@keymaster/contracts";
+import type { PluginManifest, PluginSetup, SessionCoordinatorClient } from "@keymaster/contracts";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
-import { createPluginHost, StartupCapabilityError, StartupPluginError, type PluginHost } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, type PluginHost } from "@keymaster/runtime";
+import { StartupCapabilityError, StartupPluginError } from "webloom-framework";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import {
   connectCoordinatorWithStartupRetry,
@@ -23,6 +24,7 @@ import {
 } from "./bootstrapPlugins.js";
 import { assertWebStartupContract, WEB_STARTUP_REQUIRED_CAPABILITIES } from "./bootstrapPlugins.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
+import { createWebRuntimeUnitImplementationRegistry } from "./runtimeUnitImplementations.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -104,7 +106,7 @@ describe("Coordinator startup recovery", () => {
         { capabilityId: "coordinator.owner-storage", contractVersion: "1.0.0", status: "ready", grantId: "owner-grant" },
         { capabilityId: "coordinator.crypto", contractVersion: "1.0.0", status: "ready", grantId: "crypto-grant" },
       ] : [],
-    } as unknown as import("@keymaster/contracts").RemoteServiceBridge;
+    } as unknown as import("webloom-framework").RemoteServiceBridge;
     const waiting = waitForCoordinatorServiceBridge(() => bridge, 100);
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(ready).toBe(false);
@@ -240,6 +242,7 @@ describe("web startup capability contract", () => {
       storageBindingAuthority: makeStorageBindingAuthority(),
       coordinatorForPlugin: () => coordinatorClient,
       execution: "window",
+      runtimeUnitImplementationRegistry: createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG),
       initialRuntimeIdentity: {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: "02" + "11".repeat(32),
@@ -273,28 +276,40 @@ describe("web startup capability contract", () => {
     }
   }, 30_000);
 
-  function vaultFixture(setup: PluginManifest["setup"] = (ctx) => {
+  function vaultFixture(setup: PluginSetup = (ctx) => {
     ctx.provide("vault.service", {});
     ctx.provide("keyspace.service", {});
-  }): PluginManifest {
+  }): { manifest: PluginManifest; setup: PluginSetup } {
     return {
-      id: "vault",
-      name: "Vault",
-      meta: {
-        kind: "core",
-        startup: "required",
-        defaultEnabled: true,
-        canDisable: false,
-        providesCapabilities: ["vault.service", "keyspace.service"]
+      manifest: {
+        id: "vault",
+        name: "Vault",
+        meta: {
+          kind: "core",
+          startup: "required",
+          defaultEnabled: true,
+          canDisable: false,
+          providesCapabilities: ["vault.service", "keyspace.service"]
+        },
       },
       setup
     };
   }
 
+  function createFixtureHost(setups: Record<string, PluginSetup> = {}): PluginHost {
+    return createPluginHost({
+      disableConfigPersistence: true,
+      runtimeUnitImplementationRegistry: {
+        get: (pluginId) => setups[pluginId],
+      },
+    });
+  }
+
   it("keeps Vault enabled while runtime config is stored outside localStorage", async () => {
     localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 1, value: { vault: false } }));
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register(vaultFixture());
+    const fixture = vaultFixture();
+    const host = createFixtureHost({ vault: fixture.setup });
+    await host.register(fixture.manifest);
     assertWebStartupContract(host);
     expect(host.capabilities.has("vault.service")).toBe(true);
     expect(host.configStore.read().vault).toBe(true);
@@ -302,26 +317,27 @@ describe("web startup capability contract", () => {
   });
 
   it("rejects required setup failures before startup preflight", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await expect(host.register(vaultFixture(() => { throw new Error("sensitive setup detail"); })))
+    const fixture = vaultFixture(() => { throw new Error("sensitive setup detail"); });
+    const host = createFixtureHost({ vault: fixture.setup });
+    await expect(host.register(fixture.manifest))
       .rejects.toBeInstanceOf(StartupPluginError);
     expect(() => assertWebStartupContract(host)).toThrow(StartupCapabilityError);
   });
 
   it("retries a required plugin whose manifest was recorded before setup failed", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
     let attempts = 0;
-    const manifest = vaultFixture((ctx) => {
+    const fixture = vaultFixture((ctx) => {
       attempts += 1;
       if (attempts === 1) throw new Error("transient Vault setup failure");
       ctx.provide("vault.service", {});
       ctx.provide("keyspace.service", {});
     });
+    const host = createFixtureHost({ vault: fixture.setup });
 
-    await expect(host.register(manifest)).rejects.toBeInstanceOf(StartupPluginError);
+    await expect(host.register(fixture.manifest)).rejects.toBeInstanceOf(StartupPluginError);
     expect(host.manifests()).toContain("vault");
     expect(host.state("vault").kind).toBe("error-disabled");
-    await expect(host.register(manifest)).resolves.toBeUndefined();
+    await expect(host.register(fixture.manifest)).resolves.toBeUndefined();
     expect(attempts).toBe(2);
     expect(host.state("vault").kind).toBe("enabled");
     assertWebStartupContract(host);
@@ -344,14 +360,15 @@ describe("web startup capability contract", () => {
   });
 
   it("keeps optional failures isolated while required preflight succeeds", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const optionalSetup: PluginSetup = () => { throw new Error("optional failure"); };
+    const vault = vaultFixture();
+    const host = createFixtureHost({ optional: optionalSetup, vault: vault.setup });
     await host.register({
       id: "optional",
       name: "Optional",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      setup() { throw new Error("optional failure"); }
     });
-    await host.register(vaultFixture());
+    await host.register(vault.manifest);
     assertWebStartupContract(host);
     expect(host.state("optional").kind).toBe("error-disabled");
   });

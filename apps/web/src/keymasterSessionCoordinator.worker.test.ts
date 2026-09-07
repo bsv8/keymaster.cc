@@ -4,8 +4,9 @@ import {
   hexToBytes,
   vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, JSONValue, RemoteServicePortControlMessage } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, JSONValue, KeymasterRemoteServicePortControlMessage as RemoteServicePortControlMessage } from "@keymaster/contracts";
 import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
+import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testAcquireExecutorLease,
@@ -113,7 +114,7 @@ import {
   __testUnlock,
   __testUpdateScheduleSettings
 } from "./keymasterSessionCoordinator.worker.js";
-import { createMessagePortServiceTransport, createServiceBridge } from "@keymaster/runtime";
+import { createMessagePortServiceTransport, createServiceBridge } from "webloom-framework";
 
 class TestPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -306,12 +307,17 @@ describe("Session Coordinator worker", () => {
     const mainPortMessages: unknown[] = [];
     __testAttachPort("service-bridge-client", (message) => mainPortMessages.push(message));
     const channel = new MessageChannel();
-    const transport = createMessagePortServiceTransport({ port: channel.port1 });
+    const transport = createMessagePortServiceTransport({
+      port: channel.port1,
+      codec: keymasterRemoteServiceMessageCodec,
+    });
     const bridge = createServiceBridge({ protocolVersion: "1", transport });
     const onControl = (event: MessageEvent): void => {
       const message = event.data as RemoteServicePortControlMessage;
       if (message.type === "keymaster.remote-service.handshake") bridge.handshake(message.handshake);
-      if (message.type === "keymaster.remote-service.snapshot") bridge.applySnapshot(message.snapshot);
+      if (message.type === "keymaster.remote-service.snapshot") {
+        bridge.applySnapshot(message.snapshot as unknown as import("webloom-framework").RemoteServiceSnapshot);
+      }
     };
     channel.port1.addEventListener("message", onControl);
     channel.port1.start();

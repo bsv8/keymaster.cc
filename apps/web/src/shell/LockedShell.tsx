@@ -38,7 +38,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { KeyspaceService } from "@keymaster/contracts";
 import {
   KeyPersistedButActivationFailedError,

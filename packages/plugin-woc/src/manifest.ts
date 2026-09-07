@@ -14,14 +14,15 @@ import type {
   BreadcrumbRegistry,
   I18nPluginResources,
   KeyspaceService,
-  MessageBus,
   PluginManifest,
+  PluginSetup,
   SystemSettingsRegistry,
   Woc1SatOrdinalsService,
   WocBsv21Service,
   WocService,
   WocStasService
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   RUNTIME_MESSAGE_BUS,
   WOC_COORDINATOR_CONTROL_CAPABILITY,
@@ -87,7 +88,7 @@ const wocResources: I18nPluginResources = {
   }
 };
 
-export const wocPlugin: PluginManifest = {
+const wocPluginDefinition = {
   id: "woc",
   name: "WOC",
   description: "WhatsOnChain API 代理：唯一 WOC 入口、全局限流、优先级队列、429 backoff、多标签页协调。",
@@ -184,4 +185,8 @@ export const wocPlugin: PluginManifest = {
       offActive();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: wocSetup, ...wocPlugin } = wocPluginDefinition;
+
+export { wocPlugin, wocSetup };

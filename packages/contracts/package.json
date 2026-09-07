@@ -12,6 +12,7 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@noble/hashes": "^2.0.1",
-    "cborg": "^5.1.6"
+    "cborg": "^5.1.6",
+    "webloom-framework": "0.1.0"
   }
 }

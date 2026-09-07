@@ -1,8 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ResourceSnapshot } from "@keymaster/contracts";
-import type { ResourceStoreApi } from "../resources/resourceStore.js";
-import { useResourceSelector } from "./useResourceSelector.js";
+import type { ResourceSnapshot, ResourceStoreApi } from "webloom-framework";
+import { useResourceSelector } from "webloom-framework/react";
 
 describe("useResourceSelector", () => {
   it("caches an allocating selector result while the resource snapshot is unchanged", () => {

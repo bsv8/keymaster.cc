@@ -12,7 +12,7 @@
 //   7. 业务侧 outpoint 格式错误（不含 "_"）直接返回 null，不抛错。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createMessageBus } from "@keymaster/runtime";
+import { createMessageBus } from "webloom-framework";
 import type { BsvNetwork } from "@keymaster/contracts";
 import { createWocActor } from "./wocActor.js";
 import { createWocService } from "./wocService.js";

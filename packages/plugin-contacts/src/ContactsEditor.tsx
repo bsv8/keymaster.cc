@@ -8,7 +8,8 @@
 
 import { useEffect, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import type { Contact, ContactInput, ContactsService } from "@keymaster/contracts";
 import type { KeyspaceService } from "@keymaster/contracts";
 import { ContactsDuplicateError } from "./contactsService.js";

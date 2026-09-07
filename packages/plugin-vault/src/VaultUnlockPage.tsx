@@ -4,7 +4,8 @@
 
 import { useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import type { VaultService } from "@keymaster/contracts";
 
 export function VaultUnlockPage() {

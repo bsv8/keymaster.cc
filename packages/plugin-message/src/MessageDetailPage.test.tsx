@@ -18,8 +18,9 @@ import type {
   WebrtcSessionSnapshot
 } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { PluginHostProvider } from "@keymaster/runtime";
+import { bindWebLoomHost, PluginHostProvider } from "@keymaster/runtime";
 import type { PluginHost } from "@keymaster/runtime";
+import { createFakePluginHost } from "webloom-framework/testing";
 import type { MessageService } from "./messageService.js";
 
 const OWNER = "02bbbb".padEnd(66, "b");
@@ -330,7 +331,11 @@ function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMess
     disable: async () => ({ ok: true as const }),
     unregister: async () => undefined
   };
-  return host as unknown as PluginHost;
+  const keymasterHost = host as unknown as PluginHost;
+  // 旧页面夹具仍维护 Keymaster 领域 ResourceStore；通用 capability Host
+  // 必须显式使用 WebLoom testing fake，不能依赖生产兼容桥接。
+  bindWebLoomHost(keymasterHost, createFakePluginHost({ capabilities: providers }));
+  return keymasterHost;
 }
 
 describe("MessageDetailPage in PluginHostProvider", () => {

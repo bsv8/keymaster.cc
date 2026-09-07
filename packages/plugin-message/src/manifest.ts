@@ -27,6 +27,7 @@ import type {
   MessageRecord,
   PluginContext,
   PluginManifest,
+  PluginSetup,
   ResourceRegistry,
   RouteRegistry
 } from "@keymaster/contracts";
@@ -299,7 +300,7 @@ const messageResources: I18nPluginResources = {
 /**
  * 消息业务插件 manifest。
  */
-export const messagePlatformPlugin: PluginManifest = {
+const messagePlatformPluginDefinition = {
   id: MESSAGE_PLUGIN_ID,
   name: "Messages",
   description: "keymaster.message business page: send / list / view scoped messages.",
@@ -485,4 +486,7 @@ export const messagePlatformPlugin: PluginManifest = {
       service.dispose?.();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: messageSetup, ...messagePlatformPlugin } = messagePlatformPluginDefinition;
+export { messageSetup, messagePlatformPlugin };

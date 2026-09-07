@@ -24,7 +24,7 @@ import {
   type PluginContext,
   type PluginManifest
 } from "@keymaster/contracts";
-import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
+import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { LogConfigurationSettings, LogSettingsPage } from "./LogSettingsPage.js";
 
 const LOG_DB_NAME = "keymaster.logs";
@@ -56,8 +56,15 @@ afterEach(async () => {
 
 /** 单独创建一个干净的 host + 注册 settings plugin（拿到 i18n 资源）。 */
 async function makeHostWithSettings() {
-  const host = createPluginHost({ disableConfigPersistence: true });
-  const { settingsPlugin } = await import("./manifest.js");
+  const { settingsPlugin, settingsSetup } = await import("./manifest.js");
+  const host = createPluginHost({
+    disableConfigPersistence: true,
+    runtimeUnitImplementationRegistry: {
+      get: (pluginId, unitId) => pluginId === settingsPlugin.id && unitId === settingsPlugin.units?.[0]?.id
+        ? settingsSetup
+        : undefined,
+    },
+  });
   await host.register(settingsPlugin);
   return host;
 }
@@ -169,8 +176,15 @@ describe("LogSettingsPage", () => {
 
 describe("settings plugin registers /settings/logs", () => {
   it("registers the logs settings route with the right path", async () => {
-    const { settingsPlugin } = await import("./manifest.js");
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const { settingsPlugin, settingsSetup } = await import("./manifest.js");
+    const host = createPluginHost({
+      disableConfigPersistence: true,
+      runtimeUnitImplementationRegistry: {
+        get: (pluginId, unitId) => pluginId === settingsPlugin.id && unitId === settingsPlugin.units?.[0]?.id
+          ? settingsSetup
+          : undefined,
+      },
+    });
     await host.register(settingsPlugin);
     const entry = host.business.listFeatures().find((feature) => feature.entry.path === "/settings/logs");
     expect(entry).toBeDefined();

@@ -3,89 +3,36 @@
 // 这是 plugin host 装载插件的唯一入口；plugin 通过 setup(ctx) 暴露能力，
 // 并在 disable / unregister 时由 host 调用 teardown 释放资源。
 
-import type { MessageBus } from "./messageBus.js";
+import type {
+  LifecycleDisposeResult,
+  LifecycleScope,
+  PluginExecution,
+  PluginLifetime,
+} from "webloom-framework";
+import type {
+  KeymasterWebLoomContext,
+  KeymasterWebLoomManifest,
+} from "./webloom.js";
 import type { I18nPluginResources } from "./i18n.js";
 import type { PluginLogger } from "./log.js";
 import type { PluginBusinessContribution } from "./business.js";
 import type { PluginStorageDeclaration } from "./storage/access.js";
 import type { KeyValueStore } from "./storage/kv.js";
-import type {
-  LifecycleScope,
-  RemoteServiceBridge,
-  PluginExecution,
-  PluginLifetime,
-  PluginPermission,
-  PermissionLease,
-  ScopedTaskScheduler,
-} from "./lifecycle.js";
+import type { PluginPermission } from "./keymasterLifecycle.js";
 
-/** 插件运行时上下文，由 plugin host 创建并传入 setup。 */
-export interface PluginContext {
-  /** Host 绑定的插件身份；插件不得从调用参数伪造其它 pluginId。 */
-  readonly pluginId: string;
-  /** 本次装配生成的运行实例身份；禁用后重启插件必须生成新值。 */
-  readonly instanceId: string;
-  /** 运行单元标识；旧 manifest 缺省时与产品 id 相同。 */
-  readonly unitId: string;
-  /** 当前插件实例的作用域；业务资源应登记到此作用域。 */
-  readonly scope: LifecycleScope;
-  /** 作用域撤权信号；锁屏、切 Key、禁用和关闭时触发。 */
-  readonly signal: AbortSignal;
-  /** 可信装配层批准后的权限视图；插件自声明不能扩大此集合。 */
-  readonly permissions: readonly PluginPermission[];
-  /** 绑定当前实例、owner 与授权修订的租约；最终 RPC/I/O 仍需再次校验。 */
-  readonly permissionLease: PermissionLease;
-  /** 已完成握手和快照校验的远程服务桥；不传递跨环境 Context。 */
-  readonly serviceBridge?: RemoteServiceBridge;
-  /** 绑定当前插件实例的后台任务注册面。 */
-  readonly taskScheduler?: ScopedTaskScheduler;
-  /** Register cleanup that runs before teardown and registry ownership recovery. */
-  onDispose(cleanup: PluginTeardown): void;
-  /** 注册 capability，重复注册会抛错。 */
-  provide<T>(key: string, value: T): void;
-  /** 读取 capability，缺失会抛错。 */
-  get<T>(key: string): T;
-  /** 探测 capability 是否存在。 */
-  has(key: string): boolean;
-  /** 要求某个 capability 必须存在，否则抛错。 */
-  require(key: string): void;
-  /**
-   * 访问统一 MessageBus（事件/命令/请求）。
-   * 这是事件订阅/发布、命令投递、请求响应的唯一入口。
-   * 旧 emit / on 已被移除，避免与 messageBus.publish / subscribe 双入口并存。
-   */
-  messageBus: MessageBus;
-  /**
-   * 平台注入的统一 logger。
-   *   - pluginId 已经天然绑定，插件作者**禁止**自己再传 pluginId。
-   *   - 不允许插件自己 new / 拼装第二套 logger。
-   *   - debug 关闭时 logger.debug() 不写库。
-   *   - child(scope) 仅用于在同一插件内细分模块。
-   */
-  logger: PluginLogger;
-  /**
-   * 当前 plugin 的显式配置面（施工单 2026-07-08 001 硬切换）。
-   *
-   * 由装配层在 `registerPlugin(manifest)` 期间按当前运行单元的 `unit.config` 注入；
-   * plugin 的 `setup(ctx)` 直接按 `ctx.config?.[key]` 读取。
-   *
-   * 关键边界：
-   *   - 这是 plugin **唯一**允许读取"装配层注入真值"的接口；
-   *   - **不**允许 plugin 反向写入 `ctx.config`（只读视图）；
-   *   - 缺值时按 plugin 自己声明的降级路径处理（如显示"未配置"）；
-   *   - 与 `PluginConfigStore`（启停配置）**不**共用：后者是 runtime
-   *     内部 store；前者是插件作者自定义字段。
-   */
-  readonly config?: Record<string, unknown>;
-  /** Host 在 setup 前按 manifest 声明预绑定的 owner/App K-V 句柄。 */
+/**
+ * Keymaster 插件运行时上下文。
+ *
+ * 通用字段唯一继承自 WebLoom 泛型 Context；logger、Storage 和 Coordinator
+ * 仍以 Keymaster 的平铺领域扩展保留，避免一次性改动全部业务插件调用点。
+ * 同一批领域字段也同时位于 `ctx.extension`，供新代码逐步迁移。
+ */
+export interface PluginContext extends KeymasterWebLoomContext {
+  /** 已绑定当前插件身份的 logger。 */
+  readonly logger: PluginLogger;
+  /** Host 预绑定的领域 Storage 句柄。 */
   readonly storage?: KeyValueStore;
-  /**
-   * Host 按 manifest.id 注入的 Coordinator 窄权限面。
-   *
-   * 该字段是插件身份绑定的，不允许插件通过 capability 字符串索引其它
-   * 插件的 Coordinator 面。具体插件应把它收窄为自己的
-   * `*CoordinatorControl` 契约后再使用。
-   */
+  /** 按 pluginId 收窄后的 Coordinator facade。 */
   readonly coordinator?: unknown;
 }
 
@@ -323,14 +270,14 @@ export interface RuntimeUnitDescriptor {
   config?: Record<string, unknown>;
 }
 
-/** 插件清单：插件作者导出的唯一对象。 */
-export interface PluginManifest {
-  /** 全局唯一 id，使用命名空间，例如 "vault"、"p2pkh"。 */
-  id: string;
-  /** 展示用名称。 */
-  name: string;
-  /** 描述。 */
-  description?: string;
+/**
+ * 插件清单：通用静态字段来自 WebLoom，Keymaster 只补充产品领域字段。
+ * setup 不属于清单，运行实现必须通过 RuntimeUnitImplementationRegistry 注入。
+ */
+export interface PluginManifest extends Omit<
+  KeymasterWebLoomManifest,
+  "meta" | "contribution" | "dependencies" | "permissions" | "units" | "config"
+> {
   /**
    * 无 units 的简单插件的兼容业务声明；显式运行单元必须放入 unit.business。
    * runtime 自动注册并在 disable / uninstall 时统一回收；插件 setup 不必
@@ -382,12 +329,6 @@ export interface PluginManifest {
    * 需要运行时翻译的插件可以显式 get 它（不再要求每个 plugin 手写 registerResources）。
    */
   i18n?: I18nPluginResources;
-  /**
-   * 历史 product-level 运行入口（兼容字段）。新的多环境实现应放入
-   * `RuntimeUnitImplementationRegistry`；Host 只在单元注册表没有实现时
-   * 为 Window 迁移保留该 fallback，不能让它成为 Worker 的隐式入口。
-   */
-  setup?: PluginSetup;
 }
 
 /**
@@ -432,7 +373,7 @@ export interface PluginState {
   /** 当前阻塞或清理原因（中文 UI 可据此映射）。 */
   blockedBy?: string[];
   /** 最近一次结构化清理结果。 */
-  cleanup?: import("./lifecycle.js").LifecycleDisposeResult;
+  cleanup?: LifecycleDisposeResult;
   /** 当前产品下各运行单元的独立状态；旧简单插件只包含一个单元。 */
   units?: readonly PluginUnitState[];
 }
@@ -454,7 +395,7 @@ export interface PluginUnitState {
   /** 单元的阻塞或失败原因。 */
   error?: string;
   /** 单元清理结果。 */
-  cleanup?: import("./lifecycle.js").LifecycleDisposeResult;
+  cleanup?: LifecycleDisposeResult;
 }
 
 /** 插件依赖图中"被谁依赖"查询的条目。 */

@@ -6,7 +6,8 @@
 //   - 详情页保留给 contacts 域内部查看与 breadcrumb 解析；
 //   - 联系人身份以 publicKeyHex 为准。
 
-import { useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { EmptyState, PageHeader } from "@keymaster/ui";
 import type { Contact, ContactPresenceMap } from "@keymaster/contracts";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";

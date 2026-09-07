@@ -7,7 +7,8 @@
 //   - 作为首页侧栏只提供快速识别，不承载编辑逻辑。
 
 import { EmptyState } from "@keymaster/ui";
-import { countRender, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { countRender, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { formatShortPublicKey, type Contact } from "@keymaster/contracts";
 
 export function RecentContactsWidget() {

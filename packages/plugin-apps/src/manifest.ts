@@ -18,6 +18,7 @@ import type {
   BusinessFeatureRegistry,
   I18nPluginResources,
   PluginManifest,
+  PluginSetup,
   RouteRegistry
 } from "@keymaster/contracts";
 import {
@@ -113,7 +114,7 @@ const appsResources: I18nPluginResources = {
   }
 };
 
-export const appsPlugin: PluginManifest = {
+const appsPluginDefinition = {
   id: "apps",
   name: "Apps",
   description: "Keymaster 内部 app launcher：从本地 JSON 清单展示 app，并在当前 Keymaster 窗口作为 launcher 启动 appView。",
@@ -159,4 +160,7 @@ export const appsPlugin: PluginManifest = {
       home: [{ id: "apps.home", space: { id: "apps.applications", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400 }, order: 60, component: AppsHomeWidget }]
     });
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: appsSetup, ...appsPlugin } = appsPluginDefinition;
+export { appsSetup, appsPlugin };

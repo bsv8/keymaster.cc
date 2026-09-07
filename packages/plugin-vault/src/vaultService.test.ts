@@ -9,8 +9,9 @@
 //   - 在 withPrivateKey 回调内才能拿到 material。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getFatalError, resetFatalErrorForTest, type MessageBus } from "@keymaster/runtime";
+import { getFatalError, resetFatalErrorForTest } from "@keymaster/runtime";
 import { ActiveKeySessionRevokedError } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   createVaultService as createProductionVaultService,
   KeyPersistedButActivationFailedError

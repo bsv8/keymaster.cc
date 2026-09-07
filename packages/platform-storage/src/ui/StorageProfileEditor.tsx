@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { BucketConditionalCapabilityView, StorageProviderConfigDraft, StorageProviderId, StorageProviderSummary, StorageRuntimeController } from "@keymaster/contracts";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController.js";
 import { importStorageProfileEnvelope } from "../bootstrap/storageProfileRepository.js";

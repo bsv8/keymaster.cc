@@ -8,7 +8,8 @@ import { MSFILE_READ_CONCURRENCY_RECOMMENDED } from "@keymaster/contracts";
 import {
   type MsFileMediaSnapshot,
 } from "@keymaster/msfile-media/browser";
-import { usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useResourceSelector } from "webloom-framework/react";
+import { usePluginHost } from "@keymaster/runtime";
 import {
   disposeMsFileMediaSession,
   getMsFileMediaSession,

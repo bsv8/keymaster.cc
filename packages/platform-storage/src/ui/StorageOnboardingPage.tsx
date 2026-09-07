@@ -1,5 +1,6 @@
 import type { StorageRuntimeController } from "@keymaster/contracts";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { StorageProfileEditor } from "./StorageProfileEditor.js";
 import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController.js";
 

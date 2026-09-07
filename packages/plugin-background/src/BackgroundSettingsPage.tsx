@@ -11,7 +11,8 @@
 // 硬切换 003：使用 Resource Store 读取后台设置，跨标签同步由 resource subscribe 处理。
 
 import { useEffect, useState } from "react";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { BackgroundService, BackgroundSyncSettings } from "@keymaster/contracts";
 
 /** 预设选项。 */

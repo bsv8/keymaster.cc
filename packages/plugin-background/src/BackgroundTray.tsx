@@ -9,7 +9,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Square, X, Zap } from "lucide-react";
-import { useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
 import type { BackgroundService, BackgroundTaskSnapshot, BackgroundTaskState } from "@keymaster/contracts";
 
 const EMPTY_SNAPSHOTS: BackgroundTaskSnapshot[] = [];

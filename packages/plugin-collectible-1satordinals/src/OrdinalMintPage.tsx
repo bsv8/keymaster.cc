@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import type { BsvNetwork } from "@keymaster/contracts";
 import type { OrdinalEnvelopeEntry } from "./ordinalScript.js";
 import type { OrdinalMintPreview, OrdinalMintService } from "./ordinalMintService.js";

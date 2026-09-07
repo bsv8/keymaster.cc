@@ -1,5 +1,6 @@
 import type { TokenRegistry, TransferOffer, TransferOfferStatus, TransferProvider } from "@keymaster/contracts";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import { Button, EmptyState, Select, TextInput } from "@keymaster/ui";
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { sha256 } from "@noble/hashes/sha256";

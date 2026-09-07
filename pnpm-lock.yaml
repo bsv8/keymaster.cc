@@ -213,6 +213,9 @@ importers:
       sat-subscription-protocol:
         specifier: 0.1.0
         version: 0.1.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/connect:
     devDependencies:
@@ -231,6 +234,9 @@ importers:
       cborg:
         specifier: ^5.1.6
         version: 5.1.6
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/msfile-media:
     dependencies:
@@ -264,6 +270,9 @@ importers:
       '@xmldom/xmldom':
         specifier: ^0.9.10
         version: 0.9.10
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-apps:
     dependencies:
@@ -285,6 +294,9 @@ importers:
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-background:
     dependencies:
@@ -300,6 +312,9 @@ importers:
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-bsv-price:
     dependencies:
@@ -312,6 +327,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-collectible-1satordinals:
     dependencies:
@@ -327,6 +345,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.8.0
         version: 1.8.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-contacts:
     dependencies:
@@ -345,6 +366,9 @@ importers:
       bsv8-channel-protocol:
         specifier: 0.3.0
         version: 0.3.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-home:
     dependencies:
@@ -366,6 +390,9 @@ importers:
       qrcode.react:
         specifier: ^4.2.0
         version: 4.2.0(react@18.3.1)
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-importer-hex:
     dependencies:
@@ -420,6 +447,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.4.0
         version: 1.8.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-key-import:
     dependencies:
@@ -435,6 +465,9 @@ importers:
       keyhold:
         specifier: 2.0.0
         version: 2.0.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-message:
     dependencies:
@@ -450,6 +483,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-msfile:
     dependencies:
@@ -480,6 +516,9 @@ importers:
       bitcoin-libp2p:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-p2pkh:
     dependencies:
@@ -498,6 +537,9 @@ importers:
       '@noble/secp256k1':
         specifier: ^2.1.0
         version: 2.3.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-poker:
     dependencies:
@@ -522,6 +564,9 @@ importers:
       '@noble/secp256k1':
         specifier: ^2.2.0
         version: 2.3.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-protocol:
     dependencies:
@@ -549,6 +594,9 @@ importers:
       keymaster-multisig-pool:
         specifier: 1.5.0
         version: 1.5.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-sat-subscription:
     dependencies:
@@ -582,6 +630,9 @@ importers:
       satoshi-payment-interface:
         specifier: 0.1.0
         version: 0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-settings:
     dependencies:
@@ -594,6 +645,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-token-bsv21:
     dependencies:
@@ -609,6 +663,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.8.0
         version: 1.8.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-token-stas:
     dependencies:
@@ -618,6 +675,9 @@ importers:
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-vault:
     dependencies:
@@ -642,6 +702,9 @@ importers:
       keyhold:
         specifier: 2.0.0
         version: 2.0.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-webrtc:
     dependencies:
@@ -657,6 +720,9 @@ importers:
       bsv8-channel-protocol:
         specifier: 0.3.0
         version: 0.3.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/plugin-window-p2p:
     dependencies:
@@ -690,12 +756,18 @@ importers:
       '@noble/hashes':
         specifier: ^1.4.0
         version: 1.8.0
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/runtime:
     dependencies:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
+      webloom-framework:
+        specifier: 0.1.0
+        version: 0.1.0(react@18.3.1)
 
   packages/ui:
     dependencies:
@@ -4004,6 +4076,15 @@ packages:
   webidl-conversions@7.0.0:
     resolution: {integrity: sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==}
     engines: {node: '>=12'}
+
+  webloom-framework@0.1.0:
+    resolution: {integrity: sha512-geCfa7qDGufpPrszu4b0uD2Q/BRNGZrXGrTt45Zd1P3i0rjwIa4rQrhvX7eAxMOGdfG+jAG6LxFs6nN0B8AIZw==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
 
   whatwg-encoding@3.1.1:
     resolution: {integrity: sha512-6qN4hJdMwfYBtE3YBTTHhoeuUrDBPZmbQaxWAqSALV/MeEnR5z1xd8UKud2RAkFoPkmB+hli1TZSnyi84xz1vQ==}
@@ -8033,6 +8114,10 @@ snapshots:
       tslib: 2.8.1
 
   webidl-conversions@7.0.0: {}
+
+  webloom-framework@0.1.0(react@18.3.1):
+    optionalDependencies:
+      react: 18.3.1
 
   whatwg-encoding@3.1.1:
     dependencies:

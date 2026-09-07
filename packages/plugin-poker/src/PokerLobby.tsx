@@ -15,7 +15,8 @@
 
 import React from "react";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import { router, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useResourceSelector } from "webloom-framework/react";
+import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import {
   formatShortPublicKey,
   type PokerPresence,

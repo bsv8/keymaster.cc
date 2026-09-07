@@ -21,11 +21,11 @@ import type {
   KeyIdentity,
   KeyspaceService,
   KeyValueStore,
-  MessageBus,
   PluginLogger,
   VaultService,
   P2pkhCoordinatorControl
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { ASSET_DATA_NOTIFIER_CAPABILITY } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,

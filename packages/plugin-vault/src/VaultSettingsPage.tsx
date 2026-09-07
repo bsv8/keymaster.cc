@@ -29,7 +29,8 @@ import {
   PageHeader,
   type DataTableColumn
 } from "@keymaster/ui";
-import { router, useCapability, useI18n, useLocale, usePluginHost, useRegistry, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { router, useI18n, useLocale, usePluginHost, useRegistry } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   ActiveKeyState,

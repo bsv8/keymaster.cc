@@ -60,10 +60,10 @@
 import { useEffect, useReducer } from "react";
 import { Button, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
 import {
-  useCapability,
   useI18n,
   usePluginHost
 } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
 import {
   KeyPersistedButActivationFailedError,
   type KeyImportResult,

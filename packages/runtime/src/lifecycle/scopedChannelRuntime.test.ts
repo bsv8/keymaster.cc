@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelRuntime } from "@keymaster/contracts";
-import { createLifecycleScope } from "./resourceScope.js";
+import { createLifecycleScope } from "webloom-framework";
 import { createScopedChannelRuntime } from "./scopedChannelRuntime.js";
 
 function createBaseRuntime() {

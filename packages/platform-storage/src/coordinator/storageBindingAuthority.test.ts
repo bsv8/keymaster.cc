@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RemoteServiceProxy } from "@keymaster/contracts";
+import type { RemoteServiceBridge, RemoteServiceProxy } from "webloom-framework";
 import type { StorageBindingCoordinatorClient, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 import { createStorageBindingAuthority } from "./storageBindingAuthority.js";
 
@@ -33,9 +33,11 @@ describe("storage binding authority service bridge", () => {
         authorityInstanceId: "authority:1",
         scopeId: "scope:1",
         handoverGeneration: 1,
-        sessionEpoch: "session:1",
-        ownerPublicKeyHex: OWNER.toLowerCase(),
-        ownerGeneration: 1,
+        attributes: {
+          sessionEpoch: "session:1",
+          ownerPublicKeyHex: OWNER.toLowerCase(),
+          ownerGeneration: 1,
+        },
         status: "ready",
         snapshotRevision: 1,
         grantId: "service-grant:1",
@@ -55,7 +57,7 @@ describe("storage binding authority service bridge", () => {
     } as unknown as StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined };
     const bridge = {
       getProxy: vi.fn(() => proxy),
-    } as unknown as import("@keymaster/contracts").RemoteServiceBridge;
+    } as unknown as RemoteServiceBridge;
 
     const authority = createStorageBindingAuthority(client, {
       serviceBridge: bridge,

@@ -1,10 +1,10 @@
-import type { PluginManifest, PluginContext } from "@keymaster/contracts";
+import type { PluginManifest, PluginSetup, PluginContext } from "@keymaster/contracts";
 import { WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY, defineRuntimeUnitProvidedContracts, type WindowP2pCoordinatorControl } from "@keymaster/contracts";
 import { createWindowP2pLaneRegistry } from "./laneRegistry.js";
 import { installWindowP2pExecutor } from "./windowExecutor.js";
 
 /** 唯一 Window Host/lease/lane owner 的系统插件。 */
-export const windowP2pPlugin: PluginManifest = {
+const windowP2pPluginDefinition = {
   id: "window-p2p",
   name: "Window P2P",
   description: "唯一的 bitcoin-libp2p Host、executor lease 和受限网络 lane。",
@@ -50,4 +50,7 @@ export const windowP2pPlugin: PluginManifest = {
       return cleanupExecutor();
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: windowP2pSetup, ...windowP2pPlugin } = windowP2pPluginDefinition;
+export { windowP2pSetup, windowP2pPlugin };

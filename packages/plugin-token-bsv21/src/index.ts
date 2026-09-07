@@ -1,5 +1,5 @@
 // packages/plugin-token-bsv21/src/index.ts
-export { bsv21TokenPlugin } from "./manifest.js";
+export { bsv21TokenPlugin, bsv21TokenSetup } from "./manifest.js";
 export { createBsv21SyncTask } from "./bsv21Sync.js";
 export { createBsv21StateRepository } from "./storage/bsv21StateRepository.js";
 export { createBsv21MintHistoryRepository } from "./storage/bsv21MintHistoryRepository.js";

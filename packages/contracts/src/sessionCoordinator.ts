@@ -62,8 +62,8 @@ import type {
   PluginIntentCommand,
   PluginIntentSnapshot,
   PluginIntentSubmissionResult,
-  PluginLifetime,
-} from "./lifecycle.js";
+} from "webloom-framework";
+import type { PluginLifetime } from "webloom-framework";
 
 // ============================================================
 // 1. Session Epoch

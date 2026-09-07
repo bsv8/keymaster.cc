@@ -9,12 +9,11 @@ import type {
 } from "@keymaster/contracts";
 import {
   router,
-  useCapability,
   useCurrentPath,
   useI18n,
-  usePluginHost,
-  useResourceSelector
+  usePluginHost
 } from "@keymaster/runtime";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { EmptyState, PageHeader } from "@keymaster/ui";
 import type { TransferFeatureCapability } from "./transfer/transferFeature.js";
 

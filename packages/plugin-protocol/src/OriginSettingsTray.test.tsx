@@ -22,16 +22,15 @@ import {
 let currentService: ProtocolService | null = null;
 
 vi.mock("@keymaster/runtime", () => ({
-  useCapability: (key: string) => {
-    if (key === PROTOCOL_SERVICE_CAPABILITY) {
-      return currentService;
-    }
-    return undefined;
-  },
   useI18n: () => ({
     t: (key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? key,
     language: () => "en"
   })
+}));
+
+vi.mock("webloom-framework/react", () => ({
+  useCapability: (key: string) =>
+    key === PROTOCOL_SERVICE_CAPABILITY ? currentService : undefined
 }));
 
 interface MockService extends ProtocolService {

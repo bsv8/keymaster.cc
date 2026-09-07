@@ -10,7 +10,8 @@
 //   - **不**支持 TURN：UI 上**不**给 TURN 字段入口；service 测试只发 STUN。
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
 import {
   validateStunUrl,

@@ -10,15 +10,15 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   KeyIdentity,
   KeyspaceService,
-  MessageBus,
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import { KeySwitchWidget } from "./KeySwitchWidget.js";
 
 const KEY_A = "02".padEnd(66, "a");

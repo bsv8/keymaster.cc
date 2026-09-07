@@ -9,7 +9,8 @@
 
 import { useState, type ReactElement } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
+import { useCapability, useResource } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 
 const BSV_PRICE_SERVICE_CAPABILITY = "bsv-price.service";

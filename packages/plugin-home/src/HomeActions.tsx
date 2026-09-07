@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { Camera, Check, Copy, Image, ScanLine, UserRound, UserPlus } from "lucide-react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import { useCapability, useHasCapability, useI18n, usePluginHost, useRegistry, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useHasCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost, useRegistry } from "@keymaster/runtime";
 import {
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
   formatShortPublicKey,

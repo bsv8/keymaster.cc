@@ -180,11 +180,15 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      // WebLoom 在开发阶段通过 link 接入；所有 React Hook 必须解析到
+      // Keymaster 应用的同一份 React，避免 peer 依赖产生第二份 dispatcher。
+      react: new URL("../../node_modules/react", import.meta.url).pathname,
       // `keymaster-multisig-pool` 当前发布包直接 import Node `crypto`。
       // 浏览器构建只补它实际用到的 `createHmac` 最小能力，不引入整套 polyfill。
       // 用通用全局 URL 取绝对路径，避免依赖 node:url（本项目不引入 node 类型）。
       crypto: new URL("./src/shims/crypto.ts", import.meta.url).pathname
     },
+    dedupe: ["react", "react-dom"],
     // 让 Vite 直接消费 packages/* 源码（与 tsc 行为一致）。
     preserveSymlinks: false
   },

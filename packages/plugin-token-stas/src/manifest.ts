@@ -10,12 +10,13 @@ import type {
   BackgroundService,
   I18nPluginResources,
   KeyspaceService,
-  MessageBus,
   PluginManifest,
+  PluginSetup,
   TokenRegistry,
   VaultService,
   WocStasService
 } from "@keymaster/contracts";
+import type { MessageBus } from "webloom-framework";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   BACKGROUND_REGISTRY_CAPABILITY,
@@ -51,7 +52,7 @@ const stasResources: I18nPluginResources = {
   }
 };
 
-export const stasTokenPlugin: PluginManifest = {
+const stasTokenPluginDefinition = {
   id: "token-stas",
   name: "STAS tokens",
   description: "STAS fungible token provider：通过 snapshot K-V 读取当前 active key 主网地址的 STAS 持仓，注入 token.registry。",
@@ -173,4 +174,7 @@ export const stasTokenPlugin: PluginManifest = {
       void provider;
     };
   }
-};
+} satisfies PluginManifest & { setup: PluginSetup };
+
+const { setup: stasTokenSetup, ...stasTokenPlugin } = stasTokenPluginDefinition;
+export { stasTokenSetup, stasTokenPlugin };

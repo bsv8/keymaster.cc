@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, Select, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability } from "webloom-framework/react";
+import { useI18n } from "@keymaster/runtime";
 import type { BsvNetwork } from "@keymaster/contracts";
 import type { Bsv21MintPreview, Bsv21MintService } from "./bsv21MintService.js";
 import { BSV21_MINT_SERVICE_CAPABILITY } from "./bsv21MintService.js";
