@@ -432,8 +432,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       };
       if (this.localStorageBridgeLease && snapshot.authorityInstanceId) {
         this.localStorageBridgeLease.authorityInstanceId = snapshot.authorityInstanceId;
-        this.localStorageBridgeLease.bucketId = snapshot.storageBucketId;
-        this.localStorageBridgeLease.bucketGeneration = snapshot.storageBucketGeneration ?? 0;
+        // 首个桶刚由页面提交时，Worker 的 hello 快照还没有 Root，因此
+        // storageBucketId 暂时为空。此时必须保留 openLocalStorageBridge()
+        // 从当前目录读取的选中桶；否则 hello 响应与专用端口 lease 消息的
+        // 到达顺序会决定随后的 unlock-bucket 是否被误判为 stale。
+        if (snapshot.storageBucketId) {
+          this.localStorageBridgeLease.bucketId = snapshot.storageBucketId;
+          this.localStorageBridgeLease.bucketGeneration = snapshot.storageBucketGeneration ?? 0;
+        } else if (!this.localStorageBridgeLease.bucketId) {
+          this.localStorageBridgeLease.bucketGeneration = 0;
+        }
       }
       if (snapshot.pluginIntent) this.cachePluginIntentSnapshot(snapshot.pluginIntent, snapshot.authorityInstanceId);
     }
@@ -986,6 +994,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  /**
+   * 首个桶由页面完成“快照先落地、目录后提交”后，SharedWorker 仍持有启动时
+   * 的未选择状态。重发 hello 只替换公开桶身份与 Local I/O bridge，不重启
+   * Worker，也不传递密码；随后的 unlock-bucket 才携带一次性密码。
+   */
+  async refreshStorageBootstrap(): Promise<void> {
+    const localStorageBridgePort = this.openLocalStorageBridge();
+    await this.sendHello(undefined, localStorageBridgePort);
   }
 
   async storageGrant(context: import("@keymaster/contracts").OwnerAppStorageGrant): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {

@@ -121,7 +121,7 @@ import {
 } from "./keymasterSessionCoordinator.worker.js";
 import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
-import type { LocalStorageLike } from "@keymaster/platform-storage";
+import type { LocalStorageLike, LocalStorageLocks } from "@keymaster/platform-storage";
 import { createMessagePortServiceTransport, createServiceBridge } from "webloom-framework";
 
 class TestPort {
@@ -158,7 +158,7 @@ class CatalogBridgeStorage implements LocalStorageLike {
 
 const catalogBridgeLocks = {
   request: async <T>(_name: string, callback: () => Promise<T>) => callback()
-};
+} as LocalStorageLocks;
 
 async function makeEncryptedLocalCatalogEntry(
   bucketId: string,

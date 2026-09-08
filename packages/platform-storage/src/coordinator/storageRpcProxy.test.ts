@@ -16,6 +16,7 @@ function coordinator() {
     storageGrant: vi.fn(async () => ({ status: "ok", value: "grant-a", sessionEpoch: "epoch-a" })),
     storageData: vi.fn(async (data: unknown) => ({ status: "ok", value: { path: (data as { input?: { path?: string } }).input?.path ?? "file" }, sessionEpoch: "epoch-a" })),
     storageControl: vi.fn(async () => ({ status: "ok", value: null, sessionEpoch: "epoch-a" })),
+    refreshStorageBootstrap: vi.fn(async () => undefined),
     storageCancel: vi.fn(async () => ({ status: "ok" })),
     storageSessionAbort: vi.fn(async () => ({ status: "ok" })),
   } as unknown as SessionCoordinatorClient;
@@ -91,6 +92,22 @@ describe("StorageRpcProxy grant boundary", () => {
     await proxy.renameBucket("新名称");
 
     expect(client.storageControl).toHaveBeenCalledWith({ type: "rename-bucket", label: "新名称" });
+    proxy.dispose();
+  });
+
+  it("refreshes the public bucket bootstrap bridge before first bucket unlock", async () => {
+    const client = coordinator();
+    const proxy = new StorageRpcProxy(client);
+
+    await proxy.unlockBucket("bucket-password");
+
+    expect(client.refreshStorageBootstrap).toHaveBeenCalledTimes(1);
+    expect(client.storageControl).toHaveBeenCalledWith({ type: "unlock-bucket", password: "bucket-password" });
+    const refreshOrder = vi.mocked(client.refreshStorageBootstrap!).mock.invocationCallOrder[0];
+    const unlockOrder = vi.mocked(client.storageControl).mock.invocationCallOrder[0];
+    expect(refreshOrder).toBeDefined();
+    expect(unlockOrder).toBeDefined();
+    expect(refreshOrder!).toBeLessThan(unlockOrder!);
     proxy.dispose();
   });
 });

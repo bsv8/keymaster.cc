@@ -661,6 +661,8 @@ export interface SessionCoordinatorClient {
   backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
   backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult>;
   storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
+  /** 页面新增首桶后，刷新只含公开桶身份的 Local Storage bridge 启动快照。 */
+  refreshStorageBootstrap?(): Promise<void>;
   storageGrant(context: OwnerAppStorageGrant): Promise<CoordinatorValueResult<string>>;
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
@@ -706,7 +708,7 @@ export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
 
 /** Storage 插件 Coordinator 面。 */
 export type StorageCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort"
+  "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort" | "refreshStorageBootstrap"
 >;
 
 /** Vault 插件 Coordinator 面。 */

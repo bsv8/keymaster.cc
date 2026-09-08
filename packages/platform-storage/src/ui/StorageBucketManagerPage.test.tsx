@@ -12,7 +12,7 @@ import { render } from "@testing-library/react";
 import { createKeymasterPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import type { ActiveKeyState, KeyRef, KeyspaceService, StorageBucketCatalogEntryV2, StorageRuntimeController, VaultService } from "@keymaster/contracts";
 import { writeStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
-import { StorageBucketManagerEntry } from "./StorageBucketManagerPage.js";
+import { StorageBucketManagerEntry, StorageBucketManagerPage } from "./StorageBucketManagerPage.js";
 
 const KEY_A = `02${"a".repeat(64)}`;
 const KEY_B = `03${"b".repeat(64)}`;
@@ -72,6 +72,28 @@ function mount() {
   return { activateKey, ...render(<PluginHostProvider host={host}><StorageBucketManagerEntry /></PluginHostProvider>) };
 }
 
+function mountManagerPage() {
+  let activePublicKeyHex = KEY_A;
+  const host = createKeymasterPluginHost({ disableConfigPersistence: true, i18nDebug: false });
+  const vault = {
+    status: () => "unlocked" as const,
+    getLifecycleSnapshot: () => ({ status: "unlocked" as const, activePublicKeyHex, sessionEpoch: "epoch-a", vaultLifecycleRevision: 1 }),
+    onLifecycleChange: () => () => undefined,
+    listKeys: async () => [keyA, keyB],
+    activateKey: async (input: { publicKeyHex: string }) => { activePublicKeyHex = input.publicKeyHex; return { status: "accepted" as const }; }
+  } as unknown as VaultService;
+  const storage = {
+    status: () => "ready" as const,
+    subscribe: () => () => undefined,
+    selectedBucketId: () => "bucket-a",
+    isCatalogBucket: () => true
+  } as unknown as StorageRuntimeController;
+  writeStorageCatalog({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: "bucket-a", buckets: [bucket("bucket-a", "工作桶")] });
+  host.capabilities.provide<VaultService>("vault.service", vault);
+  host.capabilities.provide<StorageRuntimeController>("storage.runtime-controller", storage);
+  return render(<PluginHostProvider host={host}><StorageBucketManagerPage /></PluginHostProvider>);
+}
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
@@ -111,5 +133,19 @@ describe("StorageBucketManagerEntry key switching", () => {
     expect(activateKey).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getByRole("button", { name: /Alpha/ }).getAttribute("aria-current")).toBe("true");
+  });
+});
+
+describe("StorageBucketManagerPage structure", () => {
+  it("lists current bucket Keys and opens add bucket in a modal", async () => {
+    const user = userEvent.setup();
+    mountManagerPage();
+    expect(await screen.findByRole("button", { name: /Alpha/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Beta/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Alpha/ }).getAttribute("aria-current")).toBe("true");
+
+    await user.click(screen.getByRole("button", { name: /添加桶|Add a bucket/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByLabelText(/桶名称|Bucket name/)).toBeTruthy();
   });
 });

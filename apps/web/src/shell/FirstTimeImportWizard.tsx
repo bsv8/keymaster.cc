@@ -119,9 +119,13 @@ const STEP_DEFINITIONS: ReadonlyArray<StepDefinition> = [
 export interface FirstTimeImportWizardProps {
   /** 用户点"返回"回到欢迎页时触发。 */
   onCancel(): void;
+  /** 初始设置页已收集的统一密码；提供后不再重复显示 Vault 密码步骤。 */
+  vaultPassword?: string;
+  /** 首把 Key 已导入并激活。 */
+  onComplete?(): void;
 }
 
-export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) {
+export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: FirstTimeImportWizardProps) {
   const vault = useCapability<VaultService>("vault.service");
   const host = usePluginHost();
   const { t } = useI18n();
@@ -232,7 +236,9 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
     //   - useSamePassword === true ⇒ 复用 resolvedImportPassword。
     //   - useSamePassword === false ⇒ 用户新设密码。
     let finalVaultPassword: string;
-    if (state.importRequiredPassword && state.useSamePassword) {
+    if (vaultPassword) {
+      finalVaultPassword = vaultPassword;
+    } else if (state.importRequiredPassword && state.useSamePassword) {
       if (!state.resolvedImportPassword) {
         // 理论不可能到这里：useSamePassword === true 但解析时没有
         // 保存密码——保留一条防御性提示。
@@ -284,6 +290,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
         }
       });
       // 成功：vault 内部会切到 unlocked，App 卸载 LockedShell。
+      onComplete?.();
       dispatch({ type: "reset" });
     } catch (err) {
       if (err instanceof KeyPersistedButActivationFailedError) {
@@ -310,6 +317,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
   }
 
   // ---- step progress 派生 ----
+  const visibleSteps = vaultPassword ? STEP_DEFINITIONS.slice(0, 3) : STEP_DEFINITIONS;
   const currentIndex = STEP_ORDER.indexOf(step);
   const doneUpToIndex = Math.max(currentIndex, 0);
 
@@ -362,7 +370,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
     return (
       <div className="first-time-import">
         <StepProgress
-          steps={STEP_DEFINITIONS}
+          steps={visibleSteps}
           currentIndex={currentIndex}
           doneUpToIndex={doneUpToIndex}
           onStepClick={gotoStepIndex}
@@ -402,7 +410,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
     return (
       <div className="first-time-import">
         <StepProgress
-          steps={STEP_DEFINITIONS}
+          steps={visibleSteps}
           currentIndex={currentIndex}
           doneUpToIndex={doneUpToIndex}
           onStepClick={gotoStepIndex}
@@ -571,7 +579,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
     return (
       <div className="first-time-import">
         <StepProgress
-          steps={STEP_DEFINITIONS}
+          steps={visibleSteps}
           currentIndex={currentIndex}
           doneUpToIndex={doneUpToIndex}
           onStepClick={gotoStepIndex}
@@ -581,7 +589,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
             defaultValue: "导入私钥：3. 确认解析结果"
           })}
           description={t("shell.import.wizard.confirmKeyDesc", {
-            defaultValue: "解析成功后，确认标签后继续设置本机系统锁屏密码。"
+            defaultValue: vaultPassword ? "确认解析结果并填写这把 Key 的标签名称。" : "解析成功后，确认标签后继续设置本机系统锁屏密码。"
           })}
         />
         <section className="first-time-import__confirm">
@@ -606,8 +614,8 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
         </section>
         {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
         <div className="first-time-import__actions">
-          <Button onClick={gotoPassword} disabled={!parsed}>
-            {t("common.action.next", { defaultValue: "下一步" })}
+          <Button onClick={vaultPassword ? finish : gotoPassword} loading={state.importState.busy} disabled={!parsed || (Boolean(vaultPassword) && !state.label.trim())}>
+            {vaultPassword ? t("shell.import.wizard.confirm", { defaultValue: "导入这把 Key" }) : t("common.action.next", { defaultValue: "下一步" })}
           </Button>
           <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
             {t("common.action.back", { defaultValue: "返回" })}

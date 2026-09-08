@@ -577,7 +577,7 @@ button { font-family: inherit; }
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 0;
   position: relative;
 }
@@ -654,7 +654,7 @@ button.step-progress__node:not(:disabled) { cursor: pointer; }
 .step-progress__item--done .step-progress__label { color: var(--text-dim); }
 button.step-progress__node:not(:disabled):hover .step-progress__label { color: var(--primary); }
 @media (max-width: 560px) {
-  .step-progress__list { grid-template-columns: repeat(4, 1fr); gap: 0; }
+  .step-progress__list { grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 0; }
   .step-progress__label { font-size: 10px; }
   .step-progress__index { width: 20px; height: 20px; font-size: 10px; }
   .step-progress__connector { top: 10px; }
@@ -668,6 +668,29 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .first-time-import__password { display: flex; flex-direction: column; gap: 10px; }
 .first-time-import__actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .first-time-import__error { color: var(--danger); font-size: 13px; margin: 0; }
+
+/* 首次设置是独立向导：每屏只完成一个决定，交互选项本身才使用卡片。 */
+.initial-setup { display: flex; flex-direction: column; gap: 16px; }
+.initial-setup__choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.initial-setup__choices button { display: flex; min-height: 104px; align-items: flex-start; gap: 12px; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; transition: border-color 140ms ease, background 140ms ease, transform 140ms ease; }
+.initial-setup__choices button:hover { transform: translateY(-1px); border-color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
+.initial-setup__choices button > svg { flex: 0 0 auto; color: var(--primary); }
+.initial-setup__choices button > span { display: grid; gap: 6px; }
+.initial-setup__choices strong { font-size: 14px; }
+.initial-setup__choices small { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+.initial-setup__actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+.initial-setup__error { margin: 0; padding: 10px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); color: var(--danger); font-size: 12px; line-height: 1.5; }
+.initial-setup__waiting { margin: 0; padding: 16px 0; color: var(--text-dim); font-size: 13px; }
+.initial-setup .bucket-connection-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.initial-setup .bucket-connection-fields label { display: grid; gap: 6px; color: var(--text-dim); font-size: 11px; font-weight: 650; }
+.initial-setup .bucket-connection-fields label.is-wide, .initial-setup .bucket-connection-fields .is-wide { grid-column: 1 / -1; }
+.initial-setup .bucket-connection-fields input:not([type="checkbox"]), .initial-setup .bucket-connection-fields select { box-sizing: border-box; width: 100%; height: 42px; padding: 0 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); color: var(--text); font: inherit; }
+.initial-setup .bucket-connection-fields__checkbox { display: flex; align-items: center; gap: 7px; }
+.initial-setup .bucket-connection-fields__note { margin: 0; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+@media (max-width: 560px) {
+  .initial-setup__choices, .initial-setup .bucket-connection-fields { grid-template-columns: 1fr; }
+  .initial-setup .bucket-connection-fields label.is-wide, .initial-setup .bucket-connection-fields .is-wide { grid-column: auto; }
+}
 .first-time-import__reuse-toggle {
   display: flex;
   align-items: center;

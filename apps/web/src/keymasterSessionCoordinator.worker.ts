@@ -6102,6 +6102,12 @@ async function handleHello(
   const connectedPort = connectedPorts.get(clientId);
   if (!connectedPort) return;
   if (request.localStorageBridgePort) installLocalStorageBridgeEndpoint(clientId, request.localStorageBridgePort, request.localStorageBridgeLeaseId, request.storageBootstrapState);
+  // 首个桶可能在 Worker 已完成“未选择存储”初始化后由页面创建。此时 hello
+  // 只允许在尚无 Root/选中桶时补入公开的目录快照；真正认证仍由随后携带
+  // 一次性密码的 unlock-bucket 完成。
+  if (!platformRootStore && !storageBootstrapState?.selectedBucket && request.storageBootstrapState?.selectedBucket) {
+    storageBootstrapState = request.storageBootstrapState;
+  }
   await startCoordinatorInitialization(request.storageBootstrapState);
   if (request.servicePort) installCoordinatorServiceEndpoint(clientId, request.servicePort);
 
@@ -6505,7 +6511,7 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
       if (!hadPlatformRoot && platformRootStore) discardCurrentPlatformStorageBinding();
       storageHealthController.setStatus("authentication", error instanceof Error ? error.message : "Bucket password is invalid");
       emitStorageState();
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: false, diagnostic: "authentication" } };
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: false, diagnostic: error instanceof Error ? error.message : "authentication" } };
     } finally {
       // 新版桶密码只属于本次 bootstrap 调用；Provider 建立后只保留
       // 当前桶 S3 凭据，不保留密码或密码派生材料。

@@ -14,14 +14,15 @@
 //     能进入协议页；locked 态在 popup 内先解锁再继续当前请求。
 //   - 其它路径保持原壳层逻辑（LockedShell / UnlockedShell）。
 
-import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus } from "@keymaster/contracts";
+import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, VaultService } from "@keymaster/contracts";
 import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, APPLICATION_BOOTSTRAP_RESOURCE_ID } from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
-import { StorageBucketManagerPage, StorageOnboardingPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
+import { useCurrentPath, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
+import { StorageBucketManagerPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
 import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
 import { LockedShell } from "./shell/LockedShell.js";
 import { UnlockedShell } from "./shell/UnlockedShell.js";
+import { InitialSetupPage } from "./shell/InitialSetupPage.js";
 
 /** 协议 popup 单一路由。 */
 const PROTOCOL_POPUP_PATH = "/protocol/v1/popup";
@@ -38,6 +39,7 @@ export function App() {
   const hasVaultService = useHasCapability("vault.service");
   const hasKeyspaceService = useHasCapability("keyspace.service");
   const bootstrap = useOptionalCapability<ApplicationBootstrapStatus>(APPLICATION_BOOTSTRAP_READY_CAPABILITY);
+  const vaultService = useOptionalCapability<VaultService>("vault.service");
   const fallbackBootstrapSnapshot: ApplicationBootstrapSnapshot = {
     // Resource 首次加载完成前只能显示门禁页。不能把 pending 资源伪装成
     // final-ready，否则 capability 刚注入而 bootstrap 状态尚未发布时，
@@ -59,14 +61,19 @@ export function App() {
     (previous, next) => JSON.stringify(previous) === JSON.stringify(next)
   );
 
-  const path = typeof window === "undefined" ? "/" : window.location.pathname;
+  const path = useCurrentPath();
   // 存储桶是系统最外层管理面；即使 Vault 尚未初始化、已锁定或存储
   // runtime 尚未 ready，也必须能进入这个页面处理桶目录。
   if (path === "/storage/buckets") return <StorageBucketManagerPage />;
 
   // Storage plugin 是未就绪时唯一允许启动的应用入口；Vault capability
   // 也必须由同一份 application-bootstrap.ready 状态确认后才进入 RuntimeApp。
-  if (!hasStorageController || !bootstrapSnapshot.storageReady) return <StorageOnboardingPage />;
+  if (!hasStorageController || !bootstrapSnapshot.storageReady) return <InitialSetupPage />;
+  // 首次设置必须保持同一个页面实例：桶刚就绪而 Vault capability 尚在装配时，
+  // 不能临时切到 booting/LockedShell，否则页面内存中的一次性密码会丢失。
+  if (!bootstrapSnapshot.hasUnlockedActiveKey && (!bootstrapSnapshot.vaultCapabilityReady || vaultService?.status() === "uninitialized")) {
+    return <InitialSetupPage />;
+  }
   const vaultSelectionReady = bootstrapSnapshot.phase === "vault-selection"
     && bootstrapSnapshot.vaultSelectionReady
     && bootstrapSnapshot.vaultCapabilityReady

@@ -102,7 +102,10 @@ export class StorageRpcProxy implements StorageRuntimeController {
   getProviderConnection(): Promise<StorageProviderConnectionView | null> { return this.control({ type: "connection" }); }
   unlockStorageProfile(password: string): Promise<StorageProbeResult> { return this.control({ type: "unlock-profile", password }); }
   /** 新版桶目录的临时解锁；密码只进入本次 Worker bootstrap。 */
-  unlockBucket(password: string): Promise<unknown> { return this.control({ type: "unlock-bucket", password }); }
+  async unlockBucket(password: string): Promise<unknown> {
+    await this.coordinator.refreshStorageBootstrap?.();
+    return this.control({ type: "unlock-bucket", password });
+  }
   /** 目标桶先在 Worker 暂存并认证，成功后才更新目录和当前运行时。 */
   switchBucket(bucket: StorageBucketCatalogEntryV2, password: string): Promise<StorageBucketSwitchResultV1> {
     return this.control({ type: "switch-bucket", bucket, password });

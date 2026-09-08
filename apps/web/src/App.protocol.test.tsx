@@ -9,8 +9,8 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
-import { useEffect, type ReactNode } from "react";
+import { act, render, screen, cleanup } from "@testing-library/react";
+import { useEffect, useState, type ReactNode } from "react";
 import { App } from "./App.js";
 
 // 把 Runtime 状态做成可注入的 stub：避免引入完整 plugin host。
@@ -31,6 +31,15 @@ const runtimeState = vi.hoisted(() => ({
 
 vi.mock("@keymaster/runtime", () => ({
   usePluginHost: () => ({ resourceStore: {} }),
+  useCurrentPath: () => {
+    const [path, setPathState] = useState(window.location.pathname);
+    useEffect(() => {
+      const update = () => setPathState(window.location.pathname);
+      window.addEventListener("popstate", update);
+      return () => window.removeEventListener("popstate", update);
+    }, []);
+    return path;
+  },
   useRuntimeStatus: () => ({ vault: runtimeState.vault, ready: runtimeState.ready }),
   useI18n: () => ({
     t: (key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? key,
@@ -45,8 +54,12 @@ vi.mock("webloom-framework/react", () => ({
 }));
 
 vi.mock("@keymaster/platform-storage", () => ({
-  StorageOnboardingPage: () => <div data-testid="storage-onboarding">storage</div>,
+  StorageBucketManagerPage: () => <div data-testid="storage-buckets">storage</div>,
   StorageUnavailableGuard: ({ children }: { children: ReactNode }) => children
+}));
+
+vi.mock("./shell/InitialSetupPage.js", () => ({
+  InitialSetupPage: () => <div data-testid="initial-setup">setup</div>
 }));
 
 vi.mock("@keymaster/plugin-protocol", () => ({
@@ -115,5 +128,16 @@ describe("App protocol path", () => {
     render(<App />);
     expect(screen.getByTestId("unlocked-shell")).toBeTruthy();
     expect(screen.queryByTestId("protocol-popup")).toBeNull();
+  });
+
+  it("switches directly from the app shell to the full-page bucket manager", () => {
+    render(<App />);
+    expect(screen.getByTestId("unlocked-shell")).toBeTruthy();
+    act(() => {
+      window.history.pushState(null, "", "/storage/buckets");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(screen.getByTestId("storage-buckets")).toBeTruthy();
+    expect(screen.queryByTestId("unlocked-shell")).toBeNull();
   });
 });

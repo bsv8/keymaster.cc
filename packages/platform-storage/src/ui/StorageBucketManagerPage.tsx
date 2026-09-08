@@ -1,49 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Check, ChevronDown, HardDrive, KeyRound, LockKeyhole } from "lucide-react";
+import { Check, ChevronDown, HardDrive, KeyRound, LockKeyhole, MoreHorizontal, Plus } from "lucide-react";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type { ActiveKeyState, KeyRef, KeyspaceService, StorageBootstrapState, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import { router, useI18n } from "@keymaster/runtime";
 import { useOptionalCapability } from "webloom-framework/react";
 import type { StorageRuntimeController, VaultService } from "@keymaster/contracts";
-import { createLocalStorageBucketProvider } from "../bucket-providers/local/localStorageBucketProvider.js";
-import { createS3BucketProvider } from "../bucket-providers/s3/s3BucketProvider.js";
 import { createStorageBucketManagementService } from "../hold/storageBucketManagement.js";
 import { exportStorageProfileEnvelope, readLegacyStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
 import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
-
-type Backend = "local" | "s3";
-
-interface BucketDraft {
-  editingBucketId?: string;
-  label: string;
-  backend: Backend;
-  password: string;
-  passwordConfirm: string;
-  endpoint: string;
-  region: string;
-  bucket: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken: string;
-  prefix: string;
-  forcePathStyle: boolean;
-}
-
-const EMPTY_DRAFT: BucketDraft = {
-  label: "",
-  backend: "local",
-  password: "",
-  passwordConfirm: "",
-  endpoint: "",
-  region: "",
-  bucket: "",
-  accessKeyId: "",
-  secretAccessKey: "",
-  sessionToken: "",
-  prefix: "",
-  forcePathStyle: false
-};
+import { BucketConnectionFields, EMPTY_BUCKET_DRAFT, bucketDraftFingerprint, connectionFromBucketDraft, createBucketProvider, type BucketDraft } from "./BucketConnectionFields.js";
 
 const EMPTY_CATALOG: StorageCatalogV2 = {
   format: "keymaster.storage.catalog",
@@ -74,32 +40,11 @@ function readLegacyState(): { state: StorageBootstrapState | null; error?: strin
   }
 }
 
-function draftFingerprint(draft: BucketDraft): string {
-  // 密码也是“测试”所验证的草稿输入；修改密码后必须重新测试，不能
-  // 复用旧测试结果。该指纹只存在 React 内存，不会写入目录。
-  return JSON.stringify(draft);
-}
-
-function connectionFromDraft(draft: BucketDraft): StorageBucketConnectionConfigV1 {
-  if (draft.backend === "local") return { kind: "local" };
-  return {
-    kind: "s3",
-    endpoint: draft.endpoint.trim(),
-    region: draft.region.trim(),
-    bucket: draft.bucket.trim(),
-    accessKeyId: draft.accessKeyId,
-    secretAccessKey: draft.secretAccessKey,
-    ...(draft.sessionToken ? { sessionToken: draft.sessionToken } : {}),
-    ...(draft.prefix.trim() ? { prefix: draft.prefix.trim() } : {}),
-    ...(draft.forcePathStyle ? { forcePathStyle: true } : {})
-  };
-}
-
 function draftFromConnection(entry: StorageBucketCatalogEntryV2, config: StorageBucketConnectionConfigV1, password: string): BucketDraft {
   return config.kind === "local"
-    ? { ...EMPTY_DRAFT, editingBucketId: entry.bucketId, label: entry.label, password, passwordConfirm: password }
+    ? { ...EMPTY_BUCKET_DRAFT, editingBucketId: entry.bucketId, label: entry.label, password, passwordConfirm: password }
     : {
-      ...EMPTY_DRAFT,
+      ...EMPTY_BUCKET_DRAFT,
       editingBucketId: entry.bucketId,
       label: entry.label,
       backend: "s3",
@@ -114,27 +59,6 @@ function draftFromConnection(entry: StorageBucketCatalogEntryV2, config: Storage
       prefix: config.prefix ?? "",
       forcePathStyle: config.forcePathStyle === true
     };
-}
-
-function createProvider(config: StorageBucketConnectionConfigV1, bucketId: string) {
-  if (config.kind === "local") return createLocalStorageBucketProvider({ bucketId });
-  return createS3BucketProvider({
-    version: 1,
-    providerId: "s3-compatible",
-    connection: {
-      endpoint: config.endpoint,
-      region: config.region,
-      bucket: config.bucket,
-      forcePathStyle: config.forcePathStyle === true,
-      ...(config.sessionToken === undefined ? {} : { sessionToken: config.sessionToken }),
-      ...(config.prefix === undefined ? {} : { prefix: config.prefix })
-    },
-    credentials: {
-      kind: "access-key",
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey
-    }
-  }, { bucketId });
 }
 
 function download(name: string, bytes: Uint8Array): void {
@@ -162,6 +86,7 @@ export function StorageBucketManagerPage() {
     changeBucketConnectionConfig?: (config: StorageBucketConnectionConfigV1, password: string, label?: string) => Promise<StorageBucketCatalogEntryV2>;
     coldExportBucket?: () => Promise<Uint8Array>;
     changeBucketPassword?: (oldPassword: string, newPassword: string) => Promise<{ ok: true; bucket: StorageBucketCatalogEntryV2 }>;
+    isCatalogBucket?: () => boolean;
   }>("storage.runtime-controller");
   const vault = useOptionalCapability<VaultService>("vault.service");
   const manager = useMemo(() => {
@@ -175,7 +100,11 @@ export function StorageBucketManagerPage() {
   const legacyBootstrap = legacyState.state;
   const legacyError = legacyState.error;
   const [legacyKeys, setLegacyKeys] = useState<KeyRef[]>([]);
-  const [draft, setDraft] = useState<BucketDraft>(EMPTY_DRAFT);
+  const [draft, setDraft] = useState<BucketDraft>(EMPTY_BUCKET_DRAFT);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [keys, setKeys] = useState<KeyRef[]>([]);
+  const [activePublicKeyHex, setActivePublicKeyHex] = useState<string | undefined>();
+  const [pendingKey, setPendingKey] = useState<KeyRef | null>(null);
   const [testedFingerprint, setTestedFingerprint] = useState<string | null>(null);
   const [busy, setBusy] = useState<"test" | "save" | "import" | "edit" | "change-password" | "switch" | "export" | "rename" | "remove" | "destroy" | null>(null);
   const [message, setMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
@@ -228,6 +157,29 @@ export function StorageBucketManagerPage() {
     };
   }, [catalog.buckets.length, legacyBootstrap, vault]);
 
+  useEffect(() => {
+    if (!vault || vault.status() !== "unlocked") {
+      setKeys([]);
+      setActivePublicKeyHex(undefined);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const next = await vault.listKeys();
+        if (!cancelled) {
+          setKeys(next);
+          setActivePublicKeyHex(vault.getLifecycleSnapshot().activePublicKeyHex);
+        }
+      } catch {
+        if (!cancelled) setKeys([]);
+      }
+    };
+    void load();
+    const unsubscribe = vault.onLifecycleChange(() => { void load(); });
+    return () => { cancelled = true; unsubscribe(); };
+  }, [vault, runtimeStatus]);
+
   function updateDraft<K extends keyof BucketDraft>(key: K, value: BucketDraft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
     setTestedFingerprint(null);
@@ -248,12 +200,12 @@ export function StorageBucketManagerPage() {
     const invalid = validateDraft();
     if (invalid) { setMessage({ kind: "error", text: invalid }); return; }
     setBusy("test"); setMessage(null);
-    const config = connectionFromDraft(draft);
-    const provider = createProvider(config, `test-${crypto.randomUUID()}`);
+    const config = connectionFromBucketDraft(draft);
+    const provider = createBucketProvider(config, `test-${crypto.randomUUID()}`);
     try {
       const result = await provider.probe();
       if (!result.ok || result.conditionalWrites !== "native") throw new Error(t("storage.bucketManager.err.conditionalWrites", { defaultValue: "桶不支持必须的原子条件写入" }));
-      setTestedFingerprint(draftFingerprint(draft));
+      setTestedFingerprint(bucketDraftFingerprint(draft));
       setMessage({ kind: "success", text: t("storage.bucketManager.tested", { defaultValue: "测试成功。草稿未改变时可以保存。" }) });
     } catch (error) {
       setTestedFingerprint(null);
@@ -271,13 +223,13 @@ export function StorageBucketManagerPage() {
     }
     const invalid = validateDraft();
     if (invalid) { setMessage({ kind: "error", text: invalid }); return; }
-    if (testedFingerprint !== draftFingerprint(draft)) {
+    if (testedFingerprint !== bucketDraftFingerprint(draft)) {
       setMessage({ kind: "error", text: t("storage.bucketManager.err.testFirst", { defaultValue: "请先测试当前草稿；修改参数后需要重新测试" }) });
       return;
     }
     setBusy("save"); setMessage(null);
     try {
-      const config = connectionFromDraft(draft);
+      const config = connectionFromBucketDraft(draft);
       if (draft.editingBucketId) {
         const entry = catalog.buckets.find((item) => item.bucketId === draft.editingBucketId);
         if (!entry) throw new Error("The bucket being edited no longer exists");
@@ -288,8 +240,8 @@ export function StorageBucketManagerPage() {
           await storage.changeBucketConnectionConfig(config, draft.password, draft.label.trim());
         } else {
           const oldConfig = await manager.unlockBucketConfig(entry, draft.password);
-          const oldProvider = createProvider(oldConfig, entry.bucketId);
-          const nextProvider = createProvider(config, entry.bucketId);
+          const oldProvider = createBucketProvider(oldConfig, entry.bucketId);
+          const nextProvider = createBucketProvider(config, entry.bucketId);
           try {
             await manager.changeBucketConnectionConfig({
               entry,
@@ -309,12 +261,13 @@ export function StorageBucketManagerPage() {
         await manager.prepareBucketConfig(config, draft.password, {
           label: draft.label.trim(),
           backend: draft.backend,
-          createProvider: (bucketId) => createProvider(config, bucketId),
+          createProvider: (bucketId) => createBucketProvider(config, bucketId),
           bucketGeneration: 1
         });
       }
       reload();
-      setDraft(EMPTY_DRAFT);
+      setDraft(EMPTY_BUCKET_DRAFT);
+      setEditorOpen(false);
       setTestedFingerprint(null);
       setReloadRequired(true);
       setMessage({ kind: "success", text: t("storage.bucketManager.saved", { defaultValue: "存储桶已保存到本机目录" }) });
@@ -334,6 +287,7 @@ export function StorageBucketManagerPage() {
     try {
       const config = await manager.unlockBucketConfig(entry, password);
       setDraft(draftFromConnection(entry, config, password));
+      setEditorOpen(true);
       setTestedFingerprint(null);
       setMessage({ kind: "success", text: t("storage.bucketManager.editLoaded", { defaultValue: "配置已读取。修改后请重新测试，再保存。" }) });
     } catch (error) {
@@ -364,7 +318,7 @@ export function StorageBucketManagerPage() {
         document,
         password,
         label,
-        createProvider
+        createProvider: createBucketProvider
       });
       reload();
       setReloadRequired(true);
@@ -400,7 +354,7 @@ export function StorageBucketManagerPage() {
       return;
     }
     setBusy("change-password"); setMessage(null);
-    let provider: ReturnType<typeof createProvider> | undefined;
+    let provider: ReturnType<typeof createBucketProvider> | undefined;
     try {
       if (catalog.selectedBucketId === entry.bucketId) {
         if (runtimeStatus !== "ready" || !storage?.changeBucketPassword) {
@@ -413,7 +367,7 @@ export function StorageBucketManagerPage() {
         // 未选中的桶没有当前会话，可在本次管理操作中短暂解密其配置，
         // 由无状态管理服务旋转该桶已提交快照并 CAS 更新本机目录。
         const config = await manager.unlockBucketConfig(entry, oldPassword);
-        provider = createProvider(config, entry.bucketId);
+        provider = createBucketProvider(config, entry.bucketId);
         await manager.changeBucketPassword({ entry, provider, oldPassword, newPassword });
       }
       reload();
@@ -526,7 +480,7 @@ export function StorageBucketManagerPage() {
       : window.confirm(t("storage.bucketManager.destroyConfirm", { label: entry.label, defaultValue: `确认销毁“${entry.label}”中的全部本地桶数据？此操作不可恢复，并会同时移除本机连接项。` }));
     if (!confirmed) return;
     let password = "";
-    let provider: ReturnType<typeof createProvider> | undefined;
+    let provider: ReturnType<typeof createBucketProvider> | undefined;
     setBusy("destroy"); setMessage(null);
     try {
       const config = entry.backend === "local"
@@ -537,7 +491,7 @@ export function StorageBucketManagerPage() {
             password = entered;
             return manager.unlockBucketConfig(entry, password);
           })();
-      provider = createProvider(config, entry.bucketId);
+      provider = createBucketProvider(config, entry.bucketId);
       const result = await manager.destroyBucketData({ entry, provider });
       reload();
       setMessage({ kind: "success", text: result.scope === "current-s3-objects"
@@ -558,13 +512,13 @@ export function StorageBucketManagerPage() {
       return;
     }
     setBusy("export"); setMessage(null);
-    let provider: ReturnType<typeof createProvider> | undefined;
+    let provider: ReturnType<typeof createBucketProvider> | undefined;
     try {
       let bytes: Uint8Array;
       if (entry.backend === "local") {
         // Local 连接配置不含秘密；冷导出直接读取该桶的已提交快照，
         // 不需要也不应该弹出桶密码。
-        provider = createProvider({ kind: "local" }, entry.bucketId);
+        provider = createBucketProvider({ kind: "local" }, entry.bucketId);
         bytes = await manager.coldExport(provider);
       } else {
         // S3 的冷导出不能为了构造 Provider 再解密本机配置。只有当前
@@ -607,12 +561,26 @@ export function StorageBucketManagerPage() {
     }
   }
 
+  function openAddBucket() {
+    setDraft(EMPTY_BUCKET_DRAFT);
+    setTestedFingerprint(null);
+    setMessage(null);
+    setEditorOpen(true);
+  }
+
+  function closeEditor() {
+    if (busy === "test" || busy === "save") return;
+    setEditorOpen(false);
+    setDraft(EMPTY_BUCKET_DRAFT);
+    setTestedFingerprint(null);
+  }
+
   return (
     <main className="storage-bucket-manager" data-testid="storage-bucket-manager">
       <PageHeader
-        title={t("storage.bucketManager.title", { defaultValue: "存储桶" })}
-        description={t("storage.bucketManager.description", { defaultValue: "桶是系统最外层身份。每个桶拥有自己的密码、连接配置和 Keys；这里不保存 Keys 列表。" })}
-        actions={<Button variant="ghost" onClick={() => router.push("/")}>{t("common.action.back", { defaultValue: "返回" })}</Button>}
+        title={t("storage.bucketManager.title", { defaultValue: "桶管理" })}
+        description={t("storage.bucketManager.description", { defaultValue: "按桶查看和切换 Key；连接配置与 Key 数据始终留在各自的桶中。" })}
+        actions={<div className="storage-bucket-manager__header-actions"><Button variant="ghost" onClick={() => router.push("/")}>{t("common.action.back", { defaultValue: "返回" })}</Button><input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={(event) => void importBucketFromFile(event)} /><Button variant="secondary" onClick={() => importInputRef.current?.click()} loading={busy === "import"} disabled={busy !== null}>{t("storage.bucketManager.import", { defaultValue: "导入桶" })}</Button><Button iconLeft={<Plus size={16} />} onClick={openAddBucket} disabled={busy !== null}>{t("storage.bucketManager.newTitle", { defaultValue: "添加桶" })}</Button></div>}
       />
 
       {message ? <p className={`storage-bucket-manager__message is-${message.kind}`} role={message.kind === "error" ? "alert" : "status"}>{message.text}</p> : null}
@@ -642,7 +610,7 @@ export function StorageBucketManagerPage() {
 
       <section className="storage-bucket-manager__section" aria-labelledby="storage-bucket-list-title">
         <div className="storage-bucket-manager__section-heading">
-          <div><span className="storage-bucket-manager__eyebrow">01</span><h2 id="storage-bucket-list-title">{t("storage.bucketManager.listTitle", { defaultValue: "已保存的桶" })}</h2></div>
+          <div><h2 id="storage-bucket-list-title">{t("storage.bucketManager.listTitle", { defaultValue: "已保存的桶" })}</h2></div>
           <span className="storage-bucket-manager__hint">{catalog.buckets.length} {t("storage.bucketManager.bucketCount", { defaultValue: "个桶" })}</span>
         </div>
         {catalog.buckets.length === 0 ? <p className="storage-bucket-manager__empty">{t("storage.bucketManager.empty", { defaultValue: "还没有存储桶。创建后，连接密文只保存在本机桶目录中。" })}</p> : (
@@ -650,50 +618,44 @@ export function StorageBucketManagerPage() {
             {catalog.buckets.map((entry) => {
               const selected = catalog.selectedBucketId === entry.bucketId;
               return <li key={entry.bucketId} className={selected ? "is-selected" : ""}>
-                <button type="button" className="storage-bucket-manager__bucket" onClick={() => void selectBucket(entry.bucketId)} aria-pressed={selected}>
-                  <span className="storage-bucket-manager__bucket-mark">{entry.backend === "local" ? "L" : "S3"}</span>
-                  <span><strong>{entry.label}</strong><small>{entry.backend === "local" ? "Local · localStorage" : "S3 · encrypted connection"}</small></span>
-                  {selected ? <em>{t("storage.bucketManager.selected", { defaultValue: "当前" })}</em> : null}
-                </button>
-                <div className="storage-bucket-manager__bucket-actions">
-                  <Button variant="ghost" size="sm" onClick={() => void exportBucket(entry)} disabled={busy !== null}>{t("storage.bucketManager.export", { defaultValue: "导出" })}</Button>
-                  <Button variant="ghost" size="sm" onClick={() => void changeBucketPassword(entry)} disabled={busy !== null}>{t("storage.bucketManager.changePassword", { defaultValue: "改密码" })}</Button>
-                  <Button variant="ghost" size="sm" onClick={() => void editBucket(entry)} disabled={busy !== null}>{t("storage.bucketManager.edit", { defaultValue: "编辑配置" })}</Button>
-                  <Button variant="ghost" size="sm" onClick={() => void renameBucket(entry)} disabled={busy !== null}>{t("storage.bucketManager.rename", { defaultValue: "改名" })}</Button>
-                  <Button variant="ghost" size="sm" onClick={() => void removeBucket(entry)} disabled={busy !== null || selected} title={selected ? t("storage.bucketManager.err.currentRemove", { defaultValue: "当前桶正在使用，不能直接移除；请先切换到其他桶" }) : undefined}>{t("storage.bucketManager.remove", { defaultValue: "移除连接" })}</Button>
-                  <Button variant="danger" size="sm" onClick={() => void destroyBucketData(entry)} disabled={busy !== null || selected} title={selected ? t("storage.bucketManager.err.currentDestroy", { defaultValue: "当前桶正在使用，不能销毁数据；请先切换到其他桶" }) : undefined}>{entry.backend === "s3" ? t("storage.bucketManager.destroyVisible", { defaultValue: "删除可见对象" }) : t("storage.bucketManager.destroy", { defaultValue: "销毁数据" })}</Button>
+                <div className="storage-bucket-manager__bucket-row">
+                  <button type="button" className="storage-bucket-manager__bucket" onClick={() => void selectBucket(entry.bucketId)} aria-pressed={selected}>
+                    <span className="storage-bucket-manager__bucket-mark">{entry.backend === "local" ? "L" : "S3"}</span>
+                    <span><strong>{entry.label}</strong><small>{entry.backend === "local" ? "Local（浏览器本地存储）" : "S3-compatible（加密连接）"}</small></span>
+                    {selected ? <em>{t("storage.bucketManager.selected", { defaultValue: "当前桶" })}</em> : null}
+                  </button>
+                  <div className="storage-bucket-manager__bucket-controls">
+                    {!selected ? <Button variant="secondary" size="sm" onClick={() => void selectBucket(entry.bucketId)} disabled={busy !== null}>{t("storage.bucketManager.switch", { defaultValue: "切换" })}</Button> : null}
+                    <details className="storage-bucket-manager__more">
+                      <summary aria-label={t("storage.bucketManager.more", { defaultValue: "更多桶操作" })}><MoreHorizontal size={18} /></summary>
+                      <div className="storage-bucket-manager__more-menu">
+                        <button type="button" onClick={() => void exportBucket(entry)} disabled={busy !== null}>{t("storage.bucketManager.export", { defaultValue: "导出桶" })}</button>
+                        <button type="button" onClick={() => void changeBucketPassword(entry)} disabled={busy !== null}>{t("storage.bucketManager.changePassword", { defaultValue: "修改密码" })}</button>
+                        <button type="button" onClick={() => void editBucket(entry)} disabled={busy !== null}>{t("storage.bucketManager.edit", { defaultValue: "编辑连接配置" })}</button>
+                        <button type="button" onClick={() => void renameBucket(entry)} disabled={busy !== null}>{t("storage.bucketManager.rename", { defaultValue: "修改名称" })}</button>
+                        <button type="button" onClick={() => void removeBucket(entry)} disabled={busy !== null || selected}>{t("storage.bucketManager.remove", { defaultValue: "移除连接" })}</button>
+                        <button type="button" className="is-danger" onClick={() => void destroyBucketData(entry)} disabled={busy !== null || selected}>{entry.backend === "s3" ? t("storage.bucketManager.destroyVisible", { defaultValue: "删除可见对象" }) : t("storage.bucketManager.destroy", { defaultValue: "销毁数据" })}</button>
+                      </div>
+                    </details>
+                  </div>
+                </div>
+                <div className="storage-bucket-manager__keys" aria-label={`${entry.label} Keys`}>
+                  {selected && vaultStatus === "unlocked" ? (keys.length > 0 ? keys.map((key) => {
+                    const active = key.publicKeyHex === activePublicKeyHex;
+                    return <button key={key.publicKeyHex} type="button" className={active ? "is-active" : ""} onClick={() => active ? undefined : setPendingKey(key)} aria-current={active ? "true" : undefined}><KeyRound size={14} /><span><strong>{key.label || t("storage.bucketManager.unnamedKey", { defaultValue: "未命名 Key" })}</strong><small>{formatShortPublicKey(key.publicKeyHex)}</small></span>{active ? <em><Check size={13} />{t("storage.bucketManager.currentKey", { defaultValue: "当前 Key" })}</em> : <span className="storage-bucket-manager__key-action">{t("storage.bucketManager.switchKey", { defaultValue: "切换" })}</span>}</button>;
+                  }) : <p>{t("storage.bucketManager.noKeys", { defaultValue: "该桶暂无 Key" })}</p>) : selected ? <div className="storage-bucket-manager__inline-unlock"><LockKeyhole size={15} /><span>{t("storage.bucketManager.readKeys", { defaultValue: "输入桶密码后读取 Keys" })}</span><input aria-label={t("storage.bucketManager.password", { defaultValue: "桶密码" })} type="password" autoComplete="current-password" value={unlockPassword} onChange={(event) => setUnlockPassword(event.currentTarget.value)} /><Button size="sm" onClick={() => void unlockSelectedBucket()} loading={unlockBusy} disabled={!unlockPassword || unlockBusy || !storage?.unlockBucket}>{t("storage.bucketManager.unlock", { defaultValue: "解锁" })}</Button></div> : <button type="button" className="storage-bucket-manager__locked-keys" onClick={() => void selectBucket(entry.bucketId)}><LockKeyhole size={14} /><span>{t("storage.bucketManager.switchToReadKeys", { defaultValue: "切换到此桶后读取 Keys" })}</span></button>}
                 </div>
               </li>;
             })}
           </ul>
         )}
-        {catalog.selectedBucketId && (runtimeStatus !== "ready" || (vaultStatus === "uninitialized" && catalog.buckets.some((bucket) => bucket.bucketId === catalog.selectedBucketId))) ? <div className="storage-bucket-manager__unlock">
-          <div><strong>{t("storage.bucketManager.unlockTitle", { defaultValue: "输入当前桶密码" })}</strong><p>{t("storage.bucketManager.unlockDescription", { defaultValue: "冷启动只显示桶目录；读取 Keys 前需要临时解锁当前桶。" })}</p></div>
-          <div className="storage-bucket-manager__unlock-form"><input type="password" autoComplete="current-password" value={unlockPassword} onChange={(event) => setUnlockPassword(event.currentTarget.value)} placeholder={t("storage.bucketManager.password", { defaultValue: "桶密码" })} /><Button onClick={() => void unlockSelectedBucket()} loading={unlockBusy} disabled={!unlockPassword || unlockBusy || !storage?.unlockBucket}>{t("storage.bucketManager.unlock", { defaultValue: "解锁桶" })}</Button></div>
-        </div> : null}
       </section>
-
-      <section className="storage-bucket-manager__section" aria-labelledby="storage-bucket-new-title">
-        <div className="storage-bucket-manager__section-heading"><div><span className="storage-bucket-manager__eyebrow">02</span><h2 id="storage-bucket-new-title">{draft.editingBucketId ? t("storage.bucketManager.editTitle", { defaultValue: "编辑桶连接配置" }) : t("storage.bucketManager.newTitle", { defaultValue: "添加存储桶" })}</h2></div></div>
-        <div className="storage-bucket-manager__form">
-          <label><span>{t("storage.bucketManager.label", { defaultValue: "桶名称" })}</span><input value={draft.label} onChange={(event) => updateDraft("label", event.currentTarget.value)} placeholder="例如：工作空间" /></label>
-          <label><span>{t("storage.bucketManager.backend", { defaultValue: "后端" })}</span><select value={draft.backend} disabled={Boolean(draft.editingBucketId)} onChange={(event) => updateDraft("backend", event.currentTarget.value as Backend)}><option value="local">Local · localStorage</option><option value="s3">S3-compatible</option></select></label>
-          {draft.backend === "s3" ? <>
-            <label className="is-wide"><span>Endpoint（HTTPS 地址）</span><input value={draft.endpoint} onChange={(event) => updateDraft("endpoint", event.currentTarget.value)} placeholder="https://s3.example.com" /></label>
-            <label><span>Region（区域）</span><input value={draft.region} onChange={(event) => updateDraft("region", event.currentTarget.value)} placeholder="auto" /></label>
-            <label><span>Bucket（物理桶名称）</span><input value={draft.bucket} onChange={(event) => updateDraft("bucket", event.currentTarget.value)} /></label>
-            <label><span>Access Key ID（访问 ID）</span><input value={draft.accessKeyId} onChange={(event) => updateDraft("accessKeyId", event.currentTarget.value)} /></label>
-            <label><span>Secret Access Key（访问密钥）</span><input type="password" value={draft.secretAccessKey} onChange={(event) => updateDraft("secretAccessKey", event.currentTarget.value)} /></label>
-            <label><span>Session Token（会话令牌，可选）</span><input type="password" value={draft.sessionToken} onChange={(event) => updateDraft("sessionToken", event.currentTarget.value)} /></label>
-            <label><span>Prefix（对象前缀，可选）</span><input value={draft.prefix} onChange={(event) => updateDraft("prefix", event.currentTarget.value)} placeholder="例如：team-a/" /></label>
-            <label className="storage-bucket-manager__checkbox"><input type="checkbox" checked={draft.forcePathStyle} onChange={(event) => updateDraft("forcePathStyle", event.currentTarget.checked)} /><span>Force Path Style（强制路径风格请求）</span></label>
-          </> : <p className="storage-bucket-manager__note is-wide">Local 桶的数据和 Keys 使用 `keymaster.bucket.&lt;bucketId&gt;.*` 命名空间保存；不会回退到其他浏览器存储。</p>}
-          <label><span>{draft.editingBucketId ? t("storage.bucketManager.currentPassword", { defaultValue: "当前桶密码（已验证）" }) : t("storage.bucketManager.password", { defaultValue: "桶密码" })}</span><input type="password" autoComplete={draft.editingBucketId ? "current-password" : "new-password"} value={draft.password} readOnly={Boolean(draft.editingBucketId)} onChange={(event) => updateDraft("password", event.currentTarget.value)} /></label>
-          <label><span>{t("storage.bucketManager.passwordConfirm", { defaultValue: "确认桶密码" })}</span><input type="password" autoComplete="new-password" value={draft.passwordConfirm} readOnly={Boolean(draft.editingBucketId)} onChange={(event) => updateDraft("passwordConfirm", event.currentTarget.value)} /></label>
-        </div>
-        <div className="storage-bucket-manager__actions"><Button variant="secondary" onClick={() => void testDraft()} loading={busy === "test"} disabled={busy !== null}>{t("storage.bucketManager.test", { defaultValue: "测试" })}</Button><Button onClick={() => void saveDraft()} loading={busy === "save"} disabled={busy !== null || testedFingerprint !== draftFingerprint(draft)}>{draft.editingBucketId ? t("storage.bucketManager.saveEdit", { defaultValue: "保存配置" }) : t("storage.bucketManager.save", { defaultValue: "保存桶" })}</Button>{draft.editingBucketId ? <Button variant="ghost" onClick={() => { setDraft(EMPTY_DRAFT); setTestedFingerprint(null); setMessage(null); }}>{t("common.action.cancel", { defaultValue: "取消" })}</Button> : null}<input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={(event) => void importBucketFromFile(event)} /><Button variant="ghost" onClick={() => importInputRef.current?.click()} loading={busy === "import"} disabled={busy !== null || Boolean(draft.editingBucketId)}>{t("storage.bucketManager.import", { defaultValue: "导入 Hold" })}</Button></div>
-        <p className="storage-bucket-manager__note">{t("storage.bucketManager.passwordNote", { defaultValue: "桶密码只用于当前测试和保存操作；不会写入目录、日志或长期 Coordinator 状态。冷导出只读取已提交快照。" })}</p>
-      </section>
+      <Modal open={editorOpen} title={draft.editingBucketId ? t("storage.bucketManager.editTitle", { defaultValue: "编辑桶连接配置" }) : t("storage.bucketManager.newTitle", { defaultValue: "添加桶" })} onClose={closeEditor} closeButtonLabel={t("common.action.close", { defaultValue: "关闭" })} footer={<><Button variant="ghost" onClick={closeEditor} disabled={busy === "test" || busy === "save"}>{t("common.action.cancel", { defaultValue: "取消" })}</Button><Button variant="secondary" onClick={() => void testDraft()} loading={busy === "test"} disabled={busy !== null}>{t("storage.bucketManager.test", { defaultValue: "测试连接" })}</Button><Button onClick={() => void saveDraft()} loading={busy === "save"} disabled={busy !== null || testedFingerprint !== bucketDraftFingerprint(draft)}>{draft.editingBucketId ? t("storage.bucketManager.saveEdit", { defaultValue: "保存配置" }) : t("storage.bucketManager.save", { defaultValue: "保存桶" })}</Button></>}>
+        <BucketConnectionFields draft={draft} onChange={updateDraft} section="all" lockBackend={Boolean(draft.editingBucketId)} />
+        {message ? <p className={`storage-bucket-manager__message is-${message.kind}`} role={message.kind === "error" ? "alert" : "status"}>{message.text}</p> : null}
+        <p className="storage-bucket-manager__note">{t("storage.bucketManager.passwordNote", { defaultValue: "密码只在当前测试和保存过程中使用，不会写入目录、日志或长期状态。" })}</p>
+      </Modal>
+      {vault ? <StorageBucketKeySwitchModal target={pendingKey} vault={vault} catalogBucket={storage?.isCatalogBucket?.() === true} onClose={() => setPendingKey(null)} onActivated={() => { if (pendingKey) setActivePublicKeyHex(pendingKey.publicKeyHex); setPendingKey(null); }} /> : null}
     </main>
   );
 }

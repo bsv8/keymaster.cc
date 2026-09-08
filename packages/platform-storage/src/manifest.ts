@@ -1,7 +1,7 @@
-import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, RouteRegistry, StorageRuntimeController, StorageCoordinatorControl, TopbarRegistry } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, StorageRuntimeController, StorageCoordinatorControl, TopbarRegistry } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
-import { StorageBucketManagerEntry, StorageBucketManagerPage } from "./ui/StorageBucketManagerPage.js";
+import { StorageBucketManagerEntry } from "./ui/StorageBucketManagerPage.js";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 import type { StorageRuntimeSnapshot } from "./runtime/storageRuntimeController.js";
 
@@ -146,6 +146,46 @@ Object.assign(resources.resources.en as Record<string, string>, {
       "storage.bucketManager.legacyKeysEmpty": "No legacy Keys were read yet; confirm that the legacy OPFS session has started.",
       "storage.bucketManager.openKeyManagement": "Open Key management",
       "storage.bucketManager.legacyMigrationNote": "Migration is explicit and reversible: export and verify old files, then create a new Local/S3 bucket. Do not clean up legacy OPFS or Profile data until the new bucket is confirmed usable.",
+      "storage.bucketManager.import": "Import a bucket",
+      "storage.bucketManager.importLabel": "Enter a name for the imported bucket",
+      "storage.bucketManager.importPassword": "Enter the Hold file password",
+      "storage.bucketManager.imported": "The Hold configuration was verified and imported. Reload to enter this bucket.",
+      "storage.bucketManager.changePassword": "Change password",
+      "storage.bucketManager.oldPassword": "Enter the current bucket password",
+      "storage.bucketManager.newPassword": "Enter a new bucket password (at least 8 characters)",
+      "storage.bucketManager.newPasswordConfirm": "Enter the new bucket password again",
+      "storage.bucketManager.passwordChanged": "The bucket password and all Key snapshots were updated. Reload and use the new password.",
+      "storage.bucketManager.switch": "Switch",
+      "storage.bucketManager.switchPassword": "Enter this bucket's password",
+      "storage.bucketManager.switchedUnlocked": "Switched buckets and restored the current Key session.",
+      "storage.bucketManager.switched": "Switched buckets. Enter the bucket password below to unlock the Key session.",
+      "storage.bucketManager.more": "More bucket actions",
+      "storage.bucketManager.switchKey": "Switch",
+      "storage.bucketManager.switchToReadKeys": "Switch to this bucket to read its Keys",
+      "storage.bucketManager.err.catalog": "The local bucket catalog is unavailable. Restore localStorage and try again.",
+      "storage.bucketManager.err.edit": "Failed to read the bucket configuration. Check the password.",
+      "storage.bucketManager.err.export": "Export failed. Check the bucket connection or current session.",
+      "storage.bucketManager.err.import": "Import failed. Check the file and password.",
+      "storage.bucketManager.err.passwordChange": "Failed to change the bucket password. The old password is still valid.",
+      "storage.bucketManager.err.switchUnavailable": "This Coordinator cannot switch buckets safely. Reload and try again.",
+      "storage.bucketFields.type": "Bucket type",
+      "storage.bucketFields.local": "Local (browser storage)",
+      "storage.bucketFields.s3": "S3-compatible (object storage)",
+      "storage.bucketFields.label": "Bucket name (local display name)",
+      "storage.bucketFields.labelPlaceholder": "For example: Workspace",
+      "storage.bucketFields.endpoint": "Endpoint (HTTPS service URL)",
+      "storage.bucketFields.region": "Region (storage region)",
+      "storage.bucketFields.bucket": "Bucket (physical bucket name)",
+      "storage.bucketFields.accessKey": "Access Key ID (access identity)",
+      "storage.bucketFields.secretKey": "Secret Access Key (access secret)",
+      "storage.bucketFields.sessionToken": "Session Token (optional temporary token)",
+      "storage.bucketFields.prefix": "Prefix (optional object path prefix)",
+      "storage.bucketFields.prefixPlaceholder": "For example: team-a/",
+      "storage.bucketFields.forcePathStyle": "Force Path Style (path-style requests)",
+      "storage.bucketFields.localNote": "A Local bucket stays in this browser and is best for one device. It is not synchronized to other devices.",
+      "storage.bucketFields.currentPassword": "Current bucket password (verified)",
+      "storage.bucketFields.password": "Password (at least 8 characters)",
+      "storage.bucketFields.passwordConfirm": "Confirm password",
       "storage.bucketManager.err.legacyExport": "Legacy storage export failed"
 });
 
@@ -273,6 +313,46 @@ Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
       "storage.bucketManager.legacyKeysEmpty": "暂未读取到旧 Key；请确认旧 OPFS 会话已启动。",
       "storage.bucketManager.openKeyManagement": "打开 Key 管理",
       "storage.bucketManager.legacyMigrationNote": "迁移是显式、逐步且可回退的：先导出并验证旧文件，再创建新版 Local/S3 桶；在确认新桶可用前，不要清理旧 OPFS 或旧 Profile。",
+      "storage.bucketManager.import": "导入桶",
+      "storage.bucketManager.importLabel": "输入导入桶名称",
+      "storage.bucketManager.importPassword": "输入 Hold 文件密码",
+      "storage.bucketManager.imported": "Hold 配置已验证并导入；重新加载后进入该桶。",
+      "storage.bucketManager.changePassword": "修改密码",
+      "storage.bucketManager.oldPassword": "输入当前桶密码",
+      "storage.bucketManager.newPassword": "输入新的桶密码（至少 8 位）",
+      "storage.bucketManager.newPasswordConfirm": "再次输入新的桶密码",
+      "storage.bucketManager.passwordChanged": "桶密码和全部 Key 快照已更新；重新加载后使用新密码。",
+      "storage.bucketManager.switch": "切换",
+      "storage.bucketManager.switchPassword": "输入该桶的密码",
+      "storage.bucketManager.switchedUnlocked": "已切换桶，当前 Key 会话已恢复。",
+      "storage.bucketManager.switched": "已切换桶；请在下方输入桶密码解锁 Key 会话。",
+      "storage.bucketManager.more": "更多桶操作",
+      "storage.bucketManager.switchKey": "切换",
+      "storage.bucketManager.switchToReadKeys": "切换到此桶后读取 Keys",
+      "storage.bucketManager.err.catalog": "本机存储桶目录不可用，请先恢复 localStorage 后重试。",
+      "storage.bucketManager.err.edit": "读取桶配置失败，请检查密码。",
+      "storage.bucketManager.err.export": "导出失败，请检查桶连接或当前会话。",
+      "storage.bucketManager.err.import": "导入失败，请检查文件和密码。",
+      "storage.bucketManager.err.passwordChange": "桶密码修改失败，旧密码仍然有效。",
+      "storage.bucketManager.err.switchUnavailable": "当前 Coordinator 不支持安全切桶，请刷新页面后重试。",
+      "storage.bucketFields.type": "桶类型",
+      "storage.bucketFields.local": "Local（浏览器本地存储）",
+      "storage.bucketFields.s3": "S3-compatible（兼容 S3 的对象存储）",
+      "storage.bucketFields.label": "桶名称（本机显示名称）",
+      "storage.bucketFields.labelPlaceholder": "例如：工作空间",
+      "storage.bucketFields.endpoint": "Endpoint（HTTPS 服务地址）",
+      "storage.bucketFields.region": "Region（存储区域）",
+      "storage.bucketFields.bucket": "Bucket（物理桶名称）",
+      "storage.bucketFields.accessKey": "Access Key ID（访问身份）",
+      "storage.bucketFields.secretKey": "Secret Access Key（访问密钥）",
+      "storage.bucketFields.sessionToken": "Session Token（临时会话令牌，可选）",
+      "storage.bucketFields.prefix": "Prefix（对象路径前缀，可选）",
+      "storage.bucketFields.prefixPlaceholder": "例如：team-a/",
+      "storage.bucketFields.forcePathStyle": "Force Path Style（强制路径风格请求）",
+      "storage.bucketFields.localNote": "Local 桶保存在当前浏览器中，适合单设备使用；不会同步到其他设备。",
+      "storage.bucketFields.currentPassword": "当前桶密码（已验证）",
+      "storage.bucketFields.password": "密码（至少 8 位）",
+      "storage.bucketFields.passwordConfirm": "确认密码",
       "storage.bucketManager.err.legacyExport": "旧版存储导出失败"
 });
 
@@ -309,14 +389,6 @@ const storagePlatformPluginDefinition = {
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
     });
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    const routeId = "storage.bucket-manager";
-    routes.register({
-      id: routeId,
-      path: "/storage/buckets",
-      label: { key: "storage.bucketManager.title", fallback: "Storage buckets" },
-      component: StorageBucketManagerPage
-    });
     const topbar = ctx.get<TopbarRegistry>("topbar.registry");
     const topbarId = "storage.bucket-manager";
     topbar.register({
@@ -327,7 +399,6 @@ const storagePlatformPluginDefinition = {
     });
     return () => {
       try { (topbar as TopbarRegistry & { unregister(id: string): void }).unregister(topbarId); } catch { /* already reclaimed */ }
-      try { routes.unregister(routeId); } catch { /* already reclaimed */ }
       resources.unregister(resourceId);
       service.dispose();
     };

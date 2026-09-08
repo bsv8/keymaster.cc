@@ -2,6 +2,8 @@ export { storagePlatformPlugin, storagePlatformSetup, STORAGE_PLATFORM_PLUGIN_ID
 export { StorageProfileEditor } from "./ui/StorageProfileEditor.js";
 export { StorageOnboardingPage } from "./ui/StorageOnboardingPage.js";
 export { StorageBucketManagerPage, StorageBucketManagerEntry } from "./ui/StorageBucketManagerPage.js";
+export { BucketConnectionFields, EMPTY_BUCKET_DRAFT, bucketDraftFingerprint, connectionFromBucketDraft, createBucketProvider } from "./ui/BucketConnectionFields.js";
+export type { BucketBackend, BucketDraft, BucketConnectionFieldsProps } from "./ui/BucketConnectionFields.js";
 export { StorageUnavailableGuard } from "./ui/StorageUnavailableGuard.js";
 export { StorageRuntimeControllerImpl, createStorageRuntimeController, STORAGE_SECRET_SCOPE } from "./runtime/storageRuntimeController.js";
 export type { StorageRuntimeSnapshot } from "./runtime/storageRuntimeController.js";

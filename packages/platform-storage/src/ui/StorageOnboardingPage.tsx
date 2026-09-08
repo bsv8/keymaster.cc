@@ -1,10 +1,9 @@
 import type { StorageRuntimeController } from "@keymaster/contracts";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
-import { StorageBucketManagerPage } from "./StorageBucketManagerPage.js";
 import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController.js";
 
-/** 存储未就绪时的唯一入口；Vault/业务插件不会在这个页面之前启动。 */
+/** 已配置存储的恢复页；首次设置由 Web 层 InitialSetupPage 独立负责。 */
 export function StorageOnboardingPage() {
   const { t } = useI18n();
   const host = usePluginHost();
@@ -27,7 +26,7 @@ export function StorageOnboardingPage() {
         </p>
       ) : null}
       {hasRetry ? <button type="button" onClick={() => { void (service as StorageRuntimeController & { retry?: () => Promise<unknown> }).retry?.(); }}>重试存储连接</button> : null}
-      <StorageBucketManagerPage />
+      <p>需要修改或重新选择桶时，请进入独立的“桶管理”页面。</p>
     </div>
   );
 }
