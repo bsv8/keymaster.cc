@@ -22,7 +22,8 @@ export interface LocalStorageLike {
 
 /** Web Locks 的最小接口；没有锁就不能宣称支持原子 CAS。 */
 export interface LocalStorageLocks {
-  request<T>(name: string, callback: () => Promise<T>, options?: { signal?: AbortSignal }): Promise<T>;
+  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
+  request<T>(name: string, options: { signal?: AbortSignal }, callback: () => Promise<T>): Promise<T>;
 }
 
 export interface LocalStorageBridgeObject {
@@ -191,7 +192,11 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
     // 全局的嵌套锁等待，因此 bridge 模式把锁边界留在页面侧。
     if (options.bridge) return operation();
     if (!locks) throw fail("storage_unavailable", "Local storage requires Web Locks for safe writes");
-    try { return await locks.request(`keymaster.storage.local.${bucketId}`, operation, signal ? { signal } : undefined); }
+    try {
+      return signal
+        ? await locks.request(`keymaster.storage.local.${bucketId}`, { signal }, operation)
+        : await locks.request(`keymaster.storage.local.${bucketId}`, operation);
+    }
     catch (caught) { throw mapStorageError(caught); }
   }
 

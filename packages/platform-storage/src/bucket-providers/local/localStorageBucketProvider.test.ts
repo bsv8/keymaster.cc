@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLocalStorageBucketProvider, type LocalStorageLike } from "./localStorageBucketProvider.js";
+import { createLocalStorageBucketProvider, type LocalStorageLike, type LocalStorageLocks } from "./localStorageBucketProvider.js";
 
 class MemoryStorage implements LocalStorageLike {
   private readonly values = new Map<string, string>();
@@ -10,7 +10,17 @@ class MemoryStorage implements LocalStorageLike {
   removeItem(key: string): void { this.values.delete(key); }
 }
 
-const locks = { request: async <T>(_name: string, callback: () => Promise<T>) => callback() };
+const locks: LocalStorageLocks = {
+  async request<T>(
+    _name: string,
+    optionsOrCallback: { signal?: AbortSignal } | (() => Promise<T>),
+    callback?: () => Promise<T>
+  ): Promise<T> {
+    const operation = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
+    if (!operation) throw new TypeError("Web Locks callback is required");
+    return operation();
+  }
+};
 
 describe("localStorage bucket provider", () => {
   it("isolates bucket namespaces and supports native CAS", async () => {
@@ -35,6 +45,31 @@ describe("localStorage bucket provider", () => {
     const provider = createLocalStorageBucketProvider({ storage: new MemoryStorage(), bucketId: "no-lock" });
     await expect(provider.put("config", new Uint8Array([1]))).rejects.toMatchObject({ code: "storage_unavailable" });
     await expect(provider.probe()).rejects.toMatchObject({ code: "storage_unavailable" });
+  });
+
+  it("uses the browser Web Locks overloads with and without an AbortSignal", async () => {
+    const storage = new MemoryStorage();
+    const calls: unknown[][] = [];
+    const browserLocks = {
+      request: async <T>(...args: unknown[]): Promise<T> => {
+        calls.push(args);
+        const callback = args.length === 2 ? args[1] : args[2];
+        if (typeof callback !== "function") throw new TypeError("Web Locks callback is required");
+        return (callback as () => Promise<T>)();
+      }
+    } as LocalStorageLocks;
+    const provider = createLocalStorageBucketProvider({ storage, locks: browserLocks, bucketId: "signal-order" });
+    const controller = new AbortController();
+
+    await provider.put("without-signal", new Uint8Array([1]));
+    await provider.put("with-signal", new Uint8Array([2]), { signal: controller.signal });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toHaveLength(2);
+    expect(calls[0]?.[1]).toBeTypeOf("function");
+    expect(calls[1]).toHaveLength(3);
+    expect(calls[1]?.[1]).toEqual({ signal: controller.signal });
+    expect(calls[1]?.[2]).toBeTypeOf("function");
   });
 
   it("uses the bridge instead of touching localStorage", async () => {

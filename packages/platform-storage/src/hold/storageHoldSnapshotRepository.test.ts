@@ -4,7 +4,7 @@ import { createStorageHoldSnapshotRepository } from "./storageHoldSnapshotReposi
 import { createStorageBucketManagementService } from "./storageBucketManagement.js";
 import { createStorageCatalogRepository } from "../bootstrap/storageCatalogRepository.js";
 import { decryptBucketConfig, decryptBucketKey, deriveBucketCryptoContext, parseBucketDocument, verifyBucketDocument } from "./keymasterHoldAdapter.js";
-import type { LocalStorageLike } from "../bucket-providers/local/localStorageBucketProvider.js";
+import type { LocalStorageLike, LocalStorageLocks } from "../bucket-providers/local/localStorageBucketProvider.js";
 import type { StorageBucketProvider } from "@keymaster/contracts";
 
 class MemoryStorage implements LocalStorageLike {
@@ -16,7 +16,17 @@ class MemoryStorage implements LocalStorageLike {
   removeItem(key: string): void { this.values.delete(key); }
 }
 
-const locks = { request: async <T>(_name: string, callback: () => Promise<T>) => callback() };
+const locks: LocalStorageLocks = {
+  async request<T>(
+    _name: string,
+    optionsOrCallback: { signal?: AbortSignal } | (() => Promise<T>),
+    callback?: () => Promise<T>
+  ): Promise<T> {
+    const operation = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
+    if (!operation) throw new TypeError("Web Locks callback is required");
+    return operation();
+  }
+};
 
 function catalogBucketInput(label: string) {
   return {
