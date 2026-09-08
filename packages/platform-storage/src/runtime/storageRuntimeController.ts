@@ -48,6 +48,10 @@ export interface StorageRuntimeSnapshot {
   status: StorageRuntimeControllerStatus;
   /** 独立于 Vault 的统一桶健康状态。 */
   healthStatus?: import("@keymaster/contracts").StorageRuntimeStatus;
+  /** 当前是否是新版多桶目录绑定。 */
+  catalogBucket?: boolean;
+  /** 本机目录中是否存在至少一个新版桶；用于旧版入口让位。 */
+  hasCatalogBuckets?: boolean;
   /** Coordinator 最终 I/O 接管被旧 Worker 阻塞时的脱敏恢复提示。 */
   authorityRecovery?: CoordinatorAuthorityRecovery;
   summary: StorageProviderSummary | null;

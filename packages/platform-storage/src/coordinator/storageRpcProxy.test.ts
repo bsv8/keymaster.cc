@@ -83,4 +83,14 @@ describe("StorageRpcProxy grant boundary", () => {
     expect(client.storageControl).toHaveBeenCalledWith({ type: "cancel-probe" });
     proxy.dispose();
   });
+
+  it("routes current bucket rename through the Coordinator control plane", async () => {
+    const client = coordinator();
+    const proxy = new StorageRpcProxy(client);
+
+    await proxy.renameBucket("新名称");
+
+    expect(client.storageControl).toHaveBeenCalledWith({ type: "rename-bucket", label: "新名称" });
+    proxy.dispose();
+  });
 });

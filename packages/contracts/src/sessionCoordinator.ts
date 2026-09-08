@@ -37,6 +37,7 @@ import type {
   StorageRuntimeStatus
 } from "./storage/runtime.js";
 import type { StorageProviderConfigDraft } from "./storage/profile.js";
+import type { StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
 import type {
   P2pkhProviderSettings,
   P2pkhProviderRegistrySnapshot,
@@ -136,16 +137,28 @@ export type CoordinatorStorageControl =
   | { type: "summary" }
   | { type: "connection" }
   | { type: "unlock-profile"; password: string }
+  /** 新版桶目录的临时桶密码；不复用旧 Storage Profile envelope。 */
+  | { type: "unlock-bucket"; password: string }
+  /** 使用目标桶密码完成 Provider/Root/Keys 会话切换；目录由页面桥原子 CAS。 */
+  | { type: "switch-bucket"; bucket: StorageBucketCatalogEntryV2; password: string }
+  /** 当前桶连接配置的原子重配置；密码只用于本次验证和重新封装。 */
+  | { type: "change-bucket-config"; config: StorageBucketConnectionConfigV1; label?: string; password: string }
+  /** 当前桶显示名称的目录 CAS；必须由当前 Coordinator 执行。 */
+  | { type: "rename-bucket"; label: string }
   | { type: "select-opfs" }
   | { type: "import-profile"; envelope: import("./storage/profile.js").StorageProfileEnvelopeV1; password: string }
   | { type: "retry" }
+  /** 当前新版桶的全量改密；Worker 同时更新 Hold 快照与桶内 Vault records。 */
+  | { type: "change-bucket-password"; oldPassword: string; newPassword: string }
   | { type: "probe"; config: StorageProviderConfigDraft }
   | { type: "activate"; config: StorageProviderConfigDraft; expectedProviderGeneration: number | null }
   | { type: "clear"; expectedProviderGeneration: number | null }
   | { type: "reset"; expectedProviderGeneration: number | null }
   | { type: "cancel-probe" }
   | { type: "capabilities" }
-  | { type: "probe-capabilities" };
+  | { type: "probe-capabilities" }
+  /** 读取当前已提交的完整 Hold 快照；不输入密码、不解密。 */
+  | { type: "cold-export" };
 
 export type CoordinatorStorageData =
   | { type: "list"; grantId: string; input: { prefix?: string; cursor?: string; limit?: number } }
@@ -276,7 +289,7 @@ export type CoordinatorClientRequest =
   | { kind: "contacts.presence.snapshot"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
   | { kind: "plugin.intent.snapshot"; clientId: string; requestId: string }
   | { kind: "plugin.intent.submit"; clientId: string; requestId: string; command: PluginIntentCommand }
-  | ({ kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: import("./storage/profile.js").StorageBootstrapState; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
+  | ({ kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: import("./storage/profile.js").StorageBootstrapState; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort; /** Local localStorage 页面桥的专用双工端口。 */ localStorageBridgePort?: MessagePort; /** 页面为本次 Coordinator hello 创建的一次性本地 I/O 租约。 */ localStorageBridgeLeaseId?: string }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
@@ -346,7 +359,7 @@ export type CoordinatorVaultOperation =
   | { type: "listKeys" }
   | { type: "getKey"; publicKeyHex: string }
   | { type: "setActive"; publicKeyHex: string }
-  | { type: "deleteKey"; publicKeyHex: string; confirmationLabel: string }
+  | { type: "deleteKey"; publicKeyHex: string; confirmationLabel: string; bucketPassword?: string }
   | { type: "verifyPassword"; password: string }
   | { type: "changePassword"; oldPassword: string; newPassword: string }
   | { type: "finalizeEmptyVaultAfterLastKeyDeletion" }
@@ -488,6 +501,12 @@ export interface CoordinatorStorageStateEvent {
   status: StorageRuntimeControllerStatus;
   /** 独立于 Vault 的 Provider/统一桶健康状态。 */
   healthStatus?: StorageRuntimeStatus;
+  /** 当前是否由新版多桶目录绑定；用于 UI 选择正确的密码生命周期。 */
+  catalogBucket?: boolean;
+  /** 当前 Coordinator 真正绑定的抽象桶身份；页面桥用于租约校验。 */
+  bucketId?: string;
+  /** 当前 Coordinator 真正绑定的桶运行世代；页面桥用于租约校验。 */
+  bucketGeneration?: number;
   /** 旧 Coordinator 尚未释放最终 I/O；只能等待后显式重试，禁止强制接管。 */
   authorityRecovery?: CoordinatorAuthorityRecovery;
   summary: StorageProviderSummary | null;
@@ -589,6 +608,8 @@ export interface CoordinatorBootstrapSnapshot {
   p2pkhSettings?: { includeTestnet: boolean };
   /** 当前抽象存储桶世代；只用于绑定生命周期身份，不代替 owner/key 世代。 */
   storageBucketGeneration?: number;
+  /** 当前抽象存储桶身份；与页面 Local I/O 租约绑定。 */
+  storageBucketId?: string;
   p2pkhProviders?: P2pkhProviderRegistrySnapshot;
   /** 插件产品启用意图；不代表运行单元已经启动。 */
   pluginIntent?: PluginIntentSnapshot;

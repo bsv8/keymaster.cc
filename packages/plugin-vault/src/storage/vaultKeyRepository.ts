@@ -89,8 +89,8 @@ const SIDECAR_PREFIX = "sidecars/";
 let keyStore: KeyValueStore | undefined;
 
 /** Storage-first 启动时注入平台 `keys/` 句柄。 */
-export function configureVaultKeyRepository(store: KeyValueStore): void {
-  keyStore?.close();
+export function configureVaultKeyRepository(store: KeyValueStore, options: { closePrevious?: boolean } = {}): void {
+  if (options.closePrevious !== false) keyStore?.close();
   keyStore = store;
 }
 
@@ -109,13 +109,35 @@ export function disposeVaultKeyRepository(): void {
   });
 }
 
-function requireStore(): KeyValueStore {
+export interface VaultKeyRepository {
+  getMeta(): Promise<VaultMetaRecord | undefined>;
+  putMeta(meta: VaultMetaRecord): Promise<void>;
+  deleteMeta(): Promise<void>;
+  listKeys(): Promise<VaultKeyRecord[]>;
+  getKey(publicKeyHex: string): Promise<VaultKeyRecord | undefined>;
+  getKeyByAddress(address: string): Promise<VaultKeyRecord | undefined>;
+  putKey(record: VaultKeyRecord): Promise<void>;
+  putKeyRecords(records: VaultKeyRecord[]): Promise<void>;
+  putMetaAndKeys(meta: VaultMetaRecord, records: VaultKeyRecord[]): Promise<void>;
+  deleteKeyAndSidecars(publicKeyHex: string): Promise<void>;
+  deleteSidecar(publicKeyHex: string, id: string): Promise<void>;
+  listSidecars(publicKeyHex: string): Promise<WebAuthnSidecarRecord[]>;
+  putSidecar(sidecar: WebAuthnSidecarRecord): Promise<void>;
+}
+
+function requireConfiguredStore(): KeyValueStore {
   if (!keyStore) throw new Error("Vault storage has not been bootstrapped");
   return keyStore;
 }
 
-async function listValues<T>(prefix: string): Promise<T[]> {
-  const store = requireStore();
+/**
+ * 为暂存/切桶流程创建一个不改变全局绑定的 Vault 仓库。
+ *
+ * 目标桶必须先在自己的 keys/ Root 中读取和校验，成功后 Coordinator
+ * 才会把它切换为全局仓库；这样失败不会把当前桶的仓库替换掉。
+ */
+export function createVaultKeyRepository(store: KeyValueStore): VaultKeyRepository {
+  async function listValues<T>(prefix: string): Promise<T[]> {
   const values: T[] = [];
   let cursor: string | undefined;
   do {
@@ -124,74 +146,90 @@ async function listValues<T>(prefix: string): Promise<T[]> {
     cursor = page.nextCursor;
   } while (cursor);
   return values;
-}
+  }
 
 const keyPath = (publicKeyHex: string) => `${KEY_PREFIX}${publicKeyHex}`;
 const sidecarPath = (publicKeyHex: string, id: string) => `${SIDECAR_PREFIX}${publicKeyHex}/${id}`;
 
-export const vaultKeyRepository = {
-  async getMeta(): Promise<VaultMetaRecord | undefined> {
-    return (await requireStore().get<VaultMetaRecord>(META_KEY, { partition: PARTITION }))?.value;
-  },
-  async putMeta(meta: VaultMetaRecord): Promise<void> {
-    await requireStore().put(META_KEY, meta, { partition: PARTITION });
-  },
-  async deleteMeta(): Promise<void> {
-    await requireStore().delete(META_KEY, { partition: PARTITION });
-  },
-  async listKeys(): Promise<VaultKeyRecord[]> {
-    return listValues<VaultKeyRecord>(KEY_PREFIX);
-  },
-  async getKey(publicKeyHex: string): Promise<VaultKeyRecord | undefined> {
-    return (await requireStore().get<VaultKeyRecord>(keyPath(publicKeyHex), { partition: PARTITION }))?.value;
-  },
-  async getKeyByAddress(address: string): Promise<VaultKeyRecord | undefined> {
-    return (await this.listKeys()).find((record) => record.address === address);
-  },
-  async putKey(record: VaultKeyRecord): Promise<void> {
-    if (!record.publicKeyHex) throw new Error("vaultKeyRepository.putKey requires publicKeyHex");
-    await requireStore().put(keyPath(record.publicKeyHex), record, { partition: PARTITION });
-  },
-  async putKeyRecords(records: VaultKeyRecord[]): Promise<void> {
-    for (const record of records) {
-      if (!record.publicKeyHex) throw new Error("vaultKeyRepository.putKeyRecords requires publicKeyHex");
+  return {
+    async getMeta(): Promise<VaultMetaRecord | undefined> {
+      return (await store.get<VaultMetaRecord>(META_KEY, { partition: PARTITION }))?.value;
+    },
+    async putMeta(meta: VaultMetaRecord): Promise<void> {
+      await store.put(META_KEY, meta, { partition: PARTITION });
+    },
+    async deleteMeta(): Promise<void> {
+      await store.delete(META_KEY, { partition: PARTITION });
+    },
+    async listKeys(): Promise<VaultKeyRecord[]> {
+      return listValues<VaultKeyRecord>(KEY_PREFIX);
+    },
+    async getKey(publicKeyHex: string): Promise<VaultKeyRecord | undefined> {
+      return (await store.get<VaultKeyRecord>(keyPath(publicKeyHex), { partition: PARTITION }))?.value;
+    },
+    async getKeyByAddress(address: string): Promise<VaultKeyRecord | undefined> {
+      return (await this.listKeys()).find((record) => record.address === address);
+    },
+    async putKey(record: VaultKeyRecord): Promise<void> {
+      if (!record.publicKeyHex) throw new Error("vaultKeyRepository.putKey requires publicKeyHex");
+      await store.put(keyPath(record.publicKeyHex), record, { partition: PARTITION });
+    },
+    async putKeyRecords(records: VaultKeyRecord[]): Promise<void> {
+      for (const record of records) {
+        if (!record.publicKeyHex) throw new Error("vaultKeyRepository.putKeyRecords requires publicKeyHex");
+      }
+      await store.commit({
+        partition: PARTITION,
+        operations: records.map((record) => ({ type: "put" as const, key: keyPath(record.publicKeyHex), value: record }))
+      });
+    },
+    async putMetaAndKeys(meta: VaultMetaRecord, records: VaultKeyRecord[]): Promise<void> {
+      for (const record of records) {
+        if (!record.publicKeyHex) throw new Error("vaultKeyRepository.putMetaAndKeys requires publicKeyHex");
+      }
+      await store.commit({
+        partition: PARTITION,
+        operations: [
+          { type: "put", key: META_KEY, value: meta },
+          ...records.map((record) => ({ type: "put" as const, key: keyPath(record.publicKeyHex), value: record }))
+        ]
+      });
+    },
+    async deleteKeyAndSidecars(publicKeyHex: string): Promise<void> {
+      const sidecars = await store.list({ partition: PARTITION, prefix: `${SIDECAR_PREFIX}${publicKeyHex}/`, limit: 1000 });
+      await store.commit({
+        partition: PARTITION,
+        operations: [
+          { type: "delete", key: keyPath(publicKeyHex) },
+          ...sidecars.entries.map((entry) => ({ type: "delete" as const, key: entry.key }))
+        ]
+      });
+    },
+    async deleteSidecar(publicKeyHex: string, id: string): Promise<void> {
+      await store.delete(sidecarPath(publicKeyHex, id), { partition: PARTITION });
+    },
+    async listSidecars(publicKeyHex: string): Promise<WebAuthnSidecarRecord[]> {
+      return listValues<WebAuthnSidecarRecord>(`${SIDECAR_PREFIX}${publicKeyHex}/`);
+    },
+    async putSidecar(sidecar: WebAuthnSidecarRecord): Promise<void> {
+      await store.put(sidecarPath(sidecar.publicKeyHex, sidecar.id), sidecar, { partition: PARTITION });
     }
-    await requireStore().commit({
-      partition: PARTITION,
-      operations: records.map((record) => ({ type: "put" as const, key: keyPath(record.publicKeyHex), value: record }))
-    });
-  },
-  /** 原子写回 Vault meta 与 canonical keys。 */
-  async putMetaAndKeys(meta: VaultMetaRecord, records: VaultKeyRecord[]): Promise<void> {
-    for (const record of records) {
-      if (!record.publicKeyHex) throw new Error("vaultKeyRepository.putMetaAndKeys requires publicKeyHex");
-    }
-    await requireStore().commit({
-      partition: PARTITION,
-      operations: [
-        { type: "put", key: META_KEY, value: meta },
-        ...records.map((record) => ({ type: "put" as const, key: keyPath(record.publicKeyHex), value: record }))
-      ]
-    });
-  },
-  async deleteKeyAndSidecars(publicKeyHex: string): Promise<void> {
-    const store = requireStore();
-    const sidecars = await store.list({ partition: PARTITION, prefix: `${SIDECAR_PREFIX}${publicKeyHex}/`, limit: 1000 });
-    await store.commit({
-      partition: PARTITION,
-      operations: [
-        { type: "delete", key: keyPath(publicKeyHex) },
-        ...sidecars.entries.map((entry) => ({ type: "delete" as const, key: entry.key }))
-      ]
-    });
-  },
-  async deleteSidecar(publicKeyHex: string, id: string): Promise<void> {
-    await requireStore().delete(sidecarPath(publicKeyHex, id), { partition: PARTITION });
-  },
-  async listSidecars(publicKeyHex: string): Promise<WebAuthnSidecarRecord[]> {
-    return listValues<WebAuthnSidecarRecord>(`${SIDECAR_PREFIX}${publicKeyHex}/`);
-  },
-  async putSidecar(sidecar: WebAuthnSidecarRecord): Promise<void> {
-    await requireStore().put(sidecarPath(sidecar.publicKeyHex, sidecar.id), sidecar, { partition: PARTITION });
-  }
+  };
+}
+
+/** 全局当前桶仓库；其它代码继续使用这个兼容入口。 */
+export const vaultKeyRepository: VaultKeyRepository = {
+  getMeta: () => createVaultKeyRepository(requireConfiguredStore()).getMeta(),
+  putMeta: (meta) => createVaultKeyRepository(requireConfiguredStore()).putMeta(meta),
+  deleteMeta: () => createVaultKeyRepository(requireConfiguredStore()).deleteMeta(),
+  listKeys: () => createVaultKeyRepository(requireConfiguredStore()).listKeys(),
+  getKey: (publicKeyHex) => createVaultKeyRepository(requireConfiguredStore()).getKey(publicKeyHex),
+  getKeyByAddress: (address) => createVaultKeyRepository(requireConfiguredStore()).getKeyByAddress(address),
+  putKey: (record) => createVaultKeyRepository(requireConfiguredStore()).putKey(record),
+  putKeyRecords: (records) => createVaultKeyRepository(requireConfiguredStore()).putKeyRecords(records),
+  putMetaAndKeys: (meta, records) => createVaultKeyRepository(requireConfiguredStore()).putMetaAndKeys(meta, records),
+  deleteKeyAndSidecars: (publicKeyHex) => createVaultKeyRepository(requireConfiguredStore()).deleteKeyAndSidecars(publicKeyHex),
+  deleteSidecar: (publicKeyHex, id) => createVaultKeyRepository(requireConfiguredStore()).deleteSidecar(publicKeyHex, id),
+  listSidecars: (publicKeyHex) => createVaultKeyRepository(requireConfiguredStore()).listSidecars(publicKeyHex),
+  putSidecar: (sidecar) => createVaultKeyRepository(requireConfiguredStore()).putSidecar(sidecar),
 };

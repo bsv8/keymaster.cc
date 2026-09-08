@@ -21,7 +21,7 @@ export function createVaultLocalSecretService(client: Client): VaultLocalSecretS
       } finally {
         transferable.fill(0);
       }
-      if (!result || typeof result !== "object" || (result as VaultSealedSecret).version !== 2) throw new Error("Invalid sealed secret returned by Vault");
+      if (!result || typeof result !== "object" || (result as VaultSealedSecret).version !== 3 || (result as VaultSealedSecret).keySource !== "active-key-hkdf-v1") throw new Error("Invalid sealed secret returned by Vault");
       return result as VaultSealedSecret;
     },
     async open(scope: string, sealed: VaultSealedSecret): Promise<Uint8Array> {

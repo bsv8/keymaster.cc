@@ -11,6 +11,7 @@ import type {
   StorageUploadPartResult
 } from "../connectStorage.js";
 import type { StorageConnection, StorageProviderConfigDraft, StorageProviderId } from "./profile.js";
+import type { StorageBucketPasswordRotationResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
 
 /** Provider 运行状态；由 Coordinator 统一发布。 */
 export type StorageRuntimeStatus = "unselected" | "authentication" | "checking" | "ready" | "degraded" | "incompatible";
@@ -125,12 +126,22 @@ export interface BucketConditionalCapabilityProbeResult {
 export interface StorageRuntimeController {
   status(): StorageRuntimeControllerStatus;
   subscribe(listener: () => void): () => void;
+  /** 是否存在新版桶目录；旧版 Vault 顶栏据此让位给桶树。 */
+  hasCatalogBuckets?(): boolean;
   getProviderSummary(): Promise<StorageProviderSummary | null>;
   getProviderConnection(): Promise<StorageProviderConnectionView | null>;
   cancelProbe(): void;
   probeProvider(config: StorageProviderConfigDraft): Promise<StorageProbeResult>;
   /** 使用独立 Storage Profile 密码恢复已保存的 Provider 配置。 */
   unlockStorageProfile(password: string): Promise<StorageProbeResult>;
+  /** 当前新版桶的配置、Hold 快照和桶内 Key records 全量改密。 */
+  changeBucketPassword?(oldPassword: string, newPassword: string): Promise<StorageBucketPasswordRotationResultV1>;
+  /** 先认证目标桶，再原子切换 Coordinator 与本机目录的当前桶。 */
+  switchBucket?(bucket: StorageBucketCatalogEntryV2, password: string): Promise<StorageBucketSwitchResultV1>;
+  /** 当前桶连接配置与名称的原子重配置。 */
+  changeBucketConnectionConfig?(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageBucketCatalogEntryV2>;
+  /** 当前桶名称的原子目录 CAS；页面不能直接改当前桶目录。 */
+  renameBucket?(label: string): Promise<StorageBucketCatalogEntryV2>;
   /** 选择并验证本地 OPFS；成功后才允许创建平台根。 */
   selectOpfs(): Promise<StorageProbeResult>;
   /** 导入本机加密 Profile 并完成冷启动恢复。 */

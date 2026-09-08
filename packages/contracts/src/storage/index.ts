@@ -4,3 +4,4 @@ export * from "./kv.js";
 export * from "./access.js";
 export * from "./profile.js";
 export * from "./runtime.js";
+export * from "./catalog.js";

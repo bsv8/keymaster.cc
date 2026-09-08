@@ -1,9 +1,9 @@
-// 抽象桶 Provider 契约：OPFS 与 S3 只在这一层对外呈现统一对象接口。
+// 抽象桶 Provider 契约：Local（localStorage）与 S3 只在这一层对外呈现统一对象接口。
 
 /** 统一存储支持的物理 Provider 类型。 */
-export type StorageBucketProviderId = "opfs" | "s3";
+export type StorageBucketProviderId = "local" | "s3" | "opfs";
 
-/** 抽象桶身份，不是 S3 bucket name，也不是 OPFS 物理目录名。 */
+/** 抽象桶身份，不是 S3 bucket name，也不是 OPFS 物理目录名。S3 Provider 会将其纳入固定物理根。 */
 export interface StorageBucketRef {
   /** 抽象桶身份，由 Keymaster 分配或从 Profile 恢复。 */
   bucketId: string;

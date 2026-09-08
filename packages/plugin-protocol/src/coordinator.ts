@@ -11,8 +11,8 @@ export function openProtocolStorageRepository(): Promise<ProtocolStorageReposito
 }
 
 /** Worker bootstrap 注入 protocol platform K-V。 */
-export function configureProtocolStorageRepository(store: import("@keymaster/contracts").KeyValueStore): void {
-  configureRawProtocolStorageRepository(store);
+export function configureProtocolStorageRepository(store: import("@keymaster/contracts").KeyValueStore, options: { closePrevious?: boolean } = {}): void {
+  configureRawProtocolStorageRepository(store, options);
   dbPromise = Promise.resolve(store).then(() => openRawProtocolStorageRepository(store));
 }
 

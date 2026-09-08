@@ -105,14 +105,16 @@ export interface VaultLifecycleSnapshot {
  * in the public Vault or protocol contracts.
  */
 export interface VaultSealedSecret {
-  /** 当前只接受独立域密钥 + salt-bound AAD 的 v2 envelope。 */
-  version: 2;
+  /** 当前使用 active Key 私钥按用途 HKDF 派生的 v3 envelope。 */
+  version: 3;
+  /** 密文密钥来源版本；消费者不得自行替换为密码派生密钥。 */
+  keySource: "active-key-hkdf-v1";
   saltHex: string;
   nonceHex: string;
   ciphertextHex: string;
 }
 
-/** Minimal capability for sealing plugin secrets with the Vault password key. */
+/** 使用当前 active Key 的按用途派生密钥封装插件本地秘密。 */
 export interface VaultLocalSecretService {
   seal(scope: string, plaintext: Uint8Array): Promise<VaultSealedSecret>;
   open(scope: string, sealed: VaultSealedSecret): Promise<Uint8Array>;

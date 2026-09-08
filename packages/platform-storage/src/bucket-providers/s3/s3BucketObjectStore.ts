@@ -147,15 +147,16 @@ export function ensureS3XmlRuntime(): void {
   }
 }
 
-function connectionDetails(config: NormalizedStorageProviderConfig): { region: string; endpoint?: string; forcePathStyle?: boolean; bucket: string; accessKeyId: string; secretAccessKey: string } {
-  const connection = config.connection as { bucket: string; region?: string; forcePathStyle?: boolean };
+function connectionDetails(config: NormalizedStorageProviderConfig): { region: string; endpoint?: string; forcePathStyle?: boolean; bucket: string; accessKeyId: string; secretAccessKey: string; sessionToken?: string } {
+  const connection = config.connection as { bucket: string; region?: string; forcePathStyle?: boolean; sessionToken?: string };
   return {
     region: config.providerId === "cloudflare-r2" ? "auto" : connection.region ?? "us-east-1",
     endpoint: providerEndpoint(config),
     forcePathStyle: connection.forcePathStyle,
     bucket: connection.bucket,
     accessKeyId: config.credentials.accessKeyId,
-    secretAccessKey: config.credentials.secretAccessKey
+    secretAccessKey: config.credentials.secretAccessKey,
+    ...(connection.sessionToken === undefined ? {} : { sessionToken: connection.sessionToken })
   };
 }
 
@@ -315,7 +316,11 @@ export function createS3BucketObjectStore(config: NormalizedStorageProviderConfi
     region: details.region,
     endpoint: details.endpoint,
     forcePathStyle: details.forcePathStyle,
-    credentials: { accessKeyId: details.accessKeyId, secretAccessKey: details.secretAccessKey },
+    credentials: {
+      accessKeyId: details.accessKeyId,
+      secretAccessKey: details.secretAccessKey,
+      ...(details.sessionToken === undefined ? {} : { sessionToken: details.sessionToken })
+    },
     requestHandler: new FetchHttpHandler({ requestInit: s3FetchRequestInit })
   }) as unknown as BucketClientAdapter;
   const send = async <T>(command: unknown, signal?: AbortSignal): Promise<T> => {

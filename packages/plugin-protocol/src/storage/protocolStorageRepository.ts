@@ -32,8 +32,8 @@ function storeForCall(): KeyValueStore {
   return testStore;
 }
 
-export function configureProtocolStorageRepository(store: KeyValueStore): void {
-  configuredStore?.close();
+export function configureProtocolStorageRepository(store: KeyValueStore, options: { closePrevious?: boolean } = {}): void {
+  if (options.closePrevious !== false) configuredStore?.close();
   configuredStore = store;
 }
 

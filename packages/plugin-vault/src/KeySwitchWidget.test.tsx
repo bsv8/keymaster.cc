@@ -15,6 +15,7 @@ import type {
   ActiveKeyState,
   KeyIdentity,
   KeyspaceService,
+  StorageRuntimeController,
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
@@ -122,6 +123,7 @@ function mount() {
   const keyspace = makeKeyspace();
   host.capabilities.provide<VaultService>("vault.service", vault);
   host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+  registerStorageStatus(host);
   registerVaultKeyState(host, keyspace, vault);
   return {
     vault,
@@ -132,6 +134,35 @@ function mount() {
       </PluginHostProvider>
     )
   };
+}
+
+function mountWithCatalogMode() {
+  const host = createPluginHost({ disableConfigPersistence: true });
+  const vault = makeVault();
+  const keyspace = makeKeyspace();
+  host.capabilities.provide<VaultService>("vault.service", vault);
+  host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+  host.capabilities.provide<StorageRuntimeController>("storage.runtime-controller", {
+    hasCatalogBuckets: () => true,
+    status: () => "ready",
+    subscribe: () => () => undefined,
+  } as unknown as StorageRuntimeController);
+  registerStorageStatus(host, true);
+  registerVaultKeyState(host, keyspace, vault);
+  return render(
+    <PluginHostProvider host={host}>
+      <KeySwitchWidget />
+    </PluginHostProvider>
+  );
+}
+
+function registerStorageStatus(host: ReturnType<typeof createPluginHost>, hasCatalogBuckets = false): void {
+  const registry = host.capabilities.get<any>("resource.registry");
+  registry.register({
+    id: "storage.status", scope: "global", key: () => ["storage.status"],
+    load: async () => ({ hasCatalogBuckets }),
+    invalidation: "immediate"
+  });
 }
 
 function registerVaultKeyState(host: ReturnType<typeof createPluginHost>, keyspace: KeyspaceService, vault: VaultService): void {
@@ -181,6 +212,7 @@ describe("KeySwitchWidget", () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     host.capabilities.provide<VaultService>("vault.service", vault);
     host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+    registerStorageStatus(host);
     registerVaultKeyState(host, keyspace, vault);
 
     const user = (await import("@testing-library/user-event")).default.setup();
@@ -233,6 +265,7 @@ describe("KeySwitchWidget", () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     host.capabilities.provide<VaultService>("vault.service", vault);
     host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+    registerStorageStatus(host);
     registerVaultKeyState(host, keyspace, vault);
 
     const user = (await import("@testing-library/user-event")).default.setup();
@@ -249,5 +282,13 @@ describe("KeySwitchWidget", () => {
     expect(activateKeyWithPasskey).toHaveBeenCalledTimes(1);
     expect(activateKeyWithPasskey).toHaveBeenCalledWith({ passkeyId: "passkey-laptop" });
     expect(vault.activateKey).not.toHaveBeenCalled();
+  });
+
+  it("hides the legacy topbar key menu when the catalog bucket tree is available", async () => {
+    mountWithCatalogMode();
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /切换 key|Switch key/ })).toBeNull();
+    });
   });
 });

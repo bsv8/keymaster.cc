@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   CoordinatorCommandResult,
@@ -16,6 +17,8 @@ export function VaultKeySwitchModal(props: {
   onClose(): void;
 }) {
   const { t } = useI18n();
+  const storage = useOptionalCapability<{ isCatalogBucket?: () => boolean }>("storage.runtime-controller");
+  const isCatalogBucket = storage?.isCatalogBucket?.() === true;
   const [password, setPassword] = useState("");
   const [passkeys, setPasskeys] = useState<PasskeyProtection[]>([]);
   const [loadingPasskeys, setLoadingPasskeys] = useState(false);
@@ -30,7 +33,7 @@ export function VaultKeySwitchModal(props: {
     setPasskeys([]);
     setPasswordError(null);
     setPasskeyError(null);
-    if (!props.target?.publicKeyHex) return;
+    if (!props.target?.publicKeyHex || isCatalogBucket) return;
     let live = true;
     setLoadingPasskeys(true);
     void props.vault.listPasskeysForKey(props.target.publicKeyHex)
@@ -38,7 +41,7 @@ export function VaultKeySwitchModal(props: {
       .catch((err) => { if (live) setPasskeyError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (live) setLoadingPasskeys(false); });
     return () => { live = false; };
-  }, [props.target?.publicKeyHex, props.vault]);
+  }, [props.target?.publicKeyHex, props.vault, isCatalogBucket]);
 
   function resultError(result: CoordinatorCommandResult): string | null {
     if (result.status === "accepted" || result.status === "ok") return null;
@@ -67,8 +70,19 @@ export function VaultKeySwitchModal(props: {
     } catch (err) {
       setPasswordError(err instanceof Error ? err.message : t("vault.keySwitch.err.failed", { defaultValue: "切换私钥失败" }));
     } finally {
+      // 密码只服务本次解锁请求；无论成功、失败还是 RPC 被拒绝，都不
+      // 留在输入组件的 React 状态中。
+      setPassword("");
       setPasswordBusy(false);
     }
+  }
+
+  function close() {
+    if (busy) return;
+    setPassword("");
+    setPasswordError(null);
+    setPasskeyError(null);
+    props.onClose();
   }
 
   async function submitPasskey(passkeyId: string) {
@@ -95,9 +109,9 @@ export function VaultKeySwitchModal(props: {
     <Modal
       open={props.target !== null}
       title={t("vault.keySwitch.confirmTitle", { defaultValue: "切换私钥" })}
-      onClose={() => { if (!busy) props.onClose(); }}
+      onClose={close}
       footer={
-        <Button variant="ghost" onClick={props.onClose} disabled={busy}>
+        <Button variant="ghost" onClick={close} disabled={busy}>
           {t("common.action.cancel", { defaultValue: "取消" })}
         </Button>
       }
@@ -114,7 +128,7 @@ export function VaultKeySwitchModal(props: {
         <p>{t("vault.keySwitch.passwordHint", { defaultValue: "输入 Vault 密码解锁并切换到这把私钥。" })}</p>
         <div className="key-switch-method__password">
           <TextInput
-            label={t("vault.keySwitch.password", { defaultValue: "Vault 密码" })}
+            label={t("vault.keySwitch.password", { defaultValue: isCatalogBucket ? "桶密码" : "Vault 密码" })}
             type="password"
             autoComplete="current-password"
             value={password}
@@ -132,30 +146,32 @@ export function VaultKeySwitchModal(props: {
         </div>
       </section>
 
-      <div className="key-switch-method-divider"><span>{t("vault.keySwitch.or", { defaultValue: "或" })}</span></div>
+      {!isCatalogBucket ? <>
+        <div className="key-switch-method-divider"><span>{t("vault.keySwitch.or", { defaultValue: "或" })}</span></div>
 
-      <section className="key-switch-method" aria-labelledby="key-switch-passkey-title">
-        <h3 id="key-switch-passkey-title">{t("vault.keySwitch.usePasskey", { defaultValue: "使用 Passkey" })}</h3>
-        <p>{t("vault.keySwitch.passkeyHint", { defaultValue: "选择这把私钥已经配置的 Passkey。" })}</p>
-        <div className="key-switch-passkey-list">
-          {passkeys.map((passkey) => (
-            <Button
-              key={passkey.id}
-              variant="secondary"
-              loading={passkeyBusyId === passkey.id}
-              disabled={busy}
-              onClick={() => void submitPasskey(passkey.id)}
-            >
-              {passkey.label}
-            </Button>
-          ))}
-          {!loadingPasskeys && passkeys.length === 0 ? (
-            <p className="key-switch-passkey-empty">{t("vault.keySwitch.noPasskeys", { defaultValue: "这把私钥尚未配置 Passkey。" })}</p>
-          ) : null}
-          {loadingPasskeys ? <p className="key-switch-passkey-empty">{t("common.status.loading", { defaultValue: "加载中…" })}</p> : null}
-        </div>
-        {passkeyError ? <p className="vault-passkey__error">{passkeyError}</p> : null}
-      </section>
+        <section className="key-switch-method" aria-labelledby="key-switch-passkey-title">
+          <h3 id="key-switch-passkey-title">{t("vault.keySwitch.usePasskey", { defaultValue: "使用 Passkey" })}</h3>
+          <p>{t("vault.keySwitch.passkeyHint", { defaultValue: "选择这把私钥已经配置的 Passkey。" })}</p>
+          <div className="key-switch-passkey-list">
+            {passkeys.map((passkey) => (
+              <Button
+                key={passkey.id}
+                variant="secondary"
+                loading={passkeyBusyId === passkey.id}
+                disabled={busy}
+                onClick={() => void submitPasskey(passkey.id)}
+              >
+                {passkey.label}
+              </Button>
+            ))}
+            {!loadingPasskeys && passkeys.length === 0 ? (
+              <p className="key-switch-passkey-empty">{t("vault.keySwitch.noPasskeys", { defaultValue: "这把私钥尚未配置 Passkey。" })}</p>
+            ) : null}
+            {loadingPasskeys ? <p className="key-switch-passkey-empty">{t("common.status.loading", { defaultValue: "加载中…" })}</p> : null}
+          </div>
+          {passkeyError ? <p className="vault-passkey__error">{passkeyError}</p> : null}
+        </section>
+      </> : null}
     </Modal>
   );
 }

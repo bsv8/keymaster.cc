@@ -21,13 +21,17 @@ import type {
   StorageUploadAbortResult,
   StorageUploadBeginResult,
   StorageUploadPartResult,
+  StorageBucketCatalogEntryV2,
+  StorageBucketConnectionConfigV1,
+  StorageBucketSwitchResultV1,
 } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
 import { encryptStorageProfile, writeStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
+import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
 import { normalizeProviderConfig } from "../bucket-providers/s3/s3ClientFactory.js";
 import { requestOpfsPersistence } from "../bucket-providers/opfs/opfsPersistence.js";
 
-type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: StorageRuntimeControllerStatus; healthStatus?: StorageRuntimeStatus; authorityRecovery?: CoordinatorAuthorityRecovery; summary: StorageProviderSummary | null; capabilities: BucketConditionalCapabilitiesView | null };
+type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: StorageRuntimeControllerStatus; healthStatus?: StorageRuntimeStatus; catalogBucket?: boolean; bucketId?: string; bucketGeneration?: number; authorityRecovery?: CoordinatorAuthorityRecovery; summary: StorageProviderSummary | null; capabilities: BucketConditionalCapabilitiesView | null };
 
 function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
   if (result.status === "ok") return Promise.resolve(result.value as T);
@@ -43,12 +47,10 @@ function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
 
 /** Page-side facade. It owns no provider config, client, cursor, or S3 I/O. */
 export class StorageRpcProxy implements StorageRuntimeController {
-  private current: StateEvent = { topic: "storage.state", sessionEpoch: "boot", status: "locked", healthStatus: "unselected", summary: null, capabilities: null };
+  private current: StateEvent = { topic: "storage.state", sessionEpoch: "boot", status: "locked", healthStatus: "unselected", catalogBucket: false, summary: null, capabilities: null };
   private readonly listeners = new Set<() => void>();
   private readonly grants = new Map<string, Promise<string>>();
   private readonly unsubscribeState: () => void;
-  private readonly recoveryTarget?: Window;
-  private readonly recoverStorage: () => void;
 
   constructor(private readonly coordinator: StorageCoordinatorControl) {
     this.unsubscribeState = coordinator.subscribeTopic("storage.state", (event: StateEvent) => {
@@ -56,14 +58,18 @@ export class StorageRpcProxy implements StorageRuntimeController {
       this.current = event;
       for (const listener of this.listeners) listener();
     });
-    this.recoveryTarget = typeof window === "undefined" ? undefined : window;
-    this.recoverStorage = () => { void this.control({ type: "retry" }).catch(() => undefined); };
-    this.recoveryTarget?.addEventListener("online", this.recoverStorage);
-    this.recoveryTarget?.addEventListener("visibilitychange", this.recoverStorage);
   }
 
   status(): StorageRuntimeControllerStatus { return this.current.status; }
+  hasCatalogBuckets(): boolean {
+    try { return readStorageCatalog().buckets.length > 0; }
+    catch { return false; }
+  }
   healthStatus(): StorageRuntimeStatus { return this.current.healthStatus ?? "degraded"; }
+  /** 当前是否为新版桶目录；页面据此决定是否必须再次输入桶密码。 */
+  isCatalogBucket(): boolean { return this.current.catalogBucket === true; }
+  /** 当前目录桶身份；仅用于页面把桶树与 Worker 当前会话对齐。 */
+  selectedBucketId(): string | undefined { return this.current.bucketId; }
   /** 返回旧 Worker 租约阻塞信息；页面只能据此等待并重试，不能强制接管。 */
   authorityRecovery(): CoordinatorAuthorityRecovery | undefined { return this.current.authorityRecovery; }
   /** 由 Storage Onboarding 或网络恢复事件触发一次全局探测。 */
@@ -71,8 +77,6 @@ export class StorageRpcProxy implements StorageRuntimeController {
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   dispose(): void {
     this.unsubscribeState();
-    this.recoveryTarget?.removeEventListener("online", this.recoverStorage);
-    this.recoveryTarget?.removeEventListener("visibilitychange", this.recoverStorage);
     this.listeners.clear();
   }
   private control<T>(control: CoordinatorStorageControl): Promise<T> { return this.coordinator.storageControl(control).then(unwrap<T>); }
@@ -97,6 +101,34 @@ export class StorageRpcProxy implements StorageRuntimeController {
   getProviderSummary(): Promise<StorageProviderSummary | null> { return Promise.resolve(this.current.summary); }
   getProviderConnection(): Promise<StorageProviderConnectionView | null> { return this.control({ type: "connection" }); }
   unlockStorageProfile(password: string): Promise<StorageProbeResult> { return this.control({ type: "unlock-profile", password }); }
+  /** 新版桶目录的临时解锁；密码只进入本次 Worker bootstrap。 */
+  unlockBucket(password: string): Promise<unknown> { return this.control({ type: "unlock-bucket", password }); }
+  /** 目标桶先在 Worker 暂存并认证，成功后才更新目录和当前运行时。 */
+  switchBucket(bucket: StorageBucketCatalogEntryV2, password: string): Promise<StorageBucketSwitchResultV1> {
+    return this.control({ type: "switch-bucket", bucket, password });
+  }
+  /** 当前桶配置改动必须由 Coordinator 同步 Provider、快照和目录。 */
+  changeBucketConnectionConfig(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageBucketCatalogEntryV2> {
+    return this.control({ type: "change-bucket-config", config, ...(label === undefined ? {} : { label }), password });
+  }
+  /** 当前桶改名与 Coordinator 运行态/目录保持同一条 CAS 边界。 */
+  renameBucket(label: string): Promise<StorageBucketCatalogEntryV2> {
+    return this.control({ type: "rename-bucket", label });
+  }
+  /** 当前桶全量改密；页面只负责把返回的目录条目写回本机目录。 */
+  changeBucketPassword(oldPassword: string, newPassword: string): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResultV1> {
+    return this.control({ type: "change-bucket-password", oldPassword, newPassword });
+  }
+  /**
+   * 冷导出当前 Coordinator 已绑定桶的已提交 Hold 快照。
+   * 返回值只允许二进制；页面不会接触桶密码或解密配置。
+   */
+  async coldExportBucket(): Promise<Uint8Array> {
+    const value = await this.control<unknown>({ type: "cold-export" });
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    throw new StorageRuntimeError("storage_provider_error", "Storage cold export returned invalid bytes");
+  }
   async selectOpfs(): Promise<StorageProbeResult> {
     // 只有 Window 能申请授权；StorageManager 访问封装在 OPFS Provider。
     await requestOpfsPersistence();

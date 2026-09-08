@@ -126,7 +126,7 @@ export interface KeyspaceService {
    * 约束：仅允许仍处于 ready 状态的 key 通过；找不到 hex 或 key 不
    * 存在时抛 "Key not found"。
    */
-  deleteKey(input: { publicKeyHex: string; confirmationLabel: string }): Promise<void>;
+  deleteKey(input: { publicKeyHex: string; confirmationLabel: string; bucketPassword?: string }): Promise<void>;
 
   /**
    * 由 background 插件在装载时调用：把 background service 注入 keyspace,

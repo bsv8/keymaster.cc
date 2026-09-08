@@ -5,7 +5,9 @@
 // 硬切换 007：
 //   - vault 同时提供 vault.service 与 keyspace.service；KeySwitchWidget 由
 //     vault 直接注册到 topbar.registry（order 90），位置在 background.tray
-//     (order 100) 左侧。
+//     (order 100) 左侧。它是旧 OPFS/无新版桶目录时的兼容入口；当新版
+//     storage catalog 存在桶时，KeySwitchWidget 会在运行时让位给
+//     platform-storage 的“桶 → Keys”树，避免两个 Key 切换真值并存。
 //   - Vault 的 keys/ 是平台根，由 Coordinator 在 Storage bootstrap 时注入。
 //   - keyspace service 通过 capability "keyspace.service" 暴露；key 状态
 //     切换由 keyspace 维护，shell 与业务插件只读不写。
@@ -607,7 +609,10 @@ const vaultPluginDefinition = {
       }
     });
 
-    // 注册 KeySwitchWidget 到 topbar（order 90 < background.tray 100）。
+    // 旧版 KeySwitchWidget 仍注册到 topbar，供没有新版 storage catalog 的
+    // OPFS/历史单桶模式使用（order 90 < background.tray 100）。新版桶目录
+    // 模式由 KeySwitchWidget 自己隐藏该入口，统一由 platform-storage 的
+    // “桶 → Keys”树负责桶和 Key 的切换。
     const topbar = ctx.get<TopbarRegistry>("topbar.registry");
     topbar.register({
       id: "vault.key-switch",

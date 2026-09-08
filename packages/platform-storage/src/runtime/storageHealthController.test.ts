@@ -6,14 +6,10 @@ afterEach(() => {
 });
 
 describe("StorageHealthController", () => {
-  it("retries after backoff and publishes the final ready state", async () => {
-    vi.useFakeTimers();
+  it("does not retry until the caller explicitly requests it", async () => {
     let attempts = 0;
     const statuses: string[] = [];
     const controller = new StorageHealthController({
-      random: () => 0,
-      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-      clearTimer: (timer) => clearTimeout(timer)
     });
     controller.subscribe((snapshot) => statuses.push(snapshot.status));
 
@@ -27,11 +23,9 @@ describe("StorageHealthController", () => {
     expect(statuses).toContain("checking");
     expect(statuses).toContain("degraded");
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    await Promise.resolve();
-
+    expect(controller.snapshot().nextProbeAt).toBeUndefined();
+    await expect(controller.retry()).resolves.toMatchObject({ status: "ready" });
     expect(attempts).toBe(2);
-    expect(controller.status()).toBe("ready");
     expect(statuses.at(-1)).toBe("ready");
     expect(controller.snapshot().retryAttempt).toBe(0);
   });
@@ -61,9 +55,6 @@ describe("StorageHealthController", () => {
     const statuses: string[] = [];
     const controller = new StorageHealthController({
       now: () => 0,
-      random: () => 0,
-      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-      clearTimer: (timer) => clearTimeout(timer)
     });
     controller.subscribe((snapshot) => statuses.push(snapshot.status));
 
@@ -78,11 +69,10 @@ describe("StorageHealthController", () => {
     expect(first.status).toBe("degraded");
     expect(providerAttempts).toBe(1);
     expect(recoveryAttempts).toBe(1);
-    expect(first.nextProbeAt).toBe(1_000);
+    expect(first.nextProbeAt).toBeUndefined();
     expect(statuses).not.toContain("ready");
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    await Promise.resolve();
+    await controller.retry();
 
     expect(providerAttempts).toBe(2);
     expect(recoveryAttempts).toBe(2);
@@ -90,14 +80,10 @@ describe("StorageHealthController", () => {
     expect(statuses.at(-1)).toBe("ready");
   });
 
-  it("retains deferred ready mode across an automatic retry", async () => {
-    vi.useFakeTimers();
+  it("retains deferred ready mode across an explicit retry", async () => {
     let attempts = 0;
     const controller = new StorageHealthController({
       now: () => 0,
-      random: () => 0,
-      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
-      clearTimer: (timer) => clearTimeout(timer)
     });
 
     await controller.probe(async () => {
@@ -106,8 +92,7 @@ describe("StorageHealthController", () => {
     }, undefined, { publishReady: false });
 
     expect(controller.status()).toBe("degraded");
-    await vi.advanceTimersByTimeAsync(1_000);
-    await Promise.resolve();
+    await controller.retry();
 
     expect(attempts).toBe(2);
     expect(controller.status()).toBe("checking");

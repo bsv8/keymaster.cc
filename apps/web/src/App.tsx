@@ -18,7 +18,7 @@ import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus } from "@
 import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, APPLICATION_BOOTSTRAP_RESOURCE_ID } from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
-import { StorageOnboardingPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
+import { StorageBucketManagerPage, StorageOnboardingPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
 import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
 import { LockedShell } from "./shell/LockedShell.js";
 import { UnlockedShell } from "./shell/UnlockedShell.js";
@@ -58,6 +58,11 @@ export function App() {
     (snapshot) => snapshot.data ?? fallbackBootstrapSnapshot,
     (previous, next) => JSON.stringify(previous) === JSON.stringify(next)
   );
+
+  const path = typeof window === "undefined" ? "/" : window.location.pathname;
+  // 存储桶是系统最外层管理面；即使 Vault 尚未初始化、已锁定或存储
+  // runtime 尚未 ready，也必须能进入这个页面处理桶目录。
+  if (path === "/storage/buckets") return <StorageBucketManagerPage />;
 
   // Storage plugin 是未就绪时唯一允许启动的应用入口；Vault capability
   // 也必须由同一份 application-bootstrap.ready 状态确认后才进入 RuntimeApp。

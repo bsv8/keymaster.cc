@@ -12,16 +12,17 @@ export interface StorageHealthSnapshot {
   lastSuccessAt?: number;
   /** 最近一次探测失败的时间（毫秒）。 */
   lastFailureAt?: number;
-  /** 下一次自动探测时间（毫秒）。 */
+  /** 旧版本字段；当前实现不会安排自动探测，因此始终为空。 */
   nextProbeAt?: number;
   /** 最近一次探测耗时（毫秒）。 */
   latencyMs?: number;
-  /** 当前退避重试次数。 */
+  /** 当前显式重试链的失败次数。 */
   retryAttempt: number;
 }
 
 export interface StorageHealthControllerOptions {
   now?: () => number;
+  /** 保留旧测试夹具的兼容字段；健康控制器不再自行创建定时器。 */
   random?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
@@ -38,23 +39,20 @@ export class StorageHealthController {
   private current: StorageHealthSnapshot = { status: "unselected", retryAttempt: 0 };
   private readonly listeners = new Set<(snapshot: StorageHealthSnapshot) => void>();
   private inFlight?: Promise<StorageHealthSnapshot>;
-  private retryTimer?: ReturnType<typeof setTimeout>;
   private probeGeneration = 0;
-  private recoveryCleanup?: () => void;
   private probeOperation?: StorageProbeOperation;
   /** Provider 成功后必须完成的 Root/Journal/任务恢复。 */
   private probeFinalizeOperation?: StorageProbeOperation;
   private probeOptions: StorageProbeOptions = {};
   private readonly now: () => number;
-  private readonly random: () => number;
-  private readonly setTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
-  private readonly clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
 
   constructor(options: StorageHealthControllerOptions = {}) {
     this.now = options.now ?? (() => Date.now());
-    this.random = options.random ?? (() => Math.random());
-    this.setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
-    this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer));
+    // `random`, `setTimer` and `clearTimer` used to drive automatic recovery.
+    // They are intentionally ignored: retry is now an explicit user action.
+    void options.random;
+    void options.setTimer;
+    void options.clearTimer;
   }
 
   snapshot(): StorageHealthSnapshot { return { ...this.current }; }
@@ -62,9 +60,6 @@ export class StorageHealthController {
   subscribe(listener: (snapshot: StorageHealthSnapshot) => void): () => void { this.listeners.add(listener); listener(this.snapshot()); return () => this.listeners.delete(listener); }
 
   setStatus(status: StorageRuntimeStatus, message?: string): void {
-    // ready/unselected 是新的健康基线，必须取消旧 degraded 状态留下的退避探测；
-    // 否则旧定时器可能在恢复后再次把 Worker 推回 degraded。
-    if (status === "ready" || status === "unselected") this.clearScheduledRetry();
     this.current = {
       ...this.current,
       status,
@@ -73,16 +68,11 @@ export class StorageHealthController {
       ...(status === "ready" || status === "unselected" ? { diagnostic: undefined, nextProbeAt: undefined } : {})
     };
     this.notify();
-    // 某些恢复路径不是由 probe() 直接包住的（例如冷启动 Root 安装后），
-    // 但仍然要进入同一条自动退避链。只有已有可重试探测且当前没有探测
-    // 在途时才安排，避免在 probe() 内部重复创建定时器。
-    if (status === "degraded" && this.probeOperation && !this.inFlight) this.scheduleRetry();
   }
 
-  /** 测试用：清理退避与旧探测结果，不触发业务恢复编排。 */
+  /** 测试用：清理旧探测结果，不触发业务恢复编排。 */
   resetForTesting(status: StorageRuntimeStatus = "unselected"): void {
     this.probeGeneration += 1;
-    this.clearScheduledRetry();
     this.inFlight = undefined;
     this.probeOperation = undefined;
     this.probeFinalizeOperation = undefined;
@@ -96,7 +86,6 @@ export class StorageHealthController {
     this.probeFinalizeOperation = finalize;
     this.probeOptions = options;
     const generation = this.probeGeneration;
-    this.clearScheduledRetry();
     this.setStatus("checking");
     const run = (async () => {
       const startedAt = this.now();
@@ -135,7 +124,6 @@ export class StorageHealthController {
           latencyMs: Math.max(0, this.now() - startedAt)
         };
         this.notify();
-        if (status === "degraded") this.scheduleRetry();
       }
       return this.snapshot();
     })();
@@ -149,42 +137,11 @@ export class StorageHealthController {
       : this.snapshot();
   }
 
-  attachRecoveryListeners(target?: { addEventListener: (type: string, listener: () => void) => void; removeEventListener: (type: string, listener: () => void) => void }): () => void {
-    this.recoveryCleanup?.();
-    if (!target) {
-      const candidate = globalThis as typeof globalThis & Partial<EventTarget>;
-      if (typeof candidate.addEventListener !== "function" || typeof candidate.removeEventListener !== "function") return () => undefined;
-      target = candidate as unknown as { addEventListener: (type: string, listener: () => void) => void; removeEventListener: (type: string, listener: () => void) => void };
-    }
-    const recover = () => { void this.retry(); };
-    target.addEventListener("online", recover);
-    target.addEventListener("visibilitychange", recover);
-    this.recoveryCleanup = () => {
-      target.removeEventListener("online", recover);
-      target.removeEventListener("visibilitychange", recover);
-      this.recoveryCleanup = undefined;
-    };
-    return this.recoveryCleanup;
-  }
-
-  dispose(): void { this.clearScheduledRetry(); this.recoveryCleanup?.(); this.listeners.clear(); }
-
-  private scheduleRetry(): void {
-    this.clearScheduledRetry();
-    const base = Math.min(60_000, 1_000 * (2 ** Math.min(this.current.retryAttempt - 1, 6)));
-    const jitter = Math.floor(base * 0.2 * this.random());
-    this.current.nextProbeAt = this.now() + base + jitter;
-    this.notify();
-    this.retryTimer = this.setTimer(() => { this.retryTimer = undefined; this.current.nextProbeAt = undefined; void this.retry(); }, base + jitter);
-  }
-
-  private clearScheduledRetry(): void {
-    if (this.retryTimer !== undefined) { this.clearTimer(this.retryTimer); this.retryTimer = undefined; }
-    if (this.current.nextProbeAt !== undefined) {
-      this.current.nextProbeAt = undefined;
-      this.notify();
-    }
-  }
+  /**
+   * 只释放订阅；不会监听 online/visibilitychange，也不会启动后台计时器。
+   * 需要恢复时由 UI 明确调用 retry()。
+   */
+  dispose(): void { this.listeners.clear(); }
 
   private notify(): void { for (const listener of this.listeners) listener(this.snapshot()); }
 }

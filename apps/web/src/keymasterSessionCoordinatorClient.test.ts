@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionCoordinatorClient } from "@keymaster/contracts";
+import type { SessionCoordinatorClient, StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
 import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { createCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
+import { readStorageCatalog, STORAGE_CATALOG_KEY } from "@keymaster/platform-storage/coordinator";
+import type { LocalStorageBridgeRequest } from "@keymaster/platform-storage/coordinator";
 
 class HubPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -24,6 +26,102 @@ class Hub {
     queueMicrotask(() => port.emit(response));
   }
   broadcast(event: unknown): void { for (const port of this.ports) port.emit(event); }
+}
+
+class BridgeMemoryStorage {
+  private readonly values = new Map<string, string>();
+
+  get length(): number { return this.values.size; }
+  key(index: number): string | null { return [...this.values.keys()][index] ?? null; }
+  getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.values.set(key, value); }
+  removeItem(key: string): void { this.values.delete(key); }
+}
+
+const bridgeLocks = {
+  request: async <T>(_name: string, callback: () => Promise<T>) => callback()
+};
+
+function bridgeCatalogEntry(bucketId: string, label: string): StorageBucketCatalogEntryV2 {
+  return {
+    bucketId,
+    label,
+    backend: "local",
+    configRevision: 1,
+    keyDerivation: {
+      algorithm: "pbkdf2-hmac-sha-256",
+      passwordEncoding: "utf-8",
+      iterations: 100_000,
+      outputLengthBits: 256,
+      saltB64Url: "0123456789ab"
+    },
+    encryptedConfig: {
+      cipher: {
+        algorithm: "aes-gcm",
+        keyLengthBits: 256,
+        ivB64Url: "0123456789ab",
+        tagLengthBits: 128,
+        ciphertextAndTagB64Url: "bridge-test-config"
+      }
+    },
+    snapshotRevision: 1,
+    createdAt: 1,
+    updatedAt: 1
+  };
+}
+
+type LocalBridgeClientInternals = {
+  openLocalStorageBridge(): MessagePort;
+  localStorageBridgePort: MessagePort | null;
+  localStorageBridgeLease: { authorityInstanceId: string; bucketId?: string; leaseId: string; bucketGeneration: number } | null;
+};
+
+async function nextMacrotask(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+function installBridgeGlobals(storage: BridgeMemoryStorage): () => void {
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { locks: bridgeLocks } });
+  return () => {
+    if (previousStorage) Object.defineProperty(globalThis, "localStorage", previousStorage);
+    else delete (globalThis as { localStorage?: unknown }).localStorage;
+    if (previousNavigator) Object.defineProperty(globalThis, "navigator", previousNavigator);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  };
+}
+
+async function openTestLocalBridge(storage: BridgeMemoryStorage, current: StorageBucketCatalogEntryV2): Promise<{
+  client: ReturnType<typeof createCoordinatorClient>;
+  workerPort: MessagePort;
+  authorityInstanceId: string;
+  leaseId: string;
+}> {
+  const client = createCoordinatorClient({ clientId: "local-bridge-test" });
+  const internals = client as unknown as LocalBridgeClientInternals;
+  const workerPort = internals.openLocalStorageBridge();
+  const lease = internals.localStorageBridgeLease;
+  if (!internals.localStorageBridgePort || !lease) throw new Error("Local bridge test endpoint was not created");
+  const authorityInstanceId = "authority:local-bridge-test";
+  workerPort.start();
+  storage.setItem(STORAGE_CATALOG_KEY, JSON.stringify({
+    format: "keymaster.storage.catalog",
+    version: 2,
+    selectedBucketId: current.bucketId,
+    buckets: [current]
+  }));
+  workerPort.postMessage({ type: "lease", authorityInstanceId, bucketId: current.bucketId, bucketGeneration: 1, leaseId: lease.leaseId });
+  await nextMacrotask();
+  return { client, workerPort, authorityInstanceId, leaseId: lease.leaseId };
+}
+
+function sendBridgeRequest(workerPort: MessagePort, requestId: string, request: LocalStorageBridgeRequest): Promise<unknown> {
+  return new Promise((resolve) => {
+    workerPort.onmessage = (event) => resolve(event.data);
+    workerPort.postMessage({ requestId, request });
+  });
 }
 
 describe("KeymasterSessionCoordinatorClient", () => {
@@ -652,5 +750,105 @@ describe("KeymasterSessionCoordinatorClient", () => {
         targetRequestId: channelRequest?.requestId,
       }));
     } finally { globalThis.SharedWorker = original; }
+  });
+
+  it("在 catalog-select 响应丢失后仍能用幂等回滚恢复旧桶", async () => {
+    const storage = new BridgeMemoryStorage();
+    const restoreGlobals = installBridgeGlobals(storage);
+    const current = bridgeCatalogEntry("bucket-old", "旧桶");
+    const target = bridgeCatalogEntry("bucket-new", "新桶");
+    const { client, workerPort, authorityInstanceId, leaseId } = await openTestLocalBridge(storage, current);
+    try {
+      storage.setItem(STORAGE_CATALOG_KEY, JSON.stringify({
+        format: "keymaster.storage.catalog",
+        version: 2,
+        selectedBucketId: current.bucketId,
+        buckets: [current, target]
+      }));
+      const selectRequest = {
+        type: "catalog-select" as const,
+        bucketId: target.bucketId,
+        bucketGeneration: 2,
+        authorityInstanceId,
+        leaseId,
+        expectedSelectedBucketId: current.bucketId,
+        targetBucket: target
+      } satisfies LocalStorageBridgeRequest;
+
+      // 消费掉但故意忽略响应，模拟 CAS 已落盘而 Worker 没收到 response。
+      await new Promise<void>((resolve) => {
+        workerPort.onmessage = () => resolve();
+        workerPort.postMessage({ requestId: "lost-select-response", request: selectRequest });
+      });
+      expect(readStorageCatalog(storage).selectedBucketId).toBe(target.bucketId);
+
+      const rollback = {
+        type: "catalog-select" as const,
+        bucketId: current.bucketId,
+        bucketGeneration: 1,
+        authorityInstanceId,
+        leaseId,
+        expectedSelectedBucketId: target.bucketId,
+        rollbackFromSelectedBucketId: target.bucketId,
+        targetBucket: current
+      } satisfies LocalStorageBridgeRequest;
+      const response = await sendBridgeRequest(workerPort, "rollback-after-lost-select", rollback) as { ok?: boolean; response?: { type?: string; bucket?: StorageBucketCatalogEntryV2 } };
+
+      expect(response).toMatchObject({ ok: true, response: { type: "catalog", bucket: { bucketId: current.bucketId } } });
+      expect(readStorageCatalog(storage).selectedBucketId).toBe(current.bucketId);
+    } finally {
+      client.disconnect();
+      workerPort.close();
+      restoreGlobals();
+    }
+  });
+
+  it("拒绝跳过世代的 Local lease 回滚，并接受精确的上一世代", async () => {
+    const storage = new BridgeMemoryStorage();
+    const restoreGlobals = installBridgeGlobals(storage);
+    const current = bridgeCatalogEntry("bucket-lease-old", "旧桶");
+    const target = bridgeCatalogEntry("bucket-lease-new", "新桶");
+    const { client, workerPort, authorityInstanceId, leaseId } = await openTestLocalBridge(storage, current);
+    try {
+      storage.setItem(STORAGE_CATALOG_KEY, JSON.stringify({
+        format: "keymaster.storage.catalog",
+        version: 2,
+        selectedBucketId: current.bucketId,
+        buckets: [current, target]
+      }));
+      const select = {
+        type: "catalog-select" as const,
+        bucketId: target.bucketId,
+        bucketGeneration: 2,
+        authorityInstanceId,
+        leaseId,
+        expectedSelectedBucketId: current.bucketId,
+        targetBucket: target
+      } satisfies LocalStorageBridgeRequest;
+      await sendBridgeRequest(workerPort, "lease-select", select);
+
+      const forgedRollback = {
+        ...select,
+        bucketId: current.bucketId,
+        bucketGeneration: 3,
+        expectedSelectedBucketId: target.bucketId,
+        rollbackFromSelectedBucketId: target.bucketId,
+        targetBucket: current
+      } as unknown as LocalStorageBridgeRequest;
+      const rejected = await sendBridgeRequest(workerPort, "lease-forged-rollback", forgedRollback) as { ok?: boolean; error?: { code?: string } };
+      expect(rejected).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
+
+      const validRollback = {
+        ...forgedRollback,
+        bucketGeneration: 1
+      } satisfies LocalStorageBridgeRequest;
+      const accepted = await sendBridgeRequest(workerPort, "lease-valid-rollback", validRollback) as { ok?: boolean; response?: { bucket?: StorageBucketCatalogEntryV2 } };
+      expect(accepted).toMatchObject({ ok: true, response: { bucket: { bucketId: current.bucketId } } });
+      expect(readStorageCatalog(storage).selectedBucketId).toBe(current.bucketId);
+    } finally {
+      client.disconnect();
+      workerPort.close();
+      restoreGlobals();
+    }
   });
 });

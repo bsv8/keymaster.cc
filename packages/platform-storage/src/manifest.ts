@@ -1,7 +1,7 @@
-import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, StorageRuntimeController, SystemSettingsRegistry, StorageCoordinatorControl } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, RouteRegistry, StorageRuntimeController, StorageCoordinatorControl, TopbarRegistry } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
-import { StorageProfileEditor } from "./ui/StorageProfileEditor.js";
+import { StorageBucketManagerEntry, StorageBucketManagerPage } from "./ui/StorageBucketManagerPage.js";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 import type { StorageRuntimeSnapshot } from "./runtime/storageRuntimeController.js";
 
@@ -58,8 +58,95 @@ Object.assign(resources.resources.en as Record<string, string>, {
   "storage.settings.autoSaveError": "Not saved — fix the error and retry",
   "storage.settings.statusReady": "Ready",
   "storage.settings.statusUnconfigured": "Not configured",
-  "storage.settings.statusDegraded": "Needs attention",
-  "storage.settings.statusReconfiguring": "Reconfiguring"
+      "storage.settings.statusDegraded": "Needs attention",
+      "storage.settings.statusReconfiguring": "Reconfiguring",
+      "storage.bucketManager.topbar": "Storage buckets",
+      "storage.bucketManager.title": "Storage buckets",
+      "storage.bucketManager.description": "Buckets are the outermost system boundary. Each bucket owns its password, connection configuration, and Keys.",
+      "storage.bucketManager.listTitle": "Saved buckets",
+      "storage.bucketManager.bucketCount": "buckets",
+      "storage.bucketManager.empty": "No buckets yet. Create one to save an encrypted connection record locally.",
+      "storage.bucketManager.selected": "Current",
+      "storage.bucketManager.newTitle": "Add a bucket",
+      "storage.bucketManager.label": "Bucket name",
+      "storage.bucketManager.backend": "Backend",
+      "storage.bucketManager.password": "Bucket password",
+      "storage.bucketManager.passwordConfirm": "Confirm bucket password",
+      "storage.bucketManager.passwordNote": "The bucket password exists only for the current test and save operation. It is not written to the catalog, logs, or long-lived Coordinator state. Cold export reads only the committed snapshot.",
+      "storage.bucketManager.test": "Test",
+      "storage.bucketManager.save": "Save bucket",
+      "storage.bucketManager.tested": "Test passed. Save is enabled until the draft changes.",
+      "storage.bucketManager.saved": "Bucket saved to the local catalog.",
+      "storage.bucketManager.export": "Export",
+      "storage.bucketManager.rename": "Rename",
+      "storage.bucketManager.edit": "Edit config",
+      "storage.bucketManager.editTitle": "Edit bucket connection",
+      "storage.bucketManager.editPassword": "Enter the current bucket password to edit the connection",
+      "storage.bucketManager.editLoaded": "Configuration loaded. Test it again after editing, then save.",
+      "storage.bucketManager.currentPassword": "Current bucket password (verified)",
+      "storage.bucketManager.saveEdit": "Save config",
+      "storage.bucketManager.remove": "Remove connection",
+      "storage.bucketManager.renamePrompt": "Enter a new bucket name",
+      "storage.bucketManager.renamed": "Bucket name updated.",
+      "storage.bucketManager.destroy": "Destroy local data",
+      "storage.bucketManager.destroyVisible": "Delete visible objects",
+      "storage.bucketManager.destroyConfirm": "Destroy all local data in {{label}}? This cannot be undone and also removes the local connection.",
+      "storage.bucketManager.destroyVisibleConfirm": "Delete the currently visible S3 objects in {{label}}? Object versions, delete markers, and incomplete multipart uploads may remain; the local connection will also be removed.",
+      "storage.bucketManager.destroyPassword": "Enter the S3 bucket password to delete its currently visible objects",
+      "storage.bucketManager.destroyed": "Local bucket data destroyed and connection removed ({{count}} objects).",
+      "storage.bucketManager.destroyedVisible": "Currently visible S3 objects deleted and connection removed ({{count}} objects); historical data may remain.",
+      "storage.bucketManager.removed": "Connection removed; bucket data was kept.",
+      "storage.bucketManager.err.rename": "Failed to rename the bucket",
+      "storage.bucketManager.err.remove": "Failed to remove the bucket connection",
+      "storage.bucketManager.err.currentRemove": "The current bucket is in use; switch buckets before removing it.",
+      "storage.bucketManager.err.currentDestroy": "The current bucket is in use; switch buckets before destroying its data.",
+      "storage.bucketManager.err.destroy": "Failed to destroy bucket data; deletion stopped.",
+      "storage.bucketManager.err.passwordRequired": "The bucket password is required to destroy S3 data.",
+      "storage.bucketManager.keySwitchTitle": "Switch Key",
+      "storage.bucketManager.bucketPassword": "Bucket password",
+      "storage.bucketManager.vaultPassword": "Vault password",
+      "storage.bucketManager.keySwitchSubmit": "Switch with password",
+      "storage.bucketManager.err.keySwitch": "Failed to switch Key",
+      "storage.bucketManager.unnamedKey": "Unnamed Key",
+      "storage.bucketManager.currentKey": "Current",
+      "storage.bucketManager.removeConfirm": "Remove only the local connection entry? Bucket data will not be destroyed.",
+      "storage.bucketManager.err.exportSession": "Unlock and enter the S3 bucket session before exporting its committed snapshot.",
+      "storage.bucketManager.exported": "The committed Hold configuration snapshot was exported.",
+      "storage.bucketManager.err.label": "Enter a bucket name",
+      "storage.bucketManager.err.password": "Bucket password must contain at least 8 characters",
+      "storage.bucketManager.err.passwordMismatch": "Bucket passwords do not match",
+      "storage.bucketManager.err.s3Required": "Enter the S3 endpoint, region, bucket, and access credentials",
+      "storage.bucketManager.err.conditionalWrites": "The bucket does not support the required atomic conditional writes",
+      "storage.bucketManager.err.test": "Bucket test failed. Check the configuration and try again.",
+      "storage.bucketManager.err.testFirst": "Test the current draft first. Changing a parameter requires another test.",
+      "storage.bucketManager.err.save": "Save failed. Keep the draft and try again.",
+      "storage.bucketManager.unlockTitle": "Unlock current bucket",
+      "storage.bucketManager.unlockDescription": "A cold start shows only bucket metadata. Enter the temporary bucket password to read Keys.",
+      "storage.bucketManager.unlock": "Unlock bucket",
+      "storage.bucketManager.unlocked": "Bucket unlocked; runtime recovery is in progress.",
+      "storage.bucketManager.err.unlock": "The bucket password is invalid or the bucket could not be read.",
+      "storage.bucketManager.reloadHint": "The new bucket is now selected. Reload to enter the new bucket session.",
+      "storage.bucketManager.reload": "Reload",
+      "storage.bucketManager.treeTitle": "Buckets / Keys",
+      "storage.bucketManager.manage": "Manage",
+      "storage.bucketManager.noKeys": "No Keys",
+      "storage.bucketManager.readKeys": "Enter password to read Keys",
+      "storage.bucketManager.switchPasswordPrompt": "Enter the bucket password for {{label}}",
+      "storage.bucketManager.err.switch": "Bucket switch failed",
+      "storage.bucketManager.legacyTitle": "Legacy storage detected",
+      "storage.bucketManager.legacyOpfs": "This is legacy single-bucket OPFS data. The new flow will not silently map it to Local or delete the original data.",
+      "storage.bucketManager.legacyProfile": "This is a legacy independent Storage Profile. It uses a different password and storage model from the new bucket catalog.",
+      "storage.bucketManager.legacyProfileHint": "Export the encrypted Profile first. Its old password is used only by the legacy unlock flow; export does not decrypt credentials.",
+      "storage.bucketManager.legacyExportProfile": "Export legacy Profile",
+      "storage.bucketManager.legacyProfileExported": "The legacy Storage Profile was exported; the original record was kept and not migrated.",
+      "storage.bucketManager.legacyKeysTitle": "Legacy KeyHold backups",
+      "storage.bucketManager.legacyKeysHint": "Export each encrypted KeyHold file, then import them one by one from Key management after creating a new bucket.",
+      "storage.bucketManager.legacyExportKey": "Export KeyHold",
+      "storage.bucketManager.legacyKeyExported": "The legacy KeyHold backup was exported; the original OPFS data was kept.",
+      "storage.bucketManager.legacyKeysEmpty": "No legacy Keys were read yet; confirm that the legacy OPFS session has started.",
+      "storage.bucketManager.openKeyManagement": "Open Key management",
+      "storage.bucketManager.legacyMigrationNote": "Migration is explicit and reversible: export and verify old files, then create a new Local/S3 bucket. Do not clean up legacy OPFS or Profile data until the new bucket is confirmed usable.",
+      "storage.bucketManager.err.legacyExport": "Legacy storage export failed"
 });
 
 Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
@@ -98,8 +185,95 @@ Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
   "storage.settings.autoSaveError": "尚未保存，请修正错误后重试",
   "storage.settings.statusReady": "已就绪",
   "storage.settings.statusUnconfigured": "未配置",
-  "storage.settings.statusDegraded": "需要处理",
-  "storage.settings.statusReconfiguring": "正在重新配置"
+      "storage.settings.statusDegraded": "需要处理",
+      "storage.settings.statusReconfiguring": "正在重新配置",
+      "storage.bucketManager.topbar": "存储桶",
+      "storage.bucketManager.title": "存储桶",
+      "storage.bucketManager.description": "桶是系统最外层边界。每个桶拥有自己的密码、连接配置和 Keys。",
+      "storage.bucketManager.listTitle": "已保存的桶",
+      "storage.bucketManager.bucketCount": "个桶",
+      "storage.bucketManager.empty": "还没有存储桶。创建后，连接密文只保存在本机目录中。",
+      "storage.bucketManager.selected": "当前",
+      "storage.bucketManager.newTitle": "添加存储桶",
+      "storage.bucketManager.label": "桶名称",
+      "storage.bucketManager.backend": "后端",
+      "storage.bucketManager.password": "桶密码",
+      "storage.bucketManager.passwordConfirm": "确认桶密码",
+      "storage.bucketManager.passwordNote": "桶密码只用于当前测试和保存操作；不会写入目录、日志或长期 Coordinator 状态。冷导出只读取已提交快照。",
+      "storage.bucketManager.test": "测试",
+      "storage.bucketManager.save": "保存桶",
+      "storage.bucketManager.tested": "测试成功。草稿未改变时可以保存。",
+      "storage.bucketManager.saved": "存储桶已保存到本机目录。",
+      "storage.bucketManager.export": "导出",
+      "storage.bucketManager.rename": "改名",
+      "storage.bucketManager.edit": "编辑配置",
+      "storage.bucketManager.editTitle": "编辑桶连接配置",
+      "storage.bucketManager.editPassword": "输入当前桶密码以编辑连接配置",
+      "storage.bucketManager.editLoaded": "配置已读取。修改后请重新测试，再保存。",
+      "storage.bucketManager.currentPassword": "当前桶密码（已验证）",
+      "storage.bucketManager.saveEdit": "保存配置",
+      "storage.bucketManager.remove": "移除连接",
+      "storage.bucketManager.renamePrompt": "输入新的桶名称",
+      "storage.bucketManager.renamed": "桶名称已更新。",
+      "storage.bucketManager.destroy": "销毁本地数据",
+      "storage.bucketManager.destroyVisible": "删除可见对象",
+      "storage.bucketManager.destroyConfirm": "确认销毁“{{label}}”中的全部本地桶数据？此操作不可恢复，并会同时移除本机连接项。",
+      "storage.bucketManager.destroyVisibleConfirm": "确认删除“{{label}}”中当前可见的 S3 对象？对象版本、Delete Marker 和未完成 multipart 可能保留；同时移除本机连接项。",
+      "storage.bucketManager.destroyPassword": "输入该 S3 桶密码以删除当前可见对象",
+      "storage.bucketManager.destroyed": "已销毁本地桶数据并移除连接项（{{count}} 个对象）。",
+      "storage.bucketManager.destroyedVisible": "已删除当前可见 S3 对象并移除连接项（{{count}} 个）；历史数据可能仍保留。",
+      "storage.bucketManager.removed": "连接项已移除；桶内数据未删除。",
+      "storage.bucketManager.err.rename": "修改桶名称失败",
+      "storage.bucketManager.err.remove": "删除桶连接项失败",
+      "storage.bucketManager.err.currentRemove": "当前桶正在使用，不能直接移除；请先切换到其他桶。",
+      "storage.bucketManager.err.currentDestroy": "当前桶正在使用，不能销毁数据；请先切换到其他桶。",
+      "storage.bucketManager.err.destroy": "销毁桶数据失败；已停止删除。",
+      "storage.bucketManager.err.passwordRequired": "销毁 S3 数据需要桶密码。",
+      "storage.bucketManager.keySwitchTitle": "切换 Key",
+      "storage.bucketManager.bucketPassword": "桶密码",
+      "storage.bucketManager.vaultPassword": "Vault 密码",
+      "storage.bucketManager.keySwitchSubmit": "使用密码切换",
+      "storage.bucketManager.err.keySwitch": "切换 Key 失败",
+      "storage.bucketManager.unnamedKey": "未命名 Key",
+      "storage.bucketManager.currentKey": "当前",
+      "storage.bucketManager.removeConfirm": "只移除本机目录中的连接项？桶内数据不会被销毁。",
+      "storage.bucketManager.err.exportSession": "S3 桶需要先解锁并进入当前会话后才能冷导出",
+      "storage.bucketManager.exported": "已导出当前已提交的完整 Hold 配置快照。",
+      "storage.bucketManager.err.label": "请输入桶名称",
+      "storage.bucketManager.err.password": "桶密码至少 8 位",
+      "storage.bucketManager.err.passwordMismatch": "两次桶密码不一致",
+      "storage.bucketManager.err.s3Required": "请填写 S3 Endpoint、区域、Bucket 和访问凭据",
+      "storage.bucketManager.err.conditionalWrites": "桶不支持必须的原子条件写入",
+      "storage.bucketManager.err.test": "桶测试失败，请检查配置后重试",
+      "storage.bucketManager.err.testFirst": "请先测试当前草稿；修改参数后需要重新测试",
+      "storage.bucketManager.err.save": "保存失败，请保留草稿并重试",
+      "storage.bucketManager.unlockTitle": "输入当前桶密码",
+      "storage.bucketManager.unlockDescription": "冷启动只显示桶目录；读取 Keys 前需要临时解锁当前桶。",
+      "storage.bucketManager.unlock": "解锁桶",
+      "storage.bucketManager.unlocked": "桶已解锁，正在恢复运行时。",
+      "storage.bucketManager.err.unlock": "桶密码错误或桶读取失败",
+      "storage.bucketManager.reloadHint": "新桶已成为当前桶；重新加载后会进入新的桶会话。",
+      "storage.bucketManager.reload": "重新加载",
+      "storage.bucketManager.treeTitle": "桶 / Keys",
+      "storage.bucketManager.manage": "管理",
+      "storage.bucketManager.noKeys": "暂无 Keys",
+      "storage.bucketManager.readKeys": "输入密码读取 Keys",
+      "storage.bucketManager.switchPasswordPrompt": "请输入“{{label}}”的桶密码",
+      "storage.bucketManager.err.switch": "切换桶失败",
+      "storage.bucketManager.legacyTitle": "检测到旧版存储",
+      "storage.bucketManager.legacyOpfs": "这是旧版 OPFS 单桶数据。新版不会把它静默映射成 Local，也不会删除原数据。",
+      "storage.bucketManager.legacyProfile": "这是旧版独立 Storage Profile。它与新版桶目录、桶密码模型不同，不能直接当作新版桶。",
+      "storage.bucketManager.legacyProfileHint": "先导出加密 Profile 文件，原密码仍只用于旧版解锁；导出不会解密凭据。",
+      "storage.bucketManager.legacyExportProfile": "导出旧 Profile",
+      "storage.bucketManager.legacyProfileExported": "旧版 Storage Profile 已导出；原记录仍保留，未自动迁移。",
+      "storage.bucketManager.legacyKeysTitle": "旧版 KeyHold 备份",
+      "storage.bucketManager.legacyKeysHint": "逐把导出加密 KeyHold 文件，再创建新版桶后从 Key 管理中逐项导入。",
+      "storage.bucketManager.legacyExportKey": "导出 KeyHold",
+      "storage.bucketManager.legacyKeyExported": "旧版 KeyHold 备份已导出；原 OPFS 数据仍保留。",
+      "storage.bucketManager.legacyKeysEmpty": "暂未读取到旧 Key；请确认旧 OPFS 会话已启动。",
+      "storage.bucketManager.openKeyManagement": "打开 Key 管理",
+      "storage.bucketManager.legacyMigrationNote": "迁移是显式、逐步且可回退的：先导出并验证旧文件，再创建新版 Local/S3 桶；在确认新桶可用前，不要清理旧 OPFS 或旧 Profile。",
+      "storage.bucketManager.err.legacyExport": "旧版存储导出失败"
 });
 
 const storagePlatformPluginDefinition = {
@@ -113,9 +287,7 @@ const storagePlatformPluginDefinition = {
     lifetime: "storage",
     provides: [STORAGE_RUNTIME_CONTROLLER_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([STORAGE_RUNTIME_CONTROLLER_CAPABILITY]),
-    dependencies: defineRuntimeUnitDependencies([
-      { capability: "system-settings.registry", reason: "Storage settings live under Settings -> System" },
-    ]),
+    dependencies: defineRuntimeUnitDependencies([]),
   }, {
     id: "storage.coordinator-worker",
     execution: "coordinator-worker",
@@ -133,14 +305,32 @@ const storagePlatformPluginDefinition = {
       id: resourceId,
       scope: "global",
       key: () => [resourceId],
-      load: async () => ({ status: service.status(), healthStatus: (service as StorageRuntimeController & { healthStatus?: () => import("@keymaster/contracts").StorageRuntimeStatus }).healthStatus?.(), authorityRecovery: (service as StorageRuntimeController & { authorityRecovery?: () => import("@keymaster/contracts").CoordinatorAuthorityRecovery }).authorityRecovery?.(), summary: await service.getProviderSummary(), capabilities: service.getConditionalCapabilities() }),
+      load: async () => ({ status: service.status(), healthStatus: (service as StorageRuntimeController & { healthStatus?: () => import("@keymaster/contracts").StorageRuntimeStatus }).healthStatus?.(), catalogBucket: (service as StorageRuntimeController & { isCatalogBucket?: () => boolean }).isCatalogBucket?.() === true, hasCatalogBuckets: service.hasCatalogBuckets?.() === true, authorityRecovery: (service as StorageRuntimeController & { authorityRecovery?: () => import("@keymaster/contracts").CoordinatorAuthorityRecovery }).authorityRecovery?.(), summary: await service.getProviderSummary(), capabilities: service.getConditionalCapabilities() }),
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
     });
-    const settings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
-    const settingsId = "storage.system-settings.provider";
-    settings.register({ id: settingsId, group: { id: "storage", label: { key: "storage.settings.group", fallback: "S3 Storage" }, order: 60 }, label: { key: "storage.settings.provider", fallback: "Provider" }, component: StorageProfileEditor, order: 10 });
-    return () => { try { settings.unregister(settingsId); } catch { /* already reclaimed */ } resources.unregister(resourceId); service.dispose(); };
+    const routes = ctx.get<RouteRegistry>("route.registry");
+    const routeId = "storage.bucket-manager";
+    routes.register({
+      id: routeId,
+      path: "/storage/buckets",
+      label: { key: "storage.bucketManager.title", fallback: "Storage buckets" },
+      component: StorageBucketManagerPage
+    });
+    const topbar = ctx.get<TopbarRegistry>("topbar.registry");
+    const topbarId = "storage.bucket-manager";
+    topbar.register({
+      id: topbarId,
+      label: { key: "storage.bucketManager.topbar", fallback: "Storage buckets" },
+      component: StorageBucketManagerEntry,
+      order: 80
+    });
+    return () => {
+      try { (topbar as TopbarRegistry & { unregister(id: string): void }).unregister(topbarId); } catch { /* already reclaimed */ }
+      try { routes.unregister(routeId); } catch { /* already reclaimed */ }
+      resources.unregister(resourceId);
+      service.dispose();
+    };
   }
 } satisfies PluginManifest & { setup: PluginSetup };
 

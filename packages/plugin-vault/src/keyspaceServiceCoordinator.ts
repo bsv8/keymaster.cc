@@ -73,7 +73,12 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
       if (!target.label) throw new Error("Key label is unavailable");
       if (input.confirmationLabel !== target.label) throw new Error("Key label mismatch");
       await prepareDeleteKeyInternal(input.publicKeyHex);
-      await unwrap<void>(await client.vaultOperation({ type: "deleteKey", publicKeyHex: input.publicKeyHex, confirmationLabel: input.confirmationLabel }), "deleteKey");
+      await unwrap<void>(await client.vaultOperation({
+        type: "deleteKey",
+        publicKeyHex: input.publicKeyHex,
+        confirmationLabel: input.confirmationLabel,
+        ...(input.bucketPassword ? { bucketPassword: input.bucketPassword } : {})
+      }), "deleteKey");
       messageBus.publish("key.deleted", { publicKeyHex: input.publicKeyHex });
     },
     isInitializing: () => false,

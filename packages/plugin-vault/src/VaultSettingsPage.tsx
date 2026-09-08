@@ -29,7 +29,7 @@ import {
   PageHeader,
   type DataTableColumn
 } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { router, useI18n, useLocale, usePluginHost, useRegistry } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
@@ -50,6 +50,8 @@ import { VaultKeySwitchModal } from "./VaultKeySwitchModal.js";
 export function VaultSettingsPage() {
   const vault = useCapability<VaultService>("vault.service");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const storage = useOptionalCapability<{ isCatalogBucket?: () => boolean }>("storage.runtime-controller");
+  const isCatalogBucket = storage?.isCatalogBucket?.() === true;
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染 + 取当前 locale 用于日期格式化。
@@ -112,14 +114,18 @@ export function VaultSettingsPage() {
     await refresh();
   }
 
-  async function handleDelete(confirmationLabel: string) {
+  async function handleDelete(confirmationLabel: string, bucketPassword?: string) {
     if (!deleting) return;
     try {
       // 删除入口只传目标标签 + publicKeyHex；service 层从 authoritative
       // vault record 读取标签并做严格匹配。
       // 也**不**在这里判断"删完是否要跳欢迎页"——真正的状态源
       // 是 vault.status()，由 App 自然切回 LockedShell。
-      await keyspace.deleteKey({ publicKeyHex: deleting.publicKeyHex, confirmationLabel });
+      await keyspace.deleteKey({
+        publicKeyHex: deleting.publicKeyHex,
+        confirmationLabel,
+        ...(bucketPassword ? { bucketPassword } : {})
+      });
       await refresh();
     } catch (err) {
       setError(
@@ -466,9 +472,9 @@ export function VaultSettingsPage() {
       <Button onClick={() => setCreating(true)}>
         {t("vault.settings.action.new", { defaultValue: "新建 Key" })}
       </Button>
-      <Button variant="secondary" onClick={openChangePassword}>
+      {!isCatalogBucket ? <Button variant="secondary" onClick={openChangePassword}>
         {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
-      </Button>
+      </Button> : null}
       <Button variant="secondary" onClick={() => setImportingBackup(true)}>
         {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
       </Button>
@@ -506,9 +512,9 @@ export function VaultSettingsPage() {
               <Button onClick={() => setCreating(true)}>
                 {t("vault.settings.action.new", { defaultValue: "新建 Key" })}
               </Button>
-              <Button variant="secondary" onClick={openChangePassword}>
+              {!isCatalogBucket ? <Button variant="secondary" onClick={openChangePassword}>
                 {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
-              </Button>
+              </Button> : null}
               <Button variant="secondary" onClick={() => setImportingBackup(true)}>
                 {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
               </Button>
@@ -534,6 +540,7 @@ export function VaultSettingsPage() {
           keyLabel={deleting.label}
           // 硬切换 003 收尾：传完整公钥，modal 内部按需现算短公钥。
           publicKeyHex={deleting.publicKeyHex}
+          requiresBucketPassword={storage?.isCatalogBucket?.() === true}
           onConfirmDelete={handleDelete}
           onClose={() => setDeleting(null)}
         />

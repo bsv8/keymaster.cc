@@ -10,6 +10,7 @@ import type { BucketObjectStore, BucketObjectStoreCapabilityState } from "../buc
 import { createBucketObjectStoreCapabilityState } from "../bucketObjectStore.js";
 import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
 import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
+import { normalizeDirectoryPath, stripRoot } from "../bucketPath.js";
 
 export interface S3BucketProviderOptions {
   /** 测试时注入桶对象实现，生产默认创建 AWS/R2 client。 */
@@ -17,6 +18,14 @@ export interface S3BucketProviderOptions {
   capabilityState?: BucketObjectStoreCapabilityState;
   bucketId?: string;
   now?: () => number;
+}
+
+function assertBucketId(bucketId: string): void {
+  // bucketId 会直接成为物理对象路径的一段；不能允许 `/`、`.` 或 `..`
+  // 把一个逻辑桶扩展成别的命名空间。
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(bucketId)) {
+    throw new StorageRuntimeError("storage_invalid_path", "Storage bucket ID is invalid");
+  }
 }
 
 function mapError(error: unknown): StorageRuntimeError {
@@ -34,10 +43,26 @@ export function createS3BucketProvider(
 ): StorageBucketProvider {
   const capabilityState = options.capabilityState ?? createBucketObjectStoreCapabilityState();
   const store = options.store ?? createS3BucketObjectStore(config, { capabilityState });
-  const bucketId = options.bucketId ?? `s3:${config.providerId}:${(config.connection as { bucket: string }).bucket}`;
+  const connection = config.connection as { bucket: string; prefix?: string };
+  const userPrefix = connection.prefix ? normalizeDirectoryPath(connection.prefix) : "";
+  const generatedBucketId = `s3-${config.providerId}-${connection.bucket}${userPrefix ? `-${userPrefix}` : ""}`
+    .replace(/[^A-Za-z0-9._-]/gu, "-")
+    .slice(0, 128);
+  const bucketId = options.bucketId ?? (generatedBucketId || "s3-bucket");
+  assertBucketId(bucketId);
+  // 每个逻辑桶必须拥有独立的物理根。用户填写的 prefix 只是租户/项目
+  // 前缀，不能成为多个 Keymaster 桶共享 Hold、Keys 和业务数据的根。
+  const root = `${userPrefix}.keymaster/buckets/${bucketId}/`;
   const now = options.now ?? (() => Date.now());
   let disposed = false;
-  const root = "";
+
+  function physicalPath(path: string): string {
+    return root ? `${root}${path}` : path;
+  }
+
+  function publicPath(path: string): string {
+    return stripRoot(root, path);
+  }
 
   function assertOpen(path: string): void {
     if (disposed) throw new StorageRuntimeError("storage_unavailable", "Storage provider is closed");
@@ -50,26 +75,26 @@ export function createS3BucketProvider(
     async probe(signal): Promise<StorageBucketProbeResult> {
       const started = now();
       try {
-        await store.probe("", signal);
+        await store.probe(root, signal);
         const probePath = `.keymaster/probes/${crypto.randomUUID()}`;
         const bytes = new TextEncoder().encode("keymaster-s3-probe");
         // This is deliberately strict. The generic S3 ObjectStore may still
         // support a best-effort mode for the old Connect file API, but a
         // Keymaster system bucket must prove native CAS before activation.
-        await store.put({ namespaceRoot: root, key: probePath, bytes, ifNoneMatch: "*", signal });
+        await store.put({ namespaceRoot: root, key: physicalPath(probePath), bytes, ifNoneMatch: "*", signal });
         if (capabilityState.put.mode !== "native") {
-          await store.delete({ namespaceRoot: root, key: probePath, signal }).catch(() => undefined);
+          await store.delete({ namespaceRoot: root, key: physicalPath(probePath), signal }).catch(() => undefined);
           throw new StorageRuntimeError("storage_provider_error", "S3 provider does not support native conditional writes", "provider");
         }
-        const value = await store.get({ namespaceRoot: root, key: probePath, signal });
+        const value = await store.get({ namespaceRoot: root, key: physicalPath(probePath), signal });
         if (!value || value.bytes.byteLength !== bytes.byteLength) throw new StorageRuntimeError("storage_provider_error", "S3 provider probe readback failed", "provider");
         try {
-          await store.put({ namespaceRoot: root, key: probePath, bytes, ifMatch: "keymaster-invalid-etag", signal });
+          await store.put({ namespaceRoot: root, key: physicalPath(probePath), bytes, ifMatch: "keymaster-invalid-etag", signal });
           throw new StorageRuntimeError("storage_provider_error", "S3 provider ignored If-Match", "provider");
         } catch (caught) {
           if (!(caught instanceof StorageRuntimeError) || caught.code !== "storage_conflict") throw caught;
         }
-        await store.delete({ namespaceRoot: root, key: probePath, signal });
+        await store.delete({ namespaceRoot: root, key: physicalPath(probePath), signal });
         return { ok: true, conditionalWrites: "native", latencyMs: Math.max(0, now() - started) };
       } catch (caught) {
         if (caught instanceof StorageRuntimeError) throw caught;
@@ -79,7 +104,7 @@ export function createS3BucketProvider(
     async get(path, input = {}): Promise<StorageBucketObject | undefined> {
       assertOpen(path);
       try {
-        const value = await store.get({ namespaceRoot: root, key: path, ifMatch: input.ifMatch, signal: input.signal });
+        const value = await store.get({ namespaceRoot: root, key: physicalPath(path), ifMatch: input.ifMatch, signal: input.signal });
         if (!value) return undefined;
         return { path, bytes: value.bytes, size: value.bytes.byteLength, etag: value.etag, lastModified: value.lastModified?.toISOString() };
       } catch (caught) {
@@ -91,10 +116,10 @@ export function createS3BucketProvider(
     async list(input = {}): Promise<StorageBucketListPage> {
       const prefix = input.prefix ?? "";
       if (prefix) assertProviderPath(prefix.endsWith("/") ? prefix.slice(0, -1) : prefix);
-      const page = await store.list({ namespaceRoot: root, prefix, continuationToken: input.cursor, maxKeys: normalizeProviderLimit(input.limit), signal: input.signal });
+      const page = await store.list({ namespaceRoot: root, prefix: physicalPath(prefix), continuationToken: input.cursor, maxKeys: normalizeProviderLimit(input.limit), signal: input.signal });
       const objects = await Promise.all(page.objects
         .map(async (object): Promise<StorageBucketObject> => ({
-          path: object.key,
+          path: publicPath(object.key),
           // Listing only returns metadata from S3. Keep bytes empty; callers
           // needing content must call get(path), preserving bounded reads.
           bytes: new Uint8Array(0),
@@ -107,7 +132,7 @@ export function createS3BucketProvider(
     async put(path, bytes, condition = {}) {
       assertOpen(path);
       try {
-        return await store.put({ namespaceRoot: root, key: path, bytes, ifMatch: condition.ifMatch, ifNoneMatch: condition.ifNoneMatch, signal: condition.signal }).then((result) => ({ etag: result.etag, lastModified: result.lastModified?.toISOString() }));
+        return await store.put({ namespaceRoot: root, key: physicalPath(path), bytes, ifMatch: condition.ifMatch, ifNoneMatch: condition.ifNoneMatch, signal: condition.signal }).then((result) => ({ etag: result.etag, lastModified: result.lastModified?.toISOString() }));
       } catch (caught) {
         throw mapError(caught);
       }
@@ -115,7 +140,7 @@ export function createS3BucketProvider(
     async delete(path, input = {}) {
       assertOpen(path);
       try {
-        await store.delete({ namespaceRoot: root, key: path, ifMatch: input.ifMatch, signal: input.signal });
+        await store.delete({ namespaceRoot: root, key: physicalPath(path), ifMatch: input.ifMatch, signal: input.signal });
       } catch (caught) {
         throw mapError(caught);
       }

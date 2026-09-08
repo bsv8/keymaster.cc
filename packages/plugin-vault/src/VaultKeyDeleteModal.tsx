@@ -9,8 +9,10 @@ export interface VaultKeyDeleteModalProps {
   open: boolean;
   keyLabel: string;
   publicKeyHex?: string;
+  /** 新版桶的 Hold 集合变更需要重新认证桶密码。 */
+  requiresBucketPassword?: boolean;
   onExportBackup?(): void;
-  onConfirmDelete(confirmationLabel: string): Promise<void> | void;
+  onConfirmDelete(confirmationLabel: string, bucketPassword?: string): Promise<void> | void;
   onClose(): void;
 }
 
@@ -18,18 +20,21 @@ export function VaultKeyDeleteModal({
   open,
   keyLabel,
   publicKeyHex,
+  requiresBucketPassword = false,
   onExportBackup,
   onConfirmDelete,
   onClose
 }: VaultKeyDeleteModalProps) {
   const { t } = useI18n();
   const [confirmationLabel, setConfirmationLabel] = useState("");
+  const [bucketPassword, setBucketPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   function close() {
     if (busy) return;
     setConfirmationLabel("");
+    setBucketPassword("");
     setError(null);
     onClose();
   }
@@ -38,17 +43,20 @@ export function VaultKeyDeleteModal({
     setError(null);
     setBusy(true);
     try {
-      await onConfirmDelete(confirmationLabel);
+      await onConfirmDelete(confirmationLabel, requiresBucketPassword ? bucketPassword : undefined);
       setConfirmationLabel("");
+      setBucketPassword("");
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("vault.keyDelete.err.failed", { defaultValue: "删除失败" }));
     } finally {
+      // 桶密码只用于本次 Hold 快照更新；失败时也不能留在 modal 状态中。
+      setBucketPassword("");
       setBusy(false);
     }
   }
 
-  const canConfirm = keyLabel.length > 0 && confirmationLabel === keyLabel;
+  const canConfirm = keyLabel.length > 0 && confirmationLabel === keyLabel && (!requiresBucketPassword || bucketPassword.length > 0);
   const identityMissingText = t("vault.settings.empty.fingerprint", { defaultValue: "身份不可用" });
 
   return (
@@ -84,6 +92,21 @@ export function VaultKeyDeleteModal({
           onChange={(e) => setConfirmationLabel(e.currentTarget.value)}
           autoFocus
         />
+        {requiresBucketPassword ? (
+          <>
+            <label className="vault-delete-warning__meta" htmlFor="vault-delete-bucket-password">
+              {t("vault.keyDelete.bucketPasswordPrompt", { defaultValue: "请输入当前桶密码以更新安全快照：" })}
+            </label>
+            <input
+              id="vault-delete-bucket-password"
+              className="vault-delete-warning__input"
+              type="password"
+              autoComplete="current-password"
+              value={bucketPassword}
+              onChange={(e) => setBucketPassword(e.currentTarget.value)}
+            />
+          </>
+        ) : null}
         {error ? <p className="vault-delete-warning__error">{error}</p> : null}
       </div>
     </Modal>

@@ -16,6 +16,7 @@
     "@keymaster/runtime": "*",
     "webloom-framework": "0.1.0",
     "@keymaster/ui": "*",
+    "keymaster-hold": "0.1.0",
     "@aws-sdk/client-s3": "^3.864.0",
     "@noble/hashes": "^2.0.1",
     "@smithy/fetch-http-handler": "^5.6.13",

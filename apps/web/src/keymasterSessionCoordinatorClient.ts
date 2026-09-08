@@ -44,6 +44,9 @@ import type {
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { readStorageBootstrap } from "@keymaster/platform-storage/coordinator/bootstrap";
+import { createLocalStorageBucketProvider, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
+import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
+import { createStorageCatalogRepository, readStorageCatalog, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import {
   createMessagePortServiceTransport,
   createServiceBridge,
@@ -78,6 +81,25 @@ export interface RecoverableCoordinatorDiagnostic {
 
 type EventListener<T> = (event: T) => void;
 
+type LocalStorageBridgeWireRequest = {
+  requestId: string;
+  /** signal 只在页面处理前存在，不能通过 MessagePort 传输。 */
+  request: LocalStorageBridgeRequest;
+} | {
+  requestId: string;
+  /** Worker 取消了尚未完成的页面端 Local 操作。 */
+  cancel: true;
+};
+type LocalStorageBridgeWireResponse = {
+  requestId: string;
+  ok: true;
+  response: LocalStorageBridgeResponse;
+} | {
+  requestId: string;
+  ok: false;
+  error: { code?: string; message: string };
+};
+
 type CoordinatorDispatchStatus = "not-dispatched" | "unknown";
 type CoordinatorSendError = Error & { dispatchStatus?: CoordinatorDispatchStatus };
 
@@ -85,6 +107,16 @@ function coordinatorSendError(message: string, dispatchStatus: CoordinatorDispat
   const error = new Error(message) as CoordinatorSendError;
   error.dispatchStatus = dispatchStatus;
   return error;
+}
+
+let fallbackIdentifierCounter = 0;
+function randomIdentifierSuffix(): string {
+  try {
+    return Array.from(crypto.getRandomValues(new Uint32Array(2)), (value) => value.toString(36)).join("");
+  } catch {
+    fallbackIdentifierCounter += 1;
+    return fallbackIdentifierCounter.toString(36);
+  }
 }
 
 // ============================================================
@@ -96,6 +128,12 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private port: MessagePort | null = null;
   /** 与 Coordinator 主 RPC 分离的服务桥端口；避免业务事件污染服务协议。 */
   private servicePort: MessagePort | null = null;
+  /** Local localStorage 的页面执行端点；Worker 只持有其对端。 */
+  private localStorageBridgePort: MessagePort | null = null;
+  /** 页面端维护的当前 Coordinator 本地 I/O 权威租约。 */
+  private localStorageBridgeLease: { authorityInstanceId: string; bucketId?: string; leaseId: string; bucketGeneration: number } | null = null;
+  /** 页面端正在等待 Web Lock 或执行 localStorage 的请求。 */
+  private readonly localStorageBridgeRequests = new Map<string, AbortController>();
   private serviceTransport: ReturnType<typeof createMessagePortServiceTransport> | null = null;
   private serviceBridge: RemoteServiceBridge | undefined;
   private clientId: string;
@@ -252,8 +290,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       port.start();
 
       const servicePortForHello = this.openServiceBridge();
+      const localStorageBridgePortForHello = this.openLocalStorageBridge();
       this.isConnected = true;
-      await this.sendHello(servicePortForHello);
+      await this.sendHello(servicePortForHello, localStorageBridgePortForHello);
       await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
 
       if (this.shutdownRequested || attempt !== this.connectionAttempt || this.port !== port) {
@@ -280,6 +319,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private disconnectInternal(closePortAfterMs: number | undefined): void {
     this.connectionAttempt += 1;
     this.disposeServiceBridge("Coordinator client disconnected");
+    this.disposeLocalStorageBridge();
     const port = this.port;
     this.port = null;
     if (port) {
@@ -390,6 +430,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           ? { coordinatorWorkerUnits: snapshot.coordinatorWorkerUnits.map((unit) => ({ ...unit, serviceIds: [...unit.serviceIds], taskIds: [...unit.taskIds] })) }
           : {}),
       };
+      if (this.localStorageBridgeLease && snapshot.authorityInstanceId) {
+        this.localStorageBridgeLease.authorityInstanceId = snapshot.authorityInstanceId;
+        this.localStorageBridgeLease.bucketId = snapshot.storageBucketId;
+        this.localStorageBridgeLease.bucketGeneration = snapshot.storageBucketGeneration ?? 0;
+      }
       if (snapshot.pluginIntent) this.cachePluginIntentSnapshot(snapshot.pluginIntent, snapshot.authorityInstanceId);
     }
     pending.resolve(response);
@@ -450,6 +495,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private handleWorkerError(message: string): void {
     this.isConnected = false;
     this.disposeServiceBridge(message);
+    this.disposeLocalStorageBridge();
     this.resetDisconnectedState();
     for (const [requestId, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout);
@@ -481,6 +527,258 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   // ============================================================
   // 5. RPC Methods
   // ============================================================
+
+  private disposeLocalStorageBridge(): void {
+    for (const controller of this.localStorageBridgeRequests.values()) controller.abort();
+    this.localStorageBridgeRequests.clear();
+    const port = this.localStorageBridgePort;
+    this.localStorageBridgePort = null;
+    this.localStorageBridgeLease = null;
+    if (!port) return;
+    port.onmessage = null;
+    port.onmessageerror = null;
+    try { port.close(); } catch { /* already closed */ }
+  }
+
+  /**
+   * 为 SharedWorker 提供一个只执行 Local localStorage I/O 的页面端点。
+   * 端点每次请求都重新读取目录并校验当前桶，不能被旧 Worker/旧选中桶
+   * 继续复用；页面端永远不会收到桶密码或明文私钥。
+   */
+  private openLocalStorageBridge(): MessagePort | undefined {
+    if (typeof MessageChannel === "undefined") return undefined;
+    this.disposeLocalStorageBridge();
+    const channel = new MessageChannel();
+    const leaseId = `local-storage-${crypto.randomUUID()}`;
+    // hello 本身可能触发首次 Local Root bootstrap；在 Worker 返回完整
+    // snapshot 之前，页面桥也必须拥有一个可校验的初始桶身份。首次
+    // bootstrap 的世代固定为 1；重连到仍存活的 Worker 时优先沿用上一
+    // 次 Worker 发布的世代，hello 响应随后会再次校正它。
+    let selectedBucketId: string | undefined;
+    try {
+      selectedBucketId = readStorageCatalog().selectedBucketId;
+    } catch {
+      // 目录错误由实际 I/O 返回；这里不能把它伪装成一个合法桶。
+    }
+    this.localStorageBridgeLease = {
+      authorityInstanceId: "",
+      ...(selectedBucketId ? { bucketId: selectedBucketId } : {}),
+      leaseId,
+      bucketGeneration: this.bootstrapSnapshotCache.storageBucketGeneration ?? (selectedBucketId ? 1 : 0)
+    };
+    const pagePort = channel.port1;
+    pagePort.onmessage = (event) => { void this.handleLocalStorageBridgeRequest(pagePort, event.data); };
+    pagePort.onmessageerror = () => this.disposeLocalStorageBridge();
+    pagePort.start();
+    this.localStorageBridgePort = pagePort;
+    return channel.port2;
+  }
+
+  private async handleLocalStorageBridgeRequest(pagePort: MessagePort, value: unknown): Promise<void> {
+    // Worker 在 hello 返回前就可能需要通过 Local Provider 打开 Root。租约
+    // 由 Worker 先在同一条专用端口发布，页面只接受与本次端口/leaseId
+    // 匹配的控制消息；不能让业务请求自行声明 authority。
+    if (value && typeof value === "object" && (value as { type?: unknown }).type === "lease") {
+      const leaseMessage = value as {
+        type: "lease";
+        authorityInstanceId?: unknown;
+        bucketId?: unknown;
+        bucketGeneration?: unknown;
+        leaseId?: unknown;
+      };
+      const current = this.localStorageBridgeLease;
+      if (
+        this.localStorageBridgePort === pagePort
+        && current
+        && typeof leaseMessage.authorityInstanceId === "string"
+        && leaseMessage.authorityInstanceId.length > 0
+        && typeof leaseMessage.leaseId === "string"
+        && leaseMessage.leaseId === current.leaseId
+        && (leaseMessage.bucketId === undefined || typeof leaseMessage.bucketId === "string")
+        && Number.isSafeInteger(leaseMessage.bucketGeneration)
+        && (leaseMessage.bucketGeneration as number) >= 0
+      ) {
+        this.localStorageBridgeLease = {
+          authorityInstanceId: leaseMessage.authorityInstanceId,
+          ...(leaseMessage.bucketId ? { bucketId: leaseMessage.bucketId } : {}),
+          leaseId: current.leaseId,
+          bucketGeneration: leaseMessage.bucketGeneration as number,
+        };
+      }
+      return;
+    }
+    const input = value as { requestId?: unknown; request?: unknown; cancel?: unknown };
+    if (!input || typeof input.requestId !== "string") return;
+    const requestId = input.requestId;
+    if (input.cancel === true) {
+      this.localStorageBridgeRequests.get(requestId)?.abort();
+      return;
+    }
+    if (!input.request || typeof input.request !== "object") return;
+    const controller = new AbortController();
+    this.localStorageBridgeRequests.set(requestId, controller);
+    try {
+      const request = input.request as LocalStorageBridgeRequest;
+      const lease = this.localStorageBridgeLease;
+      if (!lease || !lease.authorityInstanceId || !lease.bucketId || request.authorityInstanceId !== lease.authorityInstanceId || request.leaseId !== lease.leaseId) {
+        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is invalid");
+      }
+      const candidate = "candidateBucket" in request ? request.candidateBucket : undefined;
+      const isCandidateRequest = candidate !== undefined && request.type !== "catalog-update" && request.type !== "catalog-select";
+      const isCatalogSelect = request.type === "catalog-select";
+      if (!isCandidateRequest && !isCatalogSelect && request.bucketId !== lease.bucketId) {
+        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket is no longer current");
+      }
+      if (!Number.isSafeInteger(lease.bucketGeneration) || lease.bucketGeneration < 1
+        || (isCandidateRequest && request.bucketGeneration !== candidate?.bucketGeneration)
+        || (!isCandidateRequest && !isCatalogSelect && request.bucketGeneration !== lease.bucketGeneration)) {
+        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is stale");
+      }
+      if (request.type === "catalog-update") {
+        if (controller.signal.aborted) return;
+        const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
+        const repository = createStorageCatalogRepository({ storage, locks });
+        const updatedCatalog = await repository.mutate((catalog) => {
+          if (catalog.selectedBucketId !== request.bucketId) {
+            throw new StorageRuntimeError("storage_conflict", "The selected storage bucket changed during password rotation");
+          }
+          const current = catalog.buckets.find((bucket) => bucket.bucketId === request.bucketId);
+          const alreadyRestored = request.rollback === true && current && sameStorageCatalogEntry(current, request.nextBucket);
+          if (!current || (!sameStorageCatalogEntry(current, request.expectedBucket) && !alreadyRestored)) {
+            throw new StorageRuntimeError("storage_conflict", "The storage bucket catalog changed during password rotation");
+          }
+          const next = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [request.nextBucket] }).buckets[0];
+          if (!next || next.bucketId !== request.bucketId || next.backend !== current.backend) {
+            throw new StorageRuntimeError("storage_provider_error", "The storage bucket catalog update is invalid");
+          }
+          if (alreadyRestored) return catalog;
+          const buckets = catalog.buckets.map((bucket) => bucket.bucketId === request.bucketId ? next : bucket);
+          return { ...catalog, buckets };
+        });
+        const bucket = updatedCatalog.buckets.find((item) => item.bucketId === request.bucketId);
+        if (!bucket) throw new StorageRuntimeError("storage_not_found", "The storage bucket was removed during password rotation");
+        if (controller.signal.aborted) return;
+        pagePort.postMessage({ requestId, ok: true, response: { type: "catalog", bucket } } satisfies LocalStorageBridgeWireResponse);
+        return;
+      }
+      if (request.type === "catalog-select") {
+        if (request.bucketId !== request.targetBucket.bucketId) throw new StorageRuntimeError("storage_provider_error", "The target storage bucket ID is inconsistent");
+        const isRollback = request.rollbackFromSelectedBucketId !== undefined;
+        const leaseMatchesSelection = request.expectedSelectedBucketId === lease.bucketId;
+        const leaseMatchesRollbackSource = isRollback
+          && (request.rollbackFromSelectedBucketId === lease.bucketId || request.targetBucket.bucketId === lease.bucketId);
+        if (!leaseMatchesSelection && !leaseMatchesRollbackSource) throw new StorageRuntimeError("storage_conflict", "The current storage bucket changed during bucket switching");
+        if (!Number.isSafeInteger(request.bucketGeneration) || request.bucketGeneration < 1) {
+          throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is invalid");
+        }
+        if (!isRollback) {
+          // 正常切桶只能从当前 authoritative lease 前进一代，不能由
+          // 请求体任意指定世代来取得新的 Local 命名空间写权限。
+          if (request.targetBucket.bucketId === lease.bucketId || lease.bucketGeneration >= Number.MAX_SAFE_INTEGER || request.bucketGeneration !== lease.bucketGeneration + 1) {
+            throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation transition is invalid");
+          }
+        } else {
+          const leaseIsRollbackTarget = request.targetBucket.bucketId === lease.bucketId;
+          const leaseIsRollbackSource = request.rollbackFromSelectedBucketId === lease.bucketId;
+          const validSameGeneration = leaseIsRollbackTarget && request.bucketGeneration === lease.bucketGeneration;
+          const validPreviousGeneration = leaseIsRollbackSource
+            && lease.bucketGeneration > 1
+            && request.bucketGeneration === lease.bucketGeneration - 1;
+          if (!validSameGeneration && !validPreviousGeneration) {
+            throw new StorageRuntimeError("storage_forbidden", "Local storage bridge rollback generation is invalid");
+          }
+        }
+        const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
+        const repository = createStorageCatalogRepository({ storage, locks });
+        const updatedCatalog = await repository.mutate((catalog) => {
+          // 正常选择必须严格匹配旧 selectedBucketId。回滚请求可能是在
+          // CAS 成功但响应丢失后到达，也可能 CAS 根本尚未发生；两种情况
+          // 都只允许在目录仍是“目标桶”或已经回到“旧桶”时完成，不触碰
+          // 其它标签页后来选中的第三个桶。
+          const alreadyRestored = isRollback && catalog.selectedBucketId === request.targetBucket.bucketId;
+          if (catalog.selectedBucketId !== request.expectedSelectedBucketId && !alreadyRestored) {
+            throw new StorageRuntimeError("storage_conflict", "The selected storage bucket changed during bucket switching");
+          }
+          const target = catalog.buckets.find((bucket) => bucket.bucketId === request.targetBucket.bucketId);
+          if (!target || !sameStorageCatalogEntry(target, request.targetBucket)) {
+            throw new StorageRuntimeError("storage_conflict", "The target storage bucket catalog changed during bucket switching");
+          }
+          return alreadyRestored ? catalog : { ...catalog, selectedBucketId: target.bucketId };
+        });
+        const bucket = updatedCatalog.buckets.find((item) => item.bucketId === request.targetBucket.bucketId);
+        if (!bucket) throw new StorageRuntimeError("storage_not_found", "The target storage bucket was removed during bucket switching");
+        if (controller.signal.aborted) return;
+        // 目录 CAS 成功后，后续目标 Provider I/O 必须使用同一组页面租约
+        // 身份；失败回滚也会把它切回旧桶和旧世代。
+        this.localStorageBridgeLease = {
+          ...lease,
+          bucketId: bucket.bucketId,
+          bucketGeneration: request.bucketGeneration,
+        };
+        pagePort.postMessage({ requestId, ok: true, response: { type: "catalog", bucket } } satisfies LocalStorageBridgeWireResponse);
+        return;
+      }
+      const catalog = readStorageCatalog();
+      const selected = isCandidateRequest
+        ? (() => {
+            if (!candidate || candidate.bucket.bucketId !== request.bucketId || candidate.bucketGeneration !== request.bucketGeneration) return undefined;
+            const target = catalog.buckets.find((bucket) => bucket.bucketId === candidate.bucket.bucketId);
+            if (!target || !sameStorageCatalogEntry(target, candidate.bucket)) return undefined;
+            // 暂存阶段：目录仍选中旧桶；提交阶段：目录已经选中目标桶，
+            // 页面租约也已经随 catalog-select 原子更新为目标桶。
+            const stagingSelection = candidate.expectedSelectedBucketId === lease.bucketId
+              && catalog.selectedBucketId === lease.bucketId;
+            const committedSelection = catalog.selectedBucketId === candidate.bucket.bucketId
+              && lease.bucketId === candidate.bucket.bucketId;
+            return stagingSelection || committedSelection ? target : undefined;
+          })()
+        : catalog.selectedBucketId === request.bucketId
+          ? catalog.buckets.find((bucket) => bucket.bucketId === request.bucketId)
+          : undefined;
+      if (!selected || selected.backend !== "local") {
+        throw new StorageRuntimeError("storage_unavailable", "Local storage bridge lease is no longer current");
+      }
+      const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+      const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
+      const provider = createLocalStorageBucketProvider({
+        storage,
+        locks,
+        bucketId: selected.bucketId,
+        bucketGeneration: request.bucketGeneration,
+      });
+      let response: LocalStorageBridgeResponse;
+      try {
+        if (request.type === "get") {
+          response = { type: "object", object: await provider.get(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal: controller.signal }) };
+        } else if (request.type === "list") {
+          response = { type: "list", ...(await provider.list({ prefix: request.prefix, cursor: request.cursor, limit: request.limit, signal: controller.signal })) };
+        } else if (request.type === "put") {
+          response = { type: "write", ...(await provider.put(request.path, request.bytes, { ...request.condition, signal: controller.signal })) };
+        } else if (request.type === "delete") {
+          await provider.delete(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal: controller.signal });
+          response = { type: "void" };
+        } else {
+          throw new StorageRuntimeError("storage_provider_error", "Local storage bridge request is invalid");
+        }
+      } finally {
+        provider.dispose();
+      }
+      if (controller.signal.aborted) return;
+      pagePort.postMessage({ requestId, ok: true, response } satisfies LocalStorageBridgeWireResponse);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const code = error instanceof StorageRuntimeError ? error.code : undefined;
+      pagePort.postMessage({
+        requestId,
+        ok: false,
+        error: { ...(code ? { code } : {}), message: error instanceof Error ? error.message : "Local storage bridge request failed" }
+      } satisfies LocalStorageBridgeWireResponse);
+    } finally {
+      if (this.localStorageBridgeRequests.get(requestId) === controller) this.localStorageBridgeRequests.delete(requestId);
+    }
+  }
 
   private openServiceBridge(): MessagePort {
     if (typeof MessageChannel === "undefined") {
@@ -546,18 +844,26 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.serviceBridge;
   }
 
-  private async sendHello(servicePort?: MessagePort): Promise<void> {
+  private async sendHello(servicePort?: MessagePort, localStorageBridgePort?: MessagePort): Promise<void> {
     const request: CoordinatorClientRequest = {
       kind: "hello",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       ...(servicePort ? { servicePort } : {}),
+      ...(localStorageBridgePort ? { localStorageBridgePort } : {}),
+      ...(localStorageBridgePort && this.localStorageBridgeLease ? { localStorageBridgeLeaseId: this.localStorageBridgeLease.leaseId } : {}),
       ...(() => {
         const state = readStorageBootstrap();
         return state ? { storageBootstrapState: state as StorageBootstrapState } : {};
       })()
     };
-    const response = await this.sendRequest(request, servicePort ? [servicePort] : []);
+    // MessagePort 必须同时出现在 transfer list 中；否则浏览器不会把页面
+    // localStorage 桥端转移给 Worker，Local 桶会在首个真实 I/O 时失效。
+    const transfers: Transferable[] = [
+      ...(servicePort ? [servicePort] : []),
+      ...(localStorageBridgePort ? [localStorageBridgePort] : [])
+    ];
+    const response = await this.sendRequest(request, transfers);
     const result = response.operationResult as CoordinatorSubscribeTopicsResult | undefined;
     for (const baseline of result?.baselines ?? []) this.applyTopicEvent(baseline.snapshot);
   }
@@ -1074,6 +1380,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private normalizeTransportFailure(kind: CoordinatorClientRequest["kind"], cause: unknown): CoordinatorTransportFailure {
     this.isConnected = false;
     this.disposeServiceBridge(`Coordinator request failed: ${kind}`);
+    this.disposeLocalStorageBridge();
     this.resetDisconnectedState();
     this.scheduleReconnect();
     this.reportRecoverableCoordinatorFailure(kind, cause);
@@ -1113,6 +1420,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         this.pendingRequests.delete(requestId);
         this.isConnected = false;
         this.disposeServiceBridge("Coordinator request timed out");
+        this.disposeLocalStorageBridge();
         this.resetDisconnectedState();
         this.scheduleReconnect();
         reject(coordinatorSendError("Request timeout", "unknown"));
@@ -1255,6 +1563,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } else if (event.type === "background.snapshot.changed") {
       // Background is a separate domain and must not advance Session identity.
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, taskSnapshots: [...event.snapshots] };
+    } else if (event.topic === "storage.state") {
+      this.bootstrapSnapshotCache = {
+        ...this.bootstrapSnapshotCache,
+        ...(event.bucketId ? { storageBucketId: event.bucketId } : { storageBucketId: undefined }),
+        ...(event.bucketGeneration ? { storageBucketGeneration: event.bucketGeneration } : { storageBucketGeneration: undefined }),
+      };
+      if (this.localStorageBridgeLease) {
+        this.localStorageBridgeLease.bucketId = event.bucketId;
+        this.localStorageBridgeLease.bucketGeneration = event.bucketGeneration ?? 0;
+      }
     } else if (event.type === "p2pkh.providers.changed") {
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, p2pkhProviders: event.snapshot };
     } else if (event.type === "coordinator.worker-units.changed") {
@@ -1335,7 +1653,12 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && (event.authorityRecovery === undefined || this.isValidAuthorityRecovery(event.authorityRecovery));
     }
     if (event.topic === "background.snapshot") return event.type === "background.snapshot.changed" && Number.isSafeInteger(event.backgroundSnapshotRevision) && Array.isArray(event.snapshots);
-    if (event.topic === "storage.state") return event.type === "storage.state.changed" && Number.isSafeInteger(event.storageRevision) && event.storageRevision >= 0 && (event.providerGeneration === null || Number.isSafeInteger(event.providerGeneration));
+    if (event.topic === "storage.state") return event.type === "storage.state.changed"
+      && Number.isSafeInteger(event.storageRevision)
+      && event.storageRevision >= 0
+      && (event.providerGeneration === null || Number.isSafeInteger(event.providerGeneration))
+      && (event.bucketId === undefined || typeof event.bucketId === "string")
+      && (event.bucketGeneration === undefined || (Number.isSafeInteger(event.bucketGeneration) && event.bucketGeneration > 0));
     if (event.topic === "p2pkh.providers") return event.type === "p2pkh.providers.changed" && Number.isSafeInteger(event.providerRevision) && event.providerRevision >= 0 && Boolean(event.snapshot);
     if (event.topic === "msfile.state") {
       return event.type === "msfile.state.changed"
@@ -1444,11 +1767,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   // ============================================================
 
   private generateClientId(): string {
-    return `client-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    return `client-${Date.now()}-${randomIdentifierSuffix()}`;
   }
 
   private generateRequestId(): string {
-    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    return `req-${Date.now()}-${randomIdentifierSuffix()}`;
   }
 }
 

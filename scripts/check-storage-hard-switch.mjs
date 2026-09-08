@@ -30,7 +30,11 @@ const productionRoots = /^(?:packages|apps)\//u;
 const localStorageAllowlist = new Set([
   "apps/web/src/theme/themeStore.ts",
   "packages/runtime/src/i18n/i18nStore.ts",
-  "packages/platform-storage/src/bootstrap/storageProfileRepository.ts"
+  "packages/platform-storage/src/bootstrap/storageProfileRepository.ts",
+  "packages/platform-storage/src/bootstrap/storageCatalogRepository.ts",
+  "packages/platform-storage/src/bucket-providers/local/localStorageBucketProvider.ts",
+  "packages/platform-storage/src/ui/StorageBucketManagerPage.tsx",
+  "apps/web/src/keymasterSessionCoordinatorClient.ts"
 ]);
 
 function withoutComments(content) {

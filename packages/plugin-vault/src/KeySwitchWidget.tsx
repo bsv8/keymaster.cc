@@ -25,11 +25,11 @@
 // "未选择"作为正常态文案（壳层会把这种情况识别为"修复/管理态"，这里是
 // 内部瞬时或异常兜底）。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, KeyRound, Check } from "lucide-react";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { router, useI18n, usePluginHost } from "@keymaster/runtime";
-import { formatShortPublicKey } from "@keymaster/contracts";
+import { formatShortPublicKey, STORAGE_CATALOG_CHANGED_EVENT } from "@keymaster/contracts";
 import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
 import { VaultKeySwitchModal } from "./VaultKeySwitchModal.js";
@@ -46,6 +46,26 @@ export function KeySwitchWidget() {
   const [open, setOpen] = useState(false);
   const initializing = keyState.initializing;
   const [pendingSwitch, setPendingSwitch] = useState<KeyIdentity | null>(null);
+  const catalogMode = useResourceSelector<{ hasCatalogBuckets?: boolean }, boolean>(
+    host.resourceStore,
+    "storage.status",
+    [],
+    (snapshot) => snapshot.data?.hasCatalogBuckets === true
+  );
+
+  useEffect(() => {
+    const refreshStorageStatus = () => host.resourceStore.invalidate("storage.status", []);
+    window.addEventListener("storage", refreshStorageStatus);
+    window.addEventListener(STORAGE_CATALOG_CHANGED_EVENT, refreshStorageStatus);
+    return () => {
+      window.removeEventListener("storage", refreshStorageStatus);
+      window.removeEventListener(STORAGE_CATALOG_CHANGED_EVENT, refreshStorageStatus);
+    };
+  }, [host.resourceStore]);
+
+  // 新版桶树拥有桶和 Key 的统一切换入口。没有新版目录时（例如旧 OPFS
+  // 单桶模式）保留这个旧 Vault Key 菜单，避免破坏历史数据入口。
+  if (catalogMode) return null;
 
 
   const current = active.activePublicKeyHex

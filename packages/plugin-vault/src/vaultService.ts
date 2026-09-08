@@ -77,6 +77,16 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+let fallbackIdentifierCounter = 0;
+function randomIdentifierSuffix(): string {
+  try {
+    return Array.from(crypto.getRandomValues(new Uint32Array(2)), (value) => value.toString(36)).join("");
+  } catch {
+    fallbackIdentifierCounter += 1;
+    return fallbackIdentifierCounter.toString(36);
+  }
+}
+
 // 透传 contracts 中的 KeyPersistedButActivationFailedError：
 // plugin-vault 内部旧实现 / 测试仍可直接 import 本文件的符号，
 // 行为与直接 import contracts 完全一致。设计缘由见 contracts/src/vault.ts。
@@ -217,7 +227,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   type SessionCryptoEngine = Awaited<ReturnType<typeof createSessionCryptoEngine>>;
   interface VaultSessionStateInternal extends VaultSessionState {
     activeCrypto: SessionCryptoEngine | null;
-    passwordKey: CryptoKey;
   }
   let vaultSession: VaultSessionStateInternal | null = null;
   const sessionPrivateKeys = new Map<string, Uint8Array>();
@@ -303,17 +312,16 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
   async function createAndInstallSessionActiveCrypto(
     record: VaultKeyRecord,
-    passwordKey: CryptoKey,
     sessionId?: string
   ): Promise<void> {
     if (!vaultSession) {
       throw new Error("Vault is locked");
     }
-    const activeCrypto = await createActiveCryptoForRecord(record, passwordKey, sessionId);
+    const activeCrypto = await createActiveCryptoForRecord(record, sessionId);
     setSessionActiveCrypto(record.publicKeyHex, activeCrypto);
   }
 
-  async function installCurrentSessionActiveCrypto(passwordKey: CryptoKey): Promise<void> {
+  async function installCurrentSessionActiveCrypto(): Promise<void> {
     if (!vaultSession) {
       return;
     }
@@ -332,18 +340,17 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (!record) {
       return;
     }
-    await createAndInstallSessionActiveCrypto(record, passwordKey);
+    await createAndInstallSessionActiveCrypto(record);
   }
 
-  function startVaultSession(passwordKey: CryptoKey): void {
+  function startVaultSession(): void {
     const activePublicKeyHex = deps.keyspace?.active().activePublicKeyHex;
     vaultSession = {
       sessionId: crypto.randomUUID(),
       kind: "keymaster",
       publicKeyHex: activePublicKeyHex,
       revoked: false,
-      activeCrypto: null,
-      passwordKey
+      activeCrypto: null
     };
   }
 
@@ -370,11 +377,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
   async function createActiveCryptoForRecord(
     record: VaultKeyRecord,
-    passwordKey: CryptoKey,
-    sessionId?: string
+    sessionId?: string,
+    privateKeyBytes?: Uint8Array,
   ): Promise<SessionCryptoEngine> {
     const identity = await recordToIdentity(record);
-    const privateKey = sessionPrivateKeys.get(record.publicKeyHex);
+    const privateKey = privateKeyBytes ?? sessionPrivateKeys.get(record.publicKeyHex);
     if (!privateKey) throw new Error("Unsupported key storage version");
     const enginePrivateKey = privateKey.slice();
     try {
@@ -507,7 +514,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
     }
     status = next;
-    sessionEpoch = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    sessionEpoch = `${Date.now()}-${randomIdentifierSuffix()}`;
     vaultLifecycleRevision += 1;
     const snapshot: VaultLifecycleSnapshot = { status, sessionEpoch, vaultLifecycleRevision };
     for (const l of lifecycleListeners) l(snapshot);
@@ -694,7 +701,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     format: string;
     capabilities: string[];
     source?: string;
-    passwordKey: CryptoKey;
     password: string;
   }): Promise<KeyRef> {
     // 1) 锁定守卫：locked 状态 fail closed，避免在外层调用方
@@ -770,7 +776,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         }
       }
       // 7) 仅在 active 切换成功后才发 key.created。
-      await createAndInstallSessionActiveCrypto(record, input.passwordKey);
+      await createAndInstallSessionActiveCrypto(record);
       deps.messageBus.publish("key.created", {
         publicKeyHex: derivedIdentity.publicKeyHex,
         label
@@ -858,13 +864,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const verifier = await encryptVerifier(key);
       const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultKeyRepository.putMeta(meta);
-      startVaultSession(key);
+      startVaultSession();
       try {
         // 与 unlock 一致：先把 keyspace 推到 ready 状态，再宣布 unlocked。
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
-        await installCurrentSessionActiveCrypto(key);
+        await installCurrentSessionActiveCrypto();
       } catch (err) {
         // 设计缘由：createVault 失败时必须把 meta 也删掉，保证"状态 =
         // uninitialized"与"存储里没有 Vault"一致。删除 meta 失败时仍
@@ -932,13 +938,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const verifier = await encryptVerifier(key);
       const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultKeyRepository.putMeta(meta);
-      startVaultSession(key);
+      startVaultSession();
       // 2) keyspace ready 边界（与 createVault / unlock 一致）。
       try {
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
-        await installCurrentSessionActiveCrypto(key);
+        await installCurrentSessionActiveCrypto();
       } catch (err) {
         // keyspace ready 失败：与 createVault 同样的回滚——删 meta、
         // 清空内存会话、抛原错。状态保持 uninitialized（从未切到 unlocked）。
@@ -963,7 +969,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           format: GENERATED_FORMAT,
           capabilities: input.capabilities ?? DEFAULT_CAPABILITIES,
           source: GENERATED_SOURCE,
-          passwordKey: key,
           password: input.password
         });
       } catch (err) {
@@ -1058,13 +1063,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const verifier = await encryptVerifier(key);
       const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultKeyRepository.putMeta(meta);
-      startVaultSession(key);
+      startVaultSession();
       // 2) keyspace ready 边界（与 createVault / unlock 一致）。
       try {
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
-        await installCurrentSessionActiveCrypto(key);
+        await installCurrentSessionActiveCrypto();
       } catch (err) {
         // keyspace ready 失败：与 createVault 同样的回滚——删 meta、
         // 清空内存会话、抛原错。状态保持 uninitialized（从未切到 unlocked）。
@@ -1089,8 +1094,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           format: input.key.format,
           capabilities: input.key.capabilities,
           source: input.key.source,
-          passwordKey: key,
-        password: input.vaultPassword
+          password: input.vaultPassword
         });
       } catch (err) {
         if (err instanceof KeyPersistedButActivationFailedError) {
@@ -1147,7 +1151,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const meta = await vaultKeyRepository.getMeta();
       if (!meta) throw new Error("Vault not initialized");
       const { key } = await coordinatorResolveVaultPasswordKey(password, meta);
-      startVaultSession(key);
+      startVaultSession();
       try {
         const records = await vaultKeyRepository.listKeys();
         const selectedHex = deps.keyspace?.selected();
@@ -1180,7 +1184,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
-        await installCurrentSessionActiveCrypto(key);
+        await installCurrentSessionActiveCrypto();
       } catch (err) {
         // 设计缘由：ready 边界由状态机保证；keyspace.onVaultUnlocked 失败
         // 即抛到这里。**必须**先清空
@@ -1405,7 +1409,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!meta) {
         throw new Error("Vault not initialized");
       }
-      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
+      await coordinatorVerifyVaultPasswordKey(input.password, meta);
       const record = await vaultKeyRepository.getKey(input.publicKeyHex);
       if (!record) {
         throw new Error(`Unknown key ${input.publicKeyHex}`);
@@ -1424,7 +1428,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         if (deps.keyspace && previousActive !== input.publicKeyHex) {
           await deps.keyspace.setActive(input.publicKeyHex);
         }
-        await createAndInstallSessionActiveCrypto(record, passwordKey);
+        await createAndInstallSessionActiveCrypto(record);
         revokeActiveKeyCryptoLeases(previousActive, "active key changed");
         if (previousTargetBytes) previousTargetBytes.fill(0);
         return { status: "accepted" } satisfies CoordinatorCommandResult;
@@ -1475,7 +1479,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         throw new Error(`Passkey name must be at most ${LABEL_MAX_LENGTH} characters`);
       }
       const publicKeyHex = vaultSession.publicKeyHex;
-      const passwordKey = vaultSession.passwordKey;
       const record = await vaultKeyRepository.getKey(publicKeyHex);
       if (!record) throw new Error("Active key not found");
       const existingSidecars = await vaultKeyRepository.listSidecars(publicKeyHex);
@@ -1733,14 +1736,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!meta) {
         throw new Error("Vault not initialized");
       }
-      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
+      await coordinatorVerifyVaultPasswordKey(input.password, meta);
       return persistPrivateKey({
         material: input.material,
         label: input.label,
         format: input.format,
         capabilities: input.capabilities,
         source: input.source,
-        passwordKey,
         password: input.password
       });
     },
@@ -1756,7 +1758,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!meta) {
         throw new Error("Vault not initialized");
       }
-      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
+      await coordinatorVerifyVaultPasswordKey(input.password, meta);
       // 1) 锁定 fail closed。放在调用 noble 之前，避免产生私钥材料
       //    之后才发现需要清场。
       if (!vaultSession) {
@@ -1775,7 +1777,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         format: GENERATED_FORMAT,
         capabilities: input.capabilities ?? DEFAULT_CAPABILITIES,
         source: GENERATED_SOURCE,
-        passwordKey,
         password: input.password
       });
     },
@@ -1875,23 +1876,26 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!meta) {
         throw new Error("Vault not initialized");
       }
-      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
+      await coordinatorVerifyVaultPasswordKey(input.password, meta);
       const record = await vaultKeyRepository.getKey(input.publicKeyHex);
       if (!record) {
         throw new Error(`Unknown key ${input.publicKeyHex}`);
       }
       const privateKey = await unlockKeyHoldRecord(record, input.password);
-      replaceSessionPrivateKey(record.publicKeyHex, privateKey);
-      disposeAppViewSession(input.sessionId, "appView session replaced");
-      const engine = await createActiveCryptoForRecord(record, passwordKey, input.sessionId);
-      const crypto = wrapActiveKeyCrypto(record, engine, () => {
-        appViewSessions.delete(input.sessionId);
-      });
-      appViewSessions.set(input.sessionId, {
-        publicKeyHex: record.publicKeyHex,
-        crypto: engine
-      });
-      return crypto;
+      try {
+        disposeAppViewSession(input.sessionId, "appView session replaced");
+        const engine = await createActiveCryptoForRecord(record, input.sessionId, privateKey);
+        const crypto = wrapActiveKeyCrypto(record, engine, () => {
+          appViewSessions.delete(input.sessionId);
+        });
+        appViewSessions.set(input.sessionId, {
+          publicKeyHex: record.publicKeyHex,
+          crypto: engine
+        });
+        return crypto;
+      } finally {
+        clearBytesBestEffort(privateKey);
+      }
     },
 
     disposeAppViewSession(sessionId: string, reason?: string) {

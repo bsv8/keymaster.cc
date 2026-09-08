@@ -4,7 +4,7 @@ import {
   hexToBytes,
   vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, JSONValue, KeymasterRemoteServicePortControlMessage as RemoteServicePortControlMessage } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, JSONValue, KeymasterRemoteServicePortControlMessage as RemoteServicePortControlMessage, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "@keymaster/contracts";
 import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -95,6 +95,11 @@ import {
   __testRunTask,
   __testSetVaultStatus,
   __testFailNextCoordinatorMetaPersist,
+  __testFailAfterCatalogBindingPublish,
+  __testSetLocalStorageBridgeOverride,
+  __testInstallCatalogLocalBinding,
+  __testReleaseCatalogLocalBinding,
+  __testSwitchCatalogBucket,
   __testP2pkhProviderConfigGet,
   __testP2pkhProviderConfigUpdate,
   __testP2pkhProvidersUpdate,
@@ -114,6 +119,9 @@ import {
   __testUnlock,
   __testUpdateScheduleSettings
 } from "./keymasterSessionCoordinator.worker.js";
+import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
+import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
+import type { LocalStorageLike } from "@keymaster/platform-storage";
 import { createMessagePortServiceTransport, createServiceBridge } from "webloom-framework";
 
 class TestPort {
@@ -137,6 +145,93 @@ function validPublisherKey(seed: number): string {
 const VALID_PUBLISHER_KEYS = [1, 2, 3, 4, 5, 6].map(validPublisherKey);
 
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
+
+class CatalogBridgeStorage implements LocalStorageLike {
+  private readonly values = new Map<string, string>();
+
+  get length(): number { return this.values.size; }
+  key(index: number): string | null { return [...this.values.keys()][index] ?? null; }
+  getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.values.set(key, value); }
+  removeItem(key: string): void { this.values.delete(key); }
+}
+
+const catalogBridgeLocks = {
+  request: async <T>(_name: string, callback: () => Promise<T>) => callback()
+};
+
+async function makeEncryptedLocalCatalogEntry(
+  bucketId: string,
+  label: string,
+  password: string,
+): Promise<StorageBucketCatalogEntryV2> {
+  const context = await createBucketCryptoContext(password);
+  try {
+    const encryptedConfig = await encryptBucketConfig({ kind: "local" } satisfies StorageBucketConnectionConfigV1, context);
+    return {
+      bucketId,
+      label,
+      backend: "local",
+      configRevision: 1,
+      keyDerivation: { ...context.keyDerivation },
+      encryptedConfig,
+      snapshotRevision: 0,
+      createdAt: 1,
+      updatedAt: 1
+    };
+  } finally {
+    context.dispose();
+  }
+}
+
+function makeCatalogBridgeFixture(current: StorageBucketCatalogEntryV2, target: StorageBucketCatalogEntryV2) {
+  const storage = new CatalogBridgeStorage();
+  const state = {
+    catalog: {
+      format: "keymaster.storage.catalog" as const,
+      version: 2 as const,
+      selectedBucketId: current.bucketId,
+      buckets: [current, target]
+    },
+    lease: { bucketId: current.bucketId, bucketGeneration: 1 }
+  };
+
+  const bridge = async (input: LocalStorageBridgeRequest): Promise<LocalStorageBridgeResponse> => {
+    if (input.type === "catalog-select") {
+      const isRollback = input.rollbackFromSelectedBucketId !== undefined;
+      const expected = isRollback ? input.rollbackFromSelectedBucketId : input.expectedSelectedBucketId;
+      if (state.catalog.selectedBucketId !== expected) throw new Error("catalog selection conflict");
+      const selected = state.catalog.buckets.find((bucket) => bucket.bucketId === input.targetBucket.bucketId);
+      if (!selected || JSON.stringify(selected) !== JSON.stringify(input.targetBucket)) throw new Error("catalog target conflict");
+      if (!isRollback) {
+        if (state.lease.bucketId !== input.expectedSelectedBucketId || input.bucketGeneration !== state.lease.bucketGeneration + 1) throw new Error("invalid forward lease generation");
+      } else if (state.lease.bucketId !== input.rollbackFromSelectedBucketId || input.bucketGeneration !== state.lease.bucketGeneration - 1) {
+        throw new Error("invalid rollback lease generation");
+      }
+      state.catalog = { ...state.catalog, selectedBucketId: selected.bucketId };
+      state.lease = { bucketId: selected.bucketId, bucketGeneration: input.bucketGeneration };
+      return { type: "catalog", bucket: selected };
+    }
+    if (input.type === "catalog-update") throw new Error("catalog-update is not used by this fixture");
+
+    const provider = createLocalStorageBucketProvider({
+      storage,
+      locks: catalogBridgeLocks,
+      bucketId: input.bucketId,
+      bucketGeneration: input.bucketGeneration
+    });
+    try {
+      if (input.type === "get") return { type: "object", object: await provider.get(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {}) };
+      if (input.type === "list") return { type: "list", ...(await provider.list(input)) };
+      if (input.type === "put") return { type: "write", ...(await provider.put(input.path, input.bytes, input.condition ?? {})) };
+      await provider.delete(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {});
+      return { type: "void" };
+    } finally {
+      provider.dispose();
+    }
+  };
+  return { state, bridge };
+}
 
 describe("Coordinator ChannelProtocol 私信编码边界", () => {
   it("通过真实 WebRTC parser 编码 bsv8.webrtc.signal.v1 的全部信令分支", () => {
@@ -298,6 +393,33 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
 });
 
 describe("Session Coordinator worker", () => {
+  it("绑定已发布后初始化失败时回滚目录、Root 和 Worker 会话", async () => {
+    __testResetState();
+    const password = "catalog-switch-password";
+    const current = await makeEncryptedLocalCatalogEntry("catalog-current", "当前桶", password);
+    const target = await makeEncryptedLocalCatalogEntry("catalog-target", "目标桶", password);
+    const fixture = makeCatalogBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    try {
+      await __testInstallCatalogLocalBinding(current);
+      __testSetVaultStatus("uninitialized");
+      __testFailAfterCatalogBindingPublish();
+
+      await expect(__testSwitchCatalogBucket(target, password)).rejects.toThrow("injected catalog binding initialization failure");
+      expect(fixture.state.catalog.selectedBucketId).toBe(current.bucketId);
+      expect(fixture.state.lease).toEqual({ bucketId: current.bucketId, bucketGeneration: 1 });
+      expect(__testGetSnapshot()).toMatchObject({
+        storageBucketId: current.bucketId,
+        storageBucketGeneration: 1,
+        vaultStatus: "uninitialized"
+      });
+    } finally {
+      await __testReleaseCatalogLocalBinding();
+      __testResetState();
+    }
+  }, 20_000);
+
   it("通过真实 Worker MessagePort 暴露带授权的 Coordinator crypto service，并在 lock 后撤销旧代理", async () => {
     await __testDeleteVault();
     __testResetState();

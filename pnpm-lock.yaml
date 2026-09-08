@@ -270,6 +270,9 @@ importers:
       '@xmldom/xmldom':
         specifier: ^0.9.10
         version: 0.9.10
+      keymaster-hold:
+        specifier: 0.1.0
+        version: 0.1.0
       webloom-framework:
         specifier: 0.1.0
         version: 0.1.0(react@18.3.1)
@@ -2994,6 +2997,9 @@ packages:
 
   keyhold@2.0.0:
     resolution: {integrity: sha512-8yijaP9pA83feaeqKw3epj3eWB152Br4Q31bsuhFwSa4HE0ET4R4+HFWLDIJeNPj7AJO2JouqdMWfJNfDGN2yA==}
+
+  keymaster-hold@0.1.0:
+    resolution: {integrity: sha512-ETKUIJ2Q03NdyNNvA6obM3evxE6LNlAv5hl4BFVCvuLGjbtAaeRY6ftZn5LzJZoLuLFYnufXLSBnfrVrbLKn9A==}
 
   keymaster-multisig-pool@1.5.0:
     resolution: {integrity: sha512-858FmzP0wK7KuOPosuH3dso//PNI+7VIqgx62swqyA+Hnco4nlnDEdqEPCwpIpwB/3qHyBNRt3RkGRd+ys6soQ==}
@@ -6830,6 +6836,10 @@ snapshots:
   keyhold@2.0.0:
     dependencies:
       '@noble/curves': 2.2.0
+
+  keymaster-hold@0.1.0:
+    dependencies:
+      tr46: 5.1.1
 
   keymaster-multisig-pool@1.5.0:
     dependencies:

@@ -38,8 +38,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
+import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import type { KeyspaceService } from "@keymaster/contracts";
 import {
   KeyPersistedButActivationFailedError,
@@ -54,6 +54,7 @@ type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "unlock-form";
 export function LockedShell() {
   const vault = useCapability<VaultService>("vault.service");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const storage = useOptionalCapability<{ isCatalogBucket?: () => boolean }>("storage.runtime-controller");
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
@@ -118,11 +119,15 @@ export function LockedShell() {
     } catch (err) { setError(err instanceof Error ? err.message : "Export failed"); }
   }
 
-  async function deleteSelected(confirmationLabel: string) {
+  async function deleteSelected(confirmationLabel: string, bucketPassword?: string) {
     if (!selectedKey) return;
     setBusy(true); setError(null);
     try {
-      await keyspace.deleteKey({ publicKeyHex: selectedKey.publicKeyHex, confirmationLabel });
+      await keyspace.deleteKey({
+        publicKeyHex: selectedKey.publicKeyHex,
+        confirmationLabel,
+        ...(bucketPassword ? { bucketPassword } : {})
+      });
       setDeleteOpen(false);
       setSelectedKey(await loadSelectedKey());
     } catch (err) {
@@ -272,6 +277,11 @@ export function LockedShell() {
             title={t("shell.locked.notice.title", { defaultValue: "私钥不会离开你的浏览器" })}
             description={t("shell.locked.notice.body", { defaultValue: "所有私钥在本地用 WebCrypto AES-GCM 加密，密码不会上传到任何服务器。" })}
           />
+          <div className="locked-shell__actions">
+            <Button variant="ghost" onClick={() => router.push("/storage/buckets")}>
+              {t("storage.bucketManager.topbar", { defaultValue: "管理存储桶" })}
+            </Button>
+          </div>
         </div>
       </OnboardingShell>
     );
@@ -350,6 +360,9 @@ export function LockedShell() {
           <Button onClick={unlock} loading={busy} disabled={!password}>
             {t("common.action.unlock", { defaultValue: "解锁" })}
           </Button>
+          <Button variant="ghost" onClick={() => router.push("/storage/buckets")} disabled={busy}>
+            {t("storage.bucketManager.topbar", { defaultValue: "管理存储桶" })}
+          </Button>
         </div>
         {selectedKey ? <section aria-label={t("shell.locked.selected.title", { defaultValue: "当前选择的私钥" })}>
           <h2>{t("shell.locked.selected.title", { defaultValue: "当前选择的私钥" })}</h2>
@@ -362,6 +375,7 @@ export function LockedShell() {
             open={deleteOpen}
             keyLabel={selectedKey.label}
             publicKeyHex={selectedKey.publicKeyHex}
+            requiresBucketPassword={storage?.isCatalogBucket?.() === true}
             onExportBackup={() => void exportSelected()}
             onConfirmDelete={deleteSelected}
             onClose={() => setDeleteOpen(false)}

@@ -20,10 +20,15 @@ export interface StorageProfileEnvelopeV1 {
 
 /** 本机 bootstrap 只保存连接器 envelope 与首帧偏好。 */
 export interface StorageBootstrapState {
-  /** 首选统一存储后端；未选择时整个系统必须停留在启动页。 */
-  selectedBackend: "opfs" | "s3";
+  /** 首选存储后端；新格式只使用 localStorage 或 S3，opfs 仅用于识别旧数据。 */
+  selectedBackend: "local" | "s3" | "opfs";
   /** 当前选中的 Profile ID。 */
   selectedProfileId?: string;
+  /**
+   * 新版多桶目录选中的桶快照；Worker 只接收这一项，不接收整个本机目录。
+   * 其中只含桶级密文和公开 KDF 参数，不含密码、Keys 或业务数据。
+   */
+  selectedBucket?: import("./catalog.js").StorageBucketCatalogEntryV2;
   /** 与导出文件共用的加密 Profile envelope。 */
   encryptedStorageProfileEnvelope?: StorageProfileEnvelopeV1;
   /** 首帧语言镜像。 */
@@ -67,6 +72,10 @@ export interface StorageCompatibleConnection {
   region: string;
   /** Bucket 名称。 */
   bucket: string;
+  /** 可选的临时会话令牌；只存在当前 Coordinator 会话内存。 */
+  sessionToken?: string;
+  /** 可选的用户对象前缀；Provider 会在其下追加 Keymaster 桶隔离根。 */
+  prefix?: string;
   /** 是否使用 path-style 请求。 */
   forcePathStyle: boolean;
 }
