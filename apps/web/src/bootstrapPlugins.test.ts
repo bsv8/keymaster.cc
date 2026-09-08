@@ -158,7 +158,8 @@ describe("Coordinator startup recovery", () => {
       storageGrant: async () => ({ status: "ok", value: "grant" }),
       storageData: async () => ({ status: "ok", value: undefined }),
       storageCancel: async () => ({ status: "ok" }),
-      storageSessionAbort: async () => ({ status: "ok" })
+      storageSessionAbort: async () => ({ status: "ok" }),
+      refreshStorageBootstrap: vi.fn(async () => undefined)
     });
 
     const publicClient = createPublicCoordinatorClient(rawClient);
@@ -170,6 +171,7 @@ describe("Coordinator startup recovery", () => {
 
     const storageClient = createStorageCoordinatorClient(rawClient);
     expect(storageClient.storageControl).toBeTypeOf("function");
+    expect(storageClient.refreshStorageBootstrap).toBeTypeOf("function");
     expect((storageClient as unknown as Record<string, unknown>).vaultOperation).toBeUndefined();
 
     const vaultClient = createVaultCoordinatorClient(rawClient);

@@ -132,7 +132,8 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
 export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl {
   return bindCoordinatorMethods<StorageCoordinatorControl>(client, [
     "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
-    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort"
+    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
+    "refreshStorageBootstrap"
   ]);
 }
 
