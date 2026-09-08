@@ -14,6 +14,10 @@ async function prepareLocalBucket(page: Page, bucketName: string): Promise<void>
   await expect(page.getByRole("heading", { name: /Set up your first Key|设置第一把 Key/ })).toBeVisible();
 }
 
+test("initial setup prepares the first Local bucket and reaches Key selection", async ({ page }) => {
+  await prepareLocalBucket(page, "Local bucket bootstrap E2E");
+});
+
 test("initial setup creates exactly one generated Key and opens Key management", async ({ page }) => {
   await prepareLocalBucket(page, "Generated E2E bucket");
 

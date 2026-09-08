@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionCoordinatorClient, StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
+import type { CoordinatorTopicEvent, SessionCoordinatorClient, StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
 import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { createCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
@@ -74,6 +74,7 @@ type LocalBridgeClientInternals = {
   openLocalStorageBridge(): MessagePort;
   localStorageBridgePort: MessagePort | null;
   localStorageBridgeLease: { authorityInstanceId: string; bucketId?: string; leaseId: string; bucketGeneration: number } | null;
+  applyTopicEvent(event: CoordinatorTopicEvent): void;
 };
 
 async function nextMacrotask(): Promise<void> {
@@ -114,6 +115,12 @@ async function openTestLocalBridge(storage: BridgeMemoryStorage, current: Storag
   }));
   workerPort.postMessage({ type: "lease", authorityInstanceId, bucketId: current.bucketId, bucketGeneration: 1, leaseId: lease.leaseId });
   await nextMacrotask();
+  await vi.waitFor(() => expect(internals.localStorageBridgeLease).toMatchObject({
+    authorityInstanceId,
+    bucketId: current.bucketId,
+    bucketGeneration: 1,
+    leaseId: lease.leaseId
+  }));
   return { client, workerPort, authorityInstanceId, leaseId: lease.leaseId };
 }
 
@@ -796,6 +803,37 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
       expect(response).toMatchObject({ ok: true, response: { type: "catalog", bucket: { bucketId: current.bucketId } } });
       expect(readStorageCatalog(storage).selectedBucketId).toBe(current.bucketId);
+    } finally {
+      client.disconnect();
+      workerPort.close();
+      restoreGlobals();
+    }
+  });
+
+  it("首桶 Root 尚未绑定时不让旧 unselected 事件清空临时 Local 租约", async () => {
+    const storage = new BridgeMemoryStorage();
+    const restoreGlobals = installBridgeGlobals(storage);
+    const current = bridgeCatalogEntry("bucket-first", "首个桶");
+    const { client, workerPort } = await openTestLocalBridge(storage, current);
+    try {
+      const internals = client as unknown as LocalBridgeClientInternals;
+      internals.applyTopicEvent({
+        topic: "storage.state",
+        type: "storage.state.changed",
+        storageRevision: 1,
+        sessionEpoch: "boot",
+        providerGeneration: null,
+        status: "checking",
+        healthStatus: "unselected",
+        catalogBucket: false,
+        summary: null,
+        capabilities: null
+      });
+
+      expect(internals.localStorageBridgeLease).toMatchObject({
+        bucketId: current.bucketId,
+        bucketGeneration: 1
+      });
     } finally {
       client.disconnect();
       workerPort.close();

@@ -628,9 +628,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     try {
       const request = input.request as LocalStorageBridgeRequest;
       const lease = this.localStorageBridgeLease;
-      if (!lease || !lease.authorityInstanceId || !lease.bucketId || request.authorityInstanceId !== lease.authorityInstanceId || request.leaseId !== lease.leaseId) {
-        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is invalid");
-      }
+      if (!lease) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is unavailable");
+      if (!lease.authorityInstanceId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge authority is not ready");
+      if (!lease.bucketId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket is not selected");
+      if (request.authorityInstanceId !== lease.authorityInstanceId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge authority changed");
+      if (request.leaseId !== lease.leaseId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease changed");
       const candidate = "candidateBucket" in request ? request.candidateBucket : undefined;
       const isCandidateRequest = candidate !== undefined && request.type !== "catalog-update" && request.type !== "catalog-select";
       const isCatalogSelect = request.type === "catalog-select";
@@ -1588,8 +1590,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ...(event.bucketGeneration ? { storageBucketGeneration: event.bucketGeneration } : { storageBucketGeneration: undefined }),
       };
       if (this.localStorageBridgeLease) {
-        this.localStorageBridgeLease.bucketId = event.bucketId;
-        this.localStorageBridgeLease.bucketGeneration = event.bucketGeneration ?? 0;
+        // 首桶已写入页面目录、Worker 尚未完成 Root bootstrap 时，旧的
+        // unselected/checking 事件不带 bucketId。它不能清掉 hello 刚建立的
+        // 临时 Local 租约，否则 bootstrap 的首个 Hold 读取会自我拒绝。
+        // 真正绑定成功后，带 bucketId 的事件会把租约校正到权威世代。
+        if (event.bucketId) {
+          this.localStorageBridgeLease.bucketId = event.bucketId;
+          this.localStorageBridgeLease.bucketGeneration = event.bucketGeneration ?? 0;
+        } else if (!this.localStorageBridgeLease.bucketId) {
+          this.localStorageBridgeLease.bucketGeneration = 0;
+        }
       }
     } else if (event.type === "p2pkh.providers.changed") {
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, p2pkhProviders: event.snapshot };
