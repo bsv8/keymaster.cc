@@ -18,6 +18,8 @@ import type {
   StorageRuntimeControllerStatus,
   StorageRuntimeStatus,
   CoordinatorAuthorityRecovery,
+  InitialSetupRecoveryRecordV1,
+  InitialSetupRecoveryResult,
   StorageUploadAbortResult,
   StorageUploadBeginResult,
   StorageUploadPartResult,
@@ -100,6 +102,30 @@ export class StorageRpcProxy implements StorageRuntimeController {
 
   getProviderSummary(): Promise<StorageProviderSummary | null> { return Promise.resolve(this.current.summary); }
   getProviderConnection(): Promise<StorageProviderConnectionView | null> { return this.control({ type: "connection" }); }
+  /** 首次初始化的唯一高层入口；页面不再分别调用桶/Vault 持久化 API。 */
+  initialSetup(plan: import("@keymaster/contracts").InitialSetupPlan): Promise<import("@keymaster/contracts").InitialSetupResult> {
+    return this.control({ type: "initial-setup", plan });
+  }
+  getInitialSetupResult(transactionId: string): Promise<import("@keymaster/contracts").InitialSetupResult | undefined> {
+    return this.control({ type: "initial-setup-result", transactionId });
+  }
+  listInitialSetupRecoveries(): Promise<InitialSetupRecoveryRecordV1[]> {
+    return this.control({ type: "initial-setup-recovery-list" });
+  }
+  retryInitialSetupCleanup(transactionId: string, input: { password?: string; connection?: StorageBucketConnectionConfigV1 } = {}): Promise<InitialSetupRecoveryResult> {
+    return this.control({
+      type: "initial-setup-cleanup",
+      transactionId,
+      ...(input.password === undefined ? {} : { password: input.password }),
+      ...(input.connection === undefined ? {} : { connection: input.connection }),
+    });
+  }
+  inspectLegacyInitialSetup(password: string): Promise<import("@keymaster/contracts").InitialSetupLegacyInspection> {
+    return this.control({ type: "initial-setup-legacy-inspect", password });
+  }
+  cleanupLegacyInitialSetup(password: string): Promise<import("@keymaster/contracts").InitialSetupLegacyCleanupResult> {
+    return this.control({ type: "initial-setup-legacy-cleanup", password });
+  }
   unlockStorageProfile(password: string): Promise<StorageProbeResult> { return this.control({ type: "unlock-profile", password }); }
   /** 新版桶目录的临时解锁；密码只进入本次 Worker bootstrap。 */
   async unlockBucket(password: string): Promise<unknown> {

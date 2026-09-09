@@ -45,8 +45,9 @@ describe("renderFatalCrashPage", () => {
     expect(root.querySelector("[data-fatal-crash]")).not.toBeNull();
     expect(root.textContent ?? "").toContain("启动/运行失败");
     expect(root.textContent ?? "").toContain("boom");
-    const button = root.querySelector("button");
-    expect(button?.textContent).toBe("刷新页面");
+    expect(root.querySelectorAll("button").length).toBe(2);
+    expect(root.querySelectorAll("button")[0]?.textContent).toBe("复制诊断信息");
+    expect(root.querySelectorAll("button")[1]?.textContent).toBe("刷新页面");
   });
 
   it("falls back to <pre> when target.appendChild throws", () => {
@@ -117,13 +118,12 @@ describe("renderFatalCrashPage", () => {
     expect(onBody).not.toBeNull();
   });
 
-  it("renders without stack block when snapshot.stack is empty", () => {
+  it("renders a collapsed sanitized diagnostic block when snapshot.stack is empty", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     renderFatalCrashPage(root, snapshot({ stack: "" }));
-    // 没有 stack 块:页面只剩 wrap / title / desc / dl / button。
-    // 不应有两个 <pre>(一个是 wrap 内的 stack pre,另一个是 fallback pre)，
-    // 因为本路径不应走 fallback。
-    expect(root.querySelectorAll("pre").length).toBe(0);
+    expect(root.querySelector("details")?.open).toBe(false);
+    expect(root.querySelector("pre")?.textContent).toContain("Keymaster 脱敏诊断");
+    expect(root.querySelector("button")?.textContent).toBe("复制诊断信息");
   });
 });

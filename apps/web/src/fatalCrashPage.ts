@@ -23,6 +23,8 @@
 
 import type { FatalErrorSnapshot } from "@keymaster/runtime";
 import { BRAND_WORDMARK } from "./brand.js";
+import { copyDiagnosticText } from "./diagnostics/copyDiagnostic.js";
+import { buildDiagnosticText, sanitizeDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 
 /** 应用 bundle 同源 origin。global handler 用此做来源过滤。 */
 function getAppOrigin(): string | null {
@@ -49,6 +51,16 @@ export function renderFatalCrashPage(
 
 function buildDom(container: HTMLElement | null, snapshot: FatalErrorSnapshot): void {
   const target = container ?? document.body;
+  const diagnostic = buildDiagnosticText({
+    phase: snapshot.phase,
+    code: `fatal_${snapshot.phase}`,
+    incidentId: snapshot.id,
+    message: snapshot.message,
+    stack: snapshot.stack,
+    occurredAt: snapshot.time,
+    redactionVersion: "diagnostic-v2",
+    ...(snapshot.cause === undefined ? {} : { details: snapshot.cause })
+  });
   // idempotent：清空后重建,避免多次接管时 DOM 堆叠。
   target.innerHTML = "";
   const wrap = document.createElement("section");
@@ -84,27 +96,41 @@ function buildDom(container: HTMLElement | null, snapshot: FatalErrorSnapshot): 
 
   const dl = document.createElement("dl");
   dl.style.cssText = "margin:0 0 16px 0;display:grid;grid-template-columns:120px 1fr;gap:4px 12px";
-  appendDlRow(dl, "阶段", String(snapshot.phase));
-  appendDlRow(dl, "时间", snapshot.time);
-  appendDlRow(dl, "范围", String(snapshot.scope));
-  appendDlRow(dl, "来源", String(snapshot.source));
-  appendDlRow(dl, "应用 origin", getAppOrigin() ?? "(unknown)");
-  appendDlRow(dl, "摘要", snapshot.message);
+  appendDlRow(dl, "阶段", sanitizeDiagnosticText(String(snapshot.phase)));
+  appendDlRow(dl, "时间", sanitizeDiagnosticText(snapshot.time));
+  appendDlRow(dl, "范围", sanitizeDiagnosticText(String(snapshot.scope)));
+  appendDlRow(dl, "来源", sanitizeDiagnosticText(String(snapshot.source)));
+  appendDlRow(dl, "应用 origin", sanitizeDiagnosticText(getAppOrigin() ?? "(unknown)"));
+  appendDlRow(dl, "摘要", sanitizeDiagnosticText(snapshot.message));
   wrap.appendChild(dl);
 
-  if (snapshot.stack) {
-    const stackTitle = document.createElement("h2");
-    stackTitle.style.cssText =
-      "color:#e6e8ee;margin:16px 0 8px 0;font-size:14px;font-weight:600";
-    stackTitle.textContent = "技术详情";
-    wrap.appendChild(stackTitle);
-
-    const pre = document.createElement("pre");
-    pre.style.cssText =
-      "margin:0;padding:12px;background:#0c0f15;color:#cfd3dc;border-radius:4px;white-space:pre-wrap;word-break:break-all;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;max-height:240px;overflow:auto";
-    pre.textContent = snapshot.stack;
-    wrap.appendChild(pre);
-  }
+  const details = document.createElement("details");
+  details.style.cssText = "margin-top:16px";
+  const detailsSummary = document.createElement("summary");
+  detailsSummary.style.cssText = "color:#e6e8ee;cursor:pointer;font-weight:600";
+  detailsSummary.textContent = "查看脱敏技术诊断";
+  details.appendChild(detailsSummary);
+  const pre = document.createElement("pre");
+  pre.style.cssText =
+    "margin:0;padding:12px;background:#0c0f15;color:#cfd3dc;border-radius:4px;white-space:pre-wrap;word-break:break-all;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;max-height:240px;overflow:auto";
+  pre.textContent = diagnostic;
+  details.appendChild(pre);
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "复制诊断信息";
+  copy.style.cssText = "margin-top:8px;padding:6px 10px;border-radius:4px;border:1px solid #2c333f;background:#2c333f;color:#e6e8ee;cursor:pointer;font:13px system-ui,-apple-system,sans-serif";
+  const copyStatus = document.createElement("span");
+  copyStatus.setAttribute("role", "status");
+  copyStatus.setAttribute("aria-live", "polite");
+  copyStatus.style.cssText = "margin-left:8px;color:#cfd3dc";
+  copy.addEventListener("click", () => {
+    void copyDiagnosticText(diagnostic).then((copied) => {
+      copyStatus.textContent = copied ? "已复制脱敏诊断" : "复制失败，请手动选择诊断文本";
+    });
+  });
+  details.appendChild(copy);
+  details.appendChild(copyStatus);
+  wrap.appendChild(details);
 
   const actionRow = document.createElement("div");
   actionRow.style.cssText = "margin-top:16px;display:flex;gap:8px;flex-wrap:wrap";
@@ -143,14 +169,17 @@ function fallbackToPre(snapshot: FatalErrorSnapshot): void {
     pre.setAttribute("data-fatal-crash", "fallback");
     pre.style.cssText =
       "color:#e35a5a;padding:16px;white-space:pre-wrap;font:13px ui-monospace,SFMono-Regular,Menlo,monospace";
-    pre.textContent =
-      `${BRAND_WORDMARK} 启动/运行失败\n` +
-      `阶段: ${snapshot.phase}\n` +
-      `时间: ${snapshot.time}\n` +
-      `范围: ${snapshot.scope}\n` +
-      `来源: ${snapshot.source}\n` +
-      `摘要: ${snapshot.message}\n` +
-      (snapshot.stack ? `\n${snapshot.stack}\n` : "");
+    const diagnostic = buildDiagnosticText({
+      phase: snapshot.phase,
+      code: `fatal_${snapshot.phase}`,
+      incidentId: snapshot.id,
+      message: snapshot.message,
+      stack: snapshot.stack,
+      occurredAt: snapshot.time,
+      redactionVersion: "diagnostic-v2",
+      ...(snapshot.cause === undefined ? {} : { details: snapshot.cause })
+    });
+    pre.textContent = `${BRAND_WORDMARK} 启动/运行失败\n${diagnostic}`;
     document.body.appendChild(pre);
   } catch {
     // final final:无法做任何事,放弃。

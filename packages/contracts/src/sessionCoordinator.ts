@@ -37,7 +37,7 @@ import type {
   StorageRuntimeStatus
 } from "./storage/runtime.js";
 import type { StorageProviderConfigDraft } from "./storage/profile.js";
-import type { StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
+import type { InitialSetupPlan, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
 import type {
   P2pkhProviderSettings,
   P2pkhProviderRegistrySnapshot,
@@ -139,6 +139,25 @@ export type CoordinatorStorageControl =
   | { type: "unlock-profile"; password: string }
   /** 新版桶目录的临时桶密码；不复用旧 Storage Profile envelope。 */
   | { type: "unlock-bucket"; password: string }
+  /** 最终确认后的首桶 + 首 Key 单一事务；密码和材料只在本次请求内存在。 */
+  | { type: "initial-setup"; plan: InitialSetupPlan }
+  /** 响应丢失后的同事务结果查询；只携带公开事务 ID。 */
+  | { type: "initial-setup-result"; transactionId: string }
+  /** 页面重载后列出公开的初始化恢复记录；不含密码、凭据或私钥。 */
+  | { type: "initial-setup-recovery-list" }
+  /** 重试清理同一事务的候选对象；不携带密码、凭据或私钥。 */
+  | {
+      type: "initial-setup-cleanup";
+      transactionId: string;
+      /** S3 候选在目录回滚后没有可解密条目时，由用户临时重新提供的桶密码。 */
+      password?: string;
+      /** 只用于本次清理重建 Provider；不会写入恢复记录。 */
+      connection?: StorageBucketConnectionConfigV1;
+    }
+  /** 检查旧版本留下的“已选桶但没有完整首 Key”状态。 */
+  | { type: "initial-setup-legacy-inspect"; password: string }
+  /** 在检查证明安全后精确清理旧版本半截初始化。 */
+  | { type: "initial-setup-legacy-cleanup"; password: string }
   /** 使用目标桶密码完成 Provider/Root/Keys 会话切换；目录由页面桥原子 CAS。 */
   | { type: "switch-bucket"; bucket: StorageBucketCatalogEntryV2; password: string }
   /** 当前桶连接配置的原子重配置；密码只用于本次验证和重新封装。 */

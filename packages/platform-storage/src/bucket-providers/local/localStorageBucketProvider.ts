@@ -1,8 +1,10 @@
 import type {
+  InitialSetupRecoveryRecordV1,
   StorageBucketCatalogEntryV2,
   StorageBucketListPage,
   StorageBucketObject,
   StorageBucketProbeResult,
+  StorageCatalogV2,
   StorageBucketProvider,
   StorageBucketWriteCondition
 } from "@keymaster/contracts";
@@ -45,6 +47,10 @@ export interface LocalStorageBridgeCandidateBucket {
   expectedSelectedBucketId?: string;
   /** Coordinator 为目标 Root 分配的暂存世代；页面桥在 I/O 点校验。 */
   bucketGeneration?: number;
+  /** 首次初始化专用：目录仍为空时允许暂存候选命名空间。 */
+  initialSetup?: boolean;
+  /** 仅允许清理本事务候选对象；即使目录已被其它事务提交也可 list/delete。 */
+  cleanupOnly?: boolean;
 }
 
 /** 页面桥的窄操作协议；桥在真正执行 localStorage I/O 前必须重新校验租约。 */
@@ -58,15 +64,27 @@ export type LocalStorageBridgeRequest =
    * Keys 或明文连接凭据；页面端在同一把目录 Web Lock 中校验 expectedBucket。
    */
   | { type: "catalog-update"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; expectedBucket: StorageBucketCatalogEntryV2; nextBucket: StorageBucketCatalogEntryV2; /** CAS 响应丢失后的回滚请求；目标已是 nextBucket 时允许幂等成功。 */ rollback?: boolean; signal?: AbortSignal }
+  /** 首次初始化的唯一目录提交点；正常调用把空目录变成一个 selected 桶，rollback 只移除本次同一条目。 */
+  | { type: "catalog-commit"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; targetBucket: StorageBucketCatalogEntryV2; rollback?: boolean; signal?: AbortSignal }
   /** 切桶最终目录 CAS；不传密码，仅更新 selectedBucketId。 */
-  | { type: "catalog-select"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; expectedSelectedBucketId?: string; /** CAS 请求丢失响应时允许按目标桶回收；页面仍会在 Web Lock 内确认目录当前值。 */ rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2; signal?: AbortSignal };
+  | { type: "catalog-select"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; expectedSelectedBucketId?: string; /** CAS 请求丢失响应时允许按目标桶回收；页面仍会在 Web Lock 内确认目录当前值。 */ rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2; signal?: AbortSignal }
+  /** 读取当前目录；用于并发初始化回滚前重新确认权威引用。 */
+  | { type: "catalog-read"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
+  /** 读取不含秘密的初始化恢复记录。 */
+  | { type: "initial-setup-recovery-list"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
+  /** 写入不含秘密的初始化恢复记录。 */
+  | { type: "initial-setup-recovery-write"; authorityInstanceId?: string; leaseId?: string; record: InitialSetupRecoveryRecordV1; signal?: AbortSignal }
+  /** 删除一条已完成或已确认清理的恢复记录。 */
+  | { type: "initial-setup-recovery-delete"; authorityInstanceId?: string; leaseId?: string; transactionId: string; signal?: AbortSignal };
 
 export type LocalStorageBridgeResponse =
   | { type: "object"; object?: LocalStorageBridgeObject }
   | { type: "list"; objects: LocalStorageBridgeObject[]; nextCursor?: string }
   | { type: "write"; etag?: string; lastModified?: string }
   | { type: "void" }
-  | { type: "catalog"; bucket: StorageBucketCatalogEntryV2 };
+  | { type: "catalog"; bucket: StorageBucketCatalogEntryV2 }
+  | { type: "catalog-state"; catalog: StorageCatalogV2 }
+  | { type: "initial-setup-recovery"; records: InitialSetupRecoveryRecordV1[] };
 
 export interface LocalStorageBucketProviderOptions {
   /** 页面侧直接注入 localStorage；Worker 生产路径应使用 bridge。 */

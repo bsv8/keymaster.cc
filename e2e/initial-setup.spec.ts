@@ -7,10 +7,10 @@ async function prepareLocalBucket(page: Page, bucketName: string): Promise<void>
   await page.goto("/");
   await page.getByRole("button", { name: /Local/ }).click();
   await page.getByLabel(/Bucket name|桶名称/).fill(bucketName);
-  await page.getByRole("button", { name: /Next|继续/ }).click();
+  await page.getByRole("button", { name: /Next|Continue|继续/ }).click();
   await page.getByLabel(/Password \(at least 8 characters\)|密码（至少 8 位）/).fill(SETUP_PASSWORD);
   await page.getByLabel(/Confirm password|确认密码/).fill(SETUP_PASSWORD);
-  await page.getByRole("button", { name: /Save and continue|保存并继续/ }).click();
+  await page.getByRole("button", { name: /Next|Continue|继续/ }).click();
   await expect(page.getByRole("heading", { name: /Set up your first Key|设置第一把 Key/ })).toBeVisible();
 }
 
@@ -23,10 +23,11 @@ test("initial setup creates exactly one generated Key and opens Key management",
 
   await page.getByRole("button", { name: /Create a Key|新建 Key/ }).click();
   await page.getByLabel(/Tag Name/).fill("Generated E2E Key");
-  await page.getByRole("button", { name: /Create and open Key management|创建并进入 Key 管理/ }).click();
+  await page.getByRole("button", { name: /Next|继续确认/ }).click();
+  await page.getByRole("button", { name: /Create bucket and first Key|创建桶和第一把 Key/ }).click();
 
   await expect(page).toHaveURL(/\/settings\/vault$/);
-  await expect(page.getByText("Generated E2E Key", { exact: true })).toBeVisible();
+  await expect(page.getByText("Generated E2E Key", { exact: true }).first()).toBeVisible();
 });
 
 test("initial setup imports one Hex Key with the setup password and opens Key management", async ({ page }) => {
@@ -38,8 +39,9 @@ test("initial setup imports one Hex Key with the setup password and opens Key ma
   await page.getByLabel(/Text|文本/).fill("0000000000000000000000000000000000000000000000000000000000000001");
   await page.getByRole("button", { name: /Parse|解析/ }).click();
   await page.getByLabel(/Label|标签/).fill("Imported E2E Key");
-  await page.getByRole("button", { name: /Create Vault and import|创建 Vault 并导入/ }).click();
+  await page.getByRole("button", { name: /Use this Key|使用这把 Key|Import this Key|导入这把 Key/ }).click();
+  await page.getByRole("button", { name: /Create bucket and first Key|创建桶和第一把 Key/ }).click();
 
   await expect(page).toHaveURL(/\/settings\/vault$/);
-  await expect(page.getByText("Imported E2E Key", { exact: true })).toBeVisible();
+  await expect(page.getByText("Imported E2E Key", { exact: true }).first()).toBeVisible();
 });

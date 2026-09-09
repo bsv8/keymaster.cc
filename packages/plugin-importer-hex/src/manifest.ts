@@ -29,7 +29,9 @@ const hexImporterPluginDefinition = {
   meta: {
     kind: "business",
     startup: "optional",
-    bootstrapStage: "vault-selection",
+    // 首次 Storage 初始化的导入向导也需要 Hex importer；该插件只依赖
+    // Host 内置 importer.registry，不依赖尚未创建的 Vault。
+    bootstrapStage: "storage-onboarding",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "import"

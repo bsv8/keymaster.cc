@@ -63,9 +63,10 @@ import {
   useI18n,
   usePluginHost
 } from "@keymaster/runtime";
-import { useCapability } from "webloom-framework/react";
+import { useOptionalCapability } from "webloom-framework/react";
 import {
   KeyPersistedButActivationFailedError,
+  type KeyImportMaterial,
   type KeyImportResult,
   type KeyImporter,
   type VaultService
@@ -121,12 +122,31 @@ export interface FirstTimeImportWizardProps {
   onCancel(): void;
   /** 初始设置页已收集的统一密码；提供后不再重复显示 Vault 密码步骤。 */
   vaultPassword?: string;
-  /** 首把 Key 已导入并激活。 */
-  onComplete?(): void;
+  /**
+   * 首把 Key 已导入并激活；在 InitialSetupPage 模式下回调只返回内存草稿，
+   * 不调用 Vault RPC，真正持久化由最终确认页的 Storage 事务完成。
+   */
+  onComplete?(draft?: InitialSetupImportedKeyDraft): void;
+}
+
+/** importer 解析后的首 Key 草稿；不包含桶密码或导入源密码。 */
+export interface InitialSetupImportedKeyDraft {
+  /** 页面显示标签。 */
+  label: string;
+  /** 临时私钥材料，只在初始化最终提交前留在内存。 */
+  material: KeyImportMaterial;
+  /** importer 识别出的格式。 */
+  format: string;
+  /** importer 身份，用于公开来源说明。 */
+  source?: string;
+  /** 默认公开能力。 */
+  capabilities: string[];
 }
 
 export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: FirstTimeImportWizardProps) {
-  const vault = useCapability<VaultService>("vault.service");
+  // 首次 Storage 初始化时 Vault 还没有安装；导入步骤只负责解析并把
+  // 内存草稿交还给父页面，不能因为缺少 vault.service 让整个向导 fatal。
+  const vault = useOptionalCapability<VaultService>("vault.service");
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
@@ -232,6 +252,25 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
   async function finish() {
     if (!state.importState.result) return;
 
+    // InitialSetupPage 模式只把解析结果交还父页面；这里绝不创建空 Vault，
+    // 也不写入 keys/、Hold 或目录。父页面会在最终确认时调用单一事务入口。
+    if (vaultPassword && onComplete) {
+      const parsed = state.importState.result;
+      const label = state.label.trim() || `key-${Date.now()}`;
+      onComplete({
+        label,
+        material: {
+          hex: parsed.material.hex,
+          ...(parsed.material.wif === undefined ? {} : { wif: parsed.material.wif })
+        },
+        format: parsed.detectedFormat,
+        ...(importer?.id === undefined ? {} : { source: importer.id }),
+        capabilities: ["p2pkh"]
+      });
+      dispatch({ type: "reset" });
+      return;
+    }
+
     // 硬切换 011：根据 useSamePassword 显式选择最终的 vaultPassword：
     //   - useSamePassword === true ⇒ 复用 resolvedImportPassword。
     //   - useSamePassword === false ⇒ 用户新设密码。
@@ -274,6 +313,17 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
         return;
       }
       finalVaultPassword = state.vaultPasswordDraft;
+    }
+
+    if (!vault) {
+      dispatch({
+        type: "import",
+        action: {
+          type: "parse-failure",
+          error: t("shell.locked.createInitialKeyFailed", { defaultValue: "钱包服务尚未就绪" })
+        }
+      });
+      return;
     }
 
     dispatch({ type: "import", action: { type: "parse-start" } });
@@ -615,7 +665,7 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
         {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
         <div className="first-time-import__actions">
           <Button onClick={vaultPassword ? finish : gotoPassword} loading={state.importState.busy} disabled={!parsed || (Boolean(vaultPassword) && !state.label.trim())}>
-            {vaultPassword ? t("shell.import.wizard.confirm", { defaultValue: "导入这把 Key" }) : t("common.action.next", { defaultValue: "下一步" })}
+            {vaultPassword ? t("shell.import.wizard.confirmInitial", { defaultValue: "使用这把 Key" }) : t("common.action.next", { defaultValue: "下一步" })}
           </Button>
           <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
             {t("common.action.back", { defaultValue: "返回" })}

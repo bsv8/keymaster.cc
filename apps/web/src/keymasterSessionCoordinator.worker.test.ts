@@ -4,7 +4,7 @@ import {
   hexToBytes,
   vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, JSONValue, KeymasterRemoteServicePortControlMessage as RemoteServicePortControlMessage, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, KeymasterRemoteServicePortControlMessage as RemoteServicePortControlMessage, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
 import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -97,6 +97,8 @@ import {
   __testFailNextCoordinatorMetaPersist,
   __testFailAfterCatalogBindingPublish,
   __testSetLocalStorageBridgeOverride,
+  __testInitialSetupBucketId,
+  __testPrepareInitialSetup,
   __testInstallCatalogLocalBinding,
   __testReleaseCatalogLocalBinding,
   __testSwitchCatalogBucket,
@@ -119,6 +121,7 @@ import {
   __testUnlock,
   __testUpdateScheduleSettings
 } from "./keymasterSessionCoordinator.worker.js";
+import { __testParseInitialSetupRecoveryRecord } from "./keymasterSessionCoordinatorClient.js";
 import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageLike, LocalStorageLocks } from "@keymaster/platform-storage";
@@ -184,6 +187,37 @@ async function makeEncryptedLocalCatalogEntry(
   }
 }
 
+async function makeEncryptedS3CatalogEntry(
+  bucketId: string,
+  label: string,
+  password: string,
+): Promise<StorageBucketCatalogEntryV2> {
+  const context = await createBucketCryptoContext(password);
+  try {
+    const encryptedConfig = await encryptBucketConfig({
+      kind: "s3",
+      endpoint: "https://objects.example.test",
+      region: "us-east-1",
+      bucket: "same-physical-target",
+      accessKeyId: "access",
+      secretAccessKey: "secret",
+    } satisfies StorageBucketConnectionConfigV1, context);
+    return {
+      bucketId,
+      label,
+      backend: "s3",
+      configRevision: 2,
+      keyDerivation: { ...context.keyDerivation },
+      encryptedConfig,
+      snapshotRevision: 1,
+      createdAt: 1,
+      updatedAt: 1
+    };
+  } finally {
+    context.dispose();
+  }
+}
+
 function makeCatalogBridgeFixture(current: StorageBucketCatalogEntryV2, target: StorageBucketCatalogEntryV2) {
   const storage = new CatalogBridgeStorage();
   const state = {
@@ -213,6 +247,10 @@ function makeCatalogBridgeFixture(current: StorageBucketCatalogEntryV2, target: 
       return { type: "catalog", bucket: selected };
     }
     if (input.type === "catalog-update") throw new Error("catalog-update is not used by this fixture");
+    if (input.type === "catalog-commit") throw new Error("catalog-commit is not used by this fixture");
+    if (input.type !== "get" && input.type !== "list" && input.type !== "put" && input.type !== "delete") {
+      throw new Error(`unsupported bridge request: ${input.type}`);
+    }
 
     const provider = createLocalStorageBucketProvider({
       storage,
@@ -231,6 +269,59 @@ function makeCatalogBridgeFixture(current: StorageBucketCatalogEntryV2, target: 
     }
   };
   return { state, bridge };
+}
+
+function makeInitialSetupWorkerBridge(initialCatalog: StorageCatalogV2 = { format: "keymaster.storage.catalog", version: 2, buckets: [] }) {
+  const storage = new CatalogBridgeStorage();
+  let catalog: StorageCatalogV2 = structuredClone(initialCatalog);
+  const recovery = new Map<string, InitialSetupRecoveryRecordV1>();
+  const events: string[] = [];
+  const conflict = (message: string): Error & { code: string } => Object.assign(new Error(message), { code: "storage_conflict" });
+  const recoveryRecords = (): InitialSetupRecoveryRecordV1[] => [...recovery.values()]
+    .map((record) => __testParseInitialSetupRecoveryRecord(structuredClone(record)));
+  const bridge = async (input: LocalStorageBridgeRequest): Promise<LocalStorageBridgeResponse> => {
+    if (input.type === "catalog-read") return { type: "catalog-state", catalog: structuredClone(catalog) };
+    if (input.type === "initial-setup-recovery-list") return { type: "initial-setup-recovery", records: recoveryRecords() };
+    if (input.type === "initial-setup-recovery-write") {
+      const checked = __testParseInitialSetupRecoveryRecord(structuredClone(input.record));
+      recovery.set(checked.transactionId, structuredClone(checked));
+      return { type: "initial-setup-recovery", records: recoveryRecords() };
+    }
+    if (input.type === "initial-setup-recovery-delete") {
+      recovery.delete(input.transactionId);
+      return { type: "initial-setup-recovery", records: recoveryRecords() };
+    }
+    if (input.type === "catalog-commit") {
+      if (input.rollback) {
+        events.push("catalog-rollback");
+        if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return { type: "catalog", bucket: input.targetBucket };
+        if (catalog.selectedBucketId !== input.targetBucket.bucketId || catalog.buckets.length !== 1 || JSON.stringify(catalog.buckets[0]) !== JSON.stringify(input.targetBucket)) {
+          throw conflict("catalog rollback conflict");
+        }
+        catalog = { format: "keymaster.storage.catalog", version: 2, buckets: [] };
+        return { type: "catalog", bucket: input.targetBucket };
+      }
+      if (catalog.buckets.length > 0 || catalog.selectedBucketId !== undefined) {
+        if (catalog.selectedBucketId === input.targetBucket.bucketId && catalog.buckets.length === 1 && JSON.stringify(catalog.buckets[0]) === JSON.stringify(input.targetBucket)) return { type: "catalog", bucket: input.targetBucket };
+        throw conflict("catalog commit conflict");
+      }
+      catalog = { format: "keymaster.storage.catalog", version: 2, selectedBucketId: input.targetBucket.bucketId, buckets: [structuredClone(input.targetBucket)] };
+      return { type: "catalog", bucket: input.targetBucket };
+    }
+    if (input.type === "get" || input.type === "list" || input.type === "put" || input.type === "delete") {
+      if (input.type === "delete") events.push("delete");
+      const provider = createLocalStorageBucketProvider({ storage, locks: catalogBridgeLocks, bucketId: input.bucketId, bucketGeneration: input.bucketGeneration });
+      try {
+        if (input.type === "get") return { type: "object", object: await provider.get(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {}) };
+        if (input.type === "list") return { type: "list", ...(await provider.list(input)) } as LocalStorageBridgeResponse;
+        if (input.type === "put") return { type: "write", ...(await provider.put(input.path, input.bytes, input.condition ?? {})) };
+        await provider.delete(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {});
+        return { type: "void" };
+      } finally { provider.dispose(); }
+    }
+    throw new Error(`unsupported initial setup bridge request: ${input.type}`);
+  };
+  return { storage, recovery, events, getCatalog: () => structuredClone(catalog), bridge };
 }
 
 describe("Coordinator ChannelProtocol 私信编码边界", () => {
@@ -1576,6 +1667,428 @@ describe("Session Coordinator worker", () => {
       state: "blocked",
       blockedReason: { fallback: "JungleBus is unavailable" }
     });
+  });
+});
+
+describe("Session Coordinator initial setup transaction", () => {
+  const makePlan = (transactionId: string): InitialSetupPlan => ({
+    transactionId,
+    bucketLabel: "首个本地桶",
+    backend: "local",
+    connection: { kind: "local" },
+    bucketPassword: "initial-setup-password",
+    firstKey: { kind: "generate", label: "主 Key", capabilities: ["p2pkh"] },
+  });
+
+  const makeSucceededRecord = (entry: StorageBucketCatalogEntryV2, transactionId: string): InitialSetupRecoveryRecordV1 => ({
+    format: "keymaster.storage.initial-setup-recovery",
+    version: 1,
+    transactionId,
+    bucketId: entry.bucketId,
+    configRevision: entry.configRevision,
+    snapshotRevision: entry.snapshotRevision,
+    backend: "local",
+    phase: "complete",
+    catalog: "committed",
+    runtimeInstalled: true,
+    cleanup: "confirmed",
+    status: "succeeded",
+    success: {
+      bucketLabel: entry.label,
+      publicKeyHex: bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true)),
+      label: "恢复的主 Key",
+      address: "recovery-address",
+      format: "hex",
+      capabilities: ["p2pkh"],
+      createdAt: "2026-09-08T00:00:00.000Z",
+    },
+    updatedAt: 1,
+  });
+
+  beforeEach(async () => {
+    await __testReleaseCatalogLocalBinding();
+    __testResetState();
+    __testPrepareInitialSetup();
+  });
+
+  afterEach(async () => {
+    await __testReleaseCatalogLocalBinding();
+    __testResetState();
+  });
+
+  it("在真实 Coordinator 路径中提交 Local 桶、Hold、Vault 和首 Key", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const plan = makePlan("initial-setup-commit-001");
+
+    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
+    expect(response.ack.status).toBe("ok");
+    const result = response.operationResult as InitialSetupResult;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.summary);
+    expect(fixture.getCatalog()).toMatchObject({
+      selectedBucketId: result.bucket.bucketId,
+      buckets: [result.bucket],
+    });
+    expect(result.bucket.snapshotRevision).toBeGreaterThan(0);
+    expect(__testGetSnapshot()).toMatchObject({
+      storageBucketId: result.bucket.bucketId,
+      vaultStatus: "unlocked",
+      activePublicKeyHex: result.firstKey.publicKeyHex,
+    });
+    expect(fixture.storage.length).toBeGreaterThan(0);
+    expect(plan.bucketPassword).toBe("");
+  }, 20_000);
+
+  it("运行态安装后的 Coordinator meta 失败会回滚目录、Root 和候选对象", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const plan = makePlan("initial-setup-runtime-failure-001");
+    __testFailNextCoordinatorMetaPersist();
+
+    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
+    expect(response.ack.status).toBe("ok");
+    expect(response.operationResult).toMatchObject({ ok: false, error: { phase: "runtime", rollback: "confirmed" } });
+    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    expect(fixture.storage.length).toBe(0);
+    expect(__testGetSnapshot()).toMatchObject({ vaultStatus: "uninitialized" });
+    expect(__testGetSnapshot().storageBucketId).toBeUndefined();
+    expect(plan.bucketPassword).toBe("");
+  }, 20_000);
+
+  it("响应丢失后按同一 transactionId 返回已提交结果，不重新暂存第二把 Key", async () => {
+    const transactionId = "initial-setup-recovery-001";
+    const entry = await makeEncryptedLocalCatalogEntry("setup-recovery-001", "已提交首桶", "recovery-password");
+    const fixture = makeInitialSetupWorkerBridge({
+      format: "keymaster.storage.catalog",
+      version: 2,
+      selectedBucketId: entry.bucketId,
+      buckets: [entry],
+    });
+    fixture.recovery.set(transactionId, makeSucceededRecord(entry, transactionId));
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
+    expect(response.ack.status).toBe("ok");
+    expect(response.operationResult).toMatchObject({
+      ok: true,
+      bucket: entry,
+      firstKey: { label: "恢复的主 Key", format: "hex" },
+    });
+    expect(fixture.storage.length).toBe(0);
+    expect(__testGetSnapshot().storageBucketId).toBeUndefined();
+  });
+
+  it("成功恢复记录无法验证目录时返回不可重试结果，不执行新计划", async () => {
+    const transactionId = "initial-setup-recovery-mismatch-001";
+    const entry = await makeEncryptedLocalCatalogEntry("setup-recovery-mismatch-001", "缺失目录首桶", "recovery-password");
+    const fixture = makeInitialSetupWorkerBridge();
+    fixture.recovery.set(transactionId, makeSucceededRecord(entry, transactionId));
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
+    expect(response.ack.status).toBe("ok");
+    expect(response.operationResult).toMatchObject({
+      ok: false,
+      error: { phase: "runtime", rollback: "not-started", code: "storage_conflict" },
+    });
+    expect((response.operationResult as InitialSetupResult).ok ? "" : (response.operationResult as Extract<InitialSetupResult, { ok: false }>).error.diagnostic)
+      .toContain("succeeded-record-catalog-mismatch");
+    expect(fixture.storage.length).toBe(0);
+    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+  });
+
+  it("恢复记录读取失败时 fail-closed，不把未知 transactionId 当成新事务重跑", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    __testSetLocalStorageBridgeOverride(async (input) => {
+      if (input.type === "initial-setup-recovery-list") throw new Error("recovery bridge unavailable");
+      return fixture.bridge(input);
+    });
+    const plan = makePlan("initial-setup-recovery-unavailable-001");
+
+    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
+    expect(response.ack.status).toBe("ok");
+    expect(response.operationResult).toMatchObject({ ok: false, error: { code: "storage_unavailable", rollback: "not-started" } });
+    expect(fixture.storage.length).toBe(0);
+    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    expect(plan.bucketPassword).toBe("");
+  });
+
+  it("Worker 端也阻止绕过页面创建新的初始化事务", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    const blockingEntry = await makeEncryptedLocalCatalogEntry("setup-blocking-recovery-001", "待恢复桶", "recovery-password");
+    const blockingTransactionId = "initial-setup-blocking-recovery-001";
+    fixture.recovery.set(blockingTransactionId, {
+      ...makeSucceededRecord(blockingEntry, blockingTransactionId),
+      phase: "rollback",
+      status: "failed",
+      cleanup: "unconfirmed",
+      success: undefined,
+      error: {
+        title: "初始化失败",
+        summary: "候选数据尚未清理",
+        action: "请先重试清理",
+        code: "storage_provider_error",
+        incidentId: "blocking-recovery-incident",
+        transactionId: blockingTransactionId,
+        diagnostic: "diagnostic",
+        phase: "rollback",
+        rollback: "unconfirmed",
+      },
+      updatedAt: Date.now(),
+    });
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const plan = makePlan("initial-setup-bypass-block-001");
+    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
+    expect(response.ack.status).toBe("ok");
+    expect(response.operationResult).toMatchObject({
+      ok: false,
+      error: { code: "storage_conflict", rollback: "not-started" },
+    });
+    expect(fixture.storage.length).toBe(0);
+    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+  });
+
+  it("使用完整 transactionId 的 SHA-256 生成不碰撞的初始化桶 ID", () => {
+    const prefix = "a".repeat(112);
+    const left = prefix + "-winner";
+    const right = prefix + "-loser";
+    expect(__testInitialSetupBucketId(left)).toHaveLength(70);
+    expect(__testInitialSetupBucketId(left)).toBe(__testInitialSetupBucketId(left));
+    expect(__testInitialSetupBucketId(left)).not.toBe(__testInitialSetupBucketId(right));
+  });
+
+  it.each(["local", "s3"] as const)("旧格式 %s 桶 ID 与赢家目录同版本时进入人工检查，不清理赢家", async (backend) => {
+    const winnerTransactionId = "a".repeat(112) + "-winner";
+    const loserTransactionId = "a".repeat(112) + "-loser";
+    const legacyCollidingBucketId = "setup-" + "a".repeat(112);
+    const winnerBase = backend === "s3"
+      ? await makeEncryptedS3CatalogEntry(legacyCollidingBucketId, "赢家 S3 桶", "recovery-password")
+      : await makeEncryptedLocalCatalogEntry(legacyCollidingBucketId, "赢家 Local 桶", "recovery-password");
+    const winner = { ...winnerBase, configRevision: 1, snapshotRevision: 1 };
+    const fixture = makeInitialSetupWorkerBridge({
+      format: "keymaster.storage.catalog",
+      version: 2,
+      selectedBucketId: winner.bucketId,
+      buckets: [winner],
+    });
+    fixture.recovery.set(loserTransactionId, {
+      format: "keymaster.storage.initial-setup-recovery",
+      version: 1,
+      transactionId: loserTransactionId,
+      bucketId: legacyCollidingBucketId,
+      configRevision: winner.configRevision,
+      snapshotRevision: winner.snapshotRevision,
+      backend,
+      phase: "rollback",
+      catalog: "committed",
+      runtimeInstalled: false,
+      cleanup: "unconfirmed",
+      status: "failed",
+      error: {
+        title: "初始化失败",
+        summary: "需要清理候选数据",
+        action: "重试清理",
+        code: "storage_provider_error",
+        incidentId: "s3-collision-incident",
+        transactionId: loserTransactionId,
+        diagnostic: "diagnostic",
+        phase: "rollback",
+        rollback: "unconfirmed",
+      },
+      updatedAt: Date.now(),
+    });
+    const sentinelPath = `keymaster.bucket.${winner.bucketId}.candidate/winner-sentinel`;
+    const sentinelValue = btoa("winner-sentinel");
+    fixture.storage.setItem(sentinelPath, sentinelValue);
+    const catalogBeforeCleanup = fixture.getCatalog();
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const response = await __testDispatchStorageControl({
+      type: "initial-setup-cleanup",
+      transactionId: loserTransactionId,
+      password: "recovery-password",
+      ...(backend === "s3" ? {
+        connection: {
+          kind: "s3" as const,
+          endpoint: "https://objects.example.test",
+          region: "us-east-1",
+          bucket: "same-physical-target",
+          accessKeyId: "access",
+          secretAccessKey: "secret",
+        },
+      } : {}),
+    });
+    expect(response.operationResult).toMatchObject({
+      status: "cleanup-required",
+      error: { code: "storage_conflict" },
+    });
+    expect(fixture.events).not.toContain("delete");
+    expect(fixture.getCatalog()).toEqual(catalogBeforeCleanup);
+    expect(fixture.storage.getItem(sentinelPath)).toBe(sentinelValue);
+    expect(__testInitialSetupBucketId(winnerTransactionId)).not.toBe(__testInitialSetupBucketId(loserTransactionId));
+  });
+
+  it("清理接口区分已成功初始化、已确认清理和仍需清理", async () => {
+    const entry = await makeEncryptedLocalCatalogEntry("recovery-result-001", "恢复结果桶", "recovery-password");
+    const fixture = makeInitialSetupWorkerBridge({
+      format: "keymaster.storage.catalog",
+      version: 2,
+      selectedBucketId: entry.bucketId,
+      buckets: [entry],
+    });
+    const succeeded = makeSucceededRecord(entry, "initial-setup-recovery-success-result-001");
+    fixture.recovery.set(succeeded.transactionId, succeeded);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const succeededResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: succeeded.transactionId });
+    expect(succeededResponse.operationResult).toMatchObject({
+      status: "setup-succeeded",
+      result: { ok: true, bucket: entry, firstKey: { label: "恢复的主 Key" } },
+    });
+
+    const pending = {
+      ...succeeded,
+      transactionId: "initial-setup-recovery-pending-result-001",
+      bucketId: "recovery-pending-result-001",
+      phase: "rollback" as const,
+      catalog: "empty" as const,
+      cleanup: "not-started" as const,
+      status: "pending" as const,
+      success: undefined,
+      error: undefined,
+    };
+    fixture.recovery.set(pending.transactionId, pending);
+    const cleanupResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: pending.transactionId });
+    expect(cleanupResponse.operationResult).toEqual({ status: "cleanup-confirmed" });
+  });
+
+  it("真实账本校验下恢复清理先撤销目录引用，再删除候选对象", async () => {
+    const entry = await makeEncryptedLocalCatalogEntry(__testInitialSetupBucketId("initial-setup-recovery-order-001"), "清理顺序桶", "recovery-password");
+    const fixture = makeInitialSetupWorkerBridge({
+      format: "keymaster.storage.catalog",
+      version: 2,
+      selectedBucketId: entry.bucketId,
+      buckets: [entry],
+    });
+    const record = {
+      ...makeSucceededRecord(entry, "initial-setup-recovery-order-001"),
+      phase: "rollback" as const,
+      status: "failed" as const,
+      cleanup: "unconfirmed" as const,
+      success: undefined,
+      error: {
+        title: "初始化失败",
+        summary: "需要清理候选数据",
+        action: "重试清理",
+        code: "storage_provider_error",
+        incidentId: "recovery-order-incident",
+        transactionId: "initial-setup-recovery-order-001",
+        diagnostic: "diagnostic",
+        phase: "runtime" as const,
+        rollback: "unconfirmed" as const,
+      },
+    } satisfies InitialSetupRecoveryRecordV1;
+    fixture.recovery.set(record.transactionId, record);
+    fixture.storage.setItem(`keymaster.bucket.${entry.bucketId}.candidate`, btoa("candidate"));
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const response = await __testDispatchStorageControl({
+      type: "initial-setup-cleanup",
+      transactionId: record.transactionId,
+      password: "recovery-password",
+    });
+    expect(response.operationResult).toEqual({ status: "cleanup-confirmed" });
+    expect(fixture.events.indexOf("catalog-rollback")).toBeGreaterThanOrEqual(0);
+    expect(fixture.events.indexOf("delete")).toBeGreaterThan(fixture.events.indexOf("catalog-rollback"));
+    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    expect(fixture.storage.length).toBe(0);
+    expect(fixture.recovery.get(record.transactionId)).toMatchObject({ status: "failed", cleanup: "confirmed", error: expect.any(Object) });
+  });
+
+  it("S3 恢复清理拒绝未匹配物理目标，不触碰候选对象", async () => {
+    const transactionId = "initial-setup-recovery-s3-fingerprint-001";
+    const fixture = makeInitialSetupWorkerBridge();
+    fixture.recovery.set(transactionId, {
+      format: "keymaster.storage.initial-setup-recovery",
+      version: 1,
+      transactionId,
+      bucketId: "recovery-s3-fingerprint-001",
+      configRevision: 1,
+      snapshotRevision: 0,
+      backend: "s3",
+      connectionFingerprint: "a".repeat(64),
+      phase: "rollback",
+      catalog: "empty",
+      runtimeInstalled: false,
+      cleanup: "unconfirmed",
+      status: "failed",
+      error: {
+        title: "初始化失败",
+        summary: "需要清理候选数据",
+        action: "重试清理",
+        code: "storage_provider_error",
+        incidentId: "s3-fingerprint-incident",
+        transactionId,
+        diagnostic: "diagnostic",
+        phase: "rollback",
+        rollback: "unconfirmed",
+      },
+      updatedAt: Date.now(),
+    });
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const response = await __testDispatchStorageControl({
+      type: "initial-setup-cleanup",
+      transactionId,
+      connection: {
+        kind: "s3",
+        endpoint: "https://objects.example.test",
+        region: "us-east-1",
+        bucket: "different-bucket",
+        accessKeyId: "access",
+        secretAccessKey: "secret",
+      },
+    });
+    expect(response.operationResult).toMatchObject({ status: "cleanup-required", error: { code: "storage_conflict" } });
+    expect(fixture.events).not.toContain("delete");
+  });
+
+  it("只在确认旧半截桶没有 Key、owner 和业务对象时允许清理", async () => {
+    const entry = await makeEncryptedLocalCatalogEntry("legacy-empty-001", "旧版半截桶", "legacy-password");
+    const fixture = makeInitialSetupWorkerBridge({
+      format: "keymaster.storage.catalog",
+      version: 2,
+      selectedBucketId: entry.bucketId,
+      buckets: [entry],
+    });
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    await __testInstallCatalogLocalBinding(entry);
+
+    const inspected = await __testDispatchStorageControl({ type: "initial-setup-legacy-inspect", password: "legacy-password" });
+    expect(inspected.operationResult).toEqual({ status: "safe-to-clean", bucket: { bucketId: entry.bucketId, label: entry.label, backend: "local" } });
+    const cleaned = await __testDispatchStorageControl({ type: "initial-setup-legacy-cleanup", password: "legacy-password" });
+    expect(cleaned).toMatchObject({ ack: { status: "ok" }, operationResult: { ok: true } });
+    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    expect(fixture.storage.length).toBe(0);
+  });
+
+  it("发现旧桶存在 owner namespace 时拒绝自动清理", async () => {
+    const entry = await makeEncryptedLocalCatalogEntry("legacy-owner-001", "含 owner 的旧桶", "legacy-password");
+    const fixture = makeInitialSetupWorkerBridge({
+      format: "keymaster.storage.catalog",
+      version: 2,
+      selectedBucketId: entry.bucketId,
+      buckets: [entry],
+    });
+    fixture.storage.setItem(`keymaster.bucket.${entry.bucketId}.02${"ab".repeat(32)}/owner-data`, btoa("business"));
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    await __testInstallCatalogLocalBinding(entry);
+
+    const inspected = await __testDispatchStorageControl({ type: "initial-setup-legacy-inspect", password: "legacy-password" });
+    expect(inspected.operationResult).toMatchObject({ status: "unsafe", bucket: { bucketId: entry.bucketId } });
+    expect((inspected.operationResult as { status: string; reason?: string }).reason).toContain("owner namespace");
+    expect(fixture.getCatalog()).toMatchObject({ selectedBucketId: entry.bucketId, buckets: [entry] });
   });
 });
 

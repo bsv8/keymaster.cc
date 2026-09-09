@@ -95,7 +95,7 @@ import {
   normalizeMsFileReadConcurrencySettings,
   SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
-import { vaultKeyRepository, createVaultKeyRepository, configureVaultKeyRepository, type VaultMetaRecord, type VaultKeyRecord, type VaultKeyRepository, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, encryptVerifier, buildVaultMeta, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
+import { vaultKeyRepository, createVaultKeyRepository, configureVaultKeyRepository, type VaultMetaRecord, type VaultKeyRecord, type VaultKeyRepository, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, encryptVerifier, buildVaultMeta, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary, generatePrivateKeyHex as generateValidPrivateKeyHex } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, serialize as keyholdSerialize, recommendedParameters as keyholdRecommendedParameters, unlock as keyholdUnlock } from "keyhold";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
@@ -131,7 +131,7 @@ import { createBsv21CoordinatorTask, BSV21_STORAGE_ID, BSV21_SCHEMA_VERSION } fr
 import { createStasCoordinatorTask, STAS_STORAGE_ID, STAS_SCHEMA_VERSION } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService, CONTACTS_STORAGE_ID, CONTACTS_SCHEMA_VERSION } from "@keymaster/plugin-contacts/coordinator";
-import type { KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, VaultService, WocService } from "@keymaster/contracts";
+import type { InitialSetupFirstKey, InitialSetupLegacyCleanupResult, InitialSetupLegacyInspection, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupResult, KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageCatalogV2, VaultService, WocService } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -144,8 +144,9 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
 } from "@keymaster/contracts";
-import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, openMultipartUploadRepository, STORAGE_SECRET_SCOPE, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, encryptStorageProfile, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageCatalogKeyIndexRepository, createStorageBucketManagementService, serializeBucketDocument, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
+import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, openMultipartUploadRepository, STORAGE_SECRET_SCOPE, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, encryptStorageProfile, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageCatalogKeyIndexRepository, createStorageBucketManagementService, serializeBucketDocument, createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeCandidateBucket, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
+import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 
 // Web Worker 直接复用 platform-storage 的 Hold 适配器，但不需要把
 // `keymaster-hold/browser` 作为应用层依赖暴露出来；该类型由加密函数的
@@ -981,6 +982,16 @@ let platformStorageReady = false;
 let storageBootstrapState: StorageBootstrapState | null = null;
 let storageBootstrapController: StorageBootstrapController | undefined;
 const storageHealthController = new StorageHealthController();
+/**
+ * 某些 Storage control 会在成功/失败后撤销当前 Root。若控制请求本身
+ * 仍持有最终 I/O lease，必须等 lease 的后置 authority 校验和释放完成后
+ * 再销毁 Root，否则请求结果会被错误地变成 storage error。
+ */
+let catalogBindingDiscardDeferred = false;
+/** 首次初始化暂存 Root 的所有权；失败事务不能触碰赢家的全局运行态。 */
+let initialSetupRuntimeOwner: { transactionId: string; bucketId: string; rootToken: object } | undefined;
+/** Worker 内缓存的公开恢复记录；权威副本由 Window bridge 持久化。 */
+const initialSetupRecoveryRecords = new Map<string, InitialSetupRecoveryRecordV1>();
 let coordinatorInitializationInProgress = false;
 /** Storage Profile 独立密钥；与 Vault password/session 完全分离。 */
 let storageProfileKey: CryptoKey | undefined;
@@ -1213,21 +1224,26 @@ async function createCatalogProviderForSwitch(
   input: StorageBucketCatalogEntryV2,
   password: string,
   bucketGeneration: number,
-  expectedSelectedBucketId: string,
+  expectedSelectedBucketId?: string,
+  cleanupOnly = false,
 ): Promise<StorageBucketProvider> {
   const entry = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [input] }).buckets[0]!;
   if (entry.backend === "local") {
     const candidateBucket: LocalStorageBridgeCandidateBucket = {
       bucket: entry,
-      expectedSelectedBucketId,
+      ...(expectedSelectedBucketId === undefined ? {} : { expectedSelectedBucketId }),
       bucketGeneration,
+      ...(expectedSelectedBucketId === undefined ? { initialSetup: true } : {}),
+      ...(cleanupOnly ? { cleanupOnly: true } : {}),
     };
     return createLocalStorageBucketProvider({
       bucketId: entry.bucketId,
       bucketGeneration,
-      bridge: (request) => request.type === "catalog-update" || request.type === "catalog-select"
+      bridge: (request) => request.type === "catalog-update" || request.type === "catalog-select" || request.type === "catalog-commit"
         ? requestLocalStorageBridge(request)
-        : requestLocalStorageBridge({ ...request, candidateBucket }),
+        : request.type === "get" || request.type === "list" || request.type === "put" || request.type === "delete"
+          ? requestLocalStorageBridge({ ...request, candidateBucket })
+          : Promise.reject(new StorageRuntimeError("storage_provider_error", "Local storage candidate request is invalid")),
     });
   }
   if (!password) throw new StorageRuntimeError("storage_identity_required", "Bucket password is required");
@@ -1407,11 +1423,13 @@ async function stageCatalogVaultSession(
 async function stageCatalogBucket(
   input: StorageBucketCatalogEntryV2,
   password: string,
-  expectedSelectedBucketId: string,
+  expectedSelectedBucketId: string | undefined,
   bucketGeneration: number,
+  options: { provider?: StorageBucketProvider } = {},
 ): Promise<StagedCatalogBucket> {
   const entry = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [input] }).buckets[0]!;
-  const provider = await createCatalogProviderForSwitch(entry, password, bucketGeneration, expectedSelectedBucketId);
+  const ownsProvider = options.provider === undefined;
+  const provider = options.provider ?? await createCatalogProviderForSwitch(entry, password, bucketGeneration, expectedSelectedBucketId);
   const rootToken = {};
   let candidatePublished = false;
   let keys: KeyValueStore | undefined;
@@ -1471,8 +1489,1218 @@ async function stageCatalogBucket(
     protocol?.close();
     state?.close();
     keys?.close();
-    provider.dispose();
+    if (ownsProvider) provider.dispose();
     throw error;
+  }
+}
+
+type InitialSetupFailure = Extract<InitialSetupResult, { ok: false }>;
+type InitialSetupPhase = NonNullable<InitialSetupFailure["error"]["phase"]>;
+
+function initialSetupRecoveryRecord(input: {
+  transactionId: string;
+  bucketId: string;
+  catalogEntryFingerprint?: string;
+  configRevision: number;
+  snapshotRevision: number;
+  backend: "local" | "s3";
+  connectionFingerprint?: string;
+  phase: InitialSetupPhase;
+  catalog: InitialSetupRecoveryRecordV1["catalog"];
+  runtimeInstalled: boolean;
+  cleanup: InitialSetupRecoveryRecordV1["cleanup"];
+  status: InitialSetupRecoveryRecordV1["status"];
+  success?: InitialSetupRecoverySuccessV1;
+  error?: InitialSetupFailure["error"];
+}): InitialSetupRecoveryRecordV1 {
+  return {
+    format: "keymaster.storage.initial-setup-recovery",
+    version: 1,
+    transactionId: input.transactionId,
+    bucketId: input.bucketId,
+    ...(input.catalogEntryFingerprint === undefined ? {} : { catalogEntryFingerprint: input.catalogEntryFingerprint }),
+    configRevision: input.configRevision,
+    snapshotRevision: input.snapshotRevision,
+    backend: input.backend,
+    ...(input.connectionFingerprint === undefined ? {} : { connectionFingerprint: input.connectionFingerprint }),
+    phase: input.phase,
+    catalog: input.catalog,
+    runtimeInstalled: input.runtimeInstalled,
+    cleanup: input.cleanup,
+    status: input.status,
+    ...(input.success === undefined ? {} : { success: structuredClone(input.success) }),
+    ...(input.error === undefined ? {} : { error: structuredClone(input.error) }),
+    updatedAt: Date.now(),
+  };
+}
+
+async function loadInitialSetupRecoveryRecords(): Promise<boolean> {
+  try {
+    const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-list" });
+    if (response.type !== "initial-setup-recovery") return false;
+    initialSetupRecoveryRecords.clear();
+    for (const record of response.records) initialSetupRecoveryRecords.set(record.transactionId, structuredClone(record));
+    return true;
+  } catch {
+    // 恢复记录只用于恢复/诊断，不得把正常的未配置入口升级成 Fatal。
+    // 但一旦账本读取失败，旧缓存也不能继续作为恢复事实使用；否则损坏
+    // 账本可能被误判为空，或旧缓存可能继续允许危险的清理/新事务。
+    initialSetupRecoveryRecords.clear();
+    return false;
+  }
+}
+
+async function listInitialSetupRecoveries(): Promise<InitialSetupRecoveryRecordV1[]> {
+  const loaded = await loadInitialSetupRecoveryRecords();
+  if (!loaded) throw new StorageRuntimeError("storage_unavailable", "Initial setup recovery records could not be read");
+  return [...initialSetupRecoveryRecords.values()]
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .map((record) => structuredClone(record));
+}
+
+async function persistInitialSetupRecoveryRecord(record: InitialSetupRecoveryRecordV1): Promise<void> {
+  const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-write", record });
+  if (response.type !== "initial-setup-recovery") throw new StorageRuntimeError("storage_unavailable", "Initial setup recovery record could not be saved");
+  initialSetupRecoveryRecords.clear();
+  for (const persisted of response.records) initialSetupRecoveryRecords.set(persisted.transactionId, structuredClone(persisted));
+}
+
+async function readInitialSetupCatalog(): Promise<StorageCatalogV2> {
+  const response = await requestLocalStorageBridge({ type: "catalog-read" });
+  if (response.type !== "catalog-state") throw new StorageRuntimeError("storage_unavailable", "Storage catalog bridge returned an invalid read result");
+  return response.catalog;
+}
+
+function recoverySuccessFromResult(bucket: StorageBucketCatalogEntryV2, result: Extract<InitialSetupResult, { ok: true }>): InitialSetupRecoverySuccessV1 {
+  return {
+    bucketLabel: bucket.label,
+    publicKeyHex: result.firstKey.publicKeyHex,
+    label: result.firstKey.label,
+    address: result.firstKey.address,
+    format: result.firstKey.format,
+    capabilities: [...result.firstKey.capabilities],
+    createdAt: result.firstKey.createdAt,
+    ...(result.firstKey.source === undefined ? {} : { source: result.firstKey.source }),
+  };
+}
+
+function initialSetupRecoveryUnavailable(
+  record: InitialSetupRecoveryRecordV1,
+  reason: string,
+  details: unknown,
+): InitialSetupFailure {
+  return initialSetupFailure(
+    "runtime",
+    new StorageRuntimeError("storage_conflict", reason),
+    "not-started",
+    record.transactionId,
+    details,
+  );
+}
+
+async function resultFromInitialSetupRecovery(record: InitialSetupRecoveryRecordV1): Promise<InitialSetupResult | undefined> {
+  if (record.status === "failed" && record.error) return { ok: false, error: structuredClone(record.error) };
+  if (record.status !== "succeeded" || !record.success) return undefined;
+  const catalog = await readInitialSetupCatalog();
+  const bucket = catalog.buckets.find((candidate) => candidate.bucketId === record.bucketId);
+  if (!bucket
+    || catalog.selectedBucketId !== record.bucketId
+    || bucket.backend !== record.backend
+    || bucket.configRevision !== record.configRevision
+    || bucket.snapshotRevision !== record.snapshotRevision) {
+    // 成功记录不能因为目录暂时不可验证而降级为“没有结果”，更不能让
+    // executeInitialSetupOnce 继续执行一份新计划并生成第二把 Key。
+    return initialSetupRecoveryUnavailable(
+      record,
+      "The recorded initial setup succeeded but its committed catalog entry could not be verified",
+      { recovery: "succeeded-record-catalog-mismatch" },
+    );
+  }
+  return {
+    ok: true,
+    bucket,
+    firstKey: {
+      publicKeyHex: record.success.publicKeyHex,
+      label: record.success.label,
+      address: record.success.address,
+      format: record.success.format,
+      capabilities: [...record.success.capabilities],
+      createdAt: record.success.createdAt,
+      ...(record.success.source === undefined ? {} : { source: record.success.source }),
+    },
+  };
+}
+
+function ownsInitialSetupRuntime(transactionId: string, rootToken: object | undefined): boolean {
+  return rootToken !== undefined
+    && initialSetupRuntimeOwner?.transactionId === transactionId
+    && initialSetupRuntimeOwner.rootToken === rootToken
+    && platformRootToken === rootToken;
+}
+
+type InitialSetupCatalogObservation =
+  | { kind: "empty"; catalog: StorageCatalogV2 }
+  | { kind: "own"; catalog: StorageCatalogV2 }
+  | { kind: "competing"; catalog: StorageCatalogV2 }
+  | { kind: "unknown"; error: unknown };
+
+async function observeInitialSetupCatalog(entry: StorageBucketCatalogEntryV2): Promise<InitialSetupCatalogObservation> {
+  try {
+    const catalog = await readInitialSetupCatalog();
+    if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return { kind: "empty", catalog };
+    const own = catalog.selectedBucketId === entry.bucketId
+      && catalog.buckets.length === 1
+      && sameStorageCatalogEntry(catalog.buckets[0]!, entry);
+    return own ? { kind: "own", catalog } : { kind: "competing", catalog };
+  } catch (error) {
+    return { kind: "unknown", error };
+  }
+}
+
+function initialSetupBucketId(transactionId: string): string {
+  // transactionId 是外部契约输入，不能通过有损替换/截断映射到物理命名空间；
+  // 完整 SHA-256 保留确定性，同时把碰撞概率降到密码学可接受范围。
+  const digest = bytesToHex(sha256Bytes(new TextEncoder().encode("keymaster.initial-setup-bucket.v1:" + transactionId)));
+  return "setup-" + digest;
+}
+
+function initialSetupCatalogEntryFingerprint(entry: StorageBucketCatalogEntryV2): string {
+  // 目录条目包含随机密文/盐，但字段语义固定；显式构造规范顺序，避免
+  // structured clone 或 JSON 字段顺序变化导致旧格式兼容校验失效。
+  const canonical = JSON.stringify({
+    bucketId: entry.bucketId,
+    label: entry.label,
+    backend: entry.backend,
+    configRevision: entry.configRevision,
+    keyDerivation: {
+      algorithm: entry.keyDerivation.algorithm,
+      passwordEncoding: entry.keyDerivation.passwordEncoding,
+      iterations: entry.keyDerivation.iterations,
+      outputLengthBits: entry.keyDerivation.outputLengthBits,
+      saltB64Url: entry.keyDerivation.saltB64Url,
+    },
+    encryptedConfig: {
+      cipher: {
+        algorithm: entry.encryptedConfig.cipher.algorithm,
+        keyLengthBits: entry.encryptedConfig.cipher.keyLengthBits,
+        ivB64Url: entry.encryptedConfig.cipher.ivB64Url,
+        tagLengthBits: entry.encryptedConfig.cipher.tagLengthBits,
+        ciphertextAndTagB64Url: entry.encryptedConfig.cipher.ciphertextAndTagB64Url,
+      },
+    },
+    snapshotRevision: entry.snapshotRevision,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+  });
+  return bytesToHex(sha256Bytes(new TextEncoder().encode(`keymaster.initial-setup-catalog-entry.v1:${canonical}`)));
+}
+
+/**
+ * 只绑定 S3 物理目标，不绑定任何访问秘密。恢复时必须用同一指纹验证
+ * 重新输入的连接，避免把同名候选前缀误删到另一个 S3 bucket。
+ */
+function initialSetupConnectionFingerprint(connection: StorageBucketConnectionConfigV1): string | undefined {
+  if (connection.kind !== "s3") return undefined;
+  const endpoint = connection.endpoint.trim().replace(/\/+$/u, "") || connection.endpoint.trim();
+  const target = JSON.stringify({
+    endpoint,
+    region: connection.region.trim(),
+    bucket: connection.bucket.trim(),
+    prefix: connection.prefix?.trim() ?? "",
+    forcePathStyle: connection.forcePathStyle === true,
+  });
+  return bytesToHex(sha256Bytes(new TextEncoder().encode(`keymaster.initial-setup-target.v1:${target}`)));
+}
+
+function validateInitialSetupPlan(plan: InitialSetupPlan): void {
+  if (!plan || typeof plan !== "object") throw new StorageRuntimeError("storage_provider_error", "Initial setup plan is invalid");
+  if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(plan.transactionId)) throw new StorageRuntimeError("storage_provider_error", "Initial setup transaction ID is invalid");
+  if (!plan.bucketLabel.trim() || plan.bucketLabel.trim().length > 128) throw new StorageRuntimeError("storage_provider_error", "Initial setup bucket label is invalid");
+  if (plan.backend !== "local" && plan.backend !== "s3") throw new StorageRuntimeError("storage_provider_error", "Initial setup backend is invalid");
+  if (plan.connection.kind !== plan.backend) throw new StorageRuntimeError("storage_provider_error", "Initial setup connection backend is inconsistent");
+  if (typeof plan.bucketPassword !== "string" || plan.bucketPassword.length < 8) throw new StorageRuntimeError("storage_identity_required", "Bucket password must contain at least 8 characters");
+  if (!plan.firstKey || (plan.firstKey.kind !== "generate" && plan.firstKey.kind !== "import")) throw new StorageRuntimeError("storage_provider_error", "Initial setup Key kind is invalid");
+  if (typeof plan.firstKey.label !== "string" || !plan.firstKey.label.trim() || plan.firstKey.label.trim().length > 128) throw new StorageRuntimeError("storage_provider_error", "Initial setup Key label is invalid");
+  if (!Array.isArray(plan.firstKey.capabilities) || plan.firstKey.capabilities.length === 0 || !plan.firstKey.capabilities.every((value) => typeof value === "string" && value.length > 0 && value.length <= 64)) {
+    throw new StorageRuntimeError("storage_provider_error", "Initial setup Key capabilities are invalid");
+  }
+  if (plan.connection.kind === "s3") {
+    if (!plan.connection.endpoint || !plan.connection.region || !plan.connection.bucket || !plan.connection.accessKeyId || !plan.connection.secretAccessKey) {
+      throw new StorageRuntimeError("storage_provider_error", "Initial setup S3 connection is incomplete");
+    }
+    try {
+      const endpoint = new URL(plan.connection.endpoint);
+      if (endpoint.protocol !== "https:") throw new Error();
+    } catch {
+      throw new StorageRuntimeError("storage_provider_error", "Initial setup S3 endpoint must be HTTPS");
+    }
+  }
+  if (plan.firstKey.kind === "import") {
+    if (!plan.firstKey.material || typeof plan.firstKey.material.hex !== "string" || !/^[0-9a-f]{64}$/iu.test(plan.firstKey.material.hex)) throw new StorageRuntimeError("storage_provider_error", "Initial setup imported Key material is invalid");
+    if (plan.firstKey.material.wif !== undefined && typeof plan.firstKey.material.wif !== "string") throw new StorageRuntimeError("storage_provider_error", "Initial setup imported WIF material is invalid");
+    if (typeof plan.firstKey.format !== "string" || !plan.firstKey.format.trim() || plan.firstKey.format.length > 128) throw new StorageRuntimeError("storage_provider_error", "Initial setup imported Key format is invalid");
+  }
+}
+
+function initialSetupKeyFormat(firstKey: InitialSetupFirstKey): string {
+  return firstKey.kind === "generate" ? "generated-secp256k1" : firstKey.format;
+}
+
+function initialSetupErrorCode(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.startsWith("storage_") ? code : "initial_setup_failed";
+}
+
+function initialSetupFailure(
+  phase: InitialSetupPhase,
+  error: unknown,
+  rollback: InitialSetupFailure["error"]["rollback"],
+  transactionId?: string,
+  details?: unknown,
+): InitialSetupFailure {
+  const code = initialSetupErrorCode(error);
+  const incidentId = `initial-${randomIdentifierSuffix()}`;
+  const message = error instanceof Error ? error.message : "Initial setup failed";
+  const summary = rollback === "confirmed"
+    ? "初始化未完成，本次暂存数据已回滚，可以修改表单后重试。"
+    : rollback === "unconfirmed"
+      ? "初始化未完成，清理结果尚未确认；请先重试清理，不要继续进入业务页面。"
+      : "初始化尚未完成，当前没有可用的完整运行态。";
+  return {
+    ok: false,
+    error: {
+      title: "无法完成初始化",
+      summary,
+      action: rollback === "unconfirmed" ? "检查存储权限或网络后重试清理。" : "检查参数和存储权限后重试。",
+      code,
+      incidentId,
+      ...(transactionId === undefined ? {} : { transactionId }),
+      phase,
+      rollback,
+      diagnostic: buildDiagnosticText({
+        phase,
+        code,
+        incidentId,
+        rollback,
+        occurredAt: new Date().toISOString(),
+        redactionVersion: "diagnostic-v2",
+        message,
+        details: details ?? { error: message },
+      }),
+    },
+  };
+}
+
+async function deleteInitialSetupProviderObjects(provider: StorageBucketProvider): Promise<void> {
+  // Provider 已经把 S3 prefix 或 Local bucketId 限定在本次候选命名空间；
+  // 删除循环每次从头列举，避免删除对象后复用旧 cursor 跳过条目。
+  for (let pass = 0; pass < 1024; pass += 1) {
+    const page = await provider.list({ limit: 100 });
+    if (page.objects.length === 0) return;
+    for (const object of page.objects) {
+      await provider.delete(object.path, object.etag ? { ifMatch: object.etag } : {});
+    }
+  }
+  throw new StorageRuntimeError("storage_limit_exceeded", "Initial setup cleanup exceeded the object limit");
+}
+
+async function createInitialSetupEntry(plan: InitialSetupPlan): Promise<StorageBucketCatalogEntryV2> {
+  const context = await createBucketCryptoContext(plan.bucketPassword);
+  try {
+    const encryptedConfig = await encryptBucketConfig(plan.connection, context);
+    const keyDerivation = { ...context.keyDerivation } as StorageKeyDerivationV1;
+    const now = Date.now();
+    return {
+      bucketId: initialSetupBucketId(plan.transactionId),
+      label: plan.bucketLabel.trim(),
+      backend: plan.backend,
+      configRevision: 1,
+      keyDerivation,
+      encryptedConfig,
+      snapshotRevision: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+  } finally {
+    context.dispose();
+  }
+}
+
+async function privateKeyForInitialSetup(firstKey: InitialSetupFirstKey): Promise<Uint8Array> {
+  const privateKey = firstKey.kind === "generate"
+    ? cryptoHexToBytes(generateValidPrivateKeyHex())
+    : cryptoHexToBytes(firstKey.material.hex);
+  try {
+    if (privateKey.byteLength !== 32) throw new Error("Private key must contain 32 bytes");
+    // getPublicKey 同时验证曲线标量范围；不把无效导入材料写入候选桶。
+    (await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(privateKey, true);
+    return privateKey;
+  } catch (error) {
+    privateKey.fill(0);
+    throw new StorageRuntimeError("storage_provider_error", error instanceof Error ? error.message : "Initial setup private key is invalid");
+  }
+}
+
+/**
+ * 首次初始化事务：Hold、Vault/index、Root 暂存完成后，最后才提交目录引用。
+ * 该函数只被 storage.control 的 initial-setup 调用，页面不得复制这条编排。
+ */
+async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<InitialSetupResult> {
+  let phase: InitialSetupPhase = "validate";
+  let entry: StorageBucketCatalogEntryV2 | undefined;
+  let provider: StorageBucketProvider | undefined;
+  let staged: StagedCatalogBucket | undefined;
+  let catalogCommitted = false;
+  let bindingAdopted = false;
+  let cleanupConfirmed = true;
+  let privateKey: Uint8Array | undefined;
+  let adoptedRootToken: object | undefined;
+  let recovery: InitialSetupRecoveryRecordV1 | undefined;
+  let recoveryCatalog: InitialSetupRecoveryRecordV1["catalog"] = "not-started";
+  let catalogDetachedForCleanup = false;
+  const bucketGeneration = 1;
+  const transactionId = typeof plan?.transactionId === "string" ? plan.transactionId : undefined;
+  const saveRecovery = async (input: {
+    phase: InitialSetupPhase;
+    catalog?: InitialSetupRecoveryRecordV1["catalog"];
+    runtimeInstalled?: boolean;
+    cleanup?: InitialSetupRecoveryRecordV1["cleanup"];
+    status?: InitialSetupRecoveryRecordV1["status"];
+    success?: InitialSetupRecoverySuccessV1;
+    error?: InitialSetupFailure["error"];
+  }): Promise<void> => {
+    if (!entry || !transactionId) return;
+    recoveryCatalog = input.catalog ?? recoveryCatalog;
+    recovery = initialSetupRecoveryRecord({
+      transactionId,
+      bucketId: entry.bucketId,
+      catalogEntryFingerprint: initialSetupCatalogEntryFingerprint(entry),
+      configRevision: entry.configRevision,
+      snapshotRevision: entry.snapshotRevision,
+      backend: entry.backend,
+      connectionFingerprint: recovery?.connectionFingerprint ?? initialSetupConnectionFingerprint(plan.connection),
+      phase: input.phase,
+      catalog: recoveryCatalog,
+      runtimeInstalled: input.runtimeInstalled ?? recovery?.runtimeInstalled ?? false,
+      cleanup: input.cleanup ?? recovery?.cleanup ?? "not-started",
+      status: input.status ?? recovery?.status ?? "pending",
+      ...(input.success === undefined ? {} : { success: input.success }),
+      ...(input.error === undefined ? {} : { error: input.error }),
+    });
+    await persistInitialSetupRecoveryRecord(recovery);
+  };
+  try {
+    validateInitialSetupPlan(plan);
+    if (platformRootStore || storageBootstrapState?.selectedBucket || coordinatorState.vaultStatus === "unlocked" || coordinatorState.vaultStatus === "locked") {
+      throw new StorageRuntimeError("storage_conflict", "Storage is already initialized");
+    }
+    phase = "stage";
+    entry = await createInitialSetupEntry(plan);
+    await saveRecovery({ phase, catalog: "not-started", cleanup: "not-started", status: "pending" });
+    privateKey = await privateKeyForInitialSetup(plan.firstKey);
+    const publicKeyHex = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(privateKey, true)).toLowerCase();
+    const keyFormat = initialSetupKeyFormat(plan.firstKey);
+    const keyCapabilities = [...plan.firstKey.capabilities];
+    const keySource = plan.firstKey.kind === "import" ? plan.firstKey.source : undefined;
+    const keyCreatedAt = new Date().toISOString();
+    // 暂存阶段需要写入 Hold/Vault；只有回滚清理时才会重新创建
+    // cleanupOnly Provider，避免并发赢家提交后失败事务仍持有写权限。
+    provider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration);
+
+    phase = "hold";
+    await saveRecovery({ phase });
+    const context = await deriveBucketCryptoContext(plan.bucketPassword, entry.keyDerivation);
+    let committed: Awaited<ReturnType<ReturnType<typeof createStorageHoldSnapshotRepository>["publish"]>>;
+    try {
+      const encryptedKey = await encryptBucketKey({ label: plan.firstKey.label.trim(), privateKey }, context);
+      const document = await sealBucketDocument(entry.encryptedConfig, [encryptedKey], context);
+      committed = await createStorageHoldSnapshotRepository(provider).publish({
+        document,
+        configRevision: entry.configRevision,
+        bucketGeneration,
+      });
+    } finally {
+      context.dispose();
+    }
+    privateKey.fill(0);
+    privateKey = undefined;
+    entry = { ...entry, snapshotRevision: committed.header.snapshotRevision };
+    await saveRecovery({ phase, catalog: "not-started" });
+    // Hold 发布会把 snapshotRevision 写回目录条目；Local Provider 在创建时
+    // 捕获了候选目录快照，因此必须在进入 Vault/Root 暂存前换成带最新
+    // revision 的候选 Provider。否则目录 commit 后页面桥会把后续 I/O
+    // 误判成“候选条目已失效”。旧 Provider 仍保留到新 Provider 创建成功，
+    // 这样新建 Provider 失败时，下面的回滚清理仍能访问已写入的 Hold。
+    const refreshedProvider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration);
+    provider.dispose();
+    provider = refreshedProvider;
+
+    phase = "stage";
+    await saveRecovery({ phase });
+    staged = await stageCatalogBucket(entry, plan.bucketPassword, undefined, bucketGeneration, { provider });
+    // Hold KeyRecord 只携带加密私钥和 label；格式、来源、能力属于公开展示
+    // 索引，必须在暂存 Root 内一次性写成首 Key 的真实元数据，不能让
+    // stageCatalogVaultSession 的兼容默认值（keymaster-hold）泄漏到成功结果。
+    await createStorageCatalogKeyIndexRepository(staged.keys).replaceKeys([{
+      format: "keymaster.storage.catalog-key-index",
+      publicKeyHex,
+      label: plan.firstKey.label.trim(),
+      address: deriveP2pkhAddress(publicKeyHex, "main"),
+      network: "main",
+      keyFormat,
+      capabilities: keyCapabilities,
+      createdAt: keyCreatedAt,
+      ...(keySource === undefined ? {} : { source: keySource }),
+    }]);
+    provider = undefined;
+
+    phase = "catalog-commit";
+    await saveRecovery({ phase, catalog: "not-started" });
+    const selected = await commitInitialStorageCatalogBucket(entry, bucketGeneration);
+    catalogCommitted = true;
+    await saveRecovery({ phase, catalog: "committed" });
+
+    phase = "runtime";
+    await saveRecovery({ phase, catalog: "committed" });
+    const nextKeyspaceGeneration = Math.max(coordinatorState.keyspaceGeneration + 1, staged.coordinatorMeta.generation + 1);
+    staged.coordinatorMeta.generation = nextKeyspaceGeneration;
+    staged.coordinatorMeta.selectedPublicKeyHex = staged.activePublicKeyHex;
+    adoptStagedCatalogBinding(staged);
+    bindingAdopted = true;
+    adoptedRootToken = staged.rootToken;
+    initialSetupRuntimeOwner = { transactionId: plan.transactionId, bucketId: entry.bucketId, rootToken: staged.rootToken };
+    storageBootstrapState = {
+      ...(storageBootstrapState ?? { selectedBackend: selected.backend }),
+      selectedBackend: selected.backend,
+      selectedProfileId: selected.bucketId,
+      selectedBucket: selected,
+    };
+    replaceCoordinatorMeta(staged.coordinatorMeta);
+    coordinatorState.keyspaceGeneration = nextKeyspaceGeneration;
+    coordinatorState.sessionEpoch = generateEpoch();
+    coordinatorState.vaultStatus = staged.vaultStatus;
+    coordinatorState.activePublicKeyHex = undefined;
+    coordinatorState.autoLockDeadline = undefined;
+    await persistCoordinatorMeta();
+    if (coordinatorState.taskRuntimes.size === 0) await registerCoordinatorTasks();
+    activateCoordinatorRootWorkerUnits();
+    const activePrivateKeyBytes = staged.activePrivateKeyBytes;
+    staged.activePrivateKeyBytes = undefined;
+    if (!staged.activePublicKeyHex || !activePrivateKeyBytes) throw new StorageRuntimeError("storage_provider_error", "Initial setup active Key is unavailable");
+    await enterUnlockedState(staged.activePublicKeyHex, activePrivateKeyBytes, "create-initial-key");
+    storageHealthController.setStatus("ready");
+    storageStartupFailure = false;
+    emitStorageState();
+    const firstKey = await currentCatalogKeyIndex().getKey(staged.activePublicKeyHex);
+    if (!firstKey) throw new StorageRuntimeError("storage_provider_error", "Initial setup public Key index is unavailable");
+    const result: Extract<InitialSetupResult, { ok: true }> = {
+      ok: true,
+      bucket: selected,
+      firstKey: {
+        publicKeyHex: firstKey.publicKeyHex,
+        label: firstKey.label,
+        address: firstKey.address ?? deriveP2pkhAddress(firstKey.publicKeyHex, "main"),
+        format: firstKey.keyFormat,
+        capabilities: [...firstKey.capabilities],
+        createdAt: firstKey.createdAt,
+        ...(firstKey.source === undefined ? {} : { source: firstKey.source }),
+      },
+    };
+    await saveRecovery({ phase: "complete", catalog: "committed", runtimeInstalled: true, cleanup: "confirmed", status: "succeeded", success: recoverySuccessFromResult(selected, result) });
+    return result;
+  } catch (error) {
+    const ownsRuntime = bindingAdopted && transactionId !== undefined && ownsInitialSetupRuntime(transactionId, adoptedRootToken);
+    if (ownsRuntime && (coordinatorState.vaultStatus === "unlocked" || coordinatorState.activePublicKeyHex)) {
+      await performGlobalLock("initial-setup-rollback").catch(() => undefined);
+    }
+    // 回滚前重新读取目录。并发赢家的目录不能被失败事务强行删除；
+    // 只有精确命中自己的条目才发送幂等 rollback。只有确认目录已经
+    // 撤销/为空/不含本候选条目后，才允许删除候选对象。
+    if (entry) {
+      const observation = await observeInitialSetupCatalog(entry);
+      if (observation.kind === "own") {
+        try {
+          await commitInitialStorageCatalogBucket(entry, bucketGeneration, true);
+          catalogCommitted = false;
+          recoveryCatalog = "rolled-back";
+          catalogDetachedForCleanup = true;
+        } catch (rollbackError) {
+          const afterRollback = await observeInitialSetupCatalog(entry);
+          if (afterRollback.kind === "empty") {
+            catalogCommitted = false;
+            recoveryCatalog = "empty";
+            catalogDetachedForCleanup = true;
+          } else if (afterRollback.kind === "competing") {
+            const stillReferenced = afterRollback.catalog.buckets.some((candidate) => candidate.bucketId === entry!.bucketId && sameStorageCatalogEntry(candidate, entry!));
+            if (stillReferenced) {
+              cleanupConfirmed = false;
+              recoveryCatalog = "unknown";
+            } else {
+              // 另一个事务已赢得目录；这是 CAS 竞争，不是回滚未确认。
+              catalogCommitted = false;
+              recoveryCatalog = "competing";
+              catalogDetachedForCleanup = true;
+            }
+          } else {
+            cleanupConfirmed = false;
+            recoveryCatalog = "unknown";
+            void rollbackError;
+          }
+        }
+      } else if (observation.kind === "empty") {
+        recoveryCatalog = "empty";
+        catalogDetachedForCleanup = true;
+      } else if (observation.kind === "competing") {
+        const stillReferenced = observation.catalog.buckets.some((candidate) => candidate.bucketId === entry!.bucketId && sameStorageCatalogEntry(candidate, entry!));
+        recoveryCatalog = stillReferenced ? "unknown" : "competing";
+        catalogDetachedForCleanup = !stillReferenced;
+      } else {
+        cleanupConfirmed = false;
+        recoveryCatalog = "unknown";
+      }
+    } else {
+      catalogDetachedForCleanup = true;
+    }
+    await saveRecovery({ phase: "rollback", catalog: recoveryCatalog, cleanup: cleanupConfirmed ? "not-started" : "unconfirmed", status: "pending" }).catch(() => undefined);
+    let cleanupProvider = staged?.provider ?? provider;
+    let cleanupProviderOwned = false;
+    // Local bridge 在另一个事务赢得目录 CAS 后会拒绝普通候选 Provider。
+    // 用同一条目重新申请只读/删除授权，清理范围仍被 bucketId 锁定，且
+    // cleanupOnly 请求永远不能 put，避免“清理”路径反向污染赢家。
+    if (entry && (recoveryCatalog === "competing" || recoveryCatalog === "unknown")) {
+      try {
+        const candidate = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, true);
+        if (cleanupProvider && cleanupProvider !== staged?.provider) cleanupProvider.dispose();
+        cleanupProvider = candidate;
+        cleanupProviderOwned = true;
+      } catch {
+        // 继续使用已有 Provider；若目录已竞争，它会在第一次 list 时失败，
+        // 最终按 rollback-unconfirmed 返回，不把清理误报成成功。
+      }
+    }
+    if (cleanupProvider && catalogDetachedForCleanup) {
+      try { await deleteInitialSetupProviderObjects(cleanupProvider); }
+      catch (cleanupError) {
+        cleanupConfirmed = false;
+        await saveRecovery({ phase: "rollback", catalog: recoveryCatalog, cleanup: "unconfirmed", status: "pending" }).catch(() => undefined);
+        void cleanupError;
+      } finally {
+        if (!staged || cleanupProviderOwned) cleanupProvider.dispose();
+      }
+    } else if (cleanupProvider) {
+      cleanupConfirmed = false;
+      await saveRecovery({ phase: "rollback", catalog: "unknown", cleanup: "unconfirmed", status: "pending" }).catch(() => undefined);
+      if (!staged || cleanupProviderOwned) cleanupProvider.dispose();
+    }
+    if (ownsRuntime && catalogDetachedForCleanup) catalogBindingDiscardDeferred = true;
+    // 已经接管到全局的 staged binding 由上面的 deferred discard 统一销毁，
+    // 不在最终 I/O lease 内再次关闭同一组 Root/Provider。
+    if (staged && !ownsRuntime) disposeStagedCatalogBucket(staged);
+    if (ownsRuntime && catalogDetachedForCleanup) {
+      if (initialSetupRuntimeOwner?.transactionId === transactionId) initialSetupRuntimeOwner = undefined;
+      storageBootstrapState = null;
+      coordinatorState.vaultStatus = "uninitialized";
+      coordinatorState.activePublicKeyHex = undefined;
+      dropActivePrivateKey();
+      storageStartupFailure = false;
+      storageHealthController.setStatus("unselected");
+      emitStorageState();
+    } else if (ownsRuntime) {
+      storageStartupFailure = true;
+      storageHealthController.setStatus("degraded", "Initial setup catalog rollback was not confirmed");
+      emitStorageState();
+    }
+    const failure = initialSetupFailure(phase, error, cleanupConfirmed ? "confirmed" : "unconfirmed", transactionId, {
+      catalog: recoveryCatalog,
+      runtimeOwned: ownsRuntime,
+    });
+    await saveRecovery({ phase: "rollback", catalog: recoveryCatalog, cleanup: cleanupConfirmed ? "confirmed" : "unconfirmed", status: "failed", error: failure.error }).catch(() => undefined);
+    return failure;
+  } finally {
+    privateKey?.fill(0);
+    if (plan && typeof plan === "object") {
+      plan.bucketPassword = "";
+      if (plan.connection?.kind === "s3") {
+        plan.connection.accessKeyId = "";
+        plan.connection.secretAccessKey = "";
+        plan.connection.sessionToken = undefined;
+      }
+      if (plan.firstKey?.kind === "import") {
+        plan.firstKey.material.hex = "";
+        plan.firstKey.material.wif = undefined;
+      }
+    }
+  }
+}
+
+async function executeInitialSetupOnce(plan: InitialSetupPlan): Promise<InitialSetupResult> {
+  const transactionId = plan && typeof plan === "object" && typeof plan.transactionId === "string"
+    ? plan.transactionId
+    : undefined;
+  if (!transactionId) return executeInitialSetupTransaction(plan);
+  const existing = initialSetupTransactions.get(transactionId);
+  if (existing instanceof Promise) return existing;
+  if (existing) return Promise.resolve(existing);
+  const loaded = await loadInitialSetupRecoveryRecords();
+  if (!loaded) {
+    return initialSetupFailure(
+      "runtime",
+      new StorageRuntimeError("storage_unavailable", "The previous initialization transaction could not be checked for recovery"),
+      "not-started",
+      transactionId,
+      { recovery: "recovery-records-unavailable" },
+    );
+  }
+  const persisted = initialSetupRecoveryRecords.get(transactionId);
+  if (persisted?.status === "succeeded" || persisted?.status === "failed") {
+    const recovered = await resultFromInitialSetupRecovery(persisted);
+    if (recovered) return recovered;
+    if (persisted.status === "failed") {
+      return initialSetupFailure(
+        persisted.phase,
+        new StorageRuntimeError("storage_provider_error", "The previous initialization transaction has no reconstructable result"),
+        persisted.cleanup === "confirmed" ? "confirmed" : "unconfirmed",
+        transactionId,
+        { recovery: "missing-result" },
+      );
+    }
+  } else if (persisted?.status === "pending") {
+    return initialSetupFailure(
+      persisted.phase,
+      new StorageRuntimeError("storage_unavailable", "An earlier initialization transaction is still awaiting recovery"),
+      "unconfirmed",
+      transactionId,
+      { recovery: "pending" },
+    );
+  }
+  // 页面会在挂载时阻止新初始化，但 Worker 不能把这个安全边界交给
+  // React：旧页面、第二个标签页或直接 RPC 都可能绕过页面状态。只要
+  // 另一个事务仍 pending，或其清理没有 confirmed，就必须先恢复它。
+  const blockingRecovery = [...initialSetupRecoveryRecords.values()]
+    .filter((record) => record.transactionId !== transactionId)
+    .filter((record) => record.status === "pending" || record.cleanup !== "confirmed")
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  if (blockingRecovery) {
+    return initialSetupFailure(
+      "runtime",
+      new StorageRuntimeError("storage_conflict", "Another initial setup transaction requires recovery before a new setup can begin"),
+      "not-started",
+      transactionId,
+      {
+        recovery: "another-transaction-requires-recovery",
+        blockingTransactionId: blockingRecovery.transactionId,
+        blockingStatus: blockingRecovery.status,
+        blockingCleanup: blockingRecovery.cleanup,
+      },
+    );
+  }
+  const run = executeInitialSetupTransaction(plan).then((result) => {
+    initialSetupTransactions.set(transactionId, result);
+    return result;
+  }, (error) => {
+    initialSetupTransactions.delete(transactionId);
+    throw error;
+  });
+  initialSetupTransactions.set(transactionId, run);
+  return run;
+}
+
+function syntheticInitialSetupCleanupEntry(record: InitialSetupRecoveryRecordV1): StorageBucketCatalogEntryV2 {
+  // Local 候选已经回滚出目录时，恢复记录只保留公开 bucketId；桥接层在
+  // cleanupOnly 模式下不需要解密配置，使用一份结构合法的占位条目即可
+  // 重新取得同 bucketId 的删除范围。S3 没有这条捷径，仍必须由调用方
+  // 提供连接配置和密码。
+  return {
+    bucketId: record.bucketId,
+    label: `recovery-${record.bucketId}`.slice(0, 128),
+    backend: record.backend,
+    configRevision: record.configRevision,
+    keyDerivation: {
+      algorithm: "pbkdf2-hmac-sha-256",
+      passwordEncoding: "utf-8",
+      iterations: 100_000,
+      outputLengthBits: 256,
+      saltB64Url: "AAAAAAAA",
+    },
+    encryptedConfig: {
+      cipher: {
+        algorithm: "aes-gcm",
+        keyLengthBits: 256,
+        ivB64Url: "AAAAAAAA",
+        tagLengthBits: 128,
+        ciphertextAndTagB64Url: "AA",
+      },
+    },
+    snapshotRevision: record.snapshotRevision,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+}
+
+function recoveryErrorAfterCleanup(
+  record: InitialSetupRecoveryRecordV1,
+  rollback: "confirmed" | "unconfirmed",
+  error: unknown,
+  details?: unknown,
+): InitialSetupFailure {
+  if (record.error && rollback === "confirmed") {
+    const previous = record.error;
+    const message = "初始化候选数据已清理；可以修改表单后重新开始。";
+    return {
+      ok: false,
+      error: {
+        ...previous,
+        summary: message,
+        action: "修改表单后重新开始初始化。",
+        rollback,
+        diagnostic: buildDiagnosticText({
+          phase: "rollback",
+          code: previous.code,
+          incidentId: previous.incidentId,
+          rollback,
+          occurredAt: new Date().toISOString(),
+          redactionVersion: "diagnostic-v2",
+          message,
+          details: details ?? { previous: previous.code },
+        }),
+      },
+    };
+  }
+  return initialSetupFailure("rollback", error, rollback, record.transactionId, details);
+}
+
+type InitialSetupCleanupInput = Extract<CoordinatorStorageControl, { type: "initial-setup-cleanup" }>;
+
+async function retryInitialSetupCleanupTransaction(
+  transactionId: string,
+  input: InitialSetupCleanupInput,
+): Promise<InitialSetupRecoveryResult> {
+  const loaded = await loadInitialSetupRecoveryRecords();
+  if (!loaded) return { status: "cleanup-required", error: initialSetupFailure("rollback", new StorageRuntimeError("storage_unavailable", "Initial setup recovery records are unavailable"), "unconfirmed", transactionId, { recovery: "recovery-records-unavailable" }).error };
+  const current = initialSetupRecoveryRecords.get(transactionId);
+  if (!current) return { status: "not-found" };
+
+  // 成功事务只需返回可重建的公开结果；不要把同一 transactionId 当成
+  // 新初始化再次执行，避免响应丢失时生成第二把 Key。
+  if (current.status === "succeeded") {
+    try {
+      const result = await resultFromInitialSetupRecovery(current);
+      return result?.ok
+        ? { status: "setup-succeeded", result }
+        : result?.error
+          ? { status: "cleanup-required", error: result.error }
+          : { status: "not-found" };
+    } catch (error) {
+      return { status: "cleanup-required", error: recoveryErrorAfterCleanup(current, "unconfirmed", error, { recovery: "succeeded-record-unreadable" }).error };
+    }
+  }
+  if (current.status === "failed" && current.cleanup === "confirmed") {
+    return { status: "cleanup-confirmed" };
+  }
+
+  const failRecovery = async (
+    error: unknown,
+    details: unknown,
+    catalog: InitialSetupRecoveryRecordV1["catalog"] = current.catalog,
+  ): Promise<InitialSetupRecoveryResult> => {
+    const failure = recoveryErrorAfterCleanup(current, "unconfirmed", error, details);
+    await persistInitialSetupRecoveryRecord({
+      ...current,
+      phase: "rollback",
+      catalog,
+      cleanup: "unconfirmed",
+      status: "failed",
+      error: failure.error,
+    }).catch(() => undefined);
+    return { status: "cleanup-required", error: failure.error };
+  };
+
+  let catalog: StorageCatalogV2;
+  try {
+    catalog = await readInitialSetupCatalog();
+  } catch (error) {
+    return failRecovery(error, { reason: "catalog-read-failed" });
+  }
+  const catalogEntry = catalog.buckets.find((candidate) => candidate.bucketId === current.bucketId);
+  const expectedBucketId = initialSetupBucketId(current.transactionId);
+  if (current.bucketId !== expectedBucketId && catalogEntry !== undefined) {
+    const catalogEntryTrusted = current.catalogEntryFingerprint !== undefined
+      && current.catalogEntryFingerprint === initialSetupCatalogEntryFingerprint(catalogEntry);
+    if (!catalogEntryTrusted) {
+      return failRecovery(
+        new StorageRuntimeError("storage_conflict", "A legacy recovery record cannot verify the current catalog entry for its colliding bucket ID"),
+        { reason: "legacy-bucket-id-collision-requires-manual-inspection", bucketId: current.bucketId },
+        "competing",
+      );
+    }
+  }
+  if (catalogEntry && (catalogEntry.configRevision !== current.configRevision || catalogEntry.snapshotRevision !== current.snapshotRevision)) {
+    return failRecovery(
+      new StorageRuntimeError("storage_conflict", "A newer bucket entry uses this recovery bucket ID"),
+      { reason: "recovery-entry-version-mismatch" },
+      "competing",
+    );
+  }
+
+  if (current.backend === "s3" && input.connection) {
+    if (input.connection.kind !== "s3") {
+      return failRecovery(new StorageRuntimeError("storage_provider_error", "Recovery connection backend does not match the transaction"), { reason: "recovery-backend-mismatch" });
+    }
+    if (!input.connection.accessKeyId || !input.connection.secretAccessKey) {
+      return failRecovery(new StorageRuntimeError("storage_identity_required", "S3 cleanup requires Access Key ID and Secret Access Key"), { reason: "recovery-credentials-missing" });
+    }
+    const fingerprint = initialSetupConnectionFingerprint(input.connection);
+    if (!current.connectionFingerprint || fingerprint !== current.connectionFingerprint) {
+      return failRecovery(new StorageRuntimeError("storage_conflict", "The supplied S3 connection does not match the initialization transaction"), { reason: "recovery-connection-fingerprint-mismatch" });
+    }
+  } else if (current.backend === "s3" && !catalogEntry) {
+    return failRecovery(
+      new StorageRuntimeError("storage_identity_required", "S3 cleanup requires the original bucket connection"),
+      { reason: "recovery record contains no credentials or connection configuration" },
+    );
+  }
+
+  // 目录仍包含同一条目但已经不再 selected 时，不能把仍有权威引用的
+  // 桶当成孤儿删除；必须先由用户/并发事务解决目录冲突。
+  if (catalogEntry && catalog.selectedBucketId !== current.bucketId) {
+    return failRecovery(
+      new StorageRuntimeError("storage_conflict", "The recovery bucket is no longer the selected initialization bucket"),
+      { reason: "recovery-entry-not-selected" },
+      "competing",
+    );
+  }
+  const cleanupEntry = catalogEntry ?? syntheticInitialSetupCleanupEntry(current);
+  const generation = platformRootStore?.bucket.bucketGeneration ?? 1;
+  let provider: StorageBucketProvider | undefined;
+  let providerOwned = false;
+  try {
+    if (current.backend === "s3" && input.connection && (!catalogEntry || catalog.selectedBucketId !== current.bucketId)) {
+      if (input.connection.kind !== "s3") throw new StorageRuntimeError("storage_provider_error", "Recovery connection backend does not match the transaction");
+      provider = createCatalogProviderFromConnection(input.connection, current.bucketId, generation);
+      providerOwned = true;
+    } else {
+      if (cleanupEntry.backend !== current.backend) throw new StorageRuntimeError("storage_provider_error", "Recovery bucket backend does not match the transaction");
+      provider = await createCatalogProviderForSwitch(
+        cleanupEntry,
+        input.password ?? "",
+        generation,
+        undefined,
+        true,
+      );
+      providerOwned = true;
+    }
+
+    // 目录仍精确指向本事务时，必须先 CAS 撤销权威引用；只有确认目录
+    // 已为空/已竞争/已回滚后，才允许删除候选对象。
+    const ownsCatalog = catalog.selectedBucketId === current.bucketId
+      && catalogEntry !== undefined
+      && catalog.buckets.length === 1
+      && sameStorageCatalogEntry(catalogEntry, cleanupEntry);
+    let catalogState: InitialSetupRecoveryRecordV1["catalog"] = current.catalog;
+    let catalogDetached = false;
+    if (ownsCatalog) {
+      try {
+        await commitInitialStorageCatalogBucket(cleanupEntry, generation, true);
+        catalogState = "rolled-back";
+        catalogDetached = true;
+      } catch (rollbackError) {
+        const after = await observeInitialSetupCatalog(cleanupEntry);
+        if (after.kind === "empty") {
+          catalogState = "empty";
+          catalogDetached = true;
+        } else if (after.kind === "competing") {
+          const stillReferenced = after.catalog.buckets.some((candidate) => candidate.bucketId === current.bucketId && sameStorageCatalogEntry(candidate, cleanupEntry));
+          if (!stillReferenced) {
+            catalogState = "competing";
+            catalogDetached = true;
+          } else {
+            return failRecovery(rollbackError, { catalog: "rollback-unconfirmed" }, "unknown");
+          }
+        } else {
+          return failRecovery(rollbackError, { catalog: "rollback-unconfirmed" }, "unknown");
+        }
+      }
+    } else if (catalog.selectedBucketId === undefined && catalog.buckets.length === 0) {
+      catalogState = "empty";
+      catalogDetached = true;
+    } else if (catalog.selectedBucketId !== current.bucketId) {
+      catalogState = "competing";
+      catalogDetached = catalogEntry === undefined;
+    }
+
+    if (!catalogDetached) {
+      return failRecovery(new StorageRuntimeError("storage_conflict", "The recovery bucket catalog reference could not be revoked"), { catalog: "rollback-unconfirmed" }, "unknown");
+    }
+
+    // 目录撤销和候选对象删除之间存在一个可观察的中间态。账本解析器
+    // 不允许 pending 携带 error；这里必须先写成合法的 failed/unconfirmed
+    // 记录，才能在删除失败或页面/Worker 重启后继续恢复，而不是把账本
+    // 永久写成生产 bridge 会拒绝的组合。
+    const cleanupStateError = current.error ?? initialSetupFailure(
+      "rollback",
+      new StorageRuntimeError("storage_provider_error", "Initialization candidate cleanup is awaiting object deletion"),
+      "unconfirmed",
+      current.transactionId,
+      { recovery: "catalog-detached-before-cleanup" },
+    ).error;
+    await persistInitialSetupRecoveryRecord({
+      ...current,
+      phase: "rollback",
+      catalog: catalogState,
+      cleanup: "unconfirmed",
+      status: "failed",
+      error: cleanupStateError,
+      updatedAt: Date.now(),
+    });
+    try {
+      await deleteInitialSetupProviderObjects(provider);
+    } catch (error) {
+      return failRecovery(error, { catalog: catalogState, cleanup: "unconfirmed" }, catalogState);
+    }
+    const next: InitialSetupRecoveryRecordV1 = {
+      ...current,
+      phase: "rollback",
+      catalog: catalogState,
+      cleanup: "confirmed",
+      status: "failed",
+      error: cleanupStateError,
+      updatedAt: Date.now(),
+    };
+    await persistInitialSetupRecoveryRecord(next);
+    if (platformRootStore?.bucket.bucketId === current.bucketId && catalogState !== "competing") {
+      catalogBindingDiscardDeferred = true;
+      storageBootstrapState = null;
+      coordinatorState.vaultStatus = "uninitialized";
+      coordinatorState.activePublicKeyHex = undefined;
+      dropActivePrivateKey();
+      storageStartupFailure = false;
+      storageHealthController.setStatus("unselected");
+      emitStorageState();
+    }
+    return { status: "cleanup-confirmed" };
+  } catch (error) {
+    return failRecovery(error, { bucketId: current.bucketId });
+  } finally {
+    if (providerOwned) provider?.dispose();
+    if (input.password !== undefined) input.password = "";
+    if (input.connection?.kind === "s3") {
+      input.connection.accessKeyId = "";
+      input.connection.secretAccessKey = "";
+      input.connection.sessionToken = undefined;
+    }
+  }
+}
+
+async function getInitialSetupResult(transactionId: string): Promise<InitialSetupResult | undefined> {
+  const existing = initialSetupTransactions.get(transactionId);
+  if (existing instanceof Promise) return existing;
+  if (existing) return existing;
+  const record = initialSetupRecoveryRecords.get(transactionId);
+  if (record) return resultFromInitialSetupRecovery(record);
+  await loadInitialSetupRecoveryRecords();
+  const recovered = initialSetupRecoveryRecords.get(transactionId);
+  return recovered ? resultFromInitialSetupRecovery(recovered) : undefined;
+}
+
+function legacyBucketSummary(entry: StorageBucketCatalogEntryV2): Pick<StorageBucketCatalogEntryV2, "bucketId" | "label" | "backend"> {
+  return { bucketId: entry.bucketId, label: entry.label, backend: entry.backend };
+}
+
+async function listLegacyBucketObjects(provider: StorageBucketProvider): Promise<Array<{ path: string; etag?: string }>> {
+  const objects: Array<{ path: string; etag?: string }> = [];
+  let cursor: string | undefined;
+  for (let pass = 0; pass < 128; pass += 1) {
+    const page = await provider.list({ cursor, limit: 1000 });
+    objects.push(...page.objects.map((object) => ({ path: object.path, etag: object.etag })));
+    if (!page.nextCursor) return objects;
+    cursor = page.nextCursor;
+  }
+  throw new StorageRuntimeError("storage_limit_exceeded", "Legacy initialization inspection exceeded the object limit");
+}
+
+async function selectedLegacyCatalogEntry(): Promise<StorageBucketCatalogEntryV2 | undefined> {
+  const catalog = await readInitialSetupCatalog();
+  if (!catalog.selectedBucketId) return undefined;
+  return catalog.buckets.find((candidate) => candidate.bucketId === catalog.selectedBucketId);
+}
+
+async function catalogEntryConnectionFingerprint(entry: StorageBucketCatalogEntryV2, password: string): Promise<string | undefined> {
+  if (entry.backend !== "s3") return undefined;
+  const context = await deriveBucketCryptoContext(password, entry.keyDerivation);
+  try {
+    const connection = await decryptBucketConfig(entry.encryptedConfig, context);
+    return initialSetupConnectionFingerprint(connection);
+  } finally {
+    context.dispose();
+  }
+}
+
+function legacyOwnerObject(path: string): boolean {
+  return /^(?:02|03)[0-9a-f]{64}\//iu.test(path)
+    || /^\.keymaster\/owners\/(?:02|03)[0-9a-f]{64}(?:\/|$)/iu.test(path);
+}
+
+function legacyBusinessObject(path: string): boolean {
+  const top = path.split("/", 1)[0] ?? "";
+  // 这些是平台 Root/ Hold 自己的物理 namespace；其它顶层目录可能是
+  // 应用业务数据，不能在“旧半截初始化”入口中猜测并删除。
+  return !new Set([".keymaster", "keys", "settings", "logs", "protocol", "session", "storage", "coordinator"]).has(top);
+}
+
+async function inspectLegacyInitialSetup(password: string): Promise<InitialSetupLegacyInspection> {
+  const entry = await selectedLegacyCatalogEntry();
+  if (!entry) return { status: "none" };
+  if (typeof password !== "string" || password.length < 8) {
+    throw new StorageRuntimeError("storage_identity_required", "Bucket password must contain at least 8 characters");
+  }
+
+  const generation = platformRootStore?.bucket.bucketGeneration ?? 1;
+  // 清理 Provider 必须带 cleanupOnly 权限：目录 CAS 撤销后，Local
+  // candidate 仍可访问本事务命名空间，但不会获得写入其它桶的能力。
+  const provider = await createCatalogProviderForSwitch(entry, password, generation, undefined, true);
+  try {
+    // 空 Hold 也必须先证明目录配置确实属于这次输入的桶密码。
+    const context = await deriveBucketCryptoContext(password, entry.keyDerivation);
+    try { await decryptBucketConfig(entry.encryptedConfig, context); }
+    finally { context.dispose(); }
+
+    let committed: Awaited<ReturnType<ReturnType<typeof createStorageHoldSnapshotRepository>["readCommitted"]>> | undefined;
+    try {
+      committed = await createStorageHoldSnapshotRepository(provider).readCommitted();
+    } catch (error) {
+      if (!(error instanceof StorageRuntimeError) || error.code !== "storage_not_found") throw error;
+    }
+    if (committed && committed.keys.length > 0) {
+      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "Hold 快照已经包含 Key，不能按旧半截初始化删除。" };
+    }
+
+    const objects = await listLegacyBucketObjects(provider);
+    if (objects.some((object) => legacyOwnerObject(object.path))) {
+      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "桶内已经存在 owner namespace，不能证明没有业务数据。" };
+    }
+    const unknownObjects = objects.filter((object) => legacyBusinessObject(object.path));
+    if (unknownObjects.length > 0) {
+      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "桶内存在非初始化目录对象，必须走人工迁移/审计。" };
+    }
+
+    const hasCurrentKeysBinding = platformRootStore?.bucket.bucketId === entry.bucketId
+      && platformRootStore.bucket.provider === entry.backend
+      && platformBucketProvider?.bucketId === entry.bucketId
+      && platformBucketProvider.provider === entry.backend
+      && platformKeysStore !== undefined;
+    if (!hasCurrentKeysBinding || !platformKeysStore) {
+      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "当前 Storage Root 未绑定到该桶，不能证明 keys/ 和公开索引为空。" };
+    }
+    {
+      const vault = createVaultKeyRepository(platformKeysStore);
+      const [meta, legacyKeys, index] = await Promise.all([
+        vault.getMeta(),
+        vault.listKeys(),
+        createStorageCatalogKeyIndexRepository(platformKeysStore).listKeys(),
+      ]);
+      if (legacyKeys.length > 0 || index.length > 0) {
+        return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "keys/ 中仍有 Key 或公开索引，不能按旧半截初始化删除。" };
+      }
+      // 只有空 Vault verifier 可以被旧半截清理一起删除；它不代表拥有
+      // Key，但保留它会让下次启动再次误判为“已有 Vault”。
+      void meta;
+    }
+    return { status: "safe-to-clean", bucket: legacyBucketSummary(entry) };
+  } finally {
+    provider.dispose();
+  }
+}
+
+async function cleanupLegacyInitialSetup(password: string): Promise<InitialSetupLegacyCleanupResult> {
+  const inspection = await inspectLegacyInitialSetup(password);
+  if (inspection.status === "none") return { ok: true };
+  if (inspection.status === "unsafe") {
+    const failure = initialSetupFailure("rollback", new StorageRuntimeError("storage_conflict", inspection.reason), "unconfirmed", undefined, { legacy: true });
+    return { ok: false, error: failure.error };
+  }
+
+  const entry = await selectedLegacyCatalogEntry();
+  if (!entry || entry.bucketId !== inspection.bucket.bucketId) {
+    const failure = initialSetupFailure("rollback", new StorageRuntimeError("storage_conflict", "The legacy bucket changed before cleanup"), "unconfirmed", undefined, { legacy: true });
+    return { ok: false, error: failure.error };
+  }
+  const generation = platformRootStore?.bucket.bucketGeneration ?? 1;
+  const cleanupTransactionId = `legacy-cleanup-${entry.bucketId}-${randomIdentifierSuffix()}`.slice(0, 128);
+  const connectionFingerprint = await catalogEntryConnectionFingerprint(entry, password);
+  const provider = await createCatalogProviderForSwitch(entry, password, generation, undefined, true);
+  let catalogDetached = false;
+  let recoveryCatalog: InitialSetupRecoveryRecordV1["catalog"] = "committed";
+  try {
+    // 再次执行精确检查，覆盖 inspect 与 delete 之间新增 owner/业务对象的窗口。
+    const current = await inspectLegacyInitialSetup(password);
+    if (current.status !== "safe-to-clean") {
+      const reason = current.status === "unsafe" ? current.reason : "The legacy bucket disappeared before cleanup";
+      const failure = initialSetupFailure("rollback", new StorageRuntimeError("storage_conflict", reason), "unconfirmed", undefined, { legacy: true });
+      return { ok: false, error: failure.error };
+    }
+    const beforeDeleteCatalog = await readInitialSetupCatalog();
+    const beforeDeleteEntry = beforeDeleteCatalog.buckets.find((candidate) => candidate.bucketId === entry.bucketId);
+    if (beforeDeleteCatalog.selectedBucketId !== entry.bucketId
+      || !beforeDeleteEntry
+      || !sameStorageCatalogEntry(beforeDeleteEntry, entry)) {
+      throw new StorageRuntimeError("storage_conflict", "The legacy bucket catalog changed before cleanup");
+    }
+    // 先撤销权威目录引用；只有目录已经为空或确认不再包含本条目时，
+    // 才允许删除旧半截候选对象，避免留下“目录指向空桶”的损坏状态。
+    try {
+      await commitInitialStorageCatalogBucket(entry, generation, true);
+      catalogDetached = true;
+      recoveryCatalog = "rolled-back";
+    } catch (rollbackError) {
+      const afterRollback = await observeInitialSetupCatalog(entry);
+      if (afterRollback.kind === "empty") {
+        catalogDetached = true;
+        recoveryCatalog = "empty";
+      } else if (afterRollback.kind === "competing") {
+        const stillReferenced = afterRollback.catalog.buckets.some((candidate) => candidate.bucketId === entry.bucketId && sameStorageCatalogEntry(candidate, entry));
+        if (!stillReferenced) {
+          catalogDetached = true;
+          recoveryCatalog = "competing";
+        }
+        else throw rollbackError;
+      } else {
+        throw rollbackError;
+      }
+    }
+    if (!catalogDetached) throw new StorageRuntimeError("storage_conflict", "The legacy bucket catalog was not revoked");
+    await deleteInitialSetupProviderObjects(provider);
+    if (platformRootStore?.bucket.bucketId === entry.bucketId) catalogBindingDiscardDeferred = true;
+    storageBootstrapState = null;
+    coordinatorState.vaultStatus = "uninitialized";
+    coordinatorState.activePublicKeyHex = undefined;
+    dropActivePrivateKey();
+    storageStartupFailure = false;
+    storageHealthController.setStatus("unselected");
+    emitStorageState();
+    return { ok: true };
+  } catch (error) {
+    const failure = initialSetupFailure("rollback", error, "unconfirmed", cleanupTransactionId, { legacy: true, catalog: recoveryCatalog });
+    await persistInitialSetupRecoveryRecord({
+      format: "keymaster.storage.initial-setup-recovery",
+      version: 1,
+      transactionId: cleanupTransactionId,
+      bucketId: entry.bucketId,
+      catalogEntryFingerprint: initialSetupCatalogEntryFingerprint(entry),
+      configRevision: entry.configRevision,
+      snapshotRevision: entry.snapshotRevision,
+      backend: entry.backend,
+      ...(connectionFingerprint === undefined ? {} : { connectionFingerprint }),
+      phase: "rollback",
+      catalog: recoveryCatalog,
+      runtimeInstalled: false,
+      cleanup: "unconfirmed",
+      status: "failed",
+      error: failure.error,
+      updatedAt: Date.now(),
+    }).catch(() => undefined);
+    return { ok: false, error: failure.error };
+  } finally {
+    provider.dispose();
   }
 }
 
@@ -2796,6 +4024,8 @@ async function withCoordinatorFinalIoLease<T>(
   options: {
     allowLocalLock?: boolean;
     allowLocalOwnerTransition?: boolean;
+    /** 当前 control 已完成本地桶清理，Root 会在 lease 释放后销毁。 */
+    allowLocalBindingDiscard?: boolean;
     auditOperation?: FinalIoAuditOperation;
     /**
      * 非持久化的只读边界：不会改变外部或本地持久化真值，因此不需要
@@ -2846,8 +4076,11 @@ async function withCoordinatorFinalIoLease<T>(
       && coordinatorUpgradeGate !== gate
       && coordinatorState.vaultStatus === "unlocked"
       && (coordinatorState.sessionEpoch !== initialSessionEpoch || coordinatorState.keyspaceGeneration !== initialKeyspaceGeneration);
-    if (!localLockReplacedGate && !localOwnerTransitionReplacedGate) lease.assertActive();
-    await assertCoordinatorAuthorityCurrent();
+    const localBindingDiscard = options.allowLocalBindingDiscard === true && catalogBindingDiscardDeferred;
+    if (!localLockReplacedGate && !localOwnerTransitionReplacedGate && !localBindingDiscard) lease.assertActive();
+    // Root 销毁会在 finally 中、durable lease 释放后执行；此时不再要求
+    // 旧 Root 的 authority 记录完成一次无意义的后置读取。
+    if (!localBindingDiscard) await assertCoordinatorAuthorityCurrent();
     audit?.finish("completed");
     return result;
   } catch (error) {
@@ -3059,6 +4292,8 @@ const storageGrants = new Map<string, { context: import("@keymaster/contracts").
 const ownerStorageGrants = new Map<string, StorageOwnerGrant & { clientId: string }>();
 const platformStorageGrants = new Map<string, StoragePlatformGrant & { clientId: string }>();
 let storageMutationTail: Promise<void> = Promise.resolve();
+/** 首次初始化按 transactionId single-flight；响应丢失或重复点击不得生成第二把 Key。 */
+const initialSetupTransactions = new Map<string, Promise<InitialSetupResult> | InitialSetupResult>();
 let storageDataActive = 0;
 type StorageDataWaiter = {
   resolve: () => void;
@@ -4664,6 +5899,23 @@ async function selectLocalStorageCatalogBucket(
   return response.bucket;
 }
 
+/** 首次初始化的单一目录提交点；提交前目录必须为空，回滚只删除同一候选条目。 */
+async function commitInitialStorageCatalogBucket(
+  targetBucket: StorageBucketCatalogEntryV2,
+  bucketGeneration: number,
+  rollback = false,
+): Promise<StorageBucketCatalogEntryV2> {
+  const response = await requestLocalStorageBridge({
+    type: "catalog-commit",
+    bucketId: targetBucket.bucketId,
+    bucketGeneration,
+    targetBucket,
+    ...(rollback ? { rollback: true } : {}),
+  });
+  if (response.type !== "catalog") throw storageUnavailableError("Local storage catalog commit bridge returned an invalid response");
+  return response.bucket;
+}
+
 /** 发布桶内 Key 快照后同步本机目录中的提交版本。 */
 async function updateCurrentCatalogSnapshotRevision(snapshotRevision: number): Promise<void> {
   const entry = selectedCatalogBucket();
@@ -6102,6 +7354,9 @@ async function handleHello(
   const connectedPort = connectedPorts.get(clientId);
   if (!connectedPort) return;
   if (request.localStorageBridgePort) installLocalStorageBridgeEndpoint(clientId, request.localStorageBridgePort, request.localStorageBridgeLeaseId, request.storageBootstrapState);
+  // 恢复记录位于页面 localStorage；每次新 hello 先加载公开记录，再决定
+  // 是否继续同一 transactionId，不能把响应丢失误判成一次全新初始化。
+  await loadInitialSetupRecoveryRecords();
   // 首个桶可能在 Worker 已完成“未选择存储”初始化后由页面创建。此时 hello
   // 只允许在尚无 Root/选中桶时补入公开的目录快照；真正认证仍由随后携带
   // 一次性密码的 unlock-bucket 完成。
@@ -6302,7 +7557,30 @@ function storageErrorResponse(requestId: string, error: unknown): CoordinatorRes
 function clearStorageRequestSecrets(request: CoordinatorClientRequest): void {
   if (request.kind === "storage.control") {
     const control = request.control;
-  if (control.type === "unlock-profile" || control.type === "unlock-bucket" || control.type === "import-profile" || control.type === "switch-bucket" || control.type === "change-bucket-config") {
+    if (control.type === "unlock-profile" || control.type === "unlock-bucket" || control.type === "import-profile" || control.type === "switch-bucket" || control.type === "change-bucket-config") {
+      control.password = "";
+    }
+    if (control.type === "initial-setup") {
+      control.plan.bucketPassword = "";
+      if (control.plan.connection.kind === "s3") {
+        control.plan.connection.accessKeyId = "";
+        control.plan.connection.secretAccessKey = "";
+        control.plan.connection.sessionToken = undefined;
+      }
+      if (control.plan.firstKey.kind === "import") {
+        control.plan.firstKey.material.hex = "";
+        control.plan.firstKey.material.wif = undefined;
+      }
+    }
+    if (control.type === "initial-setup-cleanup") {
+      if (control.password !== undefined) control.password = "";
+      if (control.connection?.kind === "s3") {
+        control.connection.accessKeyId = "";
+        control.connection.secretAccessKey = "";
+        control.connection.sessionToken = undefined;
+      }
+    }
+    if (control.type === "initial-setup-legacy-inspect" || control.type === "initial-setup-legacy-cleanup") {
       control.password = "";
     }
     if (control.type === "change-bucket-config" && control.config.kind === "s3") {
@@ -6440,6 +7718,47 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
   if (control.type === "connection") {
     const service = await ensureStorageRuntime();
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderConnection() };
+  }
+  if (control.type === "initial-setup") {
+    const result = await executeInitialSetupOnce(control.plan);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+  }
+  if (control.type === "initial-setup-result") {
+    const result = await getInitialSetupResult(control.transactionId);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+  }
+  if (control.type === "initial-setup-recovery-list") {
+    const records = await listInitialSetupRecoveries();
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: records };
+  }
+  if (control.type === "initial-setup-cleanup") {
+    try {
+      const result = await retryInitialSetupCleanupTransaction(control.transactionId, control);
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } finally {
+      if (control.password !== undefined) control.password = "";
+      if (control.connection?.kind === "s3") {
+        control.connection.accessKeyId = "";
+        control.connection.secretAccessKey = "";
+        control.connection.sessionToken = undefined;
+      }
+    }
+  }
+  if (control.type === "initial-setup-legacy-inspect") {
+    try {
+      const result = await inspectLegacyInitialSetup(control.password);
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } finally {
+      control.password = "";
+    }
+  }
+  if (control.type === "initial-setup-legacy-cleanup") {
+    try {
+      const result = await cleanupLegacyInitialSetup(control.password);
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } finally {
+      control.password = "";
+    }
   }
   if (control.type === "switch-bucket") {
     try {
@@ -6600,6 +7919,7 @@ function storageControlIoKind(control: Extract<CoordinatorClientRequest, { kind:
     case "status":
     case "summary":
     case "connection":
+    case "initial-setup-recovery-list":
     case "capabilities":
     case "probe":
     case "probe-capabilities":
@@ -6614,26 +7934,41 @@ async function executeStorageControlAtFinalBoundary(
   request: Extract<CoordinatorClientRequest, { kind: "storage.control" }>,
   signal?: AbortSignal,
 ): Promise<CoordinatorResponse> {
+  const flushDeferredCatalogBindingDiscard = (): void => {
+    if (!catalogBindingDiscardDeferred) return;
+    catalogBindingDiscardDeferred = false;
+    try { discardCurrentPlatformStorageBinding(); }
+    catch (error) { console.warn("[coordinator] deferred catalog binding discard failed", error instanceof Error ? error.message : String(error)); }
+  };
   // 没有 Root 时，activate/select/import 是建立第一个 Root 的冷启动操作；
   // 此阶段还没有可用的 Coordinator authority，直接走 bootstrap 分支。
-  if (!platformRootStore) return executeStorageControl(request, signal);
-  return withCoordinatorFinalIoLease(
-    storageControlIoKind(request.control),
-    signal,
-    (leaseSignal) => executeStorageControl(request, leaseSignal),
-    {
-      auditOperation: "storage.control",
-      // 桶首次解锁可能同时把 Hold 快照中的 Key 恢复到 Coordinator，
-      // 然后进入同一把 Key 的 unlocked owner。这个有意的本地状态迁移
-      // 必须允许当前 storage control 的 final lease 观察到新 gate。
-      allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
-      allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
-      // status/summary/connection 等控制读取只观察本地状态；probe 也
-      // 不提交配置或远端不可逆结果。它们仍经过本地 authority/epoch
-      // 栅栏，但页面卸载时不应留下跨 Worker 恢复租约。
-      durableLease: storageControlIoKind(request.control) === "write",
-    },
-  );
+  if (!platformRootStore) {
+    try { return await executeStorageControl(request, signal); }
+    finally { flushDeferredCatalogBindingDiscard(); }
+  }
+  try {
+    return await withCoordinatorFinalIoLease(
+      storageControlIoKind(request.control),
+      signal,
+      (leaseSignal) => executeStorageControl(request, leaseSignal),
+      {
+        auditOperation: "storage.control",
+        // 桶首次解锁可能同时把 Hold 快照中的 Key 恢复到 Coordinator，
+        // 然后进入同一把 Key 的 unlocked owner。这个有意的本地状态迁移
+        // 必须允许当前 storage control 的 final lease 观察到新 gate。
+        allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
+        allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
+        allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "initial-setup-cleanup" || request.control.type === "initial-setup-legacy-cleanup",
+        // status/summary/connection 等控制读取只观察本地状态；probe 也
+        // 不提交配置或远端不可逆结果。它们仍经过本地 authority/epoch
+        // 栅栏，但页面卸载时不应留下跨 Worker 恢复租约。
+        durableLease: storageControlIoKind(request.control) === "write",
+      },
+    );
+  } finally {
+    // withCoordinatorFinalIoLease 已完成后置 authority 校验和 lease release。
+    flushDeferredCatalogBindingDiscard();
+  }
 }
 
 async function resolvePlatformStorageGrant(grantId: string, actualClientId: string): Promise<StoragePlatformGrant & { clientId: string }> {
@@ -10381,7 +11716,7 @@ async function findKeyByPasskeyId(passkeyId: string): Promise<{
   return matches[0]!;
 }
 
-function generatePrivateKeyHex(): string { const bytes = crypto.getRandomValues(new Uint8Array(32)); return bytesToHex(bytes); }
+function generatePrivateKeyHex(): string { return generateValidPrivateKeyHex(); }
 async function createVaultRpc(password: string, key?: { label?: string; capabilities?: string[]; material?: { hex: string; wif?: string }; format?: string; source?: string }): Promise<unknown> {
   if (await getVaultMeta()) throw new Error("Vault already exists");
   if (selectedCatalogBucket()) {
@@ -11836,6 +13171,10 @@ export function __testResetState(): void {
   // 避免上一个用例注入的 degraded/authentication 状态污染后续业务断言。
   storageHealthController.resetForTesting("ready");
   storageStartupFailure = false;
+  catalogBindingDiscardDeferred = false;
+  initialSetupRuntimeOwner = undefined;
+  initialSetupTransactions.clear();
+  initialSetupRecoveryRecords.clear();
   // releaseSatRuntime 会同步摘除旧 owner 的全局句柄，并把真实退订放入
   // satRuntimeRelease；下一次测试创建 runtime 时会等待该 Promise。
   void releaseSatRuntime("test");
@@ -11960,6 +13299,34 @@ export function __testSetLocalStorageBridgeOverride(
   bridge: ((input: LocalStorageBridgeRequest) => Promise<LocalStorageBridgeResponse>) | undefined,
 ): void {
   testLocalStorageBridgeOverride = bridge;
+}
+
+/** 测试专用：清空内存 Root，进入真正的“尚未初始化”首桶事务前置态。 */
+export function __testPrepareInitialSetup(): void {
+  if (platformRootStore) discardCurrentPlatformStorageBinding();
+  storageBootstrapController?.dispose();
+  storageBootstrapController = undefined;
+  storageBootstrapState = null;
+  platformStorageReady = false;
+  storageStartupFailure = false;
+  catalogBindingDiscardDeferred = false;
+  storageHealthController.resetForTesting("unselected");
+  coordinatorState.vaultStatus = "uninitialized";
+  coordinatorState.activePublicKeyHex = undefined;
+  dropActivePrivateKey();
+  initialSetupRuntimeOwner = undefined;
+  initialSetupTransactions.clear();
+  initialSetupRecoveryRecords.clear();
+}
+
+/** 测试专用：验证不同 transactionId 不会因可见字符截断而共享桶命名空间。 */
+export function __testInitialSetupBucketId(transactionId: string): string {
+  return initialSetupBucketId(transactionId);
+}
+
+/** 测试专用：注入公开恢复记录，验证同一 transactionId 不会重新执行。 */
+export function __testSeedInitialSetupRecoveryRecord(record: InitialSetupRecoveryRecordV1): void {
+  initialSetupRecoveryRecords.set(record.transactionId, structuredClone(record));
 }
 
 /** 测试专用：把一个已加密目录条目安装成当前 Local catalog binding。 */
@@ -12488,7 +13855,14 @@ export async function __testDispatchStorageData(input: { grantId: string; actual
 }
 
 export async function __testDispatchStorageControl(control: CoordinatorStorageControl): Promise<CoordinatorResponse> {
-  return executeStorageRequest({ kind: "storage.control", clientId: "test", requestId: crypto.randomUUID(), control, expectedSessionEpoch: coordinatorState.sessionEpoch }, "test");
+  const request = { kind: "storage.control" as const, clientId: "test", requestId: crypto.randomUUID(), control, expectedSessionEpoch: coordinatorState.sessionEpoch };
+  try {
+    return await executeStorageRequest(request, "test");
+  } finally {
+    // 测试 seam 直接进入 executeStorageRequest，不经过生产
+    // processRequestCore 的 finally；这里仍模拟 RPC 返回前的秘密清零。
+    clearStorageRequestSecrets(request);
+  }
 }
 
 export function __testSeedStorageRequest(requestId: string, actualPortId: string, connectSessionId?: string): AbortSignal {

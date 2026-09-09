@@ -34,6 +34,12 @@ import type {
   ContactPresenceMap,
   CoordinatorWorkerUnitStateEvent,
   StorageBootstrapState,
+  InitialSetupRecoveryRecordV1,
+  InitialSetupPhase,
+  InitialSetupRecoveryCatalogState,
+  InitialSetupRecoverySuccessV1,
+  InitialSetupRollbackState,
+  StorageUserFacingError,
 } from "@keymaster/contracts";
 import { COORDINATOR_SERVICE_PROTOCOL_VERSION } from "@keymaster/contracts";
 import type {
@@ -58,6 +64,231 @@ import {
   type PluginIntentSubmissionResult,
 } from "webloom-framework";
 import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
+
+const INITIAL_SETUP_RECOVERY_STORAGE_KEY = "keymaster.storage.initial-setup.recovery.v1";
+const INITIAL_SETUP_RECOVERY_LOCK = "keymaster.storage.initial-setup.recovery";
+
+type InitialSetupRecoveryLocks = {
+  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
+  request<T>(name: string, options: { signal?: AbortSignal }, callback: () => Promise<T>): Promise<T>;
+};
+
+const INITIAL_SETUP_PHASES = ["validate", "stage", "hold", "catalog-commit", "runtime", "rollback", "complete"] as const satisfies readonly InitialSetupPhase[];
+const INITIAL_SETUP_CATALOG_STATES = ["not-started", "committed", "rolled-back", "competing", "empty", "unknown"] as const satisfies readonly InitialSetupRecoveryCatalogState[];
+const INITIAL_SETUP_ROLLBACK_STATES = ["not-started", "confirmed", "unconfirmed"] as const satisfies readonly InitialSetupRollbackState[];
+const RECOVERY_RECORD_LIMIT = 32;
+const RECOVERY_DIAGNOSTIC_LIMIT = 12_000;
+
+function recoveryLedgerError(field: string): never {
+  throw new StorageRuntimeError("storage_provider_error", `Initialization recovery ledger contains an invalid ${field}`);
+}
+
+function isOneOf(values: readonly string[], value: unknown): boolean {
+  return typeof value === "string" && values.includes(value);
+}
+
+function assertRecoveryString(value: unknown, field: string, maxLength: number, required = true): asserts value is string {
+  if (typeof value !== "string" || value.length > maxLength || (required && !value.trim())) recoveryLedgerError(field);
+}
+
+function parseInitialSetupRecoverySuccess(value: unknown): InitialSetupRecoverySuccessV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) recoveryLedgerError("success");
+  const success = value as Partial<InitialSetupRecoverySuccessV1>;
+  assertRecoveryString(success.bucketLabel, "success.bucketLabel", 128);
+  assertRecoveryString(success.publicKeyHex, "success.publicKeyHex", 66);
+  if (!/^0[23][0-9a-f]{64}$/iu.test(success.publicKeyHex)) recoveryLedgerError("success.publicKeyHex");
+  assertRecoveryString(success.label, "success.label", 128);
+  assertRecoveryString(success.address, "success.address", 256);
+  assertRecoveryString(success.format, "success.format", 128);
+  if (!Array.isArray(success.capabilities) || success.capabilities.length === 0 || success.capabilities.length > 32 || !success.capabilities.every((item) => typeof item === "string" && item.length > 0 && item.length <= 128)) {
+    recoveryLedgerError("success.capabilities");
+  }
+  assertRecoveryString(success.createdAt, "success.createdAt", 128);
+  if (Number.isNaN(Date.parse(success.createdAt))) recoveryLedgerError("success.createdAt");
+  if (success.source !== undefined) assertRecoveryString(success.source, "success.source", 128, false);
+  return {
+    bucketLabel: success.bucketLabel,
+    publicKeyHex: success.publicKeyHex,
+    label: success.label,
+    address: success.address,
+    format: success.format,
+    capabilities: [...success.capabilities],
+    createdAt: success.createdAt,
+    ...(success.source === undefined ? {} : { source: success.source }),
+  };
+}
+
+function parseInitialSetupRecoveryError(value: unknown, transactionId: string): StorageUserFacingError {
+  if (!value || typeof value !== "object" || Array.isArray(value)) recoveryLedgerError("error");
+  const error = value as Partial<StorageUserFacingError>;
+  assertRecoveryString(error.title, "error.title", 256);
+  assertRecoveryString(error.summary, "error.summary", 2048);
+  if (error.action !== undefined) assertRecoveryString(error.action, "error.action", 512, false);
+  assertRecoveryString(error.code, "error.code", 128);
+  assertRecoveryString(error.incidentId, "error.incidentId", 128);
+  if (error.transactionId !== undefined) {
+    assertRecoveryString(error.transactionId, "error.transactionId", 128);
+    if (error.transactionId !== transactionId) recoveryLedgerError("error.transactionId");
+  }
+  assertRecoveryString(error.diagnostic, "error.diagnostic", RECOVERY_DIAGNOSTIC_LIMIT);
+  if (!isOneOf(INITIAL_SETUP_PHASES, error.phase)) recoveryLedgerError("error.phase");
+  if (!isOneOf(INITIAL_SETUP_ROLLBACK_STATES, error.rollback)) recoveryLedgerError("error.rollback");
+  return {
+    title: error.title,
+    summary: error.summary,
+    ...(error.action === undefined ? {} : { action: error.action }),
+    code: error.code,
+    incidentId: error.incidentId,
+    ...(error.transactionId === undefined ? {} : { transactionId: error.transactionId }),
+    diagnostic: error.diagnostic,
+    phase: error.phase as InitialSetupPhase,
+    rollback: error.rollback as InitialSetupRollbackState,
+  };
+}
+
+function parseInitialSetupRecoveryRecord(value: unknown): InitialSetupRecoveryRecordV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) recoveryLedgerError("record");
+  const record = value as Partial<InitialSetupRecoveryRecordV1>;
+  if (record.format !== "keymaster.storage.initial-setup-recovery" || record.version !== 1) recoveryLedgerError("format");
+  assertRecoveryString(record.transactionId, "transactionId", 128);
+  if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(record.transactionId)) recoveryLedgerError("transactionId");
+  assertRecoveryString(record.bucketId, "bucketId", 128);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(record.bucketId)) recoveryLedgerError("bucketId");
+  if (!Number.isSafeInteger(record.configRevision) || (record.configRevision as number) < 0) recoveryLedgerError("configRevision");
+  if (!Number.isSafeInteger(record.snapshotRevision) || (record.snapshotRevision as number) < 0) recoveryLedgerError("snapshotRevision");
+  if (record.backend !== "local" && record.backend !== "s3") recoveryLedgerError("backend");
+  if (record.catalogEntryFingerprint !== undefined) {
+    assertRecoveryString(record.catalogEntryFingerprint, "catalogEntryFingerprint", 64);
+    if (!/^[0-9a-f]{64}$/iu.test(record.catalogEntryFingerprint)) recoveryLedgerError("catalogEntryFingerprint");
+  }
+  if (record.connectionFingerprint !== undefined) {
+    assertRecoveryString(record.connectionFingerprint, "connectionFingerprint", 64);
+    if (!/^[0-9a-f]{64}$/iu.test(record.connectionFingerprint)) recoveryLedgerError("connectionFingerprint");
+  }
+  if (!isOneOf(INITIAL_SETUP_PHASES, record.phase)) recoveryLedgerError("phase");
+  if (!isOneOf(INITIAL_SETUP_CATALOG_STATES, record.catalog)) recoveryLedgerError("catalog");
+  if (typeof record.runtimeInstalled !== "boolean") recoveryLedgerError("runtimeInstalled");
+  if (!isOneOf(INITIAL_SETUP_ROLLBACK_STATES, record.cleanup)) recoveryLedgerError("cleanup");
+  if (!isOneOf(["pending", "succeeded", "failed"], record.status)) recoveryLedgerError("status");
+  if (!Number.isSafeInteger(record.updatedAt) || (record.updatedAt as number) < 0) recoveryLedgerError("updatedAt");
+
+  const success = record.success === undefined ? undefined : parseInitialSetupRecoverySuccess(record.success);
+  const error = record.error === undefined ? undefined : parseInitialSetupRecoveryError(record.error, record.transactionId);
+  if (record.status === "pending") {
+    if (success !== undefined || error !== undefined || record.cleanup === "confirmed" || record.phase === "complete") recoveryLedgerError("pending status");
+  } else if (record.status === "succeeded") {
+    if (success === undefined || error !== undefined || record.phase !== "complete" || record.catalog !== "committed" || !record.runtimeInstalled || record.cleanup !== "confirmed") recoveryLedgerError("succeeded status");
+  } else if (success !== undefined || error === undefined || record.phase !== "rollback" || record.cleanup === "not-started") {
+    recoveryLedgerError("failed status");
+  }
+
+  return {
+    format: record.format,
+    version: 1,
+    transactionId: record.transactionId,
+    bucketId: record.bucketId,
+    ...(record.catalogEntryFingerprint === undefined ? {} : { catalogEntryFingerprint: record.catalogEntryFingerprint }),
+    configRevision: record.configRevision as number,
+    snapshotRevision: record.snapshotRevision as number,
+    backend: record.backend,
+    ...(record.connectionFingerprint === undefined ? {} : { connectionFingerprint: record.connectionFingerprint }),
+    phase: record.phase as InitialSetupPhase,
+    catalog: record.catalog as InitialSetupRecoveryCatalogState,
+    runtimeInstalled: record.runtimeInstalled,
+    cleanup: record.cleanup as InitialSetupRollbackState,
+    status: record.status as "pending" | "succeeded" | "failed",
+    ...(success === undefined ? {} : { success }),
+    ...(error === undefined ? {} : { error }),
+    updatedAt: record.updatedAt as number,
+  };
+}
+
+/** 测试桥复用生产账本成员校验，避免 Worker fixture 放宽实际写入边界。 */
+export function __testParseInitialSetupRecoveryRecord(value: unknown): InitialSetupRecoveryRecordV1 {
+  return parseInitialSetupRecoveryRecord(value);
+}
+
+function isInitialSetupRecoveryRecord(value: unknown): value is InitialSetupRecoveryRecordV1 {
+  try {
+    parseInitialSetupRecoveryRecord(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readInitialSetupRecoveryRecords(): InitialSetupRecoveryRecordV1[] {
+  const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+  if (!storage) throw new StorageRuntimeError("storage_unavailable", "localStorage is unavailable");
+  let raw: string | null;
+  try {
+    raw = storage.getItem(INITIAL_SETUP_RECOVERY_STORAGE_KEY);
+  } catch {
+    throw new StorageRuntimeError("storage_unavailable", "Initialization recovery records are unavailable");
+  }
+  if (raw === null) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger JSON is invalid");
+  }
+  if (!Array.isArray(parsed)) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger must be an array");
+  if (parsed.length > RECOVERY_RECORD_LIMIT) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger exceeds its record limit");
+  const records = parsed.map((value) => parseInitialSetupRecoveryRecord(value));
+  const transactionIds = new Set<string>();
+  for (const record of records) {
+    if (transactionIds.has(record.transactionId)) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger contains duplicate transaction IDs");
+    transactionIds.add(record.transactionId);
+  }
+  return records;
+}
+
+function isEvictableInitialSetupRecoveryRecord(record: InitialSetupRecoveryRecordV1): boolean {
+  return record.status === "succeeded" || record.cleanup === "confirmed";
+}
+
+function writeInitialSetupRecoveryRecords(records: InitialSetupRecoveryRecordV1[]): void {
+  const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+  if (!storage) throw new StorageRuntimeError("storage_unavailable", "localStorage is unavailable");
+  const checked = records.map((record) => parseInitialSetupRecoveryRecord(record));
+  const transactionIds = new Set<string>();
+  for (const record of checked) {
+    if (transactionIds.has(record.transactionId)) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger contains duplicate transaction IDs");
+    transactionIds.add(record.transactionId);
+  }
+  let retained = checked;
+  if (checked.length > RECOVERY_RECORD_LIMIT) {
+    const requiredEvictions = checked.length - RECOVERY_RECORD_LIMIT;
+    const evictable = checked.filter(isEvictableInitialSetupRecoveryRecord).slice(0, requiredEvictions);
+    if (evictable.length < requiredEvictions) {
+      throw new StorageRuntimeError("storage_limit_exceeded", "Initialization recovery ledger has no confirmed terminal record available for eviction");
+    }
+    const evictIds = new Set(evictable.map((record) => record.transactionId));
+    retained = checked.filter((record) => !evictIds.has(record.transactionId));
+  }
+  try {
+    storage.setItem(INITIAL_SETUP_RECOVERY_STORAGE_KEY, JSON.stringify(retained));
+  } catch {
+    throw new StorageRuntimeError("storage_unavailable", "Initialization recovery records could not be saved");
+  }
+}
+
+async function withInitialSetupRecoveryLock<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  const locks = (globalThis as typeof globalThis & { navigator?: { locks?: InitialSetupRecoveryLocks } }).navigator?.locks;
+  if (!locks) throw new StorageRuntimeError("storage_unavailable", "Web Locks are required for initialization recovery records");
+  try {
+    return await locks.request(INITIAL_SETUP_RECOVERY_LOCK, { signal }, async () => {
+      if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
+      return operation();
+    });
+  } catch (caught) {
+    if (caught instanceof StorageRuntimeError) throw caught;
+    const name = caught && typeof caught === "object" ? (caught as { name?: unknown }).name : undefined;
+    if (name === "AbortError") throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
+    throw new StorageRuntimeError("storage_unavailable", "Initialization recovery records are unavailable");
+  }
+}
 
 // ============================================================
 // 1. Client Types
@@ -630,18 +861,58 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const lease = this.localStorageBridgeLease;
       if (!lease) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is unavailable");
       if (!lease.authorityInstanceId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge authority is not ready");
-      if (!lease.bucketId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket is not selected");
       if (request.authorityInstanceId !== lease.authorityInstanceId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge authority changed");
       if (request.leaseId !== lease.leaseId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease changed");
+      if (request.type === "catalog-read") {
+        if (controller.signal.aborted) return;
+        const catalog = readStorageCatalog();
+        pagePort.postMessage({ requestId, ok: true, response: { type: "catalog-state", catalog } } satisfies LocalStorageBridgeWireResponse);
+        return;
+      }
+      if (request.type === "initial-setup-recovery-list" || request.type === "initial-setup-recovery-write" || request.type === "initial-setup-recovery-delete") {
+        if (controller.signal.aborted) return;
+        // 恢复记录独立于桶目录，必须使用自己的锁。每次 mutation 都在锁内
+        // 重新读取完整数组，避免两个页面桥的 read-modify-write 互相覆盖。
+        const nextRecords = await withInitialSetupRecoveryLock(controller.signal, async () => {
+          const records = readInitialSetupRecoveryRecords();
+          if (request.type === "initial-setup-recovery-write") {
+            if (!isInitialSetupRecoveryRecord(request.record)) throw new StorageRuntimeError("storage_provider_error", "Initial setup recovery record is invalid");
+            const updated = [...records.filter((record) => record.transactionId !== request.record.transactionId), structuredClone(request.record)];
+            writeInitialSetupRecoveryRecords(updated);
+            return readInitialSetupRecoveryRecords();
+          }
+          if (request.type === "initial-setup-recovery-delete") {
+            const updated = records.filter((record) => record.transactionId !== request.transactionId);
+            if (updated.length !== records.length) writeInitialSetupRecoveryRecords(updated);
+            return readInitialSetupRecoveryRecords();
+          }
+          return records;
+        });
+        if (controller.signal.aborted) return;
+        pagePort.postMessage({ requestId, ok: true, response: { type: "initial-setup-recovery", records: nextRecords } } satisfies LocalStorageBridgeWireResponse);
+        return;
+      }
       const candidate = "candidateBucket" in request ? request.candidateBucket : undefined;
-      const isCandidateRequest = candidate !== undefined && request.type !== "catalog-update" && request.type !== "catalog-select";
+      const isCatalogCommit = request.type === "catalog-commit";
+      const isCandidateRequest = candidate !== undefined && request.type !== "catalog-update" && request.type !== "catalog-select" && !isCatalogCommit;
+      const isInitialCandidateRequest = isCandidateRequest && candidate?.initialSetup === true;
+      const isCleanupCandidateRequest = isInitialCandidateRequest && candidate?.cleanupOnly === true;
       const isCatalogSelect = request.type === "catalog-select";
-      if (!isCandidateRequest && !isCatalogSelect && request.bucketId !== lease.bucketId) {
+      if (isCleanupCandidateRequest && request.type !== "get" && request.type !== "list" && request.type !== "delete") {
+        throw new StorageRuntimeError("storage_forbidden", "Initial setup cleanup candidates are read/delete only");
+      }
+      if (!lease.bucketId && !isInitialCandidateRequest && !isCatalogCommit) {
+        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket is not selected");
+      }
+      if (!isCandidateRequest && !isCatalogSelect && !isCatalogCommit && request.bucketId !== lease.bucketId) {
         throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket is no longer current");
       }
-      if (!Number.isSafeInteger(lease.bucketGeneration) || lease.bucketGeneration < 1
-        || (isCandidateRequest && request.bucketGeneration !== candidate?.bucketGeneration)
-        || (!isCandidateRequest && !isCatalogSelect && request.bucketGeneration !== lease.bucketGeneration)) {
+      const candidateGenerationValid = isInitialCandidateRequest
+        ? Number.isSafeInteger(candidate?.bucketGeneration) && (candidate?.bucketGeneration ?? 0) >= 1 && request.bucketGeneration === candidate?.bucketGeneration
+        : isCandidateRequest && request.bucketGeneration === candidate?.bucketGeneration;
+      const currentGenerationValid = Number.isSafeInteger(lease.bucketGeneration) && lease.bucketGeneration >= 1
+        && ((!isCandidateRequest && !isCatalogSelect && !isCatalogCommit) ? request.bucketGeneration === lease.bucketGeneration : true);
+      if ((isCandidateRequest && !candidateGenerationValid) || (!isCandidateRequest && !isCatalogSelect && !isCatalogCommit && !currentGenerationValid)) {
         throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is stale");
       }
       if (request.type === "catalog-update") {
@@ -668,6 +939,46 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         });
         const bucket = updatedCatalog.buckets.find((item) => item.bucketId === request.bucketId);
         if (!bucket) throw new StorageRuntimeError("storage_not_found", "The storage bucket was removed during password rotation");
+        if (controller.signal.aborted) return;
+        pagePort.postMessage({ requestId, ok: true, response: { type: "catalog", bucket } } satisfies LocalStorageBridgeWireResponse);
+        return;
+      }
+      if (request.type === "catalog-commit") {
+        if (request.bucketId !== request.targetBucket.bucketId) throw new StorageRuntimeError("storage_provider_error", "The initial storage bucket ID is inconsistent");
+        if (!Number.isSafeInteger(request.bucketGeneration) || request.bucketGeneration < 1) {
+          throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is invalid");
+        }
+        const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
+        const repository = createStorageCatalogRepository({ storage, locks });
+        const updatedCatalog = await repository.mutate((catalog) => {
+          const target = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [request.targetBucket] }).buckets[0];
+          if (!target) throw new StorageRuntimeError("storage_provider_error", "The initial storage bucket catalog entry is invalid");
+          const alreadyCommitted = catalog.selectedBucketId === target.bucketId
+            && catalog.buckets.length === 1
+            && sameStorageCatalogEntry(catalog.buckets[0]!, target);
+          if (request.rollback === true) {
+            if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return catalog;
+            if (!alreadyCommitted) throw new StorageRuntimeError("storage_conflict", "The initial storage bucket was changed before rollback");
+            return { format: "keymaster.storage.catalog", version: 2, buckets: [] };
+          }
+          if (alreadyCommitted) return catalog;
+          if (catalog.buckets.length !== 0 || catalog.selectedBucketId !== undefined) {
+            throw new StorageRuntimeError("storage_conflict", "Another storage bucket was committed during initial setup");
+          }
+          return { format: "keymaster.storage.catalog", version: 2, selectedBucketId: target.bucketId, buckets: [target] };
+        });
+        const bucket = request.rollback === true
+          ? request.targetBucket
+          : updatedCatalog.buckets.find((item) => item.bucketId === request.targetBucket.bucketId);
+        if (!bucket) throw new StorageRuntimeError("storage_not_found", "The initial storage bucket was not committed");
+        if (request.rollback === true) {
+          this.localStorageBridgeLease = { ...lease, bucketId: undefined, bucketGeneration: 0 };
+        } else {
+          const committed = updatedCatalog.buckets.find((item) => item.bucketId === request.targetBucket.bucketId);
+          if (!committed) throw new StorageRuntimeError("storage_not_found", "The initial storage bucket was not committed");
+          this.localStorageBridgeLease = { ...lease, bucketId: committed.bucketId, bucketGeneration: request.bucketGeneration };
+        }
         if (controller.signal.aborted) return;
         pagePort.postMessage({ requestId, ok: true, response: { type: "catalog", bucket } } satisfies LocalStorageBridgeWireResponse);
         return;
@@ -735,6 +1046,26 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ? (() => {
             if (!candidate || candidate.bucket.bucketId !== request.bucketId || candidate.bucketGeneration !== request.bucketGeneration) return undefined;
             const target = catalog.buckets.find((bucket) => bucket.bucketId === candidate.bucket.bucketId);
+            if (candidate.initialSetup === true) {
+              if (candidate.cleanupOnly === true) {
+                // 竞争失败后允许原事务只清理自己生成的命名空间；不能把
+                // 另一个事务的目录条目当成自己的候选对象。
+                if (target && !sameStorageCatalogEntry(target, candidate.bucket)) return undefined;
+                return target ?? candidate.bucket;
+              }
+              // 首次初始化的候选桶在目录提交前故意不存在；只要目录仍为空，
+              // 当前 authority 租约就可以访问这个由 Worker 生成的命名空间。
+              if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return candidate.bucket;
+              // catalog-commit 之后 Provider 仍可能保留 initialSetup 标记：
+              // 它是在提交前创建的，并不会随 Worker 内部句柄自动重建。此时
+              // 只允许同一租约访问刚刚提交的同一桶，不能把“已提交”误判为
+              // 失效候选，也不能放宽到其它目录条目。
+              const committedInitialSelection = catalog.selectedBucketId === candidate.bucket.bucketId
+                && lease.bucketId === candidate.bucket.bucketId
+                && target !== undefined
+                && sameStorageCatalogEntry(target, candidate.bucket);
+              return committedInitialSelection ? target : undefined;
+            }
             if (!target || !sameStorageCatalogEntry(target, candidate.bucket)) return undefined;
             // 暂存阶段：目录仍选中旧桶；提交阶段：目录已经选中目标桶，
             // 页面租约也已经随 catalog-select 原子更新为目标桶。
