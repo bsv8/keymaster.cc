@@ -27,7 +27,7 @@ describe("msfilePlugin manifest", () => {
 
   it("registers the formal file route and removes all owned surfaces on disable", async () => {
     const host = createPluginHost({
-      execution: "window",
+      runtime: "window-main",
       disableConfigPersistence: true,
       initialRuntimeIdentity: {
         vaultStatus: "unlocked",

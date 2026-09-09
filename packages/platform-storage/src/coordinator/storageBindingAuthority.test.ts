@@ -28,7 +28,7 @@ describe("storage binding authority service bridge", () => {
       reference: {
         capabilityId: "coordinator.owner-storage",
         providerInstanceId: "provider:1",
-        execution: "coordinator-worker",
+        runtime: "shared-worker",
         contractVersion: "1.0.0",
         authorityInstanceId: "authority:1",
         scopeId: "scope:1",

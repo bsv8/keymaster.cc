@@ -168,8 +168,8 @@ const bsv21TokenPluginDefinition = {
   units: [
     {
       id: "token-bsv21.window",
-      execution: "window",
-      lifetime: "owner-session",
+      runtime: "window-main",
+      scopeKind: "owner-session",
       provides: [BSV21_MINT_SERVICE_CAPABILITY, BSV21_TRANSFER_SERVICE_CAPABILITY],
       providedContracts: defineRuntimeUnitProvidedContracts([
         BSV21_MINT_SERVICE_CAPABILITY,
@@ -196,8 +196,8 @@ const bsv21TokenPluginDefinition = {
     },
     {
       id: "token-bsv21.coordinator-worker",
-      execution: "coordinator-worker",
-      lifetime: "owner-session",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
     },
   ],
   i18n: bsv21Resources,

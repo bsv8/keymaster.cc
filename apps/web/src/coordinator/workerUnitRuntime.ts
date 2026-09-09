@@ -6,9 +6,9 @@
 
 import type {
   CoordinatorWorkerUnitSnapshot,
+  KeymasterScopeKind,
   SessionEpoch,
 } from "@keymaster/contracts";
-import type { PluginLifetime } from "webloom-framework";
 import {
   COORDINATOR_WORKER_UNIT_CATALOG,
   type CoordinatorWorkerUnitDescriptor,
@@ -45,8 +45,8 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function requiresOwner(lifetime: PluginLifetime): boolean {
-  return lifetime === "owner-session" || lifetime === "connect-session";
+function requiresOwner(scopeKind: KeymasterScopeKind): boolean {
+  return scopeKind === "owner-session" || scopeKind === "connect-session";
 }
 
 function sameIdentity(
@@ -91,7 +91,7 @@ export function createCoordinatorWorkerUnitRegistry(
   }
 
   function validateIdentity(unit: CoordinatorWorkerUnitDescriptor, identity: OwnerIdentity): void {
-    if (!requiresOwner(unit.lifetime)) {
+    if (!requiresOwner(unit.scopeKind)) {
       if (identity.ownerPublicKeyHex !== undefined || identity.sessionEpoch !== undefined) {
         throw new Error(`非 owner-session Worker unit 不得绑定 owner 身份: ${unit.unitId}`);
       }
@@ -116,8 +116,8 @@ export function createCoordinatorWorkerUnitRegistry(
       const snapshot: CoordinatorWorkerUnitSnapshot = {
         productId: unit.productId,
         unitId: unit.unitId,
-        execution: unit.execution,
-        lifetime: unit.lifetime,
+        runtime: unit.runtime,
+        scopeKind: unit.scopeKind,
         instanceId: identity.instanceId ?? `coordinator-unit:${unitId}:${++nextInstance}`,
         state: "starting",
         snapshotRevision,

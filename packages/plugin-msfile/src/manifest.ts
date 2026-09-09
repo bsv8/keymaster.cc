@@ -309,8 +309,8 @@ const msfilePluginDefinition = {
   },
   units: [{
     id: "msfile.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([
       MSFILE_SERVICE_CAPABILITY,
@@ -326,8 +326,8 @@ const msfilePluginDefinition = {
     ]),
   }, {
     id: "msfile.coordinator-worker",
-    execution: "coordinator-worker",
-    lifetime: "owner-session",
+    runtime: "shared-worker",
+    scopeKind: "owner-session",
   }],
   i18n: resources,
   setup(ctx: PluginContext) {

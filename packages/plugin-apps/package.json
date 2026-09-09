@@ -13,7 +13,7 @@
     "@noble/hashes": "^2.2.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.1.0",
+    "webloom-framework": "0.2.0",
     "@keymaster/ui": "*",
     "lucide-react": "^0.468.0"
   }

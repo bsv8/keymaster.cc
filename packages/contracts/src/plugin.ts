@@ -6,9 +6,9 @@
 import type {
   LifecycleDisposeResult,
   LifecycleScope,
-  PluginExecution,
-  PluginLifetime,
+  RuntimeKind,
 } from "webloom-framework";
+import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
 import type {
   KeymasterWebLoomContext,
   KeymasterWebLoomManifest,
@@ -48,9 +48,9 @@ export interface PluginDependency {
   /** 依赖服务的精确契约版本；跨环境依赖不得省略。 */
   contractVersion?: string;
   /** 提供者运行代码所在环境；跨 Worker 依赖不得靠 capability 猜测。 */
-  sourceExecution?: PluginExecution;
+  sourceRuntime?: RuntimeKind;
   /** 依赖服务允许存在的作用域范围；不包含单次请求这种临时作用域。 */
-  scope?: PluginLifetime;
+  scopeKind?: KeymasterScopeKind;
   /** 可选的人类可读描述，便于诊断。 */
   reason?: string;
   /** 可选依赖缺失时只关闭局部能力，不阻止插件主体运行。 */
@@ -70,9 +70,9 @@ export interface RuntimeUnitDependency {
   /** 精确契约版本；第一阶段只接受完全匹配。 */
   contractVersion: string;
   /** 提供者实际运行环境；不是消费者所在环境。 */
-  sourceExecution: PluginExecution;
+  sourceRuntime: RuntimeKind;
   /** 提供者允许存在的作用域寿命。 */
-  scope: PluginLifetime;
+  scopeKind: KeymasterScopeKind;
   /** 可选的人类可读说明。 */
   reason?: string;
   /** 缺失时只关闭局部能力；未填写表示硬依赖。 */
@@ -88,29 +88,29 @@ export interface RuntimeUnitDependency {
  */
 const RUNTIME_CAPABILITY_BINDINGS: Readonly<Record<string, {
   /** 提供者代码所在环境。 */
-  sourceExecution: PluginExecution;
+  sourceRuntime: RuntimeKind;
   /** 提供者允许存在的最长作用域。 */
-  scope: PluginLifetime;
+  scopeKind: KeymasterScopeKind;
 }>> = {
-  "vault.service": { sourceExecution: "window", scope: "root" },
-  "keyspace.service": { sourceExecution: "window", scope: "root" },
-  "vault-settings.registry": { sourceExecution: "window", scope: "root" },
-  "protocol.service": { sourceExecution: "window", scope: "storage" },
-  "p2pkh.service": { sourceExecution: "window", scope: "owner-session" },
-  "p2pkh.protocol-spend": { sourceExecution: "window", scope: "owner-session" },
-  "woc.service": { sourceExecution: "window", scope: "owner-session" },
-  "woc.bsv21.service": { sourceExecution: "window", scope: "owner-session" },
-  "woc.stas.service": { sourceExecution: "window", scope: "owner-session" },
-  "woc.1satordinals.service": { sourceExecution: "window", scope: "owner-session" },
-  "contacts.service": { sourceExecution: "window", scope: "owner-session" },
-  "webrtc.service": { sourceExecution: "window", scope: "owner-session" },
-  "message.service": { sourceExecution: "window", scope: "owner-session" },
-  "background.registry": { sourceExecution: "window", scope: "owner-session" },
-  "background.service": { sourceExecution: "window", scope: "owner-session" },
-  "channel.runtime": { sourceExecution: "window", scope: "owner-session" },
-  "window-p2p.executor": { sourceExecution: "window", scope: "root" },
-  "window-p2p.coordinator-control": { sourceExecution: "window", scope: "root" },
-  "storage.runtime-controller": { sourceExecution: "window", scope: "storage" },
+  "vault.service": { sourceRuntime: "window-main", scopeKind: "root" },
+  "keyspace.service": { sourceRuntime: "window-main", scopeKind: "root" },
+  "vault-settings.registry": { sourceRuntime: "window-main", scopeKind: "root" },
+  "protocol.service": { sourceRuntime: "window-main", scopeKind: "storage" },
+  "p2pkh.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "p2pkh.protocol-spend": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "woc.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "woc.bsv21.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "woc.stas.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "woc.1satordinals.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "contacts.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "webrtc.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "message.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "background.registry": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "background.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "channel.runtime": { sourceRuntime: "window-main", scopeKind: "owner-session" },
+  "window-p2p.executor": { sourceRuntime: "window-main", scopeKind: "root" },
+  "window-p2p.coordinator-control": { sourceRuntime: "window-main", scopeKind: "root" },
+  "storage.runtime-controller": { sourceRuntime: "window-main", scopeKind: "storage" },
 };
 
 /** 返回稳定的 capability 契约版本；字段含义：能力名 + 主版本。 */
@@ -122,21 +122,21 @@ export function runtimeCapabilityContractVersion(capability: string): string {
  * 将人类可读的依赖清单物化为严格的运行单元依赖契约。
  *
  * `defaults` 只用于尚未进入平台绑定表的本地 Registry；跨环境服务必须
- * 先补入上面的绑定表，不能依赖调用方猜测 sourceExecution / scope。
+ * 先补入上面的绑定表，不能依赖调用方猜测 sourceRuntime / scopeKind。
  */
 export function defineRuntimeUnitDependencies(
   dependencies: readonly Pick<PluginDependency, "capability" | "reason" | "optional">[],
-  defaults: Partial<Pick<RuntimeUnitDependency, "sourceExecution" | "scope">> = {},
+  defaults: Partial<Pick<RuntimeUnitDependency, "sourceRuntime" | "scopeKind">> = {},
 ): RuntimeUnitDependency[] {
   return dependencies.map((dependency) => {
     const binding = RUNTIME_CAPABILITY_BINDINGS[dependency.capability];
-    const sourceExecution = binding?.sourceExecution ?? defaults.sourceExecution ?? "window";
-    const scope = binding?.scope ?? defaults.scope ?? "root";
+    const sourceRuntime = binding?.sourceRuntime ?? defaults.sourceRuntime ?? "window-main";
+    const scopeKind = binding?.scopeKind ?? defaults.scopeKind ?? "root";
     return {
       capability: dependency.capability,
       contractVersion: runtimeCapabilityContractVersion(dependency.capability),
-      sourceExecution,
-      scope,
+      sourceRuntime,
+      scopeKind,
       ...(dependency.reason !== undefined ? { reason: dependency.reason } : {}),
       ...(dependency.optional !== undefined ? { optional: dependency.optional } : {}),
     };
@@ -217,10 +217,6 @@ export interface PluginMeta {
   providesCapabilities?: string[];
   /** UI 分组（仅展示），不传则按 kind 兜底。 */
   displayGroup?: PluginDisplayGroup;
-  /** 运行生命周期；未填写的历史 manifest 按 plugin-instance 兼容装配。 */
-  lifetime?: PluginLifetime;
-  /** 运行代码位置；不能通过 React manifest 推断。 */
-  execution?: PluginExecution;
 }
 
 /** 插件 setup 钩子可返回的清理函数。 */
@@ -250,10 +246,10 @@ export interface RuntimeUnitImplementationRegistry {
 export interface RuntimeUnitDescriptor {
   /** 稳定运行单元标识，不是每次启动生成的 instanceId。 */
   id: string;
-  /** 运行代码所在环境。 */
-  execution: PluginExecution;
-  /** 依附的作用域寿命。 */
-  lifetime: PluginLifetime;
+  /** 运行代码所在真实 Runtime。 */
+  runtime: RuntimeKind;
+  /** Keymaster 领域的 Scope 绑定类别；不进入 WebLoom Host。 */
+  scopeKind: KeymasterScopeKind;
   /** 本单元所需的服务和精确契约版本；运行单元依赖不得省略绑定字段。 */
   dependencies?: RuntimeUnitDependency[];
   /** 本单元提供的 capability；兼容旧字段的语义。 */
@@ -385,7 +381,7 @@ export interface PluginUnitState {
   /** 稳定运行单元标识。 */
   unitId: string;
   /** 运行环境。 */
-  execution: PluginExecution;
+  runtime: RuntimeKind;
   /** 当前运行实例；未运行时为空。 */
   instanceId?: string;
   /** 当前产品意图修订；用于丢弃旧单元异步结果。 */
@@ -437,7 +433,7 @@ export interface PluginUnitGraph {
   /** 稳定运行单元标识。 */
   unitId: string;
   /** 运行环境。 */
-  execution: PluginExecution;
+  runtime: RuntimeKind;
   /** 本单元依赖的 capability。 */
   dependencies: string[];
   /** 本单元依赖的精确契约描述。 */

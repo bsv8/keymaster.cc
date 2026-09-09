@@ -45,8 +45,8 @@ const jsonFileImporterPluginDefinition = {
   },
   units: [{
     id: "importer-json-file.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
       { capability: "importer.registry", reason: "需要注册 JSON 实现" },
     ]),

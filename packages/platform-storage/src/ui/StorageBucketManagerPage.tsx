@@ -9,7 +9,7 @@ import type { StorageRuntimeController, VaultService } from "@keymaster/contract
 import { createStorageBucketManagementService } from "../hold/storageBucketManagement.js";
 import { exportStorageProfileEnvelope, readLegacyStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
 import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
-import { BucketConnectionFields, EMPTY_BUCKET_DRAFT, bucketDraftFingerprint, connectionFromBucketDraft, createBucketProvider, type BucketDraft } from "./BucketConnectionFields.js";
+import { BucketConnectionFields, EMPTY_BUCKET_DRAFT, bucketDraftFingerprint, connectionFromBucketDraft, createBucketProvider, updateBucketDraft, validateBucketDraft, type BucketDraft } from "./BucketConnectionFields.js";
 
 const EMPTY_CATALOG: StorageCatalogV2 = {
   format: "keymaster.storage.catalog",
@@ -48,6 +48,9 @@ function draftFromConnection(entry: StorageBucketCatalogEntryV2, config: Storage
       editingBucketId: entry.bucketId,
       label: entry.label,
       backend: "s3",
+      // 新版目录只保存最终通用 S3 连接，无法可靠恢复当初使用的
+      // AWS/R2 页面模板；编辑统一以普通 S3-compatible 打开，禁止猜测。
+      s3ConfigMode: "s3-compatible",
       password,
       passwordConfirm: password,
       endpoint: config.endpoint,
@@ -181,7 +184,7 @@ export function StorageBucketManagerPage() {
   }, [vault, runtimeStatus]);
 
   function updateDraft<K extends keyof BucketDraft>(key: K, value: BucketDraft[K]) {
-    setDraft((current) => ({ ...current, [key]: value }));
+    setDraft((current) => updateBucketDraft(current, key, value));
     setTestedFingerprint(null);
     setMessage(null);
   }
@@ -190,9 +193,8 @@ export function StorageBucketManagerPage() {
     if (!draft.label.trim()) return t("storage.bucketManager.err.label", { defaultValue: "请输入桶名称" });
     if (draft.password.length < 8) return t("storage.bucketManager.err.password", { defaultValue: "桶密码至少 8 位" });
     if (draft.password !== draft.passwordConfirm) return t("storage.bucketManager.err.passwordMismatch", { defaultValue: "两次桶密码不一致" });
-    if (draft.backend === "s3" && (!draft.endpoint.trim() || !draft.region.trim() || !draft.bucket.trim() || !draft.accessKeyId || !draft.secretAccessKey)) {
-      return t("storage.bucketManager.err.s3Required", { defaultValue: "请填写 S3 Endpoint、区域、Bucket 和访问凭据" });
-    }
+    const invalid = validateBucketDraft(draft);
+    if (invalid) return t(`storage.bucketManager.err.${invalid.code}`, { defaultValue: invalid.message });
     return undefined;
   }
 
@@ -200,9 +202,11 @@ export function StorageBucketManagerPage() {
     const invalid = validateDraft();
     if (invalid) { setMessage({ kind: "error", text: invalid }); return; }
     setBusy("test"); setMessage(null);
-    const config = connectionFromBucketDraft(draft);
-    const provider = createBucketProvider(config, `test-${crypto.randomUUID()}`);
+    let provider: ReturnType<typeof createBucketProvider> | undefined;
     try {
+      // 新建桶测试必须沿用当前草稿的字段语义；转换后的通用连接只用于
+      // 保存/提交，不能在这里把模板信息提前丢掉。
+      provider = createBucketProvider(draft, `test-${crypto.randomUUID()}`);
       const result = await provider.probe();
       if (!result.ok || result.conditionalWrites !== "native") throw new Error(t("storage.bucketManager.err.conditionalWrites", { defaultValue: "桶不支持必须的原子条件写入" }));
       setTestedFingerprint(bucketDraftFingerprint(draft));
@@ -211,7 +215,7 @@ export function StorageBucketManagerPage() {
       setTestedFingerprint(null);
       setMessage({ kind: "error", text: error instanceof Error ? error.message : t("storage.bucketManager.err.test", { defaultValue: "桶测试失败，请检查配置后重试" }) });
     } finally {
-      provider.dispose();
+      provider?.dispose();
       setBusy(null);
     }
   }
@@ -241,7 +245,7 @@ export function StorageBucketManagerPage() {
         } else {
           const oldConfig = await manager.unlockBucketConfig(entry, draft.password);
           const oldProvider = createBucketProvider(oldConfig, entry.bucketId);
-          const nextProvider = createBucketProvider(config, entry.bucketId);
+          const nextProvider = createBucketProvider(draft, entry.bucketId);
           try {
             await manager.changeBucketConnectionConfig({
               entry,
@@ -261,7 +265,7 @@ export function StorageBucketManagerPage() {
         await manager.prepareBucketConfig(config, draft.password, {
           label: draft.label.trim(),
           backend: draft.backend,
-          createProvider: (bucketId) => createBucketProvider(config, bucketId),
+          createProvider: (bucketId) => createBucketProvider(draft, bucketId),
           bucketGeneration: 1
         });
       }

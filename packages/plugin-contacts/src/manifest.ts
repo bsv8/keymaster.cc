@@ -196,8 +196,8 @@ const contactsPluginDefinition = {
   units: [
     {
       id: "contacts.window",
-      execution: "window",
-      lifetime: "owner-session",
+      runtime: "window-main",
+      scopeKind: "owner-session",
       provides: [CONTACTS_CAPABILITY, CONTACTS_PICKER, CONTACTS_EDITOR, CONTACTS_COORDINATOR_CONTROL_CAPABILITY],
       providedContracts: defineRuntimeUnitProvidedContracts([
         CONTACTS_CAPABILITY,
@@ -219,8 +219,8 @@ const contactsPluginDefinition = {
     },
     {
       id: "contacts.coordinator-worker",
-      execution: "coordinator-worker",
-      lifetime: "owner-session",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
     },
   ],
   i18n: contactsResources,

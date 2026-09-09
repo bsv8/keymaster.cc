@@ -243,7 +243,7 @@ describe("web startup capability contract", () => {
       disableConfigPersistence: true,
       storageBindingAuthority: makeStorageBindingAuthority(),
       coordinatorForPlugin: () => coordinatorClient,
-      execution: "window",
+      runtime: "window-main",
       runtimeUnitImplementationRegistry: createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG),
       initialRuntimeIdentity: {
         vaultStatus: "unlocked",

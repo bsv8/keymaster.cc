@@ -43,8 +43,8 @@ const wifImporterPluginDefinition = {
   },
   units: [{
     id: "importer-wif.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
       { capability: "importer.registry", reason: "需要注册 WIF 实现" },
     ]),

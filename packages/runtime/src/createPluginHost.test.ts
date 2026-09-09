@@ -302,8 +302,8 @@ describe("createPluginHost - lifecycle", () => {
       },
       units: [{
         id: "unit-entry.worker",
-        execution: "coordinator-worker",
-        lifetime: "owner-session",
+        runtime: "shared-worker",
+        scopeKind: "owner-session",
         provides: ["unit-entry.service"],
         config: { source: "unit", productOnly: true, unitOnly: true },
       }],
@@ -321,8 +321,8 @@ describe("createPluginHost - lifecycle", () => {
       name: "Multi-unit product",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       units: [
-        { id: "multi-unit.worker", execution: "coordinator-worker", lifetime: "root", provides: ["multi.worker"] },
-        { id: "multi-unit.window", execution: "window", lifetime: "owner-session", provides: ["multi.window"] },
+        { id: "multi-unit.worker", runtime: "shared-worker", scopeKind: "root", provides: ["multi.worker"] },
+        { id: "multi-unit.window", runtime: "window-main", scopeKind: "owner-session", provides: ["multi.window"] },
       ],
     };
 
@@ -353,21 +353,21 @@ describe("createPluginHost - lifecycle", () => {
       units: [
         {
           id: "split-runtime.worker",
-          execution: "coordinator-worker",
-          lifetime: "root",
+          runtime: "shared-worker",
+          scopeKind: "root",
           provides: ["split.worker"],
         },
         {
           id: "split-runtime.window",
-          execution: "window",
-          lifetime: "owner-session",
+          runtime: "window-main",
+          scopeKind: "owner-session",
           provides: ["split.window"],
         },
       ],
     };
 
-    const workerHost = createPluginHost({ disableConfigPersistence: true, execution: "coordinator-worker", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
-    const windowHost = createPluginHost({ disableConfigPersistence: true, execution: "window", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
+    const workerHost = createPluginHost({ disableConfigPersistence: true, runtime: "shared-worker", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
+    const windowHost = createPluginHost({ disableConfigPersistence: true, runtime: "window-main", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
     await workerHost.register(product);
     await windowHost.register(product);
 
@@ -493,7 +493,7 @@ describe("createPluginHost - lifecycle", () => {
     const host = createPluginHost({
       disableConfigPersistence: true,
       pluginIntentCoordinator: coordinator,
-      execution: "window",
+      runtime: "window-main",
       initialRuntimeIdentity: TEST_RUNTIME_IDENTITY,
       runtimeUnitImplementationRegistry: createRuntimeUnitImplementationRegistry([{
         pluginId: "intent-product",
@@ -507,8 +507,8 @@ describe("createPluginHost - lifecycle", () => {
       meta: { kind: "business", startup: "optional", defaultEnabled: false, canDisable: true },
       units: [{
         id: "intent-product.window",
-        execution: "window",
-        lifetime: "owner-session",
+        runtime: "window-main",
+        scopeKind: "owner-session",
         provides: ["intent.product"],
       }],
     });
@@ -537,7 +537,7 @@ describe("createPluginHost - lifecycle", () => {
     const host = createPluginHost({
       disableConfigPersistence: true,
       pluginIntentCoordinator: controller,
-      execution: "window",
+      runtime: "window-main",
       initialRuntimeIdentity: TEST_RUNTIME_IDENTITY,
       runtimeUnitImplementationRegistry: createRuntimeUnitImplementationRegistry([{
         pluginId: "failing-intent",
@@ -551,8 +551,8 @@ describe("createPluginHost - lifecycle", () => {
       meta: { kind: "business", startup: "optional", defaultEnabled: false, canDisable: true },
       units: [{
         id: "failing-intent.window",
-        execution: "window",
-        lifetime: "owner-session",
+        runtime: "window-main",
+        scopeKind: "owner-session",
         provides: ["failing.intent"],
       }],
     });
@@ -731,7 +731,7 @@ describe("createPluginHost - lifecycle", () => {
     const instances: string[] = [];
     const host = createPluginHost({
       disableConfigPersistence: true,
-      execution: "window",
+      runtime: "window-main",
       initialRuntimeIdentity: {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: ownerA,
@@ -745,8 +745,8 @@ describe("createPluginHost - lifecycle", () => {
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       units: [{
         id: "owner-session-plugin.window",
-        execution: "window",
-        lifetime: "owner-session",
+        runtime: "window-main",
+        scopeKind: "owner-session",
         provides: ["owner-session-plugin.service"],
       }],
       setup(ctx) {
@@ -823,7 +823,7 @@ describe("createPluginHost - lifecycle", () => {
     const started = new Promise<void>((resolve) => { setupStarted = resolve; });
     const host = createPluginHost({
       disableConfigPersistence: true,
-      execution: "window",
+      runtime: "window-main",
       initialRuntimeIdentity: {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: ownerA,
@@ -839,8 +839,8 @@ describe("createPluginHost - lifecycle", () => {
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       units: [{
         id: "owner-session-starting.window",
-        execution: "window",
-        lifetime: "owner-session",
+        runtime: "window-main",
+        scopeKind: "owner-session",
         provides: ["owner-session-starting.service"],
       }],
       setup: async (ctx) => {

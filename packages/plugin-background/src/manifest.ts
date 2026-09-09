@@ -119,8 +119,8 @@ const backgroundPluginDefinition = {
   },
   units: [{
     id: "background.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY, BACKGROUND_COORDINATOR_CONTROL_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([
       BACKGROUND_REGISTRY_CAPABILITY,

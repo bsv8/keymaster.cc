@@ -314,8 +314,8 @@ const messagePlatformPluginDefinition = {
   },
   units: [{
     id: "message.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: ["message.service"],
     providedContracts: defineRuntimeUnitProvidedContracts(["message.service"]),
     storage: { scope: "key", applicationStorageId: "Messages", schemaVersion: 1 },

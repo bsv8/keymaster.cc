@@ -4,7 +4,8 @@
 // 只能接受清单中的产品意图；未来如果开放第三方插件，必须另建可信注册
 // 流程，不能把任意字符串直接加入这里或绕过 Worker 校验。
 
-import type { PluginExecution, PluginLifetime } from "webloom-framework";
+import type { RuntimeKind } from "webloom-framework";
+import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
 
 /**
  * 当前 Web 发行版允许用户启停的产品级 pluginId。
@@ -58,9 +59,9 @@ export interface BuiltinPluginRuntimeUnitDeclaration {
   /** 稳定运行单元标识，不是一次启动生成的 instanceId。 */
   unitId: string;
   /** 运行代码所在环境。 */
-  execution: PluginExecution;
+  runtime: RuntimeKind;
   /** 运行单元的作用域寿命。 */
-  lifetime: PluginLifetime;
+  scopeKind: KeymasterScopeKind;
 }
 
 /**
@@ -70,43 +71,43 @@ export interface BuiltinPluginRuntimeUnitDeclaration {
  * 产品的多条记录表示多个物理运行单元，而不是多个用户产品。
  */
 export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
-  { productId: "storage", unitId: "storage.window", execution: "window", lifetime: "storage" },
-  { productId: "storage", unitId: "storage.coordinator-worker", execution: "coordinator-worker", lifetime: "storage" },
-  { productId: "vault", unitId: "vault.window", execution: "window", lifetime: "root" },
-  { productId: "vault", unitId: "vault.coordinator-worker", execution: "coordinator-worker", lifetime: "root" },
-  { productId: "window-p2p", unitId: "window-p2p.window", execution: "window", lifetime: "root" },
-  { productId: "window-p2p", unitId: "window-p2p.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "msfile", unitId: "msfile.window", execution: "window", lifetime: "owner-session" },
-  { productId: "msfile", unitId: "msfile.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "sat-subscription", unitId: "sat-subscription.window", execution: "window", lifetime: "owner-session" },
-  { productId: "sat-subscription", unitId: "sat-subscription.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "protocol", unitId: "protocol.window", execution: "window", lifetime: "storage" },
-  { productId: "contacts", unitId: "contacts.window", execution: "window", lifetime: "owner-session" },
-  { productId: "contacts", unitId: "contacts.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "webrtc", unitId: "webrtc.window", execution: "window", lifetime: "owner-session" },
-  { productId: "message", unitId: "message.window", execution: "window", lifetime: "owner-session" },
-  { productId: "settings", unitId: "settings.window", execution: "window", lifetime: "root" },
-  { productId: "key-import", unitId: "key-import.window", execution: "window", lifetime: "root" },
-  { productId: "background", unitId: "background.window", execution: "window", lifetime: "owner-session" },
-  { productId: "home", unitId: "home.window", execution: "window", lifetime: "root" },
-  { productId: "woc", unitId: "woc.window", execution: "window", lifetime: "owner-session" },
-  { productId: "woc", unitId: "woc.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "junglebus", unitId: "junglebus.window", execution: "window", lifetime: "owner-session" },
-  { productId: "junglebus", unitId: "junglebus.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "p2pkh", unitId: "p2pkh.window", execution: "window", lifetime: "owner-session" },
-  { productId: "p2pkh", unitId: "p2pkh.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "token-bsv21", unitId: "token-bsv21.window", execution: "window", lifetime: "owner-session" },
-  { productId: "token-bsv21", unitId: "token-bsv21.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "token-stas", unitId: "token-stas.window", execution: "window", lifetime: "owner-session" },
-  { productId: "token-stas", unitId: "token-stas.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.window", execution: "window", lifetime: "owner-session" },
-  { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.coordinator-worker", execution: "coordinator-worker", lifetime: "owner-session" },
-  { productId: "poker", unitId: "poker.window", execution: "window", lifetime: "owner-session" },
-  { productId: "importer-wif", unitId: "importer-wif.window", execution: "window", lifetime: "root" },
-  { productId: "importer-hex", unitId: "importer-hex.window", execution: "window", lifetime: "root" },
-  { productId: "importer-json-file", unitId: "importer-json-file.window", execution: "window", lifetime: "root" },
-  { productId: "bsv-price", unitId: "bsv-price.window", execution: "window", lifetime: "owner-session" },
-  { productId: "apps", unitId: "apps.window", execution: "window", lifetime: "root" },
+  { productId: "storage", unitId: "storage.window", runtime: "window-main", scopeKind: "storage" },
+  { productId: "storage", unitId: "storage.coordinator-worker", runtime: "shared-worker", scopeKind: "storage" },
+  { productId: "vault", unitId: "vault.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "vault", unitId: "vault.coordinator-worker", runtime: "shared-worker", scopeKind: "root" },
+  { productId: "window-p2p", unitId: "window-p2p.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "window-p2p", unitId: "window-p2p.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "msfile", unitId: "msfile.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "msfile", unitId: "msfile.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "sat-subscription", unitId: "sat-subscription.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "sat-subscription", unitId: "sat-subscription.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "protocol", unitId: "protocol.window", runtime: "window-main", scopeKind: "storage" },
+  { productId: "contacts", unitId: "contacts.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "contacts", unitId: "contacts.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "webrtc", unitId: "webrtc.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "message", unitId: "message.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "settings", unitId: "settings.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "key-import", unitId: "key-import.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "background", unitId: "background.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "home", unitId: "home.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "woc", unitId: "woc.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "woc", unitId: "woc.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "junglebus", unitId: "junglebus.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "junglebus", unitId: "junglebus.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "p2pkh", unitId: "p2pkh.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "p2pkh", unitId: "p2pkh.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "token-bsv21", unitId: "token-bsv21.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "token-bsv21", unitId: "token-bsv21.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "token-stas", unitId: "token-stas.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "token-stas", unitId: "token-stas.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
+  { productId: "poker", unitId: "poker.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "importer-wif", unitId: "importer-wif.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "importer-hex", unitId: "importer-hex.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "importer-json-file", unitId: "importer-json-file.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "bsv-price", unitId: "bsv-price.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "root" },
 ] as const satisfies readonly BuiltinPluginRuntimeUnitDeclaration[];
 
 /** 返回一个产品的静态运行单元声明；调用方不得自行补默认单元。 */
@@ -132,8 +133,8 @@ export function validateBuiltinPluginRuntimeUnitCatalog(
     const productUnitKey = `${unit.productId}\u0000${unit.unitId}`;
     if (products.has(productUnitKey)) errors.push(`重复产品运行单元: ${productUnitKey}`);
     products.add(productUnitKey);
-    if (unit.execution === "coordinator-worker" && !["root", "storage", "owner-session"].includes(unit.lifetime)) {
-      errors.push(`Coordinator Worker 单元 lifetime 必须是 root、storage 或 owner-session: ${unit.unitId}`);
+    if (unit.runtime === "shared-worker" && !["root", "storage", "owner-session"].includes(unit.scopeKind)) {
+      errors.push(`Coordinator Worker 单元 scopeKind 必须是 root、storage 或 owner-session: ${unit.unitId}`);
     }
   }
   for (const productId of BUILTIN_PLUGIN_PRODUCT_IDS) {

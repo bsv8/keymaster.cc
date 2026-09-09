@@ -78,7 +78,7 @@ const WEB_WINDOW_SETUP_BY_PLUGIN_ID: ReadonlyMap<string, PluginSetup> = new Map(
 function windowUnitId(manifest: PluginManifest): string {
   const units = manifest.units ?? [];
   if (units.length === 0) return manifest.id;
-  const windowUnits = units.filter((unit) => unit.execution === "window");
+  const windowUnits = units.filter((unit) => unit.runtime === "window-main");
   if (windowUnits.length !== 1) {
     throw new Error(`产品 ${manifest.id} 必须声明唯一 Window 运行单元后才能注册 Web 实现`);
   }

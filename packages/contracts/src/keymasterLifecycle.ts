@@ -4,7 +4,10 @@
 // 这里仅保留 Keymaster 自己的 Vault 身份、权限 allowlist 和 legacy wire
 // 目录类型。业务字段不进入 WebLoom 公共包。
 
-import type { PluginExecution } from "webloom-framework";
+import type { RuntimeKind } from "webloom-framework";
+
+/** Keymaster 领域仍需区分的 Scope 绑定类别；不进入 WebLoom Runtime 契约。 */
+export type KeymasterScopeKind = "root" | "storage" | "owner-session" | "connect-session";
 
 /** Coordinator/Vault 对外发布的身份状态。 */
 export type RuntimeVaultStatus = "booting" | "uninitialized" | "locked" | "unlocked" | "fatal";
@@ -17,7 +20,7 @@ export interface RuntimeIdentityTransition {
   ownerPublicKeyHex?: string | null;
   /** 当前会话世代；unlock、lock、切 Key、Worker 接管都会变化。 */
   sessionEpoch: string;
-  /** 当前存储桶世代；桶切换时重建 storage-lifetime 实例。 */
+  /** 当前存储桶世代；桶切换时重建 storage Scope 绑定实例。 */
   bucketGeneration?: number;
 }
 
@@ -40,7 +43,7 @@ export interface KeymasterRemoteServiceReference {
   /** 提供该服务的运行实例；实例重建后必须变化。 */
   providerInstanceId: string;
   /** 提供者所在执行环境。 */
-  execution: PluginExecution;
+  runtime: RuntimeKind;
   /** 服务契约版本。 */
   contractVersion: string;
   /** 提供环境的启动身份。 */

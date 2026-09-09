@@ -67,8 +67,8 @@ const stasTokenPluginDefinition = {
   units: [
     {
       id: "token-stas.window",
-      execution: "window",
-      lifetime: "owner-session",
+      runtime: "window-main",
+      scopeKind: "owner-session",
       storage: { scope: "key", applicationStorageId: STAS_STORAGE_ID, schemaVersion: STAS_SCHEMA_VERSION },
       dependencies: defineRuntimeUnitDependencies([
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 主网地址" },
@@ -84,8 +84,8 @@ const stasTokenPluginDefinition = {
     },
     {
       id: "token-stas.coordinator-worker",
-      execution: "coordinator-worker",
-      lifetime: "owner-session",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
     },
   ],
   i18n: stasResources,

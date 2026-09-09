@@ -42,6 +42,10 @@ import {
   type PluginPermission,
   type RuntimeIdentityTransition,
 } from "@keymaster/contracts";
+import {
+  createWindowApp,
+  type WindowApp,
+} from "webloom-framework";
 import type {
   PluginIntentCoordinator,
   PluginIntentSnapshot,
@@ -50,7 +54,7 @@ import type {
 import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_OWNER_STORAGE_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
 import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
-import { createKeymasterPluginHost as createPluginHost, type PluginHost } from "@keymaster/runtime";
+import { createKeymasterPluginHost as createPluginHost, getWebLoomHost, type PluginHost } from "@keymaster/runtime";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
 import { bsvPriceConfig } from "./pluginConfigs.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
@@ -157,7 +161,7 @@ export function createVaultCoordinatorClient(client: SessionCoordinatorClient, s
     const proxy = serviceBridge?.getProxy({
       capabilityId: COORDINATOR_CRYPTO_SERVICE,
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      execution: "coordinator-worker",
+      runtime: "shared-worker",
     });
     if (!proxy) return { ack: { status: "not-ready" } };
     try {
@@ -491,11 +495,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // creating a second client here would bypass the real SharedWorker session.
   const coordinatorClient = getCoordinatorClient();
   let pageHost: PluginHost | undefined;
+  let pageWindowApp: WindowApp | undefined;
   let pageLifecycleClosed = false;
   const disposePageLifecycle = (): void => {
     if (pageLifecycleClosed) return;
     pageLifecycleClosed = true;
-    const cleanup = pageHost?.dispose("pagehide");
+    const cleanup = pageWindowApp?.dispose("pagehide") ?? pageHost?.dispose("pagehide");
     // 页面销毁不是一次可重用的业务断线；撤权同步完成后必须立即通知
     // Coordinator。若等 Host 的异步 teardown（日志/配置/远端连接）结束，
     // 浏览器可能先销毁文档而不再执行 Promise，旧 Worker 就会留下端口和
@@ -565,6 +570,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const configStorage = createCoordinatorPlatformStore(coordinatorClient, "settings");
   const runtimeUnitImplementationRegistry = createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG);
   const initialRuntimeIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
+  const coordinatorRuntime = coordinatorClient.getRuntimeHandle();
+  if (!coordinatorRuntime) throw new Error("Coordinator WebLoom RuntimeHandle is unavailable after connect");
   const host = createPluginHost({
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd,
@@ -575,18 +582,16 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       requireServiceBridge: true,
     }),
     coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId, () => coordinatorClient.getServiceBridge()),
-    // Host 上下文也保留同一条 bridge，业务 Provider 不能自行创建第二条端口。
-    serviceBridgeForPlugin: () => coordinatorClient.getServiceBridge(),
     pluginIntentCoordinator,
-    // Coordinator Worker 单元状态由唯一远程快照提供；Host 只负责把它
-    // 合并到产品页，不在 Window 侧猜测或伪造后台状态。
-    runtimeUnitSnapshots: () => coordinatorClient.getBootstrapSnapshot().coordinatorWorkerUnits ?? [],
+    // 真实 RuntimeHandle 是 Worker 服务目录、运行单元快照和 ServiceBridge
+    // 的唯一来源；Adapter 负责订阅断线/重连世代并驱动 Host reconcile。
+    remoteRuntime: coordinatorRuntime,
     // 生产 Window Host 只从当前环境实现注册表取得 setup；静态 manifest
     // 不携带可执行函数，缺少实现时直接保持 fail-closed。
     runtimeUnitImplementationRegistry,
     // 本页面 Host 明确是 Window 执行环境。未来多单元产品没有 Window
     // 单元时会 fail closed，不会把 Worker capability 当作本地能力。
-    execution: "window",
+    runtime: "window-main",
     initialRuntimeIdentity,
     approvedPermissionsForPlugin: (pluginId, requested) => {
       const approvedByPlugin: Readonly<Record<string, readonly PluginPermission[]>> = {
@@ -617,10 +622,15 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     lifecycleCleanupTimeoutMs: 5_000,
   });
   pageHost = host;
-  const removeWorkerUnitSubscription = coordinatorClient.subscribeTopic("worker.units", () => {
-    host.refreshRuntimeUnitSnapshots();
+  // Keymaster 的四阶段门禁仍由本装配层控制；createWindowApp 负责把同一
+  // WebLoom Window Host 纳入唯一 window-main Runtime，并投影真实 Worker
+  // RuntimeHandle。这样不会为了绕过 staged registration 再创建第二个 Host。
+  pageWindowApp = await createWindowApp({
+    id: "keymaster-window",
+    plugins: [],
+    host: getWebLoomHost(host),
+    remoteRuntime: coordinatorRuntime,
   });
-  host.rootScope.onDispose(removeWorkerUnitSubscription, "worker-unit-snapshot-subscription");
   host.provide(COORDINATOR_ACTIVITY_CAPABILITY, Object.freeze({
     getIsConnected: () => coordinatorClient.getIsConnected(),
     sendActivity: () => coordinatorClient.sendActivity()
@@ -684,7 +694,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     if (p.id === "bsv-price") {
       return {
         ...p,
-        units: p.units?.map((unit) => unit.execution === "window"
+        units: p.units?.map((unit) => unit.runtime === "window-main"
           ? { ...unit, config: { ...bsvPriceConfig } }
           : unit),
       };

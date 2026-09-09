@@ -200,8 +200,8 @@ const webrtcPluginDefinition = {
   },
   units: [{
     id: "webrtc.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [WEBRTC_SERVICE_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([WEBRTC_SERVICE_CAPABILITY]),
     storage: { scope: "key", applicationStorageId: "WebRTC", schemaVersion: 1 },

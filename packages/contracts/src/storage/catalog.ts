@@ -18,9 +18,9 @@ export interface LocalBucketConnectionConfigV1 {
 export interface S3BucketConnectionConfigV1 {
   /** KeymasterHold 的存储类型标识。 */
   kind: "s3";
-  /** S3-compatible HTTPS Endpoint。 */
+  /** 最终的 S3-compatible HTTPS Endpoint；AWS/R2 页面字段会先转换到这里。 */
   endpoint: string;
-  /** Provider 区域。 */
+  /** AWS 区域或 S3 签名区域；R2 转换后固定为 `auto`。 */
   region: string;
   /** 物理 S3 bucket 名称。 */
   bucket: string;

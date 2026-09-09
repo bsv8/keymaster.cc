@@ -12,10 +12,10 @@ describe("Web plugin catalog runtime units", () => {
     for (const manifest of WEB_PLUGIN_CATALOG) {
       const expected = getBuiltinPluginRuntimeUnits(manifest.id);
       expect(manifest.units).toHaveLength(expected.length);
-      expect(manifest.units?.map(({ id, execution, lifetime }) => ({ id, execution, lifetime }))).toEqual(expected.map(({ unitId, execution, lifetime }) => ({ id: unitId, execution, lifetime })));
+      expect(manifest.units?.map(({ id, runtime, scopeKind }) => ({ id, runtime, scopeKind }))).toEqual(expected.map(({ unitId, runtime, scopeKind }) => ({ id: unitId, runtime, scopeKind })));
       expect(manifest.units?.[0]).toMatchObject({
         id: `${manifest.id}.window`,
-        execution: "window",
+        runtime: "window-main",
       });
     }
   });
@@ -23,8 +23,8 @@ describe("Web plugin catalog runtime units", () => {
   it("Worker 任务对应的产品同时声明 Window 与 Coordinator Worker 单元", () => {
     for (const productId of ["contacts", "p2pkh", "token-bsv21", "token-stas", "collectible-1satordinals"]) {
       expect(WEB_PLUGIN_CATALOG.find((manifest) => manifest.id === productId)?.units).toEqual(expect.arrayContaining([
-        expect.objectContaining({ execution: "window" }),
-        expect.objectContaining({ execution: "coordinator-worker", lifetime: "owner-session" }),
+        expect.objectContaining({ runtime: "window-main" }),
+        expect.objectContaining({ runtime: "shared-worker", scopeKind: "owner-session" }),
       ]));
     }
   });
@@ -39,8 +39,8 @@ describe("Web plugin catalog runtime units", () => {
       for (const unit of manifest.units ?? []) {
         for (const dependency of unit.dependencies ?? []) {
           expect(dependency.contractVersion).toBe(`${dependency.capability}.v1`);
-          expect(dependency.sourceExecution).toBeDefined();
-          expect(dependency.scope).toBeDefined();
+          expect(dependency.sourceRuntime).toBeDefined();
+          expect(dependency.scopeKind).toBeDefined();
         }
       }
     }

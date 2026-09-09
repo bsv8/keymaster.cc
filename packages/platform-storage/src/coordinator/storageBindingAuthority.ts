@@ -62,7 +62,7 @@ export function createStorageBindingAuthority(
         remoteProxy = bridge.getProxy({
           capabilityId: COORDINATOR_OWNER_STORAGE_SERVICE,
           contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-          execution: "coordinator-worker",
+          runtime: "shared-worker",
         });
       }
       if (!remoteProxy && options.requireServiceBridge) {

@@ -132,8 +132,8 @@ export function PluginManagerPage() {
           const optionalDeps = new Set(graph.optionalDependencies?.[m.id] ?? []);
           const missingDeps = deps.filter((c) => !optionalDeps.has(c) && !runtime.hasCapability(c));
           const depsSatisfied = missingDeps.length === 0;
-          const pageUnits = state.units?.filter((unit) => unit.execution === "window") ?? [];
-          const backendUnits = state.units?.filter((unit) => unit.execution === "coordinator-worker") ?? [];
+          const pageUnits = state.units?.filter((unit) => unit.runtime === "window-main") ?? [];
+          const backendUnits = state.units?.filter((unit) => unit.runtime === "shared-worker") ?? [];
           const isOpen = expanded[m.id] === true;
           const hasDetails =
             provides.length > 0 || deps.length > 0 || reverse.length > 0 || affectedDependents.length > 0

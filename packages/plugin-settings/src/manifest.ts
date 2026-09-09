@@ -256,8 +256,8 @@ const settingsPluginDefinition = {
   },
   units: [{
     id: "settings.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
       { capability: "system-settings.registry", reason: "注册系统语言设置" },
       { capability: "application-settings.registry", reason: "展示应用设置目录" },

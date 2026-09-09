@@ -12,7 +12,7 @@ describe("Coordinator Worker unit catalog", () => {
     expect(COORDINATOR_WORKER_UNIT_CATALOG).toHaveLength(12);
     expect(COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === "storage.coordinator-worker")).toMatchObject({
       productId: "storage",
-      lifetime: "storage",
+      scopeKind: "storage",
       serviceIds: ["storage.runtime-controller"],
       taskIds: [],
     });

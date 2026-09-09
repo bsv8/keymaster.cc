@@ -64,7 +64,7 @@ import type {
   PluginIntentSnapshot,
   PluginIntentSubmissionResult,
 } from "webloom-framework";
-import type { PluginLifetime } from "webloom-framework";
+import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -107,9 +107,9 @@ export interface CoordinatorWorkerUnitSnapshot {
   /** 稳定运行单元标识，不是一次装配生成的实例标识。 */
   unitId: string;
   /** 提供者所在执行环境。 */
-  execution: "coordinator-worker";
+  runtime: "shared-worker";
   /** 该单元绑定的作用域寿命。 */
-  lifetime: PluginLifetime;
+  scopeKind: KeymasterScopeKind;
   /** 本次 Worker 装配生成的单元实例标识。 */
   instanceId: string;
   /** 单元是否仍在初始化、已经就绪或启动失败。 */

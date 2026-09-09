@@ -128,8 +128,8 @@ const appsPluginDefinition = {
   },
   units: [{
     id: "apps.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     provides: ["app.catalog"],
     providedContracts: defineRuntimeUnitProvidedContracts(["app.catalog"]),
     dependencies: defineRuntimeUnitDependencies([

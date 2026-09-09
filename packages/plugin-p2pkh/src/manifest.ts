@@ -622,8 +622,8 @@ const p2pkhPluginDefinition = {
   units: [
     {
       id: "p2pkh.window",
-      execution: "window",
-      lifetime: "owner-session",
+      runtime: "window-main",
+      scopeKind: "owner-session",
       provides: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       providedContracts: defineRuntimeUnitProvidedContracts([
         P2PKH_CAPABILITY,
@@ -651,8 +651,8 @@ const p2pkhPluginDefinition = {
     },
     {
       id: "p2pkh.coordinator-worker",
-      execution: "coordinator-worker",
-      lifetime: "owner-session",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
     },
   ],
   i18n: p2pkhResources,

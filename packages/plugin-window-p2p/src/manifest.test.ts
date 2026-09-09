@@ -21,7 +21,7 @@ describe("windowP2pPlugin manifest", () => {
   });
 
   it("provides the lane registry and rejects an independent disable", async () => {
-    const host = createPluginHost({ execution: "window", disableConfigPersistence: true, coordinatorForPlugin: () => ({
+    const host = createPluginHost({ runtime: "window-main", disableConfigPersistence: true, coordinatorForPlugin: () => ({
       getBootstrapSnapshot: () => ({ vaultStatus: "locked", sessionEpoch: "test" }),
       subscribeTopic: () => () => undefined
     }), runtimeUnitImplementationRegistry: {

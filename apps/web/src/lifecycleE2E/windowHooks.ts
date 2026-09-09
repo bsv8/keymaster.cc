@@ -228,7 +228,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     const proxy = bridge.requireProxy({
       capabilityId: COORDINATOR_CRYPTO_SERVICE,
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      execution: "coordinator-worker",
+      runtime: "shared-worker",
     });
     const result = await proxy.call<{ type: "deriveP2pkhAddress"; network: "main" }, { type: "deriveP2pkhAddress"; address: string }>(
       { type: "deriveP2pkhAddress", network: "main" },
@@ -247,7 +247,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     const oldProxy = bridge.requireProxy({
       capabilityId: COORDINATOR_CRYPTO_SERVICE,
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      execution: "coordinator-worker",
+      runtime: "shared-worker",
     });
     const oldProviderInstanceId = oldProxy.reference.providerInstanceId;
     const lockResult = await coordinator.lock();

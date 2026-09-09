@@ -54,6 +54,7 @@ import type {
   CoordinatorChannelStateEvent,
   CoordinatorContactsPresenceEvent,
   CoordinatorWorkerUnitStateEvent,
+  CoordinatorWorkerUnitSnapshot,
   ChannelPrivateMessageEvent,
   ChannelRuntime,
   ContactsService,
@@ -104,6 +105,8 @@ import {
   createMessagePortServiceProvider,
   createPluginIntentController,
   createUpgradeGate,
+  definePlugin,
+  startSharedWorkerApp,
   type MessagePortServiceCallInput,
   type MessagePortServiceProvider,
   type RemoteServicePortCallMessage,
@@ -2895,7 +2898,7 @@ async function switchSelectedCatalogBucket(
     coordinatorState.autoLockDeadline = undefined;
     await persistCoordinatorMeta();
 
-    // Storage unit 是 root lifetime；换 Root 时实例必须换代，不能让旧快照
+    // Storage unit 是 root scopeKind；换 Root 时实例必须换代，不能让旧快照
     // 继续代表新桶。旧实例此刻还没有被销毁，失败回滚仍可重新装配。
     const oldStorageUnit = coordinatorWorkerUnitRegistry.get("storage.coordinator-worker");
     if (oldStorageUnit) coordinatorWorkerUnitRegistry.stop(oldStorageUnit.unitId, oldStorageUnit.instanceId);
@@ -4130,6 +4133,7 @@ function ensurePluginIntentController(): PluginIntentController {
     // Controller 的 accepted 事件表示意图已经落盘；从这里开始 Worker
     // 必须立即撤掉旧任务入口，不能等 Window Host 的异步 reconcile。
     reconcileCoordinatorTaskIntent(snapshot);
+    reconcileCoordinatorRuntime();
     publishTopicEvent("plugin.intent", {
       type: "plugin.intent.changed",
       authorityInstanceId: coordinatorAuthorityInstanceId,
@@ -4479,6 +4483,10 @@ function assertOwnerStorageBindingFresh(ownerPublicKeyHex: string, generation: n
 
 /* ---------- MSFile runtime state（施工单 KMMF-005/006） ---------- */
 let msfileRuntime: MsFileServiceImpl | undefined;
+/** 仅测试替身；生产请求永远只读取 Host-owned msfileRuntime。 */
+let testMsfileRuntimeOverride: MsFileServiceImpl | undefined;
+/** 测试模拟 Worker/domain teardown 后允许按现有 Host instance 恢复一次。 */
+let testMsfileRuntimeRecoveryAllowed = false;
 /** MSFile 首次装配 single-flight；首页资源与设置命令可能同时触发启动。 */
 let msfileRuntimeStarting: Promise<MsFileServiceImpl> | undefined;
 /** 释放/切换 owner 时递增，阻止迟到的候选实例重新发布。 */
@@ -4833,7 +4841,7 @@ function rejectMsfileDataWaiters(error = msfileError("msfile_unavailable", "MSFi
   }
 }
 
-async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
+async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileServiceImpl> {
   // 审查修复：锁定 / 未初始化 / fatal 状态不得创建 MSFile runtime。
   if (!isCoordinatorProductEnabled("msfile")) {
     throw msfileError("msfile_unavailable", "MSFile plugin is disabled");
@@ -4846,12 +4854,42 @@ async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
   // 一个在 recovery 窗口中启动的 service 把临时 unavailable 永久缓存成
   // initializationError。
   assertStorageDataAvailable();
-  if (msfileRuntime) return msfileRuntime;
-  if (msfileRuntimeStarting) return msfileRuntimeStarting;
+  if (testMsfileRuntimeOverride) return testMsfileRuntimeOverride;
+  if (msfileRuntime) {
+    if (expectedInstanceId) {
+      const unit = activateCoordinatorOwnerWorkerUnit("msfile.coordinator-worker", expectedInstanceId);
+      const ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId);
+      if (ready.instanceId !== expectedInstanceId) throw msfileError("msfile_unavailable", "MSFile runtime instance identity mismatch");
+    }
+    return msfileRuntime;
+  }
+  if (msfileRuntimeStarting) {
+    const runtime = await msfileRuntimeStarting;
+    if (expectedInstanceId) {
+      const unit = activateCoordinatorOwnerWorkerUnit("msfile.coordinator-worker", expectedInstanceId);
+      const ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId);
+      if (ready.instanceId !== expectedInstanceId) throw msfileError("msfile_unavailable", "MSFile runtime instance identity mismatch");
+    }
+    return runtime;
+  }
+  // Requests must enter through the WebLoom unit setup.  This prevents a
+  // lazy RPC from creating a second registry instance that is not owned by the
+  // Host context.  The setup path below supplies the real instance identity.
+  if (!expectedInstanceId && coordinatorRuntimeApp && !testMsfileRuntimeRecoveryAllowed) {
+    await reconcileCoordinatorRuntime();
+    if (msfileRuntime) return msfileRuntime;
+    throw msfileError("msfile_unavailable", "MSFile WebLoom runtime unit is not ready");
+  }
+  if (!expectedInstanceId && coordinatorRuntimeApp && testMsfileRuntimeRecoveryAllowed) {
+    const hostUnit = coordinatorRuntimeApp.state().units.find((unit) => unit.unitId === "msfile.coordinator-worker");
+    if (hostUnit?.instanceId && (hostUnit.state === "enabled" || hostUnit.state === "starting" || hostUnit.state === "error-disabled")) {
+      expectedInstanceId = hostUnit.instanceId;
+    }
+  }
   if (!platformRootStore) throw msfileError("msfile_unavailable", "Platform storage has not been bootstrapped");
   const startToken = msfileRuntimeStartToken;
   const start = (async (): Promise<MsFileServiceImpl> => {
-    const workerUnit = activateCoordinatorOwnerWorkerUnit("msfile.coordinator-worker");
+    const workerUnit = activateCoordinatorOwnerWorkerUnit("msfile.coordinator-worker", expectedInstanceId);
     let service: MsFileServiceImpl | undefined;
     // MSFile 是系统应用，但数据仍属于当前 active public key，不能落入
     // platform 全局桶；createWorkerOwnerStore 会绑定 `owner/MSFile/`。
@@ -4877,6 +4915,7 @@ async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
         throw msfileError("msfile_unavailable", "MSFile runtime startup was superseded");
       }
       msfileRuntime = service;
+      testMsfileRuntimeRecoveryAllowed = false;
       coordinatorWorkerUnitRegistry.ready(workerUnit.unitId, workerUnit.instanceId);
       emitMsFileState();
       return service;
@@ -4908,7 +4947,7 @@ function emitSatState(event: import("@keymaster/contracts").CoordinatorSatEvent)
   publishTopicEvent("sat.events", next);
 }
 
-async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
+async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerRuntimeState> {
   if (!isCoordinatorProductEnabled("sat-subscription")) {
     throw new Error("SatSubscription plugin is disabled");
   }
@@ -4924,20 +4963,42 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
   if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
     throw new Error("SatSubscription owner is no longer unlocked");
   }
-  if (satRuntime) return satRuntime;
+  if (satRuntime) {
+    if (expectedInstanceId) {
+      const unit = activateCoordinatorOwnerWorkerUnit("sat-subscription.coordinator-worker", expectedInstanceId);
+      const ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId);
+      if (ready.instanceId !== expectedInstanceId) throw new Error("SatSubscription runtime instance identity mismatch");
+    }
+    return satRuntime;
+  }
   if (satRuntimeStarting) {
     const pending = satRuntimeStarting;
     if (satRuntimeStartingToken === satRuntimeStartToken) return pending;
     // lock/key switch 已使旧启动失效；等待它完成清理后再创建新世代，
     // 避免两个世代同时拥有 Supplier 连接。
     await pending.catch(() => undefined);
+    if (satRuntime) {
+      if (expectedInstanceId) {
+        const unit = activateCoordinatorOwnerWorkerUnit("sat-subscription.coordinator-worker", expectedInstanceId);
+        const ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId);
+        if (ready.instanceId !== expectedInstanceId) throw new Error("SatSubscription runtime instance identity mismatch");
+      }
+      return satRuntime;
+    }
+  }
+  // A request-side lazy load must be reconciled through the real WebLoom unit
+  // setup first, otherwise it could publish a registry instance unrelated to
+  // the Host context that owns the public runtime snapshot.
+  if (!expectedInstanceId && coordinatorRuntimeApp) {
+    await reconcileCoordinatorRuntime();
     if (satRuntime) return satRuntime;
+    throw new Error("SatSubscription WebLoom runtime unit is not ready");
   }
   const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
   const ownerGeneration = Math.max(1, coordinatorState.keyspaceGeneration);
   const expectedSessionEpoch = coordinatorState.sessionEpoch;
   const startToken = satRuntimeStartToken;
-  const workerUnit = activateCoordinatorOwnerWorkerUnit("sat-subscription.coordinator-worker");
+  const workerUnit = activateCoordinatorOwnerWorkerUnit("sat-subscription.coordinator-worker", expectedInstanceId);
   const startAbortController = new AbortController();
   satRuntimeStartAbortController = startAbortController;
   const start = (async (): Promise<SatWorkerRuntimeState> => {
@@ -5484,6 +5545,8 @@ async function ensureStorageRuntime(): Promise<StorageRuntimeController> {
     storageRuntime = testStorageRuntimeOverride;
     const unit = coordinatorWorkerUnitRegistry.activate("storage.coordinator-worker");
     coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId);
+    platformStorageReady = true;
+    reconcileCoordinatorRuntime();
     return storageRuntime;
   }
   if (testStorageStartupFailure) { storageStartupFailure = true; storageHealthController.setStatus("degraded", "Storage startup failed"); emitStorageState(); throw storageCoordinatorError("storage_unavailable"); }
@@ -5531,6 +5594,8 @@ async function ensureStorageRuntime(): Promise<StorageRuntimeController> {
   storageRuntime = runtime!;
   const storageUnit = coordinatorWorkerUnitRegistry.activate("storage.coordinator-worker");
   coordinatorWorkerUnitRegistry.ready(storageUnit.unitId, storageUnit.instanceId);
+  platformStorageReady = true;
+  reconcileCoordinatorRuntime();
   storageStartupFailure = false;
   storageRuntime.subscribe(emitStorageState);
   emitStorageState();
@@ -5541,6 +5606,7 @@ async function ensureStorageRuntime(): Promise<StorageRuntimeController> {
 async function resumeAfterStorageReady(): Promise<boolean> {
   storageStartupFailure = false;
   platformStorageReady = true;
+  reconcileCoordinatorRuntime();
   if (coordinatorState.vaultStatus === "booting") {
     // 初始 initializeCoordinator 正在等待 bootstrapPlatformStorage；健康探测
     // 的 recovery finalize 不能再次启动一个嵌套 initialize，否则会互相等待。
@@ -5579,7 +5645,9 @@ async function releaseStorageRuntime(reason: string): Promise<void> {
   (storageRuntime as (StorageRuntimeController & { dispose?: () => void }) | undefined)?.dispose?.();
   storageRuntime = undefined;
   storageRepository = undefined;
+  platformStorageReady = false;
   if (storageUnit) stopCoordinatorWorkerUnit(storageUnit.unitId, storageUnit.instanceId);
+  reconcileCoordinatorRuntime();
   void reason;
 }
 
@@ -5946,23 +6014,97 @@ const coordinatorState: CoordinatorState = {
 };
 
 /**
- * Worker 运行单元的唯一运行态注册表。
+ * 领域兼容运行态表。
  *
- * 静态 manifest / catalog 只描述边界；所有真实 Worker 服务和任务在创建
- * 后都必须通过这里绑定本次 instance。这样旧 owner 的迟到清理只能释放
- * 自己的 instance，不能覆盖新 owner。
+ * WebLoom Host 是对外运行单元状态的唯一来源；这张表暂时保留给现有
+ * Coordinator 任务和最终 I/O 清理代码保存领域句柄。它不再直接生成
+ * `worker.units` / bootstrap 的公开快照，避免手工 Registry 伪装成 Runtime
+ * Host。
  */
 const coordinatorWorkerUnitRegistry = createCoordinatorWorkerUnitRegistry(undefined, {
   onChange: () => publishCoordinatorWorkerUnitSnapshot(),
 });
+
+let coordinatorRuntimeApp: ReturnType<typeof startSharedWorkerApp> | undefined;
+let coordinatorRuntimeUnitSnapshotRevision = 0;
+
+function coordinatorRuntimeUnitVisible(unit: (typeof COORDINATOR_WORKER_UNIT_CATALOG)[number]): boolean {
+  if (!isCoordinatorProductEnabled(unit.productId)) return false;
+  if (unit.scopeKind === "storage" && !platformStorageReady) return false;
+  if (unit.scopeKind === "owner-session") {
+    return coordinatorState.vaultStatus === "unlocked" && Boolean(coordinatorState.activePublicKeyHex);
+  }
+  return true;
+}
+
+/** 将 WebLoom Host 的 unit state 投影为 Keymaster 旧协议的领域快照。 */
+function coordinatorRuntimeUnitSnapshots(): CoordinatorWorkerUnitSnapshot[] {
+  const app = coordinatorRuntimeApp;
+  // Host 尚未完成装配时 fail closed；公开协议不能退回到领域兼容表，
+  // 否则首个 bootstrap 可能把手工 Registry 误报成已由 WebLoom 启动。
+  if (!app) return [];
+  const runtimeState = app.state();
+  if (runtimeState.state === "failed" || runtimeState.state === "disposed") return [];
+  const revision = Math.max(1, runtimeState.snapshotRevision);
+  coordinatorRuntimeUnitSnapshotRevision = Math.max(coordinatorRuntimeUnitSnapshotRevision, revision);
+  const snapshots: CoordinatorWorkerUnitSnapshot[] = [];
+  for (const runtimeUnit of runtimeState.units) {
+    const descriptor = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === runtimeUnit.unitId);
+    if (!descriptor || runtimeUnit.runtime !== "shared-worker" || !coordinatorRuntimeUnitVisible(descriptor)) continue;
+    if (runtimeUnit.state !== "enabled" && runtimeUnit.state !== "starting" && runtimeUnit.state !== "error-disabled") continue;
+    if (!runtimeUnit.instanceId) continue;
+    const state = runtimeUnit.state === "error-disabled" ? "failed" : runtimeUnit.state === "enabled" ? "ready" : "starting";
+    snapshots.push({
+      productId: descriptor.productId,
+      unitId: descriptor.unitId,
+      runtime: "shared-worker",
+      scopeKind: descriptor.scopeKind,
+      instanceId: runtimeUnit.instanceId,
+      state,
+      snapshotRevision: revision,
+      serviceIds: [...(descriptor.serviceIds ?? [])],
+      taskIds: [...descriptor.taskIds],
+      ...(descriptor.scopeKind === "owner-session" && coordinatorState.activePublicKeyHex
+        ? { ownerPublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch }
+        : {}),
+    });
+  }
+  return snapshots;
+}
+
+function coordinatorRuntimeUnitRevision(): number {
+  const revision = coordinatorRuntimeApp?.state().snapshotRevision ?? 0;
+  coordinatorRuntimeUnitSnapshotRevision = Math.max(coordinatorRuntimeUnitSnapshotRevision, revision, 1);
+  return coordinatorRuntimeUnitSnapshotRevision;
+}
+
+/** 将 Host 实例身份回写到仍保留领域任务句柄的兼容表。 */
+function synchronizeCoordinatorTaskUnitInstances(): void {
+  const instances = new Map(
+    coordinatorRuntimeUnitSnapshots().map((unit) => [unit.unitId, unit.instanceId] as const),
+  );
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    const instanceId = instances.get(runtime.unitId);
+    if (instanceId) runtime.instanceId = instanceId;
+  }
+}
+
+function reconcileCoordinatorRuntime(): Promise<void> {
+  if (!coordinatorRuntimeApp) return Promise.resolve();
+  return coordinatorRuntimeApp.reconcile().then(() => {
+    synchronizeCoordinatorTaskUnitInstances();
+  }).catch((error) => {
+    console.warn("[coordinator] WebLoom runtime unit reconcile failed", error instanceof Error ? error.message : String(error));
+  });
+}
 
 /** 发布 Worker 实际运行单元快照；Window 不再用静态声明猜测后台状态。 */
 function publishCoordinatorWorkerUnitSnapshot(): void {
   publishTopicEvent("worker.units", {
     type: "coordinator.worker-units.changed",
     authorityInstanceId: coordinatorAuthorityInstanceId,
-    workerUnitRevision: coordinatorWorkerUnitRegistry.revision(),
-    units: coordinatorWorkerUnitRegistry.snapshots(),
+    workerUnitRevision: coordinatorRuntimeUnitRevision(),
+    units: coordinatorRuntimeUnitSnapshots(),
   } satisfies Omit<CoordinatorWorkerUnitStateEvent, "topic" | "sessionEpoch">);
 }
 
@@ -5976,12 +6118,41 @@ function currentOwnerWorkerUnitIdentity(): { ownerPublicKeyHex: string; sessionE
   };
 }
 
-function activateCoordinatorOwnerWorkerUnit(unitId: string): ReturnType<typeof coordinatorWorkerUnitRegistry.activate> {
+function activateCoordinatorOwnerWorkerUnit(
+  unitId: string,
+  instanceId?: string,
+): ReturnType<typeof coordinatorWorkerUnitRegistry.activate> {
   const descriptor = COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === unitId);
   if (descriptor && !isCoordinatorProductEnabled(descriptor.productId)) {
     throw new Error(`Plugin disabled: ${descriptor.productId}`);
   }
-  return coordinatorWorkerUnitRegistry.activate(unitId, currentOwnerWorkerUnitIdentity());
+  const existing = coordinatorWorkerUnitRegistry.get(unitId);
+  if (existing && instanceId !== undefined && existing.instanceId !== instanceId) {
+    // The registry is only a compatibility table. A Host setup owns the real
+    // instance identity, so discard an older compatibility entry before
+    // binding the exact Host context instance.
+    coordinatorWorkerUnitRegistry.stop(unitId, existing.instanceId);
+  }
+  return coordinatorWorkerUnitRegistry.activate(unitId, {
+    ...currentOwnerWorkerUnitIdentity(),
+    ...(instanceId !== undefined ? { instanceId } : {}),
+  });
+}
+
+function activateCoordinatorWorkerUnitForRuntime(
+  unitId: string,
+  instanceId: string,
+): ReturnType<typeof coordinatorWorkerUnitRegistry.activate> {
+  const descriptor = COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === unitId);
+  if (!descriptor) throw new Error(`Coordinator Worker unit 未登记: ${unitId}`);
+  if (descriptor.scopeKind === "owner-session") {
+    return activateCoordinatorOwnerWorkerUnit(unitId, instanceId);
+  }
+  const existing = coordinatorWorkerUnitRegistry.get(unitId);
+  if (existing && existing.instanceId !== instanceId) {
+    coordinatorWorkerUnitRegistry.stop(unitId, existing.instanceId);
+  }
+  return coordinatorWorkerUnitRegistry.activate(unitId, { instanceId });
 }
 
 function stopCoordinatorWorkerUnit(unitId: string, instanceId?: string): void {
@@ -6031,7 +6202,7 @@ function bindCoordinatorTaskUnitsToOwner(snapshot = currentPluginIntentSnapshot(
 /** 安全撤权同步摘除所有 owner-session 单元；异步领域清理随后自行收尾。 */
 function stopCoordinatorOwnerWorkerUnits(): void {
   for (const snapshot of coordinatorWorkerUnitRegistry.snapshots()) {
-    if (snapshot.lifetime === "owner-session") stopCoordinatorWorkerUnit(snapshot.unitId, snapshot.instanceId);
+    if (snapshot.scopeKind === "owner-session") stopCoordinatorWorkerUnit(snapshot.unitId, snapshot.instanceId);
   }
 }
 
@@ -6215,7 +6386,7 @@ function reconcileCoordinatorProviderIntent(snapshot: PluginIntentSnapshot): boo
 function reconcileCoordinatorWorkerUnitIntent(snapshot: PluginIntentSnapshot): boolean {
   let changed = false;
   for (const unit of coordinatorWorkerUnitRegistry.snapshots()) {
-    if (unit.lifetime !== "root" && !isCoordinatorProductEnabled(unit.productId, snapshot)) {
+    if (unit.scopeKind !== "root" && !isCoordinatorProductEnabled(unit.productId, snapshot)) {
       changed = coordinatorWorkerUnitRegistry.stop(unit.unitId, unit.instanceId) || changed;
     }
   }
@@ -6376,6 +6547,7 @@ async function enterUnlockedState(
     // 领域任务/Provider 已在 Worker 内创建；只有 owner/session 已提交并且
     // 最终 I/O 门禁重新打开后，才把这些 unit 发布为本次实例。
     bindCoordinatorTaskUnitsToOwner();
+    await reconcileCoordinatorRuntime();
   } catch (error) {
     await performGlobalLock("worker-unit-bind-failed");
     throw error;
@@ -6856,7 +7028,7 @@ function sameRemoteServiceReference(
   return Boolean(left)
     && left!.capabilityId === right.capabilityId
     && left!.providerInstanceId === right.providerInstanceId
-    && left!.execution === right.execution
+    && left!.runtime === right.runtime
     && left!.contractVersion === right.contractVersion
     && left!.authorityInstanceId === right.authorityInstanceId
     && left!.scopeId === right.scopeId
@@ -6962,7 +7134,7 @@ async function refreshCoordinatorServiceEndpoint(endpoint: CoordinatorServiceEnd
     {
       capabilityId: COORDINATOR_OWNER_STORAGE_SERVICE,
       providerInstanceId: endpoint.providerInstanceId,
-      execution: "coordinator-worker",
+      runtime: "shared-worker",
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
       authorityInstanceId: coordinatorAuthorityInstanceId,
       scopeId: `coordinator-owner-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`,
@@ -6978,7 +7150,7 @@ async function refreshCoordinatorServiceEndpoint(endpoint: CoordinatorServiceEnd
     {
       capabilityId: COORDINATOR_CRYPTO_SERVICE,
       providerInstanceId: endpoint.providerInstanceId,
-      execution: "coordinator-worker",
+      runtime: "shared-worker",
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
       authorityInstanceId: coordinatorAuthorityInstanceId,
       scopeId: `coordinator-crypto-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`,
@@ -7163,7 +7335,7 @@ function installCoordinatorServiceEndpoint(clientId: string, servicePort: Messag
 // 4. Port Management
 // ============================================================
 
-function handlePortConnect(event: MessageEvent): void {
+function handlePortConnect(event: { ports: MessagePort[] }): void {
   const port = event.ports[0];
   if (!port) return;
 
@@ -7487,7 +7659,7 @@ async function handleSubscribe(
       }];
     }
     if (topic === "worker.units") {
-      const baselineRevision = coordinatorWorkerUnitRegistry.revision();
+      const baselineRevision = coordinatorRuntimeUnitRevision();
       return [{
         topic,
         baselineRevision,
@@ -7498,7 +7670,7 @@ async function handleSubscribe(
           authorityInstanceId: coordinatorAuthorityInstanceId,
           workerUnitRevision: baselineRevision,
           sessionEpoch: coordinatorState.sessionEpoch,
-          units: coordinatorWorkerUnitRegistry.snapshots(),
+          units: coordinatorRuntimeUnitSnapshots(),
         },
       }];
     }
@@ -9306,6 +9478,10 @@ async function executePluginIntentSubmit(
   try {
     const controller = pluginIntentController ?? ensurePluginIntentController();
     const result = await controller.submit(command);
+    // Coordinator 意图提交成功后，必须在响应前完成同一 Worker Host 的
+    // unit reconcile；否则页面可能先收到 accepted，却在下一条快照里仍看见
+    // 旧 instance，或在重新启用时读到尚未装配的 unit。
+    await reconcileCoordinatorRuntime();
     return {
       requestId: request.requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
@@ -12006,6 +12182,7 @@ async function performGlobalLock(reason: string): Promise<void> {
   const satCleanup = releaseSatRuntime(reason);
   clearWindowP2pExecutorLeaseLocked();
   stopCoordinatorOwnerWorkerUnits();
+  reconcileCoordinatorRuntime();
 
   if (previousActive) {
     rememberOwnerStorageDrain(previousActive, drainOwnerStorageRequests(previousActive));
@@ -12855,8 +13032,8 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex,
     keyspaceGeneration: coordinatorState.keyspaceGeneration,
     ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
-    coordinatorWorkerUnits: coordinatorWorkerUnitRegistry.snapshots(),
-    coordinatorWorkerUnitSnapshotRevision: coordinatorWorkerUnitRegistry.revision(),
+    coordinatorWorkerUnits: coordinatorRuntimeUnitSnapshots(),
+    coordinatorWorkerUnitSnapshotRevision: coordinatorRuntimeUnitRevision(),
     taskSnapshots: getTaskSnapshots(),
     scheduleSettings: coordinatorState.scheduleSettings,
     p2pkhSettings: coordinatorMeta.p2pkhSettings,
@@ -12910,7 +13087,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorWorkerUnitRegistry.revision() } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -12955,11 +13132,83 @@ function resetAutoLockTimer(): void {
 // 13. Worker Entry Point
 // ============================================================
 
-const workerScope = globalThis as unknown as {
-  onconnect: ((event: MessageEvent) => void) | null;
-};
+const workerScope = globalThis as unknown as import("webloom-framework").SharedWorkerScopeLike;
 
-workerScope.onconnect = handlePortConnect;
+/**
+ * Coordinator 的真实 Worker 装配清单。
+ *
+ * setup 复用现有领域实现，但运行单元的启停、Scope 和公开快照由
+ * WebLoom Host 拥有。`coordinatorWorkerUnitRegistry` 只保存任务/清理代码
+ * 仍需的领域句柄；它不再是第二个对外生命周期 Host。
+ */
+const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => {
+  const snapshotCapability = `keymaster.coordinator.unit.${unit.unitId}`;
+  const required = unit.unitId === "vault.coordinator-worker";
+  return definePlugin({
+    id: `keymaster.coordinator.${unit.productId}`,
+    name: `Keymaster ${unit.productId} Coordinator`,
+    unitId: unit.unitId,
+    runtime: "shared-worker",
+    provides: [snapshotCapability],
+    required,
+    async setup(context) {
+      let ready: ReturnType<typeof coordinatorWorkerUnitRegistry.ready>;
+      if (unit.unitId === "msfile.coordinator-worker") {
+        await ensureMsfileRuntime(context.instanceId);
+        ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, context.instanceId);
+      } else if (unit.unitId === "sat-subscription.coordinator-worker") {
+        await ensureSatRuntime(context.instanceId);
+        ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, context.instanceId);
+      } else {
+        const activated = activateCoordinatorWorkerUnitForRuntime(unit.unitId, context.instanceId);
+        if (activated.instanceId !== context.instanceId) {
+          throw new Error(`Coordinator Worker unit instance mismatch: ${unit.unitId}`);
+        }
+        ready = coordinatorWorkerUnitRegistry.ready(activated.unitId, activated.instanceId);
+      }
+      if (ready.instanceId !== context.instanceId) {
+        throw new Error(`Coordinator Worker unit ready instance mismatch: ${unit.unitId}`);
+      }
+      context.provide(snapshotCapability, Object.freeze({
+        unitId: unit.unitId,
+        instanceId: context.instanceId,
+        getSnapshot: () => coordinatorWorkerUnitRegistry.get(ready.unitId),
+      }));
+      return () => stopCoordinatorWorkerUnit(ready.unitId, ready.instanceId);
+    },
+  });
+});
+
+coordinatorRuntimeApp = startSharedWorkerApp({
+  id: "keymaster-coordinator",
+  plugins: coordinatorRuntimePlugins,
+  globalScope: workerScope,
+  onPortConnect: handlePortConnect,
+  runtimeUnitAvailability: ({ unitId }) => {
+    const unit = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === unitId);
+    if (!unit) return "coordinator-unit-unknown";
+    if (!isCoordinatorProductEnabled(unit.productId)) return `plugin-disabled:${unit.productId}`;
+    if (unit.scopeKind === "storage" && !platformStorageReady) return "storage-root-unavailable";
+    if (unit.scopeKind === "owner-session"
+      && (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex)) {
+      return "owner-session-unavailable";
+    }
+    for (const dependency of unit.requiredProductIds ?? []) {
+      if (!isCoordinatorProductEnabled(dependency)) return `plugin-dependency-disabled:${dependency}`;
+    }
+    return undefined;
+  },
+  runtimeUnitAttributes: ({ unitId }) => {
+    const unit = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === unitId);
+    return {
+      ...(unit ? { productId: unit.productId, scopeKind: unit.scopeKind } : {}),
+      ...(unit?.scopeKind === "owner-session" && coordinatorState.activePublicKeyHex
+        ? { ownerPublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch }
+        : {}),
+      ...(platformRootStore ? { bucketGeneration: platformRootStore.bucket.bucketGeneration } : {}),
+    };
+  },
+});
 
 // Worker 启动时从 K-V 读取仅公开的 Vault metadata
 // 状态为 uninitialized 或 locked；绝不读取/解密私钥直到 unlock RPC
@@ -13145,6 +13394,12 @@ export async function __testHoldCoordinatorFinalIoLease(): Promise<() => Promise
 
 export function __testResetState(): void {
   ensureTestPlatformStorage();
+  // Drop domain-owned resources before resetting the compatibility table. The
+  // real WebLoom Host must then observe the booting/locked state and tear down
+  // its old owner scopes before the next test unlocks a new owner.
+  releaseMsfileRuntime("test-reset");
+  testMsfileRuntimeOverride = undefined;
+  testMsfileRuntimeRecoveryAllowed = true;
   coordinatorWorkerUnitRegistry.reset();
   if (storageRuntime) {
     const storageUnit = coordinatorWorkerUnitRegistry.activate("storage.coordinator-worker");
@@ -13543,13 +13798,8 @@ export async function __testResolveStorageGrant(grantId: string, actualPortId: s
 
 /** MSFile 测试接缝：会话解析与 RPC 分发（施工单 docs/proposals/msfile）。 */
 export function __testSetMsfileRuntimeOverride(runtime: Partial<MsFileServiceImpl> | undefined): void {
-  const previousUnit = coordinatorWorkerUnitRegistry.get("msfile.coordinator-worker");
-  msfileRuntime = runtime as MsFileServiceImpl | undefined;
-  if (runtime && coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) {
-    const unit = activateCoordinatorOwnerWorkerUnit("msfile.coordinator-worker");
-    coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId);
-  }
-  if (!runtime && previousUnit) stopCoordinatorWorkerUnit(previousUnit.unitId, previousUnit.instanceId);
+  testMsfileRuntimeOverride = runtime as MsFileServiceImpl | undefined;
+  if (!runtime) testMsfileRuntimeRecoveryAllowed = true;
 }
 
 /** 测试专用：直接切换 Worker 数据面设置，验证队列不依赖真实 Window executor。 */
@@ -13846,6 +14096,8 @@ export async function __testExecutorSignPeerRecord(input: { leaseId: string; exp
 
 export async function __testReleaseMsfileRuntime(): Promise<void> {
   releaseMsfileRuntime("test");
+  testMsfileRuntimeOverride = undefined;
+  testMsfileRuntimeRecoveryAllowed = true;
   await releaseSatRuntime("test");
 }
 

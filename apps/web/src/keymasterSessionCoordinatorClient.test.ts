@@ -21,11 +21,54 @@ class HubPort {
 class Hub {
   readonly ports = new Set<HubPort>();
   createPort(): HubPort { const port = new HubPort(this); this.ports.add(port); return port; }
-  receive(port: HubPort, message: { requestId: string; kind?: string }): void {
+  receive(port: HubPort, message: { requestId?: string; kind?: string; type?: string; runtimeId?: string; connectionId?: string }): void {
+    if (message.type === "webloom.runtime.hello") {
+      queueMicrotask(() => port.emit({
+        type: "webloom.runtime.snapshot",
+        protocolVersion: "webloom.runtime.v1",
+        runtimeId: message.runtimeId,
+        runtimeKind: "shared-worker",
+        runtimeInstanceId: "test-runtime-instance",
+        connectionId: message.connectionId,
+        snapshotRevision: 0,
+        baseline: true,
+        state: "ready",
+        units: [],
+        services: [],
+      }));
+      return;
+    }
     const response = { requestId: message.requestId, sessionEpoch: "shared-epoch", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:hub", sessionEpoch: "shared-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } } };
     queueMicrotask(() => port.emit(response));
   }
   broadcast(event: unknown): void { for (const port of this.ports) port.emit(event); }
+}
+
+/** 旧 client fake port 的最小 WebLoom Runtime 握手响应。 */
+function installRuntimeHandshake(port: {
+  postMessage: (message: any, ...rest: any[]) => any;
+  onmessage: ((event: MessageEvent) => void) | null;
+}): void {
+  const original = port.postMessage;
+  port.postMessage = (message, ...rest) => {
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "webloom.runtime.hello") {
+      const hello = message as { runtimeId?: string; connectionId?: string };
+      queueMicrotask(() => port.onmessage?.({ data: {
+        type: "webloom.runtime.snapshot",
+        protocolVersion: "webloom.runtime.v1",
+        runtimeId: hello.runtimeId,
+        runtimeKind: "shared-worker",
+        runtimeInstanceId: "test-runtime-instance",
+        connectionId: hello.connectionId,
+        snapshotRevision: 0,
+        baseline: true,
+        state: "ready",
+        units: [],
+        services: [],
+      } } as MessageEvent));
+    }
+    return original.call(port, message, ...rest);
+  };
 }
 
 class BridgeMemoryStorage {
@@ -204,7 +247,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       await client.connect();
 
       const host = createPluginHost({
-        execution: "window",
+        runtime: "window-main",
         disableConfigPersistence: true,
         coordinatorForPlugin: () => client,
         runtimeUnitImplementationRegistry: {
@@ -241,6 +284,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       queueMicrotask(() => port.onmessage?.({ data: { requestId: message.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: {} } } as MessageEvent));
     });
     const port = { start: vi.fn(), postMessage, close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    installRuntimeHandshake(port);
     const worker = { port } as unknown as SharedWorker;
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => worker);
@@ -256,6 +300,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
   it("uses the module URL constructor", async () => {
     const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
     port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
+    installRuntimeHandshake(port);
     const worker = { port } as unknown as SharedWorker;
     const Constructor = vi.fn(() => worker);
     const original = globalThis.SharedWorker;
@@ -277,6 +322,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const request = message as { requestId: string };
       queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
     });
+    installRuntimeHandshake(port);
     const Constructor = vi.fn(() => ({ port }) as unknown as SharedWorker);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = Constructor;
@@ -496,6 +542,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         : { sessionEpoch: "boot-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } };
       queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "baseline-epoch", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
+    installRuntimeHandshake(port);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -552,6 +599,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       }
       queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
+    installRuntimeHandshake(port);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -607,8 +655,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const unit = {
         productId: "p2pkh",
         unitId: "p2pkh.coordinator-worker",
-        execution: "coordinator-worker" as const,
-        lifetime: "owner-session" as const,
+        runtime: "shared-worker" as const,
+        scopeKind: "owner-session" as const,
         instanceId: "worker-unit:1",
         state: "ready" as const,
         snapshotRevision: 2,
@@ -650,8 +698,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const oldUnit = {
         productId: "storage",
         unitId: "storage.coordinator-worker",
-        execution: "coordinator-worker" as const,
-        lifetime: "storage" as const,
+        runtime: "shared-worker" as const,
+        scopeKind: "storage" as const,
         instanceId: "worker-unit:old",
         state: "ready" as const,
         snapshotRevision: 1,
@@ -676,7 +724,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
           ...oldUnit,
           productId: "p2pkh",
           unitId: "p2pkh.coordinator-worker",
-          lifetime: "owner-session" as const,
+          scopeKind: "owner-session" as const,
           instanceId: "worker-unit:next",
           snapshotRevision: 2,
           serviceIds: ["p2pkh.asset-service"],
@@ -717,6 +765,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
   it("clears an unlocked snapshot on transport timeout before reconnect", async () => {
     const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
     port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
+    installRuntimeHandshake(port);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -737,6 +786,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
       }
     });
+    installRuntimeHandshake(port);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -751,6 +801,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
   it("rejects immediately when the SharedWorker reports a startup error", async () => {
     const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    installRuntimeHandshake(port);
     const worker = { port, onerror: null as ((event: Event) => void) | null } as unknown as SharedWorker;
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => worker);
@@ -796,6 +847,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       onmessage: null as ((event: MessageEvent) => void) | null,
       onmessageerror: null,
     };
+    installRuntimeHandshake(port);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {

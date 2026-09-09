@@ -145,8 +145,8 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
   units: [
     {
       id: "collectible-1satordinals.window",
-      execution: "window",
-      lifetime: "owner-session",
+      runtime: "window-main",
+      scopeKind: "owner-session",
       provides: [ORDINAL_MINT_SERVICE_CAPABILITY, ORDINAL_TRANSFER_SERVICE_CAPABILITY],
       providedContracts: defineRuntimeUnitProvidedContracts([
         ORDINAL_MINT_SERVICE_CAPABILITY,
@@ -172,8 +172,8 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
     },
     {
       id: "collectible-1satordinals.coordinator-worker",
-      execution: "coordinator-worker",
-      lifetime: "owner-session",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
     },
   ],
   i18n: oneSatResources,

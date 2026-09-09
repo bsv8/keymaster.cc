@@ -18,8 +18,8 @@ const windowP2pPluginDefinition = {
   },
   units: [{
     id: "window-p2p.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     provides: [WINDOW_P2P_EXECUTOR_CAPABILITY, WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([
       WINDOW_P2P_EXECUTOR_CAPABILITY,
@@ -27,8 +27,8 @@ const windowP2pPluginDefinition = {
     ]),
   }, {
     id: "window-p2p.coordinator-worker",
-    execution: "coordinator-worker",
-    lifetime: "owner-session",
+    runtime: "shared-worker",
+    scopeKind: "owner-session",
   }],
   setup(ctx: PluginContext) {
     const coordinator = ctx.coordinator as WindowP2pCoordinatorControl | undefined;

@@ -427,8 +427,8 @@ const vaultPluginDefinition = {
   },
   units: [{
     id: "vault.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     provides: [VAULT_CAPABILITY, "keyspace.service", VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([
       VAULT_CAPABILITY,
@@ -438,8 +438,8 @@ const vaultPluginDefinition = {
     ]),
   }, {
     id: "vault.coordinator-worker",
-    execution: "coordinator-worker",
-    lifetime: "root",
+    runtime: "shared-worker",
+    scopeKind: "root",
   }],
   i18n: vaultResources,
   setup(ctx) {

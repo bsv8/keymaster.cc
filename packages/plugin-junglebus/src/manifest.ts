@@ -15,8 +15,8 @@ const jungleBusPluginDefinition = {
   meta: { kind: "platform", startup: "optional", bootstrapStage: "owner-apps-ready", defaultEnabled: true, canDisable: true, displayGroup: "platform" },
   units: [{
     id: "junglebus.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY]),
     dependencies: defineRuntimeUnitDependencies([
@@ -25,8 +25,8 @@ const jungleBusPluginDefinition = {
     ]),
   }, {
     id: "junglebus.coordinator-worker",
-    execution: "coordinator-worker",
-    lifetime: "owner-session",
+    runtime: "shared-worker",
+    scopeKind: "owner-session",
   }],
   i18n: jungleBusResources,
   setup(ctx) {

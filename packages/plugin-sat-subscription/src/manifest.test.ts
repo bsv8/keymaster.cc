@@ -8,7 +8,7 @@ describe("satSubscriptionPlugin manifest", () => {
       defaultEnabled: true,
       canDisable: false,
     });
-    const unit = satSubscriptionPlugin.units?.find((candidate) => candidate.execution === "window");
+    const unit = satSubscriptionPlugin.units?.find((candidate) => candidate.runtime === "window-main");
     expect(unit?.dependencies).toEqual(expect.arrayContaining([
       expect.objectContaining({ capability: WINDOW_P2P_EXECUTOR_CAPABILITY }),
     ]));

@@ -544,7 +544,7 @@ describe("Session Coordinator worker", () => {
       const proxy = bridge.requireProxy({
         capabilityId: COORDINATOR_CRYPTO_SERVICE,
         contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-        execution: "coordinator-worker",
+        runtime: "shared-worker",
       });
       await expect(proxy.call({ type: "deriveP2pkhAddress", network: "main" })).resolves.toMatchObject({ type: "deriveP2pkhAddress" });
 
@@ -565,7 +565,7 @@ describe("Session Coordinator worker", () => {
       const ownerProxy = bridge.requireProxy({
         capabilityId: "coordinator.owner-storage",
         contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-        execution: "coordinator-worker",
+        runtime: "shared-worker",
       });
       await expect(ownerProxy.call({ type: "owner.put", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge", value: { ok: true } })).resolves.toBeDefined();
       await expect(ownerProxy.call({ type: "owner.get", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge" })).resolves.toMatchObject({ value: { ok: true } });
@@ -984,6 +984,10 @@ describe("Session Coordinator worker", () => {
         instanceId: expect.any(String),
       }),
     ]));
+    const enabledSnapshot = __testGetSnapshot();
+    const enabledUnit = enabledSnapshot.coordinatorWorkerUnits?.find((unit) => unit.unitId === "p2pkh.coordinator-worker");
+    const enabledTask = enabledSnapshot.taskSnapshots.find((task) => task.id === "p2pkh.transactions-sync");
+    expect(enabledUnit?.instanceId).toBe(enabledTask?.instanceId);
     await __testRunTask("p2pkh.transactions-sync");
     expect(runs).toBe(1);
   });

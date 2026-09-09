@@ -54,16 +54,20 @@ import { createLocalStorageBucketProvider, StorageRuntimeError } from "@keymaste
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import { createStorageCatalogRepository, readStorageCatalog, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import {
+  connectSharedWorker,
   createMessagePortServiceTransport,
   createServiceBridge,
   type RemoteServiceBridge,
   type RemoteServiceHandshake,
   type RemoteServiceSnapshot,
+  type RuntimeHandle,
+  type SharedWorkerLike,
   type PluginIntentCommand,
   type PluginIntentSnapshot,
   type PluginIntentSubmissionResult,
 } from "webloom-framework";
 import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
+import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?sharedworker&url";
 
 const INITIAL_SETUP_RECOVERY_STORAGE_KEY = "keymaster.storage.initial-setup.recovery.v1";
 const INITIAL_SETUP_RECOVERY_LOCK = "keymaster.storage.initial-setup.recovery";
@@ -355,8 +359,11 @@ function randomIdentifierSuffix(): string {
 // ============================================================
 
 export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClient, StorageBindingCoordinatorClient {
-  private worker: SharedWorker | null = null;
+  private worker: SharedWorkerLike | null = null;
   private port: MessagePort | null = null;
+  /** WebLoom RuntimeHandle；与 Coordinator 领域协议复用同一物理端口。 */
+  private runtimeHandle: RuntimeHandle | null = null;
+  private removeRuntimeSubscription: (() => void) | undefined;
   /** 与 Coordinator 主 RPC 分离的服务桥端口；避免业务事件污染服务协议。 */
   private servicePort: MessagePort | null = null;
   /** Local localStorage 的页面执行端点；Worker 只持有其对端。 */
@@ -417,6 +424,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private isConnected = false;
   /** 页面生命周期结束后，连接尝试和自动重连都不得再次复活。 */
   private shutdownRequested = false;
+  /** Worker 在 connect() 尚未完成时报告的错误，必须原样拒绝本次连接。 */
+  private connectionAttemptError: Error | undefined;
   /** 使 disconnect() 能取消尚未完成的 connect/hello/subscription 链。 */
   private connectionAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -443,82 +452,86 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (this.shutdownRequested) throw new Error("Coordinator client is shut down");
     if (this.isConnected) return;
     const attempt = ++this.connectionAttempt;
+    this.connectionAttemptError = undefined;
 
     try {
-      if (typeof SharedWorker === "undefined") {
-        throw new Error("Session Coordinator requires SharedWorker support");
-      }
-      let workerLocationLabel = "bundled versioned module URL";
-      if (this.workerUrl) {
-        const customWorkerUrl = new URL(
-          this.workerUrl,
-          typeof globalThis.location?.href === "string"
-            ? globalThis.location.href
-            : import.meta.url
-        );
-        workerLocationLabel = customWorkerUrl.pathname;
-        this.worker = new SharedWorker(customWorkerUrl, {
-          ...(this.workerName ? { name: this.workerName } : {}),
-          type: "module"
-        });
-      } else if (this.workerName) {
-        // Vite 要求 new URL(...) 直接出现在 Worker 构造器中，才能把
-        // TypeScript worker 编译成带 hash 的 JavaScript 产物。
-        this.worker = new SharedWorker(
-          new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
-          { name: this.workerName, type: "module" }
-        );
-      } else {
-        // SharedWorker 的身份由最终 URL 决定。开发服务器下源码 URL 不会像
-        // 生产构建一样自动带 content hash，页面刷新可能继续连接仍驻留内存
-        // 的旧 worker。开发环境用带 revision 的名称切换实例；生产环境的
-        // unnamed worker 仍由最终构建的 hashed URL 做版本隔离。
-        const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
-        if (isDevelopment) {
-          this.worker = new SharedWorker(
-            new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
-            { name: "keymaster-coordinator-dev-20260818-woc-raw-text", type: "module" }
+      // WebLoom 负责真实 module SharedWorker、Runtime 握手、快照和物理
+      // connectionId；Coordinator 领域协议通过 onConnection 复用同一个端口。
+      // 自动重连只保留一层：领域 client 仍负责其现有 reconnect/backoff，
+      // RuntimeHandle 只负责当前物理连接，避免两个重连器交叉创建 Worker。
+      const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
+      const workerUrl = new URL(
+        this.workerUrl ?? coordinatorWorkerUrl,
+        typeof globalThis.location?.href === "string" ? globalThis.location.href : import.meta.url,
+      );
+      const workerName = this.workerName ?? (!this.workerUrl && isDevelopment
+        ? "keymaster-coordinator-dev-20260818-woc-raw-text"
+        : undefined);
+      let connectedPort: MessagePort | undefined;
+      const runtime = await connectSharedWorker({
+        id: "keymaster-coordinator",
+        url: workerUrl,
+        ...(workerName ? { name: workerName } : {}),
+        autoReconnect: false,
+        handshakeTimeoutMs: Math.max(this.requestTimeoutMs, 1_000),
+        onConnection: ({ worker, port }) => {
+          connectedPort = port;
+          this.worker = worker;
+          this.port = port;
+          // disconnect() 会给旧端口一个很短的投递窗口；旧端口在窗口内
+          // 到达的迟到事件不能污染随后建立的新连接缓存。
+          port.onmessage = (event) => {
+            if (this.port !== port) return;
+            this.handleMessage(event);
+          };
+          port.onmessageerror = (event) => {
+            if (this.port !== port) return;
+            void event;
+            this.handleMessageError();
+          };
+          // 真实 MessagePort 上 Runtime listener 与 onmessage 并存；低级
+          // fake 若不支持 addEventListener，仍由 Runtime 的 worker-side
+          // 握手错误通过这里的兼容 error handler 收敛。
+          if (!worker.addEventListener) {
+            const workerWithOnError = worker as SharedWorkerLike & {
+              onerror?: (event: Event) => void;
+            };
+            workerWithOnError.onerror = (event) => {
+              const details: string[] = [];
+              const candidate = event as Event & {
+                message?: unknown;
+                filename?: unknown;
+                lineno?: unknown;
+                colno?: unknown;
+                error?: unknown;
+              };
+              if (typeof candidate.message === "string" && candidate.message) details.push(candidate.message);
+              if (typeof candidate.filename === "string" && candidate.filename) {
+                const line = typeof candidate.lineno === "number" ? candidate.lineno : 0;
+                const column = typeof candidate.colno === "number" ? candidate.colno : 0;
+                details.push(`${candidate.filename}:${line}:${column}`);
+              }
+              if (candidate.error instanceof Error && candidate.error.stack) details.push(candidate.error.stack);
+              this.handleWorkerError(details.length
+                ? `Coordinator worker error: ${details.join(" | ")}`
+                : "Coordinator worker error");
+            };
+          }
+          port.start();
+        },
+      });
+      if (this.connectionAttemptError) throw this.connectionAttemptError;
+      if (!connectedPort) throw new Error("WebLoom did not expose a Coordinator connection port");
+      this.runtimeHandle = runtime;
+      this.removeRuntimeSubscription?.();
+      this.removeRuntimeSubscription = runtime.subscribe((snapshot) => {
+        if (this.runtimeHandle !== runtime || this.port !== connectedPort) return;
+        if (snapshot.state === "failed" || snapshot.state === "disconnected") {
+          this.handleWorkerError(
+            `Coordinator Runtime ${snapshot.state}${snapshot.error ? `: ${snapshot.error}` : ""}`,
           );
-        } else {
-          this.worker = new SharedWorker(
-            new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
-            { type: "module" }
-          );
         }
-      }
-      this.worker.onerror = (event) => {
-        const details: string[] = [];
-        if ("message" in event && typeof event.message === "string" && event.message) {
-          details.push(event.message);
-        }
-        if ("filename" in event && typeof event.filename === "string" && event.filename) {
-          const line = "lineno" in event && typeof event.lineno === "number" ? event.lineno : 0;
-          const column = "colno" in event && typeof event.colno === "number" ? event.colno : 0;
-          details.push(`${event.filename}:${line}:${column}`);
-        }
-        if ("error" in event && event.error instanceof Error && event.error.stack) {
-          details.push(event.error.stack);
-        }
-        const message = details.length
-          ? `Coordinator worker error: ${details.join(" | ")}`
-          : `Coordinator worker error while loading ${workerLocationLabel}`;
-        this.handleWorkerError(message);
-      };
-
-      const port = this.worker.port;
-      this.port = port;
-      // disconnect() 会给旧端口一个很短的投递窗口；旧端口在窗口内到达
-      // 的迟到事件不能污染随后建立的新连接缓存。
-      port.onmessage = (event) => {
-        if (this.port !== port) return;
-        this.handleMessage(event);
-      };
-      port.onmessageerror = (event) => {
-        if (this.port !== port) return;
-        void event;
-        this.handleMessageError();
-      };
-      port.start();
+      });
 
       const servicePortForHello = this.openServiceBridge();
       const localStorageBridgePortForHello = this.openLocalStorageBridge();
@@ -526,7 +539,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       await this.sendHello(servicePortForHello, localStorageBridgePortForHello);
       await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
 
-      if (this.shutdownRequested || attempt !== this.connectionAttempt || this.port !== port) {
+      if (this.shutdownRequested || attempt !== this.connectionAttempt || this.port !== connectedPort) {
         throw new Error("Coordinator connection attempt was cancelled");
       }
 
@@ -539,8 +552,14 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       // worker 都为空，不能把当前尝试误判成“已经被取消”而 resolve。
       // 只有明确出现新 attempt 才吞掉旧连接错误。
       if (attempt !== this.connectionAttempt) return;
-      if (this.port && this.worker && this.port !== this.worker.port) return;
       this.isConnected = false;
+      this.removeRuntimeSubscription?.();
+      this.removeRuntimeSubscription = undefined;
+      const runtime = this.runtimeHandle;
+      this.runtimeHandle = null;
+      if (runtime) void runtime.dispose("Coordinator connection attempt failed");
+      this.worker = null;
+      this.port = null;
       this.disposeServiceBridge("Coordinator connection attempt failed");
       if (!this.shutdownRequested) this.scheduleReconnect();
       throw err;
@@ -551,6 +570,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.connectionAttempt += 1;
     this.disposeServiceBridge("Coordinator client disconnected");
     this.disposeLocalStorageBridge();
+    this.removeRuntimeSubscription?.();
+    this.removeRuntimeSubscription = undefined;
+    const runtime = this.runtimeHandle;
+    this.runtimeHandle = null;
     const port = this.port;
     this.port = null;
     if (port) {
@@ -565,7 +588,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       // 页面 unload 期间不能再依赖一个定时器：浏览器可能在定时器
       // 执行前冻结文档。永久 shutdown 保留端口，让已排队的 disconnect
       // 尽可能先到达 SharedWorker；文档销毁时浏览器会自动解除端口。
-      if (closePortAfterMs !== undefined) {
+      if (closePortAfterMs !== undefined && !runtime) {
         if (this.disconnectCloseTimer) clearTimeout(this.disconnectCloseTimer);
         this.disconnectCloseTimer = setTimeout(() => {
           this.disconnectCloseTimer = null;
@@ -573,6 +596,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         }, closePortAfterMs);
       }
     }
+
+    // RuntimeHandle owns the same physical port and must be invalidated with
+    // the Coordinator protocol. The domain disconnect message above is sent
+    // first so the existing Worker lease/session cleanup remains authoritative.
+    if (runtime) void runtime.dispose("Coordinator client disconnected");
 
     this.worker = null;
     this.isConnected = false;
@@ -732,7 +760,15 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   private handleWorkerError(message: string): void {
+    this.connectionAttemptError = new Error(message);
     this.isConnected = false;
+    this.removeRuntimeSubscription?.();
+    this.removeRuntimeSubscription = undefined;
+    const runtime = this.runtimeHandle;
+    this.runtimeHandle = null;
+    this.worker = null;
+    this.port = null;
+    if (runtime) void runtime.dispose(message);
     this.disposeServiceBridge(message);
     this.disposeLocalStorageBridge();
     this.resetDisconnectedState();
@@ -1183,6 +1219,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   /** 当前物理连接的服务桥；重连后返回新的桥，旧桥永不复用。 */
   getServiceBridge(): RemoteServiceBridge | undefined {
     return this.serviceBridge;
+  }
+
+  /** 当前 WebLoom SharedWorker 句柄；重连后旧句柄永不复用。 */
+  getRuntimeHandle(): RuntimeHandle | undefined {
+    return this.runtimeHandle ?? undefined;
   }
 
   private async sendHello(servicePort?: MessagePort, localStorageBridgePort?: MessagePort): Promise<void> {
@@ -1730,6 +1771,13 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private normalizeTransportFailure(kind: CoordinatorClientRequest["kind"], cause: unknown): CoordinatorTransportFailure {
     this.isConnected = false;
+    this.removeRuntimeSubscription?.();
+    this.removeRuntimeSubscription = undefined;
+    const runtime = this.runtimeHandle;
+    this.runtimeHandle = null;
+    this.worker = null;
+    this.port = null;
+    if (runtime) void runtime.dispose(`Coordinator request failed: ${kind}`);
     this.disposeServiceBridge(`Coordinator request failed: ${kind}`);
     this.disposeLocalStorageBridge();
     this.resetDisconnectedState();
@@ -1770,6 +1818,13 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         this.isConnected = false;
+        this.removeRuntimeSubscription?.();
+        this.removeRuntimeSubscription = undefined;
+        const runtime = this.runtimeHandle;
+        this.runtimeHandle = null;
+        this.worker = null;
+        this.port = null;
+        if (runtime) void runtime.dispose("Coordinator request timed out");
         this.disposeServiceBridge("Coordinator request timed out");
         this.disposeLocalStorageBridge();
         this.resetDisconnectedState();
@@ -2071,8 +2126,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           && unit.productId.length > 0
           && typeof unit.unitId === "string"
           && unit.unitId.length > 0
-          && unit.execution === "coordinator-worker"
-          && ["root", "storage", "owner-session", "connect-session"].includes(unit.lifetime)
+          && unit.runtime === "shared-worker"
+          && ["root", "storage", "owner-session", "connect-session"].includes(unit.scopeKind)
           && typeof unit.instanceId === "string"
           && unit.instanceId.length > 0
           && ["starting", "ready", "failed"].includes(unit.state)
@@ -2083,7 +2138,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           && Array.isArray(unit.taskIds)
           && unit.taskIds.every((taskId) => typeof taskId === "string" && taskId.length > 0)
           && (unit.error === undefined || typeof unit.error === "string")
-          && (["owner-session", "connect-session"].includes(unit.lifetime)
+          && (["owner-session", "connect-session"].includes(unit.scopeKind)
             ? typeof unit.ownerPublicKeyHex === "string"
               && unit.ownerPublicKeyHex.length > 0
               && unit.sessionEpoch === event.sessionEpoch

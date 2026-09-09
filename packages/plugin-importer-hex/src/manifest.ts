@@ -38,8 +38,8 @@ const hexImporterPluginDefinition = {
   },
   units: [{
     id: "importer-hex.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
       { capability: "importer.registry", reason: "需要注册 HEX 实现" },
     ]),

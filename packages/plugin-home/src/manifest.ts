@@ -127,8 +127,8 @@ const homePluginDefinition = {
   },
   units: [{
     id: "home.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
       { capability: "home.registry", reason: "读取首页主栏与侧栏卡片" },
       { capability: "business.registry", reason: "读取业务首页投影" },

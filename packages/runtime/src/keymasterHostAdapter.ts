@@ -102,15 +102,15 @@ import {
   type RemoteServiceMessageCodec,
   SCOPED_TASK_SCHEDULER_CAPABILITY,
   type ContributionAdapter,
+  type LifecycleScope,
   type MessageBus as KeymasterMessageBus,
   type PluginContext as WebLoomPluginContext,
   type PluginHost as WebLoomPluginHost,
   type PluginManifest as WebLoomPluginManifest,
   type ResourceDefinition as WebLoomResourceDefinition,
   type ResourceRegistry as WebLoomResourceRegistry,
+  type RuntimeUnitParentScopeInput,
   type RuntimeUnitImplementationRegistry as WebLoomRuntimeUnitImplementationRegistry,
-  type ScopeResolver,
-  type ScopeResolution,
   registerOwnedResource,
 } from "webloom-framework";
 
@@ -272,34 +272,34 @@ function stableValue(value: unknown): string {
 
 function currentUnit(
   manifest: PluginManifest,
-  execution: string | undefined,
+  runtime: string | undefined,
 ): RuntimeUnitDescriptor | undefined {
   const units = manifest.units ?? [];
   if (units.length === 0) return undefined;
-  const matches = execution === undefined
+  const matches = runtime === undefined
     ? units
-    : units.filter((unit) => unit.execution === execution);
+    : units.filter((unit) => unit.runtime === runtime);
   return matches.length === 1 ? matches[0] : undefined;
 }
 
 function dependenciesOfManifest(
   manifest: PluginManifest,
-  execution: string | undefined,
+  runtime: string | undefined,
 ): PluginDependency[] {
-  const unit = currentUnit(manifest, execution);
+  const unit = currentUnit(manifest, runtime);
   return unit ? [...(unit.dependencies ?? [])] : [...(manifest.dependencies ?? [])];
 }
 
-function providesOfManifest(manifest: PluginManifest, execution: string | undefined): string[] {
-  const unit = currentUnit(manifest, execution);
+function providesOfManifest(manifest: PluginManifest, runtime: string | undefined): string[] {
+  const unit = currentUnit(manifest, runtime);
   return [...new Set(unit ? (unit.provides ?? []) : (manifest.meta.providesCapabilities ?? []))];
 }
 
 function storageOfManifest(
   manifest: PluginManifest,
-  execution: string | undefined,
+  runtime: string | undefined,
 ): PluginStorageDeclaration | undefined {
-  return currentUnit(manifest, execution)?.storage ?? manifest.storage;
+  return currentUnit(manifest, runtime)?.storage ?? manifest.storage;
 }
 
 function attributesFromRuntimeIdentity(
@@ -457,7 +457,7 @@ async function bindManifestStorage(
   manifest: PluginManifest,
   scope: import("webloom-framework").LifecycleScope,
 ): Promise<KeyValueStore | undefined> {
-  const declaration = storageOfManifest(manifest, options.execution);
+  const declaration = storageOfManifest(manifest, options.runtime);
   if (!declaration) return undefined;
   const authority = options.storageBindingAuthority
     ?? (host.capabilities.has(STORAGE_BINDING_AUTHORITY_CAPABILITY)
@@ -730,6 +730,9 @@ function createBusinessContributionAdapter(
 export function createKeymasterPluginHost(
   options: LegacyCreatePluginHostOptions = {},
 ): LegacyPluginHost {
+  // 未指定时保留“无执行宿主”语义：单一运行单元可按自身 Runtime 选择，
+  // 多运行单元必须在校验边界显式指定，不能静默偏向 Window。
+  const hostRuntime = options.runtime;
   const domain = createKeymasterCapabilities();
   const messageBus = createMessageBus();
   const webResourceRegistry = createResourceRegistry();
@@ -754,18 +757,41 @@ export function createKeymasterPluginHost(
   });
 
   const manifests = new Map<string, PluginManifest>();
+  const remoteRuntime = options.remoteRuntime;
+  // A live RuntimeHandle is the sole authority for cross-runtime service and
+  // unit state. Legacy callbacks remain only for callers that have not yet
+  // connected a RuntimeHandle; they never compete with one.
+  const readRemoteRuntimeSnapshots = (): import("webloom-framework").RuntimeUnitSnapshot[] => {
+    if (remoteRuntime) {
+      return remoteRuntime.state().units.map((unit) => ({
+        pluginId: unit.pluginId,
+        unitId: unit.unitId,
+        runtime: unit.runtime,
+        ...(unit.instanceId !== undefined ? { instanceId: unit.instanceId } : {}),
+        state: unit.state,
+      }));
+    }
+    return (options.runtimeUnitSnapshots?.() ?? []).map((snapshot) => ({
+      pluginId: snapshot.productId,
+      unitId: snapshot.unitId,
+      runtime: snapshot.runtime,
+      instanceId: snapshot.instanceId,
+      state: snapshot.state === "ready"
+        ? "enabled" as const
+        : snapshot.state === "starting"
+          ? "starting" as const
+          : "error-disabled" as const,
+    }));
+  };
   let coreHost: WebLoomPluginHost | undefined;
   let runtimeIdentity: RuntimeIdentityTransition | undefined = options.initialRuntimeIdentity
     ? { ...options.initialRuntimeIdentity }
     : undefined;
-  let storageScope: import("webloom-framework").LifecycleScope | undefined;
-  let storageScopeKey: string | undefined;
-  let ownerSessionScope: import("webloom-framework").LifecycleScope | undefined;
-  let ownerSessionScopeKey: string | undefined;
-  let connectSessionScope: import("webloom-framework").LifecycleScope | undefined;
-  let connectSessionScopeKey: string | undefined;
+  const runtimeParentScopes = new Map<RuntimeUnitDescriptor["scopeKind"], {
+    key: string;
+    scope: LifecycleScope;
+  }>();
   let removeHostKeyspaceListener: (() => void) | undefined;
-  const scopeListeners = new Set<() => void>();
   let transitionPromise: Promise<void> | undefined;
 
   function currentActivePublicKeyHex(): string | undefined {
@@ -782,10 +808,38 @@ export function createKeymasterPluginHost(
     return runtimeIdentity?.ownerPublicKeyHex ?? undefined;
   }
 
-  function notifyScopeChange(): void {
-    for (const listener of [...scopeListeners]) {
-      try { listener(); } catch { /* 状态观察者不能改变 Host 生命周期。 */ }
+  function runtimeUnitUnavailableReason(pluginId: string, unitId: string): string | undefined {
+    const unit = manifests.get(pluginId)?.units?.find((candidate) => candidate.id === unitId);
+    if (!unit) return undefined;
+    if ((unit.scopeKind === "owner-session" || unit.scopeKind === "connect-session")
+      && (runtimeIdentity?.vaultStatus !== "unlocked" || !runtimeIdentity.ownerPublicKeyHex)) {
+      return `runtime:${unit.scopeKind}-unavailable`;
     }
+    return undefined;
+  }
+
+  function runtimeUnitParentScope(input: RuntimeUnitParentScopeInput): LifecycleScope | undefined {
+    const unit = manifests.get(input.pluginId)?.units?.find((candidate) => candidate.id === input.unitId);
+    const scopeKind = unit?.scopeKind ?? "root";
+    if (scopeKind === "root") return undefined;
+    const root = coreHost?.rootScope;
+    if (!root) return undefined;
+    const attributes = attributesFromRuntimeIdentity(runtimeIdentity);
+    const key = scopeKind === "storage"
+      ? `storage:${attributes.bucketGeneration ?? "unknown"}`
+      : `${scopeKind}:${attributes.ownerPublicKeyHex ?? "none"}:${attributes.sessionEpoch ?? "none"}`;
+    const existing = runtimeParentScopes.get(scopeKind);
+    if (existing?.scope.state === "active" && existing.key === key) return existing.scope;
+    if (existing?.scope.state === "active") {
+      existing.scope.revoke("runtime identity changed");
+      void existing.scope.dispose({
+        reason: "runtime identity changed",
+        timeoutMs: options.lifecycleCleanupTimeoutMs,
+      }).catch(() => undefined);
+    }
+    const scope = root.child(scopeKind, { attributes });
+    runtimeParentScopes.set(scopeKind, { key, scope });
+    return scope;
   }
 
   function bindHostKeyspace(value: unknown): void {
@@ -801,80 +855,6 @@ export function createKeymasterPluginHost(
     }
     coreHost?.resourceStore.refreshRuntimeBindings();
   }
-
-  function identityAttributesFor(lifetime: string): KeymasterRuntimeScopeAttributes {
-    if (lifetime === "root") return Object.freeze({});
-    return attributesFromRuntimeIdentity(runtimeIdentity);
-  }
-
-  function ensureParentScope(
-    lifetime: string,
-    attributes: KeymasterRuntimeScopeAttributes,
-  ): import("webloom-framework").LifecycleScope | undefined {
-    const root = coreHost?.rootScope;
-    if (!root) return undefined;
-    const key = lifetime === "storage"
-      ? `bucket:${attributes.bucketGeneration ?? "unknown"}`
-      : `owner:${attributes.ownerPublicKeyHex ?? "none"}:session:${attributes.sessionEpoch ?? "none"}`;
-    if (lifetime === "storage") {
-      if (storageScope?.state === "active" && storageScopeKey === key) return storageScope;
-      if (storageScope?.state === "active") storageScope.revoke("storage identity changed");
-      storageScope = root.child("storage", { attributes });
-      storageScopeKey = key;
-      return storageScope;
-    }
-    if (lifetime === "owner-session") {
-      if (ownerSessionScope?.state === "active" && ownerSessionScopeKey === key) return ownerSessionScope;
-      if (ownerSessionScope?.state === "active") ownerSessionScope.revoke("owner session changed");
-      ownerSessionScope = root.child("owner-session", { attributes });
-      ownerSessionScopeKey = key;
-      return ownerSessionScope;
-    }
-    if (lifetime === "connect-session") {
-      if (connectSessionScope?.state === "active" && connectSessionScopeKey === key) return connectSessionScope;
-      if (connectSessionScope?.state === "active") connectSessionScope.revoke("connect session changed");
-      connectSessionScope = root.child("connect-session", { attributes });
-      connectSessionScopeKey = key;
-      return connectSessionScope;
-    }
-    return root;
-  }
-
-  const scopeResolver: ScopeResolver = {
-    resolve(input): ScopeResolution {
-      const lifetime = String(input.lifetime);
-      const attributes = Object.freeze({
-        ...identityAttributesFor(lifetime),
-        ...(options.lifecycleIdentityForPlugin?.(input.pluginId, input.unitId) ?? {}),
-      });
-      if (lifetime === "owner-session" || lifetime === "connect-session") {
-        if (runtimeIdentity?.vaultStatus !== "unlocked"
-          || !runtimeIdentity.ownerPublicKeyHex
-          || !runtimeIdentity.sessionEpoch) {
-          return {
-            available: false,
-            reason: `runtime:${lifetime}-unavailable`,
-            attributes,
-            key: `${lifetime}:unavailable`,
-          };
-        }
-      }
-      const parent = ensureParentScope(lifetime, attributes);
-      if (!parent) {
-        return { available: false, reason: "runtime:host-unavailable", attributes };
-      }
-      const key = lifetime === "storage"
-        ? `storage:${attributes.bucketGeneration ?? "unknown"}`
-        : lifetime === "owner-session" || lifetime === "connect-session"
-          ? `${lifetime}:${attributes.ownerPublicKeyHex}:${attributes.sessionEpoch}`
-          : `root:${stableValue(attributes)}`;
-      return { available: true, parent, attributes, key };
-    },
-    subscribe(listener) {
-      scopeListeners.add(listener);
-      return () => scopeListeners.delete(listener);
-    },
-  };
 
   const registryRules = new Map<string, CreateScopedRegistryFacadeOptions>([
     ["route.registry", { name: "route.registry" }],
@@ -1204,9 +1184,14 @@ export function createKeymasterPluginHost(
   domain.settings.setRoutePathProbe((path) => domain.routes.byPath(path) !== undefined);
 
   coreHost = createWebLoomPluginHost({
-    execution: options.execution,
-    defaultLifetime: "plugin-instance",
-    rootAttributes: Object.freeze({}),
+    runtime: hostRuntime,
+    rootAttributes: attributesFromRuntimeIdentity(runtimeIdentity),
+    runtimeUnitAvailability: ({ pluginId, unitId }) => runtimeUnitUnavailableReason(pluginId, unitId),
+    runtimeUnitAttributes: ({ pluginId, unitId }) => ({
+      ...attributesFromRuntimeIdentity(runtimeIdentity),
+      ...(options.lifecycleIdentityForPlugin?.(pluginId, unitId) ?? {}),
+    }),
+    runtimeUnitParentScope,
     capabilities: legacyBuiltinCapabilities,
     resourceRegistry: webResourceRegistry,
     messageBus,
@@ -1215,14 +1200,13 @@ export function createKeymasterPluginHost(
       setEnabled: (pluginId, enabled) => configStore.setEnabled(pluginId, enabled),
       subscribe: (listener) => configStore.subscribe((snapshot) => listener(snapshot)),
     } satisfies WebLoomPluginConfigStore,
-    scopeResolver,
     contextExtension: ({ pluginId }) => ({
       logger: logService.forPlugin(pluginId),
       coordinator: options.coordinatorForPlugin?.(pluginId),
     }),
     manifestValidator: (manifest) => {
       const source = manifests.get(manifest.id);
-      if (source) validateKeymasterManifest(source, options.execution, manifests.values());
+      if (source) validateKeymasterManifest(source, options.runtime, manifests.values());
     },
     permissionPolicy: ({ pluginId, unitId, requested, identity }) => {
       const requestedPermissions = requested as readonly PluginPermission[];
@@ -1239,21 +1223,30 @@ export function createKeymasterPluginHost(
       };
     },
     pluginIntentCoordinator: options.pluginIntentCoordinator,
-    serviceBridgeForPlugin: (pluginId, instanceId) => options.serviceBridgeForPlugin?.(pluginId, instanceId),
+    externalRuntimeDependencies: remoteRuntime !== undefined,
+    serviceBridgeForPlugin: (pluginId, instanceId) => remoteRuntime
+      ? remoteRuntime.serviceBridge
+      : options.serviceBridgeForPlugin?.(pluginId, instanceId),
     runtimeUnitImplementationRegistry: implementationRegistry,
     contributionAdapters: [createBusinessContributionAdapter(domain, {
       onRouteRegistered: (pluginId, routeId) => rememberRouteOwner(routeOwners, pluginId, routeId),
       onRouteRevoked: (pluginId, routeId) => forgetRouteOwner(routeOwners, pluginId, routeId),
     })],
     lifecycleCleanupTimeoutMs: options.lifecycleCleanupTimeoutMs,
-    runtimeSnapshots: () => (options.runtimeUnitSnapshots?.() ?? []).map((snapshot) => ({
-      pluginId: snapshot.productId,
-      unitId: snapshot.unitId,
-      execution: snapshot.execution,
-      instanceId: snapshot.instanceId,
-      state: snapshot.state === "ready" ? "enabled" : snapshot.state === "starting" ? "starting" : "error-disabled",
-    })),
+    remoteServiceReferences: () => remoteRuntime?.state().services ?? [],
+    runtimeSnapshots: readRemoteRuntimeSnapshots,
   });
+
+  let removeRemoteRuntimeSubscription: (() => void) | undefined;
+  if (remoteRuntime) {
+    removeRemoteRuntimeSubscription = remoteRuntime.subscribe(() => {
+      // A disconnect clears the remote directory. Refresh first so the Host
+      // stops remote consumers, then reconcile so they restart only after a
+      // new baseline has been accepted.
+      coreHost?.refreshRuntimeUnitSnapshots();
+      void coreHost?.reconcile().catch(() => undefined);
+    });
+  }
 
   /** 兼容旧 Host 的系统生命周期日志；通用 WebLoom 不绑定 Keymaster 日志。 */
   function appendRuntimeLog(input: {
@@ -1302,7 +1295,7 @@ export function createKeymasterPluginHost(
     const byId = new Map(plugins.map((plugin) => [plugin.id, plugin]));
     const providers = new Map<string, string>();
     for (const plugin of plugins) {
-      for (const capability of providesOfManifest(plugin, options.execution)) {
+      for (const capability of providesOfManifest(plugin, hostRuntime)) {
         if (!providers.has(capability)) providers.set(capability, plugin.id);
       }
     }
@@ -1313,7 +1306,7 @@ export function createKeymasterPluginHost(
       if (visited.has(plugin.id)) return;
       if (visiting.has(plugin.id)) return;
       visiting.add(plugin.id);
-      for (const dependency of dependenciesOfManifest(plugin, options.execution)) {
+      for (const dependency of dependenciesOfManifest(plugin, hostRuntime)) {
         if (dependency.optional) continue;
         const providerId = providers.get(dependency.capability);
         const provider = providerId ? byId.get(providerId) : undefined;
@@ -1333,11 +1326,24 @@ export function createKeymasterPluginHost(
     const current = coreHost!.state(pluginId);
     const declaredUnits = manifest.units ?? [];
     if (declaredUnits.length === 0) return current as ReturnType<LegacyPluginHost["state"]>;
-    const selected = currentUnit(manifest, options.execution);
-    const snapshots = options.runtimeUnitSnapshots?.() ?? [];
+    const selected = currentUnit(manifest, hostRuntime);
+    const snapshots = remoteRuntime
+      ? remoteRuntime.state().units.map((unit) => ({
+          productId: unit.pluginId,
+          unitId: unit.unitId,
+          runtime: unit.runtime,
+          instanceId: unit.instanceId,
+          state: unit.state === "enabled"
+            ? "ready" as const
+            : unit.state === "starting"
+              ? "starting" as const
+              : "failed" as const,
+          error: unit.state === "error-disabled" ? "远程运行单元失败" : undefined,
+        }))
+      : (options.runtimeUnitSnapshots?.() ?? []);
     const units = declaredUnits.map((declared) => {
       const isSelected = selected?.id === declared.id;
-      const remote = isSelected || declared.execution === options.execution
+      const remote = isSelected || declared.runtime === hostRuntime
         ? undefined
         : snapshots.find((snapshot) => snapshot.productId === manifest.id && snapshot.unitId === declared.id);
       const remoteKind = remote
@@ -1346,7 +1352,7 @@ export function createKeymasterPluginHost(
       return {
         pluginId: manifest.id,
         unitId: declared.id,
-        execution: declared.execution,
+        runtime: declared.runtime,
         ...(isSelected && current.instanceId
           ? { instanceId: current.instanceId }
           : remote?.instanceId ? { instanceId: remote.instanceId } : {}),
@@ -1367,8 +1373,7 @@ export function createKeymasterPluginHost(
   function convertManifest(manifest: PluginManifest): WebLoomPluginManifest {
     const units = manifest.units?.map((unit) => ({
       id: unit.id,
-      execution: unit.execution,
-      lifetime: unit.lifetime,
+      runtime: unit.runtime,
       dependencies: unit.dependencies,
       provides: unit.provides,
       providedContracts: unit.providedContracts,
@@ -1452,8 +1457,9 @@ export function createKeymasterPluginHost(
     const projectResourceId = (resourceId: string): string => {
       for (const [scopeId, pluginId] of scopeOwners) {
         const prefix = `child:${scopeId}:`;
-        if (resourceId.startsWith(prefix)) {
-          return `plugin:${pluginId}:${resourceId.slice(prefix.length)}`;
+        const index = resourceId.indexOf(prefix);
+        if (index >= 0) {
+          return `plugin:${pluginId}:${resourceId.slice(index + prefix.length)}`;
         }
       }
       return resourceId;
@@ -1507,7 +1513,7 @@ export function createKeymasterPluginHost(
     getManifest: (pluginId) => manifests.get(pluginId),
     reverseDeps: (pluginId) => coreHost!.reverseDeps(pluginId),
     validateManifestSet(plugins) {
-      for (const plugin of plugins) validateKeymasterManifest(plugin, options.execution, plugins);
+      for (const plugin of plugins) validateKeymasterManifest(plugin, options.runtime, plugins);
       coreHost!.validateManifestSet(plugins.map(convertManifest));
     },
     provide(key, value) {
@@ -1515,15 +1521,22 @@ export function createKeymasterPluginHost(
       if (key === KEYSPACE_SERVICE_CAPABILITY) bindHostKeyspace(value);
     },
     async register(plugin) {
-      validateKeymasterManifest(plugin, options.execution, manifests.values());
+      validateKeymasterManifest(plugin, options.runtime, manifests.values());
       updateManifestMap([plugin]);
       configStore.setRequiredPluginIds(
         [...manifests.values()].filter((item) => item.meta.startup === "required").map((item) => item.id),
       );
       try {
         const existing = coreHost!.getManifest(plugin.id);
-        if (existing && coreHost!.state(plugin.id).kind === "error-disabled") {
-          await coreHost!.retry(plugin.id);
+        if (existing) {
+          const state = coreHost!.state(plugin.id);
+          const intent = options.pluginIntentCoordinator?.snapshot().desiredEnabled[plugin.id]
+            ?? configStore.read()[plugin.id]
+            ?? plugin.meta.defaultEnabled;
+          const desired = plugin.meta.startup === "required" || plugin.meta.canDisable === false || intent;
+          if (desired && state.kind === "error-disabled") await coreHost!.retry(plugin.id);
+          else if (desired && state.kind === "blocked") await coreHost!.enable(plugin.id);
+          else if (desired && state.kind === "disabled") await coreHost!.enable(plugin.id);
           appendPluginEnabledLog(plugin.id);
           return;
         }
@@ -1539,7 +1552,7 @@ export function createKeymasterPluginHost(
       }
     },
     async registerAll(plugins) {
-      for (const plugin of plugins) validateKeymasterManifest(plugin, options.execution, plugins);
+      for (const plugin of plugins) validateKeymasterManifest(plugin, options.runtime, plugins);
       updateManifestMap(plugins);
       configStore.setRequiredPluginIds(
         [...manifests.values()].filter((item) => item.meta.startup === "required").map((item) => item.id),
@@ -1592,6 +1605,8 @@ export function createKeymasterPluginHost(
     },
     dispose: (reason) => {
       if (legacyDisposePromise) return legacyDisposePromise;
+      removeRemoteRuntimeSubscription?.();
+      removeRemoteRuntimeSubscription = undefined;
       removeHostKeyspaceListener?.();
       removeHostKeyspaceListener = undefined;
       const scopeOwners = new Map<string, string>();
@@ -1620,25 +1635,33 @@ export function createKeymasterPluginHost(
     const previous = transitionPromise;
     const run = async (): Promise<void> => {
       if (runtimeIdentityKey(runtimeIdentity) === runtimeIdentityKey(next)) return;
-      const oldScopes: import("webloom-framework").LifecycleScope[] = [];
-      const storageChanged = storageIdentityKey(runtimeIdentity) !== storageIdentityKey(next);
-      const ownerChanged = ownerIdentityKey(runtimeIdentity) !== ownerIdentityKey(next);
-      const connectChanged = connectIdentityKey(runtimeIdentity) !== connectIdentityKey(next);
-      if (storageChanged && storageScope) oldScopes.push(storageScope);
-      if (ownerChanged && ownerSessionScope) oldScopes.push(ownerSessionScope);
-      if (connectChanged && connectSessionScope) oldScopes.push(connectSessionScope);
+      const previousIdentity = runtimeIdentity;
+      const storageChanged = (previousIdentity?.bucketGeneration ?? "unknown")
+        !== (next.bucketGeneration ?? "unknown");
+      const ownerChanged = previousIdentity?.vaultStatus !== next.vaultStatus
+        || (previousIdentity?.ownerPublicKeyHex ?? "") !== (next.ownerPublicKeyHex ?? "")
+        || previousIdentity?.sessionEpoch !== next.sessionEpoch;
+      const toSuspend: { pluginId: string; scopeKind: RuntimeUnitDescriptor["scopeKind"] }[] = [];
+      for (const [pluginId, manifest] of [...manifests].reverse()) {
+        const unit = currentUnit(manifest, hostRuntime);
+        if (!unit) continue;
+        const identityBound = unit.scopeKind === "storage"
+          ? storageChanged
+          : unit.scopeKind === "owner-session" || unit.scopeKind === "connect-session"
+            ? ownerChanged
+            : false;
+        if (identityBound) toSuspend.push({ pluginId, scopeKind: unit.scopeKind });
+      }
       runtimeIdentity = { ...next };
-      if (storageChanged) { storageScope?.revoke("runtime identity changed"); storageScope = undefined; storageScopeKey = undefined; }
-      if (ownerChanged) { ownerSessionScope?.revoke("runtime identity changed"); ownerSessionScope = undefined; ownerSessionScopeKey = undefined; }
-      if (connectChanged) { connectSessionScope?.revoke("runtime identity changed"); connectSessionScope = undefined; connectSessionScopeKey = undefined; }
-      // Scope resolver 订阅是同步撤权入口；WebLoom 会先停止受影响实例，
-      // 再按最新 attributes 创建新实例。
-      notifyScopeChange();
+      // WebLoom 负责当前实例的 Scope；身份边界变化时先同步撤权，再等待
+      // 有界清理。desiredEnabled 保持不变，解锁/重绑后由分阶段装配重新启动。
+      for (const item of toSuspend) {
+        await coreHost!.suspend(item.pluginId, "runtime identity changed");
+        if (item.scopeKind === "storage") {
+          await coreHost!.enable(item.pluginId);
+        }
+      }
       await coreHost!.reconcile();
-      await Promise.all(oldScopes.map((scope) => scope.dispose({
-        reason: "runtime identity changed",
-        timeoutMs: options.lifecycleCleanupTimeoutMs,
-      })));
     };
     const settled = (previous ? previous.catch(() => undefined).then(run) : run()).finally(() => {
       if (transitionPromise === settled) transitionPromise = undefined;
@@ -1653,21 +1676,9 @@ function runtimeIdentityKey(identity: RuntimeIdentityTransition | undefined): st
   return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.bucketGeneration ?? "unknown"}`;
 }
 
-function storageIdentityKey(identity: RuntimeIdentityTransition | undefined): string {
-  return `storage:${identity?.bucketGeneration ?? "unknown"}`;
-}
-
-function ownerIdentityKey(identity: RuntimeIdentityTransition | undefined): string {
-  return `owner:${identity?.vaultStatus ?? "none"}:${identity?.ownerPublicKeyHex ?? ""}:${identity?.sessionEpoch ?? ""}`;
-}
-
-function connectIdentityKey(identity: RuntimeIdentityTransition | undefined): string {
-  return `connect:${identity?.vaultStatus ?? "none"}:${identity?.sessionEpoch ?? ""}`;
-}
-
 function validateKeymasterManifest(
   manifest: PluginManifest,
-  execution: string | undefined,
+  runtime: string | undefined,
   manifestSet: Iterable<PluginManifest>,
 ): void {
   if (!manifest || typeof manifest.id !== "string" || manifest.id.trim() === "") {
@@ -1677,14 +1688,14 @@ function validateKeymasterManifest(
     throw new Error(`Plugin "${manifest.id}" meta must define defaultEnabled and canDisable`);
   }
   const units = manifest.units ?? [];
-  if (units.length > 1 && execution === undefined) {
+  if (units.length > 1 && runtime === undefined) {
     throw new Error(`Plugin "${manifest.id}" execution must be explicit for multi-unit manifests`);
   }
   const unitIds = new Set<string>();
   for (const unit of units) {
     if (!unit.id || unitIds.has(unit.id)) throw new Error(`Plugin "${manifest.id}" has duplicate or empty runtime unit id`);
     unitIds.add(unit.id);
-    if (!unit.execution || !unit.lifetime) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" is incomplete`);
+    if (!unit.runtime || !unit.scopeKind) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" is incomplete`);
   }
   const declarations = [manifest.storage, ...units.map((unit) => unit.storage)].filter(
     (value): value is PluginStorageDeclaration => value !== undefined,
@@ -1700,13 +1711,13 @@ function validateKeymasterManifest(
     if (!manifest.meta.defaultEnabled || manifest.meta.canDisable) {
       throw new Error(`Required plugin "${manifest.id}" has inconsistent startup metadata`);
     }
-    if (providesOfManifest(manifest, execution).length === 0) {
+    if (providesOfManifest(manifest, runtime).length === 0) {
       throw new Error(`Required plugin "${manifest.id}" must provide capabilities`);
     }
     const all = [...manifestSet];
-    for (const dependency of dependenciesOfManifest(manifest, execution)) {
+    for (const dependency of dependenciesOfManifest(manifest, runtime)) {
       if (dependency.optional) continue;
-      const provider = all.find((candidate) => providesOfManifest(candidate, execution).includes(dependency.capability));
+      const provider = all.find((candidate) => providesOfManifest(candidate, runtime).includes(dependency.capability));
       if (provider?.meta.startup === "optional") {
         throw new Error(`Required plugin "${manifest.id}" cannot depend on optional capability provider "${provider.id}"`);
       }

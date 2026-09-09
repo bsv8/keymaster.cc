@@ -171,8 +171,8 @@ const bsvPricePluginDefinition = {
   },
   units: [{
     id: "bsv-price.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [BSV_PRICE_SERVICE_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([BSV_PRICE_SERVICE_CAPABILITY]),
     storage: { scope: "key", applicationStorageId: "BsvPrice", schemaVersion: 1 },

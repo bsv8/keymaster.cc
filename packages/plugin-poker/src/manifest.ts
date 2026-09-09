@@ -267,8 +267,8 @@ const pokerPluginDefinition = {
   },
   units: [{
     id: "poker.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [POKER_SERVICE_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([POKER_SERVICE_CAPABILITY]),
     storage: { scope: "key", applicationStorageId: "Poker", schemaVersion: 1 },

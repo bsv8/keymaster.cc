@@ -46,11 +46,12 @@ import type {
   LifecycleScope,
   MessageBus,
   PermissionLeaseBinding,
-  PluginExecution,
+  RuntimeKind,
   PluginIntentCoordinator,
   PluginIntentSubmissionResult,
   PluginHost as WebLoomPluginHost,
   RemoteServiceBridge,
+  RuntimeHandle,
   RuntimeUnitImplementationRegistry as WebLoomRuntimeUnitImplementationRegistry,
   ScopedTaskScheduler,
 } from "webloom-framework";
@@ -177,7 +178,9 @@ export interface CreatePluginHostOptions {
     requested: readonly PluginPermission[],
   ) => Partial<Pick<PermissionLeaseBinding, "policyRevision" | "grantRevision" | "grantId">>;
   /** 当前 Host 所在执行环境。 */
-  execution?: PluginExecution;
+  runtime?: RuntimeKind;
+  /** 页面已连接的 WebLoom SharedWorker Runtime；由 Window App 投影其快照。 */
+  remoteRuntime?: RuntimeHandle;
   /** Host 的初始 Vault/owner/session 身份。 */
   initialRuntimeIdentity?: RuntimeIdentityTransition;
   /** 新实例的领域身份扩展；最终变为 WebLoom Scope.attributes。 */

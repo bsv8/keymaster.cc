@@ -147,8 +147,8 @@ const satSubscriptionPluginDefinition = {
   },
   units: [{
     id: "sat-subscription.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [
       SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
       SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
@@ -170,8 +170,8 @@ const satSubscriptionPluginDefinition = {
     ]),
   }, {
     id: "sat-subscription.coordinator-worker",
-    execution: "coordinator-worker",
-    lifetime: "owner-session",
+    runtime: "shared-worker",
+    scopeKind: "owner-session",
   }],
   setup(ctx: PluginContext) {
     const coordinator = ctx.coordinator as SatCoordinatorControl | undefined;

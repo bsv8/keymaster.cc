@@ -83,8 +83,8 @@ export function materializeCatalogRuntimeUnit(manifest: PluginManifest): PluginM
   const declarations = getBuiltinPluginRuntimeUnits(manifest.id);
   if (declarations.length === 0) throw new Error(`产品 ${manifest.id} 没有静态运行单元契约`);
   if (manifest.units && manifest.units.length > 0) {
-    const actual = manifest.units.map(({ id, execution, lifetime }) => ({ id, execution, lifetime }));
-    const expected = declarations.map(({ unitId, execution, lifetime }) => ({ id: unitId, execution, lifetime }));
+    const actual = manifest.units.map(({ id, runtime, scopeKind }) => ({ id, runtime, scopeKind }));
+    const expected = declarations.map(({ unitId, runtime, scopeKind }) => ({ id: unitId, runtime, scopeKind }));
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new Error(`产品 ${manifest.id} 的 manifest 运行单元与静态契约不一致`);
     }
@@ -106,7 +106,7 @@ export function materializeCatalogRuntimeUnit(manifest: PluginManifest): PluginM
         }
       }
       for (const dependency of unit.dependencies ?? []) {
-        if (!dependency.contractVersion || !dependency.sourceExecution || !dependency.scope) {
+        if (!dependency.contractVersion || !dependency.sourceRuntime || !dependency.scopeKind) {
           throw new Error(`产品 ${manifest.id} 的运行单元 ${unit.id} 存在不完整依赖契约`);
         }
       }

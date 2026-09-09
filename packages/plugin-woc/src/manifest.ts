@@ -102,8 +102,8 @@ const wocPluginDefinition = {
   },
   units: [{
     id: "woc.window",
-    execution: "window",
-    lifetime: "owner-session",
+    runtime: "window-main",
+    scopeKind: "owner-session",
     provides: [WOC_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([
       WOC_CAPABILITY,
@@ -121,8 +121,8 @@ const wocPluginDefinition = {
     ]),
   }, {
     id: "woc.coordinator-worker",
-    execution: "coordinator-worker",
-    lifetime: "owner-session",
+    runtime: "shared-worker",
+    scopeKind: "owner-session",
   }],
   i18n: wocResources,
   async setup(ctx) {

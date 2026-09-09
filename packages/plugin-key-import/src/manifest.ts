@@ -134,8 +134,8 @@ const keyImportPluginDefinition = {
   },
   units: [{
     id: "key-import.window",
-    execution: "window",
-    lifetime: "root",
+    runtime: "window-main",
+    scopeKind: "root",
     provides: [KEY_IMPORT_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([KEY_IMPORT_CAPABILITY]),
     dependencies: defineRuntimeUnitDependencies([

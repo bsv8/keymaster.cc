@@ -452,8 +452,8 @@ const protocolPluginDefinition = {
   },
   units: [{
     id: "protocol.window",
-    execution: "window",
-    lifetime: "storage",
+    runtime: "window-main",
+    scopeKind: "storage",
     provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY],
     providedContracts: defineRuntimeUnitProvidedContracts([
       PROTOCOL_SERVICE_CAPABILITY,

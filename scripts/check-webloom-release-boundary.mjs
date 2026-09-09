@@ -9,7 +9,7 @@ import { join } from "node:path";
 const root = process.cwd();
 const packageRoots = [join(root, "apps"), join(root, "packages")];
 const packageName = "webloom-framework";
-const releaseVersion = "0.1.0";
+const releaseVersion = "0.2.0";
 const violations = [];
 
 function packageFiles(directory) {

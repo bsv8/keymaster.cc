@@ -5,8 +5,7 @@
 // 运行单元，taskId 和最终 I/O 审计入口则把实际执行边界连接起来。
 
 import type { FinalIoAuditOperation } from "./finalIoAudit.js";
-import type { PluginManifest } from "@keymaster/contracts";
-import type { PluginLifetime } from "webloom-framework";
+import type { KeymasterScopeKind, PluginManifest } from "@keymaster/contracts";
 import {
   BUILTIN_PLUGIN_PRODUCT_IDS,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -19,9 +18,9 @@ export interface CoordinatorWorkerUnitDescriptor {
   /** 稳定的 Worker 运行单元标识，不是一次启动生成的实例标识。 */
   unitId: string;
   /** 执行环境；此目录只登记主 Coordinator Worker。 */
-  execution: "coordinator-worker";
+  runtime: "shared-worker";
   /** 运行单元的生命周期；领域任务随 owner 会话重建，管理外壳可跨 owner 存活。 */
-  lifetime: PluginLifetime;
+  scopeKind: KeymasterScopeKind;
   /** 由该运行单元拥有的后台任务。 */
   taskIds: readonly string[];
   /** 这些任务执行前必须保持启用的产品意图；由单元目录统一维护。 */
@@ -36,7 +35,7 @@ export interface CoordinatorWorkerUnitDescriptor {
 }
 
 /**
- * Worker 领域补充信息；产品、unit、execution 和 lifetime 不在这里重复
+ * Worker 领域补充信息；产品、unit、execution 和 scopeKind 不在这里重复
  * 维护，统一从 contracts 的产品运行单元契约 materialize（物化）。
  */
 interface CoordinatorWorkerUnitRuntimeDetails {
@@ -151,14 +150,14 @@ export const COORDINATOR_WORKER_UNIT_CATALOG: readonly CoordinatorWorkerUnitDesc
     const resolved = BUILTIN_PLUGIN_PRODUCT_IDS
       .flatMap((productId) => getBuiltinPluginRuntimeUnits(productId))
       .find((unit) => unit.unitId === details.unitId);
-    if (!resolved || resolved.execution !== "coordinator-worker") {
+    if (!resolved || resolved.runtime !== "shared-worker") {
       throw new Error(`Worker 领域补充目录引用了未声明的 Coordinator unit: ${details.unitId}`);
     }
     return {
       productId: resolved.productId,
       unitId: resolved.unitId,
-      execution: resolved.execution,
-      lifetime: resolved.lifetime,
+      runtime: resolved.runtime,
+      scopeKind: resolved.scopeKind,
       taskIds: [...details.taskIds],
       ...("requiredProductIds" in details && details.requiredProductIds
         ? { requiredProductIds: [...details.requiredProductIds] }
@@ -208,7 +207,7 @@ export function validateCoordinatorWorkerUnitCatalog(
     const declared = getBuiltinPluginRuntimeUnits(unit.productId).find((candidate) => candidate.unitId === unit.unitId);
     if (!declared) {
       errors.push(`Worker 单元未在产品运行单元契约中声明: ${unit.unitId}`);
-    } else if (declared.execution !== unit.execution || declared.lifetime !== unit.lifetime) {
+    } else if (declared.runtime !== unit.runtime || declared.scopeKind !== unit.scopeKind) {
       errors.push(`Worker 单元与产品运行单元契约不一致: ${unit.unitId}`);
     }
     if (manifests) {
@@ -216,7 +215,7 @@ export function validateCoordinatorWorkerUnitCatalog(
       const manifestUnit = manifest?.units?.find((candidate) => candidate.id === unit.unitId);
       if (!manifestUnit) {
         errors.push(`Worker 单元未在 manifest 中声明: ${unit.unitId}`);
-      } else if (manifestUnit.execution !== unit.execution || manifestUnit.lifetime !== unit.lifetime) {
+      } else if (manifestUnit.runtime !== unit.runtime || manifestUnit.scopeKind !== unit.scopeKind) {
         errors.push(`Worker 单元与 manifest 描述不一致: ${unit.unitId}`);
       }
     }
@@ -224,8 +223,8 @@ export function validateCoordinatorWorkerUnitCatalog(
     products.add(unit.productId);
     if (units.has(unit.unitId)) errors.push(`重复 unitId: ${unit.unitId}`);
     units.add(unit.unitId);
-    if (unit.execution !== "coordinator-worker") errors.push(`Worker 单元 execution 无效: ${unit.unitId}`);
-    if (!["root", "storage", "owner-session"].includes(unit.lifetime)) errors.push(`Worker 单元 lifetime 无效: ${unit.unitId}`);
+    if (unit.runtime !== "shared-worker") errors.push(`Worker 单元 runtime 无效: ${unit.unitId}`);
+    if (!["root", "storage", "owner-session"].includes(unit.scopeKind)) errors.push(`Worker 单元 scopeKind 无效: ${unit.unitId}`);
     const serviceIds = unit.serviceIds ?? [];
     if (unit.taskIds.length === 0 && serviceIds.length === 0) errors.push(`Worker 单元没有 taskId 或 serviceId: ${unit.unitId}`);
     if (unit.taskIds.length !== unit.finalIoAuditEntries.length) {
@@ -260,7 +259,7 @@ export function validateCoordinatorWorkerUnitCatalog(
   if (manifests) {
     for (const manifest of manifests) {
       for (const unit of manifest.units ?? []) {
-        if (unit.execution !== "coordinator-worker") continue;
+        if (unit.runtime !== "shared-worker") continue;
         if (!catalog.some((candidate) => candidate.productId === manifest.id && candidate.unitId === unit.id)) {
           errors.push(`manifest Worker 单元未进入 Worker 领域目录: ${unit.id}`);
         }
