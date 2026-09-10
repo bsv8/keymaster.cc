@@ -46,6 +46,7 @@ import type {
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   CHANNEL_RUNTIME_CAPABILITY,
+  COORDINATOR_SERVICE_PROTOCOL_VERSION,
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   LOG_SERVICE_CAPABILITY,
@@ -114,105 +115,28 @@ import {
   registerOwnedResource,
 } from "webloom-framework";
 
-/** Keymaster 旧 MessagePort 使用的 wire 前缀。 */
+/** Keymaster MessagePort 使用的领域 wire 前缀。 */
 export const KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX = "keymaster.remote-service";
 
 type MessageRecord = Record<string, unknown>;
 
-function isMessageRecord(value: unknown): value is MessageRecord {
-  return Boolean(value) && typeof value === "object";
-}
-
-function attributeValue(
-  reference: MessageRecord,
-  attributes: MessageRecord,
-  key: string,
-): unknown {
-  return Object.prototype.hasOwnProperty.call(attributes, key)
-    ? attributes[key]
-    : reference[key];
-}
-
-/** 将旧 wire 引用转换为 WebLoom 的 attributes 绑定。 */
-function decodeKeymasterReference(input: MessageRecord): MessageRecord {
-  const attributes = isMessageRecord(input.attributes) ? input.attributes : {};
-  return {
-    ...input,
-    attributes: Object.freeze({
-      ...attributes,
-      sessionEpoch: typeof attributeValue(input, attributes, "sessionEpoch") === "string"
-        ? attributeValue(input, attributes, "sessionEpoch")
-        : null,
-      ownerPublicKeyHex: typeof attributeValue(input, attributes, "ownerPublicKeyHex") === "string"
-        ? attributeValue(input, attributes, "ownerPublicKeyHex")
-        : null,
-      ownerGeneration: typeof attributeValue(input, attributes, "ownerGeneration") === "number"
-        ? attributeValue(input, attributes, "ownerGeneration")
-        : null,
-    }),
-  };
-}
-
-/** 将 WebLoom 引用编码回当前 Keymaster wire 的旧字段布局。 */
-function encodeKeymasterReference(input: MessageRecord): MessageRecord {
-  const attributes = isMessageRecord(input.attributes) ? input.attributes : {};
-  const { attributes: _attributes, ...reference } = input;
-  return {
-    ...reference,
-    sessionEpoch: typeof attributeValue(input, attributes, "sessionEpoch") === "string"
-      ? attributeValue(input, attributes, "sessionEpoch")
-      : null,
-    ownerPublicKeyHex: typeof attributeValue(input, attributes, "ownerPublicKeyHex") === "string"
-      ? attributeValue(input, attributes, "ownerPublicKeyHex")
-      : null,
-    ownerGeneration: typeof attributeValue(input, attributes, "ownerGeneration") === "number"
-      ? attributeValue(input, attributes, "ownerGeneration")
-      : null,
-  };
-}
-
-function mapKeymasterMessage(
-  input: MessageRecord,
-  mapReference: (reference: MessageRecord) => MessageRecord,
-): MessageRecord {
-  const message = { ...input };
-  if (isMessageRecord(message.reference)) {
-    message.reference = mapReference(message.reference);
-  }
-  if (isMessageRecord(message.snapshot)) {
-    const snapshot = { ...message.snapshot };
-    if (Array.isArray(snapshot.services)) {
-      snapshot.services = snapshot.services.map((service) =>
-        isMessageRecord(service) ? mapReference(service) : service,
-      );
-    }
-    message.snapshot = snapshot;
-  }
-  return message;
-}
-
 /**
- * Keymaster legacy codec。
+ * Keymaster service codec。
  *
- * 消息 type 和 wire 字段保持 `keymaster.remote-service.*`；只有在 Adapter
- * 边界把 owner/session 世代与 WebLoom 的通用 attributes 互相转换。这样
- * 新旧 Worker 可以继续共用当前协议，同时 WebLoom 核心不认识领域字段。
+ * WebLoom v2 的 codec 只承载 call/result/error/cancel；Keymaster 的 owner、
+ * session、scope、世代等领域字段只存在于 RuntimeSnapshot 的 reference
+ * attributes，并由 Worker 权威状态和最终 I/O fence 再次校验。
  */
 export const keymasterRemoteServiceMessageCodec: RemoteServiceMessageCodec = (() => {
   const base = createRemoteServiceMessageCodec({
     prefix: KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX,
-    protocolVersion: "1",
+    protocolVersion: COORDINATOR_SERVICE_PROTOCOL_VERSION,
   });
   return Object.freeze({
     protocolVersion: base.protocolVersion,
     type: base.type,
-    encode(message: MessageRecord): unknown {
-      return base.encode(mapKeymasterMessage(message, encodeKeymasterReference));
-    },
-    decode(input: unknown): MessageRecord | undefined {
-      const message = base.decode(input);
-      return message ? mapKeymasterMessage(message, decodeKeymasterReference) : undefined;
-    },
+    encode: (message: MessageRecord): unknown => base.encode(message),
+    decode: (input: unknown): MessageRecord | undefined => base.decode(input),
   });
 })();
 
@@ -1224,16 +1148,20 @@ export function createKeymasterPluginHost(
     },
     pluginIntentCoordinator: options.pluginIntentCoordinator,
     externalRuntimeDependencies: remoteRuntime !== undefined,
-    serviceBridgeForPlugin: (pluginId, instanceId) => remoteRuntime
-      ? remoteRuntime.serviceBridge
-      : options.serviceBridgeForPlugin?.(pluginId, instanceId),
+    serviceBridgeForPlugin: (pluginId, instanceId) => options.serviceBridgeForPlugin?.(pluginId, instanceId),
     runtimeUnitImplementationRegistry: implementationRegistry,
     contributionAdapters: [createBusinessContributionAdapter(domain, {
       onRouteRegistered: (pluginId, routeId) => rememberRouteOwner(routeOwners, pluginId, routeId),
       onRouteRevoked: (pluginId, routeId) => forgetRouteOwner(routeOwners, pluginId, routeId),
     })],
     lifecycleCleanupTimeoutMs: options.lifecycleCleanupTimeoutMs,
-    remoteServiceReferences: () => remoteRuntime?.state().services ?? [],
+    remoteServiceReferences: () => {
+      const bridge = options.serviceBridgeForPlugin?.("__runtime__", "__runtime__");
+      return [
+        ...(remoteRuntime?.state().services ?? []),
+        ...(bridge && typeof bridge.services === "function" ? bridge.services() : []),
+      ];
+    },
     runtimeSnapshots: readRemoteRuntimeSnapshots,
   });
 
@@ -1242,7 +1170,7 @@ export function createKeymasterPluginHost(
     removeRemoteRuntimeSubscription = remoteRuntime.subscribe(() => {
       // A disconnect clears the remote directory. Refresh first so the Host
       // stops remote consumers, then reconcile so they restart only after a
-      // new baseline has been accepted.
+      // fresh complete directory has been accepted.
       coreHost?.refreshRuntimeUnitSnapshots();
       void coreHost?.reconcile().catch(() => undefined);
     });

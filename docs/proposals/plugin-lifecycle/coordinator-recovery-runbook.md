@@ -24,7 +24,7 @@
    - `authorityRecovery` 不存在；
    - Storage health 为 `ready`；
    - 新的 `authorityInstanceId` 和 `handoverGeneration` 已发布；
-   - 旧 `providerInstanceId`、storage grant 和 crypto proxy（密码学代理）不能继续调用；
+   - 旧 `serviceInstanceId`、storage grant 和 crypto proxy（密码学代理）不能继续调用；
    - 后台任务在当前产品意图下为 `idle` 或明确 `blocked`，没有重复实例。
 6. 对上传、远端订阅、广播、支付和未知结果逐条执行领域仓库对账。只有领域仓库确认“未提交”或“已完成”后才能继续；未知结果只能查询 / 撤销 / 转人工，不自动重放。
 

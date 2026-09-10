@@ -13,5 +13,5 @@ overrides:
 minimumReleaseAgeExclude:
   - bitcoin-libp2p@0.3.0
   - bsv8-channel-protocol@0.3.0
-  - webloom-framework@0.2.0
+  - webloom-framework@0.3.0
   - keymaster-hold@0.1.0

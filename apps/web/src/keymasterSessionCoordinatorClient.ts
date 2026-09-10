@@ -41,7 +41,6 @@ import type {
   InitialSetupRollbackState,
   StorageUserFacingError,
 } from "@keymaster/contracts";
-import { COORDINATOR_SERVICE_PROTOCOL_VERSION } from "@keymaster/contracts";
 import type {
   CoordinatorOwnerStorageData,
   CoordinatorPlatformStorageData,
@@ -57,9 +56,9 @@ import {
   connectSharedWorker,
   createMessagePortServiceTransport,
   createServiceBridge,
+  isRuntimeSnapshot,
+  RUNTIME_PROTOCOL_VERSION,
   type RemoteServiceBridge,
-  type RemoteServiceHandshake,
-  type RemoteServiceSnapshot,
   type RuntimeHandle,
   type SharedWorkerLike,
   type PluginIntentCommand,
@@ -424,8 +423,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private isConnected = false;
   /** 页面生命周期结束后，连接尝试和自动重连都不得再次复活。 */
   private shutdownRequested = false;
-  /** Worker 在 connect() 尚未完成时报告的错误，必须原样拒绝本次连接。 */
-  private connectionAttemptError: Error | undefined;
   /** 使 disconnect() 能取消尚未完成的 connect/hello/subscription 链。 */
   private connectionAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -452,12 +449,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (this.shutdownRequested) throw new Error("Coordinator client is shut down");
     if (this.isConnected) return;
     const attempt = ++this.connectionAttempt;
-    this.connectionAttemptError = undefined;
 
     try {
-      // WebLoom 负责真实 module SharedWorker、Runtime 握手、快照和物理
-      // connectionId；Coordinator 领域协议通过 onConnection 复用同一个端口。
-      // 自动重连只保留一层：领域 client 仍负责其现有 reconnect/backoff，
+      // WebLoom 同步创建真实 module SharedWorker、RuntimeHandle 和 call-first
+      // transport；Coordinator 领域协议暂时通过 SWCF-009 接缝复用同一端口。
+      // 自动重连只保留一层：领域 client 仍负责现有 reconnect/backoff，
       // RuntimeHandle 只负责当前物理连接，避免两个重连器交叉创建 Worker。
       const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
       const workerUrl = new URL(
@@ -468,30 +464,29 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ? "keymaster-coordinator-dev-20260818-woc-raw-text"
         : undefined);
       let connectedPort: MessagePort | undefined;
-      const runtime = await connectSharedWorker({
+      const runtime = connectSharedWorker({
         id: "keymaster-coordinator",
         url: workerUrl,
         ...(workerName ? { name: workerName } : {}),
-        autoReconnect: false,
-        handshakeTimeoutMs: Math.max(this.requestTimeoutMs, 1_000),
+        defaultCallTimeoutMs: this.requestTimeoutMs,
         onConnection: ({ worker, port }) => {
           connectedPort = port;
           this.worker = worker;
           this.port = port;
           // disconnect() 会给旧端口一个很短的投递窗口；旧端口在窗口内
           // 到达的迟到事件不能污染随后建立的新连接缓存。
-          port.onmessage = (event) => {
+          port.addEventListener("message", (event) => {
             if (this.port !== port) return;
             this.handleMessage(event);
-          };
-          port.onmessageerror = (event) => {
+          });
+          port.addEventListener("messageerror", (event) => {
             if (this.port !== port) return;
             void event;
             this.handleMessageError();
-          };
+          });
           // 真实 MessagePort 上 Runtime listener 与 onmessage 并存；低级
-          // fake 若不支持 addEventListener，仍由 Runtime 的 worker-side
-          // 握手错误通过这里的兼容 error handler 收敛。
+          // fake 若不支持 addEventListener，仍由这里的兼容 error handler
+          // 收敛 Worker 级错误。
           if (!worker.addEventListener) {
             const workerWithOnError = worker as SharedWorkerLike & {
               onerror?: (event: Event) => void;
@@ -520,7 +515,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           port.start();
         },
       });
-      if (this.connectionAttemptError) throw this.connectionAttemptError;
       if (!connectedPort) throw new Error("WebLoom did not expose a Coordinator connection port");
       this.runtimeHandle = runtime;
       this.removeRuntimeSubscription?.();
@@ -760,7 +754,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   private handleWorkerError(message: string): void {
-    this.connectionAttemptError = new Error(message);
     this.isConnected = false;
     this.removeRuntimeSubscription?.();
     this.removeRuntimeSubscription = undefined;
@@ -1167,40 +1160,39 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const transport = createMessagePortServiceTransport({
       port: servicePort,
       codec: keymasterRemoteServiceMessageCodec,
+      defaultCallTimeoutMs: this.requestTimeoutMs,
     });
     const bridge = createServiceBridge({
-      protocolVersion: COORDINATOR_SERVICE_PROTOCOL_VERSION,
+      // The transferred directory is a full RuntimeSnapshot, so its
+      // protocol is the Runtime protocol; call messages use the separate
+      // keymaster.remote-service.v2 codec above.
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
       transport,
+      defaultCallTimeoutMs: this.requestTimeoutMs,
     });
     servicePort.addEventListener("message", this.handleServiceBridgeMessage);
     servicePort.start();
     this.servicePort = servicePort;
     this.serviceTransport = transport;
-    // WebLoom 的通用 Reference 将 Keymaster 的 owner/session 字段收进
-    // attributes；这里保留旧 wire 对象原样传输，不增加字段、不改变协议。
     this.serviceBridge = bridge;
     // port2 只在 hello 中转移给 Coordinator；页面永远不再直接持有 Provider 端口。
     return channel.port2;
   }
 
   private readonly handleServiceBridgeMessage = (event: MessageEvent): void => {
+    if (isRuntimeSnapshot(event.data)) {
+      const bridge = this.serviceBridge;
+      if (!bridge) return;
+      const result = bridge.applySnapshot(event.data);
+      if (!result.accepted && result.reason === "protocol-mismatch") {
+        bridge.markProtocolMismatch(`Coordinator service snapshot protocol ${event.data.protocolVersion} is not supported`);
+      }
+      return;
+    }
+    // The service transport owns call/result/error/cancel messages. This
+    // listener only consumes the transferred full directory snapshot.
     const data = keymasterRemoteServiceMessageCodec.decode(event.data);
-    if (!data) return;
-    if (data.type === keymasterRemoteServiceMessageCodec.type("handshake") && data.handshake) {
-      this.serviceBridge?.handshake(data.handshake as RemoteServiceHandshake);
-      return;
-    }
-    if (data.type === keymasterRemoteServiceMessageCodec.type("snapshot") && data.snapshot) {
-      this.serviceBridge?.applySnapshot(data.snapshot as RemoteServiceSnapshot);
-      return;
-    }
-    if (data.type === keymasterRemoteServiceMessageCodec.type("invalidate")) {
-      this.serviceBridge?.invalidate("reason" in data && typeof data.reason === "string" ? data.reason : undefined);
-      return;
-    }
-    if (data.type === keymasterRemoteServiceMessageCodec.type("disconnect")) {
-      this.serviceBridge?.disconnect("reason" in data && typeof data.reason === "string" ? data.reason : undefined);
-    }
+    void data;
   };
 
   private disposeServiceBridge(reason: string): void {

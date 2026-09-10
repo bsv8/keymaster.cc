@@ -586,6 +586,9 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // 真实 RuntimeHandle 是 Worker 服务目录、运行单元快照和 ServiceBridge
     // 的唯一来源；Adapter 负责订阅断线/重连世代并驱动 Host reconcile。
     remoteRuntime: coordinatorRuntime,
+    // RuntimeHandle 不暴露裸 MessagePort 或隐藏 ServiceBridge；Keymaster
+    // 领域适配器通过这个受控 getter 取得当前端口对应的 v2 bridge。
+    serviceBridgeForPlugin: () => coordinatorClient.getServiceBridge(),
     // 生产 Window Host 只从当前环境实现注册表取得 setup；静态 manifest
     // 不携带可执行函数，缺少实现时直接保持 fail-closed。
     runtimeUnitImplementationRegistry,

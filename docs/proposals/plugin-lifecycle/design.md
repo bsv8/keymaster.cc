@@ -202,7 +202,7 @@ Cordis 仅管理本地实例。Keymaster 在现有 Coordinator RPC 和 topic sna
 | 字段 | 中文含义与比较规则 |
 | --- | --- |
 | `capabilityId` | 服务契约标识，在指定提供环境及作用域内解析 |
-| `providerInstanceId` | 此次提供服务的运行实例；每次重建必须不同 |
+| `serviceInstanceId` | 此次提供服务的运行实例；每次重建必须不同 |
 | `execution` | 实际提供者执行环境，不是消费者的位置 |
 | `contractVersion` | 接口契约版本；第一阶段要求精确匹配，不自动猜测兼容性 |
 | `authorityInstanceId` | 当前提供环境的启动身份；Worker 重启后改变，区分修订号重新计数 |

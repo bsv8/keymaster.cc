@@ -74,8 +74,6 @@ import type {
   StorageSecretEnvelope,
   StorageBootstrapState,
   PluginIntentStateEvent,
-  KeymasterRemoteServiceReference as RemoteServiceReference,
-  KeymasterRemoteServiceSnapshot as RemoteServiceSnapshot,
   CoordinatorAuthorityRecovery,
 } from "@keymaster/contracts";
 import { SYSTEM_STORAGE_DECLARATIONS, deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
@@ -109,7 +107,10 @@ import {
   startSharedWorkerApp,
   type MessagePortServiceCallInput,
   type MessagePortServiceProvider,
-  type RemoteServicePortCallMessage,
+  type RemoteServiceReference,
+  type RuntimeSnapshot,
+  RUNTIME_PROTOCOL_VERSION,
+  RUNTIME_SNAPSHOT_TYPE,
   type PluginIntentController,
   type PluginIntentSnapshot,
   type UpgradeGate,
@@ -5737,9 +5738,9 @@ interface ConnectedPort {
 
 interface CoordinatorServiceEndpoint {
   provider: MessagePortServiceProvider;
-  connectionId: string;
-  providerInstanceId: string;
-  snapshotRevision: number;
+  port: MessagePort;
+  runtimeInstanceId: string;
+  revision: number;
   /** 当前服务引用；只在 Worker 内保存，页面传来的引用不能反向创建授权。 */
   references: Map<string, RemoteServiceReference>;
   /** 每个服务实例的服务级不透明授权；不会从页面请求中接受或推导。 */
@@ -6045,7 +6046,7 @@ function coordinatorRuntimeUnitSnapshots(): CoordinatorWorkerUnitSnapshot[] {
   if (!app) return [];
   const runtimeState = app.state();
   if (runtimeState.state === "failed" || runtimeState.state === "disposed") return [];
-  const revision = Math.max(1, runtimeState.snapshotRevision);
+  const revision = Math.max(1, runtimeState.revision);
   coordinatorRuntimeUnitSnapshotRevision = Math.max(coordinatorRuntimeUnitSnapshotRevision, revision);
   const snapshots: CoordinatorWorkerUnitSnapshot[] = [];
   for (const runtimeUnit of runtimeState.units) {
@@ -6073,7 +6074,7 @@ function coordinatorRuntimeUnitSnapshots(): CoordinatorWorkerUnitSnapshot[] {
 }
 
 function coordinatorRuntimeUnitRevision(): number {
-  const revision = coordinatorRuntimeApp?.state().snapshotRevision ?? 0;
+  const revision = coordinatorRuntimeApp?.state().revision ?? 0;
   coordinatorRuntimeUnitSnapshotRevision = Math.max(coordinatorRuntimeUnitSnapshotRevision, revision, 1);
   return coordinatorRuntimeUnitSnapshotRevision;
 }
@@ -7027,17 +7028,12 @@ function sameRemoteServiceReference(
 ): boolean {
   return Boolean(left)
     && left!.capabilityId === right.capabilityId
-    && left!.providerInstanceId === right.providerInstanceId
     && left!.runtime === right.runtime
     && left!.contractVersion === right.contractVersion
-    && left!.authorityInstanceId === right.authorityInstanceId
-    && left!.scopeId === right.scopeId
-    && left!.handoverGeneration === right.handoverGeneration
-    && left!.sessionEpoch === right.sessionEpoch
-    && left!.ownerPublicKeyHex === right.ownerPublicKeyHex
-    && left!.ownerGeneration === right.ownerGeneration
+    && left!.runtimeInstanceId === right.runtimeInstanceId
+    && left!.serviceInstanceId === right.serviceInstanceId
     && left!.status === right.status
-    && left!.snapshotRevision === right.snapshotRevision
+    && JSON.stringify(left!.attributes) === JSON.stringify(right.attributes)
     && left!.grantId === right.grantId
     && left!.authorizationRevision === right.authorizationRevision;
 }
@@ -7078,7 +7074,7 @@ function coordinatorServiceAuthorizationRevision(capabilityId: string): number {
  *
  * 服务级 grant 只在这里生成并保存在 Worker；页面拿到的 reference 是
  * 可序列化目录信息，不是可单独使用的授权凭据。锁定、换 key、Root 重绑
- * 或 owner generation 变化都会产生新的 providerInstanceId 和 grant。
+ * 或 owner generation 变化都会产生新的 serviceInstanceId 和 grant。
  */
 async function refreshCoordinatorServiceEndpoint(endpoint: CoordinatorServiceEndpoint): Promise<void> {
   await ensureCoordinatorAuthorityClaim();
@@ -7117,63 +7113,92 @@ async function refreshCoordinatorServiceEndpoint(endpoint: CoordinatorServiceEnd
     ownerGeneration ?? "null",
     ready ? "ready" : "unavailable",
   ].join("\u0000");
-  if (endpoint.identityKey !== identityKey) {
+  const identityChanged = endpoint.identityKey !== identityKey;
+  if (identityChanged) {
     endpoint.identityKey = identityKey;
-    endpoint.providerInstanceId = generateCoordinatorServiceId("coordinator-provider");
     endpoint.grants.clear();
   }
 
-  const revision = endpoint.snapshotRevision + 1;
+  endpoint.runtimeInstanceId = coordinatorAuthorityInstanceId;
+  const revision = endpoint.revision + 1;
   const ownerGrantId = ready ? (endpoint.grants.get(COORDINATOR_OWNER_STORAGE_SERVICE) ?? generateCoordinatorServiceId("coordinator-owner-grant")) : undefined;
   const cryptoGrantId = ready ? (endpoint.grants.get(COORDINATOR_CRYPTO_SERVICE) ?? generateCoordinatorServiceId("coordinator-crypto-grant")) : undefined;
   if (ownerGrantId) endpoint.grants.set(COORDINATOR_OWNER_STORAGE_SERVICE, ownerGrantId);
   if (cryptoGrantId) endpoint.grants.set(COORDINATOR_CRYPTO_SERVICE, cryptoGrantId);
   if (!ready) endpoint.grants.clear();
 
+  const ownerScopeId = `coordinator-owner-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`;
+  const cryptoScopeId = `coordinator-crypto-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`;
+  const ownerAttributes = Object.freeze({
+    authorityInstanceId: coordinatorAuthorityInstanceId,
+    scopeId: ownerScopeId,
+    handoverGeneration: coordinatorHandoverGeneration,
+    sessionEpoch: ownerPublicKeyHex ? coordinatorState.sessionEpoch : null,
+    ownerPublicKeyHex: ownerPublicKeyHex ?? null,
+    ownerGeneration,
+    bucketGeneration,
+  });
+  const cryptoAttributes = Object.freeze({
+    authorityInstanceId: coordinatorAuthorityInstanceId,
+    scopeId: cryptoScopeId,
+    handoverGeneration: coordinatorHandoverGeneration,
+    sessionEpoch: ownerPublicKeyHex ? coordinatorState.sessionEpoch : null,
+    ownerPublicKeyHex: ownerPublicKeyHex ?? null,
+    ownerGeneration,
+    bucketGeneration,
+  });
+  const previousOwner = endpoint.references.get(COORDINATOR_OWNER_STORAGE_SERVICE);
+  const previousCrypto = endpoint.references.get(COORDINATOR_CRYPTO_SERVICE);
+  const ownerServiceInstanceId = previousOwner && !identityChanged
+    ? previousOwner.serviceInstanceId
+    : generateCoordinatorServiceId("coordinator-owner-service");
+  const cryptoServiceInstanceId = previousCrypto && !identityChanged
+    ? previousCrypto.serviceInstanceId
+    : generateCoordinatorServiceId("coordinator-crypto-service");
+
   const services: RemoteServiceReference[] = [
     {
       capabilityId: COORDINATOR_OWNER_STORAGE_SERVICE,
-      providerInstanceId: endpoint.providerInstanceId,
       runtime: "shared-worker",
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      authorityInstanceId: coordinatorAuthorityInstanceId,
-      scopeId: `coordinator-owner-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`,
-      handoverGeneration: coordinatorHandoverGeneration,
-      sessionEpoch: ownerPublicKeyHex ? coordinatorState.sessionEpoch : null,
-      ownerPublicKeyHex: ownerPublicKeyHex ?? null,
-      ownerGeneration,
+      runtimeInstanceId: endpoint.runtimeInstanceId,
+      serviceInstanceId: ownerServiceInstanceId,
       status: ready ? "ready" : "unavailable",
-      snapshotRevision: revision,
+      attributes: ownerAttributes,
       ...(ownerGrantId ? { grantId: ownerGrantId } : {}),
       authorizationRevision: coordinatorServiceAuthorizationRevision(COORDINATOR_OWNER_STORAGE_SERVICE),
     },
     {
       capabilityId: COORDINATOR_CRYPTO_SERVICE,
-      providerInstanceId: endpoint.providerInstanceId,
       runtime: "shared-worker",
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      authorityInstanceId: coordinatorAuthorityInstanceId,
-      scopeId: `coordinator-crypto-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`,
-      handoverGeneration: coordinatorHandoverGeneration,
-      sessionEpoch: ownerPublicKeyHex ? coordinatorState.sessionEpoch : null,
-      ownerPublicKeyHex: ownerPublicKeyHex ?? null,
-      ownerGeneration,
+      runtimeInstanceId: endpoint.runtimeInstanceId,
+      serviceInstanceId: cryptoServiceInstanceId,
       status: ready ? "ready" : "unavailable",
-      snapshotRevision: revision,
+      attributes: cryptoAttributes,
       ...(cryptoGrantId ? { grantId: cryptoGrantId } : {}),
       authorizationRevision: coordinatorServiceAuthorizationRevision(COORDINATOR_CRYPTO_SERVICE),
     },
   ];
   endpoint.references.clear();
   for (const service of services) endpoint.references.set(service.capabilityId, service);
-  endpoint.snapshotRevision = revision;
-  endpoint.provider.publishSnapshot({
-    connectionId: endpoint.connectionId,
-    authorityInstanceId: coordinatorAuthorityInstanceId,
-    snapshotRevision: revision,
-    baseline: false,
+  endpoint.revision = revision;
+  endpoint.provider.setServices(services);
+  const runtimeState = coordinatorRuntimeApp?.state();
+  const snapshot: RuntimeSnapshot = {
+    type: RUNTIME_SNAPSHOT_TYPE,
+    protocolVersion: RUNTIME_PROTOCOL_VERSION,
+    runtimeId: "keymaster-coordinator",
+    runtimeKind: "shared-worker",
+    runtimeInstanceId: endpoint.runtimeInstanceId,
+    revision,
+    state: runtimeState?.state === "failed" || runtimeState?.state === "stopping" || runtimeState?.state === "disposed"
+      ? runtimeState.state
+      : runtimeState?.state === "ready" ? "ready" : "starting",
+    units: runtimeState?.units ?? [],
     services,
-  } as unknown as import("webloom-framework").RemoteServiceSnapshot);
+  };
+  try { endpoint.port.postMessage(snapshot); } catch { /* 端口断开时由其生命周期收敛 */ }
 }
 
 function requestCoordinatorServiceRefresh(): void {
@@ -7182,7 +7207,7 @@ function requestCoordinatorServiceRefresh(): void {
       .map((connectedPort) => connectedPort.serviceEndpoint)
       .filter((endpoint): endpoint is CoordinatorServiceEndpoint => Boolean(endpoint));
     for (const endpoint of endpoints) {
-      // 刷新执行时端点可能已经断开；publishSnapshot 会在 dispose 后安全忽略。
+      // 刷新执行时端点可能已经断开；snapshot/provider 都会安全收敛。
       await refreshCoordinatorServiceEndpoint(endpoint).catch(() => undefined);
     }
   }, () => undefined);
@@ -7190,20 +7215,22 @@ function requestCoordinatorServiceRefresh(): void {
 
 async function assertCoordinatorServiceCallCurrent(
   clientId: string,
-  message: RemoteServicePortCallMessage,
-  signal?: AbortSignal,
+  input: MessagePortServiceCallInput,
 ): Promise<{ endpoint: CoordinatorServiceEndpoint; reference: RemoteServiceReference }> {
+  const { message, reference: providerReference, signal } = input;
   if (signal?.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
   await assertCoordinatorAuthorityCurrent();
   if (signal?.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
   const connectedPort = connectedPorts.get(clientId);
   const endpoint = connectedPort?.serviceEndpoint;
-  if (!endpoint || message.connectionId !== endpoint.connectionId || message.providerInstanceId !== endpoint.providerInstanceId) {
+  if (!endpoint) {
     throw serviceBoundaryError("service.reference_stale", "Coordinator service connection is stale");
   }
-  const reference = endpoint.references.get(message.reference.capabilityId);
+  const reference = [...endpoint.references.values()].find((candidate) => candidate.serviceInstanceId === message.serviceInstanceId);
   if (!reference
-    || !sameRemoteServiceReference(reference, message.reference as unknown as RemoteServiceReference)
+    || message.capabilityId !== reference.capabilityId
+    || message.contractVersion !== reference.contractVersion
+    || !sameRemoteServiceReference(reference, providerReference)
     || reference.status !== "ready") {
     throw serviceBoundaryError("service.reference_stale", "Coordinator service reference is stale");
   }
@@ -7214,14 +7241,15 @@ async function assertCoordinatorServiceCallCurrent(
   if (reference.authorizationRevision !== coordinatorServiceAuthorizationRevision(reference.capabilityId)) {
     throw serviceBoundaryError("service.authorization_stale", "Coordinator service authorization policy changed");
   }
+  const attributes = reference.attributes;
   const currentOwner = normalizedCoordinatorOwner();
   const expectedScope = `${reference.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE ? "coordinator-owner-session" : "coordinator-crypto-session"}:${coordinatorState.sessionEpoch}:bucket:${platformRootStore?.bucket.bucketGeneration ?? "null"}`;
   if (
-    reference.authorityInstanceId !== coordinatorAuthorityInstanceId
-    || reference.handoverGeneration !== coordinatorHandoverGeneration
-    || reference.sessionEpoch !== coordinatorState.sessionEpoch
-    || reference.ownerPublicKeyHex !== currentOwner
-    || reference.scopeId !== expectedScope
+    attributes.authorityInstanceId !== coordinatorAuthorityInstanceId
+    || attributes.handoverGeneration !== coordinatorHandoverGeneration
+    || attributes.sessionEpoch !== coordinatorState.sessionEpoch
+    || attributes.ownerPublicKeyHex !== currentOwner
+    || attributes.scopeId !== expectedScope
     || !coordinatorServicesCanBeReady()
   ) {
     throw serviceBoundaryError("service.unavailable", "Coordinator service is unavailable");
@@ -7233,7 +7261,8 @@ async function assertCoordinatorServiceCallCurrent(
 async function assertCoordinatorServiceGenerationCurrent(reference: RemoteServiceReference, signal?: AbortSignal): Promise<void> {
   const root = platformRootStore;
   const owner = normalizedCoordinatorOwner();
-  if (!root || !owner || reference.ownerGeneration === null) {
+  const ownerGeneration = reference.attributes.ownerGeneration;
+  if (!root || !owner || typeof ownerGeneration !== "number") {
     throw serviceBoundaryError("service.unavailable", "Coordinator service owner generation is unavailable");
   }
   const generation = await withCoordinatorFinalIoLease(
@@ -7248,7 +7277,7 @@ async function assertCoordinatorServiceGenerationCurrent(reference: RemoteServic
     },
   );
   if (signal?.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-  if (generation !== reference.ownerGeneration) {
+  if (generation !== ownerGeneration) {
     throw serviceBoundaryError("service.reference_stale", "Coordinator service owner generation changed");
   }
 }
@@ -7258,7 +7287,7 @@ async function executeCoordinatorServiceCall(
   input: MessagePortServiceCallInput
 ): Promise<unknown> {
   if (input.signal.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-  const { reference } = await assertCoordinatorServiceCallCurrent(clientId, input.message, input.signal);
+  const { reference } = await assertCoordinatorServiceCallCurrent(clientId, input);
   await assertCoordinatorServiceGenerationCurrent(reference, input.signal);
   if (reference.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE) {
     const request = input.message.request;
@@ -7268,7 +7297,7 @@ async function executeCoordinatorServiceCall(
     }
     const result = await executeOwnerStorageData(request as CoordinatorOwnerStorageData, clientId, input.signal);
     if (input.signal.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-    await assertCoordinatorServiceCallCurrent(clientId, input.message, input.signal);
+    await assertCoordinatorServiceCallCurrent(clientId, input);
     await assertCoordinatorServiceGenerationCurrent(reference, input.signal);
     return result;
   }
@@ -7283,7 +7312,7 @@ async function executeCoordinatorServiceCall(
       { auditOperation: "service.crypto.sign" },
     );
     if (input.signal.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-    await assertCoordinatorServiceCallCurrent(clientId, input.message, input.signal);
+    await assertCoordinatorServiceCallCurrent(clientId, input);
     await assertCoordinatorServiceGenerationCurrent(reference, input.signal);
     return result;
   }
@@ -7296,36 +7325,19 @@ function installCoordinatorServiceEndpoint(clientId: string, servicePort: Messag
     servicePort.close();
     return;
   }
-  connectedPort.serviceEndpoint?.provider.disconnect("Coordinator service endpoint replaced");
-  const connectionId = generateCoordinatorServiceId("coordinator-service-connection");
-  const initialSnapshot: RemoteServiceSnapshot = {
-    connectionId,
-    authorityInstanceId: coordinatorAuthorityInstanceId,
-    snapshotRevision: 0,
-    baseline: true,
-    services: [],
-  };
+  connectedPort.serviceEndpoint?.provider.dispose();
   const endpoint: CoordinatorServiceEndpoint = {
     provider: undefined as unknown as MessagePortServiceProvider,
-    connectionId,
-    providerInstanceId: generateCoordinatorServiceId("coordinator-provider").toString(),
-    snapshotRevision: 0,
+    port: servicePort,
+    runtimeInstanceId: coordinatorAuthorityInstanceId,
+    revision: 0,
     references: new Map(),
     grants: new Map(),
   };
   endpoint.provider = createMessagePortServiceProvider({
     port: servicePort,
     codec: keymasterRemoteServiceMessageCodec,
-    handshake: {
-      connectionId,
-      authorityInstanceId: coordinatorAuthorityInstanceId,
-      protocolVersion: COORDINATOR_SERVICE_PROTOCOL_VERSION,
-    },
-    snapshot: initialSnapshot as unknown as import("webloom-framework").RemoteServiceSnapshot,
-    handleCall: (input) => executeCoordinatorServiceCall(
-      clientId,
-      input as unknown as MessagePortServiceCallInput,
-    ),
+    handleCall: (input) => executeCoordinatorServiceCall(clientId, input),
   });
   connectedPort.serviceEndpoint = endpoint;
   requestCoordinatorServiceRefresh();
@@ -7372,7 +7384,7 @@ function handlePortDisconnect(clientId: string): void {
   disconnectedClientIds.add(clientId);
   removeLocalStorageBridge(clientId);
   const connectedPort = connectedPorts.get(clientId);
-  connectedPort?.serviceEndpoint?.provider.disconnect("Coordinator client disconnected");
+  connectedPort?.serviceEndpoint?.provider.dispose();
   for (const [requestId, request] of storageRequests) {
     if (request.clientId === clientId) { request.controller.abort(); storageRequests.delete(requestId); }
   }
@@ -13452,7 +13464,7 @@ export function __testResetState(): void {
   autoLockTimer = undefined;
   coordinatorState.lastActivityAt = Date.now();
   for (const connectedPort of connectedPorts.values()) {
-    connectedPort.serviceEndpoint?.provider.disconnect("Coordinator test Worker reset");
+    connectedPort.serviceEndpoint?.provider.dispose();
   }
   connectedPorts.clear();
   disconnectedClientIds.clear();

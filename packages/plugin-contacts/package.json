@@ -13,7 +13,7 @@
     "@noble/hashes": "^1.8.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.2.0",
+    "webloom-framework": "0.3.0",
     "@keymaster/ui": "*",
     "bsv8-channel-protocol": "0.3.0"
   }

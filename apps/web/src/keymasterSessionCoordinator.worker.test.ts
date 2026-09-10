@@ -4,7 +4,7 @@ import {
   hexToBytes,
   vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, KeymasterRemoteServicePortControlMessage as RemoteServicePortControlMessage, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
 import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -125,16 +125,29 @@ import { __testParseInitialSetupRecoveryRecord } from "./keymasterSessionCoordin
 import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageLike, LocalStorageLocks } from "@keymaster/platform-storage";
-import { createMessagePortServiceTransport, createServiceBridge } from "webloom-framework";
+import { createMessagePortServiceTransport, createServiceBridge, isRuntimeSnapshot, RUNTIME_PROTOCOL_VERSION } from "webloom-framework";
 
 class TestPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onmessageerror: (() => void) | null = null;
   readonly messages: unknown[] = [];
+  private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
   start(): void {}
   close(): void {}
   postMessage(message: unknown): void { this.messages.push(message); }
-  send(message: unknown): void { this.onmessage?.({ data: message } as MessageEvent); }
+  addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    const listeners = this.listeners.get(type) ?? new Set<(event: MessageEvent) => void>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+  removeEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+  send(message: unknown): void {
+    const event = { data: message } as MessageEvent;
+    this.onmessage?.(event);
+    for (const listener of [...(this.listeners.get("message") ?? [])]) listener(event);
+  }
 }
 
 // metadata snapshot validator 会校验 secp256k1 曲线点；测试 fixture 使用
@@ -524,15 +537,11 @@ describe("Session Coordinator worker", () => {
       port: channel.port1,
       codec: keymasterRemoteServiceMessageCodec,
     });
-    const bridge = createServiceBridge({ protocolVersion: "1", transport });
-    const onControl = (event: MessageEvent): void => {
-      const message = event.data as RemoteServicePortControlMessage;
-      if (message.type === "keymaster.remote-service.handshake") bridge.handshake(message.handshake);
-      if (message.type === "keymaster.remote-service.snapshot") {
-        bridge.applySnapshot(message.snapshot as unknown as import("webloom-framework").RemoteServiceSnapshot);
-      }
+    const bridge = createServiceBridge({ protocolVersion: RUNTIME_PROTOCOL_VERSION, transport });
+    const onSnapshot = (event: MessageEvent): void => {
+      if (isRuntimeSnapshot(event.data)) bridge.applySnapshot(event.data);
     };
-    channel.port1.addEventListener("message", onControl);
+    channel.port1.addEventListener("message", onSnapshot);
     channel.port1.start();
 
     try {
@@ -577,11 +586,11 @@ describe("Session Coordinator worker", () => {
 
       await __testLock();
       await vi.waitFor(() => expect(proxy.revoked).toBe(true));
-      await expect(proxy.call({ type: "deriveP2pkhAddress", network: "main" })).rejects.toMatchObject({ code: "service.unavailable" });
+      await expect(proxy.call({ type: "deriveP2pkhAddress", network: "main" })).rejects.toMatchObject({ code: "service_revoked" });
       expect(mainPortMessages).toHaveLength(1);
     } finally {
       transport.dispose();
-      channel.port1.removeEventListener("message", onControl);
+      channel.port1.removeEventListener("message", onSnapshot);
       channel.port1.close();
       channel.port2.close();
     }

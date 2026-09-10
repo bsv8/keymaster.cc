@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RemoteServiceReference, RemoteServiceSnapshot } from "webloom-framework";
+import type { RemoteServiceReference } from "webloom-framework";
 import {
   KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX,
   createKeymasterPluginHost,
@@ -10,94 +10,53 @@ import { createRuntimeUnitImplementationRegistry, type RuntimeHandle, type Runti
 function reference(): RemoteServiceReference {
   return {
     capabilityId: "coordinator.crypto",
-    providerInstanceId: "provider:1",
     runtime: "shared-worker",
     contractVersion: "1.0.0",
-    authorityInstanceId: "authority:1",
-    scopeId: "scope:1",
-    handoverGeneration: 2,
+    runtimeInstanceId: "runtime:1",
+    serviceInstanceId: "service:1",
     attributes: {
+      authorityInstanceId: "authority:1",
+      scopeId: "scope:1",
+      handoverGeneration: 2,
       sessionEpoch: "session:1",
       ownerPublicKeyHex: "02" + "11".repeat(32),
       ownerGeneration: 3,
     },
     status: "ready",
-    snapshotRevision: 4,
     grantId: "grant:1",
     authorizationRevision: 1,
   };
 }
 
-describe("Keymaster WebLoom legacy service codec", () => {
-  it("keeps the legacy message names and field layout on the wire", () => {
-    const snapshot: RemoteServiceSnapshot = {
-      connectionId: "connection:1",
-      authorityInstanceId: "authority:1",
-      snapshotRevision: 4,
-      baseline: true,
-      services: [reference()],
-    };
-
+describe("Keymaster WebLoom v2 service codec", () => {
+  it("only carries call lifecycle messages and preserves v2 identity fields", () => {
     const encoded = keymasterRemoteServiceMessageCodec.encode({
-      type: keymasterRemoteServiceMessageCodec.type("snapshot"),
-      snapshot,
-    }) as { type: string; snapshot: { services: Array<Record<string, unknown>> } };
+      type: keymasterRemoteServiceMessageCodec.type("call"),
+      protocolVersion: keymasterRemoteServiceMessageCodec.protocolVersion,
+      callId: "call:1",
+      capabilityId: reference().capabilityId,
+      contractVersion: reference().contractVersion,
+      serviceInstanceId: reference().serviceInstanceId,
+      grantId: reference().grantId,
+      request: { type: "deriveP2pkhAddress" },
+    }) as Record<string, unknown>;
 
-    expect(encoded.type).toBe(`${KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX}.snapshot`);
-    expect(encoded.snapshot.services[0]).toMatchObject({
-      sessionEpoch: "session:1",
-      ownerPublicKeyHex: "02" + "11".repeat(32),
-      ownerGeneration: 3,
-    });
-    expect(encoded.snapshot.services[0]?.attributes).toBeUndefined();
-  });
-
-  it("maps legacy identity fields into WebLoom attributes after decoding", () => {
-    const decoded = keymasterRemoteServiceMessageCodec.decode({
-      type: `${KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX}.snapshot`,
-      snapshot: {
-        connectionId: "connection:1",
-        authorityInstanceId: "authority:1",
-        snapshotRevision: 4,
-        baseline: true,
-        services: [{
-          capabilityId: "coordinator.crypto",
-          providerInstanceId: "provider:1",
-          runtime: "shared-worker",
-          contractVersion: "1.0.0",
-          authorityInstanceId: "authority:1",
-          scopeId: "scope:1",
-          handoverGeneration: 2,
-          sessionEpoch: "session:1",
-          ownerPublicKeyHex: "02" + "11".repeat(32),
-          ownerGeneration: 3,
-          status: "ready",
-          snapshotRevision: 4,
-        }],
-      },
-    });
-
-    const decodedSnapshot = decoded?.snapshot as { services: Array<Record<string, unknown>> };
-    expect(decodedSnapshot.services[0]?.attributes).toMatchObject({
-      sessionEpoch: "session:1",
-      ownerPublicKeyHex: "02" + "11".repeat(32),
-      ownerGeneration: 3,
-    });
-    // Provider 侧仍能在同一解码结果中读取旧字段，最终边界校验无需改 wire schema。
-    expect(decodedSnapshot.services[0]?.ownerGeneration).toBe(3);
+    expect(encoded.type).toBe(`${KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX}.call`);
+    expect(encoded.connectionId).toBeUndefined();
+    expect(encoded.reference).toBeUndefined();
+    expect(keymasterRemoteServiceMessageCodec.decode(encoded)).toEqual(encoded);
+    expect(() => keymasterRemoteServiceMessageCodec.type("snapshot" as never)).toThrow();
   });
 });
 
 describe("Keymaster Host remote RuntimeHandle projection", () => {
   it("uses the live RuntimeHandle as the service/snapshot source and fails closed on disconnect", async () => {
-    const remoteBridge = {} as import("webloom-framework").RemoteServiceBridge;
     let snapshot: RuntimeStatusSnapshot = {
       runtimeId: "coordinator",
       runtimeKind: "shared-worker",
       runtimeInstanceId: "worker-runtime:1",
-      connectionId: "connection:1",
       state: "ready",
-      snapshotRevision: 1,
+      revision: 1,
       units: [{
         pluginId: "remote-product",
         unitId: "remote-product.worker",
@@ -107,16 +66,12 @@ describe("Keymaster Host remote RuntimeHandle projection", () => {
       }],
       services: [{
         capabilityId: "remote.service",
-        providerInstanceId: "remote-unit:1",
         runtime: "shared-worker",
         contractVersion: "remote.service.v1",
-        authorityInstanceId: "worker-runtime:1",
-        scopeId: "scope:remote-unit:1",
-        handoverGeneration: 0,
+        runtimeInstanceId: "worker-runtime:1",
+        serviceInstanceId: "remote-unit:1",
         attributes: {},
         status: "ready",
-        connectionId: "connection:1",
-        snapshotRevision: 1,
       }],
     };
     const listeners = new Set<(nextSnapshot: RuntimeStatusSnapshot) => void>();
@@ -124,10 +79,7 @@ describe("Keymaster Host remote RuntimeHandle projection", () => {
       runtimeKind: "shared-worker",
       runtimeId: "coordinator",
       runtimeInstanceId: "worker-runtime:1",
-      connectionId: "connection:1",
-      serviceBridge: remoteBridge,
       state: () => snapshot,
-      ready: async () => undefined,
       capability: () => { throw new Error("not used"); },
       subscribe(listener) {
         listeners.add(listener);
@@ -181,7 +133,7 @@ describe("Keymaster Host remote RuntimeHandle projection", () => {
       ],
     });
 
-    expect(seenBridge).toBe(remoteBridge);
+    expect(seenBridge).toBe(fallbackBridge);
     expect(host.state("remote-product").units).toMatchObject([
       { unitId: "remote-product.worker", kind: "enabled", instanceId: "remote-unit:1" },
       { unitId: "remote-product.window", kind: "enabled" },
@@ -190,7 +142,7 @@ describe("Keymaster Host remote RuntimeHandle projection", () => {
     snapshot = {
       ...snapshot,
       state: "disconnected",
-      snapshotRevision: 2,
+      revision: 2,
       units: [],
       services: [],
     };

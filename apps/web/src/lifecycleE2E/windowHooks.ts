@@ -26,13 +26,13 @@ function delay(milliseconds: number): Promise<void> {
 
 function serviceSummary(bridge: RemoteServiceBridge | undefined): Array<{
   capabilityId: string;
-  providerInstanceId: string;
+  serviceInstanceId: string;
   status: string;
   hasServerGrant: boolean;
 }> {
   return bridge?.services().map((service) => ({
     capabilityId: service.capabilityId,
-    providerInstanceId: service.providerInstanceId,
+    serviceInstanceId: service.serviceInstanceId,
     status: service.status,
     // E2E 只报告授权是否存在，不把不透明 grant 值暴露到页面调试对象。
     hasServerGrant: typeof service.grantId === "string" && service.grantId.length > 0,
@@ -131,21 +131,21 @@ export interface LifecycleProductionE2EHooks {
     key: string;
     value: unknown;
     bridgeState: string;
-    providerInstanceId: string;
+    serviceInstanceId: string;
   }>;
   /** 通过真实独立服务桥调用 Coordinator crypto 最终边界。 */
   deriveAddress(): Promise<{
     address: string;
     ownerPublicKeyHex: string;
-    providerInstanceId: string;
+    serviceInstanceId: string;
   }>;
-  /** 锁屏撤销旧代理，解锁后必须产生新的 provider 实例。 */
+  /** 锁屏撤销旧代理，解锁后必须产生新的 service 实例。 */
   lockRevokesOldProxy(): Promise<{
     lockStatus: string;
     unlockStatus: string;
     oldProxyErrorCode: string;
-    oldProviderInstanceId: string;
-    newProviderInstanceId: string;
+    oldServiceInstanceId: string;
+    newServiceInstanceId: string;
     oldProxyRejected: boolean;
   }>;
   /** 在 Chromium 中真实启动 Dedicated Worker 的 Session Crypto 路径。 */
@@ -215,7 +215,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
         key,
         value: entry.value,
         bridgeState: bridge.state,
-        providerInstanceId: bridge.services().find((service) => service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE)?.providerInstanceId ?? "",
+        serviceInstanceId: bridge.services().find((service) => service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE)?.serviceInstanceId ?? "",
       };
     } finally {
       store.close();
@@ -237,7 +237,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     return {
       address: result.address,
       ownerPublicKeyHex: owner.ownerPublicKeyHex,
-      providerInstanceId: proxy.reference.providerInstanceId,
+      serviceInstanceId: proxy.reference?.serviceInstanceId ?? "",
     };
   };
 
@@ -249,7 +249,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
       contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
       runtime: "shared-worker",
     });
-    const oldProviderInstanceId = oldProxy.reference.providerInstanceId;
+    const oldServiceInstanceId = oldProxy.reference?.serviceInstanceId ?? "";
     const lockResult = await coordinator.lock();
     let oldProxyErrorCode = "none";
     try {
@@ -261,13 +261,13 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     }
     const unlockResult = await coordinator.unlock(E2E_VAULT_PASSWORD);
     const nextBridge = await waitForReadyBridge(client);
-    const newProviderInstanceId = nextBridge.services().find((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE)?.providerInstanceId ?? "";
+    const newServiceInstanceId = nextBridge.services().find((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE)?.serviceInstanceId ?? "";
     return {
       lockStatus: lockResult.status,
       unlockStatus: unlockResult.status,
       oldProxyErrorCode,
-      oldProviderInstanceId,
-      newProviderInstanceId,
+      oldServiceInstanceId,
+      newServiceInstanceId,
       oldProxyRejected: oldProxyErrorCode !== "none",
     };
   };

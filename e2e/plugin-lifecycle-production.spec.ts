@@ -78,10 +78,10 @@ interface LifecycleHooks {
     sessionEpoch: string;
     buildId: string;
     bridgeState: string;
-    services: Array<{ capabilityId: string; providerInstanceId: string; status: string; hasServerGrant: boolean }>;
+    services: Array<{ capabilityId: string; serviceInstanceId: string; status: string; hasServerGrant: boolean }>;
   }>;
-  ownerStorageRoundTrip(): Promise<{ key: string; value: unknown; bridgeState: string; providerInstanceId: string }>;
-  deriveAddress(): Promise<{ address: string; ownerPublicKeyHex: string; providerInstanceId: string }>;
+  ownerStorageRoundTrip(): Promise<{ key: string; value: unknown; bridgeState: string; serviceInstanceId: string }>;
+  deriveAddress(): Promise<{ address: string; ownerPublicKeyHex: string; serviceInstanceId: string }>;
   lockRevokesOldProxy(): Promise<{
     lockStatus: string;
     unlockStatus: string;
@@ -153,10 +153,10 @@ test.describe("插件生命周期生产跨环境链", () => {
       expect.objectContaining({ capabilityId: "coordinator.crypto", status: "ready", hasServerGrant: true }),
     ]));
     expect(evidence.storage.value).toEqual({ source: "browser-shared-worker-message-port", ok: true });
-    expect(evidence.storage.providerInstanceId).toBeTruthy();
+    expect(evidence.storage.serviceInstanceId).toBeTruthy();
     expect(evidence.crypto.address).toMatch(/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/u);
     expect(evidence.crypto.ownerPublicKeyHex).toHaveLength(66);
-    expect(evidence.crypto.providerInstanceId).toBeTruthy();
+    expect(evidence.crypto.serviceInstanceId).toBeTruthy();
   });
 
   test("锁屏立即拒绝旧代理，解锁后生成新的 Provider 实例", async ({ page }) => {
