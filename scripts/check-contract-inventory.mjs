@@ -36,6 +36,12 @@ const sourceRoots = (optionValues("--source-root").length > 0
   : ["packages/contracts/src"])
   .map((value) => resolve(root, value));
 const inventoryPath = resolve(root, optionValues("--inventory")[0] ?? "packages/contracts/contract-inventory.json");
+const baselineRefValues = optionValues("--baseline-ref");
+if (baselineRefValues.length > 1 || (flags.has("--baseline-ref") && baselineRefValues.length === 0)) {
+  throw new Error("--baseline-ref requires exactly one Git ref");
+}
+const baselineRef = baselineRefValues[0] ?? "HEAD";
+const hasExplicitBaselineRef = baselineRefValues.length === 1;
 const fileContents = new Map();
 
 function rel(path) {
@@ -269,9 +275,16 @@ async function readJson(path) {
   }
 }
 
-async function readHeadInventory() {
+async function readBaselineInventory() {
+  if (hasExplicitBaselineRef) {
+    try {
+      await execFileAsync("git", ["rev-parse", "--verify", `${baselineRef}^{commit}`], { cwd: root, maxBuffer: 5 * 1024 * 1024 });
+    } catch {
+      throw new Error(`Cannot resolve contract inventory baseline ref ${JSON.stringify(baselineRef)}`);
+    }
+  }
   try {
-    const { stdout } = await execFileAsync("git", ["show", `HEAD:${rel(inventoryPath)}`], { cwd: root, maxBuffer: 5 * 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", ["show", `${baselineRef}:${rel(inventoryPath)}`], { cwd: root, maxBuffer: 5 * 1024 * 1024 });
     const value = JSON.parse(stdout);
     return value?.schemaVersion === 1 && Array.isArray(value.entries) ? value : undefined;
   } catch {
@@ -358,7 +371,7 @@ if (flags.has("--print") || flags.has("--update")) {
     console.log(JSON.stringify(generated, null, 2));
   }
 } else {
-  const errors = [...scanned.errors, ...compare(observed, rawInventory, await readHeadInventory())];
+  const errors = [...scanned.errors, ...compare(observed, rawInventory, await readBaselineInventory())];
   if (errors.length > 0) {
     console.error(errors.join("\n"));
     process.exitCode = 1;

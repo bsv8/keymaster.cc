@@ -11,5 +11,8 @@
     "@keymaster/runtime": "*",
     "webloom-framework": "0.4.0",
     "@keymaster/ui": "*"
+  },
+  "devDependencies": {
+    "@noble/secp256k1": "^2.2.0"
   }
 }
