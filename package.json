@@ -10,7 +10,7 @@
   ],
   "scripts": {
   "dev": "npm run dev -w @keymaster/web",
-  "build": "npm run build -w @keymaster/web && node scripts/check-web-production-artifacts.mjs",
+  "build": "pnpm test:types && npm run build -w @keymaster/web && node scripts/check-web-production-artifacts.mjs",
   "build:production": "node scripts/build-plugin-lifecycle.mjs",
     "smoke:msfile-media-sw": "node scripts/smoke-msfile-media-sw.mjs",
     "verify:msfile-read-concurrency-pressure": "node scripts/msfile-read-concurrency-pressure.mjs",
@@ -20,6 +20,8 @@
     "verify:lifecycle-production-gates": "node scripts/check-plugin-lifecycle-production-gates.mjs",
     "verify:lifecycle-release": "pnpm verify:final-io-audit && pnpm verify:lifecycle-deployment && pnpm test:e2e:external && pnpm test:e2e:irreversible-io && pnpm test:e2e:recovery && pnpm verify:lifecycle-production-gates",
     "typecheck": "tsc -b",
+    "test:contract-inventory": "node scripts/check-contract-inventory.mjs",
+    "test:types": "pnpm typecheck && pnpm test:contract-inventory",
     "keys:balance": "node scripts/check-key-balances.mjs",
     "verify:woc-asset": "node scripts/verify-woc-asset-observation.mjs",
     "lint:storage-naming": "node scripts/check-storage-hard-switch.mjs",

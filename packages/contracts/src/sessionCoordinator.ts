@@ -17,6 +17,7 @@ import type { I18nText } from "./i18n.js";
 import type { BackgroundTaskProgress } from "./background.js";
 import type { VaultSealedSecret } from "./vault.js";
 import { defineCapability } from "webloom-framework";
+import type { CoordinatorVaultOperationResultFor } from "./sessionCoordinatorRuntime.js";
 import type {
   OwnerAppStorageGrant,
   StorageListResult,
@@ -676,7 +677,7 @@ export interface SessionCoordinatorClient {
   unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
   lock(): Promise<CoordinatorCommandResult>;
   activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
-  vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
+  vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>>;
   crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
   backgroundRunNow(taskId: string): Promise<CoordinatorCommandResult>;
   backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorCommandResult>;

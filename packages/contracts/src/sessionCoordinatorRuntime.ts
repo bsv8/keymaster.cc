@@ -439,13 +439,82 @@ export type CoordinatorRpcRequestFromClient<R extends CoordinatorClientCommandRe
 
 export type CoordinatorRpcResultFor<K extends CoordinatorRpcRequestKind> = CoordinatorRpcResultForRequest<CoordinatorRpcRequestFor<K>>;
 
+type CoordinatorRpcResponseBase = Omit<CoordinatorRpcResponse, "operationResult" | "cryptoResult">;
+type CoordinatorRpcNonOkResponse = CoordinatorRpcResponseBase & {
+  ack: Exclude<CoordinatorCommandAck, { status: "ok" }>;
+  operationResult?: never;
+  cryptoResult?: never;
+};
+type CoordinatorRpcVoidSuccessResponse = CoordinatorRpcResponseBase & {
+  ack: { status: "ok" };
+  operationResult?: never;
+  cryptoResult?: never;
+};
+type CoordinatorRpcValueSuccessResponse<R extends CoordinatorRpcRequest> = CoordinatorRpcResponseBase & {
+  ack: { status: "ok" };
+  operationResult: CoordinatorRpcResultForRequest<R>;
+  cryptoResult?: never;
+};
+type CoordinatorRpcAcceptedValueResponse<R extends CoordinatorRpcRequest> = CoordinatorRpcResponseBase & {
+  ack: { status: "accepted" };
+  operationResult?: CoordinatorRpcResultForRequest<R>;
+  cryptoResult?: never;
+};
+type CoordinatorRpcCryptoSuccessResponse<O extends CoordinatorCryptoOperation> = CoordinatorRpcResponseBase & {
+  ack: { status: "ok" };
+  operationResult?: never;
+  cryptoResult: CoordinatorCryptoResultFor<O>;
+};
+
+type CoordinatorRpcVoidRequest =
+  | Extract<CoordinatorRpcRequest, {
+    kind:
+      | "session.close"
+      | "session.activity"
+      | "unlock"
+      | "lock"
+      | "activate-key"
+      | "background.run-now"
+      | "background.trigger"
+      | "background.cancel"
+      | "background.cancel-by-key"
+      | "background.settings.update"
+      | "storage.cancel"
+      | "storage.session.abort"
+      | "msfile.cancel"
+      | "msfile.session.abort"
+      | "window-p2p.executor.release"
+      | "channel.cancel"
+      | "p2pkh.settings.update"
+      | "p2pkh.provider-config.update"
+  }>
+  | (Extract<CoordinatorRpcRequest, { kind: "storage.control" }> & {
+    control: Extract<CoordinatorStorageControl, { type: "cancel-probe" | "clear" | "reset" }>;
+  })
+  | (Extract<CoordinatorRpcRequest, { kind: "storage.owner.data" }> & {
+    data: Extract<CoordinatorOwnerStorageData, { type: "owner.delete" }>;
+  })
+  | (Extract<CoordinatorRpcRequest, { kind: "storage.platform.data" }> & {
+    data: Extract<CoordinatorPlatformStorageData, { type: "platform.delete" }>;
+  });
+
+/**
+ * Response typing mirrors the wire validator:
+ * - successful value requests must carry their request-specific result;
+ * - successful void requests must not carry a result;
+ * - non-ok responses never carry a result;
+ * - crypto has its own result field and never uses operationResult.
+ */
 export type CoordinatorRpcResponseForRequest<R extends CoordinatorRpcRequest> =
-  Omit<CoordinatorRpcResponse, "operationResult" | "cryptoResult"> & {
-    operationResult?: CoordinatorRpcResultForRequest<R>;
-    cryptoResult?: R extends { kind: "crypto"; operation: infer O }
-      ? O extends CoordinatorCryptoOperation ? CoordinatorCryptoResultFor<O> : never
-      : never;
-  };
+  R extends { kind: "crypto"; operation: infer O }
+    ? O extends CoordinatorCryptoOperation
+      ? CoordinatorRpcCryptoSuccessResponse<O> | CoordinatorRpcNonOkResponse
+      : never
+    : R extends { kind: "p2pkh.providers.update" }
+      ? CoordinatorRpcValueSuccessResponse<R> | CoordinatorRpcAcceptedValueResponse<R> | CoordinatorRpcNonOkResponse
+      : R extends CoordinatorRpcVoidRequest
+        ? CoordinatorRpcVoidSuccessResponse | CoordinatorRpcNonOkResponse
+        : CoordinatorRpcValueSuccessResponse<R> | CoordinatorRpcNonOkResponse;
 
 export type CoordinatorRpcResponseFor<K extends CoordinatorRpcRequestKind> = CoordinatorRpcResponseForRequest<CoordinatorRpcRequestFor<K>>;
 

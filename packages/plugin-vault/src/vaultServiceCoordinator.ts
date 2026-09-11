@@ -17,6 +17,8 @@ import type {
   CoordinatorCryptoResult,
   CoordinatorCommandResult,
   CoordinatorValueResult,
+  CoordinatorVaultOperation,
+  CoordinatorVaultOperationResultFor,
   VaultLifecycleSnapshot,
   VaultCoordinatorControl,
   PasskeyProtection,
@@ -48,8 +50,8 @@ function commandResultMessage(result: CoordinatorCommandResult, fallback: string
   return `${fallback}: ${result.status}`;
 }
 
-function unwrapValueResult<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
-  if (result.status === "ok") return result.value as T;
+function unwrapValueResult<T>(result: CoordinatorValueResult<T>, operation: string): T {
+  if (result.status === "ok") return result.value;
   throw new Error(commandResultMessage(result, `${operation} failed`));
 }
 
@@ -96,9 +98,9 @@ export class VaultServiceCoordinator implements VaultService {
     return changed;
   }
 
-  private async call<T>(operation: string, input?: unknown): Promise<T> {
+  private async call<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorVaultOperationResultFor<O>> {
     if (!this.coordinatorClient.getIsConnected()) throw new Error("Coordinator RPC unavailable");
-    return unwrapValueResult<T>(await this.coordinatorClient.vaultOperation(operation, input), operation);
+    return unwrapValueResult(await this.coordinatorClient.vaultOperation(operation), operation.type);
   }
 
   private async createCoordinatorCrypto(publicKeyHex: string, sessionId = `${publicKeyHex}:${Date.now()}`): Promise<ActiveKeyCrypto> {
@@ -139,7 +141,7 @@ export class VaultServiceCoordinator implements VaultService {
       async deriveP2pkhAddress(input) { guard(); const r = await client.crypto!({ type: "deriveP2pkhAddress", network: input.network }); if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Derive failed")); return { publicKeyHex, address: (r.result as { address: string }).address }; },
       exportEncryptedKeyBackup: async (input) => {
         if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
-        const backup = await this.call<string>("exportKeyBackup", input);
+        const backup = await this.call({ type: "exportKeyBackup", publicKeyHex: input.publicKeyHex });
         return { publicKeyHex, backup: new TextEncoder().encode(backup).buffer };
       },
       dispose: () => {
@@ -194,7 +196,7 @@ export class VaultServiceCoordinator implements VaultService {
   }
 
   async createVault(password: string): Promise<void> {
-    await this.call("createVault", { password });
+    await this.call({ type: "createVault", password });
   }
 
   async createVaultWithInitialKey(input: {
@@ -202,14 +204,14 @@ export class VaultServiceCoordinator implements VaultService {
     label?: string;
     capabilities?: string[];
   }): Promise<KeyRef> {
-    return await this.call<KeyRef>("createVaultWithInitialKey", input);
+    return await this.call({ type: "createVaultWithInitialKey", ...input });
   }
 
   async createVaultWithImportedKey(input: {
     vaultPassword: string;
     key: { label: string; material: VaultKeyMaterial; format: string; capabilities: string[]; source?: string };
   }): Promise<KeyRef> {
-    return await this.call<KeyRef>("createVaultWithImportedKey", input);
+    return await this.call({ type: "createVaultWithImportedKey", ...input });
   }
 
   async unlock(password: string): Promise<CoordinatorCommandResult> {
@@ -227,19 +229,19 @@ export class VaultServiceCoordinator implements VaultService {
   }
 
   async changePassword(input: { oldPassword: string; newPassword: string }): Promise<void> {
-    await this.call("changePassword", input);
+    await this.call({ type: "changePassword", ...input });
   }
 
   async verifyPassword(password: string): Promise<void> {
-    await this.call("verifyPassword", { password });
+    await this.call({ type: "verifyPassword", password });
   }
 
   async finalizeEmptyVaultAfterLastKeyDeletion(): Promise<void> {
-    await this.call("finalizeEmptyVaultAfterLastKeyDeletion");
+    await this.call({ type: "finalizeEmptyVaultAfterLastKeyDeletion" });
   }
 
   async recoverEmptyVaultToUninitialized(): Promise<void> {
-    await this.call("recoverEmptyVaultToUninitialized");
+    await this.call({ type: "recoverEmptyVaultToUninitialized" });
   }
 
   // ============================================================
@@ -247,11 +249,11 @@ export class VaultServiceCoordinator implements VaultService {
   // ============================================================
 
   async listKeys(): Promise<KeyRef[]> {
-    return await this.call<KeyRef[]>("listKeys");
+    return await this.call({ type: "listKeys" });
   }
 
   async getKey(publicKeyHex: string): Promise<KeyRef | undefined> {
-    return await this.call<KeyRef | undefined>("getKey", { publicKeyHex });
+    return await this.call({ type: "getKey", publicKeyHex });
   }
 
   async findByAddress(address: string): Promise<KeyRef | undefined> {
@@ -266,7 +268,7 @@ export class VaultServiceCoordinator implements VaultService {
     capabilities: string[];
     source?: string;
   }): Promise<KeyRef> {
-    return await this.call<KeyRef>("importPrivateKey", input);
+    return await this.call({ type: "importPrivateKey", ...input });
   }
 
   async generateKey(input: {
@@ -274,7 +276,7 @@ export class VaultServiceCoordinator implements VaultService {
     label: string;
     capabilities?: string[];
   }): Promise<KeyRef> {
-    return await this.call<KeyRef>("generateKey", input);
+    return await this.call({ type: "generateKey", ...input });
   }
 
   async deleteKeyMaterial(publicKeyHex: string): Promise<void> {
@@ -288,11 +290,11 @@ export class VaultServiceCoordinator implements VaultService {
   }
 
   async exportKeyBackup(publicKeyHex: string): Promise<string> {
-    return await this.call<string>("exportKeyBackup", { publicKeyHex });
+    return await this.call({ type: "exportKeyBackup", publicKeyHex });
   }
 
   async exportCurrentKeyBackup(): Promise<string> {
-    return await this.call<string>("exportCurrentKeyBackup");
+    return await this.call({ type: "exportCurrentKeyBackup" });
   }
 
   async importKeyBackup?(input: {
@@ -300,30 +302,27 @@ export class VaultServiceCoordinator implements VaultService {
     sourcePassword: string;
     targetPassword: string;
   }): Promise<KeyRef> {
-    return await this.call<KeyRef>("importKeyBackup", input);
+    return await this.call({ type: "importKeyBackup", ...input });
   }
 
   async listPasskeysForKey(publicKeyHex: string): Promise<PasskeyProtection[]> {
-    return await this.call<PasskeyProtection[]>("listPasskeysForKey", { publicKeyHex });
+    return await this.call({ type: "listPasskeysForKey", publicKeyHex });
   }
 
   async listCurrentKeyPasskeys(): Promise<PasskeyProtection[]> {
-    return await this.call<PasskeyProtection[]>("listCurrentKeyPasskeys");
+    return await this.call({ type: "listCurrentKeyPasskeys" });
   }
 
   async addPasskeyToCurrentKey(input: {
     label: string;
   }): Promise<PasskeyProtection> {
-    const prepared = await this.call<{ intentId: string; publicKeyHex: string }>(
-      "prepareAddPasskeyToCurrentKey",
-      input
-    );
+    const prepared = await this.call({ type: "prepareAddPasskeyToCurrentKey", ...input });
     const created = await createPasskeyPrf({
       label: input.label,
       publicKeyHex: prepared.publicKeyHex
     });
     try {
-      return await this.call<PasskeyProtection>("addPasskeyToCurrentKey", {
+      return await this.call({ type: "addPasskeyToCurrentKey",
         intentId: prepared.intentId,
         credentialIdB64: created.credentialIdB64,
         prfSaltB64: created.prfSaltB64,
@@ -339,21 +338,16 @@ export class VaultServiceCoordinator implements VaultService {
   async removePasskeyFromCurrentKey(input: {
     passkeyId: string;
   }): Promise<void> {
-    await this.call("removePasskeyFromCurrentKey", input);
+    await this.call({ type: "removePasskeyFromCurrentKey", ...input });
   }
 
   async activateKeyWithPasskey(input: {
     passkeyId: string;
   }): Promise<CoordinatorCommandResult> {
-    const details = await this.call<{
-      credentialIdB64: string;
-      prfSaltB64: string;
-      rpId: string;
-      transports?: string[];
-    }>("getPasskeyChallenge", input);
+    const details = await this.call({ type: "getPasskeyChallenge", ...input });
     const prfOutput = await requestPasskeyPrf(details);
     try {
-      await this.call("activateKeyWithPasskey", {
+      await this.call({ type: "activateKeyWithPasskey",
         passkeyId: input.passkeyId,
         prfOutputHex: bytesToHex(prfOutput)
       });
@@ -377,7 +371,7 @@ export class VaultServiceCoordinator implements VaultService {
     password: string;
   }): Promise<ActiveKeyCrypto> {
     if (this.cachedSessionState?.publicKeyHex !== input.publicKeyHex) throw new Error("AppView crypto requires the global active key");
-    await this.call("verifyPassword", { password: input.password });
+    await this.call({ type: "verifyPassword", password: input.password });
     this.disposeAppViewSession(input.sessionId, "appView session replaced");
     const crypto = await this.createCoordinatorCrypto(input.publicKeyHex, input.sessionId);
     this.appViewRevocations.set(input.sessionId, () => crypto.dispose?.("appView session disposed"));

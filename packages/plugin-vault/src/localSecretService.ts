@@ -1,13 +1,13 @@
-import type { VaultLocalSecretService, VaultSealedSecret, SessionCoordinatorClient } from "@keymaster/contracts";
+import type { VaultLocalSecretService, VaultSealedSecret, SessionCoordinatorClient, CoordinatorValueResult } from "@keymaster/contracts";
 
 type Client = Pick<SessionCoordinatorClient, "getIsConnected" | "vaultOperation">;
 
-function value<T>(result: Awaited<ReturnType<Client["vaultOperation"]>>, operation: string): T {
+function value<T>(result: CoordinatorValueResult<T>, operation: string): T {
   if (result.status !== "ok") {
     const message = "message" in result ? result.message : `${operation} failed`;
     throw new Error(message);
   }
-  return result.value as T;
+  return result.value;
 }
 
 export function createVaultLocalSecretService(client: Client): VaultLocalSecretService {
@@ -15,18 +15,18 @@ export function createVaultLocalSecretService(client: Client): VaultLocalSecretS
     async seal(scope: string, plaintext: Uint8Array): Promise<VaultSealedSecret> {
       if (!client.getIsConnected()) throw new Error("Vault coordinator unavailable");
       const transferable = new Uint8Array(plaintext);
-      let result: unknown;
+      let result: VaultSealedSecret;
       try {
-        result = value<unknown>(await client.vaultOperation({ type: "sealLocalSecret", scope, plaintext: transferable }), "sealLocalSecret");
+        result = value(await client.vaultOperation({ type: "sealLocalSecret", scope, plaintext: transferable }), "sealLocalSecret");
       } finally {
         transferable.fill(0);
       }
-      if (!result || typeof result !== "object" || (result as VaultSealedSecret).version !== 3 || (result as VaultSealedSecret).keySource !== "active-key-hkdf-v1") throw new Error("Invalid sealed secret returned by Vault");
-      return result as VaultSealedSecret;
+      if (result.version !== 3 || result.keySource !== "active-key-hkdf-v1") throw new Error("Invalid sealed secret returned by Vault");
+      return result;
     },
     async open(scope: string, sealed: VaultSealedSecret): Promise<Uint8Array> {
       if (!client.getIsConnected()) throw new Error("Vault coordinator unavailable");
-      const result = value<unknown>(await client.vaultOperation({ type: "openLocalSecret", scope, sealed }), "openLocalSecret");
+      const result = value(await client.vaultOperation({ type: "openLocalSecret", scope, sealed }), "openLocalSecret");
       if (!(result instanceof Uint8Array)) throw new Error("Invalid secret returned by Vault");
       return new Uint8Array(result);
     }

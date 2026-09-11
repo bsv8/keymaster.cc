@@ -1,5 +1,7 @@
 // packages/contracts/src/registries.ts
 import { defineCapability } from "webloom-framework";
+import { NOTICE_REGISTRY_CAPABILITY } from "./notice.js";
+import { PROTECTED_OUTPOINT_REGISTRY_CAPABILITY } from "./spendProtection.js";
 // 各种 registry 的接口声明。
 // 设计缘由：plugin 通过 capability 拿到这些 registry；类型契约放在 contracts，
 // 实现放在 runtime。这避免 plugin 直接依赖 runtime 内部模块。
@@ -31,8 +33,9 @@ export const ASSET_REGISTRY_CAPABILITY = defineCapability<IAssetRegistry>({ kind
 export const TOKEN_REGISTRY_CAPABILITY = defineCapability<TokenRegistry>({ kind: "local", id: "token.registry", version: "1" });
 export const COLLECTIBLE_REGISTRY_CAPABILITY = defineCapability<CollectibleRegistry>({ kind: "local", id: "collectible.registry", version: "1" });
 export const COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY = defineCapability<CollectibleTransferRegistry>({ kind: "local", id: "collectible-transfer.registry", version: "1" });
-export const PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED = defineCapability<import("./spendProtection.js").ProtectedOutpointRegistry>({ kind: "local", id: "protected-outpoint.registry", version: "1" });
-export const NOTICE_REGISTRY_TYPED_CAPABILITY = defineCapability<NoticeRegistry>({ kind: "local", id: "notice.registry", version: "1" });
+/** 与领域契约保持同一 capability 对象，避免同一身份出现两个 parser/type 入口。 */
+export const PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED = PROTECTED_OUTPOINT_REGISTRY_CAPABILITY;
+export const NOTICE_REGISTRY_TYPED_CAPABILITY = NOTICE_REGISTRY_CAPABILITY;
 
 export interface RouteRegistry {
   register(route: AppRoute): void;

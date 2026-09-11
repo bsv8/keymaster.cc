@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
-import type { SessionStateEvent } from "@keymaster/contracts";
+import type { CoordinatorValueResult, CoordinatorVaultOperation, CoordinatorVaultOperationResultFor, SessionStateEvent } from "@keymaster/contracts";
 import { createMessageBus } from "webloom-framework";
+
+type VaultOperationResponse<O extends CoordinatorVaultOperation> = CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>;
 
 describe("createKeyspaceServiceCoordinator", () => {
   it("initializes from the Coordinator bootstrap snapshot", () => {
@@ -19,7 +21,7 @@ describe("createKeyspaceServiceCoordinator", () => {
       }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => ({ status: "accepted" as const }),
-      vaultOperation: async () => ({ status: "ok" as const, value: undefined, sessionEpoch: "test" })
+      vaultOperation: async <O extends CoordinatorVaultOperation>(_operation: O): Promise<VaultOperationResponse<O>> => ({ status: "ok", value: true, sessionEpoch: "test" } as VaultOperationResponse<O>)
     };
 
     const keyspace = createKeyspaceServiceCoordinator(coordinatorClient, new SessionStateMirror(coordinatorClient), createMessageBus());
@@ -32,7 +34,7 @@ describe("createKeyspaceServiceCoordinator", () => {
   it("keeps selected while locked and active is empty", () => {
     const key = "02".padEnd(66, "a");
     const listeners: Array<(event: SessionStateEvent) => void> = [];
-    const client = { getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async () => ({ status: "ok" as const, value: undefined, sessionEpoch: "e" }) };
+    const client = { getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async <O extends CoordinatorVaultOperation>(_operation: O): Promise<VaultOperationResponse<O>> => ({ status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>) };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
     expect(keyspace.active()).toEqual({ activePublicKeyHex: undefined, generation: 1 });
     expect(keyspace.selected()).toBe(key);
@@ -52,18 +54,18 @@ describe("createKeyspaceServiceCoordinator", () => {
       getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
+      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
         operations.push(operation);
-        if (operation === "listKeys") {
-          return { status: "ok" as const, value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" };
+        if (operation.type === "listKeys") {
+          return { status: "ok", value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" } as unknown as VaultOperationResponse<O>;
         }
-        return { status: "ok" as const, value: true, sessionEpoch: "e" };
+        return { status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>;
       }
     };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), bus);
     await keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
     expect(operations).toEqual([
-      "listKeys",
+      { type: "listKeys" },
       "cancel",
       { type: "deleteKey", publicKeyHex: key, confirmationLabel: "key" }
     ]);
@@ -77,14 +79,14 @@ describe("createKeyspaceServiceCoordinator", () => {
       getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
+      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
         operations.push(operation);
-        return { status: "ok" as const, value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" };
+        return { status: "ok", value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" } as unknown as VaultOperationResponse<O>;
       }
     };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
     await expect(keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "wrong" })).rejects.toThrow("Key label mismatch");
-    expect(operations).toEqual(["listKeys"]);
+    expect(operations).toEqual([{ type: "listKeys" }]);
   });
 
   it("waits for the coordinator delete transaction before publishing deletion", async () => {
@@ -98,19 +100,19 @@ describe("createKeyspaceServiceCoordinator", () => {
       getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
+      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
         operations.push(operation);
-        if (operation === "listKeys") return { status: "ok" as const, value: [ { publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" } ], sessionEpoch: "e" };
-        if (typeof operation !== "string" && operation.type === "deleteKey") {
+        if (operation.type === "listKeys") return { status: "ok", value: [ { publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" } ], sessionEpoch: "e" } as unknown as VaultOperationResponse<O>;
+        if (operation.type === "deleteKey") {
           await deleteTransaction;
         }
-        return { status: "ok" as const, value: true, sessionEpoch: "e" };
+        return { status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>;
       }
     };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
     const deleting = keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
     await new Promise<void>((resolve) => queueMicrotask(resolve));
-    expect(operations).toEqual(["listKeys", "cancel"]);
+    expect(operations).toEqual([{ type: "listKeys" }, "cancel"]);
     // Coordinator 删除事务未完成前，页面不能宣告 Key 已删除。
     let settled = false;
     void deleting.then(() => { settled = true; });
@@ -119,7 +121,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     releaseDelete();
     await deleting;
     expect(operations).toEqual([
-      "listKeys",
+      { type: "listKeys" },
       "cancel",
       { type: "deleteKey", publicKeyHex: key, confirmationLabel: "key" }
     ]);
@@ -133,10 +135,10 @@ describe("createKeyspaceServiceCoordinator", () => {
       getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => ({ status: "blocked" as const, reason: { key: "background.blocked", fallback: "busy" } }),
-      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => { operations.push(operation); return { status: "ok" as const, value: operation === "listKeys" ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : true, sessionEpoch: "e" }; }
+      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => { operations.push(operation); return { status: "ok", value: operation.type === "listKeys" ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : true, sessionEpoch: "e" } as VaultOperationResponse<O>; }
     };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), bus);
     await expect(keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" })).rejects.toThrow("Background cancellation failed");
-    expect(operations).toEqual(["listKeys"]);
+    expect(operations).toEqual([{ type: "listKeys" }]);
   });
 });

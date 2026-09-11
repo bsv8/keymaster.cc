@@ -15,8 +15,8 @@ import type { MessageBus } from "webloom-framework";
 type CoordinatorClientLike = Pick<SessionCoordinatorClient, "backgroundCancelByKey" | "vaultOperation">;
 export type KeyspaceCoordinatorHandle = KeyspaceService;
 
-function unwrap<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
-  if (result.status === "ok") return result.value as T;
+function unwrap<T>(result: CoordinatorValueResult<T>, operation: string): T {
+  if (result.status === "ok") return result.value;
   const message = "message" in result
     ? result.message
     : result.status === "blocked"
@@ -50,8 +50,8 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
   }
 
   return {
-    async listKeys() { return unwrap<KeyIdentity[]>(await client.vaultOperation("listKeys"), "listKeys"); },
-    async getKey(publicKeyHex) { return unwrap<KeyIdentity | undefined>(await client.vaultOperation("getKey", { publicKeyHex }), "getKey"); },
+    async listKeys() { return unwrap(await client.vaultOperation({ type: "listKeys" }), "listKeys"); },
+    async getKey(publicKeyHex) { return unwrap(await client.vaultOperation({ type: "getKey", publicKeyHex }), "getKey"); },
     active: () => ({ activePublicKeyHex: current().activePublicKeyHex, generation: current().keyspaceGeneration }),
     selected: () => current().selectedPublicKeyHex,
     async setActive() { throw new Error("Active key changes must go through vault.activateKey with password"); },
@@ -67,13 +67,13 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
     },
     async prepareDeleteKey(publicKeyHex) { await prepareDeleteKeyInternal(publicKeyHex); },
     async deleteKey(input) {
-      const keys = unwrap<KeyIdentity[]>(await client.vaultOperation("listKeys"), "listKeys");
+      const keys = unwrap(await client.vaultOperation({ type: "listKeys" }), "listKeys");
       const target = keys.find((key) => key.publicKeyHex === input.publicKeyHex);
       if (!target) throw new Error("Key not found");
       if (!target.label) throw new Error("Key label is unavailable");
       if (input.confirmationLabel !== target.label) throw new Error("Key label mismatch");
       await prepareDeleteKeyInternal(input.publicKeyHex);
-      await unwrap<void>(await client.vaultOperation({
+      await unwrap(await client.vaultOperation({
         type: "deleteKey",
         publicKeyHex: input.publicKeyHex,
         confirmationLabel: input.confirmationLabel,

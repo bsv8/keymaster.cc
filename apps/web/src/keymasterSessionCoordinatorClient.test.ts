@@ -1040,7 +1040,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client = createCoordinatorClient({ requestTimeoutMs: 5, reconnectIntervalMs: 1000 });
       await client.connect();
       await expect(client.unlock("pw")).resolves.toMatchObject({ status: "transport-error" });
-      await expect(client.vaultOperation("listKeys")).resolves.toMatchObject({ status: "transport-error" });
+      await expect(client.vaultOperation({ type: "listKeys" })).resolves.toMatchObject({ status: "transport-error" });
       await expect(client.crypto({ type: "deriveP2pkhAddress", network: "main" })).resolves.toMatchObject({ ack: { status: "transport-error" } });
       expect(client.getRecoverableDiagnostics().length).toBeGreaterThan(0);
     } finally { globalThis.SharedWorker = original; }

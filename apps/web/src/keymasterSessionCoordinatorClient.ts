@@ -22,6 +22,7 @@ import type {
   CoordinatorBackgroundSyncSettings,
   CoordinatorTaskSnapshot,
   CoordinatorVaultOperation,
+  CoordinatorVaultOperationResultFor,
   CoordinatorSubscribeTopicsResult,
   SessionCoordinatorClient,
   CoordinatorStorageControl,
@@ -331,8 +332,10 @@ type CoordinatorDispatchStatus = "not-dispatched" | "unknown";
 type CoordinatorSendError = Error & { dispatchStatus?: CoordinatorDispatchStatus };
 
 function requiredCoordinatorOperationResult<T>(response: { operationResult?: T }, kind: string): T {
-  if (response.operationResult === undefined) throw new Error(`Coordinator ${kind} response omitted operationResult`);
-  return response.operationResult;
+  if (!Object.prototype.hasOwnProperty.call(response, "operationResult")) {
+    throw new Error(`Coordinator ${kind} response omitted operationResult`);
+  }
+  return response.operationResult as T;
 }
 
 function coordinatorSendError(message: string, dispatchStatus: CoordinatorDispatchStatus): CoordinatorSendError {
@@ -1031,13 +1034,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand(request);
   }
 
-  async vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<CoordinatorValueResult<unknown>> {
-    const normalized = typeof operation === "string" ? ({ type: operation, ...(input as object ?? {}) } as unknown as CoordinatorVaultOperation) : operation;
-    const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation: normalized, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+  async vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>> {
+    const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
       const response = await this.sendRequest(request);
       if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch } satisfies CoordinatorValueResult<unknown>;
+      return {
+        status: "ok",
+        value: requiredCoordinatorOperationResult<CoordinatorVaultOperationResultFor<O>>(response, request.kind),
+        sessionEpoch: response.sessionEpoch,
+      };
     } catch (cause) {
       return this.normalizeTransportFailure(request.kind, cause);
     }
@@ -1271,7 +1277,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     try {
       const response = await this.sendRequest(request);
       if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: (response.operationResult ?? {}) as ContactPresenceMap, sessionEpoch: response.sessionEpoch };
+      return {
+        status: "ok",
+        value: requiredCoordinatorOperationResult<ContactPresenceMap>(response, request.kind),
+        sessionEpoch: response.sessionEpoch,
+      };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
