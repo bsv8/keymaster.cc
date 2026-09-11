@@ -89,4 +89,19 @@ describe("localStorage bucket provider", () => {
     await provider.put("keys/key", new Uint8Array([1]));
     expect(requests).toEqual(["get", "put"]);
   });
+
+  it("restores storage error codes transported by the Local reverse capability", async () => {
+    const provider = createLocalStorageBucketProvider({
+      bucketId: "transported-error",
+      bridge: async () => {
+        throw Object.assign(new Error("Remote capability operation failed"), {
+          name: "WebLoomError",
+          code: "storage_conflict",
+        });
+      },
+    });
+
+    await expect(provider.put("coordinator/value", new Uint8Array([1]), { ifNoneMatch: "*" }))
+      .rejects.toMatchObject({ code: "storage_conflict" });
+  });
 });

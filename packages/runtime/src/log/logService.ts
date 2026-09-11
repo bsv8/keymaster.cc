@@ -107,15 +107,21 @@ function sanitizeData(data: Record<string, unknown> | undefined): Record<string,
     const v = data[k];
     if (typeof v === "string") {
       out[k] = truncateString(v, MAX_FIELD_LENGTH);
+    } else if (v === null || typeof v === "boolean") {
+      out[k] = v;
+    } else if (typeof v === "number") {
+      out[k] = Number.isFinite(v) ? v : "[unserializable]";
     } else if (v && typeof v === "object") {
       // 复杂对象不深挖；toString 后截断。
       try {
-        out[k] = truncateString(JSON.stringify(v), MAX_FIELD_LENGTH);
+        const serialized = JSON.stringify(v);
+        out[k] = serialized === undefined ? "[unserializable]" : truncateString(serialized, MAX_FIELD_LENGTH);
       } catch {
         out[k] = "[unserializable]";
       }
     } else {
-      out[k] = v;
+      // 平台 K-V 的线协议只接受 JSONValue；以下值不能跨 Worker 边界。
+      out[k] = "[unserializable]";
     }
   }
   if (dropped > 0) {
@@ -127,7 +133,7 @@ function sanitizeData(data: Record<string, unknown> | undefined): Record<string,
 function sanitizeError(error: LogError | undefined): LogError | undefined {
   if (!error) return undefined;
   const out: LogError = {
-    name: error.name ? truncateString(String(error.name), 200) : undefined,
+    ...(error.name ? { name: truncateString(String(error.name), 200) } : {}),
     message: truncateString(String(error.message ?? ""), MAX_FIELD_LENGTH)
   };
   if (error.stack) {
@@ -142,6 +148,8 @@ function sanitizeMessage(message: string): string {
 
 /** 把输入归一化成完整 LogEntry。 */
 function toEntry(input: LogAppendInput, pluginId: string): LogEntry {
+  const data = sanitizeData(input.data);
+  const error = sanitizeError(input.error);
   return {
     id: makeId(),
     ts: input.ts ?? nowIso(),
@@ -150,9 +158,9 @@ function toEntry(input: LogAppendInput, pluginId: string): LogEntry {
     scope: String(input.scope ?? ""),
     event: String(input.event ?? ""),
     message: sanitizeMessage(input.message),
-    data: sanitizeData(input.data),
-    keyScope: input.keyScope,
-    error: sanitizeError(input.error)
+    ...(data === undefined ? {} : { data }),
+    ...(input.keyScope === undefined ? {} : { keyScope: input.keyScope }),
+    ...(error === undefined ? {} : { error })
   };
 }
 

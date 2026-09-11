@@ -10,7 +10,7 @@ import type {
 } from "@keymaster/contracts";
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { StorageErrorCode } from "@keymaster/contracts";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError, storageErrorCode } from "../../runtime/storageRuntimeError.js";
 import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
 
 /** localStorage 的最小同步接口，便于页面桥和单元测试注入。 */
@@ -153,6 +153,22 @@ function decodeCursor(cursor: string | undefined): number {
 
 function mapStorageError(caught: unknown): StorageRuntimeError {
   if (caught instanceof StorageRuntimeError) return caught;
+  // WebLoom 的跨 realm 错误不会保留 StorageRuntimeError 原型，但页面侧
+  // capability adapter 会把领域错误码写入 WebLoomError.code。必须先恢复
+  // 该错误码，否则正常的 CAS 冲突会被误判成 provider 故障并触发回滚。
+  const transportedCode = storageErrorCode(caught);
+  if (transportedCode) {
+    const message = transportedCode === "storage_conflict"
+      ? "Local storage object changed"
+      : transportedCode === "storage_limit_exceeded"
+        ? "localStorage quota was exceeded"
+        : transportedCode === "storage_forbidden"
+          ? "Local storage operation is forbidden"
+          : transportedCode === "storage_unavailable"
+            ? "localStorage is unavailable"
+            : "Local storage operation failed";
+    return fail(transportedCode, message);
+  }
   const name = caught && typeof caught === "object" ? (caught as { name?: unknown }).name : undefined;
   if (name === "QuotaExceededError") return fail("storage_limit_exceeded", "localStorage quota was exceeded");
   if (name === "AbortError") return fail("storage_unavailable", "Storage operation was cancelled");

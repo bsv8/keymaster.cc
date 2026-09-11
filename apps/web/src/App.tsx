@@ -23,7 +23,7 @@ import {
   VAULT_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { useCurrentPath, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
+import { useCurrentPath, useHostVersion, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
 import { StorageBucketManagerPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
 import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
 import { LockedShell } from "./shell/LockedShell.js";
@@ -46,6 +46,7 @@ export function App() {
   const hasKeyspaceService = useHasCapability(KEYSPACE_SERVICE_CAPABILITY);
   const vaultService = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const bootstrap = useOptionalCapability(APPLICATION_BOOTSTRAP_READY_CAPABILITY);
+  const hostVersion = useHostVersion();
   const fallbackBootstrapSnapshot: ApplicationBootstrapSnapshot = {
     // Resource 首次加载完成前只能显示门禁页。不能把 pending 资源伪装成
     // final-ready，否则 capability 刚注入而 bootstrap 状态尚未发布时，
@@ -62,7 +63,10 @@ export function App() {
   const bootstrapSnapshot = useResourceSelector<ApplicationBootstrapSnapshot, ApplicationBootstrapSnapshot>(
     host.resourceStore,
     APPLICATION_BOOTSTRAP_RESOURCE_ID,
-    [],
+    // Keyspace capability/active-key 变化会刷新 Resource Store 绑定。把 Host
+    // 修订作为订阅世代传给 Hook，确保 React 从旧 record 迁移到新 record；
+    // ResourceDefinition.key 不使用这个参数，因此资源本身仍是同一全局状态。
+    [String(hostVersion)],
     (snapshot) => snapshot.data ?? fallbackBootstrapSnapshot,
     (previous, next) => JSON.stringify(previous) === JSON.stringify(next)
   );

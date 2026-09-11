@@ -71,6 +71,7 @@ import { createStorageCatalogRepository, readStorageCatalog, sameStorageCatalogE
 import {
   connectSharedWorker,
   definePlugin,
+  WebLoomError,
   type HandlerCallContext,
   type RuntimeHandle,
   type RuntimePluginDefinition,
@@ -955,7 +956,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
       return response;
     } catch (error) {
-      if (error instanceof StorageRuntimeError) throw error;
+      // WebLoom 只会在线上传递 WebLoomError.code；直接抛 StorageRuntimeError
+      // 会退化成 handler_failed，使 Worker 丢失 storage_conflict 等 CAS 语义。
+      if (error instanceof StorageRuntimeError) {
+        throw new WebLoomError(error.code, "Local storage capability operation failed", "execute");
+      }
       throw new StorageRuntimeError("storage_provider_error", error instanceof Error ? error.message : "Local storage bridge request failed");
     }
   }

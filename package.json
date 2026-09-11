@@ -36,6 +36,7 @@
     "test": "pnpm lint:react-boundaries && node scripts/run-vitest-batches.mjs",
     "test:storage:smoke": "vitest run --config vitest.storage-smoke.config.ts",
     "test:e2e": "playwright test",
+    "test:e2e:initial-setup-smoke": "playwright test e2e/local-initialization-smoke.spec.ts --project=chromium",
     "test:e2e:lifecycle": "playwright test --config=playwright.lifecycle.config.ts",
     "test:e2e:external": "node scripts/run-external-appview-smoke.mjs",
     "test:e2e:irreversible-io": "node scripts/run-irreversible-io-smoke.mjs",

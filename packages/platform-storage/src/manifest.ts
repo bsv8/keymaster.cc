@@ -1,4 +1,4 @@
-import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, StorageRuntimeController, StorageCoordinatorControl, TopbarRegistry } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, StorageRuntimeController, StorageCoordinatorControl } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, TOPBAR_REGISTRY_CAPABILITY, capabilityDescriptor } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { StorageBucketManagerEntry } from "./ui/StorageBucketManagerPage.js";
@@ -453,8 +453,10 @@ const storagePlatformPluginDefinition = {
       order: 80
     });
     return () => {
-      try { (topbar as TopbarRegistry & { unregister(id: string): void }).unregister(topbarId); } catch { /* already reclaimed */ }
-      resources.unregister(resourceId);
+      // topbar/resource 注册均由当前 WebLoom Scope 拥有。身份切换会先撤销
+      // Scope，再执行 teardown；此时手工 unregister 会因 Scope=stopping
+      // 失败，并把本可重启的 Storage 插件错误推进 error-disabled。
+      // scoped registry 会自动精确回收这两项，这里只释放领域服务。
       service.dispose();
     };
   }

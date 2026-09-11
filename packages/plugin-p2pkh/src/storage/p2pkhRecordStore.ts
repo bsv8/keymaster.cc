@@ -65,6 +65,17 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(canonicalize(value));
 }
 
+/**
+ * 内存记录允许业务代码临时把可选字段设为 undefined；Owner K-V 的线协议
+ * 只接受 JSONValue。记录进入 Store 时统一做 JSON 规范化，避免任一提交
+ * 因一个未设置字段而断开整个 Coordinator。
+ */
+function normalizeRecord(value: PlainRecord): PlainRecord {
+  const encoded = canonicalJson(value);
+  if (typeof encoded !== "string") throw new TypeError("P2PKH record is not JSON serializable");
+  return JSON.parse(encoded) as PlainRecord;
+}
+
 function pathValue(record: PlainRecord, path: string | string[]): RecordKey | undefined {
   const fields = record as Record<string, unknown>;
   if (Array.isArray(path)) return path.map((part) => fields[part] as string | number);
@@ -126,7 +137,12 @@ export class P2pkhStateCollection {
   async getAll(query?: RecordQuery): Promise<PlainRecord[]> {
     return [...this.rows.entries()].filter(([key]) => matches(key, query)).sort(([a], [b]) => compare(a, b)).map(([, value]) => clone(value));
   }
-  async put(value: PlainRecord): Promise<string> { const key = primaryKey(this.name, value); this.rows.set(key, clone(value)); return key; }
+  async put(value: PlainRecord): Promise<string> {
+    const normalized = normalizeRecord(value);
+    const key = primaryKey(this.name, normalized);
+    this.rows.set(key, normalized);
+    return key;
+  }
   async delete(key: RecordKey): Promise<void> { this.rows.delete(String(key)); }
   async clear(): Promise<void> { this.rows.clear(); }
 }

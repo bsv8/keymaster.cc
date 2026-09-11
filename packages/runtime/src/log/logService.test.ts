@@ -91,6 +91,26 @@ describe("createLogService - basics", () => {
     svc.dispose();
   });
 
+  it("持久化日志只包含可跨 Worker 传输的 JSON 值", async () => {
+    const svc = createLogService({ skipStartupPrune: true });
+    await svc.append({
+      level: "info",
+      pluginId: "demo",
+      scope: "transport",
+      event: "json-safe",
+      message: "hello",
+      data: { absent: undefined, nonFinite: Number.NaN, callable: () => undefined }
+    });
+    const page = await testLogStorage.list({ partition: "entries", prefix: "entry/" });
+    expect(page.entries).toHaveLength(1);
+    expect(page.entries[0]!.value).toMatchObject({
+      data: { absent: "[unserializable]", nonFinite: "[unserializable]", callable: "[unserializable]" }
+    });
+    expect(page.entries[0]!.value).not.toHaveProperty("keyScope");
+    expect(page.entries[0]!.value).not.toHaveProperty("error");
+    svc.dispose();
+  });
+
   it("listEntries flushes queued logger writes without manual delay", async () => {
     const svc = createLogService();
     const logger = svc.forPlugin("demo", "demo");

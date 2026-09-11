@@ -932,7 +932,19 @@ const p2pkhPluginDefinition = {
       invalidation: "immediate"
     });
 
-    void service.rehydrate();
+    // 首次 rehydrate 是后台补齐，不属于 setup 的同步门禁。连接切换期间
+    // 失败必须留在插件健康域；未处理的 Promise 会触发全局 fatal 页面。
+    void service.rehydrate().catch((error) => {
+      ctx.logger.warn({
+        scope: "p2pkh.manifest",
+        event: "startup.rehydrateFailed",
+        message: "P2PKH startup rehydrate deferred",
+        error: {
+          name: error instanceof Error ? error.name : "Error",
+          message: error instanceof Error ? error.message : String(error)
+        }
+      });
+    });
 
     // 硬切换 002 收尾：key.created payload 只携带 publicKeyHex；service 按 publicKeyHex 工作。
     const keyCreatedUnsub = messageBus.subscribe<{ publicKeyHex: string; label: string }>("key.created", async (payload) => {

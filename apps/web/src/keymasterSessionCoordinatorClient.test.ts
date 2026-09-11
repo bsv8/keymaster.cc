@@ -5,7 +5,7 @@ import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtim
 import { createCoordinatorClient as createRawCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
 import { readStorageCatalog, STORAGE_CATALOG_KEY } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest } from "@keymaster/platform-storage/coordinator";
-import { createWindowApp, definePlugin, type HandlerCallContext, type ServiceReference, type WindowApp } from "webloom-framework";
+import { createWindowApp, definePlugin, WebLoomError, type HandlerCallContext, type ServiceReference, type WindowApp } from "webloom-framework";
 import { startSharedWorkerAppForTesting, type SharedWorkerScopeLike } from "webloom-framework/testing";
 
 type TopicWaiter = { resolve: (event: CoordinatorTopicEvent | undefined) => void; signal: AbortSignal; onAbort: () => void };
@@ -1293,6 +1293,38 @@ describe("KeymasterSessionCoordinatorClient", () => {
       expect(readStorageCatalog(storage)).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
       await sendBridgeRequest(workerPort, "initial-rollback-retry", { ...commit, rollback: true });
       expect(readStorageCatalog(storage)).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    } finally {
+      client.disconnect();
+      workerPort.close();
+      restoreGlobals();
+    }
+  });
+
+  it("把页面 Local 存储领域错误编码为 WebLoom 跨 realm 错误", async () => {
+    const storage = new BridgeMemoryStorage();
+    const restoreGlobals = installBridgeGlobals(storage);
+    const target = bridgeCatalogEntry("bucket-error-code", "错误码桥接桶");
+    const { client, workerPort } = await openEmptyTestLocalBridge(storage);
+    const internals = client as unknown as LocalBridgeClientInternals;
+    const call = {
+      signal: new AbortController().signal,
+      deadlineAt: Date.now() + 30_000,
+      origin: "remote",
+    } as HandlerCallContext;
+    const request = {
+      type: "put",
+      bucketId: target.bucketId,
+      bucketGeneration: 1,
+      candidateBucket: { bucket: target, bucketGeneration: 1, initialSetup: true },
+      path: "coordinator/value",
+      bytes: new Uint8Array([1]),
+      condition: { ifNoneMatch: "*" as const },
+    } satisfies CoordinatorLocalStorageRequest;
+    try {
+      await internals.handleLocalStorageCapabilityRequest(request, call);
+      const error = await internals.handleLocalStorageCapabilityRequest(request, call).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(WebLoomError);
+      expect(error).toMatchObject({ code: "storage_conflict", phase: "execute" });
     } finally {
       client.disconnect();
       workerPort.close();

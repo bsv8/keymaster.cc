@@ -1369,7 +1369,11 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
   const rawKind = text(request.kind, "request.kind", 128);
   if (!COORDINATOR_REQUEST_KINDS.has(rawKind)) throw new TypeError("Coordinator RPC request kind " + rawKind + " is unsupported");
   const kind = rawKind as CoordinatorRpcRequestKind;
-  if (hasOwn(request, "clientId") || hasOwn(request, "requestId") || hasOwn(request, "operationId") || hasOwn(request, "peerId")) {
+  // peerId 通常属于 transport 身份，不得由调用方伪造；但签名 Peer Record
+  // 时它是待签名文档的业务字段，连接身份仍只来自 HandlerCallContext.peer。
+  const hasForgedPeerIdentity = hasOwn(request, "peerId")
+    && kind !== "window-p2p.executor.identity.sign-peer-record";
+  if (hasOwn(request, "clientId") || hasOwn(request, "requestId") || hasOwn(request, "operationId") || hasForgedPeerIdentity) {
     throw new TypeError("Coordinator RPC request contains transport identity");
   }
   const epoch = (field: string): string => text(request[field], "request." + field, 256);
@@ -2076,7 +2080,8 @@ function parseStoragePlatformGrant(value: unknown, field: string): StoragePlatfo
     bucketId: text(grant.bucketId, field + ".bucketId", 256),
     bucketGeneration: boundedNumber(grant.bucketGeneration, field + ".bucketGeneration"),
     applicationStorageId: text(grant.applicationStorageId, field + ".applicationStorageId", 256),
-    schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1_000),
+    // 与存储声明一致：schemaVersion（数据结构版本）是从 1 开始的安全整数。
+    schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
     sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
   };
 }

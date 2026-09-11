@@ -43,7 +43,7 @@ describe("p2pkhStateRepository", () => {
     const store = makeStore();
     const bundle = await openP2pkhStateRepository(store);
     const repository = createP2pkhStateRepository(bundle);
-    await repository.putAddress(resource);
+    await repository.putAddress({ ...resource, lastSyncedAt: undefined });
     const raw = transaction();
     await repository.ingestConfirmedTransaction({ resource, tx: { txid: txid(raw), rawTxHex: raw, blockHeight: 100 } });
     expect(await repository.listAddresses()).toEqual([resource]);
@@ -51,6 +51,8 @@ describe("p2pkhStateRepository", () => {
     expect((await repository.listOwnedOutpoints({ resourceId: resource.resourceId }))[0]).toMatchObject({ value: 1000, chainState: "available" });
     const records = await store.list({ partition: "records", prefix: "record/" });
     expect(records.entries.length).toBeGreaterThan(0);
+    const addressRecord = records.entries.find((entry) => entry.key.includes("p2pkh_addresses"));
+    expect(addressRecord?.value).not.toHaveProperty("lastSyncedAt");
     bundle.close();
   });
 

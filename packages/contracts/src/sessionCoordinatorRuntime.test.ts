@@ -46,6 +46,35 @@ function rpcRequest(kind: CoordinatorRpcRequest["kind"], nested: Record<string, 
 }
 
 describe("Coordinator runtime contract parsers", () => {
+  it("accepts the initial platform schema version through the full response boundary", () => {
+    const request = {
+      kind: "storage.platform.bind",
+      pluginId: "runtime",
+      declaration: { scope: "platform", applicationStorageId: "settings", schemaVersion: 1 },
+      expectedSessionEpoch: "epoch-1",
+    } as const satisfies CoordinatorRpcRequest;
+    const grant = {
+      platformGrantId: "platform-1",
+      bucketId: "bucket-1",
+      bucketGeneration: 1,
+      applicationStorageId: "settings",
+      schemaVersion: 1,
+      sessionEpoch: "epoch-1",
+    };
+    const response = { sessionEpoch: "epoch-1", ack: { status: "ok" }, operationResult: grant };
+    const parsedRequest = COORDINATOR_RPC_CAPABILITY.request.parse(request);
+    // Worker 先做 request-aware 校验，transport 校验 DTO，页面再次校验结果。
+    const workerResponse = parseCoordinatorResponseFor(parsedRequest, response);
+    const delivered = COORDINATOR_RPC_CAPABILITY.response.parse(structuredClone(workerResponse));
+    expect(parseCoordinatorResponseFor(request, delivered).operationResult).toEqual(grant);
+
+    for (const schemaVersion of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "1", undefined]) {
+      expect(() => parseCoordinatorResponseFor(request, {
+        ...response, operationResult: { ...grant, schemaVersion },
+      })).toThrow(/schemaVersion/);
+    }
+  });
+
   it("rejects unknown RPC kinds and transport identity before dispatch", () => {
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, { kind: "made-up" })).toThrow();
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, { kind: "session.close", requestId: "forged" })).toThrow();
@@ -450,6 +479,23 @@ describe("Coordinator runtime contract parsers", () => {
     })).toThrow();
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, {
       kind: "session.close", operationId: "forged",
+    })).toThrow();
+    expect(parse(COORDINATOR_RPC_CAPABILITY.request, {
+      kind: "window-p2p.executor.identity.sign-peer-record",
+      leaseId: "lease-1",
+      expectedSessionEpoch: "epoch-1",
+      peerId: "12D3KooWBusinessPeer",
+      addresses: [],
+      sequence: "0",
+    })).toMatchObject({ peerId: "12D3KooWBusinessPeer" });
+    expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, {
+      kind: "window-p2p.executor.identity.sign-peer-record",
+      clientId: "forged",
+      leaseId: "lease-1",
+      expectedSessionEpoch: "epoch-1",
+      peerId: "12D3KooWBusinessPeer",
+      addresses: [],
+      sequence: "0",
     })).toThrow();
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.response, {
       sessionEpoch: "epoch-1", ack: { status: "ok" }, requestId: "forged",
