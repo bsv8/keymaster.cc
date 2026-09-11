@@ -11,7 +11,7 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.4.0",
+    "webloom-framework": "0.4.1",
     "@keymaster/ui": "*",
     "@keymaster/plugin-webrtc": "*"
   }

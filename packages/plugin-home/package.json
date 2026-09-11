@@ -11,7 +11,7 @@
     "@bsv/sdk": "^2.1.7",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.4.0",
+    "webloom-framework": "0.4.1",
     "@keymaster/ui": "*",
     "@zxing/browser": "^0.2.1",
     "qrcode.react": "^4.2.0"

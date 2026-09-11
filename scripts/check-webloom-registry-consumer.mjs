@@ -7,9 +7,9 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { webLoomReleaseVersion as releaseVersion } from "./webloom-release-config.mjs";
 
 const packageName = "webloom-framework";
-const releaseVersion = "0.4.0";
 const registry = process.env.WEBLOOM_NPM_REGISTRY ?? process.env.npm_config_registry ?? "https://registry.npmjs.org/";
 const root = mkdtempSync(join(tmpdir(), "keymaster-webloom-registry-consumer-"));
 
