@@ -46,7 +46,7 @@ function statusLabel(status: string, t: (key: string, values?: { defaultValue?: 
 
 export function OrdinalMintPage() {
   const { t } = useI18n();
-  const service = useCapability<OrdinalMintService>(ORDINAL_MINT_SERVICE_CAPABILITY);
+  const service = useCapability(ORDINAL_MINT_SERVICE_CAPABILITY);
   const [network, setNetwork] = useState<BsvNetwork>("main");
   const [contentType, setContentType] = useState("image/png");
   const [name, setName] = useState("");

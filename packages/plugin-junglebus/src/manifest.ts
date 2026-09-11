@@ -1,5 +1,5 @@
-import type { BreadcrumbProvider, BreadcrumbRegistry, I18nPluginResources, PluginManifest, PluginSetup, SystemSettingsRegistry, P2pkhCoordinatorControl } from "@keymaster/contracts";
-import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
+import type { BreadcrumbProvider, I18nPluginResources, PluginManifest, PluginSetup, P2pkhCoordinatorControl } from "@keymaster/contracts";
+import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, SYSTEM_SETTINGS_REGISTRY_CAPABILITY, BREADCRUMB_REGISTRY_CAPABILITY, capabilityDescriptor, defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { JungleBusSettingsPage } from "./pages/JungleBusSettingsPage.js";
 
 export const jungleBusResources: I18nPluginResources = {
@@ -12,16 +12,15 @@ export const jungleBusResources: I18nPluginResources = {
 
 const jungleBusPluginDefinition = {
   id: "junglebus", name: "JungleBus", description: "Confirmed transaction sync provider; no broadcast or subscription capability.",
-  meta: { kind: "platform", startup: "optional", bootstrapStage: "owner-apps-ready", defaultEnabled: true, canDisable: true, displayGroup: "platform" },
+  kind: "platform", startup: "optional", bootstrapStage: "owner-apps-ready", defaultEnabled: true, canDisable: true, displayGroup: "platform",
   units: [{
     id: "junglebus.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: [JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY]),
+    provides: [capabilityDescriptor(JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY)],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "system-settings.registry", reason: "注册 JungleBus provider 设置页" },
-      { capability: "breadcrumb.registry", reason: "注册 JungleBus 设置面包屑" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 JungleBus provider 设置页" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 JungleBus 设置面包屑" },
     ]),
   }, {
     id: "junglebus.coordinator-worker",
@@ -36,9 +35,9 @@ const jungleBusPluginDefinition = {
     // The worker uses this durable flag to mirror the host plugin lifecycle;
     // a disabled optional plugin must not leave its provider executable.
     void coordinator.p2pkhProviderConfigUpdate("junglebus", { enabled: true });
-    const settings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    const settings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     settings.register({ id: "junglebus.system-settings.connection", group: { id: "junglebus", label: { key: "junglebus.crumb.junglebus", fallback: "JungleBus" }, order: 45 }, label: { key: "junglebus.settings.title", fallback: "JungleBus settings" }, description: { key: "junglebus.settings.description", fallback: "Worker-owned JungleBus endpoint and request policy." }, component: JungleBusSettingsPage, order: 10, visibleWhen: ({ unlocked }) => unlocked });
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const provider: BreadcrumbProvider = { id: "junglebus.crumbs", order: 255, match: (path) => path === "/settings/junglebus", resolve: () => [{ label: { key: "junglebus.crumb.settings", fallback: "Settings" } }, { label: { key: "junglebus.crumb.junglebus", fallback: "JungleBus" } }] };
     breadcrumbs.register(provider);
     return () => { void coordinator.p2pkhProviderConfigUpdate("junglebus", { enabled: false }); };

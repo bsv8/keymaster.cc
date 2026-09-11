@@ -1,5 +1,6 @@
 // packages/contracts/src/topbar.ts
 // Topbar 扩展点契约。
+import { defineCapability } from "webloom-framework";
 // 设计缘由：Shell 渲染 Topbar 时只读 topbar.registry，不直接 import 任何插件。
 // 任何插件都可以注册图标/按钮/小面板，runtime 负责按 order 排序并渲染。
 
@@ -25,4 +26,8 @@ export interface TopbarRegistry {
 }
 
 /** capability key。 */
-export const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
+export const TOPBAR_REGISTRY_CAPABILITY = defineCapability<TopbarRegistry>({
+  kind: "local",
+  id: "topbar.registry",
+  version: "1",
+});

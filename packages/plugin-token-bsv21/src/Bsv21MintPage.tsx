@@ -36,7 +36,7 @@ function statusLabel(status: string, t: (key: string, values?: { defaultValue?: 
 
 export function Bsv21MintPage() {
   const { t } = useI18n();
-  const service = useCapability<Bsv21MintService>(BSV21_MINT_SERVICE_CAPABILITY);
+  const service = useCapability(BSV21_MINT_SERVICE_CAPABILITY);
   const [network, setNetwork] = useState<BsvNetwork>("main");
   const [amount, setAmount] = useState("1");
   const [sym, setSym] = useState("TOK");

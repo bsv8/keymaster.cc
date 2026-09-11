@@ -10,8 +10,7 @@ import { useEffect, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
-import type { Contact, ContactInput, ContactsService } from "@keymaster/contracts";
-import type { KeyspaceService } from "@keymaster/contracts";
+import { CONTACTS_SERVICE_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, type Contact, type ContactInput } from "@keymaster/contracts";
 import { ContactsDuplicateError } from "./contactsService.js";
 
 export interface ContactsEditorProps {
@@ -33,8 +32,8 @@ const EMPTY_DRAFT: DraftState = {
 };
 
 export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
-  const service = useCapability<ContactsService>("contacts.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const service = useCapability(CONTACTS_SERVICE_CAPABILITY);
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
   const { t } = useI18n();
   const [draft, setDraft] = useState<DraftState>(EMPTY_DRAFT);
   const [loading, setLoading] = useState(false);

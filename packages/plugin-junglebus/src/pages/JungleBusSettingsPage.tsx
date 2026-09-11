@@ -18,7 +18,7 @@ function toDraft(value: Record<string, unknown>): JungleBusDraft {
 }
 
 export function JungleBusSettingsPage() {
-  const coordinator = useCapability<P2pkhCoordinatorControl>(JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY);
+  const coordinator = useCapability(JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
   const [draft, setDraft] = useState<JungleBusDraft>(() => toDraft({}));
   const [error, setError] = useState<string | null>(null);

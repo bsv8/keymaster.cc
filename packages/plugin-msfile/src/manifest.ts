@@ -4,6 +4,10 @@
 
 import type { I18nPluginResources, PluginManifest, PluginSetup, PluginContext, ResourceRegistry, RouteRegistry, WindowP2pExecutorLaneRegistry } from "@keymaster/contracts";
 import {
+  BUSINESS_REGISTRY_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
   type BusinessFeatureRegistry,
   type KeyspaceService,
   KEYSPACE_SERVICE_CAPABILITY,
@@ -14,7 +18,6 @@ import {
   type MsFileCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
   type SessionCoordinatorClient,
   type SystemSettingsRegistry,
 } from "@keymaster/contracts";
@@ -297,32 +300,28 @@ const msfilePluginDefinition = {
   id: MSFILE_PLUGIN_ID,
   name: "MSFile",
   description: "MSFile Proxy V1 客户端能力：多供应商 Stat/Read、价格授权与供应商配置。",
-  meta: {
-    kind: "platform",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    // 默认加载只负责让设置入口和首页模块稳定出现；未配置全局金额或
-    // 供应商时，组件仍在发起 Stat/Read 前 fail closed。
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "platform"
-  },
+  kind: "platform",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  // 默认加载只负责让设置入口和首页模块稳定出现；未配置全局金额或
+  // 供应商时，组件仍在发起 Stat/Read 前 fail closed。
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "platform",
   units: [{
     id: "msfile.window",
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([
-      MSFILE_SERVICE_CAPABILITY,
-      MSFILE_COORDINATOR_CONTROL_CAPABILITY,
-    ]),
     storage: { scope: "key", applicationStorageId: "MSFile", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
-      { capability: "system-settings.registry", reason: "MSFile settings live under Settings -> System" },
-      { capability: "business.registry", reason: "注册 MSFile 首页文件获取投影" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "MSFile settings live under Settings -> System" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册 MSFile 首页文件获取投影" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
-      { capability: "vault.service", reason: "首页文件读取只允许在 Vault unlocked 时进行" },
+      { capability: VAULT_SERVICE_CAPABILITY, reason: "首页文件读取只允许在 Vault unlocked 时进行" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 MSFile resources" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 MSFile 文件入口" },
     ]),
   }, {
     id: "msfile.coordinator-worker",
@@ -334,14 +333,14 @@ const msfilePluginDefinition = {
     const coordinator = ctx.coordinator as MsFileCoordinatorControl | undefined;
     if (!coordinator) throw new Error("MSFile Coordinator control is unavailable");
     ctx.provide(MSFILE_COORDINATOR_CONTROL_CAPABILITY, coordinator);
-    const laneRegistry = ctx.get<WindowP2pExecutorLaneRegistry>(WINDOW_P2P_EXECUTOR_CAPABILITY);
+    const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
     // MSFile 只注册自己的业务 lane；公共 Host 与 executor 由 Window P2P
     // 系统插件拥有，避免两个插件各自建立网络实例。
     const offLane = laneRegistry.register(new MsFileP2pLane());
     const service = new MsFileServiceProxy(coordinator);
-    ctx.provide<import("@keymaster/contracts").MsFileService>(MSFILE_SERVICE_CAPABILITY, service);
+    ctx.provide(MSFILE_SERVICE_CAPABILITY, service);
 
-    const resources_ = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    const resources_ = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     registerMsFileMediaResource(resources_, service);
     const resourceId = "msfile.status";
     resources_.register<
@@ -418,7 +417,7 @@ const msfilePluginDefinition = {
     // business.registry 支持在 home 域尚未加载时追加入口；home 插件加载后
     // 会自动显示这个投影。entry 同时是该业务特征的正式页面入口，便于
     // 用户从侧栏或直接访问 /msfile/files；首页模块复用同一个组件和状态机。
-    const routes = ctx.get<RouteRegistry>("route.registry");
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
     const entryRouteId = "msfile.home.file";
     routes.register({
       id: entryRouteId,
@@ -426,7 +425,7 @@ const msfilePluginDefinition = {
       label: { key: "msfile.home.title", fallback: "Get a file by Seed" },
       component: MsFileHomeFileWidget,
     });
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
       id: "home.msfile-file",
       label: { key: "msfile.home.title", fallback: "Get a file by Seed" },
@@ -446,7 +445,7 @@ const msfilePluginDefinition = {
       }]
     });
 
-    const settings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    const settings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     const settingsId = "msfile.system-settings";
     settings.register({
       id: settingsId,

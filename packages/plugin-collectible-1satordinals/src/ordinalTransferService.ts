@@ -1,3 +1,4 @@
+import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
   ProtocolSpendPreview,
@@ -7,7 +8,11 @@ import type {
 import { replaceOrdinalP2pkhRecipient } from "./ordinalScript.js";
 import type { OrdinalsOutpointHit, OrdinalsServiceHandle, P2pkhServiceFor1Sat } from "./ordinalsService.js";
 
-export const ORDINAL_TRANSFER_SERVICE_CAPABILITY = "collectible-1satordinals.transfer.service";
+export const ORDINAL_TRANSFER_SERVICE_CAPABILITY = defineCapability<OrdinalTransferService>({
+  kind: "local",
+  id: "collectible-1satordinals.transfer.service",
+  version: "1",
+});
 
 export interface OrdinalTransferRequest {
   collectibleId: string;

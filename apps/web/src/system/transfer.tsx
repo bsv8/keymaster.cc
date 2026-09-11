@@ -8,14 +8,19 @@ import type {
   TransferRegistry
 } from "@keymaster/contracts";
 import {
+  COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY,
+  CONTACTS_PICKER_CAPABILITY,
+  TRANSFER_REGISTRY_CAPABILITY,
+} from "@keymaster/contracts";
+import {
   router,
   useCurrentPath,
   useI18n,
   usePluginHost
 } from "@keymaster/runtime";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import type { TransferFeatureCapability } from "./transfer/transferFeature.js";
+import { TRANSFER_FEATURE_CAPABILITY, type TransferFeatureCapability } from "./transfer/transferFeature.js";
 
 interface ContactPickerProps {
   value?: string;
@@ -37,9 +42,9 @@ export function TransferPage() {
   useCurrentPath();
   const { t } = useI18n();
   const host = usePluginHost();
-  const registry = useCapability<TransferRegistry>("transfer.registry");
-  const collectibleTransferRegistry = useCapability<CollectibleTransferRegistry>("collectible-transfer.registry");
-  const ContactPicker = useCapabilityOrNull<ComponentType<ContactPickerProps>>("contacts.picker");
+  const registry = useCapability(TRANSFER_REGISTRY_CAPABILITY);
+  const collectibleTransferRegistry = useCapability(COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY);
+  const ContactPicker = useOptionalCapability(CONTACTS_PICKER_CAPABILITY) as ComponentType<ContactPickerProps> | undefined;
   const feature = useTransferFeature();
   const offers = useResourceSelector<TransferOffer[], TransferOffer[]>(
     host.resourceStore,
@@ -263,16 +268,8 @@ export function TransferPage() {
 }
 
 function useTransferFeature(): TransferFeatureCapability {
-  const capability = useCapability<TransferFeatureCapability>("feature.transfer");
+  const capability = useCapability(TRANSFER_FEATURE_CAPABILITY);
   const [, refresh] = useState(0);
   useEffect(() => capability.subscribe(() => refresh((value) => value + 1)), [capability]);
   return capability;
-}
-
-function useCapabilityOrNull<T>(key: string): T | null {
-  try {
-    return useCapability<T>(key);
-  } catch {
-    return null;
-  }
 }

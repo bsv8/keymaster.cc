@@ -1,3 +1,4 @@
+import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
   ProtocolSpendPreview,
@@ -8,7 +9,11 @@ import { buildOrdinalP2pkhScript, type OrdinalEnvelopeEntry } from "./ordinalScr
 import type { P2pkhServiceFor1Sat } from "./ordinalsService.js";
 import type { OrdinalMintHistoryRepository, OrdinalMintHistoryRecord } from "./storage/ordinalMintHistoryRepository.js";
 
-export const ORDINAL_MINT_SERVICE_CAPABILITY = "collectible-1satordinals.mint.service";
+export const ORDINAL_MINT_SERVICE_CAPABILITY = defineCapability<OrdinalMintService>({
+  kind: "local",
+  id: "collectible-1satordinals.mint.service",
+  version: "1",
+});
 
 export interface OrdinalMintRequest {
   ownerPublicKeyHex?: string;

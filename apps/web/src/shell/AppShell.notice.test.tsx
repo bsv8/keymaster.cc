@@ -23,6 +23,12 @@ import type {
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  COORDINATOR_ACTIVITY_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
 import { registerShellResources } from "./shellResources.js";
 import { AppShell } from "./AppShell.js";
@@ -85,10 +91,10 @@ function createHost() {
     disableConfigPersistence: true,
     initialI18nResources: [SHELL_RESOURCES]
   });
-  registerShellResources(host.capabilities.get("resource.registry"));
-  host.capabilities.provide<VaultService>("vault.service", makeVault());
-  host.capabilities.provide<KeyspaceService>("keyspace.service", makeKeyspace());
-  host.capabilities.provide("session-coordinator.client", {
+  registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY));
+  host.provide(VAULT_SERVICE_CAPABILITY, makeVault());
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, makeKeyspace());
+  host.provide(COORDINATOR_ACTIVITY_CAPABILITY, {
     getIsConnected: () => true,
     sendActivity: () => undefined
   });

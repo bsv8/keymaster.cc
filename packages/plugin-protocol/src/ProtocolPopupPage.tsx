@@ -26,7 +26,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCapability, useHasCapability, useResource, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
-import { formatShortPublicKey, PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import {
+  MSFILE_SERVICE_CAPABILITY,
+  PROTOCOL_SERVICE_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+  formatShortPublicKey,
+} from "@keymaster/contracts";
 import type {
   ProtocolConnectAuthSnapshot,
   MethodParams,
@@ -60,7 +65,7 @@ function openWalletHomepage(): void {
 }
 
 export function ProtocolPopupPage() {
-  const service = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
+  const service = useCapability(PROTOCOL_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
@@ -328,7 +333,7 @@ type MsFileApprovalServiceLike = {
 };
 
 function useVaultUnlocked(): boolean {
-  const vault = useCapability<{ status(): "unlocked" | "locked" | "uninitialized" | "uninitialized-empty" }>("vault.service");
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   try {
     return vault.status() === "unlocked";
   } catch {
@@ -337,14 +342,14 @@ function useVaultUnlocked(): boolean {
 }
 
 function MsFileApprovalSection({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
-  const hasMsfile = useHasCapability("msfile.service");
+  const hasMsfile = useHasCapability(MSFILE_SERVICE_CAPABILITY);
   if (!hasMsfile) return null;
   return <MsFileApprovalSectionInner t={t} />;
 }
 
 function MsFileApprovalSectionInner({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
   // 仅在 has("msfile.service") 为真时挂载，hook 顺序稳定。
-  const service = useCapability<MsFileApprovalServiceLike>("msfile.service");
+  const service = useCapability(MSFILE_SERVICE_CAPABILITY);
   const host = usePluginHost();
   // 审批列表订阅走 Resource Store（plugin-msfile 注册的 msfile.status 资源）。
   const statusResource = useResourceSelector<{ approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }, { approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }>(
@@ -465,11 +470,7 @@ function LockScreenPage({
   summary: ProtocolLockSummary | null;
   now: number;
 }) {
-  const vault = useCapability<{
-    status(): "booting" | "uninitialized" | "locked" | "unlocked";
-    onStatusChange(handler: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void): () => void;
-    unlock(password: string): Promise<CoordinatorCommandResult>;
-  }>("vault.service");
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

@@ -16,10 +16,11 @@ import type {
   LanguageMode,
   SupportedLanguage
 } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 /** 稳定订阅 i18nService：返回 i18nService 引用与当前 language。 */
 function useI18nService(): I18nService {
-  return useCapability<I18nService>("i18n.service");
+  return useCapability(I18N_SERVICE_CAPABILITY);
 }
 
 export interface UseI18nResult {

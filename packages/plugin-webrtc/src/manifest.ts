@@ -9,17 +9,19 @@
 
 import type {
   I18nPluginResources,
-  KeyspaceService,
-  ContactsService,
-  ChannelRuntimeFactory,
   PluginManifest,
   PluginSetup,
-  NoticeRegistry,
-  SystemSettingsRegistry
-  ,ResourceRegistry
 } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
-import { CHANNEL_RUNTIME_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import {
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  CHANNEL_RUNTIME_CAPABILITY,
+  CONTACTS_SERVICE_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  NOTICE_REGISTRY_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  defineRuntimeUnitDependencies,
+} from "@keymaster/contracts";
 import {
   WEBRTC_PLUGIN_ID,
   WEBRTC_SERVICE_CAPABILITY,
@@ -190,35 +192,34 @@ const webrtcPluginDefinition = {
   name: "WebRTC",
   description:
     "Keymaster WebRTC business plugin: file transfer over Channel private signalling; audio/video calls are disabled until a formal rendezvous protocol is published.",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "platform"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [{
     id: "webrtc.window",
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [WEBRTC_SERVICE_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([WEBRTC_SERVICE_CAPABILITY]),
     storage: { scope: "key", applicationStorageId: "WebRTC", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel 私信" },
-      { capability: "keyspace.service", reason: "打开 key-scoped 历史库" },
-      { capability: "contacts.service", reason: "只允许当前 owner 通讯录中的发送者进入文件传输确认" },
-      { capability: "notice.registry", reason: "投递全局紧急 notice" },
-      { capability: "system-settings.registry", reason: "注册 WebRTC 系统设置" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "打开 key-scoped 历史库" },
+      { capability: CONTACTS_SERVICE_CAPABILITY, reason: "只允许当前 owner 通讯录中的发送者进入文件传输确认" },
+      { capability: NOTICE_REGISTRY_CAPABILITY, reason: "投递全局紧急 notice" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册 WebRTC 系统设置" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 WebRTC session resources" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册 WebRTC 设置面包屑" },
     ]),
   }],
   i18n: webrtcResources,
   async setup(ctx) {
-    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
-    const contacts = ctx.get<ContactsService>("contacts.service");
-    const noticeRegistry = ctx.get<NoticeRegistry>("notice.registry");
-    const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const contacts = ctx.capability(CONTACTS_SERVICE_CAPABILITY);
+    const noticeRegistry = ctx.capability(NOTICE_REGISTRY_CAPABILITY);
+    const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
     const configStore = createKeyValueWebrtcConfigStore(ctx.storage);
     await configStore.ready();
     const offStorageActive = keyspace.onActiveKeyChanged((state) => {
@@ -269,7 +270,7 @@ const webrtcPluginDefinition = {
       }
     });
     ctx.provide(WEBRTC_SERVICE_CAPABILITY, service);
-    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<WebrtcSessionSnapshot, readonly string[]>({
       id: "webrtc.session",
       scope: "global",
@@ -292,14 +293,7 @@ const webrtcPluginDefinition = {
       invalidation: "immediate"
     });
 
-    const breadcrumbs = ctx.get<{
-      register(input: {
-        id: string;
-        order?: number;
-        match: (path: string) => boolean;
-        resolve: () => Array<{ label: { key: string; fallback: string } }>;
-      }): void;
-    }>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     breadcrumbs.register({
       id: "webrtc.settings.crumbs",
       order: 60,
@@ -309,7 +303,7 @@ const webrtcPluginDefinition = {
       ]
     });
 
-    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     systemSettings.register({
       id: "webrtc.system-settings.stun",
       group: {

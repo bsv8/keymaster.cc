@@ -14,6 +14,11 @@
 //     一个最小的 JSON importer 用于 ImportPage 测试。
 
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
+import {
+  IMPORTER_REGISTRY_CAPABILITY,
+  RUNTIME_MESSAGE_BUS,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import type {
   I18nPluginResources,
   ImporterRegistry,
@@ -83,10 +88,10 @@ export function createTestHost(opts: TestHostOptions = {}): TestHostHandle {
     },
   });
   const vault = makeStubVault(opts.vaultStatus ?? "unlocked");
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  const messageBus = host.capabilities.get<MessageBus>("runtime.messageBus");
+  host.capabilities.provide(VAULT_SERVICE_CAPABILITY, vault);
+  const messageBus = host.capabilities.get(RUNTIME_MESSAGE_BUS);
   if (!messageBus) throw new Error("runtime.messageBus missing in test host");
-  const registry = host.capabilities.get<ImporterRegistry>("importer.registry");
+  const registry = host.capabilities.get(IMPORTER_REGISTRY_CAPABILITY);
   if (!registry) throw new Error("importer.registry missing in test host");
   const importers = [makeTestJsonImporter(), ...(opts.extraImporters ?? [])];
   for (const imp of importers) {

@@ -1,3 +1,4 @@
+import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
   ProtocolSpendPreview,
@@ -7,7 +8,11 @@ import type {
 import { buildBsv21P2pkhScript } from "./bsv21Script.js";
 import type { P2pkhServiceForBsv21, Bsv21ServiceHandle } from "./bsv21Service.js";
 
-export const BSV21_TRANSFER_SERVICE_CAPABILITY = "token-bsv21.transfer.service";
+export const BSV21_TRANSFER_SERVICE_CAPABILITY = defineCapability<Bsv21TransferService>({
+  kind: "local",
+  id: "token-bsv21.transfer.service",
+  version: "1",
+});
 
 export interface Bsv21TransferRequest {
   tokenId: string;

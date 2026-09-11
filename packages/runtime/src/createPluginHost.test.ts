@@ -13,15 +13,22 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { createTestPluginHost as createPluginHost } from "./testing/createTestPluginHost.js";
 import type { PluginHost } from "./pluginHostContract.js";
-import { StartupCapabilityError, StartupPluginError, type PluginIntentCoordinator } from "webloom-framework";
-import { CHANNEL_RUNTIME_CAPABILITY, type ChannelRuntime, type ChannelRuntimeFactory, type KeyValueStore, type PluginContext, type ResourceRegistry } from "@keymaster/contracts";
+import type { LocalCapability, PluginIntentCoordinator } from "webloom-framework";
+import { defineCapability } from "webloom-framework";
+import { CHANNEL_RUNTIME_CAPABILITY, type ChannelRuntime, type ChannelRuntimeFactory, type KeyValueStore, type PluginContext } from "@keymaster/contracts";
 import type { TestPluginManifest } from "./testing/createTestPluginHost.js";
 type PluginManifest = TestPluginManifest;
 import type { RouteRegistry } from "./registries/routeRegistry.js";
 import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 import { createInMemoryKeyValueStore } from "./storage/inMemoryKeyValueStore.js";
-import { createPluginIntentController, createRuntimeUnitImplementationRegistry } from "webloom-framework";
+import { createPluginIntentController, createRuntimeUnitImplementationRegistry, StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  SETTINGS_REGISTRY_CAPABILITY,
+} from "@keymaster/contracts";
 
 interface RegistryViews {
   routes: { ids: string[] };
@@ -33,16 +40,24 @@ function view(host: PluginHost): RegistryViews {
   return {
     routes: { ids: host.routes._ids() },
     settingsRoutes: { ids: host.settings._ids() },
-    capabilities: { keys: host.capabilities.keys() }
+    capabilities: { keys: host.capabilities.descriptors().map((capability) => capability.id) }
   };
 }
 
 const ROUTE_A = "test.a.route";
 const ROUTE_B = "test.b.route";
 const ROUTE_C = "test.c.route";
-const CAP_A = "test.a.cap";
-const CAP_B = "test.b.cap";
-const CAP_C = "test.c.cap";
+const CAP_A = defineCapability<{ value: string }>({ kind: "local", id: "test.a.cap", version: "1" });
+const CAP_B = defineCapability<{ value?: string; instance?: number }>({ kind: "local", id: "test.b.cap", version: "1" });
+const CAP_C = defineCapability<{ value: string }>({ kind: "local", id: "test.c.cap", version: "1" });
+const TEST_CAPABILITIES = new Map<string, LocalCapability<unknown>>();
+function testCapability<T = unknown>(id: string): LocalCapability<T> {
+  const existing = TEST_CAPABILITIES.get(id);
+  if (existing) return existing as LocalCapability<T>;
+  const created = defineCapability<T>({ kind: "local", id, version: "1" });
+  TEST_CAPABILITIES.set(id, created);
+  return created;
+}
 const TEST_RUNTIME_IDENTITY = {
   vaultStatus: "unlocked" as const,
   ownerPublicKeyHex: "02" + "11".repeat(32),
@@ -57,7 +72,7 @@ function makeA(): PluginManifest {
     description: "plugin A",
     meta: { kind: "platform", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_A] },
     setup(ctx: PluginContext) {
-      const r = ctx.get<RouteRegistry>("route.registry");
+      const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
       r.register({
         id: ROUTE_A,
         path: "/a",
@@ -69,7 +84,7 @@ function makeA(): PluginManifest {
   };
 }
 
-function makeB(dependsOn: string[] = [CAP_A]): PluginManifest {
+function makeB(dependsOn: readonly LocalCapability<unknown>[] = [CAP_A]): PluginManifest {
   return {
     id: "b",
     name: "B",
@@ -77,14 +92,14 @@ function makeB(dependsOn: string[] = [CAP_A]): PluginManifest {
     meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_B] },
     dependencies: dependsOn.map((c) => ({ capability: c })),
     setup(ctx: PluginContext) {
-      const r = ctx.get<RouteRegistry>("route.registry");
+      const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
       r.register({
         id: ROUTE_B,
         path: "/b",
         label: "B",
         component: () => null
       });
-      const s = ctx.get<SettingsRegistry>("settings.registry");
+      const s = ctx.capability(SETTINGS_REGISTRY_CAPABILITY);
       s.register({
         id: "b.settings",
         path: "/settings/b",
@@ -97,7 +112,7 @@ function makeB(dependsOn: string[] = [CAP_A]): PluginManifest {
   };
 }
 
-function makeC(dependsOn: string[] = []): PluginManifest {
+function makeC(dependsOn: readonly LocalCapability<unknown>[] = []): PluginManifest {
   return {
     id: "c",
     name: "C",
@@ -105,7 +120,7 @@ function makeC(dependsOn: string[] = []): PluginManifest {
     meta: { kind: "core", startup: "required", defaultEnabled: true, canDisable: false, providesCapabilities: [CAP_C] },
     dependencies: dependsOn.map((c) => ({ capability: c })),
     setup(ctx: PluginContext) {
-      const r = ctx.get<RouteRegistry>("route.registry");
+      const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
       r.register({
         id: ROUTE_C,
         path: "/c",
@@ -168,15 +183,16 @@ describe("createPluginHost - runtime resource binding", () => {
         activeListeners.add(handler);
         return () => activeListeners.delete(handler);
       }
-    };
+    } as unknown as import("@keymaster/contracts").KeyspaceService;
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.register({
       id: "late-keyspace",
       name: "Late keyspace",
       description: "test",
+      provides: [KEYSPACE_SERVICE_CAPABILITY],
       meta: { kind: "platform", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx) {
-        ctx.provide("keyspace.service", keyspace);
+        ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
       }
     });
     expect(activeListeners.size).toBe(1);
@@ -202,7 +218,7 @@ describe("createPluginHost - runtime resource binding", () => {
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx) {
         contextPluginId = ctx.pluginId;
-        factory = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY);
+        factory = ctx.capability(CHANNEL_RUNTIME_CAPABILITY);
       }
     });
 
@@ -270,8 +286,8 @@ describe("createPluginHost - lifecycle", () => {
     expect(host.manifests()).toEqual(expect.arrayContaining(["a", "b", "c"]));
     const g = host.graph();
     expect(g.dependencies.a).toEqual([]);
-    expect(g.dependencies.b).toEqual([CAP_A]);
-    expect(g.provides.a).toEqual([CAP_A]);
+    expect(g.dependencies.b).toEqual([CAP_A.id]);
+    expect(g.provides.a).toEqual([CAP_A.id]);
     expect(g.reverse.a?.[0]?.pluginId).toBe("b");
   });
 
@@ -287,7 +303,7 @@ describe("createPluginHost - lifecycle", () => {
         setup(ctx) {
           seenUnitId = ctx.unitId;
           seenConfig = ctx.config;
-          ctx.provide("unit-entry.service", { instanceId: ctx.instanceId });
+          ctx.provide(testCapability("unit-entry.service"), { instanceId: ctx.instanceId });
         },
       }]),
     });
@@ -300,6 +316,7 @@ describe("createPluginHost - lifecycle", () => {
         defaultEnabled: true,
         canDisable: true,
       },
+      provides: ["unit-entry.service"],
       units: [{
         id: "unit-entry.worker",
         runtime: "shared-worker",
@@ -312,7 +329,7 @@ describe("createPluginHost - lifecycle", () => {
     expect(seenUnitId).toBe("unit-entry.worker");
     expect(seenConfig).toEqual({ source: "unit", productOnly: true, unitOnly: true });
     expect(host.state("unit-entry").unitId).toBe("unit-entry.worker");
-    expect(host.capabilities.has("unit-entry.service")).toBe(true);
+    expect(host.capabilities.has(testCapability("unit-entry.service"))).toBe(true);
   });
 
   it("fails closed when a multi-unit product is loaded without an execution host", async () => {
@@ -328,8 +345,8 @@ describe("createPluginHost - lifecycle", () => {
 
     const host = createPluginHost({ disableConfigPersistence: true });
     await expect(host.register(product)).rejects.toThrow(/execution must be explicit/i);
-    expect(host.capabilities.has("multi.worker")).toBe(false);
-    expect(host.capabilities.has("multi.window")).toBe(false);
+    expect(host.capabilities.has(testCapability("multi.worker"))).toBe(false);
+    expect(host.capabilities.has(testCapability("multi.window"))).toBe(false);
   });
 
   it("runs only the selected unit in separate Worker and Window hosts", async () => {
@@ -338,18 +355,19 @@ describe("createPluginHost - lifecycle", () => {
       {
         pluginId: "split-runtime-product",
         unitId: "split-runtime.worker",
-        setup(ctx) { starts.push(`worker:${ctx.unitId}`); ctx.provide("split.worker", ctx.instanceId); },
+        setup(ctx) { starts.push(`worker:${ctx.unitId}`); ctx.provide(testCapability("split.worker"), ctx.instanceId); },
       },
       {
         pluginId: "split-runtime-product",
         unitId: "split-runtime.window",
-        setup(ctx) { starts.push(`window:${ctx.unitId}`); ctx.provide("split.window", ctx.instanceId); },
+        setup(ctx) { starts.push(`window:${ctx.unitId}`); ctx.provide(testCapability("split.window"), ctx.instanceId); },
       },
     ]);
     const product: PluginManifest = {
       id: "split-runtime-product",
       name: "Split runtime product",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      provides: ["split.worker", "split.window"],
       units: [
         {
           id: "split-runtime.worker",
@@ -382,8 +400,8 @@ describe("createPluginHost - lifecycle", () => {
       { unitId: "split-runtime.worker", kind: "unknown", error: "远程运行单元快照不可用（状态未知）" },
       { unitId: "split-runtime.window", kind: "enabled", instanceId: expect.any(String) },
     ]);
-    expect(workerHost.capabilities.has("split.window")).toBe(false);
-    expect(windowHost.capabilities.has("split.worker")).toBe(false);
+    expect(workerHost.capabilities.has(testCapability("split.window"))).toBe(false);
+    expect(windowHost.capabilities.has(testCapability("split.worker"))).toBe(false);
   });
 
   it("does not require provider-before-consumer manifest order and restores desired consumers", async () => {
@@ -405,8 +423,9 @@ describe("createPluginHost - lifecycle", () => {
       id: "chain-c",
       name: "Chain C",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: ["chain.c"] },
+      provides: ["chain.c"],
       dependencies: [{ capability: CAP_B }],
-      setup(ctx) { ctx.provide("chain.c", { ok: true }); },
+      setup(ctx) { ctx.provide(testCapability("chain.c"), { ok: true }); },
     };
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.registerAll([c, b, makeA()]);
@@ -428,6 +447,7 @@ describe("createPluginHost - lifecycle", () => {
       id: "starting-consumer",
       name: "Starting consumer",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_B] },
+      provides: [CAP_B],
       dependencies: [{ capability: CAP_A }],
       async setup(ctx) {
         consumerStarts += 1;
@@ -453,7 +473,7 @@ describe("createPluginHost - lifecycle", () => {
       kind: "blocked",
       lifecycleState: "waiting",
       desiredEnabled: true,
-      blockedBy: [CAP_A],
+      blockedBy: [`missing:${CAP_A.kind}:${CAP_A.id}@${CAP_A.version}`],
     });
     expect(host.capabilities.has(CAP_B)).toBe(false);
 
@@ -498,13 +518,14 @@ describe("createPluginHost - lifecycle", () => {
       runtimeUnitImplementationRegistry: createRuntimeUnitImplementationRegistry([{
         pluginId: "intent-product",
         unitId: "intent-product.window",
-        setup(ctx) { ctx.provide("intent.product", { ready: true }); },
+        setup(ctx) { ctx.provide(testCapability("intent.product"), { ready: true }); },
       }]),
     });
     await host.register({
       id: "intent-product",
       name: "Intent product",
       meta: { kind: "business", startup: "optional", defaultEnabled: false, canDisable: true },
+      provides: ["intent.product"],
       units: [{
         id: "intent-product.window",
         runtime: "window-main",
@@ -581,7 +602,8 @@ describe("createPluginHost - lifecycle", () => {
       id: "config-fenced",
       name: "Config fenced",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      setup(ctx) { ctx.provide("config-fenced.service", true); },
+      provides: ["config-fenced.service"],
+      setup(ctx) { ctx.provide(testCapability("config-fenced.service"), true); },
     });
 
     host.configStore.setEnabled("config-fenced", false);
@@ -682,7 +704,7 @@ describe("createPluginHost - lifecycle", () => {
     expect(host.state("a").kind).toBe("enabled");
     const before = view(host);
     expect(before.routes.ids).toContain(ROUTE_A);
-    expect(before.capabilities.keys).toContain(CAP_A);
+    expect(before.capabilities.keys).toContain(CAP_A.id);
 
     const r = await host.disable("a");
     expect(r).toEqual({ ok: true });
@@ -690,7 +712,7 @@ describe("createPluginHost - lifecycle", () => {
 
     const after = view(host);
     expect(after.routes.ids).not.toContain(ROUTE_A);
-    expect(after.capabilities.keys).not.toContain(CAP_A);
+    expect(after.capabilities.keys).not.toContain(CAP_A.id);
   });
 
   it("removes routes synchronously even when teardown never returns", async () => {
@@ -700,13 +722,13 @@ describe("createPluginHost - lifecycle", () => {
       name: "Hanging teardown",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx) {
-        ctx.get<RouteRegistry>("route.registry").register({
+        ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "hanging-teardown.route",
           path: "/hanging-teardown",
           label: "Hanging teardown",
           component: () => null,
         });
-        ctx.get<ResourceRegistry>("resource.registry").register({
+        ctx.capability(RESOURCE_REGISTRY_CAPABILITY).register({
           id: "hanging-teardown.resource",
           scope: "global",
           key: () => ["hanging-teardown.resource"],
@@ -720,7 +742,7 @@ describe("createPluginHost - lifecycle", () => {
     const disabling = host.disable("hanging-teardown");
     // beginPluginStop() 的同步撤权必须先于网络/异步 teardown。
     expect(host.routes.byId("hanging-teardown.route")).toBeUndefined();
-    expect(host.capabilities.get<ResourceRegistry>("resource.registry").get("hanging-teardown.resource")).toBeUndefined();
+    expect(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY).get("hanging-teardown.resource")).toBeUndefined();
     await disabling;
     expect(host.state("hanging-teardown").kind).toBe("cleanup-pending");
   });
@@ -751,13 +773,13 @@ describe("createPluginHost - lifecycle", () => {
       }],
       setup(ctx) {
         instances.push(ctx.instanceId);
-        ctx.get<RouteRegistry>("route.registry").register({
+        ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "owner-session-plugin.route",
           path: "/owner-session-plugin",
           label: "Owner session plugin",
           component: () => null,
         });
-        ctx.provide("owner-session-plugin.service", true);
+        ctx.provide(testCapability("owner-session-plugin.service"), true);
       },
     });
 
@@ -774,7 +796,7 @@ describe("createPluginHost - lifecycle", () => {
     });
     // 同步撤权发生在 transition API 返回前，不等待 teardown。
     expect(host.routes.byId("owner-session-plugin.route")).toBeUndefined();
-    expect(host.capabilities.has("owner-session-plugin.service")).toBe(false);
+    expect(host.capabilities.has(testCapability("owner-session-plugin.service"))).toBe(false);
     await lockTransition;
     expect(host.state("owner-session-plugin")).toMatchObject({
       kind: "blocked",
@@ -845,7 +867,7 @@ describe("createPluginHost - lifecycle", () => {
       }],
       setup: async (ctx) => {
         instances.push(ctx.instanceId);
-        ctx.get<RouteRegistry>("route.registry").register({
+        ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "owner-session-starting.route",
           path: "/owner-session-starting",
           label: "Owner session starting",
@@ -855,7 +877,7 @@ describe("createPluginHost - lifecycle", () => {
         await setupReleased;
         // setup 的迟到完成不能把能力发布回已撤销的 owner 世代。
         if (ctx.signal.aborted) return;
-        ctx.provide("owner-session-starting.service", true);
+        ctx.provide(testCapability("owner-session-starting.service"), true);
       },
     });
     await started;
@@ -869,7 +891,7 @@ describe("createPluginHost - lifecycle", () => {
     });
     // lock 的同步阶段先撤销所有本地入口，再等待 setup 完成。
     expect(host.routes.byId("owner-session-starting.route")).toBeUndefined();
-    expect(host.capabilities.has("owner-session-starting.service")).toBe(false);
+    expect(host.capabilities.has(testCapability("owner-session-starting.service"))).toBe(false);
     releaseSetup();
     await registering;
     await locking;
@@ -1019,7 +1041,7 @@ describe("createPluginHost - lifecycle", () => {
     const r = await host.disable("a");
     expect(r).toEqual({ ok: true });
     expect(host.state("a").kind).toBe("disabled");
-    expect(host.state("b")).toMatchObject({ kind: "blocked", desiredEnabled: true, blockedBy: [CAP_A] });
+    expect(host.state("b")).toMatchObject({ kind: "blocked", desiredEnabled: true, blockedBy: [`missing:${CAP_A.kind}:${CAP_A.id}@${CAP_A.version}`] });
     expect(host.installed()).not.toEqual(expect.arrayContaining(["a", "b"]));
     expect(host.configStore.read().b).toBe(true);
 
@@ -1033,8 +1055,9 @@ describe("createPluginHost - lifecycle", () => {
       id: "optional-consumer",
       name: "Optional consumer",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      provides: ["optional-consumer.service"],
       dependencies: [{ capability: CAP_A, optional: true }],
-      setup(ctx) { ctx.provide("optional-consumer.service", true); },
+      setup(ctx) { ctx.provide(testCapability("optional-consumer.service"), true); },
     };
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.registerAll([makeA(), consumer]);
@@ -1042,7 +1065,7 @@ describe("createPluginHost - lifecycle", () => {
     await host.disable("a");
     expect(host.state("a").kind).toBe("disabled");
     expect(host.state(consumer.id)).toMatchObject({ kind: "enabled", desiredEnabled: true });
-    expect(host.capabilities.has("optional-consumer.service")).toBe(true);
+    expect(host.capabilities.has(testCapability("optional-consumer.service"))).toBe(true);
   });
 
   it("enable restores owner resources", async () => {
@@ -1100,7 +1123,7 @@ describe("createPluginHost - lifecycle", () => {
       name: "Dispose hook",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx) {
-        const routes = ctx.get<RouteRegistry>("route.registry");
+        const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
         routes.register({ id: "dispose.route", path: "/dispose", label: "Dispose", component: () => null });
         ctx.onDispose(() => { events.push(routes.byId("dispose.route") ? "dispose:before-purge" : "dispose:after-purge"); });
         return () => { events.push(routes.byId("dispose.route") ? "teardown:before-purge" : "teardown:after-purge"); };
@@ -1118,7 +1141,7 @@ describe("createPluginHost - lifecycle", () => {
       name: "Bad",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
-        const r = ctx.get<RouteRegistry>("route.registry");
+        const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
         r.register({ id: "bad.route", path: "/bad", label: "Bad", component: () => null });
         throw new Error("setup failed");
       }
@@ -1160,7 +1183,7 @@ describe("createPluginHost - lifecycle", () => {
       setup: async (ctx) => {
         await setupFinished;
         // disable 已撤销 context；这条迟到注册必须失败并被 Host 收尾。
-        ctx.get<RouteRegistry>("route.registry").register({
+        ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "starting.route",
           path: "/starting",
           label: "Starting",
@@ -1188,13 +1211,14 @@ describe("createPluginHost - lifecycle", () => {
       id: "starting-reenable",
       name: "Starting re-enable",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      provides: ["starting-reenable.service"],
       setup: async (ctx) => {
         starts += 1;
         if (starts === 1) {
           await setupFinished;
           return;
         }
-        ctx.provide("starting-reenable.service", { instance: starts });
+        ctx.provide(testCapability("starting-reenable.service"), { instance: starts });
       },
     };
 
@@ -1223,10 +1247,11 @@ describe("createPluginHost - lifecycle", () => {
       id: "stopping-reenable",
       name: "Stopping re-enable",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      provides: ["stopping-reenable.service"],
       setup(ctx) {
         starts += 1;
         if (starts === 1) ctx.onDispose(() => cleanupPending);
-        ctx.provide("stopping-reenable.service", { starts });
+        ctx.provide(testCapability("stopping-reenable.service"), { starts });
       },
     };
     const host = createPluginHost({ disableConfigPersistence: true });
@@ -1253,7 +1278,7 @@ describe("createPluginHost - lifecycle", () => {
       name: "Late registry",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx) {
-        const routes = ctx.get<RouteRegistry>("route.registry");
+        const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
         registerLate = () => routes.register({
           id: "late-registry.route",
           path: "/late-registry",
@@ -1280,15 +1305,16 @@ describe("createPluginHost - lifecycle", () => {
       id: "late-capability",
       name: "Late capability",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      provides: ["late-capability.service"],
       setup(ctx) {
-        provideLate = () => ctx.provide("late-capability.service", { ok: true });
+        provideLate = () => ctx.provide(testCapability("late-capability.service"), { ok: true });
       },
     };
     await host.register(plugin);
     provideLate();
-    expect(host.capabilities.has("late-capability.service")).toBe(true);
+    expect(host.capabilities.has(testCapability("late-capability.service"))).toBe(true);
     await host.disable(plugin.id);
-    expect(host.capabilities.has("late-capability.service")).toBe(false);
+    expect(host.capabilities.has(testCapability("late-capability.service"))).toBe(false);
   });
 
   it("missing dependency blocks enable (sets state to blocked)", async () => {
@@ -1319,8 +1345,9 @@ describe("createPluginHost - startup contract", () => {
         canDisable: false,
         providesCapabilities: ["required.service"]
       },
+      provides: ["required.service"],
       setup(ctx) {
-        ctx.provide("required.service", { ok: true });
+        ctx.provide(testCapability("required.service"), { ok: true });
       },
       ...overrides
     };
@@ -1353,7 +1380,7 @@ describe("createPluginHost - startup contract", () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     const plugin = required({
       setup(ctx) {
-        ctx.get<RouteRegistry>("route.registry").register({
+        ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "required.route",
           path: "/required",
           label: "required",
@@ -1364,14 +1391,14 @@ describe("createPluginHost - startup contract", () => {
     });
     await expect(host.register(plugin)).rejects.toBeInstanceOf(StartupPluginError);
     expect(host.routes.byId("required.route")).toBeUndefined();
-    expect(host.capabilities.has("required.service")).toBe(false);
+    expect(host.capabilities.has(testCapability("required.service"))).toBe(false);
     expect(host.state("required").kind).toBe("error-disabled");
   });
 
   it("rejects a required provider that fails to provide its declaration", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     await expect(host.register(required({ setup() {} }))).rejects.toBeInstanceOf(StartupPluginError);
-    expect(host.capabilities.has("required.service")).toBe(false);
+    expect(host.capabilities.has(testCapability("required.service"))).toBe(false);
   });
 
   it("keeps required capability and config on disable, unregister, and false config", async () => {
@@ -1380,7 +1407,7 @@ describe("createPluginHost - startup contract", () => {
     expect(await host.disable("required")).toEqual({ ok: false, reason: "Plugin is marked canDisable=false" });
     await expect(host.unregister("required")).rejects.toThrow(/startup-required/);
     host.configStore.setEnabled("required", false);
-    expect(host.capabilities.has("required.service")).toBe(true);
+    expect(host.capabilities.has(testCapability("required.service"))).toBe(true);
     expect(host.configStore.read().required).toBe(true);
   });
 
@@ -1389,7 +1416,7 @@ describe("createPluginHost - startup contract", () => {
     const provider = required({ setup() { throw new Error("private stack detail"); } });
     await expect(host.register(provider)).rejects.toBeInstanceOf(StartupPluginError);
     try {
-      host.assertCapabilities(["required.service"], { phase: "test" });
+      host.assertCapabilities([testCapability("required.service")], { phase: "test" });
       throw new Error("expected assertion to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(StartupCapabilityError);

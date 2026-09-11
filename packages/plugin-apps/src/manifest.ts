@@ -22,8 +22,12 @@ import type {
   RouteRegistry
 } from "@keymaster/contracts";
 import {
+  APP_CATALOG_CAPABILITY,
+  PROTOCOL_SERVICE_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  capabilityDescriptor,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { AppsPage } from "./AppsPage.js";
@@ -118,31 +122,28 @@ const appsPluginDefinition = {
   id: "apps",
   name: "Apps",
   description: "Keymaster 内部 app launcher：从本地 JSON 清单展示 app，并在当前 Keymaster 窗口作为 launcher 启动 appView。",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "connect-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "business",
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "connect-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [{
     id: "apps.window",
     runtime: "window-main",
     scopeKind: "root",
-    provides: ["app.catalog"],
-    providedContracts: defineRuntimeUnitProvidedContracts(["app.catalog"]),
+    provides: [capabilityDescriptor(APP_CATALOG_CAPABILITY)],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" },
-      { capability: "route.registry", reason: "注册应用列表页面" },
-      { capability: "business.registry", reason: "接入首页业务导航" },
+      { capability: PROTOCOL_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "调用 launchAppView 启动 appView" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册应用列表页面" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "接入首页业务导航" },
     ]),
   }],
   i18n: appsResources,
   setup(ctx) {
     // 暴露只读本地 resolver；协议层通过依赖注入消费，绝不反向 import 本插件。
-    ctx.provide("app.catalog", createCatalogResolver());
-    const routes = ctx.get<RouteRegistry>("route.registry");
+    ctx.provide(APP_CATALOG_CAPABILITY, createCatalogResolver());
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
     routes.register({
       id: "apps.launcher",
       path: "/apps",
@@ -150,7 +151,7 @@ const appsPluginDefinition = {
       component: AppsPage
     });
 
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("apps", "home", {
       id: "home.apps",
       label: { key: "apps.menu.label", fallback: "Apps" },

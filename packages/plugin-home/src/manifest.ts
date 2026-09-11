@@ -2,6 +2,9 @@
 // 首页插件：注册 / 路由和菜单入口。
 
 import {
+  HOME_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  CONTACTS_SERVICE_CAPABILITY,
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   defineRuntimeUnitDependencies,
@@ -117,24 +120,22 @@ const homePluginDefinition = {
   id: "home",
   name: "Home",
   description: "首页容器。",
-  meta: {
-    kind: "core",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "core"
-  },
+  kind: "core",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "core",
   units: [{
     id: "home.window",
     runtime: "window-main",
     scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "home.registry", reason: "读取首页主栏与侧栏卡片" },
-      { capability: "business.registry", reason: "读取业务首页投影" },
-      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "展示当前 key 的身份信息" },
-      { capability: "contacts.service", reason: "查询和创建联系人" },
-      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, reason: "展示扫描到的公钥可执行操作" },
+      { capability: HOME_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "读取首页主栏与侧栏卡片" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "读取业务首页投影" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "展示当前 key 的身份信息" },
+      { capability: CONTACTS_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "查询和创建联系人" },
+      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "展示扫描到的公钥可执行操作" },
     ]),
     business: {
       domains: [{

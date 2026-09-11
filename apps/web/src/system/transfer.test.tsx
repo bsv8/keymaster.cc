@@ -53,11 +53,12 @@ vi.mock("webloom-framework/react", () => ({
     if (resourceId === "transfer.recipient-collectibles") return mocks.collectibles;
     throw new Error(`unexpected resource ${resourceId}`);
   },
-  useCapability: (capability: string) => {
-    if (capability === "transfer.registry") return { list: () => [mocks.provider] };
-    if (capability === "collectible-transfer.registry") return { listSupporting: mocks.listSupporting };
-    if (capability === "contacts.picker") return mocks.contactPicker;
-    if (capability === "feature.transfer") {
+  useCapability: (capability: string | { id: string }) => {
+    const capabilityId = typeof capability === "string" ? capability : capability.id;
+    if (capabilityId === "transfer.registry") return { list: () => [mocks.provider] };
+    if (capabilityId === "collectible-transfer.registry") return { listSupporting: mocks.listSupporting };
+    if (capabilityId === "contacts.picker") return mocks.contactPicker;
+    if (capabilityId === "feature.transfer") {
       return {
         subscribe: () => () => undefined,
         listSources: () => [],
@@ -67,6 +68,10 @@ vi.mock("webloom-framework/react", () => ({
       };
     }
     throw new Error(`unexpected capability ${capability}`);
+  },
+  useOptionalCapability: (capability: string | { id: string }) => {
+    const capabilityId = typeof capability === "string" ? capability : capability.id;
+    return capabilityId === "contacts.picker" ? mocks.contactPicker : undefined;
   }
 }));
 

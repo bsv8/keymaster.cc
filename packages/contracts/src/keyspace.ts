@@ -1,4 +1,5 @@
 // packages/contracts/src/keyspace.ts
+import { defineCapability } from "webloom-framework";
 // Keyspace 平台契约：Active Key + Key Namespace 存储 + Key 删除。
 // 设计缘由：
 //   - KeyIdentity 使用公钥身份（publicKeyHex），不使用私钥、地址或
@@ -145,7 +146,11 @@ export interface KeyspaceService {
 }
 
 /** keyspace capability key。 */
-export const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
+export const KEYSPACE_SERVICE_CAPABILITY = defineCapability<KeyspaceService>({
+  kind: "local",
+  id: "keyspace.service",
+  version: "1",
+});
 
 /** 事件：key 被创建。payload 携带 publicKeyHex / label。 */
 export const EVENT_KEY_CREATED = "key.created";

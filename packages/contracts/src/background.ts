@@ -1,5 +1,6 @@
 // packages/contracts/src/background.ts
 // 后台任务通用契约。
+import { defineCapability } from "webloom-framework";
 // 设计缘由：后台任务由 plugin-background 拥有，业务插件只注册任务并
 // 订阅 snapshot；不直接持久化业务游标。
 
@@ -251,5 +252,13 @@ export const BACKGROUND_TRIGGER_REASON = {
 } as const;
 
 /** capability keys。 */
-export const BACKGROUND_REGISTRY_CAPABILITY = "background.registry";
-export const BACKGROUND_SERVICE_CAPABILITY = "background.service";
+export const BACKGROUND_REGISTRY_CAPABILITY = defineCapability<BackgroundRegistry>({
+  kind: "local",
+  id: "background.registry",
+  version: "1",
+});
+export const BACKGROUND_SERVICE_CAPABILITY = defineCapability<BackgroundService>({
+  kind: "local",
+  id: "background.service",
+  version: "1",
+});

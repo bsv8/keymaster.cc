@@ -32,6 +32,7 @@ import {
 import { useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { router, useI18n, useLocale, usePluginHost, useRegistry } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
   KeyIdentity,
@@ -48,9 +49,9 @@ import { KeyPersistedButActivationFailedError } from "./vaultService.js";
 import { VaultKeySwitchModal } from "./VaultKeySwitchModal.js";
 
 export function VaultSettingsPage() {
-  const vault = useCapability<VaultService>("vault.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const storage = useOptionalCapability<{ isCatalogBucket?: () => boolean }>("storage.runtime-controller");
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const isCatalogBucket = storage?.isCatalogBucket?.() === true;
   const host = usePluginHost();
   const { t } = useI18n();

@@ -26,6 +26,11 @@ import type {
   ImporterRegistry
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
+import {
+  IMPORTER_REGISTRY_CAPABILITY,
+  RUNTIME_MESSAGE_BUS,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import { FirstTimeImportWizard } from "./FirstTimeImportWizard.js";
 import { keyImportResources } from "@keymaster/plugin-key-import/manifest";
 import { SHELL_RESOURCES } from "../i18n/resources";
@@ -37,10 +42,10 @@ function createWizardHost() {
     initialI18nResources: [keyImportResources, SHELL_RESOURCES]
   });
   const vault: VaultService = makeStubVault();
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  const messageBus = host.capabilities.get<MessageBus>("runtime.messageBus");
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  const messageBus: MessageBus = host.capabilities.get(RUNTIME_MESSAGE_BUS);
   if (!messageBus) throw new Error("missing messageBus");
-  const registry = host.capabilities.get<ImporterRegistry>("importer.registry");
+  const registry = host.capabilities.get(IMPORTER_REGISTRY_CAPABILITY);
   if (!registry) throw new Error("missing registry");
   registry.register(makeTestJsonImporter());
   return { host, vault };

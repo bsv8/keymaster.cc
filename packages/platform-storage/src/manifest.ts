@@ -1,6 +1,6 @@
 import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, StorageRuntimeController, StorageCoordinatorControl, TopbarRegistry } from "@keymaster/contracts";
-import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
+import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, TOPBAR_REGISTRY_CAPABILITY, capabilityDescriptor } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { StorageBucketManagerEntry } from "./ui/StorageBucketManagerPage.js";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 import type { StorageRuntimeSnapshot } from "./runtime/storageRuntimeController.js";
@@ -414,14 +414,15 @@ const storagePlatformPluginDefinition = {
   id: STORAGE_PLATFORM_PLUGIN_ID,
   name: "Storage",
   description: "隔离的 Connect S3-compatible object storage capability.",
-  meta: { kind: "platform", startup: "required", bootstrapStage: "storage-onboarding", defaultEnabled: true, canDisable: false, displayGroup: "platform" },
+  kind: "platform", startup: "required", bootstrapStage: "storage-onboarding", defaultEnabled: true, canDisable: false, displayGroup: "platform",
   units: [{
     id: "storage.window",
     runtime: "window-main",
     scopeKind: "storage",
-    provides: [STORAGE_RUNTIME_CONTROLLER_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([STORAGE_RUNTIME_CONTROLLER_CAPABILITY]),
-    dependencies: defineRuntimeUnitDependencies([]),
+    provides: [capabilityDescriptor(STORAGE_RUNTIME_CONTROLLER_CAPABILITY)],
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main" },
+    ]),
   }, {
     id: "storage.coordinator-worker",
     runtime: "shared-worker",
@@ -432,8 +433,8 @@ const storagePlatformPluginDefinition = {
     const coordinator = ctx.coordinator as StorageCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Storage Coordinator control is unavailable");
     const service = new StorageRpcProxy(coordinator);
-    ctx.provide<StorageRuntimeController>(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, service);
-    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    ctx.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, service);
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     const resourceId = "storage.status";
     resources.register<StorageRuntimeSnapshot, readonly string[]>({
       id: resourceId,
@@ -443,7 +444,7 @@ const storagePlatformPluginDefinition = {
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
     });
-    const topbar = ctx.get<TopbarRegistry>("topbar.registry");
+    const topbar = ctx.capability(TOPBAR_REGISTRY_CAPABILITY);
     const topbarId = "storage.bucket-manager";
     topbar.register({
       id: topbarId,

@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { AssetRegistry, AssetSummary, BsvNetwork, I18nText, KeyIdentity, TokenRegistry } from "@keymaster/contracts";
+import { ASSET_REGISTRY_CAPABILITY, TOKEN_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useCurrentPath, useI18n, usePluginHost } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
@@ -64,8 +65,8 @@ export function AssetsPage() {
   useCurrentPath();
   const { t } = useI18n();
   const host = usePluginHost();
-  const assets = useCapability<AssetRegistry>("asset.registry");
-  const tokens = useCapability<TokenRegistry>("token.registry");
+  const assets = useCapability(ASSET_REGISTRY_CAPABILITY);
+  const tokens = useCapability(TOKEN_REGISTRY_CAPABILITY);
   const rows = useResourceSelector<HoldingRowsResult, HoldingRowsResult>(
     host.resourceStore,
     "assets.holdings",

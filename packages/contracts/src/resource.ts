@@ -1,3 +1,6 @@
+import { defineCapability } from "webloom-framework";
+import type { CapabilityDescriptor } from "webloom-framework";
+
 /**
  * Runtime Resource Store 契约
  *
@@ -23,7 +26,7 @@ export interface ResourceSnapshot<T> {
 /** 资源上下文：由 runtime 创建，包含稳定的只读 capability reader、当前 active-key 快照等 */
 export interface ResourceContext {
   /** 获取 capability */
-  getCapability<T>(id: string): T | undefined;
+  getCapability<T>(capability: string | CapabilityDescriptor): T | undefined;
   /** 当前 active public key hex（可能为 undefined） */
   readonly activePublicKeyHex: string | undefined;
   /** 插件 owner ID（由 runtime 在注册时绑定，插件代码不可写入） */
@@ -66,5 +69,9 @@ export interface ResourceRegistry {
   _ids(): string[];
 }
 
-/** Resource Registry capability key */
-export const RESOURCE_REGISTRY_CAPABILITY = "resource.registry";
+/** Resource Registry capability */
+export const RESOURCE_REGISTRY_CAPABILITY = defineCapability<ResourceRegistry>({
+  kind: "local",
+  id: "resource.registry",
+  version: "1",
+});

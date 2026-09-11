@@ -9,11 +9,22 @@
 // 向导，调 `vault.createVaultWithImportedKey` 一次性建 Vault + 落首 Key
 // + 切 active。不允许在 uninitialized 状态下进入此工作区。
 
+import { defineCapability } from "webloom-framework";
 import type { I18nPluginResources, PluginManifest, PluginSetup, VaultSettingsRegistry } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
+import {
+  VAULT_SERVICE_CAPABILITY,
+  IMPORTER_REGISTRY_CAPABILITY,
+  VAULT_SETTINGS_REGISTRY_CAPABILITY,
+  capabilityDescriptor,
+  defineRuntimeUnitDependencies,
+} from "@keymaster/contracts";
 import { KeyImportSection } from "./ImportPage.js";
 
-export const KEY_IMPORT_CAPABILITY = "key-import.platform";
+export const KEY_IMPORT_CAPABILITY = defineCapability<{ readonly version: number }>({
+  kind: "local",
+  id: "key-import.platform",
+  version: "1",
+});
 
 export const keyImportResources: I18nPluginResources = {
   namespace: "keyImport",
@@ -124,31 +135,28 @@ const keyImportPluginDefinition = {
   id: "key-import",
   name: "Key Import",
   description: "统一导入平台：选择 importer、解析、调用 vault。",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "vault-selection",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "business"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "vault-selection",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [{
     id: "key-import.window",
     runtime: "window-main",
     scopeKind: "root",
-    provides: [KEY_IMPORT_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([KEY_IMPORT_CAPABILITY]),
+    provides: [capabilityDescriptor(KEY_IMPORT_CAPABILITY)],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "vault.service", reason: "导入私钥需要 vault 提供加解密" },
-      { capability: "importer.registry", reason: "依赖 importer 注册表枚举导入器" },
-      { capability: "vault-settings.registry", reason: "将导入工作区嵌入 Key 管理页" },
+      { capability: VAULT_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "导入私钥需要 vault 提供加解密" },
+      { capability: IMPORTER_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "依赖 importer 注册表枚举导入器" },
+      { capability: VAULT_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将导入工作区嵌入 Key 管理页" },
     ]),
   }],
   i18n: keyImportResources,
   setup(ctx) {
     ctx.provide(KEY_IMPORT_CAPABILITY, { version: 1 });
 
-    const vaultSettings = ctx.get<VaultSettingsRegistry>("vault-settings.registry");
+    const vaultSettings = ctx.capability(VAULT_SETTINGS_REGISTRY_CAPABILITY);
     vaultSettings.register({
       id: "key-import.import",
       label: { key: "keyImport.page.title", fallback: "Import a key" },

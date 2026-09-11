@@ -1,14 +1,38 @@
 // packages/contracts/src/registries.ts
+import { defineCapability } from "webloom-framework";
 // 各种 registry 的接口声明。
 // 设计缘由：plugin 通过 capability 拿到这些 registry；类型契约放在 contracts，
 // 实现放在 runtime。这避免 plugin 直接依赖 runtime 内部模块。
 
 import type { AppRoute, ApplicationSettingsItem, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, SettingsRoute, SystemSettingsItem, SystemStatusModule, TransferRegistry as ITransferRegistry, VaultSettingsSection } from "./index.js";
+import type { TokenRegistry } from "./tokens.js";
+import type { CollectibleRegistry } from "./collectibles.js";
+import type { CollectibleTransferRegistry } from "./collectibleTransfer.js";
 import type { TopbarRegistry as ITopbarRegistry } from "./topbar.js";
 import type { BackgroundRegistry as IBackgroundRegistry, BackgroundService as IBackgroundService } from "./background.js";
 import type { NoticeRecord } from "./notice.js";
 import type { I18nText } from "./i18n.js";
 import type { BusinessDomain, BusinessFeature, FeatureHomeProjection } from "./business.js";
+
+/** Typed platform registry capabilities. */
+export const ROUTE_REGISTRY_CAPABILITY = defineCapability<RouteRegistry>({ kind: "local", id: "route.registry", version: "1" });
+export const BREADCRUMB_REGISTRY_CAPABILITY = defineCapability<BreadcrumbRegistry>({ kind: "local", id: "breadcrumb.registry", version: "1" });
+export const SETTINGS_REGISTRY_CAPABILITY = defineCapability<SettingsRegistry>({ kind: "local", id: "settings.registry", version: "1" });
+export const SYSTEM_SETTINGS_REGISTRY_CAPABILITY = defineCapability<SystemSettingsRegistry>({ kind: "local", id: "system-settings.registry", version: "1" });
+export const SYSTEM_STATUS_REGISTRY_CAPABILITY = defineCapability<SystemStatusRegistry>({ kind: "local", id: "system-status.registry", version: "1" });
+export const VAULT_SETTINGS_REGISTRY_CAPABILITY = defineCapability<VaultSettingsRegistry>({ kind: "local", id: "vault-settings.registry", version: "1" });
+export const APPLICATION_SETTINGS_REGISTRY_CAPABILITY = defineCapability<ApplicationSettingsRegistry>({ kind: "local", id: "application-settings.registry", version: "1" });
+export const HOME_REGISTRY_CAPABILITY = defineCapability<HomeRegistry>({ kind: "local", id: "home.registry", version: "1" });
+export const BUSINESS_REGISTRY_CAPABILITY = defineCapability<BusinessFeatureRegistry>({ kind: "local", id: "business.registry", version: "1" });
+export const COMMAND_REGISTRY_CAPABILITY = defineCapability<CommandRegistry>({ kind: "local", id: "command.registry", version: "1" });
+export const IMPORTER_REGISTRY_CAPABILITY = defineCapability<IImporterRegistry>({ kind: "local", id: "importer.registry", version: "1" });
+export const TRANSFER_REGISTRY_CAPABILITY = defineCapability<ITransferRegistry>({ kind: "local", id: "transfer.registry", version: "1" });
+export const ASSET_REGISTRY_CAPABILITY = defineCapability<IAssetRegistry>({ kind: "local", id: "asset.registry", version: "1" });
+export const TOKEN_REGISTRY_CAPABILITY = defineCapability<TokenRegistry>({ kind: "local", id: "token.registry", version: "1" });
+export const COLLECTIBLE_REGISTRY_CAPABILITY = defineCapability<CollectibleRegistry>({ kind: "local", id: "collectible.registry", version: "1" });
+export const COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY = defineCapability<CollectibleTransferRegistry>({ kind: "local", id: "collectible-transfer.registry", version: "1" });
+export const PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED = defineCapability<import("./spendProtection.js").ProtectedOutpointRegistry>({ kind: "local", id: "protected-outpoint.registry", version: "1" });
+export const NOTICE_REGISTRY_TYPED_CAPABILITY = defineCapability<NoticeRegistry>({ kind: "local", id: "notice.registry", version: "1" });
 
 export interface RouteRegistry {
   register(route: AppRoute): void;

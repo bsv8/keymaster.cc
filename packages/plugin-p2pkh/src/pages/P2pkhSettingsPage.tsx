@@ -12,13 +12,14 @@ import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 import { resolveP2pkhFeeRateSatoshisPerKb, type P2pkhFeeRateTier, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
+import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 
 const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
 
 export function P2pkhSettingsPage() {
   const host = usePluginHost();
-  const service = useCapability<P2pkhService>("p2pkh.service");
-  const coordinator = useCapability<P2pkhCoordinatorControl>(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
+  const service = useCapability(P2PKH_CAPABILITY);
+  const coordinator = useCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
   const resourceSettings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     host.resourceStore,

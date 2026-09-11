@@ -66,10 +66,10 @@ export function PluginManagerPage() {
     return [...ids]
       .map((id) => runtime.getManifest(id))
       .filter((m): m is PluginManifest => Boolean(m))
-      .filter((m) => m.meta?.canDisable === true)
+      .filter((m) => m.canDisable === true)
       .sort((a, b) => {
-        const ga = a.meta?.displayGroup ?? a.meta?.kind ?? "business";
-        const gb = b.meta?.displayGroup ?? b.meta?.kind ?? "business";
+        const ga = a.displayGroup ?? a.kind ?? "business";
+        const gb = b.displayGroup ?? b.kind ?? "business";
         if (ga !== gb) return ga.localeCompare(gb);
         return a.id.localeCompare(b.id);
       });
@@ -122,7 +122,7 @@ export function PluginManagerPage() {
           const enabled = state.kind === "enabled";
           const activeLike = state.kind === "enabled" || state.kind === "starting" || state.kind === "stopping";
           const transitionInProgress = state.kind === "starting" || state.kind === "stopping";
-          const canDisable = m.meta?.canDisable !== false;
+          const canDisable = m.canDisable !== false;
           const deps = graph.dependencies[m.id] ?? [];
           const provides = graph.provides[m.id] ?? [];
           const reverse = runtime.reverseDeps(m.id);
@@ -153,8 +153,8 @@ export function PluginManagerPage() {
                     <code>{m.id}</code>
                   </span>
                   <span className="plugin-card__group">
-                    {groupLabel(m.meta?.displayGroup ?? m.meta?.kind, (k) =>
-                      t(k, { defaultValue: m.meta?.displayGroup ?? m.meta?.kind ?? "other" })
+                    {groupLabel(m.displayGroup ?? m.kind, (k) =>
+                      t(k, { defaultValue: m.displayGroup ?? m.kind ?? "other" })
                     )}
                   </span>
                 </div>

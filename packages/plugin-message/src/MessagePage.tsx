@@ -12,9 +12,9 @@
 // 跨标签同步、请求去重、失效批处理由 resource 处理。
 
 import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useOptionalCapability, useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost, router } from "@keymaster/runtime";
-import type { Contact, KeyspaceService } from "@keymaster/contracts";
+import { CONTACTS_EDITOR_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, MESSAGE_SERVICE_CAPABILITY, type Contact } from "@keymaster/contracts";
 import { Button, EmptyState, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import type { MessageService } from "./messageService.js";
 import type { MessageConversationsData } from "./manifest.js";
@@ -29,13 +29,12 @@ interface ContactsEditorProps {
   onSaved: (contact: Contact) => void;
 }
 
-const CONTACTS_EDITOR_CAPABILITY = "contacts.editor";
 const PUBLIC_KEY_HEX_PATTERN = /^[0-9a-f]{66}$/;
 const EMPTY_CONVERSATIONS_DATA: MessageConversationsData = { messages: [], contactsByPeer: {} };
 
 export function MessagePage(): JSX.Element {
   const i18n = useI18n();
-  const service = useCapabilityOrNull<MessageService>("message.service");
+  const service = useOptionalCapability(MESSAGE_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <section className="km-message-page km-message-page--missing" data-message-page="missing-service">
@@ -47,19 +46,11 @@ export function MessagePage(): JSX.Element {
   return <MessagePageInner />;
 }
 
-function useCapabilityOrNull<T>(key: string): T | null {
-  try {
-    return useCapability<T>(key);
-  } catch {
-    return null;
-  }
-}
-
 function MessagePageInner(): JSX.Element {
   const i18n = useI18n();
   const host = usePluginHost();
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const ContactsEditor = useCapabilityOrNull<ComponentType<ContactsEditorProps>>(CONTACTS_EDITOR_CAPABILITY);
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const ContactsEditor = useOptionalCapability(CONTACTS_EDITOR_CAPABILITY) as ComponentType<ContactsEditorProps> | undefined;
   const store = host.resourceStore;
   const ownerPublicKeyHex = keyspace.active().activePublicKeyHex ?? null;
 

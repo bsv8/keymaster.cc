@@ -51,7 +51,7 @@ function describeSession(state: PokerSessionKeyState): {
 
 export function PokerSettingsPage(): React.ReactElement {
   const { t } = useI18n();
-  const service = useCapability<PokerService>(POKER_SERVICE_CAPABILITY);
+  const service = useCapability(POKER_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const settings = useResourceSelector<ReturnType<PokerService["getSettings"]>, ReturnType<PokerService["getSettings"]>>(host.resourceStore, "poker.settings", [], (s) => s.data ?? { proxyEndpoint: "", allowFallbackBroadcast: true });
   const statusResource = useResourceSelector<PokerConnectionStatus, PokerConnectionStatus>(host.resourceStore, "poker.connection", [], (s) => s.data ?? "idle");

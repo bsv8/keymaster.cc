@@ -66,6 +66,7 @@ import {
 import { useOptionalCapability } from "webloom-framework/react";
 import {
   KeyPersistedButActivationFailedError,
+  VAULT_SERVICE_CAPABILITY,
   type KeyImportMaterial,
   type KeyImportResult,
   type KeyImporter,
@@ -146,7 +147,7 @@ export interface InitialSetupImportedKeyDraft {
 export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: FirstTimeImportWizardProps) {
   // 首次 Storage 初始化时 Vault 还没有安装；导入步骤只负责解析并把
   // 内存草稿交还给父页面，不能因为缺少 vault.service 让整个向导 fatal。
-  const vault = useOptionalCapability<VaultService>("vault.service");
+  const vault = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。

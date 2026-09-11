@@ -8,6 +8,7 @@ import type {
   BucketConditionalCapabilityProbeResult,
   StorageDirectoryResult,
   StorageListResult,
+  StorageOpfsProbeResult,
   StorageProbeResult,
   StorageActivationResult,
   StorageProviderConfigDraft,
@@ -158,10 +159,10 @@ export class StorageRpcProxy implements StorageRuntimeController {
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     throw new StorageRuntimeError("storage_provider_error", "Storage cold export returned invalid bytes");
   }
-  async selectOpfs(): Promise<StorageProbeResult> {
+  async selectOpfs(): Promise<StorageOpfsProbeResult> {
     // 只有 Window 能申请授权；StorageManager 访问封装在 OPFS Provider。
     await requestOpfsPersistence();
-    const result = await this.control<StorageProbeResult>({ type: "select-opfs" });
+    const result = await this.control<StorageOpfsProbeResult>({ type: "select-opfs" });
     if (result.ok) writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
     return result;
   }

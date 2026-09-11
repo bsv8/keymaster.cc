@@ -6,6 +6,8 @@
 // WebLoom 公共契约。
 
 import type {
+  Capability,
+  CapabilityDependency,
   PluginConfig as WebLoomPluginConfig,
   PluginContext as WebLoomPluginContext,
   PluginContextExtension as WebLoomPluginContextExtension,
@@ -50,6 +52,8 @@ export type KeymasterPluginConfig = WebLoomPluginConfig;
 
 /** 带 WebLoom 通用字段和 Keymaster 扩展的 Context 类型。 */
 export type KeymasterWebLoomContext = WebLoomPluginContext<
+  readonly Capability[],
+  readonly CapabilityDependency[],
   KeymasterPluginConfig,
   KeymasterContextExtension
 >;
@@ -57,8 +61,7 @@ export type KeymasterWebLoomContext = WebLoomPluginContext<
 /** Keymaster 适配器内部使用的 WebLoom Manifest 类型。 */
 export type KeymasterWebLoomManifest = WebLoomPluginManifest<
   KeymasterPluginContribution,
-  KeymasterPluginConfig,
-  KeymasterContextExtension
+  KeymasterPluginConfig
 >;
 
 /** Keymaster 仍由产品定义的权限字符串别名，便于扩展类型自描述。 */

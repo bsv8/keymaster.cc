@@ -19,6 +19,11 @@ import type {
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
 
 const KEY_A = "02".padEnd(66, "a");
@@ -95,8 +100,8 @@ function mount(includeImportSection = false) {
   const host = createPluginHost({ disableConfigPersistence: true });
   const vault = makeVault();
   const keyspace = makeKeyspace();
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
   registerVaultKeyState(host, keyspace, vault);
   if (includeImportSection) {
     host.vaultSettings.register({
@@ -118,7 +123,7 @@ function mount(includeImportSection = false) {
 }
 
 function registerVaultKeyState(host: ReturnType<typeof createPluginHost>, keyspace: KeyspaceService, vault: VaultService): void {
-  const registry = host.capabilities.get<any>("resource.registry");
+  const registry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
   registry.register({
     id: "vault.key-state", scope: "global", key: () => ["vault.key-state"],
     load: async () => ({ keys: await keyspace.listKeys(), active: keyspace.active(), initializing: keyspace.isInitializing(), notice: vault.getInitialActivationNotice?.() ?? null }),
@@ -169,8 +174,8 @@ describe("VaultSettingsPage active switching", () => {
     });
     const vault = makeVault(activateKey);
     const host = createPluginHost({ disableConfigPersistence: true });
-    host.capabilities.provide<VaultService>("vault.service", vault);
-    host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+    host.provide(VAULT_SERVICE_CAPABILITY, vault);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
     registerVaultKeyState(host, keyspace, vault);
 
     render(

@@ -7,8 +7,7 @@ import {
   usePluginHost,
 } from "@keymaster/runtime";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { formatShortPublicKey } from "@keymaster/contracts";
-import type { PasskeyProtection, VaultService } from "@keymaster/contracts";
+import { VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type PasskeyProtection } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
 import {
   isWebAuthnPrfAvailable,
@@ -17,7 +16,7 @@ import {
 import { VaultKeyExportModal } from "./VaultKeyExportModal.js";
 
 export function CurrentKeySettingsPage() {
-  const vault = useCapability<VaultService>("vault.service");
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   const locale = useLocale();

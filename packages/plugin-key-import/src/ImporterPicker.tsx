@@ -6,7 +6,7 @@
 
 import { useCapability } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
-import type { ImporterRegistry, KeyImporter } from "@keymaster/contracts";
+import { IMPORTER_REGISTRY_CAPABILITY, type KeyImporter } from "@keymaster/contracts";
 
 export interface ImporterPickerProps {
   selected: string | undefined;
@@ -14,7 +14,7 @@ export interface ImporterPickerProps {
 }
 
 export function ImporterPicker({ selected, onSelect }: ImporterPickerProps) {
-  const registry = useCapability<ImporterRegistry>("importer.registry");
+  const registry = useCapability(IMPORTER_REGISTRY_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   const list = registry.list();

@@ -4,6 +4,22 @@
 // 并在 disable / unregister 时由 host 调用 teardown 释放资源。
 
 import type {
+  Capability,
+  CapabilityDependency,
+  CapabilityDescriptor,
+  CapabilityClient,
+  LocalCapability,
+  LocalServiceOf,
+  PluginContext as WebLoomPluginContext,
+  PluginManifest as WebLoomPluginManifest,
+  PluginSetup as WebLoomPluginSetup,
+  RuntimeUnitDependency as WebLoomRuntimeUnitDependency,
+  RuntimeUnitDescriptor as WebLoomRuntimeUnitDescriptor,
+  PluginState as WebLoomPluginState,
+  PluginGraph as WebLoomPluginGraph,
+  PluginReverseDep as WebLoomPluginReverseDep,
+} from "webloom-framework";
+import type {
   LifecycleDisposeResult,
   LifecycleScope,
   RuntimeKind,
@@ -12,6 +28,8 @@ import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
 import type {
   KeymasterWebLoomContext,
   KeymasterWebLoomManifest,
+  KeymasterContextExtension,
+  KeymasterPluginConfig,
 } from "./webloom.js";
 import type { I18nPluginResources } from "./i18n.js";
 import type { PluginLogger } from "./log.js";
@@ -36,26 +54,8 @@ export interface PluginContext extends KeymasterWebLoomContext {
   readonly coordinator?: unknown;
 }
 
-/**
- * 产品级插件依赖描述。
- *
- * 这是历史 manifest 兼容字段；产品级依赖在迁移到运行单元前允许缺少
- * 来源环境、契约版本和作用域。新拆出的运行单元必须使用下面的严格契约。
- */
-export interface PluginDependency {
-  /** 依赖的 capability key。 */
-  capability: string;
-  /** 依赖服务的精确契约版本；跨环境依赖不得省略。 */
-  contractVersion?: string;
-  /** 提供者运行代码所在环境；跨 Worker 依赖不得靠 capability 猜测。 */
-  sourceRuntime?: RuntimeKind;
-  /** 依赖服务允许存在的作用域范围；不包含单次请求这种临时作用域。 */
-  scopeKind?: KeymasterScopeKind;
-  /** 可选的人类可读描述，便于诊断。 */
-  reason?: string;
-  /** 可选依赖缺失时只关闭局部能力，不阻止插件主体运行。 */
-  optional?: boolean;
-}
+/** 产品插件依赖；唯一身份来自 capability descriptor。 */
+export type PluginDependency = CapabilityDependency;
 
 /**
  * 运行单元依赖描述（生产严格契约）。
@@ -64,20 +64,8 @@ export interface PluginDependency {
  * 猜测实际服务。因此这三个绑定字段都是必填，并在 Host 装配前再次做
  * 运行时校验，防止未经 TypeScript 检查的 JSON / JavaScript 绕过契约。
  */
-export interface RuntimeUnitDependency {
-  /** 依赖的 capability key（能力契约标识）。 */
-  capability: string;
-  /** 精确契约版本；第一阶段只接受完全匹配。 */
-  contractVersion: string;
-  /** 提供者实际运行环境；不是消费者所在环境。 */
-  sourceRuntime: RuntimeKind;
-  /** 提供者允许存在的作用域寿命。 */
-  scopeKind: KeymasterScopeKind;
-  /** 可选的人类可读说明。 */
-  reason?: string;
-  /** 缺失时只关闭局部能力；未填写表示硬依赖。 */
-  optional?: boolean;
-}
+/** 运行单元依赖；静态清单只保存 descriptor，不保存 parser/handler。 */
+export type RuntimeUnitDependency = WebLoomRuntimeUnitDependency;
 
 /**
  * 运行单元能力契约的默认绑定。
@@ -86,37 +74,7 @@ export interface RuntimeUnitDependency {
  * 它；依赖列表仍必须写在对应 RuntimeUnitDescriptor.dependencies 中。
  * 统一生成版本字符串可以避免 Window 与 Worker 手写出两个漂移的版本。
  */
-const RUNTIME_CAPABILITY_BINDINGS: Readonly<Record<string, {
-  /** 提供者代码所在环境。 */
-  sourceRuntime: RuntimeKind;
-  /** 提供者允许存在的最长作用域。 */
-  scopeKind: KeymasterScopeKind;
-}>> = {
-  "vault.service": { sourceRuntime: "window-main", scopeKind: "root" },
-  "keyspace.service": { sourceRuntime: "window-main", scopeKind: "root" },
-  "vault-settings.registry": { sourceRuntime: "window-main", scopeKind: "root" },
-  "protocol.service": { sourceRuntime: "window-main", scopeKind: "storage" },
-  "p2pkh.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "p2pkh.protocol-spend": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "woc.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "woc.bsv21.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "woc.stas.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "woc.1satordinals.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "contacts.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "webrtc.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "message.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "background.registry": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "background.service": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "channel.runtime": { sourceRuntime: "window-main", scopeKind: "owner-session" },
-  "window-p2p.executor": { sourceRuntime: "window-main", scopeKind: "root" },
-  "window-p2p.coordinator-control": { sourceRuntime: "window-main", scopeKind: "root" },
-  "storage.runtime-controller": { sourceRuntime: "window-main", scopeKind: "storage" },
-};
-
-/** 返回稳定的 capability 契约版本；字段含义：能力名 + 主版本。 */
-export function runtimeCapabilityContractVersion(capability: string): string {
-  return `${capability}.v1`;
-}
+/** 旧的字符串版本推导已删除；能力版本来自 defineCapability。 */
 
 /**
  * 将人类可读的依赖清单物化为严格的运行单元依赖契约。
@@ -125,22 +83,21 @@ export function runtimeCapabilityContractVersion(capability: string): string {
  * 先补入上面的绑定表，不能依赖调用方猜测 sourceRuntime / scopeKind。
  */
 export function defineRuntimeUnitDependencies(
-  dependencies: readonly Pick<PluginDependency, "capability" | "reason" | "optional">[],
-  defaults: Partial<Pick<RuntimeUnitDependency, "sourceRuntime" | "scopeKind">> = {},
+  dependencies: readonly CapabilityDependency[],
+  runtime: RuntimeKind = "window-main",
 ): RuntimeUnitDependency[] {
-  return dependencies.map((dependency) => {
-    const binding = RUNTIME_CAPABILITY_BINDINGS[dependency.capability];
-    const sourceRuntime = binding?.sourceRuntime ?? defaults.sourceRuntime ?? "window-main";
-    const scopeKind = binding?.scopeKind ?? defaults.scopeKind ?? "root";
-    return {
-      capability: dependency.capability,
-      contractVersion: runtimeCapabilityContractVersion(dependency.capability),
-      sourceRuntime,
-      scopeKind,
-      ...(dependency.reason !== undefined ? { reason: dependency.reason } : {}),
-      ...(dependency.optional !== undefined ? { optional: dependency.optional } : {}),
-    };
-  });
+  return dependencies.map((dependency) => ({
+    capability: {
+      kind: dependency.capability.kind,
+      id: dependency.capability.id,
+      version: dependency.capability.version,
+    },
+    ...(dependency.source === "peer"
+      ? { source: "peer" as const }
+      : { sourceRuntime: dependency.sourceRuntime ?? runtime }),
+    ...(dependency.reason !== undefined ? { reason: dependency.reason } : {}),
+    ...(dependency.optional !== undefined ? { optional: dependency.optional } : {}),
+  }));
 }
 
 /**
@@ -148,11 +105,9 @@ export function defineRuntimeUnitDependencies(
  * 提供能力和消费能力共用此函数，避免只改一侧造成契约校验失配。
  */
 export function defineRuntimeUnitProvidedContracts(
-  capabilities: readonly string[],
-): Record<string, string> {
-  return Object.fromEntries(
-    capabilities.map((capability) => [capability, runtimeCapabilityContractVersion(capability)]),
-  );
+  _capabilities: readonly Capability[],
+): never {
+  throw new Error("providedContracts was removed; put capability objects in unit.provides");
 }
 
 /**
@@ -202,29 +157,13 @@ export type PluginDisplayGroup = "core" | "platform" | "business" | "import" | "
  *   - 插件分类、默认启用、是否允许禁用、UI 分组。
  *   - 启停字段是产品意图真值；运行单元 capability / 依赖真值位于 units。
  */
-export interface PluginMeta {
-  /** 插件分类。 */
-  kind: PluginKind;
-  /** 首屏默认是否启用。runtime 启动时与全局启停配置合并得到初始集合。 */
-  defaultEnabled: boolean;
-  /** 是否允许用户在系统级 UI 禁用。core 必为 false。 */
-  canDisable: boolean;
-  /** 必须显式选择；required 插件必须 defaultEnabled=true、canDisable=false 且提供能力。 */
-  startup: PluginStartupMode;
-  /** 应用启动门禁阶段；生产 manifest 必须显式声明。 */
-  bootstrapStage?: PluginBootstrapStage;
-  /** 无 units 的简单插件的兼容能力摘要；显式单元不得从此字段继承。 */
-  providesCapabilities?: string[];
-  /** UI 分组（仅展示），不传则按 kind 兜底。 */
-  displayGroup?: PluginDisplayGroup;
-}
-
 /** 插件 setup 钩子可返回的清理函数。 */
 export type PluginTeardown = () => void | Promise<void>;
 
 /** 插件运行单元的无 React 装配入口。 */
-export type PluginSetup = (ctx: PluginContext) =>
-  void | Promise<void> | PluginTeardown | Promise<PluginTeardown>;
+export type PluginSetup = (
+  ctx: PluginContext
+) => void | Promise<void> | PluginTeardown | Promise<PluginTeardown>;
 
 /**
  * 当前执行环境的运行实现注册表。
@@ -243,27 +182,24 @@ export interface RuntimeUnitImplementationRegistry {
  * 简单插件不填写 `units`，Host 按历史 manifest 兼容为一个同名单元；
  * 多环境插件再显式拆分 Worker / Window / Connect 单元。
  */
-export interface RuntimeUnitDescriptor {
-  /** 稳定运行单元标识，不是每次启动生成的 instanceId。 */
-  id: string;
-  /** 运行代码所在真实 Runtime。 */
-  runtime: RuntimeKind;
+export interface RuntimeUnitDescriptor extends Omit<
+  WebLoomRuntimeUnitDescriptor<PluginBusinessContribution, KeymasterPluginConfig>,
+  "dependencies" | "provides" | "permissions" | "contribution"
+> {
   /** Keymaster 领域的 Scope 绑定类别；不进入 WebLoom Host。 */
-  scopeKind: KeymasterScopeKind;
-  /** 本单元所需的服务和精确契约版本；运行单元依赖不得省略绑定字段。 */
-  dependencies?: RuntimeUnitDependency[];
-  /** 本单元提供的 capability；兼容旧字段的语义。 */
-  provides?: string[];
-  /** 本单元每个 capability 的精确服务契约版本；严格依赖按此字段匹配。 */
-  providedContracts?: Record<string, string>;
-  /** 本单元的界面、菜单和首页贡献；Worker 单元不得继承 Window 贡献。 */
-  business?: PluginBusinessContribution;
+  readonly scopeKind?: KeymasterScopeKind;
+  /** 本单元所需的 typed capability 依赖。 */
+  readonly dependencies?: readonly RuntimeUnitDependency[];
+  /** 本单元提供的静态 capability descriptor。 */
+  readonly provides?: readonly CapabilityDescriptor[];
+  /** 本单元的界面、菜单和首页贡献。 */
+  readonly business?: PluginBusinessContribution;
   /** 本单元申请的权限。 */
-  permissions?: PluginPermission[];
+  readonly permissions?: readonly PluginPermission[];
   /** 本单元的存储声明。 */
-  storage?: PluginStorageDeclaration;
+  readonly storage?: PluginStorageDeclaration;
   /** 单元专属配置契约 / 部署默认值。 */
-  config?: Record<string, unknown>;
+  readonly config?: KeymasterPluginConfig;
 }
 
 /**
@@ -272,21 +208,18 @@ export interface RuntimeUnitDescriptor {
  */
 export interface PluginManifest extends Omit<
   KeymasterWebLoomManifest,
-  "meta" | "contribution" | "dependencies" | "permissions" | "units" | "config"
+  "contribution" | "units" | "startup" | "defaultEnabled" | "canDisable"
 > {
-  /**
-   * 无 units 的简单插件的兼容业务声明；显式运行单元必须放入 unit.business。
-   * runtime 自动注册并在 disable / uninstall 时统一回收；插件 setup 不必
-   * 接触 route.registry 或 home.registry。
-   */
-  business?: PluginBusinessContribution;
-  /** 无 units 的简单插件的兼容依赖；显式运行单元必须放入 unit.dependencies。 */
-  dependencies?: PluginDependency[];
-  /**
-   * 硬切换 001：插件元数据（分类、默认启用、是否可禁用、提供 capability）。
-   * meta 与 startup 都是必填，runtime 不进行默认/兼容推断。
-   */
-  meta: PluginMeta;
+  /** Keymaster 产品分类；不进入 WebLoom 通用生命周期语义。 */
+  readonly kind: PluginKind;
+  /** v4 唯一启停策略。 */
+  readonly startup: PluginStartupMode;
+  readonly defaultEnabled: boolean;
+  readonly canDisable: boolean;
+  /** 应用启动门禁阶段。 */
+  readonly bootstrapStage: PluginBootstrapStage;
+  /** UI 展示分组。 */
+  readonly displayGroup: PluginDisplayGroup;
   /**
    * 新统一存储声明。系统 App 也只能通过 `scope: "key"` 获取自己的目录；
    * `scope: "platform"` 由 Host 白名单显式授权，普通插件会被拒绝；
@@ -309,10 +242,8 @@ export interface PluginManifest extends Omit<
    *     publisher 公钥 hex 强配置注入；
    *   - 任何"装配层硬编码的部署侧真值"都走这里。
    */
-  config?: Record<string, unknown>;
-  /** 无 units 的简单插件的兼容权限集合；显式运行单元必须放入 unit.permissions。 */
-  permissions?: PluginPermission[];
-  /** 多运行环境插件的静态单元描述；缺省兼容为一个 product-instance 单元。 */
+  config?: KeymasterPluginConfig;
+  /** 多运行环境插件的静态单元描述。 */
   units?: readonly RuntimeUnitDescriptor[];
   /**
    * 可选：插件的 i18n 资源。
@@ -321,8 +252,8 @@ export interface PluginManifest extends Omit<
    * runtime 在 host 创建时拿到 i18n service 并在 register(plugin) 流程中
    * 优先注册 plugin.i18n 资源，再执行 setup。
    *
-   * 注意：i18n service 自身作为内置 capability 暴露在 ctx.get("i18n.service")，
-   * 需要运行时翻译的插件可以显式 get 它（不再要求每个 plugin 手写 registerResources）。
+   * 注意：i18n service 自身作为内置 capability 暴露在
+   * `I18N_SERVICE_CAPABILITY`，需要运行时翻译的插件可以显式消费它。
    */
   i18n?: I18nPluginResources;
 }

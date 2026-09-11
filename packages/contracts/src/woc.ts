@@ -3,6 +3,7 @@
 // 设计缘由：所有 WOC 请求必须经过 woc.service。响应类型与请求优先级都是
 // 跨包协议，因此只放类型与最小方法签名，不包含 P2PKH 业务类型。
 
+import { defineCapability } from "webloom-framework";
 import type { BsvNetwork } from "./vault.js";
 
 /** WOC 观察状态。 */
@@ -242,4 +243,8 @@ export interface WocService {
 }
 
 /** WOC capability key。 */
-export const WOC_CAPABILITY = "woc.service";
+export const WOC_CAPABILITY = defineCapability<WocService>({
+  kind: "local",
+  id: "woc.service",
+  version: "1",
+});

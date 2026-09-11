@@ -30,12 +30,16 @@ import { Button, EmptyState, PageHeader, Select, TextArea, TextInput } from "@ke
 import { useCapability } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type {
-  ImporterRegistry,
   KeyImportResult,
   KeyImporter,
   VaultService
 } from "@keymaster/contracts";
-import type { MessageBus } from "webloom-framework";
+import {
+  IMPORTER_REGISTRY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  RUNTIME_MESSAGE_BUS,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import { ImporterPicker } from "./ImporterPicker.js";
 import { persistImport } from "./importFlow.js";
 import {
@@ -52,9 +56,9 @@ import {
 } from "./jsonImportStateMachine.js";
 
 export function ImportPage({ embedded = false }: { embedded?: boolean }) {
-  const registry = useCapability<ImporterRegistry>("importer.registry");
-  const vault = useCapability<VaultService>("vault.service");
-  const messageBus = useCapability<MessageBus>("runtime.messageBus");
+  const registry = useCapability(IMPORTER_REGISTRY_CAPABILITY);
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
+  const messageBus = useCapability(RUNTIME_MESSAGE_BUS);
   const host = usePluginHost();
   const { t } = useI18n();
 

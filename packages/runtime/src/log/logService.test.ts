@@ -16,6 +16,7 @@ import {
   LOG_SERVICE_CAPABILITY,
   type LogConfig,
   type LogEntry,
+  type LogService,
   type KeyValueStore,
   type PluginContext
 } from "@keymaster/contracts";
@@ -485,13 +486,13 @@ describe("createLogService - startup", () => {
 describe("createLogService - in host", () => {
   it("provides log.service capability and ctx.logger is bound to pluginId", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
-    let captured: LogServiceHandle | undefined;
+    let captured: LogService | undefined;
     const plugin: PluginManifest = {
       id: "probe",
       name: "Probe",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
-        captured = ctx.get<LogServiceHandle>(LOG_SERVICE_CAPABILITY);
+        captured = ctx.capability(LOG_SERVICE_CAPABILITY);
         // 写一条 info 验证 logger 注入。
         ctx.logger.info({
           scope: "probe",
@@ -527,7 +528,7 @@ describe("createLogService - in host", () => {
     };
     await host.register(plugin);
     await new Promise((r) => setTimeout(r, 20));
-    const svc = host.capabilities.get<LogServiceHandle>(LOG_SERVICE_CAPABILITY);
+    const svc: LogService = host.capabilities.get(LOG_SERVICE_CAPABILITY);
     const list = await svc.listEntries({ pluginId: "runtime" });
     const enableEvt = list.find((e) => e.event === "plugin.enabled");
     expect(enableEvt).toBeDefined();
@@ -570,7 +571,7 @@ describe("createLogService - in host", () => {
     await host.register(plugin);
     await host.unregister("alpha");
     expect(host.manifests()).not.toContain("alpha");
-    const svc = host.capabilities.get<LogServiceHandle>(LOG_SERVICE_CAPABILITY);
+    const svc: LogService = host.capabilities.get(LOG_SERVICE_CAPABILITY);
     const list = await svc.listEntries({ pluginId: "alpha" });
     // 历史 entry 保留（统一 schema），只是 plugin 已 unregister。
     expect(Array.isArray(list)).toBe(true);
@@ -590,7 +591,7 @@ describe("createLogService - in host", () => {
     // host.register 内部把 setup 错误降级为 error-disabled，不会 re-throw。
     await host.register(plugin);
     expect(host.state("bad").kind).toBe("error-disabled");
-    const svc = host.capabilities.get<LogServiceHandle>(LOG_SERVICE_CAPABILITY);
+    const svc: LogService = host.capabilities.get(LOG_SERVICE_CAPABILITY);
     const list = await svc.listEntries({ pluginId: "runtime" });
     const fail = list.find((e) => e.event === "setup.failed");
     expect(fail).toBeDefined();

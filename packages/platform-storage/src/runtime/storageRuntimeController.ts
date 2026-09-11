@@ -6,6 +6,7 @@ import type {
   BucketConditionalCapabilityProbeResult,
   StorageDirectoryResult,
   StorageListResult,
+  StorageOpfsProbeResult,
   StorageProbeResult,
   StorageProviderConfigDraft,
   StorageProviderConnectionView,
@@ -636,8 +637,8 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
 
   // 这些两个入口由 Coordinator 页面代理实现；Worker 内部 Runtime 不负责
   // 修改本机 bootstrap 状态，保留明确的 fail-closed 实现避免误用。
-  async selectOpfs(): Promise<StorageProbeResult> {
-    return { ok: false, providerId: "s3-compatible", latencyMs: 0, diagnostic: "configuration" };
+  async selectOpfs(): Promise<StorageOpfsProbeResult> {
+    return { ok: false, providerId: "opfs", latencyMs: 0, diagnostic: "configuration" };
   }
 
   async importStorageProfile(_envelope: import("@keymaster/contracts").StorageProfileEnvelopeV1, password: string): Promise<StorageProbeResult> {

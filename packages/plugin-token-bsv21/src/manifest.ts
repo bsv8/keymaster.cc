@@ -31,20 +31,23 @@ import type {
   WocService,
   WocBsv21Service
 } from "@keymaster/contracts";
-import type { MessageBus } from "webloom-framework";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   BACKGROUND_TRIGGER_REASON,
   KEYSPACE_SERVICE_CAPABILITY,
+  TOKEN_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  TRANSFER_REGISTRY_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   WOC_CAPABILITY,
   WOC_BSV21_CAPABILITY,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import {
   P2PKH_CAPABILITY,
@@ -157,41 +160,35 @@ const bsv21TokenPluginDefinition = {
   id: "token-bsv21",
   name: "BSV-21 tokens",
   description: "BSV-21 fungible token provider：通过 snapshot K-V 读取当前 active key 的 BSV-21 持仓，注入 token.registry。",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "business"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [
     {
       id: "token-bsv21.window",
       runtime: "window-main",
       scopeKind: "owner-session",
       provides: [BSV21_MINT_SERVICE_CAPABILITY, BSV21_TRANSFER_SERVICE_CAPABILITY],
-      providedContracts: defineRuntimeUnitProvidedContracts([
-        BSV21_MINT_SERVICE_CAPABILITY,
-        BSV21_TRANSFER_SERVICE_CAPABILITY,
-      ]),
       storage: { scope: "key", applicationStorageId: BSV21_STORAGE_ID, schemaVersion: BSV21_SCHEMA_VERSION },
       dependencies: defineRuntimeUnitDependencies([
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 地址" },
         { capability: WOC_BSV21_CAPABILITY, reason: "BSV-21 WOC 查询入口" },
         { capability: WOC_CAPABILITY, reason: "读取交易与费率等通用 WOC 数据" },
         { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
-        { capability: "token.registry", reason: "注册 BSV-21 TokenProvider" },
+        { capability: TOKEN_REGISTRY_CAPABILITY, reason: "注册 BSV-21 TokenProvider" },
         { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
         { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
-        { capability: "vault.service", reason: "sync task canRun 门禁" },
+        { capability: VAULT_SERVICE_CAPABILITY, reason: "sync task canRun 门禁" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
         { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" },
         { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "注册 BSV-21 受保护 outpoint" },
         { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, reason: "签名 BSV-21 mint / transfer 交易" },
-        { capability: "route.registry", reason: "注册 BSV-21 创建页" },
-        { capability: "business.registry", reason: "注册 BSV-21 业务入口" },
-        { capability: "transfer.registry", reason: "注册 BSV-21 transfer provider" },
+        { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 BSV-21 创建页" },
+        { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册 BSV-21 业务入口" },
+        { capability: TRANSFER_REGISTRY_CAPABILITY, reason: "注册 BSV-21 transfer provider" },
       ]),
     },
     {
@@ -202,21 +199,21 @@ const bsv21TokenPluginDefinition = {
   ],
   i18n: bsv21Resources,
   setup(ctx) {
-    const p2pkh = ctx.get<P2pkhServiceForBsv21>(P2PKH_CAPABILITY);
-    const wocBsv21 = ctx.get<WocBsv21Service>(WOC_BSV21_CAPABILITY);
-    const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-    const tokenRegistry = ctx.get<TokenRegistry>("token.registry");
-    const backgroundRegistry = ctx.get<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY);
-    const messageBus = ctx.get<MessageBus>(RUNTIME_MESSAGE_BUS);
-    const assetDataNotifier = ctx.get<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY);
-    const protectedOutpoints = ctx.get<ProtectedOutpointRegistry>(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
-    const woc = ctx.get<WocService>(WOC_CAPABILITY);
-    const protocolSpend = ctx.get<import("@keymaster/contracts").ProtocolSpendService>(P2PKH_PROTOCOL_SPEND_CAPABILITY);
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
-    const transferRegistry = ctx.get<TransferRegistry>("transfer.registry");
-    const vault = ctx.get<VaultService>("vault.service");
-    const backgroundService = ctx.get<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY);
+    const p2pkh = ctx.capability(P2PKH_CAPABILITY);
+    const wocBsv21 = ctx.capability(WOC_BSV21_CAPABILITY);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const tokenRegistry = ctx.capability(TOKEN_REGISTRY_CAPABILITY);
+    const backgroundRegistry = ctx.capability(BACKGROUND_REGISTRY_CAPABILITY);
+    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
+    const assetDataNotifier = ctx.capability(ASSET_DATA_NOTIFIER_CAPABILITY);
+    const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
+    const woc = ctx.capability(WOC_CAPABILITY);
+    const protocolSpend = ctx.capability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
+    const transferRegistry = ctx.capability(TRANSFER_REGISTRY_CAPABILITY);
+    const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const backgroundService = ctx.capability(BACKGROUND_SERVICE_CAPABILITY);
 
     // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 Keyspace。
     if (!ctx.storage) throw new Error("BSV21 owner storage binding is unavailable");
@@ -304,11 +301,9 @@ const bsv21TokenPluginDefinition = {
     });
 
     // 监听 testnet 设置变化（通过 P2PKH settings 变化）
-    const offSettingsChange = ctx.has("p2pkh.service")
-      ? ctx.get<{ onGlobalSettingsChange?(handler: () => void): () => void }>("p2pkh.service")?.onGlobalSettingsChange?.(() => {
-          triggerSync("settings-change");
-        })
-      : undefined;
+    const offSettingsChange = p2pkh.onGlobalSettingsChange?.(() => {
+      triggerSync("settings-change");
+    });
 
     return () => {
       offActiveChange();

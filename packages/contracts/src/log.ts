@@ -1,5 +1,6 @@
 // packages/contracts/src/log.ts
 // 统一日志契约（施工单 002 硬切换）。
+import { defineCapability } from "webloom-framework";
 //
 // 设计缘由：
 //   - 日志是平台级能力，不是业务插件私货。runtime 内建 LogService，
@@ -141,8 +142,12 @@ export interface LogService {
   onConfigChange(handler: (config: LogConfig) => void): () => void;
 }
 
-/** 日志 service 的 capability key。 */
-export const LOG_SERVICE_CAPABILITY = "log.service";
+/** 日志 service capability。 */
+export const LOG_SERVICE_CAPABILITY = defineCapability<LogService>({
+  kind: "local",
+  id: "log.service",
+  version: "1",
+});
 
 /** 默认配置。runtime 启动时写入 config store；用户可改写。 */
 export const DEFAULT_LOG_CONFIG: LogConfig = {

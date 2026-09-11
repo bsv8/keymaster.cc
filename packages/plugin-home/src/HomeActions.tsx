@@ -8,13 +8,17 @@ import { useCapability, useHasCapability, useResourceSelector } from "webloom-fr
 import { useI18n, usePluginHost, useRegistry } from "@keymaster/runtime";
 import {
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
+  CONTACTS_SERVICE_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
   formatShortPublicKey,
   type Contact,
   type ContactPublicKeyAction,
   type ContactPublicKeyActionRegistry,
-  type ContactsService,
-  type KeyspaceService
+  type ContactsService
 } from "@keymaster/contracts";
+import { defineCapability } from "webloom-framework";
+
+const P2PKH_SERVICE_CAPABILITY = defineCapability<unknown>({ kind: "local", id: "p2pkh.service", version: "1" });
 
 const COMPRESSED_PUBLIC_KEY = /^(02|03)[0-9a-f]{64}$/i;
 type ScanMode = "camera" | "image";
@@ -124,10 +128,10 @@ function IdentityRow({ label, value, shortValue }: { label: string; value: strin
 }
 
 export function HomeActions() {
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const contacts = useCapability<ContactsService>("contacts.service");
-  const actionRegistry = useCapability<ContactPublicKeyActionRegistry>(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
-  const hasP2pkh = useHasCapability("p2pkh.service");
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const contacts = useCapability(CONTACTS_SERVICE_CAPABILITY);
+  const actionRegistry = useCapability(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
+  const hasP2pkh = useHasCapability(P2PKH_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   const actions = useRegistry(() => actionRegistry.list()).map((action) => ({ action, label: host.i18n.text(action.label) }));

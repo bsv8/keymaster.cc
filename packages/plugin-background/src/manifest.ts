@@ -21,8 +21,9 @@ import {
   KEYSPACE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   TOPBAR_REGISTRY_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  capabilityDescriptor,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import { createBackgroundServiceCoordinator } from "./backgroundServiceCoordinator.js";
 
@@ -109,28 +110,25 @@ const backgroundPluginDefinition = {
   id: "background",
   name: "Background",
   description: "通用后台任务平台：注册、调度、去重、Topbar 托盘。",
-  meta: {
-    kind: "platform",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "platform"
-  },
+  kind: "platform",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "platform",
   units: [{
     id: "background.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY, BACKGROUND_COORDINATOR_CONTROL_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([
-      BACKGROUND_REGISTRY_CAPABILITY,
-      BACKGROUND_SERVICE_CAPABILITY,
-      BACKGROUND_COORDINATOR_CONTROL_CAPABILITY,
-    ]),
+    provides: [
+      capabilityDescriptor(BACKGROUND_REGISTRY_CAPABILITY),
+      capabilityDescriptor(BACKGROUND_SERVICE_CAPABILITY),
+      capabilityDescriptor(BACKGROUND_COORDINATOR_CONTROL_CAPABILITY),
+    ],
     storage: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
-      { capability: TOPBAR_REGISTRY_CAPABILITY, reason: "需要向 Topbar 注册任务托盘" },
-      { capability: "system-settings.registry", reason: "注册后台同步系统设置" },
+      { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "需要向 Topbar 注册任务托盘" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册后台同步系统设置" },
     ]),
   }],
   i18n: backgroundResources,
@@ -150,11 +148,11 @@ const backgroundPluginDefinition = {
       registry = { register: () => undefined, list: () => [], get: () => undefined };
     } else throw new Error("Session Coordinator is unavailable");
 
-    ctx.provide<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY, service);
-    ctx.provide<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY, registry);
+    ctx.provide(BACKGROUND_SERVICE_CAPABILITY, service);
+    ctx.provide(BACKGROUND_REGISTRY_CAPABILITY, registry);
 
     // 注册资源定义（硬切换 003）
-    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
 
     // background.scheduleSettings：后台同步设置
     resources.register<BackgroundSyncSettings, readonly string[]>({
@@ -191,14 +189,14 @@ const backgroundPluginDefinition = {
       invalidation: "immediate"
     });
 
-    if (ctx.has(KEYSPACE_SERVICE_CAPABILITY)) {
-      const ks = ctx.get<{
-        attachBackgroundService?(s: BackgroundService): void;
-      }>(KEYSPACE_SERVICE_CAPABILITY);
+    const ks = ctx.optionalCapability(KEYSPACE_SERVICE_CAPABILITY) as {
+      attachBackgroundService?(s: BackgroundService): void;
+    } | undefined;
+    if (ks) {
       ks.attachBackgroundService?.(service);
     }
 
-    const topbar = ctx.get<TopbarRegistry>(TOPBAR_REGISTRY_CAPABILITY);
+    const topbar = ctx.capability(TOPBAR_REGISTRY_CAPABILITY);
     topbar.register({
       id: "background.tray",
       label: { key: "background.topbar.label", fallback: "Background tasks" },
@@ -206,7 +204,7 @@ const backgroundPluginDefinition = {
       order: 100
     });
 
-    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     systemSettings.register({
       id: "background.system-settings.schedule",
       group: {

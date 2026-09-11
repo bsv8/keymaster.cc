@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const packageName = "webloom-framework";
-const releaseVersion = "0.3.0";
+const releaseVersion = "0.4.0";
 const registry = process.env.WEBLOOM_NPM_REGISTRY ?? process.env.npm_config_registry ?? "https://registry.npmjs.org/";
 const root = mkdtempSync(join(tmpdir(), "keymaster-webloom-registry-consumer-"));
 
@@ -56,11 +56,21 @@ try {
 
   writeFileSync(join(root, "probe.mjs"), `
 import * as core from "${packageName}";
+import * as advanced from "${packageName}/advanced";
 import * as react from "${packageName}/react";
 import * as testing from "${packageName}/testing";
 
-if (typeof core.connectSharedWorker !== "function" || typeof core.createServiceBridge !== "function") {
-  throw new Error("registry core entry does not expose the v2 call-first API");
+if (typeof core.defineCapability !== "function"
+  || typeof core.definePlugin !== "function"
+  || typeof core.createWindowApp !== "function"
+  || typeof core.connectSharedWorker !== "function"
+  || typeof core.startSharedWorkerApp !== "function") {
+  throw new Error("registry core entry does not expose the v4 runtime API");
+}
+if (typeof advanced.registerPlugins !== "function"
+  || typeof advanced.attachRemote !== "function"
+  || typeof advanced.createWindowAppFromHost !== "function") {
+  throw new Error("registry advanced entry does not expose the v4 advanced API");
 }
 if (typeof react.usePluginRuntime !== "function" || typeof testing.connectSharedWorkerForTesting !== "function") {
   throw new Error("registry subpath exports are incomplete");

@@ -25,15 +25,16 @@
 //   - collectibleId 仍以 "txid:vout" 形式暴露给用户（更可读）；向 WOC
 //     发起查询时由 provider 内部翻译为 "txid_vout"。
 
+import { defineCapability } from "webloom-framework";
 import type { BsvNetwork } from "./vault.js";
 import type { WocObservation, WocRequestOptions } from "./woc.js";
 
 /** BSV-21 capability key。 */
-export const WOC_BSV21_CAPABILITY = "woc.bsv21.service";
+export const WOC_BSV21_CAPABILITY = defineCapability<WocBsv21Service>({ kind: "local", id: "woc.bsv21.service", version: "1" });
 /** STAS capability key。 */
-export const WOC_STAS_CAPABILITY = "woc.stas.service";
+export const WOC_STAS_CAPABILITY = defineCapability<WocStasService>({ kind: "local", id: "woc.stas.service", version: "1" });
 /** 1Sat Ordinals capability key。 */
-export const WOC_1SAT_ORDINALS_CAPABILITY = "woc.1satordinals.service";
+export const WOC_1SAT_ORDINALS_CAPABILITY = defineCapability<Woc1SatOrdinalsService>({ kind: "local", id: "woc.1satordinals.service", version: "1" });
 
 /** 把 P2PKH 内部 txid+vout 翻译为 WOC 1Sat 期望的 outpoint 字符串。 */
 export function toWocOutpoint(txid: string, vout: number): string {

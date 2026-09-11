@@ -17,13 +17,28 @@ import type {
   TransferOffer,
   TransferRegistry
 } from "@keymaster/contracts";
-import { ASSET_DATA_NOTIFIER_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import {
+  ASSET_DATA_NOTIFIER_CAPABILITY,
+  ASSET_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  COLLECTIBLE_REGISTRY_CAPABILITY,
+  COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY,
+  CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
+  HOME_REGISTRY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  TOKEN_REGISTRY_CAPABILITY,
+  TRANSFER_REGISTRY_CAPABILITY,
+} from "@keymaster/contracts";
+import type { LocalCapability } from "webloom-framework";
 import { registerKeymasterOwnedResource, router, type PluginHost } from "@keymaster/runtime";
 import { AssetsPage, AssetDetailRedirect, AssetsHomeWidget } from "./assets.js";
 import { loadAllHoldings, type HoldingRowsResult as HoldingsLoadResult } from "./assets/holdingsFlow.js";
 import { CollectiblesPage, CollectibleDetailPage } from "./collectibles.js";
 import { TransferPage } from "./transfer.js";
-import { createTransferFeatureCapability } from "./transfer/transferFeature.js";
+import { createTransferFeatureCapability, TRANSFER_FEATURE_CAPABILITY } from "./transfer/transferFeature.js";
 import { CollectibleTransferPage } from "./collectibleTransfer.js";
 import type { CollectibleSummary } from "@keymaster/contracts";
 
@@ -267,8 +282,8 @@ const collectibleTransferResources: I18nPluginResources = {
   }
 };
 
-function get<T>(host: PluginHost, capability: string): T {
-  return host.capabilities.get<T>(capability);
+function get<T>(host: PluginHost, capability: LocalCapability<T>): T {
+  return host.capabilities.get(capability);
 }
 
 /** 资产工作区不是独立产品插件，仍必须绑定到 owner-session 进行回收。 */
@@ -281,14 +296,14 @@ function registerWorkspaceResource<T, TArgs extends readonly string[]>(
 
 function registerAssetsWorkspace(host: PluginHost): void {
   host.i18n.registerResources("assets", assetsResources);
-  const assets = get<AssetRegistry>(host, "asset.registry");
-  const tokens = get<TokenRegistry>(host, "token.registry");
-  const keyspace = get<KeyspaceService>(host, "keyspace.service");
+  const assets = get(host, ASSET_REGISTRY_CAPABILITY);
+  const tokens = get(host, TOKEN_REGISTRY_CAPABILITY);
+  const keyspace = get(host, KEYSPACE_SERVICE_CAPABILITY);
   const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
   const notifier = get<AssetDataNotifier>(host, ASSET_DATA_NOTIFIER_CAPABILITY);
-  const routes = get<RouteRegistry>(host, "route.registry");
-  const business = get<BusinessFeatureRegistry>(host, "business.registry");
-  const home = get<HomeRegistry>(host, "home.registry");
+  const routes = get(host, ROUTE_REGISTRY_CAPABILITY);
+  const business = get(host, BUSINESS_REGISTRY_CAPABILITY);
+  const home = get(host, HOME_REGISTRY_CAPABILITY);
 
   const assetsDomain: BusinessDomain = {
     id: "assets",
@@ -362,11 +377,11 @@ function registerAssetsWorkspace(host: PluginHost): void {
 
 function registerCollectiblesWorkspace(host: PluginHost): void {
   host.i18n.registerResources("collectibles", collectiblesResources);
-  const collectibles = get<CollectibleRegistry>(host, "collectible.registry");
-  const transferRegistry = get<CollectibleTransferRegistry>(host, "collectible-transfer.registry");
+  const collectibles = get(host, COLLECTIBLE_REGISTRY_CAPABILITY);
+  const transferRegistry = get(host, COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY);
   const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
-  const routes = get<RouteRegistry>(host, "route.registry");
-  const business = get<BusinessFeatureRegistry>(host, "business.registry");
+  const routes = get(host, ROUTE_REGISTRY_CAPABILITY);
+  const business = get(host, BUSINESS_REGISTRY_CAPABILITY);
 
   registerWorkspaceResource(resources, {
     id: "collectibles.list",
@@ -400,14 +415,14 @@ function registerCollectiblesWorkspace(host: PluginHost): void {
 
 function registerTransferWorkspace(host: PluginHost): void {
   host.i18n.registerResources("transfer", transferResources);
-  host.provide("feature.transfer", createTransferFeatureCapability());
-  const registry = get<TransferRegistry>(host, "transfer.registry");
-  const collectibles = get<CollectibleRegistry>(host, "collectible.registry");
-  const collectibleTransfers = get<CollectibleTransferRegistry>(host, "collectible-transfer.registry");
-  const keyspace = get<KeyspaceService>(host, "keyspace.service");
+  host.provide(TRANSFER_FEATURE_CAPABILITY, createTransferFeatureCapability());
+  const registry = get(host, TRANSFER_REGISTRY_CAPABILITY);
+  const collectibles = get(host, COLLECTIBLE_REGISTRY_CAPABILITY);
+  const collectibleTransfers = get(host, COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY);
+  const keyspace = get(host, KEYSPACE_SERVICE_CAPABILITY);
   const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
-  const routes = get<RouteRegistry>(host, "route.registry");
-  const business = get<BusinessFeatureRegistry>(host, "business.registry");
+  const routes = get(host, ROUTE_REGISTRY_CAPABILITY);
+  const business = get(host, BUSINESS_REGISTRY_CAPABILITY);
 
   registerWorkspaceResource<ActiveKeyState, readonly string[]>(resources, {
     id: "transfer.active-key",
@@ -472,7 +487,7 @@ function registerTransferWorkspace(host: PluginHost): void {
     entry: { path: "/transfer", routeId: "transfer.page", visibleWhen: ({ unlocked }) => unlocked }
   });
 
-  const contactActions = get<import("@keymaster/contracts").ContactPublicKeyActionRegistry>(host, "contacts.public-key-action.registry");
+  const contactActions = get(host, CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
   contactActions.register({
     id: "transfer.to-contact",
     label: { key: "transfer.action.toContact", fallback: "Transfer" },
@@ -484,7 +499,7 @@ function registerTransferWorkspace(host: PluginHost): void {
 
 function registerCollectibleTransferWorkspace(host: PluginHost): void {
   host.i18n.registerResources("collectibleTransfer", collectibleTransferResources);
-  const routes = get<RouteRegistry>(host, "route.registry");
+  const routes = get(host, ROUTE_REGISTRY_CAPABILITY);
   routes.register({ id: "collectibles.transfer", path: "/collectibles/transfer", label: { key: "collectibleTransfer.route.transfer", fallback: "Transfer collectible" }, component: CollectibleTransferPage });
 }
 
@@ -496,7 +511,7 @@ export async function registerAssetWorkspace(host: PluginHost): Promise<() => vo
   const beforeBusiness = host.business._ids();
   const beforeBusinessDomainIds = new Set(beforeBusiness.domains);
   const beforeBusinessFeatureIds = new Set(beforeBusiness.features);
-  const hadTransferFeature = host.capabilities.has("feature.transfer");
+  const hadTransferFeature = host.capabilities.has(TRANSFER_FEATURE_CAPABILITY);
 
   registerAssetsWorkspace(host);
   registerCollectiblesWorkspace(host);
@@ -529,7 +544,7 @@ export async function registerAssetWorkspace(host: PluginHost): Promise<() => vo
     for (const id of host.contactPublicKeyActions._ids().filter((item) => !beforeContactActionIds.has(item))) {
       host.contactPublicKeyActions.unregister(id);
     }
-    if (!hadTransferFeature) host.capabilities.revoke("feature.transfer");
+    if (!hadTransferFeature) host.capabilities.revoke(TRANSFER_FEATURE_CAPABILITY);
     for (const pluginId of ["assets", "collectibles", "collectibleTransfer", "transfer"]) {
       host.i18n.unregisterResources(pluginId);
     }

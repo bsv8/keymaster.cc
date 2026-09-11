@@ -9,7 +9,7 @@
 //
 // 关键约束：
 //   - 不得 import React、页面 shell 或 plugin manifest
-//   - 只暴露 onconnect / MessagePort 协议
+//   - 生产跨 realm 连接只由 WebLoom SharedWorker Runtime 接管
 //   - Worker 重启后必为 locked，禁止恢复为 unlocked
 
 import type {
@@ -39,6 +39,7 @@ import type {
   SessionStateEvent,
   VaultSealedSecret,
   P2pkhProviderRegistrySnapshot,
+  P2pkhProviderConfig,
   P2pkhProviderSettings,
   P2pkhNetworkProviderSelection,
   P2pkhProviderRegistry,
@@ -75,8 +76,17 @@ import type {
   StorageBootstrapState,
   PluginIntentStateEvent,
   CoordinatorAuthorityRecovery,
+  CoordinatorRpcRequest,
+  CoordinatorRpcResponse,
+  CoordinatorRpcCommandRequest,
+  CoordinatorSessionOpenRequest,
+  CoordinatorLocalStorageRequest,
+  CoordinatorLocalStorageResponse,
+  CoordinatorTopicSubscription,
+  CoordinatorOwnerStorageResult,
+  CoordinatorPlatformStorageResult,
 } from "@keymaster/contracts";
-import { SYSTEM_STORAGE_DECLARATIONS, deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
+import { SYSTEM_STORAGE_DECLARATIONS, deriveThirdPartyApplicationStorageId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -86,6 +96,14 @@ import {
   COORDINATOR_OWNER_STORAGE_SERVICE,
   COORDINATOR_SERVICE_CONTRACT_VERSION,
   COORDINATOR_SERVICE_PROTOCOL_VERSION,
+} from "@keymaster/contracts";
+import {
+  COORDINATOR_RPC_CAPABILITY,
+  COORDINATOR_TOPIC_STREAM_CAPABILITY,
+  COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
+  COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
+  COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
+  COORDINATOR_CRYPTO_RPC_CAPABILITY,
 } from "@keymaster/contracts";
 import {
   MSFILE_MAX_BLOCK_BYTES,
@@ -100,25 +118,21 @@ import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, ser
 // React Refresh 注入 SharedWorker，后者没有 window。
 import {
   createMessageBus,
-  createMessagePortServiceProvider,
-  createPluginIntentController,
-  createUpgradeGate,
   definePlugin,
   startSharedWorkerApp,
-  type MessagePortServiceCallInput,
-  type MessagePortServiceProvider,
-  type RemoteServiceReference,
-  type RuntimeSnapshot,
-  RUNTIME_PROTOCOL_VERSION,
-  RUNTIME_SNAPSHOT_TYPE,
   type PluginIntentController,
   type PluginIntentSnapshot,
   type UpgradeGate,
   type UpgradeIoLease,
   type UpgradeSession,
+  type HandlerCallContext,
+  type PeerController,
 } from "webloom-framework";
+import {
+  createPluginIntentController,
+  createUpgradeGate,
+} from "webloom-framework/advanced";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
-import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 import { createFinalIoAudit, type FinalIoAuditOperation } from "./coordinator/finalIoAudit.js";
 import {
   assertCoordinatorWorkerUnitCatalog,
@@ -1538,9 +1552,9 @@ function initialSetupRecoveryRecord(input: {
   };
 }
 
-async function loadInitialSetupRecoveryRecords(): Promise<boolean> {
+async function loadInitialSetupRecoveryRecords(signal?: AbortSignal, peerId?: string): Promise<boolean> {
   try {
-    const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-list" });
+    const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-list", signal }, peerId);
     if (response.type !== "initial-setup-recovery") return false;
     initialSetupRecoveryRecords.clear();
     for (const record of response.records) initialSetupRecoveryRecords.set(record.transactionId, structuredClone(record));
@@ -4241,8 +4255,6 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
     ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
   });
   publishCoordinatorContactsPresence();
-  // 服务引用绑定 session/owner；先发布新状态，再让服务目录异步进入同一世代。
-  requestCoordinatorServiceRefresh();
 }
 
 // ============================================================
@@ -5264,7 +5276,6 @@ function emitStorageState(): void {
     lastStorageState = state;
     storageRevision = revision;
     publishTopicEvent("storage.state", state);
-    requestCoordinatorServiceRefresh();
   }, () => undefined);
 }
 
@@ -5727,154 +5738,156 @@ function createCoordinatorTaskRuntime(input: CoordinatorTaskRuntimeInput): TaskR
 
 assertCoordinatorWorkerUnitCatalog();
 
-interface ConnectedPort {
-  port: MessagePort;
-  clientId: string;
-  subscriptions: Set<CoordinatorTopic>;
-  lastSeenAt: number;
-  /** 该页面通过 hello 转移进来的服务桥 Provider 端点。 */
-  serviceEndpoint?: CoordinatorServiceEndpoint;
-}
+/**
+ * 一个页面 peer 的有界 topic 队列。WebLoom provider 负责 wire credit；这里
+ * 只负责在 baseline 与 live event 之间建立一个不会无限增长的领域队列。
+ */
+const COORDINATOR_TOPIC_QUEUE_LIMIT = 256;
 
-interface CoordinatorServiceEndpoint {
-  provider: MessagePortServiceProvider;
-  port: MessagePort;
-  runtimeInstanceId: string;
-  revision: number;
-  /** 当前服务引用；只在 Worker 内保存，页面传来的引用不能反向创建授权。 */
-  references: Map<string, RemoteServiceReference>;
-  /** 每个服务实例的服务级不透明授权；不会从页面请求中接受或推导。 */
-  grants: Map<string, string>;
-  identityKey?: string;
-}
-
-type LocalStorageBridgeWireRequest = {
-  requestId: string;
-  /** signal 只在 Worker 内使用，绝不能进入 structured clone。 */
-  request: LocalStorageBridgeRequest;
-} | {
-  requestId: string;
-  /** 页面端取消尚未完成的 Local 操作。 */
-  cancel: true;
-};
-type LocalStorageBridgeWireResponse = {
-  requestId: string;
-  ok: true;
-  response: LocalStorageBridgeResponse;
-} | {
-  requestId: string;
-  ok: false;
-  error: { code?: string; message: string };
-};
-
-interface LocalStorageBridgeEndpoint {
-  clientId: string;
-  port: MessagePort;
-  /** 由页面 hello 生成、不可由桥请求自行声明的租约。 */
-  leaseId: string;
-  pending: Map<string, {
-    resolve: (response: LocalStorageBridgeResponse) => void;
+interface CoordinatorTopicStreamQueue {
+  readonly peerId: string;
+  readonly topics: ReadonlySet<CoordinatorTopic>;
+  readonly values: CoordinatorTopicEvent[];
+  readonly waiters: Array<{
+    resolve: (result: IteratorResult<CoordinatorTopicEvent>) => void;
     reject: (error: unknown) => void;
-    signal?: AbortSignal;
-    onAbort?: () => void;
   }>;
+  closed: boolean;
+  error?: unknown;
+}
+
+function topicStreamOverflowError(): Error & { code: string } {
+  return Object.assign(new Error("Coordinator topic stream queue overflow"), { code: "stream_overflow" });
+}
+
+function createCoordinatorTopicStreamQueue(peerId: string, topics: readonly CoordinatorTopic[]): CoordinatorTopicStreamQueue {
+  return {
+    peerId,
+    topics: new Set(topics),
+    values: [],
+    waiters: [],
+    closed: false,
+  };
+}
+
+function closeCoordinatorTopicStreamQueue(queue: CoordinatorTopicStreamQueue, error?: unknown): void {
+  if (queue.closed) return;
+  queue.closed = true;
+  queue.error = error;
+  const waiters = queue.waiters.splice(0);
+  queue.values.length = 0;
+  for (const waiter of waiters) {
+    if (error !== undefined) waiter.reject(error);
+    else waiter.resolve({ done: true, value: undefined });
+  }
+}
+
+function enqueueCoordinatorTopicEvent(queue: CoordinatorTopicStreamQueue, event: CoordinatorTopicEvent): void {
+  if (queue.closed || !queue.topics.has(event.topic)) return;
+  const waiter = queue.waiters.shift();
+  if (waiter) {
+    waiter.resolve({ done: false, value: event });
+    return;
+  }
+  if (queue.values.length >= COORDINATOR_TOPIC_QUEUE_LIMIT) {
+    closeCoordinatorTopicStreamQueue(queue, topicStreamOverflowError());
+    return;
+  }
+  queue.values.push(event);
+}
+
+function takeCoordinatorTopicEvent(queue: CoordinatorTopicStreamQueue): Promise<IteratorResult<CoordinatorTopicEvent>> {
+  if (queue.values.length > 0) {
+    return Promise.resolve({ done: false, value: queue.values.shift()! });
+  }
+  if (queue.closed) {
+    return queue.error === undefined
+      ? Promise.resolve({ done: true, value: undefined })
+      : Promise.reject(queue.error);
+  }
+  return new Promise<IteratorResult<CoordinatorTopicEvent>>((resolve, reject) => {
+    queue.waiters.push({ resolve, reject });
+  });
+}
+
+interface CoordinatorPeerState {
+  readonly peer: PeerController;
+  lastSeenAt: number;
+  sessionOpen: boolean;
+  /** 每次 open/close/revoke 都推进；迟到的 await 结果不能重新开放旧 peer。 */
+  sessionGeneration: number;
+  /** 同一 peer 的 open/close/refresh 不能并行修改会话投影。 */
+  sessionOperationTail: Promise<void>;
+  topicStream?: CoordinatorTopicStreamQueue;
+  serviceExposure?: { revoke(): void };
+}
+
+/** WebLoom 连接 peer 注册表；不以“最近活动页面”选择物理 Local I/O。 */
+const coordinatorPeers = new Map<string, CoordinatorPeerState>();
+let storageIoPeerId: string | undefined;
+
+interface CoordinatorSessionOpenAttempt {
+  readonly state: CoordinatorPeerState;
+  readonly peerId: string;
+  readonly generation: number;
+  readonly signal: AbortSignal;
 }
 
 /**
- * SharedWorker 没有 Window/localStorage。Provider 只捕获这个无状态路由，
- * 每次真正 I/O 都选择当前仍在线的页面端点；页面端会再次校验桶身份。
+ * Worker 初始化是全局共享的，但首次初始化期间的 LocalStorage I/O 仍
+ * 必须临时绑定到发起 open 的真实 peer。它不是 sessionIoPeerId：只有
+ * exposeGroup 成功后才会写入后者。
  */
-const localStorageBridgeEndpoints = new Map<string, LocalStorageBridgeEndpoint>();
-let activeLocalStorageBridgeClientId: string | undefined;
+let coordinatorOpeningSession: CoordinatorSessionOpenAttempt | undefined;
+let coordinatorSessionOpenTail: Promise<void> = Promise.resolve();
 
-function rejectLocalStorageBridge(endpoint: LocalStorageBridgeEndpoint, reason: string): void {
-  for (const [requestId, request] of endpoint.pending) {
-    if (request.onAbort && request.signal) request.signal.removeEventListener("abort", request.onAbort);
-    request.reject(storageUnavailableError(reason));
-    endpoint.pending.delete(requestId);
+function coordinatorPeerState(peerId: string): CoordinatorPeerState | undefined {
+  return coordinatorPeers.get(peerId);
+}
+
+function requireCoordinatorPeer(call: HandlerCallContext): CoordinatorPeerState {
+  const peerId = call.peer?.peerId;
+  const state = peerId ? coordinatorPeerState(peerId) : undefined;
+  if (!state || state.peer.scope.state !== "active") {
+    throw Object.assign(new Error("Coordinator peer is unavailable"), { code: "transport_disconnected" });
+  }
+  state.lastSeenAt = Date.now();
+  return state;
+}
+
+function requireCoordinatorSessionPeer(call: HandlerCallContext): CoordinatorPeerState {
+  const state = requireCoordinatorPeer(call);
+  if (!state.sessionOpen) {
+    throw Object.assign(new Error("Coordinator session is not open"), { code: "service_unavailable" });
+  }
+  return state;
+}
+
+function coordinatorSessionStaleError(message = "Coordinator session open became stale"): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "service_reference_stale" });
+}
+
+function assertCoordinatorSessionOpenFresh(attempt: CoordinatorSessionOpenAttempt): void {
+  if (attempt.signal.aborted) throw coordinatorSessionStaleError("Coordinator session open was cancelled");
+  if (coordinatorPeers.get(attempt.peerId) !== attempt.state
+    || attempt.state.peer.scope.state !== "active"
+    || attempt.state.sessionGeneration !== attempt.generation) {
+    throw coordinatorSessionStaleError();
   }
 }
 
-function removeLocalStorageBridge(clientId: string): void {
-  const endpoint = localStorageBridgeEndpoints.get(clientId);
-  if (!endpoint) return;
-  localStorageBridgeEndpoints.delete(clientId);
-  rejectLocalStorageBridge(endpoint, "Local storage bridge disconnected");
-  try { endpoint.port.close(); } catch { /* already closed */ }
-  if (activeLocalStorageBridgeClientId === clientId) {
-    activeLocalStorageBridgeClientId = [...localStorageBridgeEndpoints.keys()].at(-1);
-  }
+function enqueueCoordinatorPeerSessionOperation<T>(state: CoordinatorPeerState, operation: () => Promise<T>): Promise<T> {
+  const previous = state.sessionOperationTail;
+  const current = previous.catch(() => undefined).then(operation);
+  state.sessionOperationTail = current.then(() => undefined, () => undefined);
+  return current;
 }
 
-function handleLocalStorageBridgeResponse(clientId: string, value: unknown): void {
-  const endpoint = localStorageBridgeEndpoints.get(clientId);
-  if (!endpoint || !value || typeof value !== "object") return;
-  const response = value as Partial<LocalStorageBridgeWireResponse>;
-  if (typeof response.requestId !== "string") return;
-  const pending = endpoint.pending.get(response.requestId);
-  if (!pending) return;
-  endpoint.pending.delete(response.requestId);
-  if (pending.onAbort && pending.signal) pending.signal.removeEventListener("abort", pending.onAbort);
-  if (response.ok === true && response.response) {
-    pending.resolve(response.response);
-    return;
-  }
-  const error = (response as { error?: { code?: string; message?: string } }).error;
-  const code = typeof error?.code === "string" && error.code.startsWith("storage_")
-    ? error.code as import("@keymaster/contracts").StorageErrorCode
-    : "storage_unavailable";
-  pending.reject(new StorageRuntimeError(code, typeof error?.message === "string" ? error.message : "Local storage bridge request failed"));
-}
-
-function installLocalStorageBridgeEndpoint(
-  clientId: string,
-  port: MessagePort,
-  leaseId: string | undefined,
-  bootstrapState?: StorageBootstrapState,
-): void {
-  removeLocalStorageBridge(clientId);
-  if (!leaseId) {
-    try { port.close(); } catch { /* already closed */ }
-    return;
-  }
-  const endpoint: LocalStorageBridgeEndpoint = {
-    clientId,
-    port,
-    leaseId,
-    pending: new Map(),
-  };
-  port.onmessage = (event) => handleLocalStorageBridgeResponse(clientId, event.data);
-  port.onmessageerror = () => removeLocalStorageBridge(clientId);
-  localStorageBridgeEndpoints.set(clientId, endpoint);
-  activeLocalStorageBridgeClientId = clientId;
-  port.start();
-  // 初次 Root bootstrap 可能在 hello RPC 返回前就执行 Local I/O；先把本次
-  // Worker authority 与当前 bootstrap 桶发布给页面，页面随后仍会在每个
-  // 请求和 Web Lock 内重新校验目录。没有选定桶时保持不可用于业务 I/O。
-  const bootstrapBucket = platformRootStore?.bucket;
-  const selected = bootstrapBucket
-    ?? (bootstrapState?.selectedBucket
-      ? {
-          bucketId: bootstrapState.selectedBucket.bucketId,
-          bucketGeneration: 1,
-          provider: bootstrapState.selectedBucket.backend,
-        }
-      : bootstrapState?.selectedBackend === "local"
-        ? { bucketId: bootstrapState.selectedProfileId ?? "local-default", bucketGeneration: 1, provider: "local" as const }
-        : undefined);
-  try {
-    endpoint.port.postMessage({
-      type: "lease",
-      authorityInstanceId: coordinatorAuthorityInstanceId,
-      // 即使当前桶是 S3，也要把逻辑桶 ID 和世代交给页面桥。切换到
-      // Local 时，候选请求需要用它确认“目录仍选中这个 S3 桶”；真正
-      // 的 Local 物理 I/O 仍会再检查 selected.backend === "local"。
-      ...(selected ? { bucketId: selected.bucketId, bucketGeneration: selected.bucketGeneration } : { bucketGeneration: 0 }),
-      leaseId,
-    });
-  } catch {
-    removeLocalStorageBridge(clientId);
-  }
+function enqueueCoordinatorSessionInitialization<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = coordinatorSessionOpenTail;
+  const current = previous.catch(() => undefined).then(operation);
+  coordinatorSessionOpenTail = current.then(() => undefined, () => undefined);
+  return current;
 }
 
 function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStorageBridgeRequest {
@@ -5890,39 +5903,33 @@ function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStor
   return request;
 }
 
-function requestLocalStorageBridge(input: LocalStorageBridgeRequest): Promise<LocalStorageBridgeResponse> {
+/** 将旧 Provider 内部请求收窄为 Window reverse capability 的纯 DTO。 */
+function coordinatorLocalStorageRequest(input: LocalStorageBridgeRequest): CoordinatorLocalStorageRequest {
+  const withoutSignal = bridgeRequestWithoutSignal(input) as unknown as Record<string, unknown>;
+  const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, ...request } = withoutSignal;
+  return request as unknown as CoordinatorLocalStorageRequest;
+}
+
+/**
+ * Coordinator → Window 的 LocalStorage 唯一反向调用面。peerId 只来自
+ * WebLoom HandlerCallContext/会话绑定；绝不从页面请求或“最后活动页面”推导。
+ */
+function requestLocalStorageBridge(input: LocalStorageBridgeRequest, peerId?: string): Promise<LocalStorageBridgeResponse> {
+  const opening = coordinatorOpeningSession;
+  const temporaryPeerId = peerId === undefined && storageIoPeerId === undefined && opening
+    ? (() => { assertCoordinatorSessionOpenFresh(opening); return opening.peerId; })()
+    : undefined;
+  const targetPeerId = peerId ?? storageIoPeerId ?? temporaryPeerId;
+  const signal = input.signal ?? opening?.signal;
+  if (signal?.aborted) throw storageUnavailableError("Local storage bridge request was cancelled");
   if (testLocalStorageBridgeOverride) return testLocalStorageBridgeOverride(input);
-  const clientId = activeLocalStorageBridgeClientId;
-  const endpoint = clientId ? localStorageBridgeEndpoints.get(clientId) : undefined;
-  if (!endpoint) throw storageUnavailableError("Local storage bridge is unavailable");
-  const requestId = generateRequestId();
-  const signal = input.signal;
-  const payload = {
-    ...bridgeRequestWithoutSignal(input),
-    authorityInstanceId: coordinatorAuthorityInstanceId,
-    leaseId: endpoint.leaseId,
-  } as LocalStorageBridgeRequest;
-  return new Promise<LocalStorageBridgeResponse>((resolve, reject) => {
-    const pending = { resolve, reject, ...(signal ? { signal } : {}) } as LocalStorageBridgeEndpoint["pending"] extends Map<string, infer V> ? V : never;
-    const onAbort = () => {
-      if (!endpoint.pending.delete(requestId)) return;
-      try { endpoint.port.postMessage({ requestId, cancel: true } satisfies LocalStorageBridgeWireRequest); } catch { /* 页面端可能已关闭 */ }
-      reject(storageUnavailableError("Local storage bridge request was cancelled"));
-    };
-    if (signal) {
-      pending.onAbort = onAbort;
-      if (signal.aborted) { onAbort(); return; }
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-    endpoint.pending.set(requestId, pending);
-    try {
-      endpoint.port.postMessage({ requestId, request: payload } satisfies LocalStorageBridgeWireRequest);
-    } catch (error) {
-      endpoint.pending.delete(requestId);
-      if (pending.onAbort && pending.signal) pending.signal.removeEventListener("abort", pending.onAbort);
-      reject(error);
-    }
-  });
+  const state = targetPeerId ? coordinatorPeerState(targetPeerId) : undefined;
+  if (!state || state.peer.scope.state !== "active") throw storageUnavailableError("Local storage bridge is unavailable");
+  const request = coordinatorLocalStorageRequest(input);
+  return state.peer.capability(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY).call(request, {
+    signal,
+    operationId: generateRequestId(),
+  }) as Promise<LocalStorageBridgeResponse>;
 }
 
 /**
@@ -6233,9 +6240,24 @@ function dropActivePrivateKey(): void {
   replaceActivePrivateKey(undefined);
 }
 
-const connectedPorts = new Map<string, ConnectedPort>();
-/** 已收到断开协议的端口；防止断开与异步 authority 校验竞态重新登记请求。 */
-const disconnectedClientIds = new Set<string>();
+/**
+ * Peer scope revoke 是生产连接的唯一断开/准入栅栏。
+ *
+ * 这里单独保留已经撤销的 peer 身份，是为了让仍在执行的领域 Promise
+ * 在迟到 finally/await 边界上不能重新创建 grant 或发布结果。它不是一
+ * 个端口注册表，也不承载连接消息。
+ */
+const revokedCoordinatorPeerIds = new Set<string>();
+
+/**
+ * 仅供 worker 单元测试收集领域事件；生产 Runtime 不读取或写入这张表。
+ * 测试通过 `__testAttachPort` 注册 sink，不会把它伪装成 SharedWorker 端口。
+ */
+interface CoordinatorTestEventSink {
+  readonly postMessage: (message: unknown, transfer?: ArrayBuffer[]) => void;
+  readonly topics: Set<CoordinatorTopic>;
+}
+const coordinatorTestEventSinks = new Map<string, CoordinatorTestEventSink>();
 
 /** 每个页面端口的 Channel 请求控制器；断开时取消对应的远端订阅对账。 */
 const channelRequests = new Map<string, { clientId: string; controller: AbortController }>();
@@ -6245,8 +6267,6 @@ function channelRequestKey(clientId: string, requestId: string): string {
 /** 已经被某个页面声明过的 caller；端口断开时必须释放其逻辑集合。 */
 const channelCallersByClient = new Map<string, Set<string>>();
 
-/** 服务目录刷新串行化，避免 owner 切换期间异步 generation 乱序覆盖。 */
-let coordinatorServiceRefreshTail: Promise<void> = Promise.resolve();
 const PASSKEY_ADD_INTENT_TTL_MS = 120_000;
 const passkeyAddIntents = new Map<string, {
   publicKeyHex: string;
@@ -6997,10 +7017,6 @@ function generateRequestId(): string {
   return `req-${Date.now()}-${randomIdentifierSuffix()}`;
 }
 
-function generateClientId(): string {
-  return `client-${Date.now()}-${randomIdentifierSuffix()}`;
-}
-
 function generateCoordinatorServiceId(prefix: string): string {
   try {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -7010,423 +7026,6 @@ function generateCoordinatorServiceId(prefix: string): string {
     // 这类标识只在 Worker 内比较；没有 Web Crypto 时退回进程内唯一格式。
   }
   return `${prefix}:${Date.now().toString(36)}:${randomIdentifierSuffix()}`;
-}
-
-function coordinatorServicesCanBeReady(): boolean {
-  return coordinatorState.vaultStatus === "unlocked"
-    && typeof coordinatorState.activePublicKeyHex === "string"
-    && Boolean(coordinatorState.activePrivateKeyBytes)
-    && Boolean(platformRootStore && platformRootToken)
-    && platformStorageReady
-    && !storageStartupFailure
-    && storageHealthController.status() === "ready";
-}
-
-function sameRemoteServiceReference(
-  left: RemoteServiceReference | undefined,
-  right: RemoteServiceReference
-): boolean {
-  return Boolean(left)
-    && left!.capabilityId === right.capabilityId
-    && left!.runtime === right.runtime
-    && left!.contractVersion === right.contractVersion
-    && left!.runtimeInstanceId === right.runtimeInstanceId
-    && left!.serviceInstanceId === right.serviceInstanceId
-    && left!.status === right.status
-    && JSON.stringify(left!.attributes) === JSON.stringify(right.attributes)
-    && left!.grantId === right.grantId
-    && left!.authorizationRevision === right.authorizationRevision;
-}
-
-function serviceBoundaryError(code: string, message: string): Error & { code: string } {
-  return Object.assign(new Error(message), { code });
-}
-
-/**
- * Coordinator 服务的最终操作授权表。
- *
- * 这不是页面 manifest 的申请列表，而是 Worker 在 Provider/IO 边界执行
- * 前的硬白名单；新增服务操作必须同时修改这里和对应的领域 handler。
- */
-const COORDINATOR_SERVICE_OPERATION_AUTHORIZATION: Readonly<Record<string, { revision: number; operations: readonly string[] }>> = Object.freeze({
-  [COORDINATOR_OWNER_STORAGE_SERVICE]: { revision: 1, operations: ["owner.get", "owner.list", "owner.put", "owner.delete", "owner.commit"] },
-  [COORDINATOR_CRYPTO_SERVICE]: { revision: 1, operations: ["signDigest", "deriveP2pkhAddress"] },
-});
-
-function assertCoordinatorServiceOperationAllowed(capabilityId: string, request: unknown): string {
-  const operation = request && typeof request === "object" && typeof (request as { type?: unknown }).type === "string"
-    ? (request as { type: string }).type
-    : "";
-  if (!COORDINATOR_SERVICE_OPERATION_AUTHORIZATION[capabilityId]?.operations.includes(operation)) {
-    throw serviceBoundaryError("service.operation_denied", `Coordinator service operation is not authorized: ${capabilityId}/${operation || "unknown"}`);
-  }
-  return operation;
-}
-
-function coordinatorServiceAuthorizationRevision(capabilityId: string): number {
-  const policy = COORDINATOR_SERVICE_OPERATION_AUTHORIZATION[capabilityId];
-  if (!policy) throw serviceBoundaryError("service.capability_denied", "Coordinator service capability is not allowed");
-  return policy.revision;
-}
-
-/**
- * 重新计算某条真实 MessagePort 连接的服务目录。
- *
- * 服务级 grant 只在这里生成并保存在 Worker；页面拿到的 reference 是
- * 可序列化目录信息，不是可单独使用的授权凭据。锁定、换 key、Root 重绑
- * 或 owner generation 变化都会产生新的 serviceInstanceId 和 grant。
- */
-async function refreshCoordinatorServiceEndpoint(endpoint: CoordinatorServiceEndpoint): Promise<void> {
-  await ensureCoordinatorAuthorityClaim();
-  const ownerPublicKeyHex = normalizedCoordinatorOwner();
-  const root = platformRootStore;
-  const bucketGeneration = root?.bucket.bucketGeneration ?? null;
-  let ownerGeneration: number | null = null;
-  let ready = coordinatorServicesCanBeReady();
-  if (ready && root && ownerPublicKeyHex) {
-    try {
-      ownerGeneration = await withCoordinatorFinalIoLease(
-        "read",
-        undefined,
-        () => root.getOwnerStorageGeneration({ ownerPublicKeyHex }),
-        {
-          auditOperation: "service.owner-generation.read",
-          // 目录刷新只生成当前服务快照，不读写业务真值；即使旧页面
-          // 在刷新期间销毁，也不能用这笔只读校验阻塞新 Worker 接管。
-          durableLease: false,
-        },
-      );
-    } catch {
-      ready = false;
-    }
-  } else {
-    ready = false;
-  }
-
-  const identityKey = [
-    coordinatorAuthorityInstanceId,
-    coordinatorHandoverGeneration,
-    coordinatorState.sessionEpoch,
-    coordinatorState.keyspaceGeneration,
-    ownerPublicKeyHex ?? "null",
-    bucketGeneration ?? "null",
-    ownerGeneration ?? "null",
-    ready ? "ready" : "unavailable",
-  ].join("\u0000");
-  const identityChanged = endpoint.identityKey !== identityKey;
-  if (identityChanged) {
-    endpoint.identityKey = identityKey;
-    endpoint.grants.clear();
-  }
-
-  endpoint.runtimeInstanceId = coordinatorAuthorityInstanceId;
-  const revision = endpoint.revision + 1;
-  const ownerGrantId = ready ? (endpoint.grants.get(COORDINATOR_OWNER_STORAGE_SERVICE) ?? generateCoordinatorServiceId("coordinator-owner-grant")) : undefined;
-  const cryptoGrantId = ready ? (endpoint.grants.get(COORDINATOR_CRYPTO_SERVICE) ?? generateCoordinatorServiceId("coordinator-crypto-grant")) : undefined;
-  if (ownerGrantId) endpoint.grants.set(COORDINATOR_OWNER_STORAGE_SERVICE, ownerGrantId);
-  if (cryptoGrantId) endpoint.grants.set(COORDINATOR_CRYPTO_SERVICE, cryptoGrantId);
-  if (!ready) endpoint.grants.clear();
-
-  const ownerScopeId = `coordinator-owner-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`;
-  const cryptoScopeId = `coordinator-crypto-session:${coordinatorState.sessionEpoch}:bucket:${bucketGeneration ?? "null"}`;
-  const ownerAttributes = Object.freeze({
-    authorityInstanceId: coordinatorAuthorityInstanceId,
-    scopeId: ownerScopeId,
-    handoverGeneration: coordinatorHandoverGeneration,
-    sessionEpoch: ownerPublicKeyHex ? coordinatorState.sessionEpoch : null,
-    ownerPublicKeyHex: ownerPublicKeyHex ?? null,
-    ownerGeneration,
-    bucketGeneration,
-  });
-  const cryptoAttributes = Object.freeze({
-    authorityInstanceId: coordinatorAuthorityInstanceId,
-    scopeId: cryptoScopeId,
-    handoverGeneration: coordinatorHandoverGeneration,
-    sessionEpoch: ownerPublicKeyHex ? coordinatorState.sessionEpoch : null,
-    ownerPublicKeyHex: ownerPublicKeyHex ?? null,
-    ownerGeneration,
-    bucketGeneration,
-  });
-  const previousOwner = endpoint.references.get(COORDINATOR_OWNER_STORAGE_SERVICE);
-  const previousCrypto = endpoint.references.get(COORDINATOR_CRYPTO_SERVICE);
-  const ownerServiceInstanceId = previousOwner && !identityChanged
-    ? previousOwner.serviceInstanceId
-    : generateCoordinatorServiceId("coordinator-owner-service");
-  const cryptoServiceInstanceId = previousCrypto && !identityChanged
-    ? previousCrypto.serviceInstanceId
-    : generateCoordinatorServiceId("coordinator-crypto-service");
-
-  const services: RemoteServiceReference[] = [
-    {
-      capabilityId: COORDINATOR_OWNER_STORAGE_SERVICE,
-      runtime: "shared-worker",
-      contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      runtimeInstanceId: endpoint.runtimeInstanceId,
-      serviceInstanceId: ownerServiceInstanceId,
-      status: ready ? "ready" : "unavailable",
-      attributes: ownerAttributes,
-      ...(ownerGrantId ? { grantId: ownerGrantId } : {}),
-      authorizationRevision: coordinatorServiceAuthorizationRevision(COORDINATOR_OWNER_STORAGE_SERVICE),
-    },
-    {
-      capabilityId: COORDINATOR_CRYPTO_SERVICE,
-      runtime: "shared-worker",
-      contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      runtimeInstanceId: endpoint.runtimeInstanceId,
-      serviceInstanceId: cryptoServiceInstanceId,
-      status: ready ? "ready" : "unavailable",
-      attributes: cryptoAttributes,
-      ...(cryptoGrantId ? { grantId: cryptoGrantId } : {}),
-      authorizationRevision: coordinatorServiceAuthorizationRevision(COORDINATOR_CRYPTO_SERVICE),
-    },
-  ];
-  endpoint.references.clear();
-  for (const service of services) endpoint.references.set(service.capabilityId, service);
-  endpoint.revision = revision;
-  endpoint.provider.setServices(services);
-  const runtimeState = coordinatorRuntimeApp?.state();
-  const snapshot: RuntimeSnapshot = {
-    type: RUNTIME_SNAPSHOT_TYPE,
-    protocolVersion: RUNTIME_PROTOCOL_VERSION,
-    runtimeId: "keymaster-coordinator",
-    runtimeKind: "shared-worker",
-    runtimeInstanceId: endpoint.runtimeInstanceId,
-    revision,
-    state: runtimeState?.state === "failed" || runtimeState?.state === "stopping" || runtimeState?.state === "disposed"
-      ? runtimeState.state
-      : runtimeState?.state === "ready" ? "ready" : "starting",
-    units: runtimeState?.units ?? [],
-    services,
-  };
-  try { endpoint.port.postMessage(snapshot); } catch { /* 端口断开时由其生命周期收敛 */ }
-}
-
-function requestCoordinatorServiceRefresh(): void {
-  coordinatorServiceRefreshTail = coordinatorServiceRefreshTail.then(async () => {
-    const endpoints = [...connectedPorts.values()]
-      .map((connectedPort) => connectedPort.serviceEndpoint)
-      .filter((endpoint): endpoint is CoordinatorServiceEndpoint => Boolean(endpoint));
-    for (const endpoint of endpoints) {
-      // 刷新执行时端点可能已经断开；snapshot/provider 都会安全收敛。
-      await refreshCoordinatorServiceEndpoint(endpoint).catch(() => undefined);
-    }
-  }, () => undefined);
-}
-
-async function assertCoordinatorServiceCallCurrent(
-  clientId: string,
-  input: MessagePortServiceCallInput,
-): Promise<{ endpoint: CoordinatorServiceEndpoint; reference: RemoteServiceReference }> {
-  const { message, reference: providerReference, signal } = input;
-  if (signal?.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-  await assertCoordinatorAuthorityCurrent();
-  if (signal?.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-  const connectedPort = connectedPorts.get(clientId);
-  const endpoint = connectedPort?.serviceEndpoint;
-  if (!endpoint) {
-    throw serviceBoundaryError("service.reference_stale", "Coordinator service connection is stale");
-  }
-  const reference = [...endpoint.references.values()].find((candidate) => candidate.serviceInstanceId === message.serviceInstanceId);
-  if (!reference
-    || message.capabilityId !== reference.capabilityId
-    || message.contractVersion !== reference.contractVersion
-    || !sameRemoteServiceReference(reference, providerReference)
-    || reference.status !== "ready") {
-    throw serviceBoundaryError("service.reference_stale", "Coordinator service reference is stale");
-  }
-  const serverGrantId = endpoint.grants.get(reference.capabilityId);
-  if (!serverGrantId || reference.grantId !== serverGrantId || message.grantId !== serverGrantId) {
-    throw serviceBoundaryError("service.grant_invalid", "Coordinator service grant is invalid");
-  }
-  if (reference.authorizationRevision !== coordinatorServiceAuthorizationRevision(reference.capabilityId)) {
-    throw serviceBoundaryError("service.authorization_stale", "Coordinator service authorization policy changed");
-  }
-  const attributes = reference.attributes;
-  const currentOwner = normalizedCoordinatorOwner();
-  const expectedScope = `${reference.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE ? "coordinator-owner-session" : "coordinator-crypto-session"}:${coordinatorState.sessionEpoch}:bucket:${platformRootStore?.bucket.bucketGeneration ?? "null"}`;
-  if (
-    attributes.authorityInstanceId !== coordinatorAuthorityInstanceId
-    || attributes.handoverGeneration !== coordinatorHandoverGeneration
-    || attributes.sessionEpoch !== coordinatorState.sessionEpoch
-    || attributes.ownerPublicKeyHex !== currentOwner
-    || attributes.scopeId !== expectedScope
-    || !coordinatorServicesCanBeReady()
-  ) {
-    throw serviceBoundaryError("service.unavailable", "Coordinator service is unavailable");
-  }
-  return { endpoint, reference };
-}
-
-/** 异步读取当前 owner generation，防止目录刷新尚未完成时旧引用越过边界。 */
-async function assertCoordinatorServiceGenerationCurrent(reference: RemoteServiceReference, signal?: AbortSignal): Promise<void> {
-  const root = platformRootStore;
-  const owner = normalizedCoordinatorOwner();
-  const ownerGeneration = reference.attributes.ownerGeneration;
-  if (!root || !owner || typeof ownerGeneration !== "number") {
-    throw serviceBoundaryError("service.unavailable", "Coordinator service owner generation is unavailable");
-  }
-  const generation = await withCoordinatorFinalIoLease(
-    "read",
-    signal,
-    () => root.getOwnerStorageGeneration({ ownerPublicKeyHex: owner }),
-    {
-      auditOperation: "service.owner-generation.read",
-      // 这里只是服务目录的并发校验，不产生外部或持久化副作用；页面
-      // 断开时不能让一笔未完成的只读校验阻塞新 Worker 接管。
-      durableLease: false,
-    },
-  );
-  if (signal?.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-  if (generation !== ownerGeneration) {
-    throw serviceBoundaryError("service.reference_stale", "Coordinator service owner generation changed");
-  }
-}
-
-async function executeCoordinatorServiceCall(
-  clientId: string,
-  input: MessagePortServiceCallInput
-): Promise<unknown> {
-  if (input.signal.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-  const { reference } = await assertCoordinatorServiceCallCurrent(clientId, input);
-  await assertCoordinatorServiceGenerationCurrent(reference, input.signal);
-  if (reference.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE) {
-    const request = input.message.request;
-    assertCoordinatorServiceOperationAllowed(reference.capabilityId, request);
-    if (!request || typeof request !== "object" || typeof (request as { type?: unknown }).type !== "string" || typeof (request as { storageGrantId?: unknown }).storageGrantId !== "string") {
-      throw serviceBoundaryError("service.request_invalid", "Owner storage service request is invalid");
-    }
-    const result = await executeOwnerStorageData(request as CoordinatorOwnerStorageData, clientId, input.signal);
-    if (input.signal.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-    await assertCoordinatorServiceCallCurrent(clientId, input);
-    await assertCoordinatorServiceGenerationCurrent(reference, input.signal);
-    return result;
-  }
-  if (reference.capabilityId === COORDINATOR_CRYPTO_SERVICE) {
-    const operation = input.message.request as CoordinatorCryptoOperation;
-    assertCoordinatorServiceOperationAllowed(reference.capabilityId, operation);
-    if (!coordinatorState.activePrivateKeyBytes) throw serviceBoundaryError("service.unavailable", "Coordinator crypto is unavailable");
-    const result = await withCoordinatorFinalIoLease(
-      "write",
-      input.signal,
-      () => executeCryptoOperation(operation, coordinatorState.activePrivateKeyBytes!),
-      { auditOperation: "service.crypto.sign" },
-    );
-    if (input.signal.aborted) throw serviceBoundaryError("service.request_cancelled", "Coordinator service request was cancelled");
-    await assertCoordinatorServiceCallCurrent(clientId, input);
-    await assertCoordinatorServiceGenerationCurrent(reference, input.signal);
-    return result;
-  }
-  throw serviceBoundaryError("service.capability_denied", "Coordinator service capability is not allowed");
-}
-
-function installCoordinatorServiceEndpoint(clientId: string, servicePort: MessagePort): void {
-  const connectedPort = connectedPorts.get(clientId);
-  if (!connectedPort) {
-    servicePort.close();
-    return;
-  }
-  connectedPort.serviceEndpoint?.provider.dispose();
-  const endpoint: CoordinatorServiceEndpoint = {
-    provider: undefined as unknown as MessagePortServiceProvider,
-    port: servicePort,
-    runtimeInstanceId: coordinatorAuthorityInstanceId,
-    revision: 0,
-    references: new Map(),
-    grants: new Map(),
-  };
-  endpoint.provider = createMessagePortServiceProvider({
-    port: servicePort,
-    codec: keymasterRemoteServiceMessageCodec,
-    handleCall: (input) => executeCoordinatorServiceCall(clientId, input),
-  });
-  connectedPort.serviceEndpoint = endpoint;
-  requestCoordinatorServiceRefresh();
-}
-
-// ============================================================
-// 4. Port Management
-// ============================================================
-
-function handlePortConnect(event: { ports: MessagePort[] }): void {
-  const port = event.ports[0];
-  if (!port) return;
-
-  const clientId = generateClientId();
-  const connectedPort: ConnectedPort = {
-    port,
-    clientId,
-    subscriptions: new Set(),
-    lastSeenAt: Date.now(),
-  };
-
-  disconnectedClientIds.delete(clientId);
-  connectedPorts.set(clientId, connectedPort);
-
-  port.onmessage = (msgEvent: MessageEvent<CoordinatorClientRequest>) => {
-    handleClientMessage(clientId, msgEvent.data);
-  };
-
-  port.onmessageerror = () => {
-    handlePortDisconnect(clientId);
-  };
-
-  port.start();
-
-  // 发送初始状态
-  sendToPort(port, {
-    requestId: "hello",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "ok" },
-  });
-}
-
-function handlePortDisconnect(clientId: string): void {
-  disconnectedClientIds.add(clientId);
-  removeLocalStorageBridge(clientId);
-  const connectedPort = connectedPorts.get(clientId);
-  connectedPort?.serviceEndpoint?.provider.dispose();
-  for (const [requestId, request] of storageRequests) {
-    if (request.clientId === clientId) { request.controller.abort(); storageRequests.delete(requestId); }
-  }
-  for (const [requestId, request] of channelRequests) {
-    if (request.clientId === clientId) { request.controller.abort(); channelRequests.delete(requestId); }
-  }
-  for (const [grantId, grant] of storageGrants) if (grant.clientId === clientId) storageGrants.delete(grantId);
-  for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === clientId) ownerStorageGrants.delete(grantId);
-  // storagePortCounts tracks third-party physical requests, not just live
-  // ports. A disconnected Provider may ignore AbortSignal; keep the count
-  // until executeStorageRequest's physical Promise settles so a reused
-  // clientId cannot overwrite the old admission accounting.
-  // MSFile：断开端口的未决请求与 grant 全部失效。
-  for (const [requestId, request] of msfileRequests) {
-    if (request.clientId === clientId) { request.controller.abort(); msfileRequests.delete(requestId); }
-  }
-  for (const [requestId, request] of windowP2pExecutorIdentityRequests) {
-    if (request.clientId === clientId) { request.controller.abort(); windowP2pExecutorIdentityRequests.delete(requestId); }
-  }
-  for (const [grantId, grant] of msfileGrants) if (grant.clientId === clientId) msfileGrants.delete(grantId);
-  if (windowP2pExecutorLease !== undefined && windowP2pExecutorLease.clientId === clientId) {
-    clearWindowP2pExecutorLeaseLocked();
-    emitMsFileState();
-  }
-  const channelCallers = channelCallersByClient.get(clientId);
-  channelCallersByClient.delete(clientId);
-  const mux = channelSubscriptionMux;
-  if (mux && channelCallers) {
-    for (const callerId of channelCallers) {
-      // 端口已断开后仍要释放逻辑 caller；若当前没有其它页面，下面的
-      // no-client runtime release 会把它转为领域仓库清理意图而不再发起
-      // 新的远端副作用。
-      void mux.release(callerId).catch(() => undefined);
-    }
-  }
-  connectedPorts.delete(clientId);
-  if (connectedPorts.size === 0 && coordinatorState.vaultStatus === "unlocked") {
-    // SharedWorker 没有可靠的“即将被回收”回调。最后一个页面离开时
-    // 主动撤掉 owner runtime：在途远端操作先被 signal 取消并落成
-    // unknown_result/清理意图，避免旧 Worker 的持久 lease 永远占住接管。
-    void releaseSatRuntime("all coordinator clients disconnected", { physicalCleanup: false }).catch(() => undefined);
-  }
 }
 
 function isP2pkhBroadcastRequest(request: CoordinatorClientRequest): request is Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }> {
@@ -7454,123 +7053,10 @@ async function abortNotDispatchedP2pkhSubmission(
   }
 }
 
-// ============================================================
-// 5. Message Handling
-// ============================================================
-
-async function handleClientMessage(
-  clientId: string,
-  request: CoordinatorClientRequest
-): Promise<void> {
-  const connectedPort = connectedPorts.get(clientId);
-  if (!connectedPort) return;
-
-  connectedPort.lastSeenAt = Date.now();
-
-  if (request.kind === "hello") {
-    await handleHello(clientId, request);
-    return;
-  }
-
-  if (request.kind === "subscribe") {
-    await handleSubscribe(clientId, request);
-    return;
-  }
-
-  if (request.kind === "activity") {
-    handleActivity(clientId);
-    return;
-  }
-  if (request.kind === "channel.cancel") {
-    // clientId 只取自 MessagePort 注册表；不能信任请求体里的同名字段。
-    // 取消消息不经过普通 FIFO，否则它会排在正在等待的网络请求后面，
-    // 无法及时中止尚未越过最终 I/O 边界的操作。
-    const target = channelRequests.get(channelRequestKey(clientId, request.targetRequestId));
-    if (target?.clientId === clientId) target.controller.abort();
-    sendToPort(connectedPort.port, {
-      requestId: request.requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "ok" }
-    });
-    return;
-  }
-  if (request.kind === "disconnect") {
-    console.warn(`[coordinator] disconnect message serverClient=${clientId} requestedClient=${"clientId" in request ? request.clientId : "unknown"}`);
-    handlePortDisconnect(clientId);
-    return;
-  }
-
-  // lock 是收敛型的安全操作：即使发起页面持有旧 epoch，也必须能够锁定
-  // 当前全局会话。其余命令仍由 epoch 栅栏拒绝，避免旧页面操作新会话。
-  if (request.kind !== "lock" && "expectedSessionEpoch" in request && request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
-    if (request.kind === "window-p2p.executor.acquire") {
-      try { request.executorPort?.close(); } catch { /* already detached */ }
-    }
-    if (isP2pkhBroadcastRequest(request)) {
-      await abortNotDispatchedP2pkhSubmission(request, "stale-session-epoch");
-      sendToPort(connectedPort.port, { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "stale-session-epoch" } });
-    } else {
-      sendToPort(connectedPort.port, { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } });
-    }
-    return;
-  }
-
-  const response = await processRequest(request, clientId);
-  const transfers: ArrayBuffer[] = [];
-  const body = (response.operationResult as { content?: { bytes?: ArrayBuffer }; signatureDer?: ArrayBuffer; bytes?: ArrayBuffer } | undefined)?.content?.bytes;
-  const signatureDer = (response.operationResult as { signatureDer?: ArrayBuffer } | undefined)?.signatureDer;
-  const executorTransfer = (response.operationResult as { bytes?: ArrayBuffer } | undefined)?.bytes;
-  const cryptoResult = response.cryptoResult as { envelope?: Uint8Array; signature?: Uint8Array; envelopeJson?: Uint8Array; contentJson?: Uint8Array } | undefined;
-  if (body instanceof ArrayBuffer) transfers.push(body);
-  if (signatureDer instanceof ArrayBuffer) transfers.push(signatureDer);
-  if (executorTransfer instanceof ArrayBuffer) transfers.push(executorTransfer);
-  if (cryptoResult?.envelope?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.envelope.buffer);
-  if (cryptoResult?.signature?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.signature.buffer);
-  if (cryptoResult?.envelopeJson?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.envelopeJson.buffer);
-  if (cryptoResult?.contentJson?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.contentJson.buffer);
-  sendToPort(connectedPort.port, response, transfers);
-}
-
-async function handleHello(
-  clientId: string,
-  request: { kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: StorageBootstrapState; servicePort?: MessagePort; localStorageBridgePort?: MessagePort; localStorageBridgeLeaseId?: string }
-): Promise<void> {
-  const connectedPort = connectedPorts.get(clientId);
-  if (!connectedPort) return;
-  if (request.localStorageBridgePort) installLocalStorageBridgeEndpoint(clientId, request.localStorageBridgePort, request.localStorageBridgeLeaseId, request.storageBootstrapState);
-  // 恢复记录位于页面 localStorage；每次新 hello 先加载公开记录，再决定
-  // 是否继续同一 transactionId，不能把响应丢失误判成一次全新初始化。
-  await loadInitialSetupRecoveryRecords();
-  // 首个桶可能在 Worker 已完成“未选择存储”初始化后由页面创建。此时 hello
-  // 只允许在尚无 Root/选中桶时补入公开的目录快照；真正认证仍由随后携带
-  // 一次性密码的 unlock-bucket 完成。
-  if (!platformRootStore && !storageBootstrapState?.selectedBucket && request.storageBootstrapState?.selectedBucket) {
-    storageBootstrapState = request.storageBootstrapState;
-  }
-  await startCoordinatorInitialization(request.storageBootstrapState);
-  if (request.servicePort) installCoordinatorServiceEndpoint(clientId, request.servicePort);
-
-  // 发送完整快照
-  sendToPort(connectedPort.port, {
-    requestId: request.requestId,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "ok" },
-    operationResult: buildSnapshot()
-  });
-}
-
-async function handleSubscribe(
-  clientId: string,
-  request: { kind: "subscribe"; topics: CoordinatorTopic[]; requestId: string }
-): Promise<void> {
-  const connectedPort = connectedPorts.get(clientId);
-  if (!connectedPort) return;
+async function buildTopicBaselines(
+  request: CoordinatorTopicSubscription,
+): Promise<CoordinatorTopicBaseline[]> {
   await storageStateTail;
-
-  connectedPort.subscriptions.clear();
-  for (const topic of request.topics) {
-    connectedPort.subscriptions.add(topic);
-  }
 
   const baselines: CoordinatorTopicBaseline[] = request.topics.flatMap((topic): CoordinatorTopicBaseline[] => {
     if (topic === "asset.data-changed") return [];
@@ -7693,15 +7179,10 @@ async function handleSubscribe(
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
 
-  sendToPort(connectedPort.port, {
-    requestId: request.requestId,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "ok" },
-    operationResult: { topics: request.topics, baselines } satisfies CoordinatorSubscribeTopicsResult,
-  });
+  return baselines;
 }
 
-function handleActivity(clientId: string): void {
+function handleActivity(): void {
   coordinatorState.lastActivityAt = Date.now();
   resetAutoLockTimer();
 }
@@ -8343,7 +7824,7 @@ async function abortStorageSession(connectSessionId: string): Promise<void> {
 async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.owner.delete" }>, actualClientId: string): Promise<CoordinatorResponse> {
   if (request.kind === "storage.grant") {
     const session = await readProtocolConnectSession(request.connectSessionId);
-    if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     if (!session) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage session is invalid or revoked", code: "storage_identity_required" } };
     const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
     if (coordinatorState.vaultStatus !== "unlocked" || !ownerPublicKeyHex || session.ownerPublicKeyHex.toLowerCase() !== ownerPublicKeyHex || !platformRootStore) {
@@ -8351,7 +7832,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     }
     const applicationStorageId = deriveThirdPartyApplicationStorageId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
     const ownerStorageGeneration = await platformRootStore.getOwnerStorageGeneration({ ownerPublicKeyHex });
-    if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const grantId = `grant-${crypto.randomUUID()}`;
     storageGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, appIdentity: session.appIdentity, bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration, ownerPublicKeyHex, applicationStorageId, sessionEpoch: coordinatorState.sessionEpoch }, ownerStorageGeneration, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
@@ -8395,13 +7876,13 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
     if (coordinatorState.vaultStatus !== "unlocked" || !ownerPublicKeyHex || !platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage requires an unlocked active key", code: "storage_unavailable" } };
     const ownerStorageGeneration = await platformRootStore.getOwnerStorageGeneration({ ownerPublicKeyHex });
-    if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const grant: StorageOwnerGrant & { clientId: string } = { storageGrantId: `owner-${crypto.randomUUID()}`, bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration, ownerPublicKeyHex, applicationStorageId: expected.applicationStorageId, ownerStorageGeneration, sessionEpoch: coordinatorState.sessionEpoch, clientId: actualClientId };
     ownerStorageGrants.set(grant.storageGrantId, grant);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grant };
   }
   if (request.kind === "storage.owner.delete") {
-    if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const controller = new AbortController();
     const requestKey = storageRequestKey(actualClientId, request.requestId);
     storageRequests.set(requestKey, { controller, clientId: actualClientId });
@@ -8421,7 +7902,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: true };
   }
   if (request.kind === "storage.owner.data") {
-    if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const controller = new AbortController();
     const requestKey = storageRequestKey(actualClientId, request.requestId);
     storageRequests.set(requestKey, { controller, clientId: actualClientId });
@@ -8434,10 +7915,16 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     } finally {
       if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
     }
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+    return {
+      requestId: request.requestId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      ack: { status: "ok" },
+      // owner.delete is void; owner.get may legitimately return undefined.
+      ...(request.data.type === "owner.delete" ? {} : { operationResult: value }),
+    };
   }
   if (request.kind === "storage.platform.data") {
-    if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const controller = new AbortController();
     const requestKey = storageRequestKey(actualClientId, request.requestId);
     storageRequests.set(requestKey, { controller, clientId: actualClientId });
@@ -8454,7 +7941,12 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     } finally {
       if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
     }
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+    return {
+      requestId: request.requestId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      ack: { status: "ok" },
+      ...(request.data.type === "platform.delete" ? {} : { operationResult: value }),
+    };
   }
   const controller = new AbortController();
   const requestKey = storageRequestKey(actualClientId, request.requestId);
@@ -8471,7 +7963,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
   if (request.kind === "storage.data") {
     if (!reserveStoragePortSlot(actualClientId)) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "storage_limit_exceeded", code: "storage_limit_exceeded" } };
   }
-  if (disconnectedClientIds.has(actualClientId)) {
+  if (revokedCoordinatorPeerIds.has(actualClientId)) {
     if (request.kind === "storage.data") releaseStoragePortSlot(actualClientId);
     return disconnectedClientResponse(request.requestId);
   }
@@ -9300,7 +8792,7 @@ async function executeChannelRequest(
   actualClientId: string,
   requestSignal?: AbortSignal,
 ): Promise<CoordinatorResponse> {
-  if (requestSignal?.aborted || disconnectedClientIds.has(actualClientId)) {
+  if (requestSignal?.aborted || revokedCoordinatorPeerIds.has(actualClientId)) {
     return disconnectedClientResponse(request.requestId);
   }
   if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
@@ -9339,7 +8831,7 @@ async function executeChannelRequest(
   try {
     const runtime = await ensureSatRuntime();
     const mux = await ensureChannelSubscriptionMux(runtime);
-    if (requestSignal?.aborted || disconnectedClientIds.has(actualClientId)) {
+    if (requestSignal?.aborted || revokedCoordinatorPeerIds.has(actualClientId)) {
       return disconnectedClientResponse(request.requestId);
     }
     switch (operation.type) {
@@ -9393,7 +8885,7 @@ async function executeChannelRequest(
           }
         }
         const channels = await mux.set(callerId, operation.channels, requestSignal);
-        if (requestSignal?.aborted || disconnectedClientIds.has(actualClientId)) {
+        if (requestSignal?.aborted || revokedCoordinatorPeerIds.has(actualClientId)) {
           return disconnectedClientResponse(request.requestId);
         }
         if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
@@ -10734,7 +10226,7 @@ async function executeMsfileDataUnsafe(
 type WindowP2pExecutorRequest = Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.acquire" | "window-p2p.executor.release" | "window-p2p.executor.spike.transfer" | "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>;
 
 async function executeWindowP2pExecutorRequest(request: WindowP2pExecutorRequest, actualClientId: string): Promise<CoordinatorResponse> {
-  if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+  if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
   if (request.kind === "window-p2p.executor.acquire") {
     if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
@@ -10807,7 +10299,7 @@ async function executeMsfileRequest(
   request: Extract<CoordinatorClientRequest, { kind: "msfile.grant" | "msfile.control" | "msfile.data" | "msfile.cancel" | "msfile.session.abort" }>,
   actualClientId: string
 ): Promise<CoordinatorResponse> {
-  if (disconnectedClientIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+  if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
   if (request.kind !== "msfile.cancel"
     && request.kind !== "msfile.session.abort"
     && !isCoordinatorProductEnabled("msfile")) {
@@ -11075,7 +10567,7 @@ async function processRequestCore(
   const requestId = "requestId" in request ? request.requestId : generateRequestId();
   // 断开消息与前一个异步请求的 authority 校验可能交错；断开端口一旦
   // 被登记，后续路径不得再创建 grant、排队任务或取得最终 I/O lease。
-  if (disconnectedClientIds.has(actualClientId) || requestSignal?.aborted) return disconnectedClientResponse(requestId);
+  if (revokedCoordinatorPeerIds.has(actualClientId) || requestSignal?.aborted) return disconnectedClientResponse(requestId);
   const cleanupOnly = request.kind === "lock"
     || request.kind === "storage.cancel"
     || request.kind === "storage.session.abort"
@@ -11105,7 +10597,7 @@ async function processRequestCore(
       };
     }
   }
-  if (disconnectedClientIds.has(actualClientId) || requestSignal?.aborted) return disconnectedClientResponse(requestId);
+  if (revokedCoordinatorPeerIds.has(actualClientId) || requestSignal?.aborted) return disconnectedClientResponse(requestId);
   if (isStorageRequest(request)) {
     // Storage 分支有多个异步边界（Provider、K-V、Connect session）。
     // 无论哪一层抛错都必须回到 RPC 响应，并先由同一个入口分类健康状态；
@@ -11136,15 +10628,28 @@ async function processRequestCore(
 async function processRequest(
   request: CoordinatorClientRequest,
   actualClientId = (request as { clientId?: string }).clientId ?? "unknown",
+  requestSignal?: AbortSignal,
 ): Promise<CoordinatorResponse> {
-  if (request.kind !== "channel.operation") return processRequestCore(request, actualClientId);
+  if (request.kind !== "channel.operation") return processRequestCore(request, actualClientId, requestSignal);
   const requestId = request.requestId;
   const key = channelRequestKey(actualClientId, requestId);
   const controller = new AbortController();
+  let removeRequestSignal: (() => void) | undefined;
+  if (requestSignal) {
+    const abort = (): void => {
+      try { controller.abort(requestSignal.reason); } catch { controller.abort(); }
+    };
+    if (requestSignal.aborted) abort();
+    else {
+      requestSignal.addEventListener("abort", abort, { once: true });
+      removeRequestSignal = () => requestSignal.removeEventListener("abort", abort);
+    }
+  }
   channelRequests.set(key, { clientId: actualClientId, controller });
   try {
     return await processRequestCore(request, actualClientId, controller.signal);
   } finally {
+    removeRequestSignal?.();
     if (channelRequests.get(key)?.controller === controller) channelRequests.delete(key);
   }
 }
@@ -13103,20 +12608,21 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
-  for (const [, connectedPort] of connectedPorts) {
-    if (connectedPort.subscriptions.has(topic)) {
-      sendToPort(connectedPort.port, normalized);
+  // WebLoom owns the physical stream credit; each Coordinator peer only gets
+  // a bounded domain queue. A slow peer therefore terminates its own stream
+  // with stream_overflow instead of backpressuring unrelated pages or dropping
+  // events silently.
+  for (const state of coordinatorPeers.values()) {
+    if (state.topicStream) enqueueCoordinatorTopicEvent(state.topicStream, normalized);
+  }
+  // This collection is populated only by explicit unit-test seams. It is not
+  // a second runtime transport or a production connection registry.
+  for (const sink of coordinatorTestEventSinks.values()) {
+    if (sink.topics.has(topic)) {
+      try { sink.postMessage(normalized); } catch { /* test sink may be closed */ }
     }
   }
   return normalized;
-}
-
-function sendToPort(port: MessagePort, message: unknown, transfer: ArrayBuffer[] = []): void {
-  try {
-    port.postMessage(message, transfer);
-  } catch {
-    // 端口可能已关闭
-  }
 }
 
 // ============================================================
@@ -13144,7 +12650,294 @@ function resetAutoLockTimer(): void {
 // 13. Worker Entry Point
 // ============================================================
 
-const workerScope = globalThis as unknown as import("webloom-framework").SharedWorkerScopeLike;
+async function handleCoordinatorOwnerStorageRpc(
+  request: CoordinatorOwnerStorageData,
+  call: HandlerCallContext,
+): Promise<CoordinatorOwnerStorageResult> {
+  const state = requireCoordinatorSessionPeer(call);
+  if (call.signal.aborted) throw storageUnavailableError("Owner storage request was cancelled");
+  const value = await executeOwnerStorageData(request, state.peer.peerId, call.signal);
+  if (call.signal.aborted) throw storageUnavailableError("Owner storage request was cancelled");
+  return value as CoordinatorOwnerStorageResult;
+}
+
+async function handleCoordinatorPlatformStorageRpc(
+  request: CoordinatorPlatformStorageData,
+  call: HandlerCallContext,
+): Promise<CoordinatorPlatformStorageResult> {
+  const state = requireCoordinatorSessionPeer(call);
+  if (call.signal.aborted) throw storageUnavailableError("Platform storage request was cancelled");
+  const value = await executePlatformStorageData(request, state.peer.peerId, call.signal);
+  if (call.signal.aborted) throw storageUnavailableError("Platform storage request was cancelled");
+  return value as CoordinatorPlatformStorageResult;
+}
+
+async function handleCoordinatorCryptoRpc(
+  request: CoordinatorCryptoOperation,
+  call: HandlerCallContext,
+): Promise<CoordinatorCryptoResult> {
+  requireCoordinatorSessionPeer(call);
+  if (call.signal.aborted) throw new Error("Coordinator crypto request was cancelled");
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes) {
+    throw Object.assign(new Error("Coordinator crypto is unavailable"), { code: "service_unavailable" });
+  }
+  const capturedEpoch = coordinatorState.sessionEpoch;
+  const result = await withCoordinatorFinalIoLease(
+    "write",
+    call.signal,
+    () => executeCryptoOperation(request, coordinatorState.activePrivateKeyBytes!),
+    { auditOperation: "service.crypto.sign" },
+  );
+  // The final visibility check is deliberately after the crypto promise and
+  // lease boundary: a lock/key switch must turn an old result into a failure.
+  if (call.signal.aborted || capturedEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked") {
+    throw Object.assign(new Error("Coordinator crypto session became stale"), { code: "service_reference_stale" });
+  }
+  return result;
+}
+
+/** 将领域响应收窄为 typed RPC 的 response DTO；transport requestId 只由框架 callId 承担。 */
+function coordinatorRpcResponse(request: CoordinatorRpcRequest, response: CoordinatorResponse | CoordinatorRpcResponse): CoordinatorRpcResponse {
+  const result = "requestId" in response
+    ? (({ requestId: _requestId, ...withoutRequestId }) => withoutRequestId)(response)
+    : response;
+  // Capability response parser only validates the common envelope. The
+  // request-aware pass below owns nested operation/control/data result
+  // selection and the strict ack/presence rules.
+  return parseCoordinatorResponseFor(request, result);
+}
+
+function coordinatorRequestFromRpc(
+  request: CoordinatorRpcCommandRequest,
+  call: HandlerCallContext,
+): CoordinatorClientRequest {
+  const peerId = call.peer?.peerId;
+  if (!peerId) throw Object.assign(new Error("Coordinator RPC has no bound peer"), { code: "transport_disconnected" });
+  return coordinatorClientRequestFromRpc(request, peerId, call.operationId ?? generateRequestId());
+}
+
+function coordinatorSessionClosed(peerId: string): void {
+  const state = coordinatorPeerState(peerId);
+  if (!state) return;
+  // This is the synchronous admission fence. Any in-flight session.open will
+  // fail its next await boundary and can never publish its old projection.
+  state.sessionGeneration += 1;
+  state.sessionOpen = false;
+  state.serviceExposure?.revoke();
+  state.serviceExposure = undefined;
+  if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream);
+  state.topicStream = undefined;
+  // storageIoPeerId is intentionally cleared only by the synchronous peer
+  // revoke callback. A session-close RPC is not proof that the physical peer
+  // has disappeared, so it cannot redirect Local I/O to another page.
+}
+
+const COORDINATOR_SESSION_EXPOSURES = [
+  COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
+  COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
+  COORDINATOR_CRYPTO_RPC_CAPABILITY,
+] as const;
+
+async function openCoordinatorSession(
+  state: CoordinatorPeerState,
+  request: CoordinatorSessionOpenRequest,
+  call: HandlerCallContext,
+): Promise<CoordinatorRpcResponse> {
+  // Capture the generation before entering either queue. Two concurrent opens
+  // must serialize into one session: the second one observes the committed
+  // session and returns its snapshot instead of invalidating the first open.
+  // A close/revoke meanwhile advances the generation and makes both queued
+  // stale attempts fail closed.
+  const expectedGeneration = state.sessionGeneration;
+  const peerId = state.peer.peerId;
+  return enqueueCoordinatorPeerSessionOperation(state, () => {
+    if (state.sessionOpen) {
+      return Promise.resolve({
+        sessionEpoch: coordinatorState.sessionEpoch,
+        ack: { status: "ok" as const },
+        operationResult: buildSnapshot(),
+      });
+    }
+    if (state.sessionGeneration !== expectedGeneration) throw coordinatorSessionStaleError();
+    const generation = expectedGeneration + 1;
+    state.sessionGeneration = generation;
+    const attempt: CoordinatorSessionOpenAttempt = { state, peerId, generation, signal: call.signal };
+    return enqueueCoordinatorSessionInitialization(async () => {
+      assertCoordinatorSessionOpenFresh(attempt);
+    const previousBootstrapState = storageBootstrapState;
+    const hadInitialization = coordinatorInitialization !== undefined;
+    let bootstrapHintAssigned = false;
+    coordinatorOpeningSession = attempt;
+    try {
+      // The two awaits below are deliberately followed by the same freshness
+      // check. Their results are temporary until the final synchronous
+      // exposure commit succeeds.
+      await loadInitialSetupRecoveryRecords(call.signal, attempt.peerId);
+      assertCoordinatorSessionOpenFresh(attempt);
+      if (!platformRootStore && !storageBootstrapState?.selectedBucket && request.storageBootstrapState?.selectedBucket) {
+        storageBootstrapState = request.storageBootstrapState;
+        bootstrapHintAssigned = true;
+      }
+      await startCoordinatorInitialization(request.storageBootstrapState);
+      assertCoordinatorSessionOpenFresh(attempt);
+
+      // No await is allowed between this check and exposeGroup. The group
+      // publish is itself transactional; sessionOpen and physical I/O owner
+      // become visible only after it has committed successfully.
+      const serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({ capability })));
+      state.serviceExposure = serviceExposure;
+      state.sessionOpen = true;
+      if (storageIoPeerId === undefined) storageIoPeerId = attempt.peerId;
+      return {
+        sessionEpoch: coordinatorState.sessionEpoch,
+        ack: { status: "ok" },
+        operationResult: buildSnapshot(),
+      };
+    } catch (error) {
+      // Never revoke/clear a newer session from a stale open. A failed first
+      // open has not changed sessionOpen or storageIoPeerId; the only local
+      // temporary assignment we may undo is the uncommitted bootstrap hint.
+      if (!state.sessionOpen && coordinatorOpeningSession === attempt && !hadInitialization && bootstrapHintAssigned) {
+        storageBootstrapState = previousBootstrapState;
+      }
+      throw error;
+    } finally {
+      if (coordinatorOpeningSession === attempt) coordinatorOpeningSession = undefined;
+    }
+    });
+  });
+}
+
+async function handleCoordinatorRpc(
+  request: CoordinatorRpcRequest,
+  call: HandlerCallContext,
+): Promise<CoordinatorRpcResponse> {
+  const state = requireCoordinatorPeer(call);
+  const peerId = state.peer.peerId;
+  if (request.kind === "session.open") {
+    return coordinatorRpcResponse(request, await openCoordinatorSession(state, request, call));
+  }
+  if (request.kind === "session.close") {
+    coordinatorSessionClosed(peerId);
+    return coordinatorRpcResponse(request, { sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } });
+  }
+  if (request.kind === "session.activity") {
+  handleActivity();
+    return coordinatorRpcResponse(request, { sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } });
+  }
+
+  const fullRequest = coordinatorRequestFromRpc(request as CoordinatorRpcCommandRequest, call);
+  if (fullRequest.kind === "channel.cancel") {
+    const target = channelRequests.get(channelRequestKey(peerId, fullRequest.targetRequestId));
+    if (target && target.clientId === peerId) target.controller.abort();
+    return coordinatorRpcResponse(request, { sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } });
+  }
+  const response = await processRequest(fullRequest, peerId, call.signal);
+  return coordinatorRpcResponse(request, response);
+}
+
+function coordinatorTopicStream(
+  request: CoordinatorTopicSubscription,
+  call: HandlerCallContext,
+): AsyncIterable<CoordinatorTopicEvent> {
+  const state = requireCoordinatorPeer(call);
+  const previous = state.topicStream;
+  if (previous) closeCoordinatorTopicStreamQueue(previous, new Error("Coordinator topic subscription replaced"));
+  const queue = createCoordinatorTopicStreamQueue(state.peer.peerId, request.topics);
+  state.topicStream = queue;
+  const onAbort = (): void => closeCoordinatorTopicStreamQueue(queue, new Error("Coordinator topic subscription cancelled"));
+  call.signal.addEventListener("abort", onAbort, { once: true });
+
+  return (async function* stream(): AsyncIterable<CoordinatorTopicEvent> {
+    try {
+      // Register the queue before awaiting the baseline so no live event can
+      // pass between snapshot construction and stream readiness.
+      const baselines = await buildTopicBaselines(request);
+      for (const baseline of baselines) {
+        if (call.signal.aborted) throw new Error("Coordinator topic subscription cancelled");
+        yield baseline.snapshot as CoordinatorTopicEvent;
+      }
+      while (!call.signal.aborted) {
+        const next = await takeCoordinatorTopicEvent(queue);
+        if (next.done) return;
+        yield next.value;
+      }
+    } finally {
+      call.signal.removeEventListener("abort", onAbort);
+      if (state.topicStream === queue) state.topicStream = undefined;
+      closeCoordinatorTopicStreamQueue(queue);
+    }
+  })();
+}
+
+function configureCoordinatorPeer(peer: PeerController): void {
+  const state: CoordinatorPeerState = {
+    peer,
+    lastSeenAt: Date.now(),
+    sessionOpen: false,
+    sessionGeneration: 0,
+    sessionOperationTail: Promise.resolve(),
+  };
+  coordinatorPeers.set(peer.peerId, state);
+  // Scope revocation is the synchronous admission fence. Async resource
+  // disposal happens after this callback; no late call may create grants or
+  // select this peer for physical Local I/O.
+  peer.scope.onRevoke(() => {
+    if (coordinatorPeers.get(peer.peerId) !== state) return;
+    revokedCoordinatorPeerIds.add(peer.peerId);
+    coordinatorSessionClosed(peer.peerId);
+    if (storageIoPeerId === peer.peerId) storageIoPeerId = undefined;
+    coordinatorPeers.delete(peer.peerId);
+    for (const [requestId, request] of storageRequests) {
+      if (request.clientId === peer.peerId) { request.controller.abort(); storageRequests.delete(requestId); }
+    }
+    for (const [requestId, request] of channelRequests) {
+      if (request.clientId === peer.peerId) { request.controller.abort(); channelRequests.delete(requestId); }
+    }
+    for (const [grantId, grant] of storageGrants) if (grant.clientId === peer.peerId) storageGrants.delete(grantId);
+    for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === peer.peerId) ownerStorageGrants.delete(grantId);
+    for (const [grantId, grant] of platformStorageGrants) if (grant.clientId === peer.peerId) platformStorageGrants.delete(grantId);
+    for (const [requestId, request] of msfileRequests) {
+      if (request.clientId === peer.peerId) { request.controller.abort(); msfileRequests.delete(requestId); }
+    }
+    for (const [grantId, grant] of msfileGrants) if (grant.clientId === peer.peerId) msfileGrants.delete(grantId);
+    const callers = channelCallersByClient.get(peer.peerId);
+    channelCallersByClient.delete(peer.peerId);
+    if (callers && channelSubscriptionMux) {
+      for (const callerId of callers) void channelSubscriptionMux.release(callerId).catch(() => undefined);
+    }
+  });
+}
+
+/** Worker transport plugin：所有跨 realm 命令只从这里进入领域代码。 */
+const coordinatorTransportPlugin = definePlugin({
+  id: "keymaster.coordinator.transport",
+  name: "Keymaster Coordinator transport",
+  runtime: "shared-worker",
+  unitId: "keymaster.coordinator.transport",
+  provides: [
+    COORDINATOR_RPC_CAPABILITY,
+    COORDINATOR_TOPIC_STREAM_CAPABILITY,
+    COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
+    COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
+    COORDINATOR_CRYPTO_RPC_CAPABILITY,
+  ] as const,
+  dependencies: [{
+    capability: COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
+    source: "peer",
+    reason: "Coordinator LocalStorage I/O is implemented by the bound Window peer",
+  }] as const,
+  startup: "required",
+  defaultEnabled: true,
+  canDisable: false,
+  setup(context) {
+    context.handle(COORDINATOR_RPC_CAPABILITY, (request, call) => handleCoordinatorRpc(request, call));
+    context.handle(COORDINATOR_TOPIC_STREAM_CAPABILITY, (request, call) => coordinatorTopicStream(request, call));
+    context.handle(COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, (request, call) => handleCoordinatorOwnerStorageRpc(request, call));
+    context.handle(COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, (request, call) => handleCoordinatorPlatformStorageRpc(request, call));
+    context.handle(COORDINATOR_CRYPTO_RPC_CAPABILITY, (request, call) => handleCoordinatorCryptoRpc(request, call));
+  },
+});
 
 /**
  * Coordinator 的真实 Worker 装配清单。
@@ -13154,15 +12947,14 @@ const workerScope = globalThis as unknown as import("webloom-framework").SharedW
  * 仍需的领域句柄；它不再是第二个对外生命周期 Host。
  */
 const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => {
-  const snapshotCapability = `keymaster.coordinator.unit.${unit.unitId}`;
-  const required = unit.unitId === "vault.coordinator-worker";
   return definePlugin({
     id: `keymaster.coordinator.${unit.productId}`,
     name: `Keymaster ${unit.productId} Coordinator`,
     unitId: unit.unitId,
     runtime: "shared-worker",
-    provides: [snapshotCapability],
-    required,
+    startup: unit.unitId === "vault.coordinator-worker" ? "required" : "optional",
+    defaultEnabled: true,
+    canDisable: unit.unitId !== "vault.coordinator-worker",
     async setup(context) {
       let ready: ReturnType<typeof coordinatorWorkerUnitRegistry.ready>;
       if (unit.unitId === "msfile.coordinator-worker") {
@@ -13181,22 +12973,33 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
       if (ready.instanceId !== context.instanceId) {
         throw new Error(`Coordinator Worker unit ready instance mismatch: ${unit.unitId}`);
       }
-      context.provide(snapshotCapability, Object.freeze({
-        unitId: unit.unitId,
-        instanceId: context.instanceId,
-        getSnapshot: () => coordinatorWorkerUnitRegistry.get(ready.unitId),
-      }));
       return () => stopCoordinatorWorkerUnit(ready.unitId, ready.instanceId);
     },
   });
 });
 
+// Unit tests import this module in a normal Node realm. Do not add a testing
+// fallback here: the production entry is created only when the host exposes a
+// SharedWorkerGlobalScope `onconnect` property.
+if ((globalThis as unknown as { onconnect?: unknown }).onconnect !== undefined) {
 coordinatorRuntimeApp = startSharedWorkerApp({
   id: "keymaster-coordinator",
-  plugins: coordinatorRuntimePlugins,
-  globalScope: workerScope,
-  onPortConnect: handlePortConnect,
+  plugins: [coordinatorTransportPlugin, ...coordinatorRuntimePlugins],
+  expose: [
+    COORDINATOR_RPC_CAPABILITY,
+    COORDINATOR_TOPIC_STREAM_CAPABILITY,
+  ],
+  peerExposureAllowlist: [
+    COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
+    COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
+    COORDINATOR_CRYPTO_RPC_CAPABILITY,
+  ],
+  configurePeer: configureCoordinatorPeer,
   runtimeUnitAvailability: ({ unitId }) => {
+    // The transport plugin is the Coordinator Host's required foundation; it
+    // is intentionally not part of the domain worker-unit catalog because it
+    // owns the RPC/topic entrypoints rather than a product task/service.
+    if (unitId === "keymaster.coordinator.transport") return undefined;
     const unit = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === unitId);
     if (!unit) return "coordinator-unit-unknown";
     if (!isCoordinatorProductEnabled(unit.productId)) return `plugin-disabled:${unit.productId}`;
@@ -13221,6 +13024,7 @@ coordinatorRuntimeApp = startSharedWorkerApp({
     };
   },
 });
+}
 
 // Worker 启动时从 K-V 读取仅公开的 Vault metadata
 // 状态为 uninitialized 或 locked；绝不读取/解密私钥直到 unlock RPC
@@ -13463,15 +13267,18 @@ export function __testResetState(): void {
   if (autoLockTimer) clearTimeout(autoLockTimer);
   autoLockTimer = undefined;
   coordinatorState.lastActivityAt = Date.now();
-  for (const connectedPort of connectedPorts.values()) {
-    connectedPort.serviceEndpoint?.provider.dispose();
+  for (const state of coordinatorPeers.values()) {
+    if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream);
   }
-  connectedPorts.clear();
-  disconnectedClientIds.clear();
+  coordinatorPeers.clear();
+  storageIoPeerId = undefined;
+  coordinatorOpeningSession = undefined;
+  coordinatorSessionOpenTail = Promise.resolve();
+  revokedCoordinatorPeerIds.clear();
+  coordinatorTestEventSinks.clear();
   for (const pending of channelRequests.values()) pending.controller.abort();
   channelRequests.clear();
   channelCallersByClient.clear();
-  coordinatorServiceRefreshTail = Promise.resolve();
   storageRequests.clear();
   storageGrants.clear();
   platformStorageGrants.clear();
@@ -13644,7 +13451,7 @@ async function ensureTestP2pkhProviders(): Promise<void> {
   if (!p2pkhRegistry) await registerCoordinatorTasks();
 }
 
-export async function __testP2pkhProviderConfigUpdate(providerId: string, config: Record<string, unknown>): Promise<CoordinatorResponse> {
+export async function __testP2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorResponse> {
   await ensureTestP2pkhProviders();
   return handleP2pkhProviderConfigUpdate(`test-p2pkh-config-${Date.now()}`, {
     kind: "p2pkh.provider-config.update",
@@ -13656,7 +13463,7 @@ export async function __testP2pkhProviderConfigUpdate(providerId: string, config
   });
 }
 
-export async function __testP2pkhProviderConfigGet(providerId: string): Promise<Record<string, unknown>> {
+export async function __testP2pkhProviderConfigGet(providerId: string): Promise<P2pkhProviderConfig> {
   await ensureTestP2pkhProviders();
   const response = await handleP2pkhProviderConfigGet(`test-p2pkh-config-get-${Date.now()}`, {
     kind: "p2pkh.provider-config.get",
@@ -13665,7 +13472,9 @@ export async function __testP2pkhProviderConfigGet(providerId: string): Promise<
     providerId,
     expectedSessionEpoch: coordinatorState.sessionEpoch
   });
-  return (response.operationResult ?? {}) as Record<string, unknown>;
+  return response.operationResult && typeof response.operationResult === "object" && !Array.isArray(response.operationResult)
+    ? response.operationResult as P2pkhProviderConfig
+    : {};
 }
 
 export async function __testP2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection): Promise<CoordinatorResponse> {
@@ -13745,7 +13554,7 @@ export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; n
 }
 
 export function __testGetConnectedPortCount(): number {
-  return connectedPorts.size;
+  return coordinatorTestEventSinks.size;
 }
 
 export function __testSetStorageSessionResolver(resolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined): void {
@@ -14189,24 +13998,49 @@ export function __testStorageTransfer(bytes: ArrayBuffer): { inputDetachedByteLe
     receivedByteLength = ((cloned as { operationResult?: { content?: { bytes?: ArrayBuffer } } }).operationResult?.content?.bytes)?.byteLength ?? -1;
   } } as unknown as MessagePort;
   const responseBytes = (inputClone.data as { content: { bytes: ArrayBuffer } }).content.bytes;
-  sendToPort(port, { operationResult: { content: { bytes: responseBytes } } }, [responseBytes]);
+  try { port.postMessage({ operationResult: { content: { bytes: responseBytes } } }, [responseBytes]); } catch { /* the test fake records post failures */ }
   return { inputDetachedByteLength, detachedByteLength: responseBytes.byteLength, receivedByteLength, transferCount };
 }
 
 export function __testAttachPort(clientId: string, postMessage: (message: unknown, transfer?: ArrayBuffer[]) => void): void {
-  const port = { postMessage, start() {}, close() {}, onmessage: null, onmessageerror: null } as unknown as MessagePort;
-  disconnectedClientIds.delete(clientId);
-  connectedPorts.set(clientId, { port, clientId, subscriptions: new Set(), lastSeenAt: Date.now() });
-}
-
-/** 测试专用：把真实 MessagePort 接到一个已登记的 Coordinator client。 */
-export function __testAttachServicePort(clientId: string, servicePort: MessagePort): void {
-  if (!connectedPorts.has(clientId)) __testAttachPort(clientId, () => undefined);
-  installCoordinatorServiceEndpoint(clientId, servicePort);
+  revokedCoordinatorPeerIds.delete(clientId);
+  coordinatorTestEventSinks.set(clientId, { postMessage, topics: new Set() });
 }
 
 export async function __testDispatchStorageMessage(clientId: string, request: CoordinatorClientRequest): Promise<void> {
-  await handleClientMessage(clientId, request);
+  const sink = coordinatorTestEventSinks.get(clientId);
+  if (!sink) return;
+  if (request.kind === "subscribe") {
+    sink.topics.clear();
+    for (const topic of request.topics) sink.topics.add(topic);
+    const baselines = await buildTopicBaselines({ topics: request.topics });
+    sink.postMessage({
+      requestId: request.requestId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      ack: { status: "ok" },
+      operationResult: { topics: request.topics, baselines } satisfies CoordinatorSubscribeTopicsResult,
+    });
+    return;
+  }
+  if (request.kind === "activity") {
+    handleActivity();
+    return;
+  }
+  if (request.kind === "disconnect") {
+    revokedCoordinatorPeerIds.add(clientId);
+    for (const pending of storageRequests.values()) if (pending.clientId === clientId) pending.controller.abort();
+    for (const pending of channelRequests.values()) if (pending.clientId === clientId) pending.controller.abort();
+    for (const pending of msfileRequests.values()) if (pending.clientId === clientId) pending.controller.abort();
+    for (const pending of windowP2pExecutorIdentityRequests.values()) if (pending.clientId === clientId) pending.controller.abort();
+    for (const [grantId, grant] of storageGrants) if (grant.clientId === clientId) storageGrants.delete(grantId);
+    for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === clientId) ownerStorageGrants.delete(grantId);
+    for (const [grantId, grant] of platformStorageGrants) if (grant.clientId === clientId) platformStorageGrants.delete(grantId);
+    for (const [grantId, grant] of msfileGrants) if (grant.clientId === clientId) msfileGrants.delete(grantId);
+    coordinatorTestEventSinks.delete(clientId);
+    return;
+  }
+  const response = await processRequest(request, clientId);
+  sink.postMessage(response);
 }
 
 export function __testStorageQueueSnapshot(): { globalActive: number; queued: number; perPort: Record<string, number> } {

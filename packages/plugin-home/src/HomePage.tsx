@@ -5,7 +5,7 @@
 import { PageHeader } from "@keymaster/ui";
 import { countRender, useCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
-import type { HomeRegistry, HomeWidget } from "@keymaster/contracts";
+import { HOME_REGISTRY_CAPABILITY, type HomeWidget } from "@keymaster/contracts";
 import { BusinessHomePage } from "./BusinessHomePage.js";
 import { HomeActions } from "./HomeActions.js";
 
@@ -29,7 +29,7 @@ export function partitionHomeWidgets(widgets: readonly HomeWidget[]): {
 
 export function HomePage() {
   countRender("plugin-home/HomePage");
-  const registry = useCapability<HomeRegistry>("home.registry");
+  const registry = useCapability(HOME_REGISTRY_CAPABILITY);
   const { t } = useI18n();
   const { main, aside } = partitionHomeWidgets(registry.list());
 

@@ -17,17 +17,18 @@ import type {
   WebrtcMessageService,
   WebrtcSessionSnapshot
 } from "@keymaster/contracts";
-import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import {
+  I18N_SERVICE_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  MESSAGE_SERVICE_CAPABILITY,
+  WEBRTC_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import { bindWebLoomHost, PluginHostProvider } from "@keymaster/runtime";
 import type { PluginHost } from "@keymaster/runtime";
 import { createFakePluginHost } from "webloom-framework/testing";
 import type { MessageService } from "./messageService.js";
 
 const OWNER = "02bbbb".padEnd(66, "b");
-const MESSAGE_SERVICE_CAPABILITY = "message.service";
-const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
-const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
-
 type MessageFixture = MessageRecord & {
   readonly senderAppId?: string;
   readonly recipientAppId?: string;
@@ -148,14 +149,14 @@ function makeFakeWebrtcService(opts?: {
 
 function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMessageService | null): PluginHost {
   const providers: Record<string, unknown> = {
-    [I18N_SERVICE_CAPABILITY]: makeFakeI18n(),
-    [KEYSPACE_SERVICE_CAPABILITY]: makeFakeKeyspace()
+    [I18N_SERVICE_CAPABILITY.id]: makeFakeI18n(),
+    [KEYSPACE_SERVICE_CAPABILITY.id]: makeFakeKeyspace()
   };
   if (service) {
-    providers[MESSAGE_SERVICE_CAPABILITY] = service;
+    providers[MESSAGE_SERVICE_CAPABILITY.id] = service;
   }
   if (webrtcService) {
-    providers[WEBRTC_SERVICE_CAPABILITY] = webrtcService;
+    providers[WEBRTC_SERVICE_CAPABILITY.id] = webrtcService;
   }
 
   // 创建资源注册表和资源存储
@@ -168,7 +169,7 @@ function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMess
   };
 
   // 注册 message.detail 资源定义
-  const keyspace = providers[KEYSPACE_SERVICE_CAPABILITY] as KeyspaceService;
+  const keyspace = providers[KEYSPACE_SERVICE_CAPABILITY.id] as KeyspaceService;
   resourceRegistry.register({
     id: "message.detail",
     scope: "active-key",
@@ -334,7 +335,12 @@ function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMess
   const keymasterHost = host as unknown as PluginHost;
   // 旧页面夹具仍维护 Keymaster 领域 ResourceStore；通用 capability Host
   // 必须显式使用 WebLoom testing fake，不能依赖生产兼容桥接。
-  bindWebLoomHost(keymasterHost, createFakePluginHost({ capabilities: providers }));
+  const capabilityProviders = new Map<import("webloom-framework").LocalCapability<unknown>, unknown>();
+  capabilityProviders.set(I18N_SERVICE_CAPABILITY, providers[I18N_SERVICE_CAPABILITY.id]);
+  capabilityProviders.set(KEYSPACE_SERVICE_CAPABILITY, providers[KEYSPACE_SERVICE_CAPABILITY.id]);
+  if (service) capabilityProviders.set(MESSAGE_SERVICE_CAPABILITY, service);
+  if (webrtcService) capabilityProviders.set(WEBRTC_SERVICE_CAPABILITY, webrtcService);
+  bindWebLoomHost(keymasterHost, createFakePluginHost({ capabilities: capabilityProviders }));
   return keymasterHost;
 }
 

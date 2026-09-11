@@ -2,7 +2,7 @@ import { useRef, type ReactNode } from "react";
 import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController.js";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { usePluginHost } from "@keymaster/runtime";
-import type { StorageRuntimeController } from "@keymaster/contracts";
+import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 import { StorageOnboardingPage } from "./StorageOnboardingPage.js";
 
 /**
@@ -14,7 +14,7 @@ import { StorageOnboardingPage } from "./StorageOnboardingPage.js";
 export function StorageUnavailableGuard({ children }: { children: ReactNode }) {
   const wasReady = useRef(false);
   const host = usePluginHost();
-  const service = useCapability<StorageRuntimeController>("storage.runtime-controller");
+  const service = useCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const healthStatus = (service as unknown as { healthStatus?: () => import("@keymaster/contracts").StorageRuntimeStatus }).healthStatus?.() ?? "degraded";
   const snapshot = useResourceSelector<StorageRuntimeSnapshot, StorageRuntimeSnapshot>(
     host.resourceStore,

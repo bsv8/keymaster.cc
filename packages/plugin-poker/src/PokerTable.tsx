@@ -27,7 +27,7 @@ import {
 export function PokerTable(): React.ReactElement {
   const { t } = useI18n();
   const { tableId } = useParams<{ tableId: string }>();
-  const service = useCapability<PokerService>(POKER_SERVICE_CAPABILITY);
+  const service = useCapability(POKER_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const [joined, setJoined] = useState(false);
   const [frames, setFrames] = useState<number>(0);

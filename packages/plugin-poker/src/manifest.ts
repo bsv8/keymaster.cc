@@ -33,9 +33,20 @@ import type {
   PluginSetup,
   VaultService
 } from "@keymaster/contracts";
-import type { MessageBus } from "webloom-framework";
-import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
-import { I18N_SERVICE_CAPABILITY, POKER_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import {
+  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  HOME_REGISTRY_CAPABILITY,
+  I18N_SERVICE_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  POKER_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  RUNTIME_MESSAGE_BUS,
+  VAULT_SERVICE_CAPABILITY,
+  defineRuntimeUnitDependencies,
+} from "@keymaster/contracts";
 import { POKER_SETTINGS_PATH } from "./constants.js";
 import { createPokerService } from "./pokerService.js";
 import { PokerLobby } from "./PokerLobby.js";
@@ -257,38 +268,36 @@ const pokerPluginDefinition = {
   id: "poker",
   name: "Poker",
   description: "Browser-native peer poker over bsv-poker protocol, served by an external poker-proxy.",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: false,
-    canDisable: true,
-    displayGroup: "business"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: false,
+  canDisable: true,
+  displayGroup: "business",
   units: [{
     id: "poker.window",
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [POKER_SERVICE_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([POKER_SERVICE_CAPABILITY]),
     storage: { scope: "key", applicationStorageId: "Poker", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "vault.service", reason: "need createActiveKeyCrypto for signing" },
-      { capability: "keyspace.service", reason: "active key + key-scoped storage" },
-      { capability: "runtime.messageBus", reason: "event subscription + publish" },
+      { capability: VAULT_SERVICE_CAPABILITY, reason: "need createActiveKeyCrypto for signing" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key + key-scoped storage" },
+      { capability: RUNTIME_MESSAGE_BUS, reason: "event subscription + publish" },
       { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },
-      { capability: "route.registry", reason: "register poker pages" },
-      { capability: "business.registry", reason: "register poker lobby in the Home business navigation" },
-      { capability: "application-settings.registry", reason: "register poker application settings entry" },
-      { capability: "home.registry", reason: "register poker home widget" },
-      { capability: "breadcrumb.registry", reason: "register poker breadcrumbs" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, reason: "register poker pages" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "register poker lobby in the Home business navigation" },
+      { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, reason: "register poker application settings entry" },
+      { capability: HOME_REGISTRY_CAPABILITY, reason: "register poker home widget" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "register poker breadcrumbs" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "register poker resources" },
     ]),
   }],
   i18n: pokerResources,
   async setup(ctx) {
-    const vault = ctx.get<VaultService>("vault.service");
-    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
-    const messageBus = ctx.get<MessageBus>("runtime.messageBus");
+    const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     if (!ctx.storage) throw new Error("Poker owner storage binding is unavailable");
 
     const service = createPokerService({ vault, keyspace, messageBus, storage: ctx.storage });
@@ -299,7 +308,7 @@ const pokerPluginDefinition = {
       }
     });
     ctx.provide(POKER_SERVICE_CAPABILITY, service);
-    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<PokerConnectionStatus, readonly string[]>({
       id: "poker.connection", scope: "global", key: () => ["poker.connection"],
       load: async () => service.status(),
@@ -334,7 +343,7 @@ const pokerPluginDefinition = {
       invalidation: "immediate"
     });
 
-    const routes = ctx.get<RouteRegistry>("route.registry");
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
     routes.register({
       id: "poker.lobby",
       path: "/poker",
@@ -355,7 +364,7 @@ const pokerPluginDefinition = {
       component: PokerSettingsPage
     });
 
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("poker", "home", {
       id: "home.poker",
       label: { key: "poker.route.lobby", fallback: "Poker lobby" },
@@ -370,7 +379,7 @@ const pokerPluginDefinition = {
       }
     });
 
-    const applicationSettings = ctx.get<ApplicationSettingsRegistry>("application-settings.registry");
+    const applicationSettings = ctx.capability(APPLICATION_SETTINGS_REGISTRY_CAPABILITY);
     applicationSettings.register({
       id: "poker.settings",
       path: POKER_SETTINGS_PATH,
@@ -380,7 +389,7 @@ const pokerPluginDefinition = {
       icon: "Spade"
     });
 
-    const home = ctx.get<HomeRegistry>("home.registry");
+    const home = ctx.capability(HOME_REGISTRY_CAPABILITY);
     home.register({
       id: "poker.status",
       title: { key: "poker.home.title", fallback: "Poker" },
@@ -390,7 +399,7 @@ const pokerPluginDefinition = {
       refreshHint: "manual"
     });
 
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const provider: BreadcrumbProvider = {
       id: "poker.crumbs",
       order: 220,

@@ -4,6 +4,7 @@ import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhSyncStatus, P2pkhTransactionFact, P2pkhTransactionSyncState } from "../p2pkhContracts.js";
+import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { balanceAtBlock, detailPath, inputAmount, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
 
 export const TRANSACTION_PAGE_SIZE = 20;
@@ -53,8 +54,8 @@ function amountLabel(value: number | undefined): string {
 export function P2pkhWalletPage({ view = "transactions", network = "main" }: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
   const host = usePluginHost();
   const { t } = useI18n();
-  const coordinator = useCapability<P2pkhCoordinatorControl>(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
-  const service = useCapability<P2pkhService>("p2pkh.service");
+  const coordinator = useCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
+  const service = useCapability(P2PKH_CAPABILITY);
   const [page, setPage] = useState(() => readPage());
   const [rebroadcasting, setRebroadcasting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);

@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
-import type { PasskeyProtection, VaultService } from "@keymaster/contracts";
+import {
+  RESOURCE_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+  type PasskeyProtection,
+  type VaultService,
+} from "@keymaster/contracts";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
 
 const CURRENT_KEY = "02".padEnd(66, "a");
@@ -53,8 +58,8 @@ describe("CurrentKeySettingsPage", () => {
       exportCurrentKeyBackup: async () => "{}"
     } as unknown as VaultService;
     const host = createPluginHost({ disableConfigPersistence: true });
-    host.capabilities.provide<VaultService>("vault.service", vault);
-    host.capabilities.get<any>("resource.registry").register({
+    host.provide(VAULT_SERVICE_CAPABILITY, vault);
+    host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY).register({
       id: "vault.key-state",
       scope: "global",
       key: () => ["vault.key-state"],

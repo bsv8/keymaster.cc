@@ -54,8 +54,8 @@ export function SatSubscriptionSettings() {
   const { t } = useI18n();
   const tr = (key: string, fallback: string) => t(key, { defaultValue: fallback });
   const host = usePluginHost();
-  const service = useCapability<SatSubscriptionAdminService>(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
-  const spi = useCapability<SatSubscriptionSpiService>(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY);
+  const service = useCapability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
+  const spi = useCapability(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY);
   const snapshot = useResourceSelector<
     SatSubscriptionSettingsSnapshot,
     SatSubscriptionSettingsSnapshot | null

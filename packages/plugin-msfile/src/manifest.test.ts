@@ -2,8 +2,8 @@
 // 和 host disable 时的 owner 回收必须使用同一条真实注册路径。
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionCoordinatorClient } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
+import type { SessionCoordinatorClient, WindowP2pExecutorLaneRegistry, WindowP2pExecutorLaneContext, VaultService, WindowP2pExecutorLane } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, VAULT_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { msfilePlugin, msfileSetup } from "./manifest.js";
 
@@ -22,7 +22,7 @@ describe("msfilePlugin manifest", () => {
   });
 
   it("is enabled by default and cannot be disabled independently of the P2P owner", () => {
-    expect(msfilePlugin.meta).toMatchObject({ defaultEnabled: true, canDisable: false });
+    expect(msfilePlugin).toMatchObject({ defaultEnabled: true, canDisable: false });
   });
 
   it("registers the formal file route and removes all owned surfaces on disable", async () => {
@@ -58,13 +58,18 @@ describe("msfilePlugin manifest", () => {
         deleteOwnerStorage: async () => undefined
       }
     });
-    const laneRegistry = { register: vi.fn(() => () => undefined) };
+    const laneRegistry: WindowP2pExecutorLaneRegistry = {
+      register: vi.fn((_lane: WindowP2pExecutorLane) => () => undefined),
+      attach: vi.fn(async (_context: WindowP2pExecutorLaneContext) => undefined),
+      detach: vi.fn(async () => undefined),
+      dispatch: vi.fn(async (_laneId: string, _operation: unknown, _signal: AbortSignal) => undefined),
+    };
     host.provide(WINDOW_P2P_EXECUTOR_CAPABILITY, laneRegistry);
     host.provide(KEYSPACE_SERVICE_CAPABILITY, {
       active: () => ({ activePublicKeyHex: undefined, generation: undefined }),
       onActiveKeyChanged: () => () => undefined,
-    });
-    host.provide("vault.service", {});
+    } as unknown as import("@keymaster/contracts").KeyspaceService);
+    host.provide(VAULT_SERVICE_CAPABILITY, {} as unknown as VaultService);
     host.business.register("home", {
       id: "home",
       label: { key: "test.home", fallback: "Home" },

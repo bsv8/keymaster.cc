@@ -45,8 +45,27 @@ import type {
 } from "@keymaster/contracts";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  SETTINGS_REGISTRY_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  SYSTEM_STATUS_REGISTRY_CAPABILITY,
+  VAULT_SETTINGS_REGISTRY_CAPABILITY,
+  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
+  HOME_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  COMMAND_REGISTRY_CAPABILITY,
+  IMPORTER_REGISTRY_CAPABILITY,
+  TRANSFER_REGISTRY_CAPABILITY,
+  ASSET_REGISTRY_CAPABILITY,
+  TOKEN_REGISTRY_CAPABILITY,
+  COLLECTIBLE_REGISTRY_CAPABILITY,
+  COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY,
+  PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED,
+  NOTICE_REGISTRY_TYPED_CAPABILITY,
+  CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
+  TOPBAR_REGISTRY_CAPABILITY,
   CHANNEL_RUNTIME_CAPABILITY,
-  COORDINATOR_SERVICE_PROTOCOL_VERSION,
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   LOG_SERVICE_CAPABILITY,
@@ -73,7 +92,7 @@ import { createScopedChannelRuntime } from "./lifecycle/scopedChannelRuntime.js"
 import {
   createScopedRegistryFacade,
   type CreateScopedRegistryFacadeOptions,
-} from "webloom-framework";
+} from "webloom-framework/advanced";
 import { createRouteRegistry } from "./registries/routeRegistry.js";
 import { createBreadcrumbRegistry } from "./registries/breadcrumbRegistry.js";
 import { createSettingsRegistry } from "./registries/settingsRegistry.js";
@@ -94,51 +113,43 @@ import { createCollectibleTransferRegistry } from "./registries/collectibleTrans
 import { createProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";
 import { createTopbarRegistry } from "./registries/topbarRegistry.js";
 import { createNoticeRegistry } from "./registries/noticeRegistry.js";
-import type { PluginConfigStore as WebLoomPluginConfigStore } from "webloom-framework";
 import {
   createMessageBus,
+  capabilityKey,
+} from "webloom-framework";
+import {
   createPluginHost as createWebLoomPluginHost,
   createResourceRegistry,
-  createRemoteServiceMessageCodec,
-  type RemoteServiceMessageCodec,
-  SCOPED_TASK_SCHEDULER_CAPABILITY,
+  registerOwnedResource,
+  bridgeForRuntimeHandle,
+  type PluginConfigStore as WebLoomPluginConfigStore,
   type ContributionAdapter,
+  type PluginHost as WebLoomPluginHost,
+  type RuntimeUnitParentScopeInput,
+  type HostCapabilityRegistration,
+} from "webloom-framework/advanced";
+import {
   type LifecycleScope,
   type MessageBus as KeymasterMessageBus,
   type PluginContext as WebLoomPluginContext,
-  type PluginHost as WebLoomPluginHost,
   type PluginManifest as WebLoomPluginManifest,
   type ResourceDefinition as WebLoomResourceDefinition,
   type ResourceRegistry as WebLoomResourceRegistry,
-  type RuntimeUnitParentScopeInput,
   type RuntimeUnitImplementationRegistry as WebLoomRuntimeUnitImplementationRegistry,
-  registerOwnedResource,
+  type RuntimeKind,
+  type RuntimeHandle,
 } from "webloom-framework";
+import type { CapabilityDescriptor } from "webloom-framework";
+import type { Capability, CapabilityClient, LocalCapability, LocalServiceOf } from "webloom-framework";
 
-/** Keymaster MessagePort 使用的领域 wire 前缀。 */
-export const KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX = "keymaster.remote-service";
+const keymasterRemoteRuntimeAttachers = new WeakMap<LegacyPluginHost, (runtime: RuntimeHandle) => void>();
 
-type MessageRecord = Record<string, unknown>;
-
-/**
- * Keymaster service codec。
- *
- * WebLoom v2 的 codec 只承载 call/result/error/cancel；Keymaster 的 owner、
- * session、scope、世代等领域字段只存在于 RuntimeSnapshot 的 reference
- * attributes，并由 Worker 权威状态和最终 I/O fence 再次校验。
- */
-export const keymasterRemoteServiceMessageCodec: RemoteServiceMessageCodec = (() => {
-  const base = createRemoteServiceMessageCodec({
-    prefix: KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX,
-    protocolVersion: COORDINATOR_SERVICE_PROTOCOL_VERSION,
-  });
-  return Object.freeze({
-    protocolVersion: base.protocolVersion,
-    type: base.type,
-    encode: (message: MessageRecord): unknown => base.encode(message),
-    decode: (input: unknown): MessageRecord | undefined => base.decode(input),
-  });
-})();
+/** 在 WindowApp 接管既有 Host 后绑定 SharedWorker Runtime。 */
+export function attachKeymasterRemoteRuntime(host: LegacyPluginHost, runtime: RuntimeHandle): void {
+  const attach = keymasterRemoteRuntimeAttachers.get(host);
+  if (!attach) throw new Error("Keymaster PluginHost is not ready for a remote Runtime");
+  attach(runtime);
+}
 
 /**
  * 为仍使用 Keymaster ResourceDefinition 的领域装配点绑定 owner。
@@ -179,7 +190,7 @@ export interface KeymasterRuntimeScopeAttributes extends Readonly<Record<string,
   readonly authorizationRevision?: number;
 }
 
-const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
+const TOPBAR_REGISTRY_KEY = TOPBAR_REGISTRY_CAPABILITY.id;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -196,7 +207,7 @@ function stableValue(value: unknown): string {
 
 function currentUnit(
   manifest: PluginManifest,
-  runtime: string | undefined,
+  runtime: RuntimeKind | undefined,
 ): RuntimeUnitDescriptor | undefined {
   const units = manifest.units ?? [];
   if (units.length === 0) return undefined;
@@ -208,22 +219,35 @@ function currentUnit(
 
 function dependenciesOfManifest(
   manifest: PluginManifest,
-  runtime: string | undefined,
-): PluginDependency[] {
+  runtime: RuntimeKind | undefined,
+): NonNullable<RuntimeUnitDescriptor["dependencies"]> {
   const unit = currentUnit(manifest, runtime);
-  return unit ? [...(unit.dependencies ?? [])] : [...(manifest.dependencies ?? [])];
+  if (unit) return [...(unit.dependencies ?? [])];
+  return [];
 }
 
-function providesOfManifest(manifest: PluginManifest, runtime: string | undefined): string[] {
+function providesOfManifest(manifest: PluginManifest, runtime: RuntimeKind | undefined): CapabilityDescriptor[] {
   const unit = currentUnit(manifest, runtime);
-  return [...new Set(unit ? (unit.provides ?? []) : (manifest.meta.providesCapabilities ?? []))];
+  if (unit) return [...(unit.provides ?? [])];
+  return [];
 }
 
 function storageOfManifest(
   manifest: PluginManifest,
-  runtime: string | undefined,
+  runtime: RuntimeKind | undefined,
 ): PluginStorageDeclaration | undefined {
   return currentUnit(manifest, runtime)?.storage ?? manifest.storage;
+}
+
+function startupPolicy(manifest: PluginManifest): {
+  startup: "required" | "optional";
+  defaultEnabled: boolean;
+  canDisable: boolean;
+} {
+  const startup = manifest.startup;
+  const defaultEnabled = manifest.defaultEnabled;
+  const canDisable = manifest.canDisable;
+  return { startup, defaultEnabled, canDisable };
 }
 
 function attributesFromRuntimeIdentity(
@@ -385,7 +409,7 @@ async function bindManifestStorage(
   if (!declaration) return undefined;
   const authority = options.storageBindingAuthority
     ?? (host.capabilities.has(STORAGE_BINDING_AUTHORITY_CAPABILITY)
-      ? host.capabilities.get<StorageBindingAuthority>(STORAGE_BINDING_AUTHORITY_CAPABILITY)
+      ? host.capabilities.get(STORAGE_BINDING_AUTHORITY_CAPABILITY)
       : undefined);
   if (!authority) throw new Error(`Plugin "${pluginId}" requires the storage binding authority`);
   if (declaration.scope === "platform") {
@@ -404,7 +428,8 @@ function adaptResourceDefinition<T>(
   getActivePublicKeyHex: () => string | undefined,
 ): WebLoomResourceDefinition<T, readonly string[]> {
   const context = (input: import("webloom-framework").ResourceContext) => ({
-    getCapability: input.getCapability,
+    getCapability: <T>(capability: string | CapabilityDescriptor) =>
+      input.getCapability<T>(typeof capability === "string" ? capability : capability.id),
     activePublicKeyHex: getActivePublicKeyHex(),
     ownerId: input.ownerId,
   });
@@ -541,9 +566,9 @@ function createKeymasterCapabilities(): {
     "collectible.registry": collectibles,
     "collectible-transfer.registry": collectibleTransfer,
     "protected-outpoint.registry": protectedOutpoints,
-    [TOPBAR_REGISTRY_CAPABILITY]: topbar,
+    [TOPBAR_REGISTRY_KEY]: topbar,
     "notice.registry": notice,
-    [ASSET_DATA_NOTIFIER_CAPABILITY]: assetDataNotifier,
+    [ASSET_DATA_NOTIFIER_CAPABILITY.id]: assetDataNotifier,
   };
   return {
     capabilities,
@@ -681,11 +706,11 @@ export function createKeymasterPluginHost(
   });
 
   const manifests = new Map<string, PluginManifest>();
-  const remoteRuntime = options.remoteRuntime;
+  let remoteRuntime = options.remoteRuntime;
   // A live RuntimeHandle is the sole authority for cross-runtime service and
   // unit state. Legacy callbacks remain only for callers that have not yet
   // connected a RuntimeHandle; they never compete with one.
-  const readRemoteRuntimeSnapshots = (): import("webloom-framework").RuntimeUnitSnapshot[] => {
+  const readRemoteRuntimeSnapshots = (): import("webloom-framework/advanced").RuntimeUnitSnapshot[] => {
     if (remoteRuntime) {
       return remoteRuntime.state().units.map((unit) => ({
         pluginId: unit.pluginId,
@@ -721,9 +746,7 @@ export function createKeymasterPluginHost(
   function currentActivePublicKeyHex(): string | undefined {
     if (coreHost?.capabilities.has(KEYSPACE_SERVICE_CAPABILITY)) {
       try {
-        const keyspace = coreHost.capabilities.get<{
-          active(): { activePublicKeyHex?: string };
-        }>(KEYSPACE_SERVICE_CAPABILITY);
+        const keyspace = coreHost.capabilities.get(KEYSPACE_SERVICE_CAPABILITY);
         return keyspace.active().activePublicKeyHex;
       } catch {
         // keyspace 还未启动时退回当前 Coordinator 身份快照。
@@ -798,7 +821,7 @@ export function createKeymasterPluginHost(
     ["collectible.registry", { name: "collectible.registry" }],
     ["collectible-transfer.registry", { name: "collectible-transfer.registry" }],
     ["protected-outpoint.registry", { name: "protected-outpoint.registry" }],
-    [TOPBAR_REGISTRY_CAPABILITY, { name: TOPBAR_REGISTRY_CAPABILITY }],
+    [TOPBAR_REGISTRY_KEY, { name: TOPBAR_REGISTRY_KEY }],
     ["notice.registry", {
       name: "notice.registry",
       registrations: [{ method: "upsert", idArgument: 0, unregisterMethod: "dismiss" }],
@@ -979,46 +1002,44 @@ export function createKeymasterPluginHost(
       removeKeyspaceListener?.();
       removeKeyspaceListener = undefined;
     }, "keyspace-resource-binding");
-    const get = <T>(key: string): T => {
-      if (key === RUNTIME_MESSAGE_BUS) return context.messageBus as T;
-      if (key === SCOPED_TASK_SCHEDULER_CAPABILITY) return context.taskScheduler as T;
-      if (key === RESOURCE_REGISTRY_CAPABILITY) {
-        return scopedResourceRegistry as T;
-      }
-      if (key === CHANNEL_RUNTIME_CAPABILITY) {
-        if (scopedChannelFactory) return scopedChannelFactory as T;
-        const factory = context.get<ChannelRuntimeFactory>(key);
-        const scopedRuntime = createScopedChannelRuntime(
-          factory.forPlugin(manifest.id),
-          context.scope,
-        );
-        scopedChannelFactory = {
-          // 忽略插件声称的 pluginId，始终绑定当前 manifest。
-          forPlugin: (_claimedPluginId: string) => scopedRuntime,
-          // system caller 只能由 Host/Coordinator 内部创建。
-          forSystem: (_claimedSystemId: string) => {
-            throw new Error("Plugin context cannot create a system Channel caller");
-          },
-        };
-        return scopedChannelFactory as T;
-      }
-      const facade = scopedLegacyRegistry<T & object>(key, context.scope, manifest.id);
-      if (facade) {
-        scopedCache.set(key, facade);
-        return facade as T;
-      }
-      return context.get<T>(key);
-    };
-    const has = (key: string): boolean => {
-      if (key === RUNTIME_MESSAGE_BUS || key === SCOPED_TASK_SCHEDULER_CAPABILITY || key === RESOURCE_REGISTRY_CAPABILITY) return true;
-      if (key === CHANNEL_RUNTIME_CAPABILITY) return context.has(key);
-      return context.has(key);
-    };
     const logger = logService.forPlugin(manifest.id);
     const extension = {
       logger,
       storage,
       coordinator,
+    };
+    const capability = <C extends Capability>(
+      requested: C,
+    ): CapabilityClient<C> => {
+      const key = requested.id;
+      if (key === RUNTIME_MESSAGE_BUS.id) return context.messageBus as CapabilityClient<C>;
+      if (key === RESOURCE_REGISTRY_CAPABILITY.id) return scopedResourceRegistry as CapabilityClient<C>;
+      if (key === CHANNEL_RUNTIME_CAPABILITY.id) {
+        if (!scopedChannelFactory) {
+          const factory = context.capability(CHANNEL_RUNTIME_CAPABILITY);
+          const scopedRuntime = createScopedChannelRuntime(factory.forPlugin(manifest.id), context.scope);
+          scopedChannelFactory = {
+            forPlugin: (_claimedPluginId: string) => scopedRuntime,
+            forSystem: (_claimedSystemId: string) => {
+              throw new Error("Plugin context cannot create a system Channel caller");
+            },
+          };
+        }
+        return scopedChannelFactory as CapabilityClient<C>;
+      }
+      const cached = scopedCache.get(key);
+      if (cached) return cached as CapabilityClient<C>;
+      const facade = scopedLegacyRegistry<object>(key, context.scope, manifest.id);
+      if (facade) {
+        scopedCache.set(key, facade);
+        return facade as CapabilityClient<C>;
+      }
+      return context.capability(requested) as CapabilityClient<C>;
+    };
+    const optionalCapability = <C extends Capability>(
+      requested: C,
+    ): CapabilityClient<C> | undefined => {
+      try { return capability(requested); } catch { return undefined; }
     };
     const legacyContext: KeymasterPluginContext = {
       ...context,
@@ -1043,9 +1064,11 @@ export function createKeymasterPluginHost(
       storage,
       coordinator,
       extension,
-      provide<T>(key: string, value: T): void {
-        context.provide(key, value);
-        if (key !== KEYSPACE_SERVICE_CAPABILITY) return;
+      capability,
+      optionalCapability,
+      provide<C extends LocalCapability<unknown>>(requested: C, value: LocalServiceOf<C>): void {
+        context.provide(requested, value);
+        if (requested.id !== KEYSPACE_SERVICE_CAPABILITY.id) return;
         removeKeyspaceListener?.();
         removeKeyspaceListener = undefined;
         const keyspace = value as {
@@ -1057,12 +1080,6 @@ export function createKeymasterPluginHost(
           });
         }
         coreHost?.resourceStore.refreshRuntimeBindings();
-      },
-      get,
-      has,
-      require(key: string) {
-        if (key === RUNTIME_MESSAGE_BUS || key === SCOPED_TASK_SCHEDULER_CAPABILITY || key === RESOURCE_REGISTRY_CAPABILITY) return;
-        context.require(key);
       },
       messageBus: context.messageBus,
     };
@@ -1093,16 +1110,35 @@ export function createKeymasterPluginHost(
     },
   };
 
-  const legacyBuiltinCapabilities: Record<string, unknown> = {
-    ...domain.capabilities,
-    [RESOURCE_REGISTRY_CAPABILITY]: legacyResourceRegistry,
-    [RUNTIME_MESSAGE_BUS]: messageBus,
-    [I18N_SERVICE_CAPABILITY]: i18n,
-    [LOG_SERVICE_CAPABILITY]: logService,
-    [ASSET_DATA_NOTIFIER_CAPABILITY]: domain.assetDataNotifier,
-  };
+  const legacyBuiltinCapabilities: HostCapabilityRegistration[] = [
+    { capability: ROUTE_REGISTRY_CAPABILITY, value: domain.routes },
+    { capability: BREADCRUMB_REGISTRY_CAPABILITY, value: domain.breadcrumbs },
+    { capability: SETTINGS_REGISTRY_CAPABILITY, value: domain.settings },
+    { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, value: domain.systemSettings },
+    { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, value: domain.systemStatus },
+    { capability: VAULT_SETTINGS_REGISTRY_CAPABILITY, value: domain.vaultSettings },
+    { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, value: domain.applicationSettings },
+    { capability: HOME_REGISTRY_CAPABILITY, value: domain.home },
+    { capability: BUSINESS_REGISTRY_CAPABILITY, value: domain.business },
+    { capability: COMMAND_REGISTRY_CAPABILITY, value: domain.commands },
+    { capability: IMPORTER_REGISTRY_CAPABILITY, value: domain.importers },
+    { capability: TRANSFER_REGISTRY_CAPABILITY, value: domain.transfers },
+    { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, value: domain.contactPublicKeyActions },
+    { capability: ASSET_REGISTRY_CAPABILITY, value: domain.assets },
+    { capability: TOKEN_REGISTRY_CAPABILITY, value: domain.tokens },
+    { capability: COLLECTIBLE_REGISTRY_CAPABILITY, value: domain.collectibles },
+    { capability: COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY, value: domain.collectibleTransfer },
+    { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED, value: domain.protectedOutpoints },
+    { capability: TOPBAR_REGISTRY_CAPABILITY, value: domain.topbar },
+    { capability: NOTICE_REGISTRY_TYPED_CAPABILITY, value: domain.notice },
+    { capability: ASSET_DATA_NOTIFIER_CAPABILITY, value: domain.assetDataNotifier },
+    { capability: RESOURCE_REGISTRY_CAPABILITY, value: legacyResourceRegistry },
+    { capability: RUNTIME_MESSAGE_BUS, value: messageBus },
+    { capability: I18N_SERVICE_CAPABILITY, value: i18n },
+    { capability: LOG_SERVICE_CAPABILITY, value: logService },
+  ];
   if (options.storageBindingAuthority) {
-    legacyBuiltinCapabilities[STORAGE_BINDING_AUTHORITY_CAPABILITY] = options.storageBindingAuthority;
+    legacyBuiltinCapabilities.push({ capability: STORAGE_BINDING_AUTHORITY_CAPABILITY, value: options.storageBindingAuthority });
   }
 
   domain.settings.setRoutePathProbe((path) => domain.routes.byPath(path) !== undefined);
@@ -1118,6 +1154,14 @@ export function createKeymasterPluginHost(
     runtimeUnitParentScope,
     capabilities: legacyBuiltinCapabilities,
     resourceRegistry: webResourceRegistry,
+    resourceCapabilityResolver: <T>(id: string): T | undefined => {
+      const legacy = domain.capabilities[id];
+      if (legacy !== undefined) return legacy as T;
+      const registration = coreHost?.capabilities.registrations().find(
+        (entry) => entry.capability.id === id,
+      );
+      return registration?.value as T | undefined;
+    },
     messageBus,
     configStore: {
       read: () => configStore.read(),
@@ -1147,34 +1191,32 @@ export function createKeymasterPluginHost(
       };
     },
     pluginIntentCoordinator: options.pluginIntentCoordinator,
-    externalRuntimeDependencies: remoteRuntime !== undefined,
-    serviceBridgeForPlugin: (pluginId, instanceId) => options.serviceBridgeForPlugin?.(pluginId, instanceId),
+    capabilityBridge: remoteRuntime ? bridgeForRuntimeHandle(remoteRuntime) : undefined,
     runtimeUnitImplementationRegistry: implementationRegistry,
     contributionAdapters: [createBusinessContributionAdapter(domain, {
       onRouteRegistered: (pluginId, routeId) => rememberRouteOwner(routeOwners, pluginId, routeId),
       onRouteRevoked: (pluginId, routeId) => forgetRouteOwner(routeOwners, pluginId, routeId),
     })],
     lifecycleCleanupTimeoutMs: options.lifecycleCleanupTimeoutMs,
-    remoteServiceReferences: () => {
-      const bridge = options.serviceBridgeForPlugin?.("__runtime__", "__runtime__");
-      return [
-        ...(remoteRuntime?.state().services ?? []),
-        ...(bridge && typeof bridge.services === "function" ? bridge.services() : []),
-      ];
-    },
-    runtimeSnapshots: readRemoteRuntimeSnapshots,
   });
 
   let removeRemoteRuntimeSubscription: (() => void) | undefined;
-  if (remoteRuntime) {
-    removeRemoteRuntimeSubscription = remoteRuntime.subscribe(() => {
+  const attachRemoteRuntime = (nextRuntime: RuntimeHandle): void => {
+    removeRemoteRuntimeSubscription?.();
+    removeRemoteRuntimeSubscription = undefined;
+    remoteRuntime = nextRuntime;
+    coreHost?.attachRemote(bridgeForRuntimeHandle(nextRuntime));
+    removeRemoteRuntimeSubscription = nextRuntime.subscribe(() => {
       // A disconnect clears the remote directory. Refresh first so the Host
       // stops remote consumers, then reconcile so they restart only after a
       // fresh complete directory has been accepted.
       coreHost?.refreshRuntimeUnitSnapshots();
       void coreHost?.reconcile().catch(() => undefined);
     });
-  }
+    coreHost?.refreshRuntimeUnitSnapshots();
+    void coreHost?.reconcile().catch(() => undefined);
+  };
+  if (remoteRuntime) attachRemoteRuntime(remoteRuntime);
 
   /** 兼容旧 Host 的系统生命周期日志；通用 WebLoom 不绑定 Keymaster 日志。 */
   function appendRuntimeLog(input: {
@@ -1224,7 +1266,7 @@ export function createKeymasterPluginHost(
     const providers = new Map<string, string>();
     for (const plugin of plugins) {
       for (const capability of providesOfManifest(plugin, hostRuntime)) {
-        if (!providers.has(capability)) providers.set(capability, plugin.id);
+        if (!providers.has(capabilityKey(capability))) providers.set(capabilityKey(capability), plugin.id);
       }
     }
     const visited = new Set<string>();
@@ -1236,7 +1278,7 @@ export function createKeymasterPluginHost(
       visiting.add(plugin.id);
       for (const dependency of dependenciesOfManifest(plugin, hostRuntime)) {
         if (dependency.optional) continue;
-        const providerId = providers.get(dependency.capability);
+        const providerId = providers.get(capabilityKey(dependency.capability));
         const provider = providerId ? byId.get(providerId) : undefined;
         if (provider) visit(provider);
       }
@@ -1298,13 +1340,47 @@ export function createKeymasterPluginHost(
     } as ReturnType<LegacyPluginHost["state"]>;
   }
 
+  function legacyGraph(): import("@keymaster/contracts").PluginGraph {
+    const graph = coreHost!.graph();
+    const ids = (values: readonly CapabilityDescriptor[]): string[] => values.map((value) => value.id);
+    return {
+      plugins: [...graph.plugins],
+      dependencies: Object.fromEntries(
+        Object.entries(graph.dependencies).map(([pluginId, values]) => [pluginId, ids(values)]),
+      ),
+      optionalDependencies: Object.fromEntries(
+        Object.entries(graph.optionalDependencies).map(([pluginId, values]) => [pluginId, ids(values)]),
+      ),
+      provides: Object.fromEntries(
+        Object.entries(graph.provides).map(([pluginId, values]) => [pluginId, ids(values)]),
+      ),
+      reverse: Object.fromEntries(
+        Object.entries(graph.reverse).map(([pluginId, values]) => [
+          pluginId,
+          values.map((value) => ({ ...value, capabilities: ids(value.capabilities) })),
+        ]),
+      ),
+      providers: Object.fromEntries(
+        Object.entries(graph.providers).map(([capability, pluginIds]) => [capability, [...pluginIds]]),
+      ),
+      cycles: graph.cycles.map((cycle) => [...cycle]),
+      units: Object.fromEntries(Object.entries(graph.units).map(([unitKey, unit]) => [unitKey, {
+        ...unit,
+        dependencies: ids(unit.dependencies),
+        provides: ids(unit.provides),
+      }])),
+    };
+  }
+
   function convertManifest(manifest: PluginManifest): WebLoomPluginManifest {
+    const startup = manifest.startup;
+    const defaultEnabled = manifest.defaultEnabled;
+    const canDisable = manifest.canDisable;
     const units = manifest.units?.map((unit) => ({
       id: unit.id,
       runtime: unit.runtime,
       dependencies: unit.dependencies,
       provides: unit.provides,
-      providedContracts: unit.providedContracts,
       permissions: unit.permissions,
       config: unit.config,
       contribution: unit.business,
@@ -1314,13 +1390,10 @@ export function createKeymasterPluginHost(
       name: manifest.name,
       description: manifest.description,
       ...(units ? { units } : {}),
-      ...(manifest.dependencies ? { dependencies: manifest.dependencies } : {}),
-      ...(manifest.meta.providesCapabilities ? { provides: manifest.meta.providesCapabilities } : {}),
-      meta: manifest.meta,
-      ...(manifest.permissions ? { permissions: manifest.permissions } : {}),
-      ...(manifest.config ? { config: manifest.config } : {}),
-      ...(manifest.business ? { contribution: manifest.business } : {}),
-    } as WebLoomPluginManifest;
+      startup,
+      defaultEnabled,
+      canDisable,
+    };
   }
 
   function updateManifestMap(plugins: readonly PluginManifest[]): void {
@@ -1392,12 +1465,22 @@ export function createKeymasterPluginHost(
       }
       return resourceId;
     };
-    result.pending = result.pending.map(projectResourceId);
-    result.errors = result.errors.map((issue) => ({
-      ...issue,
-      resourceId: projectResourceId(issue.resourceId),
-    }));
-    return result;
+    // The WebLoom result is deliberately live: late cleanup can settle after
+    // Host.dispose() resolves.  Keep the legacy projection live as well;
+    // spreading the arrays here would freeze a stale cleanup-pending snapshot
+    // in callers that retain the returned result object.
+    const projected = { ...result } as Awaited<ReturnType<LegacyPluginHost["dispose"]>>;
+    Object.defineProperties(projected, {
+      attempted: { enumerable: true, get: () => result.attempted },
+      released: { enumerable: true, get: () => result.released },
+      pending: { enumerable: true, get: () => result.pending.map(projectResourceId) },
+      errors: {
+        enumerable: true,
+        get: () => result.errors.map((issue) => ({ ...issue, resourceId: projectResourceId(issue.resourceId) })),
+      },
+      cleanupIncomplete: { enumerable: true, get: () => result.cleanupIncomplete },
+    });
+    return projected;
   }
 
   const legacyHost: LegacyPluginHost = {
@@ -1435,24 +1518,27 @@ export function createKeymasterPluginHost(
     state: legacyState,
     scope: (pluginId) => coreHost!.scope(pluginId),
     refreshRuntimeUnitSnapshots: () => coreHost!.refreshRuntimeUnitSnapshots(),
-    graph: () => coreHost!.graph(),
+    graph: legacyGraph,
     version: () => coreHost!.version(),
     subscribe: (listener) => coreHost!.subscribe(listener),
     getManifest: (pluginId) => manifests.get(pluginId),
-    reverseDeps: (pluginId) => coreHost!.reverseDeps(pluginId),
+    reverseDeps: (pluginId) => coreHost!.reverseDeps(pluginId).map((value) => ({
+      ...value,
+      capabilities: value.capabilities.map((capability) => capability.id),
+    })),
     validateManifestSet(plugins) {
       for (const plugin of plugins) validateKeymasterManifest(plugin, options.runtime, plugins);
       coreHost!.validateManifestSet(plugins.map(convertManifest));
     },
     provide(key, value) {
       coreHost!.provide(key, value);
-      if (key === KEYSPACE_SERVICE_CAPABILITY) bindHostKeyspace(value);
+      if (key.id === KEYSPACE_SERVICE_CAPABILITY.id) bindHostKeyspace(value);
     },
     async register(plugin) {
       validateKeymasterManifest(plugin, options.runtime, manifests.values());
       updateManifestMap([plugin]);
       configStore.setRequiredPluginIds(
-        [...manifests.values()].filter((item) => item.meta.startup === "required").map((item) => item.id),
+        [...manifests.values()].filter((item) => startupPolicy(item).startup === "required").map((item) => item.id),
       );
       try {
         const existing = coreHost!.getManifest(plugin.id);
@@ -1460,8 +1546,9 @@ export function createKeymasterPluginHost(
           const state = coreHost!.state(plugin.id);
           const intent = options.pluginIntentCoordinator?.snapshot().desiredEnabled[plugin.id]
             ?? configStore.read()[plugin.id]
-            ?? plugin.meta.defaultEnabled;
-          const desired = plugin.meta.startup === "required" || plugin.meta.canDisable === false || intent;
+            ?? startupPolicy(plugin).defaultEnabled;
+          const policy = startupPolicy(plugin);
+          const desired = policy.startup === "required" || policy.canDisable === false || intent;
           if (desired && state.kind === "error-disabled") await coreHost!.retry(plugin.id);
           else if (desired && state.kind === "blocked") await coreHost!.enable(plugin.id);
           else if (desired && state.kind === "disabled") await coreHost!.enable(plugin.id);
@@ -1469,13 +1556,18 @@ export function createKeymasterPluginHost(
           return;
         }
         await coreHost!.register(convertManifest(plugin));
+        const state = coreHost!.state(plugin.id);
+        if (state.kind === "error-disabled") {
+          appendSetupFailedLog(plugin.id, new Error(state.error ?? "Plugin setup failed"));
+          return;
+        }
         appendPluginEnabledLog(plugin.id);
       } catch (error) {
         appendSetupFailedLog(plugin.id, error);
         // 旧 API 对 optional 插件保留“状态可查询、register 不抛出”的启动
         // 语义；required 插件仍把 StartupPluginError 交给 bootstrap。
         if (error instanceof Error && error.name === "StartupPluginError"
-          && plugin.meta.startup !== "required" && plugin.meta.canDisable !== false) return;
+          && startupPolicy(plugin).startup !== "required" && startupPolicy(plugin).canDisable !== false) return;
         throw error;
       }
     },
@@ -1483,7 +1575,7 @@ export function createKeymasterPluginHost(
       for (const plugin of plugins) validateKeymasterManifest(plugin, options.runtime, plugins);
       updateManifestMap(plugins);
       configStore.setRequiredPluginIds(
-        [...manifests.values()].filter((item) => item.meta.startup === "required").map((item) => item.id),
+        [...manifests.values()].filter((item) => startupPolicy(item).startup === "required").map((item) => item.id),
       );
       for (const plugin of orderedManifests(plugins)) await legacyHost.register(plugin);
     },
@@ -1535,6 +1627,7 @@ export function createKeymasterPluginHost(
       if (legacyDisposePromise) return legacyDisposePromise;
       removeRemoteRuntimeSubscription?.();
       removeRemoteRuntimeSubscription = undefined;
+      keymasterRemoteRuntimeAttachers.delete(legacyHost);
       removeHostKeyspaceListener?.();
       removeHostKeyspaceListener = undefined;
       const scopeOwners = new Map<string, string>();
@@ -1550,9 +1643,10 @@ export function createKeymasterPluginHost(
     assertCapabilities: (capabilities, extra) => coreHost!.assertCapabilities(capabilities, extra),
     transitionRuntimeIdentity,
     resourceRegistry: legacyResourceRegistry,
-  } as LegacyPluginHost & { resourceRegistry: KeymasterResourceRegistry };
+  };
 
   bindWebLoomHost(legacyHost, coreHost);
+  keymasterRemoteRuntimeAttachers.set(legacyHost, attachRemoteRuntime);
   return legacyHost;
 
   async function transitionRuntimeIdentity(next: RuntimeIdentityTransition): Promise<void> {
@@ -1606,14 +1700,18 @@ function runtimeIdentityKey(identity: RuntimeIdentityTransition | undefined): st
 
 function validateKeymasterManifest(
   manifest: PluginManifest,
-  runtime: string | undefined,
+  runtime: RuntimeKind | undefined,
   manifestSet: Iterable<PluginManifest>,
 ): void {
   if (!manifest || typeof manifest.id !== "string" || manifest.id.trim() === "") {
     throw new Error("Plugin id must be a non-empty string");
   }
-  if (!manifest.meta || typeof manifest.meta.defaultEnabled !== "boolean" || typeof manifest.meta.canDisable !== "boolean") {
-    throw new Error(`Plugin "${manifest.id}" meta must define defaultEnabled and canDisable`);
+  const startup = manifest.startup;
+  const defaultEnabled = manifest.defaultEnabled;
+  const canDisable = manifest.canDisable;
+  if ((startup !== "required" && startup !== "optional")
+    || typeof defaultEnabled !== "boolean" || typeof canDisable !== "boolean") {
+    throw new Error(`Plugin "${manifest.id}" startup policy must define startup, defaultEnabled and canDisable`);
   }
   const units = manifest.units ?? [];
   if (units.length > 1 && runtime === undefined) {
@@ -1635,8 +1733,8 @@ function validateKeymasterManifest(
     validatePluginStorageDeclaration(declaration);
     assertSystemStorageDeclaration(manifest.id, declaration);
   }
-  if (manifest.meta.startup === "required") {
-    if (!manifest.meta.defaultEnabled || manifest.meta.canDisable) {
+  if (startup === "required") {
+    if (!defaultEnabled || canDisable) {
       throw new Error(`Required plugin "${manifest.id}" has inconsistent startup metadata`);
     }
     if (providesOfManifest(manifest, runtime).length === 0) {
@@ -1645,8 +1743,9 @@ function validateKeymasterManifest(
     const all = [...manifestSet];
     for (const dependency of dependenciesOfManifest(manifest, runtime)) {
       if (dependency.optional) continue;
-      const provider = all.find((candidate) => providesOfManifest(candidate, runtime).includes(dependency.capability));
-      if (provider?.meta.startup === "optional") {
+      const provider = all.find((candidate) => providesOfManifest(candidate, runtime).some((provided) => capabilityKey(provided) === capabilityKey(dependency.capability)));
+      const providerStartup = provider?.startup;
+      if (provider && providerStartup === "optional") {
         throw new Error(`Required plugin "${manifest.id}" cannot depend on optional capability provider "${provider.id}"`);
       }
     }

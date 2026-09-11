@@ -24,7 +24,7 @@ export function createOrdinalTransferHandler(): CollectibleTransferHandler {
 
 export function OrdinalTransferWidget({ collectibleRef, detail, recipientPublicKeyHex, onCompleted }: CollectibleTransferWidgetProps) {
   const { t } = useI18n();
-  const service = useCapability<OrdinalTransferService>(ORDINAL_TRANSFER_SERVICE_CAPABILITY);
+  const service = useCapability(ORDINAL_TRANSFER_SERVICE_CAPABILITY);
   const [recipientAddress, setRecipientAddress] = useState("");
   const [feeRate, setFeeRate] = useState("1000");
   const [busy, setBusy] = useState(false);

@@ -1,4 +1,5 @@
 // 全局紧急通知契约。
+import { defineCapability } from "webloom-framework";
 //
 // 设计缘由：
 //   - notice 是 shell/runtime 级通用能力，不属于某个业务插件；
@@ -46,5 +47,14 @@ export interface NoticeAction {
 }
 
 /** notice registry capability key。 */
-export const NOTICE_REGISTRY_CAPABILITY = "notice.registry";
-
+export const NOTICE_REGISTRY_CAPABILITY = defineCapability<{
+  upsert(record: NoticeRecord): void;
+  dismiss(id: string): void;
+  list(): NoticeRecord[];
+  subscribe(handler: (records: NoticeRecord[]) => void): () => void;
+  removeBySourcePluginId(sourcePluginId: string): void;
+}>({
+  kind: "local",
+  id: "notice.registry",
+  version: "1",
+});

@@ -1,4 +1,5 @@
 // 应用启动装配状态契约。
+import { defineCapability } from "webloom-framework";
 //
 // 这个状态与 Vault 状态、Storage 健康状态分开。启动不是一个简单的
 // loading/ready 二态，而是四个有明确前置条件的门禁：Storage onboarding、
@@ -43,7 +44,11 @@ export interface ApplicationBootstrapStatus {
 }
 
 /** 全局 capability：提供只读启动状态与装配重试入口。 */
-export const APPLICATION_BOOTSTRAP_READY_CAPABILITY = "application-bootstrap.ready";
+export const APPLICATION_BOOTSTRAP_READY_CAPABILITY = defineCapability<ApplicationBootstrapStatus>({
+  kind: "local",
+  id: "application-bootstrap.ready",
+  version: "1",
+});
 
 /** 全局 ResourceDefinition：React 只能通过 Resource Store 读取此状态。 */
 export const APPLICATION_BOOTSTRAP_RESOURCE_ID = "shell.application-bootstrap";

@@ -21,7 +21,19 @@ import type {
   Contact
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
-import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
+import {
+  CONTACTS_SERVICE_CAPABILITY,
+  CONTACTS_PICKER_CAPABILITY,
+  CONTACTS_EDITOR_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  RUNTIME_MESSAGE_BUS,
+  capabilityDescriptor,
+  defineRuntimeUnitDependencies,
+} from "@keymaster/contracts";
 import {
   KEYSPACE_SERVICE_CAPABILITY,
   CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
@@ -35,9 +47,10 @@ import { RecentContactsWidget } from "./RecentContactsWidget.js";
 import { createContactsService } from "./contactsService.js";
 import { CONTACTS_SCHEMA_VERSION, CONTACTS_STORAGE_ID } from "./storage/contactsRepository.js";
 
-export const CONTACTS_CAPABILITY = "contacts.service";
-export const CONTACTS_PICKER = "contacts.picker";
-export const CONTACTS_EDITOR = "contacts.editor";
+/** Compatibility-free product names for the shared contract exports. */
+export const CONTACTS_CAPABILITY = CONTACTS_SERVICE_CAPABILITY;
+export const CONTACTS_PICKER = CONTACTS_PICKER_CAPABILITY;
+export const CONTACTS_EDITOR = CONTACTS_EDITOR_CAPABILITY;
 
 export const contactsResources: I18nPluginResources = {
   namespace: "contacts",
@@ -185,36 +198,33 @@ const contactsPluginDefinition = {
   id: "contacts",
   name: "Contacts",
   description: "联系人管理（按 key namespace 隔离，身份字段为 publicKeyHex）。",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "business"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [
     {
       id: "contacts.window",
       runtime: "window-main",
       scopeKind: "owner-session",
-      provides: [CONTACTS_CAPABILITY, CONTACTS_PICKER, CONTACTS_EDITOR, CONTACTS_COORDINATOR_CONTROL_CAPABILITY],
-      providedContracts: defineRuntimeUnitProvidedContracts([
-        CONTACTS_CAPABILITY,
-        CONTACTS_PICKER,
-        CONTACTS_EDITOR,
-        CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
-      ]),
+      provides: [
+        capabilityDescriptor(CONTACTS_CAPABILITY),
+        capabilityDescriptor(CONTACTS_PICKER),
+        capabilityDescriptor(CONTACTS_EDITOR),
+        capabilityDescriptor(CONTACTS_COORDINATOR_CONTROL_CAPABILITY),
+      ],
       storage: {
         scope: "key",
         applicationStorageId: CONTACTS_STORAGE_ID,
         schemaVersion: CONTACTS_SCHEMA_VERSION
       },
       dependencies: defineRuntimeUnitDependencies([
-        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" },
-        { capability: "route.registry", reason: "注册联系人页面" },
-        { capability: "business.registry", reason: "接入首页业务导航" },
-        { capability: "contacts.public-key-action.registry", reason: "显示联系人公钥操作" },
+        { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "联系人按 key namespace 隔离" },
+        { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册联系人页面" },
+        { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "接入首页业务导航" },
+        { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "显示联系人公钥操作" },
       ]),
     },
     {
@@ -225,15 +235,15 @@ const contactsPluginDefinition = {
   ],
   i18n: contactsResources,
   setup(ctx) {
-    const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-    const messageBus = ctx.get<MessageBus>("runtime.messageBus");
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const coordinator = ctx.coordinator as ContactsCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Contacts Coordinator control is unavailable");
     ctx.provide(CONTACTS_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     // 页面侧只保留联系人 CRUD；Ping/Pong 与唯一后台任务均归 Coordinator Worker。
     const service = createContactsService({ keyspace, messageBus, storage: ctx.storage });
-    ctx.provide<ContactsService>(CONTACTS_CAPABILITY, service);
-    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    ctx.provide(CONTACTS_CAPABILITY, service);
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<Contact[], readonly string[]>({
       id: "contacts.list",
       scope: "active-key",
@@ -296,13 +306,10 @@ const contactsPluginDefinition = {
       },
       invalidation: "immediate"
     });
-    ctx.provide<(props: { value?: string; onChange: (a: string) => void }) => JSX.Element>(
-      CONTACTS_PICKER,
-      ContactPicker
-    );
-    ctx.provide<typeof ContactsEditor>(CONTACTS_EDITOR, ContactsEditor);
+    ctx.provide(CONTACTS_PICKER, ContactPicker);
+    ctx.provide(CONTACTS_EDITOR, ContactsEditor);
 
-    const routes = ctx.get<RouteRegistry>("route.registry");
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
     routes.register({
       id: "contacts.list",
       path: "/contacts",
@@ -316,7 +323,7 @@ const contactsPluginDefinition = {
       component: ContactDetailPage
     });
 
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("contacts", "home", {
       id: "home.contacts",
       label: { key: "contacts.route.list", fallback: "Contacts" },
@@ -331,7 +338,7 @@ const contactsPluginDefinition = {
       home: [{ id: "contacts.recent", space: { id: "contacts.shortcuts", label: { key: "contacts.domain.label", fallback: "Contacts" }, order: 500 }, order: 30, component: RecentContactsWidget }]
     });
 
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const crumbProvider: BreadcrumbProvider = {
       id: "contacts.crumbs",
       order: 300,

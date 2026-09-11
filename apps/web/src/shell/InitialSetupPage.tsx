@@ -8,6 +8,7 @@ import type {
   StorageRuntimeController,
   StorageUserFacingError
 } from "@keymaster/contracts";
+import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
 import { router, useI18n } from "@keymaster/runtime";
 import { useOptionalCapability } from "webloom-framework/react";
@@ -191,7 +192,7 @@ function InitialSetupError({
  */
 export function InitialSetupPage() {
   const { t } = useI18n();
-  const storage = useOptionalCapability<StorageRuntimeController>("storage.runtime-controller");
+  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const managerReady = Boolean(storage?.initialSetup);
   const [step, setStep] = useState<SetupStep>("type");
   const [draft, setDraft] = useState<BucketDraft>(() => ({ ...EMPTY_BUCKET_DRAFT }));

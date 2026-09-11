@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { sha256 } from "@noble/hashes/sha256";
 import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type KeyspaceService, type P2pkhCoordinatorControl, type ResourceRegistry, type SessionCoordinatorClient } from "@keymaster/contracts";
-import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhTransactionFact } from "../p2pkhContracts.js";
+import { KEYSPACE_SERVICE_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type KeyspaceService, type P2pkhCoordinatorControl, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { P2PKH_CAPABILITY, type P2pkhBalanceBreakdown, type P2pkhGlobalSettings, type P2pkhLocalOutpoint, type P2pkhLocalTransaction, type P2pkhOwnedOutpointProjection, type P2pkhService, type P2pkhTransactionFact } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";
 import { P2pkhTransactionDetailPage } from "./P2pkhTransactionDetailPage.js";
 import { P2pkhWalletPage, type WalletSnapshot } from "./P2pkhWalletPage.js";
@@ -27,7 +27,7 @@ function localRawTx(parentTxid: string, outputValue: number): { rawTxHex: string
 
 function registerWallet(includeTestnet: boolean, facts: P2pkhTransactionFact[] = [fact], serviceOverrides: Partial<P2pkhService> = {}, walletOverrides: Partial<WalletSnapshot> = {}, coordinatorOverrides: Partial<SessionCoordinatorClient> = {}) {
   const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
-  const registry = host.capabilities.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY)!;
+  const registry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
   const testResource = { resourceId: "p2pkh:test", publicKeyHex: owner, label: "test", address: "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn", network: "test" as const, createdAt: "now", generation: 0 };
   registry.register({ id: "p2pkh.settings", scope: "global", key: () => ["p2pkh.settings"], load: async () => ({ includeTestnet } satisfies P2pkhGlobalSettings), subscribe: () => () => undefined, invalidation: "immediate" });
   registry.register({
@@ -38,9 +38,9 @@ function registerWallet(includeTestnet: boolean, facts: P2pkhTransactionFact[] =
     subscribe: () => () => undefined,
     invalidation: "immediate"
   });
-  host.provide<KeyspaceService>("keyspace.service", { active: () => ({ activePublicKeyHex: owner }), onActiveKeyChanged: () => () => undefined } as unknown as KeyspaceService);
-  host.provide<P2pkhCoordinatorControl>(P2PKH_COORDINATOR_CONTROL_CAPABILITY, coordinatorOverrides as unknown as P2pkhCoordinatorControl);
-  host.provide<P2pkhService>("p2pkh.service", serviceOverrides as P2pkhService);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, { active: () => ({ activePublicKeyHex: owner }), onActiveKeyChanged: () => () => undefined } as unknown as KeyspaceService);
+  host.provide(P2PKH_COORDINATOR_CONTROL_CAPABILITY, coordinatorOverrides as unknown as P2pkhCoordinatorControl);
+  host.provide(P2PKH_CAPABILITY, serviceOverrides as P2pkhService);
   return host;
 }
 

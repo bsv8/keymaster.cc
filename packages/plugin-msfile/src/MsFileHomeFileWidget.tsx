@@ -308,7 +308,7 @@ function messageForPreviewReason(
 export function MsFileHomeFileWidget() {
   const { t } = useI18n();
   const host = usePluginHost();
-  const service = useCapability<MsFileService>(MSFILE_SERVICE_CAPABILITY);
+  const service = useCapability(MSFILE_SERVICE_CAPABILITY);
   const { vault } = useRuntimeStatus();
   const widgetInstanceId = useId();
 

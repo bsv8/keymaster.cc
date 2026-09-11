@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import type { BucketConditionalCapabilityView, StorageProviderConfigDraft, StorageProviderId, StorageProviderSummary, StorageRuntimeController } from "@keymaster/contracts";
+import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY, type BucketConditionalCapabilityView, type StorageProviderConfigDraft, type StorageProviderId, type StorageProviderSummary } from "@keymaster/contracts";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
@@ -40,7 +40,7 @@ function isConnectionComplete(providerId: StorageProviderId, connection: Storage
 export function StorageProfileEditor() {
   const { t } = useI18n();
   const host = usePluginHost();
-  const service = useCapability<StorageRuntimeController>("storage.runtime-controller");
+  const service = useCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const resource = useResourceSelector<StorageRuntimeSnapshot, StorageRuntimeSnapshot>(
     host.resourceStore,
     "storage.status",

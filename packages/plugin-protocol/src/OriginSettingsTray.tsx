@@ -98,7 +98,7 @@ function normalizeConfirmTimeoutSeconds(raw: string): { display: string; value: 
 }
 
 export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTrayInlineProps) {
-  const service = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
+  const service = useCapability(PROTOCOL_SERVICE_CAPABILITY);
   const { t } = useI18n();
   /**
    * `record` 是当前已持久化真值。所有"显示真值"与"失败回滚目标"都走它。

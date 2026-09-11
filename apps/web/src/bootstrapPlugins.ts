@@ -18,6 +18,10 @@ import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   APPLICATION_BOOTSTRAP_READY_CAPABILITY,
   COORDINATOR_ACTIVITY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
   type KeyValueCommitInput,
   type KeyValueCommitResult,
   type KeyValueEntry,
@@ -43,18 +47,13 @@ import {
   type RuntimeIdentityTransition,
 } from "@keymaster/contracts";
 import {
-  createWindowApp,
   type WindowApp,
 } from "webloom-framework";
-import type {
-  PluginIntentCoordinator,
-  PluginIntentSnapshot,
-  RemoteServiceBridge,
-} from "webloom-framework";
-import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_OWNER_STORAGE_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
+import type { PluginIntentCoordinator, PluginIntentSnapshot } from "webloom-framework";
+import { createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
 import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
-import { createKeymasterPluginHost as createPluginHost, getWebLoomHost, type PluginHost } from "@keymaster/runtime";
+import { attachKeymasterRemoteRuntime, createKeymasterPluginHost as createPluginHost, getWebLoomHost, type PluginHost } from "@keymaster/runtime";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
 import { bsvPriceConfig } from "./pluginConfigs.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
@@ -83,8 +82,8 @@ export const COORDINATOR_STARTUP_RETRY_DELAY_MS = 200;
 export const COORDINATOR_SERVICE_READY_TIMEOUT_MS = BOOTSTRAP_PLUGIN_TIMEOUT_MS;
 
 export const WEB_STARTUP_REQUIRED_CAPABILITIES = [
-  "vault.service",
-  "keyspace.service"
+  VAULT_SERVICE_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
 ] as const;
 
 const EMPTY_PLUGIN_INTENT_SNAPSHOT: PluginIntentSnapshot = {
@@ -142,50 +141,12 @@ export function createStorageCoordinatorClient(client: SessionCoordinatorClient)
 }
 
 /** Vault 插件专用 facade：只有 Vault 可以操作私钥与会话生命周期。 */
-type ServiceBridgeSource = RemoteServiceBridge | (() => RemoteServiceBridge | undefined);
-
-function resolveServiceBridge(source: ServiceBridgeSource | undefined): RemoteServiceBridge | undefined {
-  return typeof source === "function" ? source() : source;
-}
-
-export function createVaultCoordinatorClient(client: SessionCoordinatorClient, serviceBridgeSource?: ServiceBridgeSource): VaultCoordinatorControl {
+export function createVaultCoordinatorClient(client: SessionCoordinatorClient): VaultCoordinatorControl {
   const facade = bindCoordinatorMethods<VaultCoordinatorControl>(client, [
     "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic",
     "unlock", "lock", "activateKey", "vaultOperation", "crypto", "backgroundCancelByKey"
   ]);
-  if (!serviceBridgeSource) return facade;
-  // Vault 的签名/派生调用必须走 Coordinator 的物理服务桥；传入 bridge
-  // 后不再回退旧的主 RPC，避免生产链路看似可用但绕过 Provider 授权。
-  const remoteCrypto: VaultCoordinatorControl["crypto"] = async (operation) => {
-    const serviceBridge = resolveServiceBridge(serviceBridgeSource);
-    const proxy = serviceBridge?.getProxy({
-      capabilityId: COORDINATOR_CRYPTO_SERVICE,
-      contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      runtime: "shared-worker",
-    });
-    if (!proxy) return { ack: { status: "not-ready" } };
-    try {
-      const result = await proxy.call<import("@keymaster/contracts").CoordinatorCryptoOperation, import("@keymaster/contracts").CoordinatorCryptoResult>(operation, {
-        operationId: `vault-crypto:${operation.type}`,
-      });
-      return { ack: { status: "ok" }, result };
-    } catch (error) {
-      return {
-        ack: {
-          status: error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "service.unavailable"
-            ? "not-ready"
-            : "error",
-          ...((error && typeof error === "object" && "message" in error && typeof (error as { message?: unknown }).message === "string")
-            ? { message: (error as { message: string }).message }
-            : { message: "Coordinator crypto service failed" }),
-        },
-      };
-    }
-  };
-  return Object.freeze({
-    ...(facade as object),
-    crypto: remoteCrypto,
-  }) as VaultCoordinatorControl;
+  return facade;
 }
 
 /**
@@ -193,10 +154,10 @@ export function createVaultCoordinatorClient(client: SessionCoordinatorClient, s
  * 执行一次；插件 setup 通过 `ctx.coordinator` 取得已经绑定身份的对象，
  * 不再通过字符串 capability 取得其它插件的 RPC。
  */
-export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, pluginId: string, serviceBridgeSource?: ServiceBridgeSource): unknown {
+export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, pluginId: string): unknown {
   switch (pluginId) {
     case "storage": return createStorageCoordinatorClient(client);
-    case "vault": return createVaultCoordinatorClient(client, serviceBridgeSource);
+    case "vault": return createVaultCoordinatorClient(client);
     case "background": return bindCoordinatorMethods<BackgroundCoordinatorControl>(client, [
       "getIsConnected", "getBootstrapSnapshot", "subscribeTopic", "backgroundRunNow", "backgroundTrigger",
       "backgroundCancel", "backgroundCancelByKey", "backgroundSettingsUpdate", "reportRecoverableCoordinatorFailure"
@@ -271,46 +232,6 @@ function isStaleCoordinatorStorageBinding(error: unknown): boolean {
   }
   const message = error instanceof Error ? error.message : String(error);
   return /storage (?:handle|grant|binding) .*?(?:stale|invalid|changed)|storage .*unavailable|owner storage .*changed|platform storage .*changed/i.test(message);
-}
-
-/**
- * 等待当前 Coordinator 服务桥完成基线和 owner 服务授权。
- *
- * 解锁事件与独立服务端口的快照是两条异步消息：页面可能先收到
- * `session.state=unlocked`，但此时 owner-storage / crypto 代理还没有 ready。
- * 消费者必须等到两项服务都 ready，不能把“已解锁”误当成“服务已装配”。
- */
-export async function waitForCoordinatorServiceBridge(
-  getBridge: () => RemoteServiceBridge | undefined,
-  timeoutMs = COORDINATOR_SERVICE_READY_TIMEOUT_MS,
-): Promise<RemoteServiceBridge> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-    throw new Error("Coordinator service ready timeout must be a non-negative finite number");
-  }
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    const bridge = getBridge();
-    const services = bridge?.services() ?? [];
-    const ownerStorageReady = services.some((service) =>
-      service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE
-      && service.contractVersion === COORDINATOR_SERVICE_CONTRACT_VERSION
-      && service.status === "ready"
-      && typeof service.grantId === "string"
-      && service.grantId.length > 0
-    );
-    const cryptoReady = services.some((service) =>
-      service.capabilityId === COORDINATOR_CRYPTO_SERVICE
-      && service.contractVersion === COORDINATOR_SERVICE_CONTRACT_VERSION
-      && service.status === "ready"
-      && typeof service.grantId === "string"
-      && service.grantId.length > 0
-    );
-    if (bridge?.state === "ready" && ownerStorageReady && cryptoReady) return bridge;
-    if (Date.now() >= deadline) {
-      throw new Error("Coordinator service bridge did not become ready before owner plugin assembly");
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
-  }
 }
 
 /** 页面侧平台 K-V 句柄：只转发 platform K-V RPC，不暴露 Provider 或物理路径。 */
@@ -532,63 +453,48 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     window.addEventListener("pagehide", onPageHide);
   }
   try {
-    await connectCoordinatorWithStartupRetry(coordinatorClient);
-  const storageStatus = await coordinatorClient.storageControl({ type: "status" });
-  // Storage 是独立健康域。Provider/CORS/认证暂不可用时，仍需让 Vault
-  // 和设置页启动，以便用户看到恢复入口；此时不能再读取平台配置 K-V。
-  const storageReady = storageStatus.status === "ok" && storageStatus.value === "ready";
+    // 插件启停命令的唯一写入面是 SharedWorker。页面 Host 只缓存并投影
+    // Worker 快照；命令本身由 UI 通过 host.submitIntent() 发送到这里。
+    const pluginIntentCoordinator: PluginIntentCoordinator = {
+      get authorityInstanceId() {
+        return coordinatorClient.getBootstrapSnapshot().authorityInstanceId;
+      },
+      snapshot() {
+        const snapshot = coordinatorClient.getBootstrapSnapshot().pluginIntent;
+        return snapshot
+          ? {
+              revision: snapshot.revision,
+              desiredEnabled: { ...snapshot.desiredEnabled },
+              desiredRevision: { ...snapshot.desiredRevision },
+            }
+          : { ...EMPTY_PLUGIN_INTENT_SNAPSHOT };
+      },
+      submit(command) {
+        return coordinatorClient.pluginIntentSubmit(command);
+      },
+      subscribe(listener) {
+        return coordinatorClient.subscribeTopic("plugin.intent", (event) => {
+          if (event.type === "plugin.intent.changed") listener(event.snapshot);
+        });
+      },
+    };
 
-  // 插件启停命令的唯一写入面是 SharedWorker。页面 Host 只缓存并投影
-  // Worker 快照；命令本身由 UI 通过 host.submitIntent() 发送到这里。
-  const pluginIntentCoordinator: PluginIntentCoordinator = {
-    get authorityInstanceId() {
-      return coordinatorClient.getBootstrapSnapshot().authorityInstanceId;
-    },
-    snapshot() {
-      const snapshot = coordinatorClient.getBootstrapSnapshot().pluginIntent;
-      return snapshot
-        ? {
-            revision: snapshot.revision,
-            desiredEnabled: { ...snapshot.desiredEnabled },
-            desiredRevision: { ...snapshot.desiredRevision },
-          }
-        : { ...EMPTY_PLUGIN_INTENT_SNAPSHOT };
-    },
-    submit(command) {
-      return coordinatorClient.pluginIntentSubmit(command);
-    },
-    subscribe(listener) {
-      return coordinatorClient.subscribeTopic("plugin.intent", (event) => {
-        if (event.type === "plugin.intent.changed") listener(event.snapshot);
-      });
-    },
-  };
-
-  // 日志也是平台诊断数据，必须在 Host 创建时绑定到 Coordinator 平台 K-V。
-  // 这样 runtime 首次读取配置和写入 entry 时不会落到测试内存夹具。
-  const logStorage = createCoordinatorPlatformStore(coordinatorClient, "logs");
-  const configStorage = createCoordinatorPlatformStore(coordinatorClient, "settings");
-  const runtimeUnitImplementationRegistry = createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG);
-  const initialRuntimeIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
-  const coordinatorRuntime = coordinatorClient.getRuntimeHandle();
-  if (!coordinatorRuntime) throw new Error("Coordinator WebLoom RuntimeHandle is unavailable after connect");
+    // 日志也是平台诊断数据，必须在 Host 创建时绑定到 Coordinator 平台 K-V。
+    // 这样 runtime 首次读取配置和写入 entry 时不会落到测试内存夹具。
+    const logStorage = createCoordinatorPlatformStore(coordinatorClient, "logs");
+    const configStorage = createCoordinatorPlatformStore(coordinatorClient, "settings");
+    const runtimeUnitImplementationRegistry = createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG);
+    const initialRuntimeIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
   const host = createPluginHost({
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd,
     logStorage,
     configStorage,
-    storageBindingAuthority: createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }, {
-      serviceBridge: () => coordinatorClient.getServiceBridge(),
-      requireServiceBridge: true,
-    }),
-    coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId, () => coordinatorClient.getServiceBridge()),
+    storageBindingAuthority: createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }),
+    coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId),
     pluginIntentCoordinator,
-    // 真实 RuntimeHandle 是 Worker 服务目录、运行单元快照和 ServiceBridge
-    // 的唯一来源；Adapter 负责订阅断线/重连世代并驱动 Host reconcile。
-    remoteRuntime: coordinatorRuntime,
-    // RuntimeHandle 不暴露裸 MessagePort 或隐藏 ServiceBridge；Keymaster
-    // 领域适配器通过这个受控 getter 取得当前端口对应的 v2 bridge。
-    serviceBridgeForPlugin: () => coordinatorClient.getServiceBridge(),
+    // 真实 RuntimeHandle 在 WindowApp 建立后再 attach；Host 创建阶段不读取
+    // Worker、不会把尚未完成的远端目录当成本地 capability。
     // 生产 Window Host 只从当前环境实现注册表取得 setup；静态 manifest
     // 不携带可执行函数，缺少实现时直接保持 fail-closed。
     runtimeUnitImplementationRegistry,
@@ -628,12 +534,20 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // Keymaster 的四阶段门禁仍由本装配层控制；createWindowApp 负责把同一
   // WebLoom Window Host 纳入唯一 window-main Runtime，并投影真实 Worker
   // RuntimeHandle。这样不会为了绕过 staged registration 再创建第二个 Host。
-  pageWindowApp = await createWindowApp({
+  pageWindowApp = await createWindowAppFromHost({
     id: "keymaster-window",
-    plugins: [],
     host: getWebLoomHost(host),
-    remoteRuntime: coordinatorRuntime,
   });
+  coordinatorClient.setWindowApp(pageWindowApp);
+  await registerPlugins(pageWindowApp, [coordinatorClient.createWindowStoragePlugin()]);
+  await connectCoordinatorWithStartupRetry(coordinatorClient);
+  const coordinatorRuntime = coordinatorClient.getRuntimeHandle();
+  if (!coordinatorRuntime) throw new Error("Coordinator WebLoom RuntimeHandle is unavailable after connect");
+  attachKeymasterRemoteRuntime(host, coordinatorRuntime);
+  const storageStatus = await coordinatorClient.storageControl({ type: "status" });
+  // Storage 是独立健康域。Provider/CORS/认证暂不可用时，仍需让 Vault
+  // 和设置页启动，以便用户看到恢复入口；此时不能再读取平台配置 K-V。
+  const storageReady = storageStatus.status === "ok" && storageStatus.value === "ready";
   host.provide(COORDINATOR_ACTIVITY_CAPABILITY, Object.freeze({
     getIsConnected: () => coordinatorClient.getIsConnected(),
     sendActivity: () => coordinatorClient.sendActivity()
@@ -649,13 +563,11 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     assetWorkspaceReady: false
   });
   host.provide(APPLICATION_BOOTSTRAP_READY_CAPABILITY, bootstrapStatus.service);
-  registerShellResources(host.capabilities.get("resource.registry"), bootstrapStatus.service);
+  registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY), bootstrapStatus.service);
 
   // 硬切换 003：直接转发 Coordinator event 给 runtime notifier
   // 装配层只负责转发，合并语义由 runtime notifier 实现
-  const dataNotifier = host.capabilities.get<AssetDataNotifier>(
-    ASSET_DATA_NOTIFIER_CAPABILITY
-  );
+  const dataNotifier = host.capabilities.get(ASSET_DATA_NOTIFIER_CAPABILITY);
   coordinatorClient.subscribeTopic("asset.data-changed", (event) => {
     if (event.type === "asset.data-changed") {
       dataNotifier.emit(event);
@@ -671,12 +583,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     "owner-apps-ready",
     "connect-apps-ready"
   ];
-  const missingBootstrapStage = fullCatalog.filter((plugin) => !plugin.meta.bootstrapStage);
+  const missingBootstrapStage = fullCatalog.filter((plugin) => !plugin.bootstrapStage);
   if (missingBootstrapStage.length > 0) {
     throw new Error(`Web plugin catalog has no bootstrapStage: ${missingBootstrapStage.map((plugin) => plugin.id).join(", ")}`);
   }
   const catalogForStage = (catalog: readonly PluginManifest[], stage: PluginBootstrapStage): PluginManifest[] =>
-    catalog.filter((plugin) => plugin.meta.bootstrapStage === stage);
+    catalog.filter((plugin) => plugin.bootstrapStage === stage);
   const phaseOneCatalog = catalogForStage(fullCatalog, "storage-onboarding");
   if (phaseOneCatalog.length === 0) throw new Error("Web plugin catalog must contain a storage-onboarding plugin");
 
@@ -742,11 +654,11 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const registerStage = async (stage: PluginBootstrapStage, retryFailed = false): Promise<void> => {
     const plugins = catalogForStage(fullCatalogWithConfig, stage);
     host.configStore.setRequiredPluginIds(
-      fullCatalogWithConfig.filter((plugin) => plugin.meta.startup === "required").map((plugin) => plugin.id)
+      fullCatalogWithConfig.filter((plugin) => plugin.startup === "required").map((plugin) => plugin.id)
     );
     const enabledByConfig = new Set(
       host.configStore.resolveEnabled(plugins.map((plugin) => plugin.id), (pluginId) =>
-        plugins.find((plugin) => plugin.id === pluginId)?.meta.defaultEnabled ?? false
+        plugins.find((plugin) => plugin.id === pluginId)?.defaultEnabled ?? false
       ).enabled
     );
     for (const plugin of plugins) {
@@ -760,7 +672,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       await registerPluginWithTimeout(host, plugin);
       const state = host.state(plugin.id);
       const shouldRetry = retryFailed
-        && (plugin.meta.startup === "required" || plugin.meta.canDisable === false || enabledByConfig.has(plugin.id))
+        && (plugin.startup === "required" || plugin.canDisable === false || enabledByConfig.has(plugin.id))
         && (state.kind === "error-disabled" || state.kind === "blocked");
       if (shouldRetry) await host.retry(plugin.id);
     }
@@ -775,7 +687,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       generation === ownerAssemblyGeneration && currentActiveKey().unlocked;
     const stagePromise = (async () => {
       updateBootstrapStatus({ phase: "vault-selection", hasUnlockedActiveKey: true });
-      await waitForCoordinatorServiceBridge(() => coordinatorClient.getServiceBridge());
       if (!isCurrentOwnerGeneration()) return;
       await registerStage("owner-apps-ready", retryFailed);
       if (!isCurrentOwnerGeneration()) return;
@@ -813,7 +724,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         updateBootstrapStatus({
           phase: "error",
           storageReady: true,
-          vaultCapabilityReady: host.capabilities.has("vault.service") && host.capabilities.has("keyspace.service"),
+          vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY),
           hasUnlockedActiveKey: currentActiveKey().unlocked,
           vaultSelectionReady,
           ownerAppsReady,
@@ -834,7 +745,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       await host.configStore.hydrate();
       host.validateManifestSet(fullCatalogWithConfig);
       await registerStage("vault-selection", retryFailed);
-      host.assertCapabilities(["vault.service", "keyspace.service"], { phase: "vault-selection" });
+      host.assertCapabilities(WEB_STARTUP_REQUIRED_CAPABILITIES, { phase: "vault-selection" });
       vaultSelectionReady = true;
       const active = currentActiveKey();
       updateBootstrapStatus({
@@ -853,7 +764,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       updateBootstrapStatus({
         phase: "error",
         storageReady: true,
-        vaultCapabilityReady: host.capabilities.has("vault.service") && host.capabilities.has("keyspace.service"),
+        vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY),
         hasUnlockedActiveKey: currentActiveKey().unlocked,
         vaultSelectionReady,
         ownerAppsReady,
@@ -876,11 +787,11 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
 
   host.validateManifestSet(fullCatalogWithConfig);
   host.configStore.setRequiredPluginIds(
-    phaseOneRequiredCatalog.filter((plugin) => plugin.meta.startup === "required").map((plugin) => plugin.id)
+    phaseOneRequiredCatalog.filter((plugin) => plugin.startup === "required").map((plugin) => plugin.id)
   );
   for (const plugin of phaseOneCatalogWithConfig) await registerPluginWithTimeout(host, plugin);
   if (!storageReady) {
-    const storageService = host.capabilities.get<import("@keymaster/contracts").StorageRuntimeController>("storage.runtime-controller");
+    const storageService = host.capabilities.get(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
     const offStorageReady = storageService.subscribe(() => {
       if (storageService.status() !== "ready") return;
       storageReadyForBootstrap = true;

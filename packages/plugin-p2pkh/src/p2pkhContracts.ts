@@ -11,6 +11,7 @@
 //     当前打开的 namespace K-V 隐式表达（每个 key 的 namespace 独立 K-V）。
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
+import { defineCapability } from "webloom-framework";
 import type { BsvNetwork, KeyIdentity, P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 
 /** P2PKH 资产 id。设计缘由：bsv 和 bsvtest 是同一类资产的不同网络，不是不同 provider。 */
@@ -527,7 +528,11 @@ export interface P2pkhService {
 }
 
 /** P2PKH 插件对外暴露的 capability key。 */
-export const P2PKH_CAPABILITY = "p2pkh.service";
+export const P2PKH_CAPABILITY = defineCapability<P2pkhService>({
+  kind: "local",
+  id: "p2pkh.service",
+  version: "1",
+});
 
 /** assetId -> network 映射。P2PKH 内部使用，不导出到 contracts。 */
 export function assetIdToNetwork(assetId: P2pkhAssetId): BsvNetwork {

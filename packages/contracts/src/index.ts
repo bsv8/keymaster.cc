@@ -7,6 +7,7 @@
 // 资产平台协议在 assets.ts，P2PKH 只是众多 AssetProvider 之一。
 
 export * from "./plugin.js";
+export { capabilityDescriptor } from "webloom-framework";
 export * from "./vault.js";
 export * from "./keyspace.js";
 export * from "./keyImport.js";
@@ -43,6 +44,7 @@ export * from "./connectStorage.js";
 export * from "./cbor.js";
 export * from "./vaultSession.js";
 export * from "./sessionCoordinator.js";
+export * from "./sessionCoordinatorRuntime.js";
 export * from "./windowP2pExecutor.js";
 export * from "./bsvP2pkhProviders.js";
 export * from "./resource.js";

@@ -10,7 +10,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import type { ActiveKeyState, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
+import {
+  CONTACTS_SERVICE_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  type ActiveKeyState,
+  type Contact,
+  type ContactsService,
+  type KeyspaceService,
+} from "@keymaster/contracts";
 import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import type { PluginHost } from "@keymaster/runtime";
 import { ContactsEditor } from "./ContactsEditor.js";
@@ -76,8 +83,8 @@ function makeHost(service: ContactsService, keyspace: KeyspaceService): PluginHo
     disableConfigPersistence: true,
     initialI18nResources: [contactsResources]
   });
-  host.capabilities.provide("contacts.service", service);
-  host.capabilities.provide("keyspace.service", keyspace);
+  host.provide(CONTACTS_SERVICE_CAPABILITY, service);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
   return host;
 }
 

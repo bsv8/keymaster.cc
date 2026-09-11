@@ -13,7 +13,7 @@
 //     是稳定枚举（`WebrtcBlockReason`），UI 直接 `t(key)` 拿展示文案。
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useCapability, useResource } from "webloom-framework/react";
+import { useOptionalCapability, useResource } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { PageHeader } from "@keymaster/ui";
 import { formatShortPublicKey } from "@keymaster/contracts";
@@ -28,7 +28,7 @@ import type {
 
 export function WebrtcPage(): React.ReactElement {
   const { t } = useI18n();
-  const service = useCapabilityOrNull<WebrtcService>(WEBRTC_SERVICE_CAPABILITY);
+  const service = useOptionalCapability(WEBRTC_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <section
@@ -45,14 +45,6 @@ export function WebrtcPage(): React.ReactElement {
     );
   }
   return <WebrtcPageInner service={service} />;
-}
-
-function useCapabilityOrNull<T>(key: string): T | null {
-  try {
-    return useCapability<T>(key);
-  } catch {
-    return null;
-  }
 }
 
 interface WebrtcPageInnerProps {

@@ -1,4 +1,5 @@
 // 全局存储运行状态与平台运行时契约。
+import { defineCapability } from "webloom-framework";
 import type { OwnerAppStorageGrant } from "../connectStorage.js";
 import type {
   StorageDeleteResult,
@@ -70,6 +71,8 @@ export interface StorageProviderConnectionView {
 }
 
 /** Provider 探测结果。 */
+export type StorageProbeDiagnostic = "configuration" | "authentication" | "forbidden" | "not-found" | "cors" | "network" | "provider";
+
 export interface StorageProbeResult {
   /** 是否通过探测。 */
   ok: boolean;
@@ -78,7 +81,15 @@ export interface StorageProbeResult {
   /** 探测延迟（毫秒）。 */
   latencyMs: number;
   /** 脱敏诊断分类。 */
-  diagnostic?: "configuration" | "authentication" | "forbidden" | "not-found" | "cors" | "network" | "provider";
+  diagnostic?: StorageProbeDiagnostic;
+}
+
+/** 本地 OPFS 选择结果；OPFS 不是可配置的 S3 Provider。 */
+export interface StorageOpfsProbeResult {
+  ok: boolean;
+  providerId: "opfs";
+  latencyMs: number;
+  diagnostic?: StorageProbeDiagnostic;
 }
 
 /** 首次绑定 S3 桶的结果；绑定完成后不能再调用运行期 activateProvider。 */
@@ -128,6 +139,14 @@ export interface StorageRuntimeController {
   subscribe(listener: () => void): () => void;
   /** 是否存在新版桶目录；旧版 Vault 顶栏据此让位给桶树。 */
   hasCatalogBuckets?(): boolean;
+  /** Current catalog bucket mode, exposed by the coordinator proxy. */
+  isCatalogBucket?(): boolean;
+  /** Current local catalog selection, if the coordinator has one. */
+  selectedBucketId?(): string | undefined;
+  /** Unlock the current catalog bucket and restore the owner session. */
+  unlockBucket?(password: string): Promise<unknown>;
+  /** Export the committed current bucket Hold snapshot. */
+  coldExportBucket?(): Promise<Uint8Array>;
   getProviderSummary(): Promise<StorageProviderSummary | null>;
   getProviderConnection(): Promise<StorageProviderConnectionView | null>;
   /**
@@ -158,7 +177,7 @@ export interface StorageRuntimeController {
   /** 当前桶名称的原子目录 CAS；页面不能直接改当前桶目录。 */
   renameBucket?(label: string): Promise<StorageBucketCatalogEntryV2>;
   /** 选择并验证本地 OPFS；成功后才允许创建平台根。 */
-  selectOpfs(): Promise<StorageProbeResult>;
+  selectOpfs(): Promise<StorageOpfsProbeResult>;
   /** 导入本机加密 Profile 并完成冷启动恢复。 */
   importStorageProfile(envelope: import("./profile.js").StorageProfileEnvelopeV1, password: string): Promise<StorageProbeResult>;
   getConditionalCapabilities(): BucketConditionalCapabilitiesView | null;
@@ -179,5 +198,13 @@ export interface StorageRuntimeController {
   abortUpload(ctx: OwnerAppStorageGrant, input: { uploadId: string; signal?: AbortSignal }): Promise<StorageUploadAbortResult>;
 }
 
-export const STORAGE_RUNTIME_CONTROLLER_CAPABILITY = "storage.runtime-controller";
-export const VAULT_LOCAL_SECRET_CAPABILITY = "vault.local-secret";
+export const STORAGE_RUNTIME_CONTROLLER_CAPABILITY = defineCapability<StorageRuntimeController>({
+  kind: "local",
+  id: "storage.runtime-controller",
+  version: "1",
+});
+export const VAULT_LOCAL_SECRET_CAPABILITY = defineCapability<import("../vault.js").VaultLocalSecretService>({
+  kind: "local",
+  id: "vault.local-secret",
+  version: "1",
+});

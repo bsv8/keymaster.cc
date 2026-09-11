@@ -89,24 +89,21 @@ export function materializeCatalogRuntimeUnit(manifest: PluginManifest): PluginM
       throw new Error(`产品 ${manifest.id} 的 manifest 运行单元与静态契约不一致`);
     }
     const misplaced = [
-      ["dependencies", manifest.dependencies],
       ["storage", manifest.storage],
-      ["permissions", manifest.permissions],
-      ["business", manifest.business],
       ["config", manifest.config],
     ] as const;
-    if (misplaced.some(([, value]) => value !== undefined) || (manifest.meta.providesCapabilities?.length ?? 0) > 0) {
+    if (misplaced.some(([, value]) => value !== undefined)) {
       throw new Error(`产品 ${manifest.id} 的运行期声明必须位于对应 runtime unit`);
     }
     for (const unit of manifest.units) {
       const provided = unit.provides ?? [];
       for (const capability of provided) {
-        if (unit.providedContracts?.[capability] !== `${capability}.v1`) {
-          throw new Error(`产品 ${manifest.id} 的运行单元 ${unit.id} 缺少 capability 契约版本: ${capability}`);
+        if (!capability.kind || !capability.id || !capability.version) {
+          throw new Error(`产品 ${manifest.id} 的运行单元 ${unit.id} 缺少 capability 契约身份`);
         }
       }
       for (const dependency of unit.dependencies ?? []) {
-        if (!dependency.contractVersion || !dependency.sourceRuntime || !dependency.scopeKind) {
+        if (dependency.source !== "peer" && !dependency.sourceRuntime) {
           throw new Error(`产品 ${manifest.id} 的运行单元 ${unit.id} 存在不完整依赖契约`);
         }
       }

@@ -18,7 +18,7 @@ import type {
   ProtocolService,
   ProtocolSessionSnapshot
 } from "@keymaster/contracts";
-import { PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_VERSION } from "@keymaster/contracts";
+import { MSFILE_SERVICE_CAPABILITY, PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_VERSION, VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { StrictMode, type ReactNode } from "react";
 import { useRef, useSyncExternalStore } from "react";
 
@@ -51,9 +51,9 @@ vi.mock("@keymaster/runtime", () => ({
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: (key: string) => {
-    if (key === PROTOCOL_SERVICE_CAPABILITY) return currentService;
-    if (key === "vault.service") {
+  useCapability: (key: { id?: string }) => {
+    if (key.id === PROTOCOL_SERVICE_CAPABILITY.id) return currentService;
+    if (key.id === VAULT_SERVICE_CAPABILITY.id) {
       return {
         status: () => runtimeState.vault,
         onStatusChange: (h: (s: typeof runtimeState.vault) => void) => {
@@ -65,7 +65,7 @@ vi.mock("webloom-framework/react", () => ({
     }
     return undefined;
   },
-  useHasCapability: (key: string) => key !== "msfile.service",
+  useHasCapability: (key: { id?: string }) => key.id !== MSFILE_SERVICE_CAPABILITY.id,
   useResource: (_store: unknown, definitionId: string) => {
     const revision = useRef(0);
     const cached = useRef<{ revision: number; value: { data: unknown } } | undefined>(undefined);

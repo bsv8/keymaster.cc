@@ -13,7 +13,7 @@
 import { useEffect, useState } from "react";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
-import type { BackgroundService, BackgroundSyncSettings } from "@keymaster/contracts";
+import { BACKGROUND_SERVICE_CAPABILITY, type BackgroundSyncSettings } from "@keymaster/contracts";
 
 /** 预设选项。 */
 const INTERVAL_OPTIONS: Array<{ label: string; value: number }> = [
@@ -26,7 +26,7 @@ const INTERVAL_OPTIONS: Array<{ label: string; value: number }> = [
 const DEFAULT_SETTINGS: BackgroundSyncSettings = { assetHoldingsIntervalMs: 900_000 };
 
 export function BackgroundSettingsPage() {
-  const backgroundService = useCapability<BackgroundService>("background.service");
+  const backgroundService = useCapability(BACKGROUND_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   const store = host.resourceStore;

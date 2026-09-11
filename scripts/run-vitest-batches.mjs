@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -10,7 +10,7 @@ const heavyFiles = new Set([
 const batchSize = 12;
 
 function runVitest(args) {
-  const result = spawnSync("pnpm", ["exec", "vitest", ...args], {
+  const result = spawnSync(join(root, "node_modules", ".bin", process.platform === "win32" ? "vitest.cmd" : "vitest"), args, {
     cwd: root,
     stdio: "inherit"
   });
@@ -18,7 +18,7 @@ function runVitest(args) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-const listed = spawnSync("pnpm", ["exec", "vitest", "list", "--json", "--filesOnly"], {
+const listed = spawnSync(join(root, "node_modules", ".bin", process.platform === "win32" ? "vitest.cmd" : "vitest"), ["list", "--json", "--filesOnly"], {
   cwd: root,
   encoding: "utf8"
 });

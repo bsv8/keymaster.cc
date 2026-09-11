@@ -17,6 +17,7 @@
 //     址 / 网络 / 资产判断；地址应从 P2PKH resource 派生，网络由具
 //     体 plugin / resource 持有，资产判断走对应 plugin 的 namespace。
 
+import { defineCapability } from "webloom-framework";
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
 import type { VaultSessionState } from "./vaultSession.js";
 import type { CoordinatorCommandResult } from "./sessionCoordinator.js";
@@ -61,6 +62,13 @@ export interface KeyRef {
    */
   network?: BsvNetwork;
 }
+
+/** Vault 服务的唯一 typed capability 身份。 */
+export const VAULT_SERVICE_CAPABILITY = defineCapability<VaultService>({
+  kind: "local",
+  id: "vault.service",
+  version: "1",
+});
 
 /** Key 明文材料：仅在内存中使用，禁止落盘。 */
 interface VaultKeyMaterial {

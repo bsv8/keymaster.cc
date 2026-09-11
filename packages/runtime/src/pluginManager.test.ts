@@ -18,17 +18,31 @@
 // 详情页；侧栏仅消费 business.registry 的新设置入口。
 
 import { describe, expect, it } from "vitest";
-import { createTestPluginHost as createPluginHost } from "./testing/createTestPluginHost.js";
-import type { PluginHost } from "./pluginHostContract.js";
-import type { PluginContext } from "@keymaster/contracts";
+import { createTestPluginHost as createPluginHost, type TestPluginHost } from "./testing/createTestPluginHost.js";
+import { defineCapability } from "webloom-framework";
+import type { LocalCapability, PluginContext } from "webloom-framework";
+import { ROUTE_REGISTRY_CAPABILITY, SETTINGS_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import type { TestPluginManifest } from "./testing/createTestPluginHost.js";
 type PluginManifest = TestPluginManifest;
-import type { RouteRegistry } from "./registries/routeRegistry.js";
-import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 
 const ROUTE_S = "settings.plugins.route";
 const ROUTE_BIZ = "biz.route";
-const CAP_BIZ = "biz.service";
+const CAP_BIZ = defineCapability<{ ok: boolean }>({ kind: "local", id: "biz.service", version: "1" });
+const CAP_X = defineCapability<Record<string, never>>({ kind: "local", id: "x", version: "1" });
+const CAPABILITY_BY_ID = new Map<string, LocalCapability<unknown>>([
+  [ROUTE_REGISTRY_CAPABILITY.id, ROUTE_REGISTRY_CAPABILITY],
+  [SETTINGS_REGISTRY_CAPABILITY.id, SETTINGS_REGISTRY_CAPABILITY],
+  [CAP_BIZ.id, CAP_BIZ],
+  [CAP_X.id, CAP_X],
+]);
+
+function capabilityForId(id: string): LocalCapability<unknown> {
+  const existing = CAPABILITY_BY_ID.get(id);
+  if (existing) return existing;
+  const created = defineCapability({ kind: "local", id, version: "1" });
+  CAPABILITY_BY_ID.set(id, created);
+  return created;
+}
 
 /** 模拟"settings-like" 插件，setup 内部用了 4 个 capability，但只声明了 1 个。 */
 function makeBadSettings(): PluginManifest {
@@ -40,13 +54,13 @@ function makeBadSettings(): PluginManifest {
     // 制造出来的版本。下面的 `makeGoodSettings` 才是"真值正确"的版本。
     dependencies: [{ capability: "settings.registry" }],
     setup(ctx: PluginContext) {
-      ctx.get<RouteRegistry>("route.registry").register({
+      ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
         id: ROUTE_S,
         path: "/settings/plugins-route",
         label: "Plugins",
         component: () => null
       });
-      ctx.get<SettingsRegistry>("settings.registry").register({
+      ctx.capability(SETTINGS_REGISTRY_CAPABILITY).register({
         id: "settings.plugins",
         path: "/settings/plugins",
         label: "Plugins",
@@ -67,13 +81,13 @@ function makeGoodSettings(): PluginManifest {
       { capability: "route.registry" }
     ],
     setup(ctx: PluginContext) {
-      ctx.get<RouteRegistry>("route.registry").register({
+      ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
         id: ROUTE_S,
         path: "/settings/plugins-route",
         label: "Plugins",
         component: () => null
       });
-      ctx.get<SettingsRegistry>("settings.registry").register({
+      ctx.capability(SETTINGS_REGISTRY_CAPABILITY).register({
         id: "settings.plugins",
         path: "/settings/plugins",
         label: "Plugins",
@@ -95,7 +109,7 @@ function makeBiz(): PluginManifest {
       { capability: "route.registry" }
     ],
     setup(ctx: PluginContext) {
-      ctx.get<RouteRegistry>("route.registry").register({
+      ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
         id: ROUTE_BIZ,
         path: "/biz",
         label: "Biz",
@@ -106,7 +120,7 @@ function makeBiz(): PluginManifest {
   };
 }
 
-function newHost(options: { safePath?: string } = {}): PluginHost {
+function newHost(options: { safePath?: string } = {}): TestPluginHost {
   return createPluginHost({ disableConfigPersistence: true, disableLogPersistence: true, ...options });
 }
 
@@ -140,7 +154,7 @@ describe("plugin graph 依赖真值", () => {
       const g = host.graph();
       const deps = g.dependencies[id] ?? [];
       for (const cap of deps) {
-        expect(host.capabilities.has(cap), `capability ${cap} missing for ${id}`).toBe(true);
+        expect(host.capabilities.has(capabilityForId(cap)), `capability ${cap} missing for ${id}`).toBe(true);
         expect(host.getManifest(cap), `${id} dep ${cap} is not a plugin id`).toBeUndefined();
       }
     }
@@ -153,7 +167,7 @@ describe("plugin graph 依赖真值", () => {
     const deps = g.dependencies.biz ?? [];
     for (const cap of deps) {
       const lookedUpAsPluginId = host.getManifest(cap);
-      const lookedUpAsCap = host.capabilities.has(cap);
+      const lookedUpAsCap = host.capabilities.has(capabilityForId(cap));
       expect(lookedUpAsPluginId, `biz dep ${cap} should NOT be a plugin id`).toBeUndefined();
       expect(lookedUpAsCap, `biz dep ${cap} must be provided`).toBe(true);
     }
@@ -172,7 +186,7 @@ describe("plugin-manager UI 依赖判定（capability key vs plugin id）", () =
     );
     expect(oldMissing.length).toBe(deps.length);
     // 正确路径：用 host.capabilities.has 判断
-    const newMissing = deps.filter((c) => !host.capabilities.has(c));
+    const newMissing = deps.filter((c) => !host.capabilities.has(capabilityForId(c)));
     expect(newMissing).toEqual([]);
   });
 });
@@ -213,16 +227,16 @@ describe("plugin teardown 句柄必须被 host 记录", () => {
     const plugin: PluginManifest = {
       id: "meta",
       name: "M",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: false, providesCapabilities: ["x"] },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: false, providesCapabilities: [CAP_X] },
       setup(ctx: PluginContext) {
         // Match the declared capability so the test exercises metadata on a healthy plugin.
-        ctx.provide("x", {});
+        ctx.provide(CAP_X, {});
       }
     };
     await host.registerAll([plugin]);
     const m = host.getManifest("meta");
-    expect(m?.meta?.canDisable).toBe(false);
-    expect(m?.meta?.providesCapabilities).toEqual(["x"]);
+    expect(m?.canDisable).toBe(false);
+    expect(m?.units?.[0]?.provides).toEqual([{ kind: "local", id: CAP_X.id, version: CAP_X.version }]);
   });
 });
 
@@ -234,7 +248,7 @@ describe("settings registry 与 owner 回收", () => {
       name: "P",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
-        ctx.get<SettingsRegistry>("settings.registry").register({
+        ctx.capability(SETTINGS_REGISTRY_CAPABILITY).register({
           id: "p.settings",
           path: "/settings/p",
           label: "P",
@@ -262,13 +276,13 @@ describe("settings registry 与 owner 回收", () => {
       name: "P",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
-        ctx.get<RouteRegistry>("route.registry").register({
+        ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "p.route",
           path: "/settings/p",
           label: "P",
           component: () => null
         });
-        ctx.get<SettingsRegistry>("settings.registry").register({
+        ctx.capability(SETTINGS_REGISTRY_CAPABILITY).register({
           id: "p.settings",
           path: "/settings/p",
           label: "P",
@@ -338,7 +352,7 @@ describe("settings registry 与 owner 回收", () => {
         name: "P",
         meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
         setup(ctx: PluginContext) {
-          ctx.get<SettingsRegistry>("settings.registry").register({
+          ctx.capability(SETTINGS_REGISTRY_CAPABILITY).register({
             id: "p.settings",
             path: "/settings/p",
             label: "P",

@@ -1,4 +1,4 @@
-import type { TokenRegistry, TransferOffer, TransferOfferStatus, TransferProvider } from "@keymaster/contracts";
+import { TOKEN_REGISTRY_CAPABILITY, type TokenRegistry, type TransferOffer, type TransferOfferStatus, type TransferProvider } from "@keymaster/contracts";
 import { useCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
 import { Button, EmptyState, Select, TextInput } from "@keymaster/ui";
@@ -68,8 +68,8 @@ interface FormState {
 
 function Bsv21TransferWidget({ offer, onCompleted, recipientPublicKeyHex }: import("@keymaster/contracts").TransferWidgetProps) {
   const { t } = useI18n();
-  const service = useCapability<Bsv21TransferService>(BSV21_TRANSFER_SERVICE_CAPABILITY);
-  const registry = useCapability<TokenRegistry>("token.registry");
+  const service = useCapability(BSV21_TRANSFER_SERVICE_CAPABILITY);
+  const registry = useCapability(TOKEN_REGISTRY_CAPABILITY);
   const [tokens, setTokens] = useState<Array<{ tokenId: string; label: string; balance: string }>>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

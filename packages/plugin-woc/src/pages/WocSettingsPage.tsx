@@ -8,12 +8,12 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useCapability } from "webloom-framework/react";
 import { useI18n, useLocale } from "@keymaster/runtime";
-import { WOC_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
+import { WOC_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY, type WocConfig, type WocQueueSnapshot } from "@keymaster/contracts";
 import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } from "../wocSettings.js";
 
 export function WocSettingsPage() {
-  const service = useCapability<WocService>("woc.service");
-  const coordinator = useCapability<P2pkhCoordinatorControl>(WOC_COORDINATOR_CONTROL_CAPABILITY);
+  const service = useCapability(WOC_CAPABILITY);
+  const coordinator = useCapability(WOC_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
   const locale = useLocale();
   const timeFmt = useMemo(

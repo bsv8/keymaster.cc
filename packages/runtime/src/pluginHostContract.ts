@@ -41,7 +41,16 @@ import type {
   KeymasterScopeAttributes,
 } from "@keymaster/contracts";
 import type {
+  CapabilityDescriptor,
+  LocalCapability,
+  LocalServiceOf,
+} from "webloom-framework";
+import type {
   CapabilityRegistry,
+  PluginHost as WebLoomPluginHost,
+  ResourceStoreApi,
+} from "webloom-framework/advanced";
+import type {
   LifecycleDisposeResult,
   LifecycleScope,
   MessageBus,
@@ -49,17 +58,14 @@ import type {
   RuntimeKind,
   PluginIntentCoordinator,
   PluginIntentSubmissionResult,
-  PluginHost as WebLoomPluginHost,
-  RemoteServiceBridge,
   RuntimeHandle,
   RuntimeUnitImplementationRegistry as WebLoomRuntimeUnitImplementationRegistry,
   ScopedTaskScheduler,
 } from "webloom-framework";
 import type { PluginConfigStore } from "./pluginConfigStoreContract.js";
-import type { ResourceStoreApi } from "webloom-framework";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 
-export { StartupCapabilityError, StartupPluginError } from "webloom-framework";
+export { StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
 
 const webLoomHostByKeymasterHost = new WeakMap<object, WebLoomPluginHost>();
 
@@ -114,14 +120,14 @@ export interface PluginHost {
   register(plugin: PluginManifest): Promise<void>;
   registerAll(plugins: PluginManifest[]): Promise<void>;
   validateManifestSet(plugins: readonly PluginManifest[]): void;
-  provide<T>(key: string, value: T): void;
+  provide<C extends LocalCapability<unknown>>(key: C, value: LocalServiceOf<C>): void;
   enable(pluginId: string): Promise<void>;
   retry(pluginId: string): Promise<void>;
   submitIntent(pluginId: string, desiredEnabled: boolean): Promise<PluginIntentSubmissionResult>;
   disable(pluginId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   unregister(pluginId: string): Promise<void>;
   dispose(reason?: string): Promise<LifecycleDisposeResult>;
-  assertCapabilities(capabilities: readonly string[], options?: { phase?: string }): void;
+  assertCapabilities(capabilities: readonly CapabilityDescriptor[], options?: { phase?: string }): void;
   /** 旧插件类型保留的领域资源注册表；实现由 WebLoom Scope 绑定所有权。 */
   resourceRegistry?: ResourceRegistry;
 }
@@ -160,7 +166,12 @@ export interface CreatePluginHostOptions {
   /** 按 pluginId 注入的 Coordinator 窄接口。 */
   coordinatorForPlugin?: (pluginId: string) => unknown;
   /** 当前实例的远程服务桥。 */
-  serviceBridgeForPlugin?: (pluginId: string, instanceId: string) => RemoteServiceBridge | undefined;
+  /**
+   * 迁移中的运行时注入点；最终由 typed CapabilityBridge 取代。
+   * 当前保留 unknown 仅用于让旧测试在编译阶段暴露迁移点，不能进入 v4
+   * 适配器的生产调用路径。
+   */
+  serviceBridgeForPlugin?: (pluginId: string, instanceId: string) => unknown;
   /** 可信装配批准的权限。 */
   approvedPermissionsForPlugin?: (
     pluginId: string,

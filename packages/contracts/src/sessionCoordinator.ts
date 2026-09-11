@@ -16,6 +16,7 @@ import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundTaskProgress } from "./background.js";
 import type { VaultSealedSecret } from "./vault.js";
+import { defineCapability } from "webloom-framework";
 import type {
   OwnerAppStorageGrant,
   StorageListResult,
@@ -43,6 +44,9 @@ import type {
   P2pkhProviderRegistrySnapshot,
   P2pkhNetworkProviderSelection,
 } from "./bsvP2pkhProviders.js";
+
+/** Provider-specific settings cross the Coordinator wire as JSON only. */
+export type P2pkhProviderConfig = { [key: string]: JSONValue };
 import type {
   MsFileApprovalDecision,
   MsFileAppIdentityKey,
@@ -324,7 +328,7 @@ export type CoordinatorClientRequest =
     | { kind: "p2pkh.providers.update"; clientId: string; requestId: string; network: "main" | "test"; selection: P2pkhNetworkProviderSelection; expectedGeneration: number; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { includeTestnet: boolean }; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: Record<string, unknown>; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.rebroadcast-ancestors"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch: SessionEpoch }
     | { kind: "activity"; clientId: string });
@@ -709,8 +713,8 @@ export interface SessionCoordinatorClient {
   p2pkhProvidersGet(): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>>;
   p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult>;
   p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;
-  p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<Record<string, unknown>>>;
-  p2pkhProviderConfigUpdate(providerId: string, config: Record<string, unknown>): Promise<CoordinatorCommandResult>;
+  p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
+  p2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorCommandResult>;
   p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
   p2pkhRebroadcastAncestors(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
   /** 页面活动心跳；不包含任何业务 RPC 权限。 */
@@ -784,18 +788,18 @@ export type ContactsCoordinatorControl = Pick<SessionCoordinatorClient,
  * @deprecated 仅保留给旧测试夹具；生产 Host 不再注入全局 Coordinator client。
  * 业务插件必须使用按 manifest 身份绑定的窄 capability。
  */
-export const SESSION_COORDINATOR_CLIENT_CAPABILITY = "session-coordinator.client";
+export const SESSION_COORDINATOR_CLIENT_CAPABILITY = defineCapability<SessionCoordinatorClient>({ kind: "local", id: "session-coordinator.client", version: "1" });
 /** Shell 只读活动心跳面；不包含任何业务或存储控制 RPC。 */
-export const COORDINATOR_ACTIVITY_CAPABILITY = "session-coordinator.activity";
-export const SESSION_COORDINATOR_SNAPSHOT_CAPABILITY = "session-coordinator.snapshot";
-export const STORAGE_COORDINATOR_CONTROL_CAPABILITY = "storage.coordinator-control";
-export const VAULT_COORDINATOR_CONTROL_CAPABILITY = "vault.coordinator-control";
-export const BACKGROUND_COORDINATOR_CONTROL_CAPABILITY = "background.coordinator-control";
-export const P2PKH_COORDINATOR_CONTROL_CAPABILITY = "p2pkh.coordinator-control";
-export const WOC_COORDINATOR_CONTROL_CAPABILITY = "woc.coordinator-control";
-export const JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY = "junglebus.coordinator-control";
-export const MSFILE_COORDINATOR_CONTROL_CAPABILITY = "msfile.coordinator-control";
-export const SAT_COORDINATOR_CONTROL_CAPABILITY = "sat.coordinator-control";
-export const WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY = "window-p2p.coordinator-control";
-export const PROTOCOL_COORDINATOR_CONTROL_CAPABILITY = "protocol.coordinator-control";
-export const CONTACTS_COORDINATOR_CONTROL_CAPABILITY = "contacts.coordinator-control";
+export const COORDINATOR_ACTIVITY_CAPABILITY = defineCapability<Pick<SessionCoordinatorClient, "getIsConnected" | "sendActivity">>({ kind: "local", id: "session-coordinator.activity", version: "1" });
+export const SESSION_COORDINATOR_SNAPSHOT_CAPABILITY = defineCapability<{ snapshot(): CoordinatorBootstrapSnapshot }>({ kind: "local", id: "session-coordinator.snapshot", version: "1" });
+export const STORAGE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<StorageCoordinatorControl>({ kind: "local", id: "storage.coordinator-control", version: "1" });
+export const VAULT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<VaultCoordinatorControl>({ kind: "local", id: "vault.coordinator-control", version: "1" });
+export const BACKGROUND_COORDINATOR_CONTROL_CAPABILITY = defineCapability<BackgroundCoordinatorControl>({ kind: "local", id: "background.coordinator-control", version: "1" });
+export const P2PKH_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "p2pkh.coordinator-control", version: "1" });
+export const WOC_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "woc.coordinator-control", version: "1" });
+export const JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "junglebus.coordinator-control", version: "1" });
+export const MSFILE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<MsFileCoordinatorControl>({ kind: "local", id: "msfile.coordinator-control", version: "1" });
+export const SAT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<SatCoordinatorControl>({ kind: "local", id: "sat.coordinator-control", version: "1" });
+export const WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY = defineCapability<WindowP2pCoordinatorControl>({ kind: "local", id: "window-p2p.coordinator-control", version: "1" });
+export const PROTOCOL_COORDINATOR_CONTROL_CAPABILITY = defineCapability<ProtocolCoordinatorControl>({ kind: "local", id: "protocol.coordinator-control", version: "1" });
+export const CONTACTS_COORDINATOR_CONTROL_CAPABILITY = defineCapability<ContactsCoordinatorControl>({ kind: "local", id: "contacts.coordinator-control", version: "1" });

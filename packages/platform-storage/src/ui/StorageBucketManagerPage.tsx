@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Check, ChevronDown, HardDrive, KeyRound, LockKeyhole, MoreHorizontal, Plus } from "lucide-react";
-import { formatShortPublicKey } from "@keymaster/contracts";
-import type { ActiveKeyState, KeyRef, KeyspaceService, StorageBootstrapState, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type ActiveKeyState, type KeyRef, type StorageBootstrapState, type StorageBucketCatalogEntryV2, type StorageBucketConnectionConfigV1, type StorageCatalogV2, type VaultService } from "@keymaster/contracts";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import { router, useI18n } from "@keymaster/runtime";
 import { useOptionalCapability } from "webloom-framework/react";
-import type { StorageRuntimeController, VaultService } from "@keymaster/contracts";
 import { createStorageBucketManagementService } from "../hold/storageBucketManagement.js";
 import { exportStorageProfileEnvelope, readLegacyStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
 import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
@@ -83,15 +81,8 @@ function download(name: string, bytes: Uint8Array): void {
  */
 export function StorageBucketManagerPage() {
   const { t } = useI18n();
-  const storage = useOptionalCapability<StorageRuntimeController & {
-    unlockBucket?: (password: string) => Promise<unknown>;
-    switchBucket?: (bucket: StorageBucketCatalogEntryV2, password: string) => Promise<{ ok: true; bucket: StorageBucketCatalogEntryV2; vaultUnlocked: boolean }>;
-    changeBucketConnectionConfig?: (config: StorageBucketConnectionConfigV1, password: string, label?: string) => Promise<StorageBucketCatalogEntryV2>;
-    coldExportBucket?: () => Promise<Uint8Array>;
-    changeBucketPassword?: (oldPassword: string, newPassword: string) => Promise<{ ok: true; bucket: StorageBucketCatalogEntryV2 }>;
-    isCatalogBucket?: () => boolean;
-  }>("storage.runtime-controller");
-  const vault = useOptionalCapability<VaultService>("vault.service");
+  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
+  const vault = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const manager = useMemo(() => {
     try { return createStorageBucketManagementService(); }
     catch { return undefined; }
@@ -738,13 +729,9 @@ function StorageBucketKeySwitchModal(props: {
  */
 export function StorageBucketManagerEntry() {
   const { t } = useI18n();
-  const storage = useOptionalCapability<StorageRuntimeController & {
-    selectedBucketId?: () => string | undefined;
-    switchBucket?: (bucket: StorageBucketCatalogEntryV2, password: string) => Promise<unknown>;
-    isCatalogBucket?: () => boolean;
-  }>("storage.runtime-controller");
-  const vault = useOptionalCapability<VaultService>("vault.service");
-  const keyspace = useOptionalCapability<KeyspaceService>("keyspace.service");
+  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
+  const vault = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
+  const keyspace = useOptionalCapability(KEYSPACE_SERVICE_CAPABILITY);
   const [open, setOpen] = useState(false);
   const [busyBucketId, setBusyBucketId] = useState<string | undefined>();
   const [pendingKey, setPendingKey] = useState<KeyRef | null>(null);

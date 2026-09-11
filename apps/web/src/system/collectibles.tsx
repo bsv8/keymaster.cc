@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { BusinessFeatureRegistry, BsvNetwork, CollectibleRegistry, CollectibleSummary, CollectibleTransferRegistry, I18nText } from "@keymaster/contracts";
+import { BUSINESS_REGISTRY_CAPABILITY, COLLECTIBLE_REGISTRY_CAPABILITY, COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
@@ -60,8 +61,8 @@ export function CollectiblesPage() {
   useCurrentPath();
   const { t } = useI18n();
   const host = usePluginHost();
-  const registry = useCapability<CollectibleRegistry>("collectible.registry");
-  const business = useCapability<BusinessFeatureRegistry>("business.registry");
+  const registry = useCapability(COLLECTIBLE_REGISTRY_CAPABILITY);
+  const business = useCapability(BUSINESS_REGISTRY_CAPABILITY);
   const data = useResourceSelector<Array<{ provider: { id: string; name: I18nText }; items: CollectibleSummary[]; error?: string }>, Array<{ provider: { id: string; name: I18nText }; items: CollectibleSummary[]; error?: string }>>(
     host.resourceStore,
     "collectibles.list",
@@ -195,7 +196,7 @@ export function CollectibleDetailPage() {
   const { t } = useI18n();
   const providerId = readQuery("providerId");
   const collectibleId = readQuery("collectibleId");
-  const transferRegistry = useCapability<CollectibleTransferRegistry>("collectible-transfer.registry");
+  const transferRegistry = useCapability(COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY);
   const supportsTransfer = useMemo(() => Boolean(providerId && collectibleId && transferRegistry.listSupporting({ providerId, collectibleId }).length > 0), [collectibleId, providerId, transferRegistry]);
   if (!providerId || !collectibleId) {
     return <EmptyState title={t("collectibles.redirect.missing", { defaultValue: "缺少 providerId/collectibleId 参数。" })} />;

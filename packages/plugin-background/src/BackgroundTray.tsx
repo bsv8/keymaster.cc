@@ -11,12 +11,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Square, X, Zap } from "lucide-react";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
-import type { BackgroundService, BackgroundTaskSnapshot, BackgroundTaskState } from "@keymaster/contracts";
+import { BACKGROUND_SERVICE_CAPABILITY, type BackgroundService, type BackgroundTaskSnapshot, type BackgroundTaskState } from "@keymaster/contracts";
 
 const EMPTY_SNAPSHOTS: BackgroundTaskSnapshot[] = [];
 
 export function BackgroundTray() {
-  const service = useCapability<BackgroundService>("background.service");
+  const service = useCapability(BACKGROUND_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   const locale = useLocale();

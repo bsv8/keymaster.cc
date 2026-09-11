@@ -1,10 +1,15 @@
 // WebRTC capability 的跨插件公共契约。
+import { defineCapability } from "webloom-framework";
 //
 // plugin-message 只通过 `webrtc.service` 使用这些类型，不能 import
 // plugin-webrtc 的实现包；plugin-webrtc 可在内部拥有更宽的 service API。
 
 /** `webrtc.service` capability 的稳定 key。 */
-export const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
+export const WEBRTC_SERVICE_CAPABILITY = defineCapability<WebrtcMessageService>({
+  kind: "local",
+  id: "webrtc.service",
+  version: "1",
+});
 
 export type WebrtcMode = "audio" | "video";
 
@@ -19,6 +24,7 @@ export type WebrtcSessionPhase =
 export type WebrtcBlockReason =
   | "service_not_ready"
   | "invalid_target"
+  | "call_protocol_unavailable"
   | "device_unavailable"
   | "send_invite_failed"
   | "create_offer_failed"

@@ -48,3 +48,11 @@ if (typeof (globalThis as { fetch?: unknown }).fetch === "undefined") {
   }) as never;
 }
 
+// The production Coordinator entrypoint only installs a SharedWorker
+// `onconnect` handler when the host exposes the SharedWorkerGlobalScope
+// surface.  Vitest runs in node, so provide that host marker explicitly; this
+// keeps the tests on the production startup path without adding a node-only
+// fallback to the worker module itself.
+if (!("onconnect" in globalThis)) {
+  (globalThis as { onconnect?: unknown }).onconnect = null;
+}

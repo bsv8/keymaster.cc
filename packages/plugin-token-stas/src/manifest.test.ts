@@ -29,7 +29,7 @@ vi.mock("./stasService.js", () => ({
   createStasService: vi.fn(() => ({
     listActiveKeyTokens: vi.fn().mockResolvedValue([]),
   })),
-  P2PKH_CAPABILITY: "p2pkh.service",
+  P2PKH_CAPABILITY: { kind: "local", id: "p2pkh.service", version: "1" },
 }));
 
 vi.mock("./stasSync.js", () => ({
@@ -115,7 +115,7 @@ function createMockCtx() {
     // manifest 的 owner/App K-V 句柄注入由 Host 负责；本测试只验证事件绑定，
     // 因此使用不会被 mock Repository 实际访问的最小占位值。
     storage: {} as never,
-    get: vi.fn((key: string) => capabilities.get(key)),
+    capability: vi.fn((capability: { id: string }) => capabilities.get(capability.id)),
     has: vi.fn(() => true),
   };
 

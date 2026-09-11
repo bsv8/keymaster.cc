@@ -29,16 +29,24 @@ import type {
   P2pkhProviderRegistrySnapshot
   , P2pkhCoordinatorControl
 } from "@keymaster/contracts";
-import type { MessageBus } from "webloom-framework";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
+  ASSET_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  HOME_REGISTRY_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
+  PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
+  RUNTIME_MESSAGE_BUS,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  TRANSFER_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
   WOC_CAPABILITY,
   P2PKH_COORDINATOR_CONTROL_CAPABILITY,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhTransactionFact, P2pkhOwnedOutpointProjection, P2pkhLocalTransaction, P2pkhLocalOutpoint, P2pkhLocalInputClaim, P2pkhTransactionSyncState } from "./p2pkhContracts.js";
 
@@ -611,42 +619,38 @@ const p2pkhPluginDefinition = {
   id: "p2pkh",
   name: "P2PKH",
   description: "BSV P2PKH 资产实现：由 Coordinator 统一调度确认交易同步，保留旧协议 spend 的 WOC broadcaster。",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "business"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [
     {
       id: "p2pkh.window",
       runtime: "window-main",
       scopeKind: "owner-session",
       provides: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
-      providedContracts: defineRuntimeUnitProvidedContracts([
-        P2PKH_CAPABILITY,
-        P2PKH_PROTOCOL_SPEND_CAPABILITY,
-        P2PKH_COORDINATOR_CONTROL_CAPABILITY,
-      ]),
       storage: {
         scope: "key",
         applicationStorageId: P2PKH_STORAGE_ID,
         schemaVersion: P2PKH_REPOSITORY_VERSION
       },
       dependencies: defineRuntimeUnitDependencies([
-        { capability: "vault.service", reason: "需要 vault 提供私钥与 key 管理" },
+        { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
         { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
         { capability: WOC_CAPABILITY, reason: "旧协议 spend 使用 WOC broadcaster" },
-        { capability: "protected-outpoint.registry", reason: "排除协议受保护 outpoint" },
-        { capability: "asset.registry", reason: "注册 P2PKH AssetProvider" },
-        { capability: "transfer.registry", reason: "注册 P2PKH TransferProvider" },
-        { capability: "route.registry", reason: "注册 P2PKH 页面" },
-        { capability: "business.registry", reason: "接入资产业务导航" },
-        { capability: "system-settings.registry", reason: "注册 Testnet 系统设置" },
-        { capability: "home.registry", reason: "注册 P2PKH 首页 widget" },
-        { capability: "breadcrumb.registry", reason: "注册 P2PKH 面包屑" },
+        { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "排除协议受保护 outpoint" },
+        { capability: ASSET_REGISTRY_CAPABILITY, reason: "注册 P2PKH AssetProvider" },
+        { capability: TRANSFER_REGISTRY_CAPABILITY, reason: "注册 P2PKH TransferProvider" },
+        { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 P2PKH 页面" },
+        { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入资产业务导航" },
+        { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册 Testnet 系统设置" },
+        { capability: HOME_REGISTRY_CAPABILITY, reason: "注册 P2PKH 首页 widget" },
+        { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册 P2PKH 面包屑" },
+        { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 P2PKH resources" },
+        { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 key lifecycle events" },
+        { capability: ASSET_DATA_NOTIFIER_CAPABILITY, optional: true, reason: "发布可选 asset data 变更" },
       ]),
     },
     {
@@ -657,17 +661,15 @@ const p2pkhPluginDefinition = {
   ],
   i18n: p2pkhResources,
   setup(ctx) {
-    const vault = ctx.get<VaultService>("vault.service");
-    const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-    const woc = ctx.get<WocService>(WOC_CAPABILITY);
+    const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const woc = ctx.capability(WOC_CAPABILITY);
     const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
     if (!coordinator) throw new Error("P2PKH Coordinator control is unavailable");
     ctx.provide(P2PKH_COORDINATOR_CONTROL_CAPABILITY, coordinator);
-    const messageBus = ctx.get<MessageBus>("runtime.messageBus");
-    const protectedOutpoints = ctx.get<ProtectedOutpointRegistry>("protected-outpoint.registry");
-    const assetDataNotifier = ctx.has(ASSET_DATA_NOTIFIER_CAPABILITY)
-      ? ctx.get<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY)
-      : undefined;
+    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
+    const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
+    const assetDataNotifier = ctx.optionalCapability(ASSET_DATA_NOTIFIER_CAPABILITY);
 
     const service = createP2pkhService({
       vault,
@@ -720,7 +722,7 @@ const p2pkhPluginDefinition = {
     }));
 
     // 注册资源定义（硬切换 003）
-    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
 
     // p2pkh.balance：P2PKH 余额数据（bsv + bsvtest）
     resources.register<{ bsv: P2pkhBalance | null; bsvtest: P2pkhBalance | null }, readonly string[]>({
@@ -938,11 +940,11 @@ const p2pkhPluginDefinition = {
       await service.onKeyImported(payload.publicKeyHex);
     });
 
-    const assets = ctx.get<AssetRegistry>("asset.registry");
+    const assets = ctx.capability(ASSET_REGISTRY_CAPABILITY);
     const assetProvider = createP2pkhAssetProvider({ service, messageBus, keyspace });
     assets.register(assetProvider);
 
-    const routes = ctx.get<RouteRegistry>("route.registry");
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
     routes.register({
       id: "p2pkh.transaction",
       path: "/p2pkh/tx/:txid",
@@ -956,7 +958,7 @@ const p2pkhPluginDefinition = {
       component: P2pkhSettingsPage
     });
 
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     const disposeNavigation = registerP2pkhNavigation({
       routes,
       business,
@@ -965,7 +967,7 @@ const p2pkhPluginDefinition = {
     });
     ctx.onDispose(disposeNavigation);
 
-    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     systemSettings.register({
       id: "p2pkh.system-settings.testnet",
       group: {
@@ -981,11 +983,11 @@ const p2pkhPluginDefinition = {
       visibleWhen: ({ unlocked }) => unlocked
     });
 
-    const transferReg = ctx.get<import("@keymaster/contracts").TransferRegistry>("transfer.registry");
+    const transferReg = ctx.capability(TRANSFER_REGISTRY_CAPABILITY);
     const transferProvider = createP2pkhTransferProvider({ service, messageBus, keyspace });
     transferReg.register(transferProvider);
 
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const crumbProvider: BreadcrumbProvider = {
       id: "p2pkh.crumbs",
       order: 200,

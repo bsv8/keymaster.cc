@@ -1,3 +1,4 @@
+import { defineCapability } from "webloom-framework";
 import type { BsvNetwork } from "./vault.js";
 
 /** The only normalized data a confirmed P2PKH provider may expose. */
@@ -80,7 +81,11 @@ export interface P2pkhProviderSettings {
 
 export type P2pkhProviderCapability = "confirmed-sync" | "broadcast";
 
-export const P2PKH_PROVIDERS_CAPABILITY = "p2pkh.providers";
+export const P2PKH_PROVIDERS_CAPABILITY = defineCapability<P2pkhProviderRegistry>({
+  kind: "local",
+  id: "p2pkh.providers",
+  version: "1",
+});
 
 export type P2pkhProviderFailureCode =
   | "provider-unavailable"

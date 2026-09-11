@@ -10,12 +10,12 @@ import { useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { AppLink, useI18n, usePluginHost } from "@keymaster/runtime";
-import { formatShortPublicKey, type Contact, type ContactPresenceMap, type ContactsService } from "@keymaster/contracts";
+import { CONTACTS_SERVICE_CAPABILITY, formatShortPublicKey, type Contact, type ContactPresenceMap } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
 export function ContactsPage() {
-  const service = useCapability<ContactsService>("contacts.service");
+  const service = useCapability(CONTACTS_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   const listState = useResourceSelector<Contact[], { rows: Contact[]; active: boolean; error?: string }>(

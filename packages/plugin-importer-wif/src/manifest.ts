@@ -5,8 +5,8 @@
 // 硬切换 003：WIF 短码字面量稳定，name 走 string（不再走 I18nText）；
 // 但提供 i18n 资源覆盖 importer 名称/描述，方便设置/历史页展示。
 
-import type { I18nPluginResources, ImporterRegistry, PluginManifest, PluginSetup } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup } from "@keymaster/contracts";
+import { IMPORTER_REGISTRY_CAPABILITY, defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { wifImporter } from "./wifImporter.js";
 
 const wifResources: I18nPluginResources = {
@@ -31,27 +31,25 @@ const wifImporterPluginDefinition = {
   id: "importer-wif",
   name: "WIF Importer",
   description: "支持 WIF 文本私钥导入。",
-  meta: {
-    kind: "business",
-    startup: "optional",
+  kind: "business",
+  startup: "optional",
     // 首次 Storage 初始化的导入向导也需要 WIF importer；该插件只依赖
     // Host 内置 importer.registry，不依赖尚未创建的 Vault。
     bootstrapStage: "storage-onboarding",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "import"
-  },
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "import",
   units: [{
     id: "importer-wif.window",
     runtime: "window-main",
     scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "importer.registry", reason: "需要注册 WIF 实现" },
+      { capability: IMPORTER_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "需要注册 WIF 实现" },
     ]),
   }],
   i18n: wifResources,
   setup(ctx) {
-    const registry = ctx.get<ImporterRegistry>("importer.registry");
+    const registry = ctx.capability(IMPORTER_REGISTRY_CAPABILITY);
     registry.register(wifImporter);
     return () => {
       // host owner 回收时会 unregister importer；这里 no-op。

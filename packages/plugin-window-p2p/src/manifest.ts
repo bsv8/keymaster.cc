@@ -1,5 +1,5 @@
 import type { PluginManifest, PluginSetup, PluginContext } from "@keymaster/contracts";
-import { WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY, defineRuntimeUnitProvidedContracts, type WindowP2pCoordinatorControl } from "@keymaster/contracts";
+import { WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY, capabilityDescriptor, type WindowP2pCoordinatorControl } from "@keymaster/contracts";
 import { createWindowP2pLaneRegistry } from "./laneRegistry.js";
 import { installWindowP2pExecutor } from "./windowExecutor.js";
 
@@ -8,23 +8,20 @@ const windowP2pPluginDefinition = {
   id: "window-p2p",
   name: "Window P2P",
   description: "唯一的 bitcoin-libp2p Host、executor lease 和受限网络 lane。",
-  meta: {
-    kind: "platform",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "platform"
-  },
+  kind: "platform",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "platform",
   units: [{
     id: "window-p2p.window",
     runtime: "window-main",
     scopeKind: "root",
-    provides: [WINDOW_P2P_EXECUTOR_CAPABILITY, WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([
-      WINDOW_P2P_EXECUTOR_CAPABILITY,
-      WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY,
-    ]),
+    provides: [
+      capabilityDescriptor(WINDOW_P2P_EXECUTOR_CAPABILITY),
+      capabilityDescriptor(WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY),
+    ],
   }, {
     id: "window-p2p.coordinator-worker",
     runtime: "shared-worker",

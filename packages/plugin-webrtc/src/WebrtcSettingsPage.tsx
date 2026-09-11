@@ -10,7 +10,7 @@
 //   - **不**支持 TURN：UI 上**不**给 TURN 字段入口；service 测试只发 STUN。
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useCapability } from "webloom-framework/react";
+import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
 import {
@@ -30,7 +30,7 @@ type Edits = Record<number, string>;
  */
 export function WebrtcSettingsPage(): React.ReactElement {
   const { t } = useI18n();
-  const service = useCapabilityOrNull<WebrtcService>(WEBRTC_SERVICE_CAPABILITY);
+  const service = useOptionalCapability(WEBRTC_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <section
@@ -42,14 +42,6 @@ export function WebrtcSettingsPage(): React.ReactElement {
     );
   }
   return <WebrtcSettingsInner service={service} />;
-}
-
-function useCapabilityOrNull<T>(key: string): T | null {
-  try {
-    return useCapability<T>(key);
-  } catch {
-    return null;
-  }
 }
 
 interface WebrtcSettingsInnerProps {

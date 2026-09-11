@@ -1,5 +1,5 @@
 // packages/contracts/src/i18n.ts
-// 前端多语言公共契约：i18n 文本、I18nService、插件资源、capability key。
+// 前端多语言公共契约：i18n 文本、I18nService、插件资源、capability。
 //
 // 设计缘由：
 //   - 平台 UI 文案是 registry（route/menu/breadcrumb/settings/home/topbar 等）
@@ -128,5 +128,11 @@ export interface I18nService {
   onChange(handler: LanguageChangeHandler): () => void;
 }
 
-/** I18nService capability key。 */
-export const I18N_SERVICE_CAPABILITY = "i18n.service";
+import { defineCapability } from "webloom-framework";
+
+/** I18nService capability。 */
+export const I18N_SERVICE_CAPABILITY = defineCapability<I18nService>({
+  kind: "local",
+  id: "i18n.service",
+  version: "1",
+});

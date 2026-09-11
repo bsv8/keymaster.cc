@@ -40,8 +40,19 @@ import type {
   SessionCoordinatorClient,
   P2pkhProtocolAdapter
 } from "@keymaster/contracts";
-import { PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, type ProtocolCoordinatorControl } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
+import { defineCapability } from "webloom-framework";
+import {
+  APP_CATALOG_CAPABILITY,
+  MSFILE_SERVICE_CAPABILITY,
+  PROTOCOL_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  PROTOCOL_COORDINATOR_CONTROL_CAPABILITY,
+  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  type ProtocolCoordinatorControl,
+} from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import {
   createProtocolService
@@ -51,6 +62,12 @@ import { parseBootMode, parseBootstrapToken } from "./sessionWindowBootstrap.js"
 import { createConnectChannelRuntime } from "./channelRuntime.js";
 
 export const PROTOCOL_PLUGIN_ID = "protocol";
+/** Protocol only needs the stable adapter subset exposed by P2PKH. */
+const P2PKH_SERVICE_CAPABILITY = defineCapability<P2pkhProtocolAdapter>({
+  kind: "local",
+  id: "p2pkh.service",
+  version: "1",
+});
 const protocolResources: I18nPluginResources = {
   namespace: "protocol",
   resources: {
@@ -439,47 +456,46 @@ const protocolPluginDefinition = {
   id: PROTOCOL_PLUGIN_ID,
   name: "Protocol",
   description: "对外协议 V1：identity.get / intent.sign / cipher.encrypt / cipher.decrypt + p2pkh.transfer + feepool.prepare / feepool.commit。",
-  meta: {
-    kind: "platform",
-    startup: "optional",
-    // 协议 popup 是锁屏/未初始化时仍需可打开的系统入口；它只依赖
-    // Vault + Keyspace，在 vault-selection 阶段先注册。真正依赖 active
-    // owner 的 Connect App 仍由 connect-apps-ready 阶段装配。
-    bootstrapStage: "vault-selection",
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "platform"
-  },
+  kind: "platform",
+  startup: "optional",
+  // 协议 popup 是锁屏/未初始化时仍需可打开的系统入口；它只依赖
+  // Vault + Keyspace，在 vault-selection 阶段先注册。真正依赖 active
+  // owner 的 Connect App 仍由 connect-apps-ready 阶段装配。
+  bootstrapStage: "vault-selection",
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "platform",
   units: [{
     id: "protocol.window",
     runtime: "window-main",
     scopeKind: "storage",
     provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([
-      PROTOCOL_SERVICE_CAPABILITY,
-      PROTOCOL_COORDINATOR_CONTROL_CAPABILITY,
-    ]),
     storage: { scope: "platform", applicationStorageId: "protocol", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       {
-        capability: "vault.service",
+        capability: VAULT_SERVICE_CAPABILITY,
         reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
       },
-      { capability: "keyspace.service", reason: "协议需要 owner key 状态" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "协议需要 owner key 状态" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 protocol 资源" },
+      { capability: STORAGE_RUNTIME_CONTROLLER_CAPABILITY, optional: true, reason: "可选 Storage 方法" },
+      { capability: MSFILE_SERVICE_CAPABILITY, optional: true, reason: "可选 MSFile 方法" },
+      { capability: P2PKH_SERVICE_CAPABILITY, optional: true, reason: "owner-apps-ready 后可选 P2PKH 方法" },
+      { capability: APP_CATALOG_CAPABILITY, optional: true, reason: "可选 app catalog" },
     ]),
   }],
   i18n: protocolResources,
   setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
-    const vaultService = ctx.get<VaultService>("vault.service");
-    const keyspaceService = ctx.get<KeyspaceService>("keyspace.service");
+    const vaultService = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const keyspaceService = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
     const coordinatorClient = ctx.coordinator as ProtocolCoordinatorControl | undefined;
     if (!coordinatorClient) throw new Error("Protocol Coordinator control is unavailable");
     ctx.provide(PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     const connectChannelRuntime = createConnectChannelRuntime(coordinatorClient);
     let storageRuntimeController: StorageRuntimeController | undefined;
     try {
-      storageRuntimeController = ctx.get<StorageRuntimeController>("storage.runtime-controller");
+      storageRuntimeController = ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
     } catch {
       // Storage is an optional platform plugin.  The protocol service still
       // starts, while storage.* requests fail closed with a stable error.
@@ -490,7 +506,7 @@ const protocolPluginDefinition = {
     // `msfile.*` 三个方法 fail closed（msfile_unavailable），不阻塞协议页。
     let msfileService: import("@keymaster/contracts").MsFileService | undefined;
     try {
-      msfileService = ctx.get<import("@keymaster/contracts").MsFileService>("msfile.service");
+      msfileService = ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY);
     } catch {
       msfileService = undefined;
     }
@@ -505,7 +521,7 @@ const protocolPluginDefinition = {
     // 请求都重新取 capability，保证后加载的业务插件可见。
     const getP2pkhService = (): P2pkhProtocolAdapter | undefined => {
       try {
-        return ctx.get<P2pkhProtocolAdapter>("p2pkh.service");
+        return ctx.optionalCapability(P2PKH_SERVICE_CAPABILITY);
       } catch {
         return undefined;
       }
@@ -517,7 +533,7 @@ const protocolPluginDefinition = {
         storageRuntimeController,
         getStorageRuntimeController: () => {
           try {
-            return ctx.get<StorageRuntimeController>("storage.runtime-controller");
+            return ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
           } catch {
             return undefined;
           }
@@ -525,7 +541,7 @@ const protocolPluginDefinition = {
         msfileService,
         getMsfileService: () => {
           try {
-            return ctx.get<import("@keymaster/contracts").MsFileService>("msfile.service");
+            return ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY);
           } catch {
             return undefined;
           }
@@ -534,7 +550,7 @@ const protocolPluginDefinition = {
         connectChannelRuntime,
         getAppCatalogResolver: () => {
           try {
-            return ctx.get<import("@keymaster/contracts").AppCatalogResolver>("app.catalog");
+            return ctx.optionalCapability(APP_CATALOG_CAPABILITY);
           } catch {
             return undefined;
           }
@@ -567,7 +583,7 @@ const protocolPluginDefinition = {
         }
       });
       ctx.provide(PROTOCOL_SERVICE_CAPABILITY, service);
-      const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+      const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
       resources.register<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }, readonly string[]>({
         id: "protocol.state",
         scope: "global",

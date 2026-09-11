@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import type { ActiveKeyState, Contact, ContactPresenceMap, KeyspaceService, ResourceRegistry } from "@keymaster/contracts";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  type ActiveKeyState,
+  type Contact,
+  type ContactPresenceMap,
+  type KeyspaceService,
+  type ResourceRegistry,
+} from "@keymaster/contracts";
 import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { ContactDetailPage } from "./ContactDetailPage.js";
 import { contactsResources } from "./manifest.js";
@@ -47,8 +55,8 @@ describe("ContactDetailPage", () => {
 
   it("renders a structured, extensible contact info view", async () => {
     const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [contactsResources] });
-    host.provide("keyspace.service", keyspace());
-    const resources = host.capabilities.get<ResourceRegistry>("resource.registry");
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace());
+    const resources = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
     resources.register({
       id: "contacts.detail",
       scope: "active-key",

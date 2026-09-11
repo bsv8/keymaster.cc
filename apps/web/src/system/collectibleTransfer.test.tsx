@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { COLLECTIBLE_REGISTRY_CAPABILITY, COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { CollectibleTransferPage } from "./collectibleTransfer.js";
 
 const mocks = vi.hoisted(() => {
@@ -32,11 +33,12 @@ vi.mock("@keymaster/runtime", () => ({
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: (capability: string) => {
-    if (capability === "collectible.registry") {
+  useCapability: (capability: string | { id: string }) => {
+    const capabilityId = typeof capability === "string" ? capability : capability.id;
+    if (capabilityId === COLLECTIBLE_REGISTRY_CAPABILITY.id) {
       return mocks.collectibles;
     }
-    if (capability === "collectible-transfer.registry") {
+    if (capabilityId === COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY.id) {
       return mocks.transferRegistry;
     }
     throw new Error(`unexpected capability ${capability}`);

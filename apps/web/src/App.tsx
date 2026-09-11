@@ -14,8 +14,14 @@
 //     能进入协议页；locked 态在 popup 内先解锁再继续当前请求。
 //   - 其它路径保持原壳层逻辑（LockedShell / UnlockedShell）。
 
-import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, VaultService } from "@keymaster/contracts";
-import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, APPLICATION_BOOTSTRAP_RESOURCE_ID } from "@keymaster/contracts";
+import type { ApplicationBootstrapSnapshot } from "@keymaster/contracts";
+import {
+  APPLICATION_BOOTSTRAP_READY_CAPABILITY,
+  APPLICATION_BOOTSTRAP_RESOURCE_ID,
+  KEYSPACE_SERVICE_CAPABILITY,
+  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { useCurrentPath, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
 import { StorageBucketManagerPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
@@ -35,11 +41,11 @@ function isProtocolPopupPath(path: string): boolean {
 
 export function App() {
   const host = usePluginHost();
-  const hasStorageController = useHasCapability("storage.runtime-controller");
-  const hasVaultService = useHasCapability("vault.service");
-  const hasKeyspaceService = useHasCapability("keyspace.service");
-  const bootstrap = useOptionalCapability<ApplicationBootstrapStatus>(APPLICATION_BOOTSTRAP_READY_CAPABILITY);
-  const vaultService = useOptionalCapability<VaultService>("vault.service");
+  const hasStorageController = useHasCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
+  const hasVaultService = useHasCapability(VAULT_SERVICE_CAPABILITY);
+  const hasKeyspaceService = useHasCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const vaultService = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
+  const bootstrap = useOptionalCapability(APPLICATION_BOOTSTRAP_READY_CAPABILITY);
   const fallbackBootstrapSnapshot: ApplicationBootstrapSnapshot = {
     // Resource 首次加载完成前只能显示门禁页。不能把 pending 资源伪装成
     // final-ready，否则 capability 刚注入而 bootstrap 状态尚未发布时，

@@ -1,4 +1,5 @@
 // 协议 spend 契约。
+import { defineCapability } from "webloom-framework";
 //
 // 设计缘由：
 //   - 协议插件需要的是“受控签名 + 广播 + txid 归一化”，不是 P2PKH
@@ -8,7 +9,11 @@
 
 import type { BsvNetwork } from "./vault.js";
 
-export const P2PKH_PROTOCOL_SPEND_CAPABILITY = "p2pkh.protocol-spend";
+export const P2PKH_PROTOCOL_SPEND_CAPABILITY = defineCapability<ProtocolSpendService>({
+  kind: "local",
+  id: "p2pkh.protocol-spend",
+  version: "1",
+});
 
 export interface ProtocolSpendInput {
   txid: string;

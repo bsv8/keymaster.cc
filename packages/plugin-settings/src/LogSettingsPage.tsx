@@ -62,7 +62,7 @@ function summaryFor(entry: LogEntry): string | null {
 /** 系统页中的日志配置设置；每项变更均立即写入统一日志服务。 */
 export function LogConfigurationSettings() {
   const { t } = useI18n();
-  const log = useCapability<LogService>(LOG_SERVICE_CAPABILITY);
+  const log = useCapability(LOG_SERVICE_CAPABILITY);
   const [config, setConfig] = useState<LogConfig>(() => log.getConfig());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,7 +137,7 @@ export function LogConfigurationSettings() {
 
 export function LogSettingsPage() {
   const { t } = useI18n();
-  const log = useCapability<LogService>(LOG_SERVICE_CAPABILITY);
+  const log = useCapability(LOG_SERVICE_CAPABILITY);
 
   // 过滤条件
   const [filterPluginId, setFilterPluginId] = useState("");

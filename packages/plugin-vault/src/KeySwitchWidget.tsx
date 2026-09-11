@@ -29,14 +29,13 @@ import { useEffect, useState } from "react";
 import { ChevronDown, KeyRound, Check } from "lucide-react";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { router, useI18n, usePluginHost } from "@keymaster/runtime";
-import { formatShortPublicKey, STORAGE_CATALOG_CHANGED_EVENT } from "@keymaster/contracts";
-import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, VAULT_SERVICE_CAPABILITY, formatShortPublicKey, STORAGE_CATALOG_CHANGED_EVENT, type KeyIdentity } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
 import { VaultKeySwitchModal } from "./VaultKeySwitchModal.js";
 
 export function KeySwitchWidget() {
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const vault = useCapability<VaultService>("vault.service");
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。

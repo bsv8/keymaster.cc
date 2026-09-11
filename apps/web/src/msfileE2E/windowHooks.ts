@@ -191,8 +191,8 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
   // owner-apps-ready 异步门禁中。安装测试钩子不能把这个正常竞态升级成
   // fatal；先保留 Coordinator 窄面，真正调用时再取得已装配的 service。
   const coordinator = host.capabilities.has(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    ? host.capabilities.get<VaultCoordinatorControl>(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    : client as unknown as VaultCoordinatorControl;
+    ? host.capabilities.get(VAULT_COORDINATOR_CONTROL_CAPABILITY)
+    : client;
   let service: MsFileService | undefined;
   let protocolRepository: ProtocolStorageRepository | undefined;
   let readBlockDelayMs = 0;
@@ -202,7 +202,7 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
       if (!host.capabilities.has(MSFILE_SERVICE_CAPABILITY)) {
         throw new Error("MSFile E2E service is not ready; bootstrap must finish owner-apps-ready");
       }
-      service = host.capabilities.get<MsFileService>(MSFILE_SERVICE_CAPABILITY);
+      service = host.capabilities.get(MSFILE_SERVICE_CAPABILITY);
     }
     if (!readBlockPatched) {
       const readBlock = service.readBlock.bind(service);

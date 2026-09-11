@@ -9,11 +9,13 @@ import {
   COORDINATOR_CRYPTO_SERVICE,
   COORDINATOR_OWNER_STORAGE_SERVICE,
   COORDINATOR_SERVICE_CONTRACT_VERSION,
+  COORDINATOR_CRYPTO_RPC_CAPABILITY,
+  COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   SYSTEM_STORAGE_DECLARATIONS,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
 } from "@keymaster/contracts";
 import type { VaultCoordinatorControl } from "@keymaster/contracts";
-import type { RemoteServiceBridge } from "webloom-framework";
+import type { RuntimeHandle, RuntimeStatusSnapshot } from "webloom-framework";
 import { createStorageBindingAuthority, requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
 import { createSessionCryptoEngine } from "@keymaster/plugin-vault";
 import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";
@@ -24,16 +26,19 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function serviceSummary(bridge: RemoteServiceBridge | undefined): Array<{
+type RuntimeService = RuntimeStatusSnapshot["services"][number];
+
+function serviceSummary(runtime: RuntimeHandle | undefined): Array<{
   capabilityId: string;
   serviceInstanceId: string;
   status: string;
   hasServerGrant: boolean;
 }> {
-  return bridge?.services().map((service) => ({
+  const state = runtime?.state();
+  return state?.services.map((service: RuntimeService) => ({
     capabilityId: service.capabilityId,
     serviceInstanceId: service.serviceInstanceId,
-    status: service.status,
+    status: state.state === "ready" ? "ready" : state.state,
     // E2E 只报告授权是否存在，不把不透明 grant 值暴露到页面调试对象。
     hasServerGrant: typeof service.grantId === "string" && service.grantId.length > 0,
   })) ?? [];
@@ -82,26 +87,27 @@ async function ensureUnlocked(
   throw new Error(`Lifecycle E2E Vault did not become unlocked: ${JSON.stringify({ lastSnapshot, lastStorageRecovery, storageSelection: diagnostics?.storageSelection })}`);
 }
 
-async function waitForReadyBridge(client: ReturnType<typeof getCoordinatorClient>): Promise<RemoteServiceBridge> {
+async function waitForReadyRuntime(client: ReturnType<typeof getCoordinatorClient>): Promise<RuntimeHandle> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
-    const bridge = client.getServiceBridge();
-    const services = bridge?.services() ?? [];
+    const runtime = client.getRuntimeHandle();
+    const state = runtime?.state();
+    const services = state?.services ?? [];
     const ownerStorageReady = services.some((service) =>
       service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE
       && service.contractVersion === COORDINATOR_SERVICE_CONTRACT_VERSION
-      && service.status === "ready"
       && typeof service.grantId === "string"
     );
     const cryptoReady = services.some((service) =>
       service.capabilityId === COORDINATOR_CRYPTO_SERVICE
       && service.contractVersion === COORDINATOR_SERVICE_CONTRACT_VERSION
-      && service.status === "ready"
       && typeof service.grantId === "string"
     );
-    if (bridge?.state === "ready" && ownerStorageReady && cryptoReady) return bridge;
+    if (runtime && state?.state === "ready" && ownerStorageReady && cryptoReady
+      && runtime.optionalCapability(COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY)
+      && runtime.optionalCapability(COORDINATOR_CRYPTO_RPC_CAPABILITY)) return runtime;
     await delay(25);
   }
-  throw new Error("Lifecycle E2E service bridge did not become ready");
+  throw new Error("Lifecycle E2E Coordinator Runtime did not expose ready services");
 }
 
 async function waitForStorageReady(client: ReturnType<typeof getCoordinatorClient>): Promise<void> {
@@ -169,8 +175,8 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
   // Storage onboarding，Vault capability 尚不存在。测试钩子不能把这个
   // 可恢复阶段改成 fatal，直接复用同一 Coordinator client 的窄 Vault 面。
   const coordinator = host.capabilities.has(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    ? host.capabilities.get<VaultCoordinatorControl>(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    : client as unknown as VaultCoordinatorControl;
+    ? host.capabilities.get(VAULT_COORDINATOR_CONTROL_CAPABILITY)
+    : client;
 
   const bootstrap = async () => {
     const storageStatus = await client.storageControl({ type: "status" });
@@ -186,12 +192,12 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     }
     await waitForStorageReady(client);
     const owner = await ensureUnlocked(coordinator, client, diagnostics);
-    const bridge = await waitForReadyBridge(client);
+    const runtime = await waitForReadyRuntime(client);
     return {
       ...owner,
       buildId: client.getBootstrapSnapshot().buildId ?? "",
-      bridgeState: bridge.state,
-      services: serviceSummary(bridge),
+      bridgeState: runtime.state().state,
+      services: serviceSummary(runtime),
     };
   };
 
@@ -200,8 +206,6 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     const declaration = SYSTEM_STORAGE_DECLARATIONS.p2pkh;
     if (!declaration) throw new Error("Lifecycle E2E p2pkh storage declaration is missing");
     const authority = createStorageBindingAuthority(client, {
-      serviceBridge: () => client.getServiceBridge(),
-      requireServiceBridge: true,
     });
     const store = await authority.openOwnerAppStore({ pluginId: "p2pkh", declaration });
     const key = `lifecycle-e2e-${Date.now().toString(36)}`;
@@ -210,12 +214,12 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
       await store.put(key, value);
       const entry = await store.get<typeof value>(key);
       if (!entry) throw new Error("Lifecycle E2E owner K-V round trip returned no value");
-      const bridge = await waitForReadyBridge(client);
+      const runtime = await waitForReadyRuntime(client);
       return {
         key,
         value: entry.value,
-        bridgeState: bridge.state,
-        serviceInstanceId: bridge.services().find((service) => service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE)?.serviceInstanceId ?? "",
+        bridgeState: runtime.state().state,
+        serviceInstanceId: runtime.state().services.find((service) => service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE)?.serviceInstanceId ?? "",
       };
     } finally {
       store.close();
@@ -224,32 +228,24 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
 
   const deriveAddress = async () => {
     const owner = await bootstrap();
-    const bridge = await waitForReadyBridge(client);
-    const proxy = bridge.requireProxy({
-      capabilityId: COORDINATOR_CRYPTO_SERVICE,
-      contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      runtime: "shared-worker",
-    });
-    const result = await proxy.call<{ type: "deriveP2pkhAddress"; network: "main" }, { type: "deriveP2pkhAddress"; address: string }>(
+    const runtime = await waitForReadyRuntime(client);
+    const result = await runtime.capability(COORDINATOR_CRYPTO_RPC_CAPABILITY).call(
       { type: "deriveP2pkhAddress", network: "main" },
       { operationId: "lifecycle-e2e:derive-address" },
     );
+    if (result.type !== "deriveP2pkhAddress") throw new Error("Coordinator crypto returned an unexpected result");
     return {
       address: result.address,
       ownerPublicKeyHex: owner.ownerPublicKeyHex,
-      serviceInstanceId: proxy.reference?.serviceInstanceId ?? "",
+      serviceInstanceId: runtime.state().services.find((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE)?.serviceInstanceId ?? "",
     };
   };
 
   const lockRevokesOldProxy = async () => {
     await bootstrap();
-    const bridge = await waitForReadyBridge(client);
-    const oldProxy = bridge.requireProxy({
-      capabilityId: COORDINATOR_CRYPTO_SERVICE,
-      contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-      runtime: "shared-worker",
-    });
-    const oldServiceInstanceId = oldProxy.reference?.serviceInstanceId ?? "";
+    const runtime = await waitForReadyRuntime(client);
+    const oldProxy = runtime.capability(COORDINATOR_CRYPTO_RPC_CAPABILITY);
+    const oldServiceInstanceId = runtime.state().services.find((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE)?.serviceInstanceId ?? "";
     const lockResult = await coordinator.lock();
     let oldProxyErrorCode = "none";
     try {
@@ -260,8 +256,8 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
         : "unknown";
     }
     const unlockResult = await coordinator.unlock(E2E_VAULT_PASSWORD);
-    const nextBridge = await waitForReadyBridge(client);
-    const newServiceInstanceId = nextBridge.services().find((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE)?.serviceInstanceId ?? "";
+    const nextRuntime = await waitForReadyRuntime(client);
+    const newServiceInstanceId = nextRuntime.state().services.find((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE)?.serviceInstanceId ?? "";
     return {
       lockStatus: lockResult.status,
       unlockStatus: unlockResult.status,

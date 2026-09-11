@@ -205,7 +205,7 @@ function packageJsonForSource(file) {
 const webLoomPackageName = "webloom-framework";
 const legacyWebLoomImport = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']webloom(?:["']|\/)/u;
 const webLoomDeepImport = new RegExp(
-  String.raw`(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']${webLoomPackageName}\/(?!react["']|testing["'])`,
+  String.raw`(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']${webLoomPackageName}\/(?!react["']|advanced["']|testing["'])`,
   "u",
 );
 const webLoomPublicImport = new RegExp(
@@ -228,7 +228,8 @@ for (const consumerRoot of webLoomConsumerRoots) {
     if (legacyWebLoomImport.test(text)) {
       recordViolation(file, "must not import the legacy webloom package; use webloom-framework");
     }
-    // 公共入口只有 webloom-framework、webloom-framework/react、webloom-framework/testing；禁止接触内部文件。
+    // 公共入口只有 webloom-framework、webloom-framework/react、
+    // webloom-framework/advanced、webloom-framework/testing；禁止接触内部文件。
     if (webLoomDeepImport.test(text)) {
       recordViolation(file, "must import WebLoom through public exports, not webloom-framework/src, webloom-framework/dist, or another private subpath");
     }

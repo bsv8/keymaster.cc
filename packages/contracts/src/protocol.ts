@@ -24,6 +24,7 @@
 //   - `feepool.commit` 的 `operationId` 只在 popup 会话内存中有效，
 //     不持久化；popup 刷新 / 关闭后 operation 失效。
 
+import { defineCapability } from "webloom-framework";
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
 import type { AppIdentityProofV1, AppIdentitySnapshot } from "./appIdentity.js";
 import type {
@@ -1962,7 +1963,11 @@ export type ProtocolPopupLockState = "locked" | "unlocked";
  * 命令流 K-V capability key。manifest 在 setup 阶段 provide；
  * ProtocolService 通过 ctx 注入，**不**直接 import K-V 模块。
  */
-export const PROTOCOL_COMMAND_REPOSITORY_CAPABILITY = "protocol.commandRepository";
+export const PROTOCOL_COMMAND_REPOSITORY_CAPABILITY = defineCapability<Record<string, unknown>>({
+  kind: "local",
+  id: "protocol.commandRepository",
+  version: "1",
+});
 
 /**
  * 协议存储 K-V capability key。
@@ -1972,7 +1977,11 @@ export const PROTOCOL_COMMAND_REPOSITORY_CAPABILITY = "protocol.commandRepositor
  * capability 同步改名。manifest 在 setup 阶段 provide，service 通过 deps
  * 注入，**不**直接 import K-V 模块。
  */
-export const PROTOCOL_STORAGE_REPOSITORY_CAPABILITY = "protocol.storageRepository";
+export const PROTOCOL_STORAGE_REPOSITORY_CAPABILITY = defineCapability<ProtocolStorageRepository>({
+  kind: "local",
+  id: "protocol.storageRepository",
+  version: "1",
+});
 
 /**
  * 协议存储 K-V 抽象。实现走 platform K-V repository；测试用 `fake-indexeddb`。
@@ -2160,7 +2169,11 @@ export interface ProtocolSessionSnapshot {
 /* ============== capability ============== */
 
 /** ProtocolService capability key。 */
-export const PROTOCOL_SERVICE_CAPABILITY = "protocol.service";
+export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
+  kind: "local",
+  id: "protocol.service",
+  version: "1",
+});
 
 /**
  * 协议 service 对外契约。`apps/web` / `ProtocolPopupPage` 通过

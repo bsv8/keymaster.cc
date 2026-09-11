@@ -9,9 +9,9 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import type { ActiveKeyState, KeyspaceService, ResourceRegistry } from "@keymaster/contracts";
-import { RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
-import type { P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";
+import { KEYSPACE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
+import { P2PKH_CAPABILITY, type P2pkhBalance, type P2pkhService } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";
 import { P2pkhBalanceWidget } from "./P2pkhBalanceWidget.js";
 
@@ -85,7 +85,7 @@ function makeFakeKeyspace(activePublicKeyHex?: string) {
 
 /** 在 host 上注册 p2pkh 资源定义。 */
 function registerP2pkhResources(host: ReturnType<typeof createPluginHost>, service: P2pkhService) {
-  const resourceRegistry = host.capabilities.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY)!;
+  const resourceRegistry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
 
   // p2pkh.balance
   resourceRegistry.register({
@@ -157,8 +157,8 @@ describe("P2pkhBalanceWidget", () => {
     const fake = makeFakeService();
     const keyspace = makeFakeKeyspace();
     const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
-    host.provide<P2pkhService>("p2pkh.service", fake.service);
-    host.provide<KeyspaceService>("keyspace.service", keyspace.keyspace);
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
     registerP2pkhResources(host, fake.service);
 
     render(
@@ -199,8 +199,8 @@ describe("P2pkhBalanceWidget", () => {
     });
     const keyspace = makeFakeKeyspace();
     const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
-    host.provide<P2pkhService>("p2pkh.service", fake.service);
-    host.provide<KeyspaceService>("keyspace.service", keyspace.keyspace);
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
     registerP2pkhResources(host, fake.service);
 
     render(
@@ -240,8 +240,8 @@ describe("P2pkhBalanceWidget", () => {
     const fake = makeFakeService();
     const keyspace = makeFakeKeyspace();
     const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
-    host.provide<P2pkhService>("p2pkh.service", fake.service);
-    host.provide<KeyspaceService>("keyspace.service", keyspace.keyspace);
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
     registerP2pkhResources(host, fake.service);
 
     const { unmount } = render(

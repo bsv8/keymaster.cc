@@ -1,5 +1,7 @@
 // packages/plugin-webrtc/src/constants.ts
 // plugin-webrtc 自身常量（协议、能力和路由）。
+import { defineCapability } from "webloom-framework";
+import type { WebrtcService } from "./webrtcService.js";
 
 /** WebRTC owner inbox 私信协议标识。 */
 export const WEBRTC_SIGNAL_PROTOCOL = "bsv8.webrtc.signal.v1";
@@ -12,7 +14,11 @@ export const WEBRTC_SIGNAL_PROTOCOL = "bsv8.webrtc.signal.v1";
 export const WEBRTC_CALLS_ENABLED = false;
 
 /** plugin-webrtc 公开 service capability key。 */
-export const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
+export const WEBRTC_SERVICE_CAPABILITY = defineCapability<WebrtcService>({
+  kind: "local",
+  id: "webrtc.service",
+  version: "1",
+});
 
 /** 设置详情页路径。 */
 export const WEBRTC_SETTINGS_PATH = "/settings/webrtc";

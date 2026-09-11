@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import type { BusinessFeatureRegistry, RouteRegistry } from "@keymaster/contracts";
+import { BUSINESS_REGISTRY_CAPABILITY, ROUTE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { registerP2pkhNavigation } from "./P2pkhNavigation.js";
 
 function setup(includeTestnet: boolean, initialPath = "/p2pkh/mainnet/transactions") {
   window.history.replaceState({}, "", initialPath);
   const host = createPluginHost({ disableConfigPersistence: true });
-  const routes = host.capabilities.get<RouteRegistry>("route.registry");
-  const business = host.capabilities.get<BusinessFeatureRegistry>("business.registry");
+  const routes = host.capabilities.get(ROUTE_REGISTRY_CAPABILITY);
+  const business = host.capabilities.get(BUSINESS_REGISTRY_CAPABILITY);
   if (!routes || !business) throw new Error("Host registries are unavailable");
   business.register("shell", { id: "assets", label: { key: "assets", fallback: "Assets" }, order: 1, features: [] });
   let onSettingsChange: ((include: boolean) => void) | undefined;

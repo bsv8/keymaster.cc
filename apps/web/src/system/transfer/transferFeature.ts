@@ -1,4 +1,5 @@
 import type { ComponentType } from "react";
+import { defineCapability } from "webloom-framework";
 import type { TransferOffer } from "@keymaster/contracts";
 
 export interface TransferRequest { offer: TransferOffer; sourceId: string; draft?: unknown; quote?: unknown; }
@@ -18,6 +19,12 @@ export interface TransferFeatureCapability {
   listReviewSections(): TransferReviewSection[];
   listSubmitHandlers(): TransferSubmitHandler[];
 }
+
+export const TRANSFER_FEATURE_CAPABILITY = defineCapability<TransferFeatureCapability>({
+  kind: "local",
+  id: "feature.transfer",
+  version: "1",
+});
 
 export function createTransferFeatureCapability(): TransferFeatureCapability {
   const sources = new Map<string, TransferSource>();

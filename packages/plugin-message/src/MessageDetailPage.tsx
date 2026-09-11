@@ -10,16 +10,15 @@
 // WebRTC 会话快照是实时状态，保留为本地订阅。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCapability, useResource, useResourceSelector } from "webloom-framework/react";
+import { useOptionalCapability, useCapability, useResource, useResourceSelector } from "webloom-framework/react";
 import { useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
 import { EmptyState, TextArea } from "@keymaster/ui";
-import { WEBRTC_SERVICE_CAPABILITY, type KeyspaceService, type WebrtcHistoryItem, type WebrtcMessageService, type WebrtcSessionSnapshot } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, MESSAGE_SERVICE_CAPABILITY, WEBRTC_SERVICE_CAPABILITY, type WebrtcHistoryItem, type WebrtcSessionSnapshot } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";
 import type { MessageDetailData } from "./manifest.js";
 import { buildMessageTimeline, type MessageTimelineItem } from "./messageTimeline.js";
 import { shortPublicKeyHex } from "./messageConversation.js";
 
-const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const MESSAGE_READ_WINDOW = 10_000;
 const DEFAULT_VISIBLE_MESSAGE_COUNT = 20;
 const MESSAGE_ERROR_KEYS: Record<string, string> = {
@@ -50,9 +49,9 @@ export function MessageDetailPage(): JSX.Element {
   const currentPath = useCurrentPath();
   const peerPublicKeyHex = parsePeerPublicKeyHexFromPath(currentPath);
   const normalizedPeerPublicKeyHex = normalizePublicKeyHexForMatch(peerPublicKeyHex);
-  const messageService = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const webrtc = useCapabilityOrNull<WebrtcMessageService>(WEBRTC_SERVICE_CAPABILITY);
+  const messageService = useOptionalCapability(MESSAGE_SERVICE_CAPABILITY);
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const webrtc = useOptionalCapability(WEBRTC_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const store = host.resourceStore;
   const ownerPublicKeyHex = keyspace.active().activePublicKeyHex ?? null;
@@ -836,14 +835,6 @@ function AttachmentRecord(props: {
 function describeTimelineItem(item: MessageTimelineItem): string {
   if (item.kind === "text_message") return item.message.messageId;
   return item.record.recordId;
-}
-
-function useCapabilityOrNull<T>(key: string): T | null {
-  try {
-    return useCapability<T>(key);
-  } catch {
-    return null;
-  }
 }
 
 function formatTime(ms: number): string {

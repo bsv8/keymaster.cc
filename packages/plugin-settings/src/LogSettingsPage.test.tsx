@@ -72,7 +72,7 @@ async function makeHostWithSettings() {
 describe("LogSettingsPage", () => {
   it("renders, toggles debug, refreshes entries, and shows retention", async () => {
     const host = await makeHostWithSettings();
-    const log = host.capabilities.get<LogService>(LOG_SERVICE_CAPABILITY);
+    const log: LogService = host.capabilities.get(LOG_SERVICE_CAPABILITY);
     await log.append({
       level: "info",
       pluginId: "demo",
@@ -131,7 +131,7 @@ describe("LogSettingsPage", () => {
 
   it("clears all entries after confirm", async () => {
     const host = await makeHostWithSettings();
-    const log = host.capabilities.get<LogService>(LOG_SERVICE_CAPABILITY);
+    const log: LogService = host.capabilities.get(LOG_SERVICE_CAPABILITY);
     for (let i = 0; i < 3; i += 1) {
       await log.append({
         level: "info",

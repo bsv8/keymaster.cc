@@ -68,7 +68,7 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
 
 export function AppsHomeWidget() {
   countRender("plugin-apps/AppsHomeWidget");
-  const protocol = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
+  const protocol = useCapability(PROTOCOL_SERVICE_CAPABILITY);
   const { t } = useI18n();
   const validation = loadCatalog();
   const [launchingId, setLaunchingId] = useState<string | null>(null);

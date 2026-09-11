@@ -11,14 +11,14 @@
 //   - **不**展示历史 / 图表 / 告警。
 
 import React from "react";
-import { useCapability, useResource } from "webloom-framework/react";
+import { useOptionalCapability, useResource } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type {
   BsvPriceService,
   BsvPriceServiceSnapshot
 } from "./bsvPriceService.js";
 
-const BSV_PRICE_SERVICE_CAPABILITY = "bsv-price.service";
+import { BSV_PRICE_SERVICE_CAPABILITY } from "./manifest.js";
 
 export function BsvPricePage(): React.ReactElement {
   const i18n = useI18n();
@@ -49,11 +49,7 @@ export function BsvPricePage(): React.ReactElement {
  * 兼容，**不**作为生产主路径。
  */
 function useBsvPriceServiceOrNull(): BsvPriceService | null {
-  try {
-    return useCapability<BsvPriceService>(BSV_PRICE_SERVICE_CAPABILITY);
-  } catch {
-    return null;
-  }
+  return useOptionalCapability(BSV_PRICE_SERVICE_CAPABILITY) ?? null;
 }
 
 function BsvPricePageInner({

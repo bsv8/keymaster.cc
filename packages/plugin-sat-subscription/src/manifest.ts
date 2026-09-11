@@ -25,10 +25,11 @@ import {
   SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
   SAT_COORDINATOR_CONTROL_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  SYSTEM_STATUS_REGISTRY_CAPABILITY,
   type SatCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 
 export { SAT_SUBSCRIPTION_PLUGIN_ID } from "@keymaster/contracts";
@@ -137,14 +138,12 @@ const satSubscriptionPluginDefinition = {
   name: "SatSubscription",
   description: "SSP multi-supplier subscriptions and SPI management.",
   i18n: resources,
-  meta: {
-    kind: "platform",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "platform"
-  },
+  kind: "platform",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "platform",
   units: [{
     id: "sat-subscription.window",
     runtime: "window-main",
@@ -155,18 +154,12 @@ const satSubscriptionPluginDefinition = {
       CHANNEL_RUNTIME_CAPABILITY,
       SAT_COORDINATOR_CONTROL_CAPABILITY
     ],
-    providedContracts: defineRuntimeUnitProvidedContracts([
-      SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
-      SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
-      CHANNEL_RUNTIME_CAPABILITY,
-      SAT_COORDINATOR_CONTROL_CAPABILITY,
-    ]),
     storage: { scope: "key", applicationStorageId: "SatSubscription", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "设置页业务读取统一经过 Resource Store" },
-      { capability: "system-settings.registry", reason: "注册 SatSubscription 系统设置" },
-      { capability: "system-status.registry", reason: "注册 SatSubscription 运行诊断" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 系统设置" },
+      { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 运行诊断" },
     ]),
   }, {
     id: "sat-subscription.coordinator-worker",
@@ -177,19 +170,19 @@ const satSubscriptionPluginDefinition = {
     const coordinator = ctx.coordinator as SatCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Sat Coordinator control is unavailable");
     ctx.provide(SAT_COORDINATOR_CONTROL_CAPABILITY, coordinator);
-    const laneRegistry = ctx.get<WindowP2pExecutorLaneRegistry>(WINDOW_P2P_EXECUTOR_CAPABILITY);
+    const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
     // Window 只注册网络 lane；K-V、状态、Channel crypto 和 provider handle
     // 全部由 Coordinator SharedWorker 创建，避免多 Tab 重复连接/扣费。
     const offLane = laneRegistry.register(new SatWindowP2pLane());
     const admin = createSatWorkerAdminService(coordinator);
-    ctx.provide<SatSubscriptionAdminService>(SAT_SUBSCRIPTION_SERVICE_CAPABILITY, admin);
+    ctx.provide(SAT_SUBSCRIPTION_SERVICE_CAPABILITY, admin);
     const channelRuntimeFactory: ChannelRuntimeFactory = {
       forPlugin: (pluginId) => createSatWorkerChannelRuntime(coordinator, { kind: "plugin", pluginId }),
       forSystem: (systemId) => createSatWorkerChannelRuntime(coordinator, { kind: "system", systemId })
     };
-    ctx.provide<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY, channelRuntimeFactory);
+    ctx.provide(CHANNEL_RUNTIME_CAPABILITY, channelRuntimeFactory);
 
-    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     const emptySettingsSnapshot = (): SatSubscriptionSettingsSnapshot => ({
       ownerPublicKeyHex: null,
       supplierGeneration: 1,
@@ -219,10 +212,10 @@ const satSubscriptionPluginDefinition = {
     });
 
     const spi = createSatWorkerSpiService(coordinator);
-    ctx.provide<SatSubscriptionSpiService>(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, spi);
+    ctx.provide(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, spi);
 
-    const settings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
-    const status = ctx.get<SystemStatusRegistry>("system-status.registry");
+    const settings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
+    const status = ctx.capability(SYSTEM_STATUS_REGISTRY_CAPABILITY);
     const settingId = "sat-subscription.system-settings";
     const statusId = "sat-subscription.system-status";
     settings.register({

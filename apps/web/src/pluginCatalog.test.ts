@@ -31,16 +31,13 @@ describe("Web plugin catalog runtime units", () => {
 
   it("所有显式运行单元自带依赖，产品级不再保留运行期 fallback", () => {
     for (const manifest of WEB_PLUGIN_CATALOG) {
-      expect(manifest.dependencies).toBeUndefined();
       expect(manifest.storage).toBeUndefined();
-      expect(manifest.permissions).toBeUndefined();
-      expect(manifest.business).toBeUndefined();
       expect(manifest.config).toBeUndefined();
       for (const unit of manifest.units ?? []) {
+        expect(unit.scopeKind).toBeDefined();
         for (const dependency of unit.dependencies ?? []) {
-          expect(dependency.contractVersion).toBe(`${dependency.capability}.v1`);
+          expect(dependency.capability.version).toBeDefined();
           expect(dependency.sourceRuntime).toBeDefined();
-          expect(dependency.scopeKind).toBeDefined();
         }
       }
     }

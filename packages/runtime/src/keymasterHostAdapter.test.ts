@@ -1,158 +1,121 @@
 import { describe, expect, it } from "vitest";
-import type { RemoteServiceReference } from "webloom-framework";
-import {
-  KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX,
-  createKeymasterPluginHost,
-  keymasterRemoteServiceMessageCodec,
-} from "./keymasterHostAdapter.js";
-import { createRuntimeUnitImplementationRegistry, type RuntimeHandle, type RuntimeStatusSnapshot } from "webloom-framework";
+import { defineCapability } from "webloom-framework";
+import type { PluginSetup } from "@keymaster/contracts";
+import { createKeymasterPluginHost } from "./keymasterHostAdapter.js";
 
-function reference(): RemoteServiceReference {
-  return {
-    capabilityId: "coordinator.crypto",
-    runtime: "shared-worker",
-    contractVersion: "1.0.0",
-    runtimeInstanceId: "runtime:1",
-    serviceInstanceId: "service:1",
-    attributes: {
-      authorityInstanceId: "authority:1",
-      scopeId: "scope:1",
-      handoverGeneration: 2,
-      sessionEpoch: "session:1",
-      ownerPublicKeyHex: "02" + "11".repeat(32),
-      ownerGeneration: 3,
-    },
-    status: "ready",
-    grantId: "grant:1",
-    authorizationRevision: 1,
-  };
-}
-
-describe("Keymaster WebLoom v2 service codec", () => {
-  it("only carries call lifecycle messages and preserves v2 identity fields", () => {
-    const encoded = keymasterRemoteServiceMessageCodec.encode({
-      type: keymasterRemoteServiceMessageCodec.type("call"),
-      protocolVersion: keymasterRemoteServiceMessageCodec.protocolVersion,
-      callId: "call:1",
-      capabilityId: reference().capabilityId,
-      contractVersion: reference().contractVersion,
-      serviceInstanceId: reference().serviceInstanceId,
-      grantId: reference().grantId,
-      request: { type: "deriveP2pkhAddress" },
-    }) as Record<string, unknown>;
-
-    expect(encoded.type).toBe(`${KEYMASTER_REMOTE_SERVICE_MESSAGE_PREFIX}.call`);
-    expect(encoded.connectionId).toBeUndefined();
-    expect(encoded.reference).toBeUndefined();
-    expect(keymasterRemoteServiceMessageCodec.decode(encoded)).toEqual(encoded);
-    expect(() => keymasterRemoteServiceMessageCodec.type("snapshot" as never)).toThrow();
-  });
+const LOCAL_CAPABILITY = defineCapability<{ ok: boolean }>({
+  kind: "local",
+  id: "adapter.local",
+  version: "1",
 });
 
-describe("Keymaster Host remote RuntimeHandle projection", () => {
-  it("uses the live RuntimeHandle as the service/snapshot source and fails closed on disconnect", async () => {
-    let snapshot: RuntimeStatusSnapshot = {
-      runtimeId: "coordinator",
-      runtimeKind: "shared-worker",
-      runtimeInstanceId: "worker-runtime:1",
-      state: "ready",
-      revision: 1,
-      units: [{
-        pluginId: "remote-product",
-        unitId: "remote-product.worker",
-        runtime: "shared-worker",
-        instanceId: "remote-unit:1",
-        state: "enabled",
-      }],
-      services: [{
-        capabilityId: "remote.service",
-        runtime: "shared-worker",
-        contractVersion: "remote.service.v1",
-        runtimeInstanceId: "worker-runtime:1",
-        serviceInstanceId: "remote-unit:1",
-        attributes: {},
-        status: "ready",
-      }],
+describe("Keymaster WebLoom v4 adapter", () => {
+  it("converts a typed Keymaster manifest and binds setup to a scoped capability", async () => {
+    let seenPluginId: string | undefined;
+    let seenUnitId: string | undefined;
+    const setup: PluginSetup = (context) => {
+      seenPluginId = context.pluginId;
+      seenUnitId = context.unitId;
+      context.provide(LOCAL_CAPABILITY, { ok: true });
     };
-    const listeners = new Set<(nextSnapshot: RuntimeStatusSnapshot) => void>();
-    const runtime: RuntimeHandle = {
-      runtimeKind: "shared-worker",
-      runtimeId: "coordinator",
-      runtimeInstanceId: "worker-runtime:1",
-      state: () => snapshot,
-      capability: () => { throw new Error("not used"); },
-      subscribe(listener) {
-        listeners.add(listener);
-        listener(snapshot);
-        return () => listeners.delete(listener);
-      },
-      dispose: async () => undefined,
-    };
-    const fallbackBridge = {} as import("webloom-framework").RemoteServiceBridge;
-    let seenBridge: unknown;
     const host = createKeymasterPluginHost({
       runtime: "window-main",
-      remoteRuntime: runtime,
-      serviceBridgeForPlugin: () => fallbackBridge,
-      runtimeUnitSnapshots: () => [],
       disableConfigPersistence: true,
-      runtimeUnitImplementationRegistry: createRuntimeUnitImplementationRegistry([{
-        pluginId: "remote-product",
-        unitId: "remote-product.window",
-        setup(context) {
-          seenBridge = context.serviceBridge;
-          context.provide("local.service", { ok: true });
-        },
-      }]),
+      runtimeUnitImplementationRegistry: { get: () => setup },
     });
+
     await host.register({
-      id: "remote-product",
-      name: "Remote product",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      id: "adapter-plugin",
+      name: "Adapter plugin",
+      kind: "business",
+      startup: "optional",
+      defaultEnabled: true,
+      canDisable: true,
+      bootstrapStage: "owner-apps-ready",
+      displayGroup: "business",
+      units: [{
+        id: "adapter-plugin.window",
+        runtime: "window-main",
+        scopeKind: "root",
+        provides: [LOCAL_CAPABILITY],
+      }],
+    });
+
+    expect(seenPluginId).toBe("adapter-plugin");
+    expect(seenUnitId).toBe("adapter-plugin.window");
+    expect(host.capabilities.get(LOCAL_CAPABILITY)).toEqual({ ok: true });
+    expect(host.state("adapter-plugin").kind).toBe("enabled");
+
+    await host.disable("adapter-plugin");
+    expect(host.capabilities.has(LOCAL_CAPABILITY)).toBe(false);
+    await host.dispose("test");
+  });
+
+  it("projects Coordinator unit snapshots without treating an unavailable remote unit as local", async () => {
+    let snapshots: readonly {
+      productId: string;
+      unitId: string;
+      runtime: "shared-worker";
+      scopeKind: "root";
+      snapshotRevision: number;
+      serviceIds: string[];
+      taskIds: string[];
+      instanceId: string;
+      state: "ready" | "starting" | "failed";
+    }[] = [{
+      productId: "split-plugin",
+      unitId: "split-plugin.worker",
+      runtime: "shared-worker",
+      scopeKind: "root",
+      snapshotRevision: 1,
+      serviceIds: [],
+      taskIds: [],
+      instanceId: "worker-instance:1",
+      state: "ready",
+    }];
+    const host = createKeymasterPluginHost({
+      runtime: "window-main",
+      runtimeUnitSnapshots: () => snapshots,
+      disableConfigPersistence: true,
+      runtimeUnitImplementationRegistry: { get: () => (context) => {
+        context.provide(LOCAL_CAPABILITY, { ok: true });
+      } },
+    });
+
+    await host.register({
+      id: "split-plugin",
+      name: "Split plugin",
+      kind: "business",
+      startup: "optional",
+      defaultEnabled: true,
+      canDisable: true,
+      bootstrapStage: "owner-apps-ready",
+      displayGroup: "business",
       units: [
         {
-          id: "remote-product.worker",
+          id: "split-plugin.worker",
           runtime: "shared-worker",
           scopeKind: "root",
-          provides: ["remote.service"],
-          providedContracts: { "remote.service": "remote.service.v1" },
         },
         {
-          id: "remote-product.window",
+          id: "split-plugin.window",
           runtime: "window-main",
           scopeKind: "root",
-          dependencies: [{
-            capability: "remote.service",
-            contractVersion: "remote.service.v1",
-            sourceRuntime: "shared-worker",
-            scopeKind: "root",
-          }],
-          provides: ["local.service"],
-          providedContracts: { "local.service": "local.service.v1" },
+          provides: [LOCAL_CAPABILITY],
         },
       ],
     });
 
-    expect(seenBridge).toBe(fallbackBridge);
-    expect(host.state("remote-product").units).toMatchObject([
-      { unitId: "remote-product.worker", kind: "enabled", instanceId: "remote-unit:1" },
-      { unitId: "remote-product.window", kind: "enabled" },
-    ]);
+    expect(host.state("split-plugin").units).toEqual(expect.arrayContaining([
+      expect.objectContaining({ unitId: "split-plugin.worker", runtime: "shared-worker", instanceId: "worker-instance:1", kind: "enabled" }),
+      expect.objectContaining({ unitId: "split-plugin.window", runtime: "window-main", kind: "enabled" }),
+    ]));
 
-    snapshot = {
-      ...snapshot,
-      state: "disconnected",
-      revision: 2,
-      units: [],
-      services: [],
-    };
-    for (const listener of listeners) listener(snapshot);
-    for (let attempt = 0; attempt < 20 && host.state("remote-product").kind === "stopping"; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    expect(host.state("remote-product").kind).toBe("blocked");
-    expect(host.state("remote-product").blockedBy).toContain("remote.service");
+    snapshots = [];
+    host.refreshRuntimeUnitSnapshots();
+    expect(host.state("split-plugin").units).toEqual(expect.arrayContaining([
+      expect.objectContaining({ unitId: "split-plugin.worker", kind: "unknown", error: expect.stringContaining("快照不可用") }),
+    ]));
     await host.dispose("test");
   });
 });

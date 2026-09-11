@@ -16,6 +16,7 @@
 //     接口字段与 plugin-p2pkh 的实现保持松耦合：plugin-p2pkh 内部类型
 //     演进不影响本 plugin，runtime 通过 capability 走结构化类型。
 
+import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
   KeyspaceService,
@@ -27,7 +28,11 @@ import type {
 import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
 
 /** p2pkh.service capability key；与 plugin-p2pkh manifest 提供的字符串一致。 */
-export const P2PKH_CAPABILITY = "p2pkh.service";
+export const P2PKH_CAPABILITY = defineCapability<P2pkhServiceForBsv21>({
+  kind: "local",
+  id: "p2pkh.service",
+  version: "1",
+});
 
 /** 业务侧 sub-resource 标识；与 plugin-p2pkh 内部 assetId 字面量对齐。 */
 export type P2pkhAssetIdForBsv21 = "bsv" | "bsvtest";
@@ -44,6 +49,7 @@ export interface P2pkhKeyResourceForBsv21 {
 export interface P2pkhServiceForBsv21 {
   listResources(assetId: P2pkhAssetIdForBsv21): Promise<P2pkhKeyResourceForBsv21[]>;
   getGlobalSettings(): { includeTestnet: boolean };
+  onGlobalSettingsChange?(handler: () => void): () => void;
   listUtxos?(filter?: {
     assetId?: P2pkhAssetIdForBsv21;
     ownerPublicKeyHex?: string;

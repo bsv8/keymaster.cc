@@ -10,8 +10,6 @@ import type {
   KeyValueValue,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import type { RemoteServiceBridge, RemoteServiceProxy } from "webloom-framework";
-import { COORDINATOR_OWNER_STORAGE_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import type { CoordinatorOwnerStorageData, CoordinatorPlatformStorageData, StorageBindingAuthority, StorageBindingCoordinatorClient, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 
 function unwrap<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
@@ -27,16 +25,6 @@ function assertKey(key: string): void {
 }
 
 export interface StorageBindingAuthorityOptions {
-  /** 当前页面与 Coordinator 的真实服务桥；可用函数支持重连后取得新桥。 */
-  serviceBridge?: RemoteServiceBridge | (() => RemoteServiceBridge | undefined);
-  /** 生产 Host 要求 owner K-V 必须走物理服务桥，未就绪时拒绝而不降级到旧 RPC。 */
-  requireServiceBridge?: boolean;
-}
-
-function resolveServiceBridge(
-  value: StorageBindingAuthorityOptions["serviceBridge"]
-): RemoteServiceBridge | undefined {
-  return typeof value === "function" ? value() : value;
 }
 
 /** 将 Coordinator 内部 RPC 封装成 Host 使用的存储绑定权威。 */
@@ -50,38 +38,9 @@ export function createStorageBindingAuthority(
     const active = client.getActivePublicKeyHex()?.toLowerCase();
     if (!active || active !== grant.ownerPublicKeyHex) throw new Error("Owner storage owner changed");
     let closed = false;
-    let remoteProxy: RemoteServiceProxy | undefined;
     const assertOpen = () => { if (closed) throw new Error("Storage handle is closed"); };
-    const getRemoteProxy = (): RemoteServiceProxy | undefined => {
-      const bridge = resolveServiceBridge(options.serviceBridge);
-      if (!bridge) {
-        if (options.requireServiceBridge) throw new Error("Owner storage service bridge is unavailable");
-        return undefined;
-      }
-      if (!remoteProxy || remoteProxy.revoked) {
-        remoteProxy = bridge.getProxy({
-          capabilityId: COORDINATOR_OWNER_STORAGE_SERVICE,
-          contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-          runtime: "shared-worker",
-        });
-      }
-      if (!remoteProxy && options.requireServiceBridge) {
-        throw new Error("Owner storage service bridge is not ready");
-      }
-      return remoteProxy;
-    };
     const call = async <T>(data: CoordinatorOwnerStorageData): Promise<T> => {
-      const proxy = getRemoteProxy();
-      if (!proxy) return unwrap<T>(await client.storageOwnerData(data), "owner storage");
-      try {
-        return await proxy.call<CoordinatorOwnerStorageData, T>(data, {
-          operationId: `owner-storage:${grant.storageGrantId}:${data.type}`,
-        });
-      } catch (error) {
-        // 当前调用不重放；只丢弃旧代理，下一次业务调用重新观察目录。
-        remoteProxy = undefined;
-        throw error;
-      }
+      return unwrap<T>(await client.storageOwnerData(data), "owner storage");
     };
     return {
       bucketId: grant.bucketId,
@@ -93,7 +52,7 @@ export function createStorageBindingAuthority(
       async put<T = KeyValueValue>(key: string, value: T, condition = {}) { assertOpen(); assertKey(key); return call<KeyValueEntryMeta>({ type: "owner.put", storageGrantId: grant.storageGrantId, key, value, condition }); },
       async delete(key: string, condition = {}) { assertOpen(); assertKey(key); await call<void>({ type: "owner.delete", storageGrantId: grant.storageGrantId, key, condition }); },
       async commit(input: KeyValueCommitInput) { assertOpen(); return call<KeyValueCommitResult>({ type: "owner.commit", storageGrantId: grant.storageGrantId, ...input }); },
-      close() { closed = true; remoteProxy?.revoke("owner storage handle closed"); remoteProxy = undefined; }
+      close() { closed = true; }
     };
   }
 

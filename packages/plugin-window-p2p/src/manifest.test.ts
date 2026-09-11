@@ -9,7 +9,7 @@ vi.mock("./windowExecutor.js", () => ({
 
 describe("windowP2pPlugin manifest", () => {
   it("is a default-on non-disableable system owner", () => {
-    expect(windowP2pPlugin.meta).toMatchObject({
+    expect(windowP2pPlugin).toMatchObject({
       defaultEnabled: true,
       canDisable: false,
       displayGroup: "platform"

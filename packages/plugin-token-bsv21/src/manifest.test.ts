@@ -96,8 +96,8 @@ async function setupManifest() {
     // 因此使用不会被 mock Repository 实际访问的最小占位值。
     storage: {} as never,
     provide: vi.fn(),
-    get: vi.fn((cap: string) => {
-      switch (cap) {
+    capability: vi.fn((capability: { id: string }) => {
+      switch (capability.id) {
         case "p2pkh.service":
           return {
             listResources: vi.fn().mockResolvedValue([]),
@@ -182,7 +182,7 @@ async function setupManifest() {
             _ids: vi.fn(() => []),
           };
         default:
-          throw new Error(`unexpected capability: ${cap}`);
+          throw new Error(`unexpected capability: ${capability.id}`);
       }
     }),
     has: vi.fn(() => true),

@@ -42,7 +42,22 @@ import type {
   , KeyspaceService
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
-import { KEYSPACE_SERVICE_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, defineRuntimeUnitProvidedContracts, type VaultLocalSecretService, type VaultCoordinatorControl } from "@keymaster/contracts";
+import {
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  COMMAND_REGISTRY_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  RUNTIME_MESSAGE_BUS,
+  SETTINGS_REGISTRY_CAPABILITY,
+  TOPBAR_REGISTRY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_COORDINATOR_CONTROL_CAPABILITY,
+  VAULT_LOCAL_SECRET_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+  type VaultLocalSecretService,
+  type VaultCoordinatorControl,
+} from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
@@ -63,7 +78,7 @@ export interface VaultKeyResourceState {
 /** Vault setup 所需的 Coordinator contract 子集。 */
 type CoordinatorClientLike = VaultCoordinatorControl;
 
-export const VAULT_CAPABILITY = "vault.service";
+export const VAULT_CAPABILITY = VAULT_SERVICE_CAPABILITY;
 
 /** vault i18n 资源。覆盖 route / breadcrumb / topbar / command
  * 的 label 与 VaultSettingsPage 内的展示文案。 */
@@ -417,25 +432,27 @@ const vaultPluginDefinition = {
   id: "vault",
   name: "Vault",
   description: "本地密码 Vault，管理私钥加解密、内存会话与 active key 状态。",
-  meta: {
-    kind: "core",
-    startup: "required",
-    bootstrapStage: "vault-selection",
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "core"
-  },
+  kind: "core",
+  startup: "required",
+  bootstrapStage: "vault-selection",
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "core",
   units: [{
     id: "vault.window",
     runtime: "window-main",
     scopeKind: "root",
-    provides: [VAULT_CAPABILITY, "keyspace.service", VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([
-      VAULT_CAPABILITY,
-      KEYSPACE_SERVICE_CAPABILITY,
-      VAULT_LOCAL_SECRET_CAPABILITY,
-      VAULT_COORDINATOR_CONTROL_CAPABILITY,
-    ]),
+    provides: [VAULT_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY],
+    dependencies: [
+      { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "vault lifecycle events" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault key resource" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault routes" },
+      { capability: SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings navigation" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault breadcrumbs" },
+      { capability: COMMAND_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault lock command" },
+      { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault key switch" },
+    ],
   }, {
     id: "vault.coordinator-worker",
     runtime: "shared-worker",
@@ -443,7 +460,7 @@ const vaultPluginDefinition = {
   }],
   i18n: vaultResources,
   setup(ctx) {
-    const messageBus = ctx.get<MessageBus>("runtime.messageBus");
+    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
 
     // 施工单 002：优先使用 Coordinator facade
     let service!: VaultService;
@@ -462,19 +479,19 @@ const vaultPluginDefinition = {
     }
 
     ctx.provide(VAULT_CAPABILITY, service);
-    ctx.provide<VaultLocalSecretService>(VAULT_LOCAL_SECRET_CAPABILITY, createVaultLocalSecretService(coordinatorClient));
+    ctx.provide(VAULT_LOCAL_SECRET_CAPABILITY, createVaultLocalSecretService(coordinatorClient));
 
     // 创建 keyspace：依赖 vault.service。
     if (!keyspaceHandle) throw new Error("Session Coordinator is unavailable");
     ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
-    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<VaultKeyResourceState, readonly string[]>({
       id: "vault.key-state",
       scope: "global",
       key: () => ["vault.key-state"],
       load: async (_args, context) => {
-        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY);
+        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY.id);
+        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY.id);
         const keys = keyspace ? await keyspace.listKeys() : [];
         return {
           keys,
@@ -484,9 +501,9 @@ const vaultPluginDefinition = {
         };
       },
       subscribe: (_args, context, invalidate) => {
-        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY);
-        const bus = context.getCapability<MessageBus>("runtime.messageBus");
+        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY.id);
+        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY.id);
+        const bus = context.getCapability<MessageBus>(RUNTIME_MESSAGE_BUS.id);
         const offs = [
           keyspace?.onActiveKeyChanged(invalidate),
           keyspace?.onInitializationChange(invalidate),
@@ -502,7 +519,7 @@ const vaultPluginDefinition = {
       invalidation: "immediate"
     });
 
-    const routes = ctx.get<RouteRegistry>("route.registry");
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
     routes.register({
       id: "vault.unlock",
       path: "/vault/unlock",
@@ -518,7 +535,7 @@ const vaultPluginDefinition = {
 
     // 硬切换 003：/settings/vault 不再注册到旧菜单体系。
     // 改为 settings.registry.register() 一处真值；shell 走 settings 分组渲染。
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
+    const settings = ctx.capability(SETTINGS_REGISTRY_CAPABILITY);
     settings.register({
       id: "vault.current-key",
       path: "/settings/current-key",
@@ -549,7 +566,7 @@ const vaultPluginDefinition = {
     // 密钥管理沿用 settings.registry 作为页面路由真值，同时作为一个 feature
     // 挂入新的「设置」业务域。vault 在 settings 之前启动，因此 registry 支持
     // 先注册入口、等待 settings 域出现后再投影到业务导航。
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("vault", "settings", {
       id: "settings.current-key",
       label: { key: "vault.route.currentKey", fallback: "Current private key" },
@@ -574,7 +591,7 @@ const vaultPluginDefinition = {
     });
 
     // 硬切换 003：面包屑第一段固定为不可点击的"设置"分类节点。
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     breadcrumbs.register({
       id: "breadcrumb.vault.current-key",
       order: 0,
@@ -594,7 +611,7 @@ const vaultPluginDefinition = {
       ]
     });
 
-    const commands = ctx.get<CommandRegistry>("command.registry");
+    const commands = ctx.capability(COMMAND_REGISTRY_CAPABILITY);
     commands.register({
       id: "vault.lock",
       label: { key: "vault.command.lock", fallback: "Lock wallet" },
@@ -613,7 +630,7 @@ const vaultPluginDefinition = {
     // OPFS/历史单桶模式使用（order 90 < background.tray 100）。新版桶目录
     // 模式由 KeySwitchWidget 自己隐藏该入口，统一由 platform-storage 的
     // “桶 → Keys”树负责桶和 Key 的切换。
-    const topbar = ctx.get<TopbarRegistry>("topbar.registry");
+    const topbar = ctx.capability(TOPBAR_REGISTRY_CAPABILITY);
     topbar.register({
       id: "vault.key-switch",
       label: { key: "vault.topbar.keySwitch", fallback: "Switch key" },

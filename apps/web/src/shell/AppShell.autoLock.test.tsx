@@ -16,7 +16,12 @@ import type {
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
-import { COORDINATOR_ACTIVITY_CAPABILITY } from "@keymaster/contracts";
+import {
+  COORDINATOR_ACTIVITY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
 import { registerShellResources } from "./shellResources.js";
 import { AppShell } from "./AppShell.js";
@@ -67,10 +72,10 @@ function createHost(vault: VaultService, sendActivity = vi.fn()) {
     disableConfigPersistence: true,
     initialI18nResources: [SHELL_RESOURCES]
   });
-  registerShellResources(host.capabilities.get("resource.registry"));
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  host.capabilities.provide<KeyspaceService>("keyspace.service", makeKeyspace());
-  host.capabilities.provide(COORDINATOR_ACTIVITY_CAPABILITY, {
+  registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY));
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, makeKeyspace());
+  host.provide(COORDINATOR_ACTIVITY_CAPABILITY, {
     getIsConnected: () => true,
     sendActivity
   });

@@ -1,5 +1,6 @@
 // packages/contracts/src/msfile.ts
 // MSFile 客户端能力契约（docs/proposals/msfile/implementation-plan.md）。
+import { defineCapability } from "webloom-framework";
 //
 // 设计缘由：
 //   - 内部受信任插件消费 `msfile.service` 的 stat/readSeed/readBlock；
@@ -445,7 +446,11 @@ export interface MsFileService {
   readonly connect: MsFileConnectGateway;
 }
 
-export const MSFILE_SERVICE_CAPABILITY = "msfile.service";
+export const MSFILE_SERVICE_CAPABILITY = defineCapability<MsFileService>({
+  kind: "local",
+  id: "msfile.service",
+  version: "1",
+});
 
 /* ============== 错误码 ============== */
 

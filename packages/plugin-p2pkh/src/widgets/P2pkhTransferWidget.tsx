@@ -16,7 +16,7 @@ import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
 import type { KeyIdentity, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhFeeRateTier, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
-import { assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
+import { P2PKH_CAPABILITY, assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
 import { publicKeyHexToP2pkhAddress } from "../p2pkhSigner.js";
 
 interface FormState {
@@ -26,7 +26,7 @@ interface FormState {
 }
 
 export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex }: TransferWidgetProps) {
-  const service = useCapability<P2pkhService>("p2pkh.service");
+  const service = useCapability(P2PKH_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   const locale = useLocale();

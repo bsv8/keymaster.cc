@@ -6,10 +6,10 @@ import { useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
 import { useCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
-import type { VaultService } from "@keymaster/contracts";
+import { VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 export function VaultUnlockPage() {
-  const vault = useCapability<VaultService>("vault.service");
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
   const [password, setPassword] = useState("");

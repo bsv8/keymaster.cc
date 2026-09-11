@@ -40,7 +40,7 @@ import type {
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
-import { COORDINATOR_ACTIVITY_CAPABILITY } from "@keymaster/contracts";
+import { COORDINATOR_ACTIVITY_CAPABILITY, VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { Breadcrumbs } from "./Breadcrumbs.js";
 import { RouteRenderer } from "./RouteRenderer.js";
 import { Sidebar } from "./Sidebar.js";
@@ -149,7 +149,7 @@ export function AppShell() {
   const notices = useResourceSelector<NoticeRecord[], NoticeRecord[]>(host.resourceStore, "shell.notices", [], (s) => s.data ?? EMPTY_NOTICE_RECORDS);
   const guardResource = useResourceSelector<ShellGuardResource, ShellGuardResource>(host.resourceStore, "shell.guard", [], (s) => s.data ?? { kind: "normal" }, areShellGuardStatesEqual);
   const guard = guardResource as ShellGuardState;
-  const vault = useCapability<VaultService>("vault.service");
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   const vaultStatus = useResourceSelector<VaultStatus, VaultStatus>(host.resourceStore, "shell.vault-status", [], (s) => s.data ?? "uninitialized");
   const path = useCurrentPath();
   const { t } = useI18n();
@@ -159,7 +159,7 @@ export function AppShell() {
   // 页面 hidden、blur、暂停不应立即 lock；无任意用户活动达到配置时长才全局 lock。
   // Coordinator client 通过 capability 获取（在组件顶层调用 hook）。
   let coordinatorClient: { getIsConnected(): boolean; sendActivity(): void } | null = null;
-  coordinatorClient = useOptionalCapability<{ getIsConnected(): boolean; sendActivity(): void }>(COORDINATOR_ACTIVITY_CAPABILITY) ?? null;
+  coordinatorClient = useOptionalCapability(COORDINATOR_ACTIVITY_CAPABILITY) ?? null;
 
   useEffect(() => {
     if (vaultStatus !== "unlocked") {

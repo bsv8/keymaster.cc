@@ -1,11 +1,16 @@
 // Window P2P executor 的中性 capability 契约。
+import { defineCapability } from "webloom-framework";
 //
 // P2P 网络基础插件拥有唯一的 Window libp2p Host 和 executor lease；MSFile、
 // SatSubscription 等插件只能注册 lane，不能各自创建 Host。host 使用 unknown 是有意的：contracts
 // 不依赖 libp2p，具体 lane 在自己的插件边界内把它收窄为正式 SDK 类型。
 
 /** 唯一的 Window P2P executor capability。 */
-export const WINDOW_P2P_EXECUTOR_CAPABILITY = "window-p2p.executor";
+export const WINDOW_P2P_EXECUTOR_CAPABILITY = defineCapability<WindowP2pExecutorLaneRegistry>({
+  kind: "local",
+  id: "window-p2p.executor",
+  version: "1",
+});
 
 /** Window/Worker bridge 允许跨边界传递的错误领域。 */
 export type WindowP2pExecutorErrorDomain = "window-p2p" | "sat-transport" | "msfile-transport";

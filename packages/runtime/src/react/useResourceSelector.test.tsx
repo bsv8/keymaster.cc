@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ResourceSnapshot, ResourceStoreApi } from "webloom-framework";
+import type { ResourceSnapshot } from "webloom-framework";
+import type { ResourceStoreApi } from "webloom-framework/advanced";
 import { useResourceSelector } from "webloom-framework/react";
 
 describe("useResourceSelector", () => {

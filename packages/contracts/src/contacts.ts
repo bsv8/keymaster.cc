@@ -7,9 +7,34 @@
 //   - 联系人归属由 key-scoped K-V 表达，不再在联系人行内存 owner 字段；
 //   - 不做旧 address -> publicKeyHex 猜测迁移。
 
+import { defineCapability } from "webloom-framework";
 import type { I18nText } from "./i18n.js";
 
-export const CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY = "contacts.public-key-action.registry";
+/** 联系人选择器的公共组件参数。 */
+export interface ContactPickerProps {
+  value?: string;
+  onChange: (publicKeyHex: string) => void;
+  placeholder?: string;
+}
+
+/** 联系人编辑器的公共组件参数。 */
+export interface ContactsEditorProps {
+  open: boolean;
+  mode: "create" | "edit";
+  publicKeyHex?: string;
+  contactId?: string;
+  onClose: () => void;
+  onSaved: (contact: Contact) => void;
+}
+
+export type ContactPickerComponent = (props: ContactPickerProps) => import("react").ReactElement | null;
+export type ContactsEditorComponent = (props: ContactsEditorProps) => import("react").ReactElement | null;
+
+export const CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY = defineCapability<ContactPublicKeyActionRegistry>({
+  kind: "local",
+  id: "contacts.public-key-action.registry",
+  version: "1",
+});
 
 export interface ContactPublicKeyActionInput {
   readonly publicKeyHex: string;
@@ -101,3 +126,24 @@ export interface ContactsService {
   /** 硬切换 001：宿主 teardown 时调用。幂等。 */
   dispose?(): void;
 }
+
+/** 联系人服务的唯一 typed capability 身份。 */
+export const CONTACTS_SERVICE_CAPABILITY = defineCapability<ContactsService>({
+  kind: "local",
+  id: "contacts.service",
+  version: "1",
+});
+
+/** 联系人选择器 capability。 */
+export const CONTACTS_PICKER_CAPABILITY = defineCapability<ContactPickerComponent>({
+  kind: "local",
+  id: "contacts.picker",
+  version: "1",
+});
+
+/** 联系人编辑器 capability。 */
+export const CONTACTS_EDITOR_CAPABILITY = defineCapability<ContactsEditorComponent>({
+  kind: "local",
+  id: "contacts.editor",
+  version: "1",
+});

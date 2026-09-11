@@ -10,7 +10,17 @@ import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { render } from "@testing-library/react";
 import { createKeymasterPluginHost, PluginHostProvider } from "@keymaster/runtime";
-import type { ActiveKeyState, KeyRef, KeyspaceService, StorageBucketCatalogEntryV2, StorageRuntimeController, VaultService } from "@keymaster/contracts";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+  type ActiveKeyState,
+  type KeyRef,
+  type KeyspaceService,
+  type StorageBucketCatalogEntryV2,
+  type StorageRuntimeController,
+  type VaultService,
+} from "@keymaster/contracts";
 import { writeStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
 import { StorageBucketManagerEntry, StorageBucketManagerPage } from "./StorageBucketManagerPage.js";
 
@@ -66,9 +76,9 @@ function mount() {
 
   writeStorageCatalog({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: "bucket-a", buckets: [bucket("bucket-a", "工作桶")] });
   const host = createKeymasterPluginHost({ disableConfigPersistence: true, i18nDebug: false });
-  host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  host.capabilities.provide<StorageRuntimeController>("storage.runtime-controller", storage);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  host.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, storage);
   return { activateKey, ...render(<PluginHostProvider host={host}><StorageBucketManagerEntry /></PluginHostProvider>) };
 }
 
@@ -89,8 +99,8 @@ function mountManagerPage() {
     isCatalogBucket: () => true
   } as unknown as StorageRuntimeController;
   writeStorageCatalog({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: "bucket-a", buckets: [bucket("bucket-a", "工作桶")] });
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  host.capabilities.provide<StorageRuntimeController>("storage.runtime-controller", storage);
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  host.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, storage);
   return render(<PluginHostProvider host={host}><StorageBucketManagerPage /></PluginHostProvider>);
 }
 

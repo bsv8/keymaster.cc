@@ -22,6 +22,7 @@ import type {
 } from "@keymaster/contracts";
 import type { KeyspaceService, NoticeRegistry } from "@keymaster/contracts";
 import { WEBRTC_SIGNAL_PROTOCOL } from "./constants.js";
+import type { WebrtcBlockReason as ContractWebrtcBlockReason } from "@keymaster/contracts";
 import { APP_MESSAGE_PROTOCOL } from "bsv8-channel-protocol/app-message";
 import { HASH_REQUEST_CHANNEL } from "bsv8-channel-protocol/hash-request";
 import type { WebrtcHistoryItem, WebrtcHistoryService } from "./webrtcHistoryService.js";
@@ -70,15 +71,7 @@ export type WebrtcSessionPhase =
   | "ended";
 
 /** 拨号门禁失败原因。 */
-export type WebrtcBlockReason =
-  | "service_not_ready"
-  | "invalid_target"
-  | "call_protocol_unavailable"
-  | "device_unavailable"
-  | "send_invite_failed"
-  | "create_offer_failed"
-  | "busy_local"
-  | "invalid_state";
+export type WebrtcBlockReason = ContractWebrtcBlockReason | "send_invite_failed" | "create_offer_failed" | "busy_local";
 
 /** 入站远端提示（一次性，UI 消费后清）。 */
 export type WebrtcRemoteNoticeKind = "fallback_suggested" | "rejected" | "busy";

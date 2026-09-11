@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CollectibleDetail, CollectibleProvider, CollectibleRef, CollectibleRegistry, CollectibleTransferHandler, CollectibleTransferRegistry } from "@keymaster/contracts";
+import { COLLECTIBLE_REGISTRY_CAPABILITY, COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { useCapability } from "webloom-framework/react";
 import { useCurrentPath, useI18n, usePluginHost } from "@keymaster/runtime";
 import { EmptyState, PageHeader } from "@keymaster/ui";
@@ -40,8 +41,8 @@ export function CollectibleTransferPage() {
 function CollectibleTransferBody({ providerId, collectibleId, recipientPublicKeyHex }: { providerId: string; collectibleId: string; recipientPublicKeyHex?: string }) {
   const { t } = useI18n();
   const host = usePluginHost();
-  const collectibles = useCapability<CollectibleRegistry>("collectible.registry");
-  const transferRegistry = useCapability<CollectibleTransferRegistry>("collectible-transfer.registry");
+  const collectibles = useCapability(COLLECTIBLE_REGISTRY_CAPABILITY);
+  const transferRegistry = useCapability(COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY);
   const [provider, setProvider] = useState<CollectibleProvider | undefined>();
   const [detail, setDetail] = useState<CollectibleDetail | undefined>();
   const [error, setError] = useState<string | undefined>();

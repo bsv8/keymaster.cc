@@ -1,5 +1,6 @@
 // packages/contracts/src/assets.ts
 // 资产平台公共契约。
+import { defineCapability } from "webloom-framework";
 // 设计缘由：把"资产"从 P2PKH 等具体实现中抽离出来。
 // 资产平台（plugin-assets）只依赖本文件的协议；具体资产（plugin-p2pkh 等）实现 AssetProvider。
 // 禁止在本文件中出现 utxo、script、wif、p2pkh 等具体实现字段。
@@ -153,4 +154,8 @@ export interface AssetDataNotifier {
 }
 
 /** AssetDataNotifier capability key。 */
-export const ASSET_DATA_NOTIFIER_CAPABILITY = "asset.dataNotifier";
+export const ASSET_DATA_NOTIFIER_CAPABILITY = defineCapability<AssetDataNotifier>({
+  kind: "local",
+  id: "asset.dataNotifier",
+  version: "1",
+});

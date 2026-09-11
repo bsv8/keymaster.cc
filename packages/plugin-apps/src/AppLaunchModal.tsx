@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { useCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
 import { Button, Modal, Select, TextInput } from "@keymaster/ui";
-import { formatShortPublicKey, type KeyIdentity, type KeyspaceService } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, formatShortPublicKey, type KeyIdentity } from "@keymaster/contracts";
 import type { AppCatalogEntry } from "./catalog.js";
 
 export interface AppLaunchModalProps {
@@ -30,7 +30,7 @@ export function AppLaunchModal({
   onClose,
   onConfirm
 }: AppLaunchModalProps) {
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
   const { t } = useI18n();
   const [keys, setKeys] = useState<KeyIdentity[]>([]);
   const [selectedPublicKeyHex, setSelectedPublicKeyHex] = useState("");

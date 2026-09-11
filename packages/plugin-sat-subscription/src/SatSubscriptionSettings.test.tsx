@@ -12,6 +12,7 @@ import type {
   SatSubscriptionSpiService,
   SatTopUpPreview
 } from "@keymaster/contracts";
+import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 const state = vi.hoisted(() => ({
   admin: undefined as unknown as SatSubscriptionAdminService,
@@ -28,9 +29,9 @@ vi.mock("@keymaster/runtime", () => ({
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: <T,>(key: string): T => {
-    if (key === "sat-subscription.service") return state.admin as unknown as T;
-    if (key === "sat-subscription.spi.service") return state.spi as unknown as T;
+  useCapability: <T,>(key: { id?: string }): T => {
+    if (key.id === SAT_SUBSCRIPTION_SERVICE_CAPABILITY.id) return state.admin as unknown as T;
+    if (key.id === SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY.id) return state.spi as unknown as T;
     throw new Error(`unexpected capability: ${key}`);
   },
   useResourceSelector: <T,>(

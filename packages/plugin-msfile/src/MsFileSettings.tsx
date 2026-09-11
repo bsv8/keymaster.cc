@@ -66,7 +66,7 @@ function toDraft(value: MsFileSatoshiAmount | undefined): AmountDraft {
 
 export function MsFileSettings() {
   const { t } = useI18n();
-  const service = useCapability<MsFileService>(MSFILE_SERVICE_CAPABILITY);
+  const service = useCapability(MSFILE_SERVICE_CAPABILITY);
   const host = usePluginHost();
   // 订阅一律走 Resource Store（react 资源边界门禁）；manifest 已注册 msfile.status。
   const statusResource = useResourceSelector<MsFileStatusResourceSnapshot, MsFileStatusResourceSnapshot>(

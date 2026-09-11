@@ -13,6 +13,6 @@
   "dependencies": {
     "@noble/hashes": "^2.0.1",
     "cborg": "^5.1.6",
-    "webloom-framework": "0.3.0"
+    "webloom-framework": "0.4.0"
   }
 }

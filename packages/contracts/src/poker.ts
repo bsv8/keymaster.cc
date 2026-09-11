@@ -20,12 +20,17 @@
 //     key 的扑克状态"（presences / tables / txIngest 等）。
 //   - 该契约只承载类型，不放实现；实现位于 packages/plugin-poker。
 
+import { defineCapability } from "webloom-framework";
 import type { KeyIdentity } from "./keyspace.js";
 import type { MessageBus } from "webloom-framework";
 import type { I18nPluginResources } from "./i18n.js";
 
 /** poker 服务 capability key；plugin-poker 通过 ctx.provide 注册，宿主消费。 */
-export const POKER_SERVICE_CAPABILITY = "poker.service";
+export const POKER_SERVICE_CAPABILITY = defineCapability<PokerService>({
+  kind: "local",
+  id: "poker.service",
+  version: "1",
+});
 
 /**
  * poker 插件必须显式声明的依赖。
@@ -33,17 +38,7 @@ export const POKER_SERVICE_CAPABILITY = "poker.service";
  * 与 keyspace，绝不允许 deep-import plugin-vault / plugin-p2pkh 内部。
  * plugin-poker 自己的 manifest.dependencies 必须包含这些项。
  */
-export const POKER_REQUIRED_CAPABILITIES = [
-  "vault.service",
-  "keyspace.service",
-  "runtime.messageBus",
-  "i18n.service",
-  "route.registry",
-  "business.registry",
-  "application-settings.registry",
-  "home.registry",
-  "breadcrumb.registry"
-] as const;
+export const POKER_REQUIRED_CAPABILITIES = [] as const;
 
 // ----------------------------------------------------------------------------
 // Browser <-> Proxy 帧协议

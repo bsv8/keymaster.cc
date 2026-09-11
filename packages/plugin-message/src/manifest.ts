@@ -17,26 +17,28 @@
 //     **不**注册传输系统管理页或远端消息管理页。
 
 import type {
-  BusinessFeatureRegistry,
   Contact,
-  ContactPublicKeyActionRegistry,
   ContactsService,
-  ChannelRuntimeFactory,
   I18nPluginResources,
-  KeyspaceService,
   MessageRecord,
   PluginContext,
   PluginManifest,
   PluginSetup,
-  ResourceRegistry,
-  RouteRegistry
 } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
-import { router } from "@keymaster/runtime";
 import {
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
   CHANNEL_RUNTIME_CAPABILITY,
+  CONTACTS_SERVICE_CAPABILITY,
+  CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  MESSAGE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  WEBRTC_SERVICE_CAPABILITY,
+  defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
+import { router } from "@keymaster/runtime";
 import { MessagePage } from "./MessagePage.js";
 import { MessageDetailPage } from "./MessageDetailPage.js";
 import { createMessageService } from "./messageService.js";
@@ -304,34 +306,31 @@ const messagePlatformPluginDefinition = {
   id: MESSAGE_PLUGIN_ID,
   name: "Messages",
   description: "keymaster.message business page: send / list / view scoped messages.",
-  meta: {
-    kind: "core",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "platform"
-  },
+  kind: "core",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "platform",
   units: [{
     id: "message.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: ["message.service"],
-    providedContracts: defineRuntimeUnitProvidedContracts(["message.service"]),
+    provides: [MESSAGE_SERVICE_CAPABILITY],
     storage: { scope: "key", applicationStorageId: "Messages", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
-      { capability: "keyspace.service", reason: "读取 active key 并跟随会话聚合刷新" },
-      { capability: "webrtc.service", reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
-      { capability: "route.registry", reason: "注册 /message 与 /messages 详情路由" },
-      { capability: "business.registry", reason: "接入首页业务导航" },
-      { capability: "breadcrumb.registry", reason: "为 /message 与 /messages 详情路由提供面包屑" },
-      { capability: "contacts.public-key-action.registry", reason: "注册联系人发消息操作" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "读取 active key 并跟随会话聚合刷新" },
+      { capability: WEBRTC_SERVICE_CAPABILITY, optional: true, reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 /message 与 /messages 详情路由" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入首页业务导航" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为 /message 与 /messages 详情路由提供面包屑" },
+      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, reason: "注册联系人发消息操作" },
     ]),
   }],
   i18n: messageResources,
   setup(ctx) {
-    const contactActions = ctx.get<ContactPublicKeyActionRegistry>("contacts.public-key-action.registry");
+    const contactActions = ctx.capability(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
     contactActions.register({
       id: "message.to-contact",
       label: { key: "message.action.toContact", fallback: "发消息" },
@@ -339,13 +338,13 @@ const messagePlatformPluginDefinition = {
       order: 20,
       run: ({ publicKeyHex }) => router.push(`/message/${encodeURIComponent(publicKeyHex)}`)
     });
-    const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
-    const service = createMessageService({ channel, keyspace: ctx.get<KeyspaceService>("keyspace.service"), storage: ctx.storage });
-    ctx.provide("message.service", service);
+    const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const service = createMessageService({ channel, keyspace, storage: ctx.storage });
+    ctx.provide(MESSAGE_SERVICE_CAPABILITY, service);
 
     // 注册资源定义（硬切换 003）
-    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
-    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
 
     // message.conversations：消息列表 + 联系人（MessagePage 用）
     resources.register<MessageConversationsData, readonly string[]>({
@@ -356,7 +355,7 @@ const messagePlatformPluginDefinition = {
         const messages = await service.listMessages({ limit: 10_000 });
         // contacts 是可选插件，可能晚于 message 完成 setup；不能在 setup
         // 阶段把缺失状态永久缓存为 null，必须在每次资源加载时动态解析。
-        const contacts = context.getCapability<ContactsService>("contacts.service");
+        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
         // 从消息中提取 peer publicKeyHex 列表
         const ownerHex = keyspace.active().activePublicKeyHex?.trim().toLowerCase();
         const peerSet = new Set<string>();
@@ -384,7 +383,7 @@ const messagePlatformPluginDefinition = {
         return { messages, contactsByPeer };
       },
       subscribe: (_args, context, invalidate) => {
-        const contacts = context.getCapability<ContactsService>("contacts.service");
+        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
         const offMessages = service.subscribeChanges(invalidate);
         const offContacts = contacts?.onChange(invalidate) ?? (() => {});
         return () => { offMessages(); offContacts(); };
@@ -405,7 +404,7 @@ const messagePlatformPluginDefinition = {
       load: async (args, context, _signal) => {
         const peerHex = args[0];
         const messages = await service.listMessages({ limit: 10_000 });
-        const contacts = context.getCapability<ContactsService>("contacts.service");
+        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
         let contact: Contact | null = null;
         if (contacts && peerHex) {
           try {
@@ -417,7 +416,7 @@ const messagePlatformPluginDefinition = {
         return { messages, contact };
       },
       subscribe: (args, context, invalidate) => {
-        const contacts = context.getCapability<ContactsService>("contacts.service");
+        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
         const offMessages = service.subscribeChanges(invalidate);
         const offContacts = contacts?.onChange(invalidate) ?? (() => {});
         return () => { offMessages(); offContacts(); };
@@ -430,15 +429,8 @@ const messagePlatformPluginDefinition = {
       invalidation: "microtask"
     });
 
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    const breadcrumbs = ctx.get<{
-      register(input: {
-        id: string;
-        order?: number;
-        match: (path: string) => boolean;
-        resolve: () => Array<{ label: { key: string; fallback: string } }>;
-      }): void;
-    }>("breadcrumb.registry");
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
 
     routes.register({
       id: "message.page",
@@ -458,7 +450,7 @@ const messagePlatformPluginDefinition = {
       label: { key: "message.page.detail.title", fallback: "Conversation" },
       component: MessageDetailPage
     });
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MESSAGE_PLUGIN_ID, "home", {
       id: "home.messages",
       label: { key: "message.menu", fallback: "Messages" },

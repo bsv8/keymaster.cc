@@ -45,6 +45,8 @@ vi.mock("@keymaster/runtime", async () => {
 vi.mock("webloom-framework/react", () => ({
   useCapability: <T,>(_key: string): T =>
     activeTestService.service as unknown as T,
+  useOptionalCapability: <T,>(_key: unknown): T | undefined =>
+    activeTestService.service as unknown as T,
   useResource: () => {
     const service = activeTestService.service;
     const snapshot = useSyncExternalStore(service.subscribe, service.snapshot, service.snapshot);

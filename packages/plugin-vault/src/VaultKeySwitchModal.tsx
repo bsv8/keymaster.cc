@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
 import { useOptionalCapability } from "webloom-framework/react";
-import { formatShortPublicKey } from "@keymaster/contracts";
+import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY, formatShortPublicKey } from "@keymaster/contracts";
 import type {
   CoordinatorCommandResult,
   KeyIdentity,
@@ -17,7 +17,7 @@ export function VaultKeySwitchModal(props: {
   onClose(): void;
 }) {
   const { t } = useI18n();
-  const storage = useOptionalCapability<{ isCatalogBucket?: () => boolean }>("storage.runtime-controller");
+  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const isCatalogBucket = storage?.isCatalogBucket?.() === true;
   const [password, setPassword] = useState("");
   const [passkeys, setPasskeys] = useState<PasskeyProtection[]>([]);

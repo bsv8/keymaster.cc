@@ -12,14 +12,17 @@
 //     访问，不能再被某个聚合页的可见性策略遮蔽。
 
 import type {
-  BreadcrumbRegistry,
   I18nPluginResources,
   PluginManifest,
   PluginSetup,
-  SystemSettingsRegistry
 } from "@keymaster/contracts";
-import { LOG_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
+import {
+  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  LOG_SERVICE_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  defineRuntimeUnitDependencies,
+} from "@keymaster/contracts";
 import { PluginManagerPage } from "./PluginManagerPage.js";
 import { LanguageSection } from "./LanguageSection.js";
 import { LogConfigurationSettings, LogSettingsPage } from "./LogSettingsPage.js";
@@ -246,22 +249,20 @@ const settingsPluginDefinition = {
   id: "settings",
   name: "Settings",
   description: "系统级设置页：语言、插件管理。",
-  meta: {
-    kind: "core",
-    startup: "optional",
-    bootstrapStage: "vault-selection",
-    defaultEnabled: true,
-    canDisable: false,
-    displayGroup: "core"
-  },
+  kind: "core",
+  startup: "optional",
+  bootstrapStage: "vault-selection",
+  defaultEnabled: true,
+  canDisable: false,
+  displayGroup: "core",
   units: [{
     id: "settings.window",
     runtime: "window-main",
     scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "system-settings.registry", reason: "注册系统语言设置" },
-      { capability: "application-settings.registry", reason: "展示应用设置目录" },
-      { capability: "breadcrumb.registry", reason: "为设置详情页提供面包屑" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册系统语言设置" },
+      { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, reason: "展示应用设置目录" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为设置详情页提供面包屑" },
       { capability: LOG_SERVICE_CAPABILITY, reason: "统一日志页依赖 log.service" },
     ]),
     business: {
@@ -309,7 +310,7 @@ const settingsPluginDefinition = {
   }],
   i18n: settingsResources,
   setup(ctx) {
-    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     systemSettings.register({
       id: "settings.system.language",
       group: {
@@ -342,7 +343,7 @@ const settingsPluginDefinition = {
     // 面包屑：当前路径匹配时第一段固定为不可点击的"设置"分类节点。
     // 这样 plugin 的 settings breadcrumb 不再回指不存在的 /settings，
     // 同时与 /settings/apps/poker 等其它设置详情页保持一致的第一段样式。
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     breadcrumbs.register({
       id: "settings.application-settings.crumbs",
       order: 5,

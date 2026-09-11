@@ -3,7 +3,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
-import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+  type KeyIdentity,
+  type KeyspaceService,
+  type VaultService,
+} from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
 import { registerShellResources } from "./shellResources.js";
 import { LockedShell } from "./LockedShell.js";
@@ -63,9 +70,9 @@ function createLockedHost(input?: { selected?: string; keys?: KeyIdentity[]; del
     removePasskeyFromCurrentKey: async () => undefined
   };
   const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [SHELL_RESOURCES] });
-  registerShellResources(host.capabilities.get("resource.registry"));
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+  registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY));
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
   return { host, vault, keyspace };
 }
 

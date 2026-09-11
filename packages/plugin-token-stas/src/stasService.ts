@@ -11,6 +11,7 @@
 //     scripts/check-boundaries.mjs 的边界规则；本文件以 consumer-side
 //     接口形态重新声明本 plugin 实际用到的子集。
 
+import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
   KeyspaceService,
@@ -19,7 +20,11 @@ import type {
 } from "@keymaster/contracts";
 
 /** p2pkh.service capability key。 */
-export const P2PKH_CAPABILITY = "p2pkh.service";
+export const P2PKH_CAPABILITY = defineCapability<P2pkhServiceForStas>({
+  kind: "local",
+  id: "p2pkh.service",
+  version: "1",
+});
 
 /** consumer-side P2PKH resource；plugin-token-stas 只用 publicKeyHex / address / network。 */
 export interface P2pkhKeyResourceForStas {
@@ -31,6 +36,7 @@ export interface P2pkhKeyResourceForStas {
 /** consumer-side P2PKH service。 */
 export interface P2pkhServiceForStas {
   listResources(assetId: "bsv" | "bsvtest"): Promise<P2pkhKeyResourceForStas[]>;
+  onGlobalSettingsChange?(handler: () => void): () => void;
 }
 
 const STAS_NETWORK: BsvNetwork = "main";

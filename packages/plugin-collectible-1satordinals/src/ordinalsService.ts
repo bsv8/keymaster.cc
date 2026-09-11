@@ -20,6 +20,7 @@
 //     scripts/check-boundaries.mjs 的边界规则；本文件以 consumer-side
 //     接口形态重新声明本 plugin 实际用到的子集。
 
+import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
   KeyspaceService,
@@ -30,7 +31,11 @@ import type {
 import { toWocOutpoint } from "@keymaster/contracts";
 
 /** p2pkh.service capability key。 */
-export const P2PKH_CAPABILITY = "p2pkh.service";
+export const P2PKH_CAPABILITY = defineCapability<P2pkhServiceFor1Sat>({
+  kind: "local",
+  id: "p2pkh.service",
+  version: "1",
+});
 
 /** consumer-side P2PKH UTXO；本插件只用 txid/vout/address。 */
 export interface P2pkhUtxoFor1Sat {

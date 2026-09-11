@@ -1,3 +1,4 @@
+import { defineCapability } from "webloom-framework";
 import type { OwnerAppStore } from "./access.js";
 import type { KeyValueStore } from "./kv.js";
 import type { PluginStorageDeclaration } from "./access.js";
@@ -17,7 +18,11 @@ export interface StorageBindingAuthority {
   deleteOwnerStorage(input: { ownerPublicKeyHex: string }): Promise<void>;
 }
 
-export const STORAGE_BINDING_AUTHORITY_CAPABILITY = "storage.binding-authority";
+export const STORAGE_BINDING_AUTHORITY_CAPABILITY = defineCapability<StorageBindingAuthority>({
+  kind: "local",
+  id: "storage.binding-authority",
+  version: "1",
+});
 
 /** 页面到 Coordinator 的内部 owner/platform 数据面；请求只携带不透明 grant。 */
 export type CoordinatorOwnerStorageData =

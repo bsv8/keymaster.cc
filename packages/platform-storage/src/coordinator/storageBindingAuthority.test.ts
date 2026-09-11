@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RemoteServiceBridge, RemoteServiceProxy } from "webloom-framework";
 import type { StorageBindingCoordinatorClient, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 import { createStorageBindingAuthority } from "./storageBindingAuthority.js";
 
@@ -17,52 +16,24 @@ function grant(): StorageOwnerGrant {
   };
 }
 
-describe("storage binding authority service bridge", () => {
-  it("uses the Coordinator MessagePort proxy for owner K-V data and never falls back when required", async () => {
-    const directOwnerData = vi.fn();
-    const proxyCall = vi.fn(async (request: unknown) => {
-      const type = (request as { type: string }).type;
-      return type === "owner.get" ? { key: "hello", value: "world", revision: 1 } : { key: "hello", revision: 1 };
-    });
-    const proxy = {
-      reference: {
-        capabilityId: "coordinator.owner-storage",
-        runtime: "shared-worker",
-        contractVersion: "1.0.0",
-        runtimeInstanceId: "runtime:1",
-        serviceInstanceId: "service:1",
-        attributes: {
-          authorityInstanceId: "authority:1",
-          scopeId: "scope:1",
-          handoverGeneration: 1,
-          sessionEpoch: "session:1",
-          ownerPublicKeyHex: OWNER.toLowerCase(),
-          ownerGeneration: 1,
-        },
-        status: "ready",
-        grantId: "service-grant:1",
-        authorizationRevision: 1,
-      },
-      revoked: false,
-      call: proxyCall as unknown as RemoteServiceProxy["call"],
-      revoke: vi.fn(),
-    } satisfies RemoteServiceProxy;
+describe("storage binding authority", () => {
+  it("uses the typed Coordinator owner data plane and closes the bound handle", async () => {
+    const ownerData = vi.fn(async (request: { type: string }) => ({
+      status: "ok" as const,
+      value: request.type === "owner.get"
+        ? { key: "hello", value: "world", revision: 1 }
+        : { key: "hello", revision: 1 },
+    }));
     const client = {
       getActivePublicKeyHex: () => OWNER,
-      storageBindOwner: vi.fn(async () => ({ status: "ok", value: grant(), sessionEpoch: "session:1" })),
-      storageOwnerData: directOwnerData,
+      storageBindOwner: vi.fn(async () => ({ status: "ok" as const, value: grant() })),
+      storageOwnerData: ownerData,
       storageBindPlatform: vi.fn(),
       storagePlatformData: vi.fn(),
       storageDeleteOwner: vi.fn(),
     } as unknown as StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined };
-    const bridge = {
-      getProxy: vi.fn(() => proxy),
-    } as unknown as RemoteServiceBridge;
 
-    const authority = createStorageBindingAuthority(client, {
-      serviceBridge: bridge,
-      requireServiceBridge: true,
-    });
+    const authority = createStorageBindingAuthority(client);
     const store = await authority.openOwnerAppStore({
       pluginId: "background",
       declaration: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
@@ -70,10 +41,8 @@ describe("storage binding authority service bridge", () => {
 
     await expect(store.put("hello", "world")).resolves.toMatchObject({ revision: 1 });
     await expect(store.get("hello")).resolves.toMatchObject({ value: "world" });
-    expect(proxyCall).toHaveBeenCalledTimes(2);
-    expect(directOwnerData).not.toHaveBeenCalled();
+    expect(ownerData).toHaveBeenCalledTimes(2);
     store.close();
-    expect(proxy.revoke).toHaveBeenCalledWith("owner storage handle closed");
   });
 
   it("只在远端授权校验尚未进入物理 I/O 时重绑 platform grant", async () => {

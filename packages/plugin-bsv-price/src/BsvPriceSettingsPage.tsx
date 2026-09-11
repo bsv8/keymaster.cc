@@ -9,11 +9,11 @@
 
 import { useState, type ReactElement } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useResource } from "webloom-framework/react";
+import { useOptionalCapability, useResource } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 
-const BSV_PRICE_SERVICE_CAPABILITY = "bsv-price.service";
+import { BSV_PRICE_SERVICE_CAPABILITY } from "./manifest.js";
 const NOT_CONFIGURED_LABEL = "(not configured)";
 
 /**
@@ -44,11 +44,7 @@ export function BsvPriceSettingsPage(): ReactElement {
 
 /** capability 不存在时返回 null，避免页面直接抛错。 */
 function useBsvPriceServiceOrNull(): BsvPriceService | null {
-  try {
-    return useCapability<BsvPriceService>(BSV_PRICE_SERVICE_CAPABILITY);
-  } catch {
-    return null;
-  }
+  return useOptionalCapability(BSV_PRICE_SERVICE_CAPABILITY) ?? null;
 }
 
 interface BsvPriceSettingsPageInnerProps {

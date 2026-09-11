@@ -3,8 +3,8 @@
 // 设计缘由：App 组件需要根据 booting / locked / unlocked 决定渲染哪个 shell。
 
 import { useEffect, useState } from "react";
-import { useCapability } from "webloom-framework/react";
-import type { VaultService, VaultStatus } from "@keymaster/contracts";
+import { useOptionalCapability } from "webloom-framework/react";
+import { VAULT_SERVICE_CAPABILITY, type VaultStatus } from "@keymaster/contracts";
 
 export interface RuntimeStatus {
   vault: VaultStatus;
@@ -13,7 +13,7 @@ export interface RuntimeStatus {
 }
 
 export function useRuntimeStatus(): RuntimeStatus {
-  const vault = useCapability<VaultService | undefined>("vault.service");
+  const vault = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const [status, setStatus] = useState<VaultStatus>("booting");
 
   useEffect(() => {

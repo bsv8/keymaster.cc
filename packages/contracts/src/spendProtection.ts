@@ -5,6 +5,7 @@
 //   - runtime 只负责聚合和查询，不解释协议语义；
 //   - 选择 funding input 的服务必须先查询该 registry，再做普通 BSV 选币。
 
+import { defineCapability } from "webloom-framework";
 import type { BsvNetwork } from "./vault.js";
 
 /** 被保护的 outpoint。 */
@@ -51,4 +52,8 @@ export interface ProtectedOutpointRegistry {
 }
 
 /** capability key。 */
-export const PROTECTED_OUTPOINT_REGISTRY_CAPABILITY = "protected-outpoint.registry";
+export const PROTECTED_OUTPOINT_REGISTRY_CAPABILITY = defineCapability<ProtectedOutpointRegistry>({
+  kind: "local",
+  id: "protected-outpoint.registry",
+  version: "1",
+});

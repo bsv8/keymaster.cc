@@ -2,14 +2,13 @@ import React from "react";
 import { countRender, useCapability, useResource } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
-
-const BSV_PRICE_SERVICE_CAPABILITY = "bsv-price.service";
+import { BSV_PRICE_SERVICE_CAPABILITY } from "./manifest.js";
 
 export function BsvPriceHomeWidget(): React.ReactElement {
   countRender("plugin-bsv-price/BsvPriceHomeWidget");
   const { t } = useI18n();
   const host = usePluginHost();
-  const service = useCapability<BsvPriceService>(BSV_PRICE_SERVICE_CAPABILITY);
+  const service = useCapability(BSV_PRICE_SERVICE_CAPABILITY);
   const resource = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
   const snapshot = resource.data ?? service.snapshot();
   const quotes = snapshot.snapshot?.quotes ?? [];

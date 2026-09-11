@@ -5,8 +5,6 @@ import {
   vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
 import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
-import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
-import { keymasterRemoteServiceMessageCodec } from "@keymaster/runtime";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testAcquireExecutorLease,
@@ -76,7 +74,6 @@ import {
   __testPublishStorageState,
   __testStorageTransfer,
   __testAttachPort,
-  __testAttachServicePort,
   __testDispatchStorageMessage,
   __testFenceCoordinatorAuthority,
   __testHoldCoordinatorFinalIoLease,
@@ -125,15 +122,15 @@ import { __testParseInitialSetupRecoveryRecord } from "./keymasterSessionCoordin
 import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageLike, LocalStorageLocks } from "@keymaster/platform-storage";
-import { createMessagePortServiceTransport, createServiceBridge, isRuntimeSnapshot, RUNTIME_PROTOCOL_VERSION } from "webloom-framework";
 
 class TestPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onmessageerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
   readonly messages: unknown[] = [];
   private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
   start(): void {}
-  close(): void {}
+  close(): void { this.onclose?.(); }
   postMessage(message: unknown): void { this.messages.push(message); }
   addEventListener(type: string, listener: (event: MessageEvent) => void): void {
     const listeners = this.listeners.get(type) ?? new Set<(event: MessageEvent) => void>();
@@ -148,6 +145,22 @@ class TestPort {
     this.onmessage?.(event);
     for (const listener of [...(this.listeners.get("message") ?? [])]) listener(event);
   }
+}
+
+/**
+ * Unit tests enter the Coordinator through an explicit test sink. This keeps
+ * the production Worker free of a second raw MessagePort router while still
+ * allowing existing domain tests to observe typed stream projections.
+ */
+function attachTestPort(clientId: string, port = new TestPort()): TestPort {
+  __testAttachPort(clientId, (message) => port.messages.push(message));
+  port.onmessage = (event) => {
+    void __testDispatchStorageMessage(clientId, event.data as CoordinatorClientRequest);
+  };
+  port.onclose = () => {
+    void __testDispatchStorageMessage(clientId, { kind: "disconnect", clientId: "test-spoof", requestId: `disconnect-${clientId}` });
+  };
+  return port;
 }
 
 // metadata snapshot validator 会校验 secp256k1 曲线点；测试 fixture 使用
@@ -523,78 +536,6 @@ describe("Session Coordinator worker", () => {
       __testResetState();
     }
   }, 20_000);
-
-  it("通过真实 Worker MessagePort 暴露带授权的 Coordinator crypto service，并在 lock 后撤销旧代理", async () => {
-    await __testDeleteVault();
-    __testResetState();
-    const key = await __testCreateVault("pw", { label: "service-bridge" });
-    await __testUnlock("pw", key.publicKeyHex);
-
-    const mainPortMessages: unknown[] = [];
-    __testAttachPort("service-bridge-client", (message) => mainPortMessages.push(message));
-    const channel = new MessageChannel();
-    const transport = createMessagePortServiceTransport({
-      port: channel.port1,
-      codec: keymasterRemoteServiceMessageCodec,
-    });
-    const bridge = createServiceBridge({ protocolVersion: RUNTIME_PROTOCOL_VERSION, transport });
-    const onSnapshot = (event: MessageEvent): void => {
-      if (isRuntimeSnapshot(event.data)) bridge.applySnapshot(event.data);
-    };
-    channel.port1.addEventListener("message", onSnapshot);
-    channel.port1.start();
-
-    try {
-      __testAttachServicePort("service-bridge-client", channel.port2);
-      await vi.waitFor(() => {
-        expect(bridge.state).toBe("ready");
-        expect(bridge.services().some((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE && service.status === "ready")).toBe(true);
-      });
-      const proxy = bridge.requireProxy({
-        capabilityId: COORDINATOR_CRYPTO_SERVICE,
-        contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-        runtime: "shared-worker",
-      });
-      await expect(proxy.call({ type: "deriveP2pkhAddress", network: "main" })).resolves.toMatchObject({ type: "deriveP2pkhAddress" });
-
-      // 绑定仍走 Coordinator 主控制面，数据读写则必须跨独立服务端口，
-      // 这样测试覆盖的是“授权 grant -> MessagePort -> Provider -> owner K-V”完整链。
-      const bindRequest: CoordinatorClientRequest = {
-        kind: "storage.owner.bind",
-        clientId: "service-bridge-client",
-        requestId: "owner-bind-for-service-bridge",
-        pluginId: "background",
-        declaration: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
-        expectedSessionEpoch: __testGetSnapshot().sessionEpoch,
-      };
-      await __testDispatchStorageMessage("service-bridge-client", bindRequest);
-      const bindResponse = mainPortMessages.at(-1) as { ack: { status: string }; operationResult?: unknown };
-      expect(bindResponse.ack.status).toBe("ok");
-      const ownerGrant = bindResponse.operationResult as { storageGrantId: string };
-      const ownerProxy = bridge.requireProxy({
-        capabilityId: "coordinator.owner-storage",
-        contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
-        runtime: "shared-worker",
-      });
-      await expect(ownerProxy.call({ type: "owner.put", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge", value: { ok: true } })).resolves.toBeDefined();
-      await expect(ownerProxy.call({ type: "owner.get", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge" })).resolves.toMatchObject({ value: { ok: true } });
-
-      // 持久化权威被新 Worker 接管后，即使当前进程的内存状态还未刷新，
-      // 最终 owner-storage 边界也必须拒绝旧引用。
-      await __testFenceCoordinatorAuthority();
-      await expect(ownerProxy.call({ type: "owner.get", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge" })).rejects.toMatchObject({ code: "upgrade.authority_stale" });
-
-      await __testLock();
-      await vi.waitFor(() => expect(proxy.revoked).toBe(true));
-      await expect(proxy.call({ type: "deriveP2pkhAddress", network: "main" })).rejects.toMatchObject({ code: "service_revoked" });
-      expect(mainPortMessages).toHaveLength(1);
-    } finally {
-      transport.dispose();
-      channel.port1.removeEventListener("message", onSnapshot);
-      channel.port1.close();
-      channel.port2.close();
-    }
-  });
 
   it("切换 Key 前先排空旧 owner 请求，Provider 忽略 AbortSignal 也不能越过 fence", async () => {
     await __testDeleteVault();
@@ -1145,9 +1086,7 @@ describe("Session Coordinator worker", () => {
     expect(pending.aborted).toBe(true);
     await expect(__testResolveStorageGrant(granted.operationResult as string, "port-z")).rejects.toThrow();
     __testSetStorageSessionResolver(undefined);
-    const port = new TestPort();
-    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
-    onconnect?.({ ports: [port] } as unknown as MessageEvent);
+    const port = attachTestPort("port-z");
     port.send({ kind: "disconnect", clientId: "spoof", requestId: "release" });
     await flush();
     expect(__testGetConnectedPortCount()).toBe(0);
@@ -1155,9 +1094,7 @@ describe("Session Coordinator worker", () => {
 
   it("returns matching storage.state baselines to two ports", async () => {
     __testResetState();
-    const a = new TestPort(); const b = new TestPort();
-    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
-    onconnect?.({ ports: [a] } as unknown as MessageEvent); onconnect?.({ ports: [b] } as unknown as MessageEvent);
+    const a = attachTestPort("a"); const b = attachTestPort("b");
     a.send({ kind: "subscribe", clientId: "a", requestId: "sa", topics: ["storage.state"] });
     b.send({ kind: "subscribe", clientId: "b", requestId: "sb", topics: ["storage.state"] });
     await flush();
@@ -1171,9 +1108,7 @@ describe("Session Coordinator worker", () => {
 
   it("publishes one strictly increasing storage revision to every subscribed port", async () => {
     __testResetState();
-    const a = new TestPort(); const b = new TestPort();
-    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
-    onconnect?.({ ports: [a] } as unknown as MessageEvent); onconnect?.({ ports: [b] } as unknown as MessageEvent);
+    const a = attachTestPort("a"); const b = attachTestPort("b");
     a.send({ kind: "subscribe", clientId: "a", requestId: "sa2", topics: ["storage.state"] });
     b.send({ kind: "subscribe", clientId: "b", requestId: "sb2", topics: ["storage.state"] });
     await flush();
@@ -1187,10 +1122,7 @@ describe("Session Coordinator worker", () => {
 
   it("broadcasts one Worker-owned sat.events stream to both tabs", async () => {
     __testResetState();
-    const a = new TestPort(); const b = new TestPort();
-    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
-    onconnect?.({ ports: [a] } as unknown as MessageEvent);
-    onconnect?.({ ports: [b] } as unknown as MessageEvent);
+    const a = attachTestPort("a"); const b = attachTestPort("b");
     a.send({ kind: "subscribe", clientId: "a", requestId: "sat-sub-a", topics: ["sat.events"] });
     b.send({ kind: "subscribe", clientId: "b", requestId: "sat-sub-b", topics: ["sat.events"] });
     await flush();
@@ -1280,13 +1212,8 @@ describe("Session Coordinator worker", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    const a = new TestPort();
-    const b = new TestPort();
-    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
-    onconnect?.({ ports: [a] } as unknown as MessageEvent);
-    onconnect?.({ ports: [b] } as unknown as MessageEvent);
-    a.send({ kind: "hello", clientId: "a", requestId: "hello-a" });
-    b.send({ kind: "hello", clientId: "b", requestId: "hello-b" });
+    const a = attachTestPort("a");
+    const b = attachTestPort("b");
     a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["session.state"] });
     b.send({ kind: "subscribe", clientId: "b", requestId: "sub-b", topics: ["session.state"] });
     await flush();
@@ -1382,10 +1309,7 @@ describe("Session Coordinator worker", () => {
   it("broadcasts background snapshot immediately on lock", async () => {
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    const a = new TestPort();
-    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
-    onconnect?.({ ports: [a] } as unknown as MessageEvent);
-    a.send({ kind: "hello", clientId: "a", requestId: "hello-a" });
+    const a = attachTestPort("a");
     a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["background.snapshot"] });
     await flush();
     a.messages.length = 0;
@@ -2240,13 +2164,8 @@ describe("Session Coordinator backup import", () => {
     await __testDeleteVault();
     __testResetState();
 
-    const a = new TestPort();
-    const b = new TestPort();
-    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
-    onconnect?.({ ports: [a] } as unknown as MessageEvent);
-    onconnect?.({ ports: [b] } as unknown as MessageEvent);
-    a.send({ kind: "hello", clientId: "import-a", requestId: "hello-a" });
-    b.send({ kind: "hello", clientId: "import-b", requestId: "hello-b" });
+    const a = attachTestPort("import-a");
+    const b = attachTestPort("import-b");
     a.send({ kind: "subscribe", clientId: "import-a", requestId: "subscribe-a", topics: ["session.state"] });
     b.send({ kind: "subscribe", clientId: "import-b", requestId: "subscribe-b", topics: ["session.state"] });
     await flush();

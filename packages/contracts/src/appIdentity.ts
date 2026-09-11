@@ -1,3 +1,5 @@
+import { defineCapability } from "webloom-framework";
+
 export type AppRequirement = "private-key" | "storage";
 
 /** 外部 caller / catalog 使用的完整签名 proof。 */
@@ -67,3 +69,10 @@ export type AppCatalogResolution =
 export interface AppCatalogResolver {
   resolve(origin: string): AppCatalogResolution;
 }
+
+/** 本地已签名 App catalog resolver 的唯一 typed capability 身份。 */
+export const APP_CATALOG_CAPABILITY = defineCapability<AppCatalogResolver>({
+  kind: "local",
+  id: "app.catalog",
+  version: "1",
+});

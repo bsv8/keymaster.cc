@@ -1,3 +1,4 @@
+import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
   ProtocolSpendPreview,
@@ -9,7 +10,11 @@ import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
 import type { Bsv21MintHistoryRepository, Bsv21MintHistoryRecord } from "./storage/bsv21MintHistoryRepository.js";
 import type { P2pkhServiceForBsv21 } from "./bsv21Service.js";
 
-export const BSV21_MINT_SERVICE_CAPABILITY = "token-bsv21.mint.service";
+export const BSV21_MINT_SERVICE_CAPABILITY = defineCapability<Bsv21MintService>({
+  kind: "local",
+  id: "token-bsv21.mint.service",
+  version: "1",
+});
 
 export interface Bsv21MintRequest {
   network: BsvNetwork;

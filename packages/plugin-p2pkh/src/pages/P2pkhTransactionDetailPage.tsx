@@ -3,6 +3,7 @@ import { Button, EmptyState, PageHeader, formatSats } from "@keymaster/ui";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import type { P2pkhGlobalSettings, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionFact } from "../p2pkhContracts.js";
+import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { formatLocalTime, inputAmount, listPath, parseStoredTransaction, readPage, readTransactionId, readTransactionNetwork, readTransactionSource, readTransactionSubmissionId } from "./p2pkhTransactionView.js";
 import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
@@ -34,7 +35,7 @@ function OutputRow({ vout, value, scriptHex, owned }: { vout: number; value: num
 export function P2pkhTransactionDetailPage() {
   const host = usePluginHost();
   const { t } = useI18n();
-  const service = useCapability<P2pkhService>("p2pkh.service");
+  const service = useCapability(P2PKH_CAPABILITY);
   const network = readTransactionNetwork();
   const page = readPage();
   const source = readTransactionSource();

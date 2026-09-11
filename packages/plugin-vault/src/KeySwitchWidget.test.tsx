@@ -19,6 +19,12 @@ import type {
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
+} from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import { KeySwitchWidget } from "./KeySwitchWidget.js";
 
@@ -121,8 +127,8 @@ function mount() {
   const host = createPluginHost({ disableConfigPersistence: true });
   const vault = makeVault();
   const keyspace = makeKeyspace();
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
   registerStorageStatus(host);
   registerVaultKeyState(host, keyspace, vault);
   return {
@@ -140,9 +146,9 @@ function mountWithCatalogMode() {
   const host = createPluginHost({ disableConfigPersistence: true });
   const vault = makeVault();
   const keyspace = makeKeyspace();
-  host.capabilities.provide<VaultService>("vault.service", vault);
-  host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
-  host.capabilities.provide<StorageRuntimeController>("storage.runtime-controller", {
+  host.provide(VAULT_SERVICE_CAPABILITY, vault);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
+  host.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, {
     hasCatalogBuckets: () => true,
     status: () => "ready",
     subscribe: () => () => undefined,
@@ -157,7 +163,7 @@ function mountWithCatalogMode() {
 }
 
 function registerStorageStatus(host: ReturnType<typeof createPluginHost>, hasCatalogBuckets = false): void {
-  const registry = host.capabilities.get<any>("resource.registry");
+  const registry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
   registry.register({
     id: "storage.status", scope: "global", key: () => ["storage.status"],
     load: async () => ({ hasCatalogBuckets }),
@@ -166,7 +172,7 @@ function registerStorageStatus(host: ReturnType<typeof createPluginHost>, hasCat
 }
 
 function registerVaultKeyState(host: ReturnType<typeof createPluginHost>, keyspace: KeyspaceService, vault: VaultService): void {
-  const registry = host.capabilities.get<any>("resource.registry");
+  const registry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
   registry.register({
     id: "vault.key-state", scope: "global", key: () => ["vault.key-state"],
     load: async () => ({ keys: await keyspace.listKeys(), active: keyspace.active(), initializing: keyspace.isInitializing(), notice: vault.getInitialActivationNotice?.() ?? null }),
@@ -210,8 +216,8 @@ describe("KeySwitchWidget", () => {
     });
     const vault = makeVault(activateKey);
     const host = createPluginHost({ disableConfigPersistence: true });
-    host.capabilities.provide<VaultService>("vault.service", vault);
-    host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+    host.provide(VAULT_SERVICE_CAPABILITY, vault);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
     registerStorageStatus(host);
     registerVaultKeyState(host, keyspace, vault);
 
@@ -263,8 +269,8 @@ describe("KeySwitchWidget", () => {
     ];
     vault.activateKeyWithPasskey = activateKeyWithPasskey;
     const host = createPluginHost({ disableConfigPersistence: true });
-    host.capabilities.provide<VaultService>("vault.service", vault);
-    host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+    host.provide(VAULT_SERVICE_CAPABILITY, vault);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
     registerStorageStatus(host);
     registerVaultKeyState(host, keyspace, vault);
 

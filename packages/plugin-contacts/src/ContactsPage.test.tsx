@@ -1,15 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type {
-  ActiveKeyState,
-  Contact,
-  ContactsService,
-  ContactPresenceMap,
-  KeyspaceService,
-  PluginManifest,
-  PluginSetup,
-  ResourceRegistry
+import {
+  CONTACTS_SERVICE_CAPABILITY,
+  CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
+  type ActiveKeyState,
+  type Contact,
+  type ContactsService,
+  type ContactPresenceMap,
+  type KeyspaceService,
+  type PluginManifest,
+  type PluginSetup,
+  type ResourceRegistry,
 } from "@keymaster/contracts";
 import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { ContactsPage } from "./ContactsPage.js";
@@ -60,9 +64,9 @@ describe("ContactsPage public-key actions", () => {
 
   it("opens the contact detail page when the contact name is clicked", async () => {
     const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [contactsResources] });
-    host.provide("keyspace.service", keyspace());
-    host.provide("contacts.service", contacts());
-    const resources = host.capabilities.get<ResourceRegistry>("resource.registry");
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace());
+    host.provide(CONTACTS_SERVICE_CAPABILITY, contacts());
+    const resources = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
     resources.register({
       id: "contacts.list", scope: "active-key", key: (_args: readonly string[], context) => ["contacts.list", context.activePublicKeyHex ?? "none"],
       load: async () => [CONTACT], subscribe: () => () => undefined, invalidation: "immediate"
@@ -83,24 +87,30 @@ describe("ContactsPage public-key actions", () => {
       initialI18nResources: [contactsResources],
       runtimeUnitImplementationRegistry: { get: (pluginId) => setups.get(pluginId) },
     });
-    host.provide("keyspace.service", keyspace());
-    host.provide("contacts.service", contacts());
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace());
+    host.provide(CONTACTS_SERVICE_CAPABILITY, contacts());
     const actionPlugin = (id: string, actionId: string, label: string, order: number): PluginManifest => {
       const setup: PluginSetup = (ctx) => {
-        ctx.get<import("@keymaster/contracts").ContactPublicKeyActionRegistry>("contacts.public-key-action.registry").register({
+        ctx.capability(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY).register({
           id: actionId, label, order, run: () => undefined
         });
       };
       setups.set(id, setup);
       return {
         id, name: id,
-        meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, displayGroup: "business" },
-        dependencies: [{ capability: "contacts.public-key-action.registry", reason: "register contact action" }],
+        kind: "business", startup: "optional", defaultEnabled: true, canDisable: true,
+        bootstrapStage: "owner-apps-ready", displayGroup: "business",
+        units: [{
+          id,
+          runtime: "window-main",
+          scopeKind: "root",
+          dependencies: [{ capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "register contact action" }],
+        }],
       };
     };
     await host.register(actionPlugin("transfer", "transfer.to-contact", "Transfer", 10));
     await host.register(actionPlugin("message", "message.to-contact", "Message", 20));
-    const resources = host.capabilities.get<ResourceRegistry>("resource.registry");
+    const resources = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
     resources.register({
       id: "contacts.list", scope: "active-key", key: (_args: readonly string[], context) => ["contacts.list", context.activePublicKeyHex ?? "none"],
       load: async () => [CONTACT], subscribe: () => () => undefined, invalidation: "immediate"

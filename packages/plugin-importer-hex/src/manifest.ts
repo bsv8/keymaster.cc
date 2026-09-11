@@ -2,8 +2,8 @@
 // 注册 HEX importer。
 // 设计缘由：importer 插件不写 vault、不注册菜单/页面。
 
-import type { I18nPluginResources, ImporterRegistry, PluginManifest, PluginSetup } from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginSetup } from "@keymaster/contracts";
+import { IMPORTER_REGISTRY_CAPABILITY, defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { hexImporter } from "./hexImporter.js";
 
 const hexResources: I18nPluginResources = {
@@ -26,27 +26,25 @@ const hexImporterPluginDefinition = {
   id: "importer-hex",
   name: "Hex Importer",
   description: "支持 32 字节 hex 私钥导入。",
-  meta: {
-    kind: "business",
-    startup: "optional",
+  kind: "business",
+  startup: "optional",
     // 首次 Storage 初始化的导入向导也需要 Hex importer；该插件只依赖
     // Host 内置 importer.registry，不依赖尚未创建的 Vault。
     bootstrapStage: "storage-onboarding",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "import"
-  },
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "import",
   units: [{
     id: "importer-hex.window",
     runtime: "window-main",
     scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
-      { capability: "importer.registry", reason: "需要注册 HEX 实现" },
+      { capability: IMPORTER_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "需要注册 HEX 实现" },
     ]),
   }],
   i18n: hexResources,
   setup(ctx) {
-    ctx.get<ImporterRegistry>("importer.registry").register(hexImporter);
+    ctx.capability(IMPORTER_REGISTRY_CAPABILITY).register(hexImporter);
     return () => {
       // no-op
     };

@@ -75,7 +75,7 @@ export function usePluginRuntime(): UsePluginRuntime {
         return host.getManifest(id);
       },
       hasCapability(key) {
-        return host.capabilities.has(key);
+        return host.capabilities.descriptors().some((capability) => capability.id === key);
       }
     };
     return api;

@@ -1,4 +1,5 @@
 // SatSubscription / Channel / SPI 的平台内部契约。
+import { defineCapability } from "webloom-framework";
 //
 // 重要边界：这些类型只给受信任的系统插件使用，不加入 Connect public
 // contracts。Connect App 只看到 channel.* 的 JSON API。
@@ -6,9 +7,17 @@
 /** SatSubscription 平台插件 id。 */
 export const SAT_SUBSCRIPTION_PLUGIN_ID = "sat-subscription";
 /** SSP trusted capability。 */
-export const SAT_SUBSCRIPTION_SERVICE_CAPABILITY = "sat-subscription.service";
+export const SAT_SUBSCRIPTION_SERVICE_CAPABILITY = defineCapability<SatSubscriptionAdminService>({
+  kind: "local",
+  id: "sat-subscription.service",
+  version: "1",
+});
 /** SPI 管理 trusted capability。 */
-export const SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY = "sat-subscription.spi.service";
+export const SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY = defineCapability<SatSubscriptionSpiService>({
+  kind: "local",
+  id: "sat-subscription.spi.service",
+  version: "1",
+});
 /** Channel 消息协议名。 */
 export const BSV8_MESSAGE_PROTOCOL = "bsv8.message.v1";
 /** 当前 owner 私密 inbox 的 SSP channel 前缀。 */

@@ -16,13 +16,14 @@ import type {
   VaultService,
   WocStasService
 } from "@keymaster/contracts";
-import type { MessageBus } from "webloom-framework";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   BACKGROUND_TRIGGER_REASON,
   KEYSPACE_SERVICE_CAPABILITY,
+  TOKEN_REGISTRY_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   WOC_STAS_CAPABILITY,
   defineRuntimeUnitDependencies,
@@ -56,14 +57,12 @@ const stasTokenPluginDefinition = {
   id: "token-stas",
   name: "STAS tokens",
   description: "STAS fungible token provider：通过 snapshot K-V 读取当前 active key 主网地址的 STAS 持仓，注入 token.registry。",
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "business"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [
     {
       id: "token-stas.window",
@@ -74,10 +73,10 @@ const stasTokenPluginDefinition = {
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 主网地址" },
         { capability: WOC_STAS_CAPABILITY, reason: "STAS WOC 查询入口" },
         { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
-        { capability: "token.registry", reason: "注册 STAS TokenProvider" },
+        { capability: TOKEN_REGISTRY_CAPABILITY, reason: "注册 STAS TokenProvider" },
         { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
         { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
-        { capability: "vault.service", reason: "sync task canRun 门禁" },
+        { capability: VAULT_SERVICE_CAPABILITY, reason: "sync task canRun 门禁" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
         { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" },
       ]),
@@ -90,15 +89,15 @@ const stasTokenPluginDefinition = {
   ],
   i18n: stasResources,
   setup(ctx) {
-    const p2pkh = ctx.get<P2pkhServiceForStas>(P2PKH_CAPABILITY);
-    const wocStas = ctx.get<WocStasService>(WOC_STAS_CAPABILITY);
-    const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-    const tokenRegistry = ctx.get<TokenRegistry>("token.registry");
-    const backgroundRegistry = ctx.get<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY);
-    const messageBus = ctx.get<MessageBus>(RUNTIME_MESSAGE_BUS);
-    const assetDataNotifier = ctx.get<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY);
-    const vault = ctx.get<VaultService>("vault.service");
-    const backgroundService = ctx.get<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY);
+    const p2pkh = ctx.capability(P2PKH_CAPABILITY);
+    const wocStas = ctx.capability(WOC_STAS_CAPABILITY);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const tokenRegistry = ctx.capability(TOKEN_REGISTRY_CAPABILITY);
+    const backgroundRegistry = ctx.capability(BACKGROUND_REGISTRY_CAPABILITY);
+    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
+    const assetDataNotifier = ctx.capability(ASSET_DATA_NOTIFIER_CAPABILITY);
+    const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const backgroundService = ctx.capability(BACKGROUND_SERVICE_CAPABILITY);
 
     // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 Keyspace。
     if (!ctx.storage) throw new Error("STAS owner storage binding is unavailable");
@@ -158,11 +157,9 @@ const stasTokenPluginDefinition = {
     });
 
     // 监听 testnet 设置变化（通过 P2PKH settings 变化）
-    const offSettingsChange = ctx.has("p2pkh.service")
-      ? ctx.get<{ onGlobalSettingsChange?(handler: () => void): () => void }>("p2pkh.service")?.onGlobalSettingsChange?.(() => {
-          triggerSync("settings-change");
-        })
-      : undefined;
+    const offSettingsChange = p2pkh.onGlobalSettingsChange?.(() => {
+      triggerSync("settings-change");
+    });
 
     return () => {
       offActiveChange();

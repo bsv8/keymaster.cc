@@ -31,8 +31,11 @@ import {
   WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
   WOC_STAS_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  capabilityDescriptor,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
 import { createWocBsv21Service } from "./wocBsv21Service.js";
@@ -92,32 +95,29 @@ const wocPluginDefinition = {
   id: "woc",
   name: "WOC",
   description: "WhatsOnChain API 代理：唯一 WOC 入口、全局限流、优先级队列、429 backoff、多标签页协调。",
-  meta: {
-    kind: "platform",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "platform"
-  },
+  kind: "platform",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "platform",
   units: [{
     id: "woc.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: [WOC_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([
-      WOC_CAPABILITY,
-      WOC_BSV21_CAPABILITY,
-      WOC_STAS_CAPABILITY,
-      WOC_1SAT_ORDINALS_CAPABILITY,
-      WOC_COORDINATOR_CONTROL_CAPABILITY,
-    ]),
+    provides: [
+      capabilityDescriptor(WOC_CAPABILITY),
+      capabilityDescriptor(WOC_BSV21_CAPABILITY),
+      capabilityDescriptor(WOC_STAS_CAPABILITY),
+      capabilityDescriptor(WOC_1SAT_ORDINALS_CAPABILITY),
+      capabilityDescriptor(WOC_COORDINATOR_CONTROL_CAPABILITY),
+    ],
     storage: { scope: "key", applicationStorageId: "WOC", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
-      { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
-      { capability: "keyspace.service", reason: "active key 就绪后加载 WOC owner 配置" },
-      { capability: "system-settings.registry", reason: "注册 WOC 系统设置" },
-      { capability: "breadcrumb.registry", reason: "注册 WOC 面包屑" },
+      { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "注册 WOC actor handlers（target=woc）" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "active key 就绪后加载 WOC owner 配置" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 WOC 系统设置" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 WOC 面包屑" },
     ]),
   }, {
     id: "woc.coordinator-worker",
@@ -129,8 +129,8 @@ const wocPluginDefinition = {
     const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
     if (!coordinator) throw new Error("WOC Coordinator control is unavailable");
     ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, coordinator);
-    const messageBus = ctx.get<MessageBus>(RUNTIME_MESSAGE_BUS);
-    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
     const service = createWocService({ messageBus, logger: ctx.logger, storage: ctx.storage });
     await service.ready();
     const offActive = keyspace.onActiveKeyChanged((state) => {
@@ -138,20 +138,20 @@ const wocPluginDefinition = {
         void service.ready().catch((error) => ctx.logger.warn({ scope: "woc.config", event: "config.load_failed", message: "WOC config load failed", data: { error: error instanceof Error ? error.message : String(error) } }));
       }
     });
-    ctx.provide<WocService>(WOC_CAPABILITY, service);
+    ctx.provide(WOC_CAPABILITY, service);
 
     // BSV-21 / STAS / 1Sat Ordinals 的 WOC capability。
     // 全部共享同一个 actor（service 内的 createWocService 持有 actor 并
     // 已 attach 到 messageBus），因此 token / collectible 业务插件继承
     // 同一套限流 / 优先级 / 429 backoff / 多标签页协调，不复制第二套队列。
     const bsv21Service = createWocBsv21Service({ messageBus, logger: ctx.logger });
-    ctx.provide<WocBsv21Service>(WOC_BSV21_CAPABILITY, bsv21Service);
+    ctx.provide(WOC_BSV21_CAPABILITY, bsv21Service);
     const stasService = createWocStasService({ messageBus, logger: ctx.logger });
-    ctx.provide<WocStasService>(WOC_STAS_CAPABILITY, stasService);
+    ctx.provide(WOC_STAS_CAPABILITY, stasService);
     const oneSatService = createWoc1SatOrdinalsService({ messageBus, logger: ctx.logger });
-    ctx.provide<Woc1SatOrdinalsService>(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
+    ctx.provide(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
 
-    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     systemSettings.register({
       id: "woc.system-settings.connection",
       group: {
@@ -167,7 +167,7 @@ const wocPluginDefinition = {
       visibleWhen: ({ unlocked }) => unlocked
     });
 
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const crumbProvider: BreadcrumbProvider = {
       id: "woc.crumbs",
       order: 250,

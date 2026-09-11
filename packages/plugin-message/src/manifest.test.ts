@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHANNEL_RUNTIME_CAPABILITY } from "@keymaster/contracts";
+import { capabilityDescriptor, CHANNEL_RUNTIME_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { messagePlatformPlugin } from "./manifest.js";
 
 describe("messagePlatformPlugin", () => {
@@ -10,7 +10,10 @@ describe("messagePlatformPlugin", () => {
     );
     const dependencies = unit?.dependencies ?? [];
     expect(dependencies.map((dependency) => dependency.capability)).toEqual(
-      expect.arrayContaining([CHANNEL_RUNTIME_CAPABILITY, "keyspace.service"])
+      expect.arrayContaining([
+        capabilityDescriptor(CHANNEL_RUNTIME_CAPABILITY),
+        capabilityDescriptor(KEYSPACE_SERVICE_CAPABILITY),
+      ])
     );
   });
 });

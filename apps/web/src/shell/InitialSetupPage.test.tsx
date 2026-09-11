@@ -5,6 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import type { InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult } from "@keymaster/contracts";
+import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 import type { S3ConfigMode } from "@keymaster/platform-storage";
 import { InitialSetupPage } from "./InitialSetupPage.js";
 
@@ -46,7 +47,10 @@ vi.mock("webloom-framework/react", () => ({
       status: () => "ready",
       subscribe: () => () => undefined
     };
-    return (id: string) => id === "storage.runtime-controller" ? storageCapability : undefined;
+    return (capability: string | { id: string }) => {
+      const capabilityId = typeof capability === "string" ? capability : capability.id;
+      return capabilityId === STORAGE_RUNTIME_CONTROLLER_CAPABILITY.id ? storageCapability : undefined;
+    };
   })()
 }));
 

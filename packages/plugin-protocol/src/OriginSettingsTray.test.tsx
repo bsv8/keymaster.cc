@@ -29,7 +29,7 @@ vi.mock("@keymaster/runtime", () => ({
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: (key: string) =>
+  useCapability: (key: unknown) =>
     key === PROTOCOL_SERVICE_CAPABILITY ? currentService : undefined
 }));
 

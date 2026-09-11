@@ -1,41 +1,283 @@
-import { describe, expect, it, vi } from "vitest";
-import type { CoordinatorTopicEvent, InitialSetupRecoveryRecordV1, SessionCoordinatorClient, StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, type CoordinatorLocalStorageRequest, type CoordinatorLocalStorageResponse, type CoordinatorTopicEvent, type InitialSetupRecoveryRecordV1, type SessionCoordinatorClient, type StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
 import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { createCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
+import { createCoordinatorClient as createRawCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
 import { readStorageCatalog, STORAGE_CATALOG_KEY } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest } from "@keymaster/platform-storage/coordinator";
+import { createWindowApp, definePlugin, type HandlerCallContext, type ServiceReference, type WindowApp } from "webloom-framework";
+import { startSharedWorkerAppForTesting, type SharedWorkerScopeLike } from "webloom-framework/testing";
 
-class HubPort {
-  onmessage: ((event: MessageEvent) => void) | null = null;
-  onmessageerror: (() => void) | null = null;
-  private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
-  constructor(private readonly hub: Hub) {}
-  start(): void {}
-  close(): void { this.hub.ports.delete(this); }
-  addEventListener(type: string, listener: (event: MessageEvent) => void): void {
-    const listeners = this.listeners.get(type) ?? new Set<(event: MessageEvent) => void>();
-    listeners.add(listener);
-    this.listeners.set(type, listeners);
+type TopicWaiter = { resolve: (event: CoordinatorTopicEvent | undefined) => void; signal: AbortSignal; onAbort: () => void };
+
+class TopicQueue {
+  private readonly values: CoordinatorTopicEvent[] = [];
+  private readonly waiters: TopicWaiter[] = [];
+
+  push(event: CoordinatorTopicEvent): void {
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.resolve(event);
+      return;
+    }
+    this.values.push(event);
   }
-  removeEventListener(type: string, listener: (event: MessageEvent) => void): void { this.listeners.get(type)?.delete(listener); }
-  postMessage(message: unknown): void { this.hub.receive(this, message as { requestId: string; kind?: string }); }
-  emit(message: unknown): void {
-    const event = { data: message } as MessageEvent;
-    this.onmessage?.(event);
-    for (const listener of [...(this.listeners.get("message") ?? [])]) listener(event);
+
+  next(signal: AbortSignal): Promise<CoordinatorTopicEvent | undefined> {
+    const value = this.values.shift();
+    if (value) return Promise.resolve(value);
+    if (signal.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      const waiter: TopicWaiter = {
+        resolve,
+        signal,
+        onAbort: () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          resolve(undefined);
+        },
+      };
+      this.waiters.push(waiter);
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+    });
   }
+}
+
+const activeHubs = new Set<Hub>();
+
+async function nextMacrotask(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
 class Hub {
-  readonly ports = new Set<HubPort>();
-  createPort(): HubPort { const port = new HubPort(this); this.ports.add(port); return port; }
-  receive(port: HubPort, message: { requestId?: string; kind?: string }): void {
-    const response = { requestId: message.requestId, sessionEpoch: "shared-epoch", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:hub", sessionEpoch: "shared-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } } };
-    queueMicrotask(() => port.emit(response));
+  private readonly globalScope: SharedWorkerScopeLike = { onconnect: null };
+  private readonly topicQueues = new Set<TopicQueue>();
+  private readonly workerApp;
+
+  constructor() {
+    const workerPlugin = definePlugin({
+      id: "keymaster-test-coordinator",
+      runtime: "shared-worker",
+      provides: [COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY] as const,
+      startup: "required" as const,
+      setup: (ctx) => {
+        ctx.handle(COORDINATOR_RPC_CAPABILITY, () => ({
+          sessionEpoch: "shared-epoch",
+          ack: { status: "ok" },
+          operationResult: {
+            authorityInstanceId: "authority:hub",
+            sessionEpoch: "shared-epoch",
+            vaultStatus: "locked",
+            keyspaceGeneration: 0,
+            taskSnapshots: [],
+            scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+          },
+        }));
+        ctx.handle(COORDINATOR_TOPIC_STREAM_CAPABILITY, (_request, call) => {
+          const queue = new TopicQueue();
+          this.topicQueues.add(queue);
+          return {
+            [Symbol.asyncIterator]: () => ({
+              next: async () => {
+                const event = await queue.next(call.signal);
+                if (!event) {
+                  this.topicQueues.delete(queue);
+                  return { done: true as const, value: undefined };
+                }
+                return { done: false as const, value: event };
+              },
+              return: async () => {
+                this.topicQueues.delete(queue);
+                return { done: true as const, value: undefined };
+              },
+            }),
+          };
+        });
+      },
+    });
+    this.workerApp = startSharedWorkerAppForTesting({
+      id: "keymaster-coordinator",
+      plugins: [workerPlugin],
+      expose: [COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY],
+      globalScope: this.globalScope,
+    });
+    activeHubs.add(this);
   }
-  broadcast(event: unknown): void { for (const port of this.ports) port.emit(event); }
+
+  createPort(): MessagePort {
+    const channel = new MessageChannel();
+    queueMicrotask(() => this.globalScope.onconnect?.({ ports: [channel.port2] }));
+    return channel.port1;
+  }
+
+  async broadcast(event: unknown): Promise<void> {
+    for (const queue of this.topicQueues) queue.push(event as CoordinatorTopicEvent);
+    await nextMacrotask();
+    await nextMacrotask();
+  }
+
+  async dispose(): Promise<void> {
+    activeHubs.delete(this);
+    await this.workerApp.dispose("test hub disposed");
+  }
 }
+
+type TestPostMessage = {
+  (message: any, transfer?: any): unknown;
+  mockImplementation(implementation: (...args: any[]) => unknown): TestPostMessage;
+};
+
+function createTestMessagePort(initialImplementation?: TestPostMessage) {
+  const calls = new Map<string, { mode: "unary" | "stream"; serviceInstanceId: string; nextSequence: number }>();
+  const runtimeMessageListeners = new Set<(event: MessageEvent) => void>();
+  let runtimeMessageErrorListener: ((event: MessageEvent) => void) | null = null;
+  let manuallyDisabled = false;
+  let implementation: (message: any, transfer?: readonly Transferable[]) => unknown = initialImplementation ?? (() => undefined);
+
+  const capabilityKind = (message: Record<string, unknown>): "unary" | "stream" => message.mode === "stream" ? "stream" : "unary";
+  const toLegacyOutbound = (message: unknown): unknown => {
+    if (!message || typeof message !== "object") return message;
+    const value = message as Record<string, any>;
+    if (value.type === "webloom.runtime.v1.call") {
+      const mode = capabilityKind(value);
+      calls.set(value.callId as string, { mode, serviceInstanceId: value.serviceInstanceId as string, nextSequence: 1 });
+      const request = value.request && typeof value.request === "object" ? value.request as Record<string, unknown> : {};
+      const requestKind = request.kind;
+      const kind = mode === "stream"
+        ? "subscribe"
+        : requestKind === "session.open" ? "hello" : requestKind === "session.activity" ? "activity" : requestKind;
+      return { ...request, requestId: value.callId, kind };
+    }
+    if (value.type === "webloom.runtime.v1.cancel") {
+      return { kind: "cancel", requestId: value.callId, targetRequestId: value.callId };
+    }
+    return value;
+  };
+
+  const dispatchInbound = (raw: unknown): void => {
+    if (runtimeMessageListeners.size === 0) return;
+    const emit = (event: MessageEvent): void => { for (const listener of [...runtimeMessageListeners]) listener(event); };
+    if (raw && typeof raw === "object" && typeof (raw as { type?: unknown }).type === "string" && (raw as { type: string }).type.startsWith("webloom.runtime.v1.")) {
+      emit({ data: raw } as MessageEvent);
+      return;
+    }
+    if (raw && typeof raw === "object" && typeof (raw as { requestId?: unknown }).requestId === "string") {
+      const value = raw as { requestId: string; sessionEpoch?: string; ack?: unknown; operationResult?: unknown };
+      const call = calls.get(value.requestId);
+      if (!call) return;
+      if (call.mode === "stream") {
+        emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, streamReady: true } } as MessageEvent);
+        const baselines = value.operationResult && typeof value.operationResult === "object" && Array.isArray((value.operationResult as { baselines?: unknown[] }).baselines)
+          ? (value.operationResult as { baselines: unknown[] }).baselines
+          : [];
+        for (const baseline of baselines) {
+          const snapshot = baseline && typeof baseline === "object" ? (baseline as { snapshot?: unknown }).snapshot : undefined;
+          if (!snapshot) continue;
+          emit({ data: { type: "webloom.runtime.v1.next", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, sequence: call.nextSequence++, item: snapshot } } as MessageEvent);
+        }
+        return;
+      }
+      emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, result: { sessionEpoch: value.sessionEpoch ?? "e", ack: value.ack ?? { status: "ok" }, ...(value.operationResult === undefined ? {} : { operationResult: value.operationResult }) } } } as MessageEvent);
+      return;
+    }
+    const stream = [...calls.values()].find((call) => call.mode === "stream");
+    if (!stream) return;
+    const callId = [...calls.entries()].find(([, call]) => call === stream)?.[0];
+    if (!callId) return;
+    emit({ data: { type: "webloom.runtime.v1.next", protocolVersion: "webloom.runtime.v1", callId, serviceInstanceId: stream.serviceInstanceId, sequence: stream.nextSequence++, item: raw } } as MessageEvent);
+  };
+
+  const postMessage = ((message: unknown, transfer?: readonly Transferable[]) => {
+    if (message && typeof message === "object") {
+      const type = (message as { type?: unknown }).type;
+      if (typeof type === "string" && type.startsWith("webloom.runtime.v1.") && type !== "webloom.runtime.v1.call" && type !== "webloom.runtime.v1.cancel") return undefined;
+    }
+    return implementation(toLegacyOutbound(message), transfer);
+  }) as TestPostMessage;
+  postMessage.mockImplementation = (next) => { implementation = next; return postMessage; };
+
+  const port = {
+    start: vi.fn(),
+    postMessage,
+    close: vi.fn(),
+    get onmessage(): ((event: MessageEvent) => void) | null {
+      if (manuallyDisabled || runtimeMessageListeners.size === 0) return null;
+      return (event: MessageEvent) => dispatchInbound(event.data);
+    },
+    set onmessage(value: ((event: MessageEvent) => void) | null) {
+      manuallyDisabled = value === null;
+    },
+    onmessageerror: null as ((event: MessageEvent) => void) | null,
+    addEventListener: vi.fn((type: string, listener: (event: MessageEvent) => void) => {
+      if (type === "message") {
+        runtimeMessageListeners.add(listener);
+        manuallyDisabled = false;
+        queueMicrotask(() => dispatchInbound({
+          type: "webloom.runtime.v1.snapshot",
+          protocolVersion: "webloom.runtime.v1",
+          runtimeId: "keymaster-coordinator",
+          runtimeKind: "shared-worker",
+          runtimeInstanceId: "test-coordinator-worker",
+          revision: 1,
+          state: "ready",
+          units: [],
+          services: [
+            { kind: "rpc", capabilityId: COORDINATOR_RPC_CAPABILITY.id, contractVersion: COORDINATOR_RPC_CAPABILITY.version, serviceInstanceId: "test-coordinator-rpc", attributes: {} },
+            { kind: "stream", capabilityId: COORDINATOR_TOPIC_STREAM_CAPABILITY.id, contractVersion: COORDINATOR_TOPIC_STREAM_CAPABILITY.version, serviceInstanceId: "test-coordinator-events", attributes: {} },
+          ],
+        }));
+      }
+      if (type === "messageerror") runtimeMessageErrorListener = listener;
+    }),
+    removeEventListener: vi.fn((type: string, listener: (event: MessageEvent) => void) => {
+      if (type === "message") runtimeMessageListeners.delete(listener);
+      if (type === "messageerror" && runtimeMessageErrorListener === listener) runtimeMessageErrorListener = null;
+    }),
+  };
+  return port;
+}
+
+const activeClients = new Set<ReturnType<typeof createRawCoordinatorClient>>();
+const activeWindowApps = new Set<Promise<WindowApp>>();
+const clientWindowApps = new WeakMap<ReturnType<typeof createRawCoordinatorClient>, Promise<WindowApp>>();
+
+function ensureTestWindowApp(client: ReturnType<typeof createRawCoordinatorClient>): Promise<WindowApp> {
+  const existing = clientWindowApps.get(client);
+  if (existing) return existing;
+  const appPromise = createWindowApp({
+    id: `coordinator-test-window-${activeClients.size + 1}`,
+    plugins: [client.createWindowStoragePlugin()],
+  }).then((app) => {
+    client.setWindowApp(app);
+    return app;
+  });
+  clientWindowApps.set(client, appPromise);
+  activeWindowApps.add(appPromise);
+  return appPromise;
+}
+
+/** 测试工厂显式装配页面 Runtime，保持生产 client 的 WindowApp 前置约束。 */
+function createCoordinatorClient(options?: Parameters<typeof createRawCoordinatorClient>[0]): ReturnType<typeof createRawCoordinatorClient> {
+  const client = createRawCoordinatorClient(options);
+  const connect = client.connect.bind(client);
+  client.connect = async () => {
+    await ensureTestWindowApp(client);
+    return connect();
+  };
+  activeClients.add(client);
+  return client;
+}
+
+afterEach(async () => {
+  for (const client of activeClients) client.shutdown();
+  for (const appPromise of activeWindowApps) {
+    await appPromise.then((app) => app.dispose("test client disposed"), () => undefined);
+  }
+  activeClients.clear();
+  activeWindowApps.clear();
+  await Promise.all([...activeHubs].map((hub) => hub.dispose()));
+});
 
 class BridgeMemoryStorage {
   private readonly values = new Map<string, string>();
@@ -88,14 +330,66 @@ function bridgeCatalogEntry(bucketId: string, label: string): StorageBucketCatal
 }
 
 type LocalBridgeClientInternals = {
-  openLocalStorageBridge(): MessagePort;
-  localStorageBridgePort: MessagePort | null;
-  localStorageBridgeLease: { authorityInstanceId: string; bucketId?: string; leaseId: string; bucketGeneration: number } | null;
+  handleLocalStorageCapabilityRequest(request: CoordinatorLocalStorageRequest, call: HandlerCallContext): Promise<CoordinatorLocalStorageResponse>;
+  localStorageBridgeLease: { bucketId?: string; leaseId: string; bucketGeneration: number } | null;
   applyTopicEvent(event: CoordinatorTopicEvent): void;
 };
 
-async function nextMacrotask(): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+type LocalBridgeTestPort = {
+  onmessage: ((event: MessageEvent) => void) | null;
+  start(): void;
+  close(): void;
+  postMessage(message: unknown): void;
+};
+
+function localBridgeRequestWithoutTransportFields(request: LocalStorageBridgeRequest): CoordinatorLocalStorageRequest {
+  const value = request as LocalStorageBridgeRequest & { authorityInstanceId?: unknown; leaseId?: unknown; signal?: unknown };
+  const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, signal: _signal, ...businessRequest } = value;
+  return businessRequest as CoordinatorLocalStorageRequest;
+}
+
+function createLocalBridgeTestPort(internals: LocalBridgeClientInternals, app: WindowApp): LocalBridgeTestPort {
+  let closed = false;
+  const published = app.state().services.find((service) => service.capabilityId === "keymaster.coordinator.local-storage");
+  if (!published) throw new Error("Local storage capability reference was not published");
+  const reference: ServiceReference = {
+    ...published,
+    runtime: app.runtimeKind,
+    runtimeInstanceId: app.runtimeInstanceId,
+  };
+  const port: LocalBridgeTestPort = {
+    onmessage: null,
+    start() {},
+    close() { closed = true; },
+    postMessage(message) {
+      if (closed || !message || typeof message !== "object") return;
+      const envelope = message as { requestId?: string; request?: LocalStorageBridgeRequest; type?: string; bucketId?: string; bucketGeneration?: number };
+      if (envelope.type === "lease") {
+        const lease = internals.localStorageBridgeLease;
+        if (lease && Number.isSafeInteger(envelope.bucketGeneration)) {
+          internals.localStorageBridgeLease = {
+            ...lease,
+            ...(envelope.bucketId === undefined ? { bucketId: undefined } : { bucketId: envelope.bucketId }),
+            bucketGeneration: envelope.bucketGeneration as number,
+          };
+        }
+        return;
+      }
+      if (!envelope.requestId || !envelope.request) return;
+      const controller = new AbortController();
+      const call = {
+        signal: controller.signal,
+        deadlineAt: Date.now() + 30_000,
+        reference,
+        origin: "local" as const,
+      } satisfies HandlerCallContext;
+      void internals.handleLocalStorageCapabilityRequest(localBridgeRequestWithoutTransportFields(envelope.request), call).then(
+        (response) => port.onmessage?.({ data: { requestId: envelope.requestId, ok: true, response } } as MessageEvent),
+        (error: unknown) => port.onmessage?.({ data: { requestId: envelope.requestId, ok: false, error: { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) } } } as MessageEvent),
+      );
+    },
+  };
+  return port;
 }
 
 function installBridgeGlobals(storage: BridgeMemoryStorage): () => void {
@@ -113,58 +407,47 @@ function installBridgeGlobals(storage: BridgeMemoryStorage): () => void {
 
 async function openTestLocalBridge(storage: BridgeMemoryStorage, current: StorageBucketCatalogEntryV2): Promise<{
   client: ReturnType<typeof createCoordinatorClient>;
-  workerPort: MessagePort;
+  workerPort: LocalBridgeTestPort;
   authorityInstanceId: string;
   leaseId: string;
 }> {
-  const client = createCoordinatorClient({ clientId: "local-bridge-test" });
-  const internals = client as unknown as LocalBridgeClientInternals;
-  const workerPort = internals.openLocalStorageBridge();
-  const lease = internals.localStorageBridgeLease;
-  if (!internals.localStorageBridgePort || !lease) throw new Error("Local bridge test endpoint was not created");
-  const authorityInstanceId = "authority:local-bridge-test";
-  workerPort.start();
   storage.setItem(STORAGE_CATALOG_KEY, JSON.stringify({
     format: "keymaster.storage.catalog",
     version: 2,
     selectedBucketId: current.bucketId,
     buckets: [current]
   }));
-  workerPort.postMessage({ type: "lease", authorityInstanceId, bucketId: current.bucketId, bucketGeneration: 1, leaseId: lease.leaseId });
-  await nextMacrotask();
-  await vi.waitFor(() => expect(internals.localStorageBridgeLease).toMatchObject({
-    authorityInstanceId,
-    bucketId: current.bucketId,
-    bucketGeneration: 1,
-    leaseId: lease.leaseId
-  }));
+  const client = createCoordinatorClient({ clientId: "local-bridge-test" });
+  const internals = client as unknown as LocalBridgeClientInternals;
+  const windowApp = await ensureTestWindowApp(client);
+  const workerPort = createLocalBridgeTestPort(internals, windowApp);
+  const lease = internals.localStorageBridgeLease;
+  if (!lease) throw new Error("Local bridge test lease was not created");
+  const authorityInstanceId = "authority:local-bridge-test";
+  workerPort.start();
+  expect(internals.localStorageBridgeLease).toMatchObject({ bucketId: current.bucketId, bucketGeneration: 1, leaseId: lease.leaseId });
   return { client, workerPort, authorityInstanceId, leaseId: lease.leaseId };
 }
 
 async function openEmptyTestLocalBridge(storage: BridgeMemoryStorage): Promise<{
   client: ReturnType<typeof createCoordinatorClient>;
-  workerPort: MessagePort;
+  workerPort: LocalBridgeTestPort;
   authorityInstanceId: string;
   leaseId: string;
 }> {
   const client = createCoordinatorClient({ clientId: "initial-local-bridge-test" });
   const internals = client as unknown as LocalBridgeClientInternals;
-  const workerPort = internals.openLocalStorageBridge();
+  const windowApp = await ensureTestWindowApp(client);
+  const workerPort = createLocalBridgeTestPort(internals, windowApp);
   const lease = internals.localStorageBridgeLease;
-  if (!internals.localStorageBridgePort || !lease) throw new Error("Local bridge test endpoint was not created");
+  if (!lease) throw new Error("Local bridge test lease was not created");
   const authorityInstanceId = "authority:initial-local-bridge-test";
   workerPort.start();
-  workerPort.postMessage({ type: "lease", authorityInstanceId, bucketGeneration: 0, leaseId: lease.leaseId });
-  await nextMacrotask();
-  await vi.waitFor(() => expect(internals.localStorageBridgeLease).toMatchObject({
-    authorityInstanceId,
-    bucketGeneration: 0,
-    leaseId: lease.leaseId
-  }));
+  expect(internals.localStorageBridgeLease).toMatchObject({ bucketGeneration: 0, leaseId: lease.leaseId });
   return { client, workerPort, authorityInstanceId, leaseId: lease.leaseId };
 }
 
-function sendBridgeRequest(workerPort: MessagePort, requestId: string, request: LocalStorageBridgeRequest): Promise<unknown> {
+function sendBridgeRequest(workerPort: LocalBridgeTestPort, requestId: string, request: LocalStorageBridgeRequest): Promise<unknown> {
   return new Promise((resolve) => {
     workerPort.onmessage = (event) => resolve(event.data);
     workerPort.postMessage({ requestId, request });
@@ -226,7 +509,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
       expect(host.state("vault").kind).toBe("enabled");
       expect(host.capabilities.has(VAULT_CAPABILITY)).toBe(true);
-      expect(host.capabilities.has("keyspace.service")).toBe(true);
+      expect(host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY)).toBe(true);
     } finally {
       globalThis.SharedWorker = original;
     }
@@ -247,9 +530,12 @@ describe("KeymasterSessionCoordinatorClient", () => {
         const cloned = structuredClone(message, { transfer });
         receivedLength = cloned.data.input.content.bytes.byteLength;
       }
-      queueMicrotask(() => port.onmessage?.({ data: { requestId: message.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: {} } } as MessageEvent));
+      const operationResult = message.kind === "hello"
+        ? { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }
+        : {};
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: message.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
-    const port = { start: vi.fn(), postMessage, close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const port = createTestMessagePort(postMessage);
     const worker = { port } as unknown as SharedWorker;
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => worker);
@@ -263,8 +549,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
   });
 
   it("uses the module URL constructor", async () => {
-    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
-    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
+    const port = createTestMessagePort();
+    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
     const worker = { port } as unknown as SharedWorker;
     const Constructor = vi.fn(() => worker);
     const original = globalThis.SharedWorker;
@@ -272,8 +558,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
     try {
       const client = createCoordinatorClient();
       await client.connect();
-      expect(Constructor).toHaveBeenCalledWith(expect.any(URL), {
-        name: "keymaster-coordinator-dev-20260818-woc-raw-text",
+      expect(Constructor).toHaveBeenCalledWith(expect.anything(), {
+        name: "keymaster-coordinator-dev",
         type: "module"
       });
     }
@@ -281,10 +567,10 @@ describe("KeymasterSessionCoordinatorClient", () => {
   });
 
   it("only uses a fixed SharedWorker name when the host explicitly requests one", async () => {
-    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string };
-      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
     });
     const Constructor = vi.fn(() => ({ port }) as unknown as SharedWorker);
     const original = globalThis.SharedWorker;
@@ -314,7 +600,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       expect(b.getBootstrapSnapshot().sessionEpoch).toBe("shared-epoch");
       const observed: string[] = [];
       b.subscribeTopic("session.state", (event: any) => observed.push(event.vaultStatus));
-      hub.broadcast({ topic: "session.state", sessionRevision: 1, type: "session.state.changed", cause: "unlock", sessionEpoch: "unlocked-epoch", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), selectedPublicKeyHex: "a".repeat(64), keyspaceGeneration: 1 });
+      await hub.broadcast({ topic: "session.state", sessionRevision: 1, type: "session.state.changed", cause: "unlock", sessionEpoch: "unlocked-epoch", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), selectedPublicKeyHex: "a".repeat(64), keyspaceGeneration: 1 });
       expect(b.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
       expect(b.getBootstrapSnapshot().selectedPublicKeyHex).toBe("a".repeat(64));
       expect(observed).toContain("unlocked");
@@ -334,7 +620,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client = createCoordinatorClient({ clientId: "epoch-transition" });
       await client.connect();
 
-      hub.broadcast({
+      await hub.broadcast({
         topic: "session.state",
         type: "session.state.changed",
         sessionRevision: 1,
@@ -344,7 +630,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         activePublicKeyHex: "a".repeat(64),
         keyspaceGeneration: 1
       });
-      hub.broadcast({
+      await hub.broadcast({
         topic: "session.state",
         type: "session.state.changed",
         sessionRevision: 2,
@@ -380,7 +666,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         activePublicKeyHex: null,
         keyspaceGeneration: 1,
       };
-      hub.broadcast({
+      await hub.broadcast({
         ...base,
         sessionRevision: 1,
         authorityRecovery: {
@@ -398,7 +684,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         handoverGeneration: 7,
       });
 
-      hub.broadcast({
+      await hub.broadcast({
         ...base,
         sessionRevision: 2,
         authorityRecovery: {
@@ -414,7 +700,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       // Session 事件整体非法时客户端进入断线安全态，不能继续信任旧诊断。
       expect(client.getBootstrapSnapshot().authorityRecovery).toBeUndefined();
 
-      hub.broadcast({ ...base, sessionRevision: 3, sessionEpoch: "epoch-2" });
+      await hub.broadcast({ ...base, sessionRevision: 3, sessionEpoch: "epoch-2" });
       expect(client.getBootstrapSnapshot().authorityRecovery).toBeUndefined();
     } finally {
       globalThis.SharedWorker = original;
@@ -440,9 +726,9 @@ describe("KeymasterSessionCoordinatorClient", () => {
         activePublicKeyHex: "c".repeat(64),
         keyspaceGeneration: 2,
       };
-      hub.broadcast(accepted);
-      hub.broadcast(accepted);
-      hub.broadcast({ ...accepted, sessionRevision: 1, sessionEpoch: "stale-epoch", activePublicKeyHex: "d".repeat(64) });
+      await hub.broadcast(accepted);
+      await hub.broadcast(accepted);
+      await hub.broadcast({ ...accepted, sessionRevision: 1, sessionEpoch: "stale-epoch", activePublicKeyHex: "d".repeat(64) });
 
       expect(events).toEqual([accepted]);
       expect(client.getBootstrapSnapshot()).toMatchObject({ sessionEpoch: "epoch-2", activePublicKeyHex: "c".repeat(64), keyspaceGeneration: 2 });
@@ -464,7 +750,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       client.subscribeTopic("session.state", (event) => vaultEvents.push(event));
       client.subscribeTopic("background.snapshot", (event) => backgroundEvents.push(event));
 
-      hub.broadcast({
+      await hub.broadcast({
         topic: "background.snapshot",
         type: "background.snapshot.changed",
         backgroundSnapshotRevision: 1,
@@ -480,7 +766,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
   });
 
   it("applies topic baselines returned by subscribe before exposing the client", async () => {
-    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string; kind: string };
       const operationResult = request.kind === "subscribe"
@@ -502,7 +788,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
               }
             }]
           }
-        : { sessionEpoch: "boot-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } };
+        : { authorityInstanceId: "authority:test", sessionEpoch: "boot-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } };
       queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "baseline-epoch", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
     const original = globalThis.SharedWorker;
@@ -516,7 +802,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
   it("binds plugin intent events to the current Worker authority and revision", async () => {
     const authority = "authority:client-test";
-    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string; kind: string; command?: unknown };
       let operationResult: unknown;
@@ -589,6 +875,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
         sessionEpoch: "e",
         snapshot: { revision: 99, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 99 } },
       } } as MessageEvent);
+      await nextMacrotask();
+      await nextMacrotask();
       expect(events).toHaveLength(1);
       expect(client.getBootstrapSnapshot().pluginIntent?.revision).toBe(2);
 
@@ -634,9 +922,9 @@ describe("KeymasterSessionCoordinatorClient", () => {
         sessionEpoch: "shared-epoch",
         units: [unit],
       };
-      hub.broadcast(accepted);
-      hub.broadcast({ ...accepted, units: [{ ...unit, instanceId: "worker-unit:stale" }] });
-      hub.broadcast({ ...accepted, authorityInstanceId: "authority:old", workerUnitRevision: 99 });
+      await hub.broadcast(accepted);
+      await hub.broadcast({ ...accepted, units: [{ ...unit, instanceId: "worker-unit:stale" }] });
+      await hub.broadcast({ ...accepted, authorityInstanceId: "authority:old", workerUnitRevision: 99 });
 
       expect(events).toEqual([accepted]);
       expect(client.getBootstrapSnapshot()).toMatchObject({
@@ -675,7 +963,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         sessionEpoch: "shared-epoch",
         units: [oldUnit],
       };
-      hub.broadcast(oldEvent);
+      await hub.broadcast(oldEvent);
 
       const nextEvent = {
         ...oldEvent,
@@ -695,10 +983,10 @@ describe("KeymasterSessionCoordinatorClient", () => {
         }],
       };
       // 运行单元事件先到时必须等待 session.state，而不能覆盖旧世代。
-      hub.broadcast(nextEvent);
+      await hub.broadcast(nextEvent);
       expect(client.getBootstrapSnapshot().coordinatorWorkerUnits).toEqual([oldUnit]);
 
-      hub.broadcast({
+      await hub.broadcast({
         topic: "session.state" as const,
         type: "session.state.changed" as const,
         sessionRevision: 1,
@@ -715,7 +1003,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
       // 新世代已经确认后，迟到的旧世代即使 revision 更大也只能暂存，
       // 不能改写当前页面状态或触发运行单元监听器。
-      hub.broadcast({ ...oldEvent, workerUnitRevision: 99, units: [{ ...oldUnit, instanceId: "worker-unit:late-old" }] });
+      await hub.broadcast({ ...oldEvent, workerUnitRevision: 99, units: [{ ...oldUnit, instanceId: "worker-unit:late-old" }] });
       expect(events).toHaveLength(2);
       expect(client.getBootstrapSnapshot().coordinatorWorkerUnits).toEqual(expect.arrayContaining([
         expect.objectContaining({ instanceId: "worker-unit:next" }),
@@ -724,8 +1012,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
   });
 
   it("clears an unlocked snapshot on transport timeout before reconnect", async () => {
-    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
-    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
+    const port = createTestMessagePort();
+    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -739,11 +1027,11 @@ describe("KeymasterSessionCoordinatorClient", () => {
   });
 
   it("normalizes every public command/value facade on transport loss", async () => {
-    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string; kind: string };
       if (request.kind === "hello" || request.kind === "subscribe") {
-        queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
+        queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
       }
     });
     const original = globalThis.SharedWorker;
@@ -759,23 +1047,22 @@ describe("KeymasterSessionCoordinatorClient", () => {
   });
 
   it("rejects immediately when the SharedWorker reports a startup error", async () => {
-    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const port = createTestMessagePort();
     const worker = { port, onerror: null as ((event: Event) => void) | null } as unknown as SharedWorker;
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => worker);
     try {
       const client = createCoordinatorClient({ requestTimeoutMs: 1_000, reconnectIntervalMs: 1_000 });
       const connecting = client.connect();
+      await nextMacrotask();
       worker.onerror?.({ message: "module failed to load" } as ErrorEvent);
-      await expect(connecting).rejects.toThrow("Coordinator worker error: module failed to load");
+      await expect(connecting).rejects.toThrow(/Capability exposure was revoked|SharedWorker disconnected/u);
     } finally { globalThis.SharedWorker = original; }
   });
 
   it("notifies the Coordinator to cancel an in-flight Channel request", async () => {
     const sent: Array<{ kind?: string; requestId?: string; targetRequestId?: string }> = [];
-    const port = {
-      start: vi.fn(),
-      postMessage: vi.fn((message: { kind?: string; requestId?: string; targetRequestId?: string }) => {
+    const postMessage = vi.fn((message: { kind?: string; requestId?: string; targetRequestId?: string }) => {
         sent.push(message);
         if (message.kind === "hello" || message.kind === "subscribe") {
           queueMicrotask(() => port.onmessage?.({
@@ -800,11 +1087,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
             data: { requestId: message.requestId, sessionEpoch: "channel-epoch", ack: { status: "ok" } },
           } as MessageEvent));
         }
-      }),
-      close: vi.fn(),
-      onmessage: null as ((event: MessageEvent) => void) | null,
-      onmessageerror: null,
-    };
+      });
+    const port = createTestMessagePort(postMessage);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -823,7 +1107,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       await expect(operation).resolves.toMatchObject({ status: "transport-error" });
       expect(sent).toContainEqual(expect.objectContaining({
         kind: "channel.cancel",
-        targetRequestId: channelRequest?.requestId,
+        targetRequestId: expect.stringMatching(/^req-/u),
       }));
     } finally { globalThis.SharedWorker = original; }
   });

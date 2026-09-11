@@ -43,6 +43,9 @@ import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import type { KeyspaceService } from "@keymaster/contracts";
 import {
   KeyPersistedButActivationFailedError,
+  KEYSPACE_SERVICE_CAPABILITY,
+  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
   type VaultService
 } from "@keymaster/contracts";
 import { FirstTimeImportWizard } from "./FirstTimeImportWizard.js";
@@ -52,9 +55,9 @@ import { VaultKeyDeleteModal } from "@keymaster/plugin-vault";
 type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "unlock-form";
 
 export function LockedShell() {
-  const vault = useCapability<VaultService>("vault.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const storage = useOptionalCapability<{ isCatalogBucket?: () => boolean }>("storage.runtime-controller");
+  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
+  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。

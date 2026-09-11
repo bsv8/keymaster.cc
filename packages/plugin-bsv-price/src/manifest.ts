@@ -9,22 +9,25 @@
 //     注入，只作为首次 seed；运行时编辑器走「设置 → 应用设置」；
 //   - **不**接触 provider handle / wire。
 
+import { defineCapability } from "webloom-framework";
 import type {
-  ApplicationSettingsRegistry,
   ChannelRuntimeFactory,
-  BusinessFeatureRegistry,
-  HomeRegistry,
   I18nPluginResources,
-  KeyspaceService,
   PluginManifest,
   PluginSetup,
   ResourceRegistry
 } from "@keymaster/contracts";
 import {
   CHANNEL_RUNTIME_CAPABILITY,
+  ROUTE_REGISTRY_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
+  HOME_REGISTRY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
+  capabilityDescriptor,
   defineRuntimeUnitDependencies,
-  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import {
   BSV_PRICE_CONFIG_KEY,
@@ -38,7 +41,11 @@ import { BsvPriceHomeWidget } from "./BsvPriceHomeWidget.js";
 /** plugin-bsv-price 插件 id。 */
 export const BSV_PRICE_PLUGIN_ID = "bsv-price";
 /** 插件对外 service capability key。 */
-export const BSV_PRICE_SERVICE_CAPABILITY = "bsv-price.service";
+export const BSV_PRICE_SERVICE_CAPABILITY = defineCapability<BsvPriceService>({
+  kind: "local",
+  id: "bsv-price.service",
+  version: "1",
+});
 
 const bsvPriceResources: I18nPluginResources = {
   namespace: "bsv-price",
@@ -161,20 +168,17 @@ const bsvPricePluginDefinition = {
   description:
     "BSV 价格业务插件：消费 Coordinator Channel，订阅 PriceCast publisher 公钥频道，展示交易所价格快照。",
   i18n: bsvPriceResources,
-  meta: {
-    kind: "business",
-    startup: "optional",
-    bootstrapStage: "owner-apps-ready",
-    defaultEnabled: true,
-    canDisable: true,
-    displayGroup: "business"
-  },
+  kind: "business",
+  startup: "optional",
+  bootstrapStage: "owner-apps-ready",
+  defaultEnabled: true,
+  canDisable: true,
+  displayGroup: "business",
   units: [{
     id: "bsv-price.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: [BSV_PRICE_SERVICE_CAPABILITY],
-    providedContracts: defineRuntimeUnitProvidedContracts([BSV_PRICE_SERVICE_CAPABILITY]),
+    provides: [capabilityDescriptor(BSV_PRICE_SERVICE_CAPABILITY)],
     storage: { scope: "key", applicationStorageId: "BsvPrice", schemaVersion: 1 },
     config: {
       // 缺省空对象 → plugin 进入 not_configured 状态。
@@ -182,16 +186,16 @@ const bsvPricePluginDefinition = {
     },
     dependencies: defineRuntimeUnitDependencies([
       {
-        capability: CHANNEL_RUNTIME_CAPABILITY,
+        capability: CHANNEL_RUNTIME_CAPABILITY, sourceRuntime: "window-main",
         reason: "通过 Coordinator Channel runtime 订阅精确价格频道"
       },
-      { capability: "route.registry", reason: "注册行情页与应用设置详情页" },
-      { capability: "breadcrumb.registry", reason: "为行情页与应用设置详情页提供面包屑" },
-      { capability: "application-settings.registry", reason: "注册应用设置目录入口" },
-      { capability: "business.registry", reason: "将行情页挂入首页业务域" },
-      { capability: "home.registry", reason: "将 BSV 价格快照显示在首页右侧栏" },
-      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 BSV Price 状态资源" },
-      { capability: "keyspace.service", reason: "active key 就绪后加载 owner 配置" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册行情页与应用设置详情页" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "为行情页与应用设置详情页提供面包屑" },
+      { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册应用设置目录入口" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将行情页挂入首页业务域" },
+      { capability: HOME_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将 BSV 价格快照显示在首页右侧栏" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 BSV Price 状态资源" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "active key 就绪后加载 owner 配置" },
     ]),
   }],
   async setup(ctx) {
@@ -211,8 +215,8 @@ const bsvPricePluginDefinition = {
         ? (cfg[BSV_PRICE_CONFIG_KEY] as string)
         : "";
 
-    const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(BSV_PRICE_PLUGIN_ID);
-    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(BSV_PRICE_PLUGIN_ID);
+    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: publisherHex,
       storage: ctx.storage
@@ -222,38 +226,22 @@ const bsvPricePluginDefinition = {
       if (state.activePublicKeyHex) void service.ready().catch((error) => console.warn("[bsv-price] failed to load owner configuration", error));
     });
     ctx.provide(BSV_PRICE_SERVICE_CAPABILITY, service);
-    const resources = ctx.has(RESOURCE_REGISTRY_CAPABILITY)
-      ? ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY)
-      : undefined;
+    const resources = ctx.optionalCapability(RESOURCE_REGISTRY_CAPABILITY);
     resources?.register<BsvPriceServiceSnapshot, readonly string[]>({
       id: "bsv-price.snapshot",
       scope: "global",
       key: () => ["bsv-price.snapshot"],
-      load: async (_args, context) => context.getCapability<BsvPriceService>(BSV_PRICE_SERVICE_CAPABILITY)!.snapshot(),
-      subscribe: (_args, context, invalidate) => context.getCapability<BsvPriceService>(BSV_PRICE_SERVICE_CAPABILITY)?.subscribe(invalidate) ?? (() => {}),
+      load: async () => service.snapshot(),
+      subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
       invalidation: "immediate"
     });
 
-    const routes = ctx.get<{
-      register(input: {
-        id: string;
-        path: string;
-        component: unknown;
-        label: { key: string; fallback: string };
-      }): void;
-    }>("route.registry");
-    const breadcrumbs = ctx.get<{
-      register(input: {
-        id: string;
-        order?: number;
-        match: (path: string) => boolean;
-        resolve: () => Array<{ label: { key: string; fallback: string } }>;
-      }): void;
-    }>("breadcrumb.registry");
-    const applicationSettings = ctx.get<ApplicationSettingsRegistry>("application-settings.registry");
-    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
-    const home = ctx.get<HomeRegistry>("home.registry");
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
+    const applicationSettings = ctx.capability(APPLICATION_SETTINGS_REGISTRY_CAPABILITY);
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
+    const home = ctx.capability(HOME_REGISTRY_CAPABILITY);
 
     routes.register({
       id: "bsv-price.page",

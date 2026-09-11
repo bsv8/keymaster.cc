@@ -1,4 +1,5 @@
 // Channel 运行时契约。
+import { defineCapability } from "webloom-framework";
 //
 // 说明：Channel 是唯一的消息/发布抽象。这里不暴露 Supplier、SSP Wire、私钥、
 // 付款信息或远端历史；这些都属于 Coordinator 和 SatSubscription 内部。
@@ -142,7 +143,15 @@ export interface ConnectChannelRuntime {
 }
 
 /** Channel 运行时 capability key。 */
-export const CHANNEL_RUNTIME_CAPABILITY = "channel.runtime";
+export const CHANNEL_RUNTIME_CAPABILITY = defineCapability<ChannelRuntimeFactory>({
+  kind: "local",
+  id: "channel.runtime",
+  version: "1",
+});
 
 /** Protocol Service 注入的 Connect Channel facade capability key。 */
-export const CONNECT_CHANNEL_RUNTIME_CAPABILITY = "channel.connect-runtime";
+export const CONNECT_CHANNEL_RUNTIME_CAPABILITY = defineCapability<ConnectChannelRuntime>({
+  kind: "local",
+  id: "channel.connect-runtime",
+  version: "1",
+});

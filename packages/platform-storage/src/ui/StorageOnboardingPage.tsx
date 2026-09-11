@@ -1,4 +1,4 @@
-import type { StorageRuntimeController } from "@keymaster/contracts";
+import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY, type StorageRuntimeController } from "@keymaster/contracts";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController.js";
@@ -7,7 +7,7 @@ import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController
 export function StorageOnboardingPage() {
   const { t } = useI18n();
   const host = usePluginHost();
-  const service = useCapability<StorageRuntimeController>("storage.runtime-controller");
+  const service = useCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const hasRetry = typeof (service as StorageRuntimeController & { retry?: () => Promise<unknown> }).retry === "function";
   const snapshot = useResourceSelector<StorageRuntimeSnapshot, StorageRuntimeSnapshot>(
     host.resourceStore,

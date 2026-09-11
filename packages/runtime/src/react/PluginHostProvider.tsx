@@ -3,8 +3,9 @@
 // 设计缘由：组件层只通过 hooks 访问能力，不要直接 import 内部模块。
 // 硬切换 001：host 进入运行期可卸载，host.version 变化要触发订阅者重渲染。
 
-import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
-import { PluginHostProvider as WebLoomPluginHostProvider } from "webloom-framework/react";
+import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { WebLoomProvider, type WebLoomApp } from "webloom-framework/react";
+import type { Capability, CapabilityClient } from "webloom-framework";
 import type { PluginHost } from "../pluginHostContract.js";
 import { getWebLoomHost } from "../pluginHostContract.js";
 
@@ -16,20 +17,38 @@ export interface PluginHostProviderProps {
 }
 
 export function PluginHostProvider({ host, children }: PluginHostProviderProps) {
-  // 订阅 host 变化：每次 enable / disable / unregister 后 bump version，
-  // 我们把 version 透到 state 触发子树重渲染（hooks 自身也用 useHostVersion）。
-  const [version, setVersion] = useState<number>(host.version());
-  useEffect(() => {
-    return host.subscribe((snap) => {
-      setVersion(snap.version);
-    });
+  const app = useMemo(() => {
+    const webLoomHost = getWebLoomHost(host);
+    return {
+      runtimeKind: webLoomHost.runtimeKind,
+      runtimeId: webLoomHost.runtimeId,
+      runtimeInstanceId: webLoomHost.runtimeInstanceId,
+      state: () => ({
+        protocolVersion: "webloom.runtime.v1" as const,
+        runtimeId: webLoomHost.runtimeId,
+        runtimeKind: webLoomHost.runtimeKind,
+        runtimeInstanceId: webLoomHost.runtimeInstanceId,
+        revision: webLoomHost.version,
+        state: "ready" as const,
+        units: [],
+        services: [],
+      }),
+      pluginState: (pluginId: string) => webLoomHost.state(pluginId),
+      capability<C extends Capability>(capability: C): CapabilityClient<C> {
+        return webLoomHost.capability(capability);
+      },
+      optionalCapability<C extends Capability>(capability: C): CapabilityClient<C> | undefined {
+        return webLoomHost.optionalCapability(capability);
+      },
+      inspect: () => webLoomHost.inspect(),
+      subscribe: (listener: () => void) => webLoomHost.subscribe(listener),
+      dispose: (reason?: string) => webLoomHost.dispose(reason),
+    } as unknown as WebLoomApp;
   }, [host]);
-  // version 仅作为"key 变化"挂在这里，不再通过 context 暴露（避免误用）。
-  void version;
   return (
-    <WebLoomPluginHostProvider host={getWebLoomHost(host)}>
+    <WebLoomProvider app={app}>
       <PluginHostContext.Provider value={host}>{children}</PluginHostContext.Provider>
-    </WebLoomPluginHostProvider>
+    </WebLoomProvider>
   );
 }
 
@@ -45,7 +64,7 @@ export function usePluginHost(): PluginHost {
  */
 export function useHostVersion(): number {
   const host = usePluginHost();
-  const [v, setV] = useState<number>(host.version());
-  useEffect(() => host.subscribe((s) => setV(s.version)), [host]);
-  return v;
+  const [version, setVersion] = useState<number>(host.version());
+  useEffect(() => host.subscribe((snapshot) => setVersion(snapshot.version)), [host]);
+  return version;
 }
