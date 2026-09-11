@@ -120,6 +120,7 @@ import {
 import {
   createPluginHost as createWebLoomPluginHost,
   createResourceRegistry,
+  createRuntimeUnitImplementationRegistry,
   registerOwnedResource,
   bridgeForRuntimeHandle,
   type PluginConfigStore as WebLoomPluginConfigStore,
@@ -1101,13 +1102,35 @@ export function createKeymasterPluginHost(
     };
   }
 
-  const implementationRegistry: WebLoomRuntimeUnitImplementationRegistry = {
+  // WindowApp 的 registerPlugins() 会在 Host 创建后追加当前 realm 的原生
+  // WebLoom 实现，因此这里不能只暴露旧 Keymaster registry 的只读 get()。
+  // 动态实现保存在独立覆盖层：它们使用原生 WebLoom PluginContext；只有
+  // Keymaster 静态 catalog 的旧 setup 才需要 wrapSetup() 领域适配。
+  const dynamicImplementationRegistry = createRuntimeUnitImplementationRegistry();
+  const implementationRegistry = {
     get(pluginId, unitId) {
+      const dynamicSetup = dynamicImplementationRegistry.get(pluginId, unitId);
+      if (dynamicSetup) return dynamicSetup;
       const manifest = manifests.get(pluginId);
       if (!manifest) return undefined;
       const setup = options.runtimeUnitImplementationRegistry?.get(pluginId, unitId) as PluginSetup | undefined;
       return setup ? wrapSetup(manifest, setup) : undefined;
     },
+    getCapabilities(pluginId, unitId) {
+      const dynamicCapabilities = dynamicImplementationRegistry.getCapabilities?.(pluginId, unitId);
+      if (dynamicCapabilities !== undefined) return dynamicCapabilities;
+      const suppliedRegistry = options.runtimeUnitImplementationRegistry as WebLoomRuntimeUnitImplementationRegistry | undefined;
+      return suppliedRegistry?.getCapabilities?.(pluginId, unitId);
+    },
+    register(implementation: Parameters<typeof dynamicImplementationRegistry.register>[0]) {
+      dynamicImplementationRegistry.register(implementation);
+    },
+    unregister(pluginId: string, unitId: string) {
+      dynamicImplementationRegistry.unregister(pluginId, unitId);
+    },
+  } satisfies WebLoomRuntimeUnitImplementationRegistry & {
+    register: typeof dynamicImplementationRegistry.register;
+    unregister: typeof dynamicImplementationRegistry.unregister;
   };
 
   const legacyBuiltinCapabilities: HostCapabilityRegistration[] = [

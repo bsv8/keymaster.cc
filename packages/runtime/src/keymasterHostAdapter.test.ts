@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { defineCapability } from "webloom-framework";
+import { createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
 import type { PluginSetup } from "@keymaster/contracts";
 import { createKeymasterPluginHost } from "./keymasterHostAdapter.js";
+import { getWebLoomHost } from "./pluginHostContract.js";
 
 const LOCAL_CAPABILITY = defineCapability<{ ok: boolean }>({
   kind: "local",
@@ -10,6 +12,42 @@ const LOCAL_CAPABILITY = defineCapability<{ ok: boolean }>({
 });
 
 describe("Keymaster WebLoom v4 adapter", () => {
+  it("allows staged native WebLoom implementations after WindowApp takes ownership", async () => {
+    const host = createKeymasterPluginHost({
+      runtime: "window-main",
+      disableConfigPersistence: true,
+      runtimeUnitImplementationRegistry: { get: () => undefined },
+    });
+    const app = await createWindowAppFromHost({
+      id: "adapter-window",
+      host: getWebLoomHost(host),
+    });
+
+    await registerPlugins(app, [{
+      manifest: {
+        id: "native-staged-plugin",
+        name: "Native staged plugin",
+        startup: "required",
+        defaultEnabled: true,
+        canDisable: false,
+        units: [{
+          id: "native-staged-plugin.window",
+          runtime: "window-main",
+          provides: [LOCAL_CAPABILITY],
+        }],
+      },
+      unitId: "native-staged-plugin.window",
+      capabilities: [LOCAL_CAPABILITY],
+      setup(context) {
+        context.provide(LOCAL_CAPABILITY, { ok: true });
+      },
+    }]);
+
+    expect(app.pluginState?.("native-staged-plugin")?.kind).toBe("enabled");
+    expect(app.capability(LOCAL_CAPABILITY)).toEqual({ ok: true });
+    await app.dispose("test");
+  });
+
   it("converts a typed Keymaster manifest and binds setup to a scoped capability", async () => {
     let seenPluginId: string | undefined;
     let seenUnitId: string | undefined;
