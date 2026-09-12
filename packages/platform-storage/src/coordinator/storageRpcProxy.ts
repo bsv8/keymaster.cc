@@ -121,12 +121,6 @@ export class StorageRpcProxy implements StorageRuntimeController {
       ...(input.connection === undefined ? {} : { connection: input.connection }),
     });
   }
-  inspectLegacyInitialSetup(password: string): Promise<import("@keymaster/contracts").InitialSetupLegacyInspection> {
-    return this.control({ type: "initial-setup-legacy-inspect", password });
-  }
-  cleanupLegacyInitialSetup(password: string): Promise<import("@keymaster/contracts").InitialSetupLegacyCleanupResult> {
-    return this.control({ type: "initial-setup-legacy-cleanup", password });
-  }
   unlockStorageProfile(password: string): Promise<StorageProbeResult> { return this.control({ type: "unlock-profile", password }); }
   /** 新版桶目录的临时解锁；密码只进入本次 Worker bootstrap。 */
   async unlockBucket(password: string): Promise<unknown> {

@@ -92,8 +92,6 @@ import type {
   InitialSetupPlan,
   InitialSetupResult,
   InitialSetupRecoveryResult,
-  InitialSetupLegacyInspection,
-  InitialSetupLegacyCleanupResult,
   StorageBucketPasswordRotationResultV1,
   StorageBucketSwitchResultV1,
   StorageBucketCatalogEntryV2,
@@ -175,7 +173,7 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
 const STORAGE_CONTROL_TYPES = [
   "status", "summary", "connection", "unlock-profile", "unlock-bucket", "initial-setup",
   "initial-setup-result", "initial-setup-recovery-list", "initial-setup-cleanup",
-  "initial-setup-legacy-inspect", "initial-setup-legacy-cleanup", "switch-bucket",
+  "switch-bucket",
   "change-bucket-config", "rename-bucket", "select-opfs", "import-profile", "retry",
   "change-bucket-password", "probe", "activate", "clear", "reset", "cancel-probe",
   "capabilities", "probe-capabilities", "cold-export",
@@ -259,8 +257,6 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
   C extends { type: "initial-setup-result" } ? InitialSetupResult | undefined :
   C extends { type: "initial-setup-recovery-list" } ? InitialSetupRecoveryRecordV1[] :
   C extends { type: "initial-setup-cleanup" } ? InitialSetupRecoveryResult :
-  C extends { type: "initial-setup-legacy-inspect" } ? InitialSetupLegacyInspection :
-  C extends { type: "initial-setup-legacy-cleanup" } ? InitialSetupLegacyCleanupResult :
   C extends { type: "switch-bucket" } ? StorageBucketSwitchResultV1 :
   C extends { type: "change-bucket-config" | "rename-bucket" } ? StorageBucketCatalogEntryV2 :
   C extends { type: "change-bucket-password" } ? StorageBucketPasswordRotationResultV1 :
@@ -828,7 +824,7 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
     case "status": case "summary": case "connection": case "select-opfs": case "retry":
     case "initial-setup-recovery-list": case "cancel-probe": case "capabilities": case "probe-capabilities": case "cold-export":
       return { type };
-    case "unlock-profile": case "unlock-bucket": case "initial-setup-legacy-inspect": case "initial-setup-legacy-cleanup":
+    case "unlock-profile": case "unlock-bucket":
       return { type, password: text(control.password, "storage control." + type + ".password", 4_096) };
     case "initial-setup":
       return { type, plan: parseInitialSetupPlan(control.plan) };
@@ -1882,26 +1878,6 @@ function parseStorageRecoveryResult(value: unknown, field: string): InitialSetup
   throw new TypeError(`Coordinator ${field}.status is invalid`);
 }
 
-function parseStorageLegacyInspection(value: unknown, field: string): InitialSetupLegacyInspection {
-  const result = expectRecord(value, field);
-  const status = enumValue(result.status, ["none", "safe-to-clean", "unsafe"] as const, field + ".status");
-  if (status === "none") return { status };
-  const bucket = expectRecord(result.bucket, field + ".bucket");
-  const parsedBucket = {
-    bucketId: text(bucket.bucketId, field + ".bucket.bucketId", 128),
-    label: text(bucket.label, field + ".bucket.label", 256),
-    backend: enumValue(bucket.backend, ["local", "s3"] as const, field + ".bucket.backend"),
-  };
-  return status === "safe-to-clean" ? { status, bucket: parsedBucket } : { status, bucket: parsedBucket, reason: text(result.reason, field + ".reason", 2_048) };
-}
-
-function parseStorageLegacyCleanup(value: unknown, field: string): InitialSetupLegacyCleanupResult {
-  const result = expectRecord(value, field);
-  if (result.ok === true) return { ok: true };
-  if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, field + ".error") };
-  throw new TypeError(`Coordinator ${field}.ok is invalid`);
-}
-
 function parseStorageBucketSwitchResult(value: unknown, field: string): StorageBucketSwitchResultV1 {
   const result = expectRecord(value, field);
   if (result.ok !== true) throw new TypeError(`Coordinator ${field}.ok is invalid`);
@@ -1930,7 +1906,6 @@ function parseStorageControlResult(value: unknown, field: string): CoordinatorSt
   if (Array.isArray(value)) return value.map((item, index) => parseLocalStorageRecoveryRecord(item, `${field}[${index}]`));
   const result = expectRecord(value, field);
   if (result.status === "setup-succeeded" || result.status === "cleanup-confirmed" || result.status === "cleanup-required" || result.status === "not-found") return parseStorageRecoveryResult(result, field);
-  if (result.status === "none" || result.status === "safe-to-clean" || result.status === "unsafe") return parseStorageLegacyInspection(result, field);
   if (result.status === "selected") return parseStorageSelectedResult(result, field);
   if ("firstKey" in result || (result.ok === false && "error" in result)) return parseInitialSetupResult(result, field);
   if (result.ok === true && "vaultUnlocked" in result) return parseStorageBucketSwitchResult(result, field);
@@ -2511,10 +2486,6 @@ function parseStorageControlResultFor(control: CoordinatorStorageControl, value:
       return value.map((item, index) => parseLocalStorageRecoveryRecord(item, `${field}[${index}]`));
     case "initial-setup-cleanup":
       return parseStorageRecoveryResult(value, field);
-    case "initial-setup-legacy-inspect":
-      return parseStorageLegacyInspection(value, field);
-    case "initial-setup-legacy-cleanup":
-      return parseStorageLegacyCleanup(value, field);
     case "switch-bucket":
       return parseStorageBucketSwitchResult(value, field);
     case "change-bucket-config":

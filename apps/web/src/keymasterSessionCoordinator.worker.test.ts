@@ -1991,42 +1991,6 @@ describe("Session Coordinator initial setup transaction", () => {
     expect(fixture.events).not.toContain("delete");
   });
 
-  it("只在确认旧半截桶没有 Key、owner 和业务对象时允许清理", async () => {
-    const entry = await makeEncryptedLocalCatalogEntry("legacy-empty-001", "旧版半截桶", "legacy-password");
-    const fixture = makeInitialSetupWorkerBridge({
-      format: "keymaster.storage.catalog",
-      version: 2,
-      selectedBucketId: entry.bucketId,
-      buckets: [entry],
-    });
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    await __testInstallCatalogLocalBinding(entry);
-
-    const inspected = await __testDispatchStorageControl({ type: "initial-setup-legacy-inspect", password: "legacy-password" });
-    expect(inspected.operationResult).toEqual({ status: "safe-to-clean", bucket: { bucketId: entry.bucketId, label: entry.label, backend: "local" } });
-    const cleaned = await __testDispatchStorageControl({ type: "initial-setup-legacy-cleanup", password: "legacy-password" });
-    expect(cleaned).toMatchObject({ ack: { status: "ok" }, operationResult: { ok: true } });
-    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    expect(fixture.storage.length).toBe(0);
-  });
-
-  it("发现旧桶存在 owner namespace 时拒绝自动清理", async () => {
-    const entry = await makeEncryptedLocalCatalogEntry("legacy-owner-001", "含 owner 的旧桶", "legacy-password");
-    const fixture = makeInitialSetupWorkerBridge({
-      format: "keymaster.storage.catalog",
-      version: 2,
-      selectedBucketId: entry.bucketId,
-      buckets: [entry],
-    });
-    fixture.storage.setItem(`keymaster.bucket.${entry.bucketId}.02${"ab".repeat(32)}/owner-data`, btoa("business"));
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    await __testInstallCatalogLocalBinding(entry);
-
-    const inspected = await __testDispatchStorageControl({ type: "initial-setup-legacy-inspect", password: "legacy-password" });
-    expect(inspected.operationResult).toMatchObject({ status: "unsafe", bucket: { bucketId: entry.bucketId } });
-    expect((inspected.operationResult as { status: string; reason?: string }).reason).toContain("owner namespace");
-    expect(fixture.getCatalog()).toMatchObject({ selectedBucketId: entry.bucketId, buckets: [entry] });
-  });
 });
 
 // ============================================================

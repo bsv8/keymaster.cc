@@ -358,17 +358,6 @@ export interface InitialSetupRecoveryRecordV1 {
   updatedAt: number;
 }
 
-/** 旧版本“已选桶但没有完整首 Key”的安全检查结果。 */
-export type InitialSetupLegacyInspection =
-  | { status: "none" }
-  | { status: "safe-to-clean"; bucket: Pick<StorageBucketCatalogEntryV2, "bucketId" | "label" | "backend"> }
-  | { status: "unsafe"; bucket: Pick<StorageBucketCatalogEntryV2, "bucketId" | "label" | "backend">; reason: string };
-
-/** 旧半截初始化精确清理结果。 */
-export type InitialSetupLegacyCleanupResult =
-  | { ok: true }
-  | { ok: false; error: StorageUserFacingError };
-
 /** Hold 快照的认证标签。 */
 export interface StorageHoldIntegrityV1 {
   /** 整份 Hold 文档使用的认证算法。 */

@@ -149,7 +149,7 @@ import { createBsv21CoordinatorTask, BSV21_STORAGE_ID, BSV21_SCHEMA_VERSION } fr
 import { createStasCoordinatorTask, STAS_STORAGE_ID, STAS_SCHEMA_VERSION } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService, CONTACTS_STORAGE_ID, CONTACTS_SCHEMA_VERSION } from "@keymaster/plugin-contacts/coordinator";
-import type { InitialSetupFirstKey, InitialSetupLegacyCleanupResult, InitialSetupLegacyInspection, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupResult, KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageCatalogV2, VaultService, WocService } from "@keymaster/contracts";
+import type { InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupResult, KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageCatalogV2, VaultService, WocService } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -2529,208 +2529,6 @@ async function getInitialSetupResult(transactionId: string): Promise<InitialSetu
   await loadInitialSetupRecoveryRecords();
   const recovered = initialSetupRecoveryRecords.get(transactionId);
   return recovered ? resultFromInitialSetupRecovery(recovered) : undefined;
-}
-
-function legacyBucketSummary(entry: StorageBucketCatalogEntryV2): Pick<StorageBucketCatalogEntryV2, "bucketId" | "label" | "backend"> {
-  return { bucketId: entry.bucketId, label: entry.label, backend: entry.backend };
-}
-
-async function listLegacyBucketObjects(provider: StorageBucketProvider): Promise<Array<{ path: string; etag?: string }>> {
-  const objects: Array<{ path: string; etag?: string }> = [];
-  let cursor: string | undefined;
-  for (let pass = 0; pass < 128; pass += 1) {
-    const page = await provider.list({ cursor, limit: 1000 });
-    objects.push(...page.objects.map((object) => ({ path: object.path, etag: object.etag })));
-    if (!page.nextCursor) return objects;
-    cursor = page.nextCursor;
-  }
-  throw new StorageRuntimeError("storage_limit_exceeded", "Legacy initialization inspection exceeded the object limit");
-}
-
-async function selectedLegacyCatalogEntry(): Promise<StorageBucketCatalogEntryV2 | undefined> {
-  const catalog = await readInitialSetupCatalog();
-  if (!catalog.selectedBucketId) return undefined;
-  return catalog.buckets.find((candidate) => candidate.bucketId === catalog.selectedBucketId);
-}
-
-async function catalogEntryConnectionFingerprint(entry: StorageBucketCatalogEntryV2, password: string): Promise<string | undefined> {
-  if (entry.backend !== "s3") return undefined;
-  const context = await deriveBucketCryptoContext(password, entry.keyDerivation);
-  try {
-    const connection = await decryptBucketConfig(entry.encryptedConfig, context);
-    return initialSetupConnectionFingerprint(connection);
-  } finally {
-    context.dispose();
-  }
-}
-
-function legacyOwnerObject(path: string): boolean {
-  return /^(?:02|03)[0-9a-f]{64}\//iu.test(path)
-    || /^\.keymaster\/owners\/(?:02|03)[0-9a-f]{64}(?:\/|$)/iu.test(path);
-}
-
-function legacyBusinessObject(path: string): boolean {
-  const top = path.split("/", 1)[0] ?? "";
-  // 这些是平台 Root/ Hold 自己的物理 namespace；其它顶层目录可能是
-  // 应用业务数据，不能在“旧半截初始化”入口中猜测并删除。
-  return !new Set([".keymaster", "keys", "settings", "logs", "protocol", "session", "storage", "coordinator"]).has(top);
-}
-
-async function inspectLegacyInitialSetup(password: string): Promise<InitialSetupLegacyInspection> {
-  const entry = await selectedLegacyCatalogEntry();
-  if (!entry) return { status: "none" };
-  if (typeof password !== "string" || password.length < 8) {
-    throw new StorageRuntimeError("storage_identity_required", "Bucket password must contain at least 8 characters");
-  }
-
-  const generation = platformRootStore?.bucket.bucketGeneration ?? 1;
-  // 清理 Provider 必须带 cleanupOnly 权限：目录 CAS 撤销后，Local
-  // candidate 仍可访问本事务命名空间，但不会获得写入其它桶的能力。
-  const provider = await createCatalogProviderForSwitch(entry, password, generation, undefined, true);
-  try {
-    // 空 Hold 也必须先证明目录配置确实属于这次输入的桶密码。
-    const context = await deriveBucketCryptoContext(password, entry.keyDerivation);
-    try { await decryptBucketConfig(entry.encryptedConfig, context); }
-    finally { context.dispose(); }
-
-    let committed: Awaited<ReturnType<ReturnType<typeof createStorageHoldSnapshotRepository>["readCommitted"]>> | undefined;
-    try {
-      committed = await createStorageHoldSnapshotRepository(provider).readCommitted();
-    } catch (error) {
-      if (!(error instanceof StorageRuntimeError) || error.code !== "storage_not_found") throw error;
-    }
-    if (committed && committed.keys.length > 0) {
-      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "Hold 快照已经包含 Key，不能按旧半截初始化删除。" };
-    }
-
-    const objects = await listLegacyBucketObjects(provider);
-    if (objects.some((object) => legacyOwnerObject(object.path))) {
-      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "桶内已经存在 owner namespace，不能证明没有业务数据。" };
-    }
-    const unknownObjects = objects.filter((object) => legacyBusinessObject(object.path));
-    if (unknownObjects.length > 0) {
-      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "桶内存在非初始化目录对象，必须走人工迁移/审计。" };
-    }
-
-    const hasCurrentKeysBinding = platformRootStore?.bucket.bucketId === entry.bucketId
-      && platformRootStore.bucket.provider === entry.backend
-      && platformBucketProvider?.bucketId === entry.bucketId
-      && platformBucketProvider.provider === entry.backend
-      && platformKeysStore !== undefined;
-    if (!hasCurrentKeysBinding || !platformKeysStore) {
-      return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "当前 Storage Root 未绑定到该桶，不能证明 keys/ 和公开索引为空。" };
-    }
-    {
-      const vault = createVaultKeyRepository(platformKeysStore);
-      const [meta, legacyKeys, index] = await Promise.all([
-        vault.getMeta(),
-        vault.listKeys(),
-        createStorageCatalogKeyIndexRepository(platformKeysStore).listKeys(),
-      ]);
-      if (legacyKeys.length > 0 || index.length > 0) {
-        return { status: "unsafe", bucket: legacyBucketSummary(entry), reason: "keys/ 中仍有 Key 或公开索引，不能按旧半截初始化删除。" };
-      }
-      // 只有空 Vault verifier 可以被旧半截清理一起删除；它不代表拥有
-      // Key，但保留它会让下次启动再次误判为“已有 Vault”。
-      void meta;
-    }
-    return { status: "safe-to-clean", bucket: legacyBucketSummary(entry) };
-  } finally {
-    provider.dispose();
-  }
-}
-
-async function cleanupLegacyInitialSetup(password: string): Promise<InitialSetupLegacyCleanupResult> {
-  const inspection = await inspectLegacyInitialSetup(password);
-  if (inspection.status === "none") return { ok: true };
-  if (inspection.status === "unsafe") {
-    const failure = initialSetupFailure("rollback", new StorageRuntimeError("storage_conflict", inspection.reason), "unconfirmed", undefined, { legacy: true });
-    return { ok: false, error: failure.error };
-  }
-
-  const entry = await selectedLegacyCatalogEntry();
-  if (!entry || entry.bucketId !== inspection.bucket.bucketId) {
-    const failure = initialSetupFailure("rollback", new StorageRuntimeError("storage_conflict", "The legacy bucket changed before cleanup"), "unconfirmed", undefined, { legacy: true });
-    return { ok: false, error: failure.error };
-  }
-  const generation = platformRootStore?.bucket.bucketGeneration ?? 1;
-  const cleanupTransactionId = `legacy-cleanup-${entry.bucketId}-${randomIdentifierSuffix()}`.slice(0, 128);
-  const connectionFingerprint = await catalogEntryConnectionFingerprint(entry, password);
-  const provider = await createCatalogProviderForSwitch(entry, password, generation, undefined, true);
-  let catalogDetached = false;
-  let recoveryCatalog: InitialSetupRecoveryRecordV1["catalog"] = "committed";
-  try {
-    // 再次执行精确检查，覆盖 inspect 与 delete 之间新增 owner/业务对象的窗口。
-    const current = await inspectLegacyInitialSetup(password);
-    if (current.status !== "safe-to-clean") {
-      const reason = current.status === "unsafe" ? current.reason : "The legacy bucket disappeared before cleanup";
-      const failure = initialSetupFailure("rollback", new StorageRuntimeError("storage_conflict", reason), "unconfirmed", undefined, { legacy: true });
-      return { ok: false, error: failure.error };
-    }
-    const beforeDeleteCatalog = await readInitialSetupCatalog();
-    const beforeDeleteEntry = beforeDeleteCatalog.buckets.find((candidate) => candidate.bucketId === entry.bucketId);
-    if (beforeDeleteCatalog.selectedBucketId !== entry.bucketId
-      || !beforeDeleteEntry
-      || !sameStorageCatalogEntry(beforeDeleteEntry, entry)) {
-      throw new StorageRuntimeError("storage_conflict", "The legacy bucket catalog changed before cleanup");
-    }
-    // 先撤销权威目录引用；只有目录已经为空或确认不再包含本条目时，
-    // 才允许删除旧半截候选对象，避免留下“目录指向空桶”的损坏状态。
-    try {
-      await commitInitialStorageCatalogBucket(entry, generation, true);
-      catalogDetached = true;
-      recoveryCatalog = "rolled-back";
-    } catch (rollbackError) {
-      const afterRollback = await observeInitialSetupCatalog(entry);
-      if (afterRollback.kind === "empty") {
-        catalogDetached = true;
-        recoveryCatalog = "empty";
-      } else if (afterRollback.kind === "competing") {
-        const stillReferenced = afterRollback.catalog.buckets.some((candidate) => candidate.bucketId === entry.bucketId && sameStorageCatalogEntry(candidate, entry));
-        if (!stillReferenced) {
-          catalogDetached = true;
-          recoveryCatalog = "competing";
-        }
-        else throw rollbackError;
-      } else {
-        throw rollbackError;
-      }
-    }
-    if (!catalogDetached) throw new StorageRuntimeError("storage_conflict", "The legacy bucket catalog was not revoked");
-    await deleteInitialSetupProviderObjects(provider);
-    if (platformRootStore?.bucket.bucketId === entry.bucketId) catalogBindingDiscardDeferred = true;
-    storageBootstrapState = null;
-    coordinatorState.vaultStatus = "uninitialized";
-    coordinatorState.activePublicKeyHex = undefined;
-    dropActivePrivateKey();
-    storageStartupFailure = false;
-    storageHealthController.setStatus("unselected");
-    emitStorageState();
-    return { ok: true };
-  } catch (error) {
-    const failure = initialSetupFailure("rollback", error, "unconfirmed", cleanupTransactionId, { legacy: true, catalog: recoveryCatalog });
-    await persistInitialSetupRecoveryRecord({
-      format: "keymaster.storage.initial-setup-recovery",
-      version: 1,
-      transactionId: cleanupTransactionId,
-      bucketId: entry.bucketId,
-      catalogEntryFingerprint: initialSetupCatalogEntryFingerprint(entry),
-      configRevision: entry.configRevision,
-      snapshotRevision: entry.snapshotRevision,
-      backend: entry.backend,
-      ...(connectionFingerprint === undefined ? {} : { connectionFingerprint }),
-      phase: "rollback",
-      catalog: recoveryCatalog,
-      runtimeInstalled: false,
-      cleanup: "unconfirmed",
-      status: "failed",
-      error: failure.error,
-      updatedAt: Date.now(),
-    }).catch(() => undefined);
-    return { ok: false, error: failure.error };
-  } finally {
-    provider.dispose();
-  }
 }
 
 interface CurrentCatalogStorageBinding {
@@ -7275,9 +7073,6 @@ function clearStorageRequestSecrets(request: CoordinatorClientRequest): void {
         control.connection.sessionToken = undefined;
       }
     }
-    if (control.type === "initial-setup-legacy-inspect" || control.type === "initial-setup-legacy-cleanup") {
-      control.password = "";
-    }
     if (control.type === "change-bucket-config" && control.config.kind === "s3") {
       control.config.accessKeyId = "";
       control.config.secretAccessKey = "";
@@ -7437,22 +7232,6 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
         control.connection.secretAccessKey = "";
         control.connection.sessionToken = undefined;
       }
-    }
-  }
-  if (control.type === "initial-setup-legacy-inspect") {
-    try {
-      const result = await inspectLegacyInitialSetup(control.password);
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-    } finally {
-      control.password = "";
-    }
-  }
-  if (control.type === "initial-setup-legacy-cleanup") {
-    try {
-      const result = await cleanupLegacyInitialSetup(control.password);
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-    } finally {
-      control.password = "";
     }
   }
   if (control.type === "switch-bucket") {
@@ -7653,7 +7432,7 @@ async function executeStorageControlAtFinalBoundary(
         // 必须允许当前 storage control 的 final lease 观察到新 gate。
         allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
         allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
-        allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "initial-setup-cleanup" || request.control.type === "initial-setup-legacy-cleanup",
+        allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "initial-setup-cleanup",
         // status/summary/connection 等控制读取只观察本地状态；probe 也
         // 不提交配置或远端不可逆结果。它们仍经过本地 authority/epoch
         // 栅栏，但页面卸载时不应留下跨 Worker 恢复租约。

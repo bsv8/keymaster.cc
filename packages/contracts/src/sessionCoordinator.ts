@@ -159,10 +159,6 @@ export type CoordinatorStorageControl =
       /** 只用于本次清理重建 Provider；不会写入恢复记录。 */
       connection?: StorageBucketConnectionConfigV1;
     }
-  /** 检查旧版本留下的“已选桶但没有完整首 Key”状态。 */
-  | { type: "initial-setup-legacy-inspect"; password: string }
-  /** 在检查证明安全后精确清理旧版本半截初始化。 */
-  | { type: "initial-setup-legacy-cleanup"; password: string }
   /** 使用目标桶密码完成 Provider/Root/Keys 会话切换；目录由页面桥原子 CAS。 */
   | { type: "switch-bucket"; bucket: StorageBucketCatalogEntryV2; password: string }
   /** 当前桶连接配置的原子重配置；密码只用于本次验证和重新封装。 */

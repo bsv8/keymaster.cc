@@ -12,7 +12,7 @@ import type {
   StorageUploadPartResult
 } from "../connectStorage.js";
 import type { StorageConnection, StorageProviderConfigDraft, StorageProviderId } from "./profile.js";
-import type { InitialSetupLegacyCleanupResult, InitialSetupLegacyInspection, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketPasswordRotationResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
+import type { InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketPasswordRotationResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
 
 /** Provider 运行状态；由 Coordinator 统一发布。 */
 export type StorageRuntimeStatus = "unselected" | "authentication" | "checking" | "ready" | "degraded" | "incompatible";
@@ -160,10 +160,6 @@ export interface StorageRuntimeController {
   listInitialSetupRecoveries?(): Promise<InitialSetupRecoveryRecordV1[]>;
   /** 重试同一事务的候选清理；密码/连接只在本次调用中使用，不进入恢复记录。 */
   retryInitialSetupCleanup?(transactionId: string, input?: { password?: string; connection?: StorageBucketConnectionConfigV1 }): Promise<InitialSetupRecoveryResult>;
-  /** 检查旧版本半截初始化是否可以安全清理。 */
-  inspectLegacyInitialSetup?(password: string): Promise<InitialSetupLegacyInspection>;
-  /** 清理已证明没有 Key/owner 业务数据的旧半截初始化。 */
-  cleanupLegacyInitialSetup?(password: string): Promise<InitialSetupLegacyCleanupResult>;
   cancelProbe(): void;
   probeProvider(config: StorageProviderConfigDraft): Promise<StorageProbeResult>;
   /** 使用独立 Storage Profile 密码恢复已保存的 Provider 配置。 */
