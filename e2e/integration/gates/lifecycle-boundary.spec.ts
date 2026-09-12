@@ -18,7 +18,7 @@ export const GATE_METADATA = LIFECYCLE_BOUNDARY_GATE;
  * 也不能把迟到的旧资源结果发布成新的保护状态。
  *
  * 本 Gate 使用生产 lifecycle/registry 实现和最小受控 adapter；它证明撤权顺序、
- * 二次门禁和迟到结果隔离，不把 Node fake 当成真实 SharedWorker 网络证据。
+ * 二次门禁和迟到结果隔离，不把 Node 测试替身当成真实 SharedWorker 网络证据。
  */
 test(GATE_ID + "：撤权先于 drain 并隔离迟到资源结果", async () => {
   const scope = createLifecycleScope({ kind: "plugin-instance" });

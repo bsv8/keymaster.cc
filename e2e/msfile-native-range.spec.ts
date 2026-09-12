@@ -1,6 +1,6 @@
 // 施工单 003：真实 Chromium + 真实 Go msfile-nas 的原生 Range Gate。
 //
-// 该文件不注入 fake transport。媒体夹具写入临时 NAS 目录，页面通过正式
+// 该文件不注入传输层测试替身。媒体夹具写入临时 NAS 目录，页面通过正式
 // Coordinator / msfile.service / WebRTC Direct 读取；日志只输出 Range、
 // Block 序号/数量、响应元数据和媒体事件，不输出 Hash、session URL 或字节。
 

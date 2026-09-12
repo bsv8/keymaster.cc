@@ -1,0 +1,137 @@
+import { expect, test } from "@playwright/test";
+import { initializeS3User } from "../drivers/initialSetupDriver.js";
+import { readLocalCatalog, waitForReadyVaultPage } from "../drivers/appDriver.js";
+import { loadE2ES3Config, publicS3ConfigFingerprint } from "../resources/config/loader.js";
+import { S3CleanupResource } from "../resources/s3/s3CleanupResource.js";
+import { attachBrowserErrors, captureBrowserErrors } from "../support/browserEvidence.js";
+import { readS3ResourceRunState } from "../support/s3ResourceState.js";
+import { REAL_S3_INITIALIZATION_SCENARIO } from "../support/scenarioMetadata.js";
+import { scenarioObjectPrefix } from "../support/ids.js";
+import type { LoadedE2ES3Config } from "../resources/config/types.js";
+
+export const JOURNEY_ID = REAL_S3_INITIALIZATION_SCENARIO.id;
+export const JOURNEY_METADATA = REAL_S3_INITIALIZATION_SCENARIO;
+
+const SETUP_PASSWORD = "real-s3-e2e-password-123";
+const LOGICAL_BUCKET_LABEL = "真实 S3 集成测试桶";
+const FIRST_KEY_LABEL = "真实 S3 首 Key";
+
+function clearSecrets(config: LoadedE2ES3Config | undefined): void {
+  config?.s3.secretAccessKey.clear();
+  config?.s3.sessionToken?.clear();
+}
+
+/**
+ * 业务目标：首次用户把 Keymaster 的逻辑桶建立在真实 S3 物理桶中，
+ * 完成首个 Hold/Key 初始化，并在刷新后继续使用同一身份。
+ *
+ * 开始状态：resource-setup 已按 s3.json 使用物理桶，取得排他 lease 并完成
+ * 开场清理；浏览器 context 没有本地目录或 Vault。物理 S3 桶不会由页面
+ * 创建，页面只在本轮隔离前缀下创建 Keymaster 逻辑桶对象。
+ *
+ * 成功标准：页面的正式 S3 provider probe 和初始化事务成功，Node Resource
+ * 能在远端看到本轮业务对象；刷新后真实目录和首 Key 仍能恢复。健康 probe
+ * 或“配置文件可读取”本身不算初始化成功。
+ *
+ * 外部资源与收尾：只使用 setup 已取得的 S3 lease；Journey 只清理自己的
+ * prefix，resource-teardown 再负责非前缀的全量收口、版本、delete marker
+ * 和 multipart，并在确认清理后释放 lease。凭据只短暂填入页面，禁止进入
+ * resource-state、附件或 Playwright 自动产物。
+ *
+ * 覆盖需求：KM-INIT-002。
+ */
+test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async ({ page, context }, testInfo) => {
+  test.setTimeout(180_000);
+  const browserErrors = captureBrowserErrors(page, context);
+  let config: LoadedE2ES3Config | undefined;
+  let accessKeyId = "";
+  let secretAccessKey = "";
+  let sessionToken = "";
+  let s3: S3CleanupResource | undefined;
+  let resourceRunId: string | undefined;
+  let prefix: string | undefined;
+  let journeyError: unknown;
+  let evidenceError: unknown;
+  let cleanupError: unknown;
+
+  try {
+    const state = await readS3ResourceRunState();
+    expect(state, "真实 S3 初始化必须依赖成功的 resource-setup").not.toBeNull();
+    if (!state) throw new Error("真实资源运行状态不可用");
+    expect(state.s3LeaseAcquired).toBe(true);
+
+    config = await loadE2ES3Config();
+    expect(publicS3ConfigFingerprint(config), "Journey 与 setup 使用的公开 S3 配置必须一致").toBe(state.configFingerprint);
+
+    const scenarioPrefix = scenarioObjectPrefix(state.runId, JOURNEY_ID);
+    prefix = scenarioPrefix;
+    resourceRunId = state.runId;
+    const resource = new S3CleanupResource(config.s3);
+    s3 = resource;
+    await resource.adoptLease(state.runId);
+    expect(
+      await resource.countBusinessObjects(state.runId, scenarioPrefix),
+      "开场清理后本场景前缀不能残留旧业务对象",
+    ).toBe(0);
+
+    accessKeyId = config.s3.accessKeyId;
+    secretAccessKey = config.s3.secretAccessKey.read();
+    sessionToken = config.s3.sessionToken?.read() ?? "";
+
+    const ready = await test.step("用户填写真实 S3 参数并完成首桶初始化", async () => initializeS3User(page, {
+      bucketLabel: LOGICAL_BUCKET_LABEL,
+      keyLabel: FIRST_KEY_LABEL,
+      password: SETUP_PASSWORD,
+      endpoint: config!.s3.endpoint,
+      region: config!.s3.region,
+      bucket: config!.s3.bucket,
+      accessKeyId,
+      secretAccessKey,
+      ...(sessionToken ? { sessionToken } : {}),
+      prefix: scenarioPrefix,
+    }));
+
+    expect(ready.publicKeyHex).toMatch(/^0[23][0-9a-f]{64}$/iu);
+    await expect.poll(
+      () => resource.countBusinessObjects(state.runId, scenarioPrefix),
+      { timeout: 30_000, intervals: [250, 500, 1_000], message: "初始化完成后真实 S3 前缀必须至少有一个 Keymaster 业务对象" },
+    ).toBeGreaterThan(0);
+
+    await test.step("用户刷新页面后从真实 S3 恢复同一逻辑桶和 Key", async () => {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await waitForReadyVaultPage(page, FIRST_KEY_LABEL);
+      const catalog = await readLocalCatalog(page);
+      expect(catalog?.buckets).toHaveLength(1);
+      expect(catalog?.buckets?.[0]).toMatchObject({ label: LOGICAL_BUCKET_LABEL, backend: "s3" });
+      expect(catalog?.selectedBucketId).toBe(catalog?.buckets?.[0]?.bucketId);
+      await expect(page.getByText(FIRST_KEY_LABEL, { exact: true }).first()).toBeVisible();
+    });
+  } catch (error) {
+    journeyError = error;
+  } finally {
+    try {
+      // 真实资源项目关闭 trace/video/screenshot；浏览器错误也必须经过已知
+      // 凭据替换和秘密形状扫描后才允许进入报告。
+      await attachBrowserErrors(testInfo, browserErrors, [SETUP_PASSWORD, accessKeyId, secretAccessKey, sessionToken]);
+    } catch (error) {
+      evidenceError = error;
+    }
+    try {
+      if (s3 && resourceRunId && prefix) {
+        // 这是前缀测试：只清理本 Journey 创建的对象。桶级收尾仍由
+        // 非前缀 teardown 负责处理其他意外残留。
+        await s3.cleanup(resourceRunId, prefix);
+      }
+    } catch (error) {
+      cleanupError = error;
+    }
+    clearSecrets(config);
+    accessKeyId = "";
+    secretAccessKey = "";
+    sessionToken = "";
+  }
+
+  if (journeyError) throw journeyError;
+  if (evidenceError) throw evidenceError;
+  if (cleanupError) throw cleanupError;
+});

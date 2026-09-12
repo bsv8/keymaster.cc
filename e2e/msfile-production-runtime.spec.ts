@@ -1,5 +1,5 @@
 // 施工单 002：Headless Chromium -> Keymaster production runtime -> 正式 Go msfile-nas。
-// 不注入 fake MsFileTransport；Go 进程、Noise/Yamux、WebRTC Direct/WSS、
+// 不注入 MsFileTransport 测试替身；Go 进程、Noise/Yamux、WebRTC Direct/WSS、
 // SharedWorker、trusted capability 与 Connect SDK 都走生产实现。
 
 import { execFile, spawn, type ChildProcess } from "node:child_process";

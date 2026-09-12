@@ -18,11 +18,11 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
 }
 
 /**
- * 整轮 real-resource 的唯一 setup：权限预检、S3 ownership/lease/开场清理，
+ * 整轮 real-resource 的唯一 setup：权限预检、S3 lease/开场清理，
  * 以及 SatSubscription WebSocket、testnet 链网络/余额/旧账检查。缺配置或
- * 缺少真实链适配器时故意失败，不能降级为本地 fake。
+ * 缺少真实链适配器时故意失败，不能降级为本地测试替身。
  */
-test("真实资源整轮准备：专用桶、testnet 服务和资金账本门禁", async ({}, testInfo) => {
+test("真实资源整轮准备：S3、testnet 服务和资金账本门禁", async ({}, testInfo) => {
   test.setTimeout(60_000);
   let config: LoadedE2EConfig | undefined;
   let s3: S3CleanupResource | undefined;
@@ -32,10 +32,10 @@ test("真实资源整轮准备：专用桶、testnet 服务和资金账本门禁
   try {
     config = await loadE2EConfig();
     s3 = new S3CleanupResource(config.s3);
-    await s3.assertOwnership();
     await s3.acquireLease(runId);
     leaseAcquired = true;
-    // 这是本轮唯一的开场全桶清理；后续 Journey 只能使用 run_id/scenario_id 前缀。
+    // setup 是非前缀测试：按约定清理指定桶中的全部业务对象；后续 Journey
+    // 如果是前缀测试，则显式传入自己的 run_id/scenario_id 前缀。
     await s3.cleanup(runId);
 
     const websocketProbe = createWebSocketProbe();

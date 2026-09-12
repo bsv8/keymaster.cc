@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { SecretString } from "../../support/secretString.js";
-import type { E2ES3Config, E2ESatSubscriptionConfig, LoadedE2EConfig } from "./types.js";
+import type { E2ES3Config, E2ESatSubscriptionConfig, LoadedE2EConfig, LoadedE2ES3Config } from "./types.js";
 
 /** secp256k1 的阶；这里只用于检查资金种子格式，不导出或记录私钥。 */
 const SECP256K1_ORDER = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
@@ -90,30 +90,19 @@ function validateEndpoint(value: string, field: string, filename: string): strin
   return url.toString().replace(/\/$/u, "");
 }
 
-function validateBucket(value: string, filename: string): string {
-  if (!/^[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?$/u.test(value) || value.length < 3 || value.length > 63 || value.includes("..")) reject("config-bucket-invalid", `${filename} 的 bucket 不是合法 S3 桶名称`);
-  return value;
-}
-
 function parseS3(value: Record<string, unknown>): E2ES3Config {
   const filename = "s3.json";
-  if (value.purpose !== "keymaster-e2e") reject("config-purpose-invalid", "s3.json 必须声明 purpose=keymaster-e2e");
-  if (value.allowBucketWideCleanup !== true) reject("config-cleanup-not-authorized", "s3.json 必须明确 allowBucketWideCleanup=true");
   const endpoint = validateEndpoint(requiredString(value.endpoint, "endpoint", filename), "endpoint", filename);
   const region = requiredString(value.region, "region", filename);
-  const bucket = validateBucket(requiredString(value.bucket, "bucket", filename), filename);
+  // 不根据名称判断是否“专用桶”；s3.json 给出的桶就是本次测试使用的桶。
+  const bucket = requiredString(value.bucket, "bucket", filename);
   const accessKeyId = requiredString(value.accessKeyId, "accessKeyId", filename);
   const secret = requiredString(value.secretAccessKey, "secretAccessKey", filename);
   const session = value.sessionToken === undefined ? undefined : requiredString(value.sessionToken, "sessionToken", filename);
-  const ownershipKey = value.ownershipKey === undefined ? ".keymaster-e2e/ownership.json" : requiredString(value.ownershipKey, "ownershipKey", filename);
-  const leaseKey = value.leaseKey === undefined ? ".keymaster-e2e/lease.json" : requiredString(value.leaseKey, "leaseKey", filename);
-  const validControlKey = (key: string): boolean => key.startsWith(".keymaster-e2e/") && key.length > ".keymaster-e2e/".length && !key.split("/").includes("..") && !key.endsWith("/");
-  if (!validControlKey(ownershipKey) || !validControlKey(leaseKey) || ownershipKey === leaseKey) reject("config-control-key-invalid", "S3 ownership 和 lease key 必须是 .keymaster-e2e/ 下的两个不同对象");
   return {
-    purpose: "keymaster-e2e", allowBucketWideCleanup: true, endpoint, region, bucket, accessKeyId,
+    endpoint, region, bucket, accessKeyId,
     secretAccessKey: new SecretString(secret),
     ...(session === undefined ? {} : { sessionToken: new SecretString(session) }),
-    ownershipKey, leaseKey,
   };
 }
 
@@ -163,8 +152,26 @@ export async function loadE2EConfig(options: { readonly workspaceRoot?: string; 
   return { directory, s3, satsubscription, testnet };
 }
 
+/**
+ * 只加载真实 S3 Journey 所需的配置。
+ *
+ * 这样 S3 初始化不会因为同一目录里的 SatSubscription/testnet 配置暂时
+ * 不可用而无法执行；该 Journey 仍然只连接 s3.json 指定的真实桶。
+ */
+export async function loadE2ES3Config(options: { readonly workspaceRoot?: string; readonly configDir?: string } = {}): Promise<LoadedE2ES3Config> {
+  const directory = await checkDirectory(options.configDir ?? process.env.KEYMASTER_E2E_CONFIG_DIR ?? DEFAULT_CONFIG_DIR, options.workspaceRoot ?? process.cwd());
+  const s3 = parseS3(parseObject(await readPrivateFile(directory, "s3.json"), "s3.json"));
+  return { directory, s3 };
+}
+
 /** 仅用于测试/诊断配置指纹，输入不包含任何秘密值。 */
 export function publicConfigFingerprint(config: Pick<LoadedE2EConfig, "directory" | "s3" | "satsubscription">): string {
   const publicShape = JSON.stringify({ directory: config.directory, endpoint: config.s3.endpoint, bucket: config.s3.bucket, region: config.s3.region, websocket: config.satsubscription.websocket, webrtcDirect: config.satsubscription.webrtcDirect, testnetApiBaseUrl: config.satsubscription.testnetApiBaseUrl });
+  return createHash("sha256").update(publicShape).digest("hex").slice(0, 16);
+}
+
+/** 真实 S3 单资源运行状态使用的公开配置指纹。 */
+export function publicS3ConfigFingerprint(config: Pick<LoadedE2ES3Config, "directory" | "s3">): string {
+  const publicShape = JSON.stringify({ directory: config.directory, endpoint: config.s3.endpoint, bucket: config.s3.bucket, region: config.s3.region });
   return createHash("sha256").update(publicShape).digest("hex").slice(0, 16);
 }

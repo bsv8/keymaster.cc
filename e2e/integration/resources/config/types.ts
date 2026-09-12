@@ -1,27 +1,25 @@
 import type { SecretString } from "../../support/secretString.js";
 
-/** E2E 专用 S3 配置；SecretString 内部值不能被普通 JSON 序列化展开。 */
+/**
+ * 真实 S3-compatible 连接配置。
+ *
+ * 物理桶由仓库外的 s3.json 直接指定；配置目录已经是
+ * `/home/david/.config/keymaster-e2e`，不再要求额外的 purpose、专用桶名称
+ * 或远端 ownership 文件。SecretString 内部值不能被普通 JSON 序列化展开。
+ */
 export interface E2ES3Config {
-  /** 必须明确这是 keymaster.cc 的专用测试桶。 */
-  readonly purpose: "keymaster-e2e";
-  /** 允许桶级清理的人工授权开关。缺失或 false 时绝不删除。 */
-  readonly allowBucketWideCleanup: true;
   /** S3-compatible 服务的 HTTPS 端点。 */
   readonly endpoint: string;
   /** S3 签名区域。 */
   readonly region: string;
-  /** 物理桶名称，不是 Keymaster 的逻辑桶名称。 */
+  /** s3.json 指定的物理桶名称，不是 Keymaster 的逻辑桶名称。 */
   readonly bucket: string;
-  /** S3 访问身份，不是用户的 Key。 */
+  /** S3 访问身份，不是 Keymaster 用户的 Key。 */
   readonly accessKeyId: string;
   /** S3 Secret Access Key，只能由 Node Resource 短期读取。 */
   readonly secretAccessKey: SecretString;
   /** 可选的临时会话令牌，同样不能进入浏览器或报告。 */
   readonly sessionToken?: SecretString;
-  /** 专用桶中人工放置的所有权文件 key。 */
-  readonly ownershipKey: string;
-  /** 排他运行 lease 文件 key。 */
-  readonly leaseKey: string;
 }
 
 /** SatSubscription testnet 双入口配置；当前字段是公开连接信息但仍按配置文件保护。 */
@@ -53,4 +51,10 @@ export interface LoadedE2EConfig {
   readonly s3: E2ES3Config;
   readonly satsubscription: E2ESatSubscriptionConfig;
   readonly testnet: E2ETestnetSeed;
+}
+
+/** 只运行真实 S3 Journey 时的最小配置投影，不读取其它真实资源秘密。 */
+export interface LoadedE2ES3Config {
+  readonly directory: string;
+  readonly s3: E2ES3Config;
 }

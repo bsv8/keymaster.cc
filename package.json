@@ -43,6 +43,7 @@
     "check:integration-coverage": "node scripts/check-integration-coverage.mjs",
     "generate:integration-coverage": "node scripts/check-integration-coverage.mjs --write",
     "test:e2e:real-resource": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.real-resource.config.ts",
+    "test:e2e:real-s3": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.real-s3.config.ts",
     "test:e2e:deployment": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.deployment.config.ts",
     "test:e2e:lifecycle": "playwright test --config=playwright.lifecycle.config.ts",
     "test:e2e:external": "node scripts/run-external-appview-smoke.mjs",

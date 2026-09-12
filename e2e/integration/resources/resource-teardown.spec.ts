@@ -13,7 +13,7 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
 }
 
 /** 依赖测试失败也执行；清理不确定时保留 lease，让下一轮 setup 收口。 */
-test("真实资源整轮收尾：确认清理后释放专用桶 lease", async ({}, testInfo) => {
+test("真实资源整轮收尾：清理指定桶并释放 lease", async ({}, testInfo) => {
   test.setTimeout(60_000);
   const state = await readResourceRunState();
   if (!state) return;
@@ -22,8 +22,8 @@ test("真实资源整轮收尾：确认清理后释放专用桶 lease", async ({
     config = await loadE2EConfig();
     if (publicConfigFingerprint(config) !== state.configFingerprint) throw new Error("resource config changed between setup and teardown");
     const s3 = new S3CleanupResource(config.s3);
-    await s3.assertOwnership();
     await s3.adoptLease(state.runId);
+    // teardown 是非前缀测试：确保本轮任何未收口的对象都被清理。
     await s3.cleanup(state.runId);
     await s3.releaseLease(state.runId);
     await removeResourceRunState();

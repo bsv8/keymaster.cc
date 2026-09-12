@@ -145,6 +145,21 @@ function sourceFiles(directory) {
   return files;
 }
 
+/** E2E 浏览器层必须走真实网络/存储，不允许注入响应或假 provider。 */
+function validateE2EBrowserBoundary() {
+  const forbidden = [
+    { pattern: /\b(?:page|context)\.route\s*\(/u, label: "Playwright route 拦截" },
+    { pattern: /\broute\.(?:fulfill|abort|continue)\s*\(/u, label: "网络响应替换/阻断" },
+    { pattern: /\b(?:Fake[A-Za-z0-9_]*|fake[A-Za-z0-9_]+)\b/u, label: "fake provider/适配器命名" },
+  ];
+  for (const file of sourceFiles(path.join(root, "e2e"))) {
+    const text = read(file);
+    for (const item of forbidden) {
+      if (item.pattern.test(text)) fail(`${path.relative(root, file)} 包含禁止的 E2E ${item.label}；真实资源/网络证据不能由测试替身产生`);
+    }
+  }
+}
+
 function staticStringConstants(packageName) {
   const constants = new Map();
   for (const file of [...sourceFiles(packageSourceDirectory(packageName)), ...sourceFiles(path.join(root, "packages/contracts/src"))]) {
@@ -365,6 +380,7 @@ const matrix = parseMatrix();
 const catalog = catalogPackages();
 const requirementIds = new Set(matrix.requirements.map((item) => item?.requirement_id));
 const legacy = parseLegacyCatalog(requirementIds);
+validateE2EBrowserBoundary();
 validateMatrix(matrix, catalog, legacy);
 const generated = generatedMarkdown(matrix, legacy);
 if (process.argv.includes("--write")) {

@@ -32,7 +32,7 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
  * 业务目标：用户在真实 testnet 上看到自己的余额，选择 testnet 资产，
  * 完成一次受控 P2PKH 转账，并在链上观察到同一笔 canonical txid。
  *
- * 开始状态：resource-setup 已完成专用 S3 lease、SatSubscription WebSocket
+ * 开始状态：resource-setup 已完成 s3.json 指定桶的 lease、SatSubscription WebSocket
  * 健康检查和 testnet seed 余额/网络/恢复账本门禁；本浏览器仍是全新 context。
  * 长期 seed 只在本 Node 侧 Resource 中读取，一次性钱包私钥只在本 Journey
  * 的当前调用栈中短暂存在，绝不写入 resource-state、storageState 或报告。

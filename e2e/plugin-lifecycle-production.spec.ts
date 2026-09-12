@@ -3,73 +3,11 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
-const DEMO_APP_ORIGIN = "https://demo.apps.bsv8.com";
 const EXTERNAL_APPVIEW_ORIGIN = process.env.KEYMASTER_EXTERNAL_APPVIEW_ORIGIN?.replace(/\/$/u, "");
 const EXTERNAL_APPVIEW_SUCCESS_SELECTOR = process.env.KEYMASTER_EXTERNAL_APPVIEW_SUCCESS_SELECTOR;
-const DEMO_APP_IDENTITY = {
-  app: {
-    description: "Keymaster Connect V1 外部调用方 demo，验证 identity.get、intent.sign、cipher.encrypt、cipher.decrypt。",
-    id: "keymaster-connect-demo",
-    name: "Keymaster Connect Demo"
-  },
-  publisherPublicKey: "032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30",
-  requirements: ["private-key", "storage"],
-  signature: "ac1d19a29d0ce1039f3f4ef4c3c8f6a2175c346a41e81837fa0f5b57e77880dc0d8198635bdbc137250c254cbe35486b2a859620273c5df4e839760a08736981",
-  version: 1
-} as const;
 
 function isImmutableBuildId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{40}-[0-9a-f]{16}$/iu.test(value);
-}
-
-/**
- * 一个最小的真实外部 App 页面：使用生产协议报文完成 appView
- * `ready -> connect.launch -> result`，不绕过 Session Window。
- * 页面由 Playwright 路由拦截提供，避免测试接触公网应用部署。
- */
-function demoAppFixtureHtml(): string {
-  const identity = JSON.stringify(DEMO_APP_IDENTITY);
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Connect Demo E2E</title></head>
-<body data-testid="appview-connect-launch" data-result="pending">
-  <p id="result">pending</p>
-  <script>
-    (() => {
-      const params = new URLSearchParams(location.search);
-      const sessionWindowOrigin = params.get("sessionWindowOrigin");
-      const launchToken = params.get("launchToken");
-      const result = document.getElementById("result");
-      const opener = window.opener;
-      const requestId = "appview-production-e2e-launch";
-      const identity = ${identity};
-      const fail = (message) => {
-        document.body.dataset.result = "error";
-        result.textContent = message;
-      };
-      if (!sessionWindowOrigin || !launchToken || !opener) {
-        fail("missing-appview-bootstrap");
-        return;
-      }
-      window.addEventListener("message", (event) => {
-        if (event.origin !== sessionWindowOrigin || event.source !== opener) return;
-        const value = event.data;
-        if (!value || value.v !== 1 || value.type !== "result" || value.id !== requestId) return;
-        document.body.dataset.result = value.ok ? "ok" : "error";
-        result.textContent = value.ok ? "ok" : String(value.error && value.error.code || "protocol-error");
-      });
-      opener.postMessage({ v: 1, type: "ready" }, sessionWindowOrigin);
-      setTimeout(() => {
-        opener.postMessage({
-          v: 1,
-          type: "request",
-          id: requestId,
-          method: "connect.launch",
-          params: { launchToken, appIdentity: identity }
-        }, sessionWindowOrigin);
-      }, 0);
-    })();
-  </script>
-</body></html>`;
 }
 
 interface LifecycleHooks {
@@ -181,52 +119,6 @@ test.describe("插件生命周期生产跨环境链", () => {
     expect(evidence.address).toMatch(/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/u);
     expect(evidence.signatureLength).toBeGreaterThan(0);
     expect(evidence.revoked).toBe(true);
-  });
-
-  test("Playwright fixture /apps → Session Window → 外部 AppView 完成 connect.launch", async ({ page }) => {
-    test.setTimeout(120_000);
-    await page.context().route(`${DEMO_APP_ORIGIN}/**`, async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "text/html; charset=utf-8",
-        body: demoAppFixtureHtml()
-      });
-    });
-
-    await lifecycleHooks(page);
-    await page.evaluate(async () => window.__lifecycleProductionE2E!.bootstrap());
-    // 保留同一生产 Host/Coordinator 会话，通过真实 SPA 路由进入 `/apps`；
-    // 整页 reload 会关闭最后一个端口并让 SharedWorker 重启，不应把这条
-    // AppView 交接验收和“冷启动无本地 Storage 选择”的另一个场景混在一起。
-    await page.evaluate(() => {
-      window.history.pushState({}, "", "/apps");
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-    await expect(page.getByTestId("apps-card-demo")).toBeVisible({ timeout: 60_000 });
-    await page.getByTestId("apps-open-demo").click();
-    await expect(page.getByTestId("app-launch-modal")).toBeVisible();
-    await page.getByLabel(/vault password/i).fill("lifecycle-production-e2e-password");
-    await page.getByTestId("app-launch-confirm").click();
-
-    await expect.poll(
-      () => page.context().pages().filter((candidate) => candidate.url().includes("/protocol/v1/popup?boot=appView")).length,
-      { timeout: 60_000 }
-    ).toBe(1);
-    const sessionWindow = page.context().pages().find((candidate) => candidate.url().includes("/protocol/v1/popup?boot=appView"));
-    if (!sessionWindow) throw new Error("Lifecycle E2E Session Window was not opened");
-    await expect(sessionWindow.getByTestId("appview-done")).toBeVisible({ timeout: 60_000 });
-    await sessionWindow.getByTestId("appview-open-app").click();
-
-    await expect.poll(
-      () => page.context().pages().filter((candidate) => candidate.url().startsWith(`${DEMO_APP_ORIGIN}/`)).length,
-      { timeout: 60_000 }
-    ).toBe(1);
-    const appPage = page.context().pages().find((candidate) => candidate.url().startsWith(`${DEMO_APP_ORIGIN}/`));
-    if (!appPage) throw new Error("Lifecycle E2E external AppView page was not opened");
-    await expect(appPage.locator("body")).toHaveAttribute("data-result", "ok", { timeout: 60_000 });
-    await expect(appPage.getByText("ok")).toBeVisible();
-    expect(new URL(appPage.url()).searchParams.get("launchToken")).toBeTruthy();
-    expect(new URL(appPage.url()).searchParams.get("sessionWindowOrigin")).toBe(new URL(page.url()).origin);
   });
 
   test("已部署的外部 AppView 完成 connect.launch（发布门禁）", async ({ page }) => {

@@ -1,9 +1,9 @@
 /**
  * Node 侧 E2E S3 清理适配器。
  *
- * 它只提供 AWS SDK 到最小清理接口的转换，不知道 E2E ownership/lease 规则；
- * 规则仍由 e2e/integration/resources/s3 的 Resource 负责，避免生产页面获得
- * 桶级删除能力。
+ * 它只提供 AWS SDK 到最小清理接口的转换，不知道测试 lease 和清理作用域；
+ * 这些规则仍由 e2e/integration/resources/s3 的 Resource 负责，避免生产页面
+ * 获得清理能力。
  */
 import {
   AbortMultipartUploadCommand,
@@ -115,4 +115,3 @@ export function createS3CleanupApi(config: S3CleanupApiConfig): S3CleanupApi {
     },
   };
 }
-

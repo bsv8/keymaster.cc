@@ -22,7 +22,7 @@ export default defineConfig({
     name: "local-integration",
     // 真实资源和目标部署必须由各自的命令运行；本地 PR 不能因为扫描到
     // integration 目录就误读仓库外 seed 或把 preview 当成部署验收。
-    testIgnore: /journeys\/(?:deployment-acceptance|real-.*)\.spec\.ts$/u,
+    testIgnore: /(?:gates\/resource-safety|journeys\/(?:deployment-acceptance|real-.*))\.spec\.ts$/u,
     testMatch: /(?:journeys|gates)\/[^/]+\.spec\.ts$/u,
     use: { ...devices["Desktop Chrome"], launchOptions: { args: ["--enable-precise-memory-info"] } },
   }],

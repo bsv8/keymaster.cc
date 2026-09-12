@@ -11,6 +11,7 @@
 | `pnpm check:integration-coverage` | — | 检查生产入口、矩阵、Journey/Gate 和生成视图的一致性 |
 | `pnpm typecheck:e2e` | — | 检查 E2E TypeScript 类型 |
 | `pnpm test:e2e:real-resource` | `real-resource` | 显式提供受保护资源配置后才运行；缺配置时 fail closed |
+| `pnpm test:e2e:real-s3` | `real-resource` | 只读取 `s3.json`，执行真实 S3 初始化；不依赖 SatSubscription/testnet 配置 |
 | `pnpm test:e2e:deployment` | `deployment-acceptance` | 必须提供不可变目标 Build ID；本地 preview 不能替代它 |
 
 普通 `pnpm test:e2e` 仍保留仓库原有的 E2E。旧文件的需求、层级和迁移边界登记在
@@ -37,9 +38,12 @@ P2P 或目标部署。`real-resource` 只证明本次实际连接到的 testnet/
 
 真实资源配置的空白模板位于 `资源配置模板/`。复制到仓库外的
 `/home/david/.config/keymaster-e2e/` 后，必须由维护者人工填写并设置 `0700/0600` 权限；模板本身
-不含任何凭据。当前 `real-resource` 命令先执行资源权限、专用 S3 ownership/lease/清理、
-SatSubscription 健康预检和 testnet 资金库预检；真实 testnet 资产 Journey 还要等待链上确认并
-归集。SatSubscription 健康 Journey 只证明运行时身份和网络，不能替代充值、消费与账本对账；
+不含任何凭据。`real-s3` 命令只执行 s3.json 指定桶的 lease/清理和真实 S3 Journey；完整
+`real-resource` 命令还会执行 SatSubscription 健康预检和 testnet 资金库预检。S3 初始化
+Journey 会使用 setup 的 lease 在隔离 prefix 下建立逻辑桶，并在刷新后验证恢复；它不会
+创建物理桶。非前缀 setup/teardown 才执行指定桶的全量业务对象清理。真实 testnet 资产
+Journey 还要等待链上确认并归集。SatSubscription 健康
+Journey 只证明运行时身份和网络，不能替代充值、消费与账本对账；
 尚未配置真实适配器的业务 Journey 不会被伪装成已通过。
 
 ## 检查者阅读顺序

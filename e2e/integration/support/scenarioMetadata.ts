@@ -42,6 +42,20 @@ export const LOCAL_SETTINGS_SCENARIO = {
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 S3 首次初始化 Journey；物理桶由 s3.json 指定，页面创建逻辑桶。 */
+export const REAL_S3_INITIALIZATION_SCENARIO = {
+  id: "J-REAL-S3-INIT",
+  level: "real-resource",
+  requirementIds: ["KM-INIT-002"],
+  startingState: "s3.json 指定的真实物理桶已取得本轮 lease 并完成开场清理，浏览器是全新 Chromium context。",
+  successCriteria: [
+    "页面通过正式 S3-compatible 表单完成连接探测，并创建一个真实 S3 后端的逻辑桶。",
+    "首个 Hold、Vault 和第一把 Key 提交到本轮 run_id/scenario_id 隔离的远端对象前缀。",
+    "刷新后目录、选中桶和第一把 Key 仍可从真实 S3 恢复，访问凭据和桶密码不进入 localStorage。",
+  ],
+  resourceProfile: "s3",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 生命周期技术 Gate：验证撤权先于 drain，并阻止旧 owner 的迟到结果回写。 */
 export const LIFECYCLE_BOUNDARY_GATE = {
   id: "G-LIFECYCLE-BOUNDARY",
@@ -139,16 +153,29 @@ export const STORAGE_BROWSER_GATE = {
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
 
-/** Node Resource 安全 Gate：用无网络 fake adapter 验证资源边界和结果未知处理。 */
-export const RESOURCE_SAFETY_GATE = {
-  id: "G-RESOURCE-SAFETY",
+/** 配置安全 Gate：验证仓库外路径、权限和 SecretString 的读取边界。 */
+export const CONFIG_SAFETY_GATE = {
+  id: "G-CONFIG-SAFETY",
   level: "local-integration",
-  requirementIds: ["KM-RESOURCE-001"],
-  startingState: "Node Resource 使用受控 fake adapter 和临时权限目录，不连接真实外部资源。",
+  requirementIds: ["KM-TECH-002"],
+  startingState: "临时配置目录位于 Git 工作树之外，目录和文件权限由测试明确设置。",
   successCriteria: [
-    "配置目录、S3 ownership/lease 和清理范围 fail-closed。",
-    "SatSubscription 运行时身份和 testnet 网络不接受配置文字冒充。",
-    "testnet 结果未知写入恢复账本且不盲目重发。",
+    "合法配置可以读入，但 S3/testnet 秘密只以 SecretString 存在。",
+    "目录权限过宽时在读取任何资源前 fail-closed。",
   ],
   resourceProfile: "none",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 真实 S3 Resource 安全 Gate：验证真实 lease、prefix 清理范围和收尾边界。 */
+export const RESOURCE_SAFETY_GATE = {
+  id: "G-RESOURCE-SAFETY",
+  level: "real-resource",
+  requirementIds: ["KM-RESOURCE-001"],
+  startingState: "真实 S3 setup 已读取仓库外 s3.json、取得 lease 并完成非前缀开场清理。",
+  successCriteria: [
+    "真实业务对象只在本场景 run_id/scenario_id prefix 下创建。",
+    "prefix 清理不会删除另一个 prefix，路径越界会 fail-closed。",
+    "prefix 清理和非前缀 teardown 都在释放 lease 前完成并确认。",
+  ],
+  resourceProfile: "s3",
 } as const satisfies IntegrationScenarioMetadata;
