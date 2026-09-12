@@ -143,7 +143,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.setup.password.title": "Set a password",
       "shell.setup.password.resumeTitle": "Enter the password to continue setup",
       "shell.setup.password.description":
-        "This password is used only by the final initialization transaction. It is never written to the local catalog, URL, or logs.",
+        "This password is used only by the final initialization transaction. It is never written to the local catalog, URL, or long-lived runtime state.",
       "shell.setup.password.next": "Continue",
       "shell.setup.keyChoice.title": "Set up your first Key",
       "shell.setup.keyChoice.description":

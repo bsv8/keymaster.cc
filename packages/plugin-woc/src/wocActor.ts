@@ -19,7 +19,6 @@
 
 import type {
   BsvNetwork,
-  PluginLogger,
   WocBalanceResponse,
   WocBroadcastResult,
   WocConfig,
@@ -77,7 +76,7 @@ interface ActorEntry {
   reject: (err: unknown) => void;
   /** endpoint 解析后的 fetch 执行体。 */
   run: (signal: AbortSignal) => Promise<unknown>;
-  /** 业务标签（用于 snapshot / 日志）。 */
+  /** 业务标签（用于 snapshot）。 */
   label: string;
   /**
    * 唯一终态守卫。abort listener 与 fetch Promise 完成都能调用
@@ -217,12 +216,6 @@ export interface WocActorHandle {
 }
 
 export interface CreateWocActorOptions {
-  /**
-   * 硬切换 002：业务插件注入的 logger。WOC 的关键轨迹（config changed /
-   * request queued / completed / failed / backoff）都进统一日志。
-   * 不传时不记日志（保持旧行为）。
-   */
-  logger?: PluginLogger;
   /** Host 预绑定的 WOC owner/App K-V 句柄。 */
   storage?: KeyValueStore;
 }
@@ -240,7 +233,6 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
   const queueListeners = new Set<(s: WocQueueSnapshot) => void>();
   let messageBus: MessageBus | null = null;
   const unsubscribers: Array<() => void> = [];
-  const logger = options.logger;
 
   // 内部 priority queue / pump / 限流 / 429 状态。
   const queue: ActorEntry[] = [];
@@ -530,27 +522,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     // 取最长要求，不能被短窗口覆盖。
     const candidateUntil = Date.now() + duration;
     backoffUntil = Math.max(backoffUntil, candidateUntil);
-    logger?.warn({
-      scope: "woc.backoff",
-      event: "backoff.entered",
-      message: "WOC backoff entered",
-      data: { retryAfterMs: duration, reason, until: candidateUntil }
-    });
     emitSnapshot();
   }
   function resetBackoff() {
     // 关键不变量：backoffUntil 由 Retry-After 显式设定（服务端指令），
     // 不能被成功响应提前覆盖；snapshot() 在到期后自然显示为 undefined。
     // 只重置 backoffStep，让下一次 429 从 base * 2^0 开始。
-    const wasInBackoff = backoffUntil > Date.now();
     backoffStep = 0;
-    if (wasInBackoff) {
-      logger?.info({
-        scope: "woc.backoff",
-        event: "backoff.cleared",
-        message: "WOC backoff cleared"
-      });
-    }
   }
 
   function isWocNotFoundError(err: unknown): boolean {
@@ -575,13 +553,6 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       return Promise.reject(opts.signal.reason ?? new Error("aborted"));
     }
     return new Promise<T>((resolve, reject) => {
-      const startedAt = Date.now();
-      logger?.debug({
-        scope: "woc.request",
-        event: "request.queued",
-        message: `WOC request queued: ${opts.label}`,
-        data: { endpoint: opts.label, priority: opts.priority }
-      });
       const entry: ActorEntry = {
         priority: opts.priority,
         sequence: sequence++,
@@ -590,12 +561,6 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         run: () => opts.fn(opts.signal),
         settled: false,
         resolve: (v) => {
-          logger?.debug({
-            scope: "woc.request",
-            event: "request.completed",
-            message: `WOC request completed: ${opts.label}`,
-            data: { endpoint: opts.label, latencyMs: Date.now() - startedAt }
-          });
           resolve(v as T);
         },
         reject
@@ -635,16 +600,6 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           settleEntry("aborted", entry.signal.reason);
         } else {
           lastError = e instanceof Error ? e.message : String(e);
-          logger?.warn({
-            scope: "woc.request",
-            event: "request.failed",
-            message: `WOC request failed: ${opts.label}`,
-            data: { endpoint: opts.label, latencyMs: Date.now() - startedAt },
-            error: {
-              name: e instanceof Error ? e.name : "Error",
-              message: lastError ?? ""
-            }
-          });
           settleEntry("rejected", e);
         }
       };
@@ -1331,17 +1286,8 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         }
         next.requestsPerSecond = input.requestsPerSecond;
       }
-      const changed: Record<string, unknown> = {};
-      if (input.baseUrl !== undefined) changed.baseUrl = next.baseUrl;
-      if (input.requestsPerSecond !== undefined) changed.requestsPerSecond = next.requestsPerSecond;
       config = next;
       settingsStore.save(config);
-      logger?.info({
-        scope: "woc.config",
-        event: "config.changed",
-        message: "WOC config changed",
-        data: changed
-      });
       emitConfig();
       schedulePump();
       return { ...config };

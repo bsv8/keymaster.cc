@@ -16,7 +16,6 @@
 
 import type {
   BsvNetwork,
-  PluginLogger,
   WocBalanceResponse,
   WocBroadcastResult,
   WocConfig,
@@ -56,11 +55,6 @@ export interface CreateWocServiceOptions {
    * 不传时 createWocService 立即抛错，避免误用。
    */
   messageBus: MessageBus;
-  /**
-   * 硬切换 002：业务插件注入的 logger。
-   * 不传时不记日志。
-   */
-  logger?: PluginLogger;
   /** Host 绑定的 WOC owner/App K-V 句柄。 */
   storage?: KeyValueStore;
 }
@@ -70,9 +64,7 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
     throw new Error("createWocService: messageBus is required");
   }
   const messageBus: MessageBus = options.messageBus;
-  // logger 在 attach 之前已经准备好；actor 内部用它做 config / backoff /
-  // request 关键轨迹埋点。
-  const actor: WocActorHandle = createWocActor({ logger: options.logger, storage: options.storage });
+  const actor: WocActorHandle = createWocActor({ storage: options.storage });
   actor.attach(messageBus);
 
   function priorityOf(p?: WocRequestOptions["priority"]): number {

@@ -41,13 +41,11 @@ plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 
 - P2PKH 链上脚本材料 `HASH160(compressed public key)` 在 `plugin-p2pkh` 内部统一命名为 `pubKeyHash160Hex`（或语义等价名），不允许再叫 `publicKeyHash`。
 - 旧命名空间（按 `sha256(publicKeyHex)`）只允许一次性迁移 / 清理；`p2pkh` / `poker` 直接放弃（best-effort 删旧 DB），`contacts` 一次性复制旧联系人到新 namespace 后再删旧 DB；`p2pkh` / `poker` 失败 / 部分写入都保留旧库以便重试。
 
-## 系统日志
+## 诊断、审计与遗留数据边界
 
-- 日志是平台级能力：runtime 内建 `log.service` capability，全局唯一 IndexedDB `keymaster.logs`。
-- 业务插件通过 `ctx.logger` 记录日志，pluginId 由 runtime 注入，禁止手工重复传。
-- 日志查看入口是 `/settings/logs`：统一过滤、统一清理、配置 `debug` 开关与 `retentionDays`。
-- `debug` 默认关闭；关闭时 `logger.debug()` 不写库，开启后只对未来日志生效，不补历史。
-- 日志写入失败不能阻断业务；不允许 per-plugin 日志 DB / store / schema。
+- 统一产品日志能力已删除：插件 Context 不再注入 logger，runtime 不创建或持久化统一日志记录。
+- `fatalErrorStore`、必要的 `console.error` / `console.warn`，以及 protocol state、Sat fee audit、WebRTC history、deletion/recovery ledger 等业务或审计数据继续保留；独立的 storage / SatSubscription 诊断 logger 也不属于该产品能力。
+- 旧 `logs` platform namespace 默认不迁移、不读取、不新写，因此历史数据按 inaccessible 处理；后续若需要清理，只能通过平台存储抽象单独授权，不能用 `indexedDB.deleteDatabase` 替代抽象清理。
 
 ## 包结构
 

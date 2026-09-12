@@ -8,7 +8,7 @@
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { AssetDataNotifier, CoordinatorValueResult, PluginLogger, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
+import type { AssetDataNotifier, CoordinatorValueResult, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
@@ -72,8 +72,6 @@ export interface P2pkhTransferServiceDeps {
    * key ready 才进入 transfer 流程。
    */
   getKeyForOwner: (ownerPublicKeyHex: string) => Promise<ReadyKeyIdentity>;
-  /** 硬切换 002：业务插件注入的 logger。 */
-  logger?: PluginLogger;
 }
 
 export interface P2pkhTransferService {

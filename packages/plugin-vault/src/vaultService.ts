@@ -30,7 +30,6 @@ import {
   type ActiveKeyState,
   type KeyIdentity,
   type KeyRef,
-  type PluginLogger,
   type VaultService,
   type VaultStatus,
   type VaultLifecycleSnapshot,
@@ -202,12 +201,6 @@ export interface VaultServiceDeps {
   messageBus: MessageBus;
   keyspace?: KeyspaceHandle;
   sessionCryptoEngineOptions?: SessionCryptoClientOptions;
-  /**
-   * 硬切换 002：业务插件注入的 logger。
-   * vault 关键轨迹（unlock / lock / key created / deleted / active changed /
-   * identity failed）走统一日志。不传时不记日志。
-   */
-  logger?: PluginLogger;
 }
 
 /** 清理可能已 transfer 到 Dedicated Worker 的密钥副本；detached buffer 视为已不可由本侧访问。 */
@@ -488,17 +481,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   function setStatus(next: VaultStatus) {
     if (next === "locked" || next === "uninitialized") {
       clearVaultSession("vault status changed");
-      deps.logger?.info({
-        scope: "vault.session",
-        event: "vault.locked",
-        message: "Vault locked"
-      });
     } else if (next === "unlocked") {
-      deps.logger?.info({
-        scope: "vault.session",
-        event: "vault.unlocked",
-        message: "Vault unlocked"
-      });
       // 解锁后挂载 active 变化监听：如果用户随后手动把 notice 那把 key
       // 设为 active，自动清除 notice。
       if (!activeChangeUnsub) {
@@ -780,13 +763,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       deps.messageBus.publish("key.created", {
         publicKeyHex: derivedIdentity.publicKeyHex,
         label
-      });
-      deps.logger?.info({
-        scope: "vault.key",
-        event: "key.created",
-        message: "Vault key created",
-        data: { publicKeyHex: identity.publicKeyHex, label },
-        keyScope: { publicKeyHex: derivedIdentity.publicKeyHex }
       });
       return ref;
     } catch (error) {

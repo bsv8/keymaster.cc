@@ -10,7 +10,6 @@
 
 import type {
   BsvNetwork,
-  PluginLogger,
   Woc1SatOrdinalsContent,
   Woc1SatOrdinalsInscription,
   Woc1SatOrdinalsService,
@@ -26,7 +25,6 @@ export interface Woc1SatOrdinalsServiceHandle extends Woc1SatOrdinalsService {
 
 export interface CreateWoc1SatOrdinalsServiceOptions {
   messageBus: MessageBus;
-  logger?: PluginLogger;
 }
 
 export function createWoc1SatOrdinalsService(
@@ -36,7 +34,6 @@ export function createWoc1SatOrdinalsService(
     throw new Error("createWoc1SatOrdinalsService: messageBus is required");
   }
   const messageBus: MessageBus = options.messageBus;
-  const logger = options.logger;
 
   function priorityOf(p?: WocRequestOptions["priority"]): number {
     return WOC_PRIORITY[p ?? "background"];
@@ -100,11 +97,6 @@ export function createWoc1SatOrdinalsService(
     },
 
     dispose() {
-      logger?.debug({
-        scope: "woc.1sat",
-        event: "service.disposed",
-        message: "woc.1satordinals.service disposed"
-      });
     }
   };
 }

@@ -43,7 +43,7 @@
 | `packages/platform-storage/src/storage-access/platform-root/platformRootStore.ts` | owner 删除标记、操作排空、对象与 schema 清理、重导入世代 | 已有防迟到写入能力；不重新发明删除框架 |
 | `packages/contracts/src/activeKeyCrypto.ts` | 操作式私钥能力，不直接暴露私钥字节 | 签名、身份、加密备份导出仍在一个能力对象中，权限粒度偏粗 |
 | `packages/contracts/src/storage/access.ts`、`storage/systemStorageDeclarations.ts` | 桶、owner、App 目录隔离及内置插件授权表 | 继续作为存储权限基础；扩展读写动作与撤权生命周期 |
-| `packages/runtime/src/messageBus.ts`、`log/logService.ts` | 统一消息总线、带插件身份的 logger | `publish` 不等待异步监听者，不能作为删除完成或停机完成屏障 |
+| `packages/runtime/src/messageBus.ts` | 统一消息总线 | `publish` 不等待异步监听者，不能作为删除完成或停机完成屏障 |
 | `packages/plugin-token-bsv21/src/manifest.ts`、`plugin-p2pkh/src/p2pkhService.ts` 等 | 解锁、切 Key、删除后的刷新与缓存回收 | 多个业务重复处理同一生命周期，是主要迁移对象 |
 
 源码阅读发现的是架构问题和需要验证的风险，不代表上述每个路径已经有可复现的线上故障。本轮已运行主 Coordinator、存储 / 密码学、生命周期及 Chromium 主链回归；未把这些结果外推为全部业务生产验收。

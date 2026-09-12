@@ -121,7 +121,7 @@ function makeBiz(): PluginManifest {
 }
 
 function newHost(options: { safePath?: string } = {}): TestPluginHost {
-  return createPluginHost({ disableConfigPersistence: true, disableLogPersistence: true, ...options });
+  return createPluginHost({ disableConfigPersistence: true, ...options });
 }
 
 

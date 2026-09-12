@@ -7661,9 +7661,9 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
   }
   if (request.kind === "storage.platform.bind") {
     const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId];
-    // Host 的系统日志/插件配置句柄由 bootstrap 使用内部 pluginId
-    // "runtime" 申请，但真实平台目录分别是 logs/settings。
-    const allowedBootstrapNamespace = request.pluginId === "runtime" && (request.declaration.applicationStorageId === "logs" || request.declaration.applicationStorageId === "settings");
+    // Host 的插件配置句柄由 bootstrap 使用内部 pluginId "runtime"
+    // 申请，但真实平台目录是 settings。
+    const allowedBootstrapNamespace = request.pluginId === "runtime" && request.declaration.applicationStorageId === "settings";
     const allowedVaultNamespace = request.pluginId === "vault" && ["coordinator", "protocol", "storage", "session"].includes(request.declaration.applicationStorageId);
     if ((!expected || expected.scope !== "platform" || request.declaration.scope !== expected.scope || request.declaration.applicationStorageId !== expected.applicationStorageId || request.declaration.schemaVersion !== expected.schemaVersion) && !allowedBootstrapNamespace && !allowedVaultNamespace) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Platform storage declaration is not authorized", code: "storage_forbidden" } };

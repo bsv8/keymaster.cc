@@ -23,7 +23,7 @@ export interface PlatformRootStoreOptions {
   isCurrent?: (binding: { ownerPublicKeyHex?: string; bucketGeneration: number; keyspaceGeneration?: number }) => boolean;
 }
 
-const DEFAULT_PLATFORM_IDS = ["keys", "settings", "logs", "protocol", "session", "storage", "coordinator"] as const;
+const DEFAULT_PLATFORM_IDS = ["keys", "settings", "protocol", "session", "storage", "coordinator"] as const;
 const BUCKET_SCHEMA_PATH = ".keymaster/schema";
 const BUCKET_SCHEMA_FORMAT = "keymaster.bucket-schema";
 const BUCKET_SCHEMA_FORMAT_VERSION = 1;

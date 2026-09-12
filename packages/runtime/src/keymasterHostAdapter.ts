@@ -1,7 +1,7 @@
 // Keymaster Host Adapter。
 //
 // WebLoom 负责通用的产品、运行单元、依赖、Scope、权限租约和清理状态机；
-// 本适配器只负责把 Keymaster 的 Registry、i18n、日志、Storage、Coordinator
+// 本适配器只负责把 Keymaster 的 Registry、i18n、Storage、Coordinator
 // 和旧插件 Context 接回 WebLoom。领域字段不会进入 WebLoom。
 
 import type {
@@ -21,7 +21,6 @@ import type {
   I18nService,
   ImporterRegistry,
   KeyValueStore,
-  LogService,
   NoticeRegistry,
   PluginContext as KeymasterPluginContext,
   PluginDependency,
@@ -68,7 +67,6 @@ import {
   CHANNEL_RUNTIME_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
-  LOG_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   validatePluginStorageDeclaration,
@@ -87,7 +85,6 @@ import { bindWebLoomHost } from "./pluginHostContract.js";
 import type { PluginConfigStore as LegacyPluginConfigStore } from "./pluginConfigStoreContract.js";
 import { createPluginConfigStore } from "./pluginConfigStore.js";
 import { createI18nService } from "./i18n/createI18nService.js";
-import { createLogService, type LogServiceHandle } from "./log/logService.js";
 import { createScopedChannelRuntime } from "./lifecycle/scopedChannelRuntime.js";
 import {
   createScopedRegistryFacade,
@@ -696,10 +693,6 @@ export function createKeymasterPluginHost(
     initialResources: options.initialI18nResources,
     debug: options.i18nDebug,
   });
-  const logService: LogServiceHandle = createLogService({
-    storage: options.logStorage,
-    disablePersistence: options.disableLogPersistence,
-  });
   const configStore = createPluginConfigStore({
     readOnly: options.disableConfigPersistence,
     storage: options.configStorage,
@@ -1003,9 +996,7 @@ export function createKeymasterPluginHost(
       removeKeyspaceListener?.();
       removeKeyspaceListener = undefined;
     }, "keyspace-resource-binding");
-    const logger = logService.forPlugin(manifest.id);
     const extension = {
-      logger,
       storage,
       coordinator,
     };
@@ -1061,7 +1052,6 @@ export function createKeymasterPluginHost(
           get revoked() { return context.permissionLease.revoked; },
         };
       })(),
-      logger,
       storage,
       coordinator,
       extension,
@@ -1158,7 +1148,6 @@ export function createKeymasterPluginHost(
     { capability: RESOURCE_REGISTRY_CAPABILITY, value: legacyResourceRegistry },
     { capability: RUNTIME_MESSAGE_BUS, value: messageBus },
     { capability: I18N_SERVICE_CAPABILITY, value: i18n },
-    { capability: LOG_SERVICE_CAPABILITY, value: logService },
   ];
   if (options.storageBindingAuthority) {
     legacyBuiltinCapabilities.push({ capability: STORAGE_BINDING_AUTHORITY_CAPABILITY, value: options.storageBindingAuthority });
@@ -1192,7 +1181,6 @@ export function createKeymasterPluginHost(
       subscribe: (listener) => configStore.subscribe((snapshot) => listener(snapshot)),
     } satisfies WebLoomPluginConfigStore,
     contextExtension: ({ pluginId }) => ({
-      logger: logService.forPlugin(pluginId),
       coordinator: options.coordinatorForPlugin?.(pluginId),
     }),
     manifestValidator: (manifest) => {
@@ -1240,49 +1228,6 @@ export function createKeymasterPluginHost(
     void coreHost?.reconcile().catch(() => undefined);
   };
   if (remoteRuntime) attachRemoteRuntime(remoteRuntime);
-
-  /** 兼容旧 Host 的系统生命周期日志；通用 WebLoom 不绑定 Keymaster 日志。 */
-  function appendRuntimeLog(input: {
-    level: "debug" | "info" | "warn" | "error";
-    event: string;
-    message: string;
-    data?: Record<string, unknown>;
-    error?: { name?: string; message: string };
-  }): void {
-    void logService.append({
-      ...input,
-      pluginId: "runtime",
-      scope: "plugin-host",
-    }).catch(() => undefined);
-  }
-
-  function appendPluginEnabledLog(pluginId: string): void {
-    const state = coreHost!.state(pluginId);
-    if (state.kind !== "enabled") return;
-    appendRuntimeLog({
-      level: "info",
-      event: "plugin.enabled",
-      message: `Plugin enabled: ${pluginId}`,
-      data: { pluginId, instanceId: state.instanceId, unitId: state.unitId },
-    });
-  }
-
-  function appendSetupFailedLog(pluginId: string, error: unknown): void {
-    const details = error && typeof error === "object" && "details" in error
-      ? (error as { details?: { error?: unknown } }).details
-      : undefined;
-    const message = typeof details?.error === "string" ? details.error : errorMessage(error);
-    appendRuntimeLog({
-      level: "error",
-      event: "setup.failed",
-      message: `Plugin setup failed: ${pluginId}`,
-      data: { pluginId },
-      error: {
-        name: error instanceof Error && error.name !== "StartupPluginError" ? error.name : "Error",
-        message,
-      },
-    });
-  }
 
   function orderedManifests(plugins: readonly PluginManifest[]): PluginManifest[] {
     const byId = new Map(plugins.map((plugin) => [plugin.id, plugin]));
@@ -1530,7 +1475,6 @@ export function createKeymasterPluginHost(
     topbar: domain.topbar,
     notice: domain.notice,
     i18n,
-    log: logService,
     configStore,
     pluginIntent: options.pluginIntentCoordinator,
     resourceStore: coreHost.resourceStore,
@@ -1575,18 +1519,14 @@ export function createKeymasterPluginHost(
           if (desired && state.kind === "error-disabled") await coreHost!.retry(plugin.id);
           else if (desired && state.kind === "blocked") await coreHost!.enable(plugin.id);
           else if (desired && state.kind === "disabled") await coreHost!.enable(plugin.id);
-          appendPluginEnabledLog(plugin.id);
           return;
         }
         await coreHost!.register(convertManifest(plugin));
         const state = coreHost!.state(plugin.id);
         if (state.kind === "error-disabled") {
-          appendSetupFailedLog(plugin.id, new Error(state.error ?? "Plugin setup failed"));
           return;
         }
-        appendPluginEnabledLog(plugin.id);
       } catch (error) {
-        appendSetupFailedLog(plugin.id, error);
         // 旧 API 对 optional 插件保留“状态可查询、register 不抛出”的启动
         // 语义；required 插件仍把 StartupPluginError 交给 bootstrap。
         if (error instanceof Error && error.name === "StartupPluginError"
@@ -1605,14 +1545,11 @@ export function createKeymasterPluginHost(
     enable: async (pluginId) => {
       await coreHost!.enable(pluginId);
       await coreHost!.reconcile();
-      appendPluginEnabledLog(pluginId);
     },
     retry: async (pluginId) => {
       try {
         await coreHost!.retry(pluginId);
-        appendPluginEnabledLog(pluginId);
       } catch (error) {
-        appendSetupFailedLog(pluginId, error);
         throw error;
       }
     },

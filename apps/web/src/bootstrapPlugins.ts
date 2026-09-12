@@ -389,7 +389,7 @@ function bootstrapStepHint(pluginId: string): string | undefined {
   return undefined;
 }
 
-/** 生成启动步骤的人类可读描述，用于 fatal / 日志。 */
+/** 生成启动步骤的人类可读描述，用于 fatal 提示。 */
 export function describeBootstrapStep(pluginId: string): string {
   const hint = bootstrapStepHint(pluginId);
   if (!hint) return `plugin "${pluginId}"`;
@@ -498,7 +498,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     pageLifecycleClosed = true;
     const cleanup = pageWindowApp?.dispose("pagehide") ?? pageHost?.dispose("pagehide");
     // 页面销毁不是一次可重用的业务断线；撤权同步完成后必须立即通知
-    // Coordinator。若等 Host 的异步 teardown（日志/配置/远端连接）结束，
+    // Coordinator。若等 Host 的异步 teardown（配置/远端连接）结束，
     // 浏览器可能先销毁文档而不再执行 Promise，旧 Worker 就会留下端口和
     // final-I/O lease，下一页面只能被错误地挡在 recovery-required。
     // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
@@ -554,13 +554,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       },
     };
 
-    // 日志也是平台诊断数据，必须在 Host 创建时绑定到 Coordinator 平台 K-V。
-    // 这样 runtime 首次读取配置和写入 entry 时不会落到测试内存夹具。
-    const logStorage = runWithBootstrapErrorContext({
-      stage: "coordinator",
-      operation: "create-log-storage",
-      context: { bucket: "logs" }
-    }, () => createCoordinatorPlatformStore(coordinatorClient, "logs"));
     const configStorage = runWithBootstrapErrorContext({
       stage: "coordinator",
       operation: "create-config-storage",
@@ -580,7 +573,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   }, () => createPluginHost({
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd,
-    logStorage,
     configStorage,
     storageBindingAuthority: createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }),
     coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId),

@@ -36,8 +36,7 @@ import type {
   KeyIdentity,
   OwnerAppStore,
   KeyValueStore,
-  KeyspaceService,
-  PluginLogger
+  KeyspaceService
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import {
@@ -81,12 +80,6 @@ export interface KeyspaceServiceDeps {
    * 跳过 background.cancelByKey（仍会关闭 handle + emit）。
    */
   background?: BackgroundService;
-  /**
-   * 硬切换 002：业务插件注入的 logger。
-   * key.deleted / active.changed 走统一日志。
-   * 不传时不记日志。
-   */
-  logger?: PluginLogger;
   /** Storage-first 装配的 owner/App K-V 工厂；不提供即禁止业务存储。 */
   ownerStorageFactory?: (input: { ownerPublicKeyHex: string; applicationStorageId: string; schemaVersion: number }) => Promise<OwnerAppStore>;
   /** 清理一个 owner 根下的全部 App 命名空间；删除 Key 时由平台实现。 */
@@ -245,26 +238,9 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   }
 
   function setActiveInternal(next: ActiveKeyState, identity?: KeyIdentity) {
-    const prev = active;
     active = next;
     activeIdentity = next.activePublicKeyHex ? identity : undefined;
     persistActive(next);
-    // 硬切换 002：active 切换走统一日志；记录前后 publicKeyHex 摘要（不记私钥 / 不记 label）。
-    if (prev.activePublicKeyHex !== next.activePublicKeyHex) {
-      console.info("[keyspace] active.changed", {
-        previousPublicKeyHex: prev.activePublicKeyHex,
-        nextPublicKeyHex: next.activePublicKeyHex
-      });
-      deps.logger?.info({
-        scope: "vault.key",
-        event: "active.changed",
-        message: "Active key changed",
-        data: {
-          previousPublicKeyHex: prev.activePublicKeyHex,
-          nextPublicKeyHex: next.activePublicKeyHex
-        }
-      });
-    }
     // active 状态和 localStorage 写入已完成；逐个通知 listener。
     // 隔离每个 listener 的异常：active listener 是通知，任意一个
     // 抛错都不应回灌给调用方（特别是 `notifyKeyCreated` / `activateCreatedKey`），
@@ -432,12 +408,6 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     }
     // 4) 通知业务插件 key 已删除（仅此处发一次，vault.deleteKeyMaterial 不再发）。
     deps.messageBus.publish("key.deleted", { publicKeyHex });
-    deps.logger?.info({
-      scope: "vault.key",
-      event: "key.deleted",
-      message: "Vault key deleted",
-      data: { publicKeyHex }
-    });
     // 5) 收尾：剩余 0 把 key 时走 vault.finalizeEmptyVaultAfterLastKeyDeletion
     //    把 Vault 收回 uninitialized；否则按 active fallback 处理。
     //
@@ -545,7 +515,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       //   1) quiesceNamespace —— cancelByKey（await 旧 task 退出）+ 关闭
       //      该 key 的 openStores。失败必须冒泡以阻止后续 namespace store /
       //      Vault 私钥删除。
-      //   2) emit key.deleting（emit 不可 await，作为日志/保险通知）
+      //   2) emit key.deleting（emit 不可 await，作为状态/保险通知）
       //
       // 设计缘由：quiesceNamespace 是 active 切换 / 删除 key / Vault 锁定
       // 三条路径的唯一实现来源。prepareDeleteKey 必须复用，不能再手写

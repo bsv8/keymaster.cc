@@ -151,7 +151,7 @@ Keymaster 专属字段留在 `@keymaster/contracts` 的扩展类型中：
 - Storage declaration（存储声明）；
 - business contribution（路由、首页、设置、资产等界面贡献）；
 - Coordinator facade（插件专属 Coordinator 窄接口）；
-- i18n 资源及 Keymaster logger。
+- i18n 资源。
 
 WebLoom 的基础 Context 包含：
 
@@ -163,12 +163,12 @@ WebLoom 的基础 Context 包含：
 - 只读 config；
 - 宿主泛型扩展字段。
 
-`ctx.storage`、`ctx.coordinator`、`ctx.logger` 等现有字段由 Keymaster Context Extension
+`ctx.storage`、`ctx.coordinator` 等现有字段由 Keymaster Context Extension
 提供，不能作为 WebLoom 固定能力。
 
 ### 3.3 Host 扩展点
 
-通用 Host 不再自行创建 Keymaster Registry、日志、i18n、存储和 Vault 状态机。它必须
+通用 Host 不再自行创建 Keymaster Registry、i18n、存储和 Vault 状态机。它必须
 通过明确的 adapter/options 接受以下扩展：
 
 | 扩展点 | 中文职责 |
@@ -363,7 +363,7 @@ rg -n '@keymaster/|ownerPublicKeyHex|vaultStatus|bucketGeneration|P2PKH|BSV|Keym
 **施工：**
 
 - 将 createPluginHost 中所有领域 Registry 改为 contribution adapter 注入；
-- i18n、logger、storage binding、Coordinator facade 改为 Context extension；
+- i18n、storage binding、Coordinator facade 改为 Context extension；统一产品 logger 不属于当前 Context；
 - config 持久化和多 Tab intent 改为端口接口；
 - runtime identity 改为 scopeResolver + reconcile；
 - Host 不按 pluginId 内置 Storage 白名单或能力策略；
@@ -412,7 +412,7 @@ codec 的编码结果与当前 Keymaster wire 完全一致。
 - `@keymaster/contracts` 用扩展类型表达 bootstrap、storage、business、Coordinator、
   owner/session attributes 和权限字符串；
 - `@keymaster/runtime` 创建 Keymaster Host Adapter，组合 WebLoom Host 和现有 Registry；
-- Adapter 负责 i18n、logger、Resource Context、config K-V、plugin intent、Storage
+- Adapter 负责 i18n、Resource Context、config K-V、plugin intent、Storage
   declaration 校验、platform allowlist；
 - 将 Coordinator/Vault 快照转换为 scopeResolver 状态；锁屏/切 Key/换桶仍使用现有
   session epoch、owner generation、bucket generation；
