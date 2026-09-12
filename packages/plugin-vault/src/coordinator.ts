@@ -1,4 +1,5 @@
 export * from "./storage/vaultKeyRepository.js";
+export { installInsecureContextCryptoFallback, getEffectiveCryptoCapability } from "./crypto.js";
 export { deriveKey, verifyVerifier, encryptVerifier, decryptBytesWithAad, encryptBytesWithAad, bytesToHex, hexToBytes } from "./crypto.js";
 export { encryptBytesWithSaltBoundAad, decryptBytesWithSaltBoundAad } from "./crypto.js";
 export * from "./vaultCoordinator.js";

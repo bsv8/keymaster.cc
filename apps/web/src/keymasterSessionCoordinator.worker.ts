@@ -112,7 +112,7 @@ import {
   normalizeMsFileReadConcurrencySettings,
   SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
-import { vaultKeyRepository, createVaultKeyRepository, configureVaultKeyRepository, type VaultMetaRecord, type VaultKeyRecord, type VaultKeyRepository, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, encryptVerifier, buildVaultMeta, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary, generatePrivateKeyHex as generateValidPrivateKeyHex } from "@keymaster/plugin-vault/coordinator";
+import { installInsecureContextCryptoFallback, vaultKeyRepository, createVaultKeyRepository, configureVaultKeyRepository, type VaultMetaRecord, type VaultKeyRecord, type VaultKeyRepository, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, encryptVerifier, buildVaultMeta, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary, generatePrivateKeyHex as generateValidPrivateKeyHex } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, serialize as keyholdSerialize, recommendedParameters as keyholdRecommendedParameters, unlock as keyholdUnlock } from "keyhold";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
@@ -165,6 +165,10 @@ import type {
 import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, openMultipartUploadRepository, STORAGE_SECRET_SCOPE, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, encryptStorageProfile, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageCatalogKeyIndexRepository, createStorageBucketManagementService, serializeBucketDocument, createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeCandidateBucket, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
+
+// SharedWorker 的模块状态（包括 session epoch）会在下面初始化；先安装
+// HTTP fallback，避免 insecure host 上的首个随机 ID 读取到缺失的 randomUUID。
+installInsecureContextCryptoFallback();
 
 // Web Worker 直接复用 platform-storage 的 Hold 适配器，但不需要把
 // `keymaster-hold/browser` 作为应用层依赖暴露出来；该类型由加密函数的
@@ -12825,9 +12829,9 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
   });
 });
 
-// Unit tests import this module in a normal Node realm. Do not add a testing
-// fallback here: the production entry is created only when the host exposes a
-// SharedWorkerGlobalScope `onconnect` property.
+// Unit tests import this module in a normal Node realm. The installer above is
+// a no-op when native WebCrypto exists and never enables a fallback unless the
+// realm explicitly reports an insecure context.
 if ((globalThis as unknown as { onconnect?: unknown }).onconnect !== undefined) {
 coordinatorRuntimeApp = startSharedWorkerApp({
   id: "keymaster-coordinator",

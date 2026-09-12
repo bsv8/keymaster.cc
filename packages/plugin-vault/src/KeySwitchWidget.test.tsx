@@ -8,7 +8,7 @@
 
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import type {
@@ -30,6 +30,19 @@ import { KeySwitchWidget } from "./KeySwitchWidget.js";
 
 const KEY_A = "02".padEnd(66, "a");
 const KEY_B = "03".padEnd(66, "b");
+const originalNavigatorCredentialsDescriptor = Object.getOwnPropertyDescriptor(navigator, "credentials");
+const navigatorWithCredentials = navigator as Navigator & { credentials?: CredentialsContainer };
+
+beforeEach(() => {
+  // jsdom has no WebAuthn surface. These widget tests exercise the supported
+  // secure-context branch; the production capability check remains strict.
+  vi.stubGlobal("isSecureContext", true);
+  vi.stubGlobal("PublicKeyCredential", class TestPublicKeyCredential {});
+  Object.defineProperty(navigatorWithCredentials, "credentials", {
+    configurable: true,
+    value: {}
+  });
+});
 
 function makeMessageBus(): MessageBus {
   const subscriptions = new Map<string, Set<(payload: unknown) => void>>();
@@ -186,6 +199,12 @@ function registerVaultKeyState(host: ReturnType<typeof createPluginHost>, keyspa
 
 afterEach(() => {
   cleanup();
+  if (originalNavigatorCredentialsDescriptor) {
+    Object.defineProperty(navigatorWithCredentials, "credentials", originalNavigatorCredentialsDescriptor);
+  } else {
+    Reflect.deleteProperty(navigatorWithCredentials, "credentials");
+  }
+  vi.unstubAllGlobals();
 });
 
 describe("KeySwitchWidget", () => {

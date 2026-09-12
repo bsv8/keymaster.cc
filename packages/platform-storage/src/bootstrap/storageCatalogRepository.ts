@@ -13,6 +13,7 @@ import type {
 } from "@keymaster/contracts";
 import { STORAGE_CATALOG_CHANGED_EVENT } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+import { browserStorageLocks } from "../runtime/browserLocks.js";
 
 export const STORAGE_CATALOG_KEY = "keymaster.storage.catalog.v2";
 export const STORAGE_CATALOG_LOCK = "keymaster.storage.catalog.v2.lock";
@@ -201,10 +202,6 @@ function browserStorage(): StorageCatalogStorage {
   return storage;
 }
 
-function browserLocks(): StorageCatalogLocks | undefined {
-  return (globalThis as typeof globalThis & { navigator?: { locks?: StorageCatalogLocks } }).navigator?.locks;
-}
-
 /** 读本机目录；没有目录时返回空目录，而不是把旧业务数据当成桶。 */
 export function readStorageCatalog(storage: StorageCatalogStorage = browserStorage()): StorageCatalogV2 {
   const raw = storage.getItem(STORAGE_CATALOG_KEY);
@@ -233,15 +230,15 @@ export function clearStorageCatalog(storage: StorageCatalogStorage = browserStor
   storage.removeItem(STORAGE_CATALOG_KEY);
 }
 
-/** 多标签页目录修改必须通过 Web Locks；没有锁能力时明确不支持。 */
+/** 目录修改优先使用 Web Locks；HTTP fallback 只保证当前页面内串行。 */
 export function createStorageCatalogRepository(options: StorageCatalogRepositoryOptions = {}) {
   const storage = options.storage ?? browserStorage();
-  const locks = options.locks ?? browserLocks();
+  const locks = options.locks ?? browserStorageLocks();
   const now = options.now ?? (() => Date.now());
   const generateId = options.generateId ?? (() => crypto.randomUUID());
 
   async function withCatalogLock<T>(operation: () => Promise<T>): Promise<T> {
-    if (!locks) throw new StorageRuntimeError("storage_unavailable", "Web Locks are required for multi-tab bucket catalog updates");
+    if (!locks) throw new StorageRuntimeError("storage_unavailable", "Storage catalog locking is unavailable");
     return locks.request(STORAGE_CATALOG_LOCK, operation);
   }
 

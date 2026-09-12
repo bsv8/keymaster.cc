@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLocalStorageBucketProvider, type LocalStorageLike, type LocalStorageLocks } from "./localStorageBucketProvider.js";
+import { browserStorageLockMode, browserStorageLocks } from "../../runtime/browserLocks.js";
 
 class MemoryStorage implements LocalStorageLike {
   private readonly values = new Map<string, string>();
@@ -21,6 +22,10 @@ const locks: LocalStorageLocks = {
     return operation();
   }
 };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("localStorage bucket provider", () => {
   it("isolates bucket namespaces and supports native CAS", async () => {
@@ -45,6 +50,37 @@ describe("localStorage bucket provider", () => {
     const provider = createLocalStorageBucketProvider({ storage: new MemoryStorage(), bucketId: "no-lock" });
     await expect(provider.put("config", new Uint8Array([1]))).rejects.toMatchObject({ code: "storage_unavailable" });
     await expect(provider.probe()).rejects.toMatchObject({ code: "storage_unavailable" });
+  });
+
+  it("uses an explicit single-page lock queue for insecure HTTP", async () => {
+    vi.stubGlobal("isSecureContext", false);
+    vi.stubGlobal("navigator", {});
+    expect(browserStorageLockMode()).toBe("single-page-fallback");
+    const storage = new MemoryStorage();
+    const provider = createLocalStorageBucketProvider({ storage, bucketId: "http-fallback" });
+    const lock = browserStorageLocks();
+    expect(lock).toBeTruthy();
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const first = lock!.request("http-fallback-lock", async () => {
+      events.push("first-start");
+      markStarted();
+      await gate;
+      events.push("first-end");
+    });
+    const second = lock!.request("http-fallback-lock", async () => {
+      events.push("second");
+    });
+    await started;
+    expect(events).toEqual(["first-start"]);
+    release();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first-start", "first-end", "second"]);
+    await provider.put("config", new Uint8Array([1]));
+    await expect(provider.get("config")).resolves.toMatchObject({ bytes: new Uint8Array([1]) });
   });
 
   it("uses the browser Web Locks overloads with and without an AbortSignal", async () => {
