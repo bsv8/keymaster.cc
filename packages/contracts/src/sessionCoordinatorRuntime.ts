@@ -17,6 +17,9 @@ import type {
   CoordinatorTopic,
   CoordinatorTopicEvent,
   CoordinatorBootstrapSnapshot,
+  CoordinatorSessionOpenResult,
+  CoordinatorSessionBinding,
+  SessionEpoch,
   CoordinatorAuthorityRecovery,
   CoordinatorWorkerUnitSnapshot,
   P2pkhProviderConfig,
@@ -205,12 +208,18 @@ type CoordinatorCommandRequest = Exclude<
 /** 绑定一个 WebLoom peer 的显式会话打开请求；不携带 peer/client 身份。 */
 export interface CoordinatorSessionOpenRequest {
   kind: "session.open";
+  /** 页面为本次 physical peer 分配的 LocalStorage bridge lease。 */
+  leaseId: string;
   storageBootstrapState?: StorageBootstrapState;
 }
 
 /** 关闭由 Runtime peer 生命周期承载的 Coordinator 会话。 */
 export interface CoordinatorSessionCloseRequest {
   kind: "session.close";
+  /** 必须完整回传 session.open 发放的 binding；缺失时 fail-closed。 */
+  peerGeneration: number;
+  sessionEpoch: string;
+  leaseId: string;
 }
 
 /** 页面活动心跳也走同一 typed RPC；不再发送裸 activity 消息。 */
@@ -403,7 +412,7 @@ export type CoordinatorP2pkhBroadcastResult =
  * unrelated result DTOs.
  */
 export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
-  R extends { kind: "session.open" } ? CoordinatorBootstrapSnapshot :
+  R extends { kind: "session.open" } ? CoordinatorSessionOpenResult :
   R extends { kind: "vault.operation"; operation: infer O } ? O extends CoordinatorVaultOperation ? CoordinatorVaultOperationResultFor<O> : never :
   R extends { kind: "storage.control"; control: infer C } ? C extends CoordinatorStorageControl ? CoordinatorStorageControlResultFor<C> : never :
   R extends { kind: "storage.data"; data: infer D } ? D extends CoordinatorStorageData ? CoordinatorStorageDataResultFor<D> : never :
@@ -1376,10 +1385,17 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
   const target = (): string => text(request.targetRequestId, "request.targetRequestId", 256);
   switch (kind) {
     case "session.open": {
+      const leaseId = text(request.leaseId, "request.leaseId", 256);
       const bootstrap = request.storageBootstrapState === undefined ? undefined : parseStorageBootstrapState(request.storageBootstrapState);
-      return { kind, ...(bootstrap === undefined ? {} : { storageBootstrapState: bootstrap }) };
+      return { kind, leaseId, ...(bootstrap === undefined ? {} : { storageBootstrapState: bootstrap }) };
     }
-    case "session.close": case "session.activity":
+    case "session.close": {
+      const peerGeneration = boundedNumber(request.peerGeneration, "request.peerGeneration", 1);
+      const sessionEpoch = text(request.sessionEpoch, "request.sessionEpoch", 256);
+      const leaseId = text(request.leaseId, "request.leaseId", 256);
+      return { kind, peerGeneration, sessionEpoch, leaseId };
+    }
+    case "session.activity":
       return { kind };
     case "storage.grant": return { kind, connectSessionId: text(request.connectSessionId, "storage.grant.connectSessionId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.control": return { kind, control: parseStorageControl(request.control), expectedSessionEpoch: epoch("expectedSessionEpoch") };
@@ -1470,8 +1486,9 @@ export function coordinatorClientRequestFromRpc<K extends CoordinatorRpcCommandR
  * Window 反向 LocalStorage I/O 契约。
  *
  * 这是唯一允许 Coordinator 触碰页面 localStorage 的 capability。请求不
- * 携带 AbortSignal、authority 或 lease；这些由 WebLoom call context 和
- * 当前 Coordinator 会话在两端绑定，避免把连接控制字段伪装成业务 DTO。
+ * 携带 AbortSignal 或 authority；AbortSignal 由 WebLoom call context 绑定。
+ * peerGeneration/sessionEpoch/leaseId 是 Worker 发放的 fencing metadata，
+ * 由两端 parser 保留并在执行点校验。
  */
 export interface CoordinatorLocalStorageObject {
   path: string;
@@ -1490,17 +1507,17 @@ export interface CoordinatorLocalStorageCandidateBucket {
 }
 
 export type CoordinatorLocalStorageRequest =
-  | { type: "get"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; ifMatch?: string }
-  | { type: "list"; bucketId: string; bucketGeneration: number; candidateBucket?: CoordinatorLocalStorageCandidateBucket; prefix?: string; cursor?: string; limit?: number }
-  | { type: "put"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; bytes: Uint8Array; condition?: StorageBucketWriteCondition }
-  | { type: "delete"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; ifMatch?: string }
-  | { type: "catalog-update"; bucketId: string; bucketGeneration: number; expectedBucket: StorageBucketCatalogEntryV2; nextBucket: StorageBucketCatalogEntryV2; rollback?: boolean }
-  | { type: "catalog-commit"; bucketId: string; bucketGeneration: number; targetBucket: StorageBucketCatalogEntryV2; rollback?: boolean }
-  | { type: "catalog-select"; bucketId: string; bucketGeneration: number; expectedSelectedBucketId?: string; rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2 }
-  | { type: "catalog-read" }
-  | { type: "initial-setup-recovery-list" }
-  | { type: "initial-setup-recovery-write"; record: InitialSetupRecoveryRecordV1 }
-  | { type: "initial-setup-recovery-delete"; transactionId: string };
+  | (CoordinatorSessionBinding & { type: "get"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; ifMatch?: string })
+  | (CoordinatorSessionBinding & { type: "list"; bucketId: string; bucketGeneration: number; candidateBucket?: CoordinatorLocalStorageCandidateBucket; prefix?: string; cursor?: string; limit?: number })
+  | (CoordinatorSessionBinding & { type: "put"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; bytes: Uint8Array; condition?: StorageBucketWriteCondition })
+  | (CoordinatorSessionBinding & { type: "delete"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; ifMatch?: string })
+  | (CoordinatorSessionBinding & { type: "catalog-update"; bucketId: string; bucketGeneration: number; expectedBucket: StorageBucketCatalogEntryV2; nextBucket: StorageBucketCatalogEntryV2; rollback?: boolean })
+  | (CoordinatorSessionBinding & { type: "catalog-commit"; bucketId: string; bucketGeneration: number; targetBucket: StorageBucketCatalogEntryV2; rollback?: boolean })
+  | (CoordinatorSessionBinding & { type: "catalog-select"; bucketId: string; bucketGeneration: number; expectedSelectedBucketId?: string; rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2 })
+  | (CoordinatorSessionBinding & { type: "catalog-read" })
+  | (CoordinatorSessionBinding & { type: "initial-setup-recovery-list" })
+  | (CoordinatorSessionBinding & { type: "initial-setup-recovery-write"; record: InitialSetupRecoveryRecordV1 })
+  | (CoordinatorSessionBinding & { type: "initial-setup-recovery-delete"; transactionId: string });
 
 export type CoordinatorLocalStorageResponse =
   | { type: "object"; object?: CoordinatorLocalStorageObject }
@@ -1778,6 +1795,25 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
     ...(p2pkhProviders === undefined ? {} : { p2pkhProviders }),
     ...(pluginIntent === undefined ? {} : { pluginIntent }),
   };
+}
+
+function parseCoordinatorSessionBinding(value: unknown, field: string): CoordinatorSessionOpenResult["sessionBinding"] {
+  const binding = expectRecord(value, field);
+  return {
+    peerGeneration: boundedNumber(binding.peerGeneration, field + ".peerGeneration", 1),
+    sessionEpoch: text(binding.sessionEpoch, field + ".sessionEpoch", 256),
+    leaseId: text(binding.leaseId, field + ".leaseId", 256),
+  };
+}
+
+function parseCoordinatorSessionOpenResult(value: unknown, field: string): CoordinatorSessionOpenResult {
+  const result = expectRecord(value, field);
+  const snapshot = parseCoordinatorBootstrapSnapshot(result, field);
+  // session.open is the sole authority that creates the page/peer lease. A
+  // response without a binding cannot safely be used by the client, even if
+  // its bootstrap snapshot happens to be otherwise valid.
+  const sessionBinding = parseCoordinatorSessionBinding(result.sessionBinding, field + ".sessionBinding");
+  return { ...snapshot, sessionBinding };
 }
 
 function parseStorageProviderConnection(value: unknown, field: string): StorageProviderConnectionView {
@@ -2644,7 +2680,7 @@ function parseCryptoResultFor(operation: CoordinatorCryptoOperation, value: unkn
 
 function parseCoordinatorResultForRequest(request: CoordinatorRpcRequest, value: unknown, field: string): unknown {
   switch (request.kind) {
-    case "session.open": return parseCoordinatorBootstrapSnapshot(value, field);
+    case "session.open": return parseCoordinatorSessionOpenResult(value, field);
     case "vault.operation": return parseCoordinatorVaultOperationResultFor(request.operation, value, field);
     case "storage.control": return parseStorageControlResultFor(request.control, value, field);
     case "storage.data": return parseStorageDataResultFor(request.data, value, field);
@@ -3488,8 +3524,16 @@ function parseLocalStorageCondition(value: unknown): StorageBucketWriteCondition
   };
 }
 
+function parseLocalStorageBinding(value: RecordValue): CoordinatorSessionBinding {
+  return {
+    peerGeneration: localStorageInteger(value.peerGeneration, "peerGeneration", 1),
+    sessionEpoch: localStorageText(value.sessionEpoch, "sessionEpoch", 256),
+    leaseId: localStorageText(value.leaseId, "leaseId", 256),
+  };
+}
+
 function assertNoLocalStorageTransportFields(value: RecordValue): void {
-  for (const field of ["authorityInstanceId", "leaseId", "signal", "requestId", "clientId"]) {
+  for (const field of ["authorityInstanceId", "signal", "requestId", "clientId"]) {
     if (field in value) throw new TypeError(`Coordinator local-storage request contains transport field ${field}`);
   }
 }
@@ -3497,11 +3541,13 @@ function assertNoLocalStorageTransportFields(value: RecordValue): void {
 function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageRequest {
   if (!record(value)) throw new TypeError("Coordinator local-storage request must be an object");
   assertNoLocalStorageTransportFields(value);
+  const binding = parseLocalStorageBinding(value);
   const type = localStorageText(value.type, "request.type", 64);
-  if (type === "catalog-read" || type === "initial-setup-recovery-list") return { type };
-  if (type === "initial-setup-recovery-delete") return { type, transactionId: localStorageText(value.transactionId, "transactionId", 128) };
-  if (type === "initial-setup-recovery-write") return { type, record: parseLocalStorageRecoveryRecord(value.record, "record") };
+  if (type === "catalog-read" || type === "initial-setup-recovery-list") return { ...binding, type };
+  if (type === "initial-setup-recovery-delete") return { ...binding, type, transactionId: localStorageText(value.transactionId, "transactionId", 128) };
+  if (type === "initial-setup-recovery-write") return { ...binding, type, record: parseLocalStorageRecoveryRecord(value.record, "record") };
   if (type === "catalog-update") return {
+    ...binding,
     type,
     bucketId: localStorageText(value.bucketId, "bucketId", 128),
     bucketGeneration: localStorageInteger(value.bucketGeneration, "bucketGeneration", 1),
@@ -3510,6 +3556,7 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
     ...(value.rollback === undefined ? {} : { rollback: optionalLocalStorageBoolean(value.rollback, "catalog-update.rollback") }),
   };
   if (type === "catalog-commit") return {
+    ...binding,
     type,
     bucketId: localStorageText(value.bucketId, "bucketId", 128),
     bucketGeneration: localStorageInteger(value.bucketGeneration, "bucketGeneration", 1),
@@ -3517,6 +3564,7 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
     ...(value.rollback === undefined ? {} : { rollback: optionalLocalStorageBoolean(value.rollback, "catalog-commit.rollback") }),
   };
   if (type === "catalog-select") return {
+    ...binding,
     type,
     bucketId: localStorageText(value.bucketId, "bucketId", 128),
     bucketGeneration: localStorageInteger(value.bucketGeneration, "bucketGeneration", 1),
@@ -3532,10 +3580,10 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
   if (type === "put") {
     const bytes = localStorageBytes(value.bytes, "bytes");
     const condition = parseLocalStorageCondition(value.condition);
-    return { type, bucketId, bucketGeneration, path: path!, ...(candidate ? { candidateBucket: candidate } : {}), bytes, ...(condition === undefined ? {} : { condition }) };
+    return { ...binding, type, bucketId, bucketGeneration, path: path!, ...(candidate ? { candidateBucket: candidate } : {}), bytes, ...(condition === undefined ? {} : { condition }) };
   }
   if (type === "list") return {
-    type, bucketId, bucketGeneration,
+    ...binding, type, bucketId, bucketGeneration,
     ...(candidate ? { candidateBucket: candidate } : {}),
     ...(value.prefix === undefined ? {} : { prefix: localStorageText(value.prefix, "prefix", 4_096) }),
     ...(value.cursor === undefined ? {} : { cursor: localStorageText(value.cursor, "cursor", 8_192) }),
@@ -3543,7 +3591,7 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
   };
   if (path === undefined) throw new TypeError("Coordinator local-storage path is invalid");
   return {
-    type, bucketId, bucketGeneration, path,
+    ...binding, type, bucketId, bucketGeneration, path,
     ...(candidate ? { candidateBucket: candidate } : {}),
     ...(value.ifMatch === undefined ? {} : { ifMatch: localStorageText(value.ifMatch, "ifMatch", 512) }),
   };

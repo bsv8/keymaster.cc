@@ -4,7 +4,7 @@ import {
   hexToBytes,
   vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testAcquireExecutorLease,
@@ -74,6 +74,11 @@ import {
   __testPublishStorageState,
   __testStorageTransfer,
   __testAttachPort,
+  __testInstallCoordinatorBridgePeer,
+  __testHandleCoordinatorSessionRpc,
+  __testAwaitCoordinatorPeerDrain,
+  __testRequestCoordinatorLocalStorageBridge,
+  __testCloseCoordinatorBridgePeer,
   __testDispatchStorageMessage,
   __testFenceCoordinatorAuthority,
   __testHoldCoordinatorFinalIoLease,
@@ -122,6 +127,7 @@ import { __testParseInitialSetupRecoveryRecord } from "./keymasterSessionCoordin
 import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageLike, LocalStorageLocks } from "@keymaster/platform-storage";
+import type { PeerController } from "webloom-framework";
 
 class TestPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -174,6 +180,94 @@ function validPublisherKey(seed: number): string {
 const VALID_PUBLISHER_KEYS = [1, 2, 3, 4, 5, 6].map(validPublisherKey);
 
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
+
+type CoordinatorTestPeer = Pick<PeerController, "peerId" | "scope" | "capability" | "exposeGroup">;
+type CoordinatorBridgeCall = (request: unknown, signal: AbortSignal) => Promise<LocalStorageBridgeResponse>;
+
+interface CoordinatorTestPeerHarness {
+  peer: CoordinatorTestPeer;
+  bridgeCalls: Array<{ request: unknown; signal: AbortSignal }>;
+  exposureCount: number;
+  exposureRevocationCount: number;
+}
+
+const EMPTY_STORAGE_CATALOG: StorageCatalogV2 = {
+  format: "keymaster.storage.catalog",
+  version: 2,
+  buckets: [],
+};
+
+function makeCoordinatorTestPeer(peerId: string, bridgeCall: CoordinatorBridgeCall = async () => ({
+  type: "catalog-state",
+  catalog: structuredClone(EMPTY_STORAGE_CATALOG),
+})): CoordinatorTestPeerHarness {
+  const bridgeCalls: CoordinatorTestPeerHarness["bridgeCalls"] = [];
+  let exposureCount = 0;
+  let exposureRevocationCount = 0;
+  const scope = {
+    state: "active" as const,
+    onRevoke: (_listener: (reason: string) => void) => () => undefined,
+  } as unknown as PeerController["scope"];
+  const peer = {
+    peerId,
+    scope,
+    exposeGroup: () => {
+      exposureCount += 1;
+      let revoked = false;
+      return {
+        revoke: () => {
+          if (revoked) return;
+          revoked = true;
+          exposureRevocationCount += 1;
+        },
+      };
+    },
+    capability: (() => ({
+      call: (request: unknown, options?: { signal?: AbortSignal }) => {
+        const signal = options?.signal ?? new AbortController().signal;
+        bridgeCalls.push({ request, signal });
+        return bridgeCall(request, signal);
+      },
+    })) as unknown as PeerController["capability"],
+  } as CoordinatorTestPeer;
+  return {
+    peer,
+    bridgeCalls,
+    get exposureCount() { return exposureCount; },
+    get exposureRevocationCount() { return exposureRevocationCount; },
+  };
+}
+
+function installCoordinatorSessionInitializationBridge(): void {
+  // session.open 的初始化只使用这个已有 bridge override；open 之后测试
+  // 会清除 override，再让 LocalStorage 请求经由 fake peer capability 走真实
+  // requestLocalStorageBridge pending/response/fence 路径。
+  __testSetLocalStorageBridgeOverride(async (input) => {
+    if (input.type === "initial-setup-recovery-list") {
+      return { type: "initial-setup-recovery", records: [] };
+    }
+    if (input.type === "catalog-read") {
+      return { type: "catalog-state", catalog: structuredClone(EMPTY_STORAGE_CATALOG) };
+    }
+    throw new Error(`unexpected session initialization bridge request: ${input.type}`);
+  });
+}
+
+type CoordinatorSessionRpcResponse = Awaited<ReturnType<typeof __testHandleCoordinatorSessionRpc>>;
+
+function sessionBindingFromOpenResponse(response: CoordinatorSessionRpcResponse): CoordinatorSessionBinding {
+  const result = response.operationResult as { sessionBinding?: CoordinatorSessionBinding } | undefined;
+  if (!result?.sessionBinding) throw new Error("session.open did not return a session binding");
+  return result.sessionBinding;
+}
+
+function sessionOpen(leaseId: string): CoordinatorSessionOpenRequest {
+  return { kind: "session.open", leaseId };
+}
+
+function sessionClose(binding: CoordinatorSessionBinding): CoordinatorSessionCloseRequest {
+  return { kind: "session.close", ...binding };
+}
 
 class CatalogBridgeStorage implements LocalStorageLike {
   private readonly values = new Map<string, string>();
@@ -510,6 +604,182 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
 });
 
 describe("Session Coordinator worker", () => {
+  it("真实 session handler：同一 peer 的旧 binding close 后 fresh lease open 产生新的 binding/owner", async () => {
+    __testResetState();
+    const harness = makeCoordinatorTestPeer("session-fresh-lease-peer");
+    installCoordinatorSessionInitializationBridge();
+
+    try {
+      const oldResponse = await __testHandleCoordinatorSessionRpc(harness.peer, sessionOpen("lease-old"));
+      const oldBinding = sessionBindingFromOpenResponse(oldResponse);
+
+      await __testHandleCoordinatorSessionRpc(harness.peer, sessionClose(oldBinding));
+      await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
+
+      const freshResponse = await __testHandleCoordinatorSessionRpc(harness.peer, sessionOpen("lease-fresh"));
+      const freshBinding = sessionBindingFromOpenResponse(freshResponse);
+      expect(freshBinding).not.toEqual(oldBinding);
+      expect(freshBinding.peerGeneration).toBeGreaterThan(oldBinding.peerGeneration);
+      expect(freshBinding.leaseId).toBe("lease-fresh");
+      expect(harness.exposureCount).toBe(2);
+      expect(harness.exposureRevocationCount).toBe(1);
+
+      // 清除初始化 override 后不传 peerId；默认 owner 必须是 fresh lease。
+      __testSetLocalStorageBridgeOverride(undefined);
+      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" })).resolves.toMatchObject({
+        type: "catalog-state",
+      });
+      expect(harness.bridgeCalls).toHaveLength(1);
+      expect(harness.bridgeCalls[0]?.request).toMatchObject(freshBinding);
+    } finally {
+      __testSetLocalStorageBridgeOverride(undefined);
+      await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
+      __testResetState();
+    }
+  });
+
+  it("真实 session handler：旧 binding 的 late close 不能 revoke fresh session", async () => {
+    __testResetState();
+    const harness = makeCoordinatorTestPeer("session-late-close-peer");
+    installCoordinatorSessionInitializationBridge();
+
+    try {
+      const oldBinding = sessionBindingFromOpenResponse(
+        await __testHandleCoordinatorSessionRpc(harness.peer, sessionOpen("lease-old")),
+      );
+      const freshBinding = sessionBindingFromOpenResponse(
+        await __testHandleCoordinatorSessionRpc(harness.peer, sessionOpen("lease-fresh")),
+      );
+      expect(freshBinding.peerGeneration).toBeGreaterThan(oldBinding.peerGeneration);
+
+      await __testHandleCoordinatorSessionRpc(harness.peer, sessionClose(oldBinding));
+      await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
+
+      __testSetLocalStorageBridgeOverride(undefined);
+      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" })).resolves.toMatchObject({
+        type: "catalog-state",
+      });
+      expect(harness.bridgeCalls).toHaveLength(1);
+      expect(harness.bridgeCalls[0]?.request).toMatchObject(freshBinding);
+      // replacement open 已撤销旧 exposure；late close 不能再撤销 fresh exposure。
+      expect(harness.exposureRevocationCount).toBe(1);
+    } finally {
+      __testSetLocalStorageBridgeOverride(undefined);
+      await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
+      __testResetState();
+    }
+  });
+
+  it("真实 session handler：关闭当前 owner 后 LocalStorage ownership handoff 到另一个 open peer", async () => {
+    __testResetState();
+    const first = makeCoordinatorTestPeer("session-owner-first-peer");
+    const second = makeCoordinatorTestPeer("session-owner-second-peer");
+    installCoordinatorSessionInitializationBridge();
+
+    try {
+      const firstBinding = sessionBindingFromOpenResponse(
+        await __testHandleCoordinatorSessionRpc(first.peer, sessionOpen("lease-first")),
+      );
+      const secondBinding = sessionBindingFromOpenResponse(
+        await __testHandleCoordinatorSessionRpc(second.peer, sessionOpen("lease-second")),
+      );
+      expect(first.exposureCount).toBe(1);
+      expect(second.exposureCount).toBe(1);
+
+      // second 是最新提交的 owner；close 仍经真实 session.close handler。
+      await __testHandleCoordinatorSessionRpc(second.peer, sessionClose(secondBinding));
+      await __testAwaitCoordinatorPeerDrain(second.peer.peerId);
+
+      __testSetLocalStorageBridgeOverride(undefined);
+      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" })).resolves.toMatchObject({
+        type: "catalog-state",
+      });
+      expect(first.bridgeCalls).toHaveLength(1);
+      expect(second.bridgeCalls).toHaveLength(0);
+      expect(first.bridgeCalls[0]?.request).toMatchObject(firstBinding);
+    } finally {
+      __testSetLocalStorageBridgeOverride(undefined);
+      await __testAwaitCoordinatorPeerDrain(first.peer.peerId);
+      await __testAwaitCoordinatorPeerDrain(second.peer.peerId);
+      __testResetState();
+    }
+  });
+
+  it("真实 session.close handler：bridge response in-flight 时 fence 后拒绝旧响应", async () => {
+    __testResetState();
+    let releaseBridge!: (response: LocalStorageBridgeResponse) => void;
+    const bridgeResponse = new Promise<LocalStorageBridgeResponse>((resolve) => {
+      releaseBridge = resolve;
+    });
+    const harness = makeCoordinatorTestPeer("session-inflight-fence-peer", async (_request, _signal) => bridgeResponse);
+    installCoordinatorSessionInitializationBridge();
+
+    try {
+      const binding = sessionBindingFromOpenResponse(
+        await __testHandleCoordinatorSessionRpc(harness.peer, sessionOpen("lease-inflight")),
+      );
+      __testSetLocalStorageBridgeOverride(undefined);
+
+      const oldResponse = __testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" }, harness.peer.peerId);
+      expect(harness.bridgeCalls).toHaveLength(1);
+      const bridgeSignal = harness.bridgeCalls[0]!.signal;
+      let closeSettled = false;
+      const closing = __testHandleCoordinatorSessionRpc(
+        harness.peer,
+        sessionClose(binding),
+        undefined,
+        { waitForDrain: true },
+      ).then(() => { closeSettled = true; });
+      await flush();
+      expect(closeSettled).toBe(false);
+      expect(bridgeSignal.aborted).toBe(true);
+
+      releaseBridge({ type: "catalog-state", catalog: structuredClone(EMPTY_STORAGE_CATALOG) });
+      await expect(oldResponse).rejects.toMatchObject({ code: "service_reference_stale" });
+      await closing;
+      expect(closeSettled).toBe(true);
+    } finally {
+      // releaseBridge 在断言失败时也要释放 fake capability，避免 reset 遗留 drain。
+      releaseBridge?.({ type: "catalog-state", catalog: structuredClone(EMPTY_STORAGE_CATALOG) });
+      await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
+      __testSetLocalStorageBridgeOverride(undefined);
+      __testResetState();
+    }
+  });
+
+  it("同步抛出的 LocalStorage bridge call 会清理 pending 并允许 close drain 完成", async () => {
+    __testResetState();
+    const peerId = "sync-throw-bridge-peer";
+    const binding: CoordinatorSessionBinding = {
+      peerGeneration: 1,
+      sessionEpoch: "sync-throw-epoch",
+      leaseId: "sync-throw-lease",
+    };
+    const source = new AbortController();
+    const syncError = new Error("synchronous bridge dispatch failure");
+    const removeAbortListener = vi.spyOn(source.signal, "removeEventListener");
+    const scope = {
+      state: "active" as const,
+      onRevoke: () => () => undefined,
+    } as unknown as PeerController["scope"];
+    const peer = {
+      peerId,
+      scope,
+      capability: (() => ({ call: () => { throw syncError; } })) as unknown as PeerController["capability"],
+    } as Pick<PeerController, "peerId" | "scope" | "capability">;
+
+    try {
+      __testInstallCoordinatorBridgePeer(peer, binding);
+      const request = __testRequestCoordinatorLocalStorageBridge({ type: "catalog-read", signal: source.signal } satisfies LocalStorageBridgeRequest, peerId);
+      expect(request).toBeInstanceOf(Promise);
+      await expect(request).rejects.toBe(syncError);
+      expect(removeAbortListener).toHaveBeenCalledWith("abort", expect.any(Function));
+      await expect(__testCloseCoordinatorBridgePeer(peerId, binding)).resolves.toBeUndefined();
+    } finally {
+      __testResetState();
+    }
+  });
+
   it("绑定已发布后初始化失败时回滚目录、Root 和 Worker 会话", async () => {
     __testResetState();
     const password = "catalog-switch-password";

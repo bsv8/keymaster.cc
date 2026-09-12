@@ -171,7 +171,7 @@ function bindCoordinatorMethods<T>(
 /** 公开给业务插件的 Coordinator 视图：冻结普通对象，不继承真实 client 原型。 */
 export function createPublicCoordinatorClient(client: SessionCoordinatorClient): SessionCoordinatorClient {
   return bindCoordinatorMethods<SessionCoordinatorClient>(client, [
-    "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
+    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
     "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
     "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort",
     "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer", "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord",
@@ -183,7 +183,7 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
 /** Storage 插件专用 facade：只允许页面侧 StorageRuntimeController 所需 RPC。 */
 export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl {
   return bindCoordinatorMethods<StorageCoordinatorControl>(client, [
-    "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
+    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
     "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
     "refreshStorageBootstrap"
   ]);
@@ -192,7 +192,7 @@ export function createStorageCoordinatorClient(client: SessionCoordinatorClient)
 /** Vault 插件专用 facade：只有 Vault 可以操作私钥与会话生命周期。 */
 export function createVaultCoordinatorClient(client: SessionCoordinatorClient): VaultCoordinatorControl {
   const facade = bindCoordinatorMethods<VaultCoordinatorControl>(client, [
-    "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic",
+    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic",
     "unlock", "lock", "activateKey", "vaultOperation", "crypto", "backgroundCancelByKey"
   ]);
   return facade;
@@ -208,34 +208,34 @@ export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, 
     case "storage": return createStorageCoordinatorClient(client);
     case "vault": return createVaultCoordinatorClient(client);
     case "background": return bindCoordinatorMethods<BackgroundCoordinatorControl>(client, [
-      "getIsConnected", "getBootstrapSnapshot", "subscribeTopic", "backgroundRunNow", "backgroundTrigger",
+      "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "subscribeTopic", "backgroundRunNow", "backgroundTrigger",
       "backgroundCancel", "backgroundCancelByKey", "backgroundSettingsUpdate", "reportRecoverableCoordinatorFailure"
     ]);
     case "p2pkh":
     case "woc":
     case "junglebus": return bindCoordinatorMethods<P2pkhCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
       "p2pkhProvidersGet", "p2pkhProvidersUpdate", "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate",
       "p2pkhBroadcast", "p2pkhRebroadcastAncestors"
     ]);
     case "msfile": return bindCoordinatorMethods<MsFileCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
       "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort"
     ]);
     case "sat-subscription": return bindCoordinatorMethods<SatCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
       "satOperation", "channelOperation"
     ]);
     case "window-p2p": return bindCoordinatorMethods<WindowP2pCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
       "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer",
       "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord"
     ]);
     case "protocol": return bindCoordinatorMethods<ProtocolCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity", "channelOperation"
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity", "channelOperation"
     ]);
     case "contacts": return bindCoordinatorMethods<ContactsCoordinatorControl>(client, [
-      "getIsConnected", "getBootstrapSnapshot", "subscribeTopic", "contactsPresenceSnapshot"
+      "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "subscribeTopic", "contactsPresenceSnapshot"
     ]);
     default: return undefined;
   }
@@ -496,7 +496,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const disposePageLifecycle = (): void => {
     if (pageLifecycleClosed) return;
     pageLifecycleClosed = true;
-    const cleanup = pageWindowApp?.dispose("pagehide") ?? pageHost?.dispose("pagehide");
     // 页面销毁不是一次可重用的业务断线；撤权同步完成后必须立即通知
     // Coordinator。若等 Host 的异步 teardown（日志/配置/远端连接）结束，
     // 浏览器可能先销毁文档而不再执行 Promise，旧 Worker 就会留下端口和
@@ -504,6 +503,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
     // 仍在后台尽力执行，不能反过来阻塞新 Worker 的接管判定。
     coordinatorClient.shutdown();
+    const cleanup = pageWindowApp?.dispose("pagehide") ?? pageHost?.dispose("pagehide");
     if (cleanup) {
       void cleanup.catch(() => undefined);
     }
