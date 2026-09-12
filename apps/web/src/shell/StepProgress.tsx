@@ -72,7 +72,7 @@ export function StepProgress({
               key={step.id}
               className={`step-progress__item step-progress__item--${state}`}
             >
-              {i > 0 ? <span className="step-progress__connector" aria-hidden="true" /> : null}
+              {i < steps.length - 1 ? <span className="step-progress__connector" aria-hidden="true" /> : null}
               <Tag
                 type={clickable ? "button" : undefined}
                 className="step-progress__node"
