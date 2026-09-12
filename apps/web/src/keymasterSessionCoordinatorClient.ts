@@ -330,7 +330,11 @@ export interface RecoverableCoordinatorDiagnostic {
 type EventListener<T> = (event: T) => void;
 
 type CoordinatorDispatchStatus = "not-dispatched" | "unknown";
-type CoordinatorSendError = Error & { dispatchStatus?: CoordinatorDispatchStatus };
+type CoordinatorSendError = Error & {
+  dispatchStatus?: CoordinatorDispatchStatus;
+  /** 请求在本页面 DTO 校验阶段失败，尚未进入 Runtime。 */
+  requestValidation?: boolean;
+};
 
 function requiredCoordinatorOperationResult<T>(response: { operationResult?: T }, kind: string): T {
   if (!Object.prototype.hasOwnProperty.call(response, "operationResult")) {
@@ -1511,6 +1515,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   // ============================================================
 
   private normalizeTransportFailure(kind: CoordinatorClientRequest["kind"], cause: unknown): CoordinatorTransportFailure {
+    if (cause && typeof cause === "object" && (cause as CoordinatorSendError).requestValidation === true) {
+      const message = cause instanceof Error ? cause.message : "Coordinator request validation failed";
+      this.reportRecoverableCoordinatorFailure(kind, cause);
+      return { status: "transport-error", message, retryable: false, dispatchStatus: "not-dispatched" };
+    }
     this.isConnected = false;
     this.removeRuntimeSubscription?.();
     this.removeRuntimeSubscription = undefined;
@@ -1528,7 +1537,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   reportRecoverableCoordinatorFailure(kind: string, cause: unknown): void {
-    const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "Coordinator command failed";
+    const code = cause && typeof cause === "object" && typeof (cause as { code?: unknown }).code === "string"
+      ? ` [${(cause as { code: string }).code}]`
+      : "";
+    const message = `${cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "Coordinator command failed"}${code}`;
     this.recoverableDiagnostics.push({ kind, status: "recoverable", message: message.slice(0, 200), sessionEpoch: this.bootstrapSnapshotCache.sessionEpoch, connected: this.isConnected });
     if (this.recoverableDiagnostics.length > 50) this.recoverableDiagnostics.shift();
   }
@@ -1550,7 +1562,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private async sendRequest<R extends CoordinatorClientCommandRequest>(
     request: R,
   ): Promise<CoordinatorRpcResponseForRequest<CoordinatorRpcRequestFromClient<R>>> {
-    return this.sendTypedRequest(toCoordinatorRpcRequest(request), request.requestId);
+    let rpcRequest: CoordinatorRpcRequestFromClient<R>;
+    try {
+      rpcRequest = toCoordinatorRpcRequest(request);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      const failure = coordinatorSendError(`Coordinator request validation failed: ${message}`, "not-dispatched");
+      failure.requestValidation = true;
+      throw failure;
+    }
+    return this.sendTypedRequest(rpcRequest, request.requestId);
   }
 
   private async sendTypedRequest<R extends CoordinatorRpcRequest>(

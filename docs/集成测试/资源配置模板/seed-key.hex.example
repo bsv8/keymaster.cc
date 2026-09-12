@@ -1,0 +1,3 @@
+# testnet 资金库私钥：只填 64 位十六进制 secp256k1 标量，不要提交真实值。
+# 复制到仓库外的 /home/david/.config/keymaster-e2e/seed-key.hex 后再填写。
+

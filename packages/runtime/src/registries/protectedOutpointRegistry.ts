@@ -30,9 +30,20 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
 
   async function refresh(provider: ProtectedOutpointProvider): Promise<void> {
     const list = await Promise.resolve(provider.listProtectedOutpoints());
+    // 注销发生在 owner storage revoke 之后；迟到的旧结果不能重新把
+    // 已撤销插件的 outpoint 写回 registry，否则会越过生命周期边界。
+    if (providers.get(provider.id) !== provider) return;
     cache.set(provider.id, list.slice());
     pruneClaims(provider, list);
     emitChange();
+  }
+
+  function scheduleRefresh(provider: ProtectedOutpointProvider): void {
+    void refresh(provider).catch(() => {
+      // provider 刷新是 detached 的观察任务。锁定/注销期间 owner storage
+      // 被取消是正常生命周期结果；其它瞬时读取失败也保留最后一次成功快照，
+      // 不能把失败误发布为空集合（那会让普通 funding 误选受保护输入）。
+    });
   }
 
   function pruneClaims(provider: ProtectedOutpointProvider, nextList: ProtectedOutpoint[]): boolean {
@@ -73,9 +84,9 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
         throw new Error(`Protected outpoint provider id "${provider.id}" is already registered`);
       }
       providers.set(provider.id, provider);
-      void refresh(provider);
+      scheduleRefresh(provider);
       const off = provider.onChange?.(() => {
-        void refresh(provider);
+        scheduleRefresh(provider);
       });
       offChange.set(provider.id, off);
     },

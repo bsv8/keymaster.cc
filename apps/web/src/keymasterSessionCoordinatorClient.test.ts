@@ -1046,6 +1046,32 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally { globalThis.SharedWorker = original; }
   });
 
+  it("does not turn a local DTO validation error into a Coordinator disconnect", async () => {
+    const hub = new Hub();
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "local-dto-validation" });
+      await client.connect();
+      const result = await client.channelOperation({
+        type: "private-publish",
+        ownerPublicKeyHex: "a".repeat(64),
+        caller: { kind: "plugin", pluginId: "contacts" },
+        recipientPublicKeyHex: "b".repeat(64),
+        protocol: "bsv8.message.v1",
+        // 生产 DTO parser 必须拒绝 undefined；这是页面侧业务对象修复前
+        // 会触发的路径，失败不代表 SharedWorker 已断开。
+        content: undefined,
+      } as any);
+      expect(result).toMatchObject({ status: "transport-error", retryable: false, dispatchStatus: "not-dispatched" });
+      expect(result.status).toBe("transport-error");
+      if (result.status === "transport-error") {
+        expect(result.message).toMatch(/request validation|invalid value/iu);
+      }
+      expect(client.getIsConnected()).toBe(true);
+    } finally { globalThis.SharedWorker = original; }
+  });
+
   it("rejects immediately when the SharedWorker reports a startup error", async () => {
     const port = createTestMessagePort();
     const worker = { port, onerror: null as ((event: Event) => void) | null } as unknown as SharedWorker;

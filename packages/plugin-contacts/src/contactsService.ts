@@ -253,7 +253,7 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
         id: crypto.randomUUID(),
         publicKeyHex,
         name: input.name.trim(),
-        note: input.note,
+        ...(input.note?.trim() ? { note: input.note.trim() } : {}),
         tags: input.tags ?? [],
         createdAt: now,
         updatedAt: now
@@ -276,11 +276,12 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
           throw new ContactsDuplicateError(publicKeyHex);
         }
       }
+      const { note: _existingNote, ...existingWithoutNote } = existing;
       const updated: Contact = {
-        ...existing,
+        ...existingWithoutNote,
         publicKeyHex,
         name: input.name.trim(),
-        note: input.note,
+        ...(input.note?.trim() ? { note: input.note.trim() } : {}),
         tags: input.tags ?? existing.tags,
         updatedAt: new Date().toISOString()
       };

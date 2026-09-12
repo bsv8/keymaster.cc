@@ -11,7 +11,7 @@
 // 硬切换 003：使用 Resource Store 读取后台设置，跨标签同步由 resource subscribe 处理。
 
 import { useEffect, useState } from "react";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
 import { BACKGROUND_SERVICE_CAPABILITY, type BackgroundSyncSettings } from "@keymaster/contracts";
 
@@ -26,7 +26,17 @@ const INTERVAL_OPTIONS: Array<{ label: string; value: number }> = [
 const DEFAULT_SETTINGS: BackgroundSyncSettings = { assetHoldingsIntervalMs: 900_000 };
 
 export function BackgroundSettingsPage() {
-  const backgroundService = useCapability(BACKGROUND_SERVICE_CAPABILITY);
+  // owner-session 在锁定过渡中会先撤销 capability；路由树卸载前若有一帧
+  // 仍命中本页，不能把这个正常的 unavailable 状态升级成 React fatal。
+  const backgroundService = useOptionalCapability(BACKGROUND_SERVICE_CAPABILITY);
+  if (!backgroundService) {
+    return <div className="background-settings" role="status">后台任务服务正在切换，请稍候。</div>;
+  }
+  return <AvailableBackgroundSettingsPage backgroundService={backgroundService} />;
+}
+
+/** capability 存在时才挂载 resource hook，避免资源定义已撤销时调用 ensure。 */
+function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundService: import("@keymaster/contracts").BackgroundService }) {
   const host = usePluginHost();
   const { t } = useI18n();
   const store = host.resourceStore;

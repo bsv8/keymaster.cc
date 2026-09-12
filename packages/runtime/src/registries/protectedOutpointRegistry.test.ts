@@ -1,7 +1,7 @@
 // 受保护 outpoint registry 回归测试。
 
 import { describe, expect, it, vi } from "vitest";
-import type { ProtectedOutpointProvider } from "@keymaster/contracts";
+import type { ProtectedOutpoint, ProtectedOutpointProvider } from "@keymaster/contracts";
 import { createProtectedOutpointRegistry } from "./protectedOutpointRegistry.js";
 
 function provider(
@@ -185,5 +185,51 @@ describe("createProtectedOutpointRegistry", () => {
     await Promise.resolve();
 
     expect(change).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not publish a late refresh after a provider is unregistered", async () => {
+    let resolveList!: (items: ProtectedOutpoint[]) => void;
+    const pending = new Promise<ProtectedOutpoint[]>((resolve) => {
+      resolveList = resolve;
+    });
+    const registry = createProtectedOutpointRegistry();
+    registry.register({
+      id: "pending",
+      ownerPluginId: "token-bsv21",
+      listProtectedOutpoints: () => pending,
+    });
+
+    registry.unregister("pending");
+    resolveList([{
+      txid: "late",
+      vout: 0,
+      network: "main",
+      ownerPluginId: "token-bsv21",
+      kind: "test",
+    }]);
+    await Promise.resolve();
+
+    expect(registry._ids()).toEqual([]);
+    expect(registry.list()).toEqual([]);
+  });
+
+  it("contains a rejected detached refresh during provider teardown", async () => {
+    let rejectList!: (reason?: unknown) => void;
+    const pending = new Promise<ProtectedOutpoint[]>((_resolve, reject) => {
+      rejectList = reject;
+    });
+    const registry = createProtectedOutpointRegistry();
+    registry.register({
+      id: "cancelled",
+      ownerPluginId: "token-bsv21",
+      listProtectedOutpoints: () => pending,
+    });
+
+    registry.unregister("cancelled");
+    rejectList(Object.assign(new Error("Owner storage request was cancelled"), { code: "storage_unavailable" }));
+    await Promise.resolve();
+
+    expect(registry._ids()).toEqual([]);
+    expect(registry.list()).toEqual([]);
   });
 });

@@ -23,6 +23,9 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      // integration 有独立的 config、资源生命周期和证据目录；默认 E2E
+      // 命令只运行既有 e2e 测试，避免真实资源 Journey 被静默降级执行。
+      testIgnore: /integration\//u,
       use: {
         ...devices["Desktop Chrome"],
         launchOptions: { args: ["--enable-precise-memory-info"] }

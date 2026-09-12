@@ -196,30 +196,41 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
       <TextInput
         label={t("contacts.modal.label.publicKeyHex", { defaultValue: "Contact publicKeyHex" })}
         value={draft.publicKeyHex}
-        onChange={(e) => setDraft({ ...draft, publicKeyHex: e.currentTarget.value.trim() })}
+        disabled={loading || !boundActivePublicKeyHex}
+        onChange={(e) => {
+          const publicKeyHex = e.currentTarget.value.trim();
+          setDraft((currentDraft) => ({ ...currentDraft, publicKeyHex }));
+        }}
       />
       <TextInput
         label={t("contacts.modal.label.name", { defaultValue: "Name" })}
         value={draft.name}
-        onChange={(e) => setDraft({ ...draft, name: e.currentTarget.value })}
+        disabled={loading || !boundActivePublicKeyHex}
+        onChange={(e) => {
+          const name = e.currentTarget.value;
+          setDraft((currentDraft) => ({ ...currentDraft, name }));
+        }}
       />
       <TextInput
         label={t("contacts.modal.label.note", { defaultValue: "Note" })}
         value={draft.note ?? ""}
-        onChange={(e) => setDraft({ ...draft, note: e.currentTarget.value })}
+        disabled={loading || !boundActivePublicKeyHex}
+        onChange={(e) => {
+          const note = e.currentTarget.value;
+          setDraft((currentDraft) => ({ ...currentDraft, note }));
+        }}
       />
       <TextInput
         label={t("contacts.modal.label.tags", { defaultValue: "Tags (comma-separated)" })}
         value={draft.tags?.join(", ") ?? ""}
-        onChange={(e) =>
-          setDraft({
-            ...draft,
-            tags: e.currentTarget.value
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          })
-        }
+        disabled={loading || !boundActivePublicKeyHex}
+        onChange={(e) => {
+          const tags = e.currentTarget.value
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          setDraft((currentDraft) => ({ ...currentDraft, tags }));
+        }}
         error={error ?? undefined}
       />
     </Modal>

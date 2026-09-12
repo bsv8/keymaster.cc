@@ -1,0 +1,24 @@
+{
+  "说明": {
+    "purpose": "固定值 keymaster-e2e，表示这是 Keymaster 专用测试桶",
+    "allowBucketWideCleanup": "必须人工确认后改为 true；否则任何桶级删除都会被拒绝",
+    "endpoint": "不含凭据、query 或 fragment 的 HTTPS S3 endpoint",
+    "region": "S3 签名区域",
+    "bucket": "专用测试桶名称，不是 Keymaster 逻辑桶名称",
+    "accessKeyId": "仅用于本次测试桶的访问身份",
+    "secretAccessKey": "S3 Secret Access Key；只存在于 Node Resource",
+    "sessionToken": "可选临时令牌；没有时保持空字符串或删除字段",
+    "ownershipKey": "远端人工所有权文件，必须位于 .keymaster-e2e/ 下",
+    "leaseKey": "远端排他 lease 文件，必须位于 .keymaster-e2e/ 下"
+  },
+  "purpose": "",
+  "allowBucketWideCleanup": false,
+  "endpoint": "",
+  "region": "",
+  "bucket": "",
+  "accessKeyId": "",
+  "secretAccessKey": "",
+  "sessionToken": "",
+  "ownershipKey": ".keymaster-e2e/ownership.json",
+  "leaseKey": ".keymaster-e2e/lease.json"
+}

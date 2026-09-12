@@ -36,6 +36,11 @@ const localStorageAllowlist = new Set([
   "packages/platform-storage/src/ui/StorageBucketManagerPage.tsx",
   "apps/web/src/keymasterSessionCoordinatorClient.ts"
 ]);
+// E2E Node 侧清理适配器只把 AWS SDK 转成最小的测试 Resource 接口，不会
+// 进入发布产物；生产 S3 访问仍必须位于 platform-storage/s3 Provider。
+const s3TestingAllowlist = new Set([
+  "packages/platform-storage/src/testing/s3CleanupAdapter.ts"
+]);
 
 function withoutComments(content) {
   return content
@@ -94,7 +99,7 @@ for (const scanRoot of scanRoots) {
       if (/\bnavigator\.storage\b/gu.test(executable) && !relativeFile.startsWith("packages/platform-storage/src/bucket-providers/opfs/")) {
         violations.push(`${relativeFile}: OPFS StorageManager 只能由 platform-storage/opfs Provider 访问`);
       }
-      if (/@aws-sdk\/client-s3/gu.test(executable) && relativeFile !== "packages/platform-storage/package.json" && !relativeFile.startsWith("packages/platform-storage/src/bucket-providers/s3/")) {
+      if (/@aws-sdk\/client-s3/gu.test(executable) && relativeFile !== "packages/platform-storage/package.json" && !relativeFile.startsWith("packages/platform-storage/src/bucket-providers/s3/") && !s3TestingAllowlist.has(relativeFile)) {
         violations.push(`${relativeFile}: S3 SDK 只能由 platform-storage/s3 Provider 访问`);
       }
     }
