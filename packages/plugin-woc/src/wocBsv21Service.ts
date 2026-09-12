@@ -11,7 +11,6 @@
 
 import type {
   BsvNetwork,
-  PluginLogger,
   WocBsv21BalanceResponse,
   WocBsv21TokenDetail,
   WocBsv21UnspentToken,
@@ -36,7 +35,6 @@ export interface WocBsv21ServiceHandle extends WocBsv21Service {
 
 export interface CreateWocBsv21ServiceOptions {
   messageBus: MessageBus;
-  logger?: PluginLogger;
 }
 
 export function createWocBsv21Service(options: CreateWocBsv21ServiceOptions): WocBsv21ServiceHandle {
@@ -44,7 +42,6 @@ export function createWocBsv21Service(options: CreateWocBsv21ServiceOptions): Wo
     throw new Error("createWocBsv21Service: messageBus is required");
   }
   const messageBus: MessageBus = options.messageBus;
-  const logger = options.logger;
 
   function priorityOf(p?: WocRequestOptions["priority"]): number {
     return WOC_PRIORITY[p ?? "background"];
@@ -125,11 +122,6 @@ export function createWocBsv21Service(options: CreateWocBsv21ServiceOptions): Wo
     dispose() {
       // 共享 actor：本 service 不持 actor 句柄；actor 生命周期由
       // createWocService 持有并随 plugin-woc teardown 一起 dispose。
-      logger?.debug({
-        scope: "woc.bsv21",
-        event: "service.disposed",
-        message: "woc.bsv21.service disposed"
-      });
     }
   };
 }

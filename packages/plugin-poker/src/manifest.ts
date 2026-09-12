@@ -304,7 +304,7 @@ const pokerPluginDefinition = {
     await service.ready();
     const offStorageActive = keyspace.onActiveKeyChanged((state) => {
       if (state.activePublicKeyHex) {
-        void service.ready().catch((error) => ctx.logger.warn({ scope: "poker.config", event: "config.load_failed", message: "Poker config load failed", data: { error: error instanceof Error ? error.message : String(error) } }));
+        void service.ready().catch(() => undefined);
       }
     });
     ctx.provide(POKER_SERVICE_CAPABILITY, service);

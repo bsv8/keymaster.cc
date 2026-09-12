@@ -22,8 +22,7 @@ import type {
   BackgroundTaskProgress,
   BackgroundTaskSnapshot,
   BackgroundTaskState,
-  BackgroundCommandResult,
-  PluginLogger
+  BackgroundCommandResult
 } from "@keymaster/contracts";
 import type { KeyValueStore } from "@keymaster/contracts";
 import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -94,7 +93,6 @@ export interface BackgroundServiceHandle extends BackgroundService {
 }
 
 export interface CreateBackgroundServiceOptions {
-  logger?: PluginLogger;
   /** Host 绑定的 Background owner/App K-V 句柄。 */
   storage?: KeyValueStore;
 }
@@ -109,7 +107,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   const listeners = new Set<(s: BackgroundTaskSnapshot[]) => void>();
   let intervalTimer: ReturnType<typeof setInterval> | undefined;
   let disposed = false;
-  const logger = options.logger;
   const settingsStore: KeyValueSettingsStore<BackgroundSyncSettings> = createKeyValueSettingsStore({
     storage: options.storage,
     key: SCHEDULE_SETTINGS_KEY,
@@ -248,7 +245,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     t.state = "queued";
     t.rerunRequested = false;
     t.blockedReason = undefined;
-    logger?.info({ scope: "background.task", event: "triggered", message: `Task triggered: ${t.def.id}`, data: { taskId: t.def.id, reason } });
     emitAll();
 
     const promise = (async () => {
@@ -261,12 +257,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
             t.blockedReason = eligibility.reason;
             t.lastAttemptAt = new Date().toISOString();
             scheduleNext(t);
-            logger?.info({
-              scope: "background.task",
-              event: "blocked",
-              message: `Task blocked: ${t.def.id}`,
-              data: { taskId: t.def.id, reason: eligibility.retryOn }
-            });
             emitAll();
             return;
           }
@@ -276,13 +266,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
         t.blockedReason = { key: "background.blocked.canRunError", fallback: err instanceof Error ? err.message : String(err) };
         t.lastAttemptAt = new Date().toISOString();
         scheduleNext(t);
-        logger?.error({
-          scope: "background.task",
-          event: "canRun-error",
-          message: `Task canRun error: ${t.def.id}`,
-          data: { taskId: t.def.id },
-          error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
-        });
         emitAll();
         return;
       }
@@ -293,7 +276,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       t.lastStartedAt = new Date().toISOString();
       t.lastAttemptAt = t.lastStartedAt;
       t.ctl = new AbortController();
-      logger?.info({ scope: "background.task", event: "started", message: `Task started: ${t.def.id}`, data: { taskId: t.def.id, reason } });
       emitAll();
 
       const ctx: BackgroundTaskContext = {
@@ -309,32 +291,19 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
         await t.def.run(ctx);
         if (t.ctl?.signal.aborted) {
           t.state = "idle";
-          logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
         } else {
           t.state = "idle";
           t.lastCompletedAt = new Date().toISOString();
           t.progress = undefined;
           t.error = undefined;
-          logger?.info({ scope: "background.task", event: "completed", message: `Task completed: ${t.def.id}`, data: { taskId: t.def.id } });
         }
       } catch (err) {
         if (t.ctl?.signal.aborted) {
           t.state = "idle";
-          logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
         } else {
           const msg = err instanceof Error ? err.message : String(err);
           t.error = msg;
           t.state = "idle";
-          logger?.error({
-            scope: "background.task",
-            event: "failed",
-            message: `Task failed: ${t.def.id}`,
-            data: { taskId: t.def.id },
-            error: {
-              name: err instanceof Error ? err.name : "Error",
-              message: msg
-            }
-          });
         }
       } finally {
         t.ctl = undefined;

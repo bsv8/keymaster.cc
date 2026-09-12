@@ -558,29 +558,6 @@ const protocolPluginDefinition = {
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
         // 仅在 popup 挂载时解析一次；session 启动后不再变动。
         bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",
-        logger: {
-          info: (input) =>
-            ctx.logger.info({
-              scope: "protocol.lifecycle",
-              event: "info",
-              message: "",
-              data: input as Record<string, unknown>
-            }),
-          warn: (input) =>
-            ctx.logger.warn({
-              scope: "protocol.lifecycle",
-              event: "warn",
-              message: "",
-              data: input as Record<string, unknown>
-            }),
-          error: (input) =>
-            ctx.logger.error({
-              scope: "protocol.lifecycle",
-              event: "error",
-              message: "",
-              data: input as Record<string, unknown>
-            })
-        }
       });
       ctx.provide(PROTOCOL_SERVICE_CAPABILITY, service);
       const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
@@ -624,14 +601,7 @@ const protocolPluginDefinition = {
         .then((storageRepository) => {
           service.attachProtocolStorageRepository(storageRepository);
         })
-        .catch((err) => {
-          ctx.logger.error({
-            scope: "protocol.lifecycle",
-            event: "storageRepository.open.failed",
-            message: "storageRepository failed to open",
-            data: { err: err instanceof Error ? err.message : String(err) }
-          });
-        });
+        .catch(() => undefined);
 
       // 注意：协议页**不**注册到 `route.registry`。
       // 设计缘由：施工单 001 收口反馈——页面"单一 owner"意味着入口路径

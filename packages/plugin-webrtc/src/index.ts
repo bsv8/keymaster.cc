@@ -37,8 +37,7 @@ export {
   type RTCPeerConnectionLike,
   type MediaStreamLike,
   type StunDiagnosticResult,
-  type StartCallInput,
-  type WebrtcLogger
+  type StartCallInput
 } from "./webrtcService.js";
 export {
   createWebrtcHistoryService,

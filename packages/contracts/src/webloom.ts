@@ -1,7 +1,7 @@
 // Keymaster 对 WebLoom 的领域扩展类型。
 //
 // 通用 Host、Scope、权限租约和服务桥属于 webloom-framework；本文件只描述 Keymaster
-// 需要附加的 owner/session、Storage、logger、Coordinator 和业务贡献面。
+// 需要附加的 owner/session、Storage、Coordinator 和业务贡献面。
 // 这样插件可以明确区分“框架字段”和“产品字段”，不会把产品语义重新塞回
 // WebLoom 公共契约。
 
@@ -15,7 +15,6 @@ import type {
   PluginManifest as WebLoomPluginManifest,
 } from "webloom-framework";
 import type { PluginBusinessContribution } from "./business.js";
-import type { PluginLogger } from "./log.js";
 import type { PluginPermission, RuntimeVaultStatus } from "./keymasterLifecycle.js";
 import type { KeyValueStore } from "./storage/kv.js";
 
@@ -35,8 +34,6 @@ export interface KeymasterScopeAttributes extends Readonly<Record<string, unknow
 
 /** Keymaster 注入 WebLoom Context 的领域扩展。 */
 export interface KeymasterContextExtension extends WebLoomPluginContextExtension {
-  /** 已绑定当前插件身份的 logger。 */
-  readonly logger: PluginLogger;
   /** Host 预绑定的领域 Storage 句柄。 */
   readonly storage?: KeyValueStore;
   /** 按 pluginId 收窄后的 Coordinator facade。 */

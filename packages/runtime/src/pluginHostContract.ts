@@ -1,7 +1,7 @@
 // Keymaster Host 的领域兼容契约。
 //
 // 生命周期、Scope、权限和服务桥的实现都在 WebLoom；此文件只保留
-// Keymaster shell 仍需要的领域 Registry、i18n、日志、Storage 和 Coordinator
+// Keymaster shell 仍需要的领域 Registry、i18n、Storage 和 Coordinator
 // 视图。这样旧调用者可以平滑切换到 Adapter，而不会在这里再出现 Host 状态机。
 
 import type {
@@ -21,7 +21,6 @@ import type {
   I18nService,
   ImporterRegistry,
   KeyValueStore,
-  LogService,
   NoticeRegistry,
   PluginContext,
   PluginGraph,
@@ -95,8 +94,6 @@ export interface PluginHost {
   topbar: TopbarRegistry;
   notice: NoticeRegistry;
   i18n: I18nService;
-  /** Keymaster 产品日志服务。 */
-  log: LogService;
   /** 插件启停意图的 Keymaster 持久化视图。 */
   configStore: PluginConfigStore;
   /** 多页面唯一启停意图控制面。 */
@@ -151,10 +148,6 @@ export interface CreatePluginHostOptions {
   i18nDebug?: boolean;
   /** 测试时关闭启停配置持久化。 */
   disableConfigPersistence?: boolean;
-  /** 测试时关闭日志持久化。 */
-  disableLogPersistence?: boolean;
-  /** 日志平台 K-V 句柄。 */
-  logStorage?: KeyValueStore;
   /** 插件启停配置平台 K-V 句柄。 */
   configStorage?: KeyValueStore;
   /** 没有远程配置时使用的初始启停值。 */

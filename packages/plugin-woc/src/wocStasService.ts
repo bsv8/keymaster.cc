@@ -5,7 +5,6 @@
 
 import type {
   BsvNetwork,
-  PluginLogger,
   WocRequestOptions,
   WocStasService,
   WocStasTokenEntry
@@ -20,7 +19,6 @@ export interface WocStasServiceHandle extends WocStasService {
 
 export interface CreateWocStasServiceOptions {
   messageBus: MessageBus;
-  logger?: PluginLogger;
 }
 
 export function createWocStasService(options: CreateWocStasServiceOptions): WocStasServiceHandle {
@@ -28,7 +26,6 @@ export function createWocStasService(options: CreateWocStasServiceOptions): WocS
     throw new Error("createWocStasService: messageBus is required");
   }
   const messageBus: MessageBus = options.messageBus;
-  const logger = options.logger;
 
   function priorityOf(p?: WocRequestOptions["priority"]): number {
     return WOC_PRIORITY[p ?? "background"];
@@ -60,11 +57,6 @@ export function createWocStasService(options: CreateWocStasServiceOptions): WocS
     },
 
     dispose() {
-      logger?.debug({
-        scope: "woc.stas",
-        event: "service.disposed",
-        message: "woc.stas.service disposed"
-      });
     }
   };
 }

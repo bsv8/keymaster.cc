@@ -21,7 +21,6 @@ import type {
   KeyIdentity,
   KeyspaceService,
   KeyValueStore,
-  PluginLogger,
   VaultService,
   P2pkhCoordinatorControl
 } from "@keymaster/contracts";
@@ -159,12 +158,6 @@ export interface P2pkhServiceDeps {
   storage?: KeyValueStore;
   protectedOutpoints?: ProtectedOutpointRegistry;
   assetDataNotifier?: AssetDataNotifier;
-  /**
-   * 硬切换 002：业务插件注入的 logger。
-   * P2PKH 关键轨迹（资源、自愈、broadcast）走统一日志。
-   * 不传时不记日志。
-   */
-  logger?: PluginLogger;
 }
 
 export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
@@ -222,7 +215,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
      * 安全失败。
      */
     getStore: (publicKeyHex) => ensureRepositoryForOwner(publicKeyHex),
-    logger: deps.logger,
     getActiveKey: () => {
       const state = getActiveKeyState();
       if (!state.activePublicKeyHex) {
@@ -330,29 +322,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    * 硬切换 003：缺少当前 UTXOS schema 时直接失败；新桶不读取、不转换旧
    * 浏览器数据库数据，链上真值才是 P2PKH 的恢复路径。
    *
-   * 日志：stateRepository.opening / stateRepository.opened / stateRepository.reused 全部由 p2pkhRepository module
-   * 内部按 hex 缓存命中状态发出；本函数不再额外打日志，避免 cache
-   * hit 时误报 stateRepository.opening。
    */
   async function ensureRepositoryForOwner(publicKeyHex: string): Promise<P2pkhStateRepositoryHandle> {
-    try {
-      const active = deps.keyspace.active().activePublicKeyHex?.toLowerCase();
-      if (active !== publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-      const store = deps.storage;
-      if (!store) throw new Error("P2PKH owner storage is not bound by Host");
-      const bundle: P2pkhStateRepositoryBundle = await openP2pkhStateRepository(store);
-      return createP2pkhStateRepository(bundle);
-    } catch (err) {
-      // 统一 K-V 打开失败是真实错误，必须可观测。
-      deps.logger?.error({
-        scope: "p2pkh.service",
-        event: "stateRepository.openFailed",
-        message: "P2PKH failed to open owner K-V repository",
-        data: { publicKeyHex },
-        error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
-      });
-      throw err;
-    }
+    const active = deps.keyspace.active().activePublicKeyHex?.toLowerCase();
+    if (active !== publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+    const store = deps.storage;
+    if (!store) throw new Error("P2PKH owner storage is not bound by Host");
+    const bundle: P2pkhStateRepositoryBundle = await openP2pkhStateRepository(store);
+    return createP2pkhStateRepository(bundle);
   }
 
   /**
@@ -421,25 +398,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     void (async () => {
       try {
         const state = getActiveKeyState();
-        deps.logger?.info({
-          scope: "p2pkh.service",
-          event: "activeKey.changed",
-          message: "P2PKH active key changed; rebinding and rehydrating",
-          data: {
-            publicKeyHex: state.activePublicKeyHex ?? null,
-            label: activeIdentity?.label ?? null
-          }
-        });
         await rebindActiveKey();
         await rehydrateResources();
-      } catch (err) {
-        deps.logger?.error({
-          scope: "p2pkh.service",
-          event: "activeKey.changeFailed",
-          message: "P2PKH onActiveChange handler failed",
-          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
-          error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
-        });
+      } catch {
       }
     })();
   });
@@ -475,18 +436,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     const resourceId = makeResourceId(network);
     const existing = await stateRepository.getResource(resourceId);
     if (existing) {
-      deps.logger?.info({
-        scope: "p2pkh.service",
-        event: "address.reused",
-        message: "P2PKH resource already exists for active key",
-        data: {
-          resourceId,
-          network,
-          publicKeyHex: existing.publicKeyHex,
-          address: existing.address,
-          created: false
-        }
-      });
       return existing;
     }
     const key = requireActiveKeyIdentity();
@@ -511,18 +460,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       network,
       address,
       generation: 0
-    });
-    deps.logger?.info({
-      scope: "p2pkh.service",
-      event: "address.created",
-      message: "P2PKH resource created via self-heal for active key",
-      data: {
-        resourceId,
-        network,
-        publicKeyHex: key.publicKeyHex,
-        address,
-        created: true
-      }
     });
     return resource;
   }
@@ -563,12 +500,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   }
 
   async function onVaultUnlocked() {
-    deps.logger?.info({
-      scope: "p2pkh.service",
-      event: "vault.unlocked",
-      message: "P2PKH reacting to vault unlocked; rebinding and rehydrating",
-      data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
-    });
     try {
       await rebindActiveKey();
       await rehydrateResources();
@@ -576,13 +507,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const msg = err instanceof Error ? err.message : String(err);
       deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
         error: msg
-      });
-      deps.logger?.warn({
-        scope: "p2pkh.service",
-        event: "vault.unlocked.rehydrateFailed",
-        message: "P2PKH vault unlocked rehydrate failed",
-        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
-        error: { name: err instanceof Error ? err.name : "Error", message: msg }
       });
     }
   }
@@ -596,14 +520,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    *
    * 硬切换 003：手工同步 / rehydrate 触发同步 / settings 触发同步前都必须
    * 调用本方法——这是当前 active key 在链下缓存缺失时唯一不依赖用户手工
-   * 修库的自愈路径。同时本方法必须输出 info 日志，明确写出：
-   *   - 当前 active key 是谁；
-   *   - includeTestnet 是否开启；
-   *   - 本次尝试补的网络；
-   *   - 哪些 resource 已存在；
-   *   - 哪些 resource 是本次新建。
-   * 这样"为什么 confirmed sync 没有 resource"以及"为什么 sync 仍然 0
-   * resource"在日志上能直接看出来。
+   * 修库的自愈路径；结果通过 resource state 与 data-changed 通知暴露。
    */
   async function rehydrateResources(): Promise<void> {
     if (deps.vault.status() !== "unlocked") return;
@@ -611,36 +528,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     if (!state.activePublicKeyHex) return;
     if (!activeIdentity) return;
     const includeTestnet = getCurrentSettings().includeTestnet;
-    const targetNetworks: Array<"main" | "test"> = includeTestnet ? ["main", "test"] : ["main"];
-    deps.logger?.info({
-      scope: "p2pkh.service",
-      event: "rehydrate.started",
-      message: "P2PKH rehydrate started for active key",
-      data: {
-        publicKeyHex: state.activePublicKeyHex,
-        includeTestnet,
-        targetNetworks
-      }
-    });
-    const existingResources: string[] = [];
-    const createdResources: string[] = [];
     let rehydrateError: unknown;
     try {
-      const stateRepository = await ensureRepository();
-      const mainId = makeResourceId("main");
-      const mainExisted = Boolean(await stateRepository.getResource(mainId));
       await getOrCreateAddress("main");
-      // getOrCreateAddress 在已存在时只 putAddress 不会变 ——
-      // 通过调用前是否存在判断是否本次新建，避免误把刚 putAddress 的
-      // 行误判成"新建"。
-      if (mainExisted) existingResources.push(mainId);
-      else createdResources.push(mainId);
       if (includeTestnet) {
-        const testId = makeResourceId("test");
-        const testExisted = Boolean(await stateRepository.getResource(testId));
         await getOrCreateAddress("test");
-        if (testExisted) existingResources.push(testId);
-        else createdResources.push(testId);
       }
     } catch (err) {
       rehydrateError = err;
@@ -650,29 +542,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
         error: msg
       });
-      deps.logger?.warn({
-        scope: "p2pkh.service",
-        event: "rehydrate.failed",
-        message: "P2PKH rehydrate failed",
-        data: {
-          publicKeyHex: state.activePublicKeyHex,
-          includeTestnet
-        },
-        error: { name: rehydrateError instanceof Error ? rehydrateError.name : "Error", message: msg }
-      });
       return;
     }
-    deps.logger?.info({
-      scope: "p2pkh.service",
-      event: "rehydrate.completed",
-      message: "P2PKH rehydrate completed",
-      data: {
-        publicKeyHex: state.activePublicKeyHex,
-        includeTestnet,
-        existingResources,
-        createdResources
-      }
-    });
 
     // 发布 resource data-changed 通知：P2PKH 地址已就绪。
     // 设计缘由：token 插件（BSV-21 / STAS）订阅此事件来触发同步，
@@ -993,12 +864,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       setCachedSettingsAndEmit(settings);
       if (!prev.includeTestnet && settings.includeTestnet) {
         // 重新开启 testnet：立刻纳入运行范围。
-        deps.logger?.info({
-          scope: "p2pkh.service",
-          event: "settings.testnet.enabled",
-          message: "P2PKH includeTestnet enabled; rehydrating testnet and triggering sync",
-          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
-        });
         try {
           await rehydrateResources();
         } catch (err) {
@@ -1010,41 +875,21 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         // 关闭 testnet：取消可能正在跑的 recent（仅对 test 资源有效；
         // recent 自身的 resource list 由 listAllResources 提供，已经不会
         // 返回 test），并强制再触发一次 recent 让用户尽快看到 main 刷新。
-        deps.logger?.info({
-          scope: "p2pkh.service",
-          event: "settings.testnet.disabled",
-          message: "P2PKH includeTestnet disabled; confirmed sync will skip testnet",
-          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
-        });
       }
     },
 
     async onKeyImported(publicKeyHex: string) {
       // 当前 namespace 是 active key；rehydrate 会为 active key 补齐资源。
       // 硬切换 002 收尾：入参改为 publicKeyHex；plugin 内部用对应 hex
-      // 决定是否触发同步（本参数当前仅供日志使用，未来按 hex 决定
-      // 同步范围时再扩展）。
-      deps.logger?.info({
-        scope: "p2pkh.service",
-        event: "key.imported",
-        message: "P2PKH reacting to key import; rehydrating active key",
-        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null, importedHex: publicKeyHex }
-      });
+      // 决定是否触发同步（当前参数保留供未来按 hex 扩展同步范围）。
       try {
         await rehydrateResources();
-      } catch (err) {
-        deps.logger?.error({
-          scope: "p2pkh.service",
-          event: "key.imported.failed",
-          message: "P2PKH onKeyImported failed",
-          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
-          error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
-        });
+      } catch {
       }
     },
     async onKeyRemoved(publicKeyHex: string) {
       // 实际删除由 keyspace.deleteKey 统一调度；这里只清理协调器 lane。
-      // 入参为被删 key 的 publicKeyHex；目前只用于日志与扩展点。
+      // 入参为被删 key 的 publicKeyHex；目前保留给清理与扩展点。
       try {
         const resources = await listAllResources().catch(() => []);
         void resources;

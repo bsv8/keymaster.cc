@@ -131,11 +131,11 @@ const wocPluginDefinition = {
     ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
-    const service = createWocService({ messageBus, logger: ctx.logger, storage: ctx.storage });
+    const service = createWocService({ messageBus, storage: ctx.storage });
     await service.ready();
     const offActive = keyspace.onActiveKeyChanged((state) => {
       if (state.activePublicKeyHex) {
-        void service.ready().catch((error) => ctx.logger.warn({ scope: "woc.config", event: "config.load_failed", message: "WOC config load failed", data: { error: error instanceof Error ? error.message : String(error) } }));
+        void service.ready().catch(() => undefined);
       }
     });
     ctx.provide(WOC_CAPABILITY, service);
@@ -144,11 +144,11 @@ const wocPluginDefinition = {
     // 全部共享同一个 actor（service 内的 createWocService 持有 actor 并
     // 已 attach 到 messageBus），因此 token / collectible 业务插件继承
     // 同一套限流 / 优先级 / 429 backoff / 多标签页协调，不复制第二套队列。
-    const bsv21Service = createWocBsv21Service({ messageBus, logger: ctx.logger });
+    const bsv21Service = createWocBsv21Service({ messageBus });
     ctx.provide(WOC_BSV21_CAPABILITY, bsv21Service);
-    const stasService = createWocStasService({ messageBus, logger: ctx.logger });
+    const stasService = createWocStasService({ messageBus });
     ctx.provide(WOC_STAS_CAPABILITY, stasService);
-    const oneSatService = createWoc1SatOrdinalsService({ messageBus, logger: ctx.logger });
+    const oneSatService = createWoc1SatOrdinalsService({ messageBus });
     ctx.provide(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
 
     const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);

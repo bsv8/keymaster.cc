@@ -32,7 +32,6 @@ import type {
   KeymasterPluginConfig,
 } from "./webloom.js";
 import type { I18nPluginResources } from "./i18n.js";
-import type { PluginLogger } from "./log.js";
 import type { PluginBusinessContribution } from "./business.js";
 import type { PluginStorageDeclaration } from "./storage/access.js";
 import type { KeyValueStore } from "./storage/kv.js";
@@ -41,13 +40,11 @@ import type { PluginPermission } from "./keymasterLifecycle.js";
 /**
  * Keymaster 插件运行时上下文。
  *
- * 通用字段唯一继承自 WebLoom 泛型 Context；logger、Storage 和 Coordinator
+ * 通用字段唯一继承自 WebLoom 泛型 Context；Storage 和 Coordinator
  * 仍以 Keymaster 的平铺领域扩展保留，避免一次性改动全部业务插件调用点。
  * 同一批领域字段也同时位于 `ctx.extension`，供新代码逐步迁移。
  */
 export interface PluginContext extends KeymasterWebLoomContext {
-  /** 已绑定当前插件身份的 logger。 */
-  readonly logger: PluginLogger;
   /** Host 预绑定的领域 Storage 句柄。 */
   readonly storage?: KeyValueStore;
   /** 按 pluginId 收窄后的 Coordinator facade。 */

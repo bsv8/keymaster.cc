@@ -678,8 +678,7 @@ const p2pkhPluginDefinition = {
       keyspace,
       storage: ctx.storage,
       protectedOutpoints,
-      assetDataNotifier,
-      logger: ctx.logger
+      assetDataNotifier
     });
     // 将页面侧缓存的网络范围同步到 Coordinator 平台 K-V，供后台同步使用。
     void coordinator.p2pkhSettingsUpdate({ includeTestnet: service.getGlobalSettings().includeTestnet });
@@ -934,17 +933,7 @@ const p2pkhPluginDefinition = {
 
     // 首次 rehydrate 是后台补齐，不属于 setup 的同步门禁。连接切换期间
     // 失败必须留在插件健康域；未处理的 Promise 会触发全局 fatal 页面。
-    void service.rehydrate().catch((error) => {
-      ctx.logger.warn({
-        scope: "p2pkh.manifest",
-        event: "startup.rehydrateFailed",
-        message: "P2PKH startup rehydrate deferred",
-        error: {
-          name: error instanceof Error ? error.name : "Error",
-          message: error instanceof Error ? error.message : String(error)
-        }
-      });
-    });
+    void service.rehydrate().catch(() => undefined);
 
     // 硬切换 002 收尾：key.created payload 只携带 publicKeyHex；service 按 publicKeyHex 工作。
     const keyCreatedUnsub = messageBus.subscribe<{ publicKeyHex: string; label: string }>("key.created", async (payload) => {

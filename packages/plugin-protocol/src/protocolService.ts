@@ -282,8 +282,6 @@ export interface ProtocolServiceDeps {
   appCatalogResolver?: AppCatalogResolver;
   /** 延迟读取 resolver，避免 protocol -> apps capability 初始化循环。 */
   getAppCatalogResolver?: () => AppCatalogResolver | undefined;
-  /** 用于调试 / 日志的 logger（任意形状）。 */
-  logger?: { info?: (input: unknown) => void; warn?: (input: unknown) => void; error?: (input: unknown) => void };
   /** 自定义 source window（默认取 `window.opener`）。 */
   resolveOpener?: () => Window | null;
   /** 自定义 ready 发送目标（默认 `target.postMessage(msg, "*")`）。 */
@@ -1080,13 +1078,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         return normalized;
       }
       return null;
-    } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.storageRepository",
-        event: "getOrigin.failed",
-        origin,
-        err: err instanceof Error ? err.message : String(err)
-      });
+    } catch {
       return null;
     }
   }
@@ -1164,11 +1156,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (err instanceof ProtocolValidationError) {
         return;
       }
-      this.deps.logger?.error?.({
-        scope: "protocol.validation",
-        event: "unexpected",
-        data: { err: String(err) }
-      });
       return;
     }
 
@@ -1511,7 +1498,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 失败语义：
    *   - 上述校验失败时**不**抛错（best-effort；UI 可以在调用前先
-   *     `connectLoginRecord()` 检查）；任何路径出错时记录日志，不阻塞
+   *     `connectLoginRecord()` 检查）；任何路径出错时保持 best-effort，不阻塞
    *     其它请求。
    */
   async confirmConnectLogin(recordId: string, ownerPublicKeyHex: string, password: string): Promise<void> {
@@ -1521,12 +1508,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return;
     const candidates = rec.connectLoginCandidates ?? [];
     if (!candidates.some((c) => c.publicKeyHex === ownerPublicKeyHex)) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "confirmConnectLogin.invalidCandidate",
-        recordId,
-        ownerPublicKeyHex
-      });
       return;
     }
     if (this.lockStateValue === "locked") {
@@ -1579,11 +1560,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (rec.method !== "connect.resume") return;
     if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return;
     if (!rec.connectResumeSnapshot) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "confirmConnectResume.missingSnapshot",
-        recordId
-      });
       return;
     }
     if (this.lockStateValue === "locked") {
@@ -1730,11 +1706,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.currentAppClientSource = null;
     this.bootstrapFailedFlag = true;
     this.bootstrapFailureReasonValue = reason;
-    this.deps.logger?.error?.({
-      scope: "protocol.sessionWindow",
-      event: "bootstrap.failed",
-      reason
-    });
     this.emit();
   }
 
@@ -1792,10 +1763,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         : "";
     let childUrlWithSessionWindowOrigin: string;
     if (!sessionWindowOrigin) {
-      this.deps.logger?.error?.({
-        scope: "protocol.sessionWindow",
-        event: "openClientApp.sessionWindowOrigin.missing"
-      });
       this.appClientWaitingForReadyFlag = false;
       this.stopAppClientConnectTimer();
       return null;
@@ -1805,11 +1772,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       u.searchParams.set("sessionWindowOrigin", sessionWindowOrigin);
       childUrlWithSessionWindowOrigin = u.toString();
     } catch {
-      this.deps.logger?.error?.({
-        scope: "protocol.sessionWindow",
-        event: "openClientApp.sessionWindowOrigin.invalid_app_url",
-        appUrl: ctx.appUrl
-      });
       this.appClientWaitingForReadyFlag = false;
       this.stopAppClientConnectTimer();
       return null;
@@ -1830,11 +1792,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     } catch (err) {
       this.appClientWaitingForReadyFlag = false;
       this.stopAppClientConnectTimer();
-      this.deps.logger?.error?.({
-        scope: "protocol.sessionWindow",
-        event: "openClientApp.failed",
-        err: err instanceof Error ? err.message : String(err)
-      });
       return null;
     }
   }
@@ -2028,11 +1985,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       popup = window.open("about:blank", "_blank", SESSION_WINDOW_OPEN_FEATURES);
     } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.launcher",
-        event: "openSessionWindow.failed",
-        err: err instanceof Error ? err.message : String(err)
-      });
       throw new LaunchAppViewError(
         "open_session_window_failed",
         "launchAppView: window.open popup failed"
@@ -2088,11 +2040,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     } catch (err) {
       // Session 真值必须先落库再导航；存储失败时关闭预开的空白窗口，
       // 并统一转换为 typed error，UI 不应展示底层 grant/OPFS 文案。
-      this.deps.logger?.error?.({
-        scope: "protocol.launcher",
-        event: "connectSession.persist.failed",
-        err: err instanceof Error ? err.message : String(err)
-      });
       throw new LaunchAppViewError(
         "session_storage_unavailable",
         "launchAppView: session storage unavailable"
@@ -2115,11 +2062,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         crypto
       };
     } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.launcher",
-        event: "exportOwnerRuntime.failed",
-        err: err instanceof Error ? err.message : String(err)
-      });
       throw new LaunchAppViewError(
         "export_owner_runtime_failed",
         "launchAppView: failed to export owner runtime bootstrap"
@@ -2181,25 +2123,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       popup.location.replace(popupUrl);
     } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.launcher",
-        event: "openSessionWindow.navigate_failed",
-        err: err instanceof Error ? err.message : String(err)
-      });
       throw new LaunchAppViewError(
         "open_session_window_failed",
         "launchAppView: failed to navigate reserved Session Window"
       );
     }
     sessionWindowNavigated = true;
-    this.deps.logger?.info?.({
-      scope: "protocol.launcher",
-      event: "launchAppView.ok",
-      appId: input.appId,
-      appOrigin: input.appOrigin,
-      sessionId,
-      launchToken
-    });
     return {
       sessionWindowOpened: true,
       connectSessionId: sessionId,
@@ -2488,10 +2417,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.appClientConnectTimedOutFlag) return;
     this.appClientConnectTimedOutFlag = true;
     this.appClientWaitingForReadyFlag = false;
-    this.deps.logger?.warn?.({
-      scope: "protocol.sessionWindow",
-      event: "appClient.connectTimeout"
-    });
     this.emit();
   }
 
@@ -2550,10 +2475,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.childReadyFlag = true;
     this.stopAppClientConnectTimer();
     this.clearAppClientConnectTimeout();
-    this.deps.logger?.info?.({
-      scope: "protocol.sessionWindow",
-      event: "appClient.ready"
-    });
     this.emit();
   }
 
@@ -2580,10 +2501,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.clearAppClientConnectTimeout();
     if (this.childReadyFlag) return;
     this.childReadyFlag = true;
-    this.deps.logger?.info?.({
-      scope: "protocol.sessionWindow",
-      event: "appClient.aliveFromRequest"
-    });
     this.emit();
   }
 
@@ -2605,12 +2522,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     try {
       target.postMessage(READY_MESSAGE, "*");
-    } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.transport",
-        event: "ready.failed",
-        data: { err: String(err) }
-      });
+    } catch {
     }
   }
 
@@ -2831,12 +2743,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (typeof sessionId !== "string" || sessionId.length === 0) {
         // 校验层应当已经拒绝；这里是兜底——任何缺 connectSessionId 的
         // 业务 method 都不允许落 record；按 invalid_request 兜底处理。
-        this.deps.logger?.warn?.({
-          scope: "protocol.session",
-          event: "missingConnectSessionId",
-          recordId,
-          method
-        });
         this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       }
@@ -2857,13 +2763,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         // confirm 路径，execute 阶段 `requireConnectSession` 再校验。
         // ownerPublicKeyHex 留空——execute 阶段校验失败会写入
         // 本地 failureReason；caller 收到 user_rejected。
-        this.deps.logger?.warn?.({
-          scope: "protocol.session",
-          event: "acceptRequest.fetchSession.dbError",
-          recordId,
-          sessionId,
-          err: err instanceof Error ? err.message : String(err)
-        });
         dbError = true;
       }
       if (dbError) {
@@ -2979,12 +2878,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 关键（施工单 2026-06-28 002 收口）：K-V 异常**不**触发 fail-fast。
       // 与"K-V unavailable 降级"边界一致：允许 manual confirm 继续走
       // manual confirm 路径，execute 阶段再校验 session 真值。
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "preCheckConnectSession.dbError",
-        sessionId,
-        err: err instanceof Error ? err.message : String(err)
-      });
       return null;
     }
     if (session === null) {
@@ -3137,12 +3030,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         .map((k) => ({ publicKeyHex: k.publicKeyHex as string, label: k.label }));
       rec.connectLoginCandidates = candidates;
     } catch (err) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "listKeys.failed",
-        recordId: rec.recordId,
-        err: err instanceof Error ? err.message : String(err)
-      });
       rec.connectLoginCandidates = [];
     }
   }
@@ -3173,12 +3060,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       session = await this.deps.storageRepository.getConnectSession(params.connectSessionId);
     } catch (err) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "bootstrapConnectResume.getConnectSession.failed",
-        recordId: rec.recordId,
-        err: err instanceof Error ? err.message : String(err)
-      });
       return { code: "user_rejected", reason: "internal_error" };
     }
     if (!session) return { code: "user_rejected", reason: "internal_error" };
@@ -3191,12 +3072,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         return { code: "user_rejected", reason: "internal_error" };
       }
     } catch (err) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "bootstrapConnectResume.getKey.failed",
-        recordId: rec.recordId,
-        err: err instanceof Error ? err.message : String(err)
-      });
       return { code: "user_rejected", reason: "internal_error" };
     }
     rec.connectResumeSnapshot = {
@@ -3693,13 +3568,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         rec.enteredPhaseAt = Date.now();
         try {
           await this.runRequest(rec);
-        } catch (err) {
-          this.deps.logger?.error?.({
-            scope: "protocol.exec",
-            event: "runRequest.unexpected",
-            recordId,
-            err: err instanceof Error ? err.message : String(err)
-          });
+        } catch {
         } finally {
           this.executingRecordId = null;
         }
@@ -3997,8 +3866,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         },
         { uploadId }
       );
-    } catch (error) {
-      this.deps.logger?.warn?.({ scope: "protocol.storage", event: "cancel_upload_abort.failed", code: error instanceof Error ? error.message : String(error) });
+    } catch {
     }
   }
 
@@ -4284,12 +4152,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     } catch (err) {
       // K-V 异常：与"K-V unavailable 降级"边界一致——execute 阶段
       // 也走"未查到 session"路径，统一 user_rejected。
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "requireConnectSession.dbError",
-        sessionId,
-        err: err instanceof Error ? err.message : String(err)
-      });
       throw localFailure("internal_error", "connect session storage unavailable");
     }
     if (!session) {
@@ -4299,13 +4161,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       let raw: ConnectSessionRecord | null = null;
       try {
         raw = await this.deps.storageRepository.getConnectSession(sessionId);
-      } catch (err) {
-        this.deps.logger?.warn?.({
-          scope: "protocol.connect",
-          event: "requireConnectSession.rawGet.dbError",
-          sessionId,
-          err: err instanceof Error ? err.message : String(err)
-        });
+      } catch {
         throw localFailure("internal_error", "connect session storage unavailable");
       }
       if (raw && raw.origin !== rec.origin) {
@@ -4516,20 +4372,13 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 更新 session.lastUsedAt。fire-and-forget：cipher 解密 / 加密的
-   * 主路径**不**等待 K-V 写；写失败时 K-V 侧记日志但不影响主流程。
+   * 主路径**不**等待 K-V 写；写失败不影响主流程。
    */
   private touchConnectSession(session: ConnectSessionRecord): void {
     if (!this.deps.storageRepository) return;
     session.lastUsedAt = Date.now();
     const next: ConnectSessionRecord = { ...session, lastUsedAt: session.lastUsedAt };
-    void this.deps.storageRepository.putConnectSession(next).catch((err) => {
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect",
-        event: "touchConnectSession.putFailed",
-        sessionId: session.sessionId,
-        err: err instanceof Error ? err.message : String(err)
-      });
-    });
+    void this.deps.storageRepository.putConnectSession(next).catch(() => undefined);
   }
 
   /**
@@ -4629,13 +4478,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.deps.storageRepository) {
       try {
         await this.deps.storageRepository.putConnectSession(next);
-      } catch (err) {
-        this.deps.logger?.warn?.({
-          scope: "protocol.connect",
-          event: "touchConnectSession.putFailed",
-          sessionId: session.sessionId,
-          err: err instanceof Error ? err.message : String(err)
-        });
+      } catch {
       }
     }
     return {
@@ -4721,13 +4564,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // revoked）。这是 fail-closed 的安全语义，不是 bug。
     try {
       requireVaultCommandAccepted(await this.deps.vault.lock(), "lock");
-    } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.connect",
-        event: "logout.vaultLock.failed",
-        sessionId: params.connectSessionId,
-        err: err instanceof Error ? err.message : String(err)
-      });
+    } catch {
       throw localFailure("internal_error", "connect.logout: vault lock failed");
     }
     return result;
@@ -4834,13 +4671,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
     try {
       await this.deps.storageRepository.putConnectSession(next);
-    } catch (err) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.connect.launch",
-        event: "touchSession.failed",
-        sessionId: session.sessionId,
-        err: err instanceof Error ? err.message : String(err)
-      });
+    } catch {
     }
     return {
       connectSessionId: session.sessionId,
@@ -4912,12 +4743,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     for (const context of this.channelSessionBySource.values()) {
       try {
         this.deps.connectChannelRuntime?.release(this.channelCallerFor(context));
-      } catch (error) {
-        this.deps.logger?.warn?.({
-          scope: "protocol.channel",
-          event: "release.failed",
-          message: error instanceof Error ? error.message : String(error)
-        });
+      } catch {
       }
     }
     this.channelSubscriptionsBySessionId.clear();
@@ -5701,12 +5527,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
     try {
       target.postMessage(message, origin);
-    } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.transport",
-        event: "postMessage.event.failed",
-        data: { err: String(err) }
-      });
+    } catch {
     }
   }
 
@@ -5727,12 +5548,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     try {
       target.postMessage(message, origin);
-    } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.transport",
-        event: "postMessage.failed",
-        data: { err: String(err) }
-      });
+    } catch {
     }
   }
 
@@ -5761,23 +5577,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.deps.postClosing) {
       try {
         this.deps.postClosing(target, CLOSING_MESSAGE);
-      } catch (err) {
-        this.deps.logger?.error?.({
-          scope: "protocol.transport",
-          event: "closing.failed",
-          data: { err: String(err) }
-        });
+      } catch {
       }
       return;
     }
     try {
       target.postMessage(CLOSING_MESSAGE, "*");
-    } catch (err) {
-      this.deps.logger?.error?.({
-        scope: "protocol.transport",
-        event: "closing.failed",
-        data: { err: String(err) }
-      });
+    } catch {
     }
     void origin;
   }

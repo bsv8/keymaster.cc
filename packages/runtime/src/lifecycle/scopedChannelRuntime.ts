@@ -94,7 +94,7 @@ export function createScopedChannelRuntime(base: ChannelRuntime, scope: Lifecycl
     } catch (error) {
       subscriptionRelease = Promise.reject(error);
     }
-    // revoke() 不等待异步结果；接住迟到失败，让 scope.dispose() 或日志层
+    // revoke() 不等待异步结果；接住迟到失败，让 scope.dispose() 或调用方
     // 继续观察同一个 Promise，而不是制造 unhandled rejection。
     subscriptionRelease.catch(() => undefined);
     return subscriptionRelease;

@@ -49,7 +49,6 @@ package "packages/runtime" {
   [AssetRegistry]
   [TopbarRegistry]
   [I18nService]
-  [LogService]
 }
 
 package "packages/contracts" {
@@ -90,10 +89,13 @@ package "plugin 平台 / 业务层" {
 [PluginHost] --> [AssetRegistry]
 [PluginHost] --> [TopbarRegistry]
 [PluginHost] --> [I18nService]
-[PluginHost] --> [LogService]
 
 [PluginHost] ..> IPluginManifest : 按 manifest 装配
 [PluginHost] ..> IPluginContext : setup(ctx)
+
+统一产品日志能力不属于当前架构：插件 Context 不注入 logger，runtime 不创建或持久化
+`logs` namespace。fatal error、必要的 console diagnostics、业务状态和审计账本分别由
+各自边界负责；历史 `logs` 数据默认不迁移、不读取、不新写。
 
 [plugin-vault] ..> IVaultService : 实现 capability
 [plugin-background] ..> IBackgroundService : 实现 capability

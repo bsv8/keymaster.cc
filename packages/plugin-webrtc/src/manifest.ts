@@ -241,33 +241,6 @@ const webrtcPluginDefinition = {
         const contact = await contacts.findByPublicKeyHex(publicKeyHex);
         return !signal?.aborted && Boolean(contact);
       },
-      logger: {
-        info: (scope, msg, data) => {
-          ctx.logger.info({
-            scope,
-            event: msg,
-            message: "",
-            data:
-              data && typeof data === "object"
-                ? (data as Record<string, unknown>)
-                : undefined
-          });
-        },
-        warn: (scope, msg, err) =>
-          ctx.logger.warn({
-            scope,
-            event: msg,
-            message: "",
-            data: { err: err instanceof Error ? err.message : String(err) }
-          }),
-        error: (scope, msg, err) =>
-          ctx.logger.error({
-            scope,
-            event: msg,
-            message: "",
-            data: { err: err instanceof Error ? err.message : String(err) }
-          })
-      }
     });
     ctx.provide(WEBRTC_SERVICE_CAPABILITY, service);
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);

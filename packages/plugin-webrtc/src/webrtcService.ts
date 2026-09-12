@@ -512,12 +512,10 @@ export function createWebrtcService(input: {
   /** 只允许已知联系人/业务准入的发送者进入用户确认队列；缺省为拒绝。 */
   isTransferSenderAllowed?: (publicKeyHex: string, signal?: AbortSignal) => boolean | Promise<boolean>;
   env?: WebrtcEnvironment;
-  logger?: WebrtcLogger;
 }): WebrtcService {
   const channel = input.channel;
   const store = input.configStore;
   const env = input.env ?? createBrowserWebrtcEnvironment();
-  const log: WebrtcLogger = input.logger ?? silentLogger();
   const keyspace = input.keyspace ?? ({ active: () => ({}) } as KeyspaceService);
   const historyService =
     input.historyService ??
@@ -871,7 +869,6 @@ export function createWebrtcService(input: {
       });
       return await Promise.race([decision, timedOut, cancelled]);
     } catch (error) {
-      log.warn("webrtc.service", "transfer_sender_admission_failed", error);
       return false;
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
@@ -1251,9 +1248,7 @@ export function createWebrtcService(input: {
       if (isObject(msg.content) && msg.content.type === "keymaster.webrtc.call.request") return;
       const transferRequest = parseTransferRequest(msg.content);
       if (transferRequest) {
-        void handleIncomingTransferRequest(transferRequest, remote).catch((error) => {
-          log.warn("webrtc.service", "incoming_transfer_request_failed", error);
-        });
+        void handleIncomingTransferRequest(transferRequest, remote).catch(() => undefined);
         return;
       }
       return;
@@ -1264,9 +1259,7 @@ export function createWebrtcService(input: {
     if (sig.signal.type === "offer") {
       if (activeTransfer) return;
       if (isDataChannelOffer(sig.signal.sdp)) {
-        void onRemoteTransferOffer(sig as WebrtcInviteSignal, remote).catch((err) => {
-          log.warn("webrtc.service", "on_remote_transfer_offer_failed", err);
-        });
+        void onRemoteTransferOffer(sig as WebrtcInviteSignal, remote).catch(() => undefined);
       } else {
         // 音视频呼叫协议未正式注册；尤其不能接受没有前置呼叫请求的
         // 直接 offer。文件传输仍走独立的 data-channel + 文件 Hash 关系。
@@ -1283,15 +1276,11 @@ export function createWebrtcService(input: {
       && remote === activeTransfer.remotePublicKeyHex
       && isAcceptableRemoteSession(sig, transferLocal)) {
       if (sig.signal.type === "answer") {
-        void onRemoteTransferAnswer(sig as WebrtcAnswerSignal).catch((err) => {
-          log.warn("webrtc.service", "on_remote_transfer_answer_failed", err);
-        });
+        void onRemoteTransferAnswer(sig as WebrtcAnswerSignal).catch(() => undefined);
         return;
       }
       if (sig.signal.type === "ice-candidate") {
-        void onRemoteTransferIce(sig as WebrtcIceSignal).catch((err) => {
-          log.warn("webrtc.service", "on_remote_transfer_ice_failed", err);
-        });
+        void onRemoteTransferIce(sig as WebrtcIceSignal).catch(() => undefined);
         return;
       }
       if (sig.signal.type === "end-of-candidates") {
@@ -1372,7 +1361,6 @@ export function createWebrtcService(input: {
       }
     } catch (error) {
       removePendingTransferRequestIfCurrent(sessionId, request);
-      log.warn("webrtc.service", "transfer_hash_request_failed", error);
       throw error instanceof Error ? error : new Error(String(error));
     } finally {
       if (transferAcceptanceInFlight === acceptanceToken) transferAcceptanceInFlight = null;
@@ -2327,17 +2315,13 @@ export function createWebrtcService(input: {
 
   const off = channel.subscribePrivate((message) => handleIncoming(message));
   const offHashRequests = channel.subscribe((message) => {
-    void handleIncomingHashRequest(message).catch((error) => {
-      log.warn("webrtc.service", "hash_request_handler_failed", error);
-    });
+    void handleIncomingHashRequest(message).catch(() => undefined);
   });
   const subscribeOwnerInbox = (): void => {
     if (disposed) return;
     const ownerPublicKeyHex = currentOwnerPublicKeyHex();
     if (!ownerPublicKeyHex) return;
-    void channel.subscriptionSet([`bsv8.inbox.${ownerPublicKeyHex}`, HASH_REQUEST_CHANNEL]).catch((error) => {
-      log.warn("webrtc.service", "owner_inbox_subscription_failed", error);
-    });
+    void channel.subscriptionSet([`bsv8.inbox.${ownerPublicKeyHex}`, HASH_REQUEST_CHANNEL]).catch(() => undefined);
   };
   subscribeOwnerInbox();
   const offOwnerChanged = typeof keyspace.onActiveKeyChanged === "function"
@@ -2437,20 +2421,4 @@ function configToRTCConfig(cfg: WebrtcConfig): RTCConfiguration {
     return { iceServers: [{ urls: [...DEFAULT_STUN_SERVERS] }] };
   }
   return { iceServers: [{ urls }] };
-}
-
-/* ============== logger 抽象 ============== */
-
-export interface WebrtcLogger {
-  info(scope: string, msg: string, data?: unknown): void;
-  warn(scope: string, msg: string, err?: unknown): void;
-  error(scope: string, msg: string, err?: unknown): void;
-}
-
-function silentLogger(): WebrtcLogger {
-  return {
-    info: () => undefined,
-    warn: () => undefined,
-    error: () => undefined
-  };
 }

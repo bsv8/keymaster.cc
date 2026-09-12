@@ -34,7 +34,6 @@ export * from "./protocolSpend.js";
 export * from "./i18n.js";
 export * from "./keyDisplay.js";
 export * from "./poker.js";
-export * from "./log.js";
 export * from "./protocol.js";
 export * from "./satSubscription.js";
 export * from "./appIdentity.js";
