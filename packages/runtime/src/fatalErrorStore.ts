@@ -34,6 +34,16 @@
  */
 export type FatalPhase =
   | "pre-bootstrap.env"
+  | "pre-bootstrap.coordinator"
+  | "pre-bootstrap.window-app"
+  | "pre-bootstrap.transport"
+  | "pre-bootstrap.storage-status"
+  | "pre-bootstrap.storage-onboarding"
+  | "pre-bootstrap.vault-selection"
+  | "pre-bootstrap.owner-apps-ready"
+  | "pre-bootstrap.connect-apps-ready"
+  | "pre-bootstrap.fallback"
+  /** @deprecated 保留类型兼容；新的 bootstrap 错误不得使用此 umbrella phase。 */
   | "pre-bootstrap.plugins"
   | "react.render"
   | "react.lifecycle"
