@@ -6,7 +6,7 @@
 
 import type { BsvNetwork, KeyValueStore } from "@keymaster/contracts";
 import type { Document as KeyHoldDocument } from "keyhold";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 
 export interface VaultMetaRecord {
   id: "singleton";

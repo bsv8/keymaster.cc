@@ -81,6 +81,41 @@ export const COORDINATOR_STARTUP_RETRY_DELAY_MS = 200;
 /** owner 插件必须等待服务目录就绪的最长时间；超时交给启动 fatal/retry 面。 */
 export const COORDINATOR_SERVICE_READY_TIMEOUT_MS = BOOTSTRAP_PLUGIN_TIMEOUT_MS;
 
+function startupFailureText(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return String(error);
+}
+
+/**
+ * 两次 Coordinator 启动尝试都失败时保留两端错误。
+ *
+ * Vite dev Worker 的脚本执行错误可能只发生在第一次 SharedWorker 句柄
+ * 上；WebLoom 0.4.1 只把它呈现为 ready snapshot 前的 disconnected，随后
+ * 同名 Worker 的第二个句柄通常只能等到 call deadline，形成一条泛化的
+ * timeout。首个错误因此只会是明确的“尚未发布 ready、请检查 Worker
+ * console”诊断，不假装拿到了浏览器的 JS exception 文本。该错误把两次
+ * 尝试的摘要带到统一 fatal 通道，但不重放任何 capability call。
+ */
+export class CoordinatorStartupError extends Error {
+  readonly firstError: unknown;
+  readonly retryError: unknown;
+
+  constructor(firstError: unknown, retryError: unknown) {
+    super([
+      "Coordinator startup failed after one bounded retry.",
+      `Initial attempt: ${startupFailureText(firstError)}`,
+      `Retry attempt: ${startupFailureText(retryError)}`,
+    ].join("\n"));
+    this.name = "CoordinatorStartupError";
+    this.firstError = firstError;
+    this.retryError = retryError;
+    const firstStack = firstError instanceof Error ? firstError.stack : undefined;
+    if (firstStack && this.stack) {
+      this.stack = `${this.stack}\nCaused by initial Coordinator startup attempt:\n${firstStack}`;
+    }
+  }
+}
+
 export const WEB_STARTUP_REQUIRED_CAPABILITIES = [
   VAULT_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
@@ -392,13 +427,18 @@ export async function connectCoordinatorWithStartupRetry(
 ): Promise<void> {
   try {
     await coordinatorClient.connect();
-  } catch {
+  } catch (firstError) {
     // 首次模块 Worker 加载可能恰逢静态资源发布/缓存重新验证。先彻底
     // 关闭失败端口与其自动重连 timer，再进行一次有界重试；第二次仍
-    // 失败则保留原有 fail-fast，由 main fatal 页面展示增强后的诊断。
+    // 失败则保留两次错误，由 main fatal 页面展示首个 pre-ready Worker
+    // 诊断，而不是只展示第二次可能泛化的 call timeout。
     coordinatorClient.disconnect();
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    await coordinatorClient.connect();
+    try {
+      await coordinatorClient.connect();
+    } catch (retryError) {
+      throw new CoordinatorStartupError(firstError, retryError);
+    }
   }
 }
 

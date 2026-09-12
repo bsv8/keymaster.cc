@@ -128,7 +128,10 @@ type TestPostMessage = {
   mockImplementation(implementation: (...args: any[]) => unknown): TestPostMessage;
 };
 
-function createTestMessagePort(initialImplementation?: TestPostMessage) {
+function createTestMessagePort(
+  initialImplementation?: TestPostMessage,
+  options: { autoReady?: boolean } = {},
+) {
   const calls = new Map<string, { mode: "unary" | "stream"; serviceInstanceId: string; nextSequence: number }>();
   const runtimeMessageListeners = new Set<(event: MessageEvent) => void>();
   let runtimeMessageErrorListener: ((event: MessageEvent) => void) | null = null;
@@ -213,20 +216,22 @@ function createTestMessagePort(initialImplementation?: TestPostMessage) {
       if (type === "message") {
         runtimeMessageListeners.add(listener);
         manuallyDisabled = false;
-        queueMicrotask(() => dispatchInbound({
-          type: "webloom.runtime.v1.snapshot",
-          protocolVersion: "webloom.runtime.v1",
-          runtimeId: "keymaster-coordinator",
-          runtimeKind: "shared-worker",
-          runtimeInstanceId: "test-coordinator-worker",
-          revision: 1,
-          state: "ready",
-          units: [],
-          services: [
-            { kind: "rpc", capabilityId: COORDINATOR_RPC_CAPABILITY.id, contractVersion: COORDINATOR_RPC_CAPABILITY.version, serviceInstanceId: "test-coordinator-rpc", attributes: {} },
-            { kind: "stream", capabilityId: COORDINATOR_TOPIC_STREAM_CAPABILITY.id, contractVersion: COORDINATOR_TOPIC_STREAM_CAPABILITY.version, serviceInstanceId: "test-coordinator-events", attributes: {} },
-          ],
-        }));
+        if (options.autoReady !== false) {
+          queueMicrotask(() => dispatchInbound({
+            type: "webloom.runtime.v1.snapshot",
+            protocolVersion: "webloom.runtime.v1",
+            runtimeId: "keymaster-coordinator",
+            runtimeKind: "shared-worker",
+            runtimeInstanceId: "test-coordinator-worker",
+            revision: 1,
+            state: "ready",
+            units: [],
+            services: [
+              { kind: "rpc", capabilityId: COORDINATOR_RPC_CAPABILITY.id, contractVersion: COORDINATOR_RPC_CAPABILITY.version, serviceInstanceId: "test-coordinator-rpc", attributes: {} },
+              { kind: "stream", capabilityId: COORDINATOR_TOPIC_STREAM_CAPABILITY.id, contractVersion: COORDINATOR_TOPIC_STREAM_CAPABILITY.version, serviceInstanceId: "test-coordinator-events", attributes: {} },
+            ],
+          }));
+        }
       }
       if (type === "messageerror") runtimeMessageErrorListener = listener;
     }),
@@ -1072,18 +1077,54 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally { globalThis.SharedWorker = original; }
   });
 
-  it("rejects immediately when the SharedWorker reports a startup error", async () => {
-    const port = createTestMessagePort();
+  it("reports an actionable error when SharedWorker.onerror fires before ready", async () => {
+    // No ready snapshot is emitted: this models the raw browser worker error
+    // path, where WebLoom 0.4.1 only reports `disconnected` and does not expose
+    // ErrorEvent.message to the client.
+    const port = createTestMessagePort(undefined, { autoReady: false });
     const worker = { port, onerror: null as ((event: Event) => void) | null } as unknown as SharedWorker;
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => worker);
+    let client: ReturnType<typeof createCoordinatorClient> | undefined;
     try {
-      const client = createCoordinatorClient({ requestTimeoutMs: 1_000, reconnectIntervalMs: 1_000 });
+      client = createCoordinatorClient({ requestTimeoutMs: 1_000, reconnectIntervalMs: 1_000 });
       const connecting = client.connect();
       await nextMacrotask();
-      worker.onerror?.({ message: "module failed to load" } as ErrorEvent);
-      await expect(connecting).rejects.toThrow(/Capability exposure was revoked|SharedWorker disconnected/u);
-    } finally { globalThis.SharedWorker = original; }
+      worker.onerror?.({ type: "error" } as ErrorEvent);
+      await expect(connecting).rejects.toThrow(
+        "Coordinator SharedWorker failed before publishing a ready Runtime snapshot; inspect the Worker console",
+      );
+      expect(client.getIsConnected()).toBe(false);
+    } finally {
+      client?.shutdown();
+      globalThis.SharedWorker = original;
+    }
+  });
+
+  it("preserves a structured WebLoom runtime-error wire message", async () => {
+    // This is distinct from the raw SharedWorker.onerror path above: a
+    // WebLoom runtime-error message does carry a structured diagnostic.
+    const port = createTestMessagePort();
+    const worker = { port } as unknown as SharedWorker;
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => worker);
+    let client: ReturnType<typeof createCoordinatorClient> | undefined;
+    try {
+      client = createCoordinatorClient({ requestTimeoutMs: 1_000, reconnectIntervalMs: 1_000 });
+      const connecting = client.connect();
+      await nextMacrotask();
+      port.onmessage?.({ data: {
+        type: "webloom.runtime.v1.runtime-error",
+        protocolVersion: "webloom.runtime.v1",
+        code: "runtime_initialization_failed",
+        message: "ReferenceError: window is not defined at @react-refresh",
+        phase: "validate",
+      } } as MessageEvent);
+      await expect(connecting).rejects.toThrow(/window is not defined|@react-refresh/u);
+    } finally {
+      client?.shutdown();
+      globalThis.SharedWorker = original;
+    }
   });
 
   it("notifies the Coordinator to cancel an in-flight Channel request", async () => {

@@ -18,7 +18,7 @@ import {
   msFileAppPolicyKeyString,
   normalizeMsFileReadConcurrencySettings
 } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 
 export const MSFILE_STORAGE_ID = "MSFile";
 export const MSFILE_STORAGE_VERSION = 1;

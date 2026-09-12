@@ -34,7 +34,7 @@ import type {
 import type { Message, MessageBus } from "webloom-framework";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import type { KeyValueStore } from "@keymaster/contracts";
-import { createKeyValueSettingsStore } from "@keymaster/runtime";
+import { createKeyValueSettingsStore } from "@keymaster/runtime/storage";
 import { DEFAULT_WOC_CONFIG, normalizeWocConfig } from "./wocSettings.js";
 import {
   WOC_ACTOR_ACCEPT_CONCURRENCY,

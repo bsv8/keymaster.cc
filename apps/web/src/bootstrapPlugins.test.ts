@@ -20,6 +20,7 @@ import { StartupCapabilityError, StartupPluginError } from "webloom-framework/ad
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import {
   connectCoordinatorWithStartupRetry,
+  CoordinatorStartupError,
   createPublicCoordinatorClient,
   createCoordinatorPlatformStore,
   createStorageCoordinatorClient,
@@ -183,21 +184,30 @@ describe("Coordinator startup recovery", () => {
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("preserves the second failure for the fatal startup path", async () => {
+  it("preserves the first pre-ready diagnostic with a second retry failure", async () => {
     vi.useFakeTimers();
+    const firstError = new Error("Coordinator SharedWorker failed before publishing a ready Runtime snapshot; inspect the Worker console");
     const finalError = new Error("worker still unavailable");
     const connect = vi.fn()
-      .mockRejectedValueOnce(new Error("worker load failed"))
+      .mockRejectedValueOnce(firstError)
       .mockRejectedValueOnce(finalError);
     const disconnect = vi.fn();
 
     const pending = connectCoordinatorWithStartupRetry({ connect, disconnect }, 200);
-    const assertion = expect(pending).rejects.toBe(finalError);
+    const assertion = expect(pending).rejects.toBeInstanceOf(CoordinatorStartupError);
     await vi.advanceTimersByTimeAsync(200);
     await assertion;
 
     expect(connect).toHaveBeenCalledTimes(2);
     expect(disconnect).toHaveBeenCalledTimes(1);
+    try {
+      await pending;
+    } catch (error) {
+      expect(error).toMatchObject({ firstError, retryError: finalError });
+      expect(error).toBeInstanceOf(CoordinatorStartupError);
+      expect((error as Error).message).toContain("inspect the Worker console");
+      expect((error as Error).message).toContain("worker still unavailable");
+    }
   });
 });
 
