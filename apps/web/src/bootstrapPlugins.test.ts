@@ -20,16 +20,19 @@ import { StartupCapabilityError, StartupPluginError } from "webloom-framework/ad
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import {
   connectCoordinatorWithStartupRetry,
+  bootstrapPhaseForContext,
   createPublicCoordinatorClient,
   createCoordinatorPlatformStore,
   createStorageCoordinatorClient,
   createVaultCoordinatorClient,
   describeBootstrapStep,
+  getBootstrapErrorContext,
   registerPluginWithTimeout
 } from "./bootstrapPlugins.js";
 import { assertWebStartupContract, WEB_STARTUP_REQUIRED_CAPABILITIES } from "./bootstrapPlugins.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
 import { createWebRuntimeUnitImplementationRegistry } from "./runtimeUnitImplementations.js";
+import { withBootstrapErrorContext } from "./bootstrapErrorContext.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -80,12 +83,45 @@ describe("bootstrapPlugins hang detection", () => {
   it("turns permanently pending protocol bootstrap into explicit timeout error", async () => {
     vi.useFakeTimers();
     const host = makeHost(() => new Promise<void>(() => undefined));
-    const promise = registerPluginWithTimeout(host, makePlugin("protocol"), 1_500);
+    const promise = registerPluginWithTimeout(host, makePlugin("protocol"), 1_500, "storage-onboarding");
     const assertion = expect(promise).rejects.toThrow(
       'Bootstrap timed out while registering plugin "protocol" (opening platform K-V "protocol") after 1500ms'
     );
     await vi.advanceTimersByTimeAsync(1_500);
     await assertion;
+
+    try {
+      await promise;
+    } catch (error) {
+      expect(getBootstrapErrorContext(error)).toMatchObject({
+        stage: "storage-onboarding",
+        pluginId: "protocol",
+        operation: "register-plugin",
+        context: { timeoutMs: 1_500 }
+      });
+      expect(bootstrapPhaseForContext(getBootstrapErrorContext(error)))
+        .toBe("pre-bootstrap.storage-onboarding");
+    }
+  });
+
+  it("preserves structured plugin diagnostics while adding stage context", async () => {
+    const original = Object.assign(new Error("private setup detail"), {
+      name: "StartupPluginError",
+      details: { pluginId: "vault", capabilities: ["vault.service"], state: "error-disabled" }
+    });
+    const host = makeHost(() => Promise.reject(original));
+
+    await expect(registerPluginWithTimeout(host, makePlugin("vault"), 1_500, "vault-selection"))
+      .rejects.toBe(original);
+    expect(getBootstrapErrorContext(original)).toMatchObject({
+      stage: "vault-selection",
+      pluginId: "vault",
+      operation: "register-plugin"
+    });
+    expect(original.name).toBe("StartupPluginError");
+    expect(original.details).toEqual({
+      pluginId: "vault", capabilities: ["vault.service"], state: "error-disabled"
+    });
   });
 
   it("lets successful registration finish before timeout", async () => {
@@ -198,6 +234,49 @@ describe("Coordinator startup recovery", () => {
 
     expect(connect).toHaveBeenCalledTimes(2);
     expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(getBootstrapErrorContext(finalError)).toMatchObject({
+      stage: "coordinator",
+      operation: "connect-coordinator",
+      context: { retryAttempt: 2, retryDelayMs: 200 }
+    });
+    expect(bootstrapPhaseForContext(getBootstrapErrorContext(finalError)))
+      .toBe("pre-bootstrap.coordinator");
+  });
+
+  it("uses an explicit fallback for errors without bootstrap context", () => {
+    expect(bootstrapPhaseForContext(undefined)).toBe("pre-bootstrap.fallback");
+    expect(bootstrapPhaseForContext({ stage: "bootstrap", operation: "bootstrap" }))
+      .toBe("pre-bootstrap.fallback");
+    expect(bootstrapPhaseForContext(undefined)).not.toBe("pre-bootstrap.plugins");
+  });
+
+  it("keeps the innermost plugin context when wrappers are nested", async () => {
+    const original = new Error("plugin failure");
+    const nested = withBootstrapErrorContext(
+      { stage: "owner-apps-ready", operation: "register-stage" },
+      () => withBootstrapErrorContext(
+        { stage: "owner-apps-ready", pluginId: "msfile", operation: "register-plugin" },
+        () => Promise.reject(original)
+      )
+    );
+
+    await expect(nested).rejects.toBe(original);
+    expect(getBootstrapErrorContext(original)).toMatchObject({
+      stage: "owner-apps-ready",
+      pluginId: "msfile",
+      operation: "register-plugin"
+    });
+  });
+
+  it.each([
+    ["vault-selection", "pre-bootstrap.vault-selection"],
+    ["owner-apps-ready", "pre-bootstrap.owner-apps-ready"],
+    ["connect-apps-ready", "pre-bootstrap.connect-apps-ready"],
+    ["storage-status", "pre-bootstrap.storage-status"],
+    ["window-app", "pre-bootstrap.window-app"],
+    ["transport", "pre-bootstrap.transport"]
+  ] as const)("maps %s to its fatal phase", (stage, phase) => {
+    expect(bootstrapPhaseForContext({ stage, operation: "test" })).toBe(phase);
   });
 });
 

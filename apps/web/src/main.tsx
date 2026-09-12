@@ -32,7 +32,7 @@ import {
 } from "@keymaster/runtime";
 import { App } from "./App.js";
 import { AppCrashBoundary } from "./AppCrashBoundary.js";
-import { bootstrapPlugins } from "./bootstrapPlugins.js";
+import { bootstrapPhaseForContext, bootstrapPlugins, getBootstrapErrorContext } from "./bootstrapPlugins.js";
 import { renderFatalCrashPage } from "./fatalCrashPage.js";
 import { formatStartupErrorSummary } from "./startupErrorSummary.js";
 import { installGlobalFatalHandlers } from "./installGlobalFatalHandlers.js";
@@ -166,7 +166,7 @@ async function start() {
     // 不再调旧 renderFatalError；统一走 fatal 通道。
     const message = formatStartupErrorSummary(err);
     reportFatalError({
-      phase: "pre-bootstrap.plugins",
+      phase: bootstrapPhaseForContext(getBootstrapErrorContext(err)),
       scope: "app-root",
       source: "app-bundle",
       message,

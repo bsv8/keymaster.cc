@@ -61,6 +61,20 @@ import { createWebRuntimeUnitImplementationRegistry } from "./runtimeUnitImpleme
 import { SHELL_RESOURCES } from "./i18n/resources.js";
 import { registerShellResources } from "./shell/shellResources.js";
 import { registerAssetWorkspace } from "./system/registerAssetWorkspace.js";
+import { formatStartupErrorSummary } from "./startupErrorSummary.js";
+import {
+  attachBootstrapErrorContext,
+  runWithBootstrapErrorContext,
+  withBootstrapErrorContext,
+  type BootstrapErrorStage,
+} from "./bootstrapErrorContext.js";
+
+export {
+  BootstrapContextError,
+  bootstrapPhaseForContext,
+  getBootstrapErrorContext,
+} from "./bootstrapErrorContext.js";
+export type { BootstrapErrorContext, BootstrapErrorStage, BootstrapFatalPhase } from "./bootstrapErrorContext.js";
 
 /**
  * 启动期每个插件注册的最长等待时间。
@@ -357,7 +371,8 @@ export function describeBootstrapStep(pluginId: string): string {
 export async function registerPluginWithTimeout(
   host: PluginHost,
   plugin: PluginManifest,
-  timeoutMs = BOOTSTRAP_PLUGIN_TIMEOUT_MS
+  timeoutMs = BOOTSTRAP_PLUGIN_TIMEOUT_MS,
+  stage: PluginBootstrapStage | undefined = plugin.bootstrapStage
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -373,6 +388,13 @@ export async function registerPluginWithTimeout(
         }, timeoutMs);
       })
     ]);
+  } catch (error) {
+    throw attachBootstrapErrorContext(error, {
+      stage: stage ?? "bootstrap",
+      pluginId: plugin.id,
+      operation: "register-plugin",
+      context: { timeoutMs }
+    });
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -396,9 +418,17 @@ export async function connectCoordinatorWithStartupRetry(
     // 首次模块 Worker 加载可能恰逢静态资源发布/缓存重新验证。先彻底
     // 关闭失败端口与其自动重连 timer，再进行一次有界重试；第二次仍
     // 失败则保留原有 fail-fast，由 main fatal 页面展示增强后的诊断。
-    coordinatorClient.disconnect();
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    await coordinatorClient.connect();
+    try {
+      coordinatorClient.disconnect();
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      await coordinatorClient.connect();
+    } catch (error) {
+      throw attachBootstrapErrorContext(error, {
+        stage: "coordinator",
+        operation: "connect-coordinator",
+        context: { retryAttempt: 2, retryDelayMs }
+      });
+    }
   }
 }
 
@@ -411,10 +441,16 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     : false;
   // 施工单 002：注入 Coordinator client
   // 在 bootstrap 阶段创建 Coordinator client 并注入到 PluginHost
-  const { getCoordinatorClient } = await import("./keymasterSessionCoordinatorClient.js");
+  const { getCoordinatorClient } = await withBootstrapErrorContext({
+    stage: "coordinator",
+    operation: "load-coordinator-client"
+  }, () => import("./keymasterSessionCoordinatorClient.js"));
   // Spike hooks and plugin capabilities must share the same physical port;
   // creating a second client here would bypass the real SharedWorker session.
-  const coordinatorClient = getCoordinatorClient();
+  const coordinatorClient = runWithBootstrapErrorContext({
+    stage: "coordinator",
+    operation: "create-coordinator-client"
+  }, () => getCoordinatorClient());
   let pageHost: PluginHost | undefined;
   let pageWindowApp: WindowApp | undefined;
   let pageLifecycleClosed = false;
@@ -481,11 +517,28 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
 
     // 日志也是平台诊断数据，必须在 Host 创建时绑定到 Coordinator 平台 K-V。
     // 这样 runtime 首次读取配置和写入 entry 时不会落到测试内存夹具。
-    const logStorage = createCoordinatorPlatformStore(coordinatorClient, "logs");
-    const configStorage = createCoordinatorPlatformStore(coordinatorClient, "settings");
-    const runtimeUnitImplementationRegistry = createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG);
-    const initialRuntimeIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
-  const host = createPluginHost({
+    const logStorage = runWithBootstrapErrorContext({
+      stage: "coordinator",
+      operation: "create-log-storage",
+      context: { bucket: "logs" }
+    }, () => createCoordinatorPlatformStore(coordinatorClient, "logs"));
+    const configStorage = runWithBootstrapErrorContext({
+      stage: "coordinator",
+      operation: "create-config-storage",
+      context: { bucket: "settings" }
+    }, () => createCoordinatorPlatformStore(coordinatorClient, "settings"));
+    const runtimeUnitImplementationRegistry = runWithBootstrapErrorContext({
+      stage: "bootstrap",
+      operation: "create-runtime-unit-registry"
+    }, () => createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG));
+    const initialRuntimeIdentity = runWithBootstrapErrorContext({
+      stage: "coordinator",
+      operation: "read-initial-runtime-identity"
+    }, () => runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot()));
+  const host = runWithBootstrapErrorContext({
+    stage: "bootstrap",
+    operation: "create-plugin-host"
+  }, () => createPluginHost({
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd,
     logStorage,
@@ -529,30 +582,60 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     },
     // 页面销毁时给插件一个有限的异步收尾窗口；撤权本身仍同步发生。
     lifecycleCleanupTimeoutMs: 5_000,
-  });
+  }));
   pageHost = host;
   // Keymaster 的四阶段门禁仍由本装配层控制；createWindowApp 负责把同一
   // WebLoom Window Host 纳入唯一 window-main Runtime，并投影真实 Worker
   // RuntimeHandle。这样不会为了绕过 staged registration 再创建第二个 Host。
-  pageWindowApp = await createWindowAppFromHost({
+  pageWindowApp = await withBootstrapErrorContext({
+    stage: "window-app",
+    operation: "create-window-app",
+    context: { runtime: "window-main" }
+  }, () => createWindowAppFromHost({
     id: "keymaster-window",
     host: getWebLoomHost(host),
-  });
-  coordinatorClient.setWindowApp(pageWindowApp);
-  await registerPlugins(pageWindowApp, [coordinatorClient.createWindowStoragePlugin()]);
+  }));
+  runWithBootstrapErrorContext({
+    stage: "window-app",
+    operation: "bind-window-app",
+    context: { appId: "keymaster-window" }
+  }, () => coordinatorClient.setWindowApp(pageWindowApp!));
+  await withBootstrapErrorContext({
+    stage: "transport",
+    operation: "register-window-storage-plugin",
+    pluginId: "storage"
+  }, () => registerPlugins(pageWindowApp!, [coordinatorClient.createWindowStoragePlugin()]));
   await connectCoordinatorWithStartupRetry(coordinatorClient);
-  const coordinatorRuntime = coordinatorClient.getRuntimeHandle();
-  if (!coordinatorRuntime) throw new Error("Coordinator WebLoom RuntimeHandle is unavailable after connect");
-  attachKeymasterRemoteRuntime(host, coordinatorRuntime);
-  const storageStatus = await coordinatorClient.storageControl({ type: "status" });
+  const coordinatorRuntime = runWithBootstrapErrorContext({
+    stage: "transport",
+    operation: "get-coordinator-runtime-handle"
+  }, () => {
+    const runtime = coordinatorClient.getRuntimeHandle();
+    if (!runtime) throw new Error("Coordinator WebLoom RuntimeHandle is unavailable after connect");
+    return runtime;
+  });
+  runWithBootstrapErrorContext({
+    stage: "transport",
+    operation: "attach-coordinator-runtime"
+  }, () => attachKeymasterRemoteRuntime(host, coordinatorRuntime));
+  const storageStatus = await withBootstrapErrorContext({
+    stage: "storage-status",
+    operation: "read-storage-status"
+  }, () => coordinatorClient.storageControl({ type: "status" }));
   // Storage 是独立健康域。Provider/CORS/认证暂不可用时，仍需让 Vault
   // 和设置页启动，以便用户看到恢复入口；此时不能再读取平台配置 K-V。
   const storageReady = storageStatus.status === "ok" && storageStatus.value === "ready";
-  host.provide(COORDINATOR_ACTIVITY_CAPABILITY, Object.freeze({
+  runWithBootstrapErrorContext({
+    stage: "transport",
+    operation: "publish-coordinator-activity"
+  }, () => host.provide(COORDINATOR_ACTIVITY_CAPABILITY, Object.freeze({
     getIsConnected: () => coordinatorClient.getIsConnected(),
     sendActivity: () => coordinatorClient.sendActivity()
-  }));
-  const bootstrapStatus = createApplicationBootstrapStatus({
+  })));
+  const bootstrapStatus = runWithBootstrapErrorContext({
+    stage: "storage-status",
+    operation: "create-bootstrap-status"
+  }, () => createApplicationBootstrapStatus({
     phase: storageReady ? "vault-selection" : "storage-onboarding",
     storageReady,
     vaultCapabilityReady: false,
@@ -561,18 +644,30 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     ownerAppsReady: false,
     connectAppsReady: false,
     assetWorkspaceReady: false
-  });
-  host.provide(APPLICATION_BOOTSTRAP_READY_CAPABILITY, bootstrapStatus.service);
-  registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY), bootstrapStatus.service);
+  }));
+  runWithBootstrapErrorContext({
+    stage: "storage-status",
+    operation: "publish-bootstrap-status"
+  }, () => host.provide(APPLICATION_BOOTSTRAP_READY_CAPABILITY, bootstrapStatus.service));
+  runWithBootstrapErrorContext({
+    stage: "storage-status",
+    operation: "register-shell-resources"
+  }, () => registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY), bootstrapStatus.service));
 
   // 硬切换 003：直接转发 Coordinator event 给 runtime notifier
   // 装配层只负责转发，合并语义由 runtime notifier 实现
-  const dataNotifier = host.capabilities.get(ASSET_DATA_NOTIFIER_CAPABILITY);
-  coordinatorClient.subscribeTopic("asset.data-changed", (event) => {
+  const dataNotifier = runWithBootstrapErrorContext({
+    stage: "transport",
+    operation: "get-asset-data-notifier"
+  }, () => host.capabilities.get(ASSET_DATA_NOTIFIER_CAPABILITY));
+  runWithBootstrapErrorContext({
+    stage: "transport",
+    operation: "subscribe-asset-data-changes"
+  }, () => coordinatorClient.subscribeTopic("asset.data-changed", (event) => {
     if (event.type === "asset.data-changed") {
       dataNotifier.emit(event);
     }
-  });
+  }));
 
   // 硬切换 004：启动清单按 manifest.meta.bootstrapStage 分成四道门禁。
   // 阶段字段是唯一真值；这里不能根据 pluginId、kind 或 storage scope 猜测。
@@ -585,12 +680,20 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   ];
   const missingBootstrapStage = fullCatalog.filter((plugin) => !plugin.bootstrapStage);
   if (missingBootstrapStage.length > 0) {
-    throw new Error(`Web plugin catalog has no bootstrapStage: ${missingBootstrapStage.map((plugin) => plugin.id).join(", ")}`);
+    throw attachBootstrapErrorContext(
+      new Error(`Web plugin catalog has no bootstrapStage: ${missingBootstrapStage.map((plugin) => plugin.id).join(", ")}`),
+      { stage: "bootstrap", operation: "validate-bootstrap-stages" }
+    );
   }
   const catalogForStage = (catalog: readonly PluginManifest[], stage: PluginBootstrapStage): PluginManifest[] =>
     catalog.filter((plugin) => plugin.bootstrapStage === stage);
   const phaseOneCatalog = catalogForStage(fullCatalog, "storage-onboarding");
-  if (phaseOneCatalog.length === 0) throw new Error("Web plugin catalog must contain a storage-onboarding plugin");
+  if (phaseOneCatalog.length === 0) {
+    throw attachBootstrapErrorContext(
+      new Error("Web plugin catalog must contain a storage-onboarding plugin"),
+      { stage: "storage-onboarding", operation: "validate-bootstrap-catalog" }
+    );
+  }
 
   // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 的 Window
   // runtime unit 显式注入 `pricePublisherPublicKeyHex` seed；它只在本地配置缺失时作为首次
@@ -632,88 +735,112 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   let observedRuntimeIdentity = initialRuntimeIdentity;
 
   // 页面销毁时也要回收不是由某个业务 manifest 直接拥有的资产工作区。
-  host.rootScope.onDispose(() => {
+  runWithBootstrapErrorContext({
+    stage: "bootstrap",
+    operation: "register-asset-workspace-cleanup"
+  }, () => host.rootScope.onDispose(() => {
     assetWorkspaceDisposer?.();
     assetWorkspaceDisposer = undefined;
-  }, "asset-workspace-lifecycle");
+  }, "asset-workspace-lifecycle"));
 
   function runtimeIdentityKeyFor(identity: RuntimeIdentityTransition): string {
     return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.bucketGeneration ?? "unknown"}`;
   }
 
-  const currentActiveKey = (): { unlocked: boolean; activePublicKeyHex?: string } => {
-    const snapshot = coordinatorClient.getBootstrapSnapshot();
-    const unlocked = snapshot.vaultStatus === "unlocked" && typeof snapshot.activePublicKeyHex === "string";
-    return { unlocked, activePublicKeyHex: unlocked ? snapshot.activePublicKeyHex : undefined };
+  const currentActiveKey = (stage: BootstrapErrorStage = "coordinator"): { unlocked: boolean; activePublicKeyHex?: string } =>
+    runWithBootstrapErrorContext({
+      stage,
+      operation: "read-active-key-state"
+    }, () => {
+      const snapshot = coordinatorClient.getBootstrapSnapshot();
+      const unlocked = snapshot.vaultStatus === "unlocked" && typeof snapshot.activePublicKeyHex === "string";
+      return { unlocked, activePublicKeyHex: unlocked ? snapshot.activePublicKeyHex : undefined };
+    });
+
+  const updateBootstrapStatus = (
+    patch: Partial<ApplicationBootstrapSnapshot>,
+    stage: BootstrapErrorStage = "bootstrap"
+  ): void => {
+    runWithBootstrapErrorContext({ stage, operation: "update-bootstrap-status" }, () => {
+      bootstrapStatus.set({ ...bootstrapStatus.service.snapshot(), ...patch });
+    });
   };
 
-  const updateBootstrapStatus = (patch: Partial<ApplicationBootstrapSnapshot>): void => {
-    bootstrapStatus.set({ ...bootstrapStatus.service.snapshot(), ...patch });
-  };
-
-  const registerStage = async (stage: PluginBootstrapStage, retryFailed = false): Promise<void> => {
-    const plugins = catalogForStage(fullCatalogWithConfig, stage);
-    host.configStore.setRequiredPluginIds(
-      fullCatalogWithConfig.filter((plugin) => plugin.startup === "required").map((plugin) => plugin.id)
-    );
-    const enabledByConfig = new Set(
-      host.configStore.resolveEnabled(plugins.map((plugin) => plugin.id), (pluginId) =>
-        plugins.find((plugin) => plugin.id === pluginId)?.defaultEnabled ?? false
-      ).enabled
-    );
-    for (const plugin of plugins) {
-      const existing = host.getManifest(plugin.id);
-      if (!existing) {
-        await registerPluginWithTimeout(host, plugin);
-        continue;
+  const registerStage = async (stage: PluginBootstrapStage, retryFailed = false): Promise<void> =>
+    withBootstrapErrorContext({ stage, operation: "register-stage" }, async () => {
+      const plugins = catalogForStage(fullCatalogWithConfig, stage);
+      host.configStore.setRequiredPluginIds(
+        fullCatalogWithConfig.filter((plugin) => plugin.startup === "required").map((plugin) => plugin.id)
+      );
+      const enabledByConfig = new Set(
+        host.configStore.resolveEnabled(plugins.map((plugin) => plugin.id), (pluginId) =>
+          plugins.find((plugin) => plugin.id === pluginId)?.defaultEnabled ?? false
+        ).enabled
+      );
+      for (const plugin of plugins) {
+        const existing = host.getManifest(plugin.id);
+        if (!existing) {
+          await registerPluginWithTimeout(host, plugin, BOOTSTRAP_PLUGIN_TIMEOUT_MS, stage);
+          continue;
+        }
+        // register() 负责 required/immutable 插件的失败重放；显式的应用
+        // 装配重试还会按持久化启停配置重试已开启的 optional 插件。
+        await registerPluginWithTimeout(host, plugin, BOOTSTRAP_PLUGIN_TIMEOUT_MS, stage);
+        const state = host.state(plugin.id);
+        const shouldRetry = retryFailed
+          && (plugin.startup === "required" || plugin.canDisable === false || enabledByConfig.has(plugin.id))
+          && (state.kind === "error-disabled" || state.kind === "blocked");
+        if (shouldRetry) {
+          await withBootstrapErrorContext({ stage, pluginId: plugin.id, operation: "retry-plugin" }, () => host.retry(plugin.id));
+        }
       }
-      // register() 负责 required/immutable 插件的失败重放；显式的应用
-      // 装配重试还会按持久化启停配置重试已开启的 optional 插件。
-      await registerPluginWithTimeout(host, plugin);
-      const state = host.state(plugin.id);
-      const shouldRetry = retryFailed
-        && (plugin.startup === "required" || plugin.canDisable === false || enabledByConfig.has(plugin.id))
-        && (state.kind === "error-disabled" || state.kind === "blocked");
-      if (shouldRetry) await host.retry(plugin.id);
-    }
-  };
+    });
 
   const runOwnerAndConnectStages = async (retryFailed = false): Promise<void> => {
-    const active = currentActiveKey();
+    const active = currentActiveKey("owner-apps-ready");
     if (!active.unlocked) return;
     if (ownerAppsPromise) return ownerAppsPromise;
     const generation = ownerAssemblyGeneration;
     const isCurrentOwnerGeneration = (): boolean =>
-      generation === ownerAssemblyGeneration && currentActiveKey().unlocked;
+      generation === ownerAssemblyGeneration && currentActiveKey("owner-apps-ready").unlocked;
     const stagePromise = (async () => {
-      updateBootstrapStatus({ phase: "vault-selection", hasUnlockedActiveKey: true });
+      updateBootstrapStatus({ phase: "vault-selection", hasUnlockedActiveKey: true }, "owner-apps-ready");
       if (!isCurrentOwnerGeneration()) return;
       await registerStage("owner-apps-ready", retryFailed);
       if (!isCurrentOwnerGeneration()) return;
       ownerAppsReady = true;
-      updateBootstrapStatus({ phase: "owner-apps-ready", hasUnlockedActiveKey: true, ownerAppsReady: true });
+      updateBootstrapStatus({ phase: "owner-apps-ready", hasUnlockedActiveKey: true, ownerAppsReady: true }, "owner-apps-ready");
       if (!assetWorkspaceReady) {
-        const disposeWorkspace = await registerAssetWorkspace(host);
+        const disposeWorkspace = await withBootstrapErrorContext({
+          stage: "owner-apps-ready",
+          operation: "register-asset-workspace"
+        }, () => registerAssetWorkspace(host));
         if (!isCurrentOwnerGeneration()) {
-          disposeWorkspace();
+          runWithBootstrapErrorContext({
+            stage: "owner-apps-ready",
+            operation: "dispose-stale-asset-workspace"
+          }, () => disposeWorkspace());
           return;
         }
         assetWorkspaceDisposer = disposeWorkspace;
         assetWorkspaceReady = true;
       }
       if (!isCurrentOwnerGeneration()) return;
-      updateBootstrapStatus({ assetWorkspaceReady: true });
+      updateBootstrapStatus({ assetWorkspaceReady: true }, "owner-apps-ready");
       await registerStage("connect-apps-ready", retryFailed);
       if (!isCurrentOwnerGeneration()) return;
       connectAppsReady = true;
-      assertWebStartupContract(host);
+      runWithBootstrapErrorContext({
+        stage: "connect-apps-ready",
+        operation: "assert-startup-capabilities"
+      }, () => assertWebStartupContract(host));
       updateBootstrapStatus({
         phase: "connect-apps-ready",
         hasUnlockedActiveKey: true,
         ownerAppsReady,
         connectAppsReady,
         assetWorkspaceReady: true
-      });
+      }, "connect-apps-ready");
     })();
     ownerAppsPromise = stagePromise;
     try {
@@ -725,13 +852,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
           phase: "error",
           storageReady: true,
           vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY),
-          hasUnlockedActiveKey: currentActiveKey().unlocked,
+          hasUnlockedActiveKey: currentActiveKey("owner-apps-ready").unlocked,
           vaultSelectionReady,
           ownerAppsReady,
           connectAppsReady,
           assetWorkspaceReady,
-          error: error instanceof Error ? error.message : String(error)
-        });
+          error: formatStartupErrorSummary(error)
+        }, "owner-apps-ready");
       }
       throw error;
     }
@@ -741,20 +868,29 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     if (!storageReadyForBootstrap) return;
     if (vaultSelectionPromise) return vaultSelectionPromise;
     vaultSelectionPromise = (async () => {
-      updateBootstrapStatus({ phase: "vault-selection", storageReady: true });
-      await host.configStore.hydrate();
-      host.validateManifestSet(fullCatalogWithConfig);
+      updateBootstrapStatus({ phase: "vault-selection", storageReady: true }, "vault-selection");
+      await withBootstrapErrorContext({
+        stage: "vault-selection",
+        operation: "hydrate-plugin-config"
+      }, () => host.configStore.hydrate());
+      runWithBootstrapErrorContext({
+        stage: "vault-selection",
+        operation: "validate-plugin-catalog"
+      }, () => host.validateManifestSet(fullCatalogWithConfig));
       await registerStage("vault-selection", retryFailed);
-      host.assertCapabilities(WEB_STARTUP_REQUIRED_CAPABILITIES, { phase: "vault-selection" });
+      runWithBootstrapErrorContext({
+        stage: "vault-selection",
+        operation: "assert-vault-capabilities"
+      }, () => host.assertCapabilities(WEB_STARTUP_REQUIRED_CAPABILITIES, { phase: "vault-selection" }));
       vaultSelectionReady = true;
-      const active = currentActiveKey();
+      const active = currentActiveKey("vault-selection");
       updateBootstrapStatus({
         phase: "vault-selection",
         storageReady: true,
         vaultCapabilityReady: true,
         hasUnlockedActiveKey: active.unlocked,
         vaultSelectionReady: true
-      });
+      }, "vault-selection");
       if (active.unlocked) await runOwnerAndConnectStages(retryFailed);
     })();
     try {
@@ -765,13 +901,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         phase: "error",
         storageReady: true,
         vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY),
-        hasUnlockedActiveKey: currentActiveKey().unlocked,
+        hasUnlockedActiveKey: currentActiveKey("vault-selection").unlocked,
         vaultSelectionReady,
         ownerAppsReady,
         connectAppsReady,
         assetWorkspaceReady,
-        error: error instanceof Error ? error.message : String(error)
-      });
+        error: formatStartupErrorSummary(error)
+      }, "vault-selection");
       throw error;
     }
   };
@@ -779,29 +915,59 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const retryApplicationBootstrap = async (): Promise<void> => {
     if (!storageReadyForBootstrap) return;
     await enterVaultSelectionStage(true);
-    if (currentActiveKey().unlocked) await runOwnerAndConnectStages(true);
+    if (currentActiveKey("vault-selection").unlocked) await runOwnerAndConnectStages(true);
   };
-  bootstrapStatus.setRetry(retryApplicationBootstrap);
+  runWithBootstrapErrorContext({
+    stage: "vault-selection",
+    operation: "publish-bootstrap-retry"
+  }, () => bootstrapStatus.setRetry(retryApplicationBootstrap));
 
   const phaseOneRequiredCatalog = phaseOneCatalogWithConfig;
 
-  host.validateManifestSet(fullCatalogWithConfig);
-  host.configStore.setRequiredPluginIds(
+  runWithBootstrapErrorContext({
+    stage: "storage-onboarding",
+    operation: "validate-plugin-catalog"
+  }, () => host.validateManifestSet(fullCatalogWithConfig));
+  runWithBootstrapErrorContext({
+    stage: "storage-onboarding",
+    operation: "configure-required-plugins"
+  }, () => host.configStore.setRequiredPluginIds(
     phaseOneRequiredCatalog.filter((plugin) => plugin.startup === "required").map((plugin) => plugin.id)
-  );
-  for (const plugin of phaseOneCatalogWithConfig) await registerPluginWithTimeout(host, plugin);
+  ));
+  for (const plugin of phaseOneCatalogWithConfig) {
+    await registerPluginWithTimeout(host, plugin, BOOTSTRAP_PLUGIN_TIMEOUT_MS, "storage-onboarding");
+  }
   if (!storageReady) {
-    const storageService = host.capabilities.get(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
-    const offStorageReady = storageService.subscribe(() => {
-      if (storageService.status() !== "ready") return;
-      storageReadyForBootstrap = true;
-      void enterVaultSelectionStage().catch((error) => {
-        console.error("[bootstrap] Storage-ready plugin assembly failed", error);
-      });
-    });
+    const storageService = runWithBootstrapErrorContext({
+      stage: "storage-onboarding",
+      operation: "get-storage-runtime-controller"
+    }, () => host.capabilities.get(STORAGE_RUNTIME_CONTROLLER_CAPABILITY));
+    const offStorageReady = runWithBootstrapErrorContext({
+      stage: "storage-onboarding",
+      operation: "subscribe-storage-ready"
+    }, () => storageService.subscribe(() => {
+      try {
+        if (runWithBootstrapErrorContext({
+          stage: "storage-onboarding",
+          operation: "read-storage-readiness"
+        }, () => storageService.status()) !== "ready") return;
+        storageReadyForBootstrap = true;
+        void enterVaultSelectionStage().catch((error) => {
+          // 异步回调不能再交给 bootstrapPlugins() 的 caller；状态页保留
+          // 可重试入口，同时用同一套结构化/脱敏摘要暴露真实阶段。
+          console.error("[bootstrap] Storage-ready plugin assembly failed", error);
+        });
+      } catch (error) {
+        updateBootstrapStatus({ phase: "error", error: formatStartupErrorSummary(error) }, "storage-onboarding");
+        console.error("[bootstrap] Storage-ready callback failed", error);
+      }
+    }));
     // subscribe() is intentionally not an immediate callback; handle a
     // ready baseline explicitly for a race between status() and subscription.
-    if (storageService.status() === "ready") {
+    if (runWithBootstrapErrorContext({
+      stage: "storage-onboarding",
+      operation: "read-storage-readiness"
+    }, () => storageService.status()) === "ready") {
       storageReadyForBootstrap = true;
       await enterVaultSelectionStage();
     }
@@ -811,8 +977,14 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   }
 
   let sessionTransitionTail = Promise.resolve();
-  const handleSessionStateChanged = async (): Promise<void> => {
-    const nextIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
+  const handleSessionStateChanged = async (): Promise<void> => withBootstrapErrorContext({
+    stage: "coordinator",
+    operation: "handle-session-state"
+  }, async () => {
+    const nextIdentity = runWithBootstrapErrorContext({
+      stage: "coordinator",
+      operation: "read-runtime-identity"
+    }, () => runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot()));
     const nextKey = runtimeIdentityKeyFor(nextIdentity);
     const identityChanged = nextKey !== observedRuntimeIdentityKey;
     const ownerIdentityChanged = observedRuntimeIdentity.vaultStatus !== nextIdentity.vaultStatus
@@ -821,11 +993,14 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
 
     // Worker 运行单元属于 session 世代；Coordinator client 在世代切换时
     // 会先清空旧后台快照，Host 必须立即重新投影，不能等下一条 unit 事件。
-    host.refreshRuntimeUnitSnapshots();
+    runWithBootstrapErrorContext({
+      stage: "coordinator",
+      operation: "refresh-runtime-unit-snapshots"
+    }, () => host.refreshRuntimeUnitSnapshots());
     if (!identityChanged) {
-      const active = currentActiveKey();
+      const active = currentActiveKey("coordinator");
       if (vaultSelectionReady) {
-        updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked });
+        updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked }, "coordinator");
         if (active.unlocked && !connectAppsReady) await runOwnerAndConnectStages();
       }
       return;
@@ -841,7 +1016,10 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       ownerAppsPromise = undefined;
       ownerAppsReady = false;
       connectAppsReady = false;
-      assetWorkspaceDisposer?.();
+      runWithBootstrapErrorContext({
+        stage: "owner-apps-ready",
+        operation: "dispose-owner-asset-workspace"
+      }, () => assetWorkspaceDisposer?.());
       assetWorkspaceDisposer = undefined;
       assetWorkspaceReady = false;
       updateBootstrapStatus({
@@ -850,35 +1028,49 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         connectAppsReady: false,
         assetWorkspaceReady: false,
         phase: nextIdentity.vaultStatus === "unlocked" ? "vault-selection" : "vault-selection"
-      });
+      }, "coordinator");
     }
 
     // transitionRuntimeIdentity 的同步前半段会在此调用返回前撤销旧
     // owner Scope；await 部分只等待有界异步清理，再按新身份重建实例。
-    await host.transitionRuntimeIdentity(nextIdentity);
+    await withBootstrapErrorContext({
+      stage: "coordinator",
+      operation: "transition-runtime-identity",
+      context: { identityChanged, ownerIdentityChanged }
+    }, () => host.transitionRuntimeIdentity(nextIdentity));
     await staleOwnerAssembly?.catch(() => undefined);
 
     if (!vaultSelectionReady) return;
-    const active = currentActiveKey();
-    updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked });
+    const active = currentActiveKey("coordinator");
+    updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked }, "coordinator");
     if (active.unlocked && !connectAppsReady) await runOwnerAndConnectStages();
-  };
+  });
 
-  sessionStateOff = coordinatorClient.subscribeTopic("session.state", (event) => {
+  sessionStateOff = runWithBootstrapErrorContext({
+    stage: "coordinator",
+    operation: "subscribe-session-state"
+  }, () => coordinatorClient.subscribeTopic("session.state", (event) => {
     if (event.type !== "session.state.changed") return;
     // session.state 事件顺序就是身份世代顺序；串行处理可避免 A -> B
     // 的旧异步阶段在 B -> A 时覆盖新阶段状态。
     sessionTransitionTail = sessionTransitionTail
       .then(handleSessionStateChanged)
       .catch((error) => {
+        updateBootstrapStatus({
+          phase: "error",
+          error: formatStartupErrorSummary(error)
+        }, "coordinator");
         console.error("[bootstrap] session identity transition failed", error);
       });
-  });
+  }));
   void sessionStateOff;
 
     return host;
   } catch (error) {
     disposePageLifecycle();
-    throw error;
+    throw attachBootstrapErrorContext(error, {
+      stage: "bootstrap",
+      operation: "bootstrap"
+    });
   }
 }
