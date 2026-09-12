@@ -66,7 +66,7 @@ import type {
 } from "@keymaster/contracts/storage-internal";
 import { parseCoordinatorResponseFor, toCoordinatorRpcRequest } from "@keymaster/contracts";
 import { readStorageBootstrap } from "@keymaster/platform-storage/coordinator/bootstrap";
-import { createLocalStorageBucketProvider, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
+import { browserStorageLocks, createLocalStorageBucketProvider, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
 import { createStorageCatalogRepository, readStorageCatalog, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import {
   connectSharedWorker,
@@ -292,7 +292,7 @@ function writeInitialSetupRecoveryRecords(records: InitialSetupRecoveryRecordV1[
 }
 
 async function withInitialSetupRecoveryLock<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
-  const locks = (globalThis as typeof globalThis & { navigator?: { locks?: InitialSetupRecoveryLocks } }).navigator?.locks;
+  const locks = browserStorageLocks() as InitialSetupRecoveryLocks | undefined;
   if (!locks) throw new StorageRuntimeError("storage_unavailable", "Web Locks are required for initialization recovery records");
   try {
     return await locks.request(INITIAL_SETUP_RECOVERY_LOCK, { signal }, async () => {

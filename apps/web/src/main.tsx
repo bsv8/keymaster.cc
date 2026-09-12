@@ -39,6 +39,7 @@ import { installGlobalFatalHandlers } from "./installGlobalFatalHandlers.js";
 import { prepareMsFileMediaServiceWorker } from "./msfileMediaServiceWorkerClient.js";
 import { normalizeLegacyHashRoute } from "./shell/legacyHashRoute.js";
 import { applyInitialTheme } from "./theme/themeStore.js";
+import { installInsecureContextCryptoFallback } from "@keymaster/plugin-vault";
 import "./shims/buffer.js";
 import "./styles/global.css";
 import "./styles/plugins.css";
@@ -86,19 +87,13 @@ installGlobalFatalHandlers();
 /** 检测运行环境是否能跑 vault。返回 null 表示通过；否则返回错误描述。 */
 function checkEnvironment(): string | null {
   if (typeof window === "undefined") return null;
-  if (!window.isSecureContext) {
+  const capability = installInsecureContextCryptoFallback();
+  if (!capability.subtle) {
     return [
-      "当前页面不是安全上下文（secure context）。",
-      "浏览器在 HTTP + 非 localhost 主机下会禁用 WebCrypto，统一存储无法初始化。",
-      "请改用以下任一方式访问：",
-      "  - http://localhost:5173",
-      "  - http://127.0.0.1:5173",
-      "  - 通过 HTTPS（例如反向代理）",
+      "当前浏览器没有可用的密码加密后端。",
+      "请使用 HTTPS、localhost，或升级到支持本地兼容后端的现代浏览器。",
       `当前主机：${window.location.host}`
     ].join("\n");
-  }
-  if (!window.crypto?.subtle) {
-    return "当前浏览器未提供 crypto.subtle（WebCrypto API）。请使用现代浏览器（Chrome/Edge/Firefox/Safari）最新版。";
   }
   return null;
 }

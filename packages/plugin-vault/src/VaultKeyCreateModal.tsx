@@ -22,6 +22,7 @@ import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type { KeyRef } from "@keymaster/contracts";
+import { isWebAuthnPrfAvailable } from "./webauthnPrf.js";
 
 /** 标签最大长度，与 vaultService.LABEL_MAX_LENGTH 保持一致。 */
 const LABEL_MAX_LENGTH = 64;
@@ -126,6 +127,7 @@ export function VaultKeyCreateModal({
     label.trim().length > 0 &&
     label.trim().length <= LABEL_MAX_LENGTH &&
     password.length > 0;
+  const passkeySupported = isWebAuthnPrfAvailable();
 
   return (
     <Modal
@@ -158,7 +160,7 @@ export function VaultKeyCreateModal({
                   if (created) onPasskeys(created);
                   onClose();
                 }}
-                disabled={!created || busy}
+                disabled={!created || busy || !passkeySupported}
               >
                 {t("vault.keyCreate.addPasskey", { defaultValue: "添加 passkey" })}
               </Button>
@@ -207,6 +209,11 @@ export function VaultKeyCreateModal({
       ) : (
         created ? (
           <div className="vault-create-modal__success">
+            {!passkeySupported && onPasskeys ? (
+              <p className="vault-passkey__warning">
+                {t("vault.passkey.unsupported", { defaultValue: "当前上下文不支持 WebAuthn PRF；Passkey 需要 HTTPS。密码保护与加密备份不受影响。" })}
+              </p>
+            ) : null}
             <p className="vault-create-modal__success-line">
               <span className="vault-create-modal__success-label">
                 {t("vault.keyCreate.success.label", { defaultValue: "标签" })}

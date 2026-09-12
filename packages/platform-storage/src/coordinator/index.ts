@@ -4,6 +4,7 @@ export { createStorageRuntimeController, StorageRuntimeControllerImpl, STORAGE_S
 export { openMultipartUploadRepository, MULTIPART_REPOSITORY_NAME, MULTIPART_REPOSITORY_VERSION } from "../bootstrap/multipartUploadRepository.js";
 export type { MultipartUploadRepository, StoredMultipartUploadRecord, StoredProviderConfigRecord } from "../bootstrap/multipartUploadRepository.js";
 export { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+export { browserStorageLocks, browserStorageLockMode } from "../runtime/browserLocks.js";
 export { createOpfsBucketProvider } from "../bucket-providers/opfs/opfsBucketObjectStore.js";
 // Window 侧申请持久化授权；实现仍封装在 OPFS Provider 目录，SharedWorker
 // 只负责在 Provider 探测时读取已授权状态。

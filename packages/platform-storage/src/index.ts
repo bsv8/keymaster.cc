@@ -27,6 +27,7 @@ export * from "./bucket-providers/bucketPath.js";
 export * from "./storage-access/owner-app/ownerAppNamespace.js";
 export * from "./bucket-providers/s3/s3ClientFactory.js";
 export { StorageRuntimeError } from "./runtime/storageRuntimeError.js";
+export { browserStorageLocks, browserStorageLockMode } from "./runtime/browserLocks.js";
 export { StorageHealthController } from "./runtime/storageHealthController.js";
 export type { StorageHealthSnapshot, StorageProbeOptions } from "./runtime/storageHealthController.js";
 export { StorageBootstrapController } from "./bootstrap/storageBootstrapController.js";

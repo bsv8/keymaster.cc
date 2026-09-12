@@ -9,6 +9,7 @@ import type {
   PasskeyProtection,
   VaultService
 } from "@keymaster/contracts";
+import { isWebAuthnPrfAvailable } from "./webauthnPrf.js";
 
 export function VaultKeySwitchModal(props: {
   target: KeyIdentity | null;
@@ -27,6 +28,7 @@ export function VaultKeySwitchModal(props: {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
   const busy = passwordBusy || passkeyBusyId !== null;
+  const passkeySupported = isWebAuthnPrfAvailable();
 
   useEffect(() => {
     setPassword("");
@@ -86,7 +88,7 @@ export function VaultKeySwitchModal(props: {
   }
 
   async function submitPasskey(passkeyId: string) {
-    if (busy) return;
+    if (busy || !passkeySupported) return;
     setPasskeyBusyId(passkeyId);
     setPasskeyError(null);
     try {
@@ -152,13 +154,18 @@ export function VaultKeySwitchModal(props: {
         <section className="key-switch-method" aria-labelledby="key-switch-passkey-title">
           <h3 id="key-switch-passkey-title">{t("vault.keySwitch.usePasskey", { defaultValue: "使用 Passkey" })}</h3>
           <p>{t("vault.keySwitch.passkeyHint", { defaultValue: "选择这把私钥已经配置的 Passkey。" })}</p>
+          {!passkeySupported ? (
+            <p className="vault-passkey__warning">
+              {t("vault.passkey.unsupported", { defaultValue: "当前上下文不支持 WebAuthn PRF；Passkey 解锁需要 HTTPS。密码解锁仍可用。" })}
+            </p>
+          ) : null}
           <div className="key-switch-passkey-list">
             {passkeys.map((passkey) => (
               <Button
                 key={passkey.id}
                 variant="secondary"
                 loading={passkeyBusyId === passkey.id}
-                disabled={busy}
+                disabled={busy || !passkeySupported}
                 onClick={() => void submitPasskey(passkey.id)}
               >
                 {passkey.label}

@@ -11,6 +11,7 @@ import type {
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { StorageErrorCode } from "@keymaster/contracts";
 import { StorageRuntimeError, storageErrorCode } from "../../runtime/storageRuntimeError.js";
+import { browserStorageLocks, type BrowserStorageLocks } from "../../runtime/browserLocks.js";
 import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
 
 /** localStorage 的最小同步接口，便于页面桥和单元测试注入。 */
@@ -196,8 +197,10 @@ function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStor
  * localStorage 桶 Provider。
  *
  * localStorage 本身没有事务；所有 compare-and-write 必须经过同桶 Web Lock，
- * 因此没有 `navigator.locks` 时写入明确失败。Worker 不能直接访问 Window，
- * 生产 Worker 通过 `bridge` 把已经加密的 bytes 交给页面桥执行。
+ * 因此安全上下文优先使用 Web Locks；任意主机 HTTP 页面没有 Web Locks 时
+ * 使用当前页面内的兼容队列。该队列不提供跨标签页互斥，不能作为多标签页
+ * 安全保证。Worker 不能直接访问 Window，生产 Worker 通过 `bridge` 把已经
+ * 加密的 bytes 交给页面桥执行。
  */
 export function createLocalStorageBucketProvider(options: LocalStorageBucketProviderOptions): StorageBucketProvider {
   const bucketId = options.bucketId;
@@ -211,7 +214,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
   let closed = false;
   const now = options.now ?? (() => Date.now());
   const prefix = `keymaster.bucket.${bucketId}.`;
-  const locks = options.locks ?? (globalThis as typeof globalThis & { navigator?: { locks?: LocalStorageLocks } }).navigator?.locks;
+  const locks: LocalStorageLocks | BrowserStorageLocks | undefined = options.locks ?? browserStorageLocks();
 
   function assertOpen(path?: string, options: { allowEmptyPath?: boolean } = {}): void {
     if (closed) throw fail("storage_unavailable", "Local storage provider is closed");
@@ -225,7 +228,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
     // Provider 会再次进入同桶 Web Lock。若 Worker 也申请同名锁会形成跨
     // 全局的嵌套锁等待，因此 bridge 模式把锁边界留在页面侧。
     if (options.bridge) return operation();
-    if (!locks) throw fail("storage_unavailable", "Local storage requires Web Locks for safe writes");
+    if (!locks) throw fail("storage_unavailable", "Local storage locking is unavailable");
     try {
       return signal
         ? await locks.request(`keymaster.storage.local.${bucketId}`, { signal }, operation)

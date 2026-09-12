@@ -3,7 +3,8 @@ import {
   createPasskeyPrf,
   decryptMaterialWithPasskey,
   encryptMaterialWithPasskey,
-  PasskeyPrfOnCreateRequiredError
+  PasskeyPrfOnCreateRequiredError,
+  isWebAuthnPrfAvailable
 } from "./webauthnPrf.js";
 
 afterEach(() => {
@@ -17,6 +18,13 @@ afterEach(() => {
 });
 
 describe("WebAuthn PRF key protection", () => {
+  it("remains unavailable on an insecure HTTP context", () => {
+    vi.stubGlobal("isSecureContext", false);
+    vi.stubGlobal("PublicKeyCredential", class PublicKeyCredential {});
+    vi.stubGlobal("navigator", { credentials: {} });
+    expect(isWebAuthnPrfAvailable()).toBe(false);
+  });
+
   it("lets independent PRF outputs protect the same private key", async () => {
     const publicKeyHex = "02".padEnd(66, "1");
     const privateKeyBytes = new Uint8Array(32);
