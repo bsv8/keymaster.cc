@@ -20,6 +20,7 @@ import { StartupCapabilityError, StartupPluginError } from "webloom-framework/ad
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import {
   connectCoordinatorWithStartupRetry,
+  applicationBootstrapPhaseForStorageReadiness,
   bootstrapPhaseForContext,
   CoordinatorStartupError,
   createPublicCoordinatorClient,
@@ -136,6 +137,16 @@ describe("bootstrapPlugins hang detection", () => {
     const promise = registerPluginWithTimeout(host, makePlugin("settings"), 1_500);
     await vi.advanceTimersByTimeAsync(200);
     await expect(promise).resolves.toBeUndefined();
+  });
+});
+
+describe("application bootstrap phase projection", () => {
+  it("keeps storage onboarding while storage readiness is still false", () => {
+    // session.state can report booting -> uninitialized before the user has
+    // selected a storage backend. That identity event must not advance the
+    // application gate past storage onboarding.
+    expect(applicationBootstrapPhaseForStorageReadiness(false)).toBe("storage-onboarding");
+    expect(applicationBootstrapPhaseForStorageReadiness(true)).toBe("vault-selection");
   });
 });
 

@@ -42,6 +42,11 @@ vi.mock("@keymaster/runtime", () => ({
     return path;
   },
   useRuntimeStatus: () => ({ vault: runtimeState.vault, ready: runtimeState.ready }),
+  useOptionalCapability: (capability: { id: string }) => {
+    if (capability.id === "vault.service") return { status: () => runtimeState.vault };
+    if (capability.id === "application-bootstrap.ready") return { retry: vi.fn(async () => undefined) };
+    return undefined;
+  },
   useI18n: () => ({
     t: (key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? key,
     language: () => "en"
@@ -50,7 +55,17 @@ vi.mock("@keymaster/runtime", () => ({
 
 vi.mock("webloom-framework/react", () => ({
   useHasCapability: () => true,
-  useOptionalCapability: () => undefined,
+  useOptionalCapability: (capability: { id: string }) => {
+    if (capability.id === "vault.service") return { status: () => runtimeState.vault };
+    if (capability.id === "application-bootstrap.ready") return { retry: vi.fn(async () => undefined) };
+    return undefined;
+  },
+  useResource: () => ({
+    key: ["shell.application-bootstrap"],
+    status: "ready",
+    data: runtimeState.bootstrap,
+    revision: 1
+  }),
   useResourceSelector: (_store: unknown, _id: string, _args: readonly string[], selector: (snapshot: { data?: unknown }) => unknown) => selector({ data: runtimeState.bootstrap })
 }));
 

@@ -51,7 +51,7 @@ import {
 } from "webloom-framework";
 import type { PluginIntentCoordinator, PluginIntentSnapshot } from "webloom-framework";
 import { createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
-import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
+import type { ApplicationBootstrapPhase, ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
 import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
 import { attachKeymasterRemoteRuntime, createKeymasterPluginHost as createPluginHost, getWebLoomHost, type PluginHost } from "@keymaster/runtime";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
@@ -140,6 +140,20 @@ const EMPTY_PLUGIN_INTENT_SNAPSHOT: PluginIntentSnapshot = {
   desiredEnabled: {},
   desiredRevision: {},
 };
+
+/**
+ * 计算身份切换时仍可公开的最早应用装配阶段。
+ *
+ * Storage onboarding 尚未完成时，Coordinator 仍可能先发布一次
+ * `session.state`（例如 booting -> uninitialized）。这条事件只改变 Vault
+ * 身份，不能把 storageReady=false 的启动状态提前投影成 vault-selection；
+ * 否则 App 会把合法的首次存储选择误判成启动不一致。
+ */
+export function applicationBootstrapPhaseForStorageReadiness(
+  storageReadyForBootstrap: boolean
+): ApplicationBootstrapPhase {
+  return storageReadyForBootstrap ? "vault-selection" : "storage-onboarding";
+}
 
 /** 把 Coordinator 的会话快照转换成 Window Host 的作用域身份。 */
 function runtimeIdentityFromSnapshot(
@@ -1058,7 +1072,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         ownerAppsReady: false,
         connectAppsReady: false,
         assetWorkspaceReady: false,
-        phase: nextIdentity.vaultStatus === "unlocked" ? "vault-selection" : "vault-selection"
+        phase: applicationBootstrapPhaseForStorageReadiness(storageReadyForBootstrap)
       }, "coordinator");
     }
 
