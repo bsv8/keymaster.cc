@@ -5,7 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./storage": "./src/storage/inMemoryKeyValueStore.ts"
+    "./storage": "./src/storage/index.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

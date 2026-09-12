@@ -416,6 +416,15 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private shutdownRequested = false;
   /** 使 disconnect() 能取消尚未完成的 connect/hello/subscription 链。 */
   private connectionAttempt = 0;
+  /**
+   * 当前 connect() 观察到的 Runtime/Worker 端连接失败。
+   *
+   * 结构化的 WebLoom runtime-error 会带自己的 message；而原始 SharedWorker
+   * 脚本执行失败只会让 WebLoom 发出 disconnected（0.4.1 不读取 ErrorEvent
+   * 文本）。后者只能提供明确的可操作诊断，不能假装捕获到了浏览器的 JS
+   * exception 文本。
+   */
+  private observedConnectionFailure: Error | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private recoverableDiagnostics: RecoverableCoordinatorDiagnostic[] = [];
 
@@ -469,6 +478,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const windowApp = this.windowApp;
     if (!windowApp) throw new Error("Coordinator client requires a WindowApp before connect()");
     const attempt = ++this.connectionAttempt;
+    this.observedConnectionFailure = undefined;
 
     try {
       // WebLoom 是唯一的物理连接与 call/stream transport。领域 client 只
@@ -481,6 +491,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const workerName = this.workerName ?? (!this.workerUrl && isDevelopment
         ? "keymaster-coordinator-dev"
         : undefined);
+      let runtimePublishedReady = false;
       const runtime = connectSharedWorker({
         id: "keymaster-coordinator",
         url: workerUrl,
@@ -495,10 +506,13 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.removeRuntimeSubscription?.();
       this.removeRuntimeSubscription = runtime.subscribe((snapshot) => {
         if (this.runtimeHandle !== runtime) return;
+        if (snapshot.state === "ready") runtimePublishedReady = true;
         if (snapshot.state === "failed" || snapshot.state === "disconnected") {
-          this.handleWorkerError(
-            `Coordinator Runtime ${snapshot.state}${snapshot.error ? `: ${snapshot.error}` : ""}`,
-          );
+          const message = `Coordinator Runtime ${snapshot.state}${snapshot.error ? `: ${snapshot.error}` : ""}`;
+          this.observedConnectionFailure = snapshot.state === "disconnected" && !runtimePublishedReady
+            ? new Error("Coordinator SharedWorker failed before publishing a ready Runtime snapshot; inspect the Worker console")
+            : new Error(message);
+          this.handleWorkerError(message);
         }
       });
 
@@ -518,6 +532,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (err) {
       // 只有明确出现新 attempt 才吞掉旧连接错误。
       if (attempt !== this.connectionAttempt) return;
+      const observedFailure = this.observedConnectionFailure;
       this.isConnected = false;
       this.removeRuntimeSubscription?.();
       this.removeRuntimeSubscription = undefined;
@@ -527,7 +542,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.topicSubscription?.cancel("Coordinator connection attempt failed");
       this.topicSubscription = null;
       if (!this.shutdownRequested) this.scheduleReconnect();
-      throw err;
+      // Runtime 端已经给出结构化错误，或在 ready snapshot 前断线时已经
+      // 生成可操作诊断，不能用随后 hello call 的 timeout 覆盖它。若只有
+      // call 层错误，则保留原有错误。
+      throw observedFailure ?? err;
     }
   }
 

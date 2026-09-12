@@ -12,7 +12,7 @@ import type {
   ProtocolOriginSettingsRecord,
   ProtocolStorageRepository
 } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 
 export const PROTOCOL_STORAGE_ID = "protocol";
 export const PROTOCOL_STORAGE_VERSION = 1;
