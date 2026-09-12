@@ -39,6 +39,7 @@
     "test:e2e": "playwright test",
     "test:e2e:dev-http": "playwright test --config=playwright.dev-http.config.ts --project=chromium",
     "test:e2e:initial-setup-smoke": "playwright test e2e/local-initialization-smoke.spec.ts --project=chromium",
+    "test:e2e:multi-tab-refresh-smoke": "playwright test e2e/multi-tab-refresh-smoke.spec.ts --project=chromium",
     "test:e2e:integration": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.integration.config.ts --project=local-integration",
     "test:e2e:integration:list": "playwright test --config=playwright.integration.config.ts --project=local-integration --list",
     "typecheck:e2e": "tsc -p e2e/tsconfig.integration.json --noEmit",

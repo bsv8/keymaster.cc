@@ -106,7 +106,9 @@ describe("Coordinator runtime contract parsers", () => {
 
   it("validates LocalStorage rollback and emits a sanitized catalog entry", () => {
     const entry = catalogEntry();
+    const binding = { peerGeneration: 1, sessionEpoch: "epoch-1", leaseId: "lease-1" };
     const result = parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
+      ...binding,
       type: "catalog-commit",
       bucketId: "bucket-1",
       bucketGeneration: 1,
@@ -116,6 +118,7 @@ describe("Coordinator runtime contract parsers", () => {
     expect(result).toMatchObject({ type: "catalog-commit", rollback: false });
     expect(result.targetBucket).not.toHaveProperty("untrusted");
     expect(() => parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
+      ...binding,
       type: "catalog-commit",
       bucketId: "bucket-1",
       bucketGeneration: 1,

@@ -80,6 +80,8 @@ import type {
   CoordinatorRpcResponse,
   CoordinatorRpcCommandRequest,
   CoordinatorSessionOpenRequest,
+  CoordinatorSessionCloseRequest,
+  CoordinatorSessionBinding,
   CoordinatorLocalStorageRequest,
   CoordinatorLocalStorageResponse,
   CoordinatorTopicSubscription,
@@ -1574,7 +1576,8 @@ async function loadInitialSetupRecoveryRecords(signal?: AbortSignal, peerId?: st
     initialSetupRecoveryRecords.clear();
     for (const record of response.records) initialSetupRecoveryRecords.set(record.transactionId, structuredClone(record));
     return true;
-  } catch {
+  } catch (error) {
+    if ((error as { code?: unknown })?.code === "service_reference_stale") throw error;
     // 恢复记录只用于恢复/诊断，不得把正常的未配置入口升级成 Fatal。
     // 但一旦账本读取失败，旧缓存也不能继续作为恢复事实使用；否则损坏
     // 账本可能被误判为空，或旧缓存可能继续允许危险的清理/新事务。
@@ -5642,9 +5645,22 @@ function takeCoordinatorTopicEvent(queue: CoordinatorTopicStreamQueue): Promise<
   });
 }
 
+type CoordinatorPeerStatus = "active" | "open" | "closing" | "revoked";
+
+interface CoordinatorBridgeRequest {
+  readonly controller: AbortController;
+  readonly settled: Promise<void>;
+}
+
+interface CoordinatorStorageIoOwner extends CoordinatorSessionBinding {
+  readonly peerId: string;
+  readonly commitOrder: number;
+}
+
 interface CoordinatorPeerState {
   readonly peer: PeerController;
   lastSeenAt: number;
+  status: CoordinatorPeerStatus;
   sessionOpen: boolean;
   /** 每次 open/close/revoke 都推进；迟到的 await 结果不能重新开放旧 peer。 */
   sessionGeneration: number;
@@ -5652,17 +5668,23 @@ interface CoordinatorPeerState {
   sessionOperationTail: Promise<void>;
   topicStream?: CoordinatorTopicStreamQueue;
   serviceExposure?: { revoke(): void };
+  sessionBinding?: CoordinatorSessionBinding;
+  openCommitOrder?: number;
+  bridgeRequests: Set<CoordinatorBridgeRequest>;
+  drainPromise?: Promise<void>;
 }
 
 /** WebLoom 连接 peer 注册表；Local I/O 只在 session.open 提交或物理撤权时切换。 */
 const coordinatorPeers = new Map<string, CoordinatorPeerState>();
-let storageIoPeerId: string | undefined;
+let storageIoOwner: CoordinatorStorageIoOwner | undefined;
+let coordinatorSessionCommitOrder = 0;
 
 interface CoordinatorSessionOpenAttempt {
   readonly state: CoordinatorPeerState;
   readonly peerId: string;
   readonly generation: number;
   readonly signal: AbortSignal;
+  readonly binding: CoordinatorSessionBinding;
 }
 
 /**
@@ -5699,6 +5721,36 @@ function coordinatorSessionStaleError(message = "Coordinator session open became
   return Object.assign(new Error(message), { code: "service_reference_stale" });
 }
 
+function sameCoordinatorSessionBinding(left: CoordinatorSessionBinding | undefined, right: CoordinatorSessionBinding | undefined): boolean {
+  return left !== undefined && right !== undefined
+    && left.peerGeneration === right.peerGeneration
+    && left.sessionEpoch === right.sessionEpoch
+    && left.leaseId === right.leaseId;
+}
+
+function coordinatorSessionBinding(state: CoordinatorPeerState): CoordinatorSessionBinding | undefined {
+  return state.sessionBinding === undefined ? undefined : { ...state.sessionBinding };
+}
+
+function assertCoordinatorBridgeFresh(
+  state: CoordinatorPeerState,
+  binding: CoordinatorSessionBinding,
+  opening?: CoordinatorSessionOpenAttempt,
+): void {
+  const isOpening = opening !== undefined
+    && opening.state === state
+    && sameCoordinatorSessionBinding(opening.binding, binding)
+    && coordinatorOpeningSession === opening;
+  const isCommitted = state.sessionOpen
+    && state.status === "open"
+    && sameCoordinatorSessionBinding(state.sessionBinding, binding);
+  if (state.peer.scope.state !== "active"
+    || coordinatorPeers.get(state.peer.peerId) !== state
+    || (!isOpening && !isCommitted)) {
+    throw coordinatorSessionStaleError("Coordinator LocalStorage bridge session became stale");
+  }
+}
+
 function assertCoordinatorSessionOpenFresh(attempt: CoordinatorSessionOpenAttempt): void {
   if (attempt.signal.aborted) throw coordinatorSessionStaleError("Coordinator session open was cancelled");
   if (coordinatorPeers.get(attempt.peerId) !== attempt.state
@@ -5706,6 +5758,94 @@ function assertCoordinatorSessionOpenFresh(attempt: CoordinatorSessionOpenAttemp
     || attempt.state.sessionGeneration !== attempt.generation) {
     throw coordinatorSessionStaleError();
   }
+}
+
+function selectCoordinatorStorageIoOwner(): void {
+  const candidates = [...coordinatorPeers.values()]
+    .filter((candidate) => candidate.status === "open"
+      && candidate.sessionOpen
+      && candidate.peer.scope.state === "active"
+      && candidate.sessionBinding !== undefined
+      && candidate.openCommitOrder !== undefined)
+    .sort((left, right) => (left.openCommitOrder! - right.openCommitOrder!));
+  const selected = candidates[candidates.length - 1];
+  storageIoOwner = selected?.sessionBinding === undefined || selected.openCommitOrder === undefined
+    ? undefined
+    : { ...selected.sessionBinding, peerId: selected.peer.peerId, commitOrder: selected.openCommitOrder };
+}
+
+function abortCoordinatorPeerInflight(peerId: string): void {
+  for (const [requestId, request] of storageRequests) {
+    if (request.clientId === peerId) { request.controller.abort(); storageRequests.delete(requestId); }
+  }
+  for (const [requestId, request] of channelRequests) {
+    if (request.clientId === peerId) { request.controller.abort(); channelRequests.delete(requestId); }
+  }
+  for (const [requestId, request] of msfileRequests) {
+    if (request.clientId === peerId) { request.controller.abort(); msfileRequests.delete(requestId); }
+  }
+  for (const [requestId, request] of windowP2pExecutorIdentityRequests) {
+    if (request.clientId === peerId) { request.controller.abort(); windowP2pExecutorIdentityRequests.delete(requestId); }
+  }
+  for (const [grantId, grant] of storageGrants) if (grant.clientId === peerId) storageGrants.delete(grantId);
+  for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === peerId) ownerStorageGrants.delete(grantId);
+  for (const [grantId, grant] of platformStorageGrants) if (grant.clientId === peerId) platformStorageGrants.delete(grantId);
+  for (const [grantId, grant] of msfileGrants) if (grant.clientId === peerId) msfileGrants.delete(grantId);
+  const callers = channelCallersByClient.get(peerId);
+  channelCallersByClient.delete(peerId);
+  if (callers && channelSubscriptionMux) {
+    for (const callerId of callers) void channelSubscriptionMux.release(callerId).catch(() => undefined);
+  }
+}
+
+function drainCoordinatorPeer(state: CoordinatorPeerState): Promise<void> {
+  const pending = [...state.bridgeRequests].map((request) => request.settled);
+  const drain = Promise.allSettled(pending).then(() => {
+    if (coordinatorPeers.get(state.peer.peerId) === state && state.status === "closing") {
+      state.status = "active";
+      state.drainPromise = undefined;
+    }
+  });
+  state.drainPromise = drain;
+  return drain;
+}
+
+/**
+ * 关闭只先做同步 admission fence；反向 Window call 的真实 Promise 由
+ * bridgeRequests 保留到 settle，再由 drain 完成。物理 peer revoke 会把
+ * state 标为 revoked 并从注册表移除，页面主动 close 则保留 peer 以便
+ * 同一个 Runtime 在必要时重新 open。
+ */
+function fenceCoordinatorPeerSession(
+  state: CoordinatorPeerState,
+  options: { physical: boolean; binding?: CoordinatorSessionBinding },
+): boolean {
+  if (state.status === "revoked") return false;
+  const currentBinding = coordinatorSessionBinding(state);
+  if (options.binding !== undefined && !sameCoordinatorSessionBinding(currentBinding, options.binding)) return false;
+  state.sessionGeneration += 1;
+  state.sessionOpen = false;
+  state.status = options.physical ? "revoked" : "closing";
+  state.sessionBinding = undefined;
+  state.openCommitOrder = undefined;
+  state.serviceExposure?.revoke();
+  state.serviceExposure = undefined;
+  if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream, coordinatorSessionStaleError("Coordinator topic stream was revoked"));
+  state.topicStream = undefined;
+  for (const pending of state.bridgeRequests) pending.controller.abort();
+  abortCoordinatorPeerInflight(state.peer.peerId);
+
+  if (storageIoOwner?.peerId === state.peer.peerId
+    && currentBinding !== undefined
+    && sameCoordinatorSessionBinding(storageIoOwner, currentBinding)) {
+    storageIoOwner = undefined;
+    selectCoordinatorStorageIoOwner();
+  }
+  if (options.physical) {
+    coordinatorPeers.delete(state.peer.peerId);
+  }
+  void drainCoordinatorPeer(state);
+  return true;
 }
 
 function enqueueCoordinatorPeerSessionOperation<T>(state: CoordinatorPeerState, operation: () => Promise<T>): Promise<T> {
@@ -5736,10 +5876,10 @@ function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStor
 }
 
 /** 将旧 Provider 内部请求收窄为 Window reverse capability 的纯 DTO。 */
-function coordinatorLocalStorageRequest(input: LocalStorageBridgeRequest): CoordinatorLocalStorageRequest {
+function coordinatorLocalStorageRequest(input: LocalStorageBridgeRequest, binding: CoordinatorSessionBinding): CoordinatorLocalStorageRequest {
   const withoutSignal = bridgeRequestWithoutSignal(input) as unknown as Record<string, unknown>;
-  const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, ...request } = withoutSignal;
-  return request as unknown as CoordinatorLocalStorageRequest;
+  const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, peerGeneration: _peerGeneration, sessionEpoch: _sessionEpoch, ...request } = withoutSignal;
+  return { ...request, ...binding } as unknown as CoordinatorLocalStorageRequest;
 }
 
 /**
@@ -5748,20 +5888,52 @@ function coordinatorLocalStorageRequest(input: LocalStorageBridgeRequest): Coord
  */
 function requestLocalStorageBridge(input: LocalStorageBridgeRequest, peerId?: string): Promise<LocalStorageBridgeResponse> {
   const opening = coordinatorOpeningSession;
-  const temporaryPeerId = peerId === undefined && storageIoPeerId === undefined && opening
+  const temporaryPeerId = peerId === undefined && storageIoOwner === undefined && opening
     ? (() => { assertCoordinatorSessionOpenFresh(opening); return opening.peerId; })()
     : undefined;
-  const targetPeerId = peerId ?? storageIoPeerId ?? temporaryPeerId;
+  const targetPeerId = peerId ?? storageIoOwner?.peerId ?? temporaryPeerId;
   const signal = input.signal ?? opening?.signal;
   if (signal?.aborted) throw storageUnavailableError("Local storage bridge request was cancelled");
   if (testLocalStorageBridgeOverride) return testLocalStorageBridgeOverride(input);
   const state = targetPeerId ? coordinatorPeerState(targetPeerId) : undefined;
   if (!state || state.peer.scope.state !== "active") throw storageUnavailableError("Local storage bridge is unavailable");
-  const request = coordinatorLocalStorageRequest(input);
-  return state.peer.capability(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY).call(request, {
-    signal,
-    operationId: generateRequestId(),
-  }) as Promise<LocalStorageBridgeResponse>;
+  const binding = opening !== undefined && opening.state === state && (peerId === undefined || peerId === opening.peerId)
+    ? opening.binding
+    : coordinatorSessionBinding(state);
+  if (!binding) throw coordinatorSessionStaleError("Coordinator LocalStorage bridge has no committed session binding");
+  assertCoordinatorBridgeFresh(state, binding, opening);
+  const request = coordinatorLocalStorageRequest(input, binding);
+  const controller = new AbortController();
+  const sourceSignal = signal;
+  const onAbort = (): void => controller.abort();
+  if (sourceSignal?.aborted) throw storageUnavailableError("Local storage bridge request was cancelled");
+  sourceSignal?.addEventListener("abort", onAbort, { once: true });
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => { settle = resolve; });
+  const pending: CoordinatorBridgeRequest = { controller, settled };
+  state.bridgeRequests.add(pending);
+  const cleanup = (): void => {
+    sourceSignal?.removeEventListener("abort", onAbort);
+    state.bridgeRequests.delete(pending);
+    settle();
+  };
+  try {
+    // Capability clients normally return a rejected Promise for dispatch
+    // failures, but a peer adapter can also throw before returning one. The
+    // pending record is already visible to close/drain at this point, so the
+    // synchronous path must use the same cleanup as finally.
+    const call = state.peer.capability(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY).call(request, {
+      signal: controller.signal,
+      operationId: generateRequestId(),
+    }) as Promise<LocalStorageBridgeResponse>;
+    return Promise.resolve(call).then((response) => {
+      assertCoordinatorBridgeFresh(state, binding, opening);
+      return response;
+    }).finally(cleanup);
+  } catch (error) {
+    cleanup();
+    return Promise.reject(error);
+  }
 }
 
 /**
@@ -12552,20 +12724,12 @@ function coordinatorRequestFromRpc(
   return coordinatorClientRequestFromRpc(request, peerId, call.operationId ?? generateRequestId());
 }
 
-function coordinatorSessionClosed(peerId: string): void {
+function coordinatorSessionClosed(peerId: string, binding: CoordinatorSessionBinding): void {
   const state = coordinatorPeerState(peerId);
   if (!state) return;
-  // This is the synchronous admission fence. Any in-flight session.open will
-  // fail its next await boundary and can never publish its old projection.
-  state.sessionGeneration += 1;
-  state.sessionOpen = false;
-  state.serviceExposure?.revoke();
-  state.serviceExposure = undefined;
-  if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream);
-  state.topicStream = undefined;
-  // storageIoPeerId is intentionally cleared only by the synchronous peer
-  // revoke callback. A session-close RPC is not proof that the physical peer
-  // has disappeared, so it cannot redirect Local I/O to another page.
+  // The complete binding is an exact-match fence. A late close from an older
+  // lease must not revoke a newer open on the same physical peer.
+  fenceCoordinatorPeerSession(state, { physical: false, binding });
 }
 
 const COORDINATOR_SESSION_EXPOSURES = [
@@ -12579,25 +12743,54 @@ async function openCoordinatorSession(
   request: CoordinatorSessionOpenRequest,
   call: HandlerCallContext,
 ): Promise<CoordinatorRpcResponse> {
-  // Capture the generation before entering either queue. Two concurrent opens
+  // The generation is the freshness baseline for this queued open. It may
+  // legitimately move when this same physical peer replaces an old lease;
+  // in that branch the fence below explicitly establishes the new baseline.
+  // Two concurrent opens otherwise serialize on the same peer operation tail.
   // must serialize into one session: the second one observes the committed
   // session and returns its snapshot instead of invalidating the first open.
   // A close/revoke meanwhile advances the generation and makes both queued
   // stale attempts fail closed.
-  const expectedGeneration = state.sessionGeneration;
+  let expectedGeneration = state.sessionGeneration;
   const peerId = state.peer.peerId;
-  return enqueueCoordinatorPeerSessionOperation(state, () => {
-    if (state.sessionOpen) {
+  return enqueueCoordinatorPeerSessionOperation(state, async () => {
+    if (state.sessionOpen && state.status === "open"
+      && state.sessionBinding?.leaseId === request.leaseId) {
       return Promise.resolve({
         sessionEpoch: coordinatorState.sessionEpoch,
         ack: { status: "ok" as const },
-        operationResult: buildSnapshot(),
+        operationResult: { ...buildSnapshot(), sessionBinding: state.sessionBinding },
       });
+    }
+    if (state.sessionOpen) {
+      // A reconnect on the same Runtime may receive a fresh page lease. Fence
+      // the old lease before replacing it; its late bridge result cannot be
+      // admitted into the new session.
+      const fenced = fenceCoordinatorPeerSession(state, { physical: false, binding: state.sessionBinding });
+      if (!fenced) throw coordinatorSessionStaleError("Coordinator session replacement became stale");
+      // The fence synchronously increments the generation. Record that
+      // post-fence value before waiting for asynchronous bridge drain.
+      expectedGeneration = state.sessionGeneration;
+      if (state.drainPromise) await state.drainPromise;
+      if (state.sessionGeneration !== expectedGeneration || state.status === "revoked") {
+        throw coordinatorSessionStaleError("Coordinator session replacement became stale");
+      }
     }
     if (state.sessionGeneration !== expectedGeneration) throw coordinatorSessionStaleError();
     const generation = expectedGeneration + 1;
     state.sessionGeneration = generation;
-    const attempt: CoordinatorSessionOpenAttempt = { state, peerId, generation, signal: call.signal };
+    state.status = "active";
+    const attempt: CoordinatorSessionOpenAttempt = {
+      state,
+      peerId,
+      generation,
+      signal: call.signal,
+      binding: {
+        peerGeneration: generation,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        leaseId: request.leaseId,
+      },
+    };
     return enqueueCoordinatorSessionInitialization(async () => {
       assertCoordinatorSessionOpenFresh(attempt);
     const previousBootstrapState = storageBootstrapState;
@@ -12622,25 +12815,37 @@ async function openCoordinatorSession(
       // become visible only after it has committed successfully.
       const serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({ capability })));
       state.serviceExposure = serviceExposure;
+      state.sessionBinding = { ...attempt.binding };
       state.sessionOpen = true;
+      state.status = "open";
+      state.openCommitOrder = ++coordinatorSessionCommitOrder;
       // session.open 的 exposeGroup 已经提交，证明这个 peer 的反向
       // LocalStorage capability 可用。刷新时旧文档可能来不及把物理断线送达
       // SharedWorker；若继续保留旧 peer，后续 hydrate 会请求一个永不响应的
       // realm。这里切换的是“未来请求”的目标；既有请求已捕获旧 peer，并由
       // 各自 Scope/AbortSignal 收口。所有页面共享同源 localStorage，写入仍由
       // Web Lock 与 Provider CAS 串行，不会绕过存储并发边界。
-      storageIoPeerId = attempt.peerId;
+      storageIoOwner = {
+        ...attempt.binding,
+        peerId: attempt.peerId,
+        commitOrder: state.openCommitOrder,
+      };
       return {
         sessionEpoch: coordinatorState.sessionEpoch,
         ack: { status: "ok" },
-        operationResult: buildSnapshot(),
+        operationResult: { ...buildSnapshot(), sessionBinding: state.sessionBinding },
       };
     } catch (error) {
       // Never revoke/clear a newer session from a stale open. A failed first
-      // open has not changed sessionOpen or storageIoPeerId; the only local
+      // open has not changed sessionOpen or storageIoOwner; the only local
       // temporary assignment we may undo is the uncommitted bootstrap hint.
       if (!state.sessionOpen && coordinatorOpeningSession === attempt && !hadInitialization && bootstrapHintAssigned) {
         storageBootstrapState = previousBootstrapState;
+      }
+      if (!state.sessionOpen && state.sessionBinding?.leaseId === attempt.binding.leaseId) {
+        state.sessionBinding = undefined;
+        state.status = "active";
+        state.openCommitOrder = undefined;
       }
       throw error;
     } finally {
@@ -12660,7 +12865,11 @@ async function handleCoordinatorRpc(
     return coordinatorRpcResponse(request, await openCoordinatorSession(state, request, call));
   }
   if (request.kind === "session.close") {
-    coordinatorSessionClosed(peerId);
+    coordinatorSessionClosed(peerId, {
+      peerGeneration: request.peerGeneration,
+      sessionEpoch: request.sessionEpoch,
+      leaseId: request.leaseId,
+    });
     return coordinatorRpcResponse(request, { sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } });
   }
   if (request.kind === "session.activity") {
@@ -12716,9 +12925,11 @@ function configureCoordinatorPeer(peer: PeerController): void {
   const state: CoordinatorPeerState = {
     peer,
     lastSeenAt: Date.now(),
+    status: "active",
     sessionOpen: false,
     sessionGeneration: 0,
     sessionOperationTail: Promise.resolve(),
+    bridgeRequests: new Set(),
   };
   coordinatorPeers.set(peer.peerId, state);
   // Scope revocation is the synchronous admission fence. Async resource
@@ -12727,36 +12938,7 @@ function configureCoordinatorPeer(peer: PeerController): void {
   peer.scope.onRevoke(() => {
     if (coordinatorPeers.get(peer.peerId) !== state) return;
     revokedCoordinatorPeerIds.add(peer.peerId);
-    coordinatorSessionClosed(peer.peerId);
-    coordinatorPeers.delete(peer.peerId);
-    if (storageIoPeerId === peer.peerId) {
-      // 刷新页面时，新 peer 可能已经完成 session.open，旧 peer 才收到物理
-      // revoke。此时不能只清空 Local I/O 归属，否则新页面后续 hydrate 会
-      // 永久失去 bridge；也不能在新页面刚连接时抢占仍存活的旧 peer。
-      // 只有旧 peer 已被同步撤权这一刻，才把未来请求交给一个已完成 open
-      // 的活跃 peer。已经发往旧 peer 的 in-flight 请求仍由其 Scope 中止。
-      storageIoPeerId = [...coordinatorPeers.values()].find((candidate) =>
-        candidate.sessionOpen && candidate.peer.scope.state === "active"
-      )?.peer.peerId;
-    }
-    for (const [requestId, request] of storageRequests) {
-      if (request.clientId === peer.peerId) { request.controller.abort(); storageRequests.delete(requestId); }
-    }
-    for (const [requestId, request] of channelRequests) {
-      if (request.clientId === peer.peerId) { request.controller.abort(); channelRequests.delete(requestId); }
-    }
-    for (const [grantId, grant] of storageGrants) if (grant.clientId === peer.peerId) storageGrants.delete(grantId);
-    for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === peer.peerId) ownerStorageGrants.delete(grantId);
-    for (const [grantId, grant] of platformStorageGrants) if (grant.clientId === peer.peerId) platformStorageGrants.delete(grantId);
-    for (const [requestId, request] of msfileRequests) {
-      if (request.clientId === peer.peerId) { request.controller.abort(); msfileRequests.delete(requestId); }
-    }
-    for (const [grantId, grant] of msfileGrants) if (grant.clientId === peer.peerId) msfileGrants.delete(grantId);
-    const callers = channelCallersByClient.get(peer.peerId);
-    channelCallersByClient.delete(peer.peerId);
-    if (callers && channelSubscriptionMux) {
-      for (const callerId of callers) void channelSubscriptionMux.release(callerId).catch(() => undefined);
-    }
+    fenceCoordinatorPeerSession(state, { physical: true });
   });
 }
 
@@ -13122,7 +13304,8 @@ export function __testResetState(): void {
     if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream);
   }
   coordinatorPeers.clear();
-  storageIoPeerId = undefined;
+  storageIoOwner = undefined;
+  coordinatorSessionCommitOrder = 0;
   coordinatorOpeningSession = undefined;
   coordinatorSessionOpenTail = Promise.resolve();
   revokedCoordinatorPeerIds.clear();
@@ -13856,6 +14039,86 @@ export function __testStorageTransfer(bytes: ArrayBuffer): { inputDetachedByteLe
 export function __testAttachPort(clientId: string, postMessage: (message: unknown, transfer?: ArrayBuffer[]) => void): void {
   revokedCoordinatorPeerIds.delete(clientId);
   coordinatorTestEventSinks.set(clientId, { postMessage, topics: new Set() });
+}
+
+/**
+ * 测试专用的 Coordinator peer harness。它只建立已经提交的 session
+ * binding，不绕过 requestLocalStorageBridge 的 pending/drain 路径。
+ */
+export function __testInstallCoordinatorBridgePeer(
+  peer: Pick<PeerController, "peerId" | "scope" | "capability">,
+  binding: CoordinatorSessionBinding,
+): void {
+  configureCoordinatorPeer(peer as PeerController);
+  const state = coordinatorPeerState(peer.peerId);
+  if (!state) throw new Error("Coordinator test peer was not registered");
+  state.sessionGeneration = binding.peerGeneration;
+  state.status = "open";
+  state.sessionOpen = true;
+  state.sessionBinding = { ...binding };
+  state.openCommitOrder = ++coordinatorSessionCommitOrder;
+  storageIoOwner = { ...binding, peerId: peer.peerId, commitOrder: state.openCommitOrder };
+}
+
+/**
+ * 测试专用：通过真实 Coordinator RPC handler 执行 session.open/close。
+ * 首次调用仍走 configureCoordinatorPeer；后续调用复用同一 peer state，
+ * 因而可以覆盖真实的 lease replacement、exact-binding close 和 fence。
+ * 不向生产 transport 暴露第二条路由，也不改变 handler 的业务行为。
+ */
+export async function __testHandleCoordinatorSessionRpc(
+  peer: Pick<PeerController, "peerId" | "scope" | "capability" | "exposeGroup">,
+  request: CoordinatorSessionOpenRequest | CoordinatorSessionCloseRequest,
+  signal: AbortSignal = new AbortController().signal,
+  options: { waitForDrain?: boolean } = {},
+): Promise<CoordinatorRpcResponse> {
+  const existing = coordinatorPeerState(peer.peerId);
+  if (!existing) configureCoordinatorPeer(peer as PeerController);
+  else if (existing.peer !== peer) throw new Error("Coordinator test peer instance was replaced");
+  // 避免测试接缝触发真实外部初始化；handler 仍会执行 recovery-list
+  // bridge 与完整 session.open 提交。调用完成后恢复原始 single-flight。
+  const previousInitialization = coordinatorInitialization;
+  if (request.kind === "session.open") coordinatorInitialization = Promise.resolve();
+  try {
+    const response = await handleCoordinatorRpc(request, {
+      signal,
+      deadlineAt: Date.now() + 60_000,
+      operationId: `test-session-${peer.peerId}-${Date.now()}`,
+      reference: {} as HandlerCallContext["reference"],
+      origin: "remote",
+      peer: { peerId: peer.peerId } as HandlerCallContext["peer"],
+    });
+    if (request.kind === "session.close" && options.waitForDrain) {
+      await coordinatorPeerState(peer.peerId)?.drainPromise;
+    }
+    return response;
+  } finally {
+    if (request.kind === "session.open") coordinatorInitialization = previousInitialization;
+  }
+}
+
+/** 测试专用：等待真实 close handler 发起的 bridge drain 完成。 */
+export async function __testAwaitCoordinatorPeerDrain(peerId: string): Promise<void> {
+  await coordinatorPeerState(peerId)?.drainPromise;
+}
+
+/** 测试专用：直接走 Worker 的 LocalStorage reverse capability 请求路径。 */
+export function __testRequestCoordinatorLocalStorageBridge(
+  input: LocalStorageBridgeRequest,
+  peerId?: string,
+): Promise<LocalStorageBridgeResponse> {
+  return requestLocalStorageBridge(input, peerId);
+}
+
+/** 测试专用：执行 session close 并等待 Worker 的 bridge drain。 */
+export async function __testCloseCoordinatorBridgePeer(
+  peerId: string,
+  binding: CoordinatorSessionBinding,
+): Promise<void> {
+  const state = coordinatorPeerState(peerId);
+  if (!state) return;
+  coordinatorSessionClosed(peerId, binding);
+  await state.drainPromise;
 }
 
 export async function __testDispatchStorageMessage(clientId: string, request: CoordinatorClientRequest): Promise<void> {

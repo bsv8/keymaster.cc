@@ -86,6 +86,9 @@ export type CoordinatorVaultStatus =
   | "unlocked"
   | "fatal";
 
+/** 页面侧可观察的 Coordinator transport/session 状态。 */
+export type CoordinatorConnectionState = "starting" | "ready" | "recoverable" | "fatal";
+
 /**
  * Coordinator 发现旧 Worker 仍持有最终 I/O 租约时的可恢复状态。
  *
@@ -635,6 +638,24 @@ export interface CoordinatorBootstrapSnapshot {
   pluginIntent?: PluginIntentSnapshot;
 }
 
+/**
+ * 当前页面 Runtime 与 Coordinator peer 的绑定令牌。
+ *
+ * peerId 仍然只存在于 WebLoom transport 上；页面只需要回传这组不可伪造
+ * 的（由 Worker 发放、由本页面租约承载的）fencing 字段，Worker 再用
+ * HandlerCallContext.peer.peerId 完成最终身份绑定。
+ */
+export interface CoordinatorSessionBinding {
+  peerGeneration: number;
+  sessionEpoch: SessionEpoch;
+  leaseId: string;
+}
+
+/** session.open 的逐 peer 结果；普通广播快照不携带页面私有绑定。 */
+export interface CoordinatorSessionOpenResult extends CoordinatorBootstrapSnapshot {
+  sessionBinding: CoordinatorSessionBinding;
+}
+
 /** 任务快照。 */
 export interface CoordinatorTaskSnapshot {
   id: string;
@@ -664,6 +685,7 @@ export interface CoordinatorTaskSnapshot {
 export interface SessionCoordinatorClient {
   connect(): Promise<void>;
   getIsConnected(): boolean;
+  getConnectionState(): CoordinatorConnectionState;
   getBootstrapSnapshot(): CoordinatorBootstrapSnapshot;
   /** 返回当前会话代际；异步插件操作完成后用它判断结果是否仍属于原会话。 */
   getSessionEpoch(): SessionEpoch;
@@ -722,7 +744,7 @@ export interface SessionCoordinatorClient {
 
 /** Coordinator 的共同只读/生命周期面。插件只能拿到自己的扩展接口。 */
 export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
-  "connect" | "getIsConnected" | "getBootstrapSnapshot" | "getSessionEpoch" |
+  "connect" | "getIsConnected" | "getConnectionState" | "getBootstrapSnapshot" | "getSessionEpoch" |
   "getActivePublicKeyHex" | "subscribeTopic" | "sendActivity"
 >;
 
@@ -738,7 +760,7 @@ export type VaultCoordinatorControl = CoordinatorSessionControl & Pick<SessionCo
 
 /** Background 插件 Coordinator 面；诊断回报在旧测试夹具中可缺省。 */
 export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
-  "getIsConnected" | "subscribeTopic" |
+  "getIsConnected" | "getConnectionState" | "subscribeTopic" |
   "backgroundRunNow" | "backgroundTrigger" | "backgroundCancel" |
   "backgroundCancelByKey" | "backgroundSettingsUpdate"
 > & {
@@ -774,7 +796,7 @@ export type ProtocolCoordinatorControl = CoordinatorSessionControl & Pick<Sessio
 
 /** Contacts 插件只读取 Coordinator 维护的 presence 快照。 */
 export type ContactsCoordinatorControl = Pick<SessionCoordinatorClient,
-  "getIsConnected" | "getBootstrapSnapshot" | "subscribeTopic" | "contactsPresenceSnapshot"
+  "getIsConnected" | "getConnectionState" | "getBootstrapSnapshot" | "subscribeTopic" | "contactsPresenceSnapshot"
 >;
 
 // ============================================================

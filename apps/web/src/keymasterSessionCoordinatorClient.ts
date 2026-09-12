@@ -13,6 +13,7 @@ import type {
   CoordinatorTopicEvent,
   CoordinatorBootstrapSnapshot,
   CoordinatorAuthorityRecovery,
+  CoordinatorConnectionState,
   CoordinatorTopic,
   CoordinatorCommandResult,
   CoordinatorValueResult,
@@ -33,6 +34,7 @@ import type {
   CoordinatorChannelOperation,
   ContactPresenceMap,
   CoordinatorWorkerUnitStateEvent,
+  CoordinatorSessionBinding,
   StorageBootstrapState,
   InitialSetupRecoveryRecordV1,
   InitialSetupPhase,
@@ -52,6 +54,7 @@ import type {
   CoordinatorRpcResponseForRequest,
   CoordinatorRpcRequestFromClient,
   CoordinatorSessionOpenRequest,
+  CoordinatorSessionCloseRequest,
   CoordinatorLocalStorageRequest,
   CoordinatorLocalStorageResponse,
   CoordinatorClientCommandRequest,
@@ -336,6 +339,30 @@ type CoordinatorSendError = Error & {
   requestValidation?: boolean;
 };
 
+export type { CoordinatorConnectionState };
+
+function sameCoordinatorSessionBinding(left: CoordinatorSessionBinding | null | undefined, right: CoordinatorSessionBinding | null | undefined): boolean {
+  return left !== null && left !== undefined && right !== null && right !== undefined
+    && left.peerGeneration === right.peerGeneration
+    && left.sessionEpoch === right.sessionEpoch
+    && left.leaseId === right.leaseId;
+}
+
+function coordinatorKindMayHaveSideEffects(kind: CoordinatorClientRequest["kind"]): boolean {
+  switch (kind) {
+    case "contacts.presence.snapshot":
+    case "plugin.intent.snapshot":
+    case "p2pkh.providers.get":
+    case "p2pkh.provider-config.get":
+      return false;
+    default:
+      // Commands such as background.run-now, grants, storage mutations and
+      // protocol operations can duplicate work if an unknown transport error
+      // is retried. Keep them non-retryable unless dispatch is known absent.
+      return true;
+  }
+}
+
 function requiredCoordinatorOperationResult<T>(response: { operationResult?: T }, kind: string): T {
   if (!Object.prototype.hasOwnProperty.call(response, "operationResult")) {
     throw new Error(`Coordinator ${kind} response omitted operationResult`);
@@ -371,6 +398,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private windowApp: WindowApp | null = null;
   /** 页面端维护的当前 Coordinator 本地 I/O 租约；不进入任何 wire DTO。 */
   private localStorageBridgeLease: { bucketId?: string; leaseId: string; bucketGeneration: number } | null = null;
+  /** Worker 在 session.open 提交后发放的完整 peer/session fencing binding。 */
+  private sessionBinding: CoordinatorSessionBinding | null = null;
+  /** session.open 期间 Worker 可能先反向调用 Window bridge；先暂存其 binding。 */
+  private pendingSessionBinding: CoordinatorSessionBinding | null = null;
   /** 当前 peer 的 typed topic stream；重连/撤销后永久失效。 */
   private topicSubscription: import("webloom-framework").StreamSubscription<CoordinatorTopicEvent> | null = null;
   private clientId: string;
@@ -412,6 +443,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private contactsPresenceSnapshotCache: ContactPresenceMap = {};
 
   private isConnected = false;
+  private connectionState: CoordinatorConnectionState = "recoverable";
   /** 页面生命周期结束后，连接尝试和自动重连都不得再次复活。 */
   private shutdownRequested = false;
   /** 使 disconnect() 能取消尚未完成的 connect/hello/subscription 链。 */
@@ -478,7 +510,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const windowApp = this.windowApp;
     if (!windowApp) throw new Error("Coordinator client requires a WindowApp before connect()");
     const attempt = ++this.connectionAttempt;
+    this.connectionState = "starting";
     this.observedConnectionFailure = undefined;
+    this.sessionBinding = null;
+    this.pendingSessionBinding = null;
 
     try {
       // WebLoom 是唯一的物理连接与 call/stream transport。领域 client 只
@@ -529,19 +564,23 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
+      this.connectionState = "ready";
     } catch (err) {
       // 只有明确出现新 attempt 才吞掉旧连接错误。
       if (attempt !== this.connectionAttempt) return;
       const observedFailure = this.observedConnectionFailure;
       this.isConnected = false;
+      const fatal = (this.connectionState as CoordinatorConnectionState) === "fatal";
+      if (!fatal) this.connectionState = "recoverable";
       this.removeRuntimeSubscription?.();
       this.removeRuntimeSubscription = undefined;
       const runtime = this.runtimeHandle;
       this.runtimeHandle = null;
+      this.closeSessionBestEffort(runtime);
       if (runtime) void runtime.dispose("Coordinator connection attempt failed");
       this.topicSubscription?.cancel("Coordinator connection attempt failed");
       this.topicSubscription = null;
-      if (!this.shutdownRequested) this.scheduleReconnect();
+      if (!this.shutdownRequested && !fatal) this.scheduleReconnect();
       // Runtime 端已经给出结构化错误，或在 ready snapshot 前断线时已经
       // 生成可操作诊断，不能用随后 hello call 的 timeout 覆盖它。若只有
       // call 层错误，则保留原有错误。
@@ -554,14 +593,19 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.connectionAttempt += 1;
     this.topicSubscription?.cancel("Coordinator client disconnected");
     this.topicSubscription = null;
-    this.disposeLocalStorageBridge();
     this.removeRuntimeSubscription?.();
     this.removeRuntimeSubscription = undefined;
     const runtime = this.runtimeHandle;
     this.runtimeHandle = null;
+    // Invoke session.close while the Runtime peer is still alive. The call is
+    // deliberately best-effort: pagehide cannot await a promise, but invoking
+    // the typed call before dispose gives WebLoom a chance to post the fence.
+    this.closeSessionBestEffort(runtime);
     if (runtime) void runtime.dispose("Coordinator client disconnected");
 
     this.isConnected = false;
+    this.connectionState = this.shutdownRequested ? "fatal" : "recoverable";
+    this.disposeLocalStorageBridge();
     this.resetDisconnectedState();
 
     if (this.reconnectTimer) {
@@ -676,21 +720,25 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private handleWorkerError(message: string): void {
     this.isConnected = false;
+    if (this.connectionState !== "fatal") this.connectionState = "recoverable";
     this.removeRuntimeSubscription?.();
     this.removeRuntimeSubscription = undefined;
     const runtime = this.runtimeHandle;
     this.runtimeHandle = null;
+    this.closeSessionBestEffort(runtime);
     if (runtime) void runtime.dispose(message);
     this.topicSubscription?.cancel(message);
     this.topicSubscription = null;
     this.disposeLocalStorageBridge();
     this.resetDisconnectedState();
+    this.clearDisconnectedAuthorityRecovery();
     if (!this.shutdownRequested) this.scheduleReconnect();
   }
 
   private resetDisconnectedState(): void {
-    this.bootstrapSnapshotCache = { authorityInstanceId: "authority:boot", sessionEpoch: "boot", vaultStatus: "booting", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 }, coordinatorWorkerUnits: [], coordinatorWorkerUnitSnapshotRevision: 0 };
-    this.topicCaches.clear();
+    // Keep the last truthful bootstrap/topic cache for diagnostics and UI
+    // continuity. New Runtime baselines are accepted after the revision
+    // trackers below are reset, so cached data cannot authorize a request.
     this.sessionRevisionCache = -1;
     this.backgroundSnapshotRevisionCache = -1;
     this.assetDataRevisionCache = -1;
@@ -701,10 +749,12 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.channelRevisionCache = -1;
     this.contactsPresenceRevisionCache = -1;
     this.pluginIntentRevisionCache = -1;
-    this.pluginIntentAuthorityInstanceId = "authority:boot";
     this.pendingWorkerUnitEvents.clear();
-    this.contactsPresenceOwnerPublicKeyHex = null;
-    this.contactsPresenceSnapshotCache = {};
+  }
+
+  private clearDisconnectedAuthorityRecovery(): void {
+    const { authorityRecovery: _authorityRecovery, ...safeSnapshot } = this.bootstrapSnapshotCache;
+    this.bootstrapSnapshotCache = safeSnapshot;
   }
 
   // ============================================================
@@ -713,9 +763,12 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private disposeLocalStorageBridge(): void {
     this.localStorageBridgeLease = null;
+    this.sessionBinding = null;
+    this.pendingSessionBinding = null;
   }
 
   private beginLocalStorageLease(): void {
+    if (this.localStorageBridgeLease) return;
     let selectedBucketId: string | undefined;
     try {
       selectedBucketId = readStorageCatalog().selectedBucketId;
@@ -736,6 +789,34 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const signal = call.signal;
     const lease = this.localStorageBridgeLease;
     if (!lease) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is unavailable");
+    const requestBinding = request.peerGeneration !== undefined
+      && request.sessionEpoch !== undefined
+      && request.leaseId !== undefined
+      ? {
+          peerGeneration: request.peerGeneration,
+          sessionEpoch: request.sessionEpoch,
+          leaseId: request.leaseId,
+        }
+      : undefined;
+    if (!requestBinding
+      || !Number.isSafeInteger(requestBinding.peerGeneration)
+      || requestBinding.peerGeneration < 1
+      || requestBinding.sessionEpoch.length === 0
+      || requestBinding.leaseId.length === 0) {
+      throw new WebLoomError("service_reference_stale", "Local storage bridge request has no complete session binding", "execute");
+    }
+    if (requestBinding.leaseId !== lease.leaseId) {
+      throw new WebLoomError("service_reference_stale", "Local storage bridge lease is stale", "execute");
+    }
+    if (this.sessionBinding && !sameCoordinatorSessionBinding(this.sessionBinding, requestBinding)) {
+      throw new WebLoomError("service_reference_stale", "Local storage bridge session binding is stale", "execute");
+    }
+    if (this.sessionBinding === null) {
+      if (this.pendingSessionBinding && !sameCoordinatorSessionBinding(this.pendingSessionBinding, requestBinding)) {
+        throw new WebLoomError("service_reference_stale", "Local storage bridge pending binding changed", "execute");
+      }
+      this.pendingSessionBinding ??= requestBinding;
+    }
     try {
       if (request.type === "catalog-read") {
         if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
@@ -980,6 +1061,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (error) {
       // WebLoom 只会在线上传递 WebLoomError.code；直接抛 StorageRuntimeError
       // 会退化成 handler_failed，使 Worker 丢失 storage_conflict 等 CAS 语义。
+      if (error instanceof WebLoomError) throw error;
       if (error instanceof StorageRuntimeError) {
         throw new WebLoomError(error.code, "Local storage capability operation failed", "execute");
       }
@@ -992,15 +1074,55 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.runtimeHandle ?? undefined;
   }
 
+  private closeSessionBestEffort(runtime: RuntimeHandle | null): void {
+    const lease = this.localStorageBridgeLease;
+    const binding = this.sessionBinding;
+    if (!runtime || !lease || !binding || binding.leaseId !== lease.leaseId) return;
+    const request: CoordinatorSessionCloseRequest = {
+      kind: "session.close",
+      peerGeneration: binding.peerGeneration,
+      sessionEpoch: binding.sessionEpoch,
+      leaseId: binding.leaseId,
+    };
+    try {
+      // Calling the typed capability synchronously queues the WebLoom call
+      // before RuntimeHandle.dispose revokes this peer. Unload paths cannot
+      // await the returned Promise, so the result is intentionally ignored.
+      void runtime.capability(COORDINATOR_RPC_CAPABILITY).call(request, {
+        operationId: `session-close:${this.clientId}:${randomIdentifierSuffix()}`,
+        timeoutMs: Math.min(this.requestTimeoutMs, 2_000),
+      }).catch(() => undefined);
+    } catch {
+      // Best effort only; physical Scope revoke remains the Worker fence.
+    }
+  }
+
   private async sendHello(): Promise<void> {
+    const lease = this.localStorageBridgeLease;
+    if (!lease) throw coordinatorSendError("Coordinator LocalStorage lease is unavailable", "not-dispatched");
     const request: CoordinatorSessionOpenRequest = {
       kind: "session.open",
+      leaseId: lease.leaseId,
       ...(() => {
         const state = readStorageBootstrap();
         return state ? { storageBootstrapState: state as StorageBootstrapState } : {};
       })()
     };
     const response = await this.sendTypedRequest(request);
+    if (response.ack.status !== "ok") {
+      throw coordinatorSendError("Coordinator session.open was not accepted", "unknown");
+    }
+    const binding = requiredCoordinatorOperationResult(response, "session.open").sessionBinding;
+    if (!binding || binding.leaseId !== lease.leaseId) {
+      this.connectionState = "fatal";
+      throw coordinatorSendError("Coordinator session.open returned an invalid session binding", "unknown");
+    }
+    if (this.pendingSessionBinding && !sameCoordinatorSessionBinding(this.pendingSessionBinding, binding)) {
+      this.connectionState = "fatal";
+      throw coordinatorSendError("Coordinator session.open binding disagrees with the Window bridge", "unknown");
+    }
+    this.sessionBinding = { ...binding };
+    this.pendingSessionBinding = null;
     this.applyCoordinatorResponse(response, response.operationResult);
   }
 
@@ -1538,20 +1660,39 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.reportRecoverableCoordinatorFailure(kind, cause);
       return { status: "transport-error", message, retryable: false, dispatchStatus: "not-dispatched" };
     }
+    const dispatchStatus = (cause as { dispatchStatus?: CoordinatorDispatchStatus } | undefined)?.dispatchStatus ?? "unknown";
+    const code = cause && typeof cause === "object" && typeof (cause as { code?: unknown }).code === "string"
+      ? (cause as { code: string }).code
+      : undefined;
+    const staleOrRevoked = code === "service_reference_stale"
+      || code === "service_revoked"
+      || code === "transport_disconnected";
+    if (this.connectionState !== "fatal") this.connectionState = "recoverable";
     this.isConnected = false;
     this.removeRuntimeSubscription?.();
     this.removeRuntimeSubscription = undefined;
     const runtime = this.runtimeHandle;
     this.runtimeHandle = null;
+    this.closeSessionBestEffort(runtime);
     if (runtime) void runtime.dispose(`Coordinator request failed: ${kind}`);
     this.topicSubscription?.cancel(`Coordinator request failed: ${kind}`);
     this.topicSubscription = null;
     this.disposeLocalStorageBridge();
     this.resetDisconnectedState();
-    this.scheduleReconnect();
+    // A transport failure is not evidence that the currently cached Worker
+    // still owns the old authority. Keep ordinary non-sensitive continuity,
+    // but remove recovery-required before UI or dangerous actions inspect it.
+    this.clearDisconnectedAuthorityRecovery();
+    if (!this.shutdownRequested && this.connectionState !== "fatal") this.scheduleReconnect();
     this.reportRecoverableCoordinatorFailure(kind, cause);
-    const dispatchStatus = (cause as { dispatchStatus?: CoordinatorDispatchStatus } | undefined)?.dispatchStatus ?? "unknown";
-    return { status: "transport-error", message: "Coordinator connection lost", retryable: true, dispatchStatus };
+    const retryable = !staleOrRevoked
+      && !(dispatchStatus === "unknown" && coordinatorKindMayHaveSideEffects(kind));
+    return {
+      status: "transport-error",
+      message: staleOrRevoked ? "Coordinator session reference is stale or revoked" : "Coordinator connection lost",
+      retryable,
+      dispatchStatus,
+    };
   }
 
   reportRecoverableCoordinatorFailure(kind: string, cause: unknown): void {
@@ -1600,11 +1741,15 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (!this.isConnected || !runtime) {
       throw coordinatorSendError("Not connected to Coordinator", "not-dispatched");
     }
+    const attempt = this.connectionAttempt;
     try {
       const response = await runtime.capability(COORDINATOR_RPC_CAPABILITY).call(request, {
         operationId,
         timeoutMs: this.requestTimeoutMs,
       });
+      if (this.runtimeHandle !== runtime || !this.isConnected || this.connectionAttempt !== attempt) {
+        throw Object.assign(coordinatorSendError("Coordinator response belongs to a stale Runtime", "unknown"), { code: "service_reference_stale" });
+      }
       const parsed = parseCoordinatorResponseFor(request, response);
       this.applyCoordinatorResponse(parsed);
       return parsed;
@@ -1651,6 +1796,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.isConnected;
   }
 
+  getConnectionState(): CoordinatorConnectionState {
+    return this.connectionState;
+  }
+
   /** 返回当前客户端缓存的 presence 快照副本，调用方不能修改 Coordinator 状态。 */
   getContactsPresenceSnapshot(): ContactPresenceMap {
     return Object.fromEntries(Object.entries(this.contactsPresenceSnapshotCache).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
@@ -1677,6 +1826,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (!this.isValidTopicEvent(event)) {
       if (event && typeof event === "object" && "topic" in event && event.topic === "session.state") {
         this.resetDisconnectedState();
+        // A malformed session projection must not leave the previous
+        // recovery-required authority claim visible as if it were current.
+        const { authorityRecovery: _authorityRecovery, ...safeSnapshot } = this.bootstrapSnapshotCache;
+        this.bootstrapSnapshotCache = safeSnapshot;
       }
       this.reportRecoverableCoordinatorFailure("invalid-topic-event", new Error("Invalid Coordinator topic payload"));
       return;

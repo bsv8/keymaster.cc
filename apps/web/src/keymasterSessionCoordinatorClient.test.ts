@@ -62,7 +62,7 @@ class Hub {
       provides: [COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY] as const,
       startup: "required" as const,
       setup: (ctx) => {
-        ctx.handle(COORDINATOR_RPC_CAPABILITY, () => ({
+        ctx.handle(COORDINATOR_RPC_CAPABILITY, (request) => ({
           sessionEpoch: "shared-epoch",
           ack: { status: "ok" },
           operationResult: {
@@ -72,6 +72,9 @@ class Hub {
             keyspaceGeneration: 0,
             taskSnapshots: [],
             scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+            ...(request.kind === "session.open" ? {
+              sessionBinding: { peerGeneration: 1, sessionEpoch: "shared-epoch", leaseId: request.leaseId },
+            } : {}),
           },
         }));
         ctx.handle(COORDINATOR_TOPIC_STREAM_CAPABILITY, (_request, call) => {
@@ -132,7 +135,7 @@ function createTestMessagePort(
   initialImplementation?: TestPostMessage,
   options: { autoReady?: boolean } = {},
 ) {
-  const calls = new Map<string, { mode: "unary" | "stream"; serviceInstanceId: string; nextSequence: number }>();
+  const calls = new Map<string, { mode: "unary" | "stream"; serviceInstanceId: string; nextSequence: number; request?: Record<string, unknown> }>();
   const runtimeMessageListeners = new Set<(event: MessageEvent) => void>();
   let runtimeMessageErrorListener: ((event: MessageEvent) => void) | null = null;
   let manuallyDisabled = false;
@@ -144,8 +147,8 @@ function createTestMessagePort(
     const value = message as Record<string, any>;
     if (value.type === "webloom.runtime.v1.call") {
       const mode = capabilityKind(value);
-      calls.set(value.callId as string, { mode, serviceInstanceId: value.serviceInstanceId as string, nextSequence: 1 });
       const request = value.request && typeof value.request === "object" ? value.request as Record<string, unknown> : {};
+      calls.set(value.callId as string, { mode, serviceInstanceId: value.serviceInstanceId as string, nextSequence: 1, request });
       const requestKind = request.kind;
       const kind = mode === "stream"
         ? "subscribe"
@@ -181,7 +184,21 @@ function createTestMessagePort(
         }
         return;
       }
-      emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, result: { sessionEpoch: value.sessionEpoch ?? "e", ack: value.ack ?? { status: "ok" }, ...(value.operationResult === undefined ? {} : { operationResult: value.operationResult }) } } } as MessageEvent);
+      const operationResult = call.request?.kind === "session.open"
+        && value.operationResult && typeof value.operationResult === "object"
+        && !("sessionBinding" in (value.operationResult as Record<string, unknown>))
+        ? {
+            ...(value.operationResult as Record<string, unknown>),
+            // Explicit test-only adapter for pre-binding fake Worker replies.
+            // Production parsing remains strict and rejects this shape.
+            sessionBinding: {
+              peerGeneration: 1,
+              sessionEpoch: value.sessionEpoch ?? (value.operationResult as { sessionEpoch?: string }).sessionEpoch ?? "e",
+              leaseId: call.request.leaseId,
+            },
+          }
+        : value.operationResult;
+      emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, result: { sessionEpoch: value.sessionEpoch ?? "e", ack: value.ack ?? { status: "ok" }, ...(operationResult === undefined ? {} : { operationResult }) } } } as MessageEvent);
       return;
     }
     const stream = [...calls.values()].find((call) => call.mode === "stream");
@@ -337,6 +354,8 @@ function bridgeCatalogEntry(bucketId: string, label: string): StorageBucketCatal
 type LocalBridgeClientInternals = {
   handleLocalStorageCapabilityRequest(request: CoordinatorLocalStorageRequest, call: HandlerCallContext): Promise<CoordinatorLocalStorageResponse>;
   localStorageBridgeLease: { bucketId?: string; leaseId: string; bucketGeneration: number } | null;
+  sessionBinding: { peerGeneration: number; sessionEpoch: string; leaseId: string } | null;
+  pendingSessionBinding: { peerGeneration: number; sessionEpoch: string; leaseId: string } | null;
   applyTopicEvent(event: CoordinatorTopicEvent): void;
 };
 
@@ -347,10 +366,18 @@ type LocalBridgeTestPort = {
   postMessage(message: unknown): void;
 };
 
-function localBridgeRequestWithoutTransportFields(request: LocalStorageBridgeRequest): CoordinatorLocalStorageRequest {
-  const value = request as LocalStorageBridgeRequest & { authorityInstanceId?: unknown; leaseId?: unknown; signal?: unknown };
+function localBridgeRequestWithoutTransportFields(
+  request: LocalStorageBridgeRequest,
+  fallbackBinding: { peerGeneration: number; sessionEpoch: string; leaseId: string },
+): CoordinatorLocalStorageRequest {
+  const value = request as LocalStorageBridgeRequest & { authorityInstanceId?: unknown; leaseId?: unknown; peerGeneration?: number; sessionEpoch?: string; signal?: unknown };
   const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, signal: _signal, ...businessRequest } = value;
-  return businessRequest as CoordinatorLocalStorageRequest;
+  return {
+    ...businessRequest,
+    peerGeneration: value.peerGeneration ?? fallbackBinding.peerGeneration,
+    sessionEpoch: value.sessionEpoch ?? fallbackBinding.sessionEpoch,
+    leaseId: fallbackBinding.leaseId,
+  } as CoordinatorLocalStorageRequest;
 }
 
 function createLocalBridgeTestPort(internals: LocalBridgeClientInternals, app: WindowApp): LocalBridgeTestPort {
@@ -388,7 +415,13 @@ function createLocalBridgeTestPort(internals: LocalBridgeClientInternals, app: W
         reference,
         origin: "local" as const,
       } satisfies HandlerCallContext;
-      void internals.handleLocalStorageCapabilityRequest(localBridgeRequestWithoutTransportFields(envelope.request), call).then(
+      const lease = internals.localStorageBridgeLease;
+      const fallbackBinding = internals.sessionBinding ?? internals.pendingSessionBinding ?? {
+        peerGeneration: 1,
+        sessionEpoch: "boot",
+        leaseId: lease?.leaseId ?? "local-storage-test",
+      };
+      void internals.handleLocalStorageCapabilityRequest(localBridgeRequestWithoutTransportFields(envelope.request, fallbackBinding), call).then(
         (response) => port.onmessage?.({ data: { requestId: envelope.requestId, ok: true, response } } as MessageEvent),
         (error: unknown) => port.onmessage?.({ data: { requestId: envelope.requestId, ok: false, error: { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) } } } as MessageEvent),
       );
@@ -1018,16 +1051,21 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
   it("clears an unlocked snapshot on transport timeout before reconnect", async () => {
     const port = createTestMessagePort();
-    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
+    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, authorityRecovery: { status: "recovery-required", reason: "active-final-io-leases", authorityBuildId: "old-worker", activeIoLeaseCount: 1, activeIoOperations: { read: 0, write: 1 }, handoverGeneration: 1 }, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
       const client = createCoordinatorClient({ requestTimeoutMs: 5, reconnectIntervalMs: 1000 });
       await client.connect();
       expect(client.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
+      expect(client.getBootstrapSnapshot().authorityRecovery?.status).toBe("recovery-required");
       port.onmessage = null;
-      await expect(client.backgroundRunNow("missing")).resolves.toMatchObject({ status: "transport-error", retryable: true });
-      expect(client.getBootstrapSnapshot().vaultStatus).toBe("booting");
+      await expect(client.backgroundRunNow("missing")).resolves.toMatchObject({ status: "transport-error", retryable: false });
+      // Transport loss does not erase the last truthful snapshot; callers use
+      // getIsConnected()/getConnectionState() to distinguish it from live state.
+      expect(client.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
+      expect(client.getBootstrapSnapshot().authorityRecovery).toBeUndefined();
+      expect(client.getConnectionState()).toBe("recoverable");
     } finally { globalThis.SharedWorker = original; }
   });
 
@@ -1378,8 +1416,13 @@ describe("KeymasterSessionCoordinatorClient", () => {
       deadlineAt: Date.now() + 30_000,
       origin: "remote",
     } as HandlerCallContext;
+    const leaseId = internals.localStorageBridgeLease?.leaseId;
+    if (!leaseId) throw new Error("LocalStorage bridge lease was not installed by the test harness");
     const request = {
       type: "put",
+      peerGeneration: 1,
+      sessionEpoch: "boot",
+      leaseId,
       bucketId: target.bucketId,
       bucketGeneration: 1,
       candidateBucket: { bucket: target, bucketGeneration: 1, initialSetup: true },
