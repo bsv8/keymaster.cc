@@ -30,7 +30,7 @@ const runtimeState = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  usePluginHost: () => ({ resourceStore: {} }),
+  usePluginHost: () => ({ resourceStore: {}, resourceRegistry: { get: () => ({}) } }),
   useHostVersion: () => 1,
   useCurrentPath: () => {
     const [path, setPathState] = useState(window.location.pathname);

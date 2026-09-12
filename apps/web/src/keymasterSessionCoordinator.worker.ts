@@ -903,6 +903,15 @@ let coordinatorAuthorityInstanceId = makeCoordinatorAuthorityInstanceId();
 // 正式构建由 scripts/build-plugin-lifecycle.mjs 注入不可变 buildId。
 // 本地开发/单测没有构建注入时才回退到模块 URL；该回退不能用于发布证据。
 const COORDINATOR_BUILD_ID = import.meta.env.VITE_KEYMASTER_BUILD_ID ?? import.meta.url;
+// SharedWorker 的物理身份由脚本 URL 与 name 共同决定。相同身份的新模块
+// 实例开始执行，就证明旧实例已经终止；只用 buildId 无法排除同一产物以
+// 不同 URL/name 并存。旧 authority 没有此字段时必须继续 fail closed。
+const COORDINATOR_WORKER_IDENTITY = JSON.stringify([
+  import.meta.url,
+  typeof (globalThis as typeof globalThis & { name?: unknown }).name === "string"
+    ? (globalThis as typeof globalThis & { name: string }).name
+    : "",
+]);
 const COORDINATOR_UPGRADE_PARTITION = "coordinator-upgrade";
 const COORDINATOR_UPGRADE_KEY = "authority";
 const COORDINATOR_AUTHORITY_CAS_TIMEOUT_MS = 5_000;
@@ -919,6 +928,8 @@ interface CoordinatorAuthorityRecord {
   buildId: string;
   /** 当前升级控制协议版本。 */
   protocolVersion: string;
+  /** 精确 SharedWorker 身份；旧记录缺失时不允许自动清除写租约。 */
+  workerIdentity?: string;
   /** 当前权威已经进入最终读写边界、尚未释放的持久 lease。 */
   activeIoLeases: Record<string, {
     operation: "read" | "write";
@@ -3536,6 +3547,9 @@ function normalizeCoordinatorAuthorityRecord(value: unknown): CoordinatorAuthori
       handoverGeneration: record.handoverGeneration,
       buildId: record.buildId,
       protocolVersion: record.protocolVersion,
+      ...(typeof record.workerIdentity === "string" && record.workerIdentity.length > 0
+        ? { workerIdentity: record.workerIdentity }
+        : {}),
       activeIoLeases: {},
     };
   }
@@ -3565,6 +3579,9 @@ function normalizeCoordinatorAuthorityRecord(value: unknown): CoordinatorAuthori
     handoverGeneration: record.handoverGeneration,
     buildId: record.buildId,
     protocolVersion: record.protocolVersion,
+    ...(typeof record.workerIdentity === "string" && record.workerIdentity.length > 0
+      ? { workerIdentity: record.workerIdentity }
+      : {}),
     activeIoLeases,
   };
 }
@@ -3646,7 +3663,13 @@ async function claimCoordinatorAuthority(): Promise<void> {
     // 所有已升级的 Worker 都必须先登记最终 I/O lease；接管者不能在
     // 旧实例仍可能提交读写时直接覆盖 authority。没有超时强抢语义，
     // 因为未知旧版本的真实外部写入无法被本地 Abort 可靠中断。
-    if (currentRecord && Object.keys(currentRecord.activeIoLeases).length > 0) {
+    const hasActiveIoLeases = currentRecord && Object.keys(currentRecord.activeIoLeases).length > 0;
+    const canRecoverTerminatedLocalWorker = hasActiveIoLeases
+      && platformRootStore?.bucket.provider === "local"
+      && currentRecord.buildId === COORDINATOR_BUILD_ID
+      && currentRecord.protocolVersion === COORDINATOR_UPGRADE_PROTOCOL_VERSION
+      && currentRecord.workerIdentity === COORDINATOR_WORKER_IDENTITY;
+    if (hasActiveIoLeases && !canRecoverTerminatedLocalWorker) {
       const activeIoLeases = Object.values(currentRecord.activeIoLeases);
       lastBusyLeaseCount = activeIoLeases.length;
       lastBusyHandoverGeneration = currentRecord.handoverGeneration;
@@ -3660,6 +3683,12 @@ async function claimCoordinatorAuthority(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
       continue;
     }
+    // canRecoverTerminatedLocalWorker 为 true 时，Local 的物理 I/O 在同源
+    // Window localStorage 中完成，不会在 Worker 终止后继续成为远端写入。
+    // 浏览器又不会同时运行两个 URL+name 完全相同的 SharedWorker：当前
+    // 模块以相同 workerIdentity 重新执行，已构成旧 realm 终止的证据。
+    // 下方 CAS 会原子推进 authority 并清空孤儿 lease；S3、不同构建/
+    // URL/name 和旧格式记录仍保持 fail closed。
     // 旧 Worker 已经释放最终 I/O 后，之前记录的忙碌诊断不能继续影响
     // 当前这轮 claim。否则后续仅发生 CAS 冲突时会误报 recovery-required，
     // 把“暂时竞争”错误地显示成“旧 I/O 未知”。
@@ -3675,6 +3704,7 @@ async function claimCoordinatorAuthority(): Promise<void> {
       handoverGeneration,
       buildId: COORDINATOR_BUILD_ID,
       protocolVersion: COORDINATOR_UPGRADE_PROTOCOL_VERSION,
+      workerIdentity: COORDINATOR_WORKER_IDENTITY,
       activeIoLeases: {},
     };
     try {
@@ -4046,7 +4076,7 @@ async function withCoordinatorFinalIoLease<T>(
     allowLocalBindingDiscard?: boolean;
     auditOperation?: FinalIoAuditOperation;
     /**
-     * 非持久化的只读边界：不会改变外部或本地持久化真值，因此不需要
+     * 非持久化的本地边界：不会改变外部或本地持久化真值，因此不需要
      * 在 Worker 重启后阻塞新 authority；本地 gate 和前后 authority
      * 校验仍然保留。默认 true，避免新入口意外绕过跨 Worker fence。
      */
@@ -5822,7 +5852,7 @@ interface CoordinatorPeerState {
   serviceExposure?: { revoke(): void };
 }
 
-/** WebLoom 连接 peer 注册表；不以“最近活动页面”选择物理 Local I/O。 */
+/** WebLoom 连接 peer 注册表；Local I/O 只在 session.open 提交或物理撤权时切换。 */
 const coordinatorPeers = new Map<string, CoordinatorPeerState>();
 let storageIoPeerId: string | undefined;
 
@@ -10781,11 +10811,21 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
     // allowLocalLock / allowLocalOwnerTransition 只允许本次操作自己执行
     // fail-closed 锁定或 owner 切换；仍会重新校验共享 authority，不能把
     // 外部接管当成成功。
+    const ioKind = vaultOperationIoKind(request.operation);
     const result = await withCoordinatorFinalIoLease(
-      vaultOperationIoKind(request.operation),
+      ioKind,
       undefined,
       () => executeVaultOperation(request.operation),
-      { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "vault.operation" },
+      {
+        allowLocalLock: true,
+        allowLocalOwnerTransition: true,
+        auditOperation: "vault.operation",
+        // list/get/export/verify 只读取当前本地真值；底层存储入口也有各自的
+        // authority 与绑定世代检查。保留本 Worker 的前后栅栏，但只让真正
+        // 会改写 Vault 的操作持久阻塞跨 Worker 接管，避免刷新把未完成的
+        // UI 读取固化成无法释放的孤儿 lease。
+        durableLease: ioKind === "write",
+      },
     );
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   } catch (err) {
@@ -11881,7 +11921,14 @@ async function handleCrypto(
       "write",
       undefined,
       () => executeCryptoOperation(request.operation, coordinatorState.activePrivateKeyBytes!),
-      { auditOperation: "service.crypto.sign" },
+      {
+        auditOperation: "service.crypto.sign",
+        // 签名只在 Worker 内计算；结果必须经过下方 epoch 检查以及
+        // withCoordinatorFinalIoLease 的后置 authority 检查才会发布。
+        // 页面刷新若终止 Worker，持久 lease 反而会成为无法释放的孤儿，
+        // 令新 Worker 在 hydrate 前永久拒绝接管。
+        durableLease: false,
+      },
     );
 
     if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes) {
@@ -12686,7 +12733,13 @@ async function handleCoordinatorCryptoRpc(
     "write",
     call.signal,
     () => executeCryptoOperation(request, coordinatorState.activePrivateKeyBytes!),
-    { auditOperation: "service.crypto.sign" },
+    {
+      auditOperation: "service.crypto.sign",
+      // 纯本地签名没有外部 I/O 或持久化副作用；返回前仍受 authority、
+      // UpgradeGate、AbortSignal 和 session epoch 的多重后置栅栏保护。
+      // 不持久化 lease，避免页面卸载杀死 Worker 后留下恢复阻断。
+      durableLease: false,
+    },
   );
   // The final visibility check is deliberately after the crypto promise and
   // lease boundary: a lock/key switch must turn an old result into a failure.
@@ -12787,7 +12840,13 @@ async function openCoordinatorSession(
       const serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({ capability })));
       state.serviceExposure = serviceExposure;
       state.sessionOpen = true;
-      if (storageIoPeerId === undefined) storageIoPeerId = attempt.peerId;
+      // session.open 的 exposeGroup 已经提交，证明这个 peer 的反向
+      // LocalStorage capability 可用。刷新时旧文档可能来不及把物理断线送达
+      // SharedWorker；若继续保留旧 peer，后续 hydrate 会请求一个永不响应的
+      // realm。这里切换的是“未来请求”的目标；既有请求已捕获旧 peer，并由
+      // 各自 Scope/AbortSignal 收口。所有页面共享同源 localStorage，写入仍由
+      // Web Lock 与 Provider CAS 串行，不会绕过存储并发边界。
+      storageIoPeerId = attempt.peerId;
       return {
         sessionEpoch: coordinatorState.sessionEpoch,
         ack: { status: "ok" },
@@ -12886,8 +12945,17 @@ function configureCoordinatorPeer(peer: PeerController): void {
     if (coordinatorPeers.get(peer.peerId) !== state) return;
     revokedCoordinatorPeerIds.add(peer.peerId);
     coordinatorSessionClosed(peer.peerId);
-    if (storageIoPeerId === peer.peerId) storageIoPeerId = undefined;
     coordinatorPeers.delete(peer.peerId);
+    if (storageIoPeerId === peer.peerId) {
+      // 刷新页面时，新 peer 可能已经完成 session.open，旧 peer 才收到物理
+      // revoke。此时不能只清空 Local I/O 归属，否则新页面后续 hydrate 会
+      // 永久失去 bridge；也不能在新页面刚连接时抢占仍存活的旧 peer。
+      // 只有旧 peer 已被同步撤权这一刻，才把未来请求交给一个已完成 open
+      // 的活跃 peer。已经发往旧 peer 的 in-flight 请求仍由其 Scope 中止。
+      storageIoPeerId = [...coordinatorPeers.values()].find((candidate) =>
+        candidate.sessionOpen && candidate.peer.scope.state === "active"
+      )?.peer.peerId;
+    }
     for (const [requestId, request] of storageRequests) {
       if (request.clientId === peer.peerId) { request.controller.abort(); storageRequests.delete(requestId); }
     }

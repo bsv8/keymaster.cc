@@ -47,6 +47,7 @@ export function App() {
   const vaultService = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const bootstrap = useOptionalCapability(APPLICATION_BOOTSTRAP_READY_CAPABILITY);
   const hostVersion = useHostVersion();
+  const hasStorageStatusResource = host.resourceRegistry?.get("storage.status") !== undefined;
   const fallbackBootstrapSnapshot: ApplicationBootstrapSnapshot = {
     // Resource 首次加载完成前只能显示门禁页。不能把 pending 资源伪装成
     // final-ready，否则 capability 刚注入而 bootstrap 状态尚未发布时，
@@ -79,6 +80,11 @@ export function App() {
   // Storage plugin 是未就绪时唯一允许启动的应用入口；Vault capability
   // 也必须由同一份 application-bootstrap.ready 状态确认后才进入 RuntimeApp。
   if (!hasStorageController || !bootstrapSnapshot.storageReady) return <InitialSetupPage />;
+  // bucketGeneration（桶世代）切换会同步撤销旧 Storage Scope，再异步启动
+  // 新实例。这个极短窗口里 capability/bootstrap 快照可能仍可见，但旧
+  // storage.status ResourceDefinition 已被回收；提前挂载 Guard 会让 React
+  // ensure() 抛出 “Resource definition not found” 并升级成全局 fatal。
+  if (!hasStorageStatusResource) return <div className="app-booting"><p>正在恢复存储运行时…</p></div>;
   // 首次设置必须保持同一个页面实例：桶刚就绪而 Vault capability 尚在装配时，
   // 不能临时切到 booting/LockedShell，否则页面内存中的一次性密码会丢失。
   if (!bootstrapSnapshot.hasUnlockedActiveKey && (!bootstrapSnapshot.vaultCapabilityReady || vaultService?.status() === "uninitialized")) {

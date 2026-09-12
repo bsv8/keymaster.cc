@@ -77,6 +77,23 @@ test("Local runtime smoke creates demo bucket and generated test private key", a
     expect(catalog?.buckets).toHaveLength(1);
     expect(catalog?.buckets?.[0]).toMatchObject({ label: DEMO_BUCKET_NAME, backend: "local" });
     expect(catalog?.selectedBucketId).toBe(catalog?.buckets?.[0]?.bucketId);
+
+    // 首次初始化成功不是终点：新页面必须能从已持久化的 Local 桶恢复，
+    // 不能在 configStore.hydrate() 阶段退化成 pre-bootstrap fatal。
+    await page.reload();
+    const refreshOutcome = async () => {
+      if (await page.getByRole("heading", { name: /启动\/运行失败/ }).isVisible().catch(() => false)) return "failed";
+      if (await page.getByText(/Keymaster 脱敏诊断/).isVisible().catch(() => false)) return "failed";
+      const selectedKey = page.getByRole("region", { name: /Selected private key|当前选择的私钥/ });
+      if (new URL(page.url()).pathname === "/settings/vault"
+        && await selectedKey.getByText(new RegExp(`^${TEST_KEY_NAME}\\s*·`)).isVisible().catch(() => false)) return "ready";
+      return "pending";
+    };
+    await expect.poll(refreshOutcome, {
+      timeout: 15_000,
+      message: "刷新后应从 Local 桶恢复并显示首 Key，或显示可诊断的启动失败",
+    }).not.toBe("pending");
+    expect(await refreshOutcome(), "刷新后不得进入 pre-bootstrap fatal").toBe("ready");
   } finally {
     await attachRuntimeEvidence(page, testInfo, browserErrors);
   }
