@@ -56,6 +56,26 @@ describe("crypto", () => {
     );
     expect(new Uint8Array(fallbackBits)).toEqual(new Uint8Array(nativeBits));
 
+    const hmacKeyMaterial = new Uint8Array(32).fill(0x0b);
+    const hmacData = new TextEncoder().encode("http-hmac");
+    const fallbackHmacKey = await globalThis.crypto.subtle.importKey(
+      "raw",
+      hmacKeyMaterial,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const fallbackHmac = await globalThis.crypto.subtle.sign("HMAC", fallbackHmacKey, hmacData);
+    const nativeHmacKey = await nativeSubtle.importKey(
+      "raw",
+      hmacKeyMaterial,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const nativeHmac = await nativeSubtle.sign("HMAC", nativeHmacKey, hmacData);
+    expect(new Uint8Array(fallbackHmac)).toEqual(new Uint8Array(nativeHmac));
+
     const key = await globalThis.crypto.subtle.importKey("raw", new Uint8Array(32).fill(8), { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     const iv = new Uint8Array(12).fill(2);
     const aad = new TextEncoder().encode("http-aad");

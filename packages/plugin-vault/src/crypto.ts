@@ -7,6 +7,7 @@
 // fallback 而被误认为可用。
 
 import { gcm } from "@noble/ciphers/aes.js";
+import { hmac } from "@noble/hashes/hmac.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { pbkdf2Async } from "@noble/hashes/pbkdf2.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -26,7 +27,7 @@ const fallbackSubtles = new WeakSet<object>();
 
 interface FallbackCryptoKey {
   readonly [FALLBACK_KEY]: true;
-  readonly algorithm: { name: string; length?: number };
+  readonly algorithm: { name: string; length?: number; hash?: { name: string } };
   readonly extractable: boolean;
   readonly type: "secret";
   readonly usages: readonly KeyUsage[];
@@ -83,8 +84,12 @@ function createFallbackSubtle(): SubtleCrypto {
   ): Promise<CryptoKey> => {
     if (format !== "raw") throw new Error(`Unsupported fallback key format: ${format}`);
     const name = algorithmName(algorithm);
-    if (name !== "PBKDF2" && name !== "HKDF" && name !== "AES-GCM") {
+    if (name !== "PBKDF2" && name !== "HKDF" && name !== "AES-GCM" && name !== "HMAC") {
       throw new Error(`Unsupported fallback key algorithm: ${name}`);
+    }
+    const hash = name === "HMAC" ? (algorithm as HmacImportParams).hash : undefined;
+    if (name === "HMAC" && (!hash || algorithmName(hash) !== "SHA-256")) {
+      throw new Error("Unsupported fallback HMAC hash");
     }
     const material = bytes(keyData);
     if (name === "AES-GCM" && material.byteLength !== 16 && material.byteLength !== 24 && material.byteLength !== 32) {
@@ -92,7 +97,11 @@ function createFallbackSubtle(): SubtleCrypto {
     }
     const key: FallbackCryptoKey = {
       [FALLBACK_KEY]: true,
-      algorithm: { name, ...(algorithmLength(algorithm as Algorithm) ? { length: algorithmLength(algorithm as Algorithm) } : {}) },
+      algorithm: {
+        name,
+        ...(algorithmLength(algorithm as Algorithm) ? { length: algorithmLength(algorithm as Algorithm) } : {}),
+        ...(hash ? { hash: { name: algorithmName(hash) } } : {})
+      },
       extractable,
       type: "secret",
       usages: [...keyUsages]
@@ -163,6 +172,18 @@ function createFallbackSubtle(): SubtleCrypto {
     }
   };
 
+  const sign = async (
+    algorithm: AlgorithmIdentifier | HmacImportParams,
+    key: CryptoKey,
+    data: BufferSource
+  ): Promise<ArrayBuffer> => {
+    if (!isFallbackKey(key) || key.algorithm.name !== "HMAC" || key.algorithm.hash?.name !== "SHA-256") {
+      throw new Error("Invalid fallback HMAC key");
+    }
+    if (algorithmName(algorithm) !== "HMAC") throw new Error("Unsupported fallback signing algorithm");
+    return asArrayBuffer(hmac(sha256, fallbackKeyMaterial(key), bytes(data)));
+  };
+
   const subtle = {
     digest: async (algorithm: AlgorithmIdentifier, data: BufferSource) => {
       if (algorithmName(algorithm) !== "SHA-256") throw new Error("Fallback subtle supports only SHA-256");
@@ -199,7 +220,8 @@ function createFallbackSubtle(): SubtleCrypto {
       return importKey("raw", material, algorithm, extractable, keyUsages);
     },
     encrypt,
-    decrypt
+    decrypt,
+    sign
   } as unknown as SubtleCrypto;
   fallbackSubtles.add(subtle as object);
   return subtle;
