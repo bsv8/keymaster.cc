@@ -15,7 +15,7 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
 
 /**
  * 业务目标：
- * 用户完成初始化后，通过正式菜单查看系统、应用、插件、日志和系统状态设置，
+ * 用户完成初始化后，通过正式菜单查看系统、应用、插件和系统状态设置，
  * 并切换一次界面语言。
  *
  * 用户价值：
@@ -28,9 +28,9 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
  * - 不读取 S3、testnet 或任何长期秘密。
  *
  * 成功标准：
- * - 五个正式设置入口都能从业务导航打开；
+ * - 四个正式设置入口都能从业务导航打开；
  * - 语言热切换同时更新 html lang 和持久化模式；
- * - 刷新后仍能进入设置工作区，并能读取插件状态和统一日志入口。
+ * - 刷新后仍能进入设置工作区，并能读取插件状态和系统状态入口。
  *
  * 业务风险：
  * 如果菜单和页面不是同一个 registry 真值，用户可能看到入口却无法配置；
@@ -86,12 +86,7 @@ test(JOURNEY_ID + "：从正式菜单查看设置并持久化语言", async ({ p
       expect(await countManagedPlugins(page), "插件管理页必须由正式运行时提供可观察的插件状态").toBeGreaterThan(0);
     });
 
-    await test.step("用户查看统一日志和系统状态，而不是进入孤立配置页", async () => {
-      await openSettingsPage(page, {
-        label: /^System logs$|^系统日志$/,
-        path: /\/settings\/logs$/u,
-        heading: /^System logs$|^系统日志$/,
-      });
+    await test.step("用户查看系统状态，而不是进入孤立配置页", async () => {
       await openSettingsPage(page, {
         label: /^System status$|^系统状态$/,
         path: /\/settings\/system-status$/u,

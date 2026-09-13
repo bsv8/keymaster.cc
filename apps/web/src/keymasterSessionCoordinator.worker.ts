@@ -1007,6 +1007,28 @@ let testPersistCoordinatorMetaFailure = false;
 let platformRootStore: PlatformRootStore | undefined;
 /** 当前统一抽象桶 Provider；所有 K-V 与文件运行时共用这一实例。 */
 let platformBucketProvider: StorageBucketProvider | undefined;
+/**
+ * Local Provider 在候选 Root 暂存期间必须固定到发起 peer；被 staged
+ * binding 采用后，后续 I/O 必须跟随 storageIoOwner。WeakMap 让 publish
+ * 只作用于对应 Provider，避免“当前已有 Root”误把另一个候选提前解锁。
+ */
+const coordinatorLocalStorageProviderPublishers = new WeakMap<StorageBucketProvider, () => void>();
+
+function createCoordinatorLocalStorageBridgeState(peerId?: string): {
+  targetPeerId(): string | undefined;
+  publish(): void;
+} {
+  let published = false;
+  return {
+    targetPeerId: () => published ? undefined : peerId,
+    publish: () => { published = true; },
+  };
+}
+
+function publishCoordinatorLocalStorageProvider(provider: StorageBucketProvider): void {
+  coordinatorLocalStorageProviderPublishers.get(provider)?.();
+}
+
 /** Root 安装令牌；不能用 bucketGeneration 代替，因为 A→B→A 可能复用世代值。 */
 let platformRootToken: object | undefined;
 let platformKeysStore: KeyValueStore | undefined;
@@ -1128,7 +1150,7 @@ function createStorageRuntimeSecret(key: CryptoKey): { seal(scope: string, plain
 }
 
 /** Storage-first：先验证抽象桶，再打开 keys/ 与平台状态区。 */
-async function bootstrapPlatformStorage(profilePassword?: string): Promise<void> {
+async function bootstrapPlatformStorage(profilePassword?: string, peerId?: string): Promise<void> {
   if (platformRootStore) return;
   const hadPlatformRoot = Boolean(platformRootStore);
   storageBootstrapController?.dispose();
@@ -1138,7 +1160,16 @@ async function bootstrapPlatformStorage(profilePassword?: string): Promise<void>
     generation: 1,
     // localStorage 只存在 Window；Provider 的 bridge 不接收密码或明文
     // 私钥，页面在执行点重新校验当前桶和本地租约。
-    local: { bridge: requestLocalStorageBridge },
+    // Bootstrap can run while an older session remains the current I/O owner.
+    // Keep candidate I/O on the opening peer until the Root is published;
+    // after publication the provider follows the current owner for handoff.
+    local: {
+      // The provider must stay on the opening peer while the candidate Root
+      // is being probed/installed. Once that Root is published, future calls
+      // must resolve through storageIoOwner so a same-profile tab handoff can
+      // stop using the old Window bridge.
+      bridge: (request) => requestLocalStorageBridge(request, platformRootStore ? undefined : peerId),
+    },
     // 初次冷启动的 Vault metadata/Journal/任务还在上层初始化中，不能由
     // Provider probe 抢先发布 ready。健康探测定时器复用下面的回调，后续
     // 自动重试会重新安装 Root 并继续完整恢复。
@@ -1161,7 +1192,7 @@ async function bootstrapPlatformStorage(profilePassword?: string): Promise<void>
         }
       }
       if (coordinatorInitializationInProgress || storageRecoveryOrchestrator) return;
-      await runStorageRecoveryOrchestrator();
+      await runStorageRecoveryOrchestrator(peerId);
     }
   });
   storageBootstrapController = controller;
@@ -1227,14 +1258,18 @@ function createCatalogProviderFromConnection(
   bucketId: string,
   bucketGeneration = 1,
   candidateBucket?: LocalStorageBridgeCandidateBucket,
+  peerId?: string,
 ): StorageBucketProvider {
   if (config.kind === "local") {
-    return createLocalStorageBucketProvider({
+    const bridgeState = createCoordinatorLocalStorageBridgeState(peerId);
+    const provider = createLocalStorageBucketProvider({
       bucketId,
       bucketGeneration,
-      bridge: requestLocalStorageBridge,
+      bridge: (request) => requestLocalStorageBridge(request, bridgeState.targetPeerId()),
       ...(candidateBucket ? { candidateBucket } : {}),
     });
+    coordinatorLocalStorageProviderPublishers.set(provider, bridgeState.publish);
+    return provider;
   }
   const normalized = normalizeProviderConfig({
     providerId: "s3-compatible",
@@ -1261,6 +1296,7 @@ async function createCatalogProviderForSwitch(
   bucketGeneration: number,
   expectedSelectedBucketId?: string,
   cleanupOnly = false,
+  peerId?: string,
 ): Promise<StorageBucketProvider> {
   const entry = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [input] }).buckets[0]!;
   if (entry.backend === "local") {
@@ -1271,15 +1307,18 @@ async function createCatalogProviderForSwitch(
       ...(expectedSelectedBucketId === undefined ? { initialSetup: true } : {}),
       ...(cleanupOnly ? { cleanupOnly: true } : {}),
     };
-    return createLocalStorageBucketProvider({
+    const bridgeState = createCoordinatorLocalStorageBridgeState(peerId);
+    const provider = createLocalStorageBucketProvider({
       bucketId: entry.bucketId,
       bucketGeneration,
       bridge: (request) => request.type === "catalog-update" || request.type === "catalog-select" || request.type === "catalog-commit"
-        ? requestLocalStorageBridge(request)
+        ? requestLocalStorageBridge(request, bridgeState.targetPeerId())
         : request.type === "get" || request.type === "list" || request.type === "put" || request.type === "delete"
-          ? requestLocalStorageBridge({ ...request, candidateBucket })
+          ? requestLocalStorageBridge({ ...request, candidateBucket }, bridgeState.targetPeerId())
           : Promise.reject(new StorageRuntimeError("storage_provider_error", "Local storage candidate request is invalid")),
     });
+    coordinatorLocalStorageProviderPublishers.set(provider, bridgeState.publish);
+    return provider;
   }
   if (!password) throw new StorageRuntimeError("storage_identity_required", "Bucket password is required");
   const context = await deriveBucketCryptoContext(password, entry.keyDerivation);
@@ -1513,7 +1552,13 @@ async function stageCatalogBucket(
       runtime,
       storageProfileSalt,
       storageProfileKey,
-      publish: () => { candidatePublished = true; },
+      publish: () => {
+        candidatePublished = true;
+        // The provider may be reused by the adopted runtime. Only now may it
+        // follow storageIoOwner; before this point candidate I/O remains bound
+        // to the peer that staged the Root.
+        publishCoordinatorLocalStorageProvider(provider);
+      },
       ...stagedSession,
     };
   } catch (error) {
@@ -1586,23 +1631,23 @@ async function loadInitialSetupRecoveryRecords(signal?: AbortSignal, peerId?: st
   }
 }
 
-async function listInitialSetupRecoveries(): Promise<InitialSetupRecoveryRecordV1[]> {
-  const loaded = await loadInitialSetupRecoveryRecords();
+async function listInitialSetupRecoveries(peerId?: string): Promise<InitialSetupRecoveryRecordV1[]> {
+  const loaded = await loadInitialSetupRecoveryRecords(undefined, peerId);
   if (!loaded) throw new StorageRuntimeError("storage_unavailable", "Initial setup recovery records could not be read");
   return [...initialSetupRecoveryRecords.values()]
     .sort((left, right) => right.updatedAt - left.updatedAt)
     .map((record) => structuredClone(record));
 }
 
-async function persistInitialSetupRecoveryRecord(record: InitialSetupRecoveryRecordV1): Promise<void> {
-  const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-write", record });
+async function persistInitialSetupRecoveryRecord(record: InitialSetupRecoveryRecordV1, peerId?: string): Promise<void> {
+  const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-write", record }, peerId);
   if (response.type !== "initial-setup-recovery") throw new StorageRuntimeError("storage_unavailable", "Initial setup recovery record could not be saved");
   initialSetupRecoveryRecords.clear();
   for (const persisted of response.records) initialSetupRecoveryRecords.set(persisted.transactionId, structuredClone(persisted));
 }
 
-async function readInitialSetupCatalog(): Promise<StorageCatalogV2> {
-  const response = await requestLocalStorageBridge({ type: "catalog-read" });
+async function readInitialSetupCatalog(peerId?: string): Promise<StorageCatalogV2> {
+  const response = await requestLocalStorageBridge({ type: "catalog-read" }, peerId);
   if (response.type !== "catalog-state") throw new StorageRuntimeError("storage_unavailable", "Storage catalog bridge returned an invalid read result");
   return response.catalog;
 }
@@ -1634,10 +1679,10 @@ function initialSetupRecoveryUnavailable(
   );
 }
 
-async function resultFromInitialSetupRecovery(record: InitialSetupRecoveryRecordV1): Promise<InitialSetupResult | undefined> {
+async function resultFromInitialSetupRecovery(record: InitialSetupRecoveryRecordV1, peerId?: string): Promise<InitialSetupResult | undefined> {
   if (record.status === "failed" && record.error) return { ok: false, error: structuredClone(record.error) };
   if (record.status !== "succeeded" || !record.success) return undefined;
-  const catalog = await readInitialSetupCatalog();
+  const catalog = await readInitialSetupCatalog(peerId);
   const bucket = catalog.buckets.find((candidate) => candidate.bucketId === record.bucketId);
   if (!bucket
     || catalog.selectedBucketId !== record.bucketId
@@ -1680,9 +1725,9 @@ type InitialSetupCatalogObservation =
   | { kind: "competing"; catalog: StorageCatalogV2 }
   | { kind: "unknown"; error: unknown };
 
-async function observeInitialSetupCatalog(entry: StorageBucketCatalogEntryV2): Promise<InitialSetupCatalogObservation> {
+async function observeInitialSetupCatalog(entry: StorageBucketCatalogEntryV2, peerId?: string): Promise<InitialSetupCatalogObservation> {
   try {
-    const catalog = await readInitialSetupCatalog();
+    const catalog = await readInitialSetupCatalog(peerId);
     if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return { kind: "empty", catalog };
     const own = catalog.selectedBucketId === entry.bucketId
       && catalog.buckets.length === 1
@@ -1881,7 +1926,7 @@ async function privateKeyForInitialSetup(firstKey: InitialSetupFirstKey): Promis
  * 首次初始化事务：Hold、Vault/index、Root 暂存完成后，最后才提交目录引用。
  * 该函数只被 storage.control 的 initial-setup 调用，页面不得复制这条编排。
  */
-async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<InitialSetupResult> {
+async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: string): Promise<InitialSetupResult> {
   let phase: InitialSetupPhase = "validate";
   let entry: StorageBucketCatalogEntryV2 | undefined;
   let provider: StorageBucketProvider | undefined;
@@ -1923,7 +1968,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<I
       ...(input.success === undefined ? {} : { success: input.success }),
       ...(input.error === undefined ? {} : { error: input.error }),
     });
-    await persistInitialSetupRecoveryRecord(recovery);
+    await persistInitialSetupRecoveryRecord(recovery, peerId);
   };
   try {
     validateInitialSetupPlan(plan);
@@ -1941,7 +1986,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<I
     const keyCreatedAt = new Date().toISOString();
     // 暂存阶段需要写入 Hold/Vault；只有回滚清理时才会重新创建
     // cleanupOnly Provider，避免并发赢家提交后失败事务仍持有写权限。
-    provider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration);
+    provider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, false, peerId);
 
     phase = "hold";
     await saveRecovery({ phase });
@@ -1967,7 +2012,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<I
     // revision 的候选 Provider。否则目录 commit 后页面桥会把后续 I/O
     // 误判成“候选条目已失效”。旧 Provider 仍保留到新 Provider 创建成功，
     // 这样新建 Provider 失败时，下面的回滚清理仍能访问已写入的 Hold。
-    const refreshedProvider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration);
+    const refreshedProvider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, false, peerId);
     provider.dispose();
     provider = refreshedProvider;
 
@@ -1992,7 +2037,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<I
 
     phase = "catalog-commit";
     await saveRecovery({ phase, catalog: "not-started" });
-    const selected = await commitInitialStorageCatalogBucket(entry, bucketGeneration);
+    const selected = await commitInitialStorageCatalogBucket(entry, bucketGeneration, false, peerId);
     catalogCommitted = true;
     await saveRecovery({ phase, catalog: "committed" });
 
@@ -2053,15 +2098,15 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<I
     // 只有精确命中自己的条目才发送幂等 rollback。只有确认目录已经
     // 撤销/为空/不含本候选条目后，才允许删除候选对象。
     if (entry) {
-      const observation = await observeInitialSetupCatalog(entry);
+      const observation = await observeInitialSetupCatalog(entry, peerId);
       if (observation.kind === "own") {
         try {
-          await commitInitialStorageCatalogBucket(entry, bucketGeneration, true);
+          await commitInitialStorageCatalogBucket(entry, bucketGeneration, true, peerId);
           catalogCommitted = false;
           recoveryCatalog = "rolled-back";
           catalogDetachedForCleanup = true;
         } catch (rollbackError) {
-          const afterRollback = await observeInitialSetupCatalog(entry);
+          const afterRollback = await observeInitialSetupCatalog(entry, peerId);
           if (afterRollback.kind === "empty") {
             catalogCommitted = false;
             recoveryCatalog = "empty";
@@ -2105,7 +2150,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<I
     // cleanupOnly 请求永远不能 put，避免“清理”路径反向污染赢家。
     if (entry && (recoveryCatalog === "competing" || recoveryCatalog === "unknown")) {
       try {
-        const candidate = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, true);
+        const candidate = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, true, peerId);
         if (cleanupProvider && cleanupProvider !== staged?.provider) cleanupProvider.dispose();
         cleanupProvider = candidate;
         cleanupProviderOwned = true;
@@ -2169,15 +2214,15 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan): Promise<I
   }
 }
 
-async function executeInitialSetupOnce(plan: InitialSetupPlan): Promise<InitialSetupResult> {
+async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string): Promise<InitialSetupResult> {
   const transactionId = plan && typeof plan === "object" && typeof plan.transactionId === "string"
     ? plan.transactionId
     : undefined;
-  if (!transactionId) return executeInitialSetupTransaction(plan);
+  if (!transactionId) return executeInitialSetupTransaction(plan, peerId);
   const existing = initialSetupTransactions.get(transactionId);
   if (existing instanceof Promise) return existing;
   if (existing) return Promise.resolve(existing);
-  const loaded = await loadInitialSetupRecoveryRecords();
+  const loaded = await loadInitialSetupRecoveryRecords(undefined, peerId);
   if (!loaded) {
     return initialSetupFailure(
       "runtime",
@@ -2189,7 +2234,7 @@ async function executeInitialSetupOnce(plan: InitialSetupPlan): Promise<InitialS
   }
   const persisted = initialSetupRecoveryRecords.get(transactionId);
   if (persisted?.status === "succeeded" || persisted?.status === "failed") {
-    const recovered = await resultFromInitialSetupRecovery(persisted);
+    const recovered = await resultFromInitialSetupRecovery(persisted, peerId);
     if (recovered) return recovered;
     if (persisted.status === "failed") {
       return initialSetupFailure(
@@ -2230,7 +2275,7 @@ async function executeInitialSetupOnce(plan: InitialSetupPlan): Promise<InitialS
       },
     );
   }
-  const run = executeInitialSetupTransaction(plan).then((result) => {
+  const run = executeInitialSetupTransaction(plan, peerId).then((result) => {
     initialSetupTransactions.set(transactionId, result);
     return result;
   }, (error) => {
@@ -2310,8 +2355,9 @@ type InitialSetupCleanupInput = Extract<CoordinatorStorageControl, { type: "init
 async function retryInitialSetupCleanupTransaction(
   transactionId: string,
   input: InitialSetupCleanupInput,
+  peerId?: string,
 ): Promise<InitialSetupRecoveryResult> {
-  const loaded = await loadInitialSetupRecoveryRecords();
+  const loaded = await loadInitialSetupRecoveryRecords(undefined, peerId);
   if (!loaded) return { status: "cleanup-required", error: initialSetupFailure("rollback", new StorageRuntimeError("storage_unavailable", "Initial setup recovery records are unavailable"), "unconfirmed", transactionId, { recovery: "recovery-records-unavailable" }).error };
   const current = initialSetupRecoveryRecords.get(transactionId);
   if (!current) return { status: "not-found" };
@@ -2320,7 +2366,7 @@ async function retryInitialSetupCleanupTransaction(
   // 新初始化再次执行，避免响应丢失时生成第二把 Key。
   if (current.status === "succeeded") {
     try {
-      const result = await resultFromInitialSetupRecovery(current);
+      const result = await resultFromInitialSetupRecovery(current, peerId);
       return result?.ok
         ? { status: "setup-succeeded", result }
         : result?.error
@@ -2347,13 +2393,13 @@ async function retryInitialSetupCleanupTransaction(
       cleanup: "unconfirmed",
       status: "failed",
       error: failure.error,
-    }).catch(() => undefined);
+    }, peerId).catch(() => undefined);
     return { status: "cleanup-required", error: failure.error };
   };
 
   let catalog: StorageCatalogV2;
   try {
-    catalog = await readInitialSetupCatalog();
+    catalog = await readInitialSetupCatalog(peerId);
   } catch (error) {
     return failRecovery(error, { reason: "catalog-read-failed" });
   }
@@ -2412,7 +2458,7 @@ async function retryInitialSetupCleanupTransaction(
   try {
     if (current.backend === "s3" && input.connection && (!catalogEntry || catalog.selectedBucketId !== current.bucketId)) {
       if (input.connection.kind !== "s3") throw new StorageRuntimeError("storage_provider_error", "Recovery connection backend does not match the transaction");
-      provider = createCatalogProviderFromConnection(input.connection, current.bucketId, generation);
+      provider = createCatalogProviderFromConnection(input.connection, current.bucketId, generation, undefined, peerId);
       providerOwned = true;
     } else {
       if (cleanupEntry.backend !== current.backend) throw new StorageRuntimeError("storage_provider_error", "Recovery bucket backend does not match the transaction");
@@ -2422,6 +2468,7 @@ async function retryInitialSetupCleanupTransaction(
         generation,
         undefined,
         true,
+        peerId,
       );
       providerOwned = true;
     }
@@ -2436,11 +2483,11 @@ async function retryInitialSetupCleanupTransaction(
     let catalogDetached = false;
     if (ownsCatalog) {
       try {
-        await commitInitialStorageCatalogBucket(cleanupEntry, generation, true);
+        await commitInitialStorageCatalogBucket(cleanupEntry, generation, true, peerId);
         catalogState = "rolled-back";
         catalogDetached = true;
       } catch (rollbackError) {
-        const after = await observeInitialSetupCatalog(cleanupEntry);
+        const after = await observeInitialSetupCatalog(cleanupEntry, peerId);
         if (after.kind === "empty") {
           catalogState = "empty";
           catalogDetached = true;
@@ -2487,7 +2534,7 @@ async function retryInitialSetupCleanupTransaction(
       status: "failed",
       error: cleanupStateError,
       updatedAt: Date.now(),
-    });
+    }, peerId);
     try {
       await deleteInitialSetupProviderObjects(provider);
     } catch (error) {
@@ -2502,7 +2549,7 @@ async function retryInitialSetupCleanupTransaction(
       error: cleanupStateError,
       updatedAt: Date.now(),
     };
-    await persistInitialSetupRecoveryRecord(next);
+    await persistInitialSetupRecoveryRecord(next, peerId);
     if (platformRootStore?.bucket.bucketId === current.bucketId && catalogState !== "competing") {
       catalogBindingDiscardDeferred = true;
       storageBootstrapState = null;
@@ -2527,15 +2574,15 @@ async function retryInitialSetupCleanupTransaction(
   }
 }
 
-async function getInitialSetupResult(transactionId: string): Promise<InitialSetupResult | undefined> {
+async function getInitialSetupResult(transactionId: string, peerId?: string): Promise<InitialSetupResult | undefined> {
   const existing = initialSetupTransactions.get(transactionId);
   if (existing instanceof Promise) return existing;
   if (existing) return existing;
   const record = initialSetupRecoveryRecords.get(transactionId);
-  if (record) return resultFromInitialSetupRecovery(record);
-  await loadInitialSetupRecoveryRecords();
+  if (record) return resultFromInitialSetupRecovery(record, peerId);
+  await loadInitialSetupRecoveryRecords(undefined, peerId);
   const recovered = initialSetupRecoveryRecords.get(transactionId);
-  return recovered ? resultFromInitialSetupRecovery(recovered) : undefined;
+  return recovered ? resultFromInitialSetupRecovery(recovered, peerId) : undefined;
 }
 
 interface CurrentCatalogStorageBinding {
@@ -5134,7 +5181,7 @@ storageHealthController.subscribe(() => {
  * Coordinator-owned Storage recovery pipeline. Provider 恢复只是第一步；
  * Root、Vault metadata、业务任务和旧资源句柄必须在同一条编排链上恢复。
  */
-async function runStorageRecoveryOrchestrator(): Promise<void> {
+async function runStorageRecoveryOrchestrator(peerId?: string): Promise<void> {
   if (storageRecoveryOrchestrator) return storageRecoveryOrchestrator;
   storageRecoveryOrchestrator = (async () => {
     if (!platformRootStore) {
@@ -5156,7 +5203,7 @@ async function runStorageRecoveryOrchestrator(): Promise<void> {
           storageRootInstallationActive = false;
         }
       } else {
-        await bootstrapPlatformStorage();
+        await bootstrapPlatformStorage(undefined, peerId);
       }
     } else {
       // 恢复只替换当前底层绑定；任务 runtime 仍持有 wrapper，不能把
@@ -5183,7 +5230,7 @@ async function runStorageRecoveryOrchestrator(): Promise<void> {
     if (unfinishedDeletionJournals.length > 0) {
       throw storageUnavailableError("Key deletion recovery is incomplete");
     }
-    const recoveryComplete = await resumeAfterStorageReady();
+    const recoveryComplete = await resumeAfterStorageReady(peerId);
     // 初次 initialize 正在 bootstrapPlatformStorage 之后继续读取 metadata
     // 和注册任务；这里不能越权把尚未完成的冷启动发布成 ready。
     if (!recoveryComplete) return;
@@ -5225,7 +5272,7 @@ function markStorageIoFailure(error: unknown): void {
 }
 
 /** Provider 探测、Root 重绑、Journal 收敛和任务恢复的单次原子操作。 */
-async function probeStorageAndRecover(): Promise<void> {
+async function probeStorageAndRecover(peerId?: string): Promise<void> {
   const snapshot = await storageHealthController.probe(
     async () => {
       const provider = platformBucketProvider;
@@ -5236,7 +5283,7 @@ async function probeStorageAndRecover(): Promise<void> {
       }
     },
     async () => {
-      await runStorageRecoveryOrchestrator();
+      await runStorageRecoveryOrchestrator(peerId);
     }
   );
   if (snapshot.status !== "ready") {
@@ -5393,7 +5440,7 @@ async function withStorageDataSlot<T>(
   }
 }
 
-async function ensureStorageRuntime(): Promise<StorageRuntimeController> {
+async function ensureStorageRuntime(peerId?: string): Promise<StorageRuntimeController> {
   if (storageRuntime) return storageRuntime;
   if (testStorageRuntimeOverride) {
     storageRuntime = testStorageRuntimeOverride;
@@ -5420,7 +5467,7 @@ async function ensureStorageRuntime(): Promise<StorageRuntimeController> {
   };
   try {
     if (!storageRepository) {
-      if (!platformRootStore) await bootstrapPlatformStorage();
+      if (!platformRootStore) await bootstrapPlatformStorage(undefined, peerId);
       const root = platformRootStore;
       if (!root) throw new Error("Platform storage root is unavailable");
       storageRepository = await openMultipartUploadRepository(await root.openPlatformStore({ applicationStorageId: "storage", schemaVersion: 1 }));
@@ -5457,7 +5504,7 @@ async function ensureStorageRuntime(): Promise<StorageRuntimeController> {
 }
 
 /** Storage 选定/解锁后统一恢复 Root、Vault metadata、runtime 与任务。 */
-async function resumeAfterStorageReady(): Promise<boolean> {
+async function resumeAfterStorageReady(peerId?: string): Promise<boolean> {
   storageStartupFailure = false;
   platformStorageReady = true;
   reconcileCoordinatorRuntime();
@@ -5465,11 +5512,11 @@ async function resumeAfterStorageReady(): Promise<boolean> {
     // 初始 initializeCoordinator 正在等待 bootstrapPlatformStorage；健康探测
     // 的 recovery finalize 不能再次启动一个嵌套 initialize，否则会互相等待。
     if (coordinatorInitializationInProgress) return false;
-    coordinatorInitialization = initializeCoordinator(true, true);
+    coordinatorInitialization = initializeCoordinator(true, true, peerId);
     await coordinatorInitialization;
     return true;
   }
-  await ensureStorageRuntime();
+  await ensureStorageRuntime(peerId);
   if (coordinatorState.taskRuntimes.size === 0) await registerCoordinatorTasks();
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     if (runtime.state === "blocked" && runtime.blockedReason === "Storage unavailable") {
@@ -6006,6 +6053,7 @@ async function commitInitialStorageCatalogBucket(
   targetBucket: StorageBucketCatalogEntryV2,
   bucketGeneration: number,
   rollback = false,
+  peerId?: string,
 ): Promise<StorageBucketCatalogEntryV2> {
   const response = await requestLocalStorageBridge({
     type: "catalog-commit",
@@ -6013,7 +6061,7 @@ async function commitInitialStorageCatalogBucket(
     bucketGeneration,
     targetBucket,
     ...(rollback ? { rollback: true } : {}),
-  });
+  }, peerId);
   if (response.type !== "catalog") throw storageUnavailableError("Local storage catalog commit bridge returned an invalid response");
   return response.bucket;
 }
@@ -7332,7 +7380,7 @@ function disconnectedClientResponse(requestId: string): CoordinatorResponse {
 }
 
 /** 首次 S3 配置必须先形成冷启动 Profile，再探测并绑定统一桶。 */
-async function prepareInitialS3Storage(config: import("@keymaster/contracts").StorageProviderConfigDraft): Promise<import("@keymaster/contracts").StorageSelectedResult> {
+async function prepareInitialS3Storage(config: import("@keymaster/contracts").StorageProviderConfigDraft, peerId?: string): Promise<import("@keymaster/contracts").StorageSelectedResult> {
   if (platformRootStore) return { status: "selected", backend: "s3", requiresRuntimeBootstrap: true };
   const password = config.profilePassword;
   if (!password || password.length < 8) throw Object.assign(new Error("Storage Profile password is required"), { code: "storage_identity_required" });
@@ -7343,13 +7391,17 @@ async function prepareInitialS3Storage(config: import("@keymaster/contracts").St
     selectedProfileId: `${normalized.providerId}:${(normalized.connection as { bucket: string }).bucket}`,
     encryptedStorageProfileEnvelope: envelope
   };
-  await bootstrapPlatformStorage(password);
+  await bootstrapPlatformStorage(password, peerId);
   await setStorageProfilePassword(password);
-  await runStorageRecoveryOrchestrator();
+  await runStorageRecoveryOrchestrator(peerId);
   return { status: "selected", backend: "s3", requiresRuntimeBootstrap: true };
 }
 
-async function executeStorageControl(request: Extract<CoordinatorClientRequest, { kind: "storage.control" }>, signal?: AbortSignal): Promise<CoordinatorResponse> {
+async function executeStorageControl(
+  request: Extract<CoordinatorClientRequest, { kind: "storage.control" }>,
+  signal?: AbortSignal,
+  peerId?: string,
+): Promise<CoordinatorResponse> {
   if (signal?.aborted) throw storageUnavailableError("Storage control request was cancelled");
   const control = request.control;
   if (control.type === "status") {
@@ -7366,7 +7418,7 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
     if (storageHealthController.status() !== "ready" && !storageStartupFailure) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
     }
-    const service = await ensureStorageRuntime().catch(() => undefined);
+    const service = await ensureStorageRuntime(peerId).catch(() => undefined);
     if (!service) {
       if (storageStartupFailure) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage startup failed", code: "storage_unavailable" } };
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
@@ -7381,16 +7433,16 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
   if (control.type === "retry") {
     try {
       if (!platformRootStore) {
-        await bootstrapPlatformStorage();
+        await bootstrapPlatformStorage(undefined, peerId);
       } else if (platformBucketProvider) {
-        await probeStorageAndRecover();
+        await probeStorageAndRecover(peerId);
       } else {
         throw storageUnavailableError("Storage provider is unavailable");
       }
       // 初次 bootstrap 失败时，原初始化 Promise 已经结束；恢复成功后
       // 重新执行同一段 Vault metadata bootstrap，不绕过 Storage-first 门禁。
       if (platformRootStore && storageHealthController.status() !== "ready") {
-        await runStorageRecoveryOrchestrator();
+        await runStorageRecoveryOrchestrator(peerId);
       }
       storageStartupFailure = false;
       platformStorageReady = true;
@@ -7404,28 +7456,28 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
   }
   if (control.type === "summary") {
-    const service = await ensureStorageRuntime();
+    const service = await ensureStorageRuntime(peerId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderSummary() };
   }
   if (control.type === "connection") {
-    const service = await ensureStorageRuntime();
+    const service = await ensureStorageRuntime(peerId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderConnection() };
   }
   if (control.type === "initial-setup") {
-    const result = await executeInitialSetupOnce(control.plan);
+    const result = await executeInitialSetupOnce(control.plan, peerId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   }
   if (control.type === "initial-setup-result") {
-    const result = await getInitialSetupResult(control.transactionId);
+    const result = await getInitialSetupResult(control.transactionId, peerId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   }
   if (control.type === "initial-setup-recovery-list") {
-    const records = await listInitialSetupRecoveries();
+    const records = await listInitialSetupRecoveries(peerId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: records };
   }
   if (control.type === "initial-setup-cleanup") {
     try {
-      const result = await retryInitialSetupCleanupTransaction(control.transactionId, control);
+      const result = await retryInitialSetupCleanupTransaction(control.transactionId, control, peerId);
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
     } finally {
       if (control.password !== undefined) control.password = "";
@@ -7465,10 +7517,10 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
   }
   if (control.type === "unlock-profile") {
     try {
-      if (!platformRootStore) await bootstrapPlatformStorage(control.password);
+      if (!platformRootStore) await bootstrapPlatformStorage(control.password, peerId);
       await setStorageProfilePassword(control.password);
-      await runStorageRecoveryOrchestrator();
-      const service = await ensureStorageRuntime();
+      await runStorageRecoveryOrchestrator(peerId);
+      const service = await ensureStorageRuntime(peerId);
       const result = await service.unlockStorageProfile(control.password);
       if (result.ok) emitStorageState();
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
@@ -7481,8 +7533,8 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
     const hadPlatformRoot = Boolean(platformRootStore);
     try {
       if (!storageBootstrapState?.selectedBucket) throw Object.assign(new Error("No selected storage bucket"), { code: "storage_not_configured" });
-      if (!platformRootStore) await bootstrapPlatformStorage(control.password);
-      await runStorageRecoveryOrchestrator();
+      if (!platformRootStore) await bootstrapPlatformStorage(control.password, peerId);
+      await runStorageRecoveryOrchestrator(peerId);
       // Hold 冷导入文件可能已经带有完整 Keys；首次解锁桶时恢复到
       // Coordinator 的 canonical Vault 索引，空快照则仍保留 uninitialized
       // 供用户创建第一把 Key。
@@ -7517,8 +7569,8 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
     try {
       if (platformRootStore && platformBucketProvider?.provider !== "opfs") throw new Error("The active bucket cannot be switched until the next startup");
       storageBootstrapState = { selectedBackend: "opfs", selectedProfileId: "opfs" };
-      if (!platformRootStore) await bootstrapPlatformStorage();
-      await runStorageRecoveryOrchestrator();
+      if (!platformRootStore) await bootstrapPlatformStorage(undefined, peerId);
+      await runStorageRecoveryOrchestrator(peerId);
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: true, providerId: "opfs", latencyMs: 0 } };
     } catch (error) {
       storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
@@ -7530,10 +7582,10 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
     try {
       if (platformRootStore) throw new Error("Storage Profile import requires a cold start so the selected bucket can be rebound");
       storageBootstrapState = { selectedBackend: "s3", selectedProfileId: "imported", encryptedStorageProfileEnvelope: structuredClone(control.envelope) };
-      if (!platformRootStore) await bootstrapPlatformStorage(control.password);
+      if (!platformRootStore) await bootstrapPlatformStorage(control.password, peerId);
       await setStorageProfilePassword(control.password);
-      await runStorageRecoveryOrchestrator();
-      const service = await ensureStorageRuntime();
+      await runStorageRecoveryOrchestrator(peerId);
+      const service = await ensureStorageRuntime(peerId);
       const result = await service.unlockStorageProfile(control.password);
       if (result.ok) emitStorageState();
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
@@ -7560,13 +7612,13 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: bytes };
   }
   if (control.type === "activate" && !platformRootStore) {
-    const selected = await prepareInitialS3Storage(control.config);
+    const selected = await prepareInitialS3Storage(control.config, peerId);
     // 首次 S3 激活已经完成 Root/Runtime bootstrap。运行期
     // activateProvider 会把同一个 bucket 误判为“已绑定后禁止切换”，
     // 因此这里必须以专用 selected 结果结束。
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: selected };
   }
-  const service = await ensureStorageRuntime();
+  const service = await ensureStorageRuntime(peerId);
   if (control.type === "capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: typeof service.getConditionalCapabilities === "function" ? service.getConditionalCapabilities() : null };
   if (control.type === "cancel-probe") { service.cancelProbe(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
   if (control.type === "probe") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.probeProvider(control.config) };
@@ -7609,6 +7661,7 @@ function storageControlIoKind(control: Extract<CoordinatorClientRequest, { kind:
 async function executeStorageControlAtFinalBoundary(
   request: Extract<CoordinatorClientRequest, { kind: "storage.control" }>,
   signal?: AbortSignal,
+  peerId?: string,
 ): Promise<CoordinatorResponse> {
   const flushDeferredCatalogBindingDiscard = (): void => {
     if (!catalogBindingDiscardDeferred) return;
@@ -7619,14 +7672,14 @@ async function executeStorageControlAtFinalBoundary(
   // 没有 Root 时，activate/select/import 是建立第一个 Root 的冷启动操作；
   // 此阶段还没有可用的 Coordinator authority，直接走 bootstrap 分支。
   if (!platformRootStore) {
-    try { return await executeStorageControl(request, signal); }
+    try { return await executeStorageControl(request, signal, peerId); }
     finally { flushDeferredCatalogBindingDiscard(); }
   }
   try {
     return await withCoordinatorFinalIoLease(
       storageControlIoKind(request.control),
       signal,
-      (leaseSignal) => executeStorageControl(request, leaseSignal),
+      (leaseSignal) => executeStorageControl(request, leaseSignal, peerId),
       {
         auditOperation: "storage.control",
         // 桶首次解锁可能同时把 Hold 快照中的 Key 恢复到 Coordinator，
@@ -7759,7 +7812,7 @@ async function executeOwnerStorageData(
 async function executeStorageDataUnsafe(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
   assertStorageDataAvailable();
   const capturedSessionEpoch = coordinatorState.sessionEpoch;
-  const service = await ensureStorageRuntime();
+  const service = await ensureStorageRuntime(actualClientId);
   if (!("grantId" in request.data)) throw new Error("Storage grant is required for file operations");
   const data = request.data;
   const resolvedGrant = await resolveStorageGrant(data.grantId, actualClientId);
@@ -7823,12 +7876,12 @@ async function resolveStorageGrant(grantId: string, actualClientId: string): Pro
   return { context: grant.context, ownerStorageGeneration: grant.ownerStorageGeneration, connectSessionId: grant.context.connectSessionId };
 }
 
-async function abortStorageSession(connectSessionId: string): Promise<void> {
+async function abortStorageSession(connectSessionId: string, peerId: string): Promise<void> {
   for (const [requestId, pending] of storageRequests) {
     if (pending.connectSessionId === connectSessionId) { pending.controller.abort(); storageRequests.delete(requestId); }
   }
   for (const [grantId, grant] of storageGrants) if (grant.context.connectSessionId === connectSessionId) storageGrants.delete(grantId);
-  const service = await ensureStorageRuntime();
+  const service = await ensureStorageRuntime(peerId);
   await service.abortSession(connectSessionId);
 }
 
@@ -7854,7 +7907,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
   if (request.kind === "storage.session.abort") {
-    await abortStorageSession(request.connectSessionId);
+    await abortStorageSession(request.connectSessionId, actualClientId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
   if (request.kind === "storage.platform.bind") {
@@ -7982,7 +8035,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
   try {
     if (request.kind === "storage.control") {
       let result!: CoordinatorResponse;
-      const run = storageMutationTail.then(() => executeStorageControlAtFinalBoundary(request, controller.signal), () => executeStorageControlAtFinalBoundary(request, controller.signal));
+      const run = storageMutationTail.then(() => executeStorageControlAtFinalBoundary(request, controller.signal, actualClientId), () => executeStorageControlAtFinalBoundary(request, controller.signal, actualClientId));
       storageMutationTail = run.then(() => undefined, () => undefined);
       result = await run;
       return result;
@@ -12964,7 +13017,7 @@ async function openCoordinatorSession(
         storageBootstrapState = request.storageBootstrapState;
         bootstrapHintAssigned = true;
       }
-      await startCoordinatorInitialization(request.storageBootstrapState);
+      await startCoordinatorInitialization(request.storageBootstrapState, attempt.peerId);
       assertCoordinatorSessionOpenFresh(attempt);
 
       // No await is allowed between this check and exposeGroup. The group
@@ -13224,16 +13277,16 @@ coordinatorRuntimeApp = startSharedWorkerApp({
 
 // Worker 启动时从 K-V 读取仅公开的 Vault metadata
 // 状态为 uninitialized 或 locked；绝不读取/解密私钥直到 unlock RPC
-async function initializeCoordinator(skipStorageBootstrap = false, propagateFailure = false): Promise<void> {
+async function initializeCoordinator(skipStorageBootstrap = false, propagateFailure = false, peerId?: string): Promise<void> {
   coordinatorInitializationInProgress = true;
   try {
-    await initializeCoordinatorInternal(skipStorageBootstrap, propagateFailure);
+    await initializeCoordinatorInternal(skipStorageBootstrap, propagateFailure, peerId);
   } finally {
     coordinatorInitializationInProgress = false;
   }
 }
 
-async function initializeCoordinatorInternal(skipStorageBootstrap = false, propagateFailure = false): Promise<void> {
+async function initializeCoordinatorInternal(skipStorageBootstrap = false, propagateFailure = false, peerId?: string): Promise<void> {
   if (skipStorageBootstrap && !platformRootStore) {
     throw storageUnavailableError("Storage root is unavailable during recovery");
   }
@@ -13241,7 +13294,7 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
     try {
       // Storage 是独立健康域；失败时保持 Vault booting，等待页面重试，
       // 不能把可恢复的 Provider/CORS/认证问题升级成 Vault fatal。
-      await bootstrapPlatformStorage();
+      await bootstrapPlatformStorage(undefined, peerId);
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
       const healthStatus = storageHealthController.status();
@@ -13285,7 +13338,7 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
       },
       { allowLocalLock: true, auditOperation: "coordinator.bootstrap.recover" },
     );
-    await ensureStorageRuntime();
+    await ensureStorageRuntime(peerId);
     await registerCoordinatorTasks();
     activateCoordinatorRootWorkerUnits();
     // 启动时如果 vault 是 locked 状态，将所有任务标记为 blocked
@@ -13323,12 +13376,16 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
 }
 
 let coordinatorInitialization: Promise<void> | undefined;
-function startCoordinatorInitialization(state?: StorageBootstrapState): Promise<void> {
+function startCoordinatorInitialization(state?: StorageBootstrapState, peerId?: string): Promise<void> {
   if (!coordinatorInitialization) {
-    // Worker 没有 localStorage；首个页面 hello 提供启动选择。
+    // Worker 没有 localStorage；首个 session.open 提供启动选择和反向
+    // LocalStorage peer。这个 Promise 是 Worker 级 single-flight：首个
+    // 到达者的 state/peer 被闭包固定，后续 session 只等待同一初始化，
+    // 不能替换 peer 或重启初始化。peer 失效时 bridge freshness fence
+    // fail-closed；后续显式 storage/recovery 请求再绑定新的 active peer。
     // 缺失选择时保持 unselected，任何 keys/ 与 Vault 初始化都不得发生。
     storageBootstrapState = state ?? null;
-    coordinatorInitialization = initializeCoordinator();
+    coordinatorInitialization = initializeCoordinator(false, false, peerId);
   }
   return coordinatorInitialization;
 }

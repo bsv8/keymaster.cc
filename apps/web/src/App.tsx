@@ -101,6 +101,11 @@ function retryStartup(
 }
 
 function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }: ApplicationBootstrapResourceAppProps) {
+  // Storage unit 的 bucket-generation 重绑会先同步撤销旧 plugin scope，再
+  // 异步安装新 scope；在这个受控窗口中 storage.status 定义暂时不存在。
+  // 记住它曾经成功注册过，避免把生命周期重绑的 pending 窗口发布成
+  // 终态错误；首次启动若从未注册过仍保持 fail-closed recovery page。
+  const hadStorageStatusResource = useRef(false);
   const resourceArgs = [String(hostVersion)] as const;
   const snapshot = useResource<ApplicationBootstrapSnapshot>(
     host.resourceStore,
@@ -113,6 +118,7 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   const hasKeyspaceService = useHasCapability(KEYSPACE_SERVICE_CAPABILITY);
   const vaultService = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const hasStorageStatusResource = host.resourceRegistry?.get("storage.status") !== undefined;
+  if (hasStorageStatusResource) hadStorageStatusResource.current = true;
 
   if (snapshot.status === "error") {
     return (
@@ -164,6 +170,7 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   // 避免短暂回收窗口中挂载子树并调用 ensure()。这条路径必须是恢复页，
   // 不能退回 InitialSetupPage。
   if (!hasStorageStatusResource) {
+    if (hadStorageStatusResource.current) return <StartupPlaceholder />;
     return (
       <StartupError
         title="存储运行时正在恢复"

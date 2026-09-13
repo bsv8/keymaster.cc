@@ -156,4 +156,65 @@ describe("Keymaster WebLoom v4 adapter", () => {
     ]));
     await host.dispose("test");
   });
+
+  it("keeps required owner-session units blocked while a lock transition settles", async () => {
+    const owner = "02" + "44".repeat(32);
+    let setupCount = 0;
+    const host = createKeymasterPluginHost({
+      runtime: "window-main",
+      initialRuntimeIdentity: {
+        vaultStatus: "unlocked",
+        ownerPublicKeyHex: owner,
+        sessionEpoch: "session:lock-test:1",
+        bucketGeneration: 1,
+      },
+      disableConfigPersistence: true,
+      runtimeUnitImplementationRegistry: {
+        get: () => (context) => {
+          setupCount += 1;
+          context.provide(LOCAL_CAPABILITY, { ok: true });
+        },
+      },
+    });
+
+    await host.register({
+      id: "required-owner-session",
+      name: "Required owner session",
+      kind: "business",
+      startup: "optional",
+      defaultEnabled: true,
+      canDisable: false,
+      bootstrapStage: "owner-apps-ready",
+      displayGroup: "business",
+      units: [{
+        id: "required-owner-session.window",
+        runtime: "window-main",
+        scopeKind: "owner-session",
+        provides: [LOCAL_CAPABILITY],
+      }],
+    });
+    expect(host.state("required-owner-session").kind).toBe("enabled");
+
+    await expect(host.transitionRuntimeIdentity({
+      vaultStatus: "locked",
+      sessionEpoch: "session:lock-test:2",
+      bucketGeneration: 1,
+    })).resolves.toBeUndefined();
+    expect(host.state("required-owner-session")).toMatchObject({
+      kind: "blocked",
+      desiredEnabled: true,
+      blockedBy: ["runtime:owner-session-unavailable"],
+    });
+    expect(host.capabilities.has(LOCAL_CAPABILITY)).toBe(false);
+
+    await host.transitionRuntimeIdentity({
+      vaultStatus: "unlocked",
+      ownerPublicKeyHex: owner,
+      sessionEpoch: "session:lock-test:3",
+      bucketGeneration: 1,
+    });
+    expect(host.state("required-owner-session").kind).toBe("enabled");
+    expect(setupCount).toBe(2);
+    await host.dispose("test");
+  });
 });

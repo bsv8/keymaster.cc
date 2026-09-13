@@ -88,6 +88,13 @@ import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?shared
 
 const INITIAL_SETUP_RECOVERY_STORAGE_KEY = "keymaster.storage.initial-setup.recovery.v1";
 const INITIAL_SETUP_RECOVERY_LOCK = "keymaster.storage.initial-setup.recovery";
+/**
+ * SharedWorker 的共享边界必须与 localStorage profile 一致：同一个 profile
+ * 的多个 tab 继续共享 Coordinator，而不同的 Chromium storage context
+ * 不能因为 URL 相同而互相污染首次初始化状态。
+ */
+const COORDINATOR_WORKER_PROFILE_ID_KEY = "keymaster.coordinator.worker-profile-id.v1";
+const COORDINATOR_WORKER_PROFILE_ID_LOCK = "keymaster.coordinator.worker-profile-id";
 
 type InitialSetupRecoveryLocks = {
   request<T>(name: string, callback: () => Promise<T>): Promise<T>;
@@ -311,6 +318,42 @@ async function withInitialSetupRecoveryLock<T>(signal: AbortSignal, operation: (
   }
 }
 
+type WorkerProfileLocks = {
+  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
+};
+
+/** 为同一 localStorage profile 原子分配稳定的 SharedWorker 名称片段。 */
+async function ensureCoordinatorWorkerProfileId(): Promise<string | undefined> {
+  const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+  if (!storage) return undefined;
+  const read = (): string | undefined => {
+    try {
+      const current = storage.getItem(COORDINATOR_WORKER_PROFILE_ID_KEY);
+      return current && /^profile-[A-Za-z0-9_-]{1,128}$/u.test(current) ? current : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const create = (): string | undefined => {
+    const existing = read();
+    if (existing) return existing;
+    const generated = `profile-${randomIdentifierSuffix()}`;
+    try {
+      storage.setItem(COORDINATOR_WORKER_PROFILE_ID_KEY, generated);
+      return read() ?? generated;
+    } catch {
+      return undefined;
+    }
+  };
+  const locks = browserStorageLocks() as WorkerProfileLocks | undefined;
+  if (!locks) return create();
+  try {
+    return await locks.request(COORDINATOR_WORKER_PROFILE_ID_LOCK, async () => create());
+  } catch {
+    return create();
+  }
+}
+
 // ============================================================
 // 1. Client Types
 // ============================================================
@@ -505,9 +548,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private recoverableDiagnostics: RecoverableCoordinatorDiagnostic[] = [];
 
   constructor(options: CoordinatorClientOptions = {}) {
-    // 默认使用 unnamed SharedWorker：浏览器以最终构建后的 hashed URL
-    // 作为共享身份，同一发布的多个 tab 仍共享；新发布 URL 变化后不会
-    // 错连仍存活的旧协议 Worker。显式 workerName 仅供测试/定制宿主。
+    // workerName 显式传入时由宿主完全控制；默认名称在 connect() 中按
+    // localStorage profile 生成，使同一发布的多个 tab 仍共享，而独立
+    // Chromium storage context 不会复用另一个 context 的 Worker 状态。
     this.workerName = options.workerName;
     this.workerUrl = options.workerUrl;
     this.clientId = options.clientId ?? this.generateClientId();
@@ -567,8 +610,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         this.workerUrl ?? coordinatorWorkerUrl,
         typeof globalThis.location?.href === "string" ? globalThis.location.href : import.meta.url,
       );
-      const workerName = this.workerName ?? (!this.workerUrl && isDevelopment
-        ? "keymaster-coordinator-dev"
+      const workerProfileId = !this.workerName && !this.workerUrl
+        ? await ensureCoordinatorWorkerProfileId()
+        : undefined;
+      const workerName = this.workerName ?? (!this.workerUrl
+        ? `${isDevelopment ? "keymaster-coordinator-dev" : "keymaster-coordinator"}:${workerProfileId ?? "default"}`
         : undefined);
       let runtimePublishedReady = false;
       const runtime = connectSharedWorker({

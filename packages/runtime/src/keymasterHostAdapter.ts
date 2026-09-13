@@ -1643,7 +1643,12 @@ export function createKeymasterPluginHost(
           await coreHost!.enable(item.pluginId);
         }
       }
-      await coreHost!.reconcile();
+      // Locked/booting/uninitialized runtimes intentionally leave owner-session
+      // units blocked. A global reconcile would immediately try to start the
+      // required (canDisable=false) units again and turn the expected blocked
+      // state into StartupCapabilityError. The next unlocked transition will
+      // reconcile them after the owner identity is available.
+      if (next.vaultStatus === "unlocked") await coreHost!.reconcile();
     };
     const settled = (previous ? previous.catch(() => undefined).then(run) : run()).finally(() => {
       if (transitionPromise === settled) transitionPromise = undefined;
