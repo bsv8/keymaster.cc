@@ -84,16 +84,30 @@ export const REAL_TESTNET_ASSET_SCENARIO = {
   resourceProfile: "testnet",
 } as const satisfies IntegrationScenarioMetadata;
 
-/** 真实资源层的 SatSubscription 健康 Journey；不把健康握手冒充成收费业务。 */
+/** 真实资源层的 SatSubscription 配置投影 Journey；不把投影冒充成页面连接或收费业务。 */
 export const REAL_SATSUBSCRIPTION_HEALTH_SCENARIO = {
   id: "J-REAL-SATSUB-HEALTH",
   level: "real-resource",
   requirementIds: ["KM-SATSUB-001"],
-  startingState: "resource-setup 已完成 testnet WebSocket 健康握手，并写入脱敏运行状态。",
+  startingState: "resource-setup 已写入脱敏配置投影；真实连接结果由 Chromium 页面 Journey 产生。",
   successCriteria: [
-    "服务运行时返回 testnet 网络和稳定的服务身份公钥。",
-    "要求 WebRTC Direct 的运行可以明确区分已验证与未配置，而不是默认为成功。",
-    "健康门禁通过不被解释为充值、消费或服务端账本已经闭合。",
+    "资源状态只保留 testnet 和供应商公钥等公开配置投影，不把配置文字冒充实时健康握手。",
+    "WebSocket/WebRTC Direct 的 Node 直连探针不作为页面业务断言；页面 Journey 单独报告 online、disconnected 或 degraded。",
+    "资源状态检查不被解释为充值、消费或服务端账本已经闭合。",
+  ],
+  resourceProfile: "satsubscription",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 真实 SatSubscription 页面 Journey；页面结果独立于资源状态投影。 */
+export const REAL_SATSUBSCRIPTION_PAGE_SCENARIO = {
+  id: "J-REAL-SATSUB-PAGE",
+  level: "real-resource",
+  requirementIds: ["KM-SATSUB-001"],
+  startingState: "全新 Chromium context，用户通过真实 Local 页面建立 active Key；Node 只读取仓库外 Sat 配置。",
+  successCriteria: [
+    "页面把 satsubscription.json 的 websocket/webrtc-direct libp2p multiaddr 映射为供应商 multiaddrs，并保存真实配置。",
+    "正确公钥和地址在页面供应商行显示 online；故意错误公钥在同一页面显示 disconnected 或 degraded。",
+    "正确与错误连接结果都来自页面可见文本，不使用 Node WebSocket、Sat API 或 SharedWorker 内部接口断言。",
   ],
   resourceProfile: "satsubscription",
 } as const satisfies IntegrationScenarioMetadata;

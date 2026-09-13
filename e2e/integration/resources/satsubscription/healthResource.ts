@@ -1,114 +1,53 @@
-import { randomUUID } from "node:crypto";
 import type { E2ESatSubscriptionConfig } from "../config/types.js";
 import { assertSafeIdentifier } from "../../support/ids.js";
 
-export interface SatSubscriptionHealth {
-  /** 服务端运行时声明的货币网络，不能由 URL 或文件名推断。 */
-  readonly network: "testnet" | "mainnet" | "unknown";
-  /** 服务身份公钥；只保留公开身份。 */
-  readonly servicePublicKeyHex: string;
-  /** 服务返回的连接入口，用于确认双入口没有静默分叉。 */
-  readonly entrypoint: "websocket" | "webrtc-direct";
-}
-
-/** 未通过校验的探针原始结果允许显式 unknown，避免缺字段被默认为合法入口。 */
-export interface SatSubscriptionProbeHealth {
-  readonly network: "testnet" | "mainnet" | "unknown";
-  readonly servicePublicKeyHex: string;
-  readonly entrypoint: "websocket" | "webrtc-direct" | "unknown";
-}
-
-export interface SatSubscriptionProbe {
-  checkWebsocket(url: string, requestId: string): Promise<SatSubscriptionProbeHealth>;
-  /** WebRTC Direct 需要真实 P2P adapter；没有 adapter 时必须显式失败。 */
-  checkWebrtcDirect(address: string, requestId: string): Promise<SatSubscriptionProbeHealth>;
-}
-
-function assertHealth(value: SatSubscriptionProbeHealth, expectedEntrypoint: SatSubscriptionHealth["entrypoint"]): SatSubscriptionHealth {
-  if (value.entrypoint !== expectedEntrypoint) throw new Error(`SatSubscription ${expectedEntrypoint} probe returned the wrong entrypoint`);
-  if (value.network !== "testnet") throw new Error(`SatSubscription ${expectedEntrypoint} is not a testnet service`);
-  if (!/^0[23][0-9a-f]{64}$/iu.test(value.servicePublicKeyHex)) throw new Error(`SatSubscription ${expectedEntrypoint} returned an invalid service identity`);
-  return { network: "testnet", servicePublicKeyHex: value.servicePublicKeyHex.toLowerCase(), entrypoint: expectedEntrypoint };
-}
-
 /**
- * 使用浏览器/Node WebSocket 完成最小正式健康握手。
- * 服务端必须回显可验证的 network、servicePublicKeyHex 和 entrypoint；
- * 连接打开本身不能作为“testnet 服务可用”的证据。
+ * SatSubscription 资源层的公开配置投影。
+ *
+ * 这里故意不创建 WebSocket、不调用 Sat API，也不把 multiaddr 转成 URL。
+ * 真实连接是否成功只能由真实 Chromium 页面 Journey 的可见结果确认。
  */
-export function createWebSocketProbe(options: { readonly timeoutMs?: number } = {}): Pick<SatSubscriptionProbe, "checkWebsocket"> {
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  return {
-    checkWebsocket(url, requestId) {
-      return new Promise((resolve, reject) => {
-        const socket = new WebSocket(url);
-        let settled = false;
-        const finish = (error?: Error, value?: SatSubscriptionProbeHealth) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          try { socket.close(); } catch { /* already closed */ }
-          if (error) reject(error);
-          else if (value) resolve(value);
-          else reject(new Error("SatSubscription websocket health response is empty"));
-        };
-        const timer = setTimeout(() => finish(new Error("SatSubscription websocket health check timed out")), timeoutMs);
-        socket.addEventListener("open", () => {
-          socket.send(JSON.stringify({ type: "health", request_id: requestId, network: "testnet" }));
-        });
-        socket.addEventListener("message", (event) => {
-          if (typeof event.data !== "string") return finish(new Error("SatSubscription health response is not text JSON"));
-          try {
-            const value: unknown = JSON.parse(event.data);
-            if (!value || typeof value !== "object") throw new Error("health response is not an object");
-            const item = value as { network?: unknown; servicePublicKeyHex?: unknown; entrypoint?: unknown };
-            finish(undefined, {
-              network: item.network === "testnet" || item.network === "mainnet" ? item.network : "unknown",
-              servicePublicKeyHex: typeof item.servicePublicKeyHex === "string" ? item.servicePublicKeyHex : "",
-              entrypoint: item.entrypoint === "websocket" || item.entrypoint === "webrtc-direct" ? item.entrypoint : "unknown",
-            });
-          } catch (error) {
-            finish(error instanceof Error ? error : new Error("SatSubscription health response is invalid"));
-          }
-        });
-        socket.addEventListener("error", () => finish(new Error("SatSubscription websocket is unreachable")));
-        socket.addEventListener("close", (event) => {
-          if (!settled) finish(new Error(`SatSubscription websocket closed before health response (${event.code})`));
-        });
-      });
-    },
-  };
-}
-
-export interface SatSubscriptionVerification {
+export interface SatSubscriptionResourceProjection {
+  /** 本轮真实资源运行编号，限制状态归属范围。 */
   readonly runId: string;
-  readonly websocket: SatSubscriptionHealth;
-  readonly webrtcDirect?: SatSubscriptionHealth;
-  readonly servicePublicKeyHex: string;
+  /** 配置声明的网络标签；当前 SatSubscription 资源只接受 testnet。 */
   readonly network: "testnet";
+  /** satsubscription.json 中的远端供应商身份公钥。 */
+  readonly supplierPublicKeyHex: string;
+  /** 页面表单中的 WebSocket libp2p multiaddr，不是 wss:// URL。 */
+  readonly websocketMultiaddr: string;
+  /** 页面表单中的 WebRTC Direct libp2p multiaddr。 */
+  readonly webrtcDirectMultiaddr: string;
+  /** Node 资源层是否做过 WebSocket 探针；按测试边界固定为 false。 */
+  readonly websocketVerified: false;
+  /** Node 资源层是否做过 WebRTC Direct 探针；按测试边界固定为 false。 */
+  readonly webrtcDirectVerified: false;
 }
 
 /**
- * SatSubscription 双入口 Resource：身份和网络必须由服务运行时证明，不能信任配置文字。
+ * 把仓库外配置整理成跨 Playwright 项目可传递的公开投影。
+ *
+ * 该函数只做字段/身份格式检查，不代表供应商在线；页面 Journey 必须
+ * 通过 page.fill/page.click 重新提交这些字段并读取页面连接状态。
  */
-export class SatSubscriptionHealthResource {
-  readonly #config: E2ESatSubscriptionConfig;
-  readonly #probe: SatSubscriptionProbe;
-
-  constructor(config: E2ESatSubscriptionConfig, probe: SatSubscriptionProbe) {
-    this.#config = config;
-    this.#probe = probe;
+export function projectSatSubscriptionConfig(
+  config: E2ESatSubscriptionConfig,
+  runId: string,
+): SatSubscriptionResourceProjection {
+  const safeRunId = assertSafeIdentifier(runId, "run_id");
+  if (!/^0[23][0-9a-f]{64}$/iu.test(config.supplierPublicKeyHex)) {
+    throw new Error("SatSubscription 配置中的 supplierPublicKeyHex 不是合法压缩公钥");
   }
-
-  async verify(runId: string, options: { readonly requireWebrtcDirect?: boolean } = {}): Promise<SatSubscriptionVerification> {
-    const safeRunId = assertSafeIdentifier(runId, "run_id");
-    const websocket = assertHealth(await this.#probe.checkWebsocket(this.#config.websocket, `${safeRunId}:${randomUUID()}`), "websocket");
-    if (this.#config.expectedServicePublicKeyHex && websocket.servicePublicKeyHex !== this.#config.expectedServicePublicKeyHex.toLowerCase()) throw new Error("SatSubscription websocket identity does not match configured expectation");
-    let webrtcDirect: SatSubscriptionHealth | undefined;
-    if (options.requireWebrtcDirect) {
-      webrtcDirect = assertHealth(await this.#probe.checkWebrtcDirect(this.#config.webrtcDirect, `${safeRunId}:${randomUUID()}`), "webrtc-direct");
-      if (webrtcDirect.servicePublicKeyHex !== websocket.servicePublicKeyHex) throw new Error("SatSubscription websocket and WebRTC Direct identities differ");
-    }
-    return { runId: safeRunId, websocket, ...(webrtcDirect === undefined ? {} : { webrtcDirect }), servicePublicKeyHex: websocket.servicePublicKeyHex, network: "testnet" };
+  if (!config.websocket.trim() || !config.webrtcDirect.trim()) {
+    throw new Error("SatSubscription 配置必须同时提供 WebSocket 和 WebRTC Direct multiaddr");
   }
+  return {
+    runId: safeRunId,
+    network: "testnet",
+    supplierPublicKeyHex: config.supplierPublicKeyHex.toLowerCase(),
+    websocketMultiaddr: config.websocket,
+    webrtcDirectMultiaddr: config.webrtcDirect,
+    websocketVerified: false,
+    webrtcDirectVerified: false,
+  };
 }

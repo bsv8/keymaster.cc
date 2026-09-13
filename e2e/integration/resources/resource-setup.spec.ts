@@ -2,7 +2,7 @@ import { test } from "@playwright/test";
 import { loadE2EConfig, publicConfigFingerprint } from "./config/loader.js";
 import type { LoadedE2EConfig } from "./config/types.js";
 import { S3CleanupResource } from "./s3/s3CleanupResource.js";
-import { createWebSocketProbe, SatSubscriptionHealthResource } from "./satsubscription/healthResource.js";
+import { projectSatSubscriptionConfig } from "./satsubscription/healthResource.js";
 import { RecoveryLedger, TestnetFundingResource } from "./testnet/fundingResource.js";
 import { createWocTestnetChainAdapter } from "./testnet/wocChainAdapter.js";
 import { currentRunId } from "../support/ids.js";
@@ -19,8 +19,9 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
 
 /**
  * 整轮 real-resource 的唯一 setup：权限预检、S3 lease/开场清理，
- * 以及 SatSubscription WebSocket、testnet 链网络/余额/旧账检查。缺配置或
- * 缺少真实链适配器时故意失败，不能降级为本地测试替身。
+ * 以及 testnet 链网络/余额/旧账检查。SatSubscription 页面 Journey 自己
+ * 通过真实 Chromium 建立连接；这里不把 Node WebSocket 探针当作页面业务
+ * 证据，也不因为没有直接探测而把资源判定为失败。
  */
 test("真实资源整轮准备：S3、testnet 服务和资金账本门禁", async ({}, testInfo) => {
   test.setTimeout(60_000);
@@ -38,13 +39,7 @@ test("真实资源整轮准备：S3、testnet 服务和资金账本门禁", asyn
     // 如果是前缀测试，则显式传入自己的 run_id/scenario_id 前缀。
     await s3.cleanup(runId);
 
-    const websocketProbe = createWebSocketProbe();
-    const sat = new SatSubscriptionHealthResource(config.satsubscription, {
-      ...websocketProbe,
-      checkWebrtcDirect: async () => { throw new Error("WebRTC Direct real adapter is required by a scenario and was not configured"); },
-    });
-    const satVerification = await sat.verify(runId, { requireWebrtcDirect: process.env.KEYMASTER_E2E_REQUIRE_WEBRTC_DIRECT === "1" });
-
+    const satProjection = projectSatSubscriptionConfig(config.satsubscription, runId);
     const ledger = new RecoveryLedger(path.join(config.directory, "testnet-funding-ledger.json"));
     const chain = createWocTestnetChainAdapter({
       baseUrl: config.satsubscription.testnetApiBaseUrl,
@@ -62,10 +57,10 @@ test("真实资源整轮准备：S3、testnet 服务和资金账本门禁", asyn
       configFingerprint: publicConfigFingerprint(config),
       s3LeaseAcquired: true,
       satSubscription: {
-        network: satVerification.network,
-        servicePublicKeyHex: satVerification.servicePublicKeyHex,
-        websocketVerified: true,
-        webrtcDirectVerified: Boolean(satVerification.webrtcDirect),
+        network: satProjection.network,
+        configuredSupplierPublicKeyHex: satProjection.supplierPublicKeyHex,
+        websocketVerified: satProjection.websocketVerified,
+        webrtcDirectVerified: satProjection.webrtcDirectVerified,
       },
       testnet: {
         network: "testnet",

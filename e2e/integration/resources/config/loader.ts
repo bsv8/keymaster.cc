@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { SecretString } from "../../support/secretString.js";
-import type { E2ES3Config, E2ESatSubscriptionConfig, LoadedE2EConfig, LoadedE2ES3Config } from "./types.js";
+import type { E2ES3Config, E2ESatSubscriptionConfig, E2ESatSubscriptionPageConfig, LoadedE2EConfig, LoadedE2ES3Config, LoadedE2ESatSubscriptionConfig } from "./types.js";
 
 /** secp256k1 的阶；这里只用于检查资金种子格式，不导出或记录私钥。 */
 const SECP256K1_ORDER = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
@@ -106,15 +106,26 @@ function parseS3(value: Record<string, unknown>): E2ES3Config {
   };
 }
 
-function parseSatSubscription(value: Record<string, unknown>): E2ESatSubscriptionConfig {
+/** 只解析页面表单需要的三个公开 Sat 字段，不触碰链 API 或授权字段。 */
+function parseSatSubscriptionPage(value: Record<string, unknown>): E2ESatSubscriptionPageConfig {
   const websocket = requiredString(value.websocket, "websocket", "satsubscription.json");
-  let parsed;
-  try { parsed = new URL(websocket); }
-  catch { reject("config-url-invalid", "satsubscription.json 的 websocket 必须是有效 URL"); }
-  if (parsed.protocol !== "wss:" || parsed.username || parsed.password || parsed.search || parsed.hash) reject("config-url-invalid", "satsubscription.json 的 websocket 必须是无凭据的 wss:// 地址");
   const webrtcDirect = requiredString(value["webrtc-direct"], "webrtc-direct", "satsubscription.json");
-  const expected = value.expectedServicePublicKeyHex === undefined ? undefined : requiredString(value.expectedServicePublicKeyHex, "expectedServicePublicKeyHex", "satsubscription.json");
-  if (expected !== undefined && !/^0[23][0-9a-f]{64}$/iu.test(expected)) reject("config-identity-invalid", "satsubscription.json 的 expectedServicePublicKeyHex 不是合法压缩公钥");
+  // 真实配置字段名是 publickeyhex；兼容旧模板中的 expectedServicePublicKeyHex，
+  // 但最终统一暴露为页面供应商配置所需的 supplierPublicKeyHex。
+  const publicKeyValue = value.publickeyhex ?? value.expectedServicePublicKeyHex;
+  const publicKeyField = value.publickeyhex !== undefined ? "publickeyhex" : "expectedServicePublicKeyHex";
+  const supplierPublicKeyHex = requiredString(publicKeyValue, publicKeyField, "satsubscription.json");
+  if (!/^0[23][0-9a-f]{64}$/iu.test(supplierPublicKeyHex)) reject("config-identity-invalid", "satsubscription.json 的 publickeyhex 不是合法压缩公钥");
+  return {
+    websocket,
+    webrtcDirect,
+    supplierPublicKeyHex: supplierPublicKeyHex.toLowerCase(),
+  };
+}
+
+/** 解析完整资源配置；只有 resource-setup 资金准备会使用链 API 字段。 */
+function parseSatSubscription(value: Record<string, unknown>): E2ESatSubscriptionConfig {
+  const pageConfig = parseSatSubscriptionPage(value);
   const testnetApiBaseUrl = value.testnetApiBaseUrl === undefined || value.testnetApiBaseUrl === ""
     ? "https://api.whatsonchain.com/v1/bsv"
     : validateEndpoint(requiredString(value.testnetApiBaseUrl, "testnetApiBaseUrl", "satsubscription.json"), "testnetApiBaseUrl", "satsubscription.json");
@@ -122,9 +133,7 @@ function parseSatSubscription(value: Record<string, unknown>): E2ESatSubscriptio
     ? undefined
     : new SecretString(requiredString(value.testnetApiAuthorization, "testnetApiAuthorization", "satsubscription.json"));
   return {
-    websocket: parsed.toString(),
-    webrtcDirect,
-    ...(expected === undefined ? {} : { expectedServicePublicKeyHex: expected.toLowerCase() }),
+    ...pageConfig,
     testnetApiBaseUrl,
     ...(authorization === undefined ? {} : { testnetApiAuthorization: authorization }),
   };
@@ -164,9 +173,21 @@ export async function loadE2ES3Config(options: { readonly workspaceRoot?: string
   return { directory, s3 };
 }
 
+/**
+ * 只加载真实 SatSubscription 页面 Journey 所需的配置。
+ *
+ * 该函数只读取公开连接入口和供应商公钥，不读取 S3 凭据或 testnet 私钥；
+ * 页面测试仍必须通过 page.fill/page.click 把映射后的字段交给真实页面。
+ */
+export async function loadE2ESatSubscriptionConfig(options: { readonly workspaceRoot?: string; readonly configDir?: string } = {}): Promise<LoadedE2ESatSubscriptionConfig> {
+  const directory = await checkDirectory(options.configDir ?? process.env.KEYMASTER_E2E_CONFIG_DIR ?? DEFAULT_CONFIG_DIR, options.workspaceRoot ?? process.cwd());
+  const satsubscription = parseSatSubscriptionPage(parseObject(await readPrivateFile(directory, "satsubscription.json"), "satsubscription.json"));
+  return { directory, satsubscription };
+}
+
 /** 仅用于测试/诊断配置指纹，输入不包含任何秘密值。 */
 export function publicConfigFingerprint(config: Pick<LoadedE2EConfig, "directory" | "s3" | "satsubscription">): string {
-  const publicShape = JSON.stringify({ directory: config.directory, endpoint: config.s3.endpoint, bucket: config.s3.bucket, region: config.s3.region, websocket: config.satsubscription.websocket, webrtcDirect: config.satsubscription.webrtcDirect, testnetApiBaseUrl: config.satsubscription.testnetApiBaseUrl });
+  const publicShape = JSON.stringify({ directory: config.directory, endpoint: config.s3.endpoint, bucket: config.s3.bucket, region: config.s3.region, websocket: config.satsubscription.websocket, webrtcDirect: config.satsubscription.webrtcDirect, supplierPublicKeyHex: config.satsubscription.supplierPublicKeyHex, testnetApiBaseUrl: config.satsubscription.testnetApiBaseUrl });
   return createHash("sha256").update(publicShape).digest("hex").slice(0, 16);
 }
 

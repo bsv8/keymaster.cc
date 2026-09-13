@@ -28,6 +28,7 @@ async function withConfigDirectory(run: (directory: string) => Promise<void>): P
     await writeRestrictedFile(path.join(directory, "satsubscription.json"), JSON.stringify({
       websocket: "wss://sat.example.test/socket",
       "webrtc-direct": "/dns4/sat.example.test/tcp/443/wss",
+      publickeyhex: "02" + "11".repeat(32),
       testnetApiBaseUrl: "",
     }));
     await writeRestrictedFile(path.join(directory, "seed-key.hex"), `01${"0".repeat(62)}\n`);

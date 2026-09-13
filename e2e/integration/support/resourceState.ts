@@ -8,11 +8,14 @@ export interface ResourceRunState {
   readonly runId: string;
   readonly configFingerprint: string;
   readonly s3LeaseAcquired: boolean;
-  /** SatSubscription 运行时身份的非敏感结果。 */
+  /** SatSubscription 的非敏感配置投影；真实连接结果由页面 Journey 验证。 */
   readonly satSubscription: {
     readonly network: "testnet";
-    readonly servicePublicKeyHex: string;
-    readonly websocketVerified: true;
+    /** satsubscription.json 中的供应商公钥，仅用于配置投影，不代表远端服务身份已验证。 */
+    readonly configuredSupplierPublicKeyHex: string;
+    /** 是否由资源层探针验证 WebSocket；当前真实测试禁止 Node 探针，因此为 false。 */
+    readonly websocketVerified: boolean;
+    /** 是否由资源层探针验证 WebRTC Direct；当前仅由页面 Journey 验证。 */
     readonly webrtcDirectVerified: boolean;
   };
   /** testnet 资金库检查的公开投影，不包含 seed 或授权令牌。 */
@@ -56,9 +59,10 @@ export async function readResourceRunState(): Promise<ResourceRunState | null> {
       || state.s3LeaseAcquired !== true
       || !state.satSubscription
       || state.satSubscription.network !== "testnet"
-      || state.satSubscription.websocketVerified !== true
+      || typeof state.satSubscription.websocketVerified !== "boolean"
       || typeof state.satSubscription.webrtcDirectVerified !== "boolean"
-      || !/^0[23][0-9a-f]{64}$/iu.test(state.satSubscription.servicePublicKeyHex ?? "")
+      || typeof state.satSubscription.configuredSupplierPublicKeyHex !== "string"
+      || state.satSubscription.configuredSupplierPublicKeyHex.length === 0
       || !state.testnet
       || state.testnet.network !== "testnet"
       || typeof state.testnet.seedAddress !== "string"

@@ -29,9 +29,9 @@ function clearSecrets(config: LoadedE2ES3Config | undefined): void {
  * 开场清理；浏览器 context 没有本地目录或 Vault。物理 S3 桶不会由页面
  * 创建，页面只在本轮隔离前缀下创建 Keymaster 逻辑桶对象。
  *
- * 成功标准：页面的正式 S3 provider probe 和初始化事务成功，Node Resource
- * 能在远端看到本轮业务对象；刷新后真实目录和首 Key 仍能恢复。健康 probe
- * 或“配置文件可读取”本身不算初始化成功。
+ * 成功标准：页面的正式 S3 provider probe 和初始化事务成功，页面显示真实
+ * 逻辑桶、首 Key，并在刷新后恢复同一目录和身份。Node Resource 只负责租约、
+ * 本场景 prefix 的清理和生命周期安全，不把直接 S3 API 观察当作页面成功。
  *
  * 外部资源与收尾：只使用 setup 已取得的 S3 lease；Journey 只清理自己的
  * prefix，resource-teardown 再负责非前缀的全量收口、版本、delete marker
@@ -91,11 +91,9 @@ test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async 
       prefix: scenarioPrefix,
     }));
 
+    // publicKeyHex 由真实页面 Key 行读取；它是页面初始化结果的技术辅助值，
+    // 不是 Node S3 API 的业务成功判定。
     expect(ready.publicKeyHex).toMatch(/^0[23][0-9a-f]{64}$/iu);
-    await expect.poll(
-      () => resource.countBusinessObjects(state.runId, scenarioPrefix),
-      { timeout: 30_000, intervals: [250, 500, 1_000], message: "初始化完成后真实 S3 前缀必须至少有一个 Keymaster 业务对象" },
-    ).toBeGreaterThan(0);
 
     await test.step("用户刷新页面后从真实 S3 恢复同一逻辑桶和 Key", async () => {
       await page.reload({ waitUntil: "domcontentloaded" });

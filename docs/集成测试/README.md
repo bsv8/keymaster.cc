@@ -56,11 +56,13 @@ P2P 或目标部署。`real-resource` 只证明本次实际连接到的 testnet/
 真实资源配置的空白模板位于 `资源配置模板/`。复制到仓库外的
 `/home/david/.config/keymaster-e2e/` 后，必须由维护者人工填写并设置 `0700/0600` 权限；模板本身
 不含任何凭据。`real-s3` 命令只执行 s3.json 指定桶的 lease/清理和真实 S3 Journey；完整
-`real-resource` 命令还会执行 SatSubscription 健康预检和 testnet 资金库预检。S3 初始化
+`real-resource` 命令还会执行 SatSubscription 配置投影检查和 testnet 资金库预检；真实 Sat
+页面 Journey 使用独立的 `real-satsubscription-page` 项目运行，避免 S3/testnet 资源阻断掩盖页面结果。S3 初始化
 Journey 会使用 setup 的 lease 在隔离 prefix 下建立逻辑桶，并在刷新后验证恢复；它不会
 创建物理桶。非前缀 setup/teardown 才执行指定桶的全量业务对象清理。真实 testnet 资产
 Journey 还要等待链上确认并归集。SatSubscription 健康
-Journey 只证明运行时身份和网络，不能替代充值、消费与账本对账；
+Journey 只检查不冒充页面结果的配置投影，真实页面 Journey 还要比较正确/错误供应商身份的
+连接状态；两者都不能替代充值、消费与账本对账；
 尚未配置真实适配器的业务 Journey 不会被伪装成已通过。
 
 ## 检查者阅读顺序

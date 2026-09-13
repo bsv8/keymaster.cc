@@ -33,6 +33,13 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
     {
+      name: "real-satsubscription-page",
+      // 页面 Journey 只需要仓库外 satsubscription.json；不依赖会做 S3/
+      // testnet 资源准备的项目，避免资源层阻断掩盖真实页面结果。
+      testMatch: /journeys\/real-resource\/real-satsubscription-page\.spec\.ts$/u,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
       name: "resource-teardown",
       testMatch: /resources\/resource-teardown\.spec\.ts$/u,
     },

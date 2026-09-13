@@ -37,10 +37,16 @@ export function createSatSubscriptionRepository(handle: KeyValueStore): SatSubsc
 }
 
 export class SatSubscriptionRepository {
-  readonly ownerPublicKeyHex: string;
   constructor(readonly handle: KeyValueStore) {
-    this.ownerPublicKeyHex = handle.ownerPublicKeyHex;
   }
+  /**
+   * 读取延迟绑定句柄的当前 owner。
+   *
+   * Worker 句柄在首次 K-V 操作前可能还没有绑定 owner；这里不能在构造
+   * Repository 时缓存空字符串，否则第一次 load 虽然已经完成绑定，后续
+   * save 仍会拿旧的空 owner 做隔离校验。
+   */
+  get ownerPublicKeyHex(): string { return this.handle.ownerPublicKeyHex; }
   close(): void { this.handle.close(); }
   async load(): Promise<SatSubscriptionStateSnapshot> {
     const stored = (await this.handle.get<SatSubscriptionRepositorySnapshot>("snapshot", { partition: "state" }))?.value;

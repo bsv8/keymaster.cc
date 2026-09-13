@@ -1,14 +1,14 @@
 {
   "说明": {
-    "websocket": "SatSubscription testnet WebSocket 地址，必须是无凭据的 wss://",
-    "webrtc-direct": "同一 testnet 服务的 WebRTC Direct 地址；需要真实 P2P 场景时必须可连接",
-    "expectedServicePublicKeyHex": "可选的压缩服务身份公钥；留空表示不额外固定身份",
+    "websocket": "SatSubscription testnet WebSocket 的 libp2p multiaddr；不是可直接传给 new WebSocket 的 wss:// URL",
+    "webrtc-direct": "同一 testnet 服务的 WebRTC Direct libp2p multiaddr；需要真实 P2P 场景时必须可连接",
+    "publickeyhex": "真实供应商的 66 位压缩身份公钥 hex；页面映射为 supplierPublicKeyHex 并用于身份 pin",
     "testnetApiBaseUrl": "Node 侧 testnet 链查询/广播 API 根地址；留空使用 https://api.whatsonchain.com/v1/bsv",
     "testnetApiAuthorization": "可选链 API 授权令牌；只在 Node Resource 读取，不能进入浏览器或报告"
   },
   "websocket": "",
   "webrtc-direct": "",
-  "expectedServicePublicKeyHex": "",
+  "publickeyhex": "",
   "testnetApiBaseUrl": "",
   "testnetApiAuthorization": ""
 }
