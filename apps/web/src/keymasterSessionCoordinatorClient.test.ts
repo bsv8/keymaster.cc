@@ -593,7 +593,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally { globalThis.SharedWorker = original; }
   });
 
-  it("uses the module URL constructor", async () => {
+  it("uses the module URL constructor and a profile-scoped Worker name", async () => {
     const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
     const worker = { port } as unknown as SharedWorker;
@@ -604,7 +604,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client = createCoordinatorClient();
       await client.connect();
       expect(Constructor).toHaveBeenCalledWith(expect.anything(), {
-        name: "keymaster-coordinator-dev",
+        name: expect.stringMatching(/^keymaster-coordinator-dev:profile-[A-Za-z0-9_-]+$/u),
         type: "module"
       });
     }

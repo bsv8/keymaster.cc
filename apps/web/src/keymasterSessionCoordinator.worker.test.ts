@@ -1956,6 +1956,32 @@ describe("Session Coordinator initial setup transaction", () => {
     expect(plan.bucketPassword).toBe("");
   }, 20_000);
 
+  it("initial-setup adopted Local provider follows the current owner after tab handoff", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    const first = makeCoordinatorTestPeer("test", (input) => fixture.bridge(input as LocalStorageBridgeRequest));
+    __testInstallCoordinatorBridgePeer(first.peer, {
+      peerGeneration: 1,
+      sessionEpoch: __testGetSnapshot().sessionEpoch,
+      leaseId: "initial-setup-first",
+    });
+
+    const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-handoff-001") });
+    expect(response.operationResult).toMatchObject({ ok: true });
+    const firstCallCount = first.bridgeCalls.length;
+
+    const second = makeCoordinatorTestPeer("test-second", (input) => fixture.bridge(input as LocalStorageBridgeRequest));
+    __testInstallCoordinatorBridgePeer(second.peer, {
+      peerGeneration: 1,
+      sessionEpoch: __testGetSnapshot().sessionEpoch,
+      leaseId: "initial-setup-second",
+    });
+
+    const exportResponse = await __testDispatchStorageControl({ type: "cold-export" });
+    expect(exportResponse.ack.status).toBe("ok");
+    expect(first.bridgeCalls).toHaveLength(firstCallCount);
+    expect(second.bridgeCalls.length).toBeGreaterThan(0);
+  }, 20_000);
+
   it("运行态安装后的 Coordinator meta 失败会回滚目录、Root 和候选对象", async () => {
     const fixture = makeInitialSetupWorkerBridge();
     __testSetLocalStorageBridgeOverride(fixture.bridge);

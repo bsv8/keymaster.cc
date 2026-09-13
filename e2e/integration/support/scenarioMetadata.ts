@@ -35,9 +35,9 @@ export const LOCAL_SETTINGS_SCENARIO = {
   requirementIds: ["KM-NAV-001", "KM-SETTINGS-001"],
   startingState: "全新 Chromium context 已完成 Local 初始化，Vault 已解锁且存在 active Key。",
   successCriteria: [
-    "系统、应用设置、插件、日志和系统状态入口都由正式业务菜单打开。",
+    "系统、应用设置、插件和系统状态入口都由正式业务菜单打开。",
     "语言修改立即反映到页面并持久化到 localStorage，刷新后仍保持合法语言。",
-    "插件依赖状态和统一日志页可以读取，设置页失败时保留可诊断结果。",
+    "插件依赖状态和系统状态页可以读取，设置页失败时保留可诊断结果。",
   ],
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
