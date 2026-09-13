@@ -36,13 +36,14 @@ vi.mock("@keymaster/runtime", () => ({
       return value.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, name: string) => String(options?.[name] ?? ""));
     },
   }),
-  usePluginHost: () => ({ resourceStore: {} }),
+  usePluginHost: () => ({ resourceStore: {}, resourceRegistry: { get: () => ({}) } }),
   useRuntimeStatus: () => ({ vault: state.vault }),
   AppLink: ({ children }: { children?: unknown }) => children,
 }));
 
 vi.mock("webloom-framework/react", () => ({
   useCapability: <T,>(_key: string): T => state.service as unknown as T,
+  useOptionalCapability: <T,>(_key: string): T | undefined => state.service as unknown as T,
   useResourceSelector: <T,>(_store: unknown, id: string, _args: readonly string[], _selector: unknown): T =>
     (id === "msfile.status" ? state.status : state.lifecycle) as unknown as T
 }));

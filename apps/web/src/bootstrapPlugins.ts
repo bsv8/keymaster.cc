@@ -104,7 +104,7 @@ function startupFailureText(error: unknown): string {
  * 两次 Coordinator 启动尝试都失败时保留两端错误。
  *
  * Vite dev Worker 的脚本执行错误可能只发生在第一次 SharedWorker 句柄
- * 上；WebLoom 0.4.1 只把它呈现为 ready snapshot 前的 disconnected，随后
+ * 上；WebLoom 只把它呈现为 ready snapshot 前的 disconnected，随后
  * 同名 Worker 的第二个句柄通常只能等到 call deadline，形成一条泛化的
  * timeout。首个错误因此只会是明确的“尚未发布 ready、请检查 Worker
  * console”诊断，不假装拿到了浏览器的 JS exception 文本。该错误把两次
@@ -651,6 +651,16 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     pluginId: "storage"
   }, () => registerPlugins(pageWindowApp!, [coordinatorClient.createWindowStoragePlugin()]));
   await connectCoordinatorWithStartupRetry(coordinatorClient);
+  // `sendHello()` 把 Coordinator 的权威身份快照同步写入 client，但首次
+  // `session.state` topic baseline 可能稍后才到达。若此时直接进入 owner
+  // 阶段，Adapter 仍会拿创建 Host 时的 `booting` 身份检查 owner-session
+  // unit，导致真实第二个 tab 被错误地标成 unavailable。这里把已确认的
+  // hello 快照作为启动 barrier 立即投影到 Window Host；后续 topic 事件
+  // 仍负责处理真正的世代变化。
+  await withBootstrapErrorContext({
+    stage: "coordinator",
+    operation: "synchronize-runtime-identity",
+  }, () => host.transitionRuntimeIdentity(runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot())));
   const coordinatorRuntime = runWithBootstrapErrorContext({
     stage: "transport",
     operation: "get-coordinator-runtime-handle"
@@ -776,8 +786,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   let storageReadyForBootstrap = storageReady;
   let sessionStateOff: (() => void) | undefined;
   let ownerAssemblyGeneration = 0;
-  let observedRuntimeIdentityKey = runtimeIdentityKeyFor(initialRuntimeIdentity);
-  let observedRuntimeIdentity = initialRuntimeIdentity;
+  // connect() 已经完成 hello 和 topic baseline；以此刻 Coordinator 的
+  // 权威快照作为 observed baseline。否则首次 session.state baseline 会把
+  // 启动阶段刚同步过的同一身份误判为一次 owner 切换，重入
+  // runOwnerAndConnectStages，并在旧实例仍 starting 时触发 StartupCapabilityError。
+  let observedRuntimeIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
+  let observedRuntimeIdentityKey = runtimeIdentityKeyFor(observedRuntimeIdentity);
 
   // 页面销毁时也要回收不是由某个业务 manifest 直接拥有的资产工作区。
   runWithBootstrapErrorContext({
@@ -791,6 +805,32 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   function runtimeIdentityKeyFor(identity: RuntimeIdentityTransition): string {
     return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.bucketGeneration ?? "unknown"}`;
   }
+
+  /**
+   * Owner 阶段可能由 storage-ready 回调先于 `session.state` baseline 触发。
+   * 在装配 owner 插件前，把当前 Coordinator 快照先提交给 Host，并立即
+   * 更新 observed baseline；这样随后到达的同一身份事件只会刷新目录，
+   * 不会把正在启动的 owner 阶段误判为第二次身份切换并停掉。
+   */
+  let runtimeIdentitySyncPromise: Promise<void> | undefined;
+  const synchronizeRuntimeIdentityBeforeOwnerStage = (): Promise<void> => {
+    if (runtimeIdentitySyncPromise) return runtimeIdentitySyncPromise;
+    const task = (async () => {
+      const next = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
+      const nextKey = runtimeIdentityKeyFor(next);
+      if (nextKey === observedRuntimeIdentityKey) return;
+      observedRuntimeIdentity = next;
+      observedRuntimeIdentityKey = nextKey;
+      await withBootstrapErrorContext({
+        stage: "coordinator",
+        operation: "synchronize-runtime-identity-before-owner-stage",
+      }, () => host.transitionRuntimeIdentity(next));
+    })().finally(() => {
+      if (runtimeIdentitySyncPromise === task) runtimeIdentitySyncPromise = undefined;
+    });
+    runtimeIdentitySyncPromise = task;
+    return task;
+  };
 
   const currentActiveKey = (stage: BootstrapErrorStage = "coordinator"): { unlocked: boolean; activePublicKeyHex?: string } =>
     runWithBootstrapErrorContext({
@@ -842,6 +882,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     });
 
   const runOwnerAndConnectStages = async (retryFailed = false): Promise<void> => {
+    await synchronizeRuntimeIdentityBeforeOwnerStage();
     const active = currentActiveKey("owner-apps-ready");
     if (!active.unlocked) return;
     if (ownerAppsPromise) return ownerAppsPromise;
@@ -1022,10 +1063,23 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   }
 
   let sessionTransitionTail = Promise.resolve();
-  const handleSessionStateChanged = async (): Promise<void> => withBootstrapErrorContext({
-    stage: "coordinator",
-    operation: "handle-session-state"
-  }, async () => {
+  const handleSessionStateChanged = async (): Promise<void> => {
+    // session.state 可能已经排队，而页面在这段时间内主动 disconnect
+    // 并建立了新的 Runtime。旧事件不能继续让 Host enable storage；否则
+    // 正常的 late result 会被误报成启动错误并污染浏览器 console。
+    const runtimeAtStart = coordinatorClient.getRuntimeHandle();
+    const isCurrentConnection = (): boolean => Boolean(
+      runtimeAtStart
+      && coordinatorClient.getIsConnected()
+      && coordinatorClient.getRuntimeHandle() === runtimeAtStart,
+    );
+    if (!isCurrentConnection()) return;
+    try {
+      await withBootstrapErrorContext({
+        stage: "coordinator",
+        operation: "handle-session-state"
+      }, async () => {
+        if (!isCurrentConnection()) return;
     const nextIdentity = runWithBootstrapErrorContext({
       stage: "coordinator",
       operation: "read-runtime-identity"
@@ -1042,6 +1096,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       stage: "coordinator",
       operation: "refresh-runtime-unit-snapshots"
     }, () => host.refreshRuntimeUnitSnapshots());
+    if (!isCurrentConnection()) return;
     if (!identityChanged) {
       const active = currentActiveKey("coordinator");
       if (vaultSelectionReady) {
@@ -1083,13 +1138,22 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       operation: "transition-runtime-identity",
       context: { identityChanged, ownerIdentityChanged }
     }, () => host.transitionRuntimeIdentity(nextIdentity));
+    if (!isCurrentConnection()) return;
     await staleOwnerAssembly?.catch(() => undefined);
 
     if (!vaultSelectionReady) return;
     const active = currentActiveKey("coordinator");
     updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked }, "coordinator");
     if (active.unlocked && !connectAppsReady) await runOwnerAndConnectStages();
-  });
+      });
+    } catch (error) {
+      // disconnect/reconnect 是合法的生命周期路径；若错误来自已失效的
+      // Runtime，仅丢弃该旧事件。当前 Runtime 仍有效时继续上抛，让统一
+      // bootstrap error 通道暴露真实故障。
+      if (!isCurrentConnection()) return;
+      throw error;
+    }
+  };
 
   sessionStateOff = runWithBootstrapErrorContext({
     stage: "coordinator",

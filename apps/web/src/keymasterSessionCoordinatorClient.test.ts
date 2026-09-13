@@ -140,6 +140,12 @@ function createTestMessagePort(
   let runtimeMessageErrorListener: ((event: MessageEvent) => void) | null = null;
   let manuallyDisabled = false;
   let implementation: (message: any, transfer?: readonly Transferable[]) => unknown = initialImplementation ?? (() => undefined);
+  // WebLoom 0.4.2 的每条跨 realm 消息都必须带 endpoint binding；这个
+  // fake port 只模拟 Worker wire，不再依赖旧版缺少 binding 的宽松解码。
+  const remoteBinding = {
+    runtimeInstanceId: "test-coordinator-worker",
+    connectionId: "connection:test-coordinator-worker",
+  } as const;
 
   const capabilityKind = (message: Record<string, unknown>): "unary" | "stream" => message.mode === "stream" ? "stream" : "unary";
   const toLegacyOutbound = (message: unknown): unknown => {
@@ -165,7 +171,8 @@ function createTestMessagePort(
     if (runtimeMessageListeners.size === 0) return;
     const emit = (event: MessageEvent): void => { for (const listener of [...runtimeMessageListeners]) listener(event); };
     if (raw && typeof raw === "object" && typeof (raw as { type?: unknown }).type === "string" && (raw as { type: string }).type.startsWith("webloom.runtime.v1.")) {
-      emit({ data: raw } as MessageEvent);
+      const message = raw as Record<string, unknown>;
+      emit({ data: { ...message, binding: message.binding ?? remoteBinding } } as MessageEvent);
       return;
     }
     if (raw && typeof raw === "object" && typeof (raw as { requestId?: unknown }).requestId === "string") {
@@ -173,14 +180,14 @@ function createTestMessagePort(
       const call = calls.get(value.requestId);
       if (!call) return;
       if (call.mode === "stream") {
-        emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, streamReady: true } } as MessageEvent);
+        emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", binding: remoteBinding, callId: value.requestId, serviceInstanceId: call.serviceInstanceId, streamReady: true } } as MessageEvent);
         const baselines = value.operationResult && typeof value.operationResult === "object" && Array.isArray((value.operationResult as { baselines?: unknown[] }).baselines)
           ? (value.operationResult as { baselines: unknown[] }).baselines
           : [];
         for (const baseline of baselines) {
           const snapshot = baseline && typeof baseline === "object" ? (baseline as { snapshot?: unknown }).snapshot : undefined;
           if (!snapshot) continue;
-          emit({ data: { type: "webloom.runtime.v1.next", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, sequence: call.nextSequence++, item: snapshot } } as MessageEvent);
+          emit({ data: { type: "webloom.runtime.v1.next", protocolVersion: "webloom.runtime.v1", binding: remoteBinding, callId: value.requestId, serviceInstanceId: call.serviceInstanceId, sequence: call.nextSequence++, item: snapshot } } as MessageEvent);
         }
         return;
       }
@@ -198,14 +205,14 @@ function createTestMessagePort(
             },
           }
         : value.operationResult;
-      emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", callId: value.requestId, serviceInstanceId: call.serviceInstanceId, result: { sessionEpoch: value.sessionEpoch ?? "e", ack: value.ack ?? { status: "ok" }, ...(operationResult === undefined ? {} : { operationResult }) } } } as MessageEvent);
+      emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", binding: remoteBinding, callId: value.requestId, serviceInstanceId: call.serviceInstanceId, result: { sessionEpoch: value.sessionEpoch ?? "e", ack: value.ack ?? { status: "ok" }, ...(operationResult === undefined ? {} : { operationResult }) } } } as MessageEvent);
       return;
     }
     const stream = [...calls.values()].find((call) => call.mode === "stream");
     if (!stream) return;
     const callId = [...calls.entries()].find(([, call]) => call === stream)?.[0];
     if (!callId) return;
-    emit({ data: { type: "webloom.runtime.v1.next", protocolVersion: "webloom.runtime.v1", callId, serviceInstanceId: stream.serviceInstanceId, sequence: stream.nextSequence++, item: raw } } as MessageEvent);
+    emit({ data: { type: "webloom.runtime.v1.next", protocolVersion: "webloom.runtime.v1", binding: remoteBinding, callId, serviceInstanceId: stream.serviceInstanceId, sequence: stream.nextSequence++, item: raw } } as MessageEvent);
   };
 
   const postMessage = ((message: unknown, transfer?: readonly Transferable[]) => {
@@ -1117,7 +1124,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
   it("reports an actionable error when SharedWorker.onerror fires before ready", async () => {
     // No ready snapshot is emitted: this models the raw browser worker error
-    // path, where WebLoom 0.4.1 only reports `disconnected` and does not expose
+    // path, where WebLoom only reports `disconnected` and does not expose
     // ErrorEvent.message to the client.
     const port = createTestMessagePort(undefined, { autoReady: false });
     const worker = { port, onerror: null as ((event: Event) => void) | null } as unknown as SharedWorker;

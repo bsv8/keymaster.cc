@@ -3197,7 +3197,10 @@ async function installPlatformStorage(provider: StorageBucketProvider, bucket: S
       // 不把它或其派生 key 放进 Coordinator 长期状态。
       candidateStorageProfileKey = await createEphemeralStorageRuntimeKey();
     } else if (bucket.provider === "opfs" && !storageProfileKey) {
-      candidateStorageProfileKey = await deriveStorageProfileKey("opfs-local-key");
+      // 冷启动候选 Root 尚未提交，当前全局 salt 仍可能属于旧桶；
+      // 必须使用本次候选 Root 原子初始化得到的 salt 派生临时 Profile
+      // key，不能让默认参数读取尚未发布的全局 salt。
+      candidateStorageProfileKey = await deriveStorageProfileKey("opfs-local-key", candidateSalt);
     } else if (storageProfileKey) {
       candidateStorageProfileKey = storageProfileKey;
     } else {
@@ -4080,6 +4083,10 @@ function publishCoordinatorContactsPresence(): void {
 }
 
 function publishSessionState(cause: SessionStateEvent["cause"]): void {
+  // 服务目录与 owner/session 可见性共享同一状态提交点。锁定、解锁、换
+  // Key、Storage Root 重绑都会改变 identity；先同步撤权/旋转 exposure，
+  // 再广播业务状态，避免页面看到已 unlocked 但仍持有旧 service proxy。
+  reconcileCoordinatorSessionExposures();
   publishTopicEvent("session.state", {
     type: "session.state.changed",
     cause,
@@ -5668,16 +5675,26 @@ interface CoordinatorPeerState {
   sessionOperationTail: Promise<void>;
   topicStream?: CoordinatorTopicStreamQueue;
   serviceExposure?: { revoke(): void };
+  /** 当前 owner/session 世代对应的 WebLoom service exposure；旋转后旧 proxy 必须失效。 */
+  serviceExposureIdentity?: string;
   sessionBinding?: CoordinatorSessionBinding;
   openCommitOrder?: number;
   bridgeRequests: Set<CoordinatorBridgeRequest>;
   drainPromise?: Promise<void>;
 }
 
+/** WebLoom 0.4.2 endpoint 字段的领域侧窄投影；不把框架对象泄漏进持久化。 */
+type CoordinatorPeerEndpointInfo = {
+  readonly endpointState?: "active" | "closing" | "closed";
+  readonly binding?: { readonly runtimeInstanceId: string; readonly connectionId: string };
+};
+
 /** WebLoom 连接 peer 注册表；Local I/O 只在 session.open 提交或物理撤权时切换。 */
 const coordinatorPeers = new Map<string, CoordinatorPeerState>();
 let storageIoOwner: CoordinatorStorageIoOwner | undefined;
 let coordinatorSessionCommitOrder = 0;
+/** 对外报告的 owner handoff 修订；即使 survivor 早于旧 owner 打开，也必须递增。 */
+let coordinatorStorageIoHandoffRevision = 0;
 
 interface CoordinatorSessionOpenAttempt {
   readonly state: CoordinatorPeerState;
@@ -5771,7 +5788,11 @@ function selectCoordinatorStorageIoOwner(): void {
   const selected = candidates[candidates.length - 1];
   storageIoOwner = selected?.sessionBinding === undefined || selected.openCommitOrder === undefined
     ? undefined
-    : { ...selected.sessionBinding, peerId: selected.peer.peerId, commitOrder: selected.openCommitOrder };
+    : {
+      ...selected.sessionBinding,
+      peerId: selected.peer.peerId,
+      commitOrder: ++coordinatorStorageIoHandoffRevision,
+    };
 }
 
 function abortCoordinatorPeerInflight(peerId: string): void {
@@ -5830,6 +5851,7 @@ function fenceCoordinatorPeerSession(
   state.openCommitOrder = undefined;
   state.serviceExposure?.revoke();
   state.serviceExposure = undefined;
+  state.serviceExposureIdentity = undefined;
   if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream, coordinatorSessionStaleError("Coordinator topic stream was revoked"));
   state.topicStream = undefined;
   for (const pending of state.bridgeRequests) pending.controller.abort();
@@ -7335,7 +7357,11 @@ async function executeStorageControl(request: Extract<CoordinatorClientRequest, 
       const detail = coordinatorAuthorityRecoveryOperationNames.length > 0
         ? `; active final I/O=${coordinatorAuthorityRecoveryOperationNames.join(",")}`
         : "";
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `Storage startup failed${detail}`, code: "storage_unavailable" } };
+      const health = storageHealthController.snapshot();
+      const healthDetail = health.message
+        ? `; ${health.diagnostic ?? "unknown"}: ${health.message}`
+        : health.diagnostic ? `; ${health.diagnostic}` : "";
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `Storage startup failed${healthDetail}${detail}`, code: "storage_unavailable" } };
     }
     if (storageHealthController.status() !== "ready" && !storageStartupFailure) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
@@ -10437,12 +10463,39 @@ async function executeMsfileRequestUnsafe(
 }
 
 function enqueueCoordinatorRequest(request: CoordinatorClientRequest, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
-  const run = coordinatorRequestTail.then(
-    () => executeProcessRequest(request, actualClientId, requestSignal),
-    () => executeProcessRequest(request, actualClientId, requestSignal)
-  );
+  const requestId = "requestId" in request ? request.requestId : generateRequestId();
+  let started = false;
+  const execute = (): Promise<CoordinatorResponse> => {
+    started = true;
+    // A cancelled request may have spent time behind another FIFO item. Do
+    // not start its business handler after the peer was fenced; the caller's
+    // Provider slot can settle immediately while this no-op keeps the FIFO
+    // chain ordered for later requests.
+    if (requestSignal?.aborted || revokedCoordinatorPeerIds.has(actualClientId)) {
+      return Promise.resolve(disconnectedClientResponse(requestId));
+    }
+    return executeProcessRequest(request, actualClientId, requestSignal);
+  };
+  const run = coordinatorRequestTail.then(execute, execute);
   coordinatorRequestTail = run.then(() => undefined, () => undefined);
-  return run;
+  if (!requestSignal) return run;
+
+  // Only a request that has not entered executeProcessRequest is safe to
+  // settle early. Once started, its handler must retain the execution slot
+  // until its real Promise settles; this prevents a late side effect from
+  // escaping the Runtime drain fence.
+  let removeAbort: (() => void) | undefined;
+  const cancelled = new Promise<CoordinatorResponse>((resolve) => {
+    const onAbort = (): void => {
+      if (!started) resolve(disconnectedClientResponse(requestId));
+    };
+    if (requestSignal.aborted) onAbort();
+    else {
+      requestSignal.addEventListener("abort", onAbort, { once: true });
+      removeAbort = () => requestSignal.removeEventListener("abort", onAbort);
+    }
+  });
+  return Promise.race([run, cancelled]).finally(() => removeAbort?.());
 }
 
 async function executeProcessRequest(
@@ -10451,6 +10504,10 @@ async function executeProcessRequest(
   requestSignal?: AbortSignal,
 ): Promise<CoordinatorResponse> {
   const requestId = "requestId" in request ? request.requestId : generateRequestId();
+
+  if (requestSignal?.aborted || revokedCoordinatorPeerIds.has(actualClientId)) {
+    return disconnectedClientResponse(requestId);
+  }
 
   if (request.kind !== "lock" && "expectedSessionEpoch" in request) {
     if (
@@ -12541,7 +12598,26 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
 // 11. Snapshot & Broadcasting
 // ============================================================
 
+function coordinatorStorageIoOwnerPeerSnapshot(): CoordinatorBootstrapSnapshot["storageIoOwnerPeer"] {
+  if (!storageIoOwner) return undefined;
+  const state = coordinatorPeerState(storageIoOwner.peerId);
+  const endpoint = state?.peer as PeerController & CoordinatorPeerEndpointInfo;
+  // 只报告当前仍 active 的物理 endpoint；closing/revoked peer 不得被
+  // 页面误认为可以继续承载 owner I/O。
+  if (!state || endpoint.endpointState !== "active" || state.peer.scope.state !== "active"
+    || !state.sessionOpen || state.status !== "open" || !sameCoordinatorSessionBinding(state.sessionBinding, storageIoOwner)) {
+    return undefined;
+  }
+  if (!endpoint.binding) return undefined;
+  return {
+    peerId: state.peer.peerId,
+    binding: { ...endpoint.binding },
+    handoffRevision: storageIoOwner.commitOrder,
+  };
+}
+
 function buildSnapshot(): CoordinatorBootstrapSnapshot {
+  const storageIoOwnerPeer = coordinatorStorageIoOwnerPeerSnapshot();
   return {
     authorityInstanceId: coordinatorAuthorityInstanceId,
     buildId: COORDINATOR_BUILD_ID,
@@ -12559,6 +12635,7 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     storageBucketGeneration: platformRootStore?.bucket.bucketGeneration,
     ...(platformRootStore ? { storageBucketId: platformRootStore.bucket.bucketId } : {}),
     p2pkhProviders: getP2pkhProviderSnapshot(),
+    ...(storageIoOwnerPeer ? { storageIoOwnerPeer } : {}),
     // Worker 重启后 controller 可能尚未惰性创建，但持久化快照已经是
     // 当前产品意图真值；首个页面不能拿 revision=0 覆盖它。
     pluginIntent: pluginIntentController?.snapshot() ?? coordinatorMeta.pluginIntent,
@@ -12738,6 +12815,86 @@ const COORDINATOR_SESSION_EXPOSURES = [
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
 ] as const;
 
+/** 当前 owner/session 世代中可向 Window 暴露的 Coordinator 服务。 */
+function coordinatorSessionServicesReady(): boolean {
+  return coordinatorState.vaultStatus === "unlocked"
+    && Boolean(coordinatorState.activePublicKeyHex && coordinatorState.activePrivateKeyBytes)
+    && Boolean(platformRootStore && platformRootToken)
+    && platformStorageReady
+    && !storageStartupFailure
+    && storageHealthController.status() === "ready";
+}
+
+function coordinatorSessionExposureIdentity(): string {
+  const bucket = platformRootStore?.bucket;
+  return [
+    coordinatorAuthorityInstanceId,
+    coordinatorHandoverGeneration,
+    coordinatorState.sessionEpoch,
+    coordinatorState.keyspaceGeneration,
+    bucket?.bucketId ?? "null",
+    bucket?.bucketGeneration ?? "null",
+  ].join("\u0000");
+}
+
+function coordinatorSessionGrantId(state: CoordinatorPeerState, capabilityId: string): string {
+  return `coordinator-session-grant:${state.peer.peerId}:${state.sessionGeneration}:${capabilityId}:${randomIdentifierSuffix()}`;
+}
+
+/**
+ * 将当前 owner/session 世代投影到真实 WebLoom exposure。
+ *
+ * 暴露 reference 的 serviceInstanceId/grantId 由 WebLoom 生成并绑定到
+ * 当前 group；owner 锁定、换 Key、Storage Root 重绑时先撤销旧 group，
+ * 下一次 ready 才建立新 group。这样旧 proxy 即使仍在页面中也不能跨越
+ * session epoch 或 keyspace generation。
+ */
+function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void {
+  const ready = state.sessionOpen
+    && state.status === "open"
+    && state.peer.scope.state === "active"
+    && coordinatorSessionServicesReady();
+  const identity = ready ? coordinatorSessionExposureIdentity() : undefined;
+  if (state.serviceExposure && state.serviceExposureIdentity === identity) return;
+
+  state.serviceExposure?.revoke();
+  state.serviceExposure = undefined;
+  state.serviceExposureIdentity = undefined;
+  if (!identity) return;
+
+  try {
+    state.serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
+      capability,
+      options: { grantId: coordinatorSessionGrantId(state, capability.id) },
+    })));
+    state.serviceExposureIdentity = identity;
+  } catch (error) {
+    // 只有已确认的 endpoint/scope close race 可以收口；active peer 上的
+    // 配置、allowlist、协议或目录错误必须进入结构化失败通道，不能让
+    // Coordinator 看起来 ready 却静默缺失服务。
+    const endpointState = (state.peer as PeerController & CoordinatorPeerEndpointInfo).endpointState;
+    const endpointClosing = endpointState !== undefined && endpointState !== "active"
+      || state.peer.scope.state !== "active";
+    state.serviceExposure = undefined;
+    state.serviceExposureIdentity = undefined;
+    if (endpointClosing) return;
+    const code = "coordinator_session_exposure_failed";
+    const message = error instanceof Error ? error.message : "Coordinator service exposure failed";
+    console.error("[coordinator] session exposure failed", {
+      code,
+      peerId: state.peer.peerId,
+      endpointState,
+      scopeState: state.peer.scope.state,
+      message,
+    });
+    throw Object.assign(new Error("Coordinator session service exposure failed"), { code });
+  }
+}
+
+function reconcileCoordinatorSessionExposures(): void {
+  for (const state of coordinatorPeers.values()) reconcileCoordinatorSessionExposure(state);
+}
+
 async function openCoordinatorSession(
   state: CoordinatorPeerState,
   request: CoordinatorSessionOpenRequest,
@@ -12813,8 +12970,14 @@ async function openCoordinatorSession(
       // No await is allowed between this check and exposeGroup. The group
       // publish is itself transactional; sessionOpen and physical I/O owner
       // become visible only after it has committed successfully.
-      const serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({ capability })));
+      const serviceExposure = coordinatorSessionServicesReady()
+        ? state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
+            capability,
+            options: { grantId: coordinatorSessionGrantId(state, capability.id) },
+          })))
+        : undefined;
       state.serviceExposure = serviceExposure;
+      state.serviceExposureIdentity = serviceExposure ? coordinatorSessionExposureIdentity() : undefined;
       state.sessionBinding = { ...attempt.binding };
       state.sessionOpen = true;
       state.status = "open";
@@ -12828,7 +12991,7 @@ async function openCoordinatorSession(
       storageIoOwner = {
         ...attempt.binding,
         peerId: attempt.peerId,
-        commitOrder: state.openCommitOrder,
+        commitOrder: ++coordinatorStorageIoHandoffRevision,
       };
       return {
         sessionEpoch: coordinatorState.sessionEpoch,
@@ -13306,6 +13469,7 @@ export function __testResetState(): void {
   coordinatorPeers.clear();
   storageIoOwner = undefined;
   coordinatorSessionCommitOrder = 0;
+  coordinatorStorageIoHandoffRevision = 0;
   coordinatorOpeningSession = undefined;
   coordinatorSessionOpenTail = Promise.resolve();
   revokedCoordinatorPeerIds.clear();
@@ -14057,7 +14221,11 @@ export function __testInstallCoordinatorBridgePeer(
   state.sessionOpen = true;
   state.sessionBinding = { ...binding };
   state.openCommitOrder = ++coordinatorSessionCommitOrder;
-  storageIoOwner = { ...binding, peerId: peer.peerId, commitOrder: state.openCommitOrder };
+  storageIoOwner = {
+    ...binding,
+    peerId: peer.peerId,
+    commitOrder: ++coordinatorStorageIoHandoffRevision,
+  };
 }
 
 /**

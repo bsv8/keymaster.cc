@@ -10,7 +10,7 @@
     "@noble/secp256k1": "^2.1.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.4.1",
+    "webloom-framework": "0.4.2",
     "@keymaster/ui": "*"
   }
 }

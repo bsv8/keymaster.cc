@@ -79,6 +79,7 @@ const appsResources: I18nPluginResources = {
       "apps.launch.error.noKeys": "No Vault key is available.",
       "apps.widget.title": "Apps",
       "apps.widget.empty": "No apps registered yet.",
+      "apps.widget.unavailable": "The app service is temporarily unavailable for this session.",
       "apps.widget.viewAll": "View all apps"
     },
     "zh-CN": {
@@ -113,6 +114,7 @@ const appsResources: I18nPluginResources = {
       "apps.launch.error.noKeys": "没有可用的 Vault key。",
       "apps.widget.title": "应用",
       "apps.widget.empty": "尚未注册应用。",
+      "apps.widget.unavailable": "当前会话暂时无法提供应用服务。",
       "apps.widget.viewAll": "查看所有应用"
     }
   }

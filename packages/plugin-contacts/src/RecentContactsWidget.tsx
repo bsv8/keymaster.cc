@@ -7,12 +7,37 @@
 //   - 作为首页侧栏只提供快速识别，不承载编辑逻辑。
 
 import { EmptyState } from "@keymaster/ui";
-import { countRender, useResourceSelector } from "webloom-framework/react";
+import { countRender, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
-import { formatShortPublicKey, type Contact } from "@keymaster/contracts";
+import { CONTACTS_SERVICE_CAPABILITY, formatShortPublicKey, type Contact } from "@keymaster/contracts";
 
 export function RecentContactsWidget() {
   countRender("plugin-contacts/RecentContactsWidget");
+  const host = usePluginHost();
+  const { t, language } = useI18n();
+  const service = useOptionalCapability(CONTACTS_SERVICE_CAPABILITY);
+  const hasResource = host.resourceRegistry?.get("contacts.list") !== undefined;
+  if (!service || !hasResource) {
+    // contacts namespace 随 owner 实例回收；不可用空态使用本地双语文本，
+    // 避免在资源已经注销后调用 t() 触发开发期 warning。
+    const unavailableText = language() === "zh-CN"
+      ? { title: "最近联系人", message: "当前会话暂时无法提供联系人服务。" }
+      : { title: "Recent contacts", message: "Contacts are temporarily unavailable for this session." };
+    return (
+      <div className="home-widget home-widget--contacts-recent home-widget--unavailable" data-contacts-home-widget="unavailable">
+        <header className="home-widget__head">
+          <h3>{unavailableText.title}</h3>
+        </header>
+        <p className="home-widget__status">
+          {unavailableText.message}
+        </p>
+      </div>
+    );
+  }
+  return <RecentContactsWidgetContent />;
+}
+
+function RecentContactsWidgetContent() {
   const host = usePluginHost();
   const { t } = useI18n();
   const rows = useResourceSelector<Contact[], Contact[]>(

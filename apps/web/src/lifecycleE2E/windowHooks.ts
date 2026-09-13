@@ -18,7 +18,10 @@ import type { VaultCoordinatorControl } from "@keymaster/contracts";
 import type { RuntimeHandle, RuntimeStatusSnapshot } from "webloom-framework";
 import { createStorageBindingAuthority, requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
 import { createSessionCryptoEngine } from "@keymaster/plugin-vault";
-import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";
+import {
+  __testArmCoordinatorBridgeBarrier,
+  getCoordinatorClient,
+} from "../keymasterSessionCoordinatorClient.js";
 
 const E2E_VAULT_PASSWORD = "lifecycle-production-e2e-password";
 
@@ -88,10 +91,19 @@ async function ensureUnlocked(
 }
 
 async function waitForReadyRuntime(client: ReturnType<typeof getCoordinatorClient>): Promise<RuntimeHandle> {
+  const observations: Array<{ state?: string; services: Array<{ capabilityId: string; version: string; grant: boolean }>; optional: { owner: boolean; crypto: boolean } }> = [];
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const runtime = client.getRuntimeHandle();
     const state = runtime?.state();
     const services = state?.services ?? [];
+    const ownerOptional = Boolean(runtime?.optionalCapability(COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY));
+    const cryptoOptional = Boolean(runtime?.optionalCapability(COORDINATOR_CRYPTO_RPC_CAPABILITY));
+    observations.push({
+      state: state?.state,
+      services: services.map((service) => ({ capabilityId: service.capabilityId, version: service.contractVersion, grant: typeof service.grantId === "string" })),
+      optional: { owner: ownerOptional, crypto: cryptoOptional },
+    });
+    if (observations.length > 8) observations.shift();
     const ownerStorageReady = services.some((service) =>
       service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE
       && service.contractVersion === COORDINATOR_SERVICE_CONTRACT_VERSION
@@ -103,23 +115,32 @@ async function waitForReadyRuntime(client: ReturnType<typeof getCoordinatorClien
       && typeof service.grantId === "string"
     );
     if (runtime && state?.state === "ready" && ownerStorageReady && cryptoReady
-      && runtime.optionalCapability(COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY)
-      && runtime.optionalCapability(COORDINATOR_CRYPTO_RPC_CAPABILITY)) return runtime;
+      && ownerOptional
+      && cryptoOptional) return runtime;
     await delay(25);
   }
-  throw new Error("Lifecycle E2E Coordinator Runtime did not expose ready services");
+  throw new Error(`Lifecycle E2E Coordinator Runtime did not expose ready services: ${JSON.stringify(observations)}`);
 }
 
 async function waitForStorageReady(client: ReturnType<typeof getCoordinatorClient>): Promise<void> {
+  const observations: Array<{ status: unknown; vault?: string; runtime?: string; error?: string }> = [];
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const status = await client.storageControl({ type: "status" });
+    const snapshot = client.getBootstrapSnapshot();
+    observations.push({
+      status: status.status === "ok" ? status.value : status.status,
+      vault: snapshot.vaultStatus,
+      runtime: client.getRuntimeHandle()?.state().state,
+      ...(status.status !== "ok" && "message" in status ? { error: status.message } : {}),
+    });
+    if (observations.length > 8) observations.shift();
     if (status.status === "ok" && status.value === "ready") return;
     // Storage 首次选择和 Coordinator 初始化是两个异步阶段；不能只看
     // Vault snapshot 已变成 uninitialized 就提前发起 createVault。
     await client.storageControl({ type: "retry" });
     await delay(25);
   }
-  throw new Error("Lifecycle E2E Storage did not become ready");
+  throw new Error(`Lifecycle E2E Storage did not become ready: ${JSON.stringify(observations)}`);
 }
 
 export interface LifecycleProductionE2EHooks {
@@ -138,6 +159,13 @@ export interface LifecycleProductionE2EHooks {
     value: unknown;
     bridgeState: string;
     serviceInstanceId: string;
+    ownerPeerId: string;
+    ownerHandoffRevision: number;
+    /** 提交态 WebLoom 是否提供了 owner peer 的脱敏投影。 */
+    ownerPeerObservable: boolean;
+    /** 提交态 WebLoom 是否把远端 endpoint binding 公开给 Runtime 状态。 */
+    ownerBindingObservable: boolean;
+    ownerBindingMatchesRuntime: boolean;
   }>;
   /** 通过真实独立服务桥调用 Coordinator crypto 最终边界。 */
   deriveAddress(): Promise<{
@@ -160,6 +188,36 @@ export interface LifecycleProductionE2EHooks {
     signatureLength: number;
     revoked: boolean;
   }>;
+  /** 关闭当前 tab 的 Runtime，并返回旧 proxy 的真实拒绝结果。 */
+  disconnectRuntime(): Promise<{
+    oldServiceInstanceId: string;
+    oldProxyErrorCode: string;
+    connectedAfterDisconnect: boolean;
+    connectionState: string;
+    /** 当前提交态 WebLoom 是否暴露了 0.4.2 的 bounded drain API。 */
+    closeDrainSupported: boolean;
+    closeDrainCompleted: boolean;
+    closeDrainTimedOut: boolean;
+    closeDrainPendingExecutions: number;
+    wasStorageIoOwner: boolean;
+    ownerPeerId: string;
+    ownerHandoffRevision: number;
+    /** 提交态 WebLoom 是否提供了 owner peer 的脱敏投影。 */
+    ownerPeerObservable: boolean;
+    /** 提交态 WebLoom 是否把远端 endpoint binding 公开给 Runtime 状态。 */
+    ownerBindingObservable: boolean;
+  }>;
+  /** 让 session.open 的反向 bridge 结果在 endpoint 撤权后迟到。 */
+  lateSessionResultAfterReconnect(): Promise<{
+    barrierStarted: boolean;
+    pendingBeforeClose: number;
+    reconnectAttemptSettled: boolean;
+    lateResultCleanupCompleted: boolean;
+    connectedAfterLateResult: boolean;
+    connectionStateAfterLateResult: string;
+  }>;
+  /** 脱敏地报告页面启动阶段的运行单元/业务投影状态，仅供隔离 E2E。 */
+  diagnostics(): unknown;
 }
 
 declare global {
@@ -203,6 +261,9 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
 
   const ownerStorageRoundTrip = async () => {
     await bootstrap();
+    // session.open 的真实响应携带当前 owner peer 投影；重读一次让
+    // survivor 在其它 tab 完成 handoff 后也观察到最新 revision。
+    await client.refreshStorageBootstrap();
     const declaration = SYSTEM_STORAGE_DECLARATIONS.p2pkh;
     if (!declaration) throw new Error("Lifecycle E2E p2pkh storage declaration is missing");
     const authority = createStorageBindingAuthority(client, {
@@ -215,11 +276,22 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
       const entry = await store.get<typeof value>(key);
       if (!entry) throw new Error("Lifecycle E2E owner K-V round trip returned no value");
       const runtime = await waitForReadyRuntime(client);
+      const ownerPeer = client.getBootstrapSnapshot().storageIoOwnerPeer;
+      const runtimeBinding = (runtime.state() as RuntimeStatusSnapshot & {
+        binding?: { runtimeInstanceId: string; connectionId: string };
+      }).binding;
       return {
         key,
         value: entry.value,
         bridgeState: runtime.state().state,
         serviceInstanceId: runtime.state().services.find((service) => service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE)?.serviceInstanceId ?? "",
+        ownerPeerId: ownerPeer?.peerId ?? "",
+        ownerHandoffRevision: ownerPeer?.handoffRevision ?? 0,
+        ownerPeerObservable: Boolean(ownerPeer),
+        ownerBindingObservable: Boolean(runtimeBinding),
+        ownerBindingMatchesRuntime: Boolean(ownerPeer && runtimeBinding
+          && ownerPeer.binding.runtimeInstanceId === runtimeBinding.runtimeInstanceId
+          && ownerPeer.binding.connectionId === runtimeBinding.connectionId),
       };
     } finally {
       store.close();
@@ -302,12 +374,142 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     return { address: address.address, signatureLength: signature.signature.byteLength, revoked };
   };
 
+  const disconnectRuntime = async () => {
+    await bootstrap();
+    const runtime = client.getRuntimeHandle();
+    if (!runtime) throw new Error("Lifecycle E2E Runtime is unavailable before disconnect");
+    const oldServiceInstanceId = runtime.state().services.find((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE)?.serviceInstanceId ?? "";
+    const oldProxy = runtime.capability(COORDINATOR_CRYPTO_RPC_CAPABILITY);
+    const ownerPeer = client.getBootstrapSnapshot().storageIoOwnerPeer;
+    const runtimeBinding = (runtime.state() as RuntimeStatusSnapshot & {
+      binding?: { runtimeInstanceId: string; connectionId: string };
+    }).binding;
+    const wasStorageIoOwner = Boolean(ownerPeer && runtimeBinding
+      && ownerPeer.binding.runtimeInstanceId === runtimeBinding.runtimeInstanceId
+      && ownerPeer.binding.connectionId === runtimeBinding.connectionId);
+    // 真实 Runtime close handshake：等待两端 execution slots 的 bounded
+    // drain 完成后再断开页面，给 Worker 一个确定的 owner-handoff barrier。
+    // 提交态和本地验收都消费 WebLoom 0.4.2；仍保留运行时能力探测，
+    // 让缺 API 时由严格 spec 明确失败，而不是伪造 drain 结果。
+    // 先取消 Coordinator topic stream，结束 Worker 端 async iterator；再由
+    // client 观察 WebLoom 0.4.2 的 bounded close ack。缺少 drain API 或真实
+    // ack 超时都会由严格 E2E 断言失败，不能把 fallback 当成成功。
+    const closeDrainSupported = typeof runtime.drain === "function"
+      && typeof client.drainRuntime === "function";
+    const closeDrain = closeDrainSupported
+      ? await client.drainRuntime(2_000).catch(() => ({
+        drained: false,
+        timedOut: true,
+        pendingExecutions: (() => {
+          const inspection = runtime.inspect();
+          return inspection && typeof inspection === "object" && "pendingCallCount" in inspection
+            && typeof inspection.pendingCallCount === "number"
+            ? inspection.pendingCallCount
+            : 0;
+        })(),
+      }))
+      : undefined;
+    client.disconnect();
+    let oldProxyErrorCode = "none";
+    try {
+      await oldProxy.call({ type: "deriveP2pkhAddress", network: "main" }, { operationId: "lifecycle-e2e:old-after-disconnect" });
+    } catch (error) {
+      oldProxyErrorCode = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code
+        : "unknown";
+    }
+    return {
+      oldServiceInstanceId,
+      oldProxyErrorCode,
+      connectedAfterDisconnect: client.getIsConnected(),
+      connectionState: client.getConnectionState(),
+      closeDrainSupported,
+      closeDrainCompleted: closeDrain?.drained ?? false,
+      closeDrainTimedOut: closeDrain?.timedOut ?? false,
+      closeDrainPendingExecutions: closeDrain?.pendingExecutions ?? 0,
+      wasStorageIoOwner,
+      ownerPeerId: ownerPeer?.peerId ?? "",
+      ownerHandoffRevision: ownerPeer?.handoffRevision ?? 0,
+      ownerPeerObservable: Boolean(ownerPeer),
+      ownerBindingObservable: Boolean(runtimeBinding),
+    };
+  };
+
+  const lateSessionResultAfterReconnect = async () => {
+    await bootstrap();
+    const barrier = __testArmCoordinatorBridgeBarrier();
+    let barrierStarted = false;
+    let barrierReleased = false;
+    let reconnectAttemptSettled = false;
+    let lateResultCleanupCompleted = false;
+    let pendingBeforeClose = 0;
+    const releaseBarrier = (): void => {
+      if (barrierReleased) return;
+      barrierReleased = true;
+      barrier.release();
+    };
+    try {
+      // disconnect() 先撤销旧物理 peer；随后新 connect() 的 session.open
+      // 会走真实 Window reverse capability，并在 barrier 上停住。
+      client.disconnect();
+      const reconnectAttempt = client.connect().then(
+        () => { reconnectAttemptSettled = true; },
+        () => { reconnectAttemptSettled = true; },
+      );
+      await barrier.started;
+      barrierStarted = true;
+      const runtimeInspection = client.getRuntimeHandle()?.inspect();
+      pendingBeforeClose = runtimeInspection && typeof runtimeInspection === "object" && "pendingCallCount" in runtimeInspection
+        && typeof runtimeInspection.pendingCallCount === "number"
+        ? runtimeInspection.pendingCallCount
+        : 0;
+      // 新 session.open 仍在 Worker 端等待这条反向结果；立即关闭物理
+      // Runtime，使其结果只能作为 late result 到达并被 binding fence 丢弃。
+      client.disconnect();
+      releaseBarrier();
+      await reconnectAttempt;
+      // completed 位于真实 Window bridge handler 的 finally；它确认迟到
+      // response 已经完成页面侧清理，而不是只观察 connect() 提前因
+      // attempt 失效而返回。
+      await barrier.completed;
+      lateResultCleanupCompleted = true;
+    } finally {
+      // 失败时也不能把页面测试挂在永远未释放的 bridge barrier 上。
+      releaseBarrier();
+    }
+    return {
+      barrierStarted,
+      pendingBeforeClose,
+      reconnectAttemptSettled,
+      lateResultCleanupCompleted,
+      connectedAfterLateResult: client.getIsConnected(),
+      connectionStateAfterLateResult: client.getConnectionState(),
+    };
+  };
+
+  const runtimeDiagnostics = () => ({
+    connectionState: client.getConnectionState(),
+    connected: client.getIsConnected(),
+    bootstrap: client.getBootstrapSnapshot(),
+    plugins: host.installed().map((pluginId) => {
+      const state = host.state(pluginId);
+      return { id: pluginId, kind: state.kind, desiredEnabled: state.desiredEnabled, blockedBy: state.blockedBy };
+    }),
+    homeIds: host.home._ids(),
+    homeProjectionIds: host.business.listHomeProjections().map((projection) => projection.id),
+    capabilityIds: host.capabilities.registrations().map((entry) => `${entry.capability.kind}:${entry.capability.id}@${entry.capability.version}`),
+    bsvPriceState: host.state("bsv-price"),
+  });
+
   window.__lifecycleProductionE2E = {
     bootstrap,
     ownerStorageRoundTrip,
     deriveAddress,
     lockRevokesOldProxy,
     dedicatedWorkerRoundTrip,
+    disconnectRuntime,
+    lateSessionResultAfterReconnect,
+    diagnostics: runtimeDiagnostics,
   };
   window.addEventListener("pagehide", () => {
     delete window.__lifecycleProductionE2E;

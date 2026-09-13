@@ -1,15 +1,16 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// 生命周期生产链使用独立端口，且禁止复用旧 preview；避免测试误连到
-// 另一份构建产物。外部部署验收由独立 runner 负责，不在这里复用本地服务。
+// 本配置只负责本地 tarball 的严格 0.4.2 Coordinator 生命周期验收。
+// 正式 registry 0.4.2 验收使用 playwright.lifecycle.registry.config.ts，
+// 并由 registry-only 临时副本入口执行。
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "plugin-lifecycle-production.spec.ts",
+  testMatch: "coordinator-runtime-lifecycle.spec.ts",
   timeout: 30_000,
   forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/plugin-lifecycle",
+  outputDir: "test-results/coordinator-runtime-lifecycle",
   use: {
     baseURL: "http://127.0.0.1:4174",
     trace: "on-first-retry",

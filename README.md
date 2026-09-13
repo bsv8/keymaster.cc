@@ -110,6 +110,37 @@ npm run build
 pnpm --filter @keymaster/connect-docs build
 ```
 
+### 生命周期验收命令与 WebLoom 版本边界
+
+默认 `test:e2e:lifecycle` 是正式 WebLoom 0.4.2 registry 验收。脚本会复制到临时
+副本，用 frozen lockfile 从 npm registry 安装固定完整性（integrity）的 0.4.2，
+并确认实际解析路径不在当前 workspace 或本地 `file:` 依赖；随后执行临时副本自己的
+`pnpm typecheck`、`pnpm typecheck:e2e`、生产构建和真实 Chromium 生命周期用例：
+
+```bash
+pnpm test:e2e:lifecycle
+```
+
+`test:e2e:lifecycle:registry` 是同一正式 registry 门禁的显式命名入口。
+
+```bash
+pnpm test:e2e:lifecycle:registry
+```
+
+registry manifest 门禁的自测会在隔离临时副本中确认 `file:/tmp/sdk.tgz` 和 `link:`
+specifier 都会被拒绝：
+
+```bash
+pnpm test:e2e:lifecycle:registry:self-test
+```
+
+本地 tarball 验收保留为独立入口，只验证源码/tarball 与当前 Keymaster 的组合，
+不替代正式 registry 门禁：
+
+```bash
+WEBLOOM_LOCAL_TARBALL=/abs/path/webloom-framework-0.4.2.tgz pnpm test:e2e:lifecycle:local
+```
+
 ## 数据真值语义
 
 - 余额：WOC 真值；本地缓存是最近一次成功同步结果。

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { Camera, Check, Copy, Image, ScanLine, UserRound, UserPlus } from "lucide-react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import { useCapability, useHasCapability, useResourceSelector } from "webloom-framework/react";
+import { useHasCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost, useRegistry } from "@keymaster/runtime";
 import {
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
@@ -14,7 +14,8 @@ import {
   type Contact,
   type ContactPublicKeyAction,
   type ContactPublicKeyActionRegistry,
-  type ContactsService
+  type ContactsService,
+  type KeyspaceService
 } from "@keymaster/contracts";
 import { defineCapability } from "webloom-framework";
 
@@ -128,10 +129,39 @@ function IdentityRow({ label, value, shortValue }: { label: string; value: strin
 }
 
 export function HomeActions() {
-  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
-  const contacts = useCapability(CONTACTS_SERVICE_CAPABILITY);
-  const actionRegistry = useCapability(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
+  const keyspace = useOptionalCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const contacts = useOptionalCapability(CONTACTS_SERVICE_CAPABILITY);
+  const actionRegistry = useOptionalCapability(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
   const hasP2pkh = useHasCapability(P2PKH_SERVICE_CAPABILITY);
+  const { t, language } = useI18n();
+  if (!keyspace || !contacts || !actionRegistry) {
+    // owner/session 撤销会先回收 home namespace；降级分支不能为了显示
+    // 一条提示再次查询已卸载的 namespace，否则会产生缺 key 警告。
+    const unavailableText = language() === "zh-CN"
+      ? "当前会话暂时无法提供首页操作。"
+      : "Home actions are temporarily unavailable for this session.";
+    return (
+      <section className="home-actions home-actions--unavailable" data-home-actions="unavailable">
+        <p className="home-actions__hint">
+          {unavailableText}
+        </p>
+      </section>
+    );
+  }
+  return <HomeActionsContent keyspace={keyspace} contacts={contacts} actionRegistry={actionRegistry} hasP2pkh={hasP2pkh} />;
+}
+
+function HomeActionsContent({
+  keyspace,
+  contacts,
+  actionRegistry,
+  hasP2pkh,
+}: {
+  keyspace: KeyspaceService;
+  contacts: ContactsService;
+  actionRegistry: ContactPublicKeyActionRegistry;
+  hasP2pkh: boolean;
+}) {
   const host = usePluginHost();
   const { t } = useI18n();
   const actions = useRegistry(() => actionRegistry.list()).map((action) => ({ action, label: host.i18n.text(action.label) }));

@@ -606,8 +606,10 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
 describe("Session Coordinator worker", () => {
   it("真实 session handler：同一 peer 的旧 binding close 后 fresh lease open 产生新的 binding/owner", async () => {
     __testResetState();
+    await __testDeleteVault();
     const harness = makeCoordinatorTestPeer("session-fresh-lease-peer");
     installCoordinatorSessionInitializationBridge();
+    await __testCreateVault("session-test-password");
 
     try {
       const oldResponse = await __testHandleCoordinatorSessionRpc(harness.peer, sessionOpen("lease-old"));
@@ -634,14 +636,17 @@ describe("Session Coordinator worker", () => {
     } finally {
       __testSetLocalStorageBridgeOverride(undefined);
       await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
+      await __testDeleteVault();
       __testResetState();
     }
   });
 
   it("真实 session handler：旧 binding 的 late close 不能 revoke fresh session", async () => {
     __testResetState();
+    await __testDeleteVault();
     const harness = makeCoordinatorTestPeer("session-late-close-peer");
     installCoordinatorSessionInitializationBridge();
+    await __testCreateVault("session-test-password");
 
     try {
       const oldBinding = sessionBindingFromOpenResponse(
@@ -666,15 +671,18 @@ describe("Session Coordinator worker", () => {
     } finally {
       __testSetLocalStorageBridgeOverride(undefined);
       await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
+      await __testDeleteVault();
       __testResetState();
     }
   });
 
   it("真实 session handler：关闭当前 owner 后 LocalStorage ownership handoff 到另一个 open peer", async () => {
     __testResetState();
+    await __testDeleteVault();
     const first = makeCoordinatorTestPeer("session-owner-first-peer");
     const second = makeCoordinatorTestPeer("session-owner-second-peer");
     installCoordinatorSessionInitializationBridge();
+    await __testCreateVault("session-test-password");
 
     try {
       const firstBinding = sessionBindingFromOpenResponse(
@@ -701,6 +709,7 @@ describe("Session Coordinator worker", () => {
       __testSetLocalStorageBridgeOverride(undefined);
       await __testAwaitCoordinatorPeerDrain(first.peer.peerId);
       await __testAwaitCoordinatorPeerDrain(second.peer.peerId);
+      await __testDeleteVault();
       __testResetState();
     }
   });

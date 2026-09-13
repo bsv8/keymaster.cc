@@ -14,7 +14,7 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.4.1",
+    "webloom-framework": "0.4.2",
     "@keymaster/ui": "*",
     "keymaster-hold": "0.1.0",
     "@aws-sdk/client-s3": "^3.864.0",

@@ -76,6 +76,7 @@ import {
   definePlugin,
   WebLoomError,
   type HandlerCallContext,
+  type RuntimeDrainResult,
   type RuntimeHandle,
   type RuntimePluginDefinition,
   type WindowApp,
@@ -386,6 +387,49 @@ function randomIdentifierSuffix(): string {
   }
 }
 
+/**
+ * 真实 Chromium 生命周期回归用的 Window bridge barrier。
+ *
+ * 它只存在于 E2E 构建会导入的测试 hook 路径：下一次反向 LocalStorage
+ * capability 到达页面后先报告 started，再等待测试显式 release。等待故意
+ * 不读取 AbortSignal，用来制造“页面已经撤权但旧 Worker 结果仍迟到”的
+ * 真实 MessagePort 时序；生产构建不会安装或调用这个 seam。
+ */
+export interface CoordinatorTestBridgeBarrier {
+  readonly started: Promise<void>;
+  /** 真实 Window handler 返回后 resolve；用于证明 late response 已完成清理。 */
+  readonly completed: Promise<void>;
+  release(): void;
+}
+
+let coordinatorTestBridgeBarrier: {
+  readonly started: Promise<void>;
+  readonly released: Promise<void>;
+  readonly complete: () => void;
+  readonly start: () => void;
+  readonly release: () => void;
+} | undefined;
+
+/** 仅供 lifecycleE2E hook 使用；普通应用代码不得调用。 */
+export function __testArmCoordinatorBridgeBarrier(): CoordinatorTestBridgeBarrier {
+  if (coordinatorTestBridgeBarrier) throw new Error("Coordinator bridge test barrier is already armed");
+  let start!: () => void;
+  let release!: () => void;
+  let complete!: () => void;
+  const started = new Promise<void>((resolve) => { start = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const completed = new Promise<void>((resolve) => { complete = resolve; });
+  coordinatorTestBridgeBarrier = { started, released, complete, start, release };
+  return Object.freeze({
+    started,
+    completed,
+    release: () => {
+      coordinatorTestBridgeBarrier = undefined;
+      release();
+    },
+  });
+}
+
 // ============================================================
 // 2. Coordinator Client
 // ============================================================
@@ -452,9 +496,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
    * 当前 connect() 观察到的 Runtime/Worker 端连接失败。
    *
    * 结构化的 WebLoom runtime-error 会带自己的 message；而原始 SharedWorker
-   * 脚本执行失败只会让 WebLoom 发出 disconnected（0.4.1 不读取 ErrorEvent
-   * 文本）。后者只能提供明确的可操作诊断，不能假装捕获到了浏览器的 JS
-   * exception 文本。
+   * 脚本执行失败只会让 WebLoom 发出 disconnected；公共 Runtime API 不读取
+   * 浏览器 JS ErrorEvent 文本。后者只能提供明确的可操作诊断，不能假装
+   * 捕获到了浏览器的 JS exception 文本。
    */
   private observedConnectionFailure: Error | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -817,6 +861,15 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       }
       this.pendingSessionBinding ??= requestBinding;
     }
+    const bridgeBarrier = coordinatorTestBridgeBarrier;
+    if (bridgeBarrier) {
+      // Consume before awaiting so a second reverse call cannot join this
+      // deliberately held request. The test release is the only completion
+      // path; this models an AbortSignal-ignoring late browser callback.
+      coordinatorTestBridgeBarrier = undefined;
+      bridgeBarrier.start();
+      await bridgeBarrier.released;
+    }
     try {
       if (request.type === "catalog-read") {
         if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
@@ -1066,12 +1119,32 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         throw new WebLoomError(error.code, "Local storage capability operation failed", "execute");
       }
       throw new StorageRuntimeError("storage_provider_error", error instanceof Error ? error.message : "Local storage bridge request failed");
+    } finally {
+      // 这个 resolve 只用于隔离 lifecycle E2E：它位于 handler 的 finally，
+      // 因而比 release() 更强，证明迟到请求已经完成页面侧真实清理。
+      bridgeBarrier?.complete();
     }
   }
 
   /** 当前 WebLoom SharedWorker 句柄；重连后旧句柄永不复用。 */
   getRuntimeHandle(): RuntimeHandle | undefined {
     return this.runtimeHandle ?? undefined;
+  }
+
+  /**
+   * 先取消领域 topic stream，再等待 WebLoom Runtime 的 bounded close ack。
+   *
+   * topic stream 的 async iterator 必须先收到 cancel，Worker 才能结束其
+   * provider execution slot；否则仅调用 Runtime.drain 会在 Worker 等待该
+   * iterator 的 close 时进入 deadline。正式断线仍由 disconnect() 完成，
+   * 此方法只给需要观察 close 结果的生命周期验收/宿主使用。
+   */
+  drainRuntime(timeoutMs?: number): Promise<RuntimeDrainResult | undefined> {
+    const runtime = this.runtimeHandle;
+    if (!runtime) return Promise.resolve(undefined);
+    this.topicSubscription?.cancel("Coordinator Runtime drain requested");
+    this.topicSubscription = null;
+    return runtime.drain(timeoutMs);
   }
 
   private closeSessionBestEffort(runtime: RuntimeHandle | null): void {

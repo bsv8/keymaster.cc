@@ -158,11 +158,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -249,7 +249,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -317,11 +317,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -364,7 +364,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -504,11 +504,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -595,7 +595,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -603,7 +603,7 @@
       "id": "background.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -667,7 +667,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -710,7 +710,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -880,11 +880,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -971,7 +971,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -1111,11 +1111,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -1202,7 +1202,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -1362,11 +1362,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -1453,7 +1453,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -1593,11 +1593,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -1684,7 +1684,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -1824,11 +1824,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -1915,7 +1915,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -1923,7 +1923,7 @@
       "id": "contacts.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -1987,7 +1987,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -2030,7 +2030,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -2230,11 +2230,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -2321,7 +2321,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -2471,11 +2471,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -2562,7 +2562,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -2570,7 +2570,7 @@
       "id": "junglebus.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -2634,7 +2634,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -2677,7 +2677,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -2705,7 +2705,7 @@
       "id": "msfile.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -2769,7 +2769,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -2812,7 +2812,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -2880,11 +2880,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -2927,7 +2927,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -2950,7 +2950,7 @@
       "id": "p2pkh.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -3014,7 +3014,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3057,7 +3057,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -3129,11 +3129,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3176,7 +3176,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -3244,11 +3244,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3291,7 +3291,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -3382,11 +3382,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3429,7 +3429,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -3497,11 +3497,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3544,7 +3544,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -3552,7 +3552,7 @@
       "id": "protocol.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -3616,7 +3616,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3659,7 +3659,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -3727,11 +3727,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3774,7 +3774,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -3842,11 +3842,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -3889,7 +3889,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -4039,11 +4039,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -4130,7 +4130,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -4168,7 +4168,7 @@
       "id": "sat.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -4232,7 +4232,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -4275,7 +4275,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -4283,7 +4283,7 @@
       "id": "session-coordinator.activity",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -4347,7 +4347,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -4390,7 +4390,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -4398,7 +4398,7 @@
       "id": "session-coordinator.client",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -4462,7 +4462,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -4505,7 +4505,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -4513,7 +4513,7 @@
       "id": "session-coordinator.snapshot",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -4577,7 +4577,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -4620,7 +4620,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -4760,11 +4760,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -4851,7 +4851,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -4923,11 +4923,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -4966,7 +4966,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -4974,7 +4974,7 @@
       "id": "storage.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -5038,7 +5038,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -5081,7 +5081,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -5153,11 +5153,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -5196,7 +5196,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -5336,11 +5336,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -5427,7 +5427,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -5567,11 +5567,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -5658,7 +5658,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -5798,11 +5798,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -5889,7 +5889,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -6044,11 +6044,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -6135,7 +6135,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -6275,11 +6275,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/settings.ts",
@@ -6366,7 +6366,7 @@
           "fingerprint": "5f3f6b34b19a51eb74bf9a98891cb65086285f244a69f593fc0496f18e4a6711"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.2",
+      "contractTestVersion": "keymaster-v4-contract-tests.3",
       "auditEvidence": "2026-09-12 统一产品日志硬删除：移除 LogService、PluginLogger、LOG_SERVICE_CAPABILITY 与 logs namespace 依赖；保留 fatal error、必要 console diagnostics、业务状态和审计账本。源码指纹由静态 contract inventory scanner 重新生成。"
     },
     {
@@ -6374,7 +6374,7 @@
       "id": "vault.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -6438,7 +6438,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -6481,7 +6481,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -6553,11 +6553,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -6596,7 +6596,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -6668,11 +6668,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -6711,7 +6711,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -6729,7 +6729,7 @@
       "id": "window-p2p.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -6793,7 +6793,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -6836,7 +6836,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -6918,11 +6918,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -6969,7 +6969,7 @@
           "fingerprint": "a1b2fbfe1f4a62a4c5e0c1588189865f813b4b5d6db321db753fa20279d1611d"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7041,11 +7041,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7092,7 +7092,7 @@
           "fingerprint": "a1b2fbfe1f4a62a4c5e0c1588189865f813b4b5d6db321db753fa20279d1611d"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7100,7 +7100,7 @@
       "id": "woc.coordinator-control",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinator.ts",
-      "moduleFingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d",
+      "moduleFingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480",
       "dependencyFingerprints": [
         {
           "path": "packages/contracts/src/activeKeyCrypto.ts",
@@ -7164,7 +7164,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7207,7 +7207,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7279,11 +7279,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7326,7 +7326,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7398,11 +7398,11 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7449,7 +7449,7 @@
           "fingerprint": "a1b2fbfe1f4a62a4c5e0c1588189865f813b4b5d6db321db753fa20279d1611d"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7457,17 +7457,17 @@
       "id": "coordinator.crypto",
       "version": "1.0.0",
       "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-      "moduleFingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8",
+      "moduleFingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd",
       "parser": {
         "request": {
           "expression": "{ parse: parseCryptoOperation }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "{ parse: parseCryptoResult }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "dependencyFingerprints": [
@@ -7533,7 +7533,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7576,7 +7576,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7584,29 +7584,29 @@
       "id": "coordinator.owner-storage",
       "version": "1.0.0",
       "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-      "moduleFingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8",
+      "moduleFingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd",
       "parser": {
         "request": {
           "expression": "{ parse: parseOwnerStorageRequest }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "{ parse: (value) => parseOwnerStorageResult(value, \"owner-storage.response\") }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "transfer": {
         "request": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "dependencyFingerprints": [
@@ -7672,7 +7672,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7715,7 +7715,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7723,29 +7723,29 @@
       "id": "coordinator.platform-storage",
       "version": "1.0.0",
       "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-      "moduleFingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8",
+      "moduleFingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd",
       "parser": {
         "request": {
           "expression": "{ parse: parsePlatformStorageRequest }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "{ parse: (value) => parseOwnerStorageResult(value, \"platform-storage.response\") }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "transfer": {
         "request": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "dependencyFingerprints": [
@@ -7811,7 +7811,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7854,7 +7854,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -7862,29 +7862,29 @@
       "id": "keymaster.coordinator.local-storage",
       "version": "1.0.0",
       "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-      "moduleFingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8",
+      "moduleFingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd",
       "parser": {
         "request": {
           "expression": "{ parse: parseLocalStorageRequest }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "{ parse: parseLocalStorageResponse }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "transfer": {
         "request": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "dependencyFingerprints": [
@@ -7950,7 +7950,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -7993,7 +7993,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -8001,29 +8001,29 @@
       "id": "keymaster.coordinator.rpc",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-      "moduleFingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8",
+      "moduleFingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd",
       "parser": {
         "request": {
           "expression": "requestParser",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "responseParser",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "transfer": {
         "request": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "response": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "dependencyFingerprints": [
@@ -8089,7 +8089,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -8132,7 +8132,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     },
     {
@@ -8140,29 +8140,29 @@
       "id": "keymaster.coordinator.events",
       "version": "1",
       "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-      "moduleFingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8",
+      "moduleFingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd",
       "parser": {
         "request": {
           "expression": "{ parse: parseTopicSubscription }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "item": {
           "expression": "{ parse: parseTopicEvent }",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "transfer": {
         "request": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         },
         "item": {
           "expression": "(value) => transfers(value)",
           "module": "packages/contracts/src/sessionCoordinatorRuntime.ts",
-          "fingerprint": "65f514cc59f7fd2fbfbc24a057163d5d92689a0e9a94eef5751fe916a634fcb8"
+          "fingerprint": "4e21e493e51572ecc54c6443cfee857d70d907db24e5b4802b94a5eab6c069cd"
         }
       },
       "dependencyFingerprints": [
@@ -8228,7 +8228,7 @@
         },
         {
           "path": "packages/contracts/src/sessionCoordinator.ts",
-          "fingerprint": "df106e287f6d6b6d03c06258ce3ef6edfb3251327eed941902caae4c9d4ad19d"
+          "fingerprint": "d91151f5d79f233ca358ec4f1eec2aaaf902be8bfd859296fc074d2e2597d480"
         },
         {
           "path": "packages/contracts/src/storage/access.ts",
@@ -8271,7 +8271,7 @@
           "fingerprint": "e7326ef59370a635b465f219a693beb6e10d3de0cd56fc9cc9270129aea554f5"
         }
       ],
-      "contractTestVersion": "keymaster-v4-contract-tests.3",
+      "contractTestVersion": "keymaster-v4-contract-tests.4",
       "auditEvidence": "2026-09-12 合同边界收缩：首启页面不再提供历史未完成初始化精确清理；移除对应 DTO、传输消息、Worker、代理、界面链路和专属测试。保留 InitialSetupPlan、recovery ledger 与正常恢复清理。源码指纹由静态 contract inventory scanner 重新生成；回归验证为 pnpm test:contract-inventory、pnpm typecheck，以及 Worker/InitialSetupPage 定向 Vitest 128 tests passed。"
     }
   ]

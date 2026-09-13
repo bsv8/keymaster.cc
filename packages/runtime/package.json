@@ -10,6 +10,6 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@keymaster/contracts": "*",
-    "webloom-framework": "0.4.1"
+    "webloom-framework": "0.4.2"
   }
 }

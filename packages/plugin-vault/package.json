@@ -13,7 +13,7 @@
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",
-    "webloom-framework": "0.4.1",
+    "webloom-framework": "0.4.2",
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^1.8.0",
     "@noble/secp256k1": "^2.2.0",

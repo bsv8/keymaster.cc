@@ -1773,6 +1773,20 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
   const pluginIntent = snapshot.pluginIntent === undefined
     ? undefined
     : parsePluginIntentSnapshot(snapshot.pluginIntent, field + ".pluginIntent");
+  const storageIoOwnerPeer = snapshot.storageIoOwnerPeer === undefined
+    ? undefined
+    : (() => {
+      const owner = expectRecord(snapshot.storageIoOwnerPeer, field + ".storageIoOwnerPeer");
+      const binding = expectRecord(owner.binding, field + ".storageIoOwnerPeer.binding");
+      return {
+        peerId: text(owner.peerId, field + ".storageIoOwnerPeer.peerId", 256),
+        binding: {
+          runtimeInstanceId: text(binding.runtimeInstanceId, field + ".storageIoOwnerPeer.binding.runtimeInstanceId", 256),
+          connectionId: text(binding.connectionId, field + ".storageIoOwnerPeer.binding.connectionId", 256),
+        },
+        handoffRevision: boundedNumber(owner.handoffRevision, field + ".storageIoOwnerPeer.handoffRevision"),
+      };
+    })();
   return {
     authorityInstanceId: text(snapshot.authorityInstanceId, field + ".authorityInstanceId", 256),
     ...(buildId === undefined ? {} : { buildId }),
@@ -1794,6 +1808,7 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
     ...(storageBucketId === undefined ? {} : { storageBucketId }),
     ...(p2pkhProviders === undefined ? {} : { p2pkhProviders }),
     ...(pluginIntent === undefined ? {} : { pluginIntent }),
+    ...(storageIoOwnerPeer === undefined ? {} : { storageIoOwnerPeer }),
   };
 }
 

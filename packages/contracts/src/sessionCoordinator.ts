@@ -636,6 +636,19 @@ export interface CoordinatorBootstrapSnapshot {
   p2pkhProviders?: P2pkhProviderRegistrySnapshot;
   /** 插件产品启用意图；不代表运行单元已经启动。 */
   pluginIntent?: PluginIntentSnapshot;
+  /**
+   * 当前 Coordinator 选择的 storage-I/O peer 脱敏投影；只含框架
+   * endpoint binding 和 handoff 修订，不含 lease、owner 或存储配置。
+   * 该字段主要供隔离生命周期验收确认真实 owner，不提供接管权限。
+   */
+  storageIoOwnerPeer?: {
+    peerId: string;
+    binding: {
+      runtimeInstanceId: string;
+      connectionId: string;
+    };
+    handoffRevision: number;
+  };
 }
 
 /**

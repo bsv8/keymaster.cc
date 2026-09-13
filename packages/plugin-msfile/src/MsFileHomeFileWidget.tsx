@@ -23,7 +23,7 @@ import {
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import {
   AppLink,
   useI18n,
@@ -308,7 +308,25 @@ function messageForPreviewReason(
 export function MsFileHomeFileWidget() {
   const { t } = useI18n();
   const host = usePluginHost();
-  const service = useCapability(MSFILE_SERVICE_CAPABILITY);
+  const service = useOptionalCapability(MSFILE_SERVICE_CAPABILITY);
+  const hasStatusResource = host.resourceRegistry?.get(HOME_STATUS_RESOURCE_ID) !== undefined;
+  const hasLifecycleResource = host.resourceRegistry?.get(HOME_LIFECYCLE_RESOURCE_ID) !== undefined;
+  if (!service || !hasStatusResource || !hasLifecycleResource) {
+    return (
+      <section className="msfile-home-file msfile-home-file--unavailable" data-msfile-home-widget="unavailable">
+        <h3>{t("msfile.home.title", { defaultValue: "通过 Seed 获取文件" })}</h3>
+        <p className="msfile-home-file__hint">
+          {t("msfile.home.errors.unavailable", { defaultValue: "MSFile 当前不可用，请稍后重试。" })}
+        </p>
+      </section>
+    );
+  }
+  return <MsFileHomeFileWidgetContent service={service} />;
+}
+
+function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
+  const { t } = useI18n();
+  const host = usePluginHost();
   const { vault } = useRuntimeStatus();
   const widgetInstanceId = useId();
 

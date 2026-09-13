@@ -13,7 +13,7 @@
 //     `LaunchAppViewErrorCode` 类型 + 错误文案维护。
 
 import { useState } from "react";
-import { countRender, useCapability } from "webloom-framework/react";
+import { countRender, useOptionalCapability } from "webloom-framework/react";
 import { useI18n, navigateTo } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import {
@@ -68,7 +68,29 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
 
 export function AppsHomeWidget() {
   countRender("plugin-apps/AppsHomeWidget");
-  const protocol = useCapability(PROTOCOL_SERVICE_CAPABILITY);
+  const protocol = useOptionalCapability(PROTOCOL_SERVICE_CAPABILITY);
+  const { t, language } = useI18n();
+  if (!protocol) {
+    // apps namespace 可能已随 owner/session 插件注销；不可用空态不再
+    // 读取已经不存在的翻译资源，保持生命周期降级无噪声。
+    const unavailableText = language() === "zh-CN"
+      ? { title: "应用", message: "当前会话暂时无法提供应用服务。" }
+      : { title: "Apps", message: "The app service is temporarily unavailable for this session." };
+    return (
+      <div className="apps-home-widget apps-home-widget--unavailable" data-testid="apps-home-widget-unavailable">
+        <div className="apps-home-widget__title">
+          {unavailableText.title}
+        </div>
+        <div className="apps-home-widget__empty">
+          {unavailableText.message}
+        </div>
+      </div>
+    );
+  }
+  return <AppsHomeWidgetContent protocol={protocol} />;
+}
+
+function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
   const { t } = useI18n();
   const validation = loadCatalog();
   const [launchingId, setLaunchingId] = useState<string | null>(null);
