@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
-import { initializeNewLocalUser } from "../flows/initializeLocalUser.js";
-import { lockAndUnlockUser, refreshReadyUser } from "../flows/recoverLocalUser.js";
-import { captureBrowserErrors, attachBrowserErrors } from "../support/browserEvidence.js";
-import { attachVisibleDiagnostic } from "../support/diagnostics.js";
-import { LOCAL_INIT_MENU_SCENARIO } from "../support/scenarioMetadata.js";
+import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
+import { lockAndUnlockUser, refreshReadyUser } from "../../flows/recoverLocalUser.js";
+import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
+import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
+import { LOCAL_INIT_MENU_SCENARIO } from "../../support/scenarioMetadata.js";
 
 export const JOURNEY_ID = LOCAL_INIT_MENU_SCENARIO.id;
 export const JOURNEY_METADATA = LOCAL_INIT_MENU_SCENARIO;

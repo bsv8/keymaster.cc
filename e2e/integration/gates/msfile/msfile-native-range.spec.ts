@@ -13,8 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Page } from "@playwright/test";
-import { nativeMediaFixtures, type NativeMediaFixture } from "./fixtures/nativeMediaFixtures.js";
-import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "./fixtures/msfileProxyProtocol.js";
+import { nativeMediaFixtures, type NativeMediaFixture } from "../../fixtures/nativeMediaFixtures.js";
+import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "../../fixtures/msfileProxyProtocol.js";
+import { MSFILE_NATIVE_RANGE_GATE } from "../../support/scenarioMetadata.js";
+
+export const GATE_ID = MSFILE_NATIVE_RANGE_GATE.id;
+export const GATE_METADATA = MSFILE_NATIVE_RANGE_GATE;
 
 const execFileAsync = promisify(execFile);
 const MEDIA_PREFIX = "/__keymaster/msfile-media/";
@@ -124,7 +128,7 @@ async function freeUdpPort(): Promise<number> {
         reject(new Error("无法分配 loopback UDP 端口"));
         return;
       }
-      socket.close((error) => error ? reject(error) : resolvePort(address.port));
+      socket.close(() => resolvePort(address.port));
     });
   });
 }
@@ -619,7 +623,7 @@ function attachGateNetworkEvidence(page: Page): {
   };
 }
 
-test.describe("MSFile 原生 Range production Gate（施工单 003）", () => {
+test.describe(GATE_ID + "：MSFile 原生 Range production Gate（施工单 003）", () => {
   test.describe.configure({ mode: "serial" });
   let fixture: NativeNasFixture;
 

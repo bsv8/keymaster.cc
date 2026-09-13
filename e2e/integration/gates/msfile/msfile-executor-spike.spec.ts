@@ -5,13 +5,40 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "./fixtures/msfileProxyProtocol.js";
+import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "../../fixtures/msfileProxyProtocol.js";
+import { MSFILE_EXECUTOR_GATE } from "../../support/scenarioMetadata.js";
+
+export const GATE_ID = MSFILE_EXECUTOR_GATE.id;
+export const GATE_METADATA = MSFILE_EXECUTOR_GATE;
 
 const execFileAsync = promisify(execFile);
 const GO_LISTEN_ADDR = "/ip4/127.0.0.1/udp/0/webrtc-direct";
 
 type OpenPages = { context: BrowserContext; pageA: Page; pageB: Page };
 type Lease = { leaseId: string; sessionEpoch: string; activePublicKeyHex: string };
+
+interface WindowP2pExecutorSpikeHooks {
+  acquire(): Promise<any>;
+  connectAndInspect(address: string): Promise<any>;
+  signNoiseStaticKey(bytes: Uint8Array): Promise<any>;
+  signPeerRecord(sequence: string): Promise<any>;
+  rejectForgedPeerRecords(): Promise<any>;
+  abortNoiseSign(): Promise<any>;
+  bootstrap(): Promise<any>;
+  lock(): Promise<any>;
+  beginNoiseSign(): any;
+  finishNoiseSign(): Promise<any>;
+  generateReplacementKey(): Promise<any>;
+  setActive(publicKeyHex: string): Promise<any>;
+  transferBurst(totalBytes: number, chunkBytes: number, concurrency: number): Promise<any>;
+}
+
+declare global {
+  interface Window {
+    /** 仅由 VITE_MSFILE_SPIKE=1 构建暴露的 executor 技术 Gate hook。 */
+    __windowP2pExecutorSpike?: WindowP2pExecutorSpikeHooks;
+  }
+}
 
 async function evaluateWithRetry<T>(page: Page, fn: () => Promise<T>): Promise<T> {
   let lastError: unknown;
@@ -123,7 +150,7 @@ async function acquire(page: Page): Promise<Lease> {
   return result as Lease;
 }
 
-test.describe("MSFile Window executor spike（施工单 001）", () => {
+test.describe(GATE_ID + "：MSFile Window executor spike（施工单 001）", () => {
   test.describe.configure({ mode: "serial" });
 
   let goLab: { directory: string; binary: string } | undefined;
@@ -137,7 +164,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     if (goLab) await fs.rm(goLab.directory, { recursive: true, force: true });
   });
 
-  test("A01/A02/A11/A12/A13: Window host performs real Go Noise, Identity, Identify Push and constrained Peer Record signing", async ({ browser }) => {
+  test("A01/A02/A11/A12/A13：Window 主机执行真实 Go Noise、身份、Identify Push 和受约束 Peer Record 签名", async ({ browser }) => {
     test.setTimeout(120_000);
     const { context, pageA } = await openSpikeContext(browser);
     let supplier: { process: import("node:child_process").ChildProcess; address: string; stdout: string[]; stderr: string[] } | undefined;
@@ -155,8 +182,8 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
       expect(evidence.localPeerId).toBe(evidence.identity.remote_peer_id);
       expect(evidence.localPublicKeyHex).toBe(evidence.identity.remote_public_key_hex);
       expect(evidence.identity.direct).toBe(true);
-      // Go network.ConnStats.Transport reports the underlying UDP transport for
-      // WebRTC Direct. The dial address and Direct flag are the protocol evidence.
+      // Go network.ConnStats.Transport 报告 WebRTC Direct 使用的底层 UDP 传输；
+      // dial 地址和 Direct 标记共同构成协议证据。
       expect(evidence.identity.transport).toBe("udp");
       expect(evidence.echo).toBe("msfile-window-executor-spike");
       expect(evidence.identifyPush).toBe("ok");
@@ -171,7 +198,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     }
   });
 
-  test("A03/A09: typed bridge rejects malformed fields and abort leaves no pending signer request", async ({ browser }) => {
+  test("A03/A09：类型化 bridge 拒绝畸形字段，abort 后没有待处理 signer 请求", async ({ browser }) => {
     const { context, pageA } = await openSpikeContext(browser);
     try {
       await acquire(pageA);
@@ -200,7 +227,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     }
   });
 
-  test("A04/A07: same SharedWorker permits one executor, closes the port, then permits takeover", async ({ browser }) => {
+  test("A04/A07：同一 SharedWorker 只允许一个 executor，端口关闭后允许接管", async ({ browser }) => {
     test.setTimeout(120_000);
     const { context, pageA, pageB } = await openSpikeContext(browser);
     try {
@@ -231,7 +258,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     }
   });
 
-  test("A06: lock during a real signer request advances epoch and invalidates the old signer", async ({ browser }) => {
+  test("A06：真实 signer 请求进行时锁定会推进 epoch 并使旧 signer 失效", async ({ browser }) => {
     const { context, pageA, pageB } = await openSpikeContext(browser);
     try {
       await acquire(pageA);
@@ -274,7 +301,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     }
   });
 
-  test("A08/A10/A14: transferable burst is bounded and Window exposes no private-key surface", async ({ browser }) => {
+  test("A08/A10/A14：transferable burst 有界且 Window 不暴露私钥表面", async ({ browser }) => {
     const { context, pageA } = await openSpikeContext(browser);
     try {
       await acquire(pageA);

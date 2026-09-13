@@ -28,7 +28,9 @@
 
 ## 仍需外部验收的部分
 
-- 目标部署环境的 AppView：`pnpm test:e2e:external`，必须提供 `KEYMASTER_EXTERNAL_APPVIEW_ORIGIN` 与 `KEYMASTER_EXTERNAL_APPVIEW_SUCCESS_SELECTOR`。
+- 目标部署环境的 AppView：`pnpm test:e2e:external`，必须提供
+  `KEYMASTER_E2E_DEPLOYMENT_BASE_URL`、`KEYMASTER_DEPLOYED_BUILD_ID`、
+  `KEYMASTER_EXTERNAL_APPVIEW_ORIGIN` 与 `KEYMASTER_EXTERNAL_APPVIEW_SUCCESS_SELECTOR`。
 - 真实 S3 / 上传供应商、receive Supplier、广播和支付供应商的故障注入：`pnpm test:e2e:irreversible-io`，必须提供 `KEYMASTER_IRREVERSIBLE_IO_SMOKE_URL`，并由目标验收页注入 `__KEYMASTER_IRREVERSIBLE_IO_SMOKE__` runner；本地 fixture、Node 测试和 MSFile 压力测试不能替代这一步。
 - 完全不认识 authority 协议的旧 Worker：必须在部署编排中确认退出、版本淘汰和回退窗口，不能由本地 lease 猜测完成。
 

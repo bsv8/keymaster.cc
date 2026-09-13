@@ -30,7 +30,7 @@ if (missing.length > 0) {
 } else {
   const result = spawnSync(
     "pnpm",
-    ["exec", "playwright", "test", "e2e/plugin-lifecycle-irreversible-io.spec.ts", "-g", "目标部署完成不可逆 I/O smoke"],
+    ["exec", "playwright", "test", "--config=playwright.deployment.config.ts", "--project=deployment-acceptance", "e2e/integration/gates/deployment/plugin-lifecycle-irreversible-io.spec.ts"],
     { stdio: "inherit", env: process.env },
   );
   process.exitCode = result.status ?? 1;

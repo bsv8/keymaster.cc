@@ -16,7 +16,7 @@
 
 ## 真实链路
 
-`e2e/msfile-production-runtime.spec.ts` 每轮会：
+`e2e/integration/gates/msfile/msfile-production-runtime.spec.ts` 每轮会：
 
 1. 构建相邻仓库正式 `cmd/msfile-nas`；
 2. 创建真实文件、Seed 索引、供应商 secp256k1 identity 与短期 TLS 证书；
@@ -78,7 +78,7 @@ pnpm lint:react-boundaries
 pnpm exec vitest run packages/plugin-msfile/src
 pnpm exec vitest run apps/web/src/keymasterSessionCoordinator.worker.test.ts
 pnpm exec vitest run packages/plugin-protocol/src packages/connect/src
-pnpm exec playwright test e2e/msfile-production-runtime.spec.ts --project=chromium --workers=1
+pnpm exec playwright test --config=playwright.msfile.config.ts --project=msfile --workers=1
 pnpm build
 pnpm test
 

@@ -15,7 +15,6 @@ import process from "node:process";
 const root = process.cwd();
 const matrixPath = path.join(root, "docs/集成测试/覆盖矩阵.yaml");
 const markdownPath = path.join(root, "docs/集成测试/覆盖矩阵.md");
-const legacyCatalogPath = path.join(root, "docs/集成测试/现有E2E迁移目录.json");
 const catalogPath = path.join(root, "apps/web/src/pluginCatalog.ts");
 const integrationRoot = path.join(root, "e2e/integration");
 
@@ -26,7 +25,6 @@ const REQUIRED_FIELDS = [
 ];
 const STATUS = new Set(["已覆盖", "部分覆盖", "未覆盖", "阻断"]);
 const LEVELS = new Set(["local-integration", "real-resource", "deployment-acceptance"]);
-const LEGACY_STATUS = new Set(["保留", "待迁移", "spike"]);
 
 function fail(message) {
   throw new Error(`[integration-coverage] ${message}`);
@@ -61,50 +59,6 @@ function parseMatrix() {
   if (!Array.isArray(value.formal_protocols)) fail("formal_protocols 必须是数组");
   if (!Array.isArray(value.requirements)) fail("requirements 必须是数组");
   return value;
-}
-
-function parseLegacyCatalog(requirementIds) {
-  let value;
-  try {
-    value = JSON.parse(read(legacyCatalogPath));
-  } catch (error) {
-    fail(`现有E2E迁移目录.json 必须是有效 JSON：${error instanceof Error ? error.message : "parse error"}`);
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.scenarios)) {
-    fail("现有E2E迁移目录.json 必须包含 scenarios 数组");
-  }
-  const ids = new Set();
-  const files = new Set();
-  const scenarios = value.scenarios.map((item) => {
-    if (!item || typeof item !== "object") fail("现有 E2E 迁移目录条目必须是对象");
-    const scenarioId = item.scenario_id;
-    const file = item.file;
-    if (typeof scenarioId !== "string" || !/^L-[A-Z0-9-]+$/u.test(scenarioId)) fail("旧 E2E scenario_id 必须使用 L-... 稳定编号");
-    if (ids.has(scenarioId)) fail(`旧 E2E scenario_id 重复：${scenarioId}`);
-    ids.add(scenarioId);
-    if (typeof file !== "string" || !/^e2e\/[^/]+\.spec\.ts$/u.test(file)) fail(`${scenarioId} 的 file 必须是 e2e 根目录下的旧 spec 文件`);
-    if (files.has(file)) fail(`旧 E2E 文件重复登记：${file}`);
-    files.add(file);
-    if (!fs.existsSync(path.join(root, file))) fail(`旧 E2E 文件不存在：${file}`);
-    if (!LEVELS.has(item.level)) fail(`${scenarioId} 的证据层级无效`);
-    if (!LEGACY_STATUS.has(item.status)) fail(`${scenarioId} 的迁移状态无效`);
-    if (!Array.isArray(item.requirement_ids) || item.requirement_ids.length === 0) fail(`${scenarioId} 必须声明 requirement_ids`);
-    for (const requirementId of item.requirement_ids) {
-      if (typeof requirementId !== "string" || !/^KM-[A-Z0-9-]+$/u.test(requirementId)) fail(`${scenarioId} 的 requirement_id 无效：${requirementId}`);
-      if (!requirementIds.has(requirementId)) fail(`${scenarioId} 引用了不存在的需求：${requirementId}`);
-    }
-    if (typeof item.说明 !== "string" || item.说明.trim() === "") fail(`${scenarioId} 必须说明保留/迁移边界`);
-    return item;
-  });
-  const e2eRoot = path.join(root, "e2e");
-  const actualFiles = fs.readdirSync(e2eRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".spec.ts"))
-    .map((entry) => `e2e/${entry.name}`);
-  const missing = sorted(actualFiles.filter((file) => !files.has(file)));
-  const stale = sorted([...files].filter((file) => !actualFiles.includes(file)));
-  if (missing.length) fail(`现有 e2e spec 没有迁移目录条目：${missing.join(", ")}`);
-  if (stale.length) fail(`迁移目录引用了不存在或已移动的旧 e2e spec：${stale.join(", ")}`);
-  return scenarios;
 }
 
 function catalogPackages() {
@@ -206,6 +160,40 @@ function scenarioSpecFiles() {
   return ["journeys", "gates"].flatMap((directory) => sourceFiles(path.join(integrationRoot, directory)).filter((file) => file.endsWith(".spec.ts")));
 }
 
+/**
+ * 执行档是显式的风险边界。路径只能命中一个档案，避免真实资源、部署
+ * 验收或 Go supplier 被默认 local-core 误运行，也避免一个 spec 被重复收集。
+ */
+const EXECUTION_PROFILES = [
+  { name: "local-core", pattern: /^(?:journeys\/local|gates\/local)\/[^/]+\.spec\.ts$/u },
+  { name: "dev-http", pattern: /^gates\/dev-http\/[^/]+\.spec\.ts$/u },
+  { name: "lifecycle", pattern: /^gates\/lifecycle\/[^/]+\.spec\.ts$/u },
+  { name: "msfile", pattern: /^gates\/msfile\/[^/]+\.spec\.ts$/u },
+  { name: "deployment", pattern: /^(?:journeys\/deployment|gates\/deployment)\/[^/]+\.spec\.ts$/u },
+  { name: "real-s3", pattern: /^(?:journeys\/real-resource\/real-s3-initialization|gates\/real-resource\/resource-safety)\.spec\.ts$/u },
+  { name: "real-resource", pattern: /^(?:journeys\/real-resource\/(?:real-testnet-asset|real-satsubscription-health)|resources\/(?:resource-setup|resource-teardown|real-resource-availability))\.spec\.ts$/u },
+  { name: "real-s3", pattern: /^resources\/s3-resource-(?:setup|teardown)\.spec\.ts$/u },
+];
+
+function validateSpecLayout() {
+  const e2eRoot = path.join(root, "e2e");
+  const rootSpecs = fs.readdirSync(e2eRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".spec.ts"))
+    .map((entry) => `e2e/${entry.name}`);
+  if (rootSpecs.length > 0) fail(`e2e 根目录仍有未归一化 spec：${rootSpecs.join(", ")}`);
+  if (fs.existsSync(path.join(e2eRoot, "fixtures"))) {
+    fail("e2e/fixtures 已废弃；所有 E2E fixture 必须归一到 e2e/integration/fixtures");
+  }
+  const integrationSpecs = sourceFiles(integrationRoot).filter((file) => file.endsWith(".spec.ts"));
+  for (const file of integrationSpecs) {
+    const relativeFile = path.relative(integrationRoot, file).replaceAll(path.sep, "/");
+    const matches = EXECUTION_PROFILES.filter((profile) => profile.pattern.test(relativeFile));
+    if (matches.length !== 1) {
+      fail(`${path.relative(root, file)} 必须且只能属于一个执行档，当前命中：${matches.map((item) => item.name).join(", ") || "无"}`);
+    }
+  }
+}
+
 function metadataScenarioIds() {
   const metadataPath = path.join(integrationRoot, "support/scenarioMetadata.ts");
   if (!fs.existsSync(metadataPath)) return new Map();
@@ -222,6 +210,29 @@ function metadataScenarioIds() {
   return result;
 }
 
+function metadataScenarioLevels() {
+  const metadataPath = path.join(integrationRoot, "support/scenarioMetadata.ts");
+  if (!fs.existsSync(metadataPath)) return new Map();
+  const text = read(metadataPath);
+  const result = new Map();
+  const declarations = [...text.matchAll(/export\s+const\s+([A-Za-z0-9_]+)\s*=\s*\{/g)];
+  for (let index = 0; index < declarations.length; index += 1) {
+    const declaration = declarations[index];
+    const start = declaration.index + declaration[0].length;
+    const end = declarations[index + 1]?.index ?? text.length;
+    const level = text.slice(start, end).match(/\blevel:\s*["']([^"']+)["']/u)?.[1];
+    if (level) result.set(declaration[1], level);
+  }
+  return result;
+}
+
+function expectedScenarioLevel(relativeFile) {
+  if (/^(?:journeys\/local|gates\/(?:local|dev-http|lifecycle|msfile))\//u.test(relativeFile)) return "local-integration";
+  if (/^(?:journeys\/real-resource|gates\/real-resource)\//u.test(relativeFile)) return "real-resource";
+  if (/^(?:journeys\/deployment|gates\/deployment)\//u.test(relativeFile)) return "deployment-acceptance";
+  return undefined;
+}
+
 function resolveScenarioExpression(expression, localIds, metadataIds) {
   const value = expression.trim().replace(/[,;]+$/u, "");
   const literal = value.match(/^["']((?:J|G)-[A-Z0-9-]+)["']$/u);
@@ -233,9 +244,11 @@ function resolveScenarioExpression(expression, localIds, metadataIds) {
 
 function collectScenarioDeclarations() {
   const metadataIds = metadataScenarioIds();
+  const metadataLevels = metadataScenarioLevels();
   const declarations = new Map();
   for (const file of scenarioSpecFiles()) {
     const text = read(file);
+    const relativeFile = path.relative(integrationRoot, file).replaceAll(path.sep, "/");
     const idMatch = text.match(/export\s+const\s+(JOURNEY_ID|GATE_ID)\s*=\s*([^;]+);/u);
     if (!idMatch) fail(`${path.relative(root, file)} 必须导出 JOURNEY_ID 或 GATE_ID，作为可执行场景编号`);
     const localIds = new Map();
@@ -248,6 +261,14 @@ function collectScenarioDeclarations() {
       ?? metadataMatch[2].match(/\bid:\s*["']((?:J|G)-[A-Z0-9-]+)["']/u)?.[1]
       ?? (metadataMatch[2].match(/\bid:\s*(JOURNEY_ID|GATE_ID)\b/u)?.[1] ? id : undefined);
     if (metadataId && metadataId !== id) fail(`${path.relative(root, file)} 的 ID 与 metadata.id 不一致：${id} != ${metadataId}`);
+    const metadataExpression = metadataMatch[2].trim();
+    const metadataName = metadataExpression.match(/^([A-Za-z0-9_]+)$/u)?.[1];
+    const actualLevel = (metadataName ? metadataLevels.get(metadataName) : undefined)
+      ?? metadataExpression.match(/\blevel:\s*["']([^"']+)["']/u)?.[1];
+    const expectedLevel = expectedScenarioLevel(relativeFile);
+    if (actualLevel && expectedLevel && actualLevel !== expectedLevel) {
+      fail(`${path.relative(root, file)} 的证据层级 ${actualLevel} 与目录执行边界 ${expectedLevel} 不一致`);
+    }
     if (declarations.has(id)) fail(`Journey/Gate 编号重复：${id}`);
     declarations.set(id, file);
   }
@@ -256,10 +277,6 @@ function collectScenarioDeclarations() {
 
 function collectScenarioIds() {
   return new Set(collectScenarioDeclarations().keys());
-}
-
-function collectAllScenarioIds(legacy) {
-  return new Set([...collectScenarioIds(), ...legacy.map((item) => item.scenario_id)]);
 }
 
 function collectScenarioRequirementIds() {
@@ -287,7 +304,7 @@ function exportedConstantValue(packageName, constant) {
   return undefined;
 }
 
-function validateMatrix(matrix, catalog, legacy) {
+function validateMatrix(matrix, catalog) {
   const plugins = matrix.catalog_plugins;
   const packages = plugins.map((item) => item?.package);
   if (packages.some((item) => typeof item !== "string" || !item.startsWith("@keymaster/"))) fail("每个 catalog_plugins 条目必须有 @keymaster 包名");
@@ -313,12 +330,12 @@ function validateMatrix(matrix, catalog, legacy) {
     if (!STATUS.has(requirement.status)) fail(`${requirement.requirement_id} 的 status 无效`);
     if (!Array.isArray(requirement.technical_truths) || requirement.technical_truths.length === 0) fail(`${requirement.requirement_id} 必须声明 technical_truths`);
     if (!Array.isArray(requirement.failure_paths) || requirement.failure_paths.length === 0) fail(`${requirement.requirement_id} 必须声明 failure_paths`);
-    if (!Array.isArray(requirement.scenario_ids) || requirement.scenario_ids.some((id) => typeof id !== "string" || !/^(?:J|G|L)-[A-Z0-9-]+$/u.test(id))) fail(`${requirement.requirement_id} 的 scenario_ids 必须是 J-/G-/L- 场景编号数组`);
+    if (!Array.isArray(requirement.scenario_ids) || requirement.scenario_ids.some((id) => typeof id !== "string" || !/^(?:J|G)-[A-Z0-9-]+$/u.test(id))) fail(`${requirement.requirement_id} 的 scenario_ids 必须是 J-/G- 场景编号数组`);
     if (requirement.status === "已覆盖" && requirement.scenario_ids.length === 0) fail(`${requirement.requirement_id} 标记为已覆盖但没有可执行场景`);
     if (requirement.status === "未覆盖" && requirement.scenario_ids.length > 0) fail(`${requirement.requirement_id} 标记为未覆盖但已经登记场景；应改为部分覆盖或移除未执行场景`);
   }
 
-  const scenarioIds = collectAllScenarioIds(legacy);
+  const scenarioIds = collectScenarioIds();
   const referenced = requirements.flatMap((item) => item.scenario_ids);
   const unknownScenarios = sorted(unique(referenced.filter((id) => !scenarioIds.has(id))));
   if (unknownScenarios.length) fail(`矩阵引用了不存在的 Journey/Gate：${unknownScenarios.join(", ")}`);
@@ -326,8 +343,7 @@ function validateMatrix(matrix, catalog, legacy) {
   if (orphanScenarios.length) fail(`可执行 Journey/Gate 没有进入覆盖矩阵：${orphanScenarios.join(", ")}`);
 
   const matrixRequirementIds = new Set(requirementIds);
-  const legacyRequirementIds = legacy.flatMap((item) => item.requirement_ids);
-  const unknownScenarioRequirements = sorted([...new Set([...collectScenarioRequirementIds(), ...legacyRequirementIds])].filter((id) => !matrixRequirementIds.has(id)));
+  const unknownScenarioRequirements = sorted([...collectScenarioRequirementIds()].filter((id) => !matrixRequirementIds.has(id)));
   if (unknownScenarioRequirements.length) fail(`Journey/Gate 元数据引用了不存在的需求：${unknownScenarioRequirements.join(", ")}`);
 
   const routesByPackage = new Map(plugins.map((item) => [item.package, new Set(item.routes ?? [])]));
@@ -352,7 +368,7 @@ function escapeCell(value) {
   return String(value).replaceAll("|", "\\|").replaceAll("\n", "<br>");
 }
 
-function generatedMarkdown(matrix, legacy) {
+function generatedMarkdown(matrix) {
   const rows = matrix.requirements;
   const counts = Object.fromEntries([...STATUS].map((status) => [status, rows.filter((row) => row.status === status).length]));
   const lines = [
@@ -370,19 +386,16 @@ function generatedMarkdown(matrix, legacy) {
   }
   lines.push("", "## 资源与清理索引", "", "| 编号 | 资源声明 | 清理规则 |", "| --- | --- | --- |");
   for (const row of rows) lines.push(`| ${escapeCell(row.requirement_id)} | ${escapeCell(row.resource_profile)} | ${escapeCell(row.cleanup_policy)} |`);
-  lines.push("", "## 现有 E2E 迁移目录", "", "> `L-` 编号表示仍由默认 E2E 命令执行的旧测试；它们已显式登记，但不冒充新的 integration Journey。", "", "| 编号 | 文件 | 层级 | 需求 | 状态 | 说明 |", "| --- | --- | --- | --- | --- | --- |");
-  for (const item of legacy) lines.push(`| ${escapeCell(item.scenario_id)} | ${escapeCell(item.file)} | ${escapeCell(item.level)} | ${escapeCell(item.requirement_ids.join("、"))} | ${escapeCell(item.status)} | ${escapeCell(item.说明)} |`);
-  lines.push("");
+  lines.push("", "## 执行档边界", "", "| 执行档 | 目录 | 中文含义 |", "| --- | --- | --- |", "| local-core | `journeys/local`、`gates/local` | 普通本地浏览器 Journey 与本地 Gate |", "| dev-http | `gates/dev-http` | 非安全 HTTP 开发服务器回归 |", "| lifecycle | `gates/lifecycle` | 本地/registry Coordinator 生命周期验收 |", "| msfile | `gates/msfile` | 需要临时 Go supplier 的 MSFile 技术 Gate |", "| real-resource | `journeys/real-resource`、`resources` | 受保护 testnet/SatSubscription 真实资源 |", "| real-s3 | `journeys/real-resource/real-s3-initialization`、`gates/real-resource/resource-safety` 与 S3 resource | 受保护真实 S3 资源 |", "| deployment | `journeys/deployment`、`gates/deployment` | 目标部署和不可逆 I/O 验收 |");
   return lines.join("\n");
 }
 
 const matrix = parseMatrix();
 const catalog = catalogPackages();
-const requirementIds = new Set(matrix.requirements.map((item) => item?.requirement_id));
-const legacy = parseLegacyCatalog(requirementIds);
+validateSpecLayout();
 validateE2EBrowserBoundary();
-validateMatrix(matrix, catalog, legacy);
-const generated = generatedMarkdown(matrix, legacy);
+validateMatrix(matrix, catalog);
+const generated = generatedMarkdown(matrix);
 if (process.argv.includes("--write")) {
   fs.writeFileSync(markdownPath, generated, "utf8");
   console.log(`[integration-coverage] 已生成 ${path.relative(root, markdownPath)}`);
@@ -390,4 +403,4 @@ if (process.argv.includes("--write")) {
   if (!fs.existsSync(markdownPath)) fail("覆盖矩阵.md 不存在；先运行 node scripts/check-integration-coverage.mjs --write");
   if (read(markdownPath) !== generated) fail("覆盖矩阵.md 与 YAML 真值不一致；运行 --write 后提交生成结果");
 }
-console.log(`[integration-coverage] 通过：${matrix.requirements.length} 项需求，${catalog.length} 个正式插件，${collectScenarioIds().size} 个可执行 Journey/Gate，${legacy.length} 个已登记旧 E2E。`);
+console.log(`[integration-coverage] 通过：${matrix.requirements.length} 项需求，${catalog.length} 个正式插件，${collectScenarioIds().size} 个可执行 Journey/Gate，所有 spec 已归一化到 e2e/integration。`);

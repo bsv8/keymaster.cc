@@ -4,8 +4,8 @@ import { defineConfig, devices } from "@playwright/test";
 // 新增 Coordinator peer lifecycle 链。入口脚本在无 workspace/file 逃逸的
 // 临时副本中用 frozen lockfile 安装后才加载此配置。
 export default defineConfig({
-  testDir: "./e2e",
-  testMatch: /(?:plugin-lifecycle-production|coordinator-runtime-lifecycle)\.spec\.ts/u,
+  testDir: "./e2e/integration",
+  testMatch: /gates\/lifecycle\/(?:plugin-lifecycle-production|coordinator-runtime-lifecycle)\.spec\.ts$/u,
   // 两条验收链共享同源 OPFS、Coordinator Worker 和生命周期全局状态；
   // 文件内 serial 不会阻止 Playwright 跨文件并发，必须在同一 registry
   // 临时副本中串行运行，避免把真实跨 tab 时序与两条链的资源争用混在一起。
@@ -29,7 +29,7 @@ export default defineConfig({
   },
   projects: [
     {
-      name: "chromium-lifecycle-registry",
+      name: "lifecycle-registry",
       use: {
         ...devices["Desktop Chrome"],
         launchOptions: { args: ["--enable-precise-memory-info"] },

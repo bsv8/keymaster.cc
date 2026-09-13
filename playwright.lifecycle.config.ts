@@ -4,8 +4,8 @@ import { defineConfig, devices } from "@playwright/test";
 // 正式 registry 0.4.2 验收使用 playwright.lifecycle.registry.config.ts，
 // 并由 registry-only 临时副本入口执行。
 export default defineConfig({
-  testDir: "./e2e",
-  testMatch: "coordinator-runtime-lifecycle.spec.ts",
+  testDir: "./e2e/integration",
+  testMatch: /gates\/lifecycle\/(?:coordinator-runtime-lifecycle|plugin-lifecycle-production)\.spec\.ts$/u,
   timeout: 30_000,
   forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
@@ -25,7 +25,7 @@ export default defineConfig({
   },
   projects: [
     {
-      name: "chromium-lifecycle",
+      name: "lifecycle-local",
       use: {
         ...devices["Desktop Chrome"],
         launchOptions: { args: ["--enable-precise-memory-info"] },

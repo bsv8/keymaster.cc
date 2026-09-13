@@ -56,6 +56,6 @@ I09 本轮 JSON 证据：
 6. 对应 Keymaster/MSFile 已提交 commit（当前验收源仍是待提交工作树）。
 
 拿到资源后按 003 的环境清单冻结版本，复用
-`e2e/msfile-production-runtime.spec.ts` 的 hash/identity 断言，并补采 candidate
+`e2e/integration/gates/msfile/msfile-production-runtime.spec.ts` 的 hash/identity 断言，并补采 candidate
 pair、TLS chain、stream/Reset、16 MiB Seed、内存和 NAS 资源证据。全部 I02–I15
 PASS 后才迁移正式文档并单独审查 `defaultEnabled: true`。

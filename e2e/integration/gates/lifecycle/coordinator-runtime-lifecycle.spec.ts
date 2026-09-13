@@ -1,11 +1,21 @@
 import { expect, test, type Page } from "@playwright/test";
+import { COORDINATOR_RUNTIME_LIFECYCLE_GATE } from "../../support/scenarioMetadata.js";
+
+export const GATE_ID = COORDINATOR_RUNTIME_LIFECYCLE_GATE.id;
+export const GATE_METADATA = COORDINATOR_RUNTIME_LIFECYCLE_GATE;
 
 /**
  * 这些 hook 只在 VITE_MSFILE_E2E=1 的隔离构建中存在；页面仍使用真实
  * WindowApp → SharedWorker → WebLoom MessagePort → Coordinator 链路。
  */
 interface LifecycleHooks {
-  bootstrap(): Promise<unknown>;
+  bootstrap(): Promise<{
+    ownerPublicKeyHex: string;
+    sessionEpoch: string;
+    buildId: string;
+    bridgeState: string;
+    services: Array<{ capabilityId: string; serviceInstanceId: string; status: string; hasServerGrant: boolean }>;
+  }>;
   ownerStorageRoundTrip(): Promise<{
     value: unknown;
     bridgeState: string;
@@ -39,6 +49,16 @@ interface LifecycleHooks {
     connectedAfterLateResult: boolean;
     connectionStateAfterLateResult: string;
   }>;
+  deriveAddress(): Promise<{ address: string; ownerPublicKeyHex: string; serviceInstanceId: string }>;
+  lockRevokesOldProxy(): Promise<{
+    lockStatus: string;
+    unlockStatus: string;
+    oldProxyErrorCode: string;
+    oldServiceInstanceId: string;
+    newServiceInstanceId: string;
+    oldProxyRejected: boolean;
+  }>;
+  dedicatedWorkerRoundTrip(): Promise<{ address: string; signatureLength: number; revoked: boolean }>;
 }
 
 declare global {
@@ -110,7 +130,7 @@ async function grantPersistentStorage(page: Page): Promise<void> {
   await page.waitForFunction(() => window.__lifecycleProductionE2E !== undefined, undefined, { timeout: 30_000 });
 }
 
-test.describe("Coordinator WebLoom peer 生命周期真实业务链", () => {
+test.describe(GATE_ID + "：Coordinator WebLoom peer 生命周期真实业务链", () => {
   test.describe.configure({ mode: "serial" });
 
   test("关闭一个 tab 后，另一个 tab 完成 owner handoff 且旧 close 不影响新 peer", async ({ page, context }) => {

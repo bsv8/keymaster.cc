@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { createAwsS3Api, S3CleanupResource } from "../resources/s3/s3CleanupResource.js";
-import { loadE2ES3Config, publicS3ConfigFingerprint } from "../resources/config/loader.js";
-import type { LoadedE2ES3Config } from "../resources/config/types.js";
-import { attachRedactedText, redactedError } from "../support/redaction.js";
-import { readS3ResourceRunState } from "../support/s3ResourceState.js";
-import { RESOURCE_SAFETY_GATE } from "../support/scenarioMetadata.js";
-import { scenarioObjectPrefix } from "../support/ids.js";
+import { createAwsS3Api, S3CleanupResource } from "../../resources/s3/s3CleanupResource.js";
+import { loadE2ES3Config, publicS3ConfigFingerprint } from "../../resources/config/loader.js";
+import type { LoadedE2ES3Config } from "../../resources/config/types.js";
+import { attachRedactedText, redactedError } from "../../support/redaction.js";
+import { readS3ResourceRunState } from "../../support/s3ResourceState.js";
+import { RESOURCE_SAFETY_GATE } from "../../support/scenarioMetadata.js";
+import { scenarioObjectPrefix } from "../../support/ids.js";
 
 export const GATE_ID = RESOURCE_SAFETY_GATE.id;
 export const GATE_METADATA = RESOURCE_SAFETY_GATE;

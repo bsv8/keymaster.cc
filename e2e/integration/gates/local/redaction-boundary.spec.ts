@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { assertSafeArtifact, findSecretLeaks, SecretString } from "../support/redaction.js";
+import { assertSafeArtifact, findSecretLeaks, SecretString } from "../../support/redaction.js";
 
 export const GATE_ID = "G-REDACTION-BOUNDARY";
 export const GATE_METADATA = {

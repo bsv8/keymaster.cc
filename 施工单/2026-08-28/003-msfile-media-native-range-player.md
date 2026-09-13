@@ -98,7 +98,7 @@ Range Host 调用现有 service。
 Gate 输出必须记录每个场景的 HTTP 方法、Range、响应码、返回字节数、映射 Block、supplier
 读取数、cancel 时刻和媒体事件。不能只看“最终能播放”。
 
-当前可重复 Gate 位于 `e2e/msfile-native-range.spec.ts`，使用真实 Chromium、production build、
+当前可重复 Gate 位于 `e2e/integration/gates/msfile/msfile-native-range.spec.ts`，使用真实 Chromium、production build、
 真实 Go `msfile-nas` supplier 和临时 NAS 数据，覆盖格式矩阵、HTTP Range 契约、远跳/回跳/连续拖动、
 cancel、旧根作用域 Service Worker 升级和 supplier Block 读取证据。编号与证据的对应关系如下：
 
@@ -429,7 +429,7 @@ pnpm typecheck
 pnpm lint:boundaries
 pnpm lint:react-boundaries
 pnpm exec vitest run packages/msfile-media packages/plugin-msfile/src apps/web/src
-pnpm exec playwright test <MSFile native Range E2E> --project=chromium --workers=1
+pnpm exec playwright test --config=playwright.msfile.config.ts --project=msfile --workers=1
 pnpm build
 pnpm test
 git diff --check

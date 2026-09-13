@@ -6,6 +6,10 @@
 // 幂等编号、领域仓库对账和“未知结果不重放”约束。
 
 import { expect, test } from "@playwright/test";
+import { DEPLOYMENT_IRREVERSIBLE_IO_GATE } from "../../support/scenarioMetadata.js";
+
+export const GATE_ID = DEPLOYMENT_IRREVERSIBLE_IO_GATE.id;
+export const GATE_METADATA = DEPLOYMENT_IRREVERSIBLE_IO_GATE;
 
 const SMOKE_URL = process.env.KEYMASTER_IRREVERSIBLE_IO_SMOKE_URL;
 const REQUIRED_SCENARIOS = [
@@ -56,9 +60,9 @@ function isImmutableBuildId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{40}-[0-9a-f]{16}$/iu.test(value);
 }
 
-test("目标部署完成不可逆 I/O smoke 且未知结果不重放", async ({ page }) => {
+test(GATE_ID + "：目标部署完成不可逆 I/O smoke 且未知结果不重放", async ({ page }) => {
   test.setTimeout(180_000);
-  test.skip(!SMOKE_URL, "设置 KEYMASTER_IRREVERSIBLE_IO_SMOKE_URL 后执行目标部署不可逆 I/O 验收");
+  if (!SMOKE_URL) throw new Error("部署验收必须设置 KEYMASTER_IRREVERSIBLE_IO_SMOKE_URL");
   const target = new URL(SMOKE_URL!);
   expect(["http:", "https:"]).toContain(target.protocol);
   expect(LOCAL_HOSTS.has(target.hostname)).toBe(false);

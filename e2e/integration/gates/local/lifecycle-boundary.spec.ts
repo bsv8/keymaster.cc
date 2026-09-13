@@ -6,9 +6,9 @@ import type {
   ProtectedOutpointProvider,
 } from "@keymaster/contracts";
 import { createLifecycleScope } from "webloom-framework";
-import { createScopedChannelRuntime } from "../../../packages/runtime/src/lifecycle/scopedChannelRuntime.js";
-import { createProtectedOutpointRegistry } from "../../../packages/runtime/src/registries/protectedOutpointRegistry.js";
-import { LIFECYCLE_BOUNDARY_GATE } from "../support/scenarioMetadata.js";
+import { createScopedChannelRuntime } from "../../../../packages/runtime/src/lifecycle/scopedChannelRuntime.js";
+import { createProtectedOutpointRegistry } from "../../../../packages/runtime/src/registries/protectedOutpointRegistry.js";
+import { LIFECYCLE_BOUNDARY_GATE } from "../../support/scenarioMetadata.js";
 
 export const GATE_ID = LIFECYCLE_BOUNDARY_GATE.id;
 export const GATE_METADATA = LIFECYCLE_BOUNDARY_GATE;

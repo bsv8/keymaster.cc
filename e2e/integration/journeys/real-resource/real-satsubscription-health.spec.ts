@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { readResourceRunState } from "../support/resourceState.js";
-import { REAL_SATSUBSCRIPTION_HEALTH_SCENARIO } from "../support/scenarioMetadata.js";
+import { readResourceRunState } from "../../support/resourceState.js";
+import { REAL_SATSUBSCRIPTION_HEALTH_SCENARIO } from "../../support/scenarioMetadata.js";
 
 export const JOURNEY_ID = REAL_SATSUBSCRIPTION_HEALTH_SCENARIO.id;
 export const JOURNEY_METADATA = REAL_SATSUBSCRIPTION_HEALTH_SCENARIO;

@@ -13,6 +13,8 @@ export default defineConfig({
     screenshot: "only-on-failure",
     video: "off",
   },
-  projects: [{ name: "deployment-acceptance", testMatch: /journeys\/deployment-acceptance\.spec\.ts$/u }],
+  projects: [{
+    name: "deployment-acceptance",
+    testMatch: /(?:journeys\/deployment|gates\/deployment)\/[^/]+\.spec\.ts$/u,
+  }],
 });
-

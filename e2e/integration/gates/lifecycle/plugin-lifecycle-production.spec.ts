@@ -2,13 +2,10 @@
 // 测试使用临时浏览器上下文和临时 Vault，不接触真实付款、广播或生产私钥。
 
 import { expect, test, type Page } from "@playwright/test";
+import { PLUGIN_LIFECYCLE_PRODUCTION_GATE } from "../../support/scenarioMetadata.js";
 
-const EXTERNAL_APPVIEW_ORIGIN = process.env.KEYMASTER_EXTERNAL_APPVIEW_ORIGIN?.replace(/\/$/u, "");
-const EXTERNAL_APPVIEW_SUCCESS_SELECTOR = process.env.KEYMASTER_EXTERNAL_APPVIEW_SUCCESS_SELECTOR;
-
-function isImmutableBuildId(value: unknown): value is string {
-  return typeof value === "string" && /^[0-9a-f]{40}-[0-9a-f]{16}$/iu.test(value);
-}
+export const GATE_ID = PLUGIN_LIFECYCLE_PRODUCTION_GATE.id;
+export const GATE_METADATA = PLUGIN_LIFECYCLE_PRODUCTION_GATE;
 
 interface LifecycleHooks {
   bootstrap(): Promise<{
@@ -70,7 +67,7 @@ async function grantPersistentStorage(page: Page): Promise<void> {
   // context 的权限；测试结束时 Playwright 会统一关闭 Browser。
 }
 
-test.describe("插件生命周期生产跨环境链", () => {
+test.describe(GATE_ID + "：插件生命周期生产跨环境链", () => {
   test.describe.configure({ mode: "serial" });
 
   test.beforeEach(async ({ page }) => {
@@ -124,45 +121,4 @@ test.describe("插件生命周期生产跨环境链", () => {
     expect(evidence.revoked).toBe(true);
   });
 
-  test("已部署的外部 AppView 完成 connect.launch（发布门禁）", async ({ page }) => {
-    test.setTimeout(120_000);
-    test.skip(
-      !EXTERNAL_APPVIEW_ORIGIN || !EXTERNAL_APPVIEW_SUCCESS_SELECTOR,
-      "设置 KEYMASTER_EXTERNAL_APPVIEW_ORIGIN 和 KEYMASTER_EXTERNAL_APPVIEW_SUCCESS_SELECTOR 后执行已部署 AppView 验收",
-    );
-    expect(isImmutableBuildId(process.env.KEYMASTER_DEPLOYED_BUILD_ID)).toBe(true);
-    const origin = EXTERNAL_APPVIEW_ORIGIN!;
-    await lifecycleHooks(page);
-    const bootstrap = await page.evaluate(async () => window.__lifecycleProductionE2E!.bootstrap());
-    expect(isImmutableBuildId(bootstrap.buildId)).toBe(true);
-    expect(bootstrap.buildId).toBe(process.env.KEYMASTER_DEPLOYED_BUILD_ID);
-    await page.evaluate(() => {
-      window.history.pushState({}, "", "/apps");
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-    await expect(page.getByTestId("apps-card-demo")).toBeVisible({ timeout: 60_000 });
-    await page.getByTestId("apps-open-demo").click();
-    await expect(page.getByTestId("app-launch-modal")).toBeVisible();
-    await page.getByLabel(/vault password/i).fill("lifecycle-production-e2e-password");
-    await page.getByTestId("app-launch-confirm").click();
-
-    await expect.poll(
-      () => page.context().pages().filter((candidate) => candidate.url().includes("/protocol/v1/popup?boot=appView")).length,
-      { timeout: 60_000 },
-    ).toBe(1);
-    const sessionWindow = page.context().pages().find((candidate) => candidate.url().includes("/protocol/v1/popup?boot=appView"));
-    if (!sessionWindow) throw new Error("已部署 AppView 验收未打开 Session Window");
-    await expect(sessionWindow.getByTestId("appview-done")).toBeVisible({ timeout: 60_000 });
-    await sessionWindow.getByTestId("appview-open-app").click();
-
-    await expect.poll(
-      () => page.context().pages().filter((candidate) => candidate.url().startsWith(`${origin}/`)).length,
-      { timeout: 60_000 },
-    ).toBe(1);
-    const appPage = page.context().pages().find((candidate) => candidate.url().startsWith(`${origin}/`));
-    if (!appPage) throw new Error("已部署 AppView 页面未打开");
-    await expect(appPage.locator(EXTERNAL_APPVIEW_SUCCESS_SELECTOR!)).toBeVisible({ timeout: 60_000 });
-    expect(new URL(appPage.url()).searchParams.get("launchToken")).toBeTruthy();
-    expect(new URL(appPage.url()).searchParams.get("sessionWindowOrigin")).toBe(new URL(page.url()).origin);
-  });
 });

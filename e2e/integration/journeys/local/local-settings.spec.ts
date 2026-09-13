@@ -1,14 +1,14 @@
 import { expect, test } from "@playwright/test";
-import { initializeNewLocalUser } from "../flows/initializeLocalUser.js";
+import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
 import {
   changeLanguage,
   countManagedPlugins,
   openSettingsPage,
-} from "../drivers/settingsDriver.js";
-import { reloadAndAssertSameKey, unlockWalletInPlace } from "../drivers/vaultDriver.js";
-import { captureBrowserErrors, attachBrowserErrors } from "../support/browserEvidence.js";
-import { attachVisibleDiagnostic } from "../support/diagnostics.js";
-import { LOCAL_SETTINGS_SCENARIO } from "../support/scenarioMetadata.js";
+} from "../../drivers/settingsDriver.js";
+import { reloadAndAssertSameKey, unlockWalletInPlace } from "../../drivers/vaultDriver.js";
+import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
+import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
+import { LOCAL_SETTINGS_SCENARIO } from "../../support/scenarioMetadata.js";
 
 export const JOURNEY_ID = LOCAL_SETTINGS_SCENARIO.id;
 export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;

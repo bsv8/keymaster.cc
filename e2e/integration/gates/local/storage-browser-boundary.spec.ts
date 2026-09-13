@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { captureBrowserErrors, attachBrowserErrors } from "../support/browserEvidence.js";
-import { STORAGE_BROWSER_GATE } from "../support/scenarioMetadata.js";
+import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
+import { STORAGE_BROWSER_GATE } from "../../support/scenarioMetadata.js";
 
 export const GATE_ID = STORAGE_BROWSER_GATE.id;
 export const GATE_METADATA = STORAGE_BROWSER_GATE;
@@ -30,7 +30,9 @@ test(GATE_ID + "：真实浏览器存储边界", async ({ page, context }, testI
       };
     });
 
+    await expect(page).toHaveTitle("KeyMaster");
     expect(browserFacts.hasLocalStorage).toBe(true);
+    expect(browserFacts.hasLegacyDatabaseApi).toBe(true);
     expect(browserFacts.hasWebCrypto).toBe(true);
     expect(browserFacts.hasSharedWorker).toBe(true);
     // IndexedDB 可能是浏览器能力，但当前 Keymaster Local 的正式物理真值仍是 localStorage。

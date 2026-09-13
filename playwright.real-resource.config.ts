@@ -29,7 +29,7 @@ export default defineConfig({
     {
       name: "real-resource",
       dependencies: ["resource-setup"],
-      testMatch: /(?:resources\/real-resource-availability|journeys\/real-(?:testnet-asset|satsubscription-health))\.spec\.ts$/u,
+      testMatch: /(?:resources\/real-resource-availability|journeys\/real-resource\/real-(?:testnet-asset|satsubscription-health))\.spec\.ts$/u,
       use: { ...devices["Desktop Chrome"] },
     },
     {

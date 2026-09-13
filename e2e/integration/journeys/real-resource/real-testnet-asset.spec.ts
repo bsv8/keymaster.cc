@@ -1,14 +1,14 @@
 import { expect, test } from "@playwright/test";
 import path from "node:path";
-import { enableTestnetAssets, openTestnetTransfer, submitTestnetTransfer } from "../drivers/p2pkhDriver.js";
-import { initializeLocalUserWithImportedHexKey } from "../drivers/initialSetupDriver.js";
-import { loadE2EConfig, publicConfigFingerprint } from "../resources/config/loader.js";
-import { RecoveryLedger, TestnetFundingResource, deriveTestnetP2pkhAddress, deriveTestnetP2pkhAddressFromPrivateKey, type FundingLedgerRecord, type OneTimeWallet } from "../resources/testnet/fundingResource.js";
-import { createWocTestnetChainAdapter } from "../resources/testnet/wocChainAdapter.js";
-import { attachBrowserErrors, captureBrowserErrors } from "../support/browserEvidence.js";
-import { readResourceRunState } from "../support/resourceState.js";
-import { REAL_TESTNET_ASSET_SCENARIO } from "../support/scenarioMetadata.js";
-import type { LoadedE2EConfig } from "../resources/config/types.js";
+import { enableTestnetAssets, openTestnetTransfer, submitTestnetTransfer } from "../../drivers/p2pkhDriver.js";
+import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
+import { loadE2EConfig, publicConfigFingerprint } from "../../resources/config/loader.js";
+import { RecoveryLedger, TestnetFundingResource, deriveTestnetP2pkhAddress, deriveTestnetP2pkhAddressFromPrivateKey, type FundingLedgerRecord, type OneTimeWallet } from "../../resources/testnet/fundingResource.js";
+import { createWocTestnetChainAdapter } from "../../resources/testnet/wocChainAdapter.js";
+import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
+import { readResourceRunState } from "../../support/resourceState.js";
+import { REAL_TESTNET_ASSET_SCENARIO } from "../../support/scenarioMetadata.js";
+import type { LoadedE2EConfig } from "../../resources/config/types.js";
 
 export const JOURNEY_ID = REAL_TESTNET_ASSET_SCENARIO.id;
 export const JOURNEY_METADATA = REAL_TESTNET_ASSET_SCENARIO;

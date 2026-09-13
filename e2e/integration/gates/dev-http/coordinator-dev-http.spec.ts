@@ -1,4 +1,8 @@
 import { expect, test, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
+import { COORDINATOR_DEV_HTTP_GATE } from "../../support/scenarioMetadata.js";
+
+export const GATE_ID = COORDINATOR_DEV_HTTP_GATE.id;
+export const GATE_METADATA = COORDINATOR_DEV_HTTP_GATE;
 
 interface WorkerSnapshotEvidence {
   state: string;
@@ -93,7 +97,7 @@ async function installWorkerEvidence(context: BrowserContext): Promise<void> {
     const nativeSharedWorker = window.SharedWorker;
     if (typeof nativeSharedWorker !== "function") return;
 
-    const wrappedSharedWorker = function (url: string | URL, options?: SharedWorkerOptions): SharedWorker {
+    const wrappedSharedWorker = function (url: string | URL, options?: ConstructorParameters<typeof SharedWorker>[1]): SharedWorker {
       const worker = new nativeSharedWorker(url, options);
       evidence.constructed += 1;
       evidence.urls.push(String(url));
@@ -109,7 +113,7 @@ async function installWorkerEvidence(context: BrowserContext): Promise<void> {
         evidence.snapshots.push({
           state: snapshot.state,
           runtimeKind: snapshot.runtimeKind,
-          revision: snapshot.revision,
+          revision: snapshot.revision as number,
           runtimeInstanceId: snapshot.runtimeInstanceId,
         });
       });
@@ -162,10 +166,9 @@ async function attachDiagnostics(page: Page, testInfo: TestInfo, browserErrors: 
   });
 }
 
-test("Vite dev Coordinator completes Local initial setup in a non-secure HTTP context", async ({ page, context }, testInfo) => {
-  // Keep the business completion barrier at 60s below. The larger outer
-  // budget leaves enough time for finally{} to attach Worker/bridge evidence
-  // when the barrier fails; it does not turn a hung transaction into a pass.
+test(GATE_ID + "：Vite dev Coordinator 在非安全 HTTP 上完成 Local 初始化", async ({ page, context }, testInfo) => {
+  // 下面的业务完成屏障仍保持 60 秒。更大的外层预算只给 finally{} 留出附加
+  // Worker/bridge 证据的时间；它不会把卡死的事务变成通过。
   test.setTimeout(120_000);
   await installWorkerEvidence(context);
   const browserErrors = collectBrowserErrors(page, context);
@@ -185,9 +188,8 @@ test("Vite dev Coordinator completes Local initial setup in a non-secure HTTP co
     expect(environment.hasServiceWorker).toBe(false);
     expect(environment.hasEffectiveSubtle).toBe(true);
 
-  // This is the readiness barrier: the page is considered bootstrapped only
-  // after a raw ready snapshot from the real Worker and the first setup page
-  // have both arrived. No fixed sleep is used to guess startup completion.
+    // 这是启动就绪屏障：只有真实 Worker 的原始 ready 快照和首次设置页都到达后，
+    // 页面才算完成启动；不使用固定 sleep 猜测启动结束。
     await page.waitForFunction(() => {
       const evidence = window.__keymasterDevHttpWorkerEvidence;
       const workerReady = evidence?.snapshots.some((snapshot) =>
@@ -209,10 +211,9 @@ test("Vite dev Coordinator completes Local initial setup in a non-secure HTTP co
     await expect(page.locator("[data-fatal-crash]")).toHaveCount(0);
     await expect(page.getByRole("heading", { name: /Choose a bucket type|选择一个桶类型/u })).toBeVisible();
 
-  // Exercise the exact user-reported final step. This crosses Window -> real
-  // SharedWorker -> LocalStorage bridge -> keymaster-hold/browser, including
-  // its HMAC-SHA-256 document-integrity operation. The setup page itself is
-  // not sufficient evidence because the failure happens only on submission.
+    // 执行用户报告的确切最后一步。这会穿过 Window → 真实 SharedWorker →
+    // LocalStorage bridge → keymaster-hold/browser，并包含 HMAC-SHA-256 文档完整性
+    // 操作。只看到设置页不足以构成证据，因为故障只会在提交时出现。
     await page.getByRole("button", { name: /Local/ }).click();
     await page.getByLabel(/Bucket name|桶名称/u).fill("http-dev-bucket");
     await page.getByRole("button", { name: /Next|Continue|继续/u }).click();

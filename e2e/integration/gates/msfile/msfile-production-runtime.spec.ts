@@ -13,7 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "./fixtures/msfileProxyProtocol.js";
+import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "../../fixtures/msfileProxyProtocol.js";
+import { MSFILE_PRODUCTION_RUNTIME_GATE } from "../../support/scenarioMetadata.js";
+
+export const GATE_ID = MSFILE_PRODUCTION_RUNTIME_GATE.id;
+export const GATE_METADATA = MSFILE_PRODUCTION_RUNTIME_GATE;
 
 const execFileAsync = promisify(execFile);
 const KEYMASTER_ORIGIN = "http://127.0.0.1:4173";
@@ -43,7 +47,7 @@ interface ReadSummary {
 }
 
 interface ProductionHooks {
-  bootstrap(): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }>;
+  bootstrap(force?: boolean): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }>;
   configure(supplier: { name: string; supplierPublicKeyHex: string; addresses: string[]; enabled: boolean }): Promise<void>;
   status(): string;
   probe(supplierPublicKeyHex: string): Promise<{ connected: boolean; addresses: Array<{ address: string; ok: boolean; errorCode?: string }> }>;
@@ -57,6 +61,13 @@ interface ProductionHooks {
   switchToGeneratedKey(): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string }>;
   lock(): Promise<string>;
   unlock(): Promise<string>;
+}
+
+declare global {
+  interface Window {
+    /** 仅由 VITE_MSFILE_E2E=1 构建暴露的 MSFile 生产测试 hook。 */
+    __msfileProductionE2E?: ProductionHooks;
+  }
 }
 
 interface NasFixture {
@@ -111,7 +122,7 @@ async function freeUdpPort(): Promise<number> {
         reject(new Error("failed to allocate a loopback UDP port"));
         return;
       }
-      socket.close((error) => error ? reject(error) : resolvePort(address.port));
+      socket.close(() => resolvePort(address.port));
     });
   });
 }
@@ -422,7 +433,7 @@ async function readSummary(page: Page, kind: "seed" | "block", fixture: NasFixtu
   }, { kind, supplierPublicKeyHex: fixture.supplierPublicKeyHex, hashHex: hash });
 }
 
-test.describe("MSFile production runtime（施工单 002）", () => {
+test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () => {
   test.describe.configure({ mode: "serial" });
   let fixture: NasFixture;
   let browser: Browser;
@@ -475,7 +486,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     }
   });
 
-  test("B01/B04/B05/B07/B15/B16: WebRTC Direct serves real Stat, Seed, Block and bounded concurrency", async () => {
+  test("B01/B04/B05/B07/B15/B16：WebRTC Direct 提供真实 Stat、Seed、Block 和有界并发", async () => {
     test.setTimeout(120_000);
     await configure(controlPage, fixture, [fixture.webRtcAddress]);
     const probe = await controlPage.evaluate(async (supplierPublicKeyHex) => {
@@ -515,7 +526,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     console.log(JSON.stringify({ event: "msfile_b01_webrtc", peerId: fixture.peerId, seedReads: 4, blockReads: 8, durationMs: Math.round(burst.durationMs) }));
   });
 
-  test("B02/B03/B08: WSS uses pinned test certificate, rejects bad TLS and falls back without changing identity", async () => {
+  test("B02/B03/B08：WSS 使用 pin 的测试证书，拒绝错误 TLS 并在回退时保持身份不变", async () => {
     test.setTimeout(150_000);
     const badAddress = fixture.wssAddress.replace(/\/tcp\/\d+\//u, "/tcp/1/");
     await configure(controlPage, fixture, [badAddress, fixture.wssAddress]);
@@ -577,7 +588,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     }
   });
 
-  test("B03: persisted supplier identity, PeerId and WebRTC certhash pins fail closed", async () => {
+  test("B03：持久化 supplier 身份、PeerId 和 WebRTC certhash pin 校验失败时 fail-closed", async () => {
     test.setTimeout(120_000);
     const wrongPeerAddress = fixture.webRtcAddress.replace(/\/p2p\/[^/]+$/u, `/p2p/${OTHER_SUPPLIER_PEER_ID}`);
     await expect(configure(controlPage, fixture, [wrongPeerAddress])).rejects.toThrow();
@@ -601,7 +612,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     await configure(controlPage, fixture, [fixture.webRtcAddress]);
   });
 
-  test("B06: same-hash larger request ID cancels the superseded real wire Read", async () => {
+  test("B06：相同 hash 的较大 request ID 会取消被替代的真实 wire Read", async () => {
     test.setTimeout(120_000);
     await configure(controlPage, fixture, [fixture.webRtcAddress]);
     const outcomes = await controlPage.evaluate(async ({ supplierPublicKeyHex, blockHashHex }) => {
@@ -620,7 +631,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     });
   });
 
-  test("B09/I09 headless preflight: 10,000 Stat calls reuse the production stream with bounded heap", async () => {
+  test("B09/I09：无头预检的 10,000 次 Stat 调用复用生产 stream，并保持堆内存有界", async () => {
     test.setTimeout(240_000);
     await configure(controlPage, fixture, [fixture.webRtcAddress]);
     const evidence = await controlPage.evaluate(async ({ seedHashes }) => {
@@ -650,7 +661,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     console.log(JSON.stringify({ event: "msfile_i09_headless", ...evidence }));
   });
 
-  test("H01/H14/H16/H17/H19: the real home projection reads, previews and downloads a Go supplier text file", async () => {
+  test("H01/H14/H16/H17/H19：真实首页 projection 读取、预览并下载 Go supplier 文本文件", async () => {
     test.setTimeout(180_000);
     await configure(controlPage, fixture, [fixture.webRtcAddress]);
     await bootstrapProductionPage(controlPage);
@@ -701,7 +712,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     })).toBeGreaterThan(0);
   });
 
-  test("H13/H16/H19: the real home HTML preview is opaque, static and downloadable", async () => {
+  test("H13/H16/H19：真实首页 HTML 预览保持 opaque、静态且可下载", async () => {
     test.setTimeout(180_000);
     await configure(controlPage, fixture, [fixture.webRtcAddress]);
     await bootstrapProductionPage(controlPage);
@@ -744,7 +755,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     }
   });
 
-  test("B12/B13: trusted capability and real Connect SDK/session/App Identity read through WSS", async () => {
+  test("B12/B13：受信 capability 和真实 Connect SDK/session/App Identity 通过 WSS 读取", async () => {
     test.setTimeout(180_000);
     await configure(controlPage, fixture, [fixture.wssAddress]);
     await controlPage.evaluate(async ({ sessionId, origin, proof }) => {
@@ -756,7 +767,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     await appPage.goto(appServer.origin, { waitUntil: "load" });
     await appPage.addScriptTag({ content: sdkBundle });
     await appPage.evaluate(({ targetOrigin }) => {
-      const sdk = (window as Window & { KeymasterConnectE2E: { KeymasterConnectClient: new (input: { targetOrigin: string }) => unknown } }).KeymasterConnectE2E;
+      const sdk = (window as unknown as Window & { KeymasterConnectE2E: { KeymasterConnectClient: new (input: { targetOrigin: string }) => unknown } }).KeymasterConnectE2E;
       (window as Window & { __keymasterConnectClient?: unknown }).__keymasterConnectClient = new sdk.KeymasterConnectClient({ targetOrigin });
     }, { targetOrigin: KEYMASTER_ORIGIN });
 
@@ -766,7 +777,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
         ? Promise.resolve(existingPopup)
         : context.waitForEvent("page", { timeout: 15_000 });
       const resultPromise = appPage.evaluate(async ({ method: operation, sessionId, supplierPublicKeyHex, hashHex }) => {
-        const client = (window as Window & { __keymasterConnectClient: {
+        const client = (window as unknown as Window & { __keymasterConnectClient: {
           msfileStat(input: unknown): Promise<unknown>;
           msfileReadSeed(input: unknown): Promise<unknown>;
           msfileReadBlock(input: unknown): Promise<unknown>;
@@ -809,7 +820,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     expect(authorizations).toContainEqual(expect.objectContaining({ appName: "Stable App", key: expect.objectContaining({ appId: "stable-app-id" }) }));
   });
 
-  test("B10/B11/B14: lock revokes runtime, another tab takes executor lease, and bytes remain out of logs", async () => {
+  test("B10/B11/B14：锁定撤销 runtime，另一个 tab 接管 executor lease，字节不进入日志", async () => {
     test.setTimeout(120_000);
     const lockStatus = await controlPage.evaluate(async () => {
       const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;

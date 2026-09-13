@@ -2,9 +2,9 @@ import { expect, test } from "@playwright/test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadE2EConfig } from "../resources/config/loader.js";
-import type { LoadedE2EConfig } from "../resources/config/types.js";
-import { CONFIG_SAFETY_GATE } from "../support/scenarioMetadata.js";
+import { loadE2EConfig } from "../../resources/config/loader.js";
+import type { LoadedE2EConfig } from "../../resources/config/types.js";
+import { CONFIG_SAFETY_GATE } from "../../support/scenarioMetadata.js";
 
 export const GATE_ID = CONFIG_SAFETY_GATE.id;
 export const GATE_METADATA = CONFIG_SAFETY_GATE;

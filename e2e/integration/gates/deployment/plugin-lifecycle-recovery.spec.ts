@@ -5,6 +5,10 @@
 // 这一完整链路。目标验收页提供 runner，本测试只接受结构化、脱敏结果。
 
 import { expect, test } from "@playwright/test";
+import { DEPLOYMENT_RECOVERY_GATE } from "../../support/scenarioMetadata.js";
+
+export const GATE_ID = DEPLOYMENT_RECOVERY_GATE.id;
+export const GATE_METADATA = DEPLOYMENT_RECOVERY_GATE;
 
 const DRILL_URL = process.env.KEYMASTER_RECOVERY_DRILL_URL;
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -49,9 +53,9 @@ function isImmutableBuildId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{40}-[0-9a-f]{16}$/iu.test(value);
 }
 
-test("目标部署完成 Coordinator 活动 lease 崩溃恢复演练", async ({ page }) => {
+test(GATE_ID + "：目标部署完成 Coordinator 活动 lease 崩溃恢复演练", async ({ page }) => {
   test.setTimeout(180_000);
-  test.skip(!DRILL_URL, "设置 KEYMASTER_RECOVERY_DRILL_URL 后执行目标部署恢复验收");
+  if (!DRILL_URL) throw new Error("部署验收必须设置 KEYMASTER_RECOVERY_DRILL_URL");
   const target = new URL(DRILL_URL!);
   expect(["http:", "https:"]).toContain(target.protocol);
   expect(LOCAL_HOSTS.has(target.hostname)).toBe(false);

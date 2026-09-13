@@ -1,28 +1,33 @@
 import { defineConfig, devices } from "@playwright/test";
 
+/**
+ * MSFile 本地技术 Gate 执行档。
+ *
+ * 这些场景会启动仓库外（或临时构建的）Go supplier，验证真实 P2P、Range、
+ * Service Worker 和生命周期边界；它们不应被普通 local-core PR 扫描到。
+ */
 export default defineConfig({
   testDir: "./e2e/integration",
-  timeout: 60_000,
-  forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 2 : 0,
+  timeout: 360_000,
+  forbidOnly: true,
+  retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/integration-local",
+  outputDir: "test-results/integration-msfile",
+  workers: 1,
   use: {
     baseURL: "http://127.0.0.1:4173",
-    trace: "on-first-retry",
+    trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    video: "retain-on-failure",
+    video: "off",
   },
   webServer: {
     command: "VITE_MSFILE_E2E=1 VITE_MSFILE_SPIKE=1 pnpm --filter @keymaster/web build && pnpm --filter @keymaster/web exec vite preview --host 127.0.0.1 --port 4173",
     url: "http://127.0.0.1:4173",
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
   },
   projects: [{
-    name: "local-integration",
-    // 真实资源和目标部署必须由各自的命令运行；本地 PR 不能因为扫描到
-    // integration 目录就误读仓库外 seed 或把 preview 当成部署验收。
-    testMatch: /(?:journeys\/local|gates\/local)\/[^/]+\.spec\.ts$/u,
+    name: "msfile",
+    testMatch: /gates\/msfile\/[^/]+\.spec\.ts$/u,
     use: { ...devices["Desktop Chrome"], launchOptions: { args: ["--enable-precise-memory-info"] } },
   }],
 });

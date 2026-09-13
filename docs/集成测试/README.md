@@ -8,24 +8,41 @@
 | --- | --- | --- |
 | `pnpm test:e2e:integration` | `local-integration` | 生产构建 + 真实 Chromium；不需要 S3、testnet 或长期秘密 |
 | `pnpm test:e2e:integration:list` | — | 只列出集成测试，不启动浏览器 |
+| `pnpm test:e2e` | `local-core` + `dev-http` | 稳定默认聚合入口，顺序运行本地生产构建和非安全 HTTP Coordinator 回归 |
+| `pnpm test:e2e:local-core` | `local-core` | 只运行 `journeys/local` 和 `gates/local` |
+| `pnpm test:e2e:dev-http` | `dev-http` | 独立 Vite dev server，验证非安全 HTTP Coordinator 边界 |
+| `pnpm test:e2e:msfile` | `msfile` | 需要临时 Go supplier 的 MSFile 技术 Gate；默认不运行 |
 | `pnpm check:integration-coverage` | — | 检查生产入口、矩阵、Journey/Gate 和生成视图的一致性 |
 | `pnpm typecheck:e2e` | — | 检查 E2E TypeScript 类型 |
 | `pnpm test:e2e:real-resource` | `real-resource` | 显式提供受保护资源配置后才运行；缺配置时 fail closed |
 | `pnpm test:e2e:real-s3` | `real-resource` | 只读取 `s3.json`，执行真实 S3 初始化；不依赖 SatSubscription/testnet 配置 |
-| `pnpm test:e2e:deployment` | `deployment-acceptance` | 必须提供不可变目标 Build ID；本地 preview 不能替代它 |
+| `pnpm test:e2e:deployment` | `deployment-acceptance` | 收集该执行档的全部 4 个正式场景；必须提供 `KEYMASTER_E2E_DEPLOYMENT_BASE_URL` 和不可变 `KEYMASTER_DEPLOYED_BUILD_ID`，本地 preview 不能替代它 |
 
-普通 `pnpm test:e2e` 仍保留仓库原有的 E2E。旧文件的需求、层级和迁移边界登记在
-[`现有E2E迁移目录.json`](./现有E2E迁移目录.json)，不会因为新目录建设而静默丢失断言。
-新场景位于 `e2e/integration/`，不会通过另一个 Playwright `test()` 共享状态；每条 Journey
-使用自己的浏览器上下文。
+部署层的 `pnpm test:e2e:external` 还需要 `KEYMASTER_EXTERNAL_APPVIEW_ORIGIN`、
+`KEYMASTER_EXTERNAL_APPVIEW_SUCCESS_SELECTOR`，并沿用同一个
+`KEYMASTER_E2E_DEPLOYMENT_BASE_URL` 与 `KEYMASTER_DEPLOYED_BUILD_ID`。不可逆 I/O 和恢复
+runner 也只接受这个目标部署 Build ID；缺少地址、hook 或不可变标识时直接失败，不把跳过当成通过。
+
+所有浏览器 spec 已统一位于 `e2e/integration/`；`pnpm test:e2e` 是
+`local-core` + `dev-http` 的稳定聚合入口，不再扫描 `e2e/` 根目录或隐式收集外部资源测试。旧测试的独有断言
+已经按“重复合并、独有能力迁移、证据层级拆分”落到对应 Journey/Gate；覆盖矩阵只登记正式
+`J-` Journey 和 `G-` Gate，不再维护过渡性的旧测试目录。每条 Journey 使用自己的浏览器上下文，
+不会通过另一个 Playwright `test()` 共享状态。
 
 ## 目录约定
 
-- `journeys/`：一个完整用户目标对应一个可独立报告的 Playwright 测试。
+- `journeys/local/`：不依赖仓库外资源的本地用户 Journey。
+- `journeys/real-resource/`：需要受保护 S3、testnet 或 SatSubscription 资源的 Journey。
+- `journeys/deployment/`：绑定不可变 Build ID 的目标部署 Journey。
 - `flows/`：只封装可复用业务过程，不注册 `test()`。
 - `drivers/`：只负责可访问性定位、页面/协议等待和浏览器技术证据。
 - `resources/`：只在 Node 侧处理 S3、testnet 和 SatSubscription 资源。
-- `gates/`：不适合伪装成用户旅程的 Worker、协议、并发和秘密安全门禁。
+- `gates/local/`：本地浏览器能力、生命周期和秘密边界 Gate。
+- `gates/dev-http/`：非安全 HTTP 开发服务器 Gate。
+- `gates/lifecycle/`：Coordinator/插件生命周期真实浏览器 Gate。
+- `gates/msfile/`：临时 Go supplier 的 MSFile/P2P 技术 Gate。
+- `gates/real-resource/`：真实资源清理范围 Gate。
+- `gates/deployment/`：不可逆 I/O 和部署恢复 Gate。
 - `support/`：场景状态、运行编号、脱敏和报告辅助工具。
 
 ## 证据边界

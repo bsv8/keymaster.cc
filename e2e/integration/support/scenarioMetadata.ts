@@ -84,20 +84,6 @@ export const REAL_TESTNET_ASSET_SCENARIO = {
   resourceProfile: "testnet",
 } as const satisfies IntegrationScenarioMetadata;
 
-/** 真实 SatSubscription Journey；双入口身份和 testnet 由资源层运行时确认。 */
-export const REAL_SATSUBSCRIPTION_SCENARIO = {
-  id: "J-REAL-SATSUBSCRIPTION",
-  level: "real-resource",
-  requirementIds: ["KM-SATSUB-001"],
-  startingState: "SatSubscription WebSocket 与 WebRTC Direct 已通过同一 testnet 服务身份健康检查。",
-  successCriteria: [
-    "充值、消费和服务端账本按付款方、发布方和 request_id 闭合。",
-    "重复 request_id 返回幂等结果，不产生第二笔收费。",
-    "连接中断后的收费结果未知会先对账，不会盲目重发。",
-  ],
-  resourceProfile: "satsubscription",
-} as const satisfies IntegrationScenarioMetadata;
-
 /** 真实资源层的 SatSubscription 健康 Journey；不把健康握手冒充成收费业务。 */
 export const REAL_SATSUBSCRIPTION_HEALTH_SCENARIO = {
   id: "J-REAL-SATSUB-HEALTH",
@@ -110,20 +96,6 @@ export const REAL_SATSUBSCRIPTION_HEALTH_SCENARIO = {
     "健康门禁通过不被解释为充值、消费或服务端账本已经闭合。",
   ],
   resourceProfile: "satsubscription",
-} as const satisfies IntegrationScenarioMetadata;
-
-/** 真实 MSFile/P2P Journey 的矩阵入口；详细 Range/媒体断言由旧生产 Gate 承担。 */
-export const REAL_MSFILE_SCENARIO = {
-  id: "J-REAL-MSFILE",
-  level: "real-resource",
-  requirementIds: ["KM-MSFILE-001"],
-  startingState: "临时 MSFile supplier、P2P lease 和测试文件已准备，浏览器使用真实生产构建。",
-  successCriteria: [
-    "Stat、Seed、Block、Range 和媒体首段读取使用正式 parser/schema。",
-    "错误地址、非法范围、取消和锁定不会让旧 lease 继续进行不可逆 I/O。",
-    "supplier、浏览器和临时文件在结束时关闭并可验证清理。",
-  ],
-  resourceProfile: "p2p",
 } as const satisfies IntegrationScenarioMetadata;
 
 /** 部署验收 Journey 的矩阵入口；本地 preview 不得替代不可变 Build ID。 */
@@ -178,4 +150,172 @@ export const RESOURCE_SAFETY_GATE = {
     "prefix 清理和非前缀 teardown 都在释放 lease 前完成并确认。",
   ],
   resourceProfile: "s3",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 本地初始化 Journey：沿用正式导入入口建立第一把 Hex Key。 */
+export const LOCAL_IMPORTED_KEY_SCENARIO = {
+  id: "J-LOCAL-INIT-IMPORTED",
+  level: "local-integration",
+  requirementIds: ["KM-INIT-001", "KM-VAULT-001"],
+  startingState: "全新 Chromium context，没有 Local catalog、Vault 或 active Key，使用一次性测试 Hex Key。",
+  successCriteria: [
+    "用户可以在首次初始化中解析并导入 Hex Key，而不是只能生成 Key。",
+    "导入后的 Key 标签、公钥归属和 Key 管理页结果可观察。",
+    "桶密码和一次性私钥原文不进入 localStorage 或测试附件。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 本地 P2PKH Journey：验证资产菜单、主网交易和本地交易路由。 */
+export const LOCAL_P2PKH_NAVIGATION_SCENARIO = {
+  id: "J-LOCAL-P2PKH-NAVIGATION",
+  level: "local-integration",
+  requirementIds: ["KM-ASSET-001", "KM-NAV-001"],
+  startingState: "全新 Chromium context 已建立 Local 身份，但没有可消费的真实余额。",
+  successCriteria: [
+    "真实生产 provider 读取链上交易入口，不由测试替身注入响应。",
+    "主网链上交易和本地交易页面均由正式菜单/路由打开。",
+    "没有余额时只验证导航和页面就绪，不把页面打开冒充转账成功。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 多标签恢复 Journey：固定 tab1→tab2→tab1 刷新顺序。 */
+export const MULTI_TAB_RECOVERY_SCENARIO = {
+  id: "J-LOCAL-MULTI-TAB-RECOVERY",
+  level: "local-integration",
+  requirementIds: ["KM-TECH-001", "KM-LIFECYCLE-001"],
+  startingState: "同一 Chromium context 中 tab1 已完成 Local 初始化，第二个 tab 共享同源 Worker 和 catalog。",
+  successCriteria: [
+    "tab1 刷新进入可恢复锁定态，仍能读到同一把 Key。",
+    "tab2 打开并刷新不会破坏共享 catalog 或旧 peer。",
+    "回到 tab1 再刷新仍可恢复，失败时保留脱敏诊断。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 开发 HTTP Coordinator Gate：复现非安全上下文的真实 SharedWorker 链路。 */
+export const COORDINATOR_DEV_HTTP_GATE = {
+  id: "G-COORDINATOR-DEV-HTTP",
+  level: "local-integration",
+  requirementIds: ["KM-TECH-001", "KM-INIT-001"],
+  startingState: "非 loopback 信任的 Vite dev HTTP origin，真实 Chromium 未注入 Worker 替身。",
+  successCriteria: [
+    "非安全上下文仍能观察真实 SharedWorker、有效 Web Crypto 和无 Service Worker 的边界。",
+    "Local 初始化最终 HMAC 提交成功，目录、Hold 和第一把 Key 都可读回。",
+    "Worker 启动错误和页面 fatal crash 均不被吞掉。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 浏览器 Coordinator 生命周期 Gate：验证真实 peer handoff 和迟到 session 隔离。 */
+export const COORDINATOR_RUNTIME_LIFECYCLE_GATE = {
+  id: "G-COORDINATOR-RUNTIME-LIFECYCLE",
+  level: "local-integration",
+  requirementIds: ["KM-TECH-001", "KM-LIFECYCLE-001"],
+  startingState: "真实生产 E2E hook 已启动两个同源页面，Coordinator 正在承载 owner/session。",
+  successCriteria: [
+    "旧 tab close 会完成 drain 并把 owner handoff 给存活 peer。",
+    "旧 proxy 在撤权后失败，新 owner 的 Storage round-trip 仍成功。",
+    "物理断开后的 late session result 被清理，运行态保持可恢复而不复活旧 session。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 本地插件生命周期 Gate：覆盖真实 SharedWorker、Dedicated Worker 和锁屏撤权。 */
+export const PLUGIN_LIFECYCLE_PRODUCTION_GATE = {
+  id: "G-PLUGIN-LIFECYCLE-PRODUCTION",
+  level: "local-integration",
+  requirementIds: ["KM-TECH-001", "KM-LIFECYCLE-001"],
+  startingState: "生产 preview 的 E2E hook 已装配，浏览器通过真实 Window/Worker/MessagePort 链路运行。",
+  successCriteria: [
+    "owner Storage 和 crypto 能力来自真实服务端 grant。",
+    "锁屏即时拒绝旧 proxy，解锁后得到新的 service instance。",
+    "Dedicated Worker dispose 后撤权，不暴露旧能力。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** MSFile Window executor Gate：保留 Noise、签名、接管和传输边界技术证据。 */
+export const MSFILE_EXECUTOR_GATE = {
+  id: "G-MSFILE-EXECUTOR",
+  level: "local-integration",
+  requirementIds: ["KM-MSFILE-001", "KM-LIFECYCLE-001"],
+  startingState: "临时 Go MSFile supplier、真实 Chromium 和隔离 Window executor 已准备。",
+  successCriteria: [
+    "真实 Noise/Identify/Peer Record 链路通过生产 parser 和 signer。",
+    "并发 executor 只允许一个 owner，关闭后可由另一个 peer 接管。",
+    "锁屏、取消和 transferable burst 不泄漏私钥或留下 pending signer 请求。",
+  ],
+  resourceProfile: "p2p",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** MSFile 原生 Range Gate：保留 Service Worker、Range、媒体和撤权边界。 */
+export const MSFILE_NATIVE_RANGE_GATE = {
+  id: "G-MSFILE-NATIVE-RANGE",
+  level: "local-integration",
+  requirementIds: ["KM-MSFILE-001", "KM-TECH-001", "KM-LIFECYCLE-001"],
+  startingState: "临时 Go supplier 与真实生产媒体 Service Worker 已准备，浏览器通过原生媒体元素读取。",
+  successCriteria: [
+    "Range/416/cancel、尾部 moov 和多种媒体格式走真实 SW/Go 链路。",
+    "Worker 重启、旧根 controller、协议不匹配和跨 client 访问均安全收口。",
+    "锁屏、换 Key、换 supplier、换文件和 unload 都撤销旧媒体 session。",
+  ],
+  resourceProfile: "p2p",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** MSFile supplier runtime Gate：保留传输、TLS、Connect、并发和接管证据。 */
+export const MSFILE_PRODUCTION_RUNTIME_GATE = {
+  id: "G-MSFILE-PRODUCTION-RUNTIME",
+  level: "local-integration",
+  requirementIds: ["KM-MSFILE-001", "KM-APPS-001", "KM-LIFECYCLE-001"],
+  startingState: "临时 Go supplier 发布 WebRTC/WSS 地址、证书 pin 和测试文件，生产 hook 已启动。",
+  successCriteria: [
+    "Stat、Seed、Block 和 bounded concurrency 使用真实 supplier。",
+    "证书、PeerId、supplier identity 和 Connect SDK/session pin 校验失败时 fail-closed。",
+    "锁屏、Key 切换和 tab takeover 后旧 runtime 不再拥有 executor 或输出秘密。",
+  ],
+  resourceProfile: "p2p",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 部署不可逆 I/O Gate：只接受目标部署注入的真实 runner 结果。 */
+export const DEPLOYMENT_IRREVERSIBLE_IO_GATE = {
+  id: "G-DEPLOYMENT-IRREVERSIBLE-IO",
+  level: "deployment-acceptance",
+  requirementIds: ["KM-APPS-001", "KM-LIFECYCLE-001"],
+  startingState: "目标部署通过固定 Build ID 提供不可逆 I/O smoke runner。",
+  successCriteria: [
+    "供应商上传、订阅、广播和支付场景返回结构化真实结果。",
+    "每个不可逆操作使用唯一业务 operationId，不能用 transport callId 替代。",
+    "未知结果先对账，明确 replayPrevented，不自动重复提交。",
+  ],
+  resourceProfile: "deployment",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 部署 Coordinator 恢复 Gate：只接受真实部署的 lease 崩溃恢复演练。 */
+export const DEPLOYMENT_RECOVERY_GATE = {
+  id: "G-DEPLOYMENT-COORDINATOR-RECOVERY",
+  level: "deployment-acceptance",
+  requirementIds: ["KM-APPS-001", "KM-LIFECYCLE-001"],
+  startingState: "目标部署存在活动 final-I/O lease，恢复 runner 使用固定 Build ID。",
+  successCriteria: [
+    "新 Worker 拒绝旧 lease 抢占，旧操作结束后 retry 才能接管。",
+    "旧句柄在新权威下被拒绝，活动 lease 最终归零。",
+    "未知外部结果不会被自动重放，并保留可审查 evidenceRef。",
+  ],
+  resourceProfile: "deployment",
+} as const satisfies IntegrationScenarioMetadata;
+
+/** 部署外部 AppView Journey：在固定构建上完成 Connect/Popup session。 */
+export const DEPLOYMENT_APPVIEW_CONNECT_SCENARIO = {
+  id: "J-DEPLOYMENT-APPVIEW-CONNECT",
+  level: "deployment-acceptance",
+  requirementIds: ["KM-APPS-001"],
+  startingState: "目标部署返回指定不可变 Build ID，外部 AppView origin 和成功选择器均已固定。",
+  successCriteria: [
+    "正式 Apps 菜单打开 Session Window，并完成绑定部署 origin 的 connect.launch。",
+    "外部 AppView 收到 launchToken 和 sessionWindowOrigin，显示真实成功状态。",
+    "部署缺少 Build ID、hook、外部 origin 或成功选择器时直接失败。",
+  ],
+  resourceProfile: "deployment",
 } as const satisfies IntegrationScenarioMetadata;

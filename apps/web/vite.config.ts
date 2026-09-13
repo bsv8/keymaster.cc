@@ -9,8 +9,8 @@ const MSFILE_E2E_VIRTUAL_ID = "virtual:keymaster-msfile-e2e-hooks";
 const MSFILE_E2E_RESOLVED_ID = `\0${MSFILE_E2E_VIRTUAL_ID}`;
 const MSFILE_SPIKE_VIRTUAL_ID = "virtual:keymaster-msfile-spike-hooks";
 const MSFILE_SPIKE_RESOLVED_ID = `\0${MSFILE_SPIKE_VIRTUAL_ID}`;
-const MSFILE_E2E_OLD_SW_PATH = fileURLToPath(new URL("../../e2e/fixtures/e2e-old-root-sw.js", import.meta.url));
-const MSFILE_E2E_MISMATCH_SW_PATH = fileURLToPath(new URL("../../e2e/fixtures/e2e-mismatch-sw.js", import.meta.url));
+const MSFILE_E2E_OLD_SW_PATH = fileURLToPath(new URL("../../e2e/integration/fixtures/e2e-old-root-sw.js", import.meta.url));
+const MSFILE_E2E_MISMATCH_SW_PATH = fileURLToPath(new URL("../../e2e/integration/fixtures/e2e-mismatch-sw.js", import.meta.url));
 
 /** 只在显式 E2E 构建产出旧 SW 模拟器，普通 dist 不包含测试控制器。 */
 function msFileE2EOldServiceWorker(): Plugin {

@@ -74,7 +74,7 @@ pnpm lint:boundaries                                                   PASS
 pnpm lint:react-boundaries                                             PASS
 pnpm exec vitest run apps/web/src/keymasterSessionCoordinator.worker.test.ts apps/web/src/msfileSpike/transferQueue.test.ts packages/plugin-msfile/src/executorIdentitySigner.test.ts
   3 files / 86 tests                                                   PASS
-pnpm exec playwright test e2e/msfile-executor-spike.spec.ts            PASS（5/5）
+pnpm exec playwright test --config=playwright.msfile.config.ts --project=msfile --grep "MSFile Window executor"            PASS（5/5）
 pnpm build                                                            PASS
 ```
 

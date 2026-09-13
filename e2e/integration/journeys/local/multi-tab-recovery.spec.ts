@@ -1,8 +1,12 @@
 import { expect, test, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
-import { initializeNewLocalUser } from "./integration/flows/initializeLocalUser.js";
-import { reloadAndAssertSameKey } from "./integration/drivers/vaultDriver.js";
-import { attachBrowserErrors } from "./integration/support/browserEvidence.js";
-import type { BrowserErrorEvidence } from "./integration/support/types.js";
+import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
+import { reloadAndAssertSameKey } from "../../drivers/vaultDriver.js";
+import { attachBrowserErrors } from "../../support/browserEvidence.js";
+import { MULTI_TAB_RECOVERY_SCENARIO } from "../../support/scenarioMetadata.js";
+import type { BrowserErrorEvidence } from "../../support/types.js";
+
+export const JOURNEY_ID = MULTI_TAB_RECOVERY_SCENARIO.id;
+export const JOURNEY_METADATA = MULTI_TAB_RECOVERY_SCENARIO;
 
 /**
  * 这个场景故意使用同一个 BrowserContext 创建两个真实页面。
@@ -74,7 +78,7 @@ async function attachTabDiagnostic(page: Page, testInfo: TestInfo, name: string)
  * 第一页刷新拖入失败”的顺序性问题。本测试保留单页 smoke，同时覆盖
  * 两个标签页共享 Local catalog/Worker 的真实生命周期。
  */
-test("Local runtime survives the tab1-tab2-tab1 refresh ordering", async ({ page, context }, testInfo) => {
+test(JOURNEY_ID + "：tab1→tab2→tab1 刷新后 Local 运行态可恢复", async ({ page, context }, testInfo) => {
   test.setTimeout(90_000);
   const pageTwo = await context.newPage();
   const browserErrors = captureTabBrowserErrors(page, pageTwo, context);

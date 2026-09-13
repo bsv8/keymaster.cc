@@ -379,7 +379,7 @@ pnpm typecheck
 pnpm lint:boundaries
 pnpm lint:react-boundaries
 pnpm exec vitest run packages/msfile-media packages/plugin-msfile/src
-pnpm exec playwright test <MSFile 媒体流 E2E> --project=chromium --workers=1
+pnpm exec playwright test --config=playwright.msfile.config.ts --project=msfile --workers=1
 pnpm build
 pnpm test
 git diff --check

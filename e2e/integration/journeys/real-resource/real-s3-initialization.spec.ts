@@ -1,13 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { initializeS3User } from "../drivers/initialSetupDriver.js";
-import { readLocalCatalog, waitForReadyVaultPage } from "../drivers/appDriver.js";
-import { loadE2ES3Config, publicS3ConfigFingerprint } from "../resources/config/loader.js";
-import { S3CleanupResource } from "../resources/s3/s3CleanupResource.js";
-import { attachBrowserErrors, captureBrowserErrors } from "../support/browserEvidence.js";
-import { readS3ResourceRunState } from "../support/s3ResourceState.js";
-import { REAL_S3_INITIALIZATION_SCENARIO } from "../support/scenarioMetadata.js";
-import { scenarioObjectPrefix } from "../support/ids.js";
-import type { LoadedE2ES3Config } from "../resources/config/types.js";
+import { initializeS3User } from "../../drivers/initialSetupDriver.js";
+import { readLocalCatalog, waitForReadyVaultPage } from "../../drivers/appDriver.js";
+import { loadE2ES3Config, publicS3ConfigFingerprint } from "../../resources/config/loader.js";
+import { S3CleanupResource } from "../../resources/s3/s3CleanupResource.js";
+import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
+import { readS3ResourceRunState } from "../../support/s3ResourceState.js";
+import { REAL_S3_INITIALIZATION_SCENARIO } from "../../support/scenarioMetadata.js";
+import { scenarioObjectPrefix } from "../../support/ids.js";
+import type { LoadedE2ES3Config } from "../../resources/config/types.js";
 
 export const JOURNEY_ID = REAL_S3_INITIALIZATION_SCENARIO.id;
 export const JOURNEY_METADATA = REAL_S3_INITIALIZATION_SCENARIO;
