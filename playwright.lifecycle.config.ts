@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// 本配置只负责本地 tarball 的严格 0.4.2 Coordinator 生命周期验收。
-// 正式 registry 0.4.2 验收使用 playwright.lifecycle.registry.config.ts，
+// 本配置只负责本地 tarball 的严格 0.4.3 Coordinator 生命周期验收。
+// 正式 registry 0.4.3 验收使用 playwright.lifecycle.registry.config.ts，
 // 并由 registry-only 临时副本入口执行。
 export default defineConfig({
   testDir: "./e2e/integration",

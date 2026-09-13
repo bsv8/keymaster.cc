@@ -112,8 +112,8 @@ pnpm --filter @keymaster/connect-docs build
 
 ### 生命周期验收命令与 WebLoom 版本边界
 
-默认 `test:e2e:lifecycle` 是正式 WebLoom 0.4.2 registry 验收。脚本会复制到临时
-副本，用 frozen lockfile 从 npm registry 安装固定完整性（integrity）的 0.4.2，
+默认 `test:e2e:lifecycle` 是正式 WebLoom 0.4.3 registry 的生命周期验收。脚本会复制到临时
+副本，用 frozen lockfile 从 npm registry 安装固定完整性（integrity）的 0.4.3，
 并确认实际解析路径不在当前 workspace 或本地 `file:` 依赖；随后执行临时副本自己的
 `pnpm typecheck`、`pnpm typecheck:e2e`、生产构建和真实 Chromium 生命周期用例：
 
@@ -134,11 +134,16 @@ specifier 都会被拒绝：
 pnpm test:e2e:lifecycle:registry:self-test
 ```
 
+首次从 registry `0.4.2` 切换到带 Web Lock 的 `0.4.3` 时，不能依赖运行时冲突发现旧
+Worker：旧包不申请 Web Lock。必须先关闭全部旧 Keymaster 页面并由部署交接记录确认旧
+Worker 退出，再启用新版本；`pnpm verify:lifecycle-deployment` 会检查这份冷切换证据。
+双方都支持 Web Locks 的后续升级才使用 `runtime_lock_conflict` 提示刷新或关闭全部页面。
+
 本地 tarball 验收保留为独立入口，只验证源码/tarball 与当前 Keymaster 的组合，
 不替代正式 registry 门禁：
 
 ```bash
-WEBLOOM_LOCAL_TARBALL=/abs/path/webloom-framework-0.4.2.tgz pnpm test:e2e:lifecycle:local
+WEBLOOM_LOCAL_TARBALL=/abs/path/webloom-framework-0.4.3.tgz pnpm test:e2e:lifecycle:local
 ```
 
 ## 数据真值语义

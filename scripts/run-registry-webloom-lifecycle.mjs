@@ -1,4 +1,4 @@
-// 正式 registry 0.4.2 生命周期验收：在临时副本中使用 frozen lockfile
+// 正式 registry 0.4.3 生命周期验收：在临时副本中使用 frozen lockfile
 // 安装 npm registry 包，再跑插件链和 Coordinator peer lifecycle 链。
 // 该入口不读取当前工作区 node_modules，也不接受 workspace/file WebLoom。
 
@@ -9,8 +9,8 @@ import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
 const registry = "https://registry.npmjs.org/";
-const expectedVersion = "0.4.2";
-const expectedIntegrity = "sha512-dC3EufZl5yCxaCmYVKX4GpGHVON8e5xx2GFiT7zCuLoQRPSBZtZqQ4brFb9qKNUKDQrwGl6Qrj+ZoZr4avWzWw==";
+const expectedVersion = "0.4.3";
+const expectedIntegrity = "sha512-0GDqtZyFNJburCNfAgtZOgot+ykuCxqRtgltNXlRObAErwH++oLxFlGm8NFhJEmGqAIBMOwPvCHN8bf8U4Kmog==";
 const manifestGateSelfTest = process.argv.includes("--manifest-gate-self-test");
 const temporaryRoot = await mkdtemp(join(tmpdir(), "keymaster-webloom-registry-lifecycle-"));
 const excludedDirectoryNames = new Set([
@@ -135,6 +135,10 @@ try {
     throw new Error(`registry lifecycle 实际安装版本错误：${String(installedManifest.version)}`);
   }
   await assertNoLocalWebLoom(installed);
+  const installedRuntimeEntry = await readFile(join(installed, "dist/index.js"), "utf8");
+  if (!installedRuntimeEntry.includes("WEBLOOM_RUNTIME_LOCK_PREFIX")) {
+    throw new Error("当前 registry WebLoom 0.4.3 不包含浏览器运行锁能力标记；不能把本次包当作锁安全发布。请核对 registry 包产物和 integrity，再重试生命周期验收。");
+  }
 
   run("pnpm", ["typecheck"]);
   run("pnpm", ["typecheck:e2e"]);

@@ -140,7 +140,7 @@ function createTestMessagePort(
   let runtimeMessageErrorListener: ((event: MessageEvent) => void) | null = null;
   let manuallyDisabled = false;
   let implementation: (message: any, transfer?: readonly Transferable[]) => unknown = initialImplementation ?? (() => undefined);
-  // WebLoom 0.4.2 的每条跨 realm 消息都必须带 endpoint binding；这个
+  // WebLoom 0.4.3 的每条跨 realm 消息都必须带 endpoint binding；这个
   // fake port 只模拟 Worker wire，不再依赖旧版缺少 binding 的宽松解码。
   const remoteBinding = {
     runtimeInstanceId: "test-coordinator-worker",

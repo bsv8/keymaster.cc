@@ -91,8 +91,8 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.13.3)(jsdom@25.0.1)(terser@5.50.0)
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   apps/connect-docs:
     devDependencies:
@@ -226,8 +226,8 @@ importers:
         specifier: 0.1.0
         version: 0.1.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/connect:
     devDependencies:
@@ -247,8 +247,8 @@ importers:
         specifier: ^5.1.6
         version: 5.1.6
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/msfile-media:
     dependencies:
@@ -286,8 +286,8 @@ importers:
         specifier: 0.1.0
         version: 0.1.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-apps:
     dependencies:
@@ -310,8 +310,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-background:
     dependencies:
@@ -328,8 +328,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-bsv-price:
     dependencies:
@@ -343,8 +343,8 @@ importers:
         specifier: '*'
         version: link:../ui
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-collectible-1satordinals:
     dependencies:
@@ -361,8 +361,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-contacts:
     dependencies:
@@ -382,8 +382,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-home:
     dependencies:
@@ -406,8 +406,8 @@ importers:
         specifier: ^4.2.0
         version: 4.2.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-importer-hex:
     dependencies:
@@ -463,8 +463,8 @@ importers:
         specifier: ^1.4.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-key-import:
     dependencies:
@@ -481,8 +481,8 @@ importers:
         specifier: 2.0.0
         version: 2.0.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-message:
     dependencies:
@@ -499,8 +499,8 @@ importers:
         specifier: '*'
         version: link:../ui
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-msfile:
     dependencies:
@@ -532,8 +532,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-p2pkh:
     dependencies:
@@ -553,8 +553,8 @@ importers:
         specifier: ^2.1.0
         version: 2.3.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-poker:
     dependencies:
@@ -580,8 +580,8 @@ importers:
         specifier: ^2.2.0
         version: 2.3.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-protocol:
     dependencies:
@@ -610,8 +610,8 @@ importers:
         specifier: 1.5.0
         version: 1.5.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-sat-subscription:
     dependencies:
@@ -646,8 +646,8 @@ importers:
         specifier: 0.1.0
         version: 0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-settings:
     dependencies:
@@ -661,8 +661,8 @@ importers:
         specifier: '*'
         version: link:../ui
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-token-bsv21:
     dependencies:
@@ -679,8 +679,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
     devDependencies:
       '@noble/secp256k1':
         specifier: ^2.2.0
@@ -695,8 +695,8 @@ importers:
         specifier: '*'
         version: link:../runtime
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-vault:
     dependencies:
@@ -722,8 +722,8 @@ importers:
         specifier: 2.0.0
         version: 2.0.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-webrtc:
     dependencies:
@@ -740,8 +740,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/plugin-window-p2p:
     dependencies:
@@ -776,8 +776,8 @@ importers:
         specifier: ^1.4.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/runtime:
     dependencies:
@@ -785,8 +785,8 @@ importers:
         specifier: '*'
         version: link:../contracts
       webloom-framework:
-        specifier: 0.4.2
-        version: 0.4.2(react@18.3.1)
+        specifier: 0.4.3
+        version: 0.4.3(react@18.3.1)
 
   packages/ui:
     dependencies:
@@ -4099,8 +4099,8 @@ packages:
     resolution: {integrity: sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==}
     engines: {node: '>=12'}
 
-  webloom-framework@0.4.2:
-    resolution: {integrity: sha512-dC3EufZl5yCxaCmYVKX4GpGHVON8e5xx2GFiT7zCuLoQRPSBZtZqQ4brFb9qKNUKDQrwGl6Qrj+ZoZr4avWzWw==}
+  webloom-framework@0.4.3:
+    resolution: {integrity: sha512-0GDqtZyFNJburCNfAgtZOgot+ykuCxqRtgltNXlRObAErwH++oLxFlGm8NFhJEmGqAIBMOwPvCHN8bf8U4Kmog==}
     engines: {node: '>=18'}
     peerDependencies:
       react: '>=18'
@@ -8141,7 +8141,7 @@ snapshots:
 
   webidl-conversions@7.0.0: {}
 
-  webloom-framework@0.4.2(react@18.3.1):
+  webloom-framework@0.4.3(react@18.3.1):
     optionalDependencies:
       react: 18.3.1
 

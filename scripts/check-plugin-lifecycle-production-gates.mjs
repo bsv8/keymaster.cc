@@ -7,6 +7,12 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { isBuildId } from "./plugin-lifecycle-build-id.mjs";
+import {
+  RUNTIME_LOCK_MIGRATION_MODES,
+  validateRuntimeLockCapabilityData,
+  validateRuntimeLockEvidenceData,
+  validateRuntimeLockMigrationRecord,
+} from "./plugin-lifecycle-runtime-lock-gate.mjs";
 
 const evidencePath = process.env.KEYMASTER_LIFECYCLE_EVIDENCE_FILE;
 const PRODUCT_CATALOG_SOURCE = resolve("packages/contracts/src/pluginProducts.ts");
@@ -27,7 +33,9 @@ const REQUIRED_PRODUCTS = readRequiredProducts(productCatalogSource);
 
 /** 从同一份产品契约读取所有静态运行单元，防止证据只覆盖 Window。 */
 function readRequiredRuntimeUnits(source) {
-  const units = [...source.matchAll(/\{\s*productId:\s*"([^"\n]+)",\s*unitId:\s*"([^"\n]+)",\s*execution:\s*"([^"\n]+)",\s*lifetime:\s*"([^"\n]+)"\s*\}/gu)]
+  // TypeScript 契约字段现在叫 runtime/scopeKind；发布证据沿用
+  // execution/lifetime 作为面向验收人员的中文语义字段，读取时做一次明确映射。
+  const units = [...source.matchAll(/\{\s*productId:\s*"([^"\n]+)",\s*unitId:\s*"([^"\n]+)",\s*runtime:\s*"([^"\n]+)",\s*scopeKind:\s*"([^"\n]+)"\s*\}/gu)]
     .map((match) => ({ productId: match[1], unitId: match[2], execution: match[3], lifetime: match[4] }));
   if (units.length === 0 || new Set(units.map((unit) => `${unit.productId}\u0000${unit.unitId}`)).size !== units.length) {
     throw new Error(`无法从 ${PRODUCT_CATALOG_SOURCE} 读取唯一运行单元清单`);
@@ -54,7 +62,7 @@ const REQUIRED_IO_SCENARIOS = [
   "sat-payment-unknown-result",
   "unknown-result-no-replay",
 ];
-const ALLOWED_EXECUTIONS = new Set(["coordinator-worker", "window", "connect-worker"]);
+const ALLOWED_EXECUTIONS = new Set(["window-main", "shared-worker"]);
 const ALLOWED_LIFETIMES = new Set(["root", "storage", "owner-session", "connect-session"]);
 
 function fail(message, details = []) {
@@ -144,6 +152,52 @@ async function readLocalJsonReference(reference, label, baseDir, errors) {
   } catch (error) {
     errors.push(`${label} 无法读取或解析：${referencePath}`);
     return undefined;
+  }
+}
+
+/** 交接文件中的运行锁迁移记录必须经过同一份首次冷切换/后续升级规则。 */
+async function validateRuntimeLockMigrationEvidence(migration, expectedBuildId, baseDir, errors) {
+  errors.push(...validateRuntimeLockMigrationRecord(migration, {
+    expectedTargetBuildId: expectedBuildId,
+    label: "deployment.runtimeLockMigration",
+  }));
+  if (!isRecord(migration)) return;
+
+  const semanticField = migration.mode === "initial-cold-switch"
+    ? "legacyExitEvidenceRef"
+    : "conflictEvidenceRef";
+  const semanticReference = migration[semanticField];
+  if (nonEmptyString(semanticReference) && !isPlaceholder(semanticReference) && !isHttpReference(semanticReference)) {
+    const data = await readLocalJsonReference(
+      semanticReference,
+      `deployment.runtimeLockMigration.${semanticField}`,
+      baseDir,
+      errors,
+    );
+    if (data) {
+      errors.push(...validateRuntimeLockEvidenceData(data, {
+        mode: migration.mode,
+        expectedTargetBuildId: expectedBuildId,
+        label: `deployment.runtimeLockMigration.${semanticField}`,
+      }));
+    }
+  }
+
+  const capabilityReference = migration.targetCapabilityEvidenceRef;
+  if (nonEmptyString(capabilityReference) && !isPlaceholder(capabilityReference) && !isHttpReference(capabilityReference)) {
+    const data = await readLocalJsonReference(
+      capabilityReference,
+      "deployment.runtimeLockMigration.targetCapabilityEvidenceRef",
+      baseDir,
+      errors,
+    );
+    if (data) {
+      errors.push(...validateRuntimeLockCapabilityData(data, {
+        expectedTargetWebLoomVersion: migration.targetWebLoomVersion,
+        expectedTargetBuildId: expectedBuildId,
+        label: "deployment.runtimeLockMigration.targetCapabilityEvidence",
+      }));
+    }
   }
 }
 
@@ -315,6 +369,9 @@ if (!evidencePath) {
       for (const field of ["oldWorkerExitConfirmed", "trafficDrainConfirmed", "noParallelAuthority", "rollbackWindowConfirmed"]) {
         if (handover[field] !== true) errors.push(`deploymentHandover.${field} 必须为 true`);
       }
+      if (!RUNTIME_LOCK_MIGRATION_MODES.includes(handover.runtimeLockMigrationMode)) {
+        errors.push("deploymentHandover.runtimeLockMigrationMode 必须明确是首次冷切换或 lock-aware-upgrade");
+      }
     }
 
     // 本地引用必须被读取并且在内容中绑定同一构建；HTTP(S) 引用保留给
@@ -344,6 +401,10 @@ if (!evidencePath) {
         if (validDate(deployment.observedAt) && validDate(handover.verifiedAt)
           && Date.parse(handover.verifiedAt) < Date.parse(deployment.observedAt)) {
           errors.push("deploymentHandover.verifiedAt 必须晚于部署交接 observedAt");
+        }
+        await validateRuntimeLockMigrationEvidence(deployment.runtimeLockMigration, expectedBuildId, evidenceBaseDir, errors);
+        if (handover.runtimeLockMigrationMode !== deployment.runtimeLockMigration?.mode) {
+          errors.push("deploymentHandover.runtimeLockMigrationMode 必须与交接文件 runtimeLockMigration.mode 一致");
         }
       }
     }

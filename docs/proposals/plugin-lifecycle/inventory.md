@@ -67,7 +67,7 @@
 | Window、Dedicated Worker、SharedWorker 真实构建运行 | 主页面 Window / SharedWorker、独立 MessagePort 和 Dedicated Worker Session Crypto 已完成本地生产构建回归；Cordis-specific 浏览器链未做。 |
 | Worker Provider → Window proxy → owner 存储消费者 | 主页面真实浏览器链与显式 Worker / Window 单元注册已完成；固定生产部署仍需执行外部 smoke。 |
 | 真实授权表在 RPC / 最终存储与签名边界复核 | Coordinator 存储 / crypto / Worker lease 主链已完成；上传、远端订阅、广播 / 支付等不可逆领域入口仍需逐项目标环境审计。 |
-| 新旧 Worker 接管和旧 I/O 原子排空 | 持久 authority、handover generation、最终 I/O lease 已接入并有 Node / Chromium 证据；部署 handover、旧 Worker 退出和 rollback 演练仍需真实发布证据。 |
+| 新旧 Worker 接管和旧 I/O 原子排空 | WebLoom 浏览器运行锁、立即冲突失败和 Keymaster 内存 I/O gate 已接入并有单测；部署仍需验证旧 Worker 退出、未知远端结果对账和 rollback 演练。 |
 
 ## 已具名的 Coordinator Worker 单元
 

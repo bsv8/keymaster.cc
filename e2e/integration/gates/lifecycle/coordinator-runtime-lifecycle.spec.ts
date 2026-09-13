@@ -155,7 +155,7 @@ test.describe(GATE_ID + "：Coordinator WebLoom peer 生命周期真实业务链
       const survivor = await page.evaluate(async () => window.__lifecycleProductionE2E!.ownerStorageRoundTrip());
 
       expect(closed.oldServiceInstanceId).toBeTruthy();
-      // 这是严格的 0.4.2 验收：缺少任一生命周期/owner 投影能力都必须
+      // 这是严格的 0.4.3 验收：缺少任一生命周期/owner 投影能力都必须
       // 失败，不能把旧 registry 版本的降级路径报告成新契约通过。
       expect(closed.closeDrainSupported).toBe(true);
       expect(closed.closeDrainCompleted).toBe(true);

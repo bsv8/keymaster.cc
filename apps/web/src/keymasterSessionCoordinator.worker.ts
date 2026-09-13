@@ -902,25 +902,11 @@ function makeCoordinatorAuthorityInstanceId(): string {
 }
 /** 每次 Worker 载入生成一次；Worker 重启后必须变化。 */
 let coordinatorAuthorityInstanceId = makeCoordinatorAuthorityInstanceId();
-/**
- * 生产构建的 Worker URL 会随构建产物变化；把它作为升级门禁的 buildId，
- * 避免旧 Worker 只凭相同协议继续取得新一代 I/O 租约。
- */
 // 正式构建由 scripts/build-plugin-lifecycle.mjs 注入不可变 buildId。
 // 本地开发/单测没有构建注入时才回退到模块 URL；该回退不能用于发布证据。
 const COORDINATOR_BUILD_ID = import.meta.env.VITE_KEYMASTER_BUILD_ID ?? import.meta.url;
-// SharedWorker 的物理身份由脚本 URL 与 name 共同决定。相同身份的新模块
-// 实例开始执行，就证明旧实例已经终止；只用 buildId 无法排除同一产物以
-// 不同 URL/name 并存。旧 authority 没有此字段时必须继续 fail closed。
-const COORDINATOR_WORKER_IDENTITY = JSON.stringify([
-  import.meta.url,
-  typeof (globalThis as typeof globalThis & { name?: unknown }).name === "string"
-    ? (globalThis as typeof globalThis & { name: string }).name
-    : "",
-]);
-const COORDINATOR_UPGRADE_PARTITION = "coordinator-upgrade";
-const COORDINATOR_UPGRADE_KEY = "authority";
-const COORDINATOR_AUTHORITY_CAS_TIMEOUT_MS = 5_000;
+// 运行控制锁属于 WebLoom/browser LockManager；这里仅保留协议字段，供
+// 本次 Worker 的内存 gate 和旧页面/旧授权迟到检查使用。
 const COORDINATOR_UPGRADE_PROTOCOL_VERSION = COORDINATOR_SERVICE_PROTOCOL_VERSION;
 
 interface CoordinatorAuthorityRecord {
@@ -928,19 +914,17 @@ interface CoordinatorAuthorityRecord {
   version: 1;
   /** 当前 Coordinator Worker 启动身份。 */
   authorityInstanceId: string;
-  /** 跨 Worker 单调递增的接管世代。 */
+  /** 当前 Worker 内单调递增的运行世代；不是跨 Worker 的持久版本。 */
   handoverGeneration: number;
   /** 当前 Worker 构建产物标识。 */
   buildId: string;
   /** 当前升级控制协议版本。 */
   protocolVersion: string;
-  /** 精确 SharedWorker 身份；旧记录缺失时不允许自动清除写租约。 */
-  workerIdentity?: string;
-  /** 当前权威已经进入最终读写边界、尚未释放的持久 lease。 */
+  /** 当前 Worker 已进入最终 I/O 边界但尚未结束的内存租约。 */
   activeIoLeases: Record<string, {
     operation: "read" | "write";
     acquiredAt: number;
-    /** 固定的最终 I/O 入口名，只用于恢复对账；不包含业务参数。 */
+    /** 固定的最终 I/O 入口名，只用于当前运行时诊断。 */
     auditOperation?: FinalIoAuditOperation;
   }>;
 }
@@ -955,30 +939,19 @@ interface CoordinatorFinalIoLease {
 
 let coordinatorHandoverGeneration = 0;
 let coordinatorAuthorityRecord: CoordinatorAuthorityRecord | undefined;
-/** 旧 Worker 的最终 I/O 尚未释放时，向页面公开的脱敏恢复状态。 */
+/** 兼容旧快照字段；新版不从业务 K-V 恢复旧 Worker 的临时租约。 */
 let coordinatorAuthorityRecovery: CoordinatorAuthorityRecovery | undefined;
-/** 当前恢复失败对应的固定 I/O 入口名；只用于定位现场阻塞。 */
+/** 兼容旧诊断字段；新版仅保留当前运行时内的固定入口名。 */
 let coordinatorAuthorityRecoveryOperationNames: string[] = [];
 let coordinatorAuthorityClaimTail: Promise<void> = Promise.resolve();
 /**
- * 同一 SharedWorker 内的 authority 读改写互斥。
+ * 同一 Coordinator 内的并发只读请求共用一个内存 read lease。
  *
- * K-V store 自身只会串行提交单次 put，但 authority 的 revision 是先读再
- * CAS 写入；Host/Identify 连续签名时，多个请求仍可能拿到同一个旧 revision。
- * 这把锁只覆盖本地 authority CAS，不替代跨 Worker 的持久 CAS。
- */
-let coordinatorAuthorityMutationTail: Promise<void> = Promise.resolve();
-/**
- * 同一 Coordinator 内的并发只读请求共用一个持久 read lease。
- *
- * 持久 lease 的作用是阻止其它 Worker 在本 Worker 仍有最终 I/O 时接管；
- * 它不要求每个无副作用的 Stat 都对 authority K-V 做一次 CAS。每个请求
- * 仍保留自己的本地 UpgradeIoLease、epoch 检查和审计记录，只有跨 Worker
- * 的“本地仍有读请求”事实在共享记录中聚合，避免高频 Stat 把 authority
- * 存储变成串行性能瓶颈。
+ * WebLoom 浏览器锁负责不同物理 Worker 的唯一性；这里仅在当前 Worker
+ * 内聚合 read 引用，避免每个无副作用的 Stat 都重复做内存 admission。
  */
 interface CoordinatorSharedReadLease {
-  durableLease: CoordinatorFinalIoLease;
+  ioLease: CoordinatorFinalIoLease;
   authorityInstanceId: string;
   handoverGeneration: number;
   references: number;
@@ -1033,6 +1006,8 @@ function publishCoordinatorLocalStorageProvider(provider: StorageBucketProvider)
 let platformRootToken: object | undefined;
 let platformKeysStore: KeyValueStore | undefined;
 let platformStateStore: KeyValueStore | undefined;
+/** 仅测试夹具保留的内存 Store 索引；生产路径没有这个观测入口。 */
+let testPlatformStores: Map<string, KeyValueStore> | undefined;
 /** 当前桶 protocol platform K-V；切桶回滚时必须保留旧句柄直到目标提交完成。 */
 let platformProtocolStore: KeyValueStore | undefined;
 let platformStorageReady = false;
@@ -1041,13 +1016,13 @@ let storageBootstrapController: StorageBootstrapController | undefined;
 const storageHealthController = new StorageHealthController();
 /**
  * 某些 Storage control 会在成功/失败后撤销当前 Root。若控制请求本身
- * 仍持有最终 I/O lease，必须等 lease 的后置 authority 校验和释放完成后
+ * 仍持有最终 I/O lease，必须等 lease 的后置运行时校验和释放完成后
  * 再销毁 Root，否则请求结果会被错误地变成 storage error。
  */
 let catalogBindingDiscardDeferred = false;
 /** 首次初始化暂存 Root 的所有权；失败事务不能触碰赢家的全局运行态。 */
 let initialSetupRuntimeOwner: { transactionId: string; bucketId: string; rootToken: object } | undefined;
-/** Worker 内缓存的公开恢复记录；权威副本由 Window bridge 持久化。 */
+/** Worker 内缓存的公开恢复记录；业务恢复记录仍由业务 K-V 正式持久化。 */
 const initialSetupRecoveryRecords = new Map<string, InitialSetupRecoveryRecordV1>();
 let coordinatorInitializationInProgress = false;
 /** Storage Profile 独立密钥；与 Vault password/session 完全分离。 */
@@ -3302,6 +3277,7 @@ function ensureTestPlatformStorage(): void {
   const bucket: StorageBucketRef = Object.freeze({ bucketId: "test-memory", bucketGeneration: 1, provider: "opfs" });
   platformRootToken = {};
   const stores = new Map<string, KeyValueStore>();
+  testPlatformStores = stores;
   const getStore = (key: string, binding: Parameters<typeof createInMemoryKeyValueStore>[0]): KeyValueStore => {
     const existing = stores.get(key);
     if (existing) return { ...existing, close: () => undefined };
@@ -3361,9 +3337,8 @@ async function persistCoordinatorMetaValue(value: CoordinatorMetaRecord): Promis
   }
   const stateStore = platformStateStore;
   if (!stateStore) throw new Error("Coordinator storage has not been bootstrapped");
-  // metadata 也是 Coordinator 的权威状态；不能让已被新 Worker 接管的
-  // 旧实例把旧 session / plugin intent 写回共享存储。这里复用最终
-  // I/O lease，使 metadata 写入也参加跨 Worker 接管排空。
+  // metadata 是业务状态，仍然必须写入平台 K-V；运行时唯一性由 WebLoom
+  // 浏览器锁提供，最终 I/O 的内存 admission 只负责本 Worker 的排空。
   await withCoordinatorFinalIoLease("write", undefined, async () => {
     await stateStore.put("meta", value, { partition: "coordinator" });
   }, { auditOperation: "coordinator.meta.persist" });
@@ -3376,114 +3351,7 @@ function coordinatorUpgradeError(code: string, message: string): Error & { code:
   return Object.assign(new Error(message), { code });
 }
 
-function normalizeCoordinatorAuthorityRecord(value: unknown): CoordinatorAuthorityRecord | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as Partial<CoordinatorAuthorityRecord>;
-  if (
-    record.version !== 1
-    || typeof record.authorityInstanceId !== "string"
-    || record.authorityInstanceId.length === 0
-    || typeof record.handoverGeneration !== "number"
-    || !Number.isSafeInteger(record.handoverGeneration)
-    || record.handoverGeneration < 0
-    || typeof record.buildId !== "string"
-    || record.buildId.length === 0
-    || typeof record.protocolVersion !== "string"
-    || record.protocolVersion.length === 0
-  ) return undefined;
-
-  // 兼容已经落盘的早期 authority 记录；旧记录没有 activeIoLeases 时
-  // 视为空集，并在下一次 claim / lease 变更时升级为完整格式。
-  const rawLeases = record.activeIoLeases;
-  if (rawLeases === undefined) {
-    return {
-      version: 1,
-      authorityInstanceId: record.authorityInstanceId,
-      handoverGeneration: record.handoverGeneration,
-      buildId: record.buildId,
-      protocolVersion: record.protocolVersion,
-      ...(typeof record.workerIdentity === "string" && record.workerIdentity.length > 0
-        ? { workerIdentity: record.workerIdentity }
-        : {}),
-      activeIoLeases: {},
-    };
-  }
-  if (!rawLeases || typeof rawLeases !== "object" || Array.isArray(rawLeases)) return undefined;
-  const activeIoLeases: CoordinatorAuthorityRecord["activeIoLeases"] = {};
-  for (const [leaseId, lease] of Object.entries(rawLeases)) {
-    if (
-      !leaseId
-      || !lease
-      || typeof lease !== "object"
-      || ((lease as { operation?: unknown }).operation !== "read" && (lease as { operation?: unknown }).operation !== "write")
-      || typeof (lease as { acquiredAt?: unknown }).acquiredAt !== "number"
-      || !Number.isFinite((lease as { acquiredAt: number }).acquiredAt)
-      || ((lease as { auditOperation?: unknown }).auditOperation !== undefined
-        && typeof (lease as { auditOperation?: unknown }).auditOperation !== "string")
-    ) return undefined;
-    const auditOperation = (lease as { auditOperation?: unknown }).auditOperation;
-    activeIoLeases[leaseId] = {
-      operation: (lease as { operation: "read" | "write" }).operation,
-      acquiredAt: (lease as { acquiredAt: number }).acquiredAt,
-      ...(typeof auditOperation === "string" ? { auditOperation: auditOperation as FinalIoAuditOperation } : {}),
-    };
-  }
-  return {
-    version: 1,
-    authorityInstanceId: record.authorityInstanceId,
-    handoverGeneration: record.handoverGeneration,
-    buildId: record.buildId,
-    protocolVersion: record.protocolVersion,
-    ...(typeof record.workerIdentity === "string" && record.workerIdentity.length > 0
-      ? { workerIdentity: record.workerIdentity }
-      : {}),
-    activeIoLeases,
-  };
-}
-
-function isCoordinatorAuthorityRecord(value: unknown): value is CoordinatorAuthorityRecord {
-  return normalizeCoordinatorAuthorityRecord(value) !== undefined;
-}
-
-interface CoordinatorAuthoritySnapshot {
-  /** 当前 authority 值；不存在时为空。 */
-  record?: CoordinatorAuthorityRecord;
-  /** 与这次读取对应的 partition revision，用于下一次 CAS。 */
-  revision: number;
-}
-
-/**
- * 读取 authority 及其 CAS revision 的同一快照。
- *
- * 不能先 get 值、再无条件 list revision：两个异步读取之间如果有别的
- * Worker 更新 authority，后一个 list 的 revision 可能看起来是最新的，
- * 但前一个 get 仍是旧值，最终会把并发 Worker 的 lease 更新覆盖掉。
- * 已存在的 key 从 get 结果直接取得 revision；只有 key 不存在时才需要
- * list 来取得“空 partition”的 revision。
- */
-async function readCoordinatorAuthoritySnapshot(stateStore: KeyValueStore): Promise<CoordinatorAuthoritySnapshot> {
-  const entry = await stateStore.get<CoordinatorAuthorityRecord>(COORDINATOR_UPGRADE_KEY, {
-    partition: COORDINATOR_UPGRADE_PARTITION,
-  });
-  if (entry) {
-    const record = normalizeCoordinatorAuthorityRecord(entry.value);
-    if (!record) throw coordinatorUpgradeError("upgrade.authority_record_invalid", "Coordinator authority record is invalid");
-    return { record, revision: entry.revision };
-  }
-
-  const partition = await stateStore.list({ partition: COORDINATOR_UPGRADE_PARTITION, limit: 1_000 });
-  const listed = partition.entries.find((candidate) => candidate.key === COORDINATOR_UPGRADE_KEY);
-  if (!listed) return { revision: partition.revision };
-  const record = normalizeCoordinatorAuthorityRecord(listed.value);
-  if (!record) throw coordinatorUpgradeError("upgrade.authority_record_invalid", "Coordinator authority record is invalid");
-  return { record, revision: listed.revision };
-}
-
-async function readCoordinatorAuthorityRecord(): Promise<CoordinatorAuthorityRecord | undefined> {
-  if (!platformStateStore) throw coordinatorUpgradeError("upgrade.authority_unavailable", "Coordinator authority storage is unavailable");
-  return (await readCoordinatorAuthoritySnapshot(platformStateStore)).record;
-}
-
+/** 业务 K-V CAS 冲突判断；只服务 bucket/profile 等业务状态，不用于运行锁。 */
 function isStorageConflict(error: unknown): boolean {
   const code = error && typeof error === "object" && "code" in error
     ? (error as { code?: unknown }).code
@@ -3492,124 +3360,34 @@ function isStorageConflict(error: unknown): boolean {
     || (error instanceof Error && /partition revision changed|concurrently|conflict/i.test(error.message));
 }
 
+async function readCoordinatorAuthorityRecord(): Promise<CoordinatorAuthorityRecord | undefined> {
+  // Coordinator 的运行权威只存在当前 Worker 内存；浏览器级唯一性由
+  // WebLoom 的 navigator.locks 保证，不能从 Local/S3 业务 K-V 恢复临时锁。
+  return coordinatorAuthorityRecord;
+}
+
 /**
- * 在独立 partition 中用 CAS 声明当前 Worker 的唯一权威。
+ * 声明当前 Worker 的内存运行权威。
  *
- * 这条记录不是插件状态，也不依赖 Vault 是否 unlocked；它是最终存储/
- * 签名边界用来拒绝旧 Worker 的共享持久化 fence。metadata 的测试故障注入
- * 不会影响这里，避免把安全锁定误判成普通 UI 配置保存失败。
+ * 跨 Tab 的唯一性由 WebLoom 浏览器锁负责；这里的随机身份只用于旧页面、
+ * 旧授权和迟到结果检查，不依赖 Vault 状态，也不写 Local/S3 authority。
  */
 async function claimCoordinatorAuthority(): Promise<void> {
-  if (!platformStateStore) throw coordinatorUpgradeError("upgrade.authority_unavailable", "Coordinator authority storage is unavailable");
-  let lastError: unknown;
-  let lastBusyLeaseCount = 0;
-  let lastBusyHandoverGeneration = 0;
-  let lastBusyAuthorityBuildId = "";
-  let lastBusyIoOperations: CoordinatorAuthorityRecovery["activeIoOperations"] = { read: 0, write: 0 };
-  let lastBusyIoOperationNames: string[] = [];
-  // 正常的 Provider/存储请求可能超过几十毫秒；80ms 的固定重试会把
-  // 合法的冷切换误报为失败。这里等待一个明确上限，超时仍保持旧
-  // authority 记录不变，调用方继续 fail closed。
-  const deadline = Date.now() + 5_000;
-  for (;;) {
-    if (Date.now() >= deadline) break;
-    const currentSnapshot = await readCoordinatorAuthoritySnapshot(platformStateStore);
-    const currentRecord = currentSnapshot.record;
-    // 所有已升级的 Worker 都必须先登记最终 I/O lease；接管者不能在
-    // 旧实例仍可能提交读写时直接覆盖 authority。没有超时强抢语义，
-    // 因为未知旧版本的真实外部写入无法被本地 Abort 可靠中断。
-    const hasActiveIoLeases = currentRecord && Object.keys(currentRecord.activeIoLeases).length > 0;
-    const canRecoverTerminatedLocalWorker = hasActiveIoLeases
-      && platformRootStore?.bucket.provider === "local"
-      && currentRecord.buildId === COORDINATOR_BUILD_ID
-      && currentRecord.protocolVersion === COORDINATOR_UPGRADE_PROTOCOL_VERSION
-      && currentRecord.workerIdentity === COORDINATOR_WORKER_IDENTITY;
-    if (hasActiveIoLeases && !canRecoverTerminatedLocalWorker) {
-      const activeIoLeases = Object.values(currentRecord.activeIoLeases);
-      lastBusyLeaseCount = activeIoLeases.length;
-      lastBusyHandoverGeneration = currentRecord.handoverGeneration;
-      lastBusyAuthorityBuildId = currentRecord.buildId;
-      lastBusyIoOperations = {
-        read: activeIoLeases.filter((lease) => lease.operation === "read").length,
-        write: activeIoLeases.filter((lease) => lease.operation === "write").length,
-      };
-      lastBusyIoOperationNames = [...new Set(activeIoLeases.map((lease) => lease.auditOperation ?? "unknown"))].sort();
-      lastError = coordinatorUpgradeError("upgrade.authority_busy", "Coordinator authority still has active final I/O leases");
-      await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
-      continue;
-    }
-    // canRecoverTerminatedLocalWorker 为 true 时，Local 的物理 I/O 在同源
-    // Window localStorage 中完成，不会在 Worker 终止后继续成为远端写入。
-    // 浏览器又不会同时运行两个 URL+name 完全相同的 SharedWorker：当前
-    // 模块以相同 workerIdentity 重新执行，已构成旧 realm 终止的证据。
-    // 下方 CAS 会原子推进 authority 并清空孤儿 lease；S3、不同构建/
-    // URL/name 和旧格式记录仍保持 fail closed。
-    // 旧 Worker 已经释放最终 I/O 后，之前记录的忙碌诊断不能继续影响
-    // 当前这轮 claim。否则后续仅发生 CAS 冲突时会误报 recovery-required，
-    // 把“暂时竞争”错误地显示成“旧 I/O 未知”。
-    lastBusyLeaseCount = 0;
-    lastBusyHandoverGeneration = currentRecord?.handoverGeneration ?? 0;
-    lastBusyAuthorityBuildId = "";
-    lastBusyIoOperations = { read: 0, write: 0 };
-    lastBusyIoOperationNames = [];
-    const handoverGeneration = (currentRecord?.handoverGeneration ?? 0) + 1;
-    const next: CoordinatorAuthorityRecord = {
-      version: 1,
-      authorityInstanceId: coordinatorAuthorityInstanceId,
-      handoverGeneration,
-      buildId: COORDINATOR_BUILD_ID,
-      protocolVersion: COORDINATOR_UPGRADE_PROTOCOL_VERSION,
-      workerIdentity: COORDINATOR_WORKER_IDENTITY,
-      activeIoLeases: {},
-    };
-    try {
-      await platformStateStore.put(COORDINATOR_UPGRADE_KEY, next, {
-        partition: COORDINATOR_UPGRADE_PARTITION,
-        ifRevision: currentSnapshot.revision,
-      });
-      // 测试夹具可能在异步 claim 期间模拟了另一次 Worker 重启；
-      // 不能把旧启动身份写回当前内存。
-      if (next.authorityInstanceId === coordinatorAuthorityInstanceId) {
-        coordinatorHandoverGeneration = next.handoverGeneration;
-        coordinatorAuthorityRecord = next;
-        coordinatorAuthorityRecovery = undefined;
-        coordinatorAuthorityRecoveryOperationNames = [];
-      }
-      return;
-    } catch (error) {
-      if (!isStorageConflict(error)) throw error;
-      lastError = error;
-      // 让出事件循环，避免共享 K-V 在高冲突时被一个旧 Worker 忙等占满。
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-  }
-  const failure = coordinatorUpgradeError(
-    "upgrade.authority_claim_failed",
-    `Coordinator authority claim timed out${lastError instanceof Error ? `: ${lastError.message}` : ""}`,
-  );
-  if (lastBusyLeaseCount > 0) {
-    // 旧 Worker 崩溃时不能凭本地超时猜测其外部 I/O 已停止；保留安全锁定，
-    // 把“等待旧租约自然释放后重试”发布给 UI，而不是静默变成 fatal。
-    coordinatorAuthorityRecovery = {
-      status: "recovery-required",
-      reason: "active-final-io-leases",
-      authorityBuildId: lastBusyAuthorityBuildId,
-      activeIoLeaseCount: lastBusyLeaseCount,
-      activeIoOperations: lastBusyIoOperations,
-      handoverGeneration: lastBusyHandoverGeneration,
-    };
-    coordinatorAuthorityRecoveryOperationNames = lastBusyIoOperationNames;
-    Object.assign(failure, {
-      recoveryRequired: true,
-      authorityBuildId: lastBusyAuthorityBuildId,
-      activeIoLeaseCount: lastBusyLeaseCount,
-      activeIoOperations: lastBusyIoOperations,
-      handoverGeneration: lastBusyHandoverGeneration,
-      // 仅用于当前现场恢复日志，名称来自固定审计枚举，不携带请求数据。
-      activeIoOperationNames: lastBusyIoOperationNames,
-    });
-  }
-  throw failure;
+  // 运行权威已经移到 WebLoom 浏览器锁。这里仍保留一个本次 Worker 的
+  // 随机身份和内存世代，供旧页面/旧授权拒绝以及本地 gate 做迟到检查；
+  // 不再读写 coordinator-upgrade/authority，也不把活动 I/O 写入业务桶。
+  coordinatorHandoverGeneration += 1;
+  coordinatorAuthorityRecord = {
+    version: 1,
+    authorityInstanceId: coordinatorAuthorityInstanceId,
+    handoverGeneration: coordinatorHandoverGeneration,
+    buildId: COORDINATOR_BUILD_ID,
+    protocolVersion: COORDINATOR_UPGRADE_PROTOCOL_VERSION,
+    activeIoLeases: {},
+  };
+  coordinatorAuthorityRecovery = undefined;
+  coordinatorAuthorityRecoveryOperationNames = [];
+  return;
 }
 
 let coordinatorAuthorityClaimInFlight: Promise<void> | undefined;
@@ -3646,13 +3424,13 @@ async function ensureCoordinatorAuthorityClaim(): Promise<void> {
 
 async function assertCoordinatorAuthorityCurrent(): Promise<void> {
   await ensureCoordinatorAuthorityClaim();
-  const persisted = await readCoordinatorAuthorityRecord();
+  const current = await readCoordinatorAuthorityRecord();
   if (
-    !persisted
-    || persisted.authorityInstanceId !== coordinatorAuthorityInstanceId
-    || persisted.handoverGeneration !== coordinatorHandoverGeneration
-    || persisted.buildId !== COORDINATOR_BUILD_ID
-    || persisted.protocolVersion !== COORDINATOR_UPGRADE_PROTOCOL_VERSION
+    !current
+    || current.authorityInstanceId !== coordinatorAuthorityInstanceId
+    || current.handoverGeneration !== coordinatorHandoverGeneration
+    || current.buildId !== COORDINATOR_BUILD_ID
+    || current.protocolVersion !== COORDINATOR_UPGRADE_PROTOCOL_VERSION
   ) {
     throw coordinatorUpgradeError("upgrade.authority_stale", "Coordinator authority is no longer current");
   }
@@ -3664,97 +3442,39 @@ function makeCoordinatorFinalIoLeaseId(): string {
       return `coordinator-io:${crypto.randomUUID()}`;
     }
   } catch {
-    // leaseId 只是防止两个释放操作误删彼此的记录；权威与世代仍由 CAS 校验。
+    // leaseId 只是防止两个释放操作误删彼此的内存记录；身份与世代仍会校验。
   }
   return `coordinator-io:${Date.now().toString(36)}:${randomIdentifierSuffix()}`;
 }
 
-function rememberCoordinatorAuthorityRecord(record: CoordinatorAuthorityRecord): void {
-  if (
-    record.authorityInstanceId === coordinatorAuthorityInstanceId
-    && record.handoverGeneration === coordinatorHandoverGeneration
-  ) coordinatorAuthorityRecord = record;
-}
-
-function withCoordinatorAuthorityMutation<T>(operation: () => Promise<T>): Promise<T> {
-  const run = coordinatorAuthorityMutationTail.then(operation, operation);
-  coordinatorAuthorityMutationTail = run.then(() => undefined, () => undefined);
-  return run;
-}
-
-/** 在共享 authority 记录中登记一次最终 I/O；接管 CAS 会等待该记录消失。 */
-/** 直接对共享 authority 记录登记一个持久 lease；调用方已保证本地互斥。 */
+/** 在当前 Worker 内存中登记一次最终 I/O；不产生业务 K-V commit。 */
 async function acquireCoordinatorFinalIoLeaseExclusive(
   operation: "read" | "write",
   auditOperation?: FinalIoAuditOperation,
 ): Promise<CoordinatorFinalIoLease> {
-  const stateStore = platformStateStore;
-  if (!stateStore) throw coordinatorUpgradeError("upgrade.authority_unavailable", "Coordinator authority storage is unavailable");
+  // I/O 租约只表示当前 Worker 内存中的排空计数；WebLoom 已经在浏览器
+  // 级别保证只有一个 Coordinator Runtime，因此这里不能再对 Local/S3
+  // authority 做版本化 put。
   await assertCoordinatorAuthorityCurrent();
+  const record = coordinatorAuthorityRecord;
+  if (!record) throw coordinatorUpgradeError("upgrade.authority_unavailable", "Coordinator runtime authority is unavailable");
   const leaseId = makeCoordinatorFinalIoLeaseId();
-  let lastError: unknown;
-  const deadline = Date.now() + COORDINATOR_AUTHORITY_CAS_TIMEOUT_MS;
-  return withCoordinatorAuthorityMutation(async () => {
-    for (;;) {
-      if (Date.now() >= deadline) break;
-      const snapshot = await readCoordinatorAuthoritySnapshot(stateStore);
-      const current = snapshot.record;
-      if (
-        !current
-        || current.authorityInstanceId !== coordinatorAuthorityInstanceId
-        || current.handoverGeneration !== coordinatorHandoverGeneration
-        || current.buildId !== COORDINATOR_BUILD_ID
-        || current.protocolVersion !== COORDINATOR_UPGRADE_PROTOCOL_VERSION
-      ) throw coordinatorUpgradeError("upgrade.authority_stale", "Coordinator authority changed before final I/O admission");
-      const next: CoordinatorAuthorityRecord = {
-        ...current,
-        activeIoLeases: {
-          ...current.activeIoLeases,
-          [leaseId]: {
-            operation,
-            acquiredAt: Date.now(),
-            ...(auditOperation ? { auditOperation } : {}),
-          },
-        },
-      };
-      try {
-        await stateStore.put(COORDINATOR_UPGRADE_KEY, next, {
-          partition: COORDINATOR_UPGRADE_PARTITION,
-          ifRevision: snapshot.revision,
-        });
-        rememberCoordinatorAuthorityRecord(next);
-        let released = false;
-        return {
-          leaseId,
-          authorityInstanceId: current.authorityInstanceId,
-          handoverGeneration: current.handoverGeneration,
-          release: async () => {
-            if (released) return;
-            released = true;
-            // 这里不能使用当前全局 authority：测试夹具模拟 Worker 重启时，
-            // 旧 I/O 的 finally 仍要能从旧记录中释放自己的 lease；若记录已
-            // 被新 Worker 接管，release 函数会按捕获身份安全 no-op。
-            await releaseCoordinatorFinalIoLease(
-              stateStore,
-              leaseId,
-              current.authorityInstanceId,
-              current.handoverGeneration,
-            );
-          },
-        };
-      } catch (error) {
-        if (!isStorageConflict(error)) throw error;
-        lastError = error;
-        // 跨 Worker 的 CAS 竞争仍需重读；同一 Worker 内不会再有交错的
-        // authority 读改写。让出事件循环避免占满 Provider。
-        await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
-      }
-    }
-    throw coordinatorUpgradeError(
-      "upgrade.io_lease_conflict",
-      `Coordinator final I/O lease could not be admitted${lastError instanceof Error ? `: ${lastError.message}` : ""}`,
-    );
-  });
+  record.activeIoLeases[leaseId] = {
+    operation,
+    acquiredAt: Date.now(),
+    ...(auditOperation ? { auditOperation } : {}),
+  };
+  let released = false;
+  return {
+    leaseId,
+    authorityInstanceId: record.authorityInstanceId,
+    handoverGeneration: record.handoverGeneration,
+    release: async () => {
+      if (released) return;
+      released = true;
+      delete record.activeIoLeases[leaseId];
+    },
+  };
 }
 
 function withCoordinatorSharedReadLeaseMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -3771,8 +3491,8 @@ function hasCurrentCoordinatorSharedReadLease(): boolean {
 }
 
 /**
- * 读请求按本地 Coordinator 聚合持久 lease；写请求仍是一请求一 lease。
- * 每个返回对象都有独立幂等 release，最后一个读请求才释放共享记录。
+ * 读请求按本地 Coordinator 聚合内存 lease；写请求仍是一请求一 lease。
+ * 每个返回对象都有独立幂等 release，最后一个读请求才释放内存记录。
  */
 async function acquireCoordinatorFinalIoLease(
   operation: "read" | "write",
@@ -3791,7 +3511,7 @@ async function acquireCoordinatorFinalIoLease(
       existing.references += 1;
       let released = false;
       return {
-        leaseId: `${existing.durableLease.leaseId}:${existing.references}`,
+        leaseId: `${existing.ioLease.leaseId}:${existing.references}`,
         authorityInstanceId,
         handoverGeneration,
         release: async () => {
@@ -3801,27 +3521,27 @@ async function acquireCoordinatorFinalIoLease(
             existing.references = Math.max(0, existing.references - 1);
             if (existing.references !== 0) return;
             if (coordinatorSharedReadLease === existing) coordinatorSharedReadLease = undefined;
-            await existing.durableLease.release();
+            await existing.ioLease.release();
           });
         },
       };
     }
 
     // 只会在测试 reset / 本地重建后遇到不匹配对象；旧对象的在途请求仍
-    // 持有自己的引用，等它们 finally 释放，不能在这里强行改写旧记录。
-    const durableLease = await acquireCoordinatorFinalIoLeaseExclusive("read", auditOperation);
+    // 持有自己的引用，等它们 finally 释放，不能在这里强行改写新世代。
+    const ioLease = await acquireCoordinatorFinalIoLeaseExclusive("read", auditOperation);
     const shared: CoordinatorSharedReadLease = {
-      durableLease,
-      authorityInstanceId: durableLease.authorityInstanceId,
-      handoverGeneration: durableLease.handoverGeneration,
+      ioLease,
+      authorityInstanceId: ioLease.authorityInstanceId,
+      handoverGeneration: ioLease.handoverGeneration,
       references: 1,
     };
     coordinatorSharedReadLease = shared;
     let released = false;
     return {
-      leaseId: `${durableLease.leaseId}:1`,
-      authorityInstanceId: durableLease.authorityInstanceId,
-      handoverGeneration: durableLease.handoverGeneration,
+      leaseId: `${ioLease.leaseId}:1`,
+      authorityInstanceId: ioLease.authorityInstanceId,
+      handoverGeneration: ioLease.handoverGeneration,
       release: async () => {
         if (released) return;
         released = true;
@@ -3829,57 +3549,10 @@ async function acquireCoordinatorFinalIoLease(
           shared.references = Math.max(0, shared.references - 1);
           if (shared.references !== 0) return;
           if (coordinatorSharedReadLease === shared) coordinatorSharedReadLease = undefined;
-          await shared.durableLease.release();
+          await shared.ioLease.release();
         });
       },
     };
-  });
-}
-
-/** 释放持久 lease；若 authority 已被外部接管则只读退出，不能修改新 Worker 记录。 */
-async function releaseCoordinatorFinalIoLease(
-  stateStore: KeyValueStore,
-  leaseId: string,
-  leaseAuthorityInstanceId: string,
-  leaseHandoverGeneration: number,
-): Promise<void> {
-  let lastError: unknown;
-  const deadline = Date.now() + COORDINATOR_AUTHORITY_CAS_TIMEOUT_MS;
-  return withCoordinatorAuthorityMutation(async () => {
-    for (;;) {
-      if (Date.now() >= deadline) break;
-      const snapshot = await readCoordinatorAuthoritySnapshot(stateStore);
-      const current = snapshot.record;
-      if (
-        !current
-        || current.authorityInstanceId !== leaseAuthorityInstanceId
-        || current.handoverGeneration !== leaseHandoverGeneration
-      ) {
-        return;
-      }
-      if (!Object.prototype.hasOwnProperty.call(current.activeIoLeases, leaseId)) {
-        return;
-      }
-      const activeIoLeases = { ...current.activeIoLeases };
-      delete activeIoLeases[leaseId];
-      const next: CoordinatorAuthorityRecord = { ...current, activeIoLeases };
-      try {
-        await stateStore.put(COORDINATOR_UPGRADE_KEY, next, {
-          partition: COORDINATOR_UPGRADE_PARTITION,
-          ifRevision: snapshot.revision,
-        });
-        rememberCoordinatorAuthorityRecord(next);
-        return;
-      } catch (error) {
-        if (!isStorageConflict(error)) throw error;
-        lastError = error;
-        await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
-      }
-    }
-    throw coordinatorUpgradeError(
-      "upgrade.io_lease_release_failed",
-      `Coordinator final I/O lease release failed${lastError instanceof Error ? `: ${lastError.message}` : ""}`,
-    );
   });
 }
 
@@ -3931,18 +3604,15 @@ async function withCoordinatorFinalIoLease<T>(
     allowLocalBindingDiscard?: boolean;
     auditOperation?: FinalIoAuditOperation;
     /**
-     * 非持久化的本地边界：不会改变外部或本地持久化真值，因此不需要
-     * 在 Worker 重启后阻塞新 authority；本地 gate 和前后 authority
-     * 校验仍然保留。默认 true，避免新入口意外绕过跨 Worker fence。
+     * 兼容旧调用方的开关名称；现在只控制是否登记当前 Worker 的内存
+     * admission 计数，不会向 Local/S3 写入运行锁。默认 true。
      */
     durableLease?: boolean;
   } = {},
 ): Promise<T> {
   await ensureCoordinatorUpgradeSession();
-  // 共享 read lease 本身就是当前 authority 已通过持久 CAS 的证明；在
-  // 它仍有引用时，接管者不能覆盖该记录，因此高频只读请求无需每次再
-  // 读取 authority K-V。没有共享证明时（首个读、写入或重建后）仍做
-  // 完整 authority 校验。
+  // 共享 read lease 只表示当前 Worker 已通过本地 authority 检查；高频
+  // 只读请求无需重复登记内存计数。WebLoom 浏览器锁已隔离其它物理 Worker。
   if (operation !== "read" || !hasCurrentCoordinatorSharedReadLease()) {
     await assertCoordinatorAuthorityCurrent();
   }
@@ -3952,16 +3622,15 @@ async function withCoordinatorFinalIoLease<T>(
   const initialSessionEpoch = coordinatorState.sessionEpoch;
   const initialKeyspaceGeneration = coordinatorState.keyspaceGeneration;
   const lease: UpgradeIoLease = gate.admit({ session, operation, signal });
-  let durableLease: CoordinatorFinalIoLease | undefined;
+  let ioLease: CoordinatorFinalIoLease | undefined;
   let audit: ReturnType<ReturnType<typeof createFinalIoAudit>["begin"]> | undefined;
   let operationError: unknown;
   try {
     lease.assertActive();
-    // 本地 UpgradeGate 只保护当前 Worker；持久 lease 还把最终 I/O 与
-    // 其它 Worker 的 authority CAS 串起来。接管者看到此记录时只能等待，
-    // 因而不会在本次写入的前后检查之间插入新的 authority。
+    // 本地 UpgradeGate 和内存 I/O lease 只负责当前 Worker 的 admission/
+    // drain；不同物理 Worker 的唯一性由浏览器 Web Lock 保证。
     if (options.durableLease !== false) {
-      durableLease = await acquireCoordinatorFinalIoLease(operation, options.auditOperation);
+      ioLease = await acquireCoordinatorFinalIoLease(operation, options.auditOperation);
     }
     lease.assertActive();
     audit = options.auditOperation ? finalIoAudit.begin(options.auditOperation) : undefined;
@@ -3981,8 +3650,8 @@ async function withCoordinatorFinalIoLease<T>(
       && (coordinatorState.sessionEpoch !== initialSessionEpoch || coordinatorState.keyspaceGeneration !== initialKeyspaceGeneration);
     const localBindingDiscard = options.allowLocalBindingDiscard === true && catalogBindingDiscardDeferred;
     if (!localLockReplacedGate && !localOwnerTransitionReplacedGate && !localBindingDiscard) lease.assertActive();
-    // Root 销毁会在 finally 中、durable lease 释放后执行；此时不再要求
-    // 旧 Root 的 authority 记录完成一次无意义的后置读取。
+    // Root 销毁会在 finally 中、本地 lease 释放后执行；不读取业务桶里的
+    // 临时 authority 记录。
     if (!localBindingDiscard) await assertCoordinatorAuthorityCurrent();
     audit?.finish("completed");
     return result;
@@ -3993,7 +3662,7 @@ async function withCoordinatorFinalIoLease<T>(
   } finally {
     let releaseError: unknown;
     try {
-      await durableLease?.release();
+      await ioLease?.release();
     } catch (error) {
       releaseError = error;
     }
@@ -5730,7 +5399,7 @@ interface CoordinatorPeerState {
   drainPromise?: Promise<void>;
 }
 
-/** WebLoom 0.4.2 endpoint 字段的领域侧窄投影；不把框架对象泄漏进持久化。 */
+/** WebLoom 0.4.3 endpoint 字段的领域侧窄投影；不把框架对象泄漏进持久化。 */
 type CoordinatorPeerEndpointInfo = {
   readonly endpointState?: "active" | "closing" | "closed";
   readonly binding?: { readonly runtimeInstanceId: string; readonly connectionId: string };
@@ -6779,8 +6448,8 @@ function createWorkerOwnerStore(pluginId: string, schemaVersion: number): KeyVal
   }, {
     auditOperation: "storage.owner.data",
     // Worker-owned owner K-V 的 get/list 是纯本地只读，不会产生外部
-    // 副作用；仍保留当前 authority 的前后校验，但不把页面卸载时的
-    // 读 Promise 留成新 Worker 的恢复阻断。
+    // 副作用；仍保留当前运行世代的前后校验，但不把页面卸载时的
+    // 读 Promise 留成业务 K-V 中的恢复阻断。
     durableLease: operation === "write",
   });
   const handle = {
@@ -7638,9 +7307,9 @@ async function executeStorageControl(
 /**
  * Storage 控制面的最终边界分类。
  *
- * 初次选择/导入 Profile 可能还没有 Root 和 authority，必须保留冷启动
+ * 初次选择/导入 Profile 可能还没有 Root 和内存运行权威，必须保留冷启动
  * 路径；Root 已存在后，Provider 探测、配置提交和 Profile 恢复都不能
- * 绕过跨 Worker 的最终 I/O lease。
+ * 绕过当前 Worker 的最终 I/O admission。
  */
 function storageControlIoKind(control: Extract<CoordinatorClientRequest, { kind: "storage.control" }>["control"]): "read" | "write" {
   switch (control.type) {
@@ -7689,13 +7358,13 @@ async function executeStorageControlAtFinalBoundary(
         allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
         allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "initial-setup-cleanup",
         // status/summary/connection 等控制读取只观察本地状态；probe 也
-        // 不提交配置或远端不可逆结果。它们仍经过本地 authority/epoch
-        // 栅栏，但页面卸载时不应留下跨 Worker 恢复租约。
+        // 不提交配置或远端不可逆结果。它们仍经过本地运行世代/epoch
+        // 栅栏，不写入跨 Worker 的临时租约。
         durableLease: storageControlIoKind(request.control) === "write",
       },
     );
   } finally {
-    // withCoordinatorFinalIoLease 已完成后置 authority 校验和 lease release。
+    // withCoordinatorFinalIoLease 已完成后置运行世代校验和内存 lease release。
     flushDeferredCatalogBindingDiscard();
   }
 }
@@ -7745,8 +7414,8 @@ async function executePlatformStorageData(
   const operation = data.type === "platform.get" || data.type === "platform.list" ? "read" : "write";
   return withCoordinatorFinalIoLease(operation, signal, () => executePlatformStorageDataUnsafe(data, actualClientId, signal), {
     auditOperation: "storage.platform.data",
-    // 平台 K-V 的 get/list 没有外部副作用；保留本地 authority 前后校验，
-    // 但不把页面导航中尚未返回的只读 Promise 写成跨 Worker 恢复阻断。
+    // 平台 K-V 的 get/list 没有外部副作用；保留本地运行世代前后校验，
+    // 但不把页面导航中尚未返回的只读 Promise 写成持久运行锁。
     durableLease: operation === "write",
   });
 }
@@ -7803,8 +7472,8 @@ async function executeOwnerStorageData(
   const operation = data.type === "owner.get" || data.type === "owner.list" ? "read" : "write";
   return withCoordinatorFinalIoLease(operation, signal, (leaseSignal) => executeOwnerStorageDataUnsafe(data, actualClientId, leaseSignal), {
     auditOperation: "storage.owner.data",
-    // owner K-V 的读取没有不可逆副作用；写入仍必须持久化登记，保证
-    // Worker 接管不会越过未知的旧写入。
+    // owner K-V 的读取没有不可逆副作用；写入仍登记当前 Worker 的内存
+    // lease，保证本次运行不会越过未知的本地写入。
     durableLease: operation === "write",
   });
 }
@@ -8072,7 +7741,7 @@ async function executeSatRequest(
   request: Extract<CoordinatorClientRequest, { kind: "sat.operation" }>,
 ): Promise<CoordinatorResponse> {
   // Sat 的 service.publish、TopUp、collect 和 Supplier 配置共享同一个
-  // runtime；全部在持久 write lease 内完成，避免接管发生在签名/付款/
+  // runtime；全部在内存 write lease 内完成，避免本次运行发生在签名/付款/
   // 远端提交与本地结果落库之间。
   if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
@@ -10406,12 +10075,12 @@ async function executeMsfileRequest(
         allowLocalOwnerTransition: true,
         auditOperation: "msfile.control",
         // settings.get 等控制面读取只读取 Coordinator 自有状态，不会
-        // 触发供应商/支付副作用；真正的配置变更仍使用持久 final lease。
+        // 触发供应商/支付副作用；真正的配置变更仍登记内存 write lease。
         durableLease: operation === "write",
       },
     );
     } catch (error) {
-    // 请求可能在等待持久 I/O lease 时经历 lock → unlock；此时旧 gate
+    // 请求可能在等待内存 I/O lease 时经历 lock → unlock；此时旧 gate
     // 会先被撤销，不能把“旧 epoch 已失效”冒泡成未处理异常。
     if (request.kind === "msfile.control" && request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
@@ -10669,10 +10338,10 @@ async function processRequestCore(
     || request.kind === "msfile.cancel"
     || request.kind === "msfile.session.abort"
     || request.kind === "window-p2p.executor.release";
-  // lock 是 fail-closed 安全动作：即使这个 Worker 已经失去持久 authority，
-  // 仍必须能本地清空密钥、撤销代理并释放资源。其他清理入口同样不需要
-  // 重新取得业务权威；其余入口都必须经过共享 authority fence，避免旧
-  // Worker 在新 Worker 接管后继续修改状态。
+  // lock 是 fail-closed 安全动作：即使这个 Worker 已经失去当前内存
+  // authority，仍必须能本地清空密钥、撤销代理并释放资源。其他清理入口
+  // 同样不需要重新取得业务权威；其余入口都必须经过当前 authority fence，
+  // 避免旧 Worker 在新 Runtime 接管后继续修改状态。
   if (!cleanupOnly && platformRootStore && platformStorageReady) {
     try {
       await assertCoordinatorAuthorityCurrent();
@@ -10872,10 +10541,10 @@ async function handleUnlockUnsafe(
 async function handleVaultOperation(requestId: string, request: { kind: "vault.operation"; operation: CoordinatorVaultOperation }): Promise<CoordinatorResponse> {
   try {
     // 所有从页面进入的 Vault 仓库读写都必须在最终边界重新登记；仅在
-    // processRequest 开头检查一次 authority 不足以覆盖中途 Worker 接管。
+    // processRequest 开头检查一次运行世代不足以覆盖中途的状态切换。
     // allowLocalLock / allowLocalOwnerTransition 只允许本次操作自己执行
     // fail-closed 锁定或 owner 切换；仍会重新校验共享 authority，不能把
-    // 外部接管当成成功。
+    // 旧页面/迟到结果当成成功。
     const ioKind = vaultOperationIoKind(request.operation);
     const result = await withCoordinatorFinalIoLease(
       ioKind,
@@ -10887,8 +10556,8 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
         auditOperation: "vault.operation",
         // list/get/export/verify 只读取当前本地真值；底层存储入口也有各自的
         // authority 与绑定世代检查。保留本 Worker 的前后栅栏，但只让真正
-        // 会改写 Vault 的操作持久阻塞跨 Worker 接管，避免刷新把未完成的
-        // UI 读取固化成无法释放的孤儿 lease。
+        // 会改写 Vault 的操作登记内存 write lease；刷新时浏览器锁随 Worker
+        // 终止自动释放，不会留下无法清理的业务 K-V 记录。
         durableLease: ioKind === "write",
       },
     );
@@ -11989,9 +11658,9 @@ async function handleCrypto(
       {
         auditOperation: "service.crypto.sign",
         // 签名只在 Worker 内计算；结果必须经过下方 epoch 检查以及
-        // withCoordinatorFinalIoLease 的后置 authority 检查才会发布。
-        // 页面刷新若终止 Worker，持久 lease 反而会成为无法释放的孤儿，
-        // 令新 Worker 在 hydrate 前永久拒绝接管。
+        // withCoordinatorFinalIoLease 的后置运行世代检查才会发布。
+        // 页面刷新若终止 Worker，浏览器锁会自动释放；纯本地签名不需要
+        // 额外的持久运行锁。
         durableLease: false,
       },
     );
@@ -12822,7 +12491,7 @@ async function handleCoordinatorCryptoRpc(
       auditOperation: "service.crypto.sign",
       // 纯本地签名没有外部 I/O 或持久化副作用；返回前仍受 authority、
       // UpgradeGate、AbortSignal 和 session epoch 的多重后置栅栏保护。
-      // 不持久化 lease，避免页面卸载杀死 Worker 后留下恢复阻断。
+      // 纯本地签名不需要额外的内存 I/O 计数；浏览器锁负责 Worker 唯一性。
       durableLease: false,
     },
   );
@@ -13231,6 +12900,10 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
 // a no-op when native WebCrypto exists and never enables a fallback unless the
 // realm explicitly reports an insecure context.
 if ((globalThis as unknown as { onconnect?: unknown }).onconnect !== undefined) {
+// WebLoom 0.4.3 的 startSharedWorkerApp 默认会在这里的最外层申请运行锁；
+// 不把 runtimeLock 字段传给消费者，避免已发布的旧包静默忽略未知选项。
+// 锁名只由这个稳定 Runtime id 生成，不包含 buildId、Worker URL 或临时
+// session；Keymaster gate 只负责当前 Worker 内排空。
 coordinatorRuntimeApp = startSharedWorkerApp({
   id: "keymaster-coordinator",
   plugins: [coordinatorTransportPlugin, ...coordinatorRuntimePlugins],
@@ -13244,7 +12917,7 @@ coordinatorRuntimeApp = startSharedWorkerApp({
     COORDINATOR_CRYPTO_RPC_CAPABILITY,
   ],
   configurePeer: configureCoordinatorPeer,
-  runtimeUnitAvailability: ({ unitId }) => {
+  runtimeUnitAvailability: ({ unitId }: { unitId: string }) => {
     // The transport plugin is the Coordinator Host's required foundation; it
     // is intentionally not part of the domain worker-unit catalog because it
     // owns the RPC/topic entrypoints rather than a product task/service.
@@ -13262,7 +12935,7 @@ coordinatorRuntimeApp = startSharedWorkerApp({
     }
     return undefined;
   },
-  runtimeUnitAttributes: ({ unitId }) => {
+  runtimeUnitAttributes: ({ unitId }: { unitId: string }) => {
     const unit = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === unitId);
     return {
       ...(unit ? { productId: unit.productId, scopeKind: unit.scopeKind } : {}),
@@ -13439,19 +13112,15 @@ export function __testGetSnapshot(): CoordinatorBootstrapSnapshot {
   return buildSnapshot();
 }
 
-/** 测试专用：只推进持久化权威，不修改当前 Worker 内存。 */
+/** 测试专用：模拟另一个 Worker 让当前内存权威失效；不写业务 K-V。 */
 export async function __testFenceCoordinatorAuthority(): Promise<void> {
   await ensureCoordinatorAuthorityClaim();
-  if (!platformStateStore || !coordinatorAuthorityRecord) throw new Error("Coordinator authority is unavailable");
-  const partition = await platformStateStore.list({ partition: COORDINATOR_UPGRADE_PARTITION, limit: 1 });
-  await platformStateStore.put(COORDINATOR_UPGRADE_KEY, {
+  if (!coordinatorAuthorityRecord) throw new Error("Coordinator authority is unavailable");
+  coordinatorAuthorityRecord = {
     ...coordinatorAuthorityRecord,
     authorityInstanceId: "coordinator:external-test-fence",
     handoverGeneration: coordinatorAuthorityRecord.handoverGeneration + 1,
-  } satisfies CoordinatorAuthorityRecord, {
-    partition: COORDINATOR_UPGRADE_PARTITION,
-    ifRevision: partition.revision,
-  });
+  };
 }
 
 /** 测试专用：持有一条最终 I/O 租约，模拟旧 Worker 崩溃前未完成的写入。 */
@@ -13459,6 +13128,14 @@ export async function __testHoldCoordinatorFinalIoLease(): Promise<() => Promise
   await ensureCoordinatorUpgradeSession();
   const lease = await acquireCoordinatorFinalIoLease("write");
   return lease.release;
+}
+
+/** 测试专用：确认运行锁/临时 I/O 计数没有在业务 K-V 创建版本。 */
+export async function __testGetCoordinatorUpgradePartition(): Promise<{ revision: number; entryCount: number }> {
+  const store = testPlatformStores?.get("platform:coordinator:1") ?? platformStateStore;
+  if (!store) return { revision: 0, entryCount: 0 };
+  const partition = await store.list({ partition: "coordinator-upgrade", limit: 1_000 });
+  return { revision: partition.revision, entryCount: partition.entries.length };
 }
 
 export function __testResetState(): void {
@@ -13485,7 +13162,7 @@ export function __testResetState(): void {
   coordinatorAuthorityRecoveryOperationNames = [];
   coordinatorHandoverGeneration = 0;
   // reset API 保持同步以兼容既有测试；真正的最终 I/O 会等待这条 claim
-  // 完成，因此不会在新权威落盘前执行业务操作。
+  // 完成，因此不会在新内存权威建立前执行业务操作。
   void scheduleCoordinatorAuthorityClaim().catch((error) => {
     console.warn("[coordinator] test authority claim failed", error instanceof Error ? error.message : String(error));
   });

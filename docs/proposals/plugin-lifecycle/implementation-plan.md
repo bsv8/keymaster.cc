@@ -47,7 +47,7 @@
 - 验证依赖缺失等待、提供者撤销与恢复、异步初始化中卸载、初始化失败、清理异常和清理超时；确认怎样拿到可靠的就绪与停止结果。
 - 按设计 4.2 节区分产品描述、运行单元和运行实例；验证一份 Worker 服务对应多个 Window 消费实例。纯 UI 样板不能替代跨环境验证。
 - 按设计 4.4 / 6.1 节验证服务就绪、代理重建、快照乱序和控制命令冲突；确认现有 RPC / baseline 能复用的部分，记录需要补充的字段。
-- 将新旧 Worker 接管提前到此单：选择受控冷切换或两阶段升级，验证旧客户端拒绝策略与旧 I/O 排空；无法证明安全接管时，不允许后续批次切换生产写入。
+- 将升级接管提前到此单：采用 WebLoom 稳定 WebLock + `ifAvailable` 直接冲突错误，验证旧页面拒绝和当前 Worker I/O 排空；无法证明安全时，不允许后续批次切换生产写入。
 
 **交付：** [inventory.md](./inventory.md)（现状矩阵）、[cordis-spike.md](./cordis-spike.md)（版本和验证记录）、[connect-strategy.md](./connect-strategy.md)（Connect 策略决策记录）。没有实际执行的项目明确标为未验证。
 
@@ -85,7 +85,7 @@
 
 **目标：** 禁用提供者时自动停止消费者，解锁或恢复依赖不篡改用户设置。
 
-**当前结果：** SharedWorker 已持有插件意图控制器，页面 UI 已改为提交绝对意图命令；命令去重、修订冲突、Worker 重启后的旧 authority 拒绝和页面旧事件丢弃已有测试。运行时按 `execution` 选择唯一单元，严格依赖匹配 `sourceExecution`、`scope` 和 `contractVersion`；Coordinator 还在持久 authority / handover generation 上保护最终存储与签名边界。25 个产品均有显式 manifest 单元，Coordinator Worker 目录登记 12 个任务 / 服务单元，并由 Worker 运行态注册表绑定实际 instance；未登记的生产任务继续 fail closed。
+**当前结果：** SharedWorker 已持有插件意图控制器，页面 UI 已改为提交绝对意图命令；命令去重、修订冲突、Worker 重启后的旧 `authorityInstanceId` 拒绝和页面旧事件丢弃已有测试。运行时按 `execution` 选择唯一单元，严格依赖匹配 `sourceExecution`、`scope` 和 `contractVersion`；Coordinator 最终存储与签名边界使用 WebLoom 浏览器运行锁、本地 gate 和内存 I/O 计数，不再把临时 authority / active lease 写入业务 K-V。25 个产品均有显式 manifest 单元，Coordinator Worker 目录登记 12 个任务 / 服务单元，并由 Worker 运行态注册表绑定实际 instance；未登记的生产任务继续 fail closed。
 
 Coordinator 的生产任务装配现在对未登记 `productId`、`unitId` 或最终 I/O 审计入口的任务 fail closed（安全拒绝）；只有测试专用注册入口可创建临时未登记任务。这样新增手工任务会在运行前暴露为施工缺口，不会静默进入生产。
 
@@ -149,7 +149,7 @@ Coordinator 的生产任务装配现在对未登记 `productId`、`unitId` 或�
 
 **目标：** 锁屏、切 Key、解锁只通过一个控制器推动作用域。
 
-**当前结果：** 主 Coordinator 已统一锁屏、切 Key、解锁时的 session epoch、owner fence、服务代理撤销和最终 I/O lease；旧 proxy、旧 Provider 实例和旧世代请求有 Node / Chromium 回归。旧 Worker 持有活动 final-I/O lease 时不会被强制夺权，状态会保留 `recovery-required` 并由 UI 暴露，避免把“安全拒绝”误报成已恢复。人工处理步骤已记录在 [Coordinator 接管恢复操作协议](./coordinator-recovery-runbook.md)，但目标部署恢复演练和所有领域入口仍未完成。
+**当前结果：** 主 Coordinator 已统一锁屏、切 Key、解锁时的 session epoch、owner fence、服务代理撤销和最终 I/O lease；旧 proxy、旧 Provider 实例和旧世代请求有 Node / Chromium 回归。运行唯一性由 WebLoom WebLock 提供，Keymaster 仅保留本 Worker 内存 gate/计数；双方都支持 Web Locks 的后续升级中，旧 Worker 存活时新 Worker 直接报错，用户刷新或关闭全部页面后重开。首次从不支持 Web Lock 的 `0.4.2` 迁移必须先走冷切换门禁。目标部署恢复演练和所有领域入口仍未完成。
 
 **责任范围：** `apps/web/src/keymasterSessionCoordinator.worker.ts` 的 `performGlobalLock`、`transitionActiveStorageOwner`、`enterUnlockedState`、激活与 Passkey 入口；`packages/plugin-vault/src/*Coordinator.ts`、`sessionStateMirror.ts`；建议新增 `apps/web/src/coordinator/sessionLifecycle.ts`。
 
@@ -287,16 +287,17 @@ Coordinator 的生产任务装配现在对未登记 `productId`、`unitId` 或�
 
 1. 25 个产品的 manifest / contracts 静态单元和 Coordinator Worker 运行态登记已完成；仍需在发布证据中核对每个目标构建实际输出与单元快照，不能只凭源码声明放行。
 2. AppView 主链已在本地 Chromium 生产构建通过，但外部部署 origin 的同等回归仍未完成；当前外部 App 由 Playwright fixture 提供。
-3. 旧 Worker 崩溃且持有持久 final-I/O lease 时，系统只能 fail closed 并显示 `recovery-required`，不能安全强制夺权；恢复操作协议已产品化为可执行诊断 / 演练脚本，但目标部署演练证据仍未完成。
+3. 双方都支持 Web Locks 时，旧 Worker 仍存活会让新 Worker 立即 fail closed 并要求用户刷新/关闭全部页面；但首次从不申请 Web Lock 的 registry `0.4.2` 迁移到 `0.4.3` 时不能自动发现旧 Worker，必须先通过部署门禁完成冷切换退出证据。Worker 崩溃后浏览器自动释放锁，但远端未知结果仍需领域仓库对账，不能自动重放。
 4. Coordinator 入口已经统一标记并形成[不可逆 I/O 审计台账](./irreversible-io-audit.md)，但上传、远端订阅、广播 / 支付、未知结果仍需在目标部署环境执行 smoke；本地测试和 MSFile 压力验证不能替代外部供应商验证。
-5. 冷切换无法凭本地测试证明完全不认识接管协议的旧 Worker 已退出；部署 handover 文件、旧 Worker drain / exit 证明、版本淘汰和回退演练仍需发布环境完成。
+5. 运行锁只覆盖同一浏览器配置；不能把它当成跨浏览器 S3 写锁。发布环境仍需完成旧版本退出、版本淘汰、业务未知结果对账和回退演练。
 
 ## 4. 发布与回退
 
 优先使用兼容现有数据格式的代码迁移；第一阶段不更改 Key 加密格式、桶路径和业务 schema。每个批次记录删除了哪些旧逻辑、保留哪些桥接、下一批在哪里移除。
 
-本节复核 001 已选择、003 已实现的接管策略，不是新增发布阶段任务。按设计 11.1 停止旧会话并重新认证；只修改新 Worker 的握手不能阻止旧 Worker 写入。受控冷切换必须确认旧环境退出；需要双版本并存时先发布能理解接管协议的旧架构版本，并验证旧 I/O 排空后才开放新写入。无法隔离完全不识别协议的老版本时禁止自动接管。单浏览器 SharedWorker 不是跨设备写锁。
 
 回退只能在已验证读写格式兼容、没有新旧 Worker 并行接管的条件下恢复上一代码版本；已撤销的会话必须重新认证。删除是不可逆操作，失败通过原删除日志继续处理，不采用数据“回滚恢复”。
+
+本节的运行策略补充：不做新旧 Worker 自动接管。首次启用 Web Lock 是受控冷切换；只有双方都支持 Web Lock 的后续升级，旧 Worker 存活时新 Worker 才报告运行锁冲突并要求用户关闭/刷新所有页面。单浏览器 Web Lock 不是跨设备写锁，两个浏览器同时使用同一 S3 时必须依赖业务 K-V CAS 和领域级幂等。
 
 最终交付应包含实现后的依赖矩阵、完整验证记录、旧逻辑删除清单、Connect 行为说明和更新后的架构图。仅移动文件或加一层 Context 包装，不算完成重构。

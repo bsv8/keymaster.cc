@@ -14,6 +14,11 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { isBuildId } from "./plugin-lifecycle-build-id.mjs";
+import {
+  validateRuntimeLockCapabilityData,
+  validateRuntimeLockEvidenceData,
+  validateRuntimeLockMigrationRecord,
+} from "./plugin-lifecycle-runtime-lock-gate.mjs";
 
 const deploymentPath = process.argv[2] ?? process.env.KEYMASTER_LIFECYCLE_DEPLOYMENT_FILE;
 const errors = [];
@@ -78,6 +83,47 @@ async function validateEvidenceContent(record, label, expectedBuildId, baseDir) 
     }
   } catch {
     errors.push(`${label}.evidenceRef 引用的本地记录无法读取：${path}`);
+  }
+}
+
+/**
+ * 运行锁迁移的两类原始记录必须能被机器复核：首次冷切换复核旧页面/Worker
+ * 已退出；后续升级复核双方都已支持锁并实际收到冲突错误。目标包能力另有
+ * 独立记录，不能只在 handover JSON 里手填 true。
+ */
+async function validateRuntimeLockEvidence(migration, expectedBuildId, baseDir) {
+  if (!migration || typeof migration !== "object") return;
+  const semanticField = migration.mode === "initial-cold-switch"
+    ? "legacyExitEvidenceRef"
+    : "conflictEvidenceRef";
+  const semanticPath = migration[semanticField];
+  if (nonEmptyString(semanticPath) && !isPlaceholder(semanticPath) && !isHttpReference(semanticPath)) {
+    const path = resolve(baseDir, semanticPath);
+    try {
+      const data = JSON.parse(await readFile(path, "utf8"));
+      for (const error of validateRuntimeLockEvidenceData(data, {
+        mode: migration.mode,
+        expectedTargetBuildId: expectedBuildId,
+        label: `runtimeLockMigration.${semanticField}`,
+      })) errors.push(error);
+    } catch {
+      errors.push(`runtimeLockMigration.${semanticField} 必须引用可读取的 JSON 原始记录：${path}`);
+    }
+  }
+
+  const capabilityPath = migration.targetCapabilityEvidenceRef;
+  if (nonEmptyString(capabilityPath) && !isPlaceholder(capabilityPath) && !isHttpReference(capabilityPath)) {
+    const path = resolve(baseDir, capabilityPath);
+    try {
+      const data = JSON.parse(await readFile(path, "utf8"));
+      for (const error of validateRuntimeLockCapabilityData(data, {
+        expectedTargetWebLoomVersion: migration.targetWebLoomVersion,
+        expectedTargetBuildId: expectedBuildId,
+        label: "runtimeLockMigration.targetCapabilityEvidence",
+      })) errors.push(error);
+    } catch {
+      errors.push(`runtimeLockMigration.targetCapabilityEvidenceRef 必须引用可读取的 JSON 原始记录：${path}`);
+    }
   }
 }
 
@@ -161,16 +207,23 @@ if (!deploymentPath) {
       errors.push("two-phase 只允许已理解接管协议的旧 Worker");
     }
 
+    const runtimeLockMigration = deployment.runtimeLockMigration;
+    errors.push(...validateRuntimeLockMigrationRecord(runtimeLockMigration, {
+      expectedTargetBuildId: deployment.targetBuildId,
+    }));
+
     const evidenceBaseDir = dirname(resolve(deploymentPath));
     await validateEvidenceContent(previousWorker, "previousWorker", deployment.targetBuildId, evidenceBaseDir);
     await validateEvidenceContent(authority, "authority", deployment.targetBuildId, evidenceBaseDir);
     await validateEvidenceContent(rollback, "rollback", deployment.targetBuildId, evidenceBaseDir);
+    await validateRuntimeLockEvidence(runtimeLockMigration, deployment.targetBuildId, evidenceBaseDir);
 
     if (errors.length > 0) {
       fail("文件 " + deploymentPath + " 不满足接管门禁");
     } else {
       console.log("插件生命周期部署交接通过：" + deploymentPath);
       console.log("- strategy: " + deployment.strategy);
+      console.log("- runtimeLockMigration: " + deployment.runtimeLockMigration.mode);
       console.log("- targetBuildId: " + deployment.targetBuildId);
       console.log("- handoverGeneration: " + deployment.authority.handoverGeneration);
     }

@@ -82,6 +82,7 @@ import {
   __testDispatchStorageMessage,
   __testFenceCoordinatorAuthority,
   __testHoldCoordinatorFinalIoLease,
+  __testGetCoordinatorUpgradePartition,
   __testSetStorageSessionResolver,
   __testGetSnapshot,
   __testGetVaultStatus,
@@ -1291,49 +1292,36 @@ describe("Session Coordinator worker", () => {
     });
   });
 
-  it("keeps recovery-required visible when an old Worker still holds final I/O", async () => {
+  it("does not persist a temporary final-I/O lease across Worker restart", async () => {
     __testResetState();
     const release = await __testHoldCoordinatorFinalIoLease();
-    try {
-      await expect(__testRestartWorker()).rejects.toMatchObject({
-        code: "upgrade.authority_claim_failed",
-        recoveryRequired: true,
-        activeIoLeaseCount: 1,
-      });
-      expect(__testGetSnapshot().authorityRecovery).toMatchObject({
-        status: "recovery-required",
-        reason: "active-final-io-leases",
-        authorityBuildId: expect.any(String),
-        activeIoLeaseCount: 1,
-        activeIoOperations: { read: 0, write: 1 },
-      });
-    } finally {
-      // 旧 Worker 的 release 仍然按旧 authority/generation 定位租约，
-      // 即使新 Worker 已经进入恢复态也必须能够排空它。
-      await release();
-    }
-
+    // 运行锁由浏览器 WebLoom 管理，Worker 重启不会读取旧桶内租约，
+    // 因此旧 I/O 不会把新 Worker 卡在 recovery-required。
     await __testRestartWorker();
     expect(__testGetSnapshot().authorityRecovery).toBeUndefined();
+    await release();
   }, 15_000);
 
-  it("uses the explicit storage retry command to complete old-lease recovery", async () => {
+  it("keeps the storage retry command idempotent without a persisted authority lease", async () => {
     __testResetState();
     const release = await __testHoldCoordinatorFinalIoLease();
-    try {
-      await expect(__testRestartWorker()).rejects.toMatchObject({
-        code: "upgrade.authority_claim_failed",
-        recoveryRequired: true,
-      });
-      expect(__testGetSnapshot().authorityRecovery?.status).toBe("recovery-required");
-    } finally {
-      await release();
-    }
-
+    await __testRestartWorker();
     const retry = await __testDispatchStorageControl({ type: "retry" } satisfies CoordinatorStorageControl);
     expect(retry.ack.status).toBe("ok");
     expect(__testGetSnapshot().authorityRecovery).toBeUndefined();
+    await release();
   }, 15_000);
+
+  it("does not create coordinator-upgrade K-V revisions for temporary I/O admission", async () => {
+    __testResetState();
+    const before = await __testGetCoordinatorUpgradePartition();
+    const release = await __testHoldCoordinatorFinalIoLease();
+    await __testRestartWorker();
+    await release();
+    const after = await __testGetCoordinatorUpgradePartition();
+    expect(after).toEqual(before);
+    expect(after.entryCount).toBe(0);
+  });
 
   it("keeps per-port queue admission fair and bounded", () => {
     __testResetState();

@@ -74,6 +74,7 @@
     "handoverFile": "<已通过 verify:lifecycle-deployment 的文件>",
     "targetBuildId": "<与根 buildId 相同>",
     "strategy": "cold-switch",
+    "runtimeLockMigrationMode": "initial-cold-switch",
     "oldWorkerExitConfirmed": false,
     "trafficDrainConfirmed": false,
     "noParallelAuthority": false,

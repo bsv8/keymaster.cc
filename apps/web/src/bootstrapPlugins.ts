@@ -512,8 +512,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     pageLifecycleClosed = true;
     // 页面销毁不是一次可重用的业务断线；撤权同步完成后必须立即通知
     // Coordinator。若等 Host 的异步 teardown（配置/远端连接）结束，
-    // 浏览器可能先销毁文档而不再执行 Promise，旧 Worker 就会留下端口和
-    // final-I/O lease，下一页面只能被错误地挡在 recovery-required。
+    // 浏览器可能先销毁文档而不再执行 Promise；连接必须尽快撤销，避免
+    // 页面继续使用旧代理。运行锁本身由浏览器在 Worker 终止时自动释放。
     // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
     // 仍在后台尽力执行，不能反过来阻塞新 Worker 的接管判定。
     coordinatorClient.shutdown();

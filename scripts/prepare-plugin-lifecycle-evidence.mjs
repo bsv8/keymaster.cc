@@ -21,7 +21,9 @@ function readProducts() {
 }
 
 function readUnits() {
-  return [...source.matchAll(/\{\s*productId:\s*"([^"\n]+)",\s*unitId:\s*"([^"\n]+)",\s*execution:\s*"([^"\n]+)",\s*lifetime:\s*"([^"\n]+)"\s*\}/gu)]
+  // 产品契约使用 runtime/scopeKind；证据文件保留 execution/lifetime 字段名，
+  // 便于历史验收工具和中文审阅者理解，这里只做机械映射。
+  return [...source.matchAll(/\{\s*productId:\s*"([^"\n]+)",\s*unitId:\s*"([^"\n]+)",\s*runtime:\s*"([^"\n]+)",\s*scopeKind:\s*"([^"\n]+)"\s*\}/gu)]
     .map((match) => ({
       productId: match[1],
       unitId: match[2],
@@ -129,6 +131,7 @@ const evidence = {
     handoverFile: "",
     targetBuildId: buildIdentity.buildId,
     strategy: "cold-switch",
+    runtimeLockMigrationMode: "initial-cold-switch",
     oldWorkerExitConfirmed: false,
     trafficDrainConfirmed: false,
     noParallelAuthority: false,

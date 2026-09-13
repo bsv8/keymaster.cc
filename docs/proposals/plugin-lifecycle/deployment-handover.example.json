@@ -26,5 +26,17 @@
     "reauthRequired": true,
     "windowUntil": "<回退窗口截止时间>",
     "evidenceRef": "<回退演练原始记录>"
+  },
+  "runtimeLockMigration": {
+    "mode": "initial-cold-switch",
+    "previousWebLoomVersion": "0.4.2",
+    "targetWebLoomVersion": "0.4.3",
+    "previousRuntimeLockAware": false,
+    "targetRuntimeLockAware": true,
+    "targetBuildId": "<待发布构建标识>",
+    "legacyPagesExited": false,
+    "legacyWorkersExited": false,
+    "legacyExitEvidenceRef": "<部署平台确认所有旧 Keymaster 页面和 Worker 已退出的 JSON 原始记录>",
+    "targetCapabilityEvidenceRef": "<目标 WebLoom 包含 Runtime WebLock 能力的 JSON 原始记录>"
   }
 }

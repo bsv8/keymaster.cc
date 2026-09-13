@@ -514,24 +514,21 @@ Connect Worker 仍是独立的会话执行环境，可以管理协议、请求�
 
 ### 11.1 升级接管是迁移前提
 
-握手覆盖 `protocolVersion`（控制协议版本）、`buildId`（产物标识）、`authorityInstanceId`（运行权威启动身份）及支持的契约版本。构建号不同不自动意味着不兼容；按显式兼容规则决定能否接入。未知或不兼容客户端只允许受限诊断 / 升级提示，不能发业务写入、取得签名或存储授权。
+握手继续覆盖 `protocolVersion`（控制协议版本）、`buildId`（产物标识）、`authorityInstanceId`（运行权威启动身份）及支持的契约版本；这些字段用于旧页面、旧授权和迟到结果拒绝，不承担浏览器级运行锁。
 
-新 Worker 拒绝旧客户端，只保护新 Worker 自己；它不能隔空使已运行的旧 Worker 停止写入。因此分两种路径：
+升级不做自动接管：WebLoom 在 SharedWorker 启动最外层用稳定 `navigator.locks` 名称和 `ifAvailable` 立即检查。双方都支持 Web Locks 的后续升级中，旧 Worker 存活时新 Worker 直接返回结构化错误，不启动插件、不进入 ready；用户刷新或关闭全部 Keymaster 页面后再打开。首次从不认识 Web Locks 的旧包（例如 registry `0.4.2`）迁移时，新 Worker 无法发现旧 Worker，必须先经过部署门禁确认旧页面和 Worker 全部退出，再启用新版本。Web Locks 不可用时也直接失败，不能退化到 localStorage。
 
-1. **受控冷切换：** 能确认旧窗口 / Worker 全部退出的部署，停止旧会话后加载新版本，重新认证。不能把“提醒刷新”当作已经退出的证明。
-2. **需要新旧版本并存的部署：** 先发布旧架构也理解的握手与接管版本，在存储权威边界安装新旧都检查的写入接管世代；再发布新生命周期版本。新实例接管前旧版本先停止发租约并排空已提交 I/O，之后旧世代请求全部拒绝。第一阶段发布仍须解决完全不认识协议的更老客户端，不能无限递归假设它们会遵守新规则。
+不额外创建页面 leader 选举或分布式插件调度器；Keymaster 只保留当前 Worker 内的 gate、authorityInstanceId、session/bucket/keyspace 世代和 I/O 计数。跨浏览器同时使用同一 S3 时仍由业务 K-V CAS 和领域幂等保护，相关结果按 5.5 节核对。
 
-不额外创建页面 leader 选举或分布式插件调度器；接管复用现有存储绑定与世代机制。不能证明旧版本已隔离或已有 I/O 已排空时，不开放新写入。存储世代不能追回已提交到供应商的请求，相关结果按 5.5 节核对。
-
-本批次已选择受控冷切换作为首次发布路径：新版本通过持久化 authority、handover generation 和最终 I/O lease 拒绝旧世代写入；本地 Node / Chromium 已验证锁屏、旧代理撤销、重启后旧 lease 不能写入以及活动 lease 时保守进入 `recovery-required`。两阶段接管仍只保留为后续部署方案，未证明完全不认识该协议的旧 Worker 可以被隔离，因此不能自动接管这类旧实例。
+本批次已选择浏览器运行锁作为首次发布路径：WebLoom 使用 `navigator.locks` 的稳定锁名和 `ifAvailable` 立即检查，第二个物理 Worker 直接返回冲突并要求用户刷新/关闭全部页面；Keymaster 的最终 I/O gate 与计数只保存在当前 Worker 内存，不再把临时 authority、handover generation 或 lease 写入 Local/S3 业务 K-V。多浏览器同时使用同一 S3 仍需业务 K-V CAS 和领域幂等，不能把浏览器锁当作跨设备锁。
 
 ### 11.2 当前仍未解除的生产阻断项
 
 1. 25 个产品的静态 manifest / contracts 单元与 Coordinator Worker 运行态目录已经落地；发布证据仍需核对目标构建实际输出和快照，不能只凭源码声明放行。
 2. AppView 主链已经在本地 Chromium 生产构建通过，但还缺少真实外部部署 origin 的同等回归；当前外部 App 是 Playwright 路由 fixture。
-3. Worker 崩溃时若旧 Worker 持有持久 final-I/O lease，系统只能 fail closed 并显示 `recovery-required`，不能安全强制接管；[Coordinator 接管恢复操作协议](./coordinator-recovery-runbook.md) 与可执行恢复演练已补齐，但目标部署恢复证据仍未完成。
+3. Worker 崩溃后浏览器自动释放 WebLock，不能据此判断远端操作已经成功；新版本不自动重放未知结果，目标部署仍需完成领域对账和恢复演练。
 4. 代码入口已建立不可逆 I/O 审计台账（见 [irreversible-io-audit.md](./irreversible-io-audit.md)），但上传、远端订阅、广播 / 支付、未知结果仍需在目标部署环境逐项 smoke；本地 MSFile 并发、存储 smoke 不能替代外部供应商验证。
-5. 冷切换不能凭本地测试证明仍存活且完全不认识接管协议的旧 Worker 已退出；部署 handover、版本淘汰和回退演练仍需发布环境证据。
+5. WebLock 只覆盖同一浏览器配置，不能替代跨浏览器 S3 写锁；版本淘汰、未知结果对账和回退演练仍需发布环境证据。
 
 ## 12. 验收底线
 

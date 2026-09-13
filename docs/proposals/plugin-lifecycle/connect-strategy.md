@@ -38,4 +38,4 @@
 - `sessionCryptoWorker` 路径和 Coordinator facade 路径并存，必须以生产入口的浏览器测试决定后续删留，不能按名称删除。
 - 定时器、监听器和页面临时资源不建立持久清理队列；它们由作用域重建和撤权处理。上传、远端订阅、未知支付结果使用 protocol / storage / 资产领域仓库恢复依据。
 
-仍未解除的生产条件：普通 popup、真实外部部署 origin、旧 Worker 崩溃时活动 final-I/O lease 的人工恢复 / 运维协议，以及目标供应商 smoke。Coordinator 入口审计台账已建立（见 [不可逆 I/O 审计](./irreversible-io-audit.md)），但它不替代上传、订阅、广播 / 支付等未知结果的外部故障演练。冷切换也不能自动隔离完全不认识接管协议的旧 Worker。
+仍未解除的生产条件：普通 popup、真实外部部署 origin、浏览器 WebLock 释放后的远端未知结果对账，以及目标供应商 smoke。Coordinator 入口审计台账已建立（见 [不可逆 I/O 审计](./irreversible-io-audit.md)），但它不替代上传、订阅、广播 / 支付等未知结果的外部故障演练。WebLock 也不是跨浏览器 S3 写锁。

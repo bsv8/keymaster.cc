@@ -71,7 +71,14 @@ if (existsSync(lockfile)) {
         throw new Error(detail || `npm view exited with ${String(result.status)}`);
       }
       const raw = String(result.stdout ?? "").trim();
-      try { return JSON.parse(raw); } catch { return raw; }
+      try {
+        const parsed = JSON.parse(raw);
+        // npm 11 returns an array even for a single npm view field; npm 10
+        // returned the scalar directly.  Normalize both forms for the
+        // frozen-registry integrity check.
+        if (Array.isArray(parsed)) return parsed.length === 1 ? parsed[0] : parsed;
+        return parsed;
+      } catch { return raw; }
     };
 
     try {

@@ -84,6 +84,7 @@ import {
   type PluginIntentSnapshot,
   type PluginIntentSubmissionResult,
 } from "webloom-framework";
+import * as WebLoomFramework from "webloom-framework";
 import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?sharedworker&url";
 
 const INITIAL_SETUP_RECOVERY_STORAGE_KEY = "keymaster.storage.initial-setup.recovery.v1";
@@ -106,6 +107,28 @@ const INITIAL_SETUP_CATALOG_STATES = ["not-started", "committed", "rolled-back",
 const INITIAL_SETUP_ROLLBACK_STATES = ["not-started", "confirmed", "unconfirmed"] as const satisfies readonly InitialSetupRollbackState[];
 const RECOVERY_RECORD_LIMIT = 32;
 const RECOVERY_DIAGNOSTIC_LIMIT = 12_000;
+
+/**
+ * 旧 registry 包可能没有浏览器运行锁。不能把未知 runtimeLock 字段传给它
+ * 再假设已经安全；生产页面先检查当前 WebLoom 包的能力标记，旧包直接拒绝连接。
+ * 单测使用显式的 WebLoom testing 入口，不需要依赖 registry 包版本。
+ */
+function hasWebLoomRuntimeLock(): boolean {
+  return typeof Reflect.get(WebLoomFramework as object, "WEBLOOM_RUNTIME_LOCK_PREFIX") === "string";
+}
+
+function isTestBuild(): boolean {
+  return (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE === "test";
+}
+
+function runtimeLockUserMessage(snapshot: unknown): string | undefined {
+  const code = snapshot && typeof snapshot === "object"
+    ? (snapshot as { errorCode?: unknown }).errorCode
+    : undefined;
+  if (code === "runtime_lock_conflict") return "检测到另一个 Keymaster Runtime 正在运行。请刷新或关闭所有 Keymaster 页面后重新打开。";
+  if (code === "runtime_lock_unavailable") return "当前浏览器不支持 Keymaster 运行锁，无法安全启动 Coordinator。请使用支持 Web Locks 的浏览器。";
+  return undefined;
+}
 
 function recoveryLedgerError(field: string): never {
   throw new StorageRuntimeError("storage_provider_error", `Initialization recovery ledger contains an invalid ${field}`);
@@ -603,6 +626,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.pendingSessionBinding = null;
 
     try {
+      if (!hasWebLoomRuntimeLock() && !isTestBuild()) {
+        this.connectionState = "fatal";
+        throw new Error("当前加载的 WebLoom 版本不支持浏览器运行锁，无法安全启动 Coordinator。请刷新页面并更新到包含 Web Locks 的版本；旧包不能无锁运行。");
+      }
       // WebLoom 是唯一的物理连接与 call/stream transport。领域 client 只
       // 保留重连策略和产品状态缓存，不再读取或监听 Runtime 裸端口。
       const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
@@ -633,7 +660,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         if (this.runtimeHandle !== runtime) return;
         if (snapshot.state === "ready") runtimePublishedReady = true;
         if (snapshot.state === "failed" || snapshot.state === "disconnected") {
-          const message = `Coordinator Runtime ${snapshot.state}${snapshot.error ? `: ${snapshot.error}` : ""}`;
+          const lockMessage = runtimeLockUserMessage(snapshot);
+          const message = lockMessage
+            ?? `Coordinator Runtime ${snapshot.state}${snapshot.error ? `: ${snapshot.error}` : ""}`;
           this.observedConnectionFailure = snapshot.state === "disconnected" && !runtimePublishedReady
             ? new Error("Coordinator SharedWorker failed before publishing a ready Runtime snapshot; inspect the Worker console")
             : new Error(message);

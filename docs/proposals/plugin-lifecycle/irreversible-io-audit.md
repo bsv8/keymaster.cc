@@ -4,7 +4,7 @@
 
 ## 审计规则
 
-所有可能产生外部副作用、签名结果或持久化真值变化的 Coordinator 操作，必须先进入 `withCoordinatorFinalIoLease()`。该函数同时校验本地 `UpgradeSession`、共享 authority、owner/session/bucket 世代，并在结果返回前再次校验。已迁移的领域任务，其产品 / `unitId` / `taskId` / 审计入口由 [`workerUnitCatalog.ts`](../../../apps/web/src/coordinator/workerUnitCatalog.ts) 统一登记；新增任务不得只补 lease 调用而漏掉运行单元身份。
+所有可能产生外部副作用、签名结果或持久化真值变化的 Coordinator 操作，必须先进入 `withCoordinatorFinalIoLease()`。该函数同时校验当前 Worker 的内存 `authorityInstanceId`、本地 `UpgradeSession`、owner/session/bucket 世代，并在结果返回前再次校验。浏览器级唯一 Runtime 锁由 WebLoom 的 `navigator.locks` 持有；本函数中的 I/O 计数只存在 Worker 内存，不写 Local/S3 业务 K-V。已迁移的领域任务，其产品 / `unitId` / `taskId` / 审计入口由 [`workerUnitCatalog.ts`](../../../apps/web/src/coordinator/workerUnitCatalog.ts) 统一登记；新增任务不得只补 lease 调用而漏掉运行单元身份。
 
 写操作的异常结果按 `unknown` 处理；不能因为网络超时、锁屏或 Worker 接管失败而自动重放。上传、远端订阅、广播和支付结果必须由各自领域仓库继续核对。`apps/web/src/coordinator/finalIoAudit.ts` 只保存按入口聚合的内存计数，不保存 payload，也不作为重试依据。
 
@@ -12,7 +12,7 @@
 
 | 审计入口 | 业务边界 | 未知结果后的依据 |
 | --- | --- | --- |
-| `coordinator.bootstrap.recover`、`coordinator.meta.persist` | authority / Coordinator metadata / 删除 Journal | metadata、删除 Journal |
+| `coordinator.bootstrap.recover`、`coordinator.meta.persist` | Coordinator metadata / 删除 Journal | metadata、删除 Journal |
 | `keyspace.active.set`、`vault.unlock`、`vault.activate-key`、`vault.operation` | Vault / active owner 变更 | Vault metadata |
 | `vault.digest.sign`、`vault.address.derive`、`service.crypto.sign`、`window-p2p.identity.sign` | 签名或派生 | 请求方重新读取 session / owner 状态，签名类不盲目重放 |
 | `service.owner-generation.read` | 服务授权修订读取 | 新服务目录和 owner generation |
@@ -32,6 +32,6 @@
   `KEYMASTER_E2E_DEPLOYMENT_BASE_URL`、`KEYMASTER_DEPLOYED_BUILD_ID`、
   `KEYMASTER_EXTERNAL_APPVIEW_ORIGIN` 与 `KEYMASTER_EXTERNAL_APPVIEW_SUCCESS_SELECTOR`。
 - 真实 S3 / 上传供应商、receive Supplier、广播和支付供应商的故障注入：`pnpm test:e2e:irreversible-io`，必须提供 `KEYMASTER_IRREVERSIBLE_IO_SMOKE_URL`，并由目标验收页注入 `__KEYMASTER_IRREVERSIBLE_IO_SMOKE__` runner；本地 fixture、Node 测试和 MSFile 压力测试不能替代这一步。
-- 完全不认识 authority 协议的旧 Worker：必须在部署编排中确认退出、版本淘汰和回退窗口，不能由本地 lease 猜测完成。
+- 旧版本 Worker：首次从不支持 Web Lock 的 `0.4.2` 迁移时，不能依靠运行时冲突或业务桶里的临时 lease 判断是否退出，必须由部署冷切换记录确认旧页面和 Worker 已退出；双方都支持 Web Locks 的后续升级，冲突时才直接提示用户刷新或关闭所有页面。
 
-上述外部证据必须和恢复演练、领域单元覆盖、回退演练一起写入发布证据文件，运行 `pnpm verify:lifecycle-production-gates` 校验；该门禁没有证据文件时明确失败。部署切换前另运行 `pnpm verify:lifecycle-deployment` 校验交接记录。旧 Worker 活动租约的人工处理步骤见 [Coordinator 接管恢复操作协议](./coordinator-recovery-runbook.md)。
+上述外部证据必须和领域单元覆盖、回退演练一起写入发布证据文件，运行 `pnpm verify:lifecycle-production-gates` 校验；该门禁没有证据文件时明确失败。部署切换前另运行 `pnpm verify:lifecycle-deployment` 校验交接记录。运行锁行为见 [Coordinator 接管恢复操作协议](./coordinator-recovery-runbook.md)。
