@@ -8,6 +8,8 @@
 //   - 空串是合法值，表示“清空配置”；
 //   - 读到坏 JSON / 坏 schema / 坏字段时，按“没有本地配置”处理。
 
+import { parsePublicKey } from "bsv8-channel-protocol";
+
 /** K-V 中的相对配置键。 */
 export const BSV_PRICE_SETTINGS_STORAGE_KEY = "settings";
 
@@ -78,6 +80,11 @@ export function normalizePublisherPublicKeyHex(input: string): BsvPricePublicKey
   }
   if (!COMPRESSED_PUBLIC_KEY_PREFIXES.some((prefix) => value.startsWith(prefix))) {
     return { ok: false, error: "invalid_prefix" };
+  }
+  try {
+    parsePublicKey(value);
+  } catch {
+    return { ok: false, error: "invalid_public_key" };
   }
   return { ok: true, value };
 }

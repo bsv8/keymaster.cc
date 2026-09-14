@@ -1,48 +1,49 @@
-// PriceCast v1 的 Channel 业务内容校验。
+// BSV 价格业务正文适配。
+//
+// ChannelProtocol Coordinator 已经完成公开消息壳的验签；这里只把 body
+// 交给正式 bsv-price SDK 做强类型校验，不重复维护协议常量和价格正则。
 
 import type { JSONValue } from "@keymaster/contracts";
-import { PRICECAST_PROTOCOL_ID } from "./constants.js";
+import {
+  BSV_PRICE_PROTOCOL,
+  parseBody,
+  type BSVPriceBody
+} from "bsv8-channel-protocol/bsv-price";
 
-export interface BsvPriceQuote {
-  /** 稳定的小写交易所编号。 */
-  exchange: string;
-  /** 十进制价格字符串。 */
-  price: string;
-}
-
+/** keymaster 页面使用的不可变价格快照。 */
 export interface BsvPriceSnapshot {
-  quotes: readonly BsvPriceQuote[];
-  receivedAtMs: number;
+  /** 固定的 ChannelProtocol 价格协议标识。 */
+  protocol: typeof BSV_PRICE_PROTOCOL;
+  /** 行情源生成该完整快照的 Unix 毫秒时间。 */
+  snapshotAtMs: number;
+  /** 市场编号到交易对价格的映射。 */
+  markets: BSVPriceBody["markets"];
 }
 
-const decimalStringRE = /^[0-9]+(\.[0-9]+)?$/;
-
-/** 验证已由 ChannelProtocol 验签的 PriceCast JSON 内容。 */
+/** 使用 ChannelProtocol SDK 校验已验签的价格 body。 */
 export function decodePriceContent(content: JSONValue): BsvPriceSnapshot | null {
-  if (!isObject(content) || content.protocolId !== PRICECAST_PROTOCOL_ID) return null;
-  if (!Array.isArray(content.quotes)) return null;
-  const quotes: BsvPriceQuote[] = [];
-  for (const value of content.quotes) {
-    if (!isObject(value)) return null;
-    if (typeof value.exchange !== "string" || !value.exchange || typeof value.price !== "string") return null;
-    if (!decimalStringRE.test(value.price)) return null;
-    quotes.push({ exchange: value.exchange, price: value.price });
+  try {
+    const body = parseBody(content);
+    return toSnapshot(body);
+  } catch {
+    return null;
   }
-  quotes.sort((a, b) => a.exchange.localeCompare(b.exchange));
-  return { quotes, receivedAtMs: Date.now() };
 }
 
-/** 保留显式时间参数的单元测试辅助函数。 */
+/** 保留旧的测试辅助函数名；排序依据现在是 body.snapshot_at_ms。 */
 export function decodePriceBody(
   content: JSONValue,
-  receivedAtMs: number,
+  _receivedAtMs: number,
   options: { expectedProtocolId?: string } = {}
 ): BsvPriceSnapshot | null {
-  if (options.expectedProtocolId && (!isObject(content) || content.protocolId !== options.expectedProtocolId)) return null;
-  const decoded = decodePriceContent(content);
-  return decoded ? { ...decoded, receivedAtMs } : null;
+  if (options.expectedProtocolId && options.expectedProtocolId !== BSV_PRICE_PROTOCOL) return null;
+  return decodePriceContent(content);
 }
 
-function isObject(value: JSONValue): value is { [key: string]: JSONValue } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function toSnapshot(body: BSVPriceBody): BsvPriceSnapshot {
+  return {
+    protocol: body.protocol,
+    snapshotAtMs: body.snapshot_at_ms,
+    markets: body.markets
+  };
 }

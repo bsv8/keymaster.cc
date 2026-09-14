@@ -72,7 +72,7 @@ function makeFakeService(): BsvPriceService {
         subs.delete(handler);
       };
     },
-    currentQuotes: () => [],
+    currentMarkets: () => ({}),
     getPublisherPublicKeyHex: () => currentHex,
     configured: () => currentHex.length > 0,
     savePublisherPublicKeyHex: async (input) => {
@@ -85,7 +85,7 @@ function makeFakeService(): BsvPriceService {
       }
       currentHex = next;
       currentSnap = makeSnapshot({
-        channelId: next.length > 0 ? `${next}.pricecast.bsvusdt` : "(not configured)",
+        channelId: next.length > 0 ? `bsvprice.${next}` : "(not configured)",
         status: next.length > 0 ? "ready" : "not_configured",
         configured: next.length > 0
       });
@@ -107,7 +107,7 @@ describe("BsvPriceSettingsPage", () => {
     const input = screen.getByDisplayValue("") as HTMLInputElement;
     fireEvent.change(input, {
       target: {
-        value: " 02AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "
+        value: " 0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798 "
       }
     });
     fireEvent.click(screen.getByRole("button", { name: /保存/ }));
@@ -116,10 +116,10 @@ describe("BsvPriceSettingsPage", () => {
       expect(screen.getByText("已保存")).toBeTruthy();
     });
     expect(screen.getByDisplayValue(
-      "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
     )).toBeTruthy();
     expect(screen.getByText(
-      "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pricecast.bsvusdt"
+      "bsvprice.0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
     )).toBeTruthy();
   });
 

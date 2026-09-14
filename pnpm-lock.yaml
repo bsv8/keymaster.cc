@@ -214,8 +214,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.5.0
+        version: 0.5.0
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
@@ -342,6 +342,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      bsv8-channel-protocol:
+        specifier: 0.5.0
+        version: 0.5.0
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)
@@ -379,8 +382,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       bsv8-channel-protocol:
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.5.0
+        version: 0.5.0
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)
@@ -637,8 +640,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.5.0
+        version: 0.5.0
       sat-subscription-protocol:
         specifier: 0.1.0
         version: 0.1.0
@@ -737,8 +740,8 @@ importers:
         specifier: '*'
         version: link:../ui
       bsv8-channel-protocol:
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.5.0
+        version: 0.5.0
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)
@@ -2342,8 +2345,8 @@ packages:
   bser@2.1.1:
     resolution: {integrity: sha512-gQxTNE/GAfIIrmHLUE3oJyp5FO6HRBfhjnw4/wMmA63ZGDJnWBmgY/lyQBpnDUkGmAhbSe39tx2d/iTOAfglwQ==}
 
-  bsv8-channel-protocol@0.3.0:
-    resolution: {integrity: sha512-89RA/0ZGuh4FM0mhOVmVb7VG+AaogLTJ296ftTLdzgWM/yWT9SbwkXUXT2ce0EahrGfNEyfLoePXLS8XPZyl1A==}
+  bsv8-channel-protocol@0.5.0:
+    resolution: {integrity: sha512-VTr3NTa7Ra2BRaWXi9Nil1wq6MeTouWwYHW88/195v7Ai2DAqu4TpAPiPJUHLGa/WigXUNWeAFSsRyb9kU04Cg==}
     engines: {node: '>=20'}
 
   buffer-from@1.1.2:
@@ -6114,7 +6117,7 @@ snapshots:
     dependencies:
       node-int64: 0.4.0
 
-  bsv8-channel-protocol@0.3.0:
+  bsv8-channel-protocol@0.5.0:
     dependencies:
       '@multiformats/multiaddr': 13.0.3
       '@noble/curves': 1.9.7

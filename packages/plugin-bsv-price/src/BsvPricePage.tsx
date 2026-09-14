@@ -2,7 +2,7 @@
 // BSV 价格业务页（施工单 2026-07-08 001）。
 //
 // 设计缘由：
-//   - 展示交易所列表与最新价格；
+//   - 展示市场、交易对列表与最新价格；
 //   - 展示当前广播连接状态（"connected / disconnected / idle"）；
 //   - 展示当前订阅频道名（**仅展示**，无编辑）；
 //   - 不建本地 K-V；刷新 = 等待下一次快照；
@@ -62,6 +62,11 @@ function BsvPricePageInner({
   const host = usePluginHost();
   const snapshot = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
   const snap = snapshot.data ?? service.snapshot();
+  const quotes = snap.snapshot
+    ? Object.entries(snap.snapshot.markets).flatMap(([market, pairs]) =>
+        Object.entries(pairs).map(([pair, price]) => ({ market, pair, price }))
+      )
+    : [];
 
   const connectionLabel = (() => {
     switch (snap.status) {
@@ -109,7 +114,7 @@ function BsvPricePageInner({
         <h2 className="km-bsv-price-page__section-title">
           {i18n.t("bsv-price.page.quotes.label")}
         </h2>
-        {snap.snapshot === null ? (
+        {quotes.length === 0 ? (
           <p className="km-bsv-price-page__empty">
             {i18n.t("bsv-price.page.empty")}
           </p>
@@ -117,16 +122,18 @@ function BsvPricePageInner({
           <table className="km-bsv-price-page__table">
             <thead>
               <tr>
-                <th>{i18n.t("bsv-price.page.table.exchange")}</th>
+                <th>{i18n.t("bsv-price.page.table.market")}</th>
+                <th>{i18n.t("bsv-price.page.table.pair")}</th>
                 <th>{i18n.t("bsv-price.page.table.price")}</th>
               </tr>
             </thead>
             <tbody>
-              {snap.snapshot.quotes.map((q) => (
-                <tr key={q.exchange}>
-                  <td className="km-bsv-price-page__exchange">{q.exchange}</td>
+              {quotes.map(({ market, pair, price }) => (
+                <tr key={`${market}:${pair}`}>
+                  <td className="km-bsv-price-page__exchange">{market}</td>
+                  <td className="km-bsv-price-page__exchange">{pair}</td>
                   <td className="km-bsv-price-page__price km-bsv-price-page__mono">
-                    {q.price}
+                    {price}
                   </td>
                 </tr>
               ))}

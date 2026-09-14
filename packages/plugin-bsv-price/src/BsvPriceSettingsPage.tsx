@@ -110,14 +110,14 @@ function BsvPriceSettingsPageInner({
       <PageHeader
         title={t("bsv-price.settings.title", { defaultValue: "BSV Price settings" })}
         description={t("bsv-price.settings.desc", {
-          defaultValue: "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription."
+          defaultValue: "Edit the BSV price publisher public key. Saving an empty value clears the configuration and stops subscription."
         })}
         actions={<Button onClick={onSave} loading={saving}>{t("bsv-price.settings.save", { defaultValue: "保存" })}</Button>}
       />
       <div className="km-bsv-price-settings-page__card">
         <TextInput
           label={t("bsv-price.settings.field.publisher.label", {
-            defaultValue: "PriceCast publisher 公钥 hex"
+            defaultValue: "BSV price publisher 公钥 hex"
           })}
           description={t("bsv-price.settings.field.publisher.desc", {
             defaultValue: "Trimmed and lowercased before saving. Empty string clears the config."
@@ -185,6 +185,8 @@ function describeSaveError(err: unknown): string {
         return "公钥 hex 只能包含 0-9 和 a-f";
       case "invalid_prefix":
         return "压缩公钥前缀必须是 02 或 03";
+      case "invalid_public_key":
+        return "公钥不是有效的 secp256k1 压缩公钥";
       default:
         return err.message;
     }

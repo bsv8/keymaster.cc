@@ -7,7 +7,7 @@ import {
   normalizePublisherPublicKeyHex
 } from "./bsvPriceSettings.js";
 
-const PUBLISHER_A = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PUBLISHER_A = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
 function createStore() {
   return createInMemoryKeyValueStore({

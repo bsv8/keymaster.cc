@@ -1,30 +1,15 @@
 // packages/plugin-bsv-price/src/constants.ts
-// BSV 价格广播业务插件常量（施工单 2026-07-08 001）。
-//
-// 设计缘由：
-//   - 业务协议 id 固定为 "pricecast.bsv_price.v1"；插件只接受该
-//     protocolId 的消息，其它一律丢弃；
-//   - 频道名是动态拼接：由 `pricePublisherPublicKeyHex` + 后缀
-//     `.pricecast.bsvusdt`；不允许写死完整常量化整个频道；
-//   - 后缀稳定不变；只在配置层暴露公钥真值；
-//   - `pricePublisherPublicKeyHex` 的长期运行时真值现在由
-//     Host 注入的 BSV Price owner/App K-V 承担；`manifest.config` 只作首次 seed。
+// BSV 价格广播业务插件常量。
+// 协议和频道规则由独立的 ChannelProtocol SDK 维护，插件只保存发布者配置并订阅。
 
-export const PRICECAST_PROTOCOL_ID = "pricecast.bsv_price.v1";
-export const PRICECAST_CHANNEL_SUFFIX = ".pricecast.bsvusdt";
+import {
+  BSV_PRICE_CHANNEL_PREFIX,
+  BSV_PRICE_PROTOCOL
+} from "bsv8-channel-protocol/bsv-price";
+
+export { BSV_PRICE_CHANNEL_PREFIX, BSV_PRICE_PROTOCOL };
 /** BSV Price 在「设置 → 应用设置」下的详情页路径。 */
 export const BSV_PRICE_SETTINGS_PATH = "/settings/apps/bsv-price";
-
-/** 由 publisher 公钥 hex 拼出订阅频道名。 */
-export function buildPriceChannelId(publisherPublicKeyHex: string): string {
-  if (
-    typeof publisherPublicKeyHex !== "string" ||
-    publisherPublicKeyHex.length === 0
-  ) {
-    throw new Error("buildPriceChannelId: publisherPublicKeyHex must be non-empty");
-  }
-  return publisherPublicKeyHex + PRICECAST_CHANNEL_SUFFIX;
-}
 
 /**
  * plugin-bsv-price 配置 key 名（用于 manifest 装配）。

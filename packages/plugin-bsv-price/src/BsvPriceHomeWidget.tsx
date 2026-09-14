@@ -42,7 +42,11 @@ function BsvPriceHomeWidgetContent({ service }: { service: BsvPriceService }): R
   const host = usePluginHost();
   const resource = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
   const snapshot = resource.data ?? service.snapshot();
-  const quotes = snapshot.snapshot?.quotes ?? [];
+  const quotes = snapshot.snapshot
+    ? Object.entries(snapshot.snapshot.markets).flatMap(([market, pairs]) =>
+        Object.entries(pairs).map(([pair, price]) => ({ market, pair, price }))
+      )
+    : [];
 
   return (
     <div className="home-widget bsv-price-home-widget">
@@ -55,9 +59,9 @@ function BsvPriceHomeWidgetContent({ service }: { service: BsvPriceService }): R
       {quotes.length > 0 ? (
         <ul className="home-widget__list bsv-price-home-widget__list">
           {quotes.map((quote) => (
-            <li key={quote.exchange}>
-              <span>{quote.exchange}</span>
-              <strong className="bsv-price-home-widget__price">{quote.price} USDT</strong>
+            <li key={`${quote.market}:${quote.pair}`}>
+              <span>{quote.market} · {quote.pair}</span>
+              <strong className="bsv-price-home-widget__price">{quote.price}</strong>
             </li>
           ))}
         </ul>

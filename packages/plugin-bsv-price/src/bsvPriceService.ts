@@ -4,7 +4,8 @@
 // 不接触 Supplier、SSP Wire、签名壳或远端历史。
 
 import type { BorrowedKeyValueStore, ChannelRuntime } from "@keymaster/contracts";
-import { buildPriceChannelId } from "./constants.js";
+import { parsePublicKey } from "bsv8-channel-protocol";
+import { bsvPriceChannel } from "bsv8-channel-protocol/bsv-price";
 import { decodePriceContent, type BsvPriceSnapshot } from "./bsvPriceProtocol.js";
 import {
   createKeyValueBsvPriceSettingsStore,
@@ -41,7 +42,7 @@ export interface BsvPriceServiceSnapshot {
 export interface BsvPriceService {
   snapshot(): BsvPriceServiceSnapshot;
   subscribe(handler: () => void): () => void;
-  currentQuotes(): readonly { exchange: string; price: string }[];
+  currentMarkets(): Readonly<Record<string, Readonly<Record<string, string>>>>;
   getPublisherPublicKeyHex(): string;
   configured(): boolean;
   savePublisherPublicKeyHex(input: string): Promise<void>;
@@ -90,7 +91,7 @@ export function createBsvPriceService(
 
   const state: InternalState = {
     channelId: currentConfig.pricePublisherPublicKeyHex
-      ? buildPriceChannelId(currentConfig.pricePublisherPublicKeyHex)
+      ? bsvPriceChannel(parsePublicKey(currentConfig.pricePublisherPublicKeyHex))
       : NOT_CONFIGURED_LABEL,
     coreState: channel.isReady() ? "ready" : "offline",
     status: deriveStatus(channel, currentConfig.pricePublisherPublicKeyHex),
@@ -128,7 +129,7 @@ export function createBsvPriceService(
       emit();
       return;
     }
-    state.channelId = buildPriceChannelId(state.configHex);
+    state.channelId = bsvPriceChannel(parsePublicKey(state.configHex));
     state.snapshot = null;
     state.lastError = null;
     updateRuntimeState();
@@ -151,7 +152,7 @@ export function createBsvPriceService(
         emit();
         return;
       }
-      if (state.snapshot && decoded.receivedAtMs < state.snapshot.receivedAtMs) return;
+      if (state.snapshot && decoded.snapshotAtMs <= state.snapshot.snapshotAtMs) return;
       state.snapshot = decoded;
       state.lastError = null;
       state.status = "ready";
@@ -205,7 +206,7 @@ export function createBsvPriceService(
       listeners.add(handler);
       return () => listeners.delete(handler);
     },
-    currentQuotes: () => state.snapshot?.quotes.map((quote) => ({ ...quote })) ?? [],
+    currentMarkets: () => cloneMarkets(state.snapshot?.markets ?? null),
     getPublisherPublicKeyHex: () => state.configHex,
     configured: () => state.configured,
     async savePublisherPublicKeyHex(input) {
@@ -244,6 +245,25 @@ function deriveStatus(channel: ChannelRuntime, configHex: string): BsvPriceServi
 
 function cloneSnapshot(input: BsvPriceSnapshot | null): BsvPriceSnapshot | null {
   return input
-    ? { receivedAtMs: input.receivedAtMs, quotes: input.quotes.map((quote) => ({ ...quote })) }
+    ? {
+        protocol: input.protocol,
+        snapshotAtMs: input.snapshotAtMs,
+        markets: cloneMarkets(input.markets)
+      }
     : null;
+}
+
+function cloneMarkets(
+  input: Readonly<Record<string, Readonly<Record<string, string>>>> | null
+): Readonly<Record<string, Readonly<Record<string, string>>>> {
+  if (!input) return {};
+  const markets: Record<string, Record<string, string>> = {};
+  for (const market of Object.keys(input)) {
+    const quotes = input[market] ?? {};
+    markets[market] = {};
+    for (const pair of Object.keys(quotes)) {
+      markets[market]![pair] = quotes[pair]!;
+    }
+  }
+  return markets;
 }

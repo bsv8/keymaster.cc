@@ -54,7 +54,7 @@ const bsvPriceResources: I18nPluginResources = {
     en: {
       "bsv-price.menu": "BSV Price",
       "bsv-price.breadcrumb": "BSV Price",
-      "bsv-price.page.title": "BSV / USDT prices",
+      "bsv-price.page.title": "BSV market prices",
       "bsv-price.page.connection.label": "Connection",
       "bsv-price.page.connection.ready": "Receiving",
       "bsv-price.page.connection.idle": "Idle",
@@ -65,8 +65,10 @@ const bsvPriceResources: I18nPluginResources = {
         "Publisher public key not configured",
       "bsv-price.page.channel.label": "Subscribed channel",
       "bsv-price.page.quotes.label": "Quotes",
-      "bsv-price.page.table.exchange": "Exchange",
-      "bsv-price.page.table.price": "Price (USDT)",
+      "bsv-price.page.table.market": "Market",
+      "bsv-price.page.table.pair": "Trading pair",
+      "bsv-price.page.table.exchange": "Market",
+      "bsv-price.page.table.price": "Price",
       "bsv-price.page.empty": "(waiting for next snapshot)",
       "bsv-price.page.error.lastParse": "Last parse error:",
       "bsv-price.home.title": "BSV Price",
@@ -79,11 +81,11 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.home.status.not_configured": "Not configured",
       "bsv-price.settings.title": "BSV Price settings",
       "bsv-price.settings.desc":
-        "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription.",
+        "Edit the BSV price publisher public key. Saving an empty value clears the configuration and stops subscription.",
       "bsv-price.settings.save": "Save",
       "bsv-price.settings.saved": "Saved",
       "bsv-price.settings.savedCleared": "Configuration cleared",
-      "bsv-price.settings.field.publisher.label": "PriceCast publisher public key hex",
+      "bsv-price.settings.field.publisher.label": "BSV price publisher public key hex",
       "bsv-price.settings.field.publisher.desc":
         "Trimmed and lowercased before saving. Empty string clears the config.",
       "bsv-price.settings.field.publisher.placeholder": "02... (66 hex chars)",
@@ -101,7 +103,7 @@ const bsvPriceResources: I18nPluginResources = {
     "zh-CN": {
       "bsv-price.menu": "BSV 价格",
       "bsv-price.breadcrumb": "BSV 价格",
-      "bsv-price.page.title": "BSV / USDT 价格",
+      "bsv-price.page.title": "BSV 市场价格",
       "bsv-price.page.connection.label": "连接",
       "bsv-price.page.connection.ready": "正在接收",
       "bsv-price.page.connection.idle": "空闲",
@@ -110,8 +112,10 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.page.connection.notConfigured": "未配置 publisher 公钥",
       "bsv-price.page.channel.label": "当前订阅频道",
       "bsv-price.page.quotes.label": "报价",
-      "bsv-price.page.table.exchange": "交易所",
-      "bsv-price.page.table.price": "价格 (USDT)",
+      "bsv-price.page.table.market": "市场",
+      "bsv-price.page.table.pair": "交易对",
+      "bsv-price.page.table.exchange": "市场",
+      "bsv-price.page.table.price": "价格",
       "bsv-price.page.empty": "（等待下一次快照）",
       "bsv-price.page.error.lastParse": "最近一次解析错误：",
       "bsv-price.home.title": "BSV 价格",
@@ -124,11 +128,11 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.home.status.not_configured": "未配置",
       "bsv-price.settings.title": "BSV Price 设置",
       "bsv-price.settings.desc":
-        "编辑 PriceCast 订阅方公钥。保存为空值会清空配置并停止订阅。",
+        "编辑 BSV 行情发布者公钥。保存为空值会清空配置并停止订阅。",
       "bsv-price.settings.save": "保存",
       "bsv-price.settings.saved": "已保存",
       "bsv-price.settings.savedCleared": "已清空配置",
-      "bsv-price.settings.field.publisher.label": "PriceCast publisher 公钥 hex",
+      "bsv-price.settings.field.publisher.label": "BSV 行情发布者公钥 hex",
       "bsv-price.settings.field.publisher.desc":
         "保存前会 trim 并转小写。空字符串会清空配置。",
       "bsv-price.settings.field.publisher.placeholder": "02...（66 位 hex）",
@@ -158,18 +162,18 @@ const bsvPriceResources: I18nPluginResources = {
  *
  * 配置面（施工单 2026-07-08 001）：
  *   - `pricePublisherPublicKeyHex`：由装配层在 Window unit 的 `config` 显式
- *     注入；hex 字符串来自 PriceCast 服务端运营私钥导出的压缩公钥；
+ *     注入；hex 字符串来自 BSV 行情服务端运营私钥导出的压缩公钥；
  *   - 缺值 → `bsv-price.service` 立即进入 `not_configured` 状态，
  *     页面持续空态（**不**构造伪频道占位）；
  *   - 配置来源**唯一**接受 Window unit 的 `config`，不再支持 `globalThis`
- *     隐式注入路径，避免"`globalThis.__PRICECAST_PUBLISHER_PUBKEY__`
+ *     隐式注入路径，避免历史全局变量路径；
  *     被忽略谁知道写了什么"这类部署歧义。
  */
 const bsvPricePluginDefinition = {
   id: BSV_PRICE_PLUGIN_ID,
   name: "BSV Price",
   description:
-    "BSV 价格业务插件：消费 Coordinator Channel，订阅 PriceCast publisher 公钥频道，展示交易所价格快照。",
+    "BSV 价格业务插件：消费 Coordinator Channel，订阅 BSV 行情发布者频道，展示多市场价格快照。",
   i18n: bsvPriceResources,
   kind: "business",
   startup: "optional",
@@ -258,7 +262,7 @@ const bsvPricePluginDefinition = {
     business.registerFeature(BSV_PRICE_PLUGIN_ID, "home", {
       id: "home.bsv-price",
       label: { key: "bsv-price.menu", fallback: "BSV Price" },
-      description: { key: "bsv-price.page.title", fallback: "BSV / USDT prices" },
+      description: { key: "bsv-price.page.title", fallback: "BSV market prices" },
       order: 10,
       icon: "LineChart",
       entry: { path: "/bsv-price", routeId: "bsv-price.page" }
@@ -300,7 +304,7 @@ const bsvPricePluginDefinition = {
       label: { key: "bsv-price.menu", fallback: "BSV Price" },
       description: {
         key: "bsv-price.settings.desc",
-        fallback: "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription."
+        fallback: "Edit the BSV price publisher public key. Saving an empty value clears the configuration and stops subscription."
       },
       order: 130,
       icon: "LineChart"
