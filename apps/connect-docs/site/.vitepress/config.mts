@@ -15,9 +15,9 @@ const sourceUrl = repositoryUrl
   : "";
 
 export default defineConfig({
-  lang: "en-US",
+  lang: "zh-CN",
   title: "Keymaster Connect",
-  description: "Type-safe browser capabilities for identity, cryptography, messaging, storage, and payments.",
+  description: "面向浏览器 App 的类型安全身份、密码学、消息、存储和支付能力。",
   base,
   appearance: "dark",
   cleanUrls: true,
@@ -26,44 +26,44 @@ export default defineConfig({
     ["meta", { name: "theme-color", content: "#07110f" }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:title", content: "Keymaster Connect SDK" }],
-    ["meta", { property: "og:description", content: "Build browser apps that ask for capabilities, never private keys." }]
+    ["meta", { property: "og:description", content: "浏览器 App 请求能力，但永远不接触私钥。" }]
   ],
   themeConfig: {
     logo: { src: "/keymaster-mark.svg", alt: "Keymaster Connect" },
     siteTitle: "Connect",
     nav: [
-      { text: "Guide", link: "/guide/getting-started" },
-      { text: "Concepts", link: "/concepts/sessions" },
+      { text: "指南", link: "/guide/getting-started" },
+      { text: "概念", link: "/concepts/sessions" },
       { text: "API", link: "/api/" },
-      { text: "v0.1.0", items: [{ text: "Release notes", link: "/release-notes" }] }
+      { text: "v0.1.0", items: [{ text: "发布说明", link: "/release-notes" }] }
     ],
     sidebar: {
       "/guide/": [
         {
-          text: "Guide",
+          text: "指南",
           items: [
-            { text: "Getting started", link: "/guide/getting-started" },
-            { text: "Call capabilities", link: "/guide/capabilities" },
-            { text: "Handle events", link: "/guide/events" },
-            { text: "Errors & cancellation", link: "/guide/errors" }
+            { text: "快速开始", link: "/guide/getting-started" },
+            { text: "调用能力", link: "/guide/capabilities" },
+            { text: "接收事件", link: "/guide/events" },
+            { text: "错误与取消", link: "/guide/errors" }
           ]
         }
       ],
       "/concepts/": [
         {
-          text: "Concepts",
+          text: "概念",
           items: [
-            { text: "Sessions", link: "/concepts/sessions" },
-            { text: "Direct popup mode", link: "/concepts/popup-mode" },
+            { text: "会话", link: "/concepts/sessions" },
+            { text: "Popup 模式", link: "/concepts/popup-mode" },
             { text: "appView mode", link: "/concepts/appview-mode" },
-            { text: "Binary data", link: "/concepts/binary-data" },
-            { text: "Security model", link: "/concepts/security" }
+            { text: "二进制数据", link: "/concepts/binary-data" },
+            { text: "安全模型", link: "/concepts/security" }
           ]
         }
       ],
       "/api/": [
         {
-          text: "API Reference",
+          text: "API 字段参考",
           items: typedocSidebar
         }
       ]
@@ -78,13 +78,13 @@ export default defineConfig({
     ...(repositoryUrl ? {
       editLink: {
         pattern: `${repositoryUrl}/edit/${encodeURIComponent(repositoryBranch)}/apps/connect-docs/site/:path`,
-        text: "Edit this page on GitHub"
+        text: "在 GitHub 编辑此页"
       }
     } : {}),
-    outline: { level: [2, 3], label: "On this page" },
-    docFooter: { prev: "Previous", next: "Next" },
+    outline: { level: [2, 3], label: "本页内容" },
+    docFooter: { prev: "上一页", next: "下一页" },
     footer: {
-      message: "Capability access without key custody.",
+      message: "使用能力，不托管私钥。",
       copyright: "Keymaster Connect"
     }
   },

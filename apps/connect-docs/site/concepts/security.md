@@ -1,34 +1,7 @@
-# Security model
+# 安全模型
 
-The SDK makes transport checks explicit, but Keymaster remains the authority for
-identity, policy, confirmation, and private-key execution.
-
-## Exact origin
-
-The configured Keymaster target is normalized to an HTTP(S) origin. Incoming
-messages must match both that exact origin and the current Session Window object.
-Messages from another same-page iframe or popup are ignored.
-
-## Session-bound owner
-
-Business methods never fall back to a global wallet key. Keymaster resolves the
-owner from the supplied session id and rejects origin or owner mismatches.
-
-## Application identity
-
-A signed app identity proof binds publisher, app metadata, and requested
-requirements. Storage access requires a verified proof and a matching session
-snapshot; a plain unauthenticated session cannot acquire it later by adding a
-parameter.
-
-## Human confirmation
-
-Applications describe identity, signing, and encryption intent. Payment text and
-approval policy remain controlled by Keymaster so a caller cannot disguise a
-transfer as a harmless prompt.
-
-## No key export
-
-The SDK receives public identity, envelopes, signatures, ciphertext, messages,
-and operation results. It never receives an owner private key or reusable raw
-shared secret.
+- 来源：消息必须同时来自配置的精确 origin 和当前 Session Window。
+- Owner：业务方法只使用 Connect 会话绑定的 Owner，不回退到钱包当前 Key。
+- App 身份：Storage 和 MSFile 需要已验证的发行人签名；普通会话不能靠追加参数升级身份。
+- 用户确认：支付文案和授权策略由 Keymaster 控制，App 不能把支付伪装成普通操作。
+- 私钥：SDK 只得到公开身份、签名、密文、消息和结果，永远得不到私钥或可复用共享密钥。

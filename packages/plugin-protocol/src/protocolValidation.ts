@@ -153,7 +153,7 @@ function validateParams(
       return validateStorageUploadCompleteParams(raw);
     case "storage.upload.abort":
       return validateStorageUploadAbortParams(raw);
-    // 施工单 docs/proposals/msfile：MSFile 方法族。与 storage.* 同语义：
+    // MSFile 方法族与 storage.* 同语义：
     // session-bound + verified App Identity；金额与身份字段一律禁止注入。
     case "msfile.stat":
       return validateMsFileStatParams(raw);
@@ -581,7 +581,7 @@ function validateStorageUploadAbortParams(raw: unknown): StorageUploadAbortParam
   return { connectSessionId: storageSession(obj, "storage.upload.abort"), uploadId: expectNonEmptyString(obj.uploadId, "uploadId") };
 }
 
-/* ============== msfile.* validation（施工单 docs/proposals/msfile） ============== */
+/* ============== msfile.* validation（现行说明：docs/MSFile.md） ============== */
 
 // App 不能通过 params 注入身份、路由或金额语义；出现下列任一字段一律
 // invalid_request。maxPriceSatoshis / blockIndex / fileId 等被明确禁止，

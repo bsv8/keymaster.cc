@@ -6,8 +6,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const root = process.cwd();
-// 扫描整个仓库的生产源码、配置和测试入口。施工单与结构说明保留旧名重命名表，
-// 因此只排除文档目录；检查器自身也必须包含旧名匹配规则，不能被规则本身误报。
+// 扫描整个仓库的生产源码、配置和测试入口。文档只解释现行结构，不参与旧符号扫描；
+// 检查器自身也必须包含旧名匹配规则，不能被规则本身误报。
 const scanRoots = ["."];
 const sourceExtensions = /\.(?:ts|tsx|js|jsx|json|css)$/u;
 const forbiddenText = [
@@ -52,7 +52,7 @@ function withoutComments(content) {
 
 function walk(dir) {
   return readdirSync(dir).flatMap((name) => {
-    if (name === "node_modules" || name === "dist" || name === ".git" || name === "docs" || name === "施工单" || name === ".temp") return [];
+    if (name === "node_modules" || name === "dist" || name === ".git" || name === "docs" || name === ".temp") return [];
     const path = join(dir, name);
     if (statSync(path).isDirectory()) return walk(path);
     return [path];

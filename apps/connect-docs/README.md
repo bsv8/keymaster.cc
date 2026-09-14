@@ -1,9 +1,7 @@
-# Keymaster Connect documentation
+# Keymaster Connect 文档站
 
-This is the independently deployable documentation site for
-`@keymaster/connect`. Hand-written guides live in `site/`; the API reference is
-generated from the SDK's real public entry point at
-`packages/connect/src/index.ts`.
+这是 `@keymaster/connect` 的独立文档站。手写说明位于 `site/`；API 页面从
+`packages/connect/src/index.ts` 的真实导出和中文类型注释生成，不能手工修改 `site/api`。
 
 ```bash
 pnpm --filter @keymaster/connect-docs dev
@@ -11,28 +9,10 @@ pnpm --filter @keymaster/connect-docs build
 pnpm --filter @keymaster/connect-docs preview
 ```
 
-The production build is emitted to `site/.vitepress/dist`. Deploy that directory
-to any static host. `site/api` is generated output and must not be edited or
-committed.
-
-The build is origin-independent. For a site deployed below an origin root,
-provide its public pathname at build time:
+构建结果位于 `site/.vitepress/dist`。部署在子路径时传入公开路径：
 
 ```bash
 DOCS_BASE=/connect-docs/ pnpm --filter @keymaster/connect-docs build
 ```
 
-`DOCS_BASE` defaults to `/`; surrounding slashes are normalized automatically.
-Publish the generated `dist` directory at the same path used for the build.
-
-Source and edit links are optional deployment metadata:
-
-```bash
-DOCS_REPOSITORY_URL=https://git.example/team/connect \
-DOCS_REPOSITORY_BRANCH=main \
-pnpm --filter @keymaster/connect-docs build
-```
-
-The build deliberately regenerates the API reference before VitePress runs. A
-renamed or removed SDK export therefore changes the site in the same build; no
-parallel documentation adapter has to be maintained.
+可选的 `DOCS_REPOSITORY_URL` 和 `DOCS_REPOSITORY_BRANCH` 用于生成源码与编辑链接。

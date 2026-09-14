@@ -3170,7 +3170,7 @@ describe("Sat 入站 handler 资源闭环（施工单 2026-09-02/002）", () => 
   });
 });
 
-describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile）", () => {
+describe("Session Coordinator MSFile RPC lane", () => {
   const identity = {
     version: 1 as const,
     publisherPublicKeyHex: "03" + "ab".repeat(32),

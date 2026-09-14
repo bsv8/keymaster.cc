@@ -79,7 +79,7 @@ describe("connect.launch signed proof boundary", () => {
   });
 });
 
-describe("msfile protocol validation（施工单 docs/proposals/msfile KMMF-007）", () => {
+describe("msfile protocol validation", () => {
   const SUPPLIER = "035f3d296df6e017c017270bfc0293dc7d197ff9e04a25c096260420644d86d21a";
   const HASH = "ab".repeat(32);
 

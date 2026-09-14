@@ -273,7 +273,7 @@ export interface ProtocolServiceDeps {
   /** Resolve the current Storage capability at request/lifecycle time. */
   getStorageController?: () => StorageRuntimeController | undefined;
   /**
-   * Optional MSFile platform capability（施工单 docs/proposals/msfile）。
+   * Optional MSFile platform capability（可选 MSFile 平台能力）。
    * 缺失时只让 `msfile.*` fail closed；不得影响其他方法族。
    */
   msfileService?: MsFileService;
@@ -3790,7 +3790,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeStorageUploadComplete(rec);
       case "storage.upload.abort":
         return await this.executeStorageUploadAbort(rec);
-      // 施工单 docs/proposals/msfile：MSFile 走 connect gateway；
+      // MSFile 走 Connect gateway；
       // App context 只由持久 session snapshot 与 MessageEvent.origin 构造。
       case "msfile.stat":
         return await this.executeMsfileStat(rec);
@@ -3948,7 +3948,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     return service.abortUpload(context, { uploadId: params.uploadId, signal: rec.abortController?.signal });
   }
 
-  /* ============== MSFile 执行（施工单 docs/proposals/msfile KMMF-007） ============== */
+  /* ============== MSFile 执行 ============== */
 
   private async requireMsfileContext(
     rec: RequestRecord,

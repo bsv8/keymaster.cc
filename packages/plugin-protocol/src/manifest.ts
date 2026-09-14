@@ -510,7 +510,7 @@ const protocolPluginDefinition = {
       storageController = undefined;
     }
 
-    // MSFile 是可选平台能力（施工单 docs/proposals/msfile）：缺失时只让
+    // MSFile 是可选平台能力：缺失时只让
     // `msfile.*` 三个方法 fail closed（msfile_unavailable），不阻塞协议页。
     let msfileService: import("@keymaster/contracts").MsFileService | undefined;
     try {

@@ -931,7 +931,7 @@
   border-radius: 6px;
 }
 
-/* MSFile 价格确认卡（施工单 docs/proposals/msfile KMMF-006） */
+/* MSFile 价格确认卡 */
 .protocol-popup__msfile-approvals {
   display: flex;
   flex-direction: column;

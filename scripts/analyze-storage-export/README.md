@@ -1,15 +1,11 @@
-# Keymaster 本地存储导出统计工具
+# 旧版存储导出分析工具
 
-这个工具用于重复分析浏览器导出的 Keymaster `localStorage`。它会统计：
+用于排查旧版本或故障现场导出的 Keymaster `localStorage`，兼容旧 `commit`、authority
+（运行权）和 I/O lease（I/O 租约）记录。当前 Storage V1 只使用 `head` 与 `value`，其现行
+设计以[存储文档](../../docs/存储.md)为准。
 
-- Hold 快照：快照 ID、版本、密钥数量和加密配置类型；
-- K-V 引擎对象：`head`、`commit`、`value` 的数量；
-- 每个分区的提交版本范围、逻辑键和时间；
-- 当前 `head` 能追溯到哪些对象，以及哪些对象只是历史候选；
-- Coordinator 的 authority、活动 I/O 租约和操作类型；
-- 普通目录、恢复记录等 localStorage 项。
-
-程序默认不输出值内容、密文、私钥或完整的公钥/哈希/UUID。需要完整标识符时可以显式传入 `--full-identifiers`。
+报告默认隐藏值内容、密文、私钥和完整标识符。需要完整标识符时显式传入
+`--full-identifiers`。
 
 ## 使用
 
@@ -31,9 +27,9 @@ python3 scripts/analyze-storage-export/main.py \
 python3 scripts/analyze-storage-export/main.py --strict /path/to/localStorage-export.txt
 ```
 
-支持的输入格式：
+支持两种输入格式：
 
 1. 一个 JSON 对象，键是 localStorage 键，值是 localStorage 字符串值；
 2. 每行一个 `键<TAB>值` 的文本导出。
 
-报告中的 `unreachable` 只表示“从当前 head 不可达的历史对象候选”，不能据此手工删除。是否删除应由 Keymaster K-V 引擎的垃圾回收逻辑决定。
+`unreachable`（当前指针不可达对象）只用于诊断，不能据此手工删除数据。

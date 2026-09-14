@@ -1,23 +1,15 @@
-# Direct popup mode
+# Popup 模式
 
-Popup mode is the default for independently hosted web applications.
+Popup 是独立部署网页的默认模式：
 
 ```ts
 const keymaster = new KeymasterConnectClient({
-  targetOrigin: keymasterDeploymentOrigin,
+  targetOrigin: keymasterDeploymentOrigin, // 受信任 Keymaster 的精确来源
   mode: "popup"
 });
 ```
 
-The first `connect()` or `request()` call:
+首次连接会安装监听、打开 `/protocol/v1/popup`、等待 ready，然后开始请求。应从用户点击中
+发起首次操作，避免浏览器拦截弹窗。
 
-1. installs the message listener;
-2. opens `/protocol/v1/popup` on the configured Keymaster origin;
-3. waits for the popup's `ready` message;
-4. begins request/result traffic.
-
-The SDK reuses the same named Session Window. Call the first operation from a
-click or another user activation so popup blockers permit it.
-
-`close()` closes a popup owned by the SDK, rejects pending local promises, and
-removes browser listeners. It does not call `connect.logout` implicitly.
+`close()` 只关闭 SDK 创建的窗口并拒绝本地等待任务，不会自动执行 `connect.logout`。

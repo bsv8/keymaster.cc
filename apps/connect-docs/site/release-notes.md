@@ -1,13 +1,5 @@
-# Release notes
+# 发布说明
 
 ## 0.1.0
 
-Initial SDK and documentation site foundation:
-
-- reusable direct popup transport;
-- fail-closed appView opener transport;
-- typed request/result mapping for every Connect V1 method;
-- structured transport and protocol errors;
-- cancellation with `AbortSignal`;
-- server-pushed event delivery;
-- binary field helpers.
+首个 SDK 与文档站版本，提供 Popup、appView、类型化请求、稳定错误、取消、事件和二进制助手。

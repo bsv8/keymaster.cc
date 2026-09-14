@@ -1,5 +1,5 @@
 // packages/contracts/src/msfile.ts
-// MSFile 客户端能力契约（docs/proposals/msfile/implementation-plan.md）。
+// MSFile 客户端能力契约；人类可读说明见 docs/MSFile.md。
 import { defineCapability } from "webloom-framework";
 //
 // 设计缘由：
@@ -29,7 +29,7 @@ export const MSFILE_DIGEST_SIZE_BYTES = 32;
 /**
  * 旧 MSE/转封装播放器的兼容常量。
  *
- * Gate 通过前暂时保留旧后端源码，供回滚分支继续编译；当前原生 Range
+ * 保留旧后端源码供兼容测试；当前原生 Range
  * 播放器、插件设置页和 Resource Store 均不读取这些字段。
  */
 export const MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT = 5;
@@ -52,7 +52,7 @@ export const MSFILE_READ_CONCURRENCY_RECOMMENDED: Readonly<MsFileReadConcurrency
 /**
  * 读取并发技术硬上限。
  *
- * 依据：见 docs/proposals/msfile/003-read-concurrency-pressure-evidence.md。
+ * 依据：见 docs/MSFile.md 的并发设置说明。
  * 浏览器压力测试验证了 8 × 16 MiB + 32 × 256 KiB = 136 MiB 的最坏桥接
  * attachment 分配与释放；它们与上面的建议值刻意不同，并为媒体解码、页面
  * 和 Supplier 协议开销保留余量。媒体值还必须满足 media <= globalBlock。

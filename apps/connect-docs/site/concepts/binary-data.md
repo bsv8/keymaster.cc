@@ -1,35 +1,16 @@
-# Binary data
+# 二进制数据
 
-Connect wraps binary values explicitly so request objects cannot confuse bytes
-with hex or base64 strings.
+Connect 用明确结构区分字节与普通字符串：
 
 ```ts
 interface BinaryField {
-  $type: "binary";
-  bytes: ArrayBuffer;
-  mime?: string;
+  $type: "binary";  // 固定类型标记
+  bytes: ArrayBuffer; // 实际字节
+  mime?: string;      // 可选媒体类型
 }
 ```
 
-Use the SDK helpers to copy caller-owned buffers safely:
+使用 `binary()`、`binaryText()`、`binaryBytes()` 和 `binaryToText()` 创建或读取字段。
+`binary()` 会复制输入，调用方之后修改原缓冲区不会改变请求。
 
-```ts
-import {
-  binary,
-  binaryBytes,
-  binaryText,
-  binaryToText
-} from "@keymaster/connect";
-
-const image = binary(fileBytes, "image/png");
-const note = binaryText("private note");
-
-const bytes = binaryBytes(result.content);
-const text = binaryToText(result.content);
-```
-
-`binary()` copies the source view. Later mutations to the caller's buffer do not
-change the request field.
-
-Channel content is JSON. Applications that need binary data should encode it in
-their own application protocol before calling `channel.publish`.
+Channel 内容只接受 JSON；二进制内容应由 App 自己编码后再发布。

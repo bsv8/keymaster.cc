@@ -1,39 +1,13 @@
-# Sessions
+# 会话
 
-Connect deliberately separates three lifetimes.
+Connect 区分三个生命周期：
 
-## Browser transport
+| 层次 | 中文含义 |
+| --- | --- |
+| Browser transport | Session Window 中的 `postMessage` 连接 |
+| Connect session | 绑定 origin、Owner 和可选 App 身份的持久授权 |
+| Unlock runtime | 当前窗口短期可用的私钥操作环境 |
 
-The Session Window carries `postMessage` traffic. It moves from `opening` to
-`connected` after the readiness handshake, and to `disconnected` when either
-side closes.
-
-## Persistent authorization
-
-`connect.login` creates a session bound to:
-
-- the caller's exact origin;
-- the owner public key selected by the user;
-- an optional verified app identity.
-
-The resulting `connectSessionId` survives Session Window closure and is required
-by every business method. Store it according to the security policy of your
-application.
-
-## Unlock runtime
-
-A persistent authorization does not mean the current window can use private-key
-capabilities immediately. After a refresh or new popup, `connect.resume` restores
-the short-lived owner runtime without selecting a different identity.
-
-```text
-Session Window closes
-        │
-        ├── transport: disconnected
-        ├── unlock runtime: gone
-        └── Connect session: still authorized
-                              │
-                              └── connect.resume(sessionId)
-```
-
-Only `connect.logout` revokes the persistent session.
+`connect.login` 返回 `connectSessionId`（连接会话编号）。窗口关闭只会断开 transport 并清除
+短期 runtime，会话授权仍存在；重新打开后用 `connect.resume` 恢复。只有
+`connect.logout` 会撤销持久授权。

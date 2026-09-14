@@ -309,7 +309,7 @@ export function ProtocolPopupPage() {
       ) : null}
       <div className="protocol-popup__content">
         {snap.phase === "error" ? <SessionErrorBanner t={t} /> : null}
-        {/* 施工单 docs/proposals/msfile：价格确认视图。渲染在 Keymaster
+        {/* MSFile 价格确认视图。渲染在 Keymaster
             自己的 popup 内容区，Connect App HTML 无法覆盖或伪装它。 */}
         <MsFileApprovalSection t={t} />
         <ProtocolCommandFeed
@@ -324,7 +324,7 @@ export function ProtocolPopupPage() {
   );
 }
 
-/* ============== MSFile 价格确认（施工单 docs/proposals/msfile KMMF-006） ============== */
+/* ============== MSFile 价格确认 ============== */
 
 type MsFileApprovalServiceLike = {
   listPendingApprovals(): import("@keymaster/contracts").MsFilePendingApprovalView[];

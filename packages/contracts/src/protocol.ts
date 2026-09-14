@@ -175,7 +175,7 @@ export const PROTOCOL_METHODS = [
   "connect.resume",
   "connect.logout",
   "connect.launch",
-  // 施工单 2026-09-02：Channel 是唯一的公开频道 API。
+  // Channel 是唯一的公开频道 API，见 docs/SatSubscription与Channel.md。
   "channel.publish",
   "channel.subscription_set",
   "storage.list",
@@ -188,7 +188,7 @@ export const PROTOCOL_METHODS = [
   "storage.upload.part",
   "storage.upload.complete",
   "storage.upload.abort",
-  // 施工单 docs/proposals/msfile：MSFile 对外方法族。与 storage.* 同为
+  // MSFile 对外方法族，见 docs/MSFile.md。与 storage.* 同为
   // session-bound 且强制要求 verified App Identity；Seed/Block 显式区分，
   // Read 不接受 maxPriceSatoshis（金额只能来自 Keymaster 设置或用户确认）。
   "msfile.stat",

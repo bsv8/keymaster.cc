@@ -1,7 +1,4 @@
-# Handle events
-
-Keymaster can push verified JSON messages for the exact channels subscribed by
-the current Session Window.
+# 接收事件
 
 ```ts
 const keymaster = new KeymasterConnectClient({
@@ -9,19 +6,10 @@ const keymaster = new KeymasterConnectClient({
   onEvent(event) {
     if (event.event === "channel.message_received") {
       const { channel, publisherPublicKeyHex, messageId, content } = event.data;
-      // Route verified JSON content to the matching local channel.
     }
   }
 });
 ```
 
-Events are independent of request/result correlation:
-
-- They do not consume a pending request id.
-- They may arrive between any two result messages.
-- They are accepted only from the configured origin and current Session Window.
-- They stop when the transport becomes disconnected.
-
-Events are live delivery only. Persist any application state that must survive
-a disconnected Session Window and restore the exact subscription set after
-reconnecting.
+事件不占用请求编号，只接受配置来源和当前窗口的消息。Transport 断开后停止投递；这是实时
+事件而不是历史服务，需要长期保存的数据应由 App 自己持久化，并在重连后恢复精确订阅集合。

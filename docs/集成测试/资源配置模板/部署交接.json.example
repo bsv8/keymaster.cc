@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "buildId": "<目标构建编号>",
+  "deploymentId": "<部署交接编号>",
+  "targetBuildId": "<待发布构建编号>",
+  "previousBuildId": "<当前线上构建编号>",
+  "protocolVersion": "<Coordinator 协议版本>",
+  "strategy": "cold-switch",
+  "phase": "pending",
+  "observedAt": "<现场观测时间>",
+  "previousWorker": {
+    "protocolAware": false,
+    "trafficDrained": false,
+    "exitConfirmed": false,
+    "activeFinalIoLeases": -1,
+    "evidenceRef": "<旧 Worker 排空和退出记录>"
+  },
+  "authority": {
+    "currentBuildId": "<待发布构建编号>",
+    "handoverGeneration": 0,
+    "noParallelAuthority": false,
+    "evidenceRef": "<运行权对账记录>"
+  },
+  "rollback": {
+    "formatCompatibilityVerified": false,
+    "reauthRequired": true,
+    "windowUntil": "<回退窗口截止时间>",
+    "evidenceRef": "<回退演练记录>"
+  },
+  "runtimeLockMigration": {
+    "mode": "initial-cold-switch",
+    "previousWebLoomVersion": "0.4.2",
+    "targetWebLoomVersion": "0.4.3",
+    "previousRuntimeLockAware": false,
+    "targetRuntimeLockAware": true,
+    "targetBuildId": "<待发布构建编号>",
+    "legacyPagesExited": false,
+    "legacyWorkersExited": false,
+    "legacyExitEvidenceRef": "<旧页面和 Worker 退出记录>",
+    "targetCapabilityEvidenceRef": "<目标版本运行锁能力记录>"
+  }
+}

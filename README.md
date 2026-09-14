@@ -1,169 +1,46 @@
 # Keymaster
 
-本地优先的 BSV 浏览器钱包。基于插件架构，按"基础设施 / 平台 / 业务"三层分离。
+Keymaster 是本地优先的 BSV 浏览器钱包。它负责保管私钥，并通过受控的插件和
+Connect 会话提供身份、签名、加密、资产、消息、文件及应用存储能力。
 
-## 架构（硬切换后）
+## 当前能力
 
-```txt
-plugin-woc          WOC API 代理（唯一 WOC 入口、限流、优先级、429 backoff、多标签页协调）
-plugin-background   通用后台任务平台（注册、调度、去重、暂停、重试、Topbar 托盘）
-plugin-p2pkh        P2PKH 资产实现（Coordinator confirmed-sync、facts/projection、本地确认与 Transfer Widget）
-plugin-transfer     Transfer 平台（列 Offer，挂载 provider Widget，不解释 P2PKH/UTXO/地址/金额）
-plugin-poker        浏览器原生扑克（与外部 poker-proxy 通信，本地签名 / 验签）
-plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 app，以本地签名 App proof 做启动门禁并发起 appView Session Window
+- 多桶存储：浏览器 Local 桶或兼容 S3 的远程桶。
+- 多 Key：私钥密文只存在桶内 Hold 快照，页面和业务插件拿不到私钥。
+- P2PKH：主网/测试网余额、链上交易、本地交易、转账和供应商切换。
+- Channel：消息、联系人在线状态、WebRTC 信令和外部 App 频道。
+- MSFile：多供应商文件查询、读取、下载及原生 Range 媒体播放。
+- Connect：外部 App 的会话、身份、签名、加密、转账、频道和隔离存储。
+- 插件运行时：WebLoom 管理依赖、作用域、撤权和跨页面生命周期。
+
+## 运行结构
+
+```text
+浏览器页面：界面、用户操作、浏览器专属网络能力
+       ↓ 受限服务代理
+Coordinator SharedWorker：桶、Key 会话、任务和跨页面唯一运行态
+       ↓
+Local / S3、WOC / JungleBus、MSFile / SatSubscription 等外部服务
 ```
 
-### 不变量
+所有敏感操作都绑定当前桶、Owner、会话和运行世代。锁定、切 Key、切桶或插件停用
+后，旧句柄和迟到结果必须失效。
 
-- 所有 WOC 请求必须经过 `woc.service`，不允许业务插件直接 fetch。
-- 普通 BSV/P2PKH 的 confirmed 真值来自用户当前选择的 WOC 或 JungleBus provider；transaction facts 是唯一确认事实，owned outpoints 是可重建投影。其它资产与旧协议 spend 仍可使用 WOC。
-- P2PKH 普通链上同步只有一个 Coordinator 任务：`p2pkh.transactions-sync`。它按选中的 confirmed provider 从最新到最旧分页，原子写入 transaction facts、owned projection 与 checkpoint，并在终止页做重组重叠核对。
-- P2PKH 的普通确认 provider 可选 WOC 或 JungleBus；JungleBus 仅提供 confirmed read，不提供广播、订阅或 WebSocket 能力。
-- 普通 BSV 广播收到明确 `accepted` / `already-known` 后进入 `local-confirmed`，找零可继续消费；timeout、拒绝、网络异常等不确定结果进入 `isolated`，不会自动释放输入或假设 mempool 已同步。
-- Transfer 平台不解释 P2PKH/UTXO/地址/金额/矿工费；选择 Offer 后挂载 provider 的完整 Widget。
-- Shell Topbar 只渲染 `topbar.registry` 注册项，不 import 任何业务插件。
-- plugin-poker 不持有私钥 / 明文种子 / 长期签名材料；只通过 `vault.withPrivateKey` 闭包签名。
-- plugin-poker 不直接 import 其它 plugin-* 内部实现；只走 contracts capability。
-- poker-proxy 与 plugin-poker 的内部浏览器协议有版本号（`POKER_BROWSER_PROTOCOL_VERSION`）；不匹配时立即断连，不进入半可用状态。
-- App 发行信息与固定 proof 以入口 HTML meta 为唯一手写真值；
-  `keymaster.app.json` 只用于把同一 proof 人工导入 launcher catalog，Keymaster 不从
-  App 仓库或部署站点 fetch 它。
-- Direct `connect.login` 必须验签 App 从 HTML 提交的可选 `appIdentity`；无 proof
-  只能建立普通非 Storage session。`connect.launch` 必须同时提交 token 和 proof，且
-  proof 必须匹配 launcher catalog/session 绑定值。requirements 在 session 可用前
-  fail closed。详见 [App Identity Proof V1](docs/app-metadata-v1.md)。
-
-### Key 身份与 namespace（硬切换 002 收尾）
-
-- 平台根身份 = `publicKeyHex` = 压缩公钥 hex、lowercase、无 `0x` 前缀、长度 66。`KeyIdentity` / `KeyRef` / `ActiveKeyState` / `Contact` 等所有 contract 字段只持有 `publicKeyHex`；旧平台身份字段 `publicKeyHash` 已彻底删除。
-- **平台 key 域不再存在任何 surrogate id**（硬切换 002 收尾）：`KeyIdentity.keyId` / `KeyRef.id` / `KeyspaceService.deleteKeyById` 全部从 contract 删除；`vault.withPrivateKey` / `exportPrivateKey` / `deleteKey` 全部按 `publicKeyHex` 入参。Vault canonical store `vault_keys` 的 `keyPath` 已是 `publicKeyHex`；新建 / 导入 key 时必须先派生 publicKeyHex 再落库。
-- key-scoped IndexedDB 命名统一为 `keymaster.key.<publicKeyHex>.plugin.<pluginId>.<storageId>`；业务插件只能通过 `keyspace.openOwnerAppStore` 进入。
-- P2PKH 链上脚本材料 `HASH160(compressed public key)` 在 `plugin-p2pkh` 内部统一命名为 `pubKeyHash160Hex`（或语义等价名），不允许再叫 `publicKeyHash`。
-- 旧命名空间（按 `sha256(publicKeyHex)`）只允许一次性迁移 / 清理；`p2pkh` / `poker` 直接放弃（best-effort 删旧 DB），`contacts` 一次性复制旧联系人到新 namespace 后再删旧 DB；`p2pkh` / `poker` 失败 / 部分写入都保留旧库以便重试。
-
-## 诊断、审计与遗留数据边界
-
-- 统一产品日志能力已删除：插件 Context 不再注入 logger，runtime 不创建或持久化统一日志记录。
-- `fatalErrorStore`、必要的 `console.error` / `console.warn`，以及 protocol state、Sat fee audit、WebRTC history、deletion/recovery ledger 等业务或审计数据继续保留；独立的 storage / SatSubscription 诊断 logger 也不属于该产品能力。
-- 旧 `logs` platform namespace 默认不迁移、不读取、不新写，因此历史数据按 inaccessible 处理；后续若需要清理，只能通过平台存储抽象单独授权，不能用 `indexedDB.deleteDatabase` 替代抽象清理。
-
-## 包结构
-
-```txt
-packages/
-  connect/          官方 Connect 浏览器 SDK
-  contracts/        跨包协议（woc/background/topbar/transfer/poker/...）
-  runtime/          plugin host + 内置 registry（含 topbar）
-  ui/               原子组件
-  plugin-vault/     私钥存储
-  plugin-key-import/
-  plugin-importer-wif|hex|json-file/
-  plugin-contacts/
-  plugin-home/
-  plugin-settings/
-  plugin-assets/    资产平台
-  plugin-transfer/  Transfer 平台
-  plugin-p2pkh/     P2PKH 业务
-  plugin-poker/     扑克业务（与外部 poker-proxy 协议保真接入）
-  plugin-woc/       WOC 基础设施
-  plugin-background/  后台任务平台
-apps/web/           装配 + shell
-apps/connect-docs/  @keymaster/connect SDK 文档站（VitePress + TypeDoc）
-scripts/            check-boundaries.mjs
-```
-
-### 外部依赖
-
-- `Projects/poker-proxy`：独立 Go 二进制，承接 bsv-poker 的 P2PNode topic
-  平面与 TxLink raw tx 平面，承载多 web client 多租户复用。两类入口语义
-  独立，配置 / 公告 / 日志 / 健康检查里分别命名，不会被压成"一个 endpoint"。
-  - browser WSS：`wss://<proxy-host>/`（plugin-poker 拨入）
-  - mesh TCP（P2PNode 平面）：bsv-poker P2PNode 节点接入，承载 topic 流量
-  - txlink TCP（TxLink 平面）：bsv-poker TxLink 节点接入，承载 raw tx 流量
-
-### plugin-poker 内部分层（硬切换 001 修订版）
-
-```txt
-packages/plugin-poker/src/
-  manifest.ts              # 唯一插件装配入口
-  pokerService.ts          # WSS 会话 + 状态 + publish 路径
-  pokerIdentityBinding.ts  # 稳定 poker identity 绑定（独立于 active key）
-  tsstack/adapter.ts       # @bsv/sdk 真值底座包装（仅 crypto / encoding / tx 解析）
-  engine/                  # 协议真值层：txTemplates / chat / txIngest /
-                           # pokerProtocolEngine / netGameEngine / netBlackjackEngine
-  conformance/             # 与 bsv-poker C# 行为对拍的纯函数向量
-  PokerSettingsPage.tsx 等 # UI 层
-```
-
-`ts-stack` 只是底座（hash / ECDH / tx 解析）；扑克协议状态机、ingest 语义、
-chat marker / group id 派生都落在 `engine/`。`conformance/` 测试保证两端
-wire-format / 派生公式不会偏移。
-
-## 开发命令
+## 开发
 
 ```bash
-npm install
-npm run typecheck
-npm run lint:boundaries
-npm run dev       # vite
-npm run build
-pnpm --filter @keymaster/connect-docs build
+pnpm install
+pnpm typecheck
+pnpm lint:boundaries
+pnpm test
+pnpm build
+pnpm dev
 ```
 
-### 生命周期验收命令与 WebLoom 版本边界
+集成测试和真实资源测试不是默认单元测试的一部分，运行方法见
+[集成测试说明](docs/集成测试/README.md)。
 
-默认 `test:e2e:lifecycle` 是正式 WebLoom 0.4.3 registry 的生命周期验收。脚本会复制到临时
-副本，用 frozen lockfile 从 npm registry 安装固定完整性（integrity）的 0.4.3，
-并确认实际解析路径不在当前 workspace 或本地 `file:` 依赖；随后执行临时副本自己的
-`pnpm typecheck`、`pnpm typecheck:e2e`、生产构建和真实 Chromium 生命周期用例：
+## 文档
 
-```bash
-pnpm test:e2e:lifecycle
-```
-
-`test:e2e:lifecycle:registry` 是同一正式 registry 门禁的显式命名入口。
-
-```bash
-pnpm test:e2e:lifecycle:registry
-```
-
-registry manifest 门禁的自测会在隔离临时副本中确认 `file:/tmp/sdk.tgz` 和 `link:`
-specifier 都会被拒绝：
-
-```bash
-pnpm test:e2e:lifecycle:registry:self-test
-```
-
-首次从 registry `0.4.2` 切换到带 Web Lock 的 `0.4.3` 时，不能依赖运行时冲突发现旧
-Worker：旧包不申请 Web Lock。必须先关闭全部旧 Keymaster 页面并由部署交接记录确认旧
-Worker 退出，再启用新版本；`pnpm verify:lifecycle-deployment` 会检查这份冷切换证据。
-双方都支持 Web Locks 的后续升级才使用 `runtime_lock_conflict` 提示刷新或关闭全部页面。
-
-本地 tarball 验收保留为独立入口，只验证源码/tarball 与当前 Keymaster 的组合，
-不替代正式 registry 门禁：
-
-```bash
-WEBLOOM_LOCAL_TARBALL=/abs/path/webloom-framework-0.4.3.tgz pnpm test:e2e:lifecycle:local
-```
-
-## 数据真值语义
-
-- 余额：WOC 真值；本地缓存是最近一次成功同步结果。
-- UTXO：WOC 真值快照；本地 reservation 是防重复花费覆盖层。
-- 历史：WOC 真值；本地 history store 按 `resourceId + txid` 去重。
-- pending transfer：本地提交结果，不是链上确认历史。
-- reservation：本地防重复花费，不改变 WOC UTXO 真值。
-
-## 边界检查
-
-`scripts/check-boundaries.mjs` 强制以下规则（违反一律 `process.exit(1)`）：
-
-- `plugin-p2pkh` 不直接引用 WOC URL、不 import `plugin-woc`。
-- `plugin-transfer` 不 import 任何具体资产 / vault / contacts。
-- `plugin-woc` 不 import `plugin-p2pkh`。
-- `plugin-background` 不 import `plugin-p2pkh` 或 `plugin-woc`。
-- `runtime` 不 import 任何 `plugin-*`。
-- `apps/web/src/shell/` 不 import `plugin-background`。
-- `plugin-poker` 不 import 任何其它 plugin-*；不 import apps/web shell；
-  engine/ 与 tsstack/ 不接 runtime / ui；tsstack/ 不接任何其它 plugin-*；
-  代码里不允许硬编码 `new WebSocket("wss://…")`（必须从 service.settings 读）。
+从 [文档索引](docs/README.md) 开始阅读。项目不再长期保存施工单；当前行为写入对应
+主题文档，精确字段以带中文注释的契约代码为准，测试结果以覆盖矩阵为准。

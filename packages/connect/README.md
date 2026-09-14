@@ -1,32 +1,17 @@
 # @keymaster/connect
 
-Official browser SDK for Keymaster Connect V1.
+Keymaster Connect V1 的浏览器 SDK。App 可以请求身份、签名、加密、转账、Channel、Storage 和
+MSFile 能力，但不会取得用户私钥。
 
 ```ts
 import { KeymasterConnectClient } from "@keymaster/connect";
 
-// Read this from your application's deployment configuration.
-const keymasterDeploymentOrigin = getRequiredConfig("KEYMASTER_ORIGIN");
-
 const keymaster = new KeymasterConnectClient({
-  targetOrigin: keymasterDeploymentOrigin
+  targetOrigin: getRequiredConfig("KEYMASTER_ORIGIN") // 受信任 Keymaster 来源
 });
 
-const session = await keymaster.login({
-  text: "Sign in to Example"
-});
+const session = await keymaster.login({ text: "登录示例应用" });
 ```
 
-The complete guides and API reference are built by `apps/connect-docs`.
-
-Channel operations are provider-neutral. Connect Apps publish JSON content to
-an exact channel and replace their own exact subscription set; Keymaster owns
-the signing key, supplier selection, physical subscription, and private
-protocol routing. Apps do not select Suppliers and do not receive SSP/SPI
-configuration or raw protocol operations. A successful `channel.publish`
-means that Keymaster accepted the local publish operation, not that a remote
-recipient has received or read it.
-
-The SDK has no default Keymaster hostname. Direct integrations must supply the
-exact origin of the Keymaster instance they trust. Apps launched in appView
-mode receive the Session Window origin from their launch URL.
+SDK 没有默认 Keymaster 地址。直接接入必须提供精确 origin；appView 从启动 URL 获取
+Session Window origin。完整中文指南和自动生成的字段说明位于 `apps/connect-docs`。

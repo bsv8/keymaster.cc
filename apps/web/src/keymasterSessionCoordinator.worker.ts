@@ -191,8 +191,7 @@ function randomIdentifierSuffix(): string {
   }
 }
 
-// 施工单 docs/proposals/msfile：MSFile runtime 真值在 Coordinator SharedWorker。
-// 001 架构 Spike 与 002 生产 Runtime 完成前 transport fail closed；之后由 Window executor 注入。
+// MSFile runtime 真值在 Coordinator SharedWorker；transport 由 Window executor 注入。
 import {
   createMsFileService,
   openMsFileRepository,
@@ -14504,7 +14503,7 @@ export async function __testResolveStorageGrant(grantId: string, actualPortId: s
   return (await resolveStorageGrant(grantId, actualPortId)).context;
 }
 
-/** MSFile 测试接缝：会话解析与 RPC 分发（施工单 docs/proposals/msfile）。 */
+/** MSFile 测试接缝：会话解析与 RPC 分发。 */
 export function __testSetMsfileRuntimeOverride(runtime: Partial<MsFileServiceImpl> | undefined): void {
   testMsfileRuntimeOverride = runtime as MsFileServiceImpl | undefined;
   if (!runtime) testMsfileRuntimeRecoveryAllowed = true;

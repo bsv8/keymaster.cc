@@ -1,91 +1,33 @@
-# Getting started
-
-Keymaster Connect gives browser applications typed access to identity, signing,
-encryption, Channel messaging, storage, and controlled BSV payments. Private
-keys stay inside Keymaster.
-
-## Install
+# 快速开始
 
 ```bash
 pnpm add @keymaster/connect
 ```
 
-The SDK requires a browser. It does not create a server connection and it does
-not send private material to your application.
-
-## Create a client
-
 ```ts
 import { KeymasterConnectClient } from "@keymaster/connect";
 
-// Supplied by this application's deployment configuration.
-const keymasterDeploymentOrigin = getRequiredConfig("KEYMASTER_ORIGIN");
-
 const keymaster = new KeymasterConnectClient({
-  targetOrigin: keymasterDeploymentOrigin
-});
-```
-
-`targetOrigin` is normalized once and then used for every `postMessage` target
-and origin check. Paths, query strings, and fragments are ignored. The SDK has
-no built-in Keymaster hostname: each deployment explicitly chooses the exact
-wallet origin it trusts.
-
-## Log in
-
-Call login from a user gesture so the browser can open the Session Window.
-
-```ts
-const session = await keymaster.login({
-  text: "Sign in to Example",
-  claims: ["profile.name", "profile.avatar"]
+  targetOrigin: getRequiredConfig("KEYMASTER_ORIGIN") // 受信任钱包来源
 });
 
-localStorage.setItem(
-  "keymaster.connectSessionId",
-  session.connectSessionId
-);
+const session = await keymaster.login({ text: "登录示例应用" });
+localStorage.setItem("keymaster.connectSessionId", session.connectSessionId);
 ```
 
-The user chooses the owner identity in Keymaster. Your application cannot select
-an owner public key in the login request.
+首次登录应由用户点击触发。App 不能在请求里选择 Owner；用户在 Keymaster 中确认。
 
-## Call a capability
-
-Every business request carries the persistent session id:
+所有业务方法都携带会话编号：
 
 ```ts
-import { binaryText } from "@keymaster/connect";
-
-const encrypted = await keymaster.request("cipher.encrypt", {
-  text: "Encrypt my draft",
-  contentType: "text/plain",
-  content: binaryText("A private draft"),
+const result = await keymaster.identityGet({
+  aud: location.origin,       // 断言接收方，必须是当前来源
+  iat: now,                   // 签发时间，Unix 秒
+  exp: now + 300,             // 过期时间，Unix 秒
+  claims: ["key.label"],      // 请求的身份字段
   connectSessionId: session.connectSessionId
 });
 ```
 
-The method literal controls both parameter validation and the inferred result
-type. There is no untyped RPC result cast in application code.
-
-## Resume after the window closes
-
-Closing a Session Window disconnects the browser transport. It does not revoke
-the persistent authorization.
-
-```ts
-const resumed = await keymaster.resume(savedConnectSessionId);
-```
-
-Call `logout()` when the application intends to revoke the session:
-
-```ts
-await keymaster.logout(savedConnectSessionId);
-keymaster.close();
-```
-
-## Next
-
-- Learn the [session model](/concepts/sessions).
-- Browse all [capability families](/guide/capabilities).
-- Read the [`KeymasterConnectClient` API](/api/classes/KeymasterConnectClient).
+窗口关闭后调用 `resume(savedSessionId)`；需要撤销授权时调用 `logout(savedSessionId)`。
+完整方法见[能力索引](/guide/capabilities)，精确字段见[API](/api/)。

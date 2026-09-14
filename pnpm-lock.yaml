@@ -223,8 +223,8 @@ importers:
         specifier: 2.0.0
         version: 2.0.0
       sat-subscription-protocol:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.2.0
+        version: 0.2.0
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)
@@ -643,8 +643,8 @@ importers:
         specifier: 0.5.0
         version: 0.5.0
       sat-subscription-protocol:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.2.0
+        version: 0.2.0
       satoshi-payment-interface:
         specifier: 0.1.0
         version: 0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
@@ -3617,8 +3617,8 @@ packages:
   sanitize-filename@1.6.4:
     resolution: {integrity: sha512-9ZyI08PsvdQl2r/bBIGubpVdR3RR9sY6RDiWFPreA21C/EFlQhmgo20UZlNjZMMZNubusLhAQozkA0Od5J21Eg==}
 
-  sat-subscription-protocol@0.1.0:
-    resolution: {integrity: sha512-B1+Izifq9T1x3y6gsyt967kZQ1ly+RqXUSMQyXZ2WTxhogk/g3Cuwru4WdwGVHjcHY8VbVo5ddJfwuogLojFYg==}
+  sat-subscription-protocol@0.2.0:
+    resolution: {integrity: sha512-Qus5AlEOrz7mNduuDE5UtdfFjXuN+qmZWbLvzWlfUhXJntmJxqrqRwXLgcvaA6ZjhD2aaXyoNlOFcb1sPgxgVA==}
     engines: {node: '>=18'}
 
   satoshi-payment-interface@0.1.0:
@@ -7606,7 +7606,7 @@ snapshots:
     dependencies:
       truncate-utf8-bytes: 1.0.2
 
-  sat-subscription-protocol@0.1.0: {}
+  sat-subscription-protocol@0.2.0: {}
 
   satoshi-payment-interface@0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
