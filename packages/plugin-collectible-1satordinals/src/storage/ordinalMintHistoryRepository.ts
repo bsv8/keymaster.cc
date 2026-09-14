@@ -1,6 +1,6 @@
 // 1Sat Ordinals 铸造历史 owner/App K-V Repository。
 
-import type { KeyValueStore, ProtocolSpendPreview, ProtocolSpendResult } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, ProtocolSpendPreview, ProtocolSpendResult } from "@keymaster/contracts";
 import type { OrdinalEnvelopeEntry } from "../ordinalScript.js";
 
 export type OrdinalMintHistoryStatus = "prepared" | ProtocolSpendResult["status"];
@@ -15,12 +15,10 @@ export interface OrdinalMintHistoryRecord {
 }
 export interface OrdinalMintHistoryRepository { get(id: string): Promise<OrdinalMintHistoryRecord | undefined>; put(record: OrdinalMintHistoryRecord): Promise<void>; list(): Promise<OrdinalMintHistoryRecord[]>; close(): void; }
 
-export const ORDINALS_STORAGE_ID = "1SatOrdinals";
-export const ORDINALS_SCHEMA_VERSION = 1;
 const PARTITION = "mint-history";
 const PREFIX = "mint/";
 
-export function createOrdinalMintHistoryRepository(store: KeyValueStore): OrdinalMintHistoryRepository {
+export function createOrdinalMintHistoryRepository(store: BorrowedKeyValueStore): OrdinalMintHistoryRepository {
   async function listAll(): Promise<OrdinalMintHistoryRecord[]> {
     const rows: OrdinalMintHistoryRecord[] = []; let cursor: string | undefined;
     do { const page = await store.list({ partition: PARTITION, prefix: PREFIX, cursor, limit: 1000 }); rows.push(...page.entries.map((entry) => entry.value as unknown as OrdinalMintHistoryRecord)); cursor = page.nextCursor; } while (cursor);
@@ -30,6 +28,6 @@ export function createOrdinalMintHistoryRepository(store: KeyValueStore): Ordina
     async get(id) { return (await store.get<OrdinalMintHistoryRecord>(`${PREFIX}${id}`, { partition: PARTITION }))?.value; },
     async put(record) { await store.put(`${PREFIX}${record.id}`, record, { partition: PARTITION }); },
     list: listAll,
-    close() { store.close(); }
+    close() { /* Host owns the borrowed storage handle. */ }
   };
 }

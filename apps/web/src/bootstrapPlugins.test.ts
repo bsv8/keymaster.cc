@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CENTRAL_STORAGE_DECLARATIONS,
   KEYSPACE_SERVICE_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
   type PluginManifest,
@@ -36,8 +37,18 @@ import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
 import { createWebRuntimeUnitImplementationRegistry } from "./runtimeUnitImplementations.js";
 import { withBootstrapErrorContext } from "./bootstrapErrorContext.js";
 
-afterEach(() => {
+const activeHosts = new Set<PluginHost>();
+
+function trackHost<T extends PluginHost>(host: T): T {
+  activeHosts.add(host);
+  return host;
+}
+
+afterEach(async () => {
   vi.useRealTimers();
+  const hosts = [...activeHosts];
+  activeHosts.clear();
+  await Promise.all(hosts.map((host) => host.dispose().catch(() => undefined)));
 });
 
 beforeEach(() => {
@@ -59,17 +70,15 @@ function makeHost(registerImpl: (plugin: PluginManifest) => Promise<void>): Plug
 }
 
 function makeStorageBindingAuthority(): StorageBindingAuthority {
-  const open = (scope: "key" | "platform", applicationStorageId: string, ownerPublicKeyHex = "") => createInMemoryKeyValueStore({
-    scope,
-    ownerPublicKeyHex,
-    applicationStorageId,
-    schemaVersion: 1,
+  const open = (declaration: import("@keymaster/contracts").PluginStorageDeclaration, ownerPublicKeyHex = "") => createInMemoryKeyValueStore({
+    ...declaration,
+    ...(declaration.scope === "owner" ? { ownerPublicKeyHex } : {}),
     bucketId: "test-memory",
     bucketGeneration: 1
   });
   return {
-    openOwnerAppStore: async ({ declaration }) => open("key", declaration.applicationStorageId, "02" + "11".repeat(32)),
-    openPlatformStore: async ({ applicationStorageId }) => open("platform", applicationStorageId),
+    openOwnerAppStore: async ({ declaration }) => open(declaration, "02" + "11".repeat(32)),
+    openPlatformStore: async ({ declaration }) => open(declaration),
     deleteOwnerStorage: async () => undefined
   };
 }
@@ -152,7 +161,7 @@ describe("application bootstrap phase projection", () => {
 
 describe("Coordinator startup recovery", () => {
   it("only rebinds a platform grant before the remote operation reaches physical I/O", async () => {
-    const firstGrant = { platformGrantId: "platform-old", bucketId: "bucket", bucketGeneration: 1, applicationStorageId: "settings", schemaVersion: 1, sessionEpoch: "epoch", clientId: "test" };
+    const firstGrant = { platformGrantId: "platform-old", bucketId: "bucket", bucketGeneration: 1, ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, sessionEpoch: "epoch", clientId: "test" };
     const secondGrant = { ...firstGrant, platformGrantId: "platform-new", bucketGeneration: 2 };
     const storageBindPlatform = vi.fn()
       .mockResolvedValueOnce({ status: "ok", value: firstGrant })
@@ -160,7 +169,7 @@ describe("Coordinator startup recovery", () => {
     const storagePlatformData = vi.fn()
       .mockResolvedValueOnce({ status: "error", message: "Platform storage bucket generation changed" })
       .mockResolvedValueOnce({ status: "ok", value: { revision: 1 } });
-    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, "settings");
+    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads);
 
     await expect(store.put("key", { ok: true })).resolves.toEqual({ revision: 1 });
     expect(storageBindPlatform).toHaveBeenCalledTimes(2);
@@ -168,10 +177,10 @@ describe("Coordinator startup recovery", () => {
   });
 
   it("does not replay a platform write after the final I/O boundary is stale", async () => {
-    const grant = { platformGrantId: "platform-one", bucketId: "bucket", bucketGeneration: 1, applicationStorageId: "settings", schemaVersion: 1, sessionEpoch: "epoch", clientId: "test" };
+    const grant = { platformGrantId: "platform-one", bucketId: "bucket", bucketGeneration: 1, ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, sessionEpoch: "epoch", clientId: "test" };
     const storageBindPlatform = vi.fn().mockResolvedValue({ status: "ok", value: grant });
     const storagePlatformData = vi.fn().mockResolvedValue({ status: "error", message: "Platform storage binding became stale" });
-    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, "settings");
+    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads);
 
     await expect(store.put("key", { ok: true })).rejects.toThrow("Platform storage binding became stale");
     expect(storageBindPlatform).toHaveBeenCalledTimes(1);
@@ -328,7 +337,7 @@ describe("web startup capability contract", () => {
       p2pkhProvidersUpdate: async () => ({ status: "ok" }),
       p2pkhSettingsUpdate: async () => ({ status: "ok" })
     } as unknown as SessionCoordinatorClient;
-    const host = createPluginHost({
+    const host = trackHost(createPluginHost({
       disableConfigPersistence: true,
       storageBindingAuthority: makeStorageBindingAuthority(),
       coordinatorForPlugin: () => coordinatorClient,
@@ -340,7 +349,7 @@ describe("web startup capability contract", () => {
         sessionEpoch: "test-session:1",
         bucketGeneration: 1,
       }
-    });
+    }));
     const stage = (name: string) => WEB_PLUGIN_CATALOG.filter((plugin) => plugin.bootstrapStage === name);
     host.validateManifestSet([...WEB_PLUGIN_CATALOG]);
 
@@ -393,24 +402,23 @@ describe("web startup capability contract", () => {
   }
 
   function createFixtureHost(setups: Record<string, PluginSetup> = {}): PluginHost {
-    return createPluginHost({
+    return trackHost(createPluginHost({
       disableConfigPersistence: true,
       runtime: "window-main",
       runtimeUnitImplementationRegistry: {
         get: (pluginId) => setups[pluginId],
       },
-    });
+    }));
   }
 
-  it("keeps Vault enabled while runtime config is stored outside localStorage", async () => {
-    localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 1, value: { vault: false } }));
+  it("keeps required Vault enabled with an in-memory runtime projection", async () => {
     const fixture = vaultFixture();
     const host = createFixtureHost({ vault: fixture.setup });
     await host.register(fixture.manifest);
     assertWebStartupContract(host);
     expect(host.capabilities.has(VAULT_SERVICE_CAPABILITY)).toBe(true);
     expect(host.configStore.read().vault).toBe(true);
-    expect(JSON.parse(localStorage.getItem("keymaster.plugins.runtime")!).version).toBe(1);
+    expect(localStorage.length).toBe(0);
   });
 
   it("rejects required setup failures before startup preflight", async () => {
@@ -441,7 +449,7 @@ describe("web startup capability contract", () => {
   });
 
   it("reports missing provider/capability and does not enter React", () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = trackHost(createPluginHost({ disableConfigPersistence: true }));
     expect(() => assertWebStartupContract(host)).toThrow(/vault\.service/);
     try {
       assertWebStartupContract(host);

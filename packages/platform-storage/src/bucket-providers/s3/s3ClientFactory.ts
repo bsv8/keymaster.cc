@@ -7,7 +7,7 @@ import type {
   StorageProviderSummary,
   StorageR2Connection
 } from "@keymaster/contracts";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { normalizeDirectoryPath } from "../bucketPath.js";
 
 function text(value: unknown, field: string, max = 256): string {

@@ -3,7 +3,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionCoordinatorClient, WindowP2pExecutorLaneRegistry, WindowP2pExecutorLaneContext, VaultService, WindowP2pExecutorLane } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, VAULT_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, VAULT_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { msfilePlugin, msfileSetup } from "./manifest.js";
 
@@ -48,10 +48,8 @@ describe("msfilePlugin manifest", () => {
           bucketId: "test",
           bucketGeneration: 1
         }),
-        openPlatformStore: async ({ applicationStorageId, schemaVersion }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
-          scope: "platform",
-          applicationStorageId,
-          schemaVersion,
+        openPlatformStore: async ({ declaration }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
+          ...declaration,
           bucketId: "test",
           bucketGeneration: 1
         }),

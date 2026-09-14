@@ -1,7 +1,7 @@
 import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY, type StorageRuntimeController } from "@keymaster/contracts";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost } from "@keymaster/runtime";
-import type { StorageRuntimeSnapshot } from "../runtime/storageRuntimeController.js";
+import type { StorageRuntimeSnapshot } from "../runtime/storageController.js";
 
 /** 已配置存储的恢复页；首次设置由 Web 层 InitialSetupPage 独立负责。 */
 export function StorageOnboardingPage() {

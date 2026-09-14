@@ -1,5 +1,6 @@
+
 import { describe, expect, it } from "vitest";
-import { createOpfsBucketProvider } from "./opfsBucketObjectStore.js";
+import { createOpfsTestBucketProvider } from "./opfsTestBucketProvider.js";
 
 function missingFileRoot(): {
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<never>;
@@ -104,23 +105,24 @@ function existingFileWhoseReadDisappears(): {
 
 describe("OPFS bucket provider", () => {
   it("returns undefined when the final file handle is missing", async () => {
-    const provider = createOpfsBucketProvider({ root: missingFileRoot() });
+    const provider = createOpfsTestBucketProvider({ root: missingFileRoot() });
 
     await expect(provider.get(".keymaster/schema")).resolves.toBeUndefined();
     provider.dispose();
   });
 
   it("returns undefined when the file disappears while being read", async () => {
-    const provider = createOpfsBucketProvider({ root: existingDirectoryWithMissingFile() });
+    const provider = createOpfsTestBucketProvider({ root: existingDirectoryWithMissingFile() });
 
     await expect(provider.get(".keymaster/schema")).resolves.toBeUndefined();
     provider.dispose();
   });
 
   it("maps a cross-realm not-found from getFile to an absent object", async () => {
-    const provider = createOpfsBucketProvider({ root: existingFileWhoseReadDisappears() });
+    const provider = createOpfsTestBucketProvider({ root: existingFileWhoseReadDisappears() });
 
     await expect(provider.get(".keymaster/schema")).resolves.toBeUndefined();
     provider.dispose();
   });
 });
+

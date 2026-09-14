@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "./storage/systemStorageDeclarations.js";
 import {
   COORDINATOR_RESPONSE_RESULT_PARSERS,
   COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
@@ -49,16 +50,19 @@ describe("Coordinator runtime contract parsers", () => {
   it("accepts the initial platform schema version through the full response boundary", () => {
     const request = {
       kind: "storage.platform.bind",
-      pluginId: "runtime",
-      declaration: { scope: "platform", applicationStorageId: "settings", schemaVersion: 1 },
+      pluginId: "vault",
+      declaration: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata,
       expectedSessionEpoch: "epoch-1",
     } as const satisfies CoordinatorRpcRequest;
     const grant = {
       platformGrantId: "platform-1",
       bucketId: "bucket-1",
       bucketGeneration: 1,
-      applicationStorageId: "settings",
-      schemaVersion: 1,
+      moduleId: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.moduleId,
+      purposeId: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.purposeId,
+      authority: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.authority,
+      model: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.model,
+      schemaVersion: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.schemaVersion,
       sessionEpoch: "epoch-1",
     };
     const response = { sessionEpoch: "epoch-1", ack: { status: "ok" }, operationResult: grant };
@@ -243,29 +247,11 @@ describe("Coordinator runtime contract parsers", () => {
     });
   });
 
-  it("selects a typed response parser by request kind and keeps OPFS separate from S3 providers", () => {
+  it("selects a typed response parser by request kind", () => {
     expect(COORDINATOR_RESPONSE_RESULT_PARSERS["storage.control"]).toBeTypeOf("function");
-    const opfs = parseCoordinatorResponseFor(rpcRequest("storage.control", { control: { type: "select-opfs" } }), {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: { ok: true, providerId: "opfs", latencyMs: 0, untrusted: "discard" },
-    });
-    expect(opfs.operationResult).toEqual({ ok: true, providerId: "opfs", latencyMs: 0 });
-    expect(() => parseCoordinatorResponseFor(rpcRequest("storage.control", { control: { type: "select-opfs" } }), {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: { ok: true, providerId: "opfs", latencyMs: 0, diagnostic: "not-a-diagnostic" },
-    })).toThrow();
-    expect(() => parseCoordinatorResponseFor(rpcRequest("storage.control", { control: { type: "select-opfs" } }), {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: { status: "selected", backend: "local", requiresRuntimeBootstrap: false },
-    })).toThrow();
-    expect(parseCoordinatorResponseFor(rpcRequest("storage.control", { control: { type: "activate" } }), {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: { status: "selected", backend: "s3", requiresRuntimeBootstrap: true, stale: true },
-    }).operationResult).toEqual({ status: "selected", backend: "s3", requiresRuntimeBootstrap: true });
+    expect(parseCoordinatorResponseFor(rpcRequest("storage.control", { control: { type: "status" } }), {
+      sessionEpoch: "epoch-1", ack: { status: "ok" }, operationResult: "ready",
+    }).operationResult).toBe("ready");
   });
 
   it("parses each typed result after the generic capability envelope", () => {
@@ -277,8 +263,12 @@ describe("Coordinator runtime contract parsers", () => {
         bucketId: "bucket-1",
         bucketGeneration: 2,
         ownerPublicKeyHex: "02" + "11".repeat(32),
-        applicationStorageId: "app-storage",
+        moduleId: "message",
+        purposeId: "history",
+        authority: "built-in-module",
+        model: "kv",
         ownerStorageGeneration: 3,
+        schemaVersion: 1,
         sessionEpoch: "epoch-1",
         private: "discard",
       },
@@ -288,8 +278,12 @@ describe("Coordinator runtime contract parsers", () => {
       bucketId: "bucket-1",
       bucketGeneration: 2,
       ownerPublicKeyHex: "02" + "11".repeat(32),
-      applicationStorageId: "app-storage",
+      moduleId: "message",
+      purposeId: "history",
+      authority: "built-in-module",
+      model: "kv",
       ownerStorageGeneration: 3,
+      schemaVersion: 1,
       sessionEpoch: "epoch-1",
     });
     expect(() => parseCoordinatorResponseFor(rpcRequest("storage.owner.delete"), {

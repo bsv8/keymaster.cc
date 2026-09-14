@@ -20,7 +20,6 @@ import type {
   I18nPluginResources,
   I18nService,
   ImporterRegistry,
-  KeyValueStore,
   NoticeRegistry,
   PluginContext,
   PluginGraph,
@@ -148,9 +147,7 @@ export interface CreatePluginHostOptions {
   i18nDebug?: boolean;
   /** 测试时关闭启停配置持久化。 */
   disableConfigPersistence?: boolean;
-  /** 插件启停配置平台 K-V 句柄。 */
-  configStorage?: KeyValueStore;
-  /** 没有远程配置时使用的初始启停值。 */
+  /** 测试或服务端渲染时使用的初始内存投影。 */
   initialPluginConfig?: Record<string, boolean>;
   /** Keymaster Storage binding authority；只在 Adapter 内使用。 */
   storageBindingAuthority?: StorageBindingAuthority;

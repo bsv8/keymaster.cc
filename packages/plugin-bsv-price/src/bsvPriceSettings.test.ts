@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import {
   coerceBsvPriceGlobalConfig,
@@ -10,10 +11,8 @@ const PUBLISHER_A = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 function createStore() {
   return createInMemoryKeyValueStore({
-    scope: "key",
+    ...CENTRAL_STORAGE_DECLARATIONS.bsvPrice,
     ownerPublicKeyHex: PUBLISHER_A,
-    applicationStorageId: "BSVPrice",
-    schemaVersion: 1,
     bucketId: "test",
     bucketGeneration: 1
   });
@@ -51,7 +50,8 @@ describe("bsvPriceSettings K-V storage", () => {
     await settings.ready();
     expect(settings.load()).toBeNull();
     expect(settings.bootstrapPublisherPublicKeyHex(PUBLISHER_A)).toMatchObject({ pricePublisherPublicKeyHex: PUBLISHER_A, savedAtMs: 111 });
-    expect(settings.savePublisherPublicKeyHex("").pricePublisherPublicKeyHex).toBe("");
+    const saved = await settings.savePublisherPublicKeyHex("");
+    expect(saved.pricePublisherPublicKeyHex).toBe("");
     expect(settings.snapshot()?.pricePublisherPublicKeyHex).toBe("");
     storage.close();
   });

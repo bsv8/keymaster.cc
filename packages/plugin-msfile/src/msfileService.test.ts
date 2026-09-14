@@ -2,12 +2,15 @@
 // 授权与数据面必测项（施工单 §8.2 / KMMF-005 / KMMF-006）。
 
 import { afterEach, describe, expect, it } from "vitest";
-import { MsFileServiceImpl, createMsFileService } from "./msfileService.js";
+import { MsFileServiceImpl, createMsFileService as createBoundMsFileService, type MsFileServiceImplDeps } from "./msfileService.js";
+import { openMsFileRepository } from "./storage/msfileRepository.js";
 import type { MsFileTransport } from "./msfileTransport.js";
 import type {
   MsFileGlobalPriceSettings,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import { MsFileServiceError } from "./msfileErrors.js";
 import { sha256 } from "./sha256.js";
 import { OWNER_PUBKEY, SUPPLIER_PUBKEY, SUPPLIER_PEER_ID } from "./supplierConfig.test.js";
@@ -16,6 +19,21 @@ import { validatePersistedSupplier } from "./supplierConfig.js";
 const PUBLISHER_A = OWNER_PUBKEY;
 export const OWNER_PEER_ID = "16Uiu2HAm7jWZvRQWjW8LpPRXqyGJqpb4rqLkX7FUu53zoQG9oUuF";
 const OTHER_KEY = "02b6de0e542ca933c790eb27e7d759abf2947233552fd0f942c4cd391186286e72";
+
+function createMsFileService(deps: Omit<MsFileServiceImplDeps, "repository"> & { repository?: MsFileServiceImplDeps["repository"] }): MsFileServiceImpl {
+  const repository = deps.repository ?? openMsFileRepository((() => {
+    const bucketId = `msfile-service-test-${crypto.randomUUID()}`;
+    const store = (declaration: (typeof CENTRAL_STORAGE_DECLARATIONS)[keyof typeof CENTRAL_STORAGE_DECLARATIONS]) =>
+      createInMemoryKeyValueStore({ ...declaration, bucketId, bucketGeneration: 1 });
+    return {
+      settings: store(CENTRAL_STORAGE_DECLARATIONS.msfileSettings),
+      suppliers: store(CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers),
+      appPolicies: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies),
+      appUsage: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage),
+    };
+  })());
+  return createBoundMsFileService({ ...deps, repository });
+}
 
 async function hashOf(bytes: Uint8Array): Promise<string> {
   return Array.from(await sha256(bytes), (b) => b.toString(16).padStart(2, "0")).join("");

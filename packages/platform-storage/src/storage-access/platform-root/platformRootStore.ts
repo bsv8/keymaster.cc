@@ -3,27 +3,34 @@ import type {
   KeyValueStore,
   OwnerStorageActivation,
   PlatformRootStore,
+  PluginStorageDeclaration,
+  SnapshotStore,
   StorageBucketProvider,
   StorageBucketRef,
-  StorageNamespaceBinding
+  StorageNamespaceBinding,
+  StorageSnapshotJsonCompatible,
 } from "@keymaster/contracts";
-import { buildStorageNamespaceRoot, validateOwnerPublicKeyHex, validatePlatformStorageId, validatePluginStorageDeclaration } from "@keymaster/contracts";
+import { buildStorageNamespaceRoot, validateOwnerPublicKeyHex, validatePluginStorageDeclaration, CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import { createKeyValueStore } from "../../kv-engine/partitionedKvEngine.js";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { createOwnerAppStore } from "../owner-app/ownerAppStore.js";
+import { createFixedCasSnapshotStore } from "../../snapshot/fixedCasSnapshotStore.js";
 
 export interface PlatformRootStoreOptions {
   /** 当前 Provider；只由 Coordinator 注入。 */
   provider: StorageBucketProvider;
   /** 当前抽象桶引用。 */
   bucket: StorageBucketRef;
-  /** 只允许平台内部使用的 applicationStorageId。 */
-  platformApplicationStorageIds?: readonly string[];
+  /** 只允许 Coordinator 预授权的 bucket 级中央声明（平台和内置模块）。 */
+  platformStorageDeclarations?: readonly PluginStorageDeclaration[];
   /** 切桶/切 Key/切 keyspace 世代后让旧句柄 fail closed。 */
   isCurrent?: (binding: { ownerPublicKeyHex?: string; bucketGeneration: number; keyspaceGeneration?: number }) => boolean;
 }
 
-const DEFAULT_PLATFORM_IDS = ["keys", "settings", "protocol", "session", "storage", "coordinator"] as const;
+const DEFAULT_PLATFORM_DECLARATIONS: readonly PluginStorageDeclaration[] = Object.freeze([
+  ...Object.values(CENTRAL_STORAGE_DECLARATIONS).filter((declaration) =>
+    declaration.scope === "bucket"),
+]);
 const BUCKET_SCHEMA_PATH = ".keymaster/schema";
 const BUCKET_SCHEMA_FORMAT = "keymaster.bucket-schema";
 const BUCKET_SCHEMA_FORMAT_VERSION = 1;
@@ -77,8 +84,8 @@ interface OwnerLifecycleObject {
   etag?: string;
 }
 
-function namespaceSchemaKey(binding: Pick<StorageNamespaceBinding, "scope" | "applicationStorageId" | "ownerPublicKeyHex">): string {
-  return [binding.scope, binding.ownerPublicKeyHex ?? "", binding.applicationStorageId].join("|");
+function namespaceSchemaKey(binding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex">): string {
+  return [binding.scope, binding.ownerPublicKeyHex ?? "", binding.moduleId, binding.purposeId, binding.authority, binding.model].join("|");
 }
 
 function decodeBucketSchema(bytes: Uint8Array): BucketSchemaRecord {
@@ -102,7 +109,7 @@ function ownerLifecyclePath(ownerPublicKeyHex: string): string {
 }
 
 function ownerSchemaPrefix(ownerPublicKeyHex: string): string {
-  return `key|${validateOwnerPublicKeyHex(ownerPublicKeyHex)}|`;
+  return `owner|${validateOwnerPublicKeyHex(ownerPublicKeyHex)}|`;
 }
 
 function isStorageConflict(error: unknown): boolean {
@@ -113,14 +120,15 @@ function isStorageConflict(error: unknown): boolean {
 function decodeOwnerLifecycle(bytes: Uint8Array, expectedOwner: string): OwnerLifecycleRecord {
   try {
     const value = JSON.parse(new TextDecoder().decode(bytes)) as Partial<OwnerLifecycleRecord>;
+    const keys = Object.keys(value).sort();
+    const expectedKeys = ["activeOperations", "deletionOperations", "format", "generation", "ownerPublicKeyHex", "status", "updatedAt", "version"];
+    if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) throw new Error("owner lifecycle record has unexpected fields");
     const ownerPublicKeyHex = validateOwnerPublicKeyHex(String(value.ownerPublicKeyHex ?? ""));
     const generation = value.generation;
     const status = value.status;
     const updatedAt = value.updatedAt;
-    // 兼容本轮实现之前已经创建的 v1 owner 记录；缺失字段表示没有
-    // 持久化请求计数，下一次状态写入会补齐它。
-    const activeOperations = value.activeOperations ?? 0;
-    const deletionOperations = value.deletionOperations ?? 0;
+    const activeOperations = value.activeOperations;
+    const deletionOperations = value.deletionOperations;
     if (
       value.format !== OWNER_LIFECYCLE_FORMAT ||
       value.version !== OWNER_LIFECYCLE_FORMAT_VERSION ||
@@ -131,8 +139,10 @@ function decodeOwnerLifecycle(bytes: Uint8Array, expectedOwner: string): OwnerLi
       generation < 1 ||
       typeof updatedAt !== "number" ||
       !Number.isFinite(updatedAt) ||
+      typeof activeOperations !== "number" ||
       !Number.isSafeInteger(activeOperations) ||
       activeOperations < 0 ||
+      typeof deletionOperations !== "number" ||
       !Number.isSafeInteger(deletionOperations) ||
       deletionOperations < 0
     ) throw new Error("owner lifecycle record is invalid");
@@ -648,7 +658,7 @@ async function removeOwnerSchemaEntries(provider: StorageBucketProvider, ownerPu
  */
 async function ensureBucketNamespaceSchema(
   provider: StorageBucketProvider,
-  binding: Pick<StorageNamespaceBinding, "scope" | "applicationStorageId" | "ownerPublicKeyHex">,
+  binding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex">,
   schemaVersion: number,
   assertCurrent?: () => Promise<void>
 ): Promise<void> {
@@ -701,29 +711,93 @@ async function ensureBucketNamespaceSchema(
 /**
  * Storage 平台层。
  *
- * 这里是唯一可以构造 `keys/` 平台根的入口；业务插件拿到的只能是
+ * 这里是唯一可以构造平台 bucket namespace 的入口；业务插件拿到的只能是
  * `openKeyValueStore()` 返回的 owner/App 受限句柄。
  */
 export function createPlatformRootStore(options: PlatformRootStoreOptions): PlatformRootStore {
   if (options.provider.bucketId !== options.bucket.bucketId) throw new StorageRuntimeError("storage_forbidden", "Storage bucket binding mismatch");
-  const platformIds = new Set(options.platformApplicationStorageIds ?? DEFAULT_PLATFORM_IDS);
-  const openPlatformNamespace = async (applicationStorageId: string, schemaVersion: number): Promise<KeyValueStore> => {
-    validatePlatformStorageId(applicationStorageId);
-    if (!platformIds.has(applicationStorageId)) throw new StorageRuntimeError("storage_forbidden", "Platform storage namespace is not authorized");
-    if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) throw new StorageRuntimeError("storage_provider_error", "Storage schema version is invalid");
-    const declaration = validatePluginStorageDeclaration({ scope: "platform", applicationStorageId, schemaVersion });
-    await ensureBucketNamespaceSchema(options.provider, declaration, schemaVersion);
-    const binding = Object.freeze({ ...declaration, bucketId: options.bucket.bucketId, bucketGeneration: options.bucket.bucketGeneration });
+  const platformDeclarations = new Map<string, PluginStorageDeclaration>(
+    (options.platformStorageDeclarations ?? DEFAULT_PLATFORM_DECLARATIONS).map((candidate) => {
+      const declaration = validatePluginStorageDeclaration(candidate);
+      if (declaration.scope !== "bucket" || declaration.authority === "third-party-app") {
+        throw new StorageRuntimeError("storage_forbidden", "Platform root accepts only authorized bucket declarations");
+      }
+      return [declarationKey(declaration), declaration] as const;
+    }),
+  );
+  function declarationKey(declaration: PluginStorageDeclaration): string {
+    return [
+      declaration.moduleId,
+      declaration.purposeId,
+      declaration.scope,
+      declaration.authority,
+      declaration.model,
+      declaration.schemaVersion,
+    ].join("|");
+  }
+  const bindingFor = (declaration: PluginStorageDeclaration): StorageNamespaceBinding => Object.freeze({
+    ...declaration,
+    bucketId: options.bucket.bucketId,
+    bucketGeneration: options.bucket.bucketGeneration,
+  });
+  const currentFor = (binding: StorageNamespaceBinding, keyspaceGeneration?: number): (() => boolean) => () => options.isCurrent?.({
+    bucketGeneration: binding.bucketGeneration,
+    keyspaceGeneration,
+  }) ?? true;
+  const openPlatformNamespace = async (input: PluginStorageDeclaration): Promise<KeyValueStore> => {
+    const declaration = validatePluginStorageDeclaration(input);
+    if (declaration.scope !== "bucket" || declaration.authority === "third-party-app" || declaration.model !== "kv") {
+      throw new StorageRuntimeError("storage_forbidden", "Platform K-V declaration is not authorized");
+    }
+    const expected = platformDeclarations.get(declarationKey(declaration));
+    if (!expected) {
+      throw new StorageRuntimeError("storage_forbidden", "Platform storage namespace is not authorized");
+    }
+    const binding = bindingFor(declaration);
+    await ensureBucketNamespaceSchema(options.provider, binding, declaration.schemaVersion);
     buildStorageNamespaceRoot(binding);
-    return createKeyValueStore({ provider: options.provider, binding, isCurrent: () => options.isCurrent?.({ bucketGeneration: binding.bucketGeneration }) ?? true });
+    return createKeyValueStore({ provider: options.provider, binding, isCurrent: currentFor(binding) });
+  };
+  const openPlatformSnapshot = async <T>(input: { declaration: PluginStorageDeclaration; validate: (value: unknown) => StorageSnapshotJsonCompatible<T> }): Promise<SnapshotStore<T>> => {
+    const declaration = validatePluginStorageDeclaration(input.declaration);
+    if (declaration.scope !== "bucket" || declaration.authority !== "platform-only" || declaration.model !== "snapshot") {
+      throw new StorageRuntimeError("storage_forbidden", "Platform snapshot declaration is not authorized");
+    }
+    const expected = platformDeclarations.get(declarationKey(declaration));
+    if (!expected) {
+      throw new StorageRuntimeError("storage_forbidden", "Platform snapshot declaration is not authorized");
+    }
+    const binding = bindingFor(declaration);
+    await ensureBucketNamespaceSchema(options.provider, binding, declaration.schemaVersion);
+    return createFixedCasSnapshotStore({
+      provider: options.provider,
+      binding,
+      isCurrent: currentFor(binding),
+      validate: input.validate,
+    });
   };
   return {
     bucket: Object.freeze({ ...options.bucket }),
     async openKeyValueStore(input): Promise<OwnerAppStore> {
-      if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) throw new StorageRuntimeError("storage_provider_error", "Storage schema version is invalid");
-      const declaration = validatePluginStorageDeclaration({ scope: "key", applicationStorageId: input.applicationStorageId, schemaVersion: input.schemaVersion });
+      const declaration = validatePluginStorageDeclaration(input.declaration);
+      if (declaration.scope !== "owner" || declaration.authority === "platform-only" || declaration.model !== "kv") {
+        throw new StorageRuntimeError("storage_forbidden", "Owner K-V declaration is not authorized");
+      }
+      // Built-in owner modules are centrally pre-bound by pluginId. A raw root
+      // handle cannot invent a module/purpose pair. Third-party Connect file
+      // namespaces are opened through their verified identity grant and do not
+      // use this built-in module entry point.
+      const expected = Object.values(SYSTEM_STORAGE_DECLARATIONS).flat().find((candidate) =>
+        candidate.moduleId === declaration.moduleId
+        && candidate.purposeId === declaration.purposeId
+        && candidate.scope === "owner"
+        && candidate.authority === "built-in-module"
+        && candidate.model === "kv");
+      if (!expected || expected.schemaVersion !== declaration.schemaVersion) {
+        throw new StorageRuntimeError("storage_forbidden", "Owner storage namespace is not centrally authorized");
+      }
       const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
-      const schemaBinding: Pick<StorageNamespaceBinding, "scope" | "applicationStorageId" | "ownerPublicKeyHex"> = {
+      const schemaBinding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex"> = {
         ...declaration,
         ownerPublicKeyHex
       };
@@ -731,7 +805,7 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       const assertCurrent = () => assertOwnerLifecycleCurrent(options.provider, ownerPublicKeyHex, lifecycle.generation);
       const releaseSchemaLease = await acquireOwnerStorageOperation(options.provider, ownerPublicKeyHex, lifecycle.generation);
       try {
-        await ensureBucketNamespaceSchema(options.provider, schemaBinding, input.schemaVersion, assertCurrent);
+        await ensureBucketNamespaceSchema(options.provider, schemaBinding, declaration.schemaVersion, assertCurrent);
         await assertCurrent();
       } finally {
         await releaseSchemaLease();
@@ -780,7 +854,7 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       if (!await waitForOwnerDeletionOperations(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
       await markOwnerDeleted(options.provider, ownerPublicKeyHex, lifecycle.record.generation);
     },
-    openPlatformStore: (input) => openPlatformNamespace(input.applicationStorageId, input.schemaVersion),
-    openPlatformKeysStore: (schemaVersion) => openPlatformNamespace("keys", schemaVersion)
+    openPlatformStore: (input) => openPlatformNamespace(input.declaration),
+    openPlatformSnapshot,
   };
 }

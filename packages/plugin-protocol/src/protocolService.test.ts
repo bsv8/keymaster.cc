@@ -28,7 +28,7 @@ import {
   type ProtocolStorageRepository
 } from "@keymaster/contracts";
 import { ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
-import type { LaunchTokenRecord, ResolvedClaimValue } from "@keymaster/contracts";
+import type { ResolvedClaimValue } from "@keymaster/contracts";
 import { cborDecode, cborEncode } from "./protocolCbor.js";
 import { aesGcmDecrypt, deriveSiteKey, verifyCompactSecp256k1, signCompactSecp256k1 } from "./protocolCrypto.js";
 import { verifyAppIdentityProof } from "./appIdentity.js";
@@ -251,7 +251,6 @@ function makeFakeMultipartUploadRepository(): ProtocolStorageRepository & { writ
   const origins = new Map<string, ProtocolOriginSettingsRecord>();
   const pools = new Map<string, ProtocolFeePoolRecord>();
   const sessions = new Map<string, ConnectSessionRecord>();
-  const launchTokens = new Map<string, LaunchTokenRecord>();
   let writes = 0;
   let writeFailures = 0;
   return {
@@ -334,22 +333,6 @@ function makeFakeMultipartUploadRepository(): ProtocolStorageRepository & { writ
         sessions.set(sessionId, { ...value, revokedAt: revokeAt });
       }
     },
-    async putLaunchToken(record) {
-      launchTokens.set(record.token, { ...record });
-    },
-    async getLaunchToken(token) {
-      const v = launchTokens.get(token);
-      return v ? { ...v } : null;
-    },
-    async consumeLaunchToken(token) {
-      const v = launchTokens.get(token);
-      if (v && !v.consumed) {
-        launchTokens.set(token, { ...v, consumed: true });
-      }
-    },
-    async deleteLaunchToken(token) {
-      launchTokens.delete(token);
-    }
   };
 }
 
@@ -417,18 +400,6 @@ function makeFakeMultipartUploadRepositoryWithSession(
         await base.putConnectSession({ ...session, revokedAt: revokeAt });
       }
     },
-    async putLaunchToken(record) {
-      if (base.putLaunchToken) await base.putLaunchToken(record);
-    },
-    async getLaunchToken(token) {
-      return base.getLaunchToken ? base.getLaunchToken(token) : null;
-    },
-    async consumeLaunchToken(token) {
-      if (base.consumeLaunchToken) await base.consumeLaunchToken(token);
-    },
-    async deleteLaunchToken(token) {
-      if (base.deleteLaunchToken) await base.deleteLaunchToken(token);
-    }
   };
   return { ...base, ...stubOverrides };
 }
@@ -601,11 +572,11 @@ beforeEach(() => {
 });
 
 describe("ProtocolServiceImpl", () => {
-  it("can attach IndexedDB after startup without making the protocol unavailable", () => {
+  it("can attach IndexedDB after startup without making the protocol unavailable", async () => {
     const { service } = makeService(TEST_PUB_HEX, null as unknown as ProtocolStorageRepository);
     expect(service.feedSnapshot().historyAvailable).toBe(false);
 
-    service.attachProtocolStorageRepository(makeFakeMultipartUploadRepository());
+    await service.attachProtocolStorageRepository(makeFakeMultipartUploadRepository());
 
     expect(service.feedSnapshot().historyAvailable).toBe(true);
   });
@@ -1881,19 +1852,19 @@ describe("ProtocolServiceImpl", () => {
     expect(s2.snapshot().phase).toBe("waiting");
   });
 
-  it("DB write failure does not block main protocol result", async () => {
-    // 构造一个读 / 写都失败的 fake db；service 主流程不应被它打断。
+  it("DB write failure propagates to the user-facing operation", async () => {
+    // 构造一个读 / 写都失败的 fake db；终态 command-history 写失败必须
+    // 由确认调用方观察到，不能变成未处理的 background rejection。
     //
     // 施工单 2026-06-28 002 硬切换：业务方法（identity.get / cipher.* /
     // p2pkh.transfer / feepool.*）都要求 session 真值。DB 异常时
     // accept 阶段预校验按"DB unavailable 降级"放过 → execute 阶段
-    // `requireConnectSession` 仍会校验 DB 读取 → DB 异常会触发
-    // `internal_error` → 对外回 `user_rejected`。
+    // `requireConnectSession` 仍会校验 DB 读取；DB 异常首先按
+    // fail-closed 路径处理，终态历史写入错误再由确认调用方观察。
     //
     // 与旧"DB 不可用 = 仍可手动 confirm"边界不同：002 之后所有业务
-    // 方法都要求 session 真值，**不**fallback 到 active key。本测试
-    // 仍验证"DB 写失败不卡 transport + confirm 调度"，但期望
-    // result.ok = false（execute 阶段 fail-closed）。
+    // 方法都要求 session 真值，**不**fallback 到 active key。这里额外
+    // 守住终态 command-history 写失败的传播边界。
     const failingRepository: ProtocolStorageRepository = {
       async putCommand() {
         throw new Error("db down");
@@ -1939,7 +1910,7 @@ describe("ProtocolServiceImpl", () => {
       },
 
     };
-    const { service, opener, getResult } = makeService(TEST_PUB_HEX, failingRepository);
+    const { service, opener } = makeService(TEST_PUB_HEX, failingRepository);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       service.startSession();
@@ -1960,16 +1931,8 @@ describe("ProtocolServiceImpl", () => {
       await new Promise((r) => setTimeout(r, 30));
       // 此时写已经失败过一次：historyAvailable 必须为 false。
       expect(service.feedSnapshot().historyAvailable).toBe(false);
-      await service.confirmByUser();
-      // result 正常发出（002 硬切换下，DB 异常走 execute 阶段
-      // `requireConnectSession` fail-closed → 对外回 user_rejected）。
-      const r = getResult();
-      expect(r).not.toBeNull();
-      expect(r?.ok).toBe(false);
-      if (r && r.ok === false) {
-        expect(r.error.code).toBe("user_rejected");
-      }
-      // 写失败已被吞；historyAvailable 保持 false。
+      await expect(service.confirmByUser()).rejects.toThrow("db down");
+      // 写失败已传播；历史能力同时标记为不可用。
       expect(service.feedSnapshot().historyAvailable).toBe(false);
     } finally {
       errSpy.mockRestore();
@@ -2022,6 +1985,69 @@ describe("ProtocolServiceImpl", () => {
     expect(new Set(ids).size).toBe(2);
     expect(ids).toContain(recordId1!);
     expect(feed2.commands.length).toBe(2);
+  });
+
+  it("reports terminal command-history write failure as a protocol error", async () => {
+    const writeError = new Error("command history write failed");
+    const repository = makeFakeMultipartUploadRepositoryWithSession({
+      async putCommand() {
+        throw writeError;
+      }
+    });
+    const { service, opener, getResult } = makeService(TEST_PUB_HEX, repository);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      service.startSession();
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "req-command-history-write-fail",
+            method: "identity.get",
+            params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
+          },
+          ORIGIN,
+          opener
+        )
+      );
+      await service.confirmByUser();
+      const result = getResult();
+      expect(result?.ok).toBe(false);
+      if (result?.ok === false) {
+        expect(result.error.code).toBe("internal_error");
+        expect(result.error.message).toBe("command history write failed");
+      }
+      expect(service.feedSnapshot().historyAvailable).toBe(false);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("does not mutate a connect session before last-used persistence succeeds", async () => {
+    const writeError = new Error("session last-used write failed");
+    const repository = makeFakeMultipartUploadRepositoryWithSession({
+      async putConnectSession() {
+        throw writeError;
+      }
+    });
+    const { service } = makeService(TEST_PUB_HEX, repository);
+    const session: ConnectSessionRecord = {
+      sessionId: "sess-last-used-write-fail",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: 1,
+      lastUsedAt: 123,
+      revokedAt: null
+    };
+    const touchConnectSession = (service as unknown as {
+      touchConnectSession: (value: ConnectSessionRecord) => Promise<void>;
+    }).touchConnectSession.bind(service);
+
+    await expect(touchConnectSession(session)).rejects.toBe(writeError);
+    expect(session.lastUsedAt).toBe(123);
   });
 
   it("loadHistoryForOrigin preserves in-flight command card on origin switch", async () => {
@@ -3978,7 +4004,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const storageRepository = makeFakeMultipartUploadRepository();
     const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageRepository, {
       appCatalogResolver: { resolve: () => ({ kind: "known-valid" as const, proof: STORAGE_PROOF }) },
-      storageRuntimeController: { status: () => "unconfigured" } as never
+      storageController: { status: () => "unconfigured" } as never
     });
     service.startSession();
     await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "login-storage-gate", method: "connect.login", params: { text: "login", appIdentity: STORAGE_PROOF } }, ORIGIN, opener));

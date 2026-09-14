@@ -20,7 +20,7 @@ import type {
   ProtectedOutpointRegistry,
   KeyIdentity,
   KeyspaceService,
-  KeyValueStore,
+  BorrowedKeyValueStore,
   VaultService,
   P2pkhCoordinatorControl
 } from "@keymaster/contracts";
@@ -55,7 +55,7 @@ import {
   resolveP2pkhFeeRateSatoshisPerKb,
   type ReadyKeyIdentity
 } from "./p2pkhContracts.js";
-import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, P2PKH_REPOSITORY_VERSION, P2PKH_STORAGE_ID, type P2pkhStateRepositoryBundle, type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
+import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, type P2pkhStateRepositoryBundle, type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { createP2pkhTransferService, type P2pkhTransferService } from "./p2pkhTransferService.js";
 import { allocateUtxos, P2pkhAllocationError } from "./utxoAllocator.js";
@@ -155,12 +155,13 @@ export interface P2pkhServiceDeps {
   messageBus: MessageBus;
   keyspace: KeyspaceService;
   /** Host 已按 manifest 声明绑定的当前 owner K-V 句柄。 */
-  storage?: KeyValueStore;
+  storage: BorrowedKeyValueStore;
   protectedOutpoints?: ProtectedOutpointRegistry;
   assetDataNotifier?: AssetDataNotifier;
 }
 
 export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
+  if (!deps.storage) throw new Error("P2PKH central storage binding is required");
   // 硬切换 002 收尾 + 多 owner 支持：p2pkhRepository module 自己用 per-owner
   // repository 只接收 Host 已绑定的 owner/App K-V；句柄生命周期由 Keyspace 统一控制。
   // 单一 handle / 单一 currentPublicKeyHash。所有 K-V 入口走
@@ -326,9 +327,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   async function ensureRepositoryForOwner(publicKeyHex: string): Promise<P2pkhStateRepositoryHandle> {
     const active = deps.keyspace.active().activePublicKeyHex?.toLowerCase();
     if (active !== publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-    const store = deps.storage;
-    if (!store) throw new Error("P2PKH owner storage is not bound by Host");
-    const bundle: P2pkhStateRepositoryBundle = await openP2pkhStateRepository(store);
+    const bundle: P2pkhStateRepositoryBundle = await openP2pkhStateRepository(deps.storage);
     return createP2pkhStateRepository(bundle);
   }
 

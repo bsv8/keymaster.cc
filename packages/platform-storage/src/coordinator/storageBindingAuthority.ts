@@ -24,6 +24,24 @@ function assertKey(key: string): void {
   if (typeof key !== "string" || key.length === 0 || key.includes("\\") || key.includes("\u0000") || key.split("/").some((part) => !part || part === "." || part === ".." || part === ".keymaster")) throw new Error("K-V key is invalid");
 }
 
+function assertGrantDeclaration(grant: Pick<StorageOwnerGrant | StoragePlatformGrant, "moduleId" | "purposeId" | "authority" | "model" | "schemaVersion">, declaration: PluginStorageDeclaration): void {
+  if (grant.moduleId !== declaration.moduleId
+    || grant.purposeId !== declaration.purposeId
+    || grant.authority !== declaration.authority
+    || grant.model !== declaration.model
+    || grant.schemaVersion !== declaration.schemaVersion) {
+    throw new Error("Storage grant declaration does not match the requested central declaration");
+  }
+}
+
+function assertPlatformGrantBinding(grant: StoragePlatformGrant, declaration: PluginStorageDeclaration): void {
+  assertGrantDeclaration(grant, declaration);
+  if (typeof grant.bucketId !== "string" || grant.bucketId.length === 0
+    || !Number.isSafeInteger(grant.bucketGeneration) || grant.bucketGeneration < 0) {
+    throw new Error("Platform storage grant binding is invalid");
+  }
+}
+
 export interface StorageBindingAuthorityOptions {
 }
 
@@ -33,8 +51,9 @@ export function createStorageBindingAuthority(
   options: StorageBindingAuthorityOptions = {}
 ): StorageBindingAuthority {
   async function openOwnerAppStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<KeyValueStore> {
-    if (input.declaration.scope !== "key") throw new Error("Owner storage must use key scope");
+    if (input.declaration.scope !== "owner" || input.declaration.model !== "kv") throw new Error("Owner storage must use owner K-V scope");
     const grant = unwrap<StorageOwnerGrant>(await client.storageBindOwner(input), "owner storage bind");
+    assertGrantDeclaration(grant, input.declaration);
     const active = client.getActivePublicKeyHex()?.toLowerCase();
     if (!active || active !== grant.ownerPublicKeyHex) throw new Error("Owner storage owner changed");
     let closed = false;
@@ -46,7 +65,12 @@ export function createStorageBindingAuthority(
       bucketId: grant.bucketId,
       bucketGeneration: grant.bucketGeneration,
       ownerPublicKeyHex: grant.ownerPublicKeyHex,
-      applicationStorageId: grant.applicationStorageId,
+      moduleId: grant.moduleId,
+      purposeId: grant.purposeId,
+      scope: "owner",
+      authority: grant.authority,
+      model: "kv",
+      schemaVersion: grant.schemaVersion,
       async get<T = KeyValueValue>(key: string, options: { partition?: string } = {}) { assertOpen(); assertKey(key); return call<KeyValueEntry<T> | undefined>({ type: "owner.get", storageGrantId: grant.storageGrantId, key, partition: options.partition }); },
       async list(input: KeyValueListInput = {}) { assertOpen(); return call<KeyValueListResult>({ type: "owner.list", storageGrantId: grant.storageGrantId, input }); },
       async put<T = KeyValueValue>(key: string, value: T, condition = {}) { assertOpen(); assertKey(key); return call<KeyValueEntryMeta>({ type: "owner.put", storageGrantId: grant.storageGrantId, key, value, condition }); },
@@ -56,16 +80,17 @@ export function createStorageBindingAuthority(
     };
   }
 
-  async function openPlatformStore(input: { pluginId: string; applicationStorageId: string; schemaVersion: number }): Promise<KeyValueStore> {
-    if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) throw new Error("Storage schema version is invalid");
+  async function openPlatformStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<KeyValueStore> {
+    if (input.declaration.scope !== "bucket" || input.declaration.authority === "third-party-app" || input.declaration.model !== "kv") throw new Error("Platform storage declaration is invalid");
     let currentGrant: StoragePlatformGrant | undefined;
     let grantPromise: Promise<StoragePlatformGrant> | undefined;
     const bind = async (): Promise<StoragePlatformGrant> => {
       if (!grantPromise) {
         grantPromise = client.storageBindPlatform({
           pluginId: input.pluginId,
-          declaration: { scope: "platform", applicationStorageId: input.applicationStorageId, schemaVersion: input.schemaVersion }
+          declaration: input.declaration
         }).then((result) => unwrap<StoragePlatformGrant>(result, "platform storage bind")).then((nextGrant) => {
+          assertPlatformGrantBinding(nextGrant, input.declaration);
           currentGrant = nextGrant;
           return nextGrant;
         }).catch((error) => {
@@ -91,6 +116,7 @@ export function createStorageBindingAuthority(
         || message === "Platform storage bucket generation changed";
     };
     const initialGrant = await getGrant();
+    assertPlatformGrantBinding(initialGrant, input.declaration);
     let closed = false;
     const assertOpen = () => { if (closed) throw new Error("Storage handle is closed"); };
     const call = async <T>(data: CoordinatorPlatformStorageData): Promise<T> => unwrap<T>(await client.storagePlatformData(data), "platform storage");
@@ -103,14 +129,19 @@ export function createStorageBindingAuthority(
         if (closed || !isPreIoGrantValidationFailure(error)) throw error;
         invalidate(grant);
         const rebound = await getGrant();
+        assertPlatformGrantBinding(rebound, input.declaration);
         return call<T>(build(rebound.platformGrantId));
       }
     };
     return {
-      bucketId: "coordinator",
-      bucketGeneration: 0,
-      ownerPublicKeyHex: "",
-      applicationStorageId: initialGrant.applicationStorageId,
+      get bucketId() { return (currentGrant ?? initialGrant).bucketId; },
+      get bucketGeneration() { return (currentGrant ?? initialGrant).bucketGeneration; },
+      moduleId: initialGrant.moduleId,
+      purposeId: initialGrant.purposeId,
+      scope: "bucket",
+      authority: initialGrant.authority,
+      model: "kv",
+      schemaVersion: initialGrant.schemaVersion,
       async get<T = KeyValueValue>(key: string, options: { partition?: string } = {}) { assertOpen(); assertKey(key); return request<KeyValueEntry<T> | undefined>((platformGrantId) => ({ type: "platform.get", platformGrantId, key, partition: options.partition })); },
       async list(listInput: KeyValueListInput = {}) { assertOpen(); return request<KeyValueListResult>((platformGrantId) => ({ type: "platform.list", platformGrantId, input: listInput })); },
       async put<T = KeyValueValue>(key: string, value: T, condition = {}) { assertOpen(); assertKey(key); return request<KeyValueEntryMeta>((platformGrantId) => ({ type: "platform.put", platformGrantId, key, value, condition })); },

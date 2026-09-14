@@ -1,4 +1,4 @@
-import { deriveThirdPartyApplicationStorageId, validateApplicationStorageId } from "@keymaster/contracts";
+import { buildOwnerStorageModuleRoot, deriveThirdPartyStorageModuleId, validateStorageModuleId, validateStoragePurposeId } from "@keymaster/contracts";
 import type { OwnerAppStorageGrant, VerifiedAppIdentity } from "@keymaster/contracts";
 import { StoragePathError, buildObjectKey, normalizeRoot } from "../../bucket-providers/bucketPath.js";
 
@@ -13,10 +13,15 @@ export function validateStorageIdentity(identity: VerifiedAppIdentity): StorageN
   return { publisherPublicKeyHex: identity.publisherPublicKeyHex.toLowerCase(), appId: identity.appId };
 }
 
-export function buildOwnerAppNamespaceRoot(grant: Pick<OwnerAppStorageGrant, "ownerPublicKeyHex" | "applicationStorageId">): string {
+export function buildOwnerAppNamespaceRoot(grant: Pick<OwnerAppStorageGrant, "ownerPublicKeyHex" | "moduleId" | "purposeId">): string {
   if (!/^(02|03)[0-9a-f]{64}$/u.test(grant.ownerPublicKeyHex)) throw new StoragePathError("owner key is invalid");
-  validateApplicationStorageId(grant.applicationStorageId);
-  return normalizeRoot(`${grant.ownerPublicKeyHex.toLowerCase()}/${grant.applicationStorageId}/`);
+  try {
+    validateStorageModuleId(grant.moduleId);
+    validateStoragePurposeId(grant.purposeId);
+  } catch {
+    throw new StoragePathError("storage declaration is invalid");
+  }
+  return normalizeRoot(buildOwnerStorageModuleRoot({ ownerPublicKeyHex: grant.ownerPublicKeyHex, moduleId: grant.moduleId, purposeId: grant.purposeId }));
 }
 
 export function buildStorageContext(input: {
@@ -33,7 +38,7 @@ export function buildStorageContext(input: {
   if (!/^(02|03)[0-9a-f]{64}$/u.test(input.ownerPublicKeyHex)) throw new StoragePathError("owner key is invalid");
   if (!input.bucketId || input.bucketId.includes("/")) throw new StoragePathError("bucket is invalid");
   if (!Number.isSafeInteger(input.bucketGeneration) || input.bucketGeneration < 1) throw new StoragePathError("bucket generation is invalid");
-  const applicationStorageId = deriveThirdPartyApplicationStorageId(identity.publisherPublicKeyHex, identity.appId);
+  const moduleId = deriveThirdPartyStorageModuleId(identity.publisherPublicKeyHex, identity.appId);
   return {
     connectSessionId: input.connectSessionId,
     transportOrigin: input.transportOrigin,
@@ -41,7 +46,8 @@ export function buildStorageContext(input: {
     bucketId: input.bucketId,
     bucketGeneration: input.bucketGeneration,
     ownerPublicKeyHex: input.ownerPublicKeyHex.toLowerCase(),
-    applicationStorageId,
+    moduleId,
+    purposeId: "files",
     sessionEpoch: input.sessionEpoch
   };
 }

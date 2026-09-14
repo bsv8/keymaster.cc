@@ -29,10 +29,10 @@ import {
   PageHeader,
   type DataTableColumn
 } from "@keymaster/ui";
-import { useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { router, useI18n, useLocale, usePluginHost, useRegistry } from "@keymaster/runtime";
-import { formatShortPublicKey } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { formatShortPublicKey, KeyPersistedButActivationFailedError } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
   KeyIdentity,
@@ -45,14 +45,11 @@ import { VaultKeyCreateModal } from "./VaultKeyCreateModal.js";
 import { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
 import { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
 import { VaultKeyDeleteModal } from "./VaultKeyDeleteModal.js";
-import { KeyPersistedButActivationFailedError } from "./vaultService.js";
 import { VaultKeySwitchModal } from "./VaultKeySwitchModal.js";
 
 export function VaultSettingsPage() {
   const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
-  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
-  const isCatalogBucket = storage?.isCatalogBucket?.() === true;
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染 + 取当前 locale 用于日期格式化。
@@ -473,9 +470,9 @@ export function VaultSettingsPage() {
       <Button onClick={() => setCreating(true)}>
         {t("vault.settings.action.new", { defaultValue: "新建 Key" })}
       </Button>
-      {!isCatalogBucket ? <Button variant="secondary" onClick={openChangePassword}>
+      <Button variant="secondary" onClick={openChangePassword}>
         {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
-      </Button> : null}
+      </Button>
       <Button variant="secondary" onClick={() => setImportingBackup(true)}>
         {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
       </Button>
@@ -495,7 +492,7 @@ export function VaultSettingsPage() {
       <PageHeader
         title={t("vault.settings.title", { defaultValue: "Key 管理" })}
         description={t("vault.settings.description", {
-          defaultValue: "管理本地 Vault 中的 Key、active 身份和加密备份。"
+          defaultValue: "管理当前 Catalog 桶中的 Key、active 身份和加密备份。"
         })}
         actions={headerActions}
       />
@@ -513,9 +510,9 @@ export function VaultSettingsPage() {
               <Button onClick={() => setCreating(true)}>
                 {t("vault.settings.action.new", { defaultValue: "新建 Key" })}
               </Button>
-              {!isCatalogBucket ? <Button variant="secondary" onClick={openChangePassword}>
+              <Button variant="secondary" onClick={openChangePassword}>
                 {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
-              </Button> : null}
+              </Button>
               <Button variant="secondary" onClick={() => setImportingBackup(true)}>
                 {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
               </Button>
@@ -541,7 +538,7 @@ export function VaultSettingsPage() {
           keyLabel={deleting.label}
           // 硬切换 003 收尾：传完整公钥，modal 内部按需现算短公钥。
           publicKeyHex={deleting.publicKeyHex}
-          requiresBucketPassword={storage?.isCatalogBucket?.() === true}
+          requiresBucketPassword
           onConfirmDelete={handleDelete}
           onClose={() => setDeleting(null)}
         />
@@ -552,10 +549,6 @@ export function VaultSettingsPage() {
           open={creating}
           onCreate={handleCreate}
           onExport={handleCreateExport}
-          onPasskeys={(key) => {
-            void key;
-            router.push("/settings/current-key");
-          }}
           onClose={() => setCreating(false)}
         />
       ) : null}

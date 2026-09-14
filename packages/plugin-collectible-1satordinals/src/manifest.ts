@@ -53,7 +53,8 @@ import {
 import { createOrdinalsCollectibleProvider } from "./ordinalsCollectibleProvider.js";
 import { createOrdinalsSyncTask } from "./ordinalsSync.js";
 import { createOrdinalsSpendProtectionProvider } from "./ordinalsSpendProtection.js";
-import { createOrdinalMintHistoryRepository, ORDINALS_SCHEMA_VERSION, ORDINALS_STORAGE_ID } from "./storage/ordinalMintHistoryRepository.js";
+import { createOrdinalMintHistoryRepository } from "./storage/ordinalMintHistoryRepository.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import { createOrdinalMintService, ORDINAL_MINT_SERVICE_CAPABILITY } from "./ordinalMintService.js";
 import { createOrdinalTransferService, ORDINAL_TRANSFER_SERVICE_CAPABILITY } from "./ordinalTransferService.js";
 import { createOrdinalTransferHandler } from "./OrdinalTransferWidget.js";
@@ -149,7 +150,7 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
       runtime: "window-main",
       scopeKind: "owner-session",
       provides: [ORDINAL_MINT_SERVICE_CAPABILITY, ORDINAL_TRANSFER_SERVICE_CAPABILITY],
-      storage: { scope: "key", applicationStorageId: ORDINALS_STORAGE_ID, schemaVersion: ORDINALS_SCHEMA_VERSION },
+      storage: CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory,
       dependencies: defineRuntimeUnitDependencies([
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的未花费 UTXO 集合" },
         { capability: WOC_1SAT_ORDINALS_CAPABILITY, reason: "按 outpoint 反查 1Sat inscription" },
@@ -194,8 +195,7 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
     const service = createOrdinalsService({ keyspace, p2pkh, wocOneSat });
     const provider = createOrdinalsCollectibleProvider({ service });
     const spendProtection = createOrdinalsSpendProtectionProvider({ service });
-    if (!ctx.storage) throw new Error("1Sat Ordinals owner storage binding is unavailable");
-    const historyRepository = createOrdinalMintHistoryRepository(ctx.storage);
+    const historyRepository = createOrdinalMintHistoryRepository(ctx.storageFor("mint-history"));
     const syncTask = createOrdinalsSyncTask({ service, woc, historyRepository, keyspace, vault, assetDataNotifier });
     const mintService = createOrdinalMintService({
       p2pkh,

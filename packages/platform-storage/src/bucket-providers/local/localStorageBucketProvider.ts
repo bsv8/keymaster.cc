@@ -10,7 +10,7 @@ import type {
 } from "@keymaster/contracts";
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { StorageErrorCode } from "@keymaster/contracts";
-import { StorageRuntimeError, storageErrorCode } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError, storageErrorCode } from "../../runtime/storageError.js";
 import { browserStorageLocks, type BrowserStorageLocks } from "../../runtime/browserLocks.js";
 import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
 

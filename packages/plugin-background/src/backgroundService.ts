@@ -24,9 +24,7 @@ import type {
   BackgroundTaskState,
   BackgroundCommandResult
 } from "@keymaster/contracts";
-import type { KeyValueStore } from "@keymaster/contracts";
 import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { createKeyValueSettingsStore, type KeyValueSettingsStore } from "@keymaster/runtime";
 
 interface TaskRuntime {
   def: BackgroundTaskDefinition;
@@ -43,8 +41,6 @@ interface TaskRuntime {
   runPromise?: Promise<void>;
   lastScheduledAt?: number;
 }
-
-const SCHEDULE_SETTINGS_KEY = "settings";
 
 /** 默认设置。 */
 const DEFAULT_SYNC_SETTINGS: BackgroundSyncSettings = {
@@ -93,32 +89,19 @@ export interface BackgroundServiceHandle extends BackgroundService {
 }
 
 export interface CreateBackgroundServiceOptions {
-  /** Host 绑定的 Background owner/App K-V 句柄。 */
-  storage?: KeyValueStore;
 }
 
 /**
  * 创建后台任务服务。
  * 施工单 002：删除所有 leader 选举逻辑，由 Coordinator 统一管理。
  */
-export function createBackgroundService(options: CreateBackgroundServiceOptions = {}): BackgroundServiceHandle {
+export function createBackgroundService(_options: CreateBackgroundServiceOptions = {}): BackgroundServiceHandle {
   const tasks = new Map<string, TaskRuntime>();
   const cooldownMap = new Map<string, number>();
   const listeners = new Set<(s: BackgroundTaskSnapshot[]) => void>();
   let intervalTimer: ReturnType<typeof setInterval> | undefined;
   let disposed = false;
-  const settingsStore: KeyValueSettingsStore<BackgroundSyncSettings> = createKeyValueSettingsStore({
-    storage: options.storage,
-    key: SCHEDULE_SETTINGS_KEY,
-    partition: "settings",
-    defaults: () => ({ ...DEFAULT_SYNC_SETTINGS }),
-    normalize: (raw) => {
-      const value = raw && typeof raw === "object"
-        ? (raw as Partial<BackgroundSyncSettings>).assetHoldingsIntervalMs
-        : undefined;
-      return { assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(value, 0) };
-    }
-  });
+  let scheduleSettings: BackgroundSyncSettings = { ...DEFAULT_SYNC_SETTINGS };
 
   function snapshot(task: TaskRuntime): BackgroundTaskSnapshot {
     return {
@@ -157,14 +140,14 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
    * 读取后台同步设置。
    */
   function loadScheduleSettings(): BackgroundSyncSettings {
-    return settingsStore.load();
+    return { ...scheduleSettings };
   }
 
   /**
    * 保存后台同步设置。
    */
   function saveScheduleSettings(settings: BackgroundSyncSettings): void {
-    settingsStore.save(settings);
+    scheduleSettings = { ...settings };
   }
 
   function register(def: BackgroundTaskDefinition) {

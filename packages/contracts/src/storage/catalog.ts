@@ -5,7 +5,7 @@
 
 import type { KeyImportMaterial } from "../keyImport.js";
 
-/** 正式的桶后端；`opfs` 只作为旧格式识别值，不属于新目录。 */
+/** 正式的 V1 桶后端。 */
 export type StorageBucketBackend = "local" | "s3";
 
 /** Local 桶的连接配置；Local 桶数据本身位于 localStorage。 */
@@ -324,22 +324,16 @@ export interface InitialSetupRecoveryRecordV1 {
   transactionId: string;
   /** 本次候选桶 ID。 */
   bucketId: string;
-  /**
-   * 完整目录条目的非秘密指纹；用于旧格式桶 ID 兼容清理时确认目录
-   * 条目确实属于本事务。没有该字段的旧记录不能覆盖同 ID 竞争桶。
-   */
-  catalogEntryFingerprint?: string;
+  /** 完整目录条目的非秘密指纹，用于确认目录条目属于本事务。 */
+  catalogEntryFingerprint: string;
   /** 候选目录配置版本，用于恢复时拒绝清理同 ID 的新条目。 */
   configRevision: number;
   /** 候选 Hold 快照版本，用于恢复时拒绝清理同 ID 的新条目。 */
   snapshotRevision: number;
   /** 候选桶后端。 */
   backend: StorageBucketBackend;
-  /**
-   * S3 物理目标的非秘密指纹；只绑定 endpoint/region/bucket/prefix/请求风格，
-   * 不包含 Access Key、Secret 或 Session Token。Local 桶不需要此字段。
-   */
-  connectionFingerprint?: string;
+  /** 物理目标的非秘密指纹；不包含 Access Key、Secret 或 Session Token。 */
+  connectionFingerprint: string;
   /** 最近一次已持久化的事务阶段。 */
   phase: InitialSetupPhase;
   /** 目录权威引用状态。 */

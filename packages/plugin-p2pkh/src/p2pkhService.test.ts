@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { KeyspaceService, OwnerAppStore } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { createP2pkhService } from "./p2pkhService.js";
@@ -26,10 +27,8 @@ function keyspace(): KeyspaceService {
 
 function ownerStore(): OwnerAppStore {
   return createInMemoryKeyValueStore({
-    scope: "key",
+    ...CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
     ownerPublicKeyHex: OWNER,
-    applicationStorageId: "UTXOS",
-    schemaVersion: 1,
     bucketId: "test",
     bucketGeneration: 1
   }) as OwnerAppStore;

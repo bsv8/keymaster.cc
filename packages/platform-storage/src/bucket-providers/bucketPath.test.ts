@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildOwnerAppNamespaceRoot, buildKeyForContext } from "../storage-access/owner-app/ownerAppNamespace.js";
-import { deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
+import { deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
 import { StoragePathError, assertKeyInRoot, normalizeDirectoryPath } from "./bucketPath.js";
 
 const identity = {
@@ -14,16 +14,16 @@ const identity = {
 describe("storage namespace and path guards", () => {
   it("keeps publisher/app/root boundaries explicit", () => {
     const ownerPublicKeyHex = `02${"33".repeat(32)}`;
-    const applicationStorageId = deriveThirdPartyApplicationStorageId(identity.publisherPublicKeyHex, identity.appId);
-    const root = buildOwnerAppNamespaceRoot({ ownerPublicKeyHex, applicationStorageId });
-    expect(root).toBe(`${ownerPublicKeyHex}/${applicationStorageId}/`);
+    const moduleId = deriveThirdPartyStorageModuleId(identity.publisherPublicKeyHex, identity.appId);
+    const root = buildOwnerAppNamespaceRoot({ ownerPublicKeyHex, moduleId, purposeId: "files" });
+    expect(root).toBe(`${ownerPublicKeyHex}/.keymaster/modules/${moduleId}/files/`);
     expect(buildKeyForContext(root, "docs/a.txt")).toBe(`${root}docs/a.txt`);
     expect(() => assertKeyInRoot(root, `${identity.publisherPublicKeyHex}/app-aa/file`)).toThrow(StoragePathError);
   });
 
   it.each(["../app-b/x", "/publisher/app-b/x", "a//b", "a/./b", "a\\b", "a\u0000b", "a\u2215b"]) (
     "rejects traversal or separator attack: %s",
-    (value) => expect(() => buildKeyForContext(`${identity.publisherPublicKeyHex}/app-a/`, value)).toThrow(StoragePathError)
+    (value) => expect(() => buildKeyForContext(`${identity.publisherPublicKeyHex}/.keymaster/modules/app-a/files/`, value)).toThrow(StoragePathError)
   );
 
   it("does not repair repeated separators", () => {

@@ -3,7 +3,7 @@ import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, TO
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { StorageBucketManagerEntry } from "./ui/StorageBucketManagerPage.js";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
-import type { StorageRuntimeSnapshot } from "./runtime/storageRuntimeController.js";
+import type { StorageRuntimeSnapshot } from "./runtime/storageController.js";
 
 export const STORAGE_PLATFORM_PLUGIN_ID = "storage";
 
@@ -32,13 +32,6 @@ Object.assign(resources.resources.en as Record<string, string>, {
   "storage.settings.connectionTitle": "Connection",
   "storage.settings.connectionDescription": "Choose a provider and enter its bucket location.",
   "storage.settings.credentialsTitle": "Credentials",
-  "storage.settings.profilePassword": "Storage Profile password",
-  "storage.settings.profilePasswordRequired": "Enter a Storage Profile password of at least 8 characters.",
-  "storage.settings.unlockProfile": "Unlock Storage Profile",
-  "storage.settings.selectOpfs": "Use local OPFS",
-  "storage.settings.importProfile": "Import Storage Profile",
-  "storage.settings.profileUnlocked": "Storage Profile unlocked.",
-  "storage.settings.credentialsSealed": "Stored in the encrypted Storage Profile and never displayed.",
   "storage.settings.browserAccessTitle": "Browser access",
   "storage.settings.r2Cors": "R2 must allow this exact app origin before browser requests can reach the bucket.",
   "storage.settings.corsOriginExact": "The scheme, hostname and port must match exactly.",
@@ -133,19 +126,6 @@ Object.assign(resources.resources.en as Record<string, string>, {
       "storage.bucketManager.readKeys": "Enter password to read Keys",
       "storage.bucketManager.switchPasswordPrompt": "Enter the bucket password for {{label}}",
       "storage.bucketManager.err.switch": "Bucket switch failed",
-      "storage.bucketManager.legacyTitle": "Legacy storage detected",
-      "storage.bucketManager.legacyOpfs": "This is legacy single-bucket OPFS data. The new flow will not silently map it to Local or delete the original data.",
-      "storage.bucketManager.legacyProfile": "This is a legacy independent Storage Profile. It uses a different password and storage model from the new bucket catalog.",
-      "storage.bucketManager.legacyProfileHint": "Export the encrypted Profile first. Its old password is used only by the legacy unlock flow; export does not decrypt credentials.",
-      "storage.bucketManager.legacyExportProfile": "Export legacy Profile",
-      "storage.bucketManager.legacyProfileExported": "The legacy Storage Profile was exported; the original record was kept and not migrated.",
-      "storage.bucketManager.legacyKeysTitle": "Legacy KeyHold backups",
-      "storage.bucketManager.legacyKeysHint": "Export each encrypted KeyHold file, then import them one by one from Key management after creating a new bucket.",
-      "storage.bucketManager.legacyExportKey": "Export KeyHold",
-      "storage.bucketManager.legacyKeyExported": "The legacy KeyHold backup was exported; the original OPFS data was kept.",
-      "storage.bucketManager.legacyKeysEmpty": "No legacy Keys were read yet; confirm that the legacy OPFS session has started.",
-      "storage.bucketManager.openKeyManagement": "Open Key management",
-      "storage.bucketManager.legacyMigrationNote": "Migration is explicit and reversible: export and verify old files, then create a new Local/S3 bucket. Do not clean up legacy OPFS or Profile data until the new bucket is confirmed usable.",
       "storage.bucketManager.import": "Import a bucket",
       "storage.bucketManager.importLabel": "Enter a name for the imported bucket",
       "storage.bucketManager.importPassword": "Enter the Hold file password",
@@ -212,8 +192,7 @@ Object.assign(resources.resources.en as Record<string, string>, {
       "storage.bucketManager.err.s3-bucket-invalid": "Bucket must be a valid 3–63 character lowercase S3 bucket name.",
       "storage.bucketManager.err.s3-credentials-required": "Enter Access Key ID and Secret Access Key.",
       "storage.bucketManager.err.s3-session-token-invalid": "Session Token cannot contain control characters.",
-      "storage.bucketManager.err.s3-prefix-invalid": "Prefix must be a safe relative object path without . or .. segments.",
-      "storage.bucketManager.err.legacyExport": "Legacy storage export failed"
+      "storage.bucketManager.err.s3-prefix-invalid": "Prefix must be a safe relative object path without . or .. segments."
 });
 
 Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
@@ -226,13 +205,6 @@ Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
   "storage.settings.connectionTitle": "连接配置",
   "storage.settings.connectionDescription": "选择存储服务并填写 Bucket 位置。",
   "storage.settings.credentialsTitle": "访问凭据",
-  "storage.settings.profilePassword": "Storage Profile 独立密码",
-  "storage.settings.profilePasswordRequired": "请输入至少 8 位的 Storage Profile 独立密码。",
-  "storage.settings.unlockProfile": "解锁 Storage Profile",
-  "storage.settings.selectOpfs": "选择本机 OPFS",
-  "storage.settings.importProfile": "导入 Storage Profile",
-  "storage.settings.profileUnlocked": "Storage Profile 已解锁。",
-  "storage.settings.credentialsSealed": "已加密保存在 Storage Profile 中，不会回显。",
   "storage.settings.browserAccessTitle": "浏览器访问",
   "storage.settings.r2Cors": "浏览器访问 R2 前，Bucket 必须允许当前应用的精确 Origin。",
   "storage.settings.corsOriginExact": "协议、主机名和端口必须完全一致。",
@@ -327,19 +299,6 @@ Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
       "storage.bucketManager.readKeys": "输入密码读取 Keys",
       "storage.bucketManager.switchPasswordPrompt": "请输入“{{label}}”的桶密码",
       "storage.bucketManager.err.switch": "切换桶失败",
-      "storage.bucketManager.legacyTitle": "检测到旧版存储",
-      "storage.bucketManager.legacyOpfs": "这是旧版 OPFS 单桶数据。新版不会把它静默映射成 Local，也不会删除原数据。",
-      "storage.bucketManager.legacyProfile": "这是旧版独立 Storage Profile。它与新版桶目录、桶密码模型不同，不能直接当作新版桶。",
-      "storage.bucketManager.legacyProfileHint": "先导出加密 Profile 文件，原密码仍只用于旧版解锁；导出不会解密凭据。",
-      "storage.bucketManager.legacyExportProfile": "导出旧 Profile",
-      "storage.bucketManager.legacyProfileExported": "旧版 Storage Profile 已导出；原记录仍保留，未自动迁移。",
-      "storage.bucketManager.legacyKeysTitle": "旧版 KeyHold 备份",
-      "storage.bucketManager.legacyKeysHint": "逐把导出加密 KeyHold 文件，再创建新版桶后从 Key 管理中逐项导入。",
-      "storage.bucketManager.legacyExportKey": "导出 KeyHold",
-      "storage.bucketManager.legacyKeyExported": "旧版 KeyHold 备份已导出；原 OPFS 数据仍保留。",
-      "storage.bucketManager.legacyKeysEmpty": "暂未读取到旧 Key；请确认旧 OPFS 会话已启动。",
-      "storage.bucketManager.openKeyManagement": "打开 Key 管理",
-      "storage.bucketManager.legacyMigrationNote": "迁移是显式、逐步且可回退的：先导出并验证旧文件，再创建新版 Local/S3 桶；在确认新桶可用前，不要清理旧 OPFS 或旧 Profile。",
       "storage.bucketManager.import": "导入桶",
       "storage.bucketManager.importLabel": "输入导入桶名称",
       "storage.bucketManager.importPassword": "输入 Hold 文件密码",
@@ -407,7 +366,6 @@ Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
       "storage.bucketManager.err.s3-credentials-required": "请填写 Access Key ID（访问身份）和 Secret Access Key（访问密钥）。",
       "storage.bucketManager.err.s3-session-token-invalid": "Session Token 不能包含控制字符。",
       "storage.bucketManager.err.s3-prefix-invalid": "Prefix 必须是安全的相对对象路径，不能包含 . 或 .. 段。",
-      "storage.bucketManager.err.legacyExport": "旧版存储导出失败"
 });
 
 const storagePlatformPluginDefinition = {

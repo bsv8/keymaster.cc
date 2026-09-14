@@ -16,6 +16,7 @@ export {
 export {
   BSV_PRICE_SETTINGS_STORAGE_KEY,
   createKeyValueBsvPriceSettingsStore,
+  createMemoryBsvPriceSettingsStore,
   normalizePublisherPublicKeyHex,
   type BsvPriceGlobalConfig,
   type BsvPricePublicKeyCheck,

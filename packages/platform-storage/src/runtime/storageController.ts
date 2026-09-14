@@ -1,14 +1,10 @@
 import type {
-  NormalizedStorageProviderConfig,
   OwnerAppStorageGrant,
   StorageDeleteResult,
   BucketConditionalCapabilitiesView,
   BucketConditionalCapabilityProbeResult,
   StorageDirectoryResult,
   StorageListResult,
-  StorageOpfsProbeResult,
-  StorageProbeResult,
-  StorageProviderConfigDraft,
   StorageProviderConnectionView,
   StorageProviderSummary,
   StoragePutResult,
@@ -18,10 +14,9 @@ import type {
   StorageBucketProvider,
   StorageUploadAbortResult,
   StorageUploadBeginResult,
-  StorageUploadPartResult,
-  StorageSecretService
+  StorageUploadPartResult
 } from "@keymaster/contracts";
-import { deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
+import { deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
 import {
   STORAGE_CURSOR_TTL_MS,
   STORAGE_MAX_CURSORS_GLOBAL,
@@ -35,15 +30,11 @@ import {
 } from "@keymaster/contracts";
 import type { BucketListOutput, BucketObjectStore, BucketObjectStoreCapabilityState } from "../bucket-providers/bucketObjectStore.js";
 import { createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode } from "../bucket-providers/bucketObjectStore.js";
-import { createS3BucketObjectStore } from "../bucket-providers/s3/s3BucketObjectStore.js";
 import { createProviderBackedBucketObjectStore } from "../bucket-providers/providerBackedBucketObjectStore.js";
-import type { MultipartUploadRepository, StoredMultipartUploadRecord, StoredProviderConfigRecord } from "../bootstrap/multipartUploadRepository.js";
-import { configFromBytes, configToBytes, normalizeProviderConfig, summaryForConfig } from "../bucket-providers/s3/s3ClientFactory.js";
+import type { MultipartUploadRepository, StoredMultipartUploadRecord } from "../bootstrap/multipartUploadRepository.js";
 import { buildKeyForContext, buildOwnerAppNamespaceRoot } from "../storage-access/owner-app/ownerAppNamespace.js";
 import { basename, normalizeDirectoryPath, normalizeObjectPath, stripRoot, StoragePathError } from "../bucket-providers/bucketPath.js";
-import { StorageRuntimeError, storageErrorCode } from "./storageRuntimeError.js";
-
-export const STORAGE_SECRET_SCOPE = "keymaster.storage.provider-config.v1";
+import { StorageRuntimeError, storageErrorCode } from "./storageError.js";
 
 export interface StorageRuntimeSnapshot {
   status: StorageRuntimeControllerStatus;
@@ -77,15 +68,24 @@ interface RuntimeUpload {
   connectSessionId: string;
 }
 
+/** 当前已绑定桶的内存描述；不代表可恢复的 Provider 配置。 */
+interface RuntimeBucketBindingRecord {
+  providerId: StorageProviderSummary["providerId"];
+  publicSummary: {
+    bucketHint: string;
+    endpointHint?: string;
+    accessKeyHint: string;
+  };
+  generation: number;
+  updatedAt: number;
+}
+
 export interface StorageRuntimeControllerDeps {
   multipartUploadRepository: MultipartUploadRepository;
   /** Coordinator 已启动的唯一抽象桶 Provider；提供后文件 API 与 K-V 共桶。 */
   bucketProvider?: StorageBucketProvider;
   /** 当前抽象桶世代；用于 multipart 和 cursor 的失效判断。 */
   bucketGeneration?: number;
-  /** 独立于 Vault 的 Storage Profile 密钥服务。 */
-  secret: StorageSecretService;
-  objectStoreFactory?: (config: NormalizedStorageProviderConfig, capabilityState?: BucketObjectStoreCapabilityState) => BucketObjectStore;
   now?: () => number;
   generateId?: () => string;
   logger?: { info?: (event: unknown) => void; warn?: (event: unknown) => void; error?: (event: unknown) => void };
@@ -105,16 +105,6 @@ function asError(error: unknown): StorageRuntimeError {
   return new StorageRuntimeError("storage_provider_error");
 }
 
-function diagnostic(error: unknown): StorageProbeResult["diagnostic"] {
-  if (error instanceof StorageRuntimeError && error.diagnostic) return error.diagnostic;
-  const code = storageErrorCode(error);
-  if (code === "storage_forbidden") return "forbidden";
-  if (code === "storage_not_found") return "not-found";
-  if (code === "storage_unavailable") return "network";
-  if (code === "storage_provider_error") return "provider";
-  return "configuration";
-}
-
 function capabilityView(state: BucketObjectStoreCapabilityState, generation: number): BucketConditionalCapabilitiesView {
   return {
     generation,
@@ -127,23 +117,23 @@ function assertLimit(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new StorageRuntimeError("storage_limit_exceeded", `${name} is invalid`);
 }
 
-function rootForUploadRecord(config: NormalizedStorageProviderConfig, record: StoredMultipartUploadRecord): string {
-  void config;
-  return buildOwnerAppNamespaceRoot(record);
+function rootForUploadRecord(record: StoredMultipartUploadRecord): string {
+  return buildOwnerAppNamespaceRoot({
+    ownerPublicKeyHex: record.ownerPublicKeyHex,
+    moduleId: record.moduleId,
+    purposeId: record.purposeId,
+  });
 }
 
 export class StorageRuntimeControllerImpl implements StorageRuntimeControllerContract {
   private readonly listeners = new Set<() => void>();
   private readonly cursors = new Map<string, CursorRecord>();
   private readonly runtimeUploads = new Map<string, RuntimeUpload>();
-  private activeConfig?: NormalizedStorageProviderConfig;
   private activeStore?: BucketObjectStore;
   private activeCapabilityState?: BucketObjectStoreCapabilityState;
   private activeCapabilityUnsubscribe?: () => void;
-  private activeRecord: StoredProviderConfigRecord | null = null;
+  private activeRecord: RuntimeBucketBindingRecord | null = null;
   private currentStatus: StorageRuntimeControllerStatus = "unconfigured";
-  private mutation: Promise<void> = Promise.resolve();
-  private probeController?: AbortController;
   private capabilityProbeController?: AbortController;
   private rotationAbortController = new AbortController();
   private rotationActive = false;
@@ -156,7 +146,7 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
 
   static async create(deps: StorageRuntimeControllerDeps): Promise<StorageRuntimeControllerImpl> {
     const service = new StorageRuntimeControllerImpl(deps);
-    await service.loadPersistedConfig();
+    await service.bindCurrentBucket();
     return service;
   }
 
@@ -171,7 +161,6 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     this.lifecycleFence += 1;
     this.rotationAbortController.abort();
     this.rotationAbortController = new AbortController();
-    this.probeController?.abort();
     this.capabilityProbeController?.abort();
     this.cursors.clear();
     this.setStatus("reconfiguring");
@@ -225,10 +214,10 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     this.rotationAbortController = new AbortController();
     if (degraded && this.activeRecord) {
       this.setStatus("degraded");
-    } else if (this.activeStore && this.activeConfig && this.activeRecord) {
+    } else if (this.activeStore && this.activeRecord) {
       this.setStatus("ready");
     } else if (this.activeRecord) {
-      void this.restoreAfterUnlock();
+      void this.bindCurrentBucket();
     } else {
       this.setStatus("unconfigured");
     }
@@ -254,152 +243,63 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     if (this.rotationActive || signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
   }
 
-  private async loadPersistedConfig(): Promise<void> {
-    this.activeRecord = await this.deps.multipartUploadRepository.getProviderConfig();
-    if (this.deps.bucketProvider) {
-      // Provider 已由 StorageBootstrapController 探测并绑定。这里不能再
-      // 根据旧的 Connect 配置创建第二个 S3 client；文件 API 必须复用同一
-      // 个抽象桶。旧配置只作为设置页摘要保留。
-      const capabilityState = this.activeCapabilityState ?? createBucketObjectStoreCapabilityState();
-      this.activeConfig = this.unifiedRuntimeConfig();
-      this.activeStore = this.makeActiveStore(capabilityState);
-      this.activeCapabilityState = capabilityState;
-      this.bindCapabilityState(capabilityState);
-      this.setStatus("ready");
-      await this.restoreRuntimeUploads(this.activeConfig);
-      await this.cleanupStaleUploads();
+  private async bindCurrentBucket(): Promise<void> {
+    const provider = this.deps.bucketProvider;
+    if (!provider) {
+      this.setStatus("unconfigured");
       return;
     }
-    if (!this.activeRecord) { this.setStatus("unconfigured"); return; }
-    this.setStatus("reconfiguring");
-    await this.restoreAfterUnlock();
-  }
-
-  private releaseRuntime(reason: string): void {
-    // Lock/reconfiguration is a hard lifecycle boundary. Abort the runtime
-    // controller before dropping the client so late provider completions cannot
-    // pass the request gate after Vault lock.
-    this.rotationAbortController.abort();
-    this.lifecycleFence += 1;
-    this.rotationAbortController = new AbortController();
-    this.capabilityProbeController?.abort();
-    const store = this.activeStore;
-    this.cursors.clear();
-    this.activeStore = undefined;
-    this.activeConfig = undefined;
-    if (this.activeRecord) this.setStatus("locked");
-    else this.setStatus("unconfigured");
-    try { store?.dispose(); } catch { /* best effort */ }
-    // Remote multipart cleanup is intentionally not awaited here. Durable
-    // orphan records are retried after the next unlock.
-    this.deps.logger?.info?.({ scope: "storage", event: "runtime.released", reason });
-  }
-
-  private async restoreAfterUnlock(): Promise<void> {
-    return this.trackRequest(async () => {
-    if (this.deps.bucketProvider) {
-      // 统一抽象桶已经在 bootstrap 阶段完成认证和探测，不能再根据
-      // `keymaster.storage` 中的旧配置打开第二个 Provider。
-      this.setStatus("ready");
-      return;
-    }
-    if (this.disposed || this.rotationActive || !this.activeRecord) return;
-    this.setStatus("reconfiguring");
-    try {
-      const bytes = await this.deps.secret.open(STORAGE_SECRET_SCOPE, this.activeRecord.sealedConfig);
-      try {
-        const config = configFromBytes(bytes);
-        const capabilityState = this.activeCapabilityState ?? createBucketObjectStoreCapabilityState();
-        const store = this.makeStore(config, capabilityState);
-        try {
-          await this.boundedProvider(() => store.probe("", this.rotationAbortController.signal), this.rotationAbortController);
-          this.assertRequestActive(this.rotationAbortController.signal);
-          if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage runtime is disposed");
-        } catch (error) {
-          try { store.dispose(); } catch { /* best effort */ }
-          throw error;
-        }
-        this.activeConfig = config;
-        this.activeStore = store;
-        this.activeCapabilityState = capabilityState;
-        this.bindCapabilityState(capabilityState);
-        this.setStatus("ready");
-        await this.restoreRuntimeUploads(config);
-        await this.cleanupStaleUploads();
-      } finally { bytes.fill(0); }
-    } catch (error) {
-      this.releaseRuntime("restore failed");
-      const profileLocked = error instanceof Error && error.message === "Storage Profile is unavailable";
-      this.setStatus(this.rotationActive ? "reconfiguring" : profileLocked ? "locked" : "degraded");
-      this.deps.logger?.warn?.({ scope: "storage", event: "restore.failed", code: storageErrorCode(error) });
-    }
-    });
-  }
-
-  private makeStore(config: NormalizedStorageProviderConfig, capabilityState = createBucketObjectStoreCapabilityState()): BucketObjectStore {
-    return this.deps.objectStoreFactory ? this.deps.objectStoreFactory(config, capabilityState) : createS3BucketObjectStore(config, { capabilityState });
+    const capabilityState = this.activeCapabilityState ?? createBucketObjectStoreCapabilityState();
+    this.activeRecord = {
+      // The actual connection and credentials belong to the Coordinator's
+      // bucket binding. Runtime only keeps a redacted in-memory summary.
+      providerId: "s3-compatible",
+      publicSummary: { bucketHint: provider.bucketId, accessKeyHint: "unified" },
+      generation: this.runtimeGeneration(),
+      updatedAt: now(this.deps),
+    };
+    this.activeStore = this.makeActiveStore(capabilityState);
+    this.activeCapabilityState = capabilityState;
+    this.bindCapabilityState(capabilityState);
+    this.setStatus("ready");
+    await this.restoreRuntimeUploads();
+    await this.cleanupStaleUploads();
   }
 
   private makeActiveStore(capabilityState = createBucketObjectStoreCapabilityState()): BucketObjectStore {
-    return this.deps.bucketProvider
-      ? createProviderBackedBucketObjectStore(this.deps.bucketProvider, capabilityState)
-      : this.makeStore(this.activeConfig!, capabilityState);
-  }
-
-  private unifiedRuntimeConfig(): NormalizedStorageProviderConfig {
-    // 统一 Provider 模式的文件运行时只把此配置作为类型和诊断占位，
-    // 真正的连接、凭据和读写均由 bucketProvider 持有，绝不使用这些值
-    // 创建新的客户端。
-    return {
-      version: 1,
-      providerId: this.deps.bucketProvider?.provider === "s3" ? "aws-s3" : "s3-compatible",
-      connection: { endpoint: "https://unified.storage.invalid", region: "keymaster", bucket: this.deps.bucketProvider?.bucketId ?? "unified", forcePathStyle: true },
-      credentials: { kind: "access-key", accessKeyId: "unified", secretAccessKey: "unified" }
-    };
+    if (!this.deps.bucketProvider) throw new StorageRuntimeError("storage_not_configured");
+    return createProviderBackedBucketObjectStore(this.deps.bucketProvider, capabilityState);
   }
 
   private runtimeGeneration(): number {
     return this.deps.bucketGeneration ?? this.activeRecord?.generation ?? 1;
   }
 
-  private runtimeRecord(): StoredProviderConfigRecord {
-    if (this.activeRecord && !this.deps.bucketProvider) return this.activeRecord;
-    if (this.activeRecord && this.deps.bucketProvider) return { ...this.activeRecord, generation: this.runtimeGeneration() };
-    return {
-      key: "active",
-      providerId: this.unifiedRuntimeConfig().providerId,
-      publicSummary: { bucketHint: this.deps.bucketProvider?.bucketId ?? "unified", accessKeyHint: "unified" },
-      sealedConfig: { version: 2, saltHex: "", nonceHex: "", ciphertextHex: "" },
-      generation: this.runtimeGeneration(),
-      updatedAt: 0
-    };
+  private runtimeRecord(): RuntimeBucketBindingRecord {
+    if (!this.activeRecord) throw new StorageRuntimeError("storage_not_configured");
+    return { ...this.activeRecord, generation: this.runtimeGeneration() };
   }
 
-  private rememberRuntimeUpload(record: StoredMultipartUploadRecord, config: NormalizedStorageProviderConfig, s3UploadId: string): void {
+  private rememberRuntimeUpload(record: StoredMultipartUploadRecord, s3UploadId: string): void {
     this.runtimeUploads.set(record.internalUploadId, {
       s3UploadId,
       key: record.physicalKey,
-      namespaceRoot: rootForUploadRecord(config, record),
+      namespaceRoot: rootForUploadRecord(record),
       connectSessionId: record.connectSessionId
     });
   }
 
-  private async restoreRuntimeUploads(config: NormalizedStorageProviderConfig): Promise<void> {
+  private async restoreRuntimeUploads(): Promise<void> {
     for (const record of await this.deps.multipartUploadRepository.listMultiparts()) {
       if (record.providerGeneration !== this.runtimeGeneration()) continue;
-      try {
-        const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId);
-        try { this.rememberRuntimeUpload(record, config, new TextDecoder().decode(bytes)); } finally { bytes.fill(0); }
-      } catch (error) {
-        this.deps.logger?.warn?.({ scope: "storage", event: "upload_runtime_restore.failed", uploadId: record.internalUploadId, code: storageErrorCode(error) });
-      }
+      this.rememberRuntimeUpload(record, record.uploadId);
     }
   }
 
-  private requireReady(): { config: NormalizedStorageProviderConfig; store: BucketObjectStore; record: StoredProviderConfigRecord } {
-    if (this.currentStatus === "unconfigured" || (!this.activeRecord && !this.deps.bucketProvider)) throw new StorageRuntimeError("storage_not_configured");
-    if (this.currentStatus !== "ready" || !this.activeConfig || !this.activeStore) throw new StorageRuntimeError("storage_unavailable");
-    return { config: this.activeConfig, store: this.activeStore, record: this.runtimeRecord() };
+  private requireReady(): { store: BucketObjectStore; record: RuntimeBucketBindingRecord } {
+    if (this.currentStatus === "unconfigured" || !this.activeRecord) throw new StorageRuntimeError("storage_not_configured");
+    if (this.currentStatus !== "ready" || !this.activeStore) throw new StorageRuntimeError("storage_unavailable");
+    return { store: this.activeStore, record: this.runtimeRecord() };
   }
 
   private contextRoot(ctx: OwnerAppStorageGrant): string {
@@ -411,9 +311,9 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     if (!ctx.connectSessionId || !ctx.transportOrigin || !ctx.sessionEpoch || !ctx.appIdentity?.identityDigestHex || !/^[0-9a-f]{64}$/u.test(ctx.appIdentity.identityDigestHex)) throw new StorageRuntimeError("storage_identity_required");
     if (!/^(02|03)[0-9a-f]{64}$/u.test(ctx.ownerPublicKeyHex) || !Number.isSafeInteger(ctx.bucketGeneration) || ctx.bucketGeneration < 1 || !ctx.bucketId || ctx.bucketId.includes("/")) throw new StorageRuntimeError("storage_identity_required");
     let derivedId: string;
-    try { derivedId = deriveThirdPartyApplicationStorageId(ctx.appIdentity.publisherPublicKeyHex, ctx.appIdentity.appId); }
+    try { derivedId = deriveThirdPartyStorageModuleId(ctx.appIdentity.publisherPublicKeyHex, ctx.appIdentity.appId); }
     catch { throw new StorageRuntimeError("storage_identity_required"); }
-    if (derivedId !== ctx.applicationStorageId) throw new StorageRuntimeError("storage_identity_required");
+    if (derivedId !== ctx.moduleId || ctx.purposeId !== "files") throw new StorageRuntimeError("storage_identity_required");
     return this.contextRoot(ctx);
   }
 
@@ -445,9 +345,9 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
   }
 
   async getProviderConnection(): Promise<StorageProviderConnectionView | null> {
-    const config = this.activeConfig ?? await this.readExistingConfig();
-    if (!config) return null;
-    return { providerId: config.providerId, connection: structuredClone(config.connection) };
+    // The connection is owned by the Coordinator's catalog binding. Runtime
+    // intentionally has no persisted or reconstructable provider config.
+    return null;
   }
 
   private bindCapabilityState(state: BucketObjectStoreCapabilityState): void {
@@ -456,55 +356,12 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
   }
 
   getConditionalCapabilities(): BucketConditionalCapabilitiesView | null {
-    if ((!this.activeRecord && !this.deps.bucketProvider) || !this.activeCapabilityState) return null;
+    if (!this.activeRecord || !this.activeCapabilityState) return null;
     return capabilityView(this.activeCapabilityState, this.runtimeGeneration());
   }
 
   cancelProbe(): void {
-    this.probeController?.abort();
     this.capabilityProbeController?.abort();
-  }
-
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const next = this.mutation.then(operation, operation);
-    this.mutation = next.then(() => undefined, () => undefined);
-    return next;
-  }
-
-  async probeProvider(draft: StorageProviderConfigDraft): Promise<StorageProbeResult> {
-    this.probeController?.abort();
-    const controller = new AbortController();
-    this.probeController = controller;
-    return this.enqueue(async () => {
-      const started = now(this.deps);
-      try {
-        if (this.rotationActive) throw new StorageRuntimeError("storage_unavailable", "Storage is temporarily unavailable during password rotation");
-        const signal = this.requestSignal(controller.signal);
-        const persistedUnifiedConfig = this.deps.bucketProvider && this.activeRecord ? await this.readExistingConfig() : null;
-        const existing = persistedUnifiedConfig ?? this.activeConfig ?? await this.readExistingConfig();
-        const config = normalizeProviderConfig(draft, existing ?? undefined);
-        if (this.deps.bucketProvider?.provider === "opfs") {
-          throw new StorageRuntimeError("storage_provider_error", "The active OPFS bucket cannot be replaced while the runtime is running");
-        }
-        if (this.deps.bucketProvider && persistedUnifiedConfig && (
-          persistedUnifiedConfig.providerId !== config.providerId ||
-          JSON.stringify(persistedUnifiedConfig.connection) !== JSON.stringify(config.connection) ||
-          JSON.stringify(persistedUnifiedConfig.credentials) !== JSON.stringify(config.credentials)
-        )) {
-          throw new StorageRuntimeError("storage_provider_error", "The selected storage bucket is already bound; reselect the backend before changing its Profile");
-        }
-        const candidate = this.makeStore(config);
-        try {
-          await this.boundedProvider(() => candidate.probe("", signal), controller);
-          this.assertRequestActive(signal);
-        } finally { candidate.dispose(); }
-        return { ok: true, providerId: config.providerId, latencyMs: Math.max(0, now(this.deps) - started) };
-      } catch (error) {
-        return { ok: false, providerId: draft.providerId, latencyMs: Math.max(0, now(this.deps) - started), diagnostic: diagnostic(asError(error)) };
-      } finally {
-        if (this.probeController === controller) this.probeController = undefined;
-      }
-    });
   }
 
   private async probeConditionalPut(store: BucketObjectStore, root: string, key: string, signal: AbortSignal, state: BucketObjectStoreCapabilityState): Promise<"native" | "best-effort" | "inconclusive"> {
@@ -562,17 +419,15 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
       }
     }
     const operation = this.trackRequest(async () => {
-      const record = this.runtimeRecord();
-      const config = this.activeConfig;
       const state = this.activeCapabilityState;
-      if (!config || !state || this.currentStatus !== "ready" || this.rotationActive) throw new StorageRuntimeError("storage_unavailable", "Storage is not ready");
+      if (!state || this.currentStatus !== "ready" || this.rotationActive) throw new StorageRuntimeError("storage_unavailable", "Storage is not ready");
       const generation = this.runtimeGeneration();
       const stateIdentity = state;
       const root = `.keymaster-system/capability-probe/${crypto.randomUUID()}/`;
       const probeState = createBucketObjectStoreCapabilityState();
-      const store = this.deps.bucketProvider
-        ? createProviderBackedBucketObjectStore(this.deps.bucketProvider, probeState)
-        : this.makeStore(config, probeState);
+      const provider = this.deps.bucketProvider;
+      if (!provider) throw new StorageRuntimeError("storage_not_configured");
+      const store = createProviderBackedBucketObjectStore(provider, probeState);
       const keys = { put: `${root}put.bin`, complete: `${root}complete.bin` };
       const uploadIds = new Set<string>();
       const cleanupErrors: unknown[] = [];
@@ -608,238 +463,26 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     });
   }
 
-  /**
-   * 在 Coordinator 更新独立密钥后重新打开已保存的 Provider。
-   *
-   * 密码本身不进入 Runtime；Runtime 只通过注入的 StorageSecretService
-   * 读取当前密钥。这样冷启动时可以先显示脱敏摘要，再由用户输入密码。
-   */
-  async unlockStorageProfile(password: string): Promise<StorageProbeResult> {
-    return this.trackRequest(async () => {
-      const started = now(this.deps);
-      if (typeof password !== "string" || password.length < 8) {
-        throw new StorageRuntimeError("storage_provider_error", "Storage Profile password must contain at least 8 characters", "authentication");
-      }
-      if (this.deps.bucketProvider) {
-        return { ok: this.currentStatus === "ready", providerId: this.deps.bucketProvider.provider === "s3" ? "aws-s3" : "s3-compatible", latencyMs: Math.max(0, now(this.deps) - started), ...(this.currentStatus === "ready" ? {} : { diagnostic: "authentication" as const }) };
-      }
-      const record = this.activeRecord;
-      if (!record) {
-        return { ok: false, providerId: "aws-s3", latencyMs: Math.max(0, now(this.deps) - started), diagnostic: "configuration" };
-      }
-      await this.restoreAfterUnlock();
-      const providerId = record.providerId as StorageProbeResult["providerId"];
-      return this.currentStatus === "ready"
-        ? { ok: true, providerId, latencyMs: Math.max(0, now(this.deps) - started) }
-        : { ok: false, providerId, latencyMs: Math.max(0, now(this.deps) - started), diagnostic: "authentication" };
-    });
-  }
-
-  // 这些两个入口由 Coordinator 页面代理实现；Worker 内部 Runtime 不负责
-  // 修改本机 bootstrap 状态，保留明确的 fail-closed 实现避免误用。
-  async selectOpfs(): Promise<StorageOpfsProbeResult> {
-    return { ok: false, providerId: "opfs", latencyMs: 0, diagnostic: "configuration" };
-  }
-
-  async importStorageProfile(_envelope: import("@keymaster/contracts").StorageProfileEnvelopeV1, password: string): Promise<StorageProbeResult> {
-    return this.unlockStorageProfile(password);
-  }
-
-  private async readExistingConfig(): Promise<NormalizedStorageProviderConfig | null> {
-    const record = await this.deps.multipartUploadRepository.getProviderConfig();
-    if (!record) return null;
-    const bytes = await this.deps.secret.open(STORAGE_SECRET_SCOPE, record.sealedConfig);
-    try { return configFromBytes(bytes); } finally { bytes.fill(0); }
-  }
-
-  async activateProvider(draft: StorageProviderConfigDraft): Promise<StorageProbeResult> {
-    return this.enqueue(async () => {
-      const started = now(this.deps);
-      if (this.rotationActive) throw new StorageRuntimeError("storage_unavailable", "Storage is temporarily unavailable during password rotation");
-      this.rotationActive = true;
-      this.lifecycleFence += 1;
-      this.rotationAbortController.abort();
-      this.rotationAbortController = new AbortController();
-      this.cursors.clear();
-      this.setStatus("reconfiguring");
-      await this.waitForRequestsBounded();
-      this.capabilityProbeController?.abort();
-      this.setStatus("checking");
-      let candidate: BucketObjectStore | undefined;
-      try {
-        if (this.deps.bucketProvider) {
-          throw new StorageRuntimeError("storage_provider_error", "Active storage bucket changes require a restart; the current root remains bound until then");
-        }
-        const existing = this.activeConfig ?? await this.readExistingConfig();
-        const config = normalizeProviderConfig(draft, existing ?? undefined);
-        const capabilityState = createBucketObjectStoreCapabilityState();
-        candidate = this.makeStore(config, capabilityState);
-        const signal = this.rotationAbortController.signal;
-        await this.boundedProvider(() => candidate!.probe("", signal), this.rotationAbortController);
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        const configBytes = configToBytes(config);
-        let sealedConfig;
-        try { sealedConfig = await this.deps.secret.seal(STORAGE_SECRET_SCOPE, configBytes); }
-        finally { configBytes.fill(0); }
-        const generation = (this.activeRecord?.generation ?? 0) + 1;
-        const updatedAt = now(this.deps);
-        const summary = summaryForConfig(config, generation, updatedAt);
-        const record: StoredProviderConfigRecord = { key: "active", providerId: config.providerId, publicSummary: { bucketHint: summary.bucketHint, endpointHint: summary.endpointHint, accessKeyHint: summary.accessKeyHint }, sealedConfig, generation, updatedAt };
-        const oldStore = this.activeStore;
-        const oldConfig = this.activeConfig;
-        const oldGeneration = this.activeRecord?.generation;
-        // Commit the new configuration before retiring the old provider. A
-        // failed K-V commit must leave both the old provider and its uploads
-        // untouched; cleanup after commit is deliberately best effort because
-        // the new configuration is already the durable truth at that point.
-        await this.deps.multipartUploadRepository.replaceProviderConfig(record);
-        this.activeRecord = record;
-        this.activeConfig = config;
-        this.activeStore = candidate;
-        this.activeCapabilityState = capabilityState;
-        this.bindCapabilityState(capabilityState);
-        this.rotationActive = false;
-        this.rotationAbortController = new AbortController();
-        candidate = undefined;
-        this.cursors.clear();
-        this.setStatus("ready");
-        if (oldStore && oldConfig) {
-          const cleanup = this.abortKnownUploads(oldStore, oldConfig, false, oldGeneration).catch((error) => { this.deps.logger?.warn?.({ scope: "storage", event: "provider_replace_cleanup.failed", code: storageErrorCode(error) }); });
-          this.disposeAfterCleanup(cleanup, oldStore);
-        }
-        try {
-          await this.cleanupStaleUploads();
-        } catch (error) {
-          // Do not report save failure after the new record has committed.
-          this.deps.logger?.warn?.({ scope: "storage", event: "stale_upload_cleanup.failed", code: storageErrorCode(error) });
-        }
-        return { ok: true, providerId: config.providerId, latencyMs: Math.max(0, now(this.deps) - started) };
-      } catch (error) {
-        try { candidate?.dispose(); } catch { /* best effort */ }
-        this.rotationActive = false;
-        this.rotationAbortController = new AbortController();
-        this.setStatus(this.activeStore && this.activeConfig ? "ready" : this.activeRecord ? "degraded" : "unconfigured");
-        const mapped = asError(error);
-        throw mapped;
-      }
-    });
-  }
-
-  async clearProviderConfig(): Promise<void> {
-    return this.enqueue(async () => {
-      this.capabilityProbeController?.abort();
-      if (this.rotationActive) throw new StorageRuntimeError("storage_unavailable", "Storage is temporarily unavailable during password rotation");
-      if (this.deps.bucketProvider) {
-        throw new StorageRuntimeError("storage_provider_error", "The active bucket cannot be switched while the runtime is running; restart after selecting another backend");
-      }
-      if (!this.activeRecord) {
-        this.releaseRuntime("cleared");
-        return;
-      }
-      const store = this.activeStore;
-      const config = this.activeConfig;
-      const generation = this.activeRecord.generation;
-      this.beginReconfiguration("provider cleared");
-      await this.waitForRequestsBounded();
-      const uploadSnapshot = await this.deps.multipartUploadRepository.listMultiparts();
-      try {
-        await this.deps.multipartUploadRepository.clearProviderConfig();
-      } catch (error) {
-        this.finishReconfiguration(false);
-        throw error;
-      }
-      this.activeStore = undefined;
-      this.activeConfig = undefined;
-      this.activeCapabilityUnsubscribe?.();
-      this.activeCapabilityUnsubscribe = undefined;
-      this.activeCapabilityState = undefined;
-      this.activeRecord = null;
-      this.runtimeUploads.clear();
-      this.rotationActive = false;
-      this.rotationAbortController = new AbortController();
-      this.setStatus("unconfigured");
-      if (store && config) {
-        this.disposeAfterCleanup(this.abortUploadSnapshot(uploadSnapshot.filter((record) => record.providerGeneration === generation), store, config), store);
-      }
-      this.deps.logger?.info?.({ scope: "storage", event: "runtime.released", reason: "cleared" });
-    });
-  }
-
-  /**
-   * Destructive recovery escape hatch used only after an explicit Settings
-   * confirmation. Unlike ordinary writes it is allowed to remove a stuck or
-   * corrupt rotation journal and clears both local Storage stores atomically.
-   */
-  async resetStorage(): Promise<void> {
-    return this.enqueue(async () => {
-      if (this.deps.bucketProvider) {
-        throw new StorageRuntimeError("storage_provider_error", "Active storage reset requires a restart; the current root remains bound until then");
-      }
-      const store = this.activeStore;
-      const config = this.activeConfig;
-      const generation = this.activeRecord?.generation;
-      const previousRotation = { active: this.rotationActive };
-      const previousStatus = this.currentStatus;
-      this.rotationActive = true;
-      this.lifecycleFence += 1;
-      this.setStatus("reconfiguring");
-      this.rotationAbortController.abort();
-      this.probeController?.abort();
-      this.capabilityProbeController?.abort();
-      this.cursors.clear();
-      await this.waitForRequestsBounded();
-      const uploadSnapshot = await this.deps.multipartUploadRepository.listMultiparts();
-      try {
-        await this.deps.multipartUploadRepository.resetStorage();
-      } catch (error) {
-        // The old client and record are still the active truth. Re-arm request
-        // cancellation so a failed reset does not leave status=ready backed by
-        // a permanently aborted signal.
-        this.rotationActive = previousRotation.active;
-        this.rotationAbortController = new AbortController();
-        this.setStatus(previousStatus);
-        throw error;
-      }
-      this.activeStore = undefined;
-      this.activeConfig = undefined;
-      this.activeCapabilityUnsubscribe?.();
-      this.activeCapabilityUnsubscribe = undefined;
-      this.activeCapabilityState = undefined;
-      this.activeRecord = null;
-      this.runtimeUploads.clear();
-      this.rotationActive = false;
-      this.rotationAbortController = new AbortController();
-      this.setStatus("unconfigured");
-      if (store && config) {
-        this.disposeAfterCleanup(this.abortUploadSnapshot(uploadSnapshot.filter((record) => generation === undefined || record.providerGeneration === generation), store, config), store);
-      }
-    });
-  }
-
   async abortSession(connectSessionId: string): Promise<void> {
     return this.trackRequest(async () => {
     if (this.rotationActive) return;
     const activeGeneration = this.runtimeGeneration();
     const records = (await this.deps.multipartUploadRepository.listMultiparts()).filter((record) => record.connectSessionId === connectSessionId);
     const store = this.activeStore;
-    const config = this.activeConfig;
     const cleanupDeadline = Date.now() + 1000;
     const cleanupOne = async (record: StoredMultipartUploadRecord): Promise<void> => {
       try {
         if (activeGeneration !== undefined && record.providerGeneration !== activeGeneration) return;
-        if (store && config) {
+        if (store) {
           const runtime = this.runtimeUploads.get(record.internalUploadId);
           let uploadId = runtime?.s3UploadId;
-          if (!uploadId) {
-            const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId);
-            try { uploadId = new TextDecoder().decode(bytes); } finally { bytes.fill(0); }
-          }
+          if (!uploadId) uploadId = record.uploadId;
           const remaining = cleanupDeadline - Date.now();
           if (remaining <= 0) return;
           let timer: ReturnType<typeof setTimeout> | undefined;
           try {
             await Promise.race([
-              store.abortMultipart({ namespaceRoot: runtime?.namespaceRoot ?? rootForUploadRecord(config, record), key: record.physicalKey, uploadId }),
+              store.abortMultipart({ namespaceRoot: runtime?.namespaceRoot ?? rootForUploadRecord(record), key: record.physicalKey, uploadId }),
               new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("storage cleanup timeout")), remaining); })
             ]);
           } finally { if (timer) clearTimeout(timer); }
@@ -982,16 +625,12 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     }
     const s3UploadId = await store.createMultipart({ namespaceRoot: root, key, contentType: input.contentType, signal });
     this.assertRequestActive(signal);
-    const runtimeRecord = { internalUploadId, connectSessionId: ctx.connectSessionId, transportOrigin: ctx.transportOrigin, ownerPublicKeyHex: ctx.ownerPublicKeyHex, applicationStorageId: ctx.applicationStorageId, bucketId: ctx.bucketId, bucketGeneration: ctx.bucketGeneration, sessionEpoch: ctx.sessionEpoch, relativePath: path, physicalKey: key, sealedS3UploadId: { version: 2 as const, saltHex: "", nonceHex: "", ciphertextHex: "" }, providerGeneration: record.generation, contentType: input.contentType, expectedSize: input.size, overwrite: input.overwrite !== false, parts: [], expiresAt: now(this.deps) + STORAGE_UPLOAD_TTL_MS, createdAt: now(this.deps) } satisfies StoredMultipartUploadRecord;
-    this.rememberRuntimeUpload(runtimeRecord, this.requireReady().config, s3UploadId);
+    const runtimeRecord = { internalUploadId, connectSessionId: ctx.connectSessionId, transportOrigin: ctx.transportOrigin, ownerPublicKeyHex: ctx.ownerPublicKeyHex, moduleId: ctx.moduleId, purposeId: ctx.purposeId, bucketId: ctx.bucketId, bucketGeneration: ctx.bucketGeneration, sessionEpoch: ctx.sessionEpoch, relativePath: path, physicalKey: key, uploadId: s3UploadId, providerGeneration: record.generation, contentType: input.contentType, expectedSize: input.size, overwrite: input.overwrite !== false, parts: [], expiresAt: now(this.deps) + STORAGE_UPLOAD_TTL_MS, createdAt: now(this.deps) } satisfies StoredMultipartUploadRecord;
+    this.rememberRuntimeUpload(runtimeRecord, s3UploadId);
     let persisted = false;
     try {
       if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-      const uploadIdBytes = new TextEncoder().encode(s3UploadId);
-      let sealedS3UploadId;
-      try { sealedS3UploadId = await this.deps.secret.seal(`keymaster.storage.upload.v1/${internalUploadId}`, uploadIdBytes); }
-      finally { uploadIdBytes.fill(0); }
-      await this.deps.multipartUploadRepository.putMultipart({ ...runtimeRecord, sealedS3UploadId });
+      await this.deps.multipartUploadRepository.putMultipart(runtimeRecord);
       persisted = true;
       this.assertRequestActive(signal);
     } catch (error) {
@@ -1008,7 +647,7 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     this.assertRequestActive(signal);
     const { store, record: active } = this.requireReady(); const record = await this.deps.multipartUploadRepository.getMultipart(uploadId);
     this.assertRequestActive(signal);
-    if (!record || record.expiresAt <= now(this.deps) || record.providerGeneration !== active.generation || record.connectSessionId !== ctx.connectSessionId || record.transportOrigin !== ctx.transportOrigin || record.ownerPublicKeyHex !== ctx.ownerPublicKeyHex || record.applicationStorageId !== ctx.applicationStorageId || record.bucketId !== ctx.bucketId || record.bucketGeneration !== ctx.bucketGeneration || record.sessionEpoch !== ctx.sessionEpoch) throw new StorageRuntimeError("storage_invalid_upload", "Upload is not valid for this context");
+    if (!record || record.expiresAt <= now(this.deps) || record.providerGeneration !== active.generation || record.connectSessionId !== ctx.connectSessionId || record.transportOrigin !== ctx.transportOrigin || record.ownerPublicKeyHex !== ctx.ownerPublicKeyHex || record.moduleId !== ctx.moduleId || record.purposeId !== ctx.purposeId || record.bucketId !== ctx.bucketId || record.bucketGeneration !== ctx.bucketGeneration || record.sessionEpoch !== ctx.sessionEpoch) throw new StorageRuntimeError("storage_invalid_upload", "Upload is not valid for this context");
     return { record, store };
   }
 
@@ -1022,11 +661,9 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     if (record.expectedSize === 0 || input.partNumber > Math.max(1, expectedParts)) throw new StorageRuntimeError("storage_invalid_upload");
     if (input.partNumber < expectedParts && size !== STORAGE_PART_SIZE_BYTES) throw new StorageRuntimeError("storage_invalid_upload", "Non-final parts must use the fixed part size");
     if (input.partNumber === expectedParts && size !== record.expectedSize - STORAGE_PART_SIZE_BYTES * (expectedParts - 1)) throw new StorageRuntimeError("storage_invalid_upload", "Final part size does not match the declared upload size");
-    const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId);
-    let s3UploadId: string;
-    try { s3UploadId = new TextDecoder().decode(bytes); } finally { bytes.fill(0); }
-    this.rememberRuntimeUpload(record, this.requireReady().config, s3UploadId);
-    const etag = await store.uploadPart({ namespaceRoot: rootForUploadRecord(this.requireReady().config, record), key: record.physicalKey, uploadId: s3UploadId, partNumber: input.partNumber, bytes: new Uint8Array(input.content.bytes), signal });
+    const s3UploadId = record.uploadId;
+    this.rememberRuntimeUpload(record, s3UploadId);
+    const etag = await store.uploadPart({ namespaceRoot: rootForUploadRecord(record), key: record.physicalKey, uploadId: s3UploadId, partNumber: input.partNumber, bytes: new Uint8Array(input.content.bytes), signal });
     this.assertRequestActive(signal);
     if (lifecycleFence !== this.lifecycleFence || this.runtimeGeneration() !== record.providerGeneration) throw new StorageRuntimeError("storage_unavailable", "Storage generation changed");
     const parts = [...record.parts.filter((part) => part.partNumber !== input.partNumber), { partNumber: input.partNumber, etag, size }].sort((a, b) => a.partNumber - b.partNumber);
@@ -1058,14 +695,13 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     const { record, store } = await this.uploadRecord(ctx, input.uploadId, signal); const expectedParts = Math.ceil(record.expectedSize / STORAGE_PART_SIZE_BYTES);
     if (record.expectedSize > 0 && (record.parts.length !== expectedParts || record.parts.some((part, index) => part.partNumber !== index + 1))) throw new StorageRuntimeError("storage_invalid_upload", "Upload parts are incomplete");
     if (record.parts.reduce((total, part) => total + part.size, 0) !== record.expectedSize) throw new StorageRuntimeError("storage_invalid_upload", "Upload size does not match declaration");
-    const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId); let s3UploadId: string;
-    try { s3UploadId = new TextDecoder().decode(bytes); } finally { bytes.fill(0); }
-    this.rememberRuntimeUpload(record, this.requireReady().config, s3UploadId);
+    const s3UploadId = record.uploadId;
+    this.rememberRuntimeUpload(record, s3UploadId);
     if (record.overwrite === false) {
       if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-      if (await store.head({ namespaceRoot: rootForUploadRecord(this.requireReady().config, record), key: record.physicalKey, signal })) throw new StorageRuntimeError("storage_conflict", "Storage object already exists");
+      if (await store.head({ namespaceRoot: rootForUploadRecord(record), key: record.physicalKey, signal })) throw new StorageRuntimeError("storage_conflict", "Storage object already exists");
     }
-    const output = await store.completeMultipart({ namespaceRoot: rootForUploadRecord(this.requireReady().config, record), key: record.physicalKey, uploadId: s3UploadId, parts: record.parts.map(({ partNumber, etag }) => ({ partNumber, etag })), ifNoneMatch: record.overwrite === false ? "*" : undefined, signal });
+    const output = await store.completeMultipart({ namespaceRoot: rootForUploadRecord(record), key: record.physicalKey, uploadId: s3UploadId, parts: record.parts.map(({ partNumber, etag }) => ({ partNumber, etag })), ifNoneMatch: record.overwrite === false ? "*" : undefined, signal });
     this.assertRequestActive(signal);
     await this.deps.multipartUploadRepository.deleteMultipart(record.internalUploadId);
     this.runtimeUploads.delete(record.internalUploadId);
@@ -1076,10 +712,9 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
   async abortUpload(ctx: OwnerAppStorageGrant, input: { uploadId: string; signal?: AbortSignal }): Promise<StorageUploadAbortResult> {
     return this.trackRequest(async () => {
     const signal = this.requestSignal(input.signal);
-    const { record, store } = await this.uploadRecord(ctx, input.uploadId, signal); const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId); let s3UploadId: string;
-    try { s3UploadId = new TextDecoder().decode(bytes); } finally { bytes.fill(0); }
-    this.rememberRuntimeUpload(record, this.requireReady().config, s3UploadId);
-    await store.abortMultipart({ namespaceRoot: rootForUploadRecord(this.requireReady().config, record), key: record.physicalKey, uploadId: s3UploadId, signal }); this.assertRequestActive(signal); await this.deps.multipartUploadRepository.deleteMultipart(record.internalUploadId); this.runtimeUploads.delete(record.internalUploadId); return { uploadId: input.uploadId, aborted: true };
+    const { record, store } = await this.uploadRecord(ctx, input.uploadId, signal); const s3UploadId = record.uploadId;
+    this.rememberRuntimeUpload(record, s3UploadId);
+    await store.abortMultipart({ namespaceRoot: rootForUploadRecord(record), key: record.physicalKey, uploadId: s3UploadId, signal }); this.assertRequestActive(signal); await this.deps.multipartUploadRepository.deleteMultipart(record.internalUploadId); this.runtimeUploads.delete(record.internalUploadId); return { uploadId: input.uploadId, aborted: true };
     });
   }
 
@@ -1101,75 +736,12 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
       try {
         const runtime = this.runtimeUploads.get(record.internalUploadId);
         let s3UploadId = runtime?.s3UploadId;
-        if (!s3UploadId) {
-          const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId);
-          try { s3UploadId = new TextDecoder().decode(bytes); } finally { bytes.fill(0); }
-        }
-        await this.boundedCleanup(() => this.activeStore!.abortMultipart({ namespaceRoot: rootForUploadRecord(this.activeConfig!, record), key: record.physicalKey, uploadId: s3UploadId }), Math.max(1, deadline - Date.now()));
+        if (!s3UploadId) s3UploadId = record.uploadId;
+        await this.boundedCleanup(() => this.activeStore!.abortMultipart({ namespaceRoot: rootForUploadRecord(record), key: record.physicalKey, uploadId: s3UploadId }), Math.max(1, deadline - Date.now()));
         await this.deps.multipartUploadRepository.deleteMultipart(record.internalUploadId);
         this.runtimeUploads.delete(record.internalUploadId);
       } catch (error) { this.deps.logger?.warn?.({ scope: "storage", event: "stale_upload_cleanup.failed", uploadId: record.internalUploadId, code: storageErrorCode(error) }); }
     }
-  }
-
-  private async abortKnownUploads(storeOverride?: BucketObjectStore, configOverride?: NormalizedStorageProviderConfig, strict = false, generationOverride?: number, retireLocal = true): Promise<void> {
-    const store = storeOverride ?? this.activeStore;
-    const config = configOverride ?? this.activeConfig;
-    const activeGeneration = generationOverride ?? this.activeRecord?.generation;
-    const records = (await this.deps.multipartUploadRepository.listMultiparts()).filter((record) => activeGeneration === undefined || record.providerGeneration === activeGeneration);
-    const deadline = Date.now() + 1000;
-    for (const record of records) {
-      if (Date.now() >= deadline) break;
-      let aborted = false;
-      try {
-        if (store) {
-          const runtime = this.runtimeUploads.get(record.internalUploadId);
-          let uploadId = runtime?.s3UploadId;
-          if (!uploadId) {
-            const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId);
-            try { uploadId = new TextDecoder().decode(bytes); } finally { bytes.fill(0); }
-          }
-          if (!config) throw new StorageRuntimeError("storage_unavailable", "Storage configuration is unavailable");
-          await this.boundedCleanup(() => store.abortMultipart({ namespaceRoot: runtime?.namespaceRoot ?? rootForUploadRecord(config, record), key: record.physicalKey, uploadId }), Math.max(1, deadline - Date.now()));
-          aborted = true;
-        }
-      } catch (error) {
-        this.deps.logger?.warn?.({ scope: "storage", event: "upload_abort.failed", code: storageErrorCode(error) });
-        if (strict) throw error;
-      } finally {
-        // Once configuration is cleared/replaced, retaining an opaque upload
-        // record would either leak an orphan or bind it to a new provider
-        // generation. The provider abort is best-effort; the local record is
-        // always retired at the lifecycle boundary.
-        if (retireLocal && (!strict || aborted)) await this.deps.multipartUploadRepository.deleteMultipart(record.internalUploadId).catch(() => undefined);
-        if (retireLocal && (!strict || aborted)) this.runtimeUploads.delete(record.internalUploadId);
-      }
-    }
-  }
-
-  private async abortUploadSnapshot(records: StoredMultipartUploadRecord[], store: BucketObjectStore | undefined, config: NormalizedStorageProviderConfig | undefined): Promise<void> {
-    if (!store || !config) return;
-    const deadline = Date.now() + 1000;
-    for (const record of records) {
-      if (Date.now() >= deadline) break;
-      try {
-        const bytes = await this.deps.secret.open(`keymaster.storage.upload.v1/${record.internalUploadId}`, record.sealedS3UploadId);
-        let uploadId: string;
-        try { uploadId = new TextDecoder().decode(bytes); } finally { bytes.fill(0); }
-        await this.boundedCleanup(() => store.abortMultipart({ namespaceRoot: rootForUploadRecord(config, record), key: record.physicalKey, uploadId }), Math.max(1, deadline - Date.now()));
-      } catch (error) {
-        this.deps.logger?.warn?.({ scope: "storage", event: "upload_snapshot_abort.failed", code: storageErrorCode(error) });
-      }
-    }
-  }
-
-  private disposeAfterCleanup(cleanup: Promise<void>, store: BucketObjectStore): void {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, 2000); });
-    void Promise.race([cleanup, timeout]).finally(() => {
-      if (timer) clearTimeout(timer);
-      try { store.dispose(); } catch { /* best effort */ }
-    });
   }
 
   private async boundedCleanup(operation: () => Promise<unknown>, timeoutMs = 1000): Promise<void> {
@@ -1197,13 +769,11 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.probeController?.abort();
     this.capabilityProbeController?.abort();
     this.rotationAbortController.abort();
     this.cursors.clear();
     const store = this.activeStore;
     this.activeStore = undefined;
-    this.activeConfig = undefined;
     this.activeCapabilityUnsubscribe?.();
     this.activeCapabilityUnsubscribe = undefined;
     this.listeners.clear();

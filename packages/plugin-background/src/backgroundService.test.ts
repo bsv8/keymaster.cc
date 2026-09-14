@@ -12,11 +12,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackgroundRunEligibility } from "@keymaster/contracts";
 import { createBackgroundBundle } from "./backgroundService.js";
 
-beforeEach(() => {
-  localStorage.removeItem("background.enabled");
-  localStorage.removeItem("background.sync.settings");
-});
-
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -247,11 +242,8 @@ describe("BackgroundService cancel semantics", () => {
 });
 
 describe("BackgroundService hard switch", () => {
-  it("不读取也不删除旧的 background.enabled 偏好", () => {
-    // 新统一存储路径不读取、不迁移旧浏览器键。
-    localStorage.setItem("background.enabled", JSON.stringify({ "task1": false, "task2": true }));
+  it("does not declare or require a persistence store", () => {
     const { service, registry } = createBackgroundBundle();
-    expect(localStorage.getItem("background.enabled")).toBe(JSON.stringify({ "task1": false, "task2": true }));
     // 所有任务默认持续启用
     registry.register({
       id: "task1",

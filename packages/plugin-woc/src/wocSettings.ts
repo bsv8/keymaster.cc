@@ -4,8 +4,8 @@
 // 缺省值与 WOC 官方文档一致：base = api.whatsonchain.com/v1/bsv。
 // 硬切换 001：默认 rate 由 3 改为 2；服务端窗口、同 IP 其它请求、
 // 浏览器调度误差与 429 backoff 都需要余量。
-// 持久化由 Host 注入的 WOC owner/App K-V 句柄负责；本模块只负责默认值
-// 与输入校验，不接触浏览器存储、Provider 或物理路径。
+// 运行时配置由 Coordinator bootstrap 提供；本模块只负责默认值与输入校验，
+// 不接触浏览器存储、Provider 或物理路径。
 
 import type { WocConfig } from "@keymaster/contracts";
 
@@ -14,7 +14,7 @@ export const DEFAULT_WOC_CONFIG: WocConfig = {
   requestsPerSecond: 2
 };
 
-/** 从 K-V 的未知值恢复合法配置；旧浏览器存储不会被读取。 */
+/** 从 bootstrap 的未知值恢复合法配置。 */
 export function normalizeWocConfig(raw: unknown): WocConfig {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_WOC_CONFIG };
   const parsed = raw as Partial<WocConfig>;

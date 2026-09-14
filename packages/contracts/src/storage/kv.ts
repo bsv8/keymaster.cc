@@ -15,6 +15,51 @@ export const STORAGE_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 export type KeyValueJson = null | boolean | number | string | KeyValueJson[] | { [key: string]: KeyValueJson };
 export type KeyValueValue = KeyValueJson | Uint8Array;
 
+function canonicalKeyValueJson(value: unknown, seen: Set<object>): string {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("K-V value is not JSON serializable");
+    return JSON.stringify(value);
+  }
+  if (typeof value !== "object" || value instanceof Uint8Array) {
+    throw new TypeError("K-V value is not JSON serializable");
+  }
+  if (seen.has(value)) throw new TypeError("K-V value is cyclic");
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const items: string[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) throw new TypeError("K-V array is sparse");
+        items.push(canonicalKeyValueJson(value[index], seen));
+      }
+      return `[${items.join(",")}]`;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new TypeError("K-V value is not a JSON object");
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalKeyValueJson((value as Record<string, unknown>)[key], seen)}`);
+    return `{${entries.join(",")}}`;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+/** JSON 键序无关、Uint8Array 按字节比较的 K-V 语义身份。 */
+export function keyValueSemanticFingerprint(value: unknown): string {
+  if (value instanceof Uint8Array) {
+    return `binary:${Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+  return `json:${canonicalKeyValueJson(value, new Set())}`;
+}
+
+/** 与语义身份相同的 canonical JSON 文本，供 unique-value-id 编码。 */
+export function canonicalizeKeyValueJson(value: unknown): string {
+  return canonicalKeyValueJson(value, new Set());
+}
+
 /** K-V 读结果。revision 属于当前 App namespace 的单调版本。 */
 export interface KeyValueEntry<T = KeyValueValue> {
   /** App 命名空间内的相对 K-V 键，不是物理对象路径。 */
@@ -86,7 +131,7 @@ export interface KeyValueCommitInput {
 export interface KeyValueCommitResult {
   /** 新的 partition revision。 */
   revision: number;
-  /** 不可变 commit 身份。 */
+  /** 本次调用的操作身份；V1 不把 commit 对象持久化。 */
   commitId: string;
   /** 提交时间戳（毫秒）。 */
   committedAt: number;
@@ -98,10 +143,20 @@ export interface KeyValueStore {
   readonly bucketId: string;
   /** 打开句柄时的桶运行世代。 */
   readonly bucketGeneration: number;
-  /** 当前 owner 的压缩公钥 hex。平台句柄为空字符串。 */
-  readonly ownerPublicKeyHex: string;
-  /** 平台验证后的 App 存储 ID。 */
-  readonly applicationStorageId: string;
+  /** owner 句柄的压缩公钥 hex；bucket 句柄没有 owner。 */
+  readonly ownerPublicKeyHex?: string;
+  /** 中央声明绑定的稳定模块身份。 */
+  readonly moduleId: string;
+  /** 中央声明绑定的稳定用途身份。 */
+  readonly purposeId: string;
+  /** 中央声明作用域。 */
+  readonly scope: "bucket" | "owner";
+  /** 中央声明授权主体。 */
+  readonly authority: "platform-only" | "built-in-module" | "third-party-app";
+  /** 中央声明数据模型；此句柄必须是 kv。 */
+  readonly model: "kv";
+  /** 中央声明 schema 版本。 */
+  readonly schemaVersion: number;
   /** 读取 K-V。 */
   get<T = KeyValueValue>(key: string, options?: { partition?: string }): Promise<KeyValueEntry<T> | undefined>;
   /** 分页列出 K-V；不会返回 `.keymaster/` 保留区。 */
@@ -115,3 +170,6 @@ export interface KeyValueStore {
   /** 关闭句柄；关闭后所有请求 fail closed。 */
   close(): void;
 }
+
+/** Host-owned K-V view injected into plugins; lifecycle close remains with the Host. */
+export type BorrowedKeyValueStore = Omit<KeyValueStore, "close">;

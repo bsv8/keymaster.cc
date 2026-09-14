@@ -15,7 +15,7 @@ import { createTestPluginHost as createPluginHost } from "./testing/createTestPl
 import type { PluginHost } from "./pluginHostContract.js";
 import type { LocalCapability, PluginIntentCoordinator } from "webloom-framework";
 import { defineCapability } from "webloom-framework";
-import { CHANNEL_RUNTIME_CAPABILITY, type ChannelRuntime, type ChannelRuntimeFactory, type KeyValueStore, type PluginContext } from "@keymaster/contracts";
+import { CHANNEL_RUNTIME_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS, type ChannelRuntime, type ChannelRuntimeFactory, type KeyValueStore, type PluginContext } from "@keymaster/contracts";
 import type { TestPluginManifest } from "./testing/createTestPluginHost.js";
 type PluginManifest = TestPluginManifest;
 import type { RouteRegistry } from "./registries/routeRegistry.js";
@@ -135,19 +135,27 @@ function makeC(dependsOn: readonly LocalCapability<unknown>[] = []): PluginManif
 describe("createPluginHost - runtime resource binding", () => {
   it("closes an owner store that finishes opening after the plugin was revoked", async () => {
     const owner = "02" + "11".repeat(32);
+    const storageDeclaration = {
+      moduleId: "late-owner-store",
+      purposeId: "settings",
+      scope: "owner",
+      authority: "third-party-app",
+      model: "kv",
+      schemaVersion: 1,
+    } as const;
     let resolveOpen!: (store: KeyValueStore) => void;
     const openPromise = new Promise<KeyValueStore>((resolve) => { resolveOpen = resolve; });
     const authority: StorageBindingAuthority = {
       getActivePublicKeyHex: () => owner,
       openOwnerAppStore: async () => openPromise,
-      openPlatformStore: async () => createInMemoryKeyValueStore({ scope: "platform", applicationStorageId: "platform", schemaVersion: 1, bucketId: "bucket", bucketGeneration: 1 }),
+      openPlatformStore: async () => createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, bucketId: "bucket", bucketGeneration: 1 }),
       deleteOwnerStorage: async () => undefined,
     };
     const host = createPluginHost({ disableConfigPersistence: true, storageBindingAuthority: authority });
     const plugin: PluginManifest = {
       id: "late-owner-store",
       name: "Late owner store",
-      storage: { scope: "key", applicationStorageId: "LateOwnerStore", schemaVersion: 1 },
+      storage: storageDeclaration,
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       async setup(ctx) {
         // 首次 K-V 操作会触发延迟 owner binding；在 binding 等待期间撤权。
@@ -159,9 +167,7 @@ describe("createPluginHost - runtime resource binding", () => {
     expect(host.state(plugin.id).kind).toBe("starting");
     const disabling = host.disable(plugin.id);
     const rawStore = createInMemoryKeyValueStore({
-      scope: "key",
-      applicationStorageId: "LateOwnerStore",
-      schemaVersion: 1,
+      ...storageDeclaration,
       bucketId: "bucket",
       bucketGeneration: 1,
       ownerPublicKeyHex: owner,

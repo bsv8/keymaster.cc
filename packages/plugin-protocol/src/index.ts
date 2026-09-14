@@ -10,7 +10,14 @@ export {
   ProtocolServiceImpl,
   type ProtocolServiceDeps
 } from "./protocolService.js";
-export { openProtocolStorageRepository } from "./storage/protocolStorageRepository.js";
+export {
+  openProtocolStorageRepository,
+  type ProtocolStorageStores
+} from "./storage/protocolStorageRepository.js";
+export {
+  PROTOCOL_STORAGE_DECLARATIONS,
+  PROTOCOL_STORAGE_PURPOSES
+} from "./storage/protocolStorageDeclarations.js";
 export { ProtocolValidationError, parseRequestMessage, assertMainnetP2pkhAddress, assertCompressedPubkeyHex } from "./protocolValidation.js";
 export {
   cborEncode,

@@ -1,12 +1,30 @@
 // Message 历史统一 K-V Repository。
 // 每条记录按 owner 隔离；调用方只能拿到当前 active owner 的受限句柄。
 
-import type { KeyValueStore, MessageRecord } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, MessageRecord } from "@keymaster/contracts";
 
-const STORAGE_ID = "Messages";
 const PARTITION = "messages";
 const PREFIX = "message/";
 export type MessageRepositoryOwnerGuard = () => boolean;
+
+/**
+ * The K-V write may finish just as the owner session becomes stale. If the
+ * compensating delete also fails, callers must observe both failures; the
+ * late record may still exist and must not be reported as cleaned up.
+ */
+export class MessageHistoryCompensationError extends Error {
+  readonly writeError: unknown;
+  readonly cleanupError: unknown;
+  readonly errors: readonly [unknown, unknown];
+
+  constructor(writeError: unknown, cleanupError: unknown) {
+    super("Message history write became stale and compensation failed", { cause: writeError });
+    this.name = "MessageHistoryCompensationError";
+    this.writeError = writeError;
+    this.cleanupError = cleanupError;
+    this.errors = [writeError, cleanupError];
+  }
+}
 
 export interface MessageRepository {
   list(guard?: MessageRepositoryOwnerGuard): Promise<MessageRecord[]>;
@@ -20,17 +38,15 @@ function normalizeOwner(ownerPublicKeyHex: string): string {
   return owner;
 }
 
-export const MESSAGE_STORAGE_ID = STORAGE_ID;
-export const MESSAGE_SCHEMA_VERSION = 1;
-
-export function createMessageRepository(store: KeyValueStore): MessageRepository {
+export function createMessageRepository(store: BorrowedKeyValueStore): MessageRepository {
   // Storage-first 启动时 Host 会先注入延迟绑定句柄；setup 阶段还没有
   // active key，不能在构造 Repository 时读取 owner。真正执行 K-V 操作
   // 时句柄已经完成 owner 绑定，再校验其 canonical publicKeyHex。
   function currentOwner(): string {
+    if (!store.ownerPublicKeyHex) throw new Error("Message history owner binding is unavailable");
     return normalizeOwner(store.ownerPublicKeyHex);
   }
-  async function listValues(current: KeyValueStore): Promise<MessageRecord[]> {
+  async function listValues(current: BorrowedKeyValueStore): Promise<MessageRecord[]> {
     const rows: MessageRecord[] = [];
     let cursor: string | undefined;
     do {
@@ -63,9 +79,14 @@ export function createMessageRepository(store: KeyValueStore): MessageRepository
       } catch (error) {
         if (!guard || guard()) throw error;
         // K-V commit may have completed immediately before the session fence
-        // changed. Remove this newly written record before surfacing the stale
-        // owner error; the repository never leaves a late message behind.
-        try { await store.delete(`${PREFIX}${message.messageId}`, { partition: PARTITION }); } catch { /* best effort */ }
+        // changed. Try to remove this newly written record before surfacing the
+        // stale owner error. If compensation fails, surface both failures: a
+        // late record may remain and must be reconciled by the caller.
+        try {
+          await store.delete(`${PREFIX}${message.messageId}`, { partition: PARTITION });
+        } catch (cleanupError) {
+          throw new MessageHistoryCompensationError(error, cleanupError);
+        }
         throw error;
       }
     }

@@ -47,6 +47,8 @@ describe("localStorage bucket provider", () => {
   });
 
   it("fails closed when Web Locks are unavailable", async () => {
+    vi.stubGlobal("isSecureContext", true);
+    vi.stubGlobal("navigator", {});
     const provider = createLocalStorageBucketProvider({ storage: new MemoryStorage(), bucketId: "no-lock" });
     await expect(provider.put("config", new Uint8Array([1]))).rejects.toMatchObject({ code: "storage_unavailable" });
     await expect(provider.probe()).rejects.toMatchObject({ code: "storage_unavailable" });

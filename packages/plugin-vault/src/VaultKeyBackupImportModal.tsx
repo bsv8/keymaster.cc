@@ -1,9 +1,9 @@
 // packages/plugin-vault/src/VaultKeyBackupImportModal.tsx
-// 单 Key Backup 导入 modal：收集备份 JSON + 源密码 + 目标 Vault 密码，
-// 调用 vault.importKeyBackup 还原加密 key 记录。
+// 单 Key Backup 导入 modal：收集备份 JSON + 来源桶密码 + 目标桶密码，
+// 调用 vault.importKeyBackup 还原 Catalog Hold 加密 key 记录。
 //
 // 设计缘由：
-//   - 备份恢复需要两重授权：先验证备份来源密码，再验证当前 Vault 目标密码。
+//   - 备份恢复需要两重授权：先验证备份来源桶密码，再验证当前目标桶密码。
 //   - JSON 文本不是单行输入，使用 TextArea；密码仍用 TextInput。
 //   - 提交失败时保留 modal，方便修正 backup 或密码后重试。
 //
@@ -65,7 +65,7 @@ export function VaultKeyBackupImportModal({
       return;
     }
     if (!targetPassword) {
-      setError(t("vault.keyImportBackup.err.emptyTargetPassword", { defaultValue: "请输入目标 Vault 密码" }));
+      setError(t("vault.keyImportBackup.err.emptyTargetPassword", { defaultValue: "请输入目标桶密码" }));
       return;
     }
 
@@ -118,7 +118,7 @@ export function VaultKeyBackupImportModal({
       <p className="vault-import-backup-modal__hint">
         {t("vault.keyImportBackup.hint", {
           defaultValue:
-            "粘贴导出的单 Key Backup JSON。恢复时需要备份来源密码，以及当前 Vault 的目标密码。"
+            "粘贴导出的 Catalog Hold Key 备份 JSON。恢复时需要来源桶密码，以及当前目标桶密码。"
         })}
       </p>
       <TextArea
@@ -127,20 +127,20 @@ export function VaultKeyBackupImportModal({
         onChange={(e) => setBackup(e.currentTarget.value)}
         error={error ?? undefined}
         placeholder={t("vault.keyImportBackup.backupPlaceholder", {
-          defaultValue: '{"format":"keymaster","version":2,...}'
+          defaultValue: '{"format":"keymaster.storage.catalog-key-backup","version":1,...}'
         })}
         rows={10}
         autoFocus
       />
       <TextInput
-        label={t("vault.keyImportBackup.sourcePassword", { defaultValue: "源密码" })}
+        label={t("vault.keyImportBackup.sourcePassword", { defaultValue: "来源桶密码" })}
         type="password"
         autoComplete="current-password"
         value={sourcePassword}
         onChange={(e) => setSourcePassword(e.currentTarget.value)}
       />
       <TextInput
-        label={t("vault.keyImportBackup.targetPassword", { defaultValue: "目标 Vault 密码" })}
+        label={t("vault.keyImportBackup.targetPassword", { defaultValue: "目标桶密码" })}
         type="password"
         autoComplete="current-password"
         value={targetPassword}

@@ -2,7 +2,7 @@
  * 抽象桶 Provider 与条件写能力状态。
  *
  * 本文件只定义 Provider 适配层使用的通用对象形状和能力状态，不引入
- * S3 SDK、OPFS API 或任何具体物理存储实现。具体实现必须位于对应 Provider
+ * S3 SDK、localStorage API 或任何具体物理存储实现。具体实现必须位于对应 Provider
  * 子目录，避免业务层绕过统一边界。
  */
 

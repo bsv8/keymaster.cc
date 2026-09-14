@@ -1,14 +1,12 @@
 // Contacts 统一 K-V Repository。
 // 联系人只通过 Host 绑定的 owner/App 句柄访问，不暴露 Provider 或物理路径。
 
-import type { Contact, KeyValueStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, Contact } from "@keymaster/contracts";
 
-export const CONTACTS_STORAGE_ID = "Contacts";
-export const CONTACTS_SCHEMA_VERSION = 1;
 const PARTITION = "contacts";
 const PREFIX = "contact/";
 
-async function listValues(store: KeyValueStore): Promise<Contact[]> {
+async function listValues(store: BorrowedKeyValueStore): Promise<Contact[]> {
   const result: Contact[] = [];
   let cursor: string | undefined;
   do {
@@ -20,11 +18,11 @@ async function listValues(store: KeyValueStore): Promise<Contact[]> {
 }
 
 /** Repository 只接收 Host 已绑定的 Contacts owner/App K-V 句柄。 */
-export function createContactsRepository(store: KeyValueStore) {
+export function createContactsRepository(store: BorrowedKeyValueStore) {
   const key = (id: string) => `${PREFIX}${id}`;
   return {
-    getStore(): KeyValueStore { return store; },
-    close(): void { store.close(); },
+    getStore(): BorrowedKeyValueStore { return store; },
+    close(): void { /* Host owns the borrowed storage handle. */ },
     async list(): Promise<Contact[]> { return listValues(store); },
     async get(id: string): Promise<Contact | undefined> { return (await store.get<Contact>(key(id), { partition: PARTITION }))?.value; },
     async findByPublicKeyHex(publicKeyHex: string): Promise<Contact | undefined> { return (await listValues(store)).find((item) => item.publicKeyHex === publicKeyHex); },

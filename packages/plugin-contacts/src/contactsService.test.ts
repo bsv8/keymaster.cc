@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { ActiveKeyState, KeyValueStore } from "@keymaster/contracts";
 import { createContactsService } from "./contactsService.js";
 
@@ -25,10 +26,11 @@ describe("ContactsService wire values", () => {
   it("omits an empty optional note before owner K-V transport", async () => {
     const writes: unknown[] = [];
     const storage = {
+      ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
       bucketId: "test",
       bucketGeneration: 1,
       ownerPublicKeyHex: OWNER,
-      applicationStorageId: "Contacts",
+      model: "kv" as const,
       async get() { return undefined; },
       async list() { return { revision: 0, entries: [] }; },
       async put(_key: string, value: unknown) {

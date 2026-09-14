@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NormalizedStorageProviderConfig } from "@keymaster/contracts";
-import { deriveThirdPartyApplicationStorageId, STORAGE_PART_SIZE_BYTES } from "@keymaster/contracts";
+import { deriveThirdPartyStorageModuleId, STORAGE_PART_SIZE_BYTES } from "@keymaster/contracts";
 import { createS3BucketObjectStore, type BucketObjectStore } from "./s3BucketObjectStore.js";
 import { buildOwnerAppNamespaceRoot } from "../../storage-access/owner-app/ownerAppNamespace.js";
 
@@ -17,7 +17,7 @@ const smokeIdentity = {
   appName: "Keymaster Storage Smoke",
   identityDigestHex: "00".repeat(32)
 };
-const namespaceRoot = buildOwnerAppNamespaceRoot({ ownerPublicKeyHex: `02${"cd".repeat(32)}`, applicationStorageId: deriveThirdPartyApplicationStorageId(smokeIdentity.publisherPublicKeyHex, smokeIdentity.appId) });
+const namespaceRoot = buildOwnerAppNamespaceRoot({ ownerPublicKeyHex: `02${"cd".repeat(32)}`, moduleId: deriveThirdPartyStorageModuleId(smokeIdentity.publisherPublicKeyHex, smokeIdentity.appId), purposeId: "files" });
 const providerSelection = (process.env.KEYMASTER_STORAGE_SMOKE_PROVIDER ?? "all").trim().toLowerCase();
 const fixtures = buildFixtures(providerSelection);
 

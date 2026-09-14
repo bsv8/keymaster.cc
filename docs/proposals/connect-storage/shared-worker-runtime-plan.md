@@ -170,7 +170,7 @@ Settings tab 不得静默覆盖新配置。
 
 ```text
 packages/plugin-storage/src/coordinator/
-  storageRuntime.ts       # worker-safe 状态机；无 React/window/plugin manifest
+  storageController.ts    # worker-safe 状态机；无 React/window/plugin manifest
   storageRpc.ts           # 命令校验、结果和错误映射
   storageScheduler.ts     # mutation/data lane、取消与并发上限
   storageState.ts         # revision/baseline/state event

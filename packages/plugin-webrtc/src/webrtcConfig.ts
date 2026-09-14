@@ -160,8 +160,8 @@ function isObject(v: unknown): v is Record<string, unknown> {
 export interface WebrtcConfigStore {
   /** 同步读当前配置；缺省值兜底。 */
   load(): WebrtcConfig;
-  /** 同步校验 + 写。失败抛错。 */
-  save(next: WebrtcConfig): void;
+  /** 远端保存成功后更新内存并通知订阅者。 */
+  save(next: WebrtcConfig): Promise<void>;
   /** 订阅配置变化；返回取消订阅函数。 */
   subscribe(handler: (config: WebrtcConfig) => void): () => void;
   /** 当前内存真值（最近一次成功 load / save）。 */
@@ -175,50 +175,30 @@ export interface WebrtcConfigStore {
  * 内只持有一份内存真值。
  *
  * 设计要点：
- *   - 构造时**不**抛：缺 / 损坏 → 全部降级成默认；
- *   - `save` 同步更新内存并排队写 K-V；
- *   - 订阅者**不**会立即收到自己的 save 的回调（典型 store 模式）；
+ *   - 构造时只建立内存默认值，首次读取由 `ready()` 完成；
+ *   - `save` 串行写 K-V，远端成功后才提交内存并通知订阅者；
  *   - 内存态与持久态分离：save 失败抛错时内存态仍保留**上次成功**的
  *     真值，避免脏读。
  */
 export function createKeyValueWebrtcConfigStore(
-  storage: import("@keymaster/contracts").KeyValueStore | undefined,
+  storage: import("@keymaster/contracts").BorrowedKeyValueStore,
   now: () => number = () => Date.now()
 ): WebrtcConfigStore {
+  if (!storage) throw new Error("WebRTC settings central storage binding is required");
   let current: WebrtcConfig = { stunServers: [...DEFAULT_STUN_SERVERS] };
   const subscribers = new Set<(c: WebrtcConfig) => void>();
   let writeQueue = Promise.resolve();
 
   async function ready(): Promise<void> {
-    if (!storage) return;
-    try {
-      const entry = await storage.get<unknown>(WEBRTC_CONFIG_STORAGE_KEY, { partition: "settings" });
-      if (entry) current = coerceWebrtcConfig(entry.value);
-    } catch (error) {
-      // 插件在 active key 产生前可以先装载；延迟 owner 句柄此时只允许
-      // 返回默认内存配置，active 事件会再次触发 ready()。
-      if (!(error instanceof Error) || !/active key/u.test(error.message)) throw error;
-    }
+    const entry = await storage.get<unknown>(WEBRTC_CONFIG_STORAGE_KEY, { partition: "settings" });
+    if (entry) current = coerceWebrtcConfig(entry.value);
   }
 
   function snapshot(): WebrtcConfig {
     return { stunServers: [...current.stunServers] };
   }
 
-  function save(next: WebrtcConfig): void {
-    const validated = validateStunServers(next.stunServers);
-    if (!validated.ok || validated.value === undefined) {
-      throw new Error(validated.error ?? "invalid_config");
-    }
-    const normalized: WebrtcConfig = { stunServers: validated.value };
-    current = normalized;
-    if (storage) {
-      const persisted = { ...normalized, savedAtMs: now() };
-      writeQueue = writeQueue
-        .then(() => storage.put(WEBRTC_CONFIG_STORAGE_KEY, persisted, { partition: "settings" }))
-        .then(() => undefined)
-        .catch(() => undefined);
-    }
+  function notify(): void {
     for (const handler of subscribers) {
       try {
         handler(snapshot());
@@ -226,6 +206,22 @@ export function createKeyValueWebrtcConfigStore(
         // 防御性吞掉 handler 异常——配置订阅不影响持久结果。
       }
     }
+  }
+
+  function save(next: WebrtcConfig): Promise<void> {
+    const validated = validateStunServers(next.stunServers);
+    if (!validated.ok || validated.value === undefined) {
+      throw new Error(validated.error ?? "invalid_config");
+    }
+    const normalized: WebrtcConfig = { stunServers: validated.value };
+    const persisted = { ...normalized, savedAtMs: now() };
+    const result = writeQueue.then(async () => {
+      await storage.put(WEBRTC_CONFIG_STORAGE_KEY, persisted, { partition: "settings" });
+      current = normalized;
+      notify();
+    });
+    writeQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   return {
@@ -252,7 +248,7 @@ export function createMemoryWebrtcConfigStore(
   const subscribers = new Set<(c: WebrtcConfig) => void>();
   return {
     load: () => ({ ...current, stunServers: [...current.stunServers] }),
-    save: (next) => {
+    save: async (next) => {
       const validated = validateStunServers(next.stunServers);
       if (!validated.ok || validated.value === undefined) {
         throw new Error(validated.error ?? "invalid_config");

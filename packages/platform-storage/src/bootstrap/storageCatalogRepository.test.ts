@@ -41,7 +41,7 @@ describe("Storage catalog repository", () => {
   it("rejects an update based on a stale entry without overwriting the latest entry", async () => {
     const storage = new MemoryStorage();
     const catalog = createStorageCatalogRepository({ storage, locks, generateId: () => "bucket-1", now: () => 100 });
-    const original = await catalog.createBucket(bucketInput("原名称"));
+    const original = await catalog.commitBucket(catalog.createBucketEntry(bucketInput("原名称")));
 
     const latest = await catalog.updateBucket(original.bucketId, { label: "最新名称" }, original);
     await expect(catalog.updateBucket(original.bucketId, { label: "过时名称" }, original)).rejects.toMatchObject({ code: "storage_conflict" });
@@ -50,10 +50,10 @@ describe("Storage catalog repository", () => {
     expect(catalog.read().buckets[0]).toEqual(latest);
   });
 
-  it("keeps the legacy unconditional update form for callers that already hold the lock boundary", async () => {
+  it("allows an unconditional update for callers that own the lock boundary", async () => {
     const storage = new MemoryStorage();
     const catalog = createStorageCatalogRepository({ storage, locks, generateId: () => "bucket-2", now: () => 200 });
-    const original: StorageBucketCatalogEntryV2 = await catalog.createBucket(bucketInput("原名称"));
+    const original: StorageBucketCatalogEntryV2 = await catalog.commitBucket(catalog.createBucketEntry(bucketInput("原名称")));
 
     await expect(catalog.updateBucket(original.bucketId, { label: "更新名称" })).resolves.toMatchObject({ label: "更新名称" });
   });
@@ -62,8 +62,8 @@ describe("Storage catalog repository", () => {
     const storage = new MemoryStorage();
     let id = 0;
     const catalog = createStorageCatalogRepository({ storage, locks, generateId: () => `bucket-${++id}`, now: () => 300 });
-    const current = await catalog.createBucket(bucketInput("当前桶"));
-    const other = await catalog.createBucket(bucketInput("备用桶"));
+    const current = await catalog.commitBucket(catalog.createBucketEntry(bucketInput("当前桶")));
+    const other = await catalog.commitBucket(catalog.createBucketEntry(bucketInput("备用桶")));
 
     await expect(catalog.removeBucket(current.bucketId, current)).rejects.toMatchObject({ code: "storage_forbidden" });
     await expect(catalog.removeBucket(other.bucketId, other)).resolves.toBeTruthy();

@@ -2,13 +2,22 @@
 // `keymaster.msfile` schema：全局设置 / 供应商 / App 策略 / App 使用摘要。
 
 import { afterEach, describe, expect, it } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import { openMsFileRepository, sanitizeAppOverride } from "./storage/msfileRepository.js";
 import { OWNER_PUBKEY, SUPPLIER_PUBKEY } from "./supplierConfig.test.js";
 
 const PUBLISHER = OWNER_PUBKEY;
 
 async function freshRepository() {
-  return openMsFileRepository();
+  const store = (declaration: (typeof CENTRAL_STORAGE_DECLARATIONS)[keyof typeof CENTRAL_STORAGE_DECLARATIONS]) =>
+    createInMemoryKeyValueStore({ ...declaration, bucketId: "msfile-test", bucketGeneration: 1 });
+  return openMsFileRepository({
+    settings: store(CENTRAL_STORAGE_DECLARATIONS.msfileSettings),
+    suppliers: store(CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers),
+    appPolicies: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies),
+    appUsage: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage),
+  });
 }
 
 afterEach(async () => {
@@ -16,36 +25,22 @@ afterEach(async () => {
 });
 
 describe("global settings", () => {
+  it("requires an explicit central store", async () => {
+    await expect(openMsFileRepository(undefined as never)).rejects.toThrow("MSFile central storage bindings are required");
+  });
+
   it("starts unconfigured and persists explicit saves", async () => {
     const db = await freshRepository();
     expect(await db.getGlobalSettings()).toBeNull();
     await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" }, 1234);
     expect(await db.getGlobalSettings()).toEqual({
       settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" },
-      mediaPlaybackPrefetchBlocks: 5,
       mediaBlockReadConcurrency: 2,
       globalSeedReadConcurrency: 4,
       globalBlockReadConcurrency: 8,
       globalStatConcurrency: 4,
       updatedAt: 1234,
     });
-    db.close();
-  });
-
-  it("updates the media policy independently and preserves price settings", async () => {
-    const db = await freshRepository();
-    await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" }, 10);
-    await db.putMediaPlaybackPrefetchBlocks!({ mediaPlaybackPrefetchBlocks: 64 }, 20);
-    expect(await db.getGlobalSettings()).toEqual({
-      settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" },
-      mediaPlaybackPrefetchBlocks: 64,
-      mediaBlockReadConcurrency: 2,
-      globalSeedReadConcurrency: 4,
-      globalBlockReadConcurrency: 8,
-      globalStatConcurrency: 4,
-      updatedAt: 20,
-    });
-    await expect(db.putMediaPlaybackPrefetchBlocks!({ mediaPlaybackPrefetchBlocks: 1 }, 30)).rejects.toThrow();
     db.close();
   });
 

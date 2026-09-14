@@ -37,6 +37,7 @@ describe("Coordinator Worker unit catalog", () => {
       "Worker 单元未在产品运行单元契约中声明: contacts.coordinator-worker",
       "重复 productId: p2pkh",
       "重复 unitId: contacts.coordinator-worker",
+      "Worker 单元引用未授权存储声明: contacts.coordinator-worker/address-book",
       "重复 taskId: contacts.presence-probe",
       "任务产品依赖必须包含自身产品: contacts.coordinator-worker",
       "重复 serviceId: contacts.service",

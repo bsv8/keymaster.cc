@@ -15,8 +15,6 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 let mockDbListResult: unknown[] = [];
 
 vi.mock("./storage/stasRepository.js", () => ({
-  STAS_STORAGE_ID: "STAS",
-  STAS_SCHEMA_VERSION: 1,
   createStasRepository: vi.fn(() => ({
     put: vi.fn(),
     replaceAll: vi.fn(),
@@ -114,7 +112,7 @@ function createMockCtx() {
   const ctx = {
     // manifest 的 owner/App K-V 句柄注入由 Host 负责；本测试只验证事件绑定，
     // 因此使用不会被 mock Repository 实际访问的最小占位值。
-    storage: {} as never,
+    storageFor: () => ({}) as never,
     capability: vi.fn((capability: { id: string }) => capabilities.get(capability.id)),
     has: vi.fn(() => true),
   };

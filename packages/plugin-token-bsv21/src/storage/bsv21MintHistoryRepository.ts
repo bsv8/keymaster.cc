@@ -1,6 +1,6 @@
 // BSV-21 mint history owner/App K-V Repository。
 
-import type { KeyValueStore, ProtocolSpendPreview, ProtocolSpendResult } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, ProtocolSpendPreview, ProtocolSpendResult } from "@keymaster/contracts";
 import type { Bsv21Payload } from "../bsv21Script.js";
 
 export type Bsv21MintHistoryStatus = "prepared" | ProtocolSpendResult["status"];
@@ -26,7 +26,7 @@ export interface Bsv21MintHistoryRepository {
 const PREFIX = "mint/";
 const PARTITION = "mint-history";
 
-export function createBsv21MintHistoryRepository(store: KeyValueStore): Bsv21MintHistoryRepository {
+export function createBsv21MintHistoryRepository(store: BorrowedKeyValueStore): Bsv21MintHistoryRepository {
   async function listAll(): Promise<Bsv21MintHistoryRecord[]> {
     const rows: Bsv21MintHistoryRecord[] = [];
     let cursor: string | undefined;
@@ -41,6 +41,6 @@ export function createBsv21MintHistoryRepository(store: KeyValueStore): Bsv21Min
     async put(record) { await store.put(`${PREFIX}${record.id}`, record, { partition: PARTITION }); },
     list: listAll,
     async findByTokenId(tokenId) { return (await listAll()).find((record) => record.preview.tokenId === tokenId || record.submit?.tokenId === tokenId); },
-    close() { store.close(); }
+    close() { /* Host owns the borrowed storage handle. */ }
   };
 }

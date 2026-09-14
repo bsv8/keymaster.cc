@@ -1,12 +1,10 @@
 // SatSubscription owner/App K-V Repository。
 // 一个 snapshot 作为单个值提交，避免部分 collection 写入被读者观察到。
 
-import type { KeyValueStore, SatCollectResult, SatOwnerSupplierSettingsV1, SatSpiInformation, SatSupplierConfigV1 } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, SatCollectResult, SatOwnerSupplierSettingsV1, SatSpiInformation, SatSupplierConfigV1 } from "@keymaster/contracts";
 import { normalizeOwnerSettings, normalizeSupplierConfig, parseUnsignedBigInt } from "../satValidation.js";
 import type { SatChannelDedupEntry, SatFeeAuditEntry, SatSubscriptionRecord, SatSubscriptionStateSnapshot } from "../satState.js";
 
-export const SAT_SUBSCRIPTION_STORAGE_ID = "SatSubscription";
-export const SAT_SUBSCRIPTION_SCHEMA_VERSION = 1;
 interface StoredSpiInformation {
   supplierId: string;
   ownerPublicKeyHex: string;
@@ -32,16 +30,18 @@ function fromStoredSpi(value: StoredSpiInformation): SatSpiInformation { return 
 function toStoredCollect(value: SatCollectResult): StoredCollectResult { return { ...value, amount: value.amount.toString(10) }; }
 function fromStoredCollect(value: StoredCollectResult): SatCollectResult { return { ...value, amount: parseUnsignedBigInt(value.amount, "collect.amount") }; }
 
-export function createSatSubscriptionRepository(handle: KeyValueStore): SatSubscriptionRepository {
+export function createSatSubscriptionRepository(handle: BorrowedKeyValueStore): SatSubscriptionRepository {
   return new SatSubscriptionRepository(handle);
 }
 
 export class SatSubscriptionRepository {
   readonly ownerPublicKeyHex: string;
-  constructor(readonly handle: KeyValueStore) {
+  constructor(readonly handle: BorrowedKeyValueStore) {
+    if (!handle.ownerPublicKeyHex) throw new Error("SatSubscription owner binding is unavailable");
     this.ownerPublicKeyHex = handle.ownerPublicKeyHex;
   }
-  close(): void { this.handle.close(); }
+  // The Host owns the borrowed handle lifecycle.
+  close(): void {}
   async load(): Promise<SatSubscriptionStateSnapshot> {
     const stored = (await this.handle.get<SatSubscriptionRepositorySnapshot>("snapshot", { partition: "state" }))?.value;
     if (!stored) return { ownerPublicKeyHex: this.ownerPublicKeyHex, supplierGeneration: 1, suppliers: [], ownerSettings: null, subscriptions: [], feeAudit: [], channelDedup: [], spiInformation: [], collectResults: [] };

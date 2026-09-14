@@ -1,87 +1,124 @@
-import { deriveThirdPartyApplicationStorageId } from "../appIdentity.js";
+import { deriveThirdPartyStorageModuleId } from "../appIdentity.js";
 import type { StorageBucketRef } from "./bucket.js";
 import type { KeyValueStore } from "./kv.js";
+import type { SnapshotStore, StorageSnapshotJsonCompatible } from "./snapshot.js";
 
-/** App 存储声明的权限范围。普通插件不能声明 platform。 */
-export type StorageScope = "key" | "platform";
+/**
+ * 中央存储声明的物理作用域。
+ *
+ * `bucket` 是桶级、与 owner 无关的系统数据；`owner` 必须绑定当前
+ * active owner。调用方不能把 scope 当成路径或自由选择的权限。
+ */
+export type StorageScope = "bucket" | "owner";
 
-/** 插件 manifest 对存储能力的自声明。 */
+/** 中央存储声明的授权主体。 */
+export type StorageAuthority = "platform-only" | "built-in-module" | "third-party-app";
+
+/** 中央存储声明的数据模型。 */
+export type StorageModel = "snapshot" | "kv";
+
+/**
+ * Host/Coordinator 使用的 V1 中央存储声明。
+ *
+ * 这是逻辑身份，不是物理目录名。moduleId + purposeId 是稳定的业务
+ * 坐标；bucket、owner、authority 和 model 由平台在绑定时一起校验。
+ */
 export interface PluginStorageDeclaration {
-  /** key：限制到当前 owner；platform：仅平台装配层可授权。 */
+  /** 稳定模块身份，例如 `coordinator`、`p2pkh` 或派生的第三方 App UUID。 */
+  moduleId: string;
+  /** 模块内稳定用途，例如 `selection`、`settings` 或 `state`。 */
+  purposeId: string;
+  /** bucket：桶级；owner：当前 owner 级。 */
   scope: StorageScope;
-  /** 稳定的 App 存储目录 ID，例如 `Contacts`、`UTXOS`。 */
-  applicationStorageId: string;
-  /** 数据 schema 版本。 */
+  /** 平台专属、内置模块或已验证第三方 App。 */
+  authority: StorageAuthority;
+  /** 固定单对象快照或 unique-value-id K-V。 */
+  model: StorageModel;
+  /** 当前数据 schema 版本；V1 不提供迁移回退。 */
   schemaVersion: number;
 }
 
-/** 装配层发放的最终存储绑定。调用方不能修改这些字段。 */
+/** 装配层发放的最终存储绑定；调用方不能修改这些字段。 */
 export interface StorageNamespaceBinding extends PluginStorageDeclaration {
   /** 抽象桶身份，不是物理路径。 */
   bucketId: string;
-  /** 当前桶运行世代。 */
+  /** 当前桶运行世代；切桶后旧绑定必须失效。 */
   bucketGeneration: number;
-  /** key scope 的当前 owner；platform scope 不应携带 owner。 */
+  /** owner 作用域的当前压缩公钥；bucket 作用域不得携带 owner。 */
   ownerPublicKeyHex?: string;
 }
 
-const STORAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}[A-Za-z0-9]$/u;
+const STORAGE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/u;
 const PUBLIC_KEY_PATTERN = /^(02|03)[0-9a-f]{64}$/u;
 
-/** 校验不会穿透 owner/App namespace 的业务存储 ID。 */
-export function validateApplicationStorageId(applicationStorageId: string): string {
-  if (
-    typeof applicationStorageId !== "string" ||
-    applicationStorageId.length > 63 ||
-    !STORAGE_ID_PATTERN.test(applicationStorageId) ||
-    applicationStorageId === ".keymaster" ||
-    applicationStorageId.toLowerCase() === "keys"
-  ) {
-    throw new Error("applicationStorageId is invalid");
+function validateStableId(value: string, field: "moduleId" | "purposeId"): string {
+  if (typeof value !== "string" || value.length > 63 || !STORAGE_ID_PATTERN.test(value)) {
+    throw new Error(`${field} is invalid`);
   }
-  return applicationStorageId;
+  return value;
 }
 
-/** 校验平台根 ID；平台根允许专用的 `keys` 命名空间。 */
-export function validatePlatformStorageId(applicationStorageId: string): string {
-  if (
-    typeof applicationStorageId !== "string" ||
-    applicationStorageId.length > 63 ||
-    !STORAGE_ID_PATTERN.test(applicationStorageId) ||
-    applicationStorageId === ".keymaster"
-  ) {
-    throw new Error("platform storage ID is invalid");
-  }
-  return applicationStorageId;
+/** 校验稳定模块身份。 */
+export function validateStorageModuleId(moduleId: string): string {
+  return validateStableId(moduleId, "moduleId");
+}
+
+/** 校验稳定用途身份。 */
+export function validateStoragePurposeId(purposeId: string): string {
+  return validateStableId(purposeId, "purposeId");
 }
 
 /** 校验压缩公钥 owner 根。 */
 export function validateOwnerPublicKeyHex(ownerPublicKeyHex: string): string {
-  if (!PUBLIC_KEY_PATTERN.test(ownerPublicKeyHex)) throw new Error("ownerPublicKeyHex is invalid");
+  if (typeof ownerPublicKeyHex !== "string" || !PUBLIC_KEY_PATTERN.test(ownerPublicKeyHex)) {
+    throw new Error("ownerPublicKeyHex is invalid");
+  }
   return ownerPublicKeyHex.toLowerCase();
 }
 
-/** 校验并规范化一个 manifest 存储声明。 */
+/** 校验并规范化一个中央存储声明。 */
 export function validatePluginStorageDeclaration(input: PluginStorageDeclaration): PluginStorageDeclaration {
-  if (!input || (input.scope !== "key" && input.scope !== "platform")) {
+  if (!input || (input.scope !== "bucket" && input.scope !== "owner")) {
     throw new Error("storage declaration scope is invalid");
   }
-  const applicationStorageId = input.scope === "platform"
-    ? validatePlatformStorageId(input.applicationStorageId)
-    : validateApplicationStorageId(input.applicationStorageId);
+  if (input.authority !== "platform-only" && input.authority !== "built-in-module" && input.authority !== "third-party-app") {
+    throw new Error("storage declaration authority is invalid");
+  }
+  if (input.model !== "snapshot" && input.model !== "kv") {
+    throw new Error("storage declaration model is invalid");
+  }
+  const moduleId = validateStorageModuleId(input.moduleId);
+  const purposeId = validateStoragePurposeId(input.purposeId);
   if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) {
     throw new Error("storage declaration schemaVersion is invalid");
   }
-  return { scope: input.scope, applicationStorageId, schemaVersion: input.schemaVersion };
+  if (input.scope === "bucket" && input.authority === "third-party-app") {
+    throw new Error("bucket storage cannot use third-party-app authority");
+  }
+  if (input.scope === "owner" && input.authority === "platform-only") {
+    throw new Error("owner storage cannot use platform-only authority");
+  }
+  return { moduleId, purposeId, scope: input.scope, authority: input.authority, model: input.model, schemaVersion: input.schemaVersion };
 }
 
 /**
- * 由 verified identity 派生三方 App 的稳定目录 ID。
- * 这是唯一允许三方 App 得到 applicationStorageId 的入口。
+ * 由 verified identity 派生三方 App 的稳定模块身份。
+ *
+ * 这是三方 App 唯一可用的 moduleId 来源；caller 不能在 grant 中自报
+ * 另一个 moduleId、owner 或 bucket。
  */
-export { deriveThirdPartyApplicationStorageId };
+export { deriveThirdPartyStorageModuleId };
 
-/** 构造绑定后的物理 namespace 根；bucketId 由 Provider 绑定，不进入路径。 */
+/** 中央 path planner 使用的 owner 模块根；文件 API 也必须复用这一坐标。 */
+export function buildOwnerStorageModuleRoot(input: {
+  ownerPublicKeyHex: string;
+  moduleId: string;
+  purposeId: string;
+}): string {
+  return `${validateOwnerPublicKeyHex(input.ownerPublicKeyHex)}/.keymaster/modules/${validateStorageModuleId(input.moduleId)}/${validateStoragePurposeId(input.purposeId)}/`;
+}
+
+/** 构造绑定后的逻辑 namespace 根；Provider 仍由 Coordinator 私有持有。 */
 export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): string {
   const declaration = validatePluginStorageDeclaration(binding);
   if (typeof binding.bucketId !== "string" || binding.bucketId.length === 0 || binding.bucketId.includes("/")) {
@@ -90,12 +127,21 @@ export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): str
   if (!Number.isSafeInteger(binding.bucketGeneration) || binding.bucketGeneration < 0) {
     throw new Error("bucketGeneration is invalid");
   }
-  if (declaration.scope === "key") {
-    if (!binding.ownerPublicKeyHex) throw new Error("key storage requires ownerPublicKeyHex");
-    return `${validateOwnerPublicKeyHex(binding.ownerPublicKeyHex)}/${declaration.applicationStorageId}/`;
+  if (declaration.scope === "owner") {
+    if (!binding.ownerPublicKeyHex) throw new Error("owner storage requires ownerPublicKeyHex");
+    // owner lifecycle 记录在桶根；业务 namespace 统一落在 owner 下的
+    // modules 目录，module/purpose 由中央 path planner 生成。
+    return buildOwnerStorageModuleRoot({ ownerPublicKeyHex: binding.ownerPublicKeyHex, moduleId: declaration.moduleId, purposeId: declaration.purposeId });
   }
-  if (binding.ownerPublicKeyHex !== undefined) throw new Error("platform storage must not contain an owner");
-  return `${declaration.applicationStorageId}/`;
+  if (binding.ownerPublicKeyHex !== undefined) throw new Error("bucket storage must not contain an owner");
+  // 系统对象的固定路径由 moduleId + purposeId 决定，绝不接受调用方传入
+  // 任意 physical path。K-V engine 会在此根下继续使用 heads/values。
+  return `.keymaster/system/${declaration.moduleId}/${declaration.purposeId}/`;
+}
+
+/** 固定 snapshot 对象的逻辑路径；只有平台实现使用此函数执行 Provider I/O。 */
+export function buildStorageSnapshotPath(binding: StorageNamespaceBinding): string {
+  return `${buildStorageNamespaceRoot(binding)}current`;
 }
 
 /** 最终路径 guard：只允许 namespace 内的相对键，拒绝父目录和保留区。 */
@@ -109,24 +155,16 @@ export function assertStorageKeyInNamespace(root: string, key: string): void {
   if (!key.startsWith(root)) throw new Error("storage key is outside namespace");
   const relative = key.slice(root.length);
   if (
-    relative.length === 0 ||
-    relative.split("/").some((segment) => !segment || segment === "." || segment === "..") ||
-    relative.split("/").includes(".keymaster")
+    relative.length === 0
+    || relative.split("/").some((segment) => !segment || segment === "." || segment === "..")
+    || relative.split("/").includes(".keymaster")
   ) {
     throw new Error("storage key is outside namespace");
   }
 }
 
-/** 已绑定当前 owner 与业务 App 的受限存储句柄。 */
+/** 已绑定当前 owner 与内置/三方模块的受限 K-V 句柄。 */
 export interface OwnerAppStore extends KeyValueStore {}
-
-/** 打开 owner/App 存储时唯一允许调用方提供的参数。 */
-export interface OwnerAppStoreOpenInput {
-  /** 业务 App 的稳定存储标识。 */
-  applicationStorageId: string;
-  /** 业务 schema 版本；不承载迁移回调。 */
-  schemaVersion: number;
-}
 
 /** 一次 owner 重新导入/重新绑定后的桶级世代。 */
 export interface OwnerStorageActivation {
@@ -134,25 +172,22 @@ export interface OwnerStorageActivation {
   generation: number;
 }
 
-/** 平台根只能访问此类受限 K-V；平台物理 Provider 不向业务传递。 */
+/** 平台根存储权威；Provider、ETag 和物理路径不会穿过此接口进入插件。 */
 export interface PlatformRootStore {
   /** 当前抽象桶。 */
   readonly bucket: StorageBucketRef;
-  /**
-   * 打开 owner/App 受限 K-V；owner 和 App ID 由装配层绑定。
-   * keyspaceGeneration 只供 Coordinator 内部绑定世代，业务插件不能提供。
-   */
-  openKeyValueStore(input: { ownerPublicKeyHex: string; applicationStorageId: string; schemaVersion: number; keyspaceGeneration?: number }): Promise<OwnerAppStore>;
+  /** 打开 Host 已预绑定的 owner 模块 K-V。 */
+  openKeyValueStore(input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number }): Promise<OwnerAppStore>;
+  /** 打开 bucket 级内置 snapshot；返回值不含 Provider/ETag/path。 */
+  openPlatformSnapshot<T>(input: { declaration: PluginStorageDeclaration; validate: (value: unknown) => StorageSnapshotJsonCompatible<T> }): Promise<SnapshotStore<T>>;
+  /** 打开 bucket 级平台 K-V（Vault purpose、protocol、multipart 等）。 */
+  openPlatformStore(input: { declaration: PluginStorageDeclaration }): Promise<KeyValueStore>;
   /** 为新导入的 owner 建立/恢复桶级 active 记录；普通解锁不会调用此方法。 */
   activateOwnerStorage(input: { ownerPublicKeyHex: string }): Promise<OwnerStorageActivation>;
   /** 读取现有 owner 世代；缺失记录只初始化 active，不会复活 deleted owner。 */
   getOwnerStorageGeneration(input: { ownerPublicKeyHex: string }): Promise<number>;
   /** 在文件 API 等非 K-V 请求的物理 I/O 前后检查 owner 生命周期。 */
   assertOwnerStorageCurrent(input: { ownerPublicKeyHex: string; generation?: number }): Promise<void>;
-  /** 删除指定 owner 根下全部 App 的 K-V；只由 Key 删除流程调用。 */
+  /** 删除指定 owner 根下全部模块的 K-V；只由 Key 删除流程调用。 */
   deleteOwnerStorage(input: { ownerPublicKeyHex: string }): Promise<void>;
-  /** 打开平台全局 K-V；只能由平台内部调用。 */
-  openPlatformStore(input: { applicationStorageId: string; schemaVersion: number }): Promise<KeyValueStore>;
-  /** 专用 keys/ 根；不会把 `keys` 再拼成 `keys/keys/`。 */
-  openPlatformKeysStore(schemaVersion: number): Promise<KeyValueStore>;
 }

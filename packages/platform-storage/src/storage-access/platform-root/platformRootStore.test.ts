@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { StorageBucketProvider, StorageBucketRef } from "@keymaster/contracts";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { createOwnerLifecycleGuardedProvider, createPlatformRootStore } from "./platformRootStore.js";
 
 interface TestObject {
@@ -44,7 +45,7 @@ function makeProvider(state: ProviderState = { objects: new Map(), sequence: 0 }
     };
   };
   return {
-    provider: "opfs",
+    provider: "local",
     bucketId: "schema-test",
     async probe() { return { ok: true, conditionalWrites: "native", latencyMs: 0 }; },
     async get(path, input = {}) {
@@ -128,17 +129,45 @@ function armOwnerPutBarrier(state: ProviderState, owner: string): OwnerPutBarrie
   return barrier;
 }
 
-const bucket: StorageBucketRef = { bucketId: "schema-test", bucketGeneration: 1, provider: "opfs" };
+const bucket: StorageBucketRef = { bucketId: "schema-test", bucketGeneration: 1, provider: "local" };
 
 describe("PlatformRoot bucket schema", () => {
+  it("authorizes every central bucket/platform declaration by default", async () => {
+    const root = createPlatformRootStore({ provider: makeProvider(), bucket });
+    await expect(root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.vaultKeyIndex })).resolves.toMatchObject({
+      moduleId: "vault",
+      purposeId: "key-index",
+    });
+    await expect(root.openPlatformSnapshot({
+      declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings,
+      validate: (value) => value === null ? null : (() => { throw new Error("invalid"); })(),
+    })).resolves.toBeDefined();
+  });
+
+  it("uses the same custom full-declaration whitelist for K-V and snapshots", async () => {
+    const root = createPlatformRootStore({
+      provider: makeProvider(),
+      bucket,
+      platformStorageDeclarations: [CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads],
+    });
+    await expect(root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads })).resolves.toBeDefined();
+    await expect(root.openPlatformSnapshot({
+      declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection,
+      validate: (value) => value === null ? null : (() => { throw new Error("invalid"); })(),
+    })).rejects.toMatchObject({ code: "storage_forbidden" });
+    await expect(root.openPlatformStore({
+      declaration: { ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, schemaVersion: 2 },
+    })).rejects.toMatchObject({ code: "storage_forbidden" });
+  });
+
   it("persists namespace versions and rejects opening the same directory with another version", async () => {
     const provider = makeProvider();
     const root = createPlatformRootStore({ provider, bucket });
-    await root.openPlatformStore({ applicationStorageId: "settings", schemaVersion: 1 });
+    await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
     expect((await provider.get(".keymaster/schema"))?.bytes.byteLength).toBeGreaterThan(0);
 
-    await expect(root.openPlatformStore({ applicationStorageId: "settings", schemaVersion: 2 })).rejects.toMatchObject({
-      code: "storage_provider_error"
+    await expect(root.openPlatformStore({ declaration: { ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, schemaVersion: 2 } })).rejects.toMatchObject({
+      code: "storage_forbidden"
     });
   });
 
@@ -146,11 +175,11 @@ describe("PlatformRoot bucket schema", () => {
     const provider = makeProvider();
     const root = createPlatformRootStore({ provider, bucket });
     const ownerPublicKeyHex = `02${"11".repeat(32)}`;
-    await root.openKeyValueStore({ ownerPublicKeyHex, applicationStorageId: "Contacts", schemaVersion: 1 });
-    await expect(root.openKeyValueStore({ ownerPublicKeyHex, applicationStorageId: "Contacts", schemaVersion: 2 })).rejects.toMatchObject({
-      code: "storage_provider_error"
+    await root.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook });
+    await expect(root.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 2 } })).rejects.toMatchObject({
+      code: "storage_forbidden"
     });
-    await expect(root.openKeyValueStore({ ownerPublicKeyHex: `03${"22".repeat(32)}`, applicationStorageId: "Contacts", schemaVersion: 2 })).resolves.toBeDefined();
+    await expect(root.openKeyValueStore({ ownerPublicKeyHex: `03${"22".repeat(32)}`, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
   });
 
   it("serializes same-worker owner lease CAS while allowing concurrent stores", async () => {
@@ -160,8 +189,7 @@ describe("PlatformRoot bucket schema", () => {
     const stores = await Promise.all(
       Array.from({ length: 4 }, () => root.openKeyValueStore({
         ownerPublicKeyHex,
-        applicationStorageId: "Contacts",
-        schemaVersion: 1
+        declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook
       }))
     );
 
@@ -183,7 +211,7 @@ describe("PlatformRoot bucket schema", () => {
     const firstRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const secondRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const ownerPublicKeyHex = `02${"33".repeat(32)}`;
-    const oldStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, applicationStorageId: "Contacts", schemaVersion: 1 });
+    const oldStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook });
     await oldStore.put("before-delete", "value");
 
     const barrier = armOwnerListBarrier(state, ownerPublicKeyHex);
@@ -192,7 +220,7 @@ describe("PlatformRoot bucket schema", () => {
       secondRoot.deleteOwnerStorage({ ownerPublicKeyHex })
     ]);
     await barrier.reached;
-    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, applicationStorageId: "Contacts", schemaVersion: 1 })).rejects.toMatchObject({ code: "storage_unavailable" });
+    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook })).rejects.toMatchObject({ code: "storage_unavailable" });
     await expect(oldStore.put("late", "must-fail")).rejects.toMatchObject({ code: "storage_unavailable" });
     barrier.release();
     await deleting;
@@ -200,14 +228,14 @@ describe("PlatformRoot bucket schema", () => {
     const schemaObject = state.objects.get(".keymaster/schema");
     expect(schemaObject).toBeDefined();
     const schema = JSON.parse(new TextDecoder().decode(schemaObject!.bytes)) as { namespaces: Record<string, number> };
-    expect(Object.keys(schema.namespaces).some((key) => key.startsWith(`key|${ownerPublicKeyHex}|`))).toBe(false);
+    expect(Object.keys(schema.namespaces).some((key) => key.startsWith(`owner|${ownerPublicKeyHex}|`))).toBe(false);
     const lifecycle = JSON.parse(new TextDecoder().decode(state.objects.get(`.keymaster/owners/${ownerPublicKeyHex}`)!.bytes)) as { status: string; generation: number };
     expect(lifecycle).toMatchObject({ status: "deleted", generation: 1 });
     await expect(createOwnerLifecycleGuardedProvider(makeProvider(state)).put(`${ownerPublicKeyHex}/Contacts/file.txt`, new Uint8Array([1]))).rejects.toMatchObject({ code: "storage_unavailable" });
 
-    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, applicationStorageId: "Contacts", schemaVersion: 2 })).rejects.toMatchObject({ code: "storage_unavailable" });
+    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
     await expect(secondRoot.activateOwnerStorage({ ownerPublicKeyHex })).resolves.toEqual({ generation: 2 });
-    const freshStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, applicationStorageId: "Contacts", schemaVersion: 2 });
+    const freshStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 1 } });
     await expect(oldStore.put("old-generation", "must-fail")).rejects.toMatchObject({ code: "storage_unavailable" });
     await expect(freshStore.put("new-generation", "works")).resolves.toMatchObject({ key: "new-generation" });
   });
@@ -216,7 +244,7 @@ describe("PlatformRoot bucket schema", () => {
     const state: ProviderState = { objects: new Map(), sequence: 0 };
     const root = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const ownerPublicKeyHex = `03${"44".repeat(32)}`;
-    const store = await root.openKeyValueStore({ ownerPublicKeyHex, applicationStorageId: "Contacts", schemaVersion: 1 });
+    const store = await root.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook });
     const barrier = armOwnerPutBarrier(state, ownerPublicKeyHex);
     const inflight = store.put("inflight", "late");
     await barrier.reached;

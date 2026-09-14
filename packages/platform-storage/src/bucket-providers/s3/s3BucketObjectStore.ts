@@ -15,7 +15,7 @@ import { DOMParser as XmlDomParser } from "@xmldom/xmldom";
 import { STORAGE_MAX_PAYLOAD_BYTES } from "@keymaster/contracts";
 import type { NormalizedStorageProviderConfig } from "@keymaster/contracts";
 import { providerEndpoint } from "./s3ClientFactory.js";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { assertKeyInRoot } from "../bucketPath.js";
 
 export interface BucketObject {

@@ -8,13 +8,17 @@ import type {
   ChannelPrivateMessageEvent,
   ChannelRuntime,
   JSONValue,
-  KeyValueStore,
+  BorrowedKeyValueStore,
   KeyspaceService,
   MessageContentType,
   MessageRecord
 } from "@keymaster/contracts";
 import { MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
-import { createMessageRepository, type MessageRepositoryOwnerGuard } from "./storage/messageRepository.js";
+import {
+  createMessageRepository,
+  MessageHistoryCompensationError,
+  type MessageRepositoryOwnerGuard
+} from "./storage/messageRepository.js";
 
 /** 消息业务插件公开的 service。 */
 export interface MessageService {
@@ -35,6 +39,8 @@ export interface MessageService {
   subscribeMessages(handler: (message: MessageRecord) => void): () => void;
   /** 订阅本地历史变化。 */
   subscribeChanges(handler: () => void): () => void;
+  /** 订阅后台接收路径中的持久化错误（包括补偿失败）。 */
+  subscribeErrors?(handler: (error: unknown) => void): () => void;
   /** 释放 Channel 订阅。 */
   dispose?(): void;
 }
@@ -59,15 +65,38 @@ type MessagePrivateContent = MessageTextContent | MessageAckContent;
 export interface MessageServiceDeps {
   channel: ChannelRuntime;
   keyspace: KeyspaceService;
-  storage?: KeyValueStore;
+  storage: BorrowedKeyValueStore;
+  /** Optional observer for storage compensation failures in background receive handling. */
+  onStorageError?(error: unknown): void;
 }
 
 /** 构造消息 service。 */
 export function createMessageService(deps: MessageServiceDeps): MessageService {
   const messageListeners = new Set<(message: MessageRecord) => void>();
   const changeListeners = new Set<() => void>();
-  const messageRepository = deps.storage ? createMessageRepository(deps.storage) : undefined;
+  const errorListeners = new Set<(error: unknown) => void>();
+  if (!deps.storage) throw new Error("Message central storage binding is required");
+  const messageRepository = createMessageRepository(deps.storage);
   let disposed = false;
+
+  function reportStorageError(error: unknown): void {
+    const observers: Array<(error: unknown) => void> = [
+      ...(deps.onStorageError ? [deps.onStorageError] : []),
+      ...errorListeners
+    ];
+    if (observers.length === 0) {
+      console.error("Message history persistence failed", error);
+      return;
+    }
+    for (const observer of observers) {
+      try {
+        observer(error);
+      } catch (observerError) {
+        // A diagnostics consumer must not hide the original persistence error.
+        console.error("Message history persistence observer failed", observerError, error);
+      }
+    }
+  }
 
   function ownerPublicKeyHex(): string | undefined {
     return deps.keyspace.active().activePublicKeyHex?.trim().toLowerCase();
@@ -145,7 +174,6 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
 
   async function handlePrivateMessage(event: ChannelPrivateMessageEvent): Promise<void> {
     if (disposed || event.protocol !== MESSAGE_PRIVATE_PROTOCOL) return;
-    if (!messageRepository) return;
     const owner = captureOwner();
     if (!owner || !isMessageContent(event.content)) return;
     if (event.content.type === "ack") return;
@@ -166,8 +194,11 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
       if (!guard()) return;
       notify(record);
       await acknowledge(event, guard);
-    } catch {
+    } catch (error) {
       // 锁定、切 key 或本地 K-V 关闭时，丢弃本次事件；不伪造成功通知。
+      // 尤其是补偿删除失败时，错误携带 writeError + cleanupError，且必须
+      // 通过 observer / console 可见；不能把可能残留的晚到消息说成已清理。
+      if (error instanceof MessageHistoryCompensationError) reportStorageError(error);
     }
   }
 
@@ -189,7 +220,7 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
 
     async listMessages(input) {
       const owner = captureOwner();
-      if (!owner || !messageRepository) throw new Error("not_ready");
+      if (!owner) throw new Error("not_ready");
       const rows = await messageRepository.list(ownerGuard(owner));
       rows.sort((a, b) => b.insertedAtMs - a.insertedAtMs || b.messageId.localeCompare(a.messageId));
       const afterMessageId = input?.afterMessageId;
@@ -201,12 +232,12 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
 
     async getMessage(messageId) {
       const owner = captureOwner();
-      if (!owner || !messageRepository) throw new Error("not_ready");
+      if (!owner) throw new Error("not_ready");
       return (await messageRepository.get(messageId, ownerGuard(owner))) ?? null;
     },
 
     async sendTextMessage(input) {
-      if (disposed || !messageRepository || !deps.channel.isReady() || !ownerPublicKeyHex()) throw new Error("not_ready");
+      if (disposed || !deps.channel.isReady() || !ownerPublicKeyHex()) throw new Error("not_ready");
       const recipientPublicKeyHex = input.recipientPublicKeyHex.trim().toLowerCase();
       if (!/^(02|03)[0-9a-f]{64}$/.test(recipientPublicKeyHex)) {
         throw new Error("invalid_target");
@@ -256,6 +287,11 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
       return () => changeListeners.delete(handler);
     },
 
+    subscribeErrors(handler) {
+      errorListeners.add(handler);
+      return () => errorListeners.delete(handler);
+    },
+
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -264,6 +300,7 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
       void deps.channel.subscriptionSet([]).catch(() => undefined);
       messageListeners.clear();
       changeListeners.clear();
+      errorListeners.clear();
     }
   };
 }

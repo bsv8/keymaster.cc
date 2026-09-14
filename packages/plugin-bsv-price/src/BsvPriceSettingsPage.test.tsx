@@ -75,7 +75,7 @@ function makeFakeService(): BsvPriceService {
     currentQuotes: () => [],
     getPublisherPublicKeyHex: () => currentHex,
     configured: () => currentHex.length > 0,
-    savePublisherPublicKeyHex: (input) => {
+    savePublisherPublicKeyHex: async (input) => {
       const next = input.trim().toLowerCase();
       if (next.length > 0 && next.length !== 66) {
         throw new Error("invalid_length");

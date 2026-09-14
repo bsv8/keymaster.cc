@@ -144,7 +144,6 @@ export type CoordinatorStorageControl =
   | { type: "status" }
   | { type: "summary" }
   | { type: "connection" }
-  | { type: "unlock-profile"; password: string }
   /** 新版桶目录的临时桶密码；不复用旧 Storage Profile envelope。 */
   | { type: "unlock-bucket"; password: string }
   /** 最终确认后的首桶 + 首 Key 单一事务；密码和材料只在本次请求内存在。 */
@@ -168,15 +167,9 @@ export type CoordinatorStorageControl =
   | { type: "change-bucket-config"; config: StorageBucketConnectionConfigV1; label?: string; password: string }
   /** 当前桶显示名称的目录 CAS；必须由当前 Coordinator 执行。 */
   | { type: "rename-bucket"; label: string }
-  | { type: "select-opfs" }
-  | { type: "import-profile"; envelope: import("./storage/profile.js").StorageProfileEnvelopeV1; password: string }
   | { type: "retry" }
   /** 当前新版桶的全量改密；Worker 同时更新 Hold 快照与桶内 Vault records。 */
   | { type: "change-bucket-password"; oldPassword: string; newPassword: string }
-  | { type: "probe"; config: StorageProviderConfigDraft }
-  | { type: "activate"; config: StorageProviderConfigDraft; expectedProviderGeneration: number | null }
-  | { type: "clear"; expectedProviderGeneration: number | null }
-  | { type: "reset"; expectedProviderGeneration: number | null }
   | { type: "cancel-probe" }
   | { type: "capabilities" }
   | { type: "probe-capabilities" }
@@ -392,13 +385,6 @@ export type CoordinatorVaultOperation =
   | { type: "exportKeyBackup"; publicKeyHex: string }
   | { type: "importKeyBackup"; backup: string; sourcePassword: string; targetPassword: string }
   | { type: "exportCurrentKeyBackup" }
-  | { type: "listCurrentKeyPasskeys" }
-  | { type: "listPasskeysForKey"; publicKeyHex: string }
-  | { type: "prepareAddPasskeyToCurrentKey"; label: string }
-  | { type: "addPasskeyToCurrentKey"; intentId: string; credentialIdB64: string; prfSaltB64: string; prfOutputHex: string; rpId: string; transports?: string[] }
-  | { type: "removePasskeyFromCurrentKey"; passkeyId: string }
-  | { type: "getPasskeyChallenge"; passkeyId: string }
-  | { type: "activateKeyWithPasskey"; passkeyId: string; prfOutputHex: string }
   | { type: "sealLocalSecret"; scope: string; plaintext: Uint8Array }
   | { type: "openLocalSecret"; scope: string; sealed: VaultSealedSecret };
 

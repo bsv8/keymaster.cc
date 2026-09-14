@@ -125,7 +125,6 @@ const backgroundPluginDefinition = {
       capabilityDescriptor(BACKGROUND_SERVICE_CAPABILITY),
       capabilityDescriptor(BACKGROUND_COORDINATOR_CONTROL_CAPABILITY),
     ],
-    storage: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "需要向 Topbar 注册任务托盘" },
       { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册后台同步系统设置" },

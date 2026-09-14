@@ -12,7 +12,7 @@ import type {
   StorageRecordV1
 } from "@keymaster/contracts";
 import { STORAGE_CATALOG_CHANGED_EVENT } from "@keymaster/contracts";
-import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
 import { browserStorageLocks } from "../runtime/browserLocks.js";
 
 export const STORAGE_CATALOG_KEY = "keymaster.storage.catalog.v2";
@@ -38,7 +38,7 @@ export interface StorageCatalogRepositoryOptions {
 export interface CreateStorageBucketInput {
   /** 桶显示名称。 */
   label: string;
-  /** Local 或 S3；旧 OPFS 不允许新建。 */
+  /** V1 Local 或 S3 后端。 */
   backend: "local" | "s3";
   /** KeymasterHold 公共 KDF 参数。 */
   keyDerivation: StorageKeyDerivationV1;
@@ -291,11 +291,6 @@ export function createStorageCatalogRepository(options: StorageCatalogRepository
     return checked;
   }
 
-  /** 兼容旧调用方：立即提交一个尚未带 Hold 快照的目录条目。 */
-  async function createBucket(input: CreateStorageBucketInput): Promise<StorageBucketCatalogEntryV2> {
-    return commitBucket(createBucketEntry(input));
-  }
-
   async function updateBucket(
     bucketId: string,
     update: Partial<Pick<StorageBucketCatalogEntryV2, "label" | "backend" | "configRevision" | "keyDerivation" | "encryptedConfig" | "snapshotRevision">>,
@@ -325,7 +320,6 @@ export function createStorageCatalogRepository(options: StorageCatalogRepository
     mutate,
     createBucketEntry,
     commitBucket,
-    createBucket,
     updateBucket,
     selectBucket: (bucketId: string) => mutate((catalog) => {
       if (!catalog.buckets.some((bucket) => bucket.bucketId === bucketId)) throw new StorageRuntimeError("storage_not_found", "Storage bucket was not found");

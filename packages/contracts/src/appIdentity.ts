@@ -21,14 +21,14 @@ export interface VerifiedAppIdentity {
 }
 
 /**
- * 从已验证的 publisher 公钥和 App ID 派生三方 App 的稳定存储目录 ID。
+ * 从已验证的 publisher 公钥和 App ID 派生三方 App 的稳定 moduleId。
  *
  * 这不是 caller 可以提交的权限字段：Host 必须从已验证 identity 重新计算，
  * 这样 caller 伪造 owner 或另一个 App UUID 时会在装配层被拒绝。
  * 算法使用 SHA-256 的固定域分隔输入，并按 RFC 4122 UUID v5 的版本/变体
  * 位格式化；同一 publisher + appId 在不同设备和 Provider 上结果一致。
  */
-export function deriveThirdPartyApplicationStorageId(
+export function deriveThirdPartyStorageModuleId(
   publisherPublicKeyHex: string,
   appId: string
 ): string {
@@ -43,7 +43,7 @@ export function deriveThirdPartyApplicationStorageId(
   // validation. Keep the small hash implementation local to contracts and
   // avoid making the public contract depend on a crypto provider at runtime.
   const bytes = new TextEncoder().encode(
-    `keymaster.app-storage.v1\u0000${publisherPublicKeyHex.toLowerCase()}\u0000${appId}`
+    `keymaster.storage-module.v1\u0000${publisherPublicKeyHex.toLowerCase()}\u0000${appId}`
   );
   // SHA-256 is provided by the platform through a tiny, deterministic
   // fallback-free implementation imported by the contracts package.

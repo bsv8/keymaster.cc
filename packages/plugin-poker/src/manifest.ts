@@ -53,6 +53,7 @@ import { PokerLobby } from "./PokerLobby.js";
 import { PokerTable as PokerTablePage } from "./PokerTable.js";
 import { PokerSettingsPage } from "./PokerSettingsPage.js";
 import { PokerHomeWidget } from "./widgets/PokerHomeWidget.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 export { POKER_SERVICE_CAPABILITY };
 
@@ -279,7 +280,7 @@ const pokerPluginDefinition = {
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [POKER_SERVICE_CAPABILITY],
-    storage: { scope: "key", applicationStorageId: "Poker", schemaVersion: 1 },
+    storages: [CENTRAL_STORAGE_DECLARATIONS.pokerSettings, CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory],
     dependencies: defineRuntimeUnitDependencies([
       { capability: VAULT_SERVICE_CAPABILITY, reason: "need createActiveKeyCrypto for signing" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key + key-scoped storage" },
@@ -298,9 +299,13 @@ const pokerPluginDefinition = {
     const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
     const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
-    if (!ctx.storage) throw new Error("Poker owner storage binding is unavailable");
-
-    const service = createPokerService({ vault, keyspace, messageBus, storage: ctx.storage });
+    const service = createPokerService({
+      vault,
+      keyspace,
+      messageBus,
+      settingsStorage: ctx.storageFor("settings"),
+      sessionHistoryStore: ctx.storageFor("session-history"),
+    });
     await service.ready();
     const offStorageActive = keyspace.onActiveKeyChanged((state) => {
       if (state.activePublicKeyHex) {

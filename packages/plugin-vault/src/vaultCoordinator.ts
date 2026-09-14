@@ -16,7 +16,7 @@ import {
   PBKDF2_PARAMS,
   verifyVerifier
 } from "./crypto.js";
-import type { VaultMetaRecord } from "./storage/vaultKeyRepository.js";
+import type { VaultAuthMetadata } from "./storage/vaultStorageRepository.js";
 
 export interface VaultKeyMaterial {
   hex: string;
@@ -30,7 +30,7 @@ export interface VaultMetaInput {
   cryptoVersion?: "v2";
 }
 
-export function buildVaultMeta(input: VaultMetaInput): VaultMetaRecord {
+export function buildVaultAuthMetadata(input: VaultMetaInput): VaultAuthMetadata {
   return {
     id: "singleton",
     saltB64: bytesToHex(input.salt),
@@ -50,7 +50,7 @@ export async function deriveVaultPasswordKey(password: string, salt: Uint8Array)
 }
 
 /** 只接受当前 Vault schema；旧编码和旧 verifier 不进入新桶读取路径。 */
-export async function resolveVaultPasswordKey(password: string, meta: VaultMetaRecord): Promise<{ key: CryptoKey }> {
+export async function resolveVaultPasswordKey(password: string, meta: VaultAuthMetadata): Promise<{ key: CryptoKey }> {
   if (meta.cryptoVersion !== "v2" || meta.kdf !== "pbkdf2-sha256" || meta.iterations !== PBKDF2_PARAMS.iterations || meta.keyLengthBits !== 256) {
     throw new Error("Unsupported Vault schema");
   }
@@ -69,7 +69,7 @@ export async function resolveVaultPasswordKey(password: string, meta: VaultMetaR
 /** 保持调用方只需要 key 的现有 API；需解码记录时使用 resolve*。 */
 export async function verifyVaultPasswordKey(
   password: string,
-  meta: VaultMetaRecord
+  meta: VaultAuthMetadata
 ): Promise<CryptoKey> {
   return (await resolveVaultPasswordKey(password, meta)).key;
 }

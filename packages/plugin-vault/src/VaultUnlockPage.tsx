@@ -38,7 +38,7 @@ export function VaultUnlockPage() {
     <div className="vault-page vault-page--unlock">
       <PageHeader
         title={t("vault.unlock.title", { defaultValue: "解锁钱包" })}
-        description={t("vault.unlock.description", { defaultValue: "输入密码以解锁本地 Vault。" })}
+        description={t("vault.unlock.description", { defaultValue: "输入桶密码以解锁当前 Catalog 桶。" })}
       />
       <form onSubmit={submit} className="vault-form">
         <TextInput

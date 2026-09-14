@@ -1,6 +1,7 @@
 // 消息 service 单测：Channel 私信 + 当前 owner 本地历史。
 
 import { describe, expect, it, vi } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS, MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
   ChannelPrivateMessageEvent,
@@ -8,9 +9,8 @@ import type {
   OwnerAppStore,
   KeyspaceService
 } from "@keymaster/contracts";
-import { MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
-import { createMessageRepository } from "./storage/messageRepository.js";
+import { createMessageRepository, MessageHistoryCompensationError } from "./storage/messageRepository.js";
 import { createMessageService } from "./messageService.js";
 
 const OWNER = "02" + "aa".repeat(32);
@@ -25,7 +25,7 @@ interface TestKeyspace {
 function keyspace(): TestKeyspace {
   const state: ActiveKeyState = { activePublicKeyHex: OWNER };
   const stores = new Map<string, OwnerAppStore>();
-  stores.set(OWNER, createInMemoryKeyValueStore({ scope: "key", ownerPublicKeyHex: OWNER, applicationStorageId: "Messages", schemaVersion: 1, bucketId: "test", bucketGeneration: 1 }) as OwnerAppStore);
+  stores.set(OWNER, createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, ownerPublicKeyHex: OWNER, bucketId: "test", bucketGeneration: 1 }) as OwnerAppStore);
   const value: KeyspaceService = {
     listKeys: async () => [],
     getKey: async () => undefined,
@@ -70,7 +70,7 @@ describe("createMessageService", () => {
   it("reports readiness from the owner-scoped Channel runtime", () => {
     const transport = channel();
     const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
     expect(service.isReady()).toBe(true);
     service.dispose?.();
   });
@@ -78,7 +78,7 @@ describe("createMessageService", () => {
   it("publishes a private message and stores only the local record", async () => {
     const transport = channel();
     const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
 
     await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "hello" });
 
@@ -96,7 +96,7 @@ describe("createMessageService", () => {
   it("persists a valid incoming message and sends an independent ACK", async () => {
     const transport = channel();
     const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
     transport.emit({
       channel: `bsv8.inbox.${OWNER}`,
       publisherPublicKeyHex: PEER,
@@ -123,7 +123,7 @@ describe("createMessageService", () => {
   it("rejects an invalid target before publishing", async () => {
     const transport = channel();
     const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
     await expect(service.sendTextMessage({ recipientPublicKeyHex: "not-a-public-key", body: "hello" }))
       .rejects.toThrow("invalid_target");
     expect(transport.publishPrivate).not.toHaveBeenCalled();
@@ -135,7 +135,7 @@ describe("createMessageService", () => {
     let releasePublish!: (value: { messageId: string }) => void;
     const publishGate = new Promise<{ messageId: string }>((resolve) => { releasePublish = resolve; });
     const transport = channel({ publishPrivate: async () => publishGate });
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER) });
+    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER)! });
 
     const pendingSend = service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "owner fenced" });
     await vi.waitFor(() => expect(transport.publishPrivate).toHaveBeenCalled());
@@ -157,7 +157,7 @@ describe("createMessageService", () => {
   it("drops an incoming message when the owner changes before the DB write", async () => {
     const testKeyspace = keyspace();
     const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER) });
+    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER)! });
     transport.emit({
       channel: `bsv8.inbox.${OWNER}`,
       publisherPublicKeyHex: PEER,
@@ -185,11 +185,57 @@ describe("createMessageService", () => {
   it("writes message history as owner K-V records", async () => {
     const testKeyspace = keyspace();
     const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER) });
+    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER)! });
     await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "stored in K-V" });
     const entries = await testKeyspace.stores.get(OWNER)!.list({ partition: "messages", prefix: "message/" });
     expect(entries.entries).toHaveLength(1);
     expect(entries.entries[0]?.value).toEqual(expect.objectContaining({ body: "stored in K-V" }));
+    service.dispose?.();
+  });
+
+  it("reports both errors when stale-write cleanup fails", async () => {
+    const testKeyspace = keyspace();
+    const baseStorage = testKeyspace.stores.get(OWNER)!;
+    const cleanupError = new Error("cleanup unavailable");
+    const staleStorage = {
+      ...baseStorage,
+      async put<T>(key: string, value: T, condition?: Parameters<OwnerAppStore["put"]>[2]) {
+        await baseStorage.put(key, value, condition);
+        testKeyspace.state.activePublicKeyHex = OTHER_OWNER;
+        testKeyspace.state.generation = 2;
+      },
+      async delete() {
+        throw cleanupError;
+      }
+    } as unknown as OwnerAppStore;
+    const transport = channel();
+    const errors: unknown[] = [];
+    const service = createMessageService({
+      channel: transport.runtime,
+      keyspace: testKeyspace.keyspace,
+      storage: staleStorage,
+      onStorageError: (error) => errors.push(error)
+    });
+    transport.emit({
+      channel: `bsv8.inbox.${OWNER}`,
+      publisherPublicKeyHex: PEER,
+      messageId: "incoming-cleanup-failure",
+      protocol: MESSAGE_PRIVATE_PROTOCOL,
+      content: {
+        type: "text",
+        contentType: "text/plain",
+        body: "must report cleanup failure",
+        clientMessageId: "client-cleanup-failure",
+        createdAtMs: 123
+      }
+    });
+
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(errors[0]).toBeInstanceOf(MessageHistoryCompensationError);
+    const reported = errors[0] as MessageHistoryCompensationError;
+    expect(reported.writeError).toBeInstanceOf(Error);
+    expect(reported.cleanupError).toBe(cleanupError);
+    expect(reported.errors).toEqual([reported.writeError, cleanupError]);
     service.dispose?.();
   });
 });

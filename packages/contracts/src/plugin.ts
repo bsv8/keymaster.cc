@@ -34,7 +34,7 @@ import type {
 import type { I18nPluginResources } from "./i18n.js";
 import type { PluginBusinessContribution } from "./business.js";
 import type { PluginStorageDeclaration } from "./storage/access.js";
-import type { KeyValueStore } from "./storage/kv.js";
+import type { BorrowedKeyValueStore } from "./storage/kv.js";
 import type { PluginPermission } from "./keymasterLifecycle.js";
 
 /**
@@ -46,7 +46,9 @@ import type { PluginPermission } from "./keymasterLifecycle.js";
  */
 export interface PluginContext extends KeymasterWebLoomContext {
   /** Host 预绑定的领域 Storage 句柄。 */
-  readonly storage?: KeyValueStore;
+  readonly storage?: BorrowedKeyValueStore;
+  /** Resolve a named declaration from the current unit. */
+  readonly storageFor: (purposeId: string) => BorrowedKeyValueStore;
   /** 按 pluginId 收窄后的 Coordinator facade。 */
   readonly coordinator?: unknown;
 }
@@ -195,6 +197,8 @@ export interface RuntimeUnitDescriptor extends Omit<
   readonly permissions?: readonly PluginPermission[];
   /** 本单元的存储声明。 */
   readonly storage?: PluginStorageDeclaration;
+  /** 同一单元需要多个 purpose/scope 时使用的命名声明。 */
+  readonly storages?: readonly PluginStorageDeclaration[];
   /** 单元专属配置契约 / 部署默认值。 */
   readonly config?: KeymasterPluginConfig;
 }
@@ -218,11 +222,13 @@ export interface PluginManifest extends Omit<
   /** UI 展示分组。 */
   readonly displayGroup: PluginDisplayGroup;
   /**
-   * 新统一存储声明。系统 App 也只能通过 `scope: "key"` 获取自己的目录；
-   * `scope: "platform"` 由 Host 白名单显式授权，普通插件会被拒绝；
-   * 显式运行单元必须将声明放入 unit.storage。
+   * 中央存储 V1 声明。内置模块可按 purpose 使用 owner 或 bucket 作用域；
+   * bucket 作用域只能由平台或已发布的内置模块绑定；
+   * 显式运行单元必须将完整 module/purpose/scope/authority/model 声明放入 unit.storage。
    */
   storage?: PluginStorageDeclaration;
+  /** 无显式 units 的插件可声明多个命名存储。 */
+  storages?: readonly PluginStorageDeclaration[];
   /**
    * 显式配置面（施工单 2026-07-08 001 硬切换；仅无 units 的兼容插件）。
    *

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { awsS3EndpointForRegion, configFromBytes, normalizeProviderConfig, r2EndpointForAccount, summaryForConfig } from "./s3ClientFactory.js";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 
 const credentials = { mode: "replace" as const, accessKeyId: "access-key-1234", secretAccessKey: "secret-value" };
 

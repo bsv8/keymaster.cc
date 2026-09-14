@@ -6,7 +6,7 @@
 //   - 新命令插入后能按 updatedAt desc 返回；
 //   - 不同 origin 不串历史；
 //   - 更新同 id 后仍只保留一条记录；
-//   - origins / feePools 三 store 升级正确；
+//   - durable-policy / sessions / command-history 三 purpose 路由正确；
 //   - feePools 按 poolKey 复合 key 隔离；
 //   - 不存在 `operations` store。
 
@@ -16,7 +16,33 @@ import type {
   ProtocolFeePoolRecord,
   ProtocolOriginSettingsRecord
 } from "@keymaster/contracts";
-import { openProtocolStorageRepository } from "./storage/protocolStorageRepository.js";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import { openProtocolStorageRepository as openBoundProtocolStorageRepository } from "./storage/protocolStorageRepository.js";
+import { PROTOCOL_STORAGE_DECLARATIONS } from "./storage/protocolStorageDeclarations.js";
+
+function createProtocolStores(suffix = Math.random().toString(36).slice(2, 8)) {
+  return {
+    durablePolicy: createInMemoryKeyValueStore({
+      ...PROTOCOL_STORAGE_DECLARATIONS.durablePolicy,
+      bucketId: `protocol-policy-${suffix}`,
+      bucketGeneration: 1,
+    }),
+    sessions: createInMemoryKeyValueStore({
+      ...PROTOCOL_STORAGE_DECLARATIONS.sessions,
+      bucketId: `protocol-sessions-${suffix}`,
+      bucketGeneration: 1,
+    }),
+    commandHistory: createInMemoryKeyValueStore({
+      ...PROTOCOL_STORAGE_DECLARATIONS.commandHistory,
+      bucketId: `protocol-history-${suffix}`,
+      bucketGeneration: 1,
+    })
+  };
+}
+
+function openProtocolStorageRepository() {
+  return openBoundProtocolStorageRepository(createProtocolStores());
+}
 
 function makeRecord(
   id: string,
@@ -86,6 +112,53 @@ function makePool(
 }
 
 describe("openProtocolStorageRepository", () => {
+  it("requires all three purpose stores", () => {
+    // @ts-expect-error production API requires a bound store
+    expect(() => openBoundProtocolStorageRepository()).toThrow("Protocol durable-policy storage binding is required");
+  });
+
+  it("routes policy, session, and command history records to separate purpose stores", async () => {
+    const stores = createProtocolStores("routing");
+    const db = openBoundProtocolStorageRepository(stores);
+    await db.putOrigin(makeOrigin("https://routing.example", 1));
+    await db.putConnectSession({
+      sessionId: "routing-session",
+      origin: "https://routing.example",
+      ownerPublicKeyHex: "02" + "11".repeat(32),
+      ownerLabel: "Owner",
+      claimsSnapshot: {},
+      createdAt: 1,
+      lastUsedAt: 1,
+      revokedAt: null
+    });
+    await db.putCommand(makeRecord("routing-command", "https://routing.example", "identity.get", 1, 2));
+
+    expect((await stores.durablePolicy.list({ partition: "protocol" })).entries).toHaveLength(1);
+    expect((await stores.sessions.list({ partition: "protocol" })).entries).toHaveLength(1);
+    expect((await stores.commandHistory.list({ partition: "protocol" })).entries).toHaveLength(1);
+    expect((await stores.durablePolicy.list({ partition: "protocol" })).entries[0]?.key).toMatch(/^origins\//);
+    expect((await stores.sessions.list({ partition: "protocol" })).entries[0]?.key).toMatch(/^sessions\//);
+    expect((await stores.commandHistory.list({ partition: "protocol" })).entries[0]?.key).toMatch(/^commands\//);
+  });
+
+  it("propagates purpose-store write failures", async () => {
+    const stores = createProtocolStores("write-failure");
+    const policyError = new Error("policy write failed");
+    stores.durablePolicy.put = async () => { throw policyError; };
+    const db = openBoundProtocolStorageRepository(stores);
+    await expect(db.putOrigin(makeOrigin("https://write-failure.example", 1))).rejects.toBe(policyError);
+  });
+
+  it("does not close Host-owned borrowed stores", async () => {
+    const stores = createProtocolStores("borrowed");
+    const close = stores.sessions.close;
+    let closeCalls = 0;
+    stores.sessions.close = () => { closeCalls += 1; close(); };
+    const db = openBoundProtocolStorageRepository(stores);
+    await db.getConnectSession("missing");
+    expect(closeCalls).toBe(0);
+  });
+
   it("stores and retrieves a command by id", async () => {
     const db = await openProtocolStorageRepository();
     const rec = makeRecord("a", "https://demo.example", "identity.get", 1, 2);
@@ -302,40 +375,11 @@ describe("openProtocolStorageRepository", () => {
 
 });
 
-/* ============== 施工单 2026-06-30 002：v8 迁移 wiperuntimeBinding 测试 ============== */
-/**
- * 验证 v8 升级**真正**清空旧 connectSessions（带 runtimeBinding 字段的）数据，
- * 而不只是"忽略字段"——这是硬切"不留尾巴"的可执行验收。
- */
-
-/* ============== 施工单 2026-06-30 002：v8 迁移 wiperuntimeBinding 测试 ============== */
-/**
- * 验证 v8 升级**真正**清空旧 connectSessions（带 runtimeBinding 字段的）数据，
- * 而不只是"忽略字段"——这是硬切"不留尾巴"的可执行验收。
- *
- * 设计缘由：fake-indexeddb 的实例被多个 vitest 用例共享，无法对单个
- * 固定 DB_NAME 做 "v7 预置 → v8 升级"序列（需要先 deleteDatabase，
- * 但 fake-indexeddb 的 deleteDatabase 在已有活跃连接时会 onblocked）。
- * 因此改为**结构 + 行为**双向验证：
- *   1. 结构验证：源码级断言 v8 onupgradeneeded 真删除 connectSessions
- *      + launchTokens store；
- *   2. 行为验证：v8 schema 下新 session 真值三元组不带 runtimeBinding。
- * 生产升级（用户浏览器 IndexedDB）走的是同一份 onupgradeneeded handler，
- * 结构验证保证该路径下发生真删除。
- */
-describe("protocolMultipartUploadRepository v8 migration (施工单 2026-06-30 002)", () => {
-  // 关于 v8 migration **真正删除 connectSessions / launchTokens 而不是
-  // 只忽略 runtimeBinding 字段**这件事：fake-indexeddb 的 IDB 实例在
-  // vitest 用例间共享，无法跨用例 deleteDatabase；纯 e2e（用户浏览器
-  // IndexedDB 上的真 onupgradeneeded）路径不在本测试覆盖。本测试守住
-  // 边界三件事：
-  //   1. v8 schema 真值三元组不带 runtimeBinding（下面用例）；
-  //   2. `ConnectSessionRecord` 类型上不允许写 `runtimeBinding` 字段；
-  //      —— 这是 TS 编译期保证；
-  //   3. onupgradeneeded handler 真删除两个 store 由源码中的
-  //      `if (oldVersion < 8) { deleteObjectStore(...) }` 块保证；
-  //      这是 reviewer 必看的硬切边界。
-  it("v8 schema 下 connectSessions 真值三元组写入与读取均不带 runtimeBinding", async () => {
+/* ============== Protocol V1 session record boundary ============== */
+describe("Protocol V1 session records", () => {
+  // Session truth is public authorization state only; runtime/bootstrap
+  // material and launch tokens stay in the current Session Window memory.
+  it("connect session records contain authorization truth but no runtime material", async () => {
     const db = await openProtocolStorageRepository();
     await db.putConnectSession({
       sessionId: "sess-schema-v8-clean",

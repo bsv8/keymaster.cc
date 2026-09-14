@@ -5,7 +5,7 @@
 //   - 不管理通话状态机；
 //   - 不持久化临时协商态，只记录终态。
 
-import type { KeyspaceService, KeyValueStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, KeyspaceService } from "@keymaster/contracts";
 import {
   CALL_PARTITION,
   TRANSFER_PARTITION,
@@ -32,19 +32,20 @@ export type WebrtcHistoryItem =
 export function createWebrtcHistoryService(input: {
   keyspace: KeyspaceService;
   ownerPublicKeyHex: () => string | null;
-  storage?: KeyValueStore;
+  storage: BorrowedKeyValueStore;
 }): WebrtcHistoryService {
-  const repository = input.storage ? createWebrtcHistoryRepository(input.storage) : undefined;
-  async function withRepository<T>(fn: (store: KeyValueStore) => Promise<T>): Promise<T | null> {
+  if (!input.storage) throw new Error("WebRTC history central storage binding is required");
+  const repository = createWebrtcHistoryRepository(input.storage);
+  async function withRepository<T>(fn: (store: BorrowedKeyValueStore) => Promise<T>): Promise<T | null> {
     const owner = input.ownerPublicKeyHex();
-    if (!owner || !repository) return null;
+    if (!owner) return null;
     return fn(repository.store);
   }
 
   return {
     async listForPeer(peerPublicKeyHex) {
       const owner = input.ownerPublicKeyHex();
-      if (!owner || !repository) return [];
+      if (!owner) return [];
       {
         const calls = await listWebrtcRows<WebrtcCallHistoryRow>(repository.store, CALL_PARTITION);
         const transfers = await listWebrtcRows<WebrtcTransferHistoryRow>(repository.store, TRANSFER_PARTITION);
@@ -76,7 +77,7 @@ export function createWebrtcHistoryService(input: {
     },
     async getBlob(blobKey) {
       const owner = input.ownerPublicKeyHex();
-      if (!owner || !repository) return null;
+      if (!owner) return null;
       return getWebrtcBlob(repository.store, blobKey);
     }
   };

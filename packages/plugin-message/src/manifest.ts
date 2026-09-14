@@ -42,6 +42,7 @@ import { router } from "@keymaster/runtime";
 import { MessagePage } from "./MessagePage.js";
 import { MessageDetailPage } from "./MessageDetailPage.js";
 import { createMessageService } from "./messageService.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 /** 消息会话聚合结果（Resource Store 数据模型） */
 export interface MessageConversationsData {
@@ -317,7 +318,7 @@ const messagePlatformPluginDefinition = {
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [MESSAGE_SERVICE_CAPABILITY],
-    storage: { scope: "key", applicationStorageId: "Messages", schemaVersion: 1 },
+    storage: CENTRAL_STORAGE_DECLARATIONS.messageHistory,
     dependencies: defineRuntimeUnitDependencies([
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "读取 active key 并跟随会话聚合刷新" },
@@ -340,7 +341,7 @@ const messagePlatformPluginDefinition = {
     });
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
     const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
-    const service = createMessageService({ channel, keyspace, storage: ctx.storage });
+    const service = createMessageService({ channel, keyspace, storage: ctx.storageFor("history") });
     ctx.provide(MESSAGE_SERVICE_CAPABILITY, service);
 
     // 注册资源定义（硬切换 003）

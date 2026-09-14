@@ -36,6 +36,7 @@ export { SAT_SUBSCRIPTION_PLUGIN_ID } from "@keymaster/contracts";
 import { SatSubscriptionSettings } from "./SatSubscriptionSettings.js";
 import { SatWindowP2pLane } from "./satWindowLane.js";
 import { createSatWorkerAdminService, createSatWorkerChannelRuntime, createSatWorkerSpiService } from "./satWorkerProxy.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 export const SAT_SUBSCRIPTION_ROUTE_PATH = "/settings/system";
 
@@ -154,7 +155,6 @@ const satSubscriptionPluginDefinition = {
       CHANNEL_RUNTIME_CAPABILITY,
       SAT_COORDINATOR_CONTROL_CAPABILITY
     ],
-    storage: { scope: "key", applicationStorageId: "SatSubscription", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "设置页业务读取统一经过 Resource Store" },
@@ -165,6 +165,7 @@ const satSubscriptionPluginDefinition = {
     id: "sat-subscription.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
+    storage: CENTRAL_STORAGE_DECLARATIONS.satSubscriptionState,
   }],
   setup(ctx: PluginContext) {
     const coordinator = ctx.coordinator as SatCoordinatorControl | undefined;

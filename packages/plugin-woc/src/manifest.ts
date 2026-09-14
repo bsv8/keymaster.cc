@@ -13,12 +13,12 @@ import type {
   BreadcrumbProvider,
   BreadcrumbRegistry,
   I18nPluginResources,
-  KeyspaceService,
   PluginManifest,
   PluginSetup,
   SystemSettingsRegistry,
   Woc1SatOrdinalsService,
   WocBsv21Service,
+  WocConfig,
   WocService,
   WocStasService
 } from "@keymaster/contracts";
@@ -31,7 +31,6 @@ import {
   WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
   WOC_STAS_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
   SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   capabilityDescriptor,
@@ -112,10 +111,8 @@ const wocPluginDefinition = {
       capabilityDescriptor(WOC_1SAT_ORDINALS_CAPABILITY),
       capabilityDescriptor(WOC_COORDINATOR_CONTROL_CAPABILITY),
     ],
-    storage: { scope: "key", applicationStorageId: "WOC", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "注册 WOC actor handlers（target=woc）" },
-      { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "active key 就绪后加载 WOC owner 配置" },
       { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 WOC 系统设置" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 WOC 面包屑" },
     ]),
@@ -130,14 +127,20 @@ const wocPluginDefinition = {
     if (!coordinator) throw new Error("WOC Coordinator control is unavailable");
     ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
-    const service = createWocService({ messageBus, storage: ctx.storage });
-    await service.ready();
-    const offActive = keyspace.onActiveKeyChanged((state) => {
-      if (state.activePublicKeyHex) {
-        void service.ready().catch(() => undefined);
+    const bootstrap: Partial<WocConfig> = {};
+    const bootstrapResult = await coordinator.p2pkhProviderConfigGet("woc");
+    if (bootstrapResult.status === "ok") {
+      const endpoint = bootstrapResult.value.endpoint;
+      const requestsPerSecond = bootstrapResult.value.requestsPerSecond;
+      if (typeof endpoint === "string" && endpoint.trim()) {
+        bootstrap.baseUrl = endpoint.trim().replace(/\/+$/, "");
       }
-    });
+      if (typeof requestsPerSecond === "number" && Number.isFinite(requestsPerSecond) && requestsPerSecond > 0) {
+        bootstrap.requestsPerSecond = requestsPerSecond;
+      }
+    }
+    const service = createWocService({ messageBus, initialConfig: bootstrap });
+    await service.ready();
     ctx.provide(WOC_CAPABILITY, service);
 
     // BSV-21 / STAS / 1Sat Ordinals 的 WOC capability。
@@ -182,7 +185,6 @@ const wocPluginDefinition = {
       // 硬切换 001：bridge 到 service.dispose()。
       // actor detach + 取消 messageBus handle 都在 dispose 内。
       service.dispose();
-      offActive();
     };
   }
 } satisfies PluginManifest & { setup: PluginSetup };

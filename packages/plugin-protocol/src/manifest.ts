@@ -6,9 +6,11 @@
 // 2026-06-30 002 + 2026-07-01 001 + 2026-07-01 002）：
 //   - 协议页是常驻 popup：单条 request 完成后 popup 不自动关闭；
 //     `closing` 由 pageUnloading 路径发出。
-//   - 命令流历史走 `protocol` platform K-V，按 origin 与时间字段在仓库层过滤。
+//   - 命令流历史、origin policy/fee-pool、connect session 分别走中央
+//     `command-history` / `durable-policy` / `sessions` K-V purpose。
 //   - service 收到第一条合法 request 时按 `event.origin` 拉历史；
-//     切换 origin 时重新载入；K-V 失败时 `historyAvailable=false` 降级。
+//     切换 origin 时重新载入；历史读取失败时仅保留当前运行时内存投影，
+//     但终态写入失败必须传播给用户可见结果。
 //   - popup 入口路径只有一条 `/protocol/v1/popup`，**不**注册到
 //     `route.registry`（与施工单 001 公共语义保持一致）。
 //   - 施工单 2026-06-29 001 硬切换：popup 语义统一为 Session Window；
@@ -45,6 +47,7 @@ import {
   APP_CATALOG_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
+  PROTOCOL_STORAGE_REPOSITORY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   PROTOCOL_COORDINATOR_CONTROL_CAPABILITY,
   STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
@@ -60,6 +63,7 @@ import {
 import { openProtocolStorageRepository } from "./storage/protocolStorageRepository.js";
 import { parseBootMode, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import { createConnectChannelRuntime } from "./channelRuntime.js";
+import { PROTOCOL_STORAGE_DECLARATIONS, PROTOCOL_STORAGE_PURPOSES } from "./storage/protocolStorageDeclarations.js";
 
 export const PROTOCOL_PLUGIN_ID = "protocol";
 /** Protocol only needs the stable adapter subset exposed by P2PKH. */
@@ -469,8 +473,12 @@ const protocolPluginDefinition = {
     id: "protocol.window",
     runtime: "window-main",
     scopeKind: "storage",
-    provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY],
-    storage: { scope: "platform", applicationStorageId: "protocol", schemaVersion: 1 },
+    provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY],
+    storages: [
+      PROTOCOL_STORAGE_DECLARATIONS.durablePolicy,
+      PROTOCOL_STORAGE_DECLARATIONS.sessions,
+      PROTOCOL_STORAGE_DECLARATIONS.commandHistory
+    ],
     dependencies: defineRuntimeUnitDependencies([
       {
         capability: VAULT_SERVICE_CAPABILITY,
@@ -485,7 +493,7 @@ const protocolPluginDefinition = {
     ]),
   }],
   i18n: protocolResources,
-  setup(ctx: PluginContext) {
+  async setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
     const vaultService = ctx.capability(VAULT_SERVICE_CAPABILITY);
     const keyspaceService = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
@@ -493,13 +501,13 @@ const protocolPluginDefinition = {
     if (!coordinatorClient) throw new Error("Protocol Coordinator control is unavailable");
     ctx.provide(PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     const connectChannelRuntime = createConnectChannelRuntime(coordinatorClient);
-    let storageRuntimeController: StorageRuntimeController | undefined;
+    let storageController: StorageRuntimeController | undefined;
     try {
-      storageRuntimeController = ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
+      storageController = ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
     } catch {
       // Storage is an optional platform plugin.  The protocol service still
       // starts, while storage.* requests fail closed with a stable error.
-      storageRuntimeController = undefined;
+      storageController = undefined;
     }
 
     // MSFile 是可选平台能力（施工单 docs/proposals/msfile）：缺失时只让
@@ -511,10 +519,9 @@ const protocolPluginDefinition = {
       msfileService = undefined;
     }
 
-    // platform K-V repository 是历史 / 每站点配置的可选持久化层，绝不能阻塞插件注册。
-    // 某些浏览器在存储服务异常时会让 platform K-V repository.open() 永久 pending，既不触发
-    // error 也不触发 blocked。先以 historyAvailable=false 创建 service，后台
-    // 打开成功后再 attach，确保钱包主路径始终可用。
+    // Host 已在 setup 前绑定三个 purpose-scoped K-V 句柄；它们承载历史、
+    // 每站点配置和 session 必要真值。仓储 attach 在 setup 生命周期内 await，
+    // 任何绑定或回补写失败都必须让 setup 失败，不能静默降级。
     //
     // P2PKH 在 owner-apps-ready 阶段才装配。这里必须保存 resolver，而不是
     // 在 vault-selection setup 时读取一次 undefined；每次 transfer/feepool
@@ -530,8 +537,8 @@ const protocolPluginDefinition = {
     const service = createProtocolService({
         vault: vaultService,
         keyspace: keyspaceService,
-        storageRuntimeController,
-        getStorageRuntimeController: () => {
+        storageController,
+        getStorageController: () => {
           try {
             return ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
           } catch {
@@ -597,11 +604,13 @@ const protocolPluginDefinition = {
         invalidation: "immediate"
       });
 
-      void openProtocolStorageRepository(ctx.storage)
-        .then((storageRepository) => {
-          service.attachProtocolStorageRepository(storageRepository);
-        })
-        .catch(() => undefined);
+      const storageRepository = openProtocolStorageRepository({
+        durablePolicy: ctx.storageFor(PROTOCOL_STORAGE_PURPOSES.durablePolicy),
+        sessions: ctx.storageFor(PROTOCOL_STORAGE_PURPOSES.sessions),
+        commandHistory: ctx.storageFor(PROTOCOL_STORAGE_PURPOSES.commandHistory)
+      });
+      ctx.provide(PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, storageRepository);
+      await service.attachProtocolStorageRepository(storageRepository);
 
       // 注意：协议页**不**注册到 `route.registry`。
       // 设计缘由：施工单 001 收口反馈——页面"单一 owner"意味着入口路径

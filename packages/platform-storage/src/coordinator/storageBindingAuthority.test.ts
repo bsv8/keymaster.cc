@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { StorageBindingCoordinatorClient, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 import { createStorageBindingAuthority } from "./storageBindingAuthority.js";
 
@@ -10,7 +11,7 @@ function grant(): StorageOwnerGrant {
     bucketId: "bucket:1",
     bucketGeneration: 1,
     ownerPublicKeyHex: OWNER.toLowerCase(),
-    applicationStorageId: "Background",
+    ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
     ownerStorageGeneration: 1,
     sessionEpoch: "session:1",
   };
@@ -35,8 +36,8 @@ describe("storage binding authority", () => {
 
     const authority = createStorageBindingAuthority(client);
     const store = await authority.openOwnerAppStore({
-      pluginId: "background",
-      declaration: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
+      pluginId: "contacts",
+      declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
     });
 
     await expect(store.put("hello", "world")).resolves.toMatchObject({ revision: 1 });
@@ -50,11 +51,15 @@ describe("storage binding authority", () => {
       platformGrantId: "platform-grant:old",
       bucketId: "bucket:1",
       bucketGeneration: 1,
-      applicationStorageId: "protocol",
-      schemaVersion: 1,
+      ...CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
       sessionEpoch: "session:1",
     };
-    const nextGrant: StoragePlatformGrant = { ...firstGrant, platformGrantId: "platform-grant:new" };
+    const nextGrant: StoragePlatformGrant = {
+      ...firstGrant,
+      platformGrantId: "platform-grant:new",
+      bucketId: "bucket:2",
+      bucketGeneration: 2,
+    };
     const bind = vi.fn()
       .mockResolvedValueOnce({ status: "ok", value: firstGrant, sessionEpoch: "session:1" })
       .mockResolvedValueOnce({ status: "ok", value: nextGrant, sessionEpoch: "session:1" });
@@ -70,13 +75,14 @@ describe("storage binding authority", () => {
       storageDeleteOwner: vi.fn(),
     } as unknown as StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined };
 
-    const store = await createStorageBindingAuthority(client).openPlatformStore({
-      pluginId: "protocol",
-      applicationStorageId: "protocol",
-      schemaVersion: 1,
-    });
+    const store = await createStorageBindingAuthority(client).openPlatformStore({ pluginId: "protocol", declaration: CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy });
 
+    expect(store.bucketId).toBe("bucket:1");
+    expect(store.bucketGeneration).toBe(1);
+    expect("ownerPublicKeyHex" in store).toBe(false);
     await expect(store.get("hello")).resolves.toMatchObject({ value: "world" });
+    expect(store.bucketId).toBe("bucket:2");
+    expect(store.bucketGeneration).toBe(2);
     expect(bind).toHaveBeenCalledTimes(2);
     expect(data).toHaveBeenNthCalledWith(1, expect.objectContaining({ platformGrantId: "platform-grant:old" }));
     expect(data).toHaveBeenNthCalledWith(2, expect.objectContaining({ platformGrantId: "platform-grant:new" }));
@@ -87,8 +93,7 @@ describe("storage binding authority", () => {
       platformGrantId: "platform-grant:one-shot",
       bucketId: "bucket:1",
       bucketGeneration: 1,
-      applicationStorageId: "protocol",
-      schemaVersion: 1,
+      ...CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
       sessionEpoch: "session:1",
     };
     const bind = vi.fn(async () => ({ status: "ok", value: platformGrant, sessionEpoch: "session:1" }));
@@ -101,7 +106,7 @@ describe("storage binding authority", () => {
       storagePlatformData: data,
       storageDeleteOwner: vi.fn(),
     } as unknown as StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined };
-    const store = await createStorageBindingAuthority(client).openPlatformStore({ pluginId: "protocol", applicationStorageId: "protocol", schemaVersion: 1 });
+    const store = await createStorageBindingAuthority(client).openPlatformStore({ pluginId: "protocol", declaration: CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy });
 
     await expect(store.put("one-shot", "value")).rejects.toThrow("Platform storage binding became stale");
     expect(bind).toHaveBeenCalledTimes(1);

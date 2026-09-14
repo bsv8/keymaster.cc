@@ -34,8 +34,9 @@ import {
   type P2pkhServiceForStas
 } from "./stasService.js";
 import { createStasTokenProvider } from "./stasTokenProvider.js";
-import { createStasRepository, STAS_SCHEMA_VERSION, STAS_STORAGE_ID } from "./storage/stasRepository.js";
+import { createStasRepository } from "./storage/stasRepository.js";
 import { createStasSyncTask } from "./stasSync.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 const stasResources: I18nPluginResources = {
   namespace: "stas",
@@ -68,7 +69,7 @@ const stasTokenPluginDefinition = {
       id: "token-stas.window",
       runtime: "window-main",
       scopeKind: "owner-session",
-      storage: { scope: "key", applicationStorageId: STAS_STORAGE_ID, schemaVersion: STAS_SCHEMA_VERSION },
+      storage: CENTRAL_STORAGE_DECLARATIONS.tokenStasState,
       dependencies: defineRuntimeUnitDependencies([
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 主网地址" },
         { capability: WOC_STAS_CAPABILITY, reason: "STAS WOC 查询入口" },
@@ -85,6 +86,7 @@ const stasTokenPluginDefinition = {
       id: "token-stas.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
+      storage: CENTRAL_STORAGE_DECLARATIONS.tokenStasState,
     },
   ],
   i18n: stasResources,
@@ -100,8 +102,7 @@ const stasTokenPluginDefinition = {
     const backgroundService = ctx.capability(BACKGROUND_SERVICE_CAPABILITY);
 
     // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 Keyspace。
-    if (!ctx.storage) throw new Error("STAS owner storage binding is unavailable");
-    const stateRepository = createStasRepository(ctx.storage);
+    const stateRepository = createStasRepository(ctx.storageFor("token-state"));
 
     // 创建 service（保留 WOC 能力，供 sync task 使用）
     const service = createStasService({ keyspace, p2pkh, wocStas });

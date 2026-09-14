@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sha256 } from "@noble/hashes/sha256";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { OwnerAppStore } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { createP2pkhStateRepository, openP2pkhStateRepository, disposeP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
@@ -29,10 +30,8 @@ function transaction(prevTxid?: string): string {
 
 function makeStore(ownerPublicKeyHex = OWNER_A): OwnerAppStore {
   return createInMemoryKeyValueStore({
-    scope: "key",
+    ...CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
     ownerPublicKeyHex,
-    applicationStorageId: "UTXOS",
-    schemaVersion: 1,
     bucketId: "test",
     bucketGeneration: 1
   }) as OwnerAppStore;

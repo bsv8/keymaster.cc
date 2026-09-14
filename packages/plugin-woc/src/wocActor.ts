@@ -32,8 +32,6 @@ import type {
 } from "@keymaster/contracts";
 import type { Message, MessageBus } from "webloom-framework";
 import { WOC_PRIORITY } from "@keymaster/contracts";
-import type { KeyValueStore } from "@keymaster/contracts";
-import { createKeyValueSettingsStore } from "@keymaster/runtime/storage";
 import { DEFAULT_WOC_CONFIG, normalizeWocConfig } from "./wocSettings.js";
 import {
   WOC_ACTOR_ACCEPT_CONCURRENCY,
@@ -65,8 +63,6 @@ import type {
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const WEB_LOCK_NAME = "woc.service.send";
-const WOC_SETTINGS_KEY = "settings";
-const WOC_SETTINGS_PARTITION = "settings";
 
 interface ActorEntry {
   priority: number;
@@ -210,25 +206,18 @@ export interface WocActorHandle {
   onConfigChange(handler: (c: WocConfig) => void): () => void;
   getQueueSnapshot(): WocQueueSnapshot;
   onQueueChange(handler: (s: WocQueueSnapshot) => void): () => void;
-  /** 等待 K-V 配置完成首次加载。 */
+  /** 保留兼容的异步就绪钩子；actor 不读取持久化配置。 */
   ready(): Promise<void>;
   dispose(): void;
 }
 
 export interface CreateWocActorOptions {
-  /** Host 预绑定的 WOC owner/App K-V 句柄。 */
-  storage?: KeyValueStore;
+  /** Coordinator bootstrap 提供的运行时配置；actor 不负责持久化。 */
+  initialConfig?: Partial<WocConfig>;
 }
 
 export function createWocActor(options: CreateWocActorOptions = {}): WocActorHandle {
-  const settingsStore = createKeyValueSettingsStore<WocConfig>({
-    storage: options.storage,
-    key: WOC_SETTINGS_KEY,
-    partition: WOC_SETTINGS_PARTITION,
-    defaults: () => ({ ...DEFAULT_WOC_CONFIG }),
-    normalize: normalizeWocConfig
-  });
-  let config: WocConfig = settingsStore.load();
+  let config: WocConfig = normalizeWocConfig({ ...DEFAULT_WOC_CONFIG, ...options.initialConfig });
   const configListeners = new Set<(c: WocConfig) => void>();
   const queueListeners = new Set<(s: WocQueueSnapshot) => void>();
   let messageBus: MessageBus | null = null;
@@ -1287,7 +1276,6 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         next.requestsPerSecond = input.requestsPerSecond;
       }
       config = next;
-      settingsStore.save(config);
       emitConfig();
       schedulePump();
       return { ...config };
@@ -1301,18 +1289,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       queueListeners.add(handler);
       return () => queueListeners.delete(handler);
     },
-    ready: async () => {
-      try {
-        await settingsStore.ready();
-      } catch (error) {
-        // Host 可以在 Vault 解锁前完成插件装载；此时延迟 owner 句柄
-        // 尚无 active key。真正的 K-V 读取由 keyspace active 事件重试。
-        if (!(error instanceof Error) || !/active key/u.test(error.message)) throw error;
-        return;
-      }
-      config = settingsStore.load();
-      emitConfig();
-    },
+    ready: async () => undefined,
     dispose() {
       if (disposed) return;
       disposed = true;

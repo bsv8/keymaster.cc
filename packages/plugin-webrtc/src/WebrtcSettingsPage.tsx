@@ -95,12 +95,6 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
       if (trimmed.length === 0) {
         // 视为"删除"
         const nextDraft = draft.filter((_, idx) => idx !== i);
-        setDraft(nextDraft);
-        setEdits((cur) => {
-          const out = { ...cur };
-          delete out[i];
-          return out;
-        });
         await commitConfig(nextDraft);
         return;
       }
@@ -128,8 +122,6 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
           deduped.push(trimmedU);
         }
       }
-      setDraft(deduped);
-      setEdits({});
       await commitConfig(deduped);
     },
     [draft, t]
@@ -147,10 +139,12 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
         const after = { stunServers: [...service.getStunServers()] };
         setSaved(after);
         setDraft([...after.stunServers]);
+        setEdits({});
       } catch (err) {
         if (myGen !== genRef.current) return;
         setSaved(prev);
         setDraft([...prev.stunServers]);
+        setEdits({});
         setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (myGen === genRef.current) setSaving(false);
@@ -167,12 +161,6 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
   const onRemoveRow = useCallback(
     async (i: number) => {
       const next = draft.filter((_, idx) => idx !== i);
-      setDraft(next);
-      setEdits((cur) => {
-        const out = { ...cur };
-        delete out[i];
-        return out;
-      });
       await commitConfig(next);
     },
     [commitConfig, draft]

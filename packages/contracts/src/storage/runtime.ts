@@ -26,24 +26,6 @@ export type StorageErrorCode =
   | "storage_conflict" | "storage_forbidden" | "storage_limit_exceeded" | "storage_invalid_upload"
   | "storage_provider_error" | "storage_identity_required";
 
-/** 独立于 Vault 的运行时密文；用于封装 Provider 配置和 multipart ID。 */
-export interface StorageSecretEnvelope {
-  /** 当前本地密文协议版本。 */
-  version: 2;
-  /** 随机 salt，hex 编码。 */
-  saltHex: string;
-  /** 随机 nonce，hex 编码。 */
-  nonceHex: string;
-  /** AES-GCM 密文，hex 编码。 */
-  ciphertextHex: string;
-}
-
-/** Storage Runtime 使用的独立密钥服务。 */
-export interface StorageSecretService {
-  seal(scope: string, plaintext: Uint8Array): Promise<StorageSecretEnvelope>;
-  open(scope: string, sealed: StorageSecretEnvelope): Promise<Uint8Array>;
-}
-
 /** Provider 连接摘要。 */
 export interface StorageProviderSummary {
   /** Provider 类型。 */
@@ -56,7 +38,7 @@ export interface StorageProviderSummary {
   accessKeyHint: string;
   /** 当前始终存在密钥配置。 */
   secretConfigured: true;
-  /** Provider 配置世代。 */
+  /** 当前抽象桶绑定世代。 */
   generation: number;
   /** 最后更新时间戳（毫秒）。 */
   updatedAt: number;
@@ -84,15 +66,7 @@ export interface StorageProbeResult {
   diagnostic?: StorageProbeDiagnostic;
 }
 
-/** 本地 OPFS 选择结果；OPFS 不是可配置的 S3 Provider。 */
-export interface StorageOpfsProbeResult {
-  ok: boolean;
-  providerId: "opfs";
-  latencyMs: number;
-  diagnostic?: StorageProbeDiagnostic;
-}
-
-/** 首次绑定 S3 桶的结果；绑定完成后不能再调用运行期 activateProvider。 */
+/** 首次绑定 S3 桶的结果；绑定完成后不再提供运行期 Provider 选择。 */
 export interface StorageSelectedResult {
   status: "selected";
   backend: "s3";
@@ -161,9 +135,6 @@ export interface StorageRuntimeController {
   /** 重试同一事务的候选清理；密码/连接只在本次调用中使用，不进入恢复记录。 */
   retryInitialSetupCleanup?(transactionId: string, input?: { password?: string; connection?: StorageBucketConnectionConfigV1 }): Promise<InitialSetupRecoveryResult>;
   cancelProbe(): void;
-  probeProvider(config: StorageProviderConfigDraft): Promise<StorageProbeResult>;
-  /** 使用独立 Storage Profile 密码恢复已保存的 Provider 配置。 */
-  unlockStorageProfile(password: string): Promise<StorageProbeResult>;
   /** 当前新版桶的配置、Hold 快照和桶内 Key records 全量改密。 */
   changeBucketPassword?(oldPassword: string, newPassword: string): Promise<StorageBucketPasswordRotationResultV1>;
   /** 先认证目标桶，再原子切换 Coordinator 与本机目录的当前桶。 */
@@ -172,15 +143,8 @@ export interface StorageRuntimeController {
   changeBucketConnectionConfig?(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageBucketCatalogEntryV2>;
   /** 当前桶名称的原子目录 CAS；页面不能直接改当前桶目录。 */
   renameBucket?(label: string): Promise<StorageBucketCatalogEntryV2>;
-  /** 选择并验证本地 OPFS；成功后才允许创建平台根。 */
-  selectOpfs(): Promise<StorageOpfsProbeResult>;
-  /** 导入本机加密 Profile 并完成冷启动恢复。 */
-  importStorageProfile(envelope: import("./profile.js").StorageProfileEnvelopeV1, password: string): Promise<StorageProbeResult>;
   getConditionalCapabilities(): BucketConditionalCapabilitiesView | null;
   probeConditionalCapabilities(signal?: AbortSignal): Promise<BucketConditionalCapabilityProbeResult>;
-  activateProvider(config: StorageProviderConfigDraft): Promise<StorageActivationResult>;
-  clearProviderConfig(): Promise<void>;
-  resetStorage(): Promise<void>;
   abortSession(connectSessionId: string): Promise<void>;
   list(ctx: OwnerAppStorageGrant, input: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<StorageListResult>;
   createDirectory(ctx: OwnerAppStorageGrant, input: { path: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StorageDirectoryResult>;

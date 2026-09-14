@@ -2,9 +2,8 @@
 // WebCrypto 封装：PBKDF2 派生 key + AES-GCM 加解密。
 //
 // Chromium 在任意主机的 HTTP 页面上仍提供 getRandomValues，但会隐藏
-// crypto.subtle。密码加密因此可以使用经过审计的 noble 实现降级；Passkey/
-// WebAuthn PRF 仍由 webauthnPrf.ts 独立做 secure-context 检查，不能因为这个
-// fallback 而被误认为可用。
+// crypto.subtle。密码加密因此可以使用经过审计的 noble 实现降级，不能因为
+// 这个 fallback 而被误认为不可用。
 
 import { gcm } from "@noble/ciphers/aes.js";
 import { hmac } from "@noble/hashes/hmac.js";
@@ -16,7 +15,7 @@ export type EffectiveCryptoMode = "native" | "insecure-context-fallback" | "unav
 
 export interface EffectiveCryptoCapability {
   mode: EffectiveCryptoMode;
-  /** true 表示密码/本地加密链可用；不代表 WebAuthn PRF 可用。 */
+  /** true 表示密码/本地加密链可用。 */
   subtle: boolean;
   /** fallback 模式明确是单独的本地实现，不是浏览器 secure-context API。 */
   secureContext: boolean;

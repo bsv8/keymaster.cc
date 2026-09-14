@@ -14,7 +14,7 @@ import type {
   ContactPresence,
   ContactPresenceMap,
   ContactsService,
-  KeyValueStore,
+  BorrowedKeyValueStore,
   KeyspaceService,
   ChannelRuntime,
   JSONValue
@@ -37,7 +37,7 @@ export class ContactsNoActiveKeyError extends Error {
 
 export interface ContactsServiceDeps {
   keyspace: KeyspaceService;
-  storage?: KeyValueStore;
+  storage: BorrowedKeyValueStore;
   messageBus?: MessageBus;
   /** Coordinator Channel runtime；缺失时联系人 CRUD 仍可用，但不会探测在线状态。 */
   channel?: ChannelRuntime;
@@ -86,6 +86,7 @@ export function createContactsPresenceTask(deps: ContactsPresenceTaskDeps): Back
 }
 
 export function createContactsService(deps: ContactsServiceDeps): ContactsService {
+  if (!deps.storage) throw new Error("Contacts central storage binding is required");
   const listeners = new Set<() => void>();
   let handle: ContactsRepositoryHandle | undefined;
   let handleFor: string | undefined;
@@ -215,7 +216,6 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     if (handle && handleFor === state.activePublicKeyHex) {
       return handle;
     }
-    if (!deps.storage) throw new ContactsNoActiveKeyError();
     handle ??= createContactsRepository(deps.storage);
     handleFor = state.activePublicKeyHex;
     return handle;
@@ -228,11 +228,6 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       return;
     }
     if (handle) {
-      try {
-        handle.close();
-      } catch {
-        // 静默。
-      }
       handle = undefined;
       handleFor = undefined;
     }
@@ -334,11 +329,8 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       keyDeletingOff?.();
       offActiveKeyChanged();
       presenceListeners.clear();
-      if (handle) {
-        try { handle.close(); } catch { /* noop */ }
-        handle = undefined;
-        handleFor = undefined;
-      }
+      handle = undefined;
+      handleFor = undefined;
     }
   };
 }

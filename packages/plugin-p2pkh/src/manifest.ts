@@ -56,11 +56,12 @@ import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
-import { createP2pkhStateRepository, openP2pkhStateRepository, P2PKH_REPOSITORY_VERSION, P2PKH_STORAGE_ID } from "./storage/p2pkhStateRepository.js";
+import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import { P2pkhSettingsPage } from "./pages/P2pkhSettingsPage.js";
 import { registerP2pkhNavigation } from "./pages/P2pkhNavigation.js";
 import { P2pkhTransactionDetailRoute } from "./pages/P2pkhTransactionDetailPage.js";
 import { transactionSourceListPath } from "./pages/p2pkhTransactionView.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 export { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 
@@ -631,11 +632,7 @@ const p2pkhPluginDefinition = {
       runtime: "window-main",
       scopeKind: "owner-session",
       provides: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
-      storage: {
-        scope: "key",
-        applicationStorageId: P2PKH_STORAGE_ID,
-        schemaVersion: P2PKH_REPOSITORY_VERSION
-      },
+      storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
       dependencies: defineRuntimeUnitDependencies([
         { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
         { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
@@ -657,6 +654,7 @@ const p2pkhPluginDefinition = {
       id: "p2pkh.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
+      storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
     },
   ],
   i18n: p2pkhResources,
@@ -670,18 +668,17 @@ const p2pkhPluginDefinition = {
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
     const assetDataNotifier = ctx.optionalCapability(ASSET_DATA_NOTIFIER_CAPABILITY);
+    const storage = ctx.storageFor("state");
 
     const service = createP2pkhService({
       vault,
       coordinator,
       messageBus,
       keyspace,
-      storage: ctx.storage,
+      storage,
       protectedOutpoints,
       assetDataNotifier
     });
-    // 将页面侧缓存的网络范围同步到 Coordinator 平台 K-V，供后台同步使用。
-    void coordinator.p2pkhSettingsUpdate({ includeTestnet: service.getGlobalSettings().includeTestnet });
     ctx.provide(P2PKH_CAPABILITY, service);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
       vault,
@@ -689,24 +686,24 @@ const p2pkhPluginDefinition = {
       claimStore: {
         async tryClaimInputs(input) {
           if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).tryClaimInputs(input);
         },
         async releaseLocalInputClaims(input) {
           if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).releaseLocalInputClaims(input.claimIds);
         }
       },
         submissionStore: {
           async getProtocolSubmission(input) {
           if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).getProtocolSubmission(input.id);
         },
         async putProtocolSubmission(record) {
           if (keyspace.active().activePublicKeyHex?.toLowerCase() !== record.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).putProtocolSubmission(record);
         }
       },
@@ -823,7 +820,7 @@ const p2pkhPluginDefinition = {
       if (!context.activePublicKeyHex) return { resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null, factCursors: {}, ownedCursors: {}, localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {} };
       const includeTestnet = service.getGlobalSettings().includeTestnet;
       const networks = includeTestnet ? ["main", "test"] as const : ["main"] as const;
-      const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(ctx.storage!));
+      const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
       const resourcesForKey = await service.listResources();
       const resourceIds = resourcesForKey.map((resource) => resource.resourceId);
       // The wallet starts with a bounded page. The returned cursors are opaque
