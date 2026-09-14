@@ -169,6 +169,7 @@ import type {
 import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageBucketManagementService, serializeBucketDocument, createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeCandidateBucket, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
+import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
 
 // SharedWorker 的模块状态（包括 session epoch）会在下面初始化；先安装
 // HTTP fallback，避免 insecure host 上的首个随机 ID 读取到缺失的 randomUUID。
@@ -13816,6 +13817,10 @@ coordinatorRuntimeApp = startSharedWorkerApp({
     };
   },
 });
+installSharedWorkerRetirement(
+  coordinatorRuntimeApp,
+  globalThis as unknown as Parameters<typeof installSharedWorkerRetirement>[1],
+);
 }
 
 // Worker 启动时从 K-V 读取仅公开的 Vault metadata

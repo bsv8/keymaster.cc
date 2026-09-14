@@ -92,7 +92,10 @@ export type { BootstrapErrorContext, BootstrapErrorStage, BootstrapFatalPhase } 
 export const BOOTSTRAP_PLUGIN_TIMEOUT_MS = 15_000;
 
 /** Worker 发布切换或缓存重新验证时的一次性恢复等待。 */
-export const COORDINATOR_STARTUP_RETRY_DELAY_MS = 200;
+// 需覆盖旧 Worker 的空闲宽限、Runtime 排空和浏览器 Web Lock 释放。
+// 失败的新 Worker 会在 25ms 后主动退出，旧 Worker 在无页面后 250ms
+// 开始退场；500ms 仍保持一次有界恢复，不会长期掩盖真实的多页面冲突。
+export const COORDINATOR_STARTUP_RETRY_DELAY_MS = 500;
 
 /** owner 插件必须等待服务目录就绪的最长时间；超时交给启动 fatal/retry 面。 */
 export const COORDINATOR_SERVICE_READY_TIMEOUT_MS = BOOTSTRAP_PLUGIN_TIMEOUT_MS;
