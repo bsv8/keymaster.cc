@@ -1,6 +1,6 @@
 // STAS owner/App K-V Repository。
 
-import type { BsvNetwork, KeyValueStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, BsvNetwork } from "@keymaster/contracts";
 
 export interface StasTokenSnapshot {
   /** token symbol。 */
@@ -24,13 +24,11 @@ export interface StasRepository {
   close(): void;
 }
 
-export const STAS_STORAGE_ID = "STAS";
-export const STAS_SCHEMA_VERSION = 1;
 const PARTITION = "snapshots";
 const PREFIX = "snapshot/";
 const snapshotKey = (snapshot: StasTokenSnapshot) => `${PREFIX}${snapshot.network}/${snapshot.address}/${snapshot.issuer || "_"}/${snapshot.symbol}`;
 
-export function createStasRepository(store: KeyValueStore): StasRepository {
+export function createStasRepository(store: BorrowedKeyValueStore): StasRepository {
   async function entries(): Promise<Array<{ key: string; value: StasTokenSnapshot }>> {
     const rows: Array<{ key: string; value: StasTokenSnapshot }> = [];
     let cursor: string | undefined;
@@ -47,6 +45,6 @@ export function createStasRepository(store: KeyValueStore): StasRepository {
       await store.commit({ partition: PARTITION, operations: [...old.map((row) => ({ type: "delete" as const, key: row.key })), ...snapshots.map((row) => ({ type: "put" as const, key: snapshotKey(row), value: row }))] });
     },
     async list() { return (await entries()).map((row) => row.value); },
-    close() { store.close(); }
+    close() { /* Host owns the borrowed storage handle. */ }
   };
 }

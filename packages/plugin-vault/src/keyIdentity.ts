@@ -13,9 +13,8 @@
 //
 // 硬切换 002：本模块同时承担"在 Vault 内部安全生成 secp256k1 私钥"的
 // 局部职责。私钥字节由 noble secp256k1 的 randomPrivateKey 生成,调用方
-// （vaultService.generateKey）只接收 hex 字符串并立即按 importPrivateKey
-// 一样的加密流程写入 vault；不在 React state、MessageBus 或 platform K-V repository
-// 普通字段中保留明文。
+// （Coordinator.generateKey）只接收 hex 字符串并立即交给 Catalog Hold
+// 加密流程；不在 React state、MessageBus 或任何 metadata K-V 字段中保留明文。
 
 import { getPublicKey, utils as secp256k1Utils } from "@noble/secp256k1";
 
@@ -51,10 +50,10 @@ export function identityFromPublicKeyHex(publicKeyHex: string): KeyIdentityField
  *   - 使用 noble secp256k1 的 `utils.randomPrivateKey()`，其内部走
  *     `crypto.getRandomValues`，符合密码学安全随机源要求。
  *   - 不使用 `Math.random()`、时间戳、UUID、用户输入或 hash 拼私钥。
- *   - 字节数组由调用方（vaultService.generateKey）立即在闭包内消费,
+ *   - 字节数组由 Coordinator.generateKey 立即在闭包内消费,
  *     不会出现在返回 heap 上：本函数只返回 hex 字符串，调用结束后
  *     引用链断开由 GC 回收。
- *   - 不派生地址、不写 platform K-V repository。地址与持久化由 vaultService 负责。
+ *   - 不派生地址、不写 metadata K-V repository。地址与持久化由 Coordinator 负责。
  */
 export function generatePrivateKeyHex(): string {
   const priv = secp256k1Utils.randomPrivateKey();

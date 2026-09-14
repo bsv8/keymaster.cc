@@ -8,9 +8,7 @@ import type {
   BucketConditionalCapabilityProbeResult,
   StorageDirectoryResult,
   StorageListResult,
-  StorageOpfsProbeResult,
   StorageProbeResult,
-  StorageActivationResult,
   StorageProviderConfigDraft,
   StorageProviderConnectionView,
   StorageProviderSummary,
@@ -28,11 +26,8 @@ import type {
   StorageBucketConnectionConfigV1,
   StorageBucketSwitchResultV1,
 } from "@keymaster/contracts";
-import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
-import { encryptStorageProfile, writeStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
 import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
-import { normalizeProviderConfig } from "../bucket-providers/s3/s3ClientFactory.js";
-import { requestOpfsPersistence } from "../bucket-providers/opfs/opfsPersistence.js";
 
 type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: StorageRuntimeControllerStatus; healthStatus?: StorageRuntimeStatus; catalogBucket?: boolean; bucketId?: string; bucketGeneration?: number; authorityRecovery?: CoordinatorAuthorityRecovery; summary: StorageProviderSummary | null; capabilities: BucketConditionalCapabilitiesView | null };
 
@@ -121,7 +116,6 @@ export class StorageRpcProxy implements StorageRuntimeController {
       ...(input.connection === undefined ? {} : { connection: input.connection }),
     });
   }
-  unlockStorageProfile(password: string): Promise<StorageProbeResult> { return this.control({ type: "unlock-profile", password }); }
   /** 新版桶目录的临时解锁；密码只进入本次 Worker bootstrap。 */
   async unlockBucket(password: string): Promise<unknown> {
     await this.coordinator.refreshStorageBootstrap?.();
@@ -153,52 +147,13 @@ export class StorageRpcProxy implements StorageRuntimeController {
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     throw new StorageRuntimeError("storage_provider_error", "Storage cold export returned invalid bytes");
   }
-  async selectOpfs(): Promise<StorageOpfsProbeResult> {
-    // 只有 Window 能申请授权；StorageManager 访问封装在 OPFS Provider。
-    await requestOpfsPersistence();
-    const result = await this.control<StorageOpfsProbeResult>({ type: "select-opfs" });
-    if (result.ok) writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
-    return result;
-  }
-  importStorageProfile(envelope: import("@keymaster/contracts").StorageProfileEnvelopeV1, password: string): Promise<StorageProbeResult> {
-    return this.control<StorageProbeResult>({ type: "import-profile", envelope, password }).then((result) => {
-      if (result.ok) writeStorageBootstrap({ selectedBackend: "s3", selectedProfileId: `${result.providerId}:imported`, encryptedStorageProfileEnvelope: envelope });
-      return result;
-    });
-  }
   cancelProbe(): void { void this.control({ type: "cancel-probe" }); }
-  probeProvider(config: StorageProviderConfigDraft): Promise<StorageProbeResult> { return this.control({ type: "probe", config }); }
   getConditionalCapabilities(): BucketConditionalCapabilitiesView | null { return this.current.capabilities; }
   probeConditionalCapabilities(signal?: AbortSignal): Promise<BucketConditionalCapabilityProbeResult> {
     if (signal?.aborted) return Promise.reject(new StorageRuntimeError("storage_unavailable"));
     const abort = () => { void this.control({ type: "cancel-probe" }).catch(() => undefined); };
     signal?.addEventListener("abort", abort, { once: true });
     return this.control<BucketConditionalCapabilityProbeResult>({ type: "probe-capabilities" }).finally(() => signal?.removeEventListener("abort", abort));
-  }
-  async activateProvider(config: StorageProviderConfigDraft): Promise<StorageActivationResult> {
-    const result = await this.control<StorageActivationResult>({ type: "activate", config, expectedProviderGeneration: this.current.summary?.generation ?? null });
-    // 页面把启动选择同步到本机 bootstrap；密文由独立 Storage Profile
-    // 密码保护，明文凭据不会进入 localStorage。
-    if ((("status" in result && result.status === "selected") || ("ok" in result && result.ok)) && config.profilePassword && config.profilePassword.length >= 8) {
-      try {
-        const normalized = normalizeProviderConfig(config);
-        const envelope = await encryptStorageProfile(normalized, config.profilePassword);
-        writeStorageBootstrap({ selectedBackend: "s3", selectedProfileId: `${normalized.providerId}:${(normalized.connection as { bucket: string }).bucket}`, encryptedStorageProfileEnvelope: envelope });
-      } catch {
-        // Provider 已由 Coordinator 激活；本机 bootstrap 写失败由下次设置页重试，
-        // 不能把成功的远端配置改报成失败。
-      }
-    }
-    return result;
-  }
-  async clearProviderConfig(): Promise<void> {
-    await this.control({ type: "clear", expectedProviderGeneration: this.current.summary?.generation ?? null });
-    // 只有 Coordinator 确认当前没有活跃 Root 时，页面侧才持久化下次启动项。
-    writeStorageBootstrap({ selectedBackend: "opfs" });
-  }
-  async resetStorage(): Promise<void> {
-    await this.control({ type: "reset", expectedProviderGeneration: this.current.summary?.generation ?? null });
-    writeStorageBootstrap({ selectedBackend: "opfs" });
   }
   abortSession(connectSessionId: string): Promise<void> { return this.coordinator.storageSessionAbort(connectSessionId).then((result) => { if (result.status !== "ok") throw new StorageRuntimeError("storage_unavailable"); for (const key of this.grants.keys()) if (key.startsWith(`${connectSessionId}|`)) this.grants.delete(key); }); }
 

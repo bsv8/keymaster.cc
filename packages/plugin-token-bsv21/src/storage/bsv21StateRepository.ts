@@ -1,7 +1,7 @@
 // BSV-21 owner/App K-V Repository。
 // 快照替换与普通写入都通过同一 partition commit，保证读者只看到完整版本。
 
-import type { BsvNetwork, KeyValueStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, BsvNetwork } from "@keymaster/contracts";
 
 export interface Bsv21TokenSnapshot {
   /** token origin（即 tokenId）。 */
@@ -31,8 +31,6 @@ export interface Bsv21StateRepository {
   close(): void;
 }
 
-export const BSV21_STORAGE_ID = "BSV21";
-export const BSV21_SCHEMA_VERSION = 1;
 const PARTITION = "snapshots";
 const PREFIX = "snapshot/";
 
@@ -42,7 +40,7 @@ function assertSnapshot(snapshot: Bsv21TokenSnapshot): void {
   }
 }
 
-async function all(store: KeyValueStore): Promise<Array<{ key: string; value: Bsv21TokenSnapshot }>> {
+async function all(store: BorrowedKeyValueStore): Promise<Array<{ key: string; value: Bsv21TokenSnapshot }>> {
   const rows: Array<{ key: string; value: Bsv21TokenSnapshot }> = [];
   let cursor: string | undefined;
   do {
@@ -53,7 +51,7 @@ async function all(store: KeyValueStore): Promise<Array<{ key: string; value: Bs
   return rows;
 }
 
-export function createBsv21StateRepository(store: KeyValueStore): Bsv21StateRepository {
+export function createBsv21StateRepository(store: BorrowedKeyValueStore): Bsv21StateRepository {
   return {
     async put(snapshot) {
       assertSnapshot(snapshot);
@@ -68,6 +66,6 @@ export function createBsv21StateRepository(store: KeyValueStore): Bsv21StateRepo
       ] });
     },
     async list() { return (await all(store)).map((entry) => entry.value); },
-    close() { store.close(); }
+    close() { /* Host owns the borrowed storage handle. */ }
   };
 }

@@ -16,11 +16,11 @@ import type {
 import {
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
+  PROTOCOL_STORAGE_REPOSITORY_CAPABILITY,
 } from "@keymaster/contracts";
-import { openProtocolStorageRepository, verifyAppIdentityProof } from "@keymaster/plugin-protocol";
+import { verifyAppIdentityProof } from "@keymaster/plugin-protocol";
 import type { PluginHost } from "@keymaster/runtime";
 import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";
-import { requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
 import {
   configureMsFileMediaServiceWorker,
   ensureMsFileMediaServiceWorker,
@@ -90,13 +90,19 @@ async function ensureStorageReady(client: ReturnType<typeof getCoordinatorClient
     if (status.status !== "ok") {
       throw new Error(`MSFile E2E Storage status failed: ${"message" in status ? status.message : status.status}`);
     }
-    if (status.status === "ok" && (status.value === "unselected" || status.value === "authentication")) {
-      await requestOpfsPersistence();
-      const selected = await client.storageControl({ type: "select-opfs" });
-      if (selected.status !== "ok") throw new Error(`MSFile E2E OPFS selection failed: ${selected.status}`);
-      // SharedWorker 可能在页面导航时重启；把选择写入本机 bootstrap，
-      // 让下一次 hello 仍然使用同一真实 OPFS 后端。
-      writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
+    if (status.status === "ok" && status.value === "unselected") {
+      const selected = await client.storageControl({ type: "initial-setup", plan: {
+        transactionId: `msfile-e2e-${crypto.randomUUID()}`,
+        bucketLabel: "MSFile E2E Local",
+        backend: "local",
+        connection: { kind: "local" },
+        bucketPassword: E2E_VAULT_PASSWORD,
+        firstKey: { kind: "generate", label: "MSFile E2E", capabilities: ["p2pkh"] },
+      } });
+      if (selected.status !== "ok") throw new Error(`MSFile E2E Local setup failed: ${selected.status}`);
+    } else if (status.status === "ok" && status.value === "authentication") {
+      const unlocked = await client.storageControl({ type: "unlock-bucket", password: E2E_VAULT_PASSWORD });
+      if (unlocked.status !== "ok") throw new Error(`MSFile E2E Local unlock failed: ${unlocked.status}`);
     } else {
       await client.storageControl({ type: "retry" });
     }
@@ -273,7 +279,7 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
     async seedConnectSession(input) {
       const { ownerPublicKeyHex } = await ensureUnlocked(coordinator, client);
       const appIdentity = verifyAppIdentityProof(input.proof);
-      protocolRepository ??= await openProtocolStorageRepository();
+      protocolRepository ??= await host.capabilities.get(PROTOCOL_STORAGE_REPOSITORY_CAPABILITY);
       const now = Date.now();
       await protocolRepository.putConnectSession({
         sessionId: input.sessionId,

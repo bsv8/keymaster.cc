@@ -1414,21 +1414,6 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .vault-key-list__actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .vault-key-list__actions .ui-button { white-space: nowrap; }
 
-.vault-passkey__hint { margin: 0; color: var(--text-dim); font-size: 13px; line-height: 1.55; }
-.vault-passkey__list { display: grid; margin: 16px 0; border-top: 1px solid var(--border); }
-.vault-passkey__item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(150px, auto) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 52px;
-  border-bottom: 1px solid var(--border);
-}
-.vault-passkey__name { font-weight: 650; overflow-wrap: anywhere; }
-.vault-passkey__state { color: var(--text-dim); font-size: 12px; }
-.vault-passkey__form { display: grid; gap: 10px; padding-top: 4px; }
-.vault-passkey__warning, .vault-passkey__error { color: var(--danger); font-size: 12px; line-height: 1.5; }
-
 /* ---------- Current private key ---------- */
 .current-key-page { max-width: 900px; }
 .current-key-section {
@@ -1472,7 +1457,6 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .current-key-protector strong { font-size: 14px; overflow-wrap: anywhere; }
 .current-key-protector span { color: var(--text-dim); font-size: 12px; }
 .current-key-protector__status { color: var(--primary) !important; font-weight: 650; }
-.current-key-passkey-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; margin-top: 20px; }
 .current-key-backup { display: flex; align-items: center; justify-content: space-between; gap: 32px; }
 
 /* ---------- Key switch methods ---------- */
@@ -1480,20 +1464,10 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .key-switch-method h3 { margin: 0; font-size: 15px; }
 .key-switch-method > p { margin: 5px 0 14px; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
 .key-switch-method__password { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
-.key-switch-method-divider { display: flex; align-items: center; gap: 12px; margin: 20px 0; color: var(--text-dim); font-size: 11px; }
-.key-switch-method-divider::before, .key-switch-method-divider::after { content: ""; height: 1px; flex: 1; background: var(--border); }
-.key-switch-passkey-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.key-switch-passkey-list .ui-button { justify-content: flex-start; min-height: 42px; }
-.key-switch-passkey-empty { grid-column: 1 / -1; margin: 0 !important; }
-
 @media (max-width: 560px) {
-  .vault-passkey__item { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 10px 0; }
-  .vault-passkey__state { grid-column: 1; }
-  .vault-passkey__item .ui-button { grid-column: 2; grid-row: 1 / span 2; }
   .current-key-identity > div { grid-template-columns: 1fr; gap: 3px; }
-  .current-key-passkey-add, .key-switch-method__password { grid-template-columns: 1fr; }
+  .key-switch-method__password { grid-template-columns: 1fr; }
   .current-key-backup { align-items: stretch; flex-direction: column; gap: 14px; }
-  .key-switch-passkey-list { grid-template-columns: 1fr; }
 }
 
 .vault-create-modal__hint {

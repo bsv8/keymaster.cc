@@ -11,12 +11,12 @@ import {
   COORDINATOR_SERVICE_CONTRACT_VERSION,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
-  SYSTEM_STORAGE_DECLARATIONS,
+  systemStorageDeclarationFor,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
 } from "@keymaster/contracts";
 import type { VaultCoordinatorControl } from "@keymaster/contracts";
 import type { RuntimeHandle, RuntimeStatusSnapshot } from "webloom-framework";
-import { createStorageBindingAuthority, requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
+import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator";
 import { createSessionCryptoEngine } from "@keymaster/plugin-vault";
 import {
   __testArmCoordinatorBridgeBarrier,
@@ -238,15 +238,21 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
 
   const bootstrap = async () => {
     const storageStatus = await client.storageControl({ type: "status" });
-    if (storageStatus.status !== "ok" || storageStatus.value !== "ready") {
-      await requestOpfsPersistence();
-      const selected = await client.storageControl({ type: "select-opfs" });
+    if (storageStatus.status === "ok" && storageStatus.value === "authentication") {
+      const unlocked = await client.storageControl({ type: "unlock-bucket", password: E2E_VAULT_PASSWORD });
+      diagnostics.storageSelection = unlocked.status === "ok" ? unlocked.value : unlocked.status;
+      if (unlocked.status !== "ok") throw new Error(`Lifecycle E2E Local unlock failed: ${unlocked.status}`);
+    } else if (storageStatus.status !== "ok" || storageStatus.value !== "ready") {
+      const selected = await client.storageControl({ type: "initial-setup", plan: {
+        transactionId: `lifecycle-e2e-${crypto.randomUUID()}`,
+        bucketLabel: "Lifecycle E2E Local",
+        backend: "local",
+        connection: { kind: "local" },
+        bucketPassword: E2E_VAULT_PASSWORD,
+        firstKey: { kind: "generate", label: "Lifecycle E2E", capabilities: ["p2pkh"] },
+      } });
       diagnostics.storageSelection = selected.status === "ok" ? selected.value : selected.status;
-      if (selected.status !== "ok") throw new Error(`Lifecycle E2E OPFS selection failed: ${selected.status}`);
-      // 与 StorageRpcProxy.selectOpfs 的生产行为一致：Worker 选择成功后，
-      // 页面还要留下下次 hello 可读取的首帧后端选择。否则页面导航时
-      // SharedWorker 可能因没有活动端口退出，新 Worker 会回到 onboarding。
-      writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
+      if (selected.status !== "ok") throw new Error(`Lifecycle E2E Local setup failed: ${selected.status}`);
     }
     await waitForStorageReady(client);
     const owner = await ensureUnlocked(coordinator, client, diagnostics);
@@ -264,7 +270,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     // session.open 的真实响应携带当前 owner peer 投影；重读一次让
     // survivor 在其它 tab 完成 handoff 后也观察到最新 revision。
     await client.refreshStorageBootstrap();
-    const declaration = SYSTEM_STORAGE_DECLARATIONS.p2pkh;
+    const declaration = systemStorageDeclarationFor("p2pkh");
     if (!declaration) throw new Error("Lifecycle E2E p2pkh storage declaration is missing");
     const authority = createStorageBindingAuthority(client, {
     });

@@ -8,13 +8,13 @@ import type { SessionEpoch } from "../sessionCoordinator.js";
  * Host/Coordinator 内部的存储绑定权威。
  *
  * 该接口不放进公开 KeyspaceService：业务插件只能拿到 Host 已绑定的
- * ctx.storage，不能通过 applicationStorageId 自己选择其它 namespace。
+ * ctx.storage，不能通过 moduleId/purposeId 自己选择其它 namespace。
  */
 export interface StorageBindingAuthority {
   /** 当前 active owner；锁定或切 key 时返回最新状态，供 Host 使句柄失效。 */
   getActivePublicKeyHex?(): string | undefined;
   openOwnerAppStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<OwnerAppStore>;
-  openPlatformStore(input: { pluginId: string; applicationStorageId: string; schemaVersion: number }): Promise<KeyValueStore>;
+  openPlatformStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<KeyValueStore>;
   deleteOwnerStorage(input: { ownerPublicKeyHex: string }): Promise<void>;
 }
 
@@ -39,12 +39,15 @@ export type CoordinatorPlatformStorageData =
   | { type: "platform.delete"; platformGrantId: string; key: string; condition?: { ifRevision?: number; partition?: string } }
   | { type: "platform.commit"; platformGrantId: string; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] };
 
-/** 平台 K-V 授权；物理 applicationStorageId 只保存在 Worker 内。 */
+/** 平台 K-V 授权；物理路径、Provider 和 ETag 只保存在 Worker 内。 */
 export interface StoragePlatformGrant {
   platformGrantId: string;
   bucketId: string;
   bucketGeneration: number;
-  applicationStorageId: string;
+  moduleId: string;
+  purposeId: string;
+  authority: "platform-only" | "built-in-module";
+  model: "kv";
   schemaVersion: number;
   sessionEpoch: SessionEpoch;
 }
@@ -63,7 +66,11 @@ export interface StorageOwnerGrant {
   bucketId: string;
   bucketGeneration: number;
   ownerPublicKeyHex: string;
-  applicationStorageId: string;
+  moduleId: string;
+  purposeId: string;
+  authority: "built-in-module" | "third-party-app";
+  model: "kv";
+  schemaVersion: number;
   /** 发放时绑定的桶级 owner 世代；重导入后旧授权不能写入新世代。 */
   ownerStorageGeneration: number;
   sessionEpoch: SessionEpoch;

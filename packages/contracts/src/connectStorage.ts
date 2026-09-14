@@ -21,8 +21,10 @@ export interface OwnerAppStorageGrant {
   bucketGeneration: number;
   /** 当前 Keymaster owner 公钥；不能使用 App 发布者公钥替代。 */
   ownerPublicKeyHex: string;
-  /** 从验证后的 App 身份派生的稳定 App 存储 ID。 */
-  applicationStorageId: string;
+  /** 从验证后的 App 身份派生的稳定中央 moduleId。 */
+  moduleId: string;
+  /** Connect 文件 namespace 的固定用途坐标。 */
+  purposeId: "files";
   /** 发放授权时的 Coordinator session 世代。 */
   sessionEpoch: string;
 }

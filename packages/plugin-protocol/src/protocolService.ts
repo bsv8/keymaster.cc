@@ -65,7 +65,7 @@
 // 不依赖 React；可单测。
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
+import { deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
 import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
@@ -254,9 +254,9 @@ export interface ProtocolServiceDeps {
   vault: VaultService;
   keyspace: KeyspaceService;
   /**
-   * 可选协议存储 K-V（commands / origins / feePools）。manifest 在 setup 阶段
-   * 打开并通过这个钩子注入；测试里可以传一个内存 fake。`undefined` 时按
-   * "历史不可用"降级（p2pkh auto-approve 关闭；feepool fail-closed）。
+   * 协议存储 K-V（command-history / durable-policy / sessions）。生产 manifest
+   * 必须注入；测试可传内存 fake。独立构造时缺失绑定只允许读路径安全降级，
+   * 必要写入会抛错。
    */
   storageRepository?: ProtocolStorageRepository;
   /**
@@ -269,9 +269,9 @@ export interface ProtocolServiceDeps {
   /** Session Window 使用的已验证 Connect Channel facade。 */
   connectChannelRuntime?: ConnectChannelRuntime;
   /** Optional Storage platform capability; absence only disables storage.*. */
-  storageRuntimeController?: StorageRuntimeController;
+  storageController?: StorageRuntimeController;
   /** Resolve the current Storage capability at request/lifecycle time. */
-  getStorageRuntimeController?: () => StorageRuntimeController | undefined;
+  getStorageController?: () => StorageRuntimeController | undefined;
   /**
    * Optional MSFile platform capability（施工单 docs/proposals/msfile）。
    * 缺失时只让 `msfile.*` fail closed；不得影响其他方法族。
@@ -756,15 +756,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /** Resolve the current Storage capability after an independent plugin restart. */
-  private currentStorageRuntimeController(): StorageRuntimeController | undefined {
-    if (this.deps.getStorageRuntimeController) {
+  private currentStorageController(): StorageRuntimeController | undefined {
+    if (this.deps.getStorageController) {
       try {
-        return this.deps.getStorageRuntimeController();
+        return this.deps.getStorageController();
       } catch {
         return undefined;
       }
     }
-    return this.deps.storageRuntimeController;
+    return this.deps.storageController;
   }
 
   /** MSFile capability 是可选依赖；缺失时 `msfile.*` fail closed。 */
@@ -792,25 +792,24 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 在服务已经启动后接入可选的协议存储。
+   * 在服务已经启动后接入协议存储。
    *
-   * platform K-V repository 只承载历史、站点配置和 session 持久化，不能成为协议页
-   * 首屏可用性的前置条件。manifest 因而会先创建本 service，再在后台
-   * 成功打开 K-V 后调用本方法；若浏览器的 open 永久 pending，service 保持
-   * historyAvailable=false 的安全降级状态，主应用和手动确认流程仍可使用。
+   * purpose-scoped K-V repository 只承载历史、站点配置和 session 持久化。
+   * 生产 manifest 在 setup 生命周期内完成绑定；本方法保留给 service 的
+   * 独立构造 / 测试场景，并会传播回补写失败。
    */
-  attachProtocolStorageRepository(storageRepository: ProtocolStorageRepository): void {
+  async attachProtocolStorageRepository(storageRepository: ProtocolStorageRepository): Promise<void> {
     if (this.deps.storageRepository) return;
     this.deps.storageRepository = storageRepository;
     this.historyAvailableFlag = true;
 
     // K-V 尚未就绪期间完成的终态记录仍在内存中；接入后补写，避免一次短暂
     // 初始化延迟导致本次会话的历史永久丢失。
-    for (const request of this.requestsByRecordId.values()) {
-      if (this.isTerminalPhase(request.phase)) {
-        this.persistRecord(this.makeCommandRecord(request));
-      }
-    }
+    await Promise.all(
+      Array.from(this.requestsByRecordId.values())
+        .filter((request) => this.isTerminalPhase(request.phase))
+        .map((request) => this.persistRecord(this.makeCommandRecord(request)))
+    );
 
     // 当前站点已存在时立即回补历史和站点配置；没有当前站点则只刷新
     // historyAvailable 投影，等第一条请求到达后再按 origin 加载。
@@ -930,10 +929,10 @@ export class ProtocolServiceImpl implements ProtocolService {
         rec.abortController?.abort();
       }
     }
-    const storageRuntimeController = this.currentStorageRuntimeController();
+    const storageController = this.currentStorageController();
     const msfileService = this.currentMsfileService();
     for (const sessionId of sessionIds) {
-      void storageRuntimeController?.abortSession(sessionId);
+      void storageController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
     }
     // 把所有未终态 request 强制收尾为 rejected（不发 result 给 opener）。
@@ -1336,10 +1335,10 @@ export class ProtocolServiceImpl implements ProtocolService {
         rec.abortController?.abort();
       }
     }
-    const storageRuntimeController = this.currentStorageRuntimeController();
+    const storageController = this.currentStorageController();
     const msfileService = this.currentMsfileService();
     for (const sessionId of sessionIds) {
-      void storageRuntimeController?.abortSession(sessionId);
+      void storageController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
     }
     this.sendClosingBestEffort();
@@ -1900,7 +1899,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       );
     }
     if (proof.requirements.includes("storage")) {
-      const storage = this.deps.getStorageRuntimeController?.() ?? this.deps.storageRuntimeController;
+      const storage = this.deps.getStorageController?.() ?? this.deps.storageController;
       if (!storage || storage.status() !== "ready") {
         throw new LaunchAppViewError(
           "requirement_unavailable",
@@ -1918,7 +1917,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       );
     }
     if (proof.requirements.includes("storage")) {
-      const storage = this.deps.getStorageRuntimeController?.() ?? this.deps.storageRuntimeController;
+      const storage = this.deps.getStorageController?.() ?? this.deps.storageController;
       if (!storage || storage.status() !== "ready") {
         throw protocolError(
           "storage_unavailable",
@@ -2645,7 +2644,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
     this.requestsByRecordId.set(recordId, rec);
 
-    // 决定初始 phase。`setRecordPhase` 会负责写 feed 卡 + 持久化（施工单
+    // 决定初始 phase。`setRecordPhase` 只更新内存 feed 卡（施工单
     // 2026-06-27 002 硬切换：feed 投影走 `buildFeedDisplay`，活卡按
     // createdAt asc 稳定排序，不再做"先占位后改 phase"的两次写）。
     //
@@ -2679,7 +2678,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const resumeParams = parsed.params as ConnectResumeParams;
       const resumePre = await this.bootstrapConnectResumeRecord(rec, resumeParams, origin);
       if (resumePre !== null) {
-        this.scheduleFailFastRequest(recordId, resumePre.code, resumePre.reason);
+        await this.scheduleFailFastRequest(recordId, resumePre.code, resumePre.reason);
         return;
       }
       const pendingLogin = this.pickConnectRecord("connect.login", undefined, origin);
@@ -2712,14 +2711,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       // App params。只能使用此前由同一 source + exact origin 建立的登录会话。
       const channelSession = this.channelSessionBySource.get(source);
       if (!channelSession || channelSession.origin !== origin) {
-        this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
+        await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       }
       rec.connectSessionId = channelSession.sessionId;
       rec.ownerPublicKeyHex = channelSession.ownerPublicKeyHex;
       if (this.lockStateValue === "locked") {
         // 锁定会话立即使 Channel 调用失效；不把 App 请求挂在解锁队列中。
-        this.scheduleFailFastRequest(recordId, "user_rejected", "runtime_missing");
+        await this.scheduleFailFastRequest(recordId, "user_rejected", "runtime_missing");
         return;
       }
       rec.autoApproved = true;
@@ -2743,12 +2742,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (typeof sessionId !== "string" || sessionId.length === 0) {
         // 校验层应当已经拒绝；这里是兜底——任何缺 connectSessionId 的
         // 业务 method 都不允许落 record；按 invalid_request 兜底处理。
-        this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
+        await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       }
       const sessionFail = await this.preCheckConnectSession(sessionId, origin);
       if (sessionFail !== null) {
-        this.scheduleFailFastRequest(recordId, sessionFail.code, sessionFail.reason);
+        await this.scheduleFailFastRequest(recordId, sessionFail.code, sessionFail.reason);
         return;
       }
       // preCheck 已通过：session 真值有效 / K-V 异常按降级放行（手动
@@ -2771,7 +2770,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       } else if (session === null) {
         // 极端竞态：preCheck 通过 → session 突然被外部 logout / 删除。
         // 走 fail-fast（与 K-V 异常区分）。
-        this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
+        await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       } else {
         rec.connectSessionId = sessionId;
@@ -2781,7 +2780,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           // 进入执行；对外用稳定 code fail-fast。
           const identityCode: ProtocolErrorCode =
             method.startsWith("msfile.") ? "msfile_identity_required" : "storage_identity_required";
-          this.scheduleFailFastRequest(recordId, identityCode, "storage_error");
+          await this.scheduleFailFastRequest(recordId, identityCode, "storage_error");
           return;
         }
       }
@@ -2949,11 +2948,11 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 不动 setVaultLockState / autoExecuteAfterUnlock——fail-fast record
    *     已经没有"unlock 后怎么办"的概念。
    */
-  private scheduleFailFastRequest(
+  private async scheduleFailFastRequest(
     recordId: string,
     code: ProtocolErrorCode,
     reason: ProtocolFailureReason
-  ): void {
+  ): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     rec.phase = "failed";
@@ -2965,11 +2964,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.finishedAt = Date.now();
     rec.updatedAt = rec.finishedAt;
     // 写 feed 历史卡（终态）。
-    this.writeFeedCommandFor(rec);
+    await this.persistFeedCommandFor(rec);
     this.emitFeed();
     // 直接向 opener 回 result。fire-and-forget：postMessage 失败不影响
     // 本地 record 终态；与现有 dispatch 收尾保持一致。
-    void this.replyErrorToRec(rec, code, rec.errorMessage);
+    await this.replyErrorToRec(rec, code, rec.errorMessage);
     this.emit();
   }
 
@@ -3441,7 +3440,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.failureReason = "request_timeout";
     rec.finishedAt = Date.now();
     rec.updatedAt = rec.finishedAt;
-    this.writeFeedCommandFor(rec);
+    await this.persistFeedCommandFor(rec);
     this.emitFeed();
     await this.replyErrorToRec(rec, "user_rejected", "User rejected");
     this.emit();
@@ -3483,7 +3482,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.failureReason = failureReason;
     rec.finishedAt = Date.now();
     rec.updatedAt = rec.finishedAt;
-    this.writeFeedCommandFor(rec);
+    await this.persistFeedCommandFor(rec);
     await this.replyErrorToRec(rec, "user_rejected", "User rejected");
     this.emitFeed();
     this.emit();
@@ -3555,7 +3554,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           rec.failureReason = "runtime_missing";
           rec.finishedAt = Date.now();
           rec.updatedAt = rec.finishedAt;
-          this.writeFeedCommandFor(rec);
+          await this.persistFeedCommandFor(rec);
           await this.replyErrorToRec(rec, "user_rejected", "User rejected");
           this.emitFeed();
           this.emit();
@@ -3708,15 +3707,30 @@ export class ProtocolServiceImpl implements ProtocolService {
         rec.failureReason = "client_canceled";
         rec.finishedAt = Date.now();
         rec.updatedAt = rec.finishedAt;
-        this.writeFeedCommandFor(rec);
+        await this.persistFeedCommandFor(rec);
         await this.replyErrorToRec(rec, "user_rejected", "User rejected");
       } else if (result) {
         rec.phase = "approved";
         rec.finishedAt = Date.now();
         rec.updatedAt = rec.finishedAt;
-        this.writeFeedCommandFor(rec);
+        await this.persistFeedCommandFor(rec);
         await this.replyResultToRec(rec, result);
       }
+      this.emitFeed();
+      this.emit();
+    } catch (err) {
+      // A terminal command-history write is part of the user-visible request
+      // result. Surface its failure as a protocol error instead of allowing a
+      // rejected background promise to disappear.
+      const protoErr = toProtocolError(err);
+      rec.phase = "failed";
+      rec.errorCode = protoErr.code;
+      rec.errorMessage = protoErr.message;
+      rec.failureReason = "storage_error";
+      rec.finishedAt = Date.now();
+      rec.updatedAt = rec.finishedAt;
+      this.writeFeedCommandFor(rec);
+      await this.replyErrorToRec(rec, protoErr.code, protoErr.message);
       this.emitFeed();
       this.emit();
     } finally {
@@ -3813,7 +3827,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.failureReason = localReason;
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyErrorToRec(rec, errCode, errMessage);
       return null;
     }
@@ -3821,31 +3835,32 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private async requireStorageContext(rec: RequestRecord, connectSessionId: string): Promise<{ service: StorageRuntimeController; context: OwnerAppStorageGrant }> {
-    const service = this.currentStorageRuntimeController();
+    const service = this.currentStorageController();
     if (!service) throw protocolError("storage_unavailable", "Storage service is unavailable");
     const session = await this.requireConnectSession(rec, connectSessionId);
     if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity proof snapshot");
     if (!session.ownerPublicKeyHex) throw protocolError("storage_identity_required", "Storage requires an active owner");
     const summary = await service.getProviderSummary();
     const lifecycle = this.deps.vault.getLifecycleSnapshot();
-    const applicationStorageId = deriveThirdPartyApplicationStorageId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
+    const moduleId = deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
     return {
       service,
       context: {
         connectSessionId: session.sessionId,
         transportOrigin: rec.origin,
         appIdentity: session.appIdentity,
-        bucketId: `runtime:${summary?.providerId ?? "unknown"}`,
+        bucketId: service.selectedBucketId?.() ?? summary?.bucketHint ?? "unknown",
         bucketGeneration: summary?.generation ?? 1,
         ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
-        applicationStorageId,
+        moduleId,
+        purposeId: "files",
         sessionEpoch: lifecycle.sessionEpoch
       }
     };
   }
 
   private async abortCancelledUpload(rec: RequestRecord, connectSessionId: string, uploadId: string): Promise<void> {
-    const service = this.currentStorageRuntimeController();
+    const service = this.currentStorageController();
     if (!service) return;
     try {
       const session = await this.requireConnectSession(rec, connectSessionId);
@@ -3858,10 +3873,11 @@ export class ProtocolServiceImpl implements ProtocolService {
           connectSessionId,
           transportOrigin: rec.origin,
           appIdentity: session.appIdentity,
-          bucketId: `runtime:${summary?.providerId ?? "unknown"}`,
+          bucketId: service.selectedBucketId?.() ?? summary?.bucketHint ?? "unknown",
           bucketGeneration: summary?.generation ?? 1,
           ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
-          applicationStorageId: deriveThirdPartyApplicationStorageId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId),
+          moduleId: deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId),
+          purposeId: "files",
           sessionEpoch: lifecycle.sessionEpoch
         },
         { uploadId }
@@ -4060,7 +4076,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       new Uint8Array(params.content.bytes)
     ]);
     const { nonce, cipherbytes } = aesGcmEncrypt(siteKey, inner);
-    void this.touchConnectSession(session);
+    await this.touchConnectSession(session);
     return {
       nonce: toBinaryField(nonce),
       cipherbytes: toBinaryField(cipherbytes)
@@ -4103,7 +4119,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     ) {
       throw protocolError("decrypt_failed", "Decrypt failed");
     }
-    void this.touchConnectSession(session);
+    await this.touchConnectSession(session);
     return {
       contentType,
       content: toBinaryField(contentBytes)
@@ -4371,14 +4387,16 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 更新 session.lastUsedAt。fire-and-forget：cipher 解密 / 加密的
-   * 主路径**不**等待 K-V 写；写失败不影响主流程。
+   * 更新 session.lastUsedAt。该写入属于授权 session 的用户可见真值，
+   * 因此主路径必须等待并传播存储错误。
    */
-  private touchConnectSession(session: ConnectSessionRecord): void {
-    if (!this.deps.storageRepository) return;
-    session.lastUsedAt = Date.now();
-    const next: ConnectSessionRecord = { ...session, lastUsedAt: session.lastUsedAt };
-    void this.deps.storageRepository.putConnectSession(next).catch(() => undefined);
+  private async touchConnectSession(session: ConnectSessionRecord): Promise<void> {
+    if (!this.deps.storageRepository) {
+      throw new Error("connect session storage unavailable");
+    }
+    const next: ConnectSessionRecord = { ...session, lastUsedAt: Date.now() };
+    await this.deps.storageRepository.putConnectSession(next);
+    session.lastUsedAt = next.lastUsedAt;
   }
 
   /**
@@ -4468,6 +4486,10 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async executeConnectResume(rec: RequestRecord): Promise<ConnectResumeResult> {
     const params = rec.params as ConnectResumeParams;
     const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const storageRepository = this.deps.storageRepository;
+    if (!storageRepository) {
+      throw localFailure("internal_error", "connect.resume: session storage unavailable");
+    }
     const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
     if (!key || !key.publicKeyHex) {
       throw localFailure("internal_error", "connect.resume: owner key not found");
@@ -4475,12 +4497,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
     const now = Date.now();
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
-    if (this.deps.storageRepository) {
-      try {
-        await this.deps.storageRepository.putConnectSession(next);
-      } catch {
-      }
-    }
+    await storageRepository.putConnectSession(next);
     return {
       connectSessionId: session.sessionId,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
@@ -4549,7 +4566,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 这一步不依赖 vault.lock 成功与否：session 一旦 logout，旧 owner
     // capability 就不应继续常驻内存。
     this.clearSessionRuntimeBootstrap(result.connectSessionId, "logout");
-    await this.currentStorageRuntimeController()?.abortSession(result.connectSessionId);
+    await this.currentStorageController()?.abortSession(result.connectSessionId);
     await this.currentMsfileService()?.abortSession(result.connectSessionId);
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
     // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
@@ -4665,14 +4682,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     //     通过 probe 验证过；如果到这里仍然解析不到，再单独做一次
     //     兜底校验，明确告诉用户"runtime 丢失请重新打开 app"。
     await this.resolveOwnerRuntime(session);
-    // 消费 token：一次性，幂等。
-    this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
     const now = Date.now();
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
-    try {
-      await this.deps.storageRepository.putConnectSession(next);
-    } catch {
-    }
+    await this.deps.storageRepository.putConnectSession(next);
+    // 消费 token：一次性，幂等。只有 session 真值写入成功后才消费，
+    // 这样失败可由调用方观察并重试，而不会留下半成功的内存状态。
+    this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
     return {
       connectSessionId: session.sessionId,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
@@ -4885,7 +4900,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.failureReason = "internal_error";
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyErrorToRec(rec, "internal_error", "p2pkh service not available");
       return;
     }
@@ -4909,7 +4924,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.amountSatoshis = params.amountSatoshis;
         card.autoApproved = rec.autoApproved;
         card.updatedAt = Date.now();
-        this.persistRecord(card);
       }
       const preview = await p2pkhService.prepareTransfer({
         assetId: "bsv",
@@ -4932,7 +4946,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.phase = "approved";
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyResultToRec(rec, result);
     } catch (err) {
       const reason = classifyP2pkhFailure(err);
@@ -4942,7 +4956,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.failureReason = reason;
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyErrorToRec(rec, "user_rejected", "User rejected");
     }
   }
@@ -4958,7 +4972,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.failureReason = "fee_pool_db_unavailable";
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyErrorToRec(rec, "user_rejected", "User rejected");
       return;
     }
@@ -5182,7 +5196,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.counterpartyPublicKeyHex = params.counterpartyPublicKeyHex;
         card.amountSatoshis = params.amountSatoshis;
         card.updatedAt = Date.now();
-        this.persistRecord(card);
       }
 
       const result: FeepoolPrepareResult = {
@@ -5208,7 +5221,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.phase = "approved";
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyResultToRec(rec, result);
     } catch (err) {
       let reason: ProtocolFailureReason = "internal_error";
@@ -5221,7 +5234,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.failureReason = reason;
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyErrorToRec(rec, "user_rejected", "User rejected");
     }
   }
@@ -5297,7 +5310,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.failureReason = "fee_pool_db_unavailable";
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyErrorToRec(rec, "user_rejected", "User rejected");
       return;
     }
@@ -5448,7 +5461,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.action = op.action;
         card.operationId = op.operationId;
         card.updatedAt = Date.now();
-        this.persistRecord(card);
       }
 
       const result: FeepoolCommitResult = {
@@ -5463,7 +5475,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.phase = "approved";
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyResultToRec(rec, result);
     } catch (err) {
       let reason: ProtocolFailureReason = "internal_error";
@@ -5476,7 +5488,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.failureReason = reason;
       rec.finishedAt = Date.now();
       rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
+      await this.persistFeedCommandFor(rec);
       await this.replyErrorToRec(rec, "user_rejected", "User rejected");
     }
   }
@@ -5728,10 +5740,14 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 后续即便用户在 popup 会话里切换 active key，旧卡片的元数据
    *     不会被污染。
    */
-  private writeFeedCommandFor(rec: RequestRecord): void {
+  private writeFeedCommandFor(rec: RequestRecord): ProtocolCommandRecord {
     const card = this.makeCommandRecord(rec);
     this.upsertFeedCommand(card);
-    this.persistRecord(card);
+    return card;
+  }
+
+  private async persistFeedCommandFor(rec: RequestRecord): Promise<void> {
+    await this.persistRecord(this.writeFeedCommandFor(rec));
   }
 
   private makeCommandRecord(rec: RequestRecord): ProtocolCommandRecord {
@@ -5796,15 +5812,19 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.writeFeedCommandFor(rec);
   }
 
-  private persistRecord(record: ProtocolCommandRecord): void {
+  private async persistRecord(record: ProtocolCommandRecord): Promise<void> {
     const storageRepository = this.deps.storageRepository;
-    if (!storageRepository) return;
     // 施工单 2026-06-27 001/002 明确：活请求只存在于当前 popup 会话内存，
-    // popup 刷新 / 关闭后不做会话级活卡恢复。因此 platform K-V repository 只持久化终态；
+    // popup 刷新 / 关闭后不做会话级活卡恢复。因此 command-history repository 只持久化终态；
     // 中间态（waiting_unlock_* / confirming / queued / executing）即便误写，
     // 也只会制造"UI 看起来有活卡，但内存里已经没有 request"的脏状态。
     if (!this.isTerminalPhase(record.phase)) return;
-    void storageRepository.putCommand(record).catch((err) => {
+    if (!storageRepository) {
+      throw new Error("Protocol command-history storage is unavailable");
+    }
+    try {
+      await storageRepository.putCommand(record);
+    } catch (err) {
       console.error("[protocol.storageRepository] persistRecord failed", {
         id: record.id,
         origin: record.origin,
@@ -5814,7 +5834,8 @@ export class ProtocolServiceImpl implements ProtocolService {
         this.historyAvailableFlag = false;
         this.emitFeed();
       }
-    });
+      throw err;
+    }
   }
 
   /**

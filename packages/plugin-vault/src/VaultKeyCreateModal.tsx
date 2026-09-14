@@ -22,7 +22,6 @@ import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type { KeyRef } from "@keymaster/contracts";
-import { isWebAuthnPrfAvailable } from "./webauthnPrf.js";
 
 /** 标签最大长度，与 vaultService.LABEL_MAX_LENGTH 保持一致。 */
 const LABEL_MAX_LENGTH = 64;
@@ -33,8 +32,6 @@ export interface VaultKeyCreateModalProps {
   onCreate(label: string, password: string): Promise<KeyRef>;
   /** 创建成功后父组件如何打开导出 Modal。 */
   onExport(key: KeyRef): void;
-  /** 创建成功后立即配置 WebAuthn PRF passkey。 */
-  onPasskeys?(key: KeyRef): void;
   onClose(): void;
 }
 
@@ -53,7 +50,6 @@ export function VaultKeyCreateModal({
   open,
   onCreate,
   onExport,
-  onPasskeys,
   onClose
 }: VaultKeyCreateModalProps) {
   const { t } = useI18n();
@@ -95,7 +91,7 @@ export function VaultKeyCreateModal({
       return;
     }
     if (!password) {
-      setError(t("vault.keyCreate.err.password", { defaultValue: "请输入 Vault 密码" }));
+      setError(t("vault.keyCreate.err.password", { defaultValue: "请输入桶密码" }));
       return;
     }
     setBusy(true);
@@ -127,8 +123,6 @@ export function VaultKeyCreateModal({
     label.trim().length > 0 &&
     label.trim().length <= LABEL_MAX_LENGTH &&
     password.length > 0;
-  const passkeySupported = isWebAuthnPrfAvailable();
-
   return (
     <Modal
       open={open}
@@ -153,18 +147,6 @@ export function VaultKeyCreateModal({
             <Button variant="ghost" onClick={close} disabled={busy}>
               {t("vault.keyCreate.later", { defaultValue: "稍后" })}
             </Button>
-            {onPasskeys ? (
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  if (created) onPasskeys(created);
-                  onClose();
-                }}
-                disabled={!created || busy || !passkeySupported}
-              >
-                {t("vault.keyCreate.addPasskey", { defaultValue: "添加 passkey" })}
-              </Button>
-            ) : null}
             <Button
               onClick={() => {
                 if (created) onExport(created);
@@ -196,7 +178,7 @@ export function VaultKeyCreateModal({
             autoFocus
           />
           <TextInput
-            label={t("vault.keyCreate.password", { defaultValue: "Vault 密码" })}
+            label={t("vault.keyCreate.password", { defaultValue: "桶密码" })}
             type="password"
             autoComplete="current-password"
             value={password}
@@ -209,11 +191,6 @@ export function VaultKeyCreateModal({
       ) : (
         created ? (
           <div className="vault-create-modal__success">
-            {!passkeySupported && onPasskeys ? (
-              <p className="vault-passkey__warning">
-                {t("vault.passkey.unsupported", { defaultValue: "当前上下文不支持 WebAuthn PRF；Passkey 需要 HTTPS。密码保护与加密备份不受影响。" })}
-              </p>
-            ) : null}
             <p className="vault-create-modal__success-line">
               <span className="vault-create-modal__success-label">
                 {t("vault.keyCreate.success.label", { defaultValue: "标签" })}
@@ -240,7 +217,7 @@ export function VaultKeyCreateModal({
             <p className="vault-create-modal__warning">
               {t("vault.keyCreate.warning", {
                 defaultValue:
-                  "该 Key 只保存在当前浏览器的本地 Vault 中。清除浏览器数据、设备损坏或忘记 Vault 密码都可能导致无法恢复，请尽快导出加密备份。"
+                  "该 Key 保存在当前 Catalog 桶中。失去桶或桶密码都可能导致无法恢复，请尽快导出加密备份。"
               })}
             </p>
           </div>

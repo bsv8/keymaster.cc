@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { OwnerAppStore, KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
@@ -139,10 +140,8 @@ function openIntegrationStore(publicKeyHex: string): OwnerAppStore {
     let store = integrationStores.get(publicKeyHex);
     if (!store) {
       store = createInMemoryKeyValueStore({
-        scope: "key",
+        ...CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
         ownerPublicKeyHex: publicKeyHex,
-        applicationStorageId: "UTXOS",
-        schemaVersion: 1,
         bucketId: "test",
         bucketGeneration: 1
       }) as OwnerAppStore;

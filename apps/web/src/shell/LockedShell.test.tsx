@@ -63,11 +63,6 @@ function createLockedHost(input?: { selected?: string; keys?: KeyIdentity[]; del
     disposeAppViewSession: () => undefined,
     disposeAllAppViewSessions: () => undefined,
     activateKey: async () => ({ status: "accepted" as const }),
-    activateKeyWithPasskey: async () => ({ status: "accepted" as const }),
-    listPasskeysForKey: async () => [],
-    listCurrentKeyPasskeys: async () => [],
-    addPasskeyToCurrentKey: async () => ({ id: "id", label: "", credentialIdB64: "", rpId: "", createdAt: "", transports: [] }),
-    removePasskeyFromCurrentKey: async () => undefined
   };
   const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [SHELL_RESOURCES] });
   registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY));

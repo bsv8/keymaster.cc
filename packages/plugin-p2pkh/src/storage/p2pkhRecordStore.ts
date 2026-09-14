@@ -4,7 +4,7 @@
 // 只表示内存中的记录操作，不是浏览器数据库 API。每个写事务结束时通过一次
 // K-V commit 原子发布，读取只看当前句柄已经加载的桶快照。
 
-import type { KeyValueCommitOperation, KeyValueStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, KeyValueCommitOperation } from "@keymaster/contracts";
 
 export type RecordKey = string | number | readonly (string | number)[];
 
@@ -163,7 +163,7 @@ export class P2pkhRecordStore {
   private closed = false;
   private baseline = new Map<string, Map<string, PlainRecord>>();
   private partitionRevision = 0;
-  private constructor(private readonly store: KeyValueStore) {}
+  private constructor(private readonly store: BorrowedKeyValueStore) {}
 
   private replaceFromSnapshot(snapshot: Map<string, Map<string, PlainRecord>>): void {
     for (const name of this.objectStoreNames) {
@@ -183,7 +183,7 @@ export class P2pkhRecordStore {
     return error;
   }
 
-  static async open(store: KeyValueStore): Promise<P2pkhRecordStore> {
+  static async open(store: BorrowedKeyValueStore): Promise<P2pkhRecordStore> {
     const recordStore = new P2pkhRecordStore(store);
     let revision = 0;
     let cursor: string | undefined;
@@ -318,5 +318,5 @@ export class P2pkhRecordStore {
     } while (cursor);
     return { revision, snapshot };
   }
-  close(): void { this.closed = true; this.store.close(); }
+  close(): void { this.closed = true; }
 }

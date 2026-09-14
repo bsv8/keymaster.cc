@@ -3,11 +3,12 @@
 // 价格订阅是普通 Channel 公共消息：插件只知道精确频道和自己的业务内容，
 // 不接触 Supplier、SSP Wire、签名壳或远端历史。
 
-import type { ChannelRuntime, KeyValueStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, ChannelRuntime } from "@keymaster/contracts";
 import { buildPriceChannelId } from "./constants.js";
 import { decodePriceContent, type BsvPriceSnapshot } from "./bsvPriceProtocol.js";
 import {
   createKeyValueBsvPriceSettingsStore,
+  type BsvPriceSettingsStore,
   normalizePublisherPublicKeyHex,
   type BsvPriceGlobalConfig
 } from "./bsvPriceSettings.js";
@@ -43,29 +44,45 @@ export interface BsvPriceService {
   currentQuotes(): readonly { exchange: string; price: string }[];
   getPublisherPublicKeyHex(): string;
   configured(): boolean;
-  savePublisherPublicKeyHex(input: string): void;
+  savePublisherPublicKeyHex(input: string): Promise<void>;
   dispose(): void;
 }
 
-export interface CreateBsvPriceServiceOptions {
+export interface CreateBsvPriceServicePersistentOptions {
   /** 首次启动时使用的配置种子。 */
   seedPublisherPublicKeyHex?: string;
-  /** Host 绑定的 BSV Price owner/App K-V 句柄。 */
-  storage?: KeyValueStore;
+  /** Host 绑定的 BSV Price bucket K-V 句柄。 */
+  storage: BorrowedKeyValueStore;
   /** 测试可注入时钟。 */
   now?: () => number;
 }
 
+/** 显式内存实现，仅供测试注入；生产构造必须使用持久化 storage。 */
+export interface CreateBsvPriceServiceMemoryOptions {
+  seedPublisherPublicKeyHex?: string;
+  settingsStore: BsvPriceSettingsStore;
+  storage?: never;
+  now?: () => number;
+}
+
+export type CreateBsvPriceServiceOptions =
+  | CreateBsvPriceServicePersistentOptions
+  | CreateBsvPriceServiceMemoryOptions;
+
 export function createBsvPriceService(
   channel: ChannelRuntime,
-  options: CreateBsvPriceServiceOptions = {}
+  options: CreateBsvPriceServiceOptions
 ): BsvPriceService & { ready(): Promise<void> } {
-  const store = createKeyValueBsvPriceSettingsStore(options.storage, options.now);
+  const store = "settingsStore" in options
+    ? options.settingsStore
+    : createKeyValueBsvPriceSettingsStore(options.storage, options.now);
+  const isExplicitMemoryStore = "settingsStore" in options;
   const listeners = new Set<() => void>();
   let offMessage: (() => void) | null = null;
   let subscriptionGeneration = 0;
+  let bound = false;
   let currentConfig = store.load();
-  if (!currentConfig && !options.storage) {
+  if (!currentConfig) {
     const seed = normalizePublisherPublicKeyHex(options.seedPublisherPublicKeyHex ?? "");
     if (seed.ok && seed.value) currentConfig = store.bootstrapPublisherPublicKeyHex(seed.value);
   }
@@ -101,6 +118,7 @@ export function createBsvPriceService(
   }
 
   function bind(): void {
+    bound = true;
     unbind();
     if (!state.configured) {
       state.channelId = NOT_CONFIGURED_LABEL;
@@ -149,16 +167,28 @@ export function createBsvPriceService(
     bind();
   }
 
-  bind();
+  // A persistent store has not loaded its central truth before ready(). Do not
+  // briefly subscribe using a deployment seed that a stored value may replace.
+  // The explicit memory store is synchronous and can bind immediately.
+  if (isExplicitMemoryStore) bind();
 
   const ready = store.ready().then(() => {
-    currentConfig = store.load();
-    if (!currentConfig) {
+    const loaded = store.load();
+    let nextConfig = loaded;
+    if (!nextConfig) {
       const seed = normalizePublisherPublicKeyHex(options.seedPublisherPublicKeyHex ?? "");
-      if (seed.ok && seed.value) currentConfig = store.bootstrapPublisherPublicKeyHex(seed.value);
+      if (seed.ok && seed.value) nextConfig = store.bootstrapPublisherPublicKeyHex(seed.value);
     }
-    currentConfig ??= { pricePublisherPublicKeyHex: "", savedAtMs: 0 };
-    applyConfig(currentConfig);
+    nextConfig ??= { pricePublisherPublicKeyHex: "", savedAtMs: 0 };
+    const unchanged = currentConfig?.pricePublisherPublicKeyHex === nextConfig.pricePublisherPublicKeyHex
+      && currentConfig?.savedAtMs === nextConfig.savedAtMs;
+    if (unchanged) {
+      currentConfig = nextConfig;
+      if (bound) updateRuntimeState();
+      else bind();
+    } else {
+      applyConfig(nextConfig);
+    }
   });
 
   return {
@@ -178,12 +208,14 @@ export function createBsvPriceService(
     currentQuotes: () => state.snapshot?.quotes.map((quote) => ({ ...quote })) ?? [],
     getPublisherPublicKeyHex: () => state.configHex,
     configured: () => state.configured,
-    savePublisherPublicKeyHex(input) {
+    async savePublisherPublicKeyHex(input) {
       const normalized = normalizePublisherPublicKeyHex(input);
       if (!normalized.ok || normalized.value === undefined) {
         throw new Error(normalized.error ?? "invalid_publisher_public_key_hex");
       }
-      applyConfig(store.savePublisherPublicKeyHex(normalized.value));
+      await ready;
+      const saved = await store.savePublisherPublicKeyHex(normalized.value);
+      applyConfig(saved);
     },
     dispose() {
       unbind();

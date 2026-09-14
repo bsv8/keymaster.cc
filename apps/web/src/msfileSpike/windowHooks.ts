@@ -8,7 +8,6 @@ import { webRTCDirect } from "@libp2p/webrtc";
 import { webSockets } from "@libp2p/websockets";
 import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";
 import { KeymasterWindowP2pIdentitySigner } from "@keymaster/plugin-window-p2p/identity-signer";
-import { requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
 
 const SPIKE_PASSWORD = "msfile-spike-test-password";
 
@@ -172,11 +171,19 @@ async function ensureStorageReady(coordinator: ReturnType<typeof getCoordinatorC
   for (let attempt = 0; attempt < 400; attempt += 1) {
     const status = await coordinator.storageControl({ type: "status" });
     if (status.status === "ok" && status.value === "ready") return;
-    if (status.status === "ok" && (status.value === "unselected" || status.value === "authentication")) {
-      await requestOpfsPersistence();
-      const selected = await coordinator.storageControl({ type: "select-opfs" });
-      if (selected.status !== "ok") throw new Error(`spike OPFS selection failed: ${selected.status}`);
-      writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
+    if (status.status === "ok" && status.value === "unselected") {
+      const selected = await coordinator.storageControl({ type: "initial-setup", plan: {
+        transactionId: `msfile-spike-${crypto.randomUUID()}`,
+        bucketLabel: "MSFile Spike Local",
+        backend: "local",
+        connection: { kind: "local" },
+        bucketPassword: SPIKE_PASSWORD,
+        firstKey: { kind: "generate", label: "MSFile executor spike", capabilities: ["p2pkh"] },
+      } });
+      if (selected.status !== "ok") throw new Error(`spike Local setup failed: ${selected.status}`);
+    } else if (status.status === "ok" && status.value === "authentication") {
+      const unlocked = await coordinator.storageControl({ type: "unlock-bucket", password: SPIKE_PASSWORD });
+      if (unlocked.status !== "ok") throw new Error(`spike Local unlock failed: ${unlocked.status}`);
     } else {
       await coordinator.storageControl({ type: "retry" });
     }

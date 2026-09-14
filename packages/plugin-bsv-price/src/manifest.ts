@@ -37,6 +37,7 @@ import { createBsvPriceService, type BsvPriceService, type BsvPriceServiceSnapsh
 import { BsvPricePage } from "./BsvPricePage.js";
 import { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";
 import { BsvPriceHomeWidget } from "./BsvPriceHomeWidget.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 /** plugin-bsv-price 插件 id。 */
 export const BSV_PRICE_PLUGIN_ID = "bsv-price";
@@ -181,7 +182,7 @@ const bsvPricePluginDefinition = {
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [capabilityDescriptor(BSV_PRICE_SERVICE_CAPABILITY)],
-    storage: { scope: "key", applicationStorageId: "BsvPrice", schemaVersion: 1 },
+    storage: CENTRAL_STORAGE_DECLARATIONS.bsvPrice,
     config: {
       // 缺省空对象 → plugin 进入 not_configured 状态。
       pricePublisherPublicKeyHex: ""
@@ -197,7 +198,6 @@ const bsvPricePluginDefinition = {
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将行情页挂入首页业务域" },
       { capability: HOME_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将 BSV 价格快照显示在首页右侧栏" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 BSV Price 状态资源" },
-      { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "active key 就绪后加载 owner 配置" },
     ]),
   }],
   async setup(ctx) {
@@ -218,15 +218,11 @@ const bsvPricePluginDefinition = {
         : "";
 
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(BSV_PRICE_PLUGIN_ID);
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: publisherHex,
-      storage: ctx.storage
+      storage: ctx.storageFor("settings")
     });
     await service.ready();
-    const offActive = keyspace.onActiveKeyChanged((state) => {
-      if (state.activePublicKeyHex) void service.ready().catch((error) => console.warn("[bsv-price] failed to load owner configuration", error));
-    });
     ctx.provide(BSV_PRICE_SERVICE_CAPABILITY, service);
     const resources = ctx.optionalCapability(RESOURCE_REGISTRY_CAPABILITY);
     resources?.register<BsvPriceServiceSnapshot, readonly string[]>({
@@ -311,7 +307,6 @@ const bsvPricePluginDefinition = {
     });
 
     return () => {
-      offActive();
       service.dispose();
     };
   }

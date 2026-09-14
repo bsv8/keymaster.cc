@@ -4,8 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const heavyFiles = new Set([
-  "apps/web/src/keymasterSessionCoordinator.worker.test.ts",
-  "packages/plugin-vault/src/vaultService.test.ts"
+  "apps/web/src/keymasterSessionCoordinator.worker.test.ts"
 ]);
 const batchSize = 12;
 

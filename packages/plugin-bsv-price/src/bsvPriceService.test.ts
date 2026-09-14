@@ -1,10 +1,12 @@
 // BSV 价格服务的 Channel 精确订阅测试。
 
 import { describe, expect, it } from "vitest";
-import type { ChannelMessageReceivedEventData, ChannelRuntime } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, ChannelMessageReceivedEventData, ChannelRuntime } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { PRICECAST_PROTOCOL_ID, buildPriceChannelId } from "./constants.js";
 import { createBsvPriceService } from "./bsvPriceService.js";
+import { createMemoryBsvPriceSettingsStore } from "./bsvPriceSettings.js";
 
 class FakeChannel implements ChannelRuntime {
   readonly subscriptionCalls: string[][] = [];
@@ -42,7 +44,7 @@ function makeMessage(channel: string, price = "100.00"): ChannelMessageReceivedE
 }
 
 function makeStorage() {
-  return createInMemoryKeyValueStore({ scope: "key", ownerPublicKeyHex: PUBLISHER_A, applicationStorageId: "BSVPrice", schemaVersion: 1, bucketId: "test", bucketGeneration: 1 });
+  return createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.bsvPrice, ownerPublicKeyHex: PUBLISHER_A, bucketId: "test", bucketGeneration: 1 });
 }
 
 describe("createBsvPriceService", () => {
@@ -59,23 +61,29 @@ describe("createBsvPriceService", () => {
     service.dispose();
   });
 
-  it("uses the seed when no stored config exists", () => {
+  it("uses the seed when an explicit memory store is injected", async () => {
     const service = createBsvPriceService(new FakeChannel(), {
-      seedPublisherPublicKeyHex: PUBLISHER_B
+      seedPublisherPublicKeyHex: PUBLISHER_B,
+      settingsStore: createMemoryBsvPriceSettingsStore()
     });
+    await service.ready();
     expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_B);
     service.dispose();
   });
 
-  it("switches exact subscriptions and ignores messages from the old Channel", () => {
+  it("switches exact subscriptions and ignores messages from the old Channel", async () => {
     const channel = new FakeChannel();
-    const service = createBsvPriceService(channel, { seedPublisherPublicKeyHex: PUBLISHER_A });
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: createMemoryBsvPriceSettingsStore()
+    });
+    await service.ready();
     const oldChannel = buildPriceChannelId(PUBLISHER_A);
     const newChannel = buildPriceChannelId(PUBLISHER_B);
     channel.emit(makeMessage(oldChannel, "100.01"));
     expect(service.snapshot().snapshot?.quotes[0]?.price).toBe("100.01");
 
-    service.savePublisherPublicKeyHex(PUBLISHER_B);
+    await service.savePublisherPublicKeyHex(PUBLISHER_B);
     expect(channel.subscriptionCalls).toEqual([[oldChannel], [newChannel]]);
     expect(service.snapshot().snapshot).toBeNull();
     channel.emit(makeMessage(oldChannel, "999.99"));
@@ -85,11 +93,13 @@ describe("createBsvPriceService", () => {
     service.dispose();
   });
 
-  it("ignores a valid message from the wrong publisher on the configured Channel", () => {
+  it("ignores a valid message from the wrong publisher on the configured Channel", async () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
-      seedPublisherPublicKeyHex: PUBLISHER_A
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: createMemoryBsvPriceSettingsStore()
     });
+    await service.ready();
     channel.emit({
       ...makeMessage(buildPriceChannelId(PUBLISHER_A), "999.99"),
       publisherPublicKeyHex: PUBLISHER_B
@@ -98,12 +108,43 @@ describe("createBsvPriceService", () => {
     service.dispose();
   });
 
-  it("clears the configured Channel and rejects invalid publisher keys", () => {
+  it("clears the configured Channel and rejects invalid publisher keys", async () => {
     const channel = new FakeChannel();
-    const service = createBsvPriceService(channel, { seedPublisherPublicKeyHex: PUBLISHER_A });
-    service.savePublisherPublicKeyHex("");
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: createMemoryBsvPriceSettingsStore()
+    });
+    await service.ready();
+    await service.savePublisherPublicKeyHex("");
     expect(service.snapshot()).toMatchObject({ status: "not_configured", configured: false, channelId: "(not configured)" });
-    expect(() => service.savePublisherPublicKeyHex("bad")).toThrow("invalid_length");
+    await expect(service.savePublisherPublicKeyHex("bad")).rejects.toThrow("invalid_length");
+    service.dispose();
+  });
+
+  it("propagates storage failures without changing the configured publisher", async () => {
+    const storage = makeStorage();
+    let fail = true;
+    const failingStorage = {
+      ...storage,
+      async put<T>(key: string, value: T, condition?: Parameters<BorrowedKeyValueStore["put"]>[2]) {
+        if (fail) throw new Error("injected BSV Price storage failure");
+        return storage.put(key, value, condition);
+      }
+    } as BorrowedKeyValueStore;
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      storage: failingStorage
+    });
+    await service.ready();
+    const before = service.getPublisherPublicKeyHex();
+    await expect(service.savePublisherPublicKeyHex(PUBLISHER_B))
+      .rejects.toThrow("injected BSV Price storage failure");
+    expect(service.getPublisherPublicKeyHex()).toBe(before);
+    expect(channel.subscriptionCalls).toEqual([[buildPriceChannelId(PUBLISHER_A)]]);
+    fail = false;
+    await service.savePublisherPublicKeyHex(PUBLISHER_B);
+    expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_B);
     service.dispose();
   });
 });

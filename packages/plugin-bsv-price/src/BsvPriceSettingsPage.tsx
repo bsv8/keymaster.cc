@@ -63,12 +63,12 @@ function BsvPriceSettingsPageInner({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  function onSave(): void {
+  async function onSave(): Promise<void> {
     setSaving(true);
     setSaveError(null);
     setSaveMessage(null);
     try {
-      service.savePublisherPublicKeyHex(draft);
+      await service.savePublisherPublicKeyHex(draft);
       const nextHex = service.getPublisherPublicKeyHex();
       setDraft(nextHex);
       setSaveMessage(

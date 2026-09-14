@@ -197,7 +197,7 @@ Coordinator 的生产任务装配现在对未登记 `productId`、`unitId` 或�
 
 **目标：** 删除 Key 不依赖运行中的插件，同时覆盖平台目录中的关联数据。
 
-**责任范围：** Coordinator 的 `executeKeyDeletionTransaction`、`recoverKeyDeletionJournals`；`platformRootStore.ts`；Vault 仓库；Protocol 仓库；multipart 仓库和实际盘点发现的共享元数据仓库。
+**责任范围：** Coordinator 的 `executeKeyDeletionTransaction`、`recoverKeyLifecycleJournals`；`platformRootStore.ts`；Vault 仓库；Protocol 仓库；multipart 仓库和实际盘点发现的共享元数据仓库。
 
 **施工内容：**
 

@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { KeyValueCommitInput, KeyValueCommitResult, KeyValueEntry, KeyValueEntryMeta, KeyValueListInput, KeyValueListResult, KeyValueStore, KeyValueValue } from "@keymaster/contracts";
 import { createPokerService } from "./pokerService.js";
 import { writePresence, writeTable, writeTxIngest } from "./storage/pokerRepository.js";
@@ -178,6 +179,11 @@ class FakeKeyspace {
   // 存在 / 缺省；老 `mode: "all" / setAll()` 已删除。
   private state: { activePublicKeyHex?: string } = { activePublicKeyHex: PUB_A };
   private stores = new Map<string, KeyValueStore>();
+  private readonly settings = createInMemoryKeyValueStore({
+    ...CENTRAL_STORAGE_DECLARATIONS.pokerSettings,
+    bucketId: "test-memory",
+    bucketGeneration: 1
+  });
   private activeHandlers = new Set<(s: any) => void>();
   private keyMeta = new Map<string, any>([
     [PUB_A, KEY_A],
@@ -226,25 +232,29 @@ class FakeKeyspace {
     this.keyMeta.delete(pkh);
   }
 
+  settingsStore(): KeyValueStore {
+    return this.settings;
+  }
+
   ownerStore(ownerPublicKeyHex: string = this.state.activePublicKeyHex ?? ""): KeyValueStore {
     if (!ownerPublicKeyHex) throw new Error("No active owner in test keyspace");
-    const key = `${ownerPublicKeyHex}:Poker:1`;
+    const key = `${ownerPublicKeyHex}:PokerSessionHistory:1`;
     const existing = this.stores.get(key);
     if (existing) return { ...existing, close: () => undefined };
     const created = createInMemoryKeyValueStore({
-      scope: "key",
+      ...CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory,
       ownerPublicKeyHex,
-      applicationStorageId: "Poker",
-      schemaVersion: 1,
       bucketId: "test-memory",
       bucketGeneration: 1
     });
     this.stores.set(key, created);
     return { ...created, close: () => undefined };
   }
-  async openOwnerAppStore(input: { applicationStorageId: string; schemaVersion: number }): Promise<KeyValueStore> {
+  async openOwnerAppStore(input: { declaration: typeof CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory }): Promise<KeyValueStore> {
     if (!this.state.activePublicKeyHex) throw new Error("No active owner in test keyspace");
-    if (input.applicationStorageId !== "Poker" || input.schemaVersion !== 1) throw new Error("Unexpected Poker storage declaration");
+    if (input.declaration.moduleId !== CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.moduleId
+      || input.declaration.purposeId !== CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.purposeId
+      || input.declaration.schemaVersion !== CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.schemaVersion) throw new Error("Unexpected Poker storage declaration");
     return this.ownerStore(this.state.activePublicKeyHex);
   }
   registerStorageDeclaration() {}
@@ -269,18 +279,39 @@ class FakeKeyspace {
 
 /** 模拟 Host 的延迟 OwnerAppStore：每次 I/O 按当前 active key 重新取句柄。 */
 function activeOwnerStore(ownerKeyspace: FakeKeyspace): KeyValueStore {
-  const open = () => ownerKeyspace.openOwnerAppStore({ applicationStorageId: "Poker", schemaVersion: 1 });
+  const open = () => ownerKeyspace.openOwnerAppStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory });
   return {
     get bucketId() { return "test-memory"; },
     get bucketGeneration() { return 1; },
     get ownerPublicKeyHex() { return ownerKeyspace.active().activePublicKeyHex ?? ""; },
-    applicationStorageId: "Poker",
+    moduleId: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.moduleId,
+    purposeId: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.purposeId,
+    scope: "owner",
+    authority: "built-in-module",
+    model: "kv",
+    schemaVersion: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.schemaVersion,
     async get<T = KeyValueValue>(key: string, input: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> { return (await open()).get<T>(key, input); },
     async list(input: KeyValueListInput = {}): Promise<KeyValueListResult> { return (await open()).list(input); },
     async put<T = KeyValueValue>(key: string, value: T, condition: { ifRevision?: number; partition?: string } = {}): Promise<KeyValueEntryMeta> { return (await open()).put(key, value, condition); },
     async delete(key: string, condition: { ifRevision?: number; partition?: string } = {}): Promise<void> { await (await open()).delete(key, condition); },
     async commit(input: KeyValueCommitInput): Promise<KeyValueCommitResult> { return (await open()).commit(input); },
     close() {}
+  };
+}
+
+function pokerDeps(
+  ownerVault: FakeVault,
+  ownerKeyspace: FakeKeyspace,
+  ownerBus: FakeMessageBus,
+  sessionHistoryStore: KeyValueStore = ownerKeyspace.ownerStore(PUB_A),
+  settingsStorage: KeyValueStore = ownerKeyspace.settingsStore()
+) {
+  return {
+    vault: ownerVault as any,
+    keyspace: ownerKeyspace as any,
+    messageBus: ownerBus as any,
+    settingsStorage,
+    sessionHistoryStore
   };
 }
 
@@ -295,7 +326,7 @@ beforeEach(async () => {
   keyspace = new FakeKeyspace();
   bus = new FakeMessageBus();
   keyspace.attachBus(bus);
-  svc = createPokerService({ vault: vault as any, keyspace: keyspace as any, messageBus: bus as any, storage: keyspace.ownerStore(PUB_A) });
+  svc = createPokerService(pokerDeps(vault, keyspace, bus));
   // 让 service 的 init rebind 完成。
   // 关键（修复 pokerService.test.ts:683 偶发 flake）：
   // rebindToActiveKey("init") 内部在写完 currentSessionKeyHash 之后还要
@@ -472,12 +503,7 @@ describe("pokerService (active-key-driven)", () => {
       allowFallbackBroadcast: false
     });
     // 模拟"应用刷新"：构造一个新 service，应能从全局配置 hydrate。
-    const svc2 = createPokerService({
-      vault: vault as any,
-      keyspace: keyspace as any,
-      messageBus: bus as any,
-      storage: keyspace.ownerStore(PUB_A)
-    });
+    const svc2 = createPokerService(pokerDeps(vault, keyspace, bus));
     await new Promise((r) => setTimeout(r, 0));
     const s = svc2.getSettings();
     expect(s.proxyEndpoint).toBe("wss://persist.example");
@@ -566,27 +592,45 @@ describe("pokerService (active-key-driven)", () => {
     expect((svc as any).listIdentityCandidates).toBeUndefined();
   });
 
-  it("updateSettings writes to Poker owner K-V and survives service recreation", async () => {
+  it("updateSettings writes to the Poker settings bucket and survives service recreation", async () => {
     await svc.updateSettings({ proxyEndpoint: "wss://ls.example" });
-    const stored = await keyspace.ownerStore(PUB_A).get("settings", { partition: "settings" });
+    const stored = await keyspace.settingsStore().get("settings", { partition: "settings" });
     expect(stored?.value).toMatchObject({ proxyEndpoint: "wss://ls.example" });
-    const svc2 = createPokerService({
-      vault: vault as any,
-      keyspace: keyspace as any,
-      messageBus: bus as any,
-      storage: keyspace.ownerStore(PUB_A)
-    });
+    const svc2 = createPokerService(pokerDeps(vault, keyspace, bus));
     await svc2.ready();
     expect(svc2.getSettings().proxyEndpoint).toBe("wss://ls.example");
-    await keyspace.ownerStore(PUB_A).delete("settings", { partition: "settings" });
-    const svc3 = createPokerService({
-      vault: vault as any,
-      keyspace: keyspace as any,
-      messageBus: bus as any,
-      storage: keyspace.ownerStore(PUB_A)
-    });
+    await keyspace.settingsStore().delete("settings", { partition: "settings" });
+    const svc3 = createPokerService(pokerDeps(vault, keyspace, bus));
     await svc3.ready();
     expect(svc3.getSettings().proxyEndpoint).toBe("");
+  });
+
+  it("updateSettings propagates settings storage failures without changing memory", async () => {
+    const settings = keyspace.settingsStore();
+    let fail = true;
+    const failingSettings = {
+      ...settings,
+      async put<T>(key: string, value: T, condition?: Parameters<KeyValueStore["put"]>[2]) {
+        if (fail) throw new Error("injected Poker settings failure");
+        return settings.put(key, value, condition);
+      }
+    } as KeyValueStore;
+    const local = createPokerService(pokerDeps(
+      vault,
+      keyspace,
+      bus,
+      keyspace.ownerStore(PUB_A),
+      failingSettings
+    ));
+    await local.ready();
+    const before = local.getSettings();
+    await expect(local.updateSettings({ proxyEndpoint: "wss://failed.example" }))
+      .rejects.toThrow("injected Poker settings failure");
+    expect(local.getSettings()).toEqual(before);
+    fail = false;
+    await local.updateSettings({ proxyEndpoint: "wss://recovered.example" });
+    expect(local.getSettings().proxyEndpoint).toBe("wss://recovered.example");
+    local.dispose();
   });
 
   // ------------------------------------------------------------------------
@@ -605,12 +649,7 @@ describe("pokerService (active-key-driven)", () => {
 
     // 直接 new，不等任何 tick；构造里 rebindToActiveKey("init") 还
     // 没走完（pending microtask，停在 await keyspace.getKey(...)）。
-    const fresh = createPokerService({
-      vault: localVault as any,
-      keyspace: localKeyspace as any,
-      messageBus: localBus as any,
-      storage: localKeyspace.ownerStore(PUB_A)
-    });
+    const fresh = createPokerService(pokerDeps(localVault, localKeyspace, localBus));
     // 这时：(fresh as any).currentSessionKeyHash 还是 null（init 没填），
     // 但 keyspace.active().activePublicKeyHex === PUB_A——后者是同步
     // 数据源，handler 改用它就不会漏掉 teardown。
@@ -787,12 +826,7 @@ describe("pokerService (active-key-driven)", () => {
 
     // 构造一个新 service：构造函数会触发 rebindToActiveKey("init") →
     // hydrateFromKeyScopedRepository(PUB_A)，应能恢复上面写入的 tables / presences。
-    const svc2 = createPokerService({
-      vault: vault as any,
-      keyspace: keyspace as any,
-      messageBus: bus as any,
-      storage: keyspace.ownerStore(PUB_A)
-    });
+    const svc2 = createPokerService(pokerDeps(vault, keyspace, bus));
     for (let i = 0; i < 50; i++) {
       const tables = svc2.listTables();
       const presences = svc2.listPresences();
@@ -836,12 +870,7 @@ describe("pokerService (active-key-driven)", () => {
     // 构造 service → onActiveChange (eager) + scheduleRebindToActiveKey("init")
     // 应当被合并成一次 rebind 跑一次 hydrate。即便 service 内部的
     // scheduleRebindToActiveKey 没有合并，hydrate 自身也应幂等。
-    const local = createPokerService({
-      vault: vault as any,
-      keyspace: keyspace as any,
-      messageBus: bus as any,
-      storage: keyspace.ownerStore(PUB_A)
-    });
+    const local = createPokerService(pokerDeps(vault, keyspace, bus));
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 
     // 关键不变量：txEvents 应该有 5 条（与 DB 写入条数一致），不是 10 条
@@ -878,12 +907,7 @@ describe("pokerService (active-key-driven)", () => {
     });
 
     // 3) 构造新 service → init hydrate from pkhA。
-    const svc2 = createPokerService({
-      vault: vault as any,
-      keyspace: keyspace as any,
-      messageBus: bus as any,
-      storage: activeOwnerStore(keyspace)
-    });
+    const svc2 = createPokerService(pokerDeps(vault, keyspace, bus, activeOwnerStore(keyspace)));
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
     expect(svc2.listTables().find((t) => t.tableId === "t-A")).toBeTruthy();
     expect(svc2.listTables().find((t) => t.tableId === "t-B")).toBeFalsy();

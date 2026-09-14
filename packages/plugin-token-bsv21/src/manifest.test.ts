@@ -18,8 +18,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 let mockDbListResult: unknown[] = [];
 
 vi.mock("./storage/bsv21StateRepository.js", () => ({
-  BSV21_STORAGE_ID: "BSV21",
-  BSV21_SCHEMA_VERSION: 1,
   createBsv21StateRepository: () => ({
     put: vi.fn(),
     replaceAll: vi.fn(),
@@ -94,7 +92,7 @@ async function setupManifest() {
   const ctx = {
     // manifest 的 owner/App K-V 句柄注入由 Host 负责；本测试只验证事件绑定，
     // 因此使用不会被 mock Repository 实际访问的最小占位值。
-    storage: {} as never,
+    storageFor: () => ({}) as never,
     provide: vi.fn(),
     capability: vi.fn((capability: { id: string }) => {
       switch (capability.id) {

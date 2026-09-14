@@ -1,4 +1,4 @@
-import type { BsvNetwork, KeyValueStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, BsvNetwork } from "@keymaster/contracts";
 import type {
   P2pkhKeyResource,
   P2pkhLocalInputClaim, P2pkhLocalOutpoint,
@@ -10,9 +10,6 @@ import { makeResourceId } from "../p2pkhContracts.js";
 import { ownedP2pkhOutputs, parseP2pkhTransaction } from "../p2pkhTransactionParser.js";
 import { P2pkhRecordStore, P2pkhStateCollection, P2pkhStateIndex, P2pkhStateTransaction, recordKeyRange, type RecordKey, type RecordQuery } from "./p2pkhRecordStore.js";
 
-export const P2PKH_REPOSITORY_VERSION = 1;
-/** 统一目标目录：UTXOS，不能再使用旧 state 数据库名。 */
-export const P2PKH_STORAGE_ID = "UTXOS";
 const STORE_PREFIX = "p2pkh_";
 
 export interface P2pkhStateRepositoryBundle { close(): void; getStore(): P2pkhRecordStore; }
@@ -70,7 +67,7 @@ function boundedLimit(value: number | undefined): number | undefined {
 }
 
 
-export async function openP2pkhStateRepository(store: KeyValueStore): Promise<P2pkhStateRepositoryBundle> {
+export async function openP2pkhStateRepository(store: BorrowedKeyValueStore): Promise<P2pkhStateRepositoryBundle> {
   const recordStore = await P2pkhRecordStore.open(store);
   let closed = false;
   const bundle: P2pkhStateRepositoryBundle = {

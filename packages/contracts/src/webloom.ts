@@ -16,7 +16,7 @@ import type {
 } from "webloom-framework";
 import type { PluginBusinessContribution } from "./business.js";
 import type { PluginPermission, RuntimeVaultStatus } from "./keymasterLifecycle.js";
-import type { KeyValueStore } from "./storage/kv.js";
+import type { BorrowedKeyValueStore } from "./storage/kv.js";
 
 /** WebLoom Scope.attributes 中由 Keymaster 绑定的领域元数据。 */
 export interface KeymasterScopeAttributes extends Readonly<Record<string, unknown>> {
@@ -35,7 +35,9 @@ export interface KeymasterScopeAttributes extends Readonly<Record<string, unknow
 /** Keymaster 注入 WebLoom Context 的领域扩展。 */
 export interface KeymasterContextExtension extends WebLoomPluginContextExtension {
   /** Host 预绑定的领域 Storage 句柄。 */
-  readonly storage?: KeyValueStore;
+  readonly storage?: BorrowedKeyValueStore;
+  /** Resolve one of the current unit's declared storage purposes. */
+  readonly storageFor?: (purposeId: string) => BorrowedKeyValueStore;
   /** 按 pluginId 收窄后的 Coordinator facade。 */
   readonly coordinator?: unknown;
 }

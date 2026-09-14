@@ -6,6 +6,7 @@
 import type {
   StorageBucketCatalogEntryV2,
   StorageBucketConnectionConfigV1,
+  StorageHoldHeadExpectation,
   StorageKeyDerivationV1,
   StorageRecordV1,
   StorageBucketProvider
@@ -27,7 +28,7 @@ import {
 } from "./keymasterHoldAdapter.js";
 import { createStorageCatalogRepository, removeStorageCatalogEntry, sameStorageCatalogEntry, type CreateStorageBucketInput } from "../bootstrap/storageCatalogRepository.js";
 import { createStorageHoldSnapshotRepository } from "./storageHoldSnapshotRepository.js";
-import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
 
 export interface BucketManagementDependencies {
   catalog?: ReturnType<typeof createStorageCatalogRepository>;
@@ -139,8 +140,12 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
     }
   }
 
-  async function publishSealedSnapshot(input: { provider: StorageBucketProvider; document: HoldDocument; configRevision: number; bucketGeneration: number; snapshotId?: string }) {
+  async function publishSealedSnapshot(input: { provider: StorageBucketProvider; document: HoldDocument; configRevision: number; bucketGeneration: number; snapshotId?: string; expectedHead: StorageHoldHeadExpectation }) {
     return createStorageHoldSnapshotRepository(input.provider).publish(input);
+  }
+
+  function expectedHead(head: { etag?: string }): StorageHoldHeadExpectation {
+    return head.etag === undefined ? { kind: "absent" } : { kind: "etag", etag: head.etag };
   }
 
   /**
@@ -178,7 +183,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
         document,
         configRevision: input.entry.configRevision,
         bucketGeneration: input.bucketGeneration ?? 1,
-        ...(existingHead.etag ? { expectedHeadEtag: existingHead.etag } : {})
+        expectedHead: expectedHead(existingHead)
       });
       if (input.persistCatalog !== false) {
         await getCatalog().updateBucket(input.entry.bucketId, { snapshotRevision: committed.header.snapshotRevision }, input.entry);
@@ -247,7 +252,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
       // 同一逻辑桶的连接配置可能指向已有物理根。即使新 Provider
       // 是另一个对象，也必须以目标根当前提交头做 CAS，不能覆盖并发
       // 标签页刚发布的版本。
-      ...(nextHead.etag ? { expectedHeadEtag: nextHead.etag } : {})
+      expectedHead: expectedHead(nextHead)
     });
     try {
       const nextEntry: StorageBucketCatalogEntryV2 = {
@@ -271,7 +276,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
             document: previous.document,
             configRevision: previous.header.configRevision,
             bucketGeneration: input.bucketGeneration ?? 1,
-            expectedHeadEtag: published.headEtag
+            expectedHead: { kind: "etag", etag: published.headEtag }
           });
         } catch (rollbackError) {
           throw new Error(`Storage bucket configuration update could not update the local catalog and rollback was not confirmed: ${rollbackError instanceof Error ? rollbackError.message : "unknown rollback error"}`);
@@ -324,7 +329,8 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
       const committed = await createStorageHoldSnapshotRepository(provider).publish({
         document,
         configRevision: entry.configRevision,
-        bucketGeneration: input.bucketGeneration ?? 1
+        bucketGeneration: input.bucketGeneration ?? 1,
+        expectedHead: { kind: "absent" }
       });
       return await getCatalog().commitBucket({ ...entry, snapshotRevision: committed.header.snapshotRevision });
     } catch (error) {
@@ -397,7 +403,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
         document,
         configRevision: nextConfigRevision,
         bucketGeneration: input.bucketGeneration ?? 1,
-        ...(committed.headEtag ? { expectedHeadEtag: committed.headEtag } : {})
+        expectedHead: expectedHead({ etag: committed.headEtag })
       });
       try {
         const nextEntry: StorageBucketCatalogEntryV2 = {
@@ -421,7 +427,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
               document: committed.document,
               configRevision: committed.header.configRevision,
               bucketGeneration: input.bucketGeneration ?? 1,
-              expectedHeadEtag: published.headEtag
+              expectedHead: { kind: "etag", etag: published.headEtag }
             });
           } catch (rollbackError) {
             throw new Error(`Bucket password rotation could not update the local catalog and rollback was not confirmed: ${rollbackError instanceof Error ? rollbackError.message : "unknown rollback error"}`);

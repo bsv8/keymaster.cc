@@ -21,11 +21,8 @@ import type {
   CoordinatorVaultOperationResultFor,
   VaultLifecycleSnapshot,
   VaultCoordinatorControl,
-  PasskeyProtection,
 } from "@keymaster/contracts";
 import type { SessionStateMirror } from "./sessionStateMirror.js";
-import { createPasskeyPrf, requestPasskeyPrf } from "./webauthnPrf.js";
-import { bytesToHex } from "./crypto.js";
 
 // ============================================================
 // 1. Types
@@ -303,58 +300,6 @@ export class VaultServiceCoordinator implements VaultService {
     targetPassword: string;
   }): Promise<KeyRef> {
     return await this.call({ type: "importKeyBackup", ...input });
-  }
-
-  async listPasskeysForKey(publicKeyHex: string): Promise<PasskeyProtection[]> {
-    return await this.call({ type: "listPasskeysForKey", publicKeyHex });
-  }
-
-  async listCurrentKeyPasskeys(): Promise<PasskeyProtection[]> {
-    return await this.call({ type: "listCurrentKeyPasskeys" });
-  }
-
-  async addPasskeyToCurrentKey(input: {
-    label: string;
-  }): Promise<PasskeyProtection> {
-    const prepared = await this.call({ type: "prepareAddPasskeyToCurrentKey", ...input });
-    const created = await createPasskeyPrf({
-      label: input.label,
-      publicKeyHex: prepared.publicKeyHex
-    });
-    try {
-      return await this.call({ type: "addPasskeyToCurrentKey",
-        intentId: prepared.intentId,
-        credentialIdB64: created.credentialIdB64,
-        prfSaltB64: created.prfSaltB64,
-        prfOutputHex: bytesToHex(created.prfOutput),
-        rpId: created.rpId,
-        transports: created.transports
-      });
-    } finally {
-      created.prfOutput.fill(0);
-    }
-  }
-
-  async removePasskeyFromCurrentKey(input: {
-    passkeyId: string;
-  }): Promise<void> {
-    await this.call({ type: "removePasskeyFromCurrentKey", ...input });
-  }
-
-  async activateKeyWithPasskey(input: {
-    passkeyId: string;
-  }): Promise<CoordinatorCommandResult> {
-    const details = await this.call({ type: "getPasskeyChallenge", ...input });
-    const prfOutput = await requestPasskeyPrf(details);
-    try {
-      await this.call({ type: "activateKeyWithPasskey",
-        passkeyId: input.passkeyId,
-        prfOutputHex: bytesToHex(prfOutput)
-      });
-    } finally {
-      prfOutput.fill(0);
-    }
-    return { status: "accepted" };
   }
 
   // ============================================================

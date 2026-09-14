@@ -2408,7 +2408,7 @@ export function createWebrtcService(input: {
     runStunDiagnostics,
     getStunServers: () => store.snapshot().stunServers.slice(),
     applyStunServers: async (input: string[]): Promise<void> => {
-      store.save({ stunServers: input });
+      await store.save({ stunServers: input });
     },
     dispose
   };

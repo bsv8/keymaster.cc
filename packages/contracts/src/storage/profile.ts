@@ -1,36 +1,16 @@
-// 冷启动 Profile envelope 与本机 bootstrap 状态契约。
+// 冷启动桶目录快照与 S3 配置 envelope 契约。
 
-/** 独立于 Vault 的加密 Storage Profile envelope。 */
-export interface StorageProfileEnvelopeV1 {
-  /** 固定格式标识，防止把业务 JSON 当 Profile 解密。 */
-  format: "keymaster.storage-profile";
-  /** envelope 格式版本。 */
-  version: 1;
-  /** 独立存储密码 KDF。 */
-  kdf: "pbkdf2-sha256";
-  /** PBKDF2 迭代次数。 */
-  iterations: number;
-  /** KDF salt，hex 编码。 */
-  saltHex: string;
-  /** AES-GCM nonce，hex 编码。 */
-  nonceHex: string;
-  /** 加密后的 Profile JSON，hex 编码。 */
-  ciphertextHex: string;
-}
-
-/** 本机 bootstrap 只保存连接器 envelope 与首帧偏好。 */
+/** 本机 bootstrap 只传递当前 V1 桶目录中选中的桶。 */
 export interface StorageBootstrapState {
-  /** 首选存储后端；新格式只使用 localStorage 或 S3，opfs 仅用于识别旧数据。 */
-  selectedBackend: "local" | "s3" | "opfs";
-  /** 当前选中的 Profile ID。 */
-  selectedProfileId?: string;
+  /** 当前 V1 存储后端。 */
+  selectedBackend: "local" | "s3";
+  /** 当前选中的桶 ID。 */
+  selectedProfileId: string;
   /**
    * 新版多桶目录选中的桶快照；Worker 只接收这一项，不接收整个本机目录。
    * 其中只含桶级密文和公开 KDF 参数，不含密码、Keys 或业务数据。
    */
-  selectedBucket?: import("./catalog.js").StorageBucketCatalogEntryV2;
-  /** 与导出文件共用的加密 Profile envelope。 */
-  encryptedStorageProfileEnvelope?: StorageProfileEnvelopeV1;
+  selectedBucket: import("./catalog.js").StorageBucketCatalogEntryV2;
   /** 首帧语言镜像。 */
   language?: string;
   /** 首帧主题镜像。 */

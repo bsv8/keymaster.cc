@@ -49,8 +49,6 @@ function makeVault(activateKey = vi.fn(async () => ({ status: "accepted" as cons
     changePassword: async () => undefined,
     dispose: () => undefined,
     activateKey,
-    activateKeyWithPasskey: async () => ({ status: "accepted" as const }),
-    listPasskeysForKey: async () => [],
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
     recoverEmptyVaultToUninitialized: async () => undefined,
     listKeys: async () => [],
@@ -78,7 +76,7 @@ function makeKeyspace() {
     active = { activePublicKeyHex: publicKeyHex };
     for (const handler of [...listeners]) handler(active);
   });
-  const deleteKey = vi.fn(async (_input: { publicKeyHex: string; confirmationLabel: string }) => undefined);
+  const deleteKey = vi.fn(async (_input: { publicKeyHex: string; confirmationLabel: string; bucketPassword?: string }) => undefined);
   return {
     active: () => active,
     onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
@@ -191,7 +189,7 @@ describe("VaultSettingsPage active switching", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeTruthy();
     });
-    await user.type(screen.getByLabelText(/Vault 密码|Vault password/i), "correct-horse-battery-staple");
+    await user.type(screen.getByLabelText(/桶密码|Bucket password/i), "correct-horse-battery-staple");
     await user.click(screen.getByRole("button", { name: /使用密码解锁|Unlock with password/ }));
 
     await waitFor(() => {
@@ -209,7 +207,7 @@ describe("VaultSettingsPage active switching", () => {
 });
 
 describe("VaultSettingsPage label-confirmed deletion", () => {
-  it("keeps confirmation disabled for a mismatch and deletes with the exact label without password verification", async () => {
+  it("keeps confirmation disabled for a mismatch and deletes with the exact label after bucket authentication", async () => {
     const { keyspace, vault } = mount();
     const user = userEvent.setup();
 
@@ -217,6 +215,7 @@ describe("VaultSettingsPage label-confirmed deletion", () => {
     await user.click(deleteButtons[0]!);
     const dialog = await screen.findByRole("dialog");
     const input = within(dialog).getByRole("textbox");
+    const bucketPassword = within(dialog).getByLabelText(/桶密码|Bucket password/i);
     const confirm = within(dialog).getByRole("button", { name: /确认删除|Confirm delete/ });
 
     await user.type(input, "alpha");
@@ -225,11 +224,13 @@ describe("VaultSettingsPage label-confirmed deletion", () => {
 
     await user.clear(input);
     await user.type(input, "Alpha");
+    await user.type(bucketPassword, "correct-horse-battery-staple");
     await user.click(confirm);
     await waitFor(() => {
       expect(keyspace.deleteKey).toHaveBeenCalledWith({
         publicKeyHex: KEY_A,
-        confirmationLabel: "Alpha"
+        confirmationLabel: "Alpha",
+        bucketPassword: "correct-horse-battery-staple"
       });
     });
     expect(vault.verifyPassword).not.toHaveBeenCalled();
@@ -244,6 +245,7 @@ describe("VaultSettingsPage label-confirmed deletion", () => {
     const dialog = await screen.findByRole("dialog");
     const input = within(dialog).getByRole("textbox");
     await user.type(input, "Alpha");
+    await user.type(within(dialog).getByLabelText(/桶密码|Bucket password/i), "correct-horse-battery-staple");
     await user.click(within(dialog).getByRole("button", { name: /确认删除|Confirm delete/ }));
 
     await waitFor(() => expect(within(dialog).getByText("Key label mismatch")).toBeTruthy());

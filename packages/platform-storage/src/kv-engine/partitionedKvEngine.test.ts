@@ -7,7 +7,7 @@ import type {
   StorageBucketWriteCondition
 } from "@keymaster/contracts";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
 import { createKeyValueStore } from "./partitionedKvEngine.js";
 
 const OWNER = `02${"11".repeat(32)}`;
@@ -25,19 +25,20 @@ function deferred<T = void>(): Deferred<T> {
 
 /**
  * 只模拟抽象桶的 CAS 与分页语义。测试故意不使用 in-memory K-V 夹具，
- * 否则无法验证 head/commit/value 三层对象的原子发布与迟到结果栅栏。
+ * 否则无法验证 full-head/value 两层对象的原子发布与迟到结果栅栏。
  */
 class FakeBucketProvider implements StorageBucketProvider {
-  readonly provider = "opfs" as const;
+  readonly provider = "local" as const;
   readonly bucketId = "kv-engine-test";
+  listCalls = 0;
   private readonly objects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: string }>();
   private etagNumber = 0;
+  constructor(private readonly serverNow: () => number = () => Date.now()) {}
   private headReadBarrier?: { arrivals: number; released: Deferred };
   private valueReadBarrier?: { reached: Deferred; released: Deferred };
   private headPutBarrier?: { published: Deferred; released: Deferred; onPublished?: () => void };
   private deleteBarrier?: { matches: (path: string) => boolean; reached: Deferred; released: Deferred };
-  private commitReadBarrier?: { reached: Deferred; released: Deferred };
-  onCommitPut?: () => void;
+  onValuePut?: () => void;
 
   async probe(): Promise<StorageBucketProbeResult> {
     return { ok: true, conditionalWrites: "native", latencyMs: 0 };
@@ -59,22 +60,14 @@ class FakeBucketProvider implements StorageBucketProvider {
       barrier.reached.resolve();
       await barrier.released.promise;
     }
-    const delayedObject = path.includes("/.keymaster/commits/") && this.commitReadBarrier
-      ? this.objects.get(path)
-      : undefined;
-    if (delayedObject) {
-      const barrier = this.commitReadBarrier!;
-      this.commitReadBarrier = undefined;
-      barrier.reached.resolve();
-      await barrier.released.promise;
-    }
-    const object = delayedObject ?? this.objects.get(path);
+    const object = this.objects.get(path);
     return object
       ? { path, bytes: new Uint8Array(object.bytes), etag: object.etag, lastModified: object.lastModified, size: object.bytes.byteLength }
       : undefined;
   }
 
   async list(input: { prefix?: string; cursor?: string; limit?: number } = {}): Promise<StorageBucketListPage> {
+    this.listCalls += 1;
     const prefix = input.prefix ?? "";
     const offset = input.cursor ? Number.parseInt(input.cursor, 10) : 0;
     const limit = input.limit ?? 1000;
@@ -95,10 +88,10 @@ class FakeBucketProvider implements StorageBucketProvider {
     const entry = {
       bytes: new Uint8Array(bytes),
       etag: `etag-${++this.etagNumber}`,
-      lastModified: new Date().toISOString()
+      lastModified: new Date(this.serverNow()).toISOString()
     };
     this.objects.set(path, entry);
-    if (path.includes("/.keymaster/commits/")) this.onCommitPut?.();
+    if (path.includes("/.keymaster/values/")) this.onValuePut?.();
     if (path.includes("/.keymaster/heads/") && this.headPutBarrier) {
       const barrier = this.headPutBarrier;
       this.headPutBarrier = undefined;
@@ -150,13 +143,6 @@ class FakeBucketProvider implements StorageBucketProvider {
     return { reached: reached.promise, release: () => released.resolve() };
   }
 
-  armCommitReadBarrier(): { reached: Promise<void>; release(): void } {
-    const reached = deferred();
-    const released = deferred();
-    this.commitReadBarrier = { reached, released };
-    return { reached: reached.promise, release: () => released.resolve() };
-  }
-
   seed(path: string, bytes: Uint8Array, lastModified = new Date(0).toISOString()): void {
     this.objects.set(path, { bytes: new Uint8Array(bytes), etag: `etag-${++this.etagNumber}`, lastModified });
   }
@@ -172,22 +158,93 @@ class FakeBucketProvider implements StorageBucketProvider {
   }
 }
 
-function makeStore(provider: FakeBucketProvider, isCurrent: () => boolean = () => true) {
+function makeStore(provider: FakeBucketProvider, isCurrent: () => boolean = () => true, now?: () => number, generateValueId?: () => string) {
   return createKeyValueStore({
     provider,
     binding: {
-      scope: "key",
-      applicationStorageId: "KvTest",
+      moduleId: "kv-test",
+      purposeId: "state",
+      scope: "owner",
+      authority: "built-in-module",
+      model: "kv",
       schemaVersion: 1,
       bucketId: provider.bucketId,
       bucketGeneration: 1,
       ownerPublicKeyHex: OWNER
     },
-    isCurrent
+    isCurrent,
+    ...(now ? { now } : {}),
+    ...(generateValueId ? { generateValueId } : {}),
   });
 }
 
+function orphanValueObject(valueId: string, value: unknown, createdAt: number, partition = "default"): Uint8Array {
+  const payload = new TextEncoder().encode(`keymaster-kv-v1:json\n${JSON.stringify(value)}`);
+  const valueHash = Array.from(sha256(payload), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const header = new TextEncoder().encode(`keymaster-kv-value-v1:${JSON.stringify({ format: "keymaster.kv-value", version: 1, valueId, partition, valueHash, createdAt })}\n`);
+  const result = new Uint8Array(header.byteLength + payload.byteLength);
+  result.set(header);
+  result.set(payload, header.byteLength);
+  return result;
+}
+
 describe("partitioned K-V engine", () => {
+  it("returns persisted timestamps for semantic put and net-zero commit no-ops", async () => {
+    const provider = new FakeBucketProvider();
+    let clock = 100;
+    const store = makeStore(provider, () => true, () => clock);
+    const first = await store.put("existing", { b: 2, a: 1 }, { partition: "state" });
+    expect(first).toEqual({ key: "existing", revision: 1, updatedAt: 100 });
+
+    clock = 150;
+    await expect(store.put("other", true, { partition: "state" })).resolves.toEqual({ key: "other", revision: 2, updatedAt: 150 });
+
+    clock = 200;
+    const same = await store.put("existing", { a: 1, b: 2 }, { partition: "state" });
+    expect(same).toEqual({ key: "existing", revision: 2, updatedAt: 100 });
+    await expect(store.get("existing", { partition: "state" })).resolves.toMatchObject({ revision: 2, updatedAt: 100 });
+
+    clock = 300;
+    await expect(store.commit({ partition: "state", operations: [
+      { type: "put", key: "existing", value: "temporary" },
+      { type: "put", key: "existing", value: { b: 2, a: 1 } },
+    ] })).resolves.toEqual({ revision: 2, commitId: "", committedAt: 150 });
+    await expect(store.commit({ partition: "empty", operations: [] })).resolves.toEqual({ revision: 0, commitId: "", committedAt: 0 });
+  });
+
+  it("publishes only a final net change and never writes intermediate values", async () => {
+    const provider = new FakeBucketProvider();
+    const store = makeStore(provider);
+    await store.put("existing", "B", { partition: "state" });
+    const pathsBefore = provider.paths().sort();
+
+    await expect(store.commit({
+      partition: "state",
+      operations: [
+        { type: "put", key: "existing", value: "A" },
+        { type: "put", key: "existing", value: "B" },
+        { type: "put", key: "missing", value: "A" },
+        { type: "delete", key: "missing" },
+      ],
+    })).resolves.toMatchObject({ revision: 1, commitId: "" });
+    expect(provider.paths().sort()).toEqual(pathsBefore);
+  });
+
+  it("treats canonical JSON and byte copies as semantic no-ops", async () => {
+    const provider = new FakeBucketProvider();
+    const store = makeStore(provider);
+    await store.put("json", { b: 2, a: 1 }, { partition: "state" });
+    await store.put("bytes", new Uint8Array([1, 2, 3]), { partition: "state" });
+    const pathsBefore = provider.paths().sort();
+    const revision = (await store.list({ partition: "state" })).revision;
+
+    await expect(store.commit({ partition: "state", operations: [
+      { type: "put", key: "json", value: { a: 1, b: 2 } },
+      { type: "put", key: "bytes", value: new Uint8Array([1, 2, 3]) },
+    ] })).resolves.toMatchObject({ revision, commitId: "" });
+    expect(provider.paths().sort()).toEqual(pathsBefore);
+  });
+
   it("uses head CAS and never exposes a partial losing commit", async () => {
     const provider = new FakeBucketProvider();
     const first = makeStore(provider);
@@ -259,13 +316,13 @@ describe("partitioned K-V engine", () => {
     const provider = new FakeBucketProvider();
     let current = true;
     const store = makeStore(provider, () => current);
-    provider.onCommitPut = () => { current = false; };
+    provider.onValuePut = () => { current = false; };
 
     await expect(store.put("late-write", "old")).rejects.toMatchObject({ code: "storage_unavailable" });
     expect(provider.paths().some((path) => path.includes("/.keymaster/heads/"))).toBe(false);
   });
 
-  it("fails closed on a corrupted content-addressed value", async () => {
+  it("fails closed on a corrupted unique value object", async () => {
     const provider = new FakeBucketProvider();
     const store = makeStore(provider);
     await store.put("corrupt", { ok: true });
@@ -275,36 +332,70 @@ describe("partitioned K-V engine", () => {
     await expect(store.get("corrupt")).rejects.toMatchObject({ code: "storage_provider_error" });
   });
 
-  it("does not let concurrent GC delete a value re-referenced by a newer head", async () => {
+  it("does not list during writes", async () => {
     const provider = new FakeBucketProvider();
-    const gcStore = makeStore(provider);
-    const writer = makeStore(provider);
-    await gcStore.put("live", "v1");
-    const valueBytes = new TextEncoder().encode("keymaster-kv-v1:json\n\"v2\"");
-    const valueHash = Array.from(sha256(valueBytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    const orphanPath = `${OWNER}/KvTest/.keymaster/values/${valueHash}`;
-    provider.seed(orphanPath, valueBytes);
-    const orphanCommitPath = `${OWNER}/KvTest/.keymaster/commits/default/999-orphan`;
-    provider.seed(orphanCommitPath, new TextEncoder().encode(JSON.stringify({
-      version: 1,
-      partition: "default",
-      revision: 999,
-      commitId: "orphan",
-      committedAt: 0,
-      entries: []
-    })));
-    // 在 GC 读到旧 commit 后暂停；writer 随后发布引用同一个 hash 的新
-    // head。旧实现此时会把 orphan value 当作不可达对象删除。
-    const gate = provider.armCommitReadBarrier();
+    const store = makeStore(provider);
+    await expect(store.put("write-only", "value", { partition: "state" })).resolves.toMatchObject({ key: "write-only" });
+    await expect(store.commit({ partition: "state", operations: [{ type: "put", key: "second-write", value: 2 }] })).resolves.toMatchObject({ revision: 2 });
+    expect(provider.listCalls).toBe(0);
+  });
 
-    const gc = gcStore.inspectGarbageCandidates({ minAgeMs: 0 });
+  it("keeps an old-head reader safe through the grace window", async () => {
+    let clock = 1_000;
+    const provider = new FakeBucketProvider(() => clock);
+    const writer = makeStore(provider, () => true, () => clock);
+    const reader = makeStore(provider, () => true, () => clock);
+    await writer.put("item", "old", { partition: "state" });
+    const oldValuePath = provider.paths().find((path) => path.includes("/.keymaster/values/"));
+    expect(oldValuePath).toBeTruthy();
+
+    const gate = provider.armValueReadBarrier();
+    const pendingRead = reader.get("item", { partition: "state" });
     await gate.reached;
-    const write = writer.put("live", "v2");
+    clock = 1_100;
+    await writer.put("item", "new", { partition: "state" });
+    await expect(writer.inspectGarbageCandidates({ minAgeMs: 500 })).resolves.toMatchObject({ candidates: 0 });
+
     gate.release();
-    await expect(write).resolves.toMatchObject({ key: "live" });
-    await expect(gc).resolves.toMatchObject({ candidates: 2 });
+    await expect(pendingRead).resolves.toMatchObject({ value: "old" });
+    clock = 1_700;
+    await expect(writer.inspectGarbageCandidates({ minAgeMs: 500 })).resolves.toMatchObject({ candidates: 1 });
+    await expect(writer.collectGarbage({ minAgeMs: 500 })).resolves.toMatchObject({ candidates: 1, deleted: 1, failed: 0 });
+    expect(provider.paths()).not.toContain(oldValuePath);
+  });
+
+  it("collects a no-head crash orphan using the object timestamp", async () => {
+    let clock = 100;
+    const provider = new FakeBucketProvider(() => clock);
+    const gcStore = makeStore(provider, () => true, () => clock);
+    const orphanPath = `${OWNER}/.keymaster/modules/kv-test/state/.keymaster/values/no-head-orphan`;
+    provider.seed(orphanPath, orphanValueObject("no-head-orphan", "crashed", 0), new Date(0).toISOString());
+    await expect(gcStore.inspectGarbageCandidates({ minAgeMs: 0 })).resolves.toMatchObject({ scanned: 1, candidates: 1 });
+    await expect(gcStore.collectGarbage({ minAgeMs: 0 })).resolves.toMatchObject({ scanned: 1, candidates: 1, deleted: 1, failed: 0 });
+    gcStore.close();
+  });
+
+  it("collects crash orphans by unique value ID without hash-addressed paths", async () => {
+    const provider = new FakeBucketProvider(() => clock);
+    let clock = 100;
+    let valueId = 0;
+    const writer = makeStore(provider, () => true, () => clock, () => `value-${++valueId}`);
+    const gcStore = makeStore(provider, () => true, () => clock);
+    await writer.put("live", "v1");
+    const firstValuePath = provider.paths().find((path) => path.includes("/.keymaster/values/"));
+    expect(firstValuePath).toBeTruthy();
+    expect(firstValuePath).not.toContain(Array.from(sha256(new TextEncoder().encode("keymaster-kv-v1:json\n\"v1\"")), (byte) => byte.toString(16).padStart(2, "0")).join(""));
+
+    const orphanPath = `${OWNER}/.keymaster/modules/kv-test/state/.keymaster/values/orphan-value`;
+    provider.seed(orphanPath, orphanValueObject("orphan-value", "crashed", 0), new Date(clock).toISOString());
+    await expect(gcStore.inspectGarbageCandidates({ minAgeMs: 0 })).resolves.toMatchObject({ scanned: 2, candidates: 1 });
+    await expect(gcStore.collectGarbage({ minAgeMs: 0 })).resolves.toMatchObject({ scanned: 2, candidates: 1, deleted: 1, failed: 0 });
+    expect(provider.paths()).not.toContain(orphanPath);
+
+    clock = 200;
+    await expect(writer.put("live", "v2")).resolves.toMatchObject({ key: "live" });
     await expect(writer.get("live")).resolves.toMatchObject({ value: "v2" });
-    expect(provider.paths()).toContain(orphanPath);
-    expect(provider.paths()).toContain(orphanCommitPath);
+    expect(provider.paths().filter((path) => path.includes("/.keymaster/values/")).length).toBe(2);
+    expect(provider.paths().some((path) => path.split("/").includes("commits"))).toBe(false);
   });
 });

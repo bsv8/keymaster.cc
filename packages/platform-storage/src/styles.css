@@ -302,17 +302,6 @@
 .storage-bucket-manager__unlock p { margin: 3px 0 0; }
 .storage-bucket-manager__unlock-form { display: flex; flex: 0 0 min(360px, 45%); gap: 8px; }
 .storage-bucket-manager__unlock-form input { min-width: 0; flex: 1; height: 34px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
-.storage-bucket-manager__legacy { margin: 15px 0 0; padding: 16px; border: 1px solid color-mix(in srgb, #b27a18 42%, var(--border)); background: color-mix(in srgb, #b27a18 7%, var(--surface)); }
-.storage-bucket-manager__legacy-copy { display: flex; align-items: flex-start; gap: 12px; }
-.storage-bucket-manager__legacy-copy h2 { margin: 0; color: var(--text); }
-.storage-bucket-manager__legacy-copy p, .storage-bucket-manager__legacy-action span, .storage-bucket-manager__legacy-keys p, .storage-bucket-manager__legacy-footnote { margin: 4px 0 0; color: var(--text-dim); font-size: 11px; line-height: 1.55; }
-.storage-bucket-manager__legacy-action { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed color-mix(in srgb, #b27a18 36%, var(--border)); }
-.storage-bucket-manager__legacy-keys { margin-top: 14px; padding-top: 12px; border-top: 1px dashed color-mix(in srgb, #b27a18 36%, var(--border)); }
-.storage-bucket-manager__legacy-keys strong { color: var(--text); font-size: 12px; }
-.storage-bucket-manager__legacy-keys ul { display: grid; gap: 1px; margin: 10px 0; padding: 0; list-style: none; background: var(--border); }
-.storage-bucket-manager__legacy-keys li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 9px; background: var(--surface); color: var(--text); font-size: 11px; }
-.storage-bucket-manager__legacy-empty { color: var(--text-dim); font-size: 11px; }
-.storage-bucket-manager__legacy-footnote { margin-top: 14px; color: color-mix(in srgb, var(--text-dim) 86%, #b27a18); }
 
 /* 桶管理是独立全页工作台：桶为一级行，Key 为行内二级树。 */
 .storage-bucket-manager { box-sizing: border-box; width: min(1120px, 100%); min-height: 100vh; margin: 0 auto; padding: 38px clamp(18px, 4vw, 56px) 64px; }
@@ -390,7 +379,6 @@
   .storage-bucket-manager__form label.is-wide, .storage-bucket-manager__note.is-wide { grid-column: auto; }
   .storage-bucket-manager__reload, .storage-bucket-manager__unlock { align-items: stretch; flex-direction: column; }
   .storage-bucket-manager__unlock-form { flex-basis: auto; }
-  .storage-bucket-manager__legacy-action { align-items: stretch; flex-direction: column; }
   .storage-bucket-manager { padding: 22px 14px 42px; }
   .storage-bucket-manager__header-actions { justify-content: flex-start; }
   .storage-bucket-manager__bucket-row { align-items: flex-start; }

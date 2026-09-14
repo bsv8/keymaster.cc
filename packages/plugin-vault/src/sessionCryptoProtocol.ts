@@ -13,7 +13,7 @@ import type { EcdsaSignatureFormat } from "@keymaster/contracts";
 export interface SessionCryptoBootstrapInput {
   sessionId: string;
   publicKeyHex: string;
-  /** Canonical KeyHold-unlocked raw key; transferred only to the worker. */
+  /** Catalog Hold-unlocked raw key; transferred only to the worker. */
   privateKeyBytes: Uint8Array;
   label: string;
   capabilities: string[];

@@ -4,14 +4,14 @@ import type { BucketGetOutput, BucketListOutput, BucketObjectStore, BucketObject
 import { createBucketObjectStoreCapabilityState } from "./bucketObjectStore.js";
 import { assertKeyInRoot, normalizeRoot } from "./bucketPath.js";
 import { assertProviderPath } from "./bucketProvider.js";
-import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
 
 /**
  * 将统一抽象桶 Provider 适配成 Connect 文件运行时使用的对象接口。
  *
  * 该适配器不创建第二个 Provider：文件 API、平台 K-V 和系统 App K-V
- * 都直接落到传入的同一个 OPFS/S3 桶。Multipart 在 Provider 原语之上
- * 使用 `.keymaster/uploads/` 临时对象实现，因此 OPFS 与 S3 具有相同语义。
+ * 都直接落到传入的同一个 Local/S3 桶。Multipart 在 Provider 原语之上
+ * 使用 `.keymaster/uploads/` 临时对象实现。
  */
 export function createProviderBackedBucketObjectStore(
   provider: StorageBucketProvider,

@@ -41,6 +41,8 @@ const localStorageAllowlist = new Set([
 const s3TestingAllowlist = new Set([
   "packages/platform-storage/src/testing/s3CleanupAdapter.ts"
 ]);
+const repositoryFixtureDirectory = /(?:^|\/)(?:testing|testSupport)(?:\/|$)/u;
+const centralV1Source = /^(?:packages\/contracts\/src\/storage\/|packages\/platform-storage\/src\/(?:kv-engine|snapshot|storage-access|coordinator)\/|apps\/web\/src\/keymasterSessionCoordinator\.worker\.ts$)/u;
 
 function withoutComments(content) {
   return content
@@ -87,6 +89,23 @@ for (const scanRoot of scanRoots) {
         if (pattern.test(content)) violations.push(`${relativeFile}: 命中${label}`);
       }
       const executable = withoutComments(content);
+      if (/Repository\.(?:ts|tsx|js|jsx)$/u.test(relativeFile)
+        && !repositoryFixtureDirectory.test(relativeFile)
+        && /\bcreateInMemoryKeyValueStore\b/u.test(executable)) {
+        violations.push(`${relativeFile}: 生产 Repository 禁止导入或创建内存 K-V`);
+      }
+      if (centralV1Source.test(relativeFile)) {
+        const removedV1Compatibility = [
+          ["applicationStorageId", /\bapplicationStorageId\b/u],
+          ["聚合 Coordinator meta 路径", /["'`]coordinator\/meta["'`]/u],
+          ["K-V commits 对象层", /["'`][^"'`]*\.keymaster\/commits\//u],
+          ["旧 catalog KeyHold 自动迁移", /\blegacyKeyholdRecords\b/u],
+          ["旧 K-V commit reader", /\b(?:readLegacyCommit|readCommitRecord|legacyHead)\b/u],
+        ];
+        for (const [label, pattern] of removedV1Compatibility) {
+          if (pattern.test(executable)) violations.push(`${relativeFile}: V1 禁止${label}`);
+        }
+      }
       if (/\bindexedDB\b|\bIDB(?:Database|Transaction|Request|ObjectStore|Index|KeyRange|VersionChangeEvent)\b/gu.test(executable)) {
         violations.push(`${relativeFile}: 生产代码禁止直接使用 IndexedDB API`);
       }
@@ -112,4 +131,4 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
-console.log("存储代码结构硬切换检查通过：旧包名、旧符号、*Db.ts、业务浏览器存储和越层 Provider 均未发现。");
+console.log("存储代码结构硬切换检查通过：旧命名、Repository 内存旁路、V1 兼容读取、业务浏览器存储和越层 Provider 均未发现。");

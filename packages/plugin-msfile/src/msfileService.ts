@@ -41,14 +41,14 @@ import {
   normalizeMsFileReadConcurrencySettings,
   type MsFileService,
 } from "@keymaster/contracts";
-import { openMsFileRepository, sanitizeAppOverride, type MsFileRepository } from "./storage/msfileRepository.js";
+import { sanitizeAppOverride, type MsFileRepository } from "./storage/msfileRepository.js";
 import { MsFileServiceError } from "./msfileErrors.js";
 import { validateBlockContent, validateSeedContent } from "./contentValidation.js";
 import { toArrayBuffer } from "./sha256.js";
 import { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
 
 export interface MsFileServiceImplDeps {
-  repository?: MsFileRepository;
+  repository: MsFileRepository | Promise<MsFileRepository>;
   transport?: MsFileTransport;
   now?(): number;
   randomId?(): string;
@@ -150,8 +150,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   private cachedSuppliers: MsFileSupplierConfig[] = [];
   private disposed = false;
 
-  constructor(deps: MsFileServiceImplDeps = {}) {
-    this.repository = deps.repository ? Promise.resolve(deps.repository) : openMsFileRepository();
+  constructor(deps: MsFileServiceImplDeps) {
+    this.repository = Promise.resolve(deps.repository);
     this.transport = deps.transport ?? createUnavailableMsFileTransport();
     this.now = deps.now ?? DEFAULT_NOW;
     this.randomId = deps.randomId ?? DEFAULT_RANDOM_ID;
@@ -1064,6 +1064,6 @@ export const MSFILE_READ_SIZE_LIMITS = {
   block: MSFILE_MAX_BLOCK_BYTES,
 } as const;
 
-export function createMsFileService(deps?: MsFileServiceImplDeps): MsFileServiceImpl {
+export function createMsFileService(deps: MsFileServiceImplDeps): MsFileServiceImpl {
   return new MsFileServiceImpl(deps);
 }

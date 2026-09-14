@@ -8,7 +8,7 @@ import type {
 import { createLocalStorageBucketProvider } from "../bucket-providers/local/localStorageBucketProvider.js";
 import { awsS3EndpointForRegion, normalizeProviderConfig, r2EndpointForAccount, R2_ENDPOINT_VARIANTS, type R2EndpointVariant } from "../bucket-providers/s3/s3ClientFactory.js";
 import { createS3BucketProvider } from "../bucket-providers/s3/s3BucketProvider.js";
-import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
 
 /** S3 表单方式；它们只是页面模板，不是新的桶后端。 */
 export const S3_CONFIG_MODES = ["aws-s3", "cloudflare-r2", "s3-compatible"] as const;

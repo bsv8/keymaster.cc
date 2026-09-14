@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
   hexToBytes,
-  vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
 import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -32,15 +31,12 @@ import {
   __testBuildChannelSeenMessageKey,
 } from "./keymasterSessionCoordinator.worker.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
-import { parse as keyholdParse, unlock as keyholdUnlock } from "keyhold";
 import { newMessageID, newSessionID } from "bsv8-channel-protocol";
 import { parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
 import { verifySignedPrivateMessage } from "bsv8-channel-protocol/inbox";
 import { PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
 import {
   __testBackgroundRunNow,
-  __testAddPasskeyToCurrentKey,
-  __testActivateKeyWithPasskey,
   __testCancelByKey,
   __testCreateVault,
   __testCreateEmptyVault,
@@ -50,6 +46,7 @@ import {
   __testExportCurrentKeyBackup,
   __testDeleteKeyMaterial,
   __testFinalizeEmptyVaultAfterLastKeyDeletion,
+  __testCollectCoordinatorKeyValueGarbage,
   __testGetActivePublicKeyHex,
   __testOwnerStoragePut,
   __testGetConnectedPortCount,
@@ -62,7 +59,7 @@ import {
   __testSeedStorageRequest,
   __testSeedOwnerStorageRequest,
   __testSetStorageRuntime,
-  __testClearPlatformNamespace,
+  __testClearCentralNamespace,
   __testSetStorageStartupFailure,
   __testReleaseStorageRuntime,
   __testStorageMutationBarrierProbe,
@@ -86,21 +83,35 @@ import {
   __testSetStorageSessionResolver,
   __testGetSnapshot,
   __testGetVaultStatus,
+  __testGetVaultAuthMetadata,
+  __testGetVaultKeyIndex,
+  __testListKeyLifecycleJournals,
+  __testOwnerStorageNamespaceExists,
+  __testClearVaultHold,
   __testImportKeyBackup,
   __testImportPrivateKey,
+  __testListVaultKeys,
   __testInvalidateSession,
   __testLock,
-  __testListPasskeysForKey,
   __testRegisterTask,
-  __testRemovePasskeyFromCurrentKey,
   __testResetState,
   __testRestartWorker,
   __testRunTask,
   __testSetVaultStatus,
-  __testFailNextCoordinatorMetaPersist,
+  __testFailNextCoordinatorSnapshotPersist,
   __testFailAfterCatalogBindingPublish,
+  __testFailKeyLifecycleJournalAfterHold,
+  __testFailNextOwnerStorageActivation,
+  __testMaterializeNextOwnerStorageActivation,
+  __testFailNextOwnerStorageDeletion,
+  __testFailAfterOwnerStorageActivation,
+  __testBlockNextCatalogHoldPublish,
+  __testBlockNextCatalogHoldRollback,
+  __testBlockNextKeyLifecycleOwnerSideEffect,
+  __testFailNextHoldRollbackCas,
   __testSetLocalStorageBridgeOverride,
   __testInitialSetupBucketId,
+  __testInitialSetupCatalogEntryFingerprint,
   __testPrepareInitialSetup,
   __testInstallCatalogLocalBinding,
   __testReleaseCatalogLocalBinding,
@@ -122,7 +133,11 @@ import {
   __testValidateChannelPrivateProtocol,
   __testSignChannelPrivateMessage,
   __testUnlock,
-  __testUpdateScheduleSettings
+  __testUpdateScheduleSettings,
+  __testReloadCoordinatorMeta,
+  __testCoordinatorSnapshotMetrics,
+  __testSeedCoordinatorKeyValueGarbage,
+  __testCoordinatorKeyValueObjectExists,
 } from "./keymasterSessionCoordinator.worker.js";
 import { __testParseInitialSetupRecoveryRecord } from "./keymasterSessionCoordinatorClient.js";
 import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
@@ -367,7 +382,15 @@ function makeCatalogBridgeFixture(current: StorageBucketCatalogEntryV2, target: 
       state.lease = { bucketId: selected.bucketId, bucketGeneration: input.bucketGeneration };
       return { type: "catalog", bucket: selected };
     }
-    if (input.type === "catalog-update") throw new Error("catalog-update is not used by this fixture");
+    if (input.type === "catalog-update") {
+      const current = state.catalog.buckets.find((bucket) => bucket.bucketId === input.expectedBucket.bucketId);
+      if (!current || JSON.stringify(current) !== JSON.stringify(input.expectedBucket)) throw new Error("catalog update conflict");
+      state.catalog = {
+        ...state.catalog,
+        buckets: state.catalog.buckets.map((bucket) => bucket.bucketId === input.nextBucket.bucketId ? structuredClone(input.nextBucket) : bucket),
+      };
+      return { type: "catalog", bucket: structuredClone(input.nextBucket) };
+    }
     if (input.type === "catalog-commit") throw new Error("catalog-commit is not used by this fixture");
     if (input.type !== "get" && input.type !== "list" && input.type !== "put" && input.type !== "delete") {
       throw new Error(`unsupported bridge request: ${input.type}`);
@@ -872,6 +895,57 @@ describe("Session Coordinator worker", () => {
     await expect(__testOwnerStoragePut("after-lock-switch", { owner: "first" })).resolves.toBeUndefined();
   });
 
+  it("普通 lock→unlock 不写 Coordinator 固定对象，真实变化只写所属对象", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const first = await __testCreateVault("pw", { label: "snapshot-first" });
+    const second = await __testImportPrivateKey("pw", {
+      label: "snapshot-second",
+      material: { hex: "3".padStart(64, "0") },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    await __testSetActive(first.publicKeyHex!);
+
+    const beforeLifecycle = __testCoordinatorSnapshotMetrics();
+    await __testLock();
+    await __testUnlock("pw", first.publicKeyHex);
+    expect(__testCoordinatorSnapshotMetrics()).toEqual(beforeLifecycle);
+
+    await __testSetActive(second.publicKeyHex);
+    const afterSelection = __testCoordinatorSnapshotMetrics();
+    expect(afterSelection.selection).toEqual({ revision: beforeLifecycle.selection.revision + 1, writes: beforeLifecycle.selection.writes + 1 });
+    expect(afterSelection.settings).toEqual(beforeLifecycle.settings);
+    expect(afterSelection.pluginIntent).toEqual(beforeLifecycle.pluginIntent);
+
+    await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 61_000 });
+    const afterSettings = __testCoordinatorSnapshotMetrics();
+    expect(afterSettings.settings).toEqual({ revision: afterSelection.settings.revision + 1, writes: afterSelection.settings.writes + 1 });
+    expect(afterSettings.selection).toEqual(afterSelection.selection);
+    expect(afterSettings.pluginIntent).toEqual(afterSelection.pluginIntent);
+
+    const messages: unknown[] = [];
+    __testAttachPort("snapshot-intent-port", (message) => messages.push(message));
+    const snapshot = __testGetSnapshot();
+    await __testDispatchStorageMessage("snapshot-intent-port", {
+      kind: "plugin.intent.submit",
+      clientId: "snapshot-intent-port",
+      requestId: "snapshot-intent-change",
+      command: {
+        commandId: "snapshot-intent-change:1",
+        authorityInstanceId: snapshot.authorityInstanceId,
+        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+        pluginId: "background",
+        desiredEnabled: false,
+      },
+    });
+    expect(messages.find((message) => (message as { requestId?: string }).requestId === "snapshot-intent-change")).toMatchObject({ operationResult: { status: "accepted" } });
+    const afterIntent = __testCoordinatorSnapshotMetrics();
+    expect(afterIntent.pluginIntent).toEqual({ revision: afterSettings.pluginIntent.revision + 1, writes: afterSettings.pluginIntent.writes + 1 });
+    expect(afterIntent.selection).toEqual(afterSettings.selection);
+    expect(afterIntent.settings).toEqual(afterSettings.settings);
+  });
+
   it("Provider 忽略 AbortSignal 时，lock→unlock 仍等待真实 storage.data 结束", async () => {
     await __testDeleteVault();
     __testResetState();
@@ -1159,6 +1233,47 @@ describe("Session Coordinator worker", () => {
       status: "command-conflict",
       message: "插件产品未在 Coordinator 内置清单注册",
     });
+  });
+
+  it("Root 重装从空 snapshot 恢复默认 settings 和新的 plugin-intent controller", async () => {
+    __testResetState();
+    await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 60_000 });
+    const messages: unknown[] = [];
+    __testAttachPort("root-reload-intent-port", (message) => messages.push(message));
+    const before = __testGetSnapshot();
+    await __testDispatchStorageMessage("root-reload-intent-port", {
+      kind: "plugin.intent.submit",
+      clientId: "root-reload-intent-port",
+      requestId: "root-reload-intent-disable",
+      command: {
+        commandId: "root-reload-intent:disable",
+        authorityInstanceId: before.authorityInstanceId,
+        expectedRevision: before.pluginIntent?.revision ?? 0,
+        pluginId: "p2pkh",
+        desiredEnabled: false,
+      },
+    });
+    expect(__testGetSnapshot()).toMatchObject({
+      scheduleSettings: { assetHoldingsIntervalMs: 60_000 },
+      pluginIntent: { desiredEnabled: { p2pkh: false } },
+    });
+
+    const password = "root-reload-password";
+    const current = await makeEncryptedLocalCatalogEntry("root-reload-current", "重装桶", password);
+    const target = await makeEncryptedLocalCatalogEntry("root-reload-unused", "未使用桶", password);
+    const bridge = makeCatalogBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(bridge.bridge);
+    try {
+      await __testInstallCatalogLocalBinding(current);
+      await __testReloadCoordinatorMeta();
+      expect(__testGetSnapshot()).toMatchObject({
+        scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+        pluginIntent: { revision: 0, desiredEnabled: {}, desiredRevision: {} },
+      });
+    } finally {
+      await __testReleaseCatalogLocalBinding();
+      __testResetState();
+    }
   });
 
   it("blocks Coordinator tasks after product intent is persisted and resumes only after re-enable", async () => {
@@ -1531,9 +1646,9 @@ describe("Session Coordinator worker", () => {
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
     const before = __testGetSnapshot().scheduleSettings;
-    __testFailNextCoordinatorMetaPersist();
+    __testFailNextCoordinatorSnapshotPersist();
 
-    await expect(__testUpdateScheduleSettings({ assetHoldingsIntervalMs: 180_000 })).rejects.toThrow(/injected coordinator meta persist failure/);
+    await expect(__testUpdateScheduleSettings({ assetHoldingsIntervalMs: 180_000 })).rejects.toThrow(/injected coordinator snapshot persist failure/);
     expect(__testGetSnapshot().scheduleSettings).toEqual(before);
 
     await __testRestartWorker();
@@ -1638,7 +1753,7 @@ describe("Session Coordinator worker", () => {
     await __testRestartWorker();
     const before = __testGetSnapshot();
     const beforeConfig = await __testP2pkhProviderConfigGet("woc");
-    __testFailNextCoordinatorMetaPersist();
+    __testFailNextCoordinatorSnapshotPersist();
     await expect(__testP2pkhProviderConfigUpdate("woc", { endpoint: "https://should-not-apply.example/v1" })).rejects.toThrow(/persist/i);
     const after = __testGetSnapshot();
     expect(after.p2pkhProviders?.selection).toEqual(before.p2pkhProviders?.selection);
@@ -1650,7 +1765,7 @@ describe("Session Coordinator worker", () => {
     await __testRestartWorker();
     const before = __testGetSnapshot();
     const generation = before.p2pkhProviders?.selection.generation ?? 0;
-    __testFailNextCoordinatorMetaPersist();
+    __testFailNextCoordinatorSnapshotPersist();
     await expect(__testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" })).rejects.toThrow(/persist/i);
     expect(__testGetSnapshot().p2pkhProviders?.selection).toEqual(before.p2pkhProviders?.selection);
     expect(__testGetSnapshot().p2pkhProviders?.selection.generation).toBe(generation);
@@ -1889,9 +2004,11 @@ describe("Session Coordinator initial setup transaction", () => {
     version: 1,
     transactionId,
     bucketId: entry.bucketId,
+    catalogEntryFingerprint: __testInitialSetupCatalogEntryFingerprint(entry),
     configRevision: entry.configRevision,
     snapshotRevision: entry.snapshotRevision,
     backend: "local",
+    connectionFingerprint: "b".repeat(64),
     phase: "complete",
     catalog: "committed",
     runtimeInstalled: true,
@@ -1974,7 +2091,7 @@ describe("Session Coordinator initial setup transaction", () => {
     const fixture = makeInitialSetupWorkerBridge();
     __testSetLocalStorageBridgeOverride(fixture.bridge);
     const plan = makePlan("initial-setup-runtime-failure-001");
-    __testFailNextCoordinatorMetaPersist();
+    __testFailNextCoordinatorSnapshotPersist();
 
     const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
     expect(response.ack.status).toBe("ok");
@@ -2048,12 +2165,11 @@ describe("Session Coordinator initial setup transaction", () => {
     const fixture = makeInitialSetupWorkerBridge();
     const blockingEntry = await makeEncryptedLocalCatalogEntry("setup-blocking-recovery-001", "待恢复桶", "recovery-password");
     const blockingTransactionId = "initial-setup-blocking-recovery-001";
-    fixture.recovery.set(blockingTransactionId, {
+    const blockingRecord: InitialSetupRecoveryRecordV1 = {
       ...makeSucceededRecord(blockingEntry, blockingTransactionId),
       phase: "rollback",
       status: "failed",
       cleanup: "unconfirmed",
-      success: undefined,
       error: {
         title: "初始化失败",
         summary: "候选数据尚未清理",
@@ -2066,7 +2182,9 @@ describe("Session Coordinator initial setup transaction", () => {
         rollback: "unconfirmed",
       },
       updatedAt: Date.now(),
-    });
+    };
+    delete blockingRecord.success;
+    fixture.recovery.set(blockingTransactionId, blockingRecord);
     __testSetLocalStorageBridgeOverride(fixture.bridge);
 
     const plan = makePlan("initial-setup-bypass-block-001");
@@ -2089,7 +2207,7 @@ describe("Session Coordinator initial setup transaction", () => {
     expect(__testInitialSetupBucketId(left)).not.toBe(__testInitialSetupBucketId(right));
   });
 
-  it.each(["local", "s3"] as const)("旧格式 %s 桶 ID 与赢家目录同版本时进入人工检查，不清理赢家", async (backend) => {
+  it.each(["local", "s3"] as const)("拒绝 %s 恢复记录中与事务不匹配的桶 ID，且不清理赢家", async (backend) => {
     const winnerTransactionId = "a".repeat(112) + "-winner";
     const loserTransactionId = "a".repeat(112) + "-loser";
     const legacyCollidingBucketId = "setup-" + "a".repeat(112);
@@ -2108,9 +2226,11 @@ describe("Session Coordinator initial setup transaction", () => {
       version: 1,
       transactionId: loserTransactionId,
       bucketId: legacyCollidingBucketId,
+      catalogEntryFingerprint: "c".repeat(64),
       configRevision: winner.configRevision,
       snapshotRevision: winner.snapshotRevision,
       backend,
+      connectionFingerprint: "d".repeat(64),
       phase: "rollback",
       catalog: "committed",
       runtimeInstalled: false,
@@ -2181,14 +2301,14 @@ describe("Session Coordinator initial setup transaction", () => {
     const pending = {
       ...succeeded,
       transactionId: "initial-setup-recovery-pending-result-001",
-      bucketId: "recovery-pending-result-001",
+      bucketId: __testInitialSetupBucketId("initial-setup-recovery-pending-result-001"),
       phase: "rollback" as const,
       catalog: "empty" as const,
       cleanup: "not-started" as const,
       status: "pending" as const,
-      success: undefined,
-      error: undefined,
     };
+    delete pending.success;
+    delete pending.error;
     fixture.recovery.set(pending.transactionId, pending);
     const cleanupResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: pending.transactionId });
     expect(cleanupResponse.operationResult).toEqual({ status: "cleanup-confirmed" });
@@ -2207,7 +2327,6 @@ describe("Session Coordinator initial setup transaction", () => {
       phase: "rollback" as const,
       status: "failed" as const,
       cleanup: "unconfirmed" as const,
-      success: undefined,
       error: {
         title: "初始化失败",
         summary: "需要清理候选数据",
@@ -2220,6 +2339,7 @@ describe("Session Coordinator initial setup transaction", () => {
         rollback: "unconfirmed" as const,
       },
     } satisfies InitialSetupRecoveryRecordV1;
+    delete record.success;
     fixture.recovery.set(record.transactionId, record);
     fixture.storage.setItem(`keymaster.bucket.${entry.bucketId}.candidate`, btoa("candidate"));
     __testSetLocalStorageBridgeOverride(fixture.bridge);
@@ -2245,6 +2365,7 @@ describe("Session Coordinator initial setup transaction", () => {
       version: 1,
       transactionId,
       bucketId: "recovery-s3-fingerprint-001",
+      catalogEntryFingerprint: "b".repeat(64),
       configRevision: 1,
       snapshotRevision: 0,
       backend: "s3",
@@ -2291,6 +2412,7 @@ describe("Session Coordinator initial setup transaction", () => {
 // ============================================================
 
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
+const TEST_PRIV_3 = "0000000000000000000000000000000000000000000000000000000000000003";
 
 describe("Session Coordinator backup import", () => {
   beforeEach(async () => {
@@ -2301,23 +2423,6 @@ describe("Session Coordinator backup import", () => {
   afterEach(async () => {
     await __testDeleteVault();
     __testResetState();
-  });
-
-  it("rejects a legacy whole-Vault backup as an unrecognized format", async () => {
-    await __testCreateEmptyVault("target-pw");
-    const legacyBackup = JSON.stringify({
-      backupVersion: 1,
-      sourceVaultMeta: { id: "singleton" },
-      keyRecord: {
-        publicKeyHex: "02a301cedb7a6cf4d6fc5ba5afe611ef4d13b0d48887ed2574fb186c69aa01058e",
-        cipherVersion: "v2",
-        cipherB64: "legacy-ciphertext"
-      }
-    });
-
-    await expect(__testImportKeyBackup(legacyBackup, "legacy-pw", "target-pw"))
-      .rejects.toThrow("Unrecognized key backup format");
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
   });
 
   it("cross-vault import succeeds with different passwords", async () => {
@@ -2332,12 +2437,10 @@ describe("Session Coordinator backup import", () => {
     const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
     expect(imported.publicKeyHex).toBe(sourceResult.publicKeyHex);
 
-    const targetMeta = await vaultKeyRepository.getMeta();
-    const targetRecord = await vaultKeyRepository.getKey(imported.publicKeyHex);
+    const targetMeta = await __testGetVaultAuthMetadata();
+    const targetRecord = await __testGetVaultKeyIndex(imported.publicKeyHex);
     expect(targetMeta).toBeDefined();
     expect(targetRecord).toBeDefined();
-    expect(targetRecord?.storageVersion).toBe("keyhold-v2");
-    expect(targetRecord?.keyholdDocument).toBeDefined();
     await __testLock();
     const unlocked = await __testUnlock("target-pw", imported.publicKeyHex);
     expect(unlocked.ack.status).toBe("accepted");
@@ -2351,8 +2454,8 @@ describe("Session Coordinator backup import", () => {
     __testResetState();
     await __testCreateEmptyVault("target-pw");
 
-    await expect(__testImportKeyBackup(backup, "wrong-source-pw", "target-pw")).rejects.toThrow(/unable to unlock document/);
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
+    await expect(__testImportKeyBackup(backup, "wrong-source-pw", "target-pw")).rejects.toThrow(/record authentication failed/);
+    expect(await __testListVaultKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("locked");
   });
 
@@ -2364,7 +2467,7 @@ describe("Session Coordinator backup import", () => {
     await __testCreateEmptyVault("target-pw");
 
     await expect(__testImportKeyBackup(backup, "source-pw", "wrong-target-pw")).rejects.toThrow(/Invalid password/);
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
+    expect(await __testListVaultKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("locked");
   });
 
@@ -2381,7 +2484,7 @@ describe("Session Coordinator backup import", () => {
     await __testCreateEmptyVault("target-pw");
 
     await expect(__testImportKeyBackup(tamperedBackup, "source-pw", "target-pw")).rejects.toThrow();
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
+    expect(await __testListVaultKeys()).toHaveLength(0);
   });
 
   it("rejects duplicate key import with Key already exists", async () => {
@@ -2391,11 +2494,12 @@ describe("Session Coordinator backup import", () => {
     __testResetState();
     await __testCreateEmptyVault("target-pw");
     const first = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    const original = await vaultKeyRepository.getKey(first.publicKeyHex);
+    const original = await __testGetVaultKeyIndex(first.publicKeyHex);
 
     await expect(__testImportKeyBackup(backup, "source-pw", "target-pw")).rejects.toThrow("Key already exists");
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(1);
-    expect(await vaultKeyRepository.getKey(first.publicKeyHex)).toEqual(original);
+    expect(await __testListVaultKeys()).toHaveLength(1);
+    expect(await __testGetVaultKeyIndex(first.publicKeyHex)).toEqual(original);
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
   });
 
   it("imports the first key into a locked empty Vault and activates it after unlock", async () => {
@@ -2406,7 +2510,7 @@ describe("Session Coordinator backup import", () => {
     await __testCreateEmptyVault("target-pw");
 
     const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(1);
+    expect(await __testListVaultKeys()).toHaveLength(1);
     expect(__testGetVaultStatus()).toBe("locked");
     expect(__testGetActivePublicKeyHex()).toBeUndefined();
 
@@ -2432,8 +2536,8 @@ describe("Session Coordinator backup import", () => {
     const placeholder = await __testCreateVault("target-pw", { label: "placeholder" });
     // Model an unlocked empty Vault without forging session crypto state: remove
     // the only persisted key while retaining the real unlocked target session.
-    await vaultKeyRepository.deleteKeyAndSidecars(placeholder.publicKeyHex!);
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
+    await __testClearVaultHold("target-pw");
+    expect(await __testListVaultKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("unlocked");
 
     const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
@@ -2464,47 +2568,43 @@ describe("Session Coordinator locked deletion and cold export", () => {
     expect(result.ack.status).toBe("accepted");
     expect(__testGetVaultStatus()).toBe("uninitialized");
     expect(__testGetActivePublicKeyHex()).toBeUndefined();
-    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
+    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
   });
 
   it("classifies a legacy empty Vault as uninitialized after a worker restart", async () => {
     await __testCreateEmptyVault("pw");
     await __testRestartWorker();
     expect(__testGetVaultStatus()).toBe("uninitialized");
-    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
+    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
   });
 
-  it("cold-exports the persisted selected KeyHold document while locked", async () => {
+  it("cold-exports the encrypted Hold record while locked", async () => {
     const key = await __testCreateVault("pw");
     await __testLock();
     const backup = await __testExportCurrentKeyBackup();
-    expect(Object.keys(JSON.parse(backup)).sort()).toEqual(["cipher", "format", "keyDerivation", "label", "publicKeyHex", "version"]);
-    expect(JSON.parse(backup)).toMatchObject({ format: "keymaster", version: 2 });
+    expect(Object.keys(JSON.parse(backup)).sort()).toEqual(["address", "capabilities", "createdAt", "format", "key", "keyDerivation", "keyFormat", "label", "network", "publicKeyHex", "version"]);
+    expect(JSON.parse(backup)).toMatchObject({ format: "keymaster.storage.catalog-key-backup", version: 1 });
     expect(__testGetVaultStatus()).toBe("locked");
     expect(__testGetActivePublicKeyHex()).toBeUndefined();
     expect(key.publicKeyHex).toBeDefined();
   });
 
-  it("new and hex-imported records round-trip through the KeyHold SDK", async () => {
+  it("new and hex-imported records keep private material out of the public index", async () => {
     const first = await __testCreateVault("pw", { label: "first" });
     const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
     for (const key of [first, second]) {
-      const document = keyholdParse(await __testExportKeyBackup(key.publicKeyHex!));
-      const unlocked = await keyholdUnlock(document, "pw");
-      try {
-        expect(unlocked.publicKeyHex).toBe(key.publicKeyHex);
-        expect(bytesToHex(secp256k1.getPublicKey(unlocked.privateKey, true))).toBe(key.publicKeyHex);
-      } finally {
-        unlocked.privateKey.fill(0);
-      }
+      const index = await __testGetVaultKeyIndex(key.publicKeyHex!);
+      expect(index).toBeDefined();
+      expect(index).not.toHaveProperty("cipher");
+      expect(index).not.toHaveProperty("privateKey");
     }
   }, 15_000);
 
   it("rolls back active bytes and selected state when active metadata persistence fails", async () => {
     const first = await __testCreateVault("pw", { label: "first" });
     const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
-    __testFailNextCoordinatorMetaPersist();
-    await expect(__testSetActive(first.publicKeyHex!)).rejects.toThrow("injected coordinator meta persist failure");
+    __testFailNextCoordinatorSnapshotPersist();
+    await expect(__testSetActive(first.publicKeyHex!)).rejects.toThrow("injected coordinator snapshot persist failure");
     expect(__testGetActivePublicKeyHex()).toBe(second.publicKeyHex);
     expect(__testGetSnapshot().selectedPublicKeyHex).toBe(second.publicKeyHex);
   });
@@ -2513,29 +2613,260 @@ describe("Session Coordinator locked deletion and cold export", () => {
     const first = await __testCreateVault("pw", { label: "first" });
     const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
     await __testLock();
-    await __testDeleteKeyMaterial(second.publicKeyHex);
+    await __testDeleteKeyMaterial(second.publicKeyHex, "pw");
     const snapshot = __testGetSnapshot();
     expect(snapshot.vaultStatus).toBe("locked");
     expect(snapshot.activePublicKeyHex).toBeUndefined();
     expect(snapshot.selectedPublicKeyHex).toBe(first.publicKeyHex);
   });
 
+  it("releases a Delete claim when bucket authentication fails before Hold publication", async () => {
+    const key = await __testCreateVault("pw", { label: "delete-auth" });
+    await __testLock();
+
+    await expect(__testDeleteKeyMaterial(key.publicKeyHex!, "wrong-password")).rejects.toThrow("Invalid password");
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+    expect(await __testListVaultKeys()).toEqual([
+      expect.objectContaining({ publicKeyHex: key.publicKeyHex }),
+    ]);
+  });
+
+  it("recovers a prepared deletion after Hold commit and Journal failure across worker restart", async () => {
+    const key = await __testCreateVault("pw", { label: "crash-delete" });
+    await __testLock();
+    __testFailKeyLifecycleJournalAfterHold();
+
+    await expect(__testDeleteKeyMaterial(key.publicKeyHex!, "pw"))
+      .rejects.toThrow("injected key lifecycle Journal persist failure");
+    expect(await __testListKeyLifecycleJournals()).toEqual([
+      expect.objectContaining({ publicKeyHex: key.publicKeyHex, phase: "prepared" }),
+    ]);
+    expect(await __testListVaultKeys()).toHaveLength(0);
+
+    // __testRestartWorker follows the production order: Journal recovery runs
+    // before an empty public index can make the Vault look uninitialized.
+    await __testRestartWorker();
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+    expect(await __testListVaultKeys()).toHaveLength(0);
+    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
+    expect(__testGetVaultStatus()).toBe("uninitialized");
+  }, 15_000);
+
+  it("keeps initial auth metadata and fails closed when new Key rollback is unconfirmed", async () => {
+    __testFailNextOwnerStorageActivation();
+    __testFailNextHoldRollbackCas();
+
+    await expect(__testCreateVault("pw", { label: "rollback-unconfirmed" }))
+      .rejects.toThrow(/rollback-unconfirmed/);
+
+    // The new encrypted Key may still be present in Hold/index.  Keeping the
+    // verifier is what makes the degraded state recoverable instead of
+    // destroying the only authentication route.
+    expect(await __testGetVaultAuthMetadata()).toBeDefined();
+    expect(await __testListVaultKeys()).toHaveLength(1);
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetActivePublicKeyHex()).toBeUndefined();
+  }, 15_000);
+
+  it("recovers an orphaned new-Key owner namespace after Hold rollback and worker restart", async () => {
+    const first = await __testCreateVault("pw", { label: "existing" });
+    __testMaterializeNextOwnerStorageActivation();
+    __testFailAfterOwnerStorageActivation();
+    __testFailNextOwnerStorageDeletion();
+
+    await expect(__testImportPrivateKey("pw", {
+      label: "rollback-owner-cleanup",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    })).rejects.toThrow(/rollback-unconfirmed/);
+
+    const orphan = (await __testListKeyLifecycleJournals()).find((journal) => journal.publicKeyHex !== first.publicKeyHex);
+    expect(orphan).toEqual(expect.objectContaining({ operation: "add", phase: "hold-committed" }));
+    expect(__testOwnerStorageNamespaceExists(orphan!.publicKeyHex)).toBe(true);
+    expect(await __testListVaultKeys()).toHaveLength(1);
+
+    await __testRestartWorker();
+
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+    expect(__testOwnerStorageNamespaceExists(orphan!.publicKeyHex)).toBe(false);
+    expect(await __testListVaultKeys()).toEqual([expect.objectContaining({ publicKeyHex: first.publicKeyHex })]);
+  }, 15_000);
+
   it("finalizes the last material deletion exactly once to uninitialized", async () => {
     const key = await __testCreateVault("pw");
     await __testLock();
-    await __testDeleteKeyMaterial(key.publicKeyHex!);
+    await __testDeleteKeyMaterial(key.publicKeyHex!, "pw");
     // 删除事务本身已完成最后一把 Key 的 Vault meta 清理，状态直接收敛
     // 到 uninitialized；旧的显式 finalize 入口仍保持幂等。
     expect(__testGetVaultStatus()).toBe("uninitialized");
     await __testFinalizeEmptyVaultAfterLastKeyDeletion();
     expect(__testGetVaultStatus()).toBe("uninitialized");
-    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
+    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
+    expect(await __testListVaultKeys()).toHaveLength(0);
   });
 
 });
 
-describe("Session Coordinator WebAuthn PRF protection", () => {
+describe("Catalog Hold lifecycle CAS", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testReleaseCatalogLocalBinding();
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  it("rejects an add based on a stale Hold snapshot instead of overwriting the concurrent key", async () => {
+    const password = "catalog-cas-password";
+    const current = await makeEncryptedLocalCatalogEntry("catalog-cas-current", "CAS 当前桶", password);
+    const target = await makeEncryptedLocalCatalogEntry("catalog-cas-target", "CAS 目标桶", password);
+    const fixture = makeCatalogBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    await __testInstallCatalogLocalBinding(current);
+    await __testCreateEmptyVault(password);
+
+    const barrier = __testBlockNextCatalogHoldPublish();
+    const staleAdd = __testImportPrivateKey(password, {
+      label: "stale-add",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    await barrier.entered;
+
+    const concurrent = await __testImportPrivateKey(password, {
+      label: "concurrent-add",
+      material: { hex: TEST_PRIV_3 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    barrier.release();
+
+    await expect(staleAdd).rejects.toMatchObject({ code: "storage_conflict" });
+    expect(await __testListVaultKeys()).toEqual([
+      expect.objectContaining({ publicKeyHex: concurrent.publicKeyHex, label: "concurrent-add" }),
+    ]);
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+  }, 20_000);
+
+  it("rejects a first empty-Hold publish when another creator wins the absent-Head CAS", async () => {
+    const password = "catalog-absent-cas-password";
+    const current = await makeEncryptedLocalCatalogEntry("catalog-absent-cas-current", "CAS 首次桶", password);
+    const target = await makeEncryptedLocalCatalogEntry("catalog-absent-cas-target", "CAS 首次目标桶", password);
+    const fixture = makeCatalogBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    await __testInstallCatalogLocalBinding(current);
+
+    const barrier = __testBlockNextCatalogHoldPublish();
+    const staleCreator = __testCreateVault(password, { label: "stale-first-key" });
+    await barrier.entered;
+
+    const winner = await __testCreateVault(password, { label: "winner-first-key" });
+    barrier.release();
+
+    await expect(staleCreator).rejects.toMatchObject({ code: "storage_conflict" });
+    expect(await __testListVaultKeys()).toEqual([
+      expect.objectContaining({ publicKeyHex: winner.publicKeyHex, label: "winner-first-key" }),
+    ]);
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+  }, 20_000);
+
+  it("does not let a failed Hold rollback overwrite a newer concurrent Head", async () => {
+    const first = await __testCreateVault("pw", { label: "existing" });
+    __testMaterializeNextOwnerStorageActivation();
+    __testFailAfterOwnerStorageActivation();
+    const rollbackBarrier = __testBlockNextCatalogHoldRollback();
+    const failedAdd = __testImportPrivateKey("pw", {
+      label: "rollback-race",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    await rollbackBarrier.entered;
+
+    const concurrent = await __testImportPrivateKey("pw", {
+      label: "concurrent-after-publish",
+      material: { hex: TEST_PRIV_3 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    rollbackBarrier.release();
+
+    await expect(failedAdd).rejects.toThrow(/rollback-unconfirmed/);
+    expect(await __testListVaultKeys()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ publicKeyHex: first.publicKeyHex, label: "existing" }),
+      expect.objectContaining({ publicKeyHex: concurrent.publicKeyHex, label: "concurrent-after-publish" }),
+    ]));
+    expect(await __testListKeyLifecycleJournals()).toEqual([
+      expect.objectContaining({ operation: "add", phase: "hold-committed" }),
+    ]);
+  }, 20_000);
+
+  it("blocks same-key Delete while Add has committed Hold but not Owner activation", async () => {
+    const first = await __testCreateVault("pw", { label: "existing" });
+    __testMaterializeNextOwnerStorageActivation();
+    const owner = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
+    const ownerBarrier = __testBlockNextKeyLifecycleOwnerSideEffect();
+    const adding = __testImportPrivateKey("pw", {
+      label: "lifecycle-add",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    await ownerBarrier.entered;
+
+    const deleting = __testDeleteKeyMaterial(owner, "pw");
+    await expect(deleting).rejects.toMatchObject({ code: "storage_conflict" });
+    ownerBarrier.release();
+
+    await expect(adding).resolves.toEqual(expect.objectContaining({ publicKeyHex: owner }));
+    expect(await __testListVaultKeys()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ publicKeyHex: first.publicKeyHex }),
+      expect.objectContaining({ publicKeyHex: owner, label: "lifecycle-add" }),
+    ]));
+    expect(__testOwnerStorageNamespaceExists(owner)).toBe(true);
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+  }, 20_000);
+
+  it("blocks same-key Add while Delete has committed Hold but not Owner deletion", async () => {
+    await __testCreateVault("pw", { label: "existing" });
+    __testMaterializeNextOwnerStorageActivation();
+    const target = await __testImportPrivateKey("pw", {
+      label: "lifecycle-delete",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    const owner = target.publicKeyHex;
+    expect(__testOwnerStorageNamespaceExists(owner)).toBe(true);
+
+    const ownerBarrier = __testBlockNextKeyLifecycleOwnerSideEffect();
+    const deleting = __testDeleteKeyMaterial(owner, "pw");
+    await ownerBarrier.entered;
+
+    const readding = __testImportPrivateKey("pw", {
+      label: "lifecycle-readd",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    await expect(readding).rejects.toMatchObject({ code: "storage_conflict" });
+    ownerBarrier.release();
+
+    await expect(deleting).resolves.toBeUndefined();
+    expect(await __testListVaultKeys()).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ publicKeyHex: owner }),
+    ]));
+    expect(__testOwnerStorageNamespaceExists(owner)).toBe(false);
+    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+  }, 20_000);
+});
+
+describe("Coordinator K-V GC registry enumeration", () => {
   beforeEach(async () => {
     await __testDeleteVault();
     __testResetState();
@@ -2546,56 +2877,25 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
     __testResetState();
   });
 
-  it("stores a passkey alongside password and switches with its PRF output", async () => {
-    const first = await __testCreateVault("vault-password", { label: "first" });
-    const prfOutputHex = "ab".repeat(32);
-    await __testAddPasskeyToCurrentKey({
-      label: "passkey01",
-      credentialIdB64: "credential-one",
-      prfSaltB64: "salt-one",
-      prfOutputHex,
-      rpId: "keymaster.cc"
-    });
-    expect(await vaultKeyRepository.listSidecars(first.publicKeyHex!)).toHaveLength(1);
-    const backup = JSON.parse(await __testExportKeyBackup(first.publicKeyHex!)) as Record<string, unknown>;
-    expect(Object.keys(backup).sort()).toEqual(["cipher", "format", "keyDerivation", "label", "publicKeyHex", "version"]);
-    expect(backup.format).toBe("keymaster");
+  it("reopens a bucket namespace from central declarations after its handle is closed", async () => {
+    const orphanPath = await __testSeedCoordinatorKeyValueGarbage("bucket");
+    expect(__testCoordinatorKeyValueObjectExists(orphanPath)).toBe(true);
 
-    const second = await __testImportPrivateKey("vault-password", {
-      label: "second",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"]
-    });
-    expect(__testGetActivePublicKeyHex()).toBe(second.publicKeyHex);
-    await __testActivateKeyWithPasskey({
-      passkeyId: "credential-one",
-      prfOutputHex
-    });
-    expect(__testGetActivePublicKeyHex()).toBe(first.publicKeyHex);
+    await __testCollectCoordinatorKeyValueGarbage();
+
+    expect(__testCoordinatorKeyValueObjectExists(orphanPath)).toBe(false);
   });
 
-  it("removes a passkey protector without asking for the Vault password", async () => {
-    const key = await __testCreateVault("vault-password", { label: "first" });
-    await __testAddPasskeyToCurrentKey({
-      label: "passkey01",
-      credentialIdB64: "credential-one",
-      prfSaltB64: "salt-one",
-      prfOutputHex: "ab".repeat(32),
-      rpId: "keymaster.cc"
-    });
+  it("reopens the current Owner built-in namespace from central declarations after its handle is closed", async () => {
+    await __testCreateVault("pw", { label: "gc-owner" });
+    const orphanPath = await __testSeedCoordinatorKeyValueGarbage("owner");
+    expect(__testCoordinatorKeyValueObjectExists(orphanPath)).toBe(true);
 
-    await __testRemovePasskeyFromCurrentKey({
-      passkeyId: "credential-one"
-    });
+    await __testCollectCoordinatorKeyValueGarbage();
 
-    const backup = JSON.parse(await __testExportKeyBackup(key.publicKeyHex!)) as Record<string, unknown>;
-    expect(Object.keys(backup).sort()).toEqual(["cipher", "format", "keyDerivation", "label", "publicKeyHex", "version"]);
-    expect(backup.format).toBe("keymaster");
+    expect(__testCoordinatorKeyValueObjectExists(orphanPath)).toBe(false);
   });
-
 });
-
 
 // 预生成 PeerId 向量（由 @libp2p/peer-id 派生，避免 apps/web 引入 libp2p 依赖）。
 const SUPPLIER_PEER_IDS = new Map<string, string>([
@@ -2882,7 +3182,7 @@ describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile�
 
   beforeEach(async () => {
     await __testDeleteVault();
-    await __testClearPlatformNamespace("MSFile");
+    await __testClearCentralNamespace("MSFile");
     __testResetState();
   });
 
@@ -2890,7 +3190,7 @@ describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile�
     __testSetStorageSessionResolver(undefined);
     await __testReleaseMsfileRuntime();
     await __testDeleteVault();
-    await __testClearPlatformNamespace("MSFile");
+    await __testClearCentralNamespace("MSFile");
     __testResetState();
   });
 

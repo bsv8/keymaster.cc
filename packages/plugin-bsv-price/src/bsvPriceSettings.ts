@@ -38,8 +38,8 @@ export interface BsvPriceSettingsStore {
   snapshot(): BsvPriceGlobalConfig | null;
   /** 初始化种子值：写入 K-V 队列；空值表示未配置。 */
   bootstrapPublisherPublicKeyHex(input: string): BsvPriceGlobalConfig;
-  /** 保存新值并更新内存真值。 */
-  savePublisherPublicKeyHex(input: string): BsvPriceGlobalConfig;
+  /** 远端保存成功后更新内存真值。 */
+  savePublisherPublicKeyHex(input: string): Promise<BsvPriceGlobalConfig>;
   /** 订阅内存真值变化。 */
   subscribe(handler: (config: BsvPriceGlobalConfig | null) => void): () => void;
   /** 等待 K-V 配置完成首次加载。 */
@@ -106,26 +106,26 @@ export function coerceBsvPriceGlobalConfig(raw: unknown): BsvPriceGlobalConfig |
  *
  * 设计缘由：
  *   - 旧浏览器持久化不参与启动或 seed；
- *   - K-V 句柄缺失时只保留内存态，生产装配应在 Storage ready 后注入句柄。
+ *   - K-V 句柄是生产实现的必需依赖；测试使用显式的内存 factory。
  */
 export function createKeyValueBsvPriceSettingsStore(
-  storage: import("@keymaster/contracts").KeyValueStore | undefined,
+  storage: import("@keymaster/contracts").BorrowedKeyValueStore,
   now: () => number = () => Date.now()
 ): BsvPriceSettingsStore {
+  if (!storage) throw new Error("BSV Price central storage binding is required");
   let current: BsvPriceGlobalConfig | null = null;
   const subscribers = new Set<(config: BsvPriceGlobalConfig | null) => void>();
   let writeQueue = Promise.resolve();
 
+  const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = writeQueue.then(operation);
+    writeQueue = result.then(() => undefined, () => undefined);
+    return result;
+  };
+
   async function ready(): Promise<void> {
-    if (!storage) return;
-    try {
-      const entry = await storage.get<unknown>(BSV_PRICE_SETTINGS_STORAGE_KEY, { partition: "settings" });
-      current = entry ? coerceBsvPriceGlobalConfig(entry.value) : null;
-    } catch (error) {
-      // 插件可以在 Vault 解锁前完成装载；延迟 owner 句柄此时没有 active
-      // key，等 keyspace 通知后由 service 再次调用 ready()。
-      if (!(error instanceof Error) || !/active key/u.test(error.message)) throw error;
-    }
+    const entry = await storage.get<unknown>(BSV_PRICE_SETTINGS_STORAGE_KEY, { partition: "settings" });
+    current = entry ? coerceBsvPriceGlobalConfig(entry.value) : null;
   }
 
   function snapshot(): BsvPriceGlobalConfig | null {
@@ -143,7 +143,7 @@ export function createKeyValueBsvPriceSettingsStore(
     }
   }
 
-  function applyNext(hex: string, persist: boolean): BsvPriceGlobalConfig {
+  function nextConfig(hex: string): BsvPriceGlobalConfig {
     const normalized = normalizePublisherPublicKeyHex(hex);
     if (!normalized.ok || normalized.value === undefined) {
       throw new Error(normalized.error ?? "invalid_publisher_public_key_hex");
@@ -152,25 +152,31 @@ export function createKeyValueBsvPriceSettingsStore(
       pricePublisherPublicKeyHex: normalized.value,
       savedAtMs: now()
     };
-    if (storage) {
-      writeQueue = writeQueue
-        .then(() => storage.put(BSV_PRICE_SETTINGS_STORAGE_KEY, next, { partition: "settings" }))
-        .then(() => undefined)
-        .catch(() => undefined);
-    }
+    return next;
+  }
+
+  function applyBootstrap(hex: string): BsvPriceGlobalConfig {
+    const next = nextConfig(hex);
     current = next;
     emit();
-    return {
-      pricePublisherPublicKeyHex: next.pricePublisherPublicKeyHex,
-      savedAtMs: next.savedAtMs
-    };
+    return cloneConfig(next)!;
+  }
+
+  function savePublisherPublicKeyHex(input: string): Promise<BsvPriceGlobalConfig> {
+    const next = nextConfig(input);
+    return enqueue(async () => {
+      await storage.put(BSV_PRICE_SETTINGS_STORAGE_KEY, next, { partition: "settings" });
+      current = next;
+      emit();
+      return cloneConfig(next)!;
+    });
   }
 
   return {
     load: () => cloneConfig(current),
     snapshot,
-    bootstrapPublisherPublicKeyHex: (input) => applyNext(input, false),
-    savePublisherPublicKeyHex: (input) => applyNext(input, true),
+    bootstrapPublisherPublicKeyHex: applyBootstrap,
+    savePublisherPublicKeyHex,
     subscribe(handler) {
       subscribers.add(handler);
       return () => {
@@ -178,6 +184,54 @@ export function createKeyValueBsvPriceSettingsStore(
       };
     },
     ready
+  };
+}
+
+/** 明确的内存版设置存储，仅供测试或离线调用方注入。 */
+export function createMemoryBsvPriceSettingsStore(
+  initial: BsvPriceGlobalConfig | null = null,
+  now: () => number = () => Date.now()
+): BsvPriceSettingsStore {
+  let current = cloneConfig(initial);
+  const subscribers = new Set<(config: BsvPriceGlobalConfig | null) => void>();
+
+  function emit(): void {
+    const next = cloneConfig(current);
+    for (const handler of subscribers) {
+      try {
+        handler(next);
+      } catch {
+        // 订阅者异常不应影响设置真值。
+      }
+    }
+  }
+
+  return {
+    load: () => cloneConfig(current),
+    snapshot: () => cloneConfig(current),
+    bootstrapPublisherPublicKeyHex(input) {
+      const normalized = normalizePublisherPublicKeyHex(input);
+      if (!normalized.ok || normalized.value === undefined) {
+        throw new Error(normalized.error ?? "invalid_publisher_public_key_hex");
+      }
+      current = { pricePublisherPublicKeyHex: normalized.value, savedAtMs: now() };
+      emit();
+      return cloneConfig(current)!;
+    },
+    async savePublisherPublicKeyHex(input) {
+      const normalized = normalizePublisherPublicKeyHex(input);
+      if (!normalized.ok || normalized.value === undefined) {
+        throw new Error(normalized.error ?? "invalid_publisher_public_key_hex");
+      }
+      current = { pricePublisherPublicKeyHex: normalized.value, savedAtMs: now() };
+      emit();
+      return cloneConfig(current)!;
+    },
+    subscribe(handler) {
+      subscribers.add(handler);
+      return () => subscribers.delete(handler);
+    },
+    ready: async () => undefined
   };
 }
 

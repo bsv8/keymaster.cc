@@ -9,7 +9,8 @@
 //     把请求投递给 actor mailbox。
 //   - snapshot / config / dispose 委托给 actor。
 //   - 业务插件禁止直接发 "woc.*" 消息；必须通过 WocService。
-//   - 默认 baseUrl + requestsPerSecond 仍由 wocSettings 持久化。
+//   - 默认 baseUrl + requestsPerSecond 由 Coordinator bootstrap 注入；
+//     service/actor 只保留运行时配置。
 //   - 阶段 2：CreateWocServiceOptions.messageBus 强制必填；manifest 必须
 //     传 runtime messageBus。WocServiceHandle 不再暴露 messageBus，避免
 //     业务插件绕过 WocService 直接发 woc.* 消息。
@@ -28,7 +29,6 @@ import type {
   WocUtxoResponse
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
-import type { KeyValueStore } from "@keymaster/contracts";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import { createWocActor, type WocActorHandle } from "./wocActor.js";
 import {
@@ -42,7 +42,7 @@ import {
 } from "./wocMessages.js";
 
 export interface WocServiceHandle extends WocService {
-  /** 等待配置从 Host 绑定的 K-V 完成加载。 */
+  /** 保留兼容的异步就绪钩子；配置已由 Coordinator bootstrap 提供。 */
   ready(): Promise<void>;
   /** 停止调度器(用于测试)。 */
   dispose(): void;
@@ -55,8 +55,8 @@ export interface CreateWocServiceOptions {
    * 不传时 createWocService 立即抛错，避免误用。
    */
   messageBus: MessageBus;
-  /** Host 绑定的 WOC owner/App K-V 句柄。 */
-  storage?: KeyValueStore;
+  /** Coordinator bootstrap 提供的运行时配置；service 不负责持久化。 */
+  initialConfig?: Partial<WocConfig>;
 }
 
 export function createWocService(options: CreateWocServiceOptions): WocServiceHandle {
@@ -64,7 +64,7 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
     throw new Error("createWocService: messageBus is required");
   }
   const messageBus: MessageBus = options.messageBus;
-  const actor: WocActorHandle = createWocActor({ storage: options.storage });
+  const actor: WocActorHandle = createWocActor({ initialConfig: options.initialConfig });
   actor.attach(messageBus);
 
   function priorityOf(p?: WocRequestOptions["priority"]): number {

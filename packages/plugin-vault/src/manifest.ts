@@ -2,13 +2,8 @@
 // vault 插件清单。
 // 设计缘由：vault 是平台依赖，必须最先注册；它不依赖任何其他 plugin capability。
 //
-// 硬切换 007：
-//   - vault 同时提供 vault.service 与 keyspace.service；KeySwitchWidget 由
-//     vault 直接注册到 topbar.registry（order 90），位置在 background.tray
-//     (order 100) 左侧。它是旧 OPFS/无新版桶目录时的兼容入口；当新版
-//     storage catalog 存在桶时，KeySwitchWidget 会在运行时让位给
-//     platform-storage 的“桶 → Keys”树，避免两个 Key 切换真值并存。
-//   - Vault 的 keys/ 是平台根，由 Coordinator 在 Storage bootstrap 时注入。
+// 硬切换 007：Vault 的 Keys 入口统一由当前 catalog 桶流程提供。
+//   - Vault 的 Hold 与公开元数据由 Coordinator 在 Storage bootstrap 时绑定。
 //   - keyspace service 通过 capability "keyspace.service" 暴露；key 状态
 //     切换由 keyspace 维护，shell 与业务插件只读不写。
 //
@@ -29,17 +24,16 @@ import type {
   PluginSetup,
   RouteRegistry,
   SettingsRegistry,
-  TopbarRegistry
-  ,ResourceRegistry
-  ,ActiveKeyState
-  ,KeyIdentity
-  , VaultService
-  , CoordinatorValueResult
-  , CoordinatorCommandResult
-  , CoordinatorCryptoOperation
-  , CoordinatorCryptoResult
-  , CoordinatorVaultStatus
-  , KeyspaceService
+  ResourceRegistry,
+  ActiveKeyState,
+  KeyIdentity,
+  VaultService,
+  CoordinatorValueResult,
+  CoordinatorCommandResult,
+  CoordinatorCryptoOperation,
+  CoordinatorCryptoResult,
+  CoordinatorVaultStatus,
+  KeyspaceService
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import {
@@ -50,7 +44,6 @@ import {
   ROUTE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   SETTINGS_REGISTRY_CAPABILITY,
-  TOPBAR_REGISTRY_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
   VAULT_LOCAL_SECRET_CAPABILITY,
@@ -65,7 +58,6 @@ import { VaultUnlockPage } from "./VaultUnlockPage.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
-import { KeySwitchWidget } from "./KeySwitchWidget.js";
 import { createVaultLocalSecretService } from "./localSecretService.js";
 
 export interface VaultKeyResourceState {
@@ -80,7 +72,7 @@ type CoordinatorClientLike = VaultCoordinatorControl;
 
 export const VAULT_CAPABILITY = VAULT_SERVICE_CAPABILITY;
 
-/** vault i18n 资源。覆盖 route / breadcrumb / topbar / command
+/** vault i18n 资源。覆盖 route / breadcrumb / command
  * 的 label 与 VaultSettingsPage 内的展示文案。 */
 const vaultResources: I18nPluginResources = {
   namespace: "vault",
@@ -94,7 +86,6 @@ const vaultResources: I18nPluginResources = {
       "vault.crumb.keys": "Key management",
       "vault.crumb.currentKey": "Current private key",
       "vault.command.lock": "Lock wallet",
-      "vault.topbar.keySwitch": "Switch key",
       "vault.unlock.title": "Unlock wallet",
       "vault.unlock.description": "Enter your password to unlock the local Vault.",
       "vault.unlock.password": "Password",
@@ -109,30 +100,15 @@ const vaultResources: I18nPluginResources = {
       "vault.create.err.failed": "Create failed",
       "vault.create.err.initialKeyFailed": "Failed to create the first Key",
       "vault.unlock.err.failed": "Unlock failed",
-      "vault.keySwitch.label": "Switch key",
-      "vault.keySwitch.initializing": "Initializing",
-      "vault.keySwitch.noKey": "No key",
-      "vault.keySwitch.noReadyKey": "No ready key",
-      "vault.keySwitch.unnamed": "Unnamed",
-      "vault.keySwitch.notReady": "Identity not ready",
-      "vault.keySwitch.empty": "No keys yet. Go to Import to add one.",
-      "vault.keySwitch.manage": "Manage keys",
       "vault.keySwitch.confirmTitle": "Confirm switch",
-      "vault.keySwitch.confirm": "Confirm",
-      "vault.keySwitch.confirmHint": "Enter the Vault password to unlock the selected key.",
-      "vault.keySwitch.password": "Password",
-      "vault.keySwitch.orPasskey": "Or use a passkey",
       "vault.keySwitch.usePassword": "Use password",
       "vault.keySwitch.passwordHint": "Enter the Vault password to unlock and switch to this private key.",
+      "vault.keySwitch.password": "Password",
       "vault.keySwitch.passwordSubmit": "Unlock with password",
-      "vault.keySwitch.or": "or",
-      "vault.keySwitch.usePasskey": "Use Passkey",
-      "vault.keySwitch.passkeyHint": "Choose a Passkey configured for this private key.",
-      "vault.keySwitch.noPasskeys": "This private key has no Passkeys yet.",
-      "vault.keySwitch.passkeyFailed": "Passkey verification failed",
       "vault.keySwitch.err.failed": "Failed to switch key",
+      "vault.keySwitch.unnamed": "Unnamed",
       "vault.settings.title": "Key management",
-      "vault.settings.description": "Manage local Vault keys, the active identity, and encrypted backups.",
+      "vault.settings.description": "Manage Catalog bucket keys, the active identity, and encrypted backups.",
       "vault.settings.col.label": "Label",
       "vault.settings.col.status": "Status",
       "vault.settings.col.pubkey": "Public key",
@@ -151,7 +127,6 @@ const vaultResources: I18nPluginResources = {
       "vault.settings.action.setActive": "Set active",
       "vault.settings.action.current": "Current key",
       "vault.settings.action.export": "Export",
-      "vault.settings.action.passkeys": "Passkeys",
       "vault.settings.action.delete": "Delete",
       "vault.settings.action.new": "New key",
       "vault.settings.action.changePassword": "Change password",
@@ -171,7 +146,6 @@ const vaultResources: I18nPluginResources = {
       "vault.settings.activate.submit": "Confirm",
       "vault.settings.activate.hint": "Enter the Vault password to switch the active key.",
       "vault.settings.activate.password": "Password",
-      "vault.settings.activate.orPasskey": "Or use a passkey",
       "vault.settings.activate.err.failed": "Failed to switch key",
       "vault.keyCreate.title": "New key",
       "vault.keyCreate.successTitle": "Key created and set as active",
@@ -179,7 +153,6 @@ const vaultResources: I18nPluginResources = {
       "vault.keyCreate.submit": "Create key",
       "vault.keyCreate.later": "Later",
       "vault.keyCreate.exportBackup": "Export encrypted backup",
-      "vault.keyCreate.addPasskey": "Add passkey",
       "vault.keyCreate.hint": "The Vault will securely generate a new secp256k1 private key in the browser and immediately encrypt it with the current password. The key is set as active automatically after generation.",
       "vault.keyCreate.label": "Label",
       "vault.keyCreate.placeholder": "e.g. Key 2026-06-06 14:30",
@@ -187,7 +160,7 @@ const vaultResources: I18nPluginResources = {
       "vault.keyCreate.copyPubkey": "Copy full public key",
       "vault.keyCreate.success.label": "Label",
       "vault.keyCreate.success.publicKey": "Public key",
-      "vault.keyCreate.warning": "This key is stored only in the current browser's local Vault. Clearing browser data, device damage, or losing the Vault password can make it unrecoverable. Export an encrypted backup as soon as possible.",
+      "vault.keyCreate.warning": "This key is stored in the selected Catalog bucket. Losing access to the bucket or its password can make it unrecoverable. Export an encrypted backup as soon as possible.",
       "vault.keyCreate.err.empty": "Label cannot be empty",
       "vault.keyCreate.err.tooLong": "Label must be at most {{max}} characters",
       "vault.keyCreate.err.failed": "Create failed",
@@ -203,15 +176,15 @@ const vaultResources: I18nPluginResources = {
       "vault.keyExport.title": "Export backup",
       "vault.keyExport.cancel": "Cancel",
       "vault.keyExport.submit": "Download backup file",
-      "vault.keyExport.hint": "Exports the canonical KeyHold v2 document. WebAuthn passkeys remain local to this device and are never included.",
+      "vault.keyExport.hint": "Exports an encrypted backup of the selected Catalog Hold key.",
       "vault.keyExport.err.failed": "Export failed",
       "vault.keyImportBackup.title": "Import backup",
       "vault.keyImportBackup.submit": "Restore backup",
-      "vault.keyImportBackup.hint": "Paste the exported single Key Backup JSON. Restoring it requires the source backup password and the current Vault password.",
+      "vault.keyImportBackup.hint": "Paste a Catalog Hold key backup JSON. Restoring it requires the source bucket password and the current bucket password.",
       "vault.keyImportBackup.backup": "Backup JSON",
-      "vault.keyImportBackup.backupPlaceholder": "{\"format\":\"keymaster\",\"version\":2,...}",
-      "vault.keyImportBackup.sourcePassword": "Source password",
-      "vault.keyImportBackup.targetPassword": "Target Vault password",
+      "vault.keyImportBackup.backupPlaceholder": "{\"format\":\"keymaster.storage.catalog-key-backup\",\"version\":1,...}",
+      "vault.keyImportBackup.sourcePassword": "Source bucket password",
+      "vault.keyImportBackup.targetPassword": "Target bucket password",
       "vault.keyImportBackup.notice": "Backup restored: {{label}}",
       "vault.keyImportBackup.err.emptyBackup": "Backup JSON cannot be empty",
       "vault.keyImportBackup.err.emptySourcePassword": "Enter the source password",
@@ -228,19 +201,6 @@ const vaultResources: I18nPluginResources = {
       "vault.changePassword.err.tooShort": "New password must be at least 8 characters",
       "vault.changePassword.err.mismatch": "The new passwords do not match",
       "vault.changePassword.err.failed": "Change password failed",
-      "vault.passkey.title": "Passkey protection",
-      "vault.passkey.hint": "Each passkey uses WebAuthn PRF to encrypt the same private key independently. The Vault password protector is always retained.",
-      "vault.passkey.password": "Vault password",
-      "vault.passkey.recovery": "Recovery method · always retained",
-      "vault.passkey.name": "Passkey name",
-      "vault.passkey.namePlaceholder": "e.g. MacBook Touch ID",
-      "vault.passkey.passwordConfirm": "Vault password (required only when adding)",
-      "vault.passkey.add": "Add passkey",
-      "vault.passkey.remove": "Remove",
-      "vault.passkey.unsupported": "This browser or context does not support WebAuthn PRF. Use HTTPS and a compatible passkey device.",
-      "vault.passkey.err.add": "Failed to add passkey",
-      "vault.passkey.err.singleStepRequired": "This Passkey creation did not return PRF directly. This does not mean Chrome lacks PRF support. KeyMaster did not add it in strict single-step mode; your Passkey manager may still contain the newly created credential.",
-      "vault.passkey.err.remove": "Failed to remove passkey",
       "vault.currentKey.title": "Current private key",
       "vault.currentKey.description": "Manage protection methods and encrypted backups for the active private key.",
       "vault.currentKey.empty.title": "No current private key",
@@ -248,10 +208,10 @@ const vaultResources: I18nPluginResources = {
       "vault.currentKey.empty.action": "Open Key management",
       "vault.currentKey.identity.active": "Current active private key",
       "vault.currentKey.protection.title": "Private key protection",
-      "vault.currentKey.protection.description": "Each protection method can independently recover the same private key.",
+      "vault.currentKey.protection.description": "The current bucket password protects the private-key ciphertext in Hold.",
       "vault.currentKey.protection.available": "Available",
-      "vault.currentKey.passkeys.added": "Passkey added to the current private key.",
-      "vault.currentKey.passkeys.removed": "Passkey removed.",
+      "vault.currentKey.protection.password": "Bucket password",
+      "vault.currentKey.protection.passwordDescription": "Hold ciphertext protector · used for unlock and recovery",
       "vault.currentKey.backup.title": "Encrypted backup",
       "vault.currentKey.backup.action": "Export current key backup"
     },
@@ -264,7 +224,6 @@ const vaultResources: I18nPluginResources = {
       "vault.crumb.keys": "Key 管理",
       "vault.crumb.currentKey": "当前私钥",
       "vault.command.lock": "锁定钱包",
-      "vault.topbar.keySwitch": "切换 Key",
       "vault.unlock.title": "解锁钱包",
       "vault.unlock.description": "输入密码以解锁本地 Vault。",
       "vault.unlock.password": "密码",
@@ -279,30 +238,15 @@ const vaultResources: I18nPluginResources = {
       "vault.create.err.failed": "创建失败",
       "vault.create.err.initialKeyFailed": "创建首把 Key 失败",
       "vault.unlock.err.failed": "解锁失败",
-      "vault.keySwitch.label": "切换 key",
-      "vault.keySwitch.initializing": "初始化中",
-      "vault.keySwitch.noKey": "无 key",
-      "vault.keySwitch.noReadyKey": "无可切换 key",
-      "vault.keySwitch.unnamed": "未命名",
-      "vault.keySwitch.notReady": "身份尚未就绪",
-      "vault.keySwitch.empty": "还没有 key，前往 导入 添加。",
-      "vault.keySwitch.manage": "管理 key",
       "vault.keySwitch.confirmTitle": "确认切换",
-      "vault.keySwitch.confirm": "确认",
-      "vault.keySwitch.confirmHint": "请输入 Vault 密码以解锁所选 key。",
-      "vault.keySwitch.password": "密码",
-      "vault.keySwitch.orPasskey": "或使用 passkey",
       "vault.keySwitch.usePassword": "使用密码",
       "vault.keySwitch.passwordHint": "输入 Vault 密码解锁并切换到这把私钥。",
+      "vault.keySwitch.password": "密码",
       "vault.keySwitch.passwordSubmit": "使用密码解锁",
-      "vault.keySwitch.or": "或",
-      "vault.keySwitch.usePasskey": "使用 Passkey",
-      "vault.keySwitch.passkeyHint": "选择这把私钥已经配置的 Passkey。",
-      "vault.keySwitch.noPasskeys": "这把私钥尚未配置 Passkey。",
-      "vault.keySwitch.passkeyFailed": "Passkey 验证失败",
-      "vault.keySwitch.err.failed": "切换 key 失败",
+      "vault.keySwitch.err.failed": "切换私钥失败",
+      "vault.keySwitch.unnamed": "未命名",
       "vault.settings.title": "Key 管理",
-      "vault.settings.description": "管理本地 Vault 中的 Key、active 身份和加密备份。",
+      "vault.settings.description": "管理当前 Catalog 桶中的 Key、active 身份和加密备份。",
       "vault.settings.col.label": "标签",
       "vault.settings.col.status": "状态",
       "vault.settings.col.pubkey": "公钥",
@@ -321,7 +265,6 @@ const vaultResources: I18nPluginResources = {
       "vault.settings.action.setActive": "设为 active",
       "vault.settings.action.current": "当前 key",
       "vault.settings.action.export": "导出",
-      "vault.settings.action.passkeys": "Passkeys",
       "vault.settings.action.delete": "删除",
       "vault.settings.action.new": "新建 Key",
       "vault.settings.action.changePassword": "修改密码",
@@ -341,7 +284,6 @@ const vaultResources: I18nPluginResources = {
       "vault.settings.activate.submit": "确认",
       "vault.settings.activate.hint": "请输入 Vault 密码以切换 active key。",
       "vault.settings.activate.password": "密码",
-      "vault.settings.activate.orPasskey": "或使用 passkey",
       "vault.settings.activate.err.failed": "切换 key 失败",
       "vault.keyCreate.title": "新建 Key",
       "vault.keyCreate.successTitle": "Key 已创建并设为 active",
@@ -349,7 +291,6 @@ const vaultResources: I18nPluginResources = {
       "vault.keyCreate.submit": "新建 Key",
       "vault.keyCreate.later": "稍后",
       "vault.keyCreate.exportBackup": "导出加密备份",
-      "vault.keyCreate.addPasskey": "添加 passkey",
       "vault.keyCreate.hint": "Vault 会在浏览器内安全生成一把新的 secp256k1 私钥，并立即用当前密码加密保存。生成成功后会自动设为 active key。",
       "vault.keyCreate.label": "标签",
       "vault.keyCreate.placeholder": "例如：Key 2026-06-06 14:30",
@@ -357,7 +298,7 @@ const vaultResources: I18nPluginResources = {
       "vault.keyCreate.copyPubkey": "复制完整公钥",
       "vault.keyCreate.success.label": "标签",
       "vault.keyCreate.success.publicKey": "公钥",
-      "vault.keyCreate.warning": "该 Key 只保存在当前浏览器的本地 Vault 中。清除浏览器数据、设备损坏或忘记 Vault 密码都可能导致无法恢复，请尽快导出加密备份。",
+      "vault.keyCreate.warning": "该 Key 保存在当前 Catalog 桶中。失去桶或桶密码都可能导致无法恢复，请尽快导出加密备份。",
       "vault.keyCreate.err.empty": "标签不能为空",
       "vault.keyCreate.err.tooLong": "标签最长 {{max}} 个字符",
       "vault.keyCreate.err.failed": "创建失败",
@@ -373,15 +314,15 @@ const vaultResources: I18nPluginResources = {
       "vault.keyExport.title": "导出备份",
       "vault.keyExport.cancel": "取消",
       "vault.keyExport.submit": "下载备份文件",
-      "vault.keyExport.hint": "导出 canonical KeyHold v2 文档；WebAuthn passkey 仅保留在本机，不会写入导出文件。",
+      "vault.keyExport.hint": "导出当前 Catalog Hold Key 的加密备份。",
       "vault.keyExport.err.failed": "导出失败",
       "vault.keyImportBackup.title": "导入备份",
       "vault.keyImportBackup.submit": "恢复备份",
-      "vault.keyImportBackup.hint": "粘贴导出的单 Key Backup JSON。恢复时需要备份来源密码，以及当前 Vault 的目标密码。",
+      "vault.keyImportBackup.hint": "粘贴导出的 Catalog Hold Key 备份 JSON。恢复时需要来源桶密码，以及当前目标桶密码。",
       "vault.keyImportBackup.backup": "备份 JSON",
-      "vault.keyImportBackup.backupPlaceholder": "{\"format\":\"keymaster\",\"version\":2,...}",
-      "vault.keyImportBackup.sourcePassword": "源密码",
-      "vault.keyImportBackup.targetPassword": "目标 Vault 密码",
+      "vault.keyImportBackup.backupPlaceholder": "{\"format\":\"keymaster.storage.catalog-key-backup\",\"version\":1,...}",
+      "vault.keyImportBackup.sourcePassword": "来源桶密码",
+      "vault.keyImportBackup.targetPassword": "目标桶密码",
       "vault.keyImportBackup.notice": "备份已恢复：{{label}}",
       "vault.keyImportBackup.err.emptyBackup": "备份内容不能为空",
       "vault.keyImportBackup.err.emptySourcePassword": "请输入源密码",
@@ -398,19 +339,6 @@ const vaultResources: I18nPluginResources = {
       "vault.changePassword.err.tooShort": "新密码至少 8 位",
       "vault.changePassword.err.mismatch": "两次新密码不一致",
       "vault.changePassword.err.failed": "修改密码失败",
-      "vault.passkey.title": "Passkey 保护",
-      "vault.passkey.hint": "每个 passkey 使用 WebAuthn PRF 独立加密同一把私钥；Vault 密码保护器会一直保留。",
-      "vault.passkey.password": "Vault 密码",
-      "vault.passkey.recovery": "恢复方式 · 始终保留",
-      "vault.passkey.name": "Passkey 名称",
-      "vault.passkey.namePlaceholder": "例如：MacBook Touch ID",
-      "vault.passkey.passwordConfirm": "Vault 密码（仅添加时需要）",
-      "vault.passkey.add": "添加 passkey",
-      "vault.passkey.remove": "移除",
-      "vault.passkey.unsupported": "当前浏览器或上下文不支持 WebAuthn PRF；请使用 HTTPS 和兼容的 passkey 设备。",
-      "vault.passkey.err.add": "添加 passkey 失败",
-      "vault.passkey.err.singleStepRequired": "本次 Passkey 创建没有直接返回 PRF（不代表 Chrome 不支持 PRF），严格单次模式下 KeyMaster 未添加它；Passkey 管理器中可能仍保留刚创建的凭证。",
-      "vault.passkey.err.remove": "移除 passkey 失败",
       "vault.currentKey.title": "当前私钥管理",
       "vault.currentKey.description": "管理当前 active 私钥的保护方式与加密备份。",
       "vault.currentKey.empty.title": "当前没有可管理的私钥",
@@ -418,10 +346,10 @@ const vaultResources: I18nPluginResources = {
       "vault.currentKey.empty.action": "前往 Key 管理",
       "vault.currentKey.identity.active": "当前 active 私钥",
       "vault.currentKey.protection.title": "私钥保护",
-      "vault.currentKey.protection.description": "每种保护方式都能独立恢复同一把私钥。",
+      "vault.currentKey.protection.description": "当前桶密码保护 Hold 中的私钥密文。",
       "vault.currentKey.protection.available": "可用",
-      "vault.currentKey.passkeys.added": "Passkey 已添加到当前私钥。",
-      "vault.currentKey.passkeys.removed": "Passkey 已移除。",
+      "vault.currentKey.protection.password": "桶密码",
+      "vault.currentKey.protection.passwordDescription": "Hold 密文保护器 · 用于解锁和恢复",
       "vault.currentKey.backup.title": "加密备份",
       "vault.currentKey.backup.action": "导出当前私钥备份"
     }
@@ -451,7 +379,6 @@ const vaultPluginDefinition = {
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings navigation" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault breadcrumbs" },
       { capability: COMMAND_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault lock command" },
-      { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault key switch" },
     ],
   }, {
     id: "vault.coordinator-worker",
@@ -624,18 +551,6 @@ const vaultPluginDefinition = {
           throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
         }
       }
-    });
-
-    // 旧版 KeySwitchWidget 仍注册到 topbar，供没有新版 storage catalog 的
-    // OPFS/历史单桶模式使用（order 90 < background.tray 100）。新版桶目录
-    // 模式由 KeySwitchWidget 自己隐藏该入口，统一由 platform-storage 的
-    // “桶 → Keys”树负责桶和 Key 的切换。
-    const topbar = ctx.capability(TOPBAR_REGISTRY_CAPABILITY);
-    topbar.register({
-      id: "vault.key-switch",
-      label: { key: "vault.topbar.keySwitch", fallback: "Switch key" },
-      component: KeySwitchWidget,
-      order: 90
     });
 
     // 硬切换 001：vault 是 core 插件，理论上不会被 disable。

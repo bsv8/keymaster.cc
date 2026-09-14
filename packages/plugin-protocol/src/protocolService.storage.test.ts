@@ -39,10 +39,6 @@ function makeRepository(session: ConnectSessionRecord | null): ProtocolStorageRe
     getConnectSession: async (value) => sessions.get(value) ?? null,
     listConnectSessionsByOrigin: async (origin) => [...sessions.values()].filter((value) => value.origin === origin),
     putConnectSessionAndRevokeOriginPeers: async (value) => { sessions.set(value.sessionId, value); },
-    putLaunchToken: async () => undefined,
-    getLaunchToken: async () => null,
-    consumeLaunchToken: async () => undefined,
-    deleteLaunchToken: async () => undefined
   };
 }
 
@@ -65,10 +61,6 @@ function makeStorage(overrides: Partial<StorageRuntimeController> = {}): Storage
     getProviderSummary: async () => null,
     getProviderConnection: async () => null,
     cancelProbe: () => undefined,
-    probeProvider: async () => ({ ok: true, providerId: "aws-s3", latencyMs: 0 }),
-    activateProvider: async () => ({ ok: true, providerId: "aws-s3", latencyMs: 0 }),
-    clearProviderConfig: async () => undefined,
-    resetStorage: async () => undefined,
     abortSession: vi.fn(async () => undefined),
     list: vi.fn(async () => emptyResult),
     createDirectory: vi.fn(),
@@ -84,7 +76,7 @@ function makeStorage(overrides: Partial<StorageRuntimeController> = {}): Storage
   } as unknown as StorageRuntimeController;
 }
 
-function makeHarness(storageRuntimeController: StorageRuntimeController, session: ConnectSessionRecord | null = {
+function makeHarness(storageController: StorageRuntimeController, session: ConnectSessionRecord | null = {
   sessionId: SESSION_ID,
   origin: ORIGIN,
   ownerPublicKeyHex: OWNER_PUBLIC_KEY_HEX,
@@ -94,7 +86,7 @@ function makeHarness(storageRuntimeController: StorageRuntimeController, session
   createdAt: 1,
   lastUsedAt: 1,
   revokedAt: null
-}, getStorageRuntimeController: () => StorageRuntimeController | undefined = () => storageRuntimeController) {
+}, getStorageController: () => StorageRuntimeController | undefined = () => storageController) {
   const opener = { closed: false } as Window;
   const results: ProtocolResultMessage[] = [];
   const keyspace = {
@@ -104,8 +96,8 @@ function makeHarness(storageRuntimeController: StorageRuntimeController, session
     vault: makeVault(),
     keyspace: keyspace as never,
     storageRepository: makeRepository(session),
-    storageRuntimeController,
-    getStorageRuntimeController,
+    storageController,
+    getStorageController,
     resolveOpener: () => opener,
     postReady: () => undefined,
     postResult: (_target, _origin, result) => { results.push(result); }

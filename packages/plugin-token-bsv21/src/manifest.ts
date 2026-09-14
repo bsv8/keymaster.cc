@@ -5,7 +5,8 @@
 //   - p2pkh.service：BSV-21 的所有权仍然基于当前钱包 BSV 地址。
 //   - woc.bsv21.service：BSV-21 的 WOC 查询入口。
 //   - token.registry：注册 BSV-21 TokenProvider。
-//   - keyspace.service：拿当前 active key、打开 key-scoped K-V。
+//   - Host storage bindings：window 同时使用 token-state 与 mint-history；
+//     coordinator worker 只使用 token-state。
 //   - background.registry：注册 token-bsv21.sync 后台任务。
 //   - background.service：触发即时同步。
 //   - vault.service：sync task canRun 门禁。
@@ -55,7 +56,7 @@ import {
   type P2pkhServiceForBsv21
 } from "./bsv21Service.js";
 import { createBsv21TokenProvider } from "./bsv21TokenProvider.js";
-import { createBsv21StateRepository, BSV21_SCHEMA_VERSION, BSV21_STORAGE_ID } from "./storage/bsv21StateRepository.js";
+import { createBsv21StateRepository } from "./storage/bsv21StateRepository.js";
 import { createBsv21MintHistoryRepository } from "./storage/bsv21MintHistoryRepository.js";
 import { createBsv21SyncTask } from "./bsv21Sync.js";
 import { createBsv21SpendProtectionProvider } from "./bsv21SpendProtection.js";
@@ -63,6 +64,7 @@ import { createBsv21MintService, BSV21_MINT_SERVICE_CAPABILITY } from "./bsv21Mi
 import { createBsv21TransferService, BSV21_TRANSFER_SERVICE_CAPABILITY } from "./bsv21TransferService.js";
 import { createBsv21TransferProvider } from "./bsv21TransferProvider.js";
 import { Bsv21MintPage } from "./Bsv21MintPage.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 const bsv21Resources: I18nPluginResources = {
   namespace: "bsv21",
@@ -172,7 +174,7 @@ const bsv21TokenPluginDefinition = {
       runtime: "window-main",
       scopeKind: "owner-session",
       provides: [BSV21_MINT_SERVICE_CAPABILITY, BSV21_TRANSFER_SERVICE_CAPABILITY],
-      storage: { scope: "key", applicationStorageId: BSV21_STORAGE_ID, schemaVersion: BSV21_SCHEMA_VERSION },
+      storages: [CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, CENTRAL_STORAGE_DECLARATIONS.tokenBsv21MintHistory],
       dependencies: defineRuntimeUnitDependencies([
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 地址" },
         { capability: WOC_BSV21_CAPABILITY, reason: "BSV-21 WOC 查询入口" },
@@ -195,6 +197,7 @@ const bsv21TokenPluginDefinition = {
       id: "token-bsv21.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
+      storage: CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State,
     },
   ],
   i18n: bsv21Resources,
@@ -215,10 +218,10 @@ const bsv21TokenPluginDefinition = {
     const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
     const backgroundService = ctx.capability(BACKGROUND_SERVICE_CAPABILITY);
 
-    // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 Keyspace。
-    if (!ctx.storage) throw new Error("BSV21 owner storage binding is unavailable");
-    const stateRepository = createBsv21StateRepository(ctx.storage);
-    const historyRepository = createBsv21MintHistoryRepository(ctx.storage);
+    // Host 已完成声明校验并按 purpose 注入 owner/App K-V 句柄；Repository
+    // 不再接收 Keyspace，也不把 state 与 mint history 混入同一 bucket。
+    const stateRepository = createBsv21StateRepository(ctx.storageFor("token-state"));
+    const historyRepository = createBsv21MintHistoryRepository(ctx.storageFor("mint-history"));
 
     // 创建 service（保留 WOC 能力，供 sync task 使用）
     const service = createBsv21Service({ keyspace, p2pkh, wocBsv21 });

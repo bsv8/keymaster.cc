@@ -1,8 +1,9 @@
 // packages/plugin-msfile/src/manifest.ts
 // MSFile 插件清单：提供 `msfile.service`（页面侧 proxy）与 /settings/system
-// 的 MSFile group。设置真值、K-V 与网络都在 Coordinator SharedWorker。
+// 的 MSFile group。设置真值、分 purpose K-V 与网络都在 Coordinator SharedWorker。
 
 import type { I18nPluginResources, PluginManifest, PluginSetup, PluginContext, ResourceRegistry, RouteRegistry, WindowP2pExecutorLaneRegistry } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import {
   BUSINESS_REGISTRY_CAPABILITY,
   ROUTE_REGISTRY_CAPABILITY,
@@ -313,7 +314,6 @@ const msfilePluginDefinition = {
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY],
-    storage: { scope: "key", applicationStorageId: "MSFile", schemaVersion: 1 },
     dependencies: defineRuntimeUnitDependencies([
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
       { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "MSFile settings live under Settings -> System" },
@@ -327,6 +327,12 @@ const msfilePluginDefinition = {
     id: "msfile.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
+    storages: [
+      CENTRAL_STORAGE_DECLARATIONS.msfileSettings,
+      CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers,
+      CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies,
+      CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage,
+    ],
   }],
   i18n: resources,
   setup(ctx: PluginContext) {

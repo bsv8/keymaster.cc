@@ -8,7 +8,7 @@ import type {
 import { createS3BucketObjectStore } from "./s3BucketObjectStore.js";
 import type { BucketObjectStore, BucketObjectStoreCapabilityState } from "../bucketObjectStore.js";
 import { createBucketObjectStoreCapabilityState } from "../bucketObjectStore.js";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
 import { normalizeDirectoryPath, stripRoot } from "../bucketPath.js";
 

@@ -200,6 +200,13 @@ function parseInitialSetupRecoveryError(value: unknown, transactionId: string): 
 function parseInitialSetupRecoveryRecord(value: unknown): InitialSetupRecoveryRecordV1 {
   if (!value || typeof value !== "object" || Array.isArray(value)) recoveryLedgerError("record");
   const record = value as Partial<InitialSetupRecoveryRecordV1>;
+  const allowedKeys = new Set([
+    "format", "version", "transactionId", "bucketId", "catalogEntryFingerprint",
+    "configRevision", "snapshotRevision", "backend", "connectionFingerprint",
+    "phase", "catalog", "runtimeInstalled", "cleanup", "status", "updatedAt",
+    ...(record.status === "succeeded" ? ["success"] : record.status === "failed" ? ["error"] : []),
+  ]);
+  if (Object.keys(record).some((key) => !allowedKeys.has(key))) recoveryLedgerError("record fields");
   if (record.format !== "keymaster.storage.initial-setup-recovery" || record.version !== 1) recoveryLedgerError("format");
   assertRecoveryString(record.transactionId, "transactionId", 128);
   if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(record.transactionId)) recoveryLedgerError("transactionId");
@@ -208,14 +215,10 @@ function parseInitialSetupRecoveryRecord(value: unknown): InitialSetupRecoveryRe
   if (!Number.isSafeInteger(record.configRevision) || (record.configRevision as number) < 0) recoveryLedgerError("configRevision");
   if (!Number.isSafeInteger(record.snapshotRevision) || (record.snapshotRevision as number) < 0) recoveryLedgerError("snapshotRevision");
   if (record.backend !== "local" && record.backend !== "s3") recoveryLedgerError("backend");
-  if (record.catalogEntryFingerprint !== undefined) {
-    assertRecoveryString(record.catalogEntryFingerprint, "catalogEntryFingerprint", 64);
-    if (!/^[0-9a-f]{64}$/iu.test(record.catalogEntryFingerprint)) recoveryLedgerError("catalogEntryFingerprint");
-  }
-  if (record.connectionFingerprint !== undefined) {
-    assertRecoveryString(record.connectionFingerprint, "connectionFingerprint", 64);
-    if (!/^[0-9a-f]{64}$/iu.test(record.connectionFingerprint)) recoveryLedgerError("connectionFingerprint");
-  }
+  assertRecoveryString(record.catalogEntryFingerprint, "catalogEntryFingerprint", 64);
+  if (!/^[0-9a-f]{64}$/u.test(record.catalogEntryFingerprint)) recoveryLedgerError("catalogEntryFingerprint");
+  assertRecoveryString(record.connectionFingerprint, "connectionFingerprint", 64);
+  if (!/^[0-9a-f]{64}$/u.test(record.connectionFingerprint)) recoveryLedgerError("connectionFingerprint");
   if (!isOneOf(INITIAL_SETUP_PHASES, record.phase)) recoveryLedgerError("phase");
   if (!isOneOf(INITIAL_SETUP_CATALOG_STATES, record.catalog)) recoveryLedgerError("catalog");
   if (typeof record.runtimeInstalled !== "boolean") recoveryLedgerError("runtimeInstalled");
@@ -238,11 +241,11 @@ function parseInitialSetupRecoveryRecord(value: unknown): InitialSetupRecoveryRe
     version: 1,
     transactionId: record.transactionId,
     bucketId: record.bucketId,
-    ...(record.catalogEntryFingerprint === undefined ? {} : { catalogEntryFingerprint: record.catalogEntryFingerprint }),
+    catalogEntryFingerprint: record.catalogEntryFingerprint,
     configRevision: record.configRevision as number,
     snapshotRevision: record.snapshotRevision as number,
     backend: record.backend,
-    ...(record.connectionFingerprint === undefined ? {} : { connectionFingerprint: record.connectionFingerprint }),
+    connectionFingerprint: record.connectionFingerprint,
     phase: record.phase as InitialSetupPhase,
     catalog: record.catalog as InitialSetupRecoveryCatalogState,
     runtimeInstalled: record.runtimeInstalled,

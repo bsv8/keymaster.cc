@@ -7,9 +7,8 @@ import type {
 } from "@keymaster/contracts";
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { StorageErrorCode } from "@keymaster/contracts";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
-import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
-export { requestOpfsPersistence } from "./opfsPersistence.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
+import { assertProviderPath, normalizeProviderLimit } from "../bucket-providers/bucketProvider.js";
 
 interface OpfsDirectoryHandle {
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<OpfsDirectoryHandle>;
@@ -41,7 +40,7 @@ interface OpfsStorageManager {
   estimate?(): Promise<{ usage?: number; quota?: number }>;
 }
 
-export interface OpfsBucketProviderOptions {
+export interface OpfsTestBucketProviderOptions {
   /** 测试或宿主可注入根句柄；生产默认取 navigator.storage.getDirectory()。 */
   root?: OpfsDirectoryHandle;
   /** 抽象桶 ID，不等于 OPFS 物理目录。 */
@@ -51,6 +50,8 @@ export interface OpfsBucketProviderOptions {
   /** 可注入时钟，便于测试。 */
   now?: () => number;
 }
+
+export type OpfsTestBucketProvider = Omit<StorageBucketProvider, "provider"> & { readonly provider: "opfs-test" };
 
 function error(code: StorageErrorCode, message: string = code): StorageRuntimeError {
   return new StorageRuntimeError(code, message);
@@ -149,7 +150,8 @@ async function listRecursive(root: OpfsDirectoryHandle, prefix: string, output: 
  * fallback。没有原生 FileSystemHandle.move 时拒绝写入，避免复制覆盖在
  * 崩溃点产生半写入对象。
  */
-export function createOpfsBucketProvider(options: OpfsBucketProviderOptions = {}): StorageBucketProvider {
+/** OPFS is retained only as a direct low-level test fixture; it is not a V1 provider. */
+export function createOpfsTestBucketProvider(options: OpfsTestBucketProviderOptions = {}): OpfsTestBucketProvider {
   const manager = options.storageManager ?? (globalThis as typeof globalThis & { navigator?: { storage?: OpfsStorageManager } }).navigator?.storage;
   const bucketId = options.bucketId ?? "opfs:default";
   let rootPromise: Promise<OpfsDirectoryHandle> | undefined = options.root ? Promise.resolve(options.root) : manager?.getDirectory();
@@ -215,7 +217,7 @@ export function createOpfsBucketProvider(options: OpfsBucketProviderOptions = {}
   }
 
   return {
-    provider: "opfs",
+    provider: "opfs-test" as const,
     bucketId,
     async probe(signal): Promise<StorageBucketProbeResult> {
       const started = now();

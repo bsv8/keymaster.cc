@@ -1,7 +1,7 @@
 // packages/plugin-vault/src/VaultKeyExportModal.tsx
 // 单 Key Backup 导出 modal：直接请求 Vault 生成备份 JSON -> 下载文件。
 // 设计缘由：
-//   - 备份只复制 vault_meta + 选中的 canonical vault_keys 记录，不接触明文私钥。
+//   - 备份只复制 Catalog Hold 中选中的加密记录，不接触明文私钥。
 //   - 该 modal 不直接调用 removeKey、不保存 key 列表、不参与删除流程。
 //   - 不在页面明文展示完整私钥；下载流程失败时保留 modal 让用户重试。
 //
@@ -105,10 +105,7 @@ export function VaultKeyExportModal({
       }
     >
       <p className="vault-export-modal__hint">
-        {t("vault.keyExport.hint", {
-          defaultValue:
-            "JSON 备份包含密码保护器和全部 passkey 保护器；任一可用保护器都能恢复同一把私钥。"
-        })}
+        {t("vault.keyExport.hint", { defaultValue: "导出当前 Catalog Hold Key 的加密备份。" })}
       </p>
       {error ? <p className="vault-export-modal__error">{error}</p> : null}
     </Modal>

@@ -70,7 +70,7 @@ describe("Storage Hold snapshot", () => {
     // sealConfigAndKeys 清理调用方可控的字节；这里验证它没有把密码留在 API 返回值中。
     expect(privateKey.every((byte) => byte === 0)).toBe(true);
     const repository = createStorageHoldSnapshotRepository(provider, { generateId: () => "snapshot-1", now: () => 100 });
-    await repository.publish({ document: sealed.document, configRevision: 1, bucketGeneration: 1 });
+    await repository.publish({ document: sealed.document, configRevision: 1, bucketGeneration: 1, expectedHead: { kind: "absent" } });
 
     const exported = await manager.coldExport(provider);
     const document = parseBucketDocument(exported);
@@ -95,11 +95,29 @@ describe("Storage Hold snapshot", () => {
     const firstKey = new Uint8Array(32); firstKey[31] = 1;
     const first = await manager.sealConfigAndKeys({ config: { kind: "local" }, keys: [{ label: "A", privateKey: firstKey }], password: "bucket-password" });
     const repo = createStorageHoldSnapshotRepository(provider, { generateId: () => "snapshot-1" });
-    await repo.publish({ document: first.document, configRevision: 1, bucketGeneration: 1 });
+    const firstPublished = await repo.publish({ document: first.document, configRevision: 1, bucketGeneration: 1, expectedHead: { kind: "absent" } });
     const secondKey = new Uint8Array(32); secondKey[31] = 2;
     const second = await manager.sealConfigAndKeys({ config: { kind: "local" }, keys: [{ label: "B", privateKey: secondKey }], password: "bucket-password" });
-    await expect(repo.publish({ document: second.document, configRevision: 2, bucketGeneration: 1, snapshotId: "snapshot-1" })).rejects.toMatchObject({ code: "storage_conflict" });
+    await expect(repo.publish({ document: second.document, configRevision: 2, bucketGeneration: 1, snapshotId: "snapshot-1", expectedHead: { kind: "etag", etag: firstPublished.headEtag! } })).rejects.toMatchObject({ code: "storage_conflict" });
     await expect(repo.readCommitted()).resolves.toMatchObject({ document: { keys: [{ label: "A" }] } });
+    provider.dispose();
+  });
+
+  it("enforces an absent-head CAS when the first writer races another creator", async () => {
+    const storage = new MemoryStorage();
+    const provider = createLocalStorageBucketProvider({ storage, locks, bucketId: "absent-head-conflict-bucket" });
+    const manager = createStorageBucketManagementService({ catalog: undefined });
+    const firstKey = new Uint8Array(32); firstKey[31] = 6;
+    const first = await manager.sealConfigAndKeys({ config: { kind: "local" }, keys: [{ label: "winner", privateKey: firstKey }], password: "bucket-password" });
+    const secondKey = new Uint8Array(32); secondKey[31] = 7;
+    const second = await manager.sealConfigAndKeys({ config: { kind: "local" }, keys: [{ label: "stale", privateKey: secondKey }], password: "bucket-password" });
+    const winner = createStorageHoldSnapshotRepository(provider, { generateId: () => "winner-snapshot" });
+    const stale = createStorageHoldSnapshotRepository(provider, { generateId: () => "stale-snapshot" });
+
+    await winner.publish({ document: first.document, configRevision: 1, bucketGeneration: 1, expectedHead: { kind: "absent" } });
+    await expect(stale.publish({ document: second.document, configRevision: 1, bucketGeneration: 1, expectedHead: { kind: "absent" } }))
+      .rejects.toMatchObject({ code: "storage_conflict" });
+    await expect(winner.readCommitted()).resolves.toMatchObject({ document: { keys: [{ label: "winner" }] } });
     provider.dispose();
   });
 
@@ -144,7 +162,7 @@ describe("Storage Hold snapshot", () => {
 
   it("does not compensate a failed new-bucket initialization by deleting another tab's catalog bucket", async () => {
     const { catalog, manager } = managementFixture();
-    const existing = await catalog.createBucket(catalogBucketInput("已绑定桶"));
+    const existing = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("已绑定桶")));
     const seenBeforeFailure: string[] = [];
 
     await expect(manager.prepareBucketConfig({ kind: "local" }, "bucket-password", {
@@ -254,8 +272,8 @@ describe("Storage Hold snapshot", () => {
 
   it("keeps connection removal separate from destructive data cleanup", async () => {
     const { catalog, manager } = managementFixture();
-    const current = await catalog.createBucket(catalogBucketInput("当前桶"));
-    const other = await catalog.createBucket(catalogBucketInput("待销毁桶"));
+    const current = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("当前桶")));
+    const other = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("待销毁桶")));
     const objects = new Map([
       ["keys/a", new Uint8Array([1])],
       ["data/b", new Uint8Array([2, 3])]
@@ -277,11 +295,11 @@ describe("Storage Hold snapshot", () => {
     await expect(manager.destroyBucketData({ entry: current, provider: { ...provider, bucketId: current.bucketId } })).rejects.toMatchObject({ code: "storage_forbidden" });
     await expect(manager.catalog.removeBucket(other.bucketId, other)).resolves.toBeTruthy();
     // 连接移除不会触碰 Provider 数据；重新加回目录后，销毁动作才执行物理删除。
-    const restored = await catalog.createBucket(catalogBucketInput("待销毁桶"));
+    const restored = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("待销毁桶")));
     expect(restored.bucketId).not.toBe(other.bucketId);
     // 使用原 entry 仍能验证真实销毁语义，目录 CAS 会拒绝过时条目，故先
     // 只保留一个独立的数据销毁夹具并直接检查 Provider 清空。
-    const dataEntry = await catalog.createBucket(catalogBucketInput("数据桶"));
+    const dataEntry = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("数据桶")));
     const dataProvider: StorageBucketProvider = { ...provider, bucketId: dataEntry.bucketId };
     await expect(manager.destroyBucketData({ entry: dataEntry, provider: dataProvider })).resolves.toEqual({ deletedObjects: 2, scope: "all-local-objects" });
     expect(objects.size).toBe(0);
@@ -290,8 +308,8 @@ describe("Storage Hold snapshot", () => {
 
   it("checks the latest catalog entry before listing or deleting data", async () => {
     const { catalog, manager } = managementFixture();
-    await catalog.createBucket(catalogBucketInput("当前桶"));
-    const stale = await catalog.createBucket(catalogBucketInput("旧名称"));
+    await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("当前桶")));
+    const stale = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("旧名称")));
     await catalog.updateBucket(stale.bucketId, { label: "并发更新后的桶" }, stale);
     let listCalls = 0;
     let deleteCalls = 0;

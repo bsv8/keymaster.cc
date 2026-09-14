@@ -6,7 +6,7 @@ import type {
   KeyValueEntryMeta,
   KeyValueListInput,
   KeyValueListResult,
-  KeyValueStore,
+  BorrowedKeyValueStore,
   KeyValueValue,
   KeyValueWriteCondition,
 } from "@keymaster/contracts";
@@ -23,7 +23,7 @@ const OWNER_B = "03" + "22".repeat(32);
  * 第一次读取时才绑定 OWNER_A；后续可切换到另一个 owner 或锁定态。
  */
 function createDeferredOwnerHandle(): {
-  handle: KeyValueStore;
+  handle: BorrowedKeyValueStore;
   setOwner: (owner: string) => void;
 } {
   const partitions = new Map<string, { revision: number; values: Map<string, { value: unknown; updatedAt: number }> }>();
@@ -91,21 +91,30 @@ function createDeferredOwnerHandle(): {
       operations: [{ type: "delete", key }],
     });
   };
-  const handle: KeyValueStore = {
+  const handle: BorrowedKeyValueStore = {
     /** 测试用抽象桶身份，不对应真实物理存储路径。 */
     bucketId: "sat-repository-test-bucket",
     /** 测试用桶世代，用于满足公开 K-V 句柄契约。 */
     bucketGeneration: 1,
     /** 延迟 owner getter 是本回归的核心：首次 get 前必须保持空字符串。 */
     get ownerPublicKeyHex() { return ownerPublicKeyHex; },
-    /** 测试插件的稳定 App 存储命名空间。 */
-    applicationStorageId: "SatSubscription",
+    /** 测试用中央声明绑定的稳定模块身份。 */
+    moduleId: "SatSubscription",
+    /** 测试用中央声明绑定的稳定用途身份。 */
+    purposeId: "state",
+    /** 测试用 owner 作用域。 */
+    scope: "owner",
+    /** 测试用内置模块授权主体。 */
+    authority: "built-in-module",
+    /** 测试用 K-V 数据模型。 */
+    model: "kv",
+    /** 测试用 schema 版本。 */
+    schemaVersion: 1,
     get,
     list,
     put,
     delete: remove,
     commit,
-    close() { closed = true; },
   };
   return {
     handle,

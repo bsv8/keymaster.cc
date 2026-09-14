@@ -138,8 +138,6 @@ function installFakeWebLocks(): { uninstall: () => void; isBusy: () => boolean }
 
 beforeEach(() => {
   fetchLog.length = 0;
-  localStorage.removeItem("woc.settings");
-  localStorage.removeItem("woc.sharedTimestamps");
   installFetchMock();
 });
 
@@ -387,10 +385,24 @@ describe("WocService coordinated flag", () => {
   // 这是契约的关键不变量；UI 据 coordinated=false 提示用户。
 
   it("coordinated=false when navigator.locks is absent", () => {
-    // 默认 node 测试环境没有 navigator.locks。
-    const s = createWocService({ messageBus: createMessageBus() });
-    expect(s.getQueueSnapshot().coordinated).toBe(false);
-    s.dispose();
+    // Node 版本可能自带 navigator.locks；测试显式移除它，保持断言与
+    // 场景独立，不依赖运行环境的 Web Locks 实现。
+    const navAny = globalThis as { navigator?: Navigator };
+    const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const previousNavigator = navAny.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      writable: true,
+      value: previousNavigator ? { ...previousNavigator, locks: undefined } : undefined
+    });
+    try {
+      const s = createWocService({ messageBus: createMessageBus() });
+      expect(s.getQueueSnapshot().coordinated).toBe(false);
+      s.dispose();
+    } finally {
+      if (previousDescriptor) Object.defineProperty(globalThis, "navigator", previousDescriptor);
+      else delete (navAny as { navigator?: Navigator }).navigator;
+    }
   });
 
   it("coordinated=true when navigator.locks is available", () => {

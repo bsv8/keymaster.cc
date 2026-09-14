@@ -35,6 +35,7 @@ import {
 } from "./webrtcConfig.js";
 import { createWebrtcHistoryService } from "./webrtcHistoryService.js";
 import { createWebrtcService } from "./webrtcService.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 const webrtcResources: I18nPluginResources = {
   namespace: "webrtc",
@@ -203,7 +204,7 @@ const webrtcPluginDefinition = {
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [WEBRTC_SERVICE_CAPABILITY],
-    storage: { scope: "key", applicationStorageId: "WebRTC", schemaVersion: 1 },
+    storages: [CENTRAL_STORAGE_DECLARATIONS.webrtcSettings, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory],
     dependencies: defineRuntimeUnitDependencies([
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel 私信" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "打开 key-scoped 历史库" },
@@ -220,15 +221,13 @@ const webrtcPluginDefinition = {
     const contacts = ctx.capability(CONTACTS_SERVICE_CAPABILITY);
     const noticeRegistry = ctx.capability(NOTICE_REGISTRY_CAPABILITY);
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
-    const configStore = createKeyValueWebrtcConfigStore(ctx.storage);
+    const configStore = createKeyValueWebrtcConfigStore(ctx.storageFor("settings"));
     await configStore.ready();
-    const offStorageActive = keyspace.onActiveKeyChanged((state) => {
-      if (state.activePublicKeyHex) void configStore.ready().catch((error) => console.warn("[webrtc] failed to load owner configuration", error));
-    });
+    const historyStorage = ctx.storageFor("history");
     const historyService = createWebrtcHistoryService({
       keyspace,
       ownerPublicKeyHex: () => keyspace.active().activePublicKeyHex ?? null,
-      storage: ctx.storage
+      storage: historyStorage
     });
     const service = createWebrtcService({
       channel,
@@ -296,7 +295,6 @@ const webrtcPluginDefinition = {
     });
 
     return async () => {
-      offStorageActive();
       await service.dispose();
     };
   }

@@ -45,7 +45,7 @@ import { ContactPicker } from "./ContactPicker.js";
 import { ContactsPage } from "./ContactsPage.js";
 import { RecentContactsWidget } from "./RecentContactsWidget.js";
 import { createContactsService } from "./contactsService.js";
-import { CONTACTS_SCHEMA_VERSION, CONTACTS_STORAGE_ID } from "./storage/contactsRepository.js";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 /** Compatibility-free product names for the shared contract exports. */
 export const CONTACTS_CAPABILITY = CONTACTS_SERVICE_CAPABILITY;
@@ -217,11 +217,7 @@ const contactsPluginDefinition = {
         capabilityDescriptor(CONTACTS_EDITOR),
         capabilityDescriptor(CONTACTS_COORDINATOR_CONTROL_CAPABILITY),
       ],
-      storage: {
-        scope: "key",
-        applicationStorageId: CONTACTS_STORAGE_ID,
-        schemaVersion: CONTACTS_SCHEMA_VERSION
-      },
+      storage: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
       dependencies: defineRuntimeUnitDependencies([
         { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "联系人按 key namespace 隔离" },
         { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册联系人页面" },
@@ -233,6 +229,7 @@ const contactsPluginDefinition = {
       id: "contacts.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
+      storage: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
     },
   ],
   i18n: contactsResources,
@@ -243,7 +240,7 @@ const contactsPluginDefinition = {
     if (!coordinator) throw new Error("Contacts Coordinator control is unavailable");
     ctx.provide(CONTACTS_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     // 页面侧只保留联系人 CRUD；Ping/Pong 与唯一后台任务均归 Coordinator Worker。
-    const service = createContactsService({ keyspace, messageBus, storage: ctx.storage });
+    const service = createContactsService({ keyspace, messageBus, storage: ctx.storageFor("address-book") });
     ctx.provide(CONTACTS_CAPABILITY, service);
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<Contact[], readonly string[]>({

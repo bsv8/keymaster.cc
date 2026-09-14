@@ -4,13 +4,14 @@
 // 导出固定读取一个已经发布的快照，不会把并发更新中的 storage 与 keys 拼接。
 
 import type {
+  StorageHoldHeadExpectation,
   StorageBucketProvider,
   StorageHoldCommitHeadV1,
   StorageHoldSnapshotHeaderV1,
   StorageRecordV1
 } from "@keymaster/contracts";
 import type { HoldDocument } from "keymaster-hold/browser";
-import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../runtime/storageError.js";
 import {
   integrityFromDocument,
   parseBucketDocument,
@@ -34,8 +35,8 @@ export interface StorageHoldSnapshotWriteInput {
   now?: number;
   /** 可注入快照 ID。 */
   snapshotId?: string;
-  /** 可选的提交头 ETag；用于回滚或要求从某个头继续发布。 */
-  expectedHeadEtag?: string;
+  /** 提交头 CAS；首次发布必须明确要求 Head 不存在。 */
+  expectedHead: StorageHoldHeadExpectation;
 }
 
 export interface StorageHoldCommittedSnapshot {
@@ -136,7 +137,10 @@ export function createStorageHoldSnapshotRepository(provider: StorageBucketProvi
   async function publish(input: StorageHoldSnapshotWriteInput): Promise<StorageHoldCommittedSnapshot> {
     const document = parseBucketDocument(serializeBucketDocument(input.document));
     const previous = await readHead();
-    if (input.expectedHeadEtag !== undefined && previous.etag !== input.expectedHeadEtag) {
+    if (input.expectedHead.kind === "etag" && previous.etag !== input.expectedHead.etag) {
+      throw snapshotError("Storage Hold commit head changed; retry from the latest snapshot", "storage_conflict");
+    }
+    if (input.expectedHead.kind === "absent" && previous.value !== undefined) {
       throw snapshotError("Storage Hold commit head changed; retry from the latest snapshot", "storage_conflict");
     }
     const snapshotId = input.snapshotId ?? generateId();
@@ -171,7 +175,10 @@ export function createStorageHoldSnapshotRepository(provider: StorageBucketProvi
       committedAt: input.now ?? now()
     };
     try {
-      const written = await provider.put(HEAD_PATH, jsonBytes(head), previous.etag ? { ifMatch: previous.etag } : { ifNoneMatch: "*" });
+      const condition = input.expectedHead.kind === "etag"
+        ? { ifMatch: input.expectedHead.etag }
+        : { ifNoneMatch: "*" as const };
+      const written = await provider.put(HEAD_PATH, jsonBytes(head), condition);
       return readSnapshot(head, written.etag);
     } catch (caught) {
       if (caught instanceof StorageRuntimeError && caught.code === "storage_conflict") throw snapshotError("Storage Hold snapshot publish conflicted; retry from the latest snapshot", "storage_conflict");

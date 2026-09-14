@@ -8,7 +8,7 @@ import type {
 } from "@keymaster/contracts";
 import { buildStorageNamespaceRoot, validateOwnerPublicKeyHex, validatePluginStorageDeclaration } from "@keymaster/contracts";
 import { createKeyValueStore } from "../../kv-engine/partitionedKvEngine.js";
-import { StorageRuntimeError } from "../../runtime/storageRuntimeError.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 
 export interface OwnerAppStoreOptions {
   /** 当前抽象桶 Provider；业务调用方不能自行替换。 */
@@ -34,8 +34,8 @@ export interface OwnerAppStoreOptions {
  * binding，K-V 引擎只接收 binding，不接收调用方提供的物理路径。
  */
 export function createOwnerAppStore(options: OwnerAppStoreOptions): OwnerAppStore {
-  if (options.declaration.scope !== "key") {
-    throw new StorageRuntimeError("storage_forbidden", "Owner App storage must use key scope");
+  if (options.declaration.scope !== "owner" || options.declaration.authority === "platform-only" || options.declaration.model !== "kv") {
+    throw new StorageRuntimeError("storage_forbidden", "Owner App storage declaration is invalid");
   }
   if (options.provider.bucketId !== options.bucket.bucketId) {
     throw new StorageRuntimeError("storage_forbidden", "Storage bucket binding mismatch");

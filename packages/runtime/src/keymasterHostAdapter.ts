@@ -230,11 +230,13 @@ function providesOfManifest(manifest: PluginManifest, runtime: RuntimeKind | und
   return [];
 }
 
-function storageOfManifest(
+function storagesOfManifest(
   manifest: PluginManifest,
   runtime: RuntimeKind | undefined,
-): PluginStorageDeclaration | undefined {
-  return currentUnit(manifest, runtime)?.storage ?? manifest.storage;
+): PluginStorageDeclaration[] {
+  const unit = currentUnit(manifest, runtime);
+  if (unit) return unit.storages ? [...unit.storages] : unit.storage ? [unit.storage] : [];
+  return manifest.storages ? [...manifest.storages] : manifest.storage ? [manifest.storage] : [];
 }
 
 function startupPolicy(manifest: PluginManifest): {
@@ -344,6 +346,7 @@ function createDeferredOwnerAppStore(
       const opened = await authority.openOwnerAppStore({ pluginId, declaration });
       try {
         scope.assertActive();
+        if (!opened.ownerPublicKeyHex) throw new Error("Owner storage binding has no owner");
         const latestOwner = authority.getActivePublicKeyHex?.()?.toLowerCase();
         if (latestOwner && opened.ownerPublicKeyHex.toLowerCase() !== latestOwner) {
           throw new Error("Owner storage owner changed while opening binding");
@@ -382,7 +385,12 @@ function createDeferredOwnerAppStore(
     get bucketId() { return current?.bucketId ?? "pending"; },
     get bucketGeneration() { return current?.bucketGeneration ?? 0; },
     get ownerPublicKeyHex() { return ownerPublicKeyHex ?? ""; },
-    applicationStorageId: declaration.applicationStorageId,
+    moduleId: declaration.moduleId,
+    purposeId: declaration.purposeId,
+    scope: declaration.scope,
+    authority: declaration.authority,
+    model: "kv",
+    schemaVersion: declaration.schemaVersion,
     get: async (key, options) => run((store) => store.get(key, options)),
     list: async (input) => run((store) => store.list(input)),
     put: async (key, value, condition) => run((store) => store.put(key, value, condition)),
@@ -396,28 +404,41 @@ function createDeferredOwnerAppStore(
   };
 }
 
-async function bindManifestStorage(
+async function bindStorageDeclaration(
   options: LegacyCreatePluginHostOptions,
   host: WebLoomPluginHost,
   pluginId: string,
-  manifest: PluginManifest,
+  declaration: PluginStorageDeclaration,
   scope: import("webloom-framework").LifecycleScope,
 ): Promise<KeyValueStore | undefined> {
-  const declaration = storageOfManifest(manifest, options.runtime);
-  if (!declaration) return undefined;
   const authority = options.storageBindingAuthority
     ?? (host.capabilities.has(STORAGE_BINDING_AUTHORITY_CAPABILITY)
       ? host.capabilities.get(STORAGE_BINDING_AUTHORITY_CAPABILITY)
       : undefined);
   if (!authority) throw new Error(`Plugin "${pluginId}" requires the storage binding authority`);
-  if (declaration.scope === "platform") {
-    return authority.openPlatformStore({
-      pluginId,
-      applicationStorageId: declaration.applicationStorageId,
-      schemaVersion: declaration.schemaVersion,
-    });
+  if (declaration.scope === "bucket") {
+    return authority.openPlatformStore({ pluginId, declaration });
   }
   return createDeferredOwnerAppStore(authority, pluginId, declaration, scope);
+}
+
+function borrowKeyValueStore(store: KeyValueStore): import("@keymaster/contracts").BorrowedKeyValueStore {
+  return {
+    get bucketId() { return store.bucketId; },
+    get bucketGeneration() { return store.bucketGeneration; },
+    get ownerPublicKeyHex() { return store.ownerPublicKeyHex; },
+    get moduleId() { return store.moduleId; },
+    get purposeId() { return store.purposeId; },
+    get scope() { return store.scope; },
+    get authority() { return store.authority; },
+    get model() { return store.model; },
+    get schemaVersion() { return store.schemaVersion; },
+    get: (key, input) => store.get(key, input),
+    list: (input) => store.list(input),
+    put: (key, value, condition) => store.put(key, value, condition),
+    delete: (key, condition) => store.delete(key, condition),
+    commit: (input) => store.commit(input),
+  };
 }
 
 /** 把 Keymaster ResourceDefinition 适配为 WebLoom ResourceDefinition。 */
@@ -695,7 +716,6 @@ export function createKeymasterPluginHost(
   });
   const configStore = createPluginConfigStore({
     readOnly: options.disableConfigPersistence,
-    storage: options.configStorage,
     initial: options.initialPluginConfig,
   });
 
@@ -953,7 +973,8 @@ export function createKeymasterPluginHost(
   function createLegacyContext(
     context: WebLoomPluginContext,
     manifest: PluginManifest,
-    storage: KeyValueStore | undefined,
+    storage: import("@keymaster/contracts").BorrowedKeyValueStore | undefined,
+    storages: ReadonlyMap<string, import("@keymaster/contracts").BorrowedKeyValueStore>,
   ): KeymasterPluginContext {
     const scopedCache = new Map<string, unknown>();
     let scopedChannelFactory: ChannelRuntimeFactory | undefined;
@@ -998,6 +1019,11 @@ export function createKeymasterPluginHost(
     }, "keyspace-resource-binding");
     const extension = {
       storage,
+      storageFor: (purposeId: string) => {
+        const selected = storages.get(purposeId);
+        if (!selected) throw new Error(`Plugin "${manifest.id}" did not declare storage purpose "${purposeId}" for this runtime unit`);
+        return selected;
+      },
       coordinator,
     };
     const capability = <C extends Capability>(
@@ -1053,6 +1079,7 @@ export function createKeymasterPluginHost(
         };
       })(),
       storage,
+      storageFor: extension.storageFor,
       coordinator,
       extension,
       capability,
@@ -1083,11 +1110,16 @@ export function createKeymasterPluginHost(
         i18n.registerResources(manifest.id, manifest.i18n);
         context.onDispose(() => i18n.unregisterResources(manifest.id));
       }
-      let storage = await bindManifestStorage(options, coreHost!, manifest.id, manifest, context.scope);
-      if (storage) {
-        storage = context.scope.track(storage, (value) => value.close(), "storage");
+      const declared = storagesOfManifest(manifest, options.runtime);
+      const bound = new Map<string, import("@keymaster/contracts").BorrowedKeyValueStore>();
+      for (const declaration of declared) {
+        let owned = await bindStorageDeclaration(options, coreHost!, manifest.id, declaration, context.scope);
+        if (!owned) continue;
+        owned = context.scope.track(owned, (value) => value.close(), `storage:${declaration.purposeId}`);
+        bound.set(declaration.purposeId, borrowKeyValueStore(owned));
       }
-      const result = await setup(createLegacyContext(context, manifest, storage));
+      const storage = declared.length === 1 ? bound.get(declared[0]!.purposeId) : undefined;
+      const result = await setup(createLegacyContext(context, manifest, storage, bound));
       return typeof result === "function" ? async () => { await result(); } : async () => undefined;
     };
   }
@@ -1688,15 +1720,17 @@ function validateKeymasterManifest(
     unitIds.add(unit.id);
     if (!unit.runtime || !unit.scopeKind) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" is incomplete`);
   }
-  const declarations = [manifest.storage, ...units.map((unit) => unit.storage)].filter(
+  const declarations = [manifest.storage, ...(manifest.storages ?? []), ...units.flatMap((unit) => [unit.storage, ...(unit.storages ?? [])])].filter(
     (value): value is PluginStorageDeclaration => value !== undefined,
   );
   for (const declaration of declarations) {
-    if (declaration.scope === "platform" && !new Set(["storage", "protocol", "vault", "settings"]).has(manifest.id)) {
-      throw new Error(`Plugin "${manifest.id}" is not allowed to declare platform storage`);
-    }
     validatePluginStorageDeclaration(declaration);
     assertSystemStorageDeclaration(manifest.id, declaration);
+  }
+  for (const unit of units) {
+    if (unit.storage && unit.storages) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" cannot declare both storage and storages`);
+    const purposes = (unit.storages ?? []).map((declaration) => declaration.purposeId);
+    if (new Set(purposes).size !== purposes.length) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" has duplicate storage purposes`);
   }
   if (startup === "required") {
     if (!defaultEnabled || canDisable) {

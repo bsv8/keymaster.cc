@@ -48,6 +48,7 @@ export function WocSettingsPage() {
   }, [service]);
 
   async function apply(next: WocConfig) {
+    const previous = service.getConfig();
     setDraft(next);
     setError(null);
     const urlCheck = validateWocBaseUrl(next.baseUrl);
@@ -60,11 +61,19 @@ export function WocSettingsPage() {
       setError(rateCheck.error);
       return;
     }
-    const result = await coordinator.p2pkhProviderConfigUpdate("woc", { endpoint: urlCheck.value, requestsPerSecond: rateCheck.value });
-    if (result.status !== "accepted" && result.status !== "ok") {
-      setError("message" in result ? result.message : "Coordinator configuration update failed");
+    try {
+      const result = await coordinator.p2pkhProviderConfigUpdate("woc", { endpoint: urlCheck.value, requestsPerSecond: rateCheck.value });
+      if (result.status !== "accepted" && result.status !== "ok") {
+        setDraft(previous);
+        setError("message" in result ? result.message : "Coordinator configuration update failed");
+        return;
+      }
+    } catch (cause) {
+      setDraft(previous);
+      setError(cause instanceof Error ? cause.message : String(cause));
       return;
     }
+    // Coordinator 已确认持久化成功后，才更新 actor 的运行时配置。
     service.updateConfig({ baseUrl: urlCheck.value, requestsPerSecond: rateCheck.value });
   }
 

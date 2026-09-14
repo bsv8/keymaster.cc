@@ -2,7 +2,7 @@
 // 单 Key Backup 导入 modal 回归测试。
 //
 // 关键不变量：
-//   - 源密码 / 目标 Vault 密码必须原样透传，不能在 UI 层 trim；
+//   - 来源桶密码 / 目标桶密码必须原样透传，不能在 UI 层 trim；
 //   - 成功时调用 vault.importKeyBackup 并关闭 modal。
 
 // @vitest-environment jsdom
@@ -56,10 +56,10 @@ describe("VaultKeyBackupImportModal", () => {
     fireEvent.change(screen.getByLabelText("备份 JSON"), {
       target: { value: '{"backupVersion":1}' }
     });
-    fireEvent.change(screen.getByLabelText("源密码"), {
+    fireEvent.change(screen.getByLabelText("来源桶密码"), {
       target: { value: "  source-pass  " }
     });
-    fireEvent.change(screen.getByLabelText("目标 Vault 密码"), {
+    fireEvent.change(screen.getByLabelText("目标桶密码"), {
       target: { value: "  target-pass  " }
     });
 

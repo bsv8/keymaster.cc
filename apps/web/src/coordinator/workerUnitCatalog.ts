@@ -5,11 +5,12 @@
 // 运行单元，taskId 和最终 I/O 审计入口则把实际执行边界连接起来。
 
 import type { FinalIoAuditOperation } from "./finalIoAudit.js";
-import type { KeymasterScopeKind, PluginManifest } from "@keymaster/contracts";
+import type { KeymasterScopeKind, PluginManifest, PluginStorageDeclaration } from "@keymaster/contracts";
 import {
   BUILTIN_PLUGIN_PRODUCT_IDS,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
   getBuiltinPluginRuntimeUnits,
+  SYSTEM_STORAGE_DECLARATIONS,
 } from "@keymaster/contracts";
 
 export interface CoordinatorWorkerUnitDescriptor {
@@ -27,6 +28,10 @@ export interface CoordinatorWorkerUnitDescriptor {
   requiredProductIds?: readonly string[];
   /** 由该运行单元拥有的 Worker 服务；服务单元可以没有周期任务。 */
   serviceIds?: readonly string[];
+  /** 该真实 Worker 执行单元实际打开的中央命名存储声明。 */
+  storageDeclarations: readonly PluginStorageDeclaration[];
+  /** 与实际打开顺序对应的命名 purpose；禁止以“第一个声明”代替。 */
+  storagePurposeIds: readonly string[];
   /** 任务进入最终 I/O lease 的审计入口；显式绑定 taskId，避免靠数组顺序猜测。 */
   finalIoAuditEntries: readonly {
     taskId: string;
@@ -47,6 +52,8 @@ interface CoordinatorWorkerUnitRuntimeDetails {
   requiredProductIds?: readonly string[];
   /** 由该运行单元拥有的 Worker 服务。 */
   serviceIds?: readonly string[];
+  /** 由实际 Worker 实现打开的中央 purpose；声明对象由 contracts 目录解析。 */
+  storagePurposes: readonly string[];
   /** 任务进入最终 I/O lease 的审计入口。 */
   finalIoAuditEntries: readonly {
     taskId: string;
@@ -65,30 +72,35 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     unitId: "storage.coordinator-worker",
     taskIds: [],
     serviceIds: ["storage.runtime-controller"],
+    storagePurposes: [],
     finalIoAuditEntries: [],
   },
   {
     unitId: "vault.coordinator-worker",
     taskIds: [],
     serviceIds: ["vault.keyspace", "vault.crypto"],
+    storagePurposes: [],
     finalIoAuditEntries: [],
   },
   {
     unitId: "window-p2p.coordinator-worker",
     taskIds: [],
     serviceIds: ["window-p2p.executor-lease"],
+    storagePurposes: [],
     finalIoAuditEntries: [],
   },
   {
     unitId: "msfile.coordinator-worker",
     taskIds: [],
     serviceIds: ["msfile.service"],
+    storagePurposes: ["settings", "suppliers", "app-policies", "app-usage"],
     finalIoAuditEntries: [],
   },
   {
     unitId: "sat-subscription.coordinator-worker",
     taskIds: [],
     serviceIds: ["sat-subscription.service", "channel.subscription-mux"],
+    storagePurposes: ["subscription-state"],
     finalIoAuditEntries: [],
   },
   {
@@ -96,6 +108,7 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     taskIds: ["contacts.presence-probe"],
     requiredProductIds: ["background", "contacts"],
     serviceIds: ["contacts.service"],
+    storagePurposes: ["address-book"],
     finalIoAuditEntries: [{ taskId: "contacts.presence-probe", operation: "contacts.presence-probe" }],
   },
   {
@@ -103,6 +116,7 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     taskIds: ["p2pkh.transactions-sync"],
     requiredProductIds: ["background", "p2pkh"],
     serviceIds: ["p2pkh.provider-registry", "p2pkh.asset-service"],
+    storagePurposes: ["state"],
     finalIoAuditEntries: [{ taskId: "p2pkh.transactions-sync", operation: "p2pkh.sync" }],
   },
   {
@@ -110,6 +124,7 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     taskIds: ["token-bsv21.sync"],
     requiredProductIds: ["background", "p2pkh", "token-bsv21", "woc"],
     serviceIds: ["token-bsv21.service"],
+    storagePurposes: ["token-state"],
     finalIoAuditEntries: [{ taskId: "token-bsv21.sync", operation: "token-bsv21.sync" }],
   },
   {
@@ -117,6 +132,7 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     taskIds: ["token-stas.sync"],
     requiredProductIds: ["background", "p2pkh", "token-stas", "woc"],
     serviceIds: ["token-stas.service"],
+    storagePurposes: ["token-state"],
     finalIoAuditEntries: [{ taskId: "token-stas.sync", operation: "token-stas.sync" }],
   },
   {
@@ -124,18 +140,21 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     taskIds: ["collectible-1satordinals.sync"],
     requiredProductIds: ["background", "p2pkh", "collectible-1satordinals", "woc"],
     serviceIds: ["collectible-1satordinals.service"],
+    storagePurposes: [],
     finalIoAuditEntries: [{ taskId: "collectible-1satordinals.sync", operation: "collectible-1satordinals.sync" }],
   },
   {
     unitId: "woc.coordinator-worker",
     taskIds: [],
     serviceIds: ["woc.service", "woc.bsv21", "woc.stas", "woc.1satordinals"],
+    storagePurposes: [],
     finalIoAuditEntries: [],
   },
   {
     unitId: "junglebus.coordinator-worker",
     taskIds: [],
     serviceIds: ["junglebus.confirmed-provider"],
+    storagePurposes: [],
     finalIoAuditEntries: [],
   },
 ] as const satisfies readonly CoordinatorWorkerUnitRuntimeDetails[];
@@ -159,6 +178,14 @@ export const COORDINATOR_WORKER_UNIT_CATALOG: readonly CoordinatorWorkerUnitDesc
       runtime: resolved.runtime,
       scopeKind: resolved.scopeKind,
       taskIds: [...details.taskIds],
+      storagePurposeIds: [...details.storagePurposes],
+      storageDeclarations: details.storagePurposes.map((purposeId) => {
+        const declaration = SYSTEM_STORAGE_DECLARATIONS[resolved.productId]?.find((candidate) => candidate.purposeId === purposeId);
+        if (!declaration) {
+          throw new Error(`Worker 领域补充目录引用了未声明的存储 purpose: ${resolved.productId}/${purposeId}`);
+        }
+        return { ...declaration };
+      }),
       ...("requiredProductIds" in details && details.requiredProductIds
         ? { requiredProductIds: [...details.requiredProductIds] }
         : {}),
@@ -166,6 +193,22 @@ export const COORDINATOR_WORKER_UNIT_CATALOG: readonly CoordinatorWorkerUnitDesc
       finalIoAuditEntries: [...details.finalIoAuditEntries],
     };
   });
+
+function sameStorageDeclaration(left: PluginStorageDeclaration, right: PluginStorageDeclaration): boolean {
+  return left.moduleId === right.moduleId
+    && left.purposeId === right.purposeId
+    && left.scope === right.scope
+    && left.authority === right.authority
+    && left.model === right.model
+    && left.schemaVersion === right.schemaVersion;
+}
+
+function storageDeclarationsOfUnit(unit: {
+  storage?: PluginStorageDeclaration;
+  storages?: readonly PluginStorageDeclaration[];
+}): PluginStorageDeclaration[] {
+  return unit.storages ? [...unit.storages] : unit.storage ? [unit.storage] : [];
+}
 
 /** 返回任务对应的 Worker 单元；未知任务由测试注册入口或未来迁移使用。 */
 export function getCoordinatorWorkerUnitForTask(taskId: string): CoordinatorWorkerUnitDescriptor | undefined {
@@ -217,6 +260,15 @@ export function validateCoordinatorWorkerUnitCatalog(
         errors.push(`Worker 单元未在 manifest 中声明: ${unit.unitId}`);
       } else if (manifestUnit.runtime !== unit.runtime || manifestUnit.scopeKind !== unit.scopeKind) {
         errors.push(`Worker 单元与 manifest 描述不一致: ${unit.unitId}`);
+      } else {
+        const manifestDeclarations = storageDeclarationsOfUnit(manifestUnit);
+        if (manifestDeclarations.length !== unit.storageDeclarations.length
+          || manifestDeclarations.some((declaration, index) => {
+            const expected = unit.storageDeclarations[index];
+            return !expected || !sameStorageDeclaration(declaration, expected);
+          })) {
+          errors.push(`Worker 存储声明与 manifest 不一致: ${unit.unitId}`);
+        }
       }
     }
     if (products.has(unit.productId)) errors.push(`重复 productId: ${unit.productId}`);
@@ -225,6 +277,19 @@ export function validateCoordinatorWorkerUnitCatalog(
     units.add(unit.unitId);
     if (unit.runtime !== "shared-worker") errors.push(`Worker 单元 runtime 无效: ${unit.unitId}`);
     if (!["root", "storage", "owner-session"].includes(unit.scopeKind)) errors.push(`Worker 单元 scopeKind 无效: ${unit.unitId}`);
+    if (new Set(unit.storagePurposeIds).size !== unit.storagePurposeIds.length) {
+      errors.push(`重复 Worker 存储 purpose: ${unit.unitId}`);
+    }
+    if (unit.storagePurposeIds.length !== unit.storageDeclarations.length
+      || unit.storagePurposeIds.some((purposeId, index) => unit.storageDeclarations[index]?.purposeId !== purposeId)) {
+      errors.push(`Worker 存储 purpose 与声明不一致: ${unit.unitId}`);
+    }
+    const centralDeclarations = SYSTEM_STORAGE_DECLARATIONS[unit.productId] ?? [];
+    for (const declaration of unit.storageDeclarations) {
+      if (!centralDeclarations.some((candidate) => sameStorageDeclaration(candidate, declaration))) {
+        errors.push(`Worker 单元引用未授权存储声明: ${unit.unitId}/${declaration.purposeId}`);
+      }
+    }
     const serviceIds = unit.serviceIds ?? [];
     if (unit.taskIds.length === 0 && serviceIds.length === 0) errors.push(`Worker 单元没有 taskId 或 serviceId: ${unit.unitId}`);
     if (unit.taskIds.length !== unit.finalIoAuditEntries.length) {

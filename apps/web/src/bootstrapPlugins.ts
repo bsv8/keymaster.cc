@@ -45,6 +45,8 @@ import {
   type ContactsCoordinatorControl,
   type PluginPermission,
   type RuntimeIdentityTransition,
+  CENTRAL_STORAGE_DECLARATIONS,
+  type PluginStorageDeclaration,
 } from "@keymaster/contracts";
 import {
   type WindowApp,
@@ -301,15 +303,18 @@ function isStaleCoordinatorStorageBinding(error: unknown): boolean {
 /** 创建页面 Host 使用的受限平台 K-V 句柄；不暴露真实 Provider 或 grant 值。 */
 export function createCoordinatorPlatformStore(
   client: SessionCoordinatorClient,
-  applicationStorageId: string,
+  declaration: PluginStorageDeclaration,
   pluginId = "runtime"
 ): KeyValueStore {
+  if (declaration.scope !== "bucket" || declaration.authority !== "platform-only" || declaration.model !== "kv") {
+    throw new Error("Coordinator platform store requires a bucket platform K-V declaration");
+  }
   const internalClient = client as SessionCoordinatorClient & StorageBindingCoordinatorClient;
   let currentGrant: import("@keymaster/contracts/storage-internal").StoragePlatformGrant | undefined;
   let grantPromise: Promise<import("@keymaster/contracts/storage-internal").StoragePlatformGrant> | undefined;
   const grant = async () => {
     if (!grantPromise) {
-      grantPromise = internalClient.storageBindPlatform({ pluginId, declaration: { scope: "platform", applicationStorageId, schemaVersion: 1 } }).then((result) => {
+      grantPromise = internalClient.storageBindPlatform({ pluginId, declaration }).then((result) => {
         if (result.status !== "ok") {
           const error = new Error("message" in result ? result.message : `Platform storage bind failed: ${result.status}`) as Error & { code?: string };
           if ("code" in result && typeof result.code === "string") error.code = result.code;
@@ -373,7 +378,12 @@ export function createCoordinatorPlatformStore(
     bucketId: "coordinator",
     bucketGeneration: 0,
     ownerPublicKeyHex: "",
-    applicationStorageId,
+    moduleId: declaration.moduleId,
+    purposeId: declaration.purposeId,
+    scope: declaration.scope,
+    authority: declaration.authority,
+    model: declaration.model,
+    schemaVersion: declaration.schemaVersion,
     get<T = KeyValueValue>(key: string, options: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> {
       return request<KeyValueEntry<T> | undefined>((platformGrantId) => ({ type: "platform.get", platformGrantId, key, partition: options.partition }));
     },
@@ -568,11 +578,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       },
     };
 
-    const configStorage = runWithBootstrapErrorContext({
-      stage: "coordinator",
-      operation: "create-config-storage",
-      context: { bucket: "settings" }
-    }, () => createCoordinatorPlatformStore(coordinatorClient, "settings"));
     const runtimeUnitImplementationRegistry = runWithBootstrapErrorContext({
       stage: "bootstrap",
       operation: "create-runtime-unit-registry"
@@ -587,7 +592,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   }, () => createPluginHost({
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd,
-    configStorage,
     storageBindingAuthority: createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }),
     coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId),
     pluginIntentCoordinator,

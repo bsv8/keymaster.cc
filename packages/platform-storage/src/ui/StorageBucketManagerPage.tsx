@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Check, ChevronDown, HardDrive, KeyRound, LockKeyhole, MoreHorizontal, Plus } from "lucide-react";
-import { KEYSPACE_SERVICE_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type ActiveKeyState, type KeyRef, type StorageBootstrapState, type StorageBucketCatalogEntryV2, type StorageBucketConnectionConfigV1, type StorageCatalogV2, type VaultService } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type ActiveKeyState, type KeyRef, type StorageBucketCatalogEntryV2, type StorageBucketConnectionConfigV1, type StorageCatalogV2, type VaultService } from "@keymaster/contracts";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import { router, useI18n } from "@keymaster/runtime";
 import { useOptionalCapability } from "webloom-framework/react";
 import { createStorageBucketManagementService } from "../hold/storageBucketManagement.js";
-import { exportStorageProfileEnvelope, readLegacyStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
 import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
 import { BucketConnectionFields, EMPTY_BUCKET_DRAFT, bucketDraftFingerprint, connectionFromBucketDraft, createBucketProvider, updateBucketDraft, validateBucketDraft, type BucketDraft } from "./BucketConnectionFields.js";
 
@@ -25,16 +24,6 @@ function readCatalogState(): { catalog: StorageCatalogV2; error?: string } {
       catalog: EMPTY_CATALOG,
       error: error instanceof Error ? error.message : "Storage catalog is unavailable"
     };
-  }
-}
-
-function readLegacyState(): { state: StorageBootstrapState | null; error?: string } {
-  try {
-    return { state: readLegacyStorageBootstrap() };
-  } catch (error) {
-    // 旧记录损坏也必须显式显示，不能把它当成“没有旧数据”从而让用户
-    // 误以为切换到新版桶已经完成。
-    return { state: null, error: error instanceof Error ? error.message : "Legacy storage bootstrap is invalid" };
   }
 }
 
@@ -90,10 +79,6 @@ export function StorageBucketManagerPage() {
   const [catalogState, setCatalogState] = useState(readCatalogState);
   const catalog = catalogState.catalog;
   const catalogError = catalogState.error;
-  const [legacyState, setLegacyState] = useState(readLegacyState);
-  const legacyBootstrap = legacyState.state;
-  const legacyError = legacyState.error;
-  const [legacyKeys, setLegacyKeys] = useState<KeyRef[]>([]);
   const [draft, setDraft] = useState<BucketDraft>(EMPTY_BUCKET_DRAFT);
   const [editorOpen, setEditorOpen] = useState(false);
   const [keys, setKeys] = useState<KeyRef[]>([]);
@@ -111,7 +96,6 @@ export function StorageBucketManagerPage() {
 
   const reload = useCallback(() => {
     setCatalogState(readCatalogState());
-    setLegacyState(readLegacyState());
   }, []);
 
   useEffect(() => {
@@ -125,31 +109,6 @@ export function StorageBucketManagerPage() {
     setRuntimeStatus(storage.status());
     return storage.subscribe(() => setRuntimeStatus(storage.status()));
   }, [storage]);
-
-  useEffect(() => {
-    // 只在旧 bootstrap 仍是当前启动来源时读取旧 Key 元数据。若新版
-    // 目录已经存在，Worker 不会绑定旧 OPFS；此时不能把新版 Keys 误显示
-    // 成旧桶 Keys，只保留迁移/导出提示。
-    if (!legacyBootstrap || !vault || catalog.buckets.length > 0) {
-      setLegacyKeys([]);
-      return;
-    }
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const keys = await vault.listKeys();
-        if (!cancelled) setLegacyKeys(keys);
-      } catch {
-        if (!cancelled) setLegacyKeys([]);
-      }
-    };
-    void load();
-    const unsubscribe = vault.onLifecycleChange(() => { void load(); });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [catalog.buckets.length, legacyBootstrap, vault]);
 
   useEffect(() => {
     if (!vault || vault.status() !== "unlocked") {
@@ -531,31 +490,6 @@ export function StorageBucketManagerPage() {
     } finally { provider?.dispose(); setBusy(null); }
   }
 
-  function exportLegacyStorageProfile() {
-    const envelope = legacyBootstrap?.encryptedStorageProfileEnvelope;
-    if (!envelope) return;
-    try {
-      download("legacy-storage-profile.json", exportStorageProfileEnvelope(envelope));
-      setMessage({ kind: "success", text: t("storage.bucketManager.legacyProfileExported", { defaultValue: "旧版 Storage Profile 已导出；原记录仍保留，未自动迁移。" }) });
-    } catch (error) {
-      setMessage({ kind: "error", text: error instanceof Error ? error.message : t("storage.bucketManager.err.legacyExport", { defaultValue: "旧版存储导出失败" }) });
-    }
-  }
-
-  async function exportLegacyKey(key: KeyRef) {
-    if (!vault) return;
-    setBusy("export"); setMessage(null);
-    try {
-      const backup = await vault.exportKeyBackup(key.publicKeyHex);
-      download(`${key.label.replace(/[^\p{L}\p{N}._-]+/gu, "_") || "legacy-key"}.keyhold.json`, new TextEncoder().encode(backup));
-      setMessage({ kind: "success", text: t("storage.bucketManager.legacyKeyExported", { defaultValue: "旧版 KeyHold 备份已导出；原 OPFS 数据仍保留。" }) });
-    } catch (error) {
-      setMessage({ kind: "error", text: error instanceof Error ? error.message : t("storage.bucketManager.err.legacyExport", { defaultValue: "旧版存储导出失败" }) });
-    } finally {
-      setBusy(null);
-    }
-  }
-
   function openAddBucket() {
     setDraft(EMPTY_BUCKET_DRAFT);
     setTestedFingerprint(null);
@@ -581,27 +515,6 @@ export function StorageBucketManagerPage() {
       {message ? <p className={`storage-bucket-manager__message is-${message.kind}`} role={message.kind === "error" ? "alert" : "status"}>{message.text}</p> : null}
       {catalogError ? <p className="storage-bucket-manager__message is-error" role="alert">{t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" })}</p> : null}
       {reloadRequired ? <p className="storage-bucket-manager__reload"><span>{t("storage.bucketManager.reloadHint", { defaultValue: "新桶已成为当前桶；重新加载后会进入新的桶会话。" })}</span><Button variant="secondary" size="sm" onClick={() => window.location.reload()}>{t("storage.bucketManager.reload", { defaultValue: "重新加载" })}</Button></p> : null}
-
-      {legacyBootstrap || legacyError ? <section className="storage-bucket-manager__legacy" aria-labelledby="storage-bucket-legacy-title">
-        <div className="storage-bucket-manager__legacy-copy">
-          <span className="storage-bucket-manager__eyebrow">LEGACY</span>
-          <div><h2 id="storage-bucket-legacy-title">{t("storage.bucketManager.legacyTitle", { defaultValue: "检测到旧版存储" })}</h2>
-            <p>{legacyError ?? (legacyBootstrap?.selectedBackend === "opfs"
-              ? t("storage.bucketManager.legacyOpfs", { defaultValue: "这是旧版 OPFS 单桶数据。新版不会把它静默映射成 Local，也不会删除原数据。" })
-              : t("storage.bucketManager.legacyProfile", { defaultValue: "这是旧版独立 Storage Profile。它与新版桶目录、桶密码模型不同，不能直接当作新版桶。" }))}</p>
-          </div>
-        </div>
-        {legacyBootstrap?.encryptedStorageProfileEnvelope ? <div className="storage-bucket-manager__legacy-action">
-          <span>{t("storage.bucketManager.legacyProfileHint", { defaultValue: "先导出加密 Profile 文件，原密码仍只用于旧版解锁；导出不会解密凭据。" })}</span>
-          <Button variant="secondary" size="sm" onClick={exportLegacyStorageProfile} disabled={busy !== null}>{t("storage.bucketManager.legacyExportProfile", { defaultValue: "导出旧 Profile" })}</Button>
-        </div> : null}
-        {legacyBootstrap?.selectedBackend === "opfs" && catalog.buckets.length === 0 ? <div className="storage-bucket-manager__legacy-keys">
-          <div><strong>{t("storage.bucketManager.legacyKeysTitle", { defaultValue: "旧版 KeyHold 备份" })}</strong><p>{t("storage.bucketManager.legacyKeysHint", { defaultValue: "逐把导出加密 KeyHold 文件，再在新桶的 Key 管理中逐项导入。不会复制私钥到本机目录。" })}</p></div>
-          {legacyKeys.length > 0 ? <ul>{legacyKeys.map((key) => <li key={key.publicKeyHex}><span>{key.label}</span><Button variant="ghost" size="sm" onClick={() => void exportLegacyKey(key)} disabled={busy !== null}>{t("storage.bucketManager.legacyExportKey", { defaultValue: "导出 KeyHold" })}</Button></li>)}</ul> : <p className="storage-bucket-manager__legacy-empty">{t("storage.bucketManager.legacyKeysEmpty", { defaultValue: "暂未读取到旧 Key；请确认旧 OPFS 会话已启动。" })}</p>}
-          <Button variant="ghost" size="sm" onClick={() => router.push("/settings/vault")}>{t("storage.bucketManager.openKeyManagement", { defaultValue: "打开 Key 管理" })}</Button>
-        </div> : null}
-        <p className="storage-bucket-manager__legacy-footnote">{t("storage.bucketManager.legacyMigrationNote", { defaultValue: "迁移是显式、逐步且可回退的：先导出并验证旧文件，再创建新版 Local/S3 桶；在确认新桶可用前，不要清理旧 OPFS 或旧 Profile。" })}</p>
-      </section> : null}
 
       <section className="storage-bucket-manager__section" aria-labelledby="storage-bucket-list-title">
         <div className="storage-bucket-manager__section-heading">

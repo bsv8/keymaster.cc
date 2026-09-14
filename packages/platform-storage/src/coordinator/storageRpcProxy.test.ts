@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
 import type { SessionCoordinatorClient, OwnerAppStorageGrant } from "@keymaster/contracts";
 import { StorageRpcProxy } from "./storageRpcProxy.js";
 
@@ -6,7 +7,7 @@ const context: OwnerAppStorageGrant = {
   connectSessionId: "session-a", transportOrigin: "https://app.example",
   appIdentity: { version: 1, publisherPublicKeyHex: "02" + "11".repeat(32), appId: "app-a", appName: "App A", identityDigestHex: "aa".repeat(32) },
   bucketId: "bucket", bucketGeneration: 1, ownerPublicKeyHex: "02" + "33".repeat(32),
-  applicationStorageId: "app-storage-a", sessionEpoch: "epoch-a"
+  moduleId: deriveThirdPartyStorageModuleId("02" + "11".repeat(32), "app-a"), purposeId: "files", sessionEpoch: "epoch-a"
 };
 
 function coordinator() {
@@ -23,19 +24,6 @@ function coordinator() {
 }
 
 describe("StorageRpcProxy grant boundary", () => {
-  it("preserves the Coordinator provider diagnostic for the settings UI", async () => {
-    const client = coordinator();
-    vi.spyOn(client, "storageControl").mockResolvedValue({ status: "error", code: "storage_unavailable", message: "Storage provider CORS request failed" });
-    const proxy = new StorageRpcProxy(client);
-
-    await expect(proxy.probeProvider({
-      providerId: "cloudflare-r2",
-      connection: { accountId: "ab".repeat(16), endpointVariant: "default", bucket: "bucket" },
-      credentials: { mode: "replace", accessKeyId: "access", secretAccessKey: "secret" }
-    })).rejects.toThrow("Storage provider CORS request failed");
-    proxy.dispose();
-  });
-
   it("registers an opaque grant and never sends OwnerAppStorageGrant on data RPC", async () => {
     const client = coordinator();
     const proxy = new StorageRpcProxy(client);

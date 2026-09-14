@@ -9,11 +9,11 @@ import type {
   CoordinatorMsFileStateEvent,
   SessionEpoch,
 } from "@keymaster/contracts";
-import { openMsFileRepository, type MsFileRepository } from "./storage/msfileRepository.js";
+import type { MsFileRepository } from "./storage/msfileRepository.js";
 import { createMsFileService, MsFileServiceImpl, type MsFileServiceImplDeps, type MsFileServiceEventState } from "./msfileService.js";
 import { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
 
-export { openMsFileRepository, MSFILE_STORAGE_ID, MSFILE_STORAGE_VERSION, sanitizeAppOverride } from "./storage/msfileRepository.js";
+export { openMsFileRepository, sanitizeAppOverride, type MsFileRepositoryStores } from "./storage/msfileRepository.js";
 export {
   createMsFileService,
   MsFileServiceImpl,
@@ -71,10 +71,10 @@ export async function startMsFileRuntime(options: {
   transport?: MsFileTransport;
   notify: (event: CoordinatorMsFileStateEvent) => void;
   revisionProvider: () => number;
-  repository?: MsFileRepository;
+  repository: MsFileRepository;
 }): Promise<MsFileServiceImpl> {
   const deps: MsFileServiceImplDeps = {
-    repository: options.repository ?? (await openMsFileRepository()),
+    repository: options.repository,
     transport: options.transport ?? createUnavailableMsFileTransport(),
     notifyStateChange: (state) => {
       options.notify(buildMsFileStateEvent(state, options.revisionProvider(), options.sessionEpoch));

@@ -79,7 +79,7 @@ import type {
   StorageOwnerGrant,
   StoragePlatformGrant,
 } from "./storage/internal.js";
-import type { StorageBootstrapState, StorageProfileEnvelopeV1, StorageProviderConfigDraft, StorageConnection, StorageSecretUpdate, StorageProviderId } from "./storage/profile.js";
+import type { StorageBootstrapState, StorageProviderConfigDraft, StorageConnection, StorageSecretUpdate, StorageProviderId } from "./storage/profile.js";
 import type {
   StorageDeleteResult,
   StorageDirectoryResult,
@@ -105,10 +105,9 @@ import type { InitialSetupRecoveryRecordV1 } from "./storage/catalog.js";
 import { STORAGE_MAX_PARTS, STORAGE_PART_SIZE_BYTES } from "./storage/kv.js";
 import type { KeyValueCommitResult, KeyValueEntry, KeyValueEntryMeta, KeyValueListResult, KeyValueValue } from "./storage/kv.js";
 import type { PluginIntentCommand, PluginIntentSnapshot, PluginIntentSubmissionResult } from "webloom-framework";
-import type { BucketConditionalCapabilityProbeResult, BucketConditionalCapabilitiesView, StorageActivationResult, StorageOpfsProbeResult, StorageProviderConnectionView, StorageProbeResult, StorageProviderSummary, StorageRuntimeControllerStatus, StorageRuntimeStatus, StorageSelectedResult } from "./storage/runtime.js";
+import type { BucketConditionalCapabilityProbeResult, BucketConditionalCapabilitiesView, StorageActivationResult, StorageProviderConnectionView, StorageProbeResult, StorageProviderSummary, StorageRuntimeControllerStatus, StorageRuntimeStatus, StorageSelectedResult } from "./storage/runtime.js";
 import type {
   KeyRef,
-  PasskeyProtection,
   VaultSealedSecret,
 } from "./vault.js";
 import type {
@@ -174,11 +173,11 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
 ]);
 
 const STORAGE_CONTROL_TYPES = [
-  "status", "summary", "connection", "unlock-profile", "unlock-bucket", "initial-setup",
+  "status", "summary", "connection", "unlock-bucket", "initial-setup",
   "initial-setup-result", "initial-setup-recovery-list", "initial-setup-cleanup",
   "switch-bucket",
-  "change-bucket-config", "rename-bucket", "select-opfs", "import-profile", "retry",
-  "change-bucket-password", "probe", "activate", "clear", "reset", "cancel-probe",
+  "change-bucket-config", "rename-bucket", "retry",
+  "change-bucket-password", "cancel-probe",
   "capabilities", "probe-capabilities", "cold-export",
 ] as const satisfies readonly CoordinatorStorageControl["type"][];
 
@@ -190,9 +189,7 @@ const STORAGE_DATA_TYPES = [
 const VAULT_OPERATION_TYPES = [
   "createVault", "createVaultWithInitialKey", "createVaultWithImportedKey", "listKeys", "getKey",
   "setActive", "deleteKey", "verifyPassword", "changePassword", "generateKey", "importPrivateKey",
-  "exportKeyBackup", "exportCurrentKeyBackup", "importKeyBackup", "listCurrentKeyPasskeys",
-  "listPasskeysForKey", "prepareAddPasskeyToCurrentKey", "addPasskeyToCurrentKey",
-  "removePasskeyFromCurrentKey", "getPasskeyChallenge", "activateKeyWithPasskey", "sealLocalSecret",
+  "exportKeyBackup", "exportCurrentKeyBackup", "importKeyBackup", "sealLocalSecret",
   "openLocalSecret", "finalizeEmptyVaultAfterLastKeyDeletion", "recoverEmptyVaultToUninitialized",
 ] as const satisfies readonly CoordinatorVaultOperation["type"][];
 
@@ -247,12 +244,8 @@ export type CoordinatorVaultOperationResultFor<O extends CoordinatorVaultOperati
   O extends { type: "createVaultWithInitialKey" | "createVaultWithImportedKey" | "generateKey" | "importPrivateKey" | "importKeyBackup" } ? CoordinatorVaultKeyView :
   O extends { type: "listKeys" } ? CoordinatorVaultKeyView[] :
   O extends { type: "getKey" } ? CoordinatorVaultKeyView | undefined :
-  O extends { type: "setActive" | "deleteKey" | "verifyPassword" | "changePassword" | "finalizeEmptyVaultAfterLastKeyDeletion" | "recoverEmptyVaultToUninitialized" | "removePasskeyFromCurrentKey" | "activateKeyWithPasskey" } ? true :
+  O extends { type: "setActive" | "deleteKey" | "verifyPassword" | "changePassword" | "finalizeEmptyVaultAfterLastKeyDeletion" | "recoverEmptyVaultToUninitialized" } ? true :
   O extends { type: "exportKeyBackup" | "exportCurrentKeyBackup" } ? string :
-  O extends { type: "listCurrentKeyPasskeys" | "listPasskeysForKey" } ? PasskeyProtection[] :
-  O extends { type: "prepareAddPasskeyToCurrentKey" } ? { intentId: string; publicKeyHex: string } :
-  O extends { type: "addPasskeyToCurrentKey" } ? PasskeyProtection :
-  O extends { type: "getPasskeyChallenge" } ? CoordinatorVaultPasskeyChallenge :
   O extends { type: "sealLocalSecret" } ? VaultSealedSecret :
   O extends { type: "openLocalSecret" } ? Uint8Array :
   never;
@@ -269,14 +262,11 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
   C extends { type: "switch-bucket" } ? StorageBucketSwitchResultV1 :
   C extends { type: "change-bucket-config" | "rename-bucket" } ? StorageBucketCatalogEntryV2 :
   C extends { type: "change-bucket-password" } ? StorageBucketPasswordRotationResultV1 :
-  C extends { type: "unlock-profile" | "import-profile" | "probe" } ? StorageProbeResult :
   C extends { type: "unlock-bucket" } ? CoordinatorStorageUnlockBucketResult :
-  C extends { type: "select-opfs" } ? StorageOpfsProbeResult :
   C extends { type: "cold-export" } ? Uint8Array :
-  C extends { type: "activate" } ? StorageActivationResult :
   C extends { type: "capabilities" } ? BucketConditionalCapabilitiesView | null :
   C extends { type: "probe-capabilities" } ? BucketConditionalCapabilityProbeResult :
-  C extends { type: "cancel-probe" | "clear" | "reset" } ? undefined :
+  C extends { type: "cancel-probe" } ? undefined :
   never;
 
 /** 依据 storage.data 内层 data discriminant 收窄 operationResult。 */
@@ -355,13 +345,6 @@ export type CoordinatorVaultKeyView = Pick<KeyRef, "publicKeyHex" | "label" | "c
   source?: string;
 };
 
-export type CoordinatorVaultPasskeyChallenge = {
-  credentialIdB64: string;
-  prfSaltB64: string;
-  rpId: string;
-  transports?: string[];
-};
-
 /** Vault operation 的可序列化结果联合；按操作内部 discriminant 解析。 */
 export type CoordinatorVaultOperationResult =
   | boolean
@@ -371,9 +354,6 @@ export type CoordinatorVaultOperationResult =
   | VaultSealedSecret
   | CoordinatorVaultKeyView
   | CoordinatorVaultKeyView[]
-  | PasskeyProtection
-  | PasskeyProtection[]
-  | CoordinatorVaultPasskeyChallenge
   | { intentId: string; publicKeyHex: string };
 
 export type CoordinatorStorageUnlockBucketResult =
@@ -670,26 +650,6 @@ function parseJsonRecord(value: unknown, field: string): P2pkhProviderConfig {
   return parsed;
 }
 
-function parseProfileEnvelope(value: unknown): StorageProfileEnvelopeV1 {
-  const envelope = expectRecord(value, "storageBootstrapState.encryptedStorageProfileEnvelope");
-  if (envelope.format !== "keymaster.storage-profile" || envelope.version !== 1 || envelope.kdf !== "pbkdf2-sha256") {
-    throw new TypeError("Coordinator storage profile envelope is invalid");
-  }
-  boundedNumber(envelope.iterations, "storage profile iterations", 1);
-  text(envelope.saltHex, "storage profile saltHex", 512);
-  text(envelope.nonceHex, "storage profile nonceHex", 512);
-  text(envelope.ciphertextHex, "storage profile ciphertextHex", 2_000_000);
-  return {
-    format: "keymaster.storage-profile",
-    version: 1,
-    kdf: "pbkdf2-sha256",
-    iterations: envelope.iterations as number,
-    saltHex: envelope.saltHex as string,
-    nonceHex: envelope.nonceHex as string,
-    ciphertextHex: envelope.ciphertextHex as string,
-  };
-}
-
 function parseBucketConnection(value: unknown): StorageBucketConnectionConfigV1 {
   const connection = expectRecord(value, "storage connection");
   if (connection.kind === "local") return { kind: "local" };
@@ -710,19 +670,20 @@ function parseBucketConnection(value: unknown): StorageBucketConnectionConfigV1 
 
 function parseStorageBootstrapState(value: unknown): StorageBootstrapState {
   const state = expectRecord(value, "storageBootstrapState");
-  if (state.selectedBackend !== "local" && state.selectedBackend !== "s3" && state.selectedBackend !== "opfs") {
+  if (state.selectedBackend !== "local" && state.selectedBackend !== "s3") {
     throw new TypeError("Coordinator storageBootstrapState.selectedBackend is invalid");
   }
-  const selectedProfileId = optionalText(state.selectedProfileId, "storageBootstrapState.selectedProfileId", 256);
+  const selectedProfileId = text(state.selectedProfileId, "storageBootstrapState.selectedProfileId", 256);
   const language = optionalText(state.language, "storageBootstrapState.language", 64);
   const theme = optionalText(state.theme, "storageBootstrapState.theme", 64);
-  const selectedBucket = state.selectedBucket === undefined ? undefined : parseLocalStorageCatalogEntry(state.selectedBucket, "storageBootstrapState.selectedBucket");
-  const envelope = state.encryptedStorageProfileEnvelope === undefined ? undefined : parseProfileEnvelope(state.encryptedStorageProfileEnvelope);
+  const selectedBucket = parseLocalStorageCatalogEntry(state.selectedBucket, "storageBootstrapState.selectedBucket");
+  if (selectedBucket.bucketId !== selectedProfileId || selectedBucket.backend !== state.selectedBackend) {
+    throw new TypeError("Coordinator storageBootstrapState selection is inconsistent");
+  }
   return {
     selectedBackend: state.selectedBackend,
-    ...(selectedProfileId === undefined ? {} : { selectedProfileId }),
-    ...(selectedBucket === undefined ? {} : { selectedBucket }),
-    ...(envelope === undefined ? {} : { encryptedStorageProfileEnvelope: envelope }),
+    selectedProfileId,
+    selectedBucket,
     ...(language === undefined ? {} : { language }),
     ...(theme === undefined ? {} : { theme }),
   };
@@ -830,10 +791,10 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
   const control = expectRecord(value, "storage control");
   const type = enumValue(control.type, STORAGE_CONTROL_TYPES, "storage control.type");
   switch (type) {
-    case "status": case "summary": case "connection": case "select-opfs": case "retry":
+    case "status": case "summary": case "connection": case "retry":
     case "initial-setup-recovery-list": case "cancel-probe": case "capabilities": case "probe-capabilities": case "cold-export":
       return { type };
-    case "unlock-profile": case "unlock-bucket":
+    case "unlock-bucket":
       return { type, password: text(control.password, "storage control." + type + ".password", 4_096) };
     case "initial-setup":
       return { type, plan: parseInitialSetupPlan(control.plan) };
@@ -856,16 +817,8 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
     }
     case "rename-bucket":
       return { type, label: text(control.label, "storage control.rename-bucket.label", 256) };
-    case "import-profile":
-      return { type, envelope: parseProfileEnvelope(control.envelope), password: text(control.password, "storage control.import-profile.password", 4_096) };
     case "change-bucket-password":
       return { type, oldPassword: text(control.oldPassword, "storage control.change-bucket-password.oldPassword", 4_096), newPassword: text(control.newPassword, "storage control.change-bucket-password.newPassword", 4_096) };
-    case "probe":
-      return { type, config: parseProviderConfigDraft(control.config) };
-    case "activate":
-      return { type, config: parseProviderConfigDraft(control.config), expectedProviderGeneration: nullableBoundedNumber(control.expectedProviderGeneration, "storage control.activate.expectedProviderGeneration") };
-    case "clear": case "reset":
-      return { type, expectedProviderGeneration: nullableBoundedNumber(control.expectedProviderGeneration, "storage control." + type + ".expectedProviderGeneration") };
     default:
       throw new TypeError("Coordinator storage control type " + type + " is unsupported");
   }
@@ -1025,11 +978,18 @@ function platformStorageDataFromParsed(parsed: ParsedInternalStorageData): Coord
 function parseStorageDeclaration(value: unknown, field: string): PluginStorageDeclaration {
   const declaration = expectRecord(value, field);
   const scope = declaration.scope;
-  if (scope !== "key" && scope !== "platform") throw new TypeError(`Coordinator ${field}.scope is invalid`);
-  const applicationStorageId = text(declaration.applicationStorageId, `${field}.applicationStorageId`, 63);
+  if (scope !== "bucket" && scope !== "owner") throw new TypeError(`Coordinator ${field}.scope is invalid`);
+  const authority = declaration.authority;
+  if (authority !== "platform-only" && authority !== "built-in-module" && authority !== "third-party-app") {
+    throw new TypeError(`Coordinator ${field}.authority is invalid`);
+  }
+  const model = declaration.model;
+  if (model !== "snapshot" && model !== "kv") throw new TypeError(`Coordinator ${field}.model is invalid`);
+  const moduleId = text(declaration.moduleId, `${field}.moduleId`, 63);
+  const purposeId = text(declaration.purposeId, `${field}.purposeId`, 63);
   const schemaVersion = boundedNumber(declaration.schemaVersion, `${field}.schemaVersion`, 1);
   try {
-    return validatePluginStorageDeclaration({ scope, applicationStorageId, schemaVersion });
+    return validatePluginStorageDeclaration({ moduleId, purposeId, scope, authority, model, schemaVersion });
   } catch (error) {
     throw new TypeError(`Coordinator ${field} is invalid`, { cause: error });
   }
@@ -1228,9 +1188,9 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
         },
       };
     }
-    case "listKeys": case "exportCurrentKeyBackup": case "listCurrentKeyPasskeys": case "finalizeEmptyVaultAfterLastKeyDeletion": case "recoverEmptyVaultToUninitialized":
+    case "listKeys": case "exportCurrentKeyBackup": case "finalizeEmptyVaultAfterLastKeyDeletion": case "recoverEmptyVaultToUninitialized":
       return { type };
-    case "getKey": case "setActive": case "exportKeyBackup": case "listPasskeysForKey":
+    case "getKey": case "setActive": case "exportKeyBackup":
       return { type, publicKeyHex: publicKey() };
     case "deleteKey": {
       const bucketPassword = optionalText(operation.bucketPassword, "Vault operation.bucketPassword", 4_096);
@@ -1249,14 +1209,6 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
       return { type, password: password("password"), label: label(), material: { hex: text(material.hex, "Vault operation.material.hex", 256), ...(wif === undefined ? {} : { wif }) }, format: text(operation.format, "Vault operation.format", 128), capabilities: capabilities(), ...(source === undefined ? {} : { source }) };
     }
     case "importKeyBackup": return { type, backup: text(operation.backup, "Vault operation.backup", 2_000_000), sourcePassword: password("sourcePassword"), targetPassword: password("targetPassword") };
-    case "prepareAddPasskeyToCurrentKey": return { type, label: label() };
-    case "addPasskeyToCurrentKey": {
-      const transports = optionalStringList(operation.transports, "Vault operation.transports", 16, 64);
-      return { type, intentId: text(operation.intentId, "Vault operation.intentId", 256), credentialIdB64: text(operation.credentialIdB64, "Vault operation.credentialIdB64", 2_048), prfSaltB64: text(operation.prfSaltB64, "Vault operation.prfSaltB64", 2_048), prfOutputHex: text(operation.prfOutputHex, "Vault operation.prfOutputHex", 2_048), rpId: text(operation.rpId, "Vault operation.rpId", 256), ...(transports === undefined ? {} : { transports }) };
-    }
-    case "removePasskeyFromCurrentKey": return { type, passkeyId: text(operation.passkeyId, "Vault operation.passkeyId", 256) };
-    case "getPasskeyChallenge": return { type, passkeyId: text(operation.passkeyId, "Vault operation.passkeyId", 256) };
-    case "activateKeyWithPasskey": return { type, passkeyId: text(operation.passkeyId, "Vault operation.passkeyId", 256), prfOutputHex: text(operation.prfOutputHex, "Vault operation.prfOutputHex", 2_048) };
     case "sealLocalSecret": return { type, scope: text(operation.scope, "Vault operation.scope", 256), plaintext: uint8ArrayValue(operation.plaintext, "Vault operation.plaintext") };
     case "openLocalSecret": {
       const sealed = expectRecord(operation.sealed, "Vault operation.sealed");
@@ -1686,27 +1638,6 @@ function parseCoordinatorVaultKeyView(value: unknown, field: string): Coordinato
   };
 }
 
-function parsePasskeyProtection(value: unknown, field: string): PasskeyProtection {
-  const protection = expectRecord(value, field);
-  return {
-    id: text(protection.id, field + ".id", 2_048),
-    label: text(protection.label, field + ".label", 256),
-    rpId: text(protection.rpId, field + ".rpId", 256),
-    createdAt: text(protection.createdAt, field + ".createdAt", 128),
-  };
-}
-
-function parsePasskeyChallenge(value: unknown, field: string): CoordinatorVaultPasskeyChallenge {
-  const challenge = expectRecord(value, field);
-  const transports = optionalStringList(challenge.transports, field + ".transports", 16, 64);
-  return {
-    credentialIdB64: text(challenge.credentialIdB64, field + ".credentialIdB64", 2_048),
-    prfSaltB64: text(challenge.prfSaltB64, field + ".prfSaltB64", 2_048),
-    rpId: text(challenge.rpId, field + ".rpId", 256),
-    ...(transports === undefined ? {} : { transports }),
-  };
-}
-
 function parseVaultSealedSecret(value: unknown, field: string): VaultSealedSecret {
   const sealed = expectRecord(value, field);
   if (sealed.version !== 3 || sealed.keySource !== "active-key-hkdf-v1") throw new TypeError(`Coordinator ${field} version is invalid`);
@@ -1725,10 +1656,6 @@ function parseCoordinatorVaultOperationResult(value: unknown, field: string): Co
   if (typeof value === "string") return text(value, field, 2_000_000);
   if (value instanceof Uint8Array) return value.slice();
   if (Array.isArray(value)) {
-    if (value.length === 0) return [];
-    if (value.every((item) => record(item) && "id" in item && "rpId" in item)) {
-      return value.map((item, index) => parsePasskeyProtection(item, `${field}[${index}]`));
-    }
     return value.map((item, index) => parseCoordinatorVaultKeyView(item, `${field}[${index}]`));
   }
   const object = expectRecord(value, field);
@@ -1736,8 +1663,6 @@ function parseCoordinatorVaultOperationResult(value: unknown, field: string): Co
   if ("intentId" in object) {
     return { intentId: text(object.intentId, field + ".intentId", 256), publicKeyHex: text(object.publicKeyHex, field + ".publicKeyHex", 66) };
   }
-  if ("credentialIdB64" in object) return parsePasskeyChallenge(object, field);
-  if ("id" in object && "rpId" in object) return parsePasskeyProtection(object, field);
   if ("publicKeyHex" in object) return parseCoordinatorVaultKeyView(object, field);
   throw new TypeError(`Coordinator ${field} is unsupported`);
 }
@@ -1855,18 +1780,6 @@ function parseStorageProbeResult(value: unknown, field: string): StorageProbeRes
   };
 }
 
-function parseStorageOpfsProbeResult(value: unknown, field: string): StorageOpfsProbeResult {
-  const probe = expectRecord(value, field);
-  return {
-    ok: booleanValue(probe.ok, field + ".ok"),
-    providerId: enumValue(probe.providerId, ["opfs"] as const, field + ".providerId"),
-    latencyMs: boundedNumber(probe.latencyMs, field + ".latencyMs"),
-    ...(parseStorageProbeDiagnostic(probe.diagnostic, field + ".diagnostic") === undefined
-      ? {}
-      : { diagnostic: parseStorageProbeDiagnostic(probe.diagnostic, field + ".diagnostic") }),
-  };
-}
-
 function parseStorageSelectedResult(value: unknown, field: string): StorageSelectedResult {
   const result = expectRecord(value, field);
   if (result.status !== "selected" || result.backend !== "s3" || result.requiresRuntimeBootstrap !== true) {
@@ -1957,14 +1870,11 @@ function parseStorageControlResult(value: unknown, field: string): CoordinatorSt
   if (Array.isArray(value)) return value.map((item, index) => parseLocalStorageRecoveryRecord(item, `${field}[${index}]`));
   const result = expectRecord(value, field);
   if (result.status === "setup-succeeded" || result.status === "cleanup-confirmed" || result.status === "cleanup-required" || result.status === "not-found") return parseStorageRecoveryResult(result, field);
-  if (result.status === "selected") return parseStorageSelectedResult(result, field);
   if ("firstKey" in result || (result.ok === false && "error" in result)) return parseInitialSetupResult(result, field);
   if (result.ok === true && "vaultUnlocked" in result) return parseStorageBucketSwitchResult(result, field);
   if (result.ok === false && "diagnostic" in result && !("providerId" in result)) return parseStorageUnlockBucketResult(result, field);
   if (result.ok === true && "bucket" in result && !("firstKey" in result) && !("vaultUnlocked" in result)) return parseStorageBucketRotationResult(result, field);
   if ("providerId" in result && "connection" in result) return parseStorageProviderConnection(result, field);
-  if (result.providerId === "opfs" && "latencyMs" in result) return parseStorageOpfsProbeResult(result, field);
-  if ("providerId" in result && "latencyMs" in result) return parseStorageProbeResult(result, field);
   if ("bucketHint" in result) return parseStorageProviderSummary(result, field);
   if ("put" in result && "complete" in result) return parseStorageCapabilities(result, field);
   if ("put" in result && typeof result.put === "string" && "cleanupWarning" in result) {
@@ -2093,7 +2003,11 @@ function parseStorageOwnerGrant(value: unknown, field: string): StorageOwnerGran
     bucketId: text(grant.bucketId, field + ".bucketId", 256),
     bucketGeneration: boundedNumber(grant.bucketGeneration, field + ".bucketGeneration"),
     ownerPublicKeyHex: text(grant.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 66),
-    applicationStorageId: text(grant.applicationStorageId, field + ".applicationStorageId", 256),
+    moduleId: text(grant.moduleId, field + ".moduleId", 63),
+    purposeId: text(grant.purposeId, field + ".purposeId", 63),
+    authority: enumValue(grant.authority, ["built-in-module", "third-party-app"] as const, field + ".authority"),
+    model: "kv",
+    schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
     ownerStorageGeneration: boundedNumber(grant.ownerStorageGeneration, field + ".ownerStorageGeneration"),
     sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
   };
@@ -2105,7 +2019,10 @@ function parseStoragePlatformGrant(value: unknown, field: string): StoragePlatfo
     platformGrantId: text(grant.platformGrantId, field + ".platformGrantId", 256),
     bucketId: text(grant.bucketId, field + ".bucketId", 256),
     bucketGeneration: boundedNumber(grant.bucketGeneration, field + ".bucketGeneration"),
-    applicationStorageId: text(grant.applicationStorageId, field + ".applicationStorageId", 256),
+    moduleId: text(grant.moduleId, field + ".moduleId", 63),
+    purposeId: text(grant.purposeId, field + ".purposeId", 63),
+    authority: enumValue(grant.authority, ["platform-only", "built-in-module"] as const, field + ".authority"),
+    model: "kv",
     // 与存储声明一致：schemaVersion（数据结构版本）是从 1 开始的安全整数。
     schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
     sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
@@ -2451,11 +2368,6 @@ function parseKeyViewArray(value: unknown, field: string): CoordinatorVaultKeyVi
   return value.map((item, index) => parseCoordinatorVaultKeyView(item, `${field}[${index}]`));
 }
 
-function parsePasskeyArray(value: unknown, field: string): PasskeyProtection[] {
-  if (!Array.isArray(value)) throw new TypeError(`Coordinator ${field} must be an array`);
-  return value.map((item, index) => parsePasskeyProtection(item, `${field}[${index}]`));
-}
-
 function parseCoordinatorVaultOperationResultFor(
   operation: CoordinatorVaultOperation,
   value: unknown,
@@ -2469,8 +2381,6 @@ function parseCoordinatorVaultOperationResultFor(
     case "changePassword":
     case "finalizeEmptyVaultAfterLastKeyDeletion":
     case "recoverEmptyVaultToUninitialized":
-    case "removePasskeyFromCurrentKey":
-    case "activateKeyWithPasskey":
       return parseTrueResult(value, field);
     case "createVaultWithInitialKey":
     case "createVaultWithImportedKey":
@@ -2485,19 +2395,6 @@ function parseCoordinatorVaultOperationResultFor(
     case "exportKeyBackup":
     case "exportCurrentKeyBackup":
       return text(value, field, 2_000_000);
-    case "listCurrentKeyPasskeys":
-    case "listPasskeysForKey":
-      return parsePasskeyArray(value, field);
-    case "prepareAddPasskeyToCurrentKey": {
-      const intent = expectRecord(value, field);
-      const publicKeyHex = text(intent.publicKeyHex, field + ".publicKeyHex", 66);
-      if (!/^(02|03)[0-9a-f]{64}$/iu.test(publicKeyHex)) throw new TypeError(`Coordinator ${field}.publicKeyHex is invalid`);
-      return { intentId: text(intent.intentId, field + ".intentId", 256), publicKeyHex };
-    }
-    case "addPasskeyToCurrentKey":
-      return parsePasskeyProtection(value, field);
-    case "getPasskeyChallenge":
-      return parsePasskeyChallenge(value, field);
     case "sealLocalSecret":
       return parseVaultSealedSecret(value, field);
     case "openLocalSecret":
@@ -2510,13 +2407,6 @@ function parseStorageRuntimeStatus(value: unknown, field: string): StorageRuntim
     "unselected", "authentication", "checking", "ready", "degraded", "incompatible",
     "unconfigured", "locked", "reconfiguring",
   ] as const, field);
-}
-
-function parseStorageActivationResult(value: unknown, field: string): StorageActivationResult {
-  const result = expectRecord(value, field);
-  return result.status === "selected"
-    ? parseStorageSelectedResult(result, field)
-    : parseStorageProbeResult(result, field);
 }
 
 function parseStorageControlResultFor(control: CoordinatorStorageControl, value: unknown, field: string): unknown {
@@ -2544,25 +2434,15 @@ function parseStorageControlResultFor(control: CoordinatorStorageControl, value:
       return parseLocalStorageCatalogEntry(value, field);
     case "change-bucket-password":
       return parseStorageBucketRotationResult(value, field);
-    case "unlock-profile":
-    case "import-profile":
-    case "probe":
-      return parseStorageProbeResult(value, field);
     case "unlock-bucket":
       return parseStorageUnlockBucketResult(value, field);
-    case "select-opfs":
-      return parseStorageOpfsProbeResult(value, field);
     case "cold-export":
       return uint8ArrayValue(value, field);
-    case "activate":
-      return parseStorageActivationResult(value, field);
     case "capabilities":
       return value === null ? null : parseStorageCapabilities(value, field);
     case "probe-capabilities":
       return parseStorageCapabilitiesProbeResult(value, field);
     case "cancel-probe":
-    case "clear":
-    case "reset":
       return parseUndefinedResult(value, field);
   }
 }
@@ -2762,7 +2642,7 @@ function isVoidCoordinatorRequest(request: CoordinatorRpcRequest): boolean {
     case "storage.owner.data":
     case "storage.platform.data":
       return request.data.type === "owner.delete" || request.data.type === "platform.delete";
-    case "storage.control": return request.control.type === "cancel-probe" || request.control.type === "clear" || request.control.type === "reset";
+    case "storage.control": return request.control.type === "cancel-probe";
     default: return false;
   }
 }
@@ -3477,15 +3357,24 @@ function parseLocalStorageRecoveryRecord(value: unknown, field: string): Initial
   if (value.backend !== "local" && value.backend !== "s3") throw new TypeError(`Coordinator local-storage ${field}.backend is invalid`);
   const transactionId = localStorageText(value.transactionId, `${field}.transactionId`, 128);
   const bucketId = localStorageText(value.bucketId, `${field}.bucketId`, 128);
-  const catalogEntryFingerprint = value.catalogEntryFingerprint === undefined ? undefined : localStorageText(value.catalogEntryFingerprint, `${field}.catalogEntryFingerprint`, 64);
+  const catalogEntryFingerprint = localStorageText(value.catalogEntryFingerprint, `${field}.catalogEntryFingerprint`, 64);
+  if (!/^[0-9a-f]{64}$/u.test(catalogEntryFingerprint)) throw new TypeError(`Coordinator local-storage ${field}.catalogEntryFingerprint is invalid`);
   const configRevision = localStorageInteger(value.configRevision, `${field}.configRevision`);
   const snapshotRevision = localStorageInteger(value.snapshotRevision, `${field}.snapshotRevision`);
-  const connectionFingerprint = value.connectionFingerprint === undefined ? undefined : localStorageText(value.connectionFingerprint, `${field}.connectionFingerprint`, 64);
+  const connectionFingerprint = localStorageText(value.connectionFingerprint, `${field}.connectionFingerprint`, 64);
+  if (!/^[0-9a-f]{64}$/u.test(connectionFingerprint)) throw new TypeError(`Coordinator local-storage ${field}.connectionFingerprint is invalid`);
   const phase = localStorageEnum(value.phase, LOCAL_SETUP_PHASES, `${field}.phase`);
   const catalog = localStorageEnum(value.catalog, LOCAL_SETUP_CATALOG_STATES, `${field}.catalog`);
   if (typeof value.runtimeInstalled !== "boolean") throw new TypeError(`Coordinator local-storage ${field}.runtimeInstalled is invalid`);
   const cleanup = localStorageEnum(value.cleanup, LOCAL_SETUP_ROLLBACK_STATES, `${field}.cleanup`);
   const status = localStorageEnum(value.status, LOCAL_SETUP_STATUSES, `${field}.status`);
+  const allowedKeys = new Set([
+    "format", "version", "transactionId", "bucketId", "catalogEntryFingerprint",
+    "configRevision", "snapshotRevision", "backend", "connectionFingerprint", "phase",
+    "catalog", "runtimeInstalled", "cleanup", "status", "updatedAt",
+    ...(status === "succeeded" ? ["success"] : status === "failed" ? ["error"] : []),
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) throw new TypeError(`Coordinator local-storage ${field} fields are invalid`);
   const success = value.success === undefined ? undefined : parseLocalStorageRecoverySuccess(value.success, `${field}.success`);
   const error = value.error === undefined ? undefined : parseLocalStorageUserFacingError(value.error, `${field}.error`);
   const updatedAt = localStorageInteger(value.updatedAt, `${field}.updatedAt`);
@@ -3494,11 +3383,11 @@ function parseLocalStorageRecoveryRecord(value: unknown, field: string): Initial
     version: 1,
     transactionId,
     bucketId,
-    ...(catalogEntryFingerprint === undefined ? {} : { catalogEntryFingerprint }),
+    catalogEntryFingerprint,
     configRevision,
     snapshotRevision,
     backend: value.backend,
-    ...(connectionFingerprint === undefined ? {} : { connectionFingerprint }),
+    connectionFingerprint,
     phase,
     catalog,
     runtimeInstalled: value.runtimeInstalled,

@@ -29,7 +29,7 @@
 import type {
   KeyIdentity,
   KeyspaceService,
-  KeyValueStore,
+  BorrowedKeyValueStore,
   PokerService,
   PokerSessionKeyState,
   VaultService
@@ -53,8 +53,6 @@ import { signDigestWithVault, sha256 as pokerSha256 } from "./pokerCrypto.js";
 import { PokerProtocolEngine, POKER_DISCOVERY_TOPICS } from "./engine/pokerProtocolEngine.js";
 import { BsvEncoding } from "./tsstack/adapter.js";
 import {
-  POKER_KEY_STORAGE_ID,
-  POKER_KEY_STORAGE_VERSION,
   readAllPresences,
   readAllTables,
   readAllTxIngest,
@@ -75,8 +73,10 @@ export interface PokerServiceDeps {
   vault: VaultService;
   keyspace: KeyspaceService;
   messageBus: MessageBus;
-  /** Host 绑定的 Poker owner/App K-V 句柄；缺失时禁止启动。 */
-  storage: KeyValueStore;
+  /** Host 绑定的 bucket-level Poker settings K-V 句柄。 */
+  settingsStorage: BorrowedKeyValueStore;
+  /** Host 绑定的 active-owner Poker history/state K-V 句柄。 */
+  sessionHistoryStore: BorrowedKeyValueStore;
 }
 
 /**
@@ -205,7 +205,7 @@ class PokerServiceImpl implements PokerService {
   constructor(deps: PokerServiceDeps) {
     this.deps = deps;
     this.settingsStore = createKeyValueSettingsStore<PokerSettings>({
-      storage: deps.storage,
+      storage: deps.settingsStorage,
       key: "settings",
       partition: "settings",
       defaults: defaultGlobalPokerConfig,
@@ -473,14 +473,16 @@ class PokerServiceImpl implements PokerService {
    *
    * 设计缘由（硬切换 004）：
    *   - 全局配置不随切 key 丢失，所以写盘目标是 global config；
-   *   - 写失败不抛错（UI 已经反映新值；下次 hydrate 会兜底）；
+   *   - 先等待远端 K-V 写入成功，再更新内存和通知 UI；写失败必须传播，
+   *     且不能改变当前内存配置；
    *   - patch.proxyEndpoint 变化且当前已 ready：service 主动
    *     disconnect → reconnect，让新 endpoint 立即生效。
    */
   async updateSettings(patch: Partial<PokerSettings>): Promise<void> {
-    const next: PokerSettings = { ...this.settings, ...patch };
-    this.settings = normalizePokerConfig(next);
-    this.settingsStore.save(this.settings);
+    await this.settingsReady;
+    const next = normalizePokerConfig({ ...this.settings, ...patch });
+    await this.settingsStore.save(next);
+    this.settings = next;
     this.deps.messageBus.publish(POKER_EVENT.SettingsChanged, this.settings);
     this.notifySettings();
     if (patch.proxyEndpoint !== undefined && this.currentStatus === "ready") {
@@ -789,9 +791,8 @@ class PokerServiceImpl implements PokerService {
   private async hydrateFromKeyScopedRepository(publicKeyHex: string | null): Promise<void> {
     if (!publicKeyHex) return;
     try {
-      const handle = this.deps.storage;
-      try {
-        const reads: Promise<unknown>[] = [readAllTables(handle), readAllPresences(handle), readAllTxIngest(handle, this.txEventCap)];
+      const handle = this.deps.sessionHistoryStore;
+      const reads: Promise<unknown>[] = [readAllTables(handle), readAllPresences(handle), readAllTxIngest(handle, this.txEventCap)];
         const [cachedTables, cachedPresences, cachedTxIngest] = await Promise.all(reads) as [
           ReturnType<typeof readAllTables> extends Promise<infer T> ? T : never,
           ReturnType<typeof readAllPresences> extends Promise<infer T> ? T : never,
@@ -884,13 +885,6 @@ class PokerServiceImpl implements PokerService {
         }
         // txIngest：是历史数据，不主动 fire onTxEvent；调用方通过
         // service.recentTxEvents() 取快照（用于 inbox / 诊断）。
-      } finally {
-        try {
-          handle.close();
-        } catch {
-          /* noop */
-        }
-      }
     } catch {
       // namespace 打不开（vault locked / 已删 / 旧版本无表）→ 静默
       // 兜底为空 cache。绝不允许 K-V 故障阻塞 service 启动或切 key。
@@ -920,11 +914,7 @@ class PokerServiceImpl implements PokerService {
   }
 
   private reloadSettings(): Promise<void> {
-    return this.settingsStore.ready().catch((error) => {
-      // 插件在 active key 产生前可以先装载；延迟 owner 句柄此时没有
-      // 可读取的 namespace，等 keyspace active 事件再次调用 ready()。
-      if (!(error instanceof Error) || !/active key/u.test(error.message)) throw error;
-    }).then(() => {
+    return this.settingsStore.ready().then(() => {
       this.settings = this.settingsStore.load();
       this.notifySettings();
     });
@@ -1238,24 +1228,16 @@ class PokerServiceImpl implements PokerService {
     const hash = this.currentSessionKeyHash;
     if (!hash) return;
     try {
-      const handle = this.deps.storage;
-      try {
-        await writeTxIngest(handle, {
-          txid: e.txid,
-          route: e.route,
-          kind: e.kind,
-          reason: e.reason,
-          rawTx: e.rawTx,
-          receivedAt: e.receivedAt,
-          consumed: false
-        });
-      } finally {
-        try {
-          handle.close();
-        } catch {
-          /* noop */
-        }
-      }
+      const handle = this.deps.sessionHistoryStore;
+      await writeTxIngest(handle, {
+        txid: e.txid,
+        route: e.route,
+        kind: e.kind,
+        reason: e.reason,
+        rawTx: e.rawTx,
+        receivedAt: e.receivedAt,
+        consumed: false
+      });
     } catch {
       // 旧 key namespace 不可用 / 已删：吞掉；不允许脏写入。
     }

@@ -2,7 +2,9 @@
 // STUN 配置校验 / owner K-V 持久化 / 内存 store 单测。
 
 import { describe, expect, it, vi } from "vitest";
+import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import type { BorrowedKeyValueStore } from "@keymaster/contracts";
 import {
   DEFAULT_STUN_SERVERS,
   WEBRTC_CONFIG_STORAGE_KEY,
@@ -107,10 +109,8 @@ describe("coerceWebrtcConfig", () => {
 describe("createKeyValueWebrtcConfigStore", () => {
   function createTestStore() {
     const storage = createInMemoryKeyValueStore({
-      scope: "key",
+      ...CENTRAL_STORAGE_DECLARATIONS.webrtcSettings,
       ownerPublicKeyHex: "a".repeat(64),
-      applicationStorageId: "WebRTC",
-      schemaVersion: 1,
       bucketId: "test-memory",
       bucketGeneration: 1
     });
@@ -123,18 +123,40 @@ describe("createKeyValueWebrtcConfigStore", () => {
     expect(c.stunServers).toEqual([...DEFAULT_STUN_SERVERS]);
   });
 
-  it("blur-save persists and notifies subscribers", () => {
+  it("blur-save persists and notifies subscribers", async () => {
     const { store: s } = createTestStore();
     const seen: string[][] = [];
     const off = s.subscribe((c) => seen.push(c.stunServers));
-    s.save({ stunServers: ["stun:a.example.com:3478"] });
+    await s.save({ stunServers: ["stun:a.example.com:3478"] });
     expect(seen).toEqual([["stun:a.example.com:3478"]]);
     off();
   });
 
-  it("rollback on save-failure: throws and does not update memory", () => {
+  it("rollback on save-failure: throws and does not update memory", async () => {
+    const { storage } = createTestStore();
+    let fail = true;
+    const failingStorage: BorrowedKeyValueStore = {
+      ...storage,
+      async put<T>(...args: Parameters<BorrowedKeyValueStore["put"]>): ReturnType<BorrowedKeyValueStore["put"]> {
+        if (fail) throw new Error("injected WebRTC storage failure");
+        return storage.put<T>(...args);
+      }
+    } as BorrowedKeyValueStore;
+    const s = createKeyValueWebrtcConfigStore(failingStorage);
+    const before = s.snapshot();
+    const seen: unknown[] = [];
+    s.subscribe((c) => seen.push(c));
+    await expect(s.save({ stunServers: ["stun:a.example.com:3478"] })).rejects.toThrow("injected WebRTC storage failure");
+    expect(s.snapshot()).toEqual(before);
+    expect(seen).toEqual([]);
+    fail = false;
+    await s.save({ stunServers: ["stun:a.example.com:3478"] });
+    expect(s.snapshot().stunServers).toEqual(["stun:a.example.com:3478"]);
+  });
+
+  it("validation failure does not update memory", async () => {
     const { store: s } = createTestStore();
-    s.save({ stunServers: ["stun:a.example.com:3478"] });
+    await s.save({ stunServers: ["stun:a.example.com:3478"] });
     const before = s.snapshot();
     expect(() =>
       s.save({ stunServers: ["turn:bad"] })
@@ -142,19 +164,18 @@ describe("createKeyValueWebrtcConfigStore", () => {
     expect(s.snapshot()).toEqual(before);
   });
 
-  it("save notify does not include save calls themselves twice", () => {
+  it("save notify does not include save calls themselves twice", async () => {
     const { store: s } = createTestStore();
     let count = 0;
     s.subscribe(() => count++);
     count = 0;
-    s.save({ stunServers: ["stun:abc.example.com:19302"] });
+    await s.save({ stunServers: ["stun:abc.example.com:19302"] });
     expect(count).toBe(1);
   });
 
   it("uses WEBRTC_CONFIG_STORAGE_KEY in the owner K-V namespace", async () => {
     const { storage, store: s } = createTestStore();
-    s.save({ stunServers: ["stun:abc.example.com:19302"] });
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await s.save({ stunServers: ["stun:abc.example.com:19302"] });
     const entry = await storage.get<{ stunServers: string[] }>(WEBRTC_CONFIG_STORAGE_KEY, { partition: "settings" });
     expect(entry?.value.stunServers).toEqual(["stun:abc.example.com:19302"]);
   });
@@ -166,11 +187,11 @@ describe("createMemoryWebrtcConfigStore", () => {
     expect(s.snapshot().stunServers).toEqual([...DEFAULT_STUN_SERVERS]);
   });
 
-  it("save notifies", () => {
+  it("save notifies", async () => {
     const s = createMemoryWebrtcConfigStore();
     const handler = vi.fn();
     s.subscribe(handler);
-    s.save({ stunServers: ["stun:x.example.com:3478"] });
+    await s.save({ stunServers: ["stun:x.example.com:3478"] });
     expect(handler).toHaveBeenCalledOnce();
   });
 });

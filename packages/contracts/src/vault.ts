@@ -154,18 +154,6 @@ export interface KeyExportEnvelope {
   created_at_unix: number;
 }
 
-/** 一把业务私钥上的 WebAuthn PRF 保护器公开信息。 */
-export interface PasskeyProtection {
-  /** 本地保护器标识；当前等于 credential id 的 base64url 编码。 */
-  id: string;
-  /** 用户可读名称，例如“MacBook Touch ID”。 */
-  label: string;
-  /** WebAuthn relying party id。 */
-  rpId: string;
-  /** 创建时间 ISO 字符串。 */
-  createdAt: string;
-}
-
 /**
  * "Key 已落库但未能自动设为 active"专用错误。
  *
@@ -251,28 +239,6 @@ export interface VaultService {
    * 造成两条真值来源。
    */
   activateKey(input: { publicKeyHex: string; password: string }): Promise<CoordinatorCommandResult>;
-  /** 使用指定 WebAuthn PRF 保护器解密并切换 active key。 */
-  activateKeyWithPasskey(input: {
-    passkeyId: string;
-  }): Promise<CoordinatorCommandResult>;
-  /** 列出目标私钥的 passkey，供切换私钥界面渲染独立按钮。 */
-  listPasskeysForKey(publicKeyHex: string): Promise<PasskeyProtection[]>;
-  /** 列出当前 active 私钥的 passkey；不接收公钥，避免双重目标真值。 */
-  listCurrentKeyPasskeys(): Promise<PasskeyProtection[]>;
-  /**
-   * 为当前 active 私钥添加 WebAuthn PRF 保护器。
-   * 当前 session 的内存私钥是唯一材料来源，不接收公钥或 Vault 密码。
-   */
-  addPasskeyToCurrentKey(input: {
-    label: string;
-  }): Promise<PasskeyProtection>;
-  /**
-   * 移除一个 passkey 保护器；无需密码，因为这只删除一个冗余解密器，
-   * 不会解密或导出私钥。密码保护器始终保留，不能由此接口删除。
-   */
-  removePasskeyFromCurrentKey(input: {
-    passkeyId: string;
-  }): Promise<void>;
   /**
    * 订阅 notice 变化（设置 / 清除）。返回取消订阅函数。
    * 订阅时会立即把当前 notice 值喂给 handler，避免新挂载的 UI 漏掉
@@ -417,7 +383,7 @@ export interface VaultService {
    *
    * 设计缘由：
    *   - "删完最后一把 Key 后应该回到首启欢迎页"是平台级生命周期，
-   *     不能由 keyspace 越层动 `vaultKeyRepository.deleteMeta()`，也不能让 UI 凭
+   *     不能由 keyspace 越层删除 Vault 元数据，也不能让 UI 凭
    *     "本地列表 length === 0"自己跳转；状态源必须是 Vault。
    *   - 仅允许在"Vault 仍存在但 key 列表已空"的收尾场景调用；否则
    *     fail closed。具体来说：
@@ -519,8 +485,7 @@ export interface VaultService {
 
   /**
    * 导出单 Key Backup。
-   * v2 备份把密码与所有 WebAuthn PRF passkey 作为独立 protectors 导出；
-   * 任一仍可用的 protector 都对应同一把业务私钥。导出不接触明文私钥。
+   * 备份只包含由当前桶密码保护的 Hold 密文；导出不接触明文私钥。
    * 返回值是可直接下载的 JSON 字符串。
    */
   exportKeyBackup(publicKeyHex: string): Promise<string>;
