@@ -1,5 +1,5 @@
 // apps/web/src/theme/themeStore.ts
-// 主题状态：mode（持久化、三档选择） + theme（实际生效的视觉主题，不持久化）。
+// 主题状态只存在于当前 Tab；跨客户端偏好应由远端设置负责。
 // 设计缘由：
 //   - 用户在 UI 上选择的是「跟随系统 / 黑 / 白」，这是「模式」；
 //   - 实际写到 <html data-theme="…"> 的只有 dark/light 两套视觉主题。
@@ -10,31 +10,10 @@
 export type ThemeMode = "auto" | "dark" | "light";
 export type ThemeName = "dark" | "light";
 
-const STORAGE_KEY = "keymaster.themeMode";
 const DATA_ATTR = "data-theme";
 
 function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
-}
-
-function readStoredMode(): ThemeMode {
-  if (!isBrowser()) return "auto";
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw === "auto" || raw === "dark" || raw === "light") return raw;
-  } catch {
-    // localStorage 可能因隐私模式 / Safari ITP 抛错，吞掉走默认。
-  }
-  return "auto";
-}
-
-function writeStoredMode(mode: ThemeMode): void {
-  if (!isBrowser()) return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, mode);
-  } catch {
-    // 同上。
-  }
 }
 
 /** 解析 matchMedia 结果到 theme。系统未明确时按 light 兜底（与参考图风格一致）。 */
@@ -96,10 +75,10 @@ function ensureSystemListener(): void {
   }
 }
 
-/** 首屏调用：读 localStorage、计算 theme、写到 <html>、建立系统监听。 */
+/** 首屏使用系统默认，随后可由当前 Tab 或远端设置投影覆盖。 */
 export function applyInitialTheme(): void {
   if (!isBrowser()) return;
-  store.mode = readStoredMode();
+  store.mode = "auto";
   store.theme = computeTheme(store.mode);
   applyTheme(store.theme);
   ensureSystemListener();
@@ -116,7 +95,6 @@ export function getTheme(): ThemeName {
 export function setMode(mode: ThemeMode): void {
   if (store.mode === mode) return;
   store.mode = mode;
-  writeStoredMode(mode);
   const next = computeTheme(mode);
   if (next !== store.theme) {
     store.theme = next;

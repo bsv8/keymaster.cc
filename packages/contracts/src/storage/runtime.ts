@@ -12,7 +12,7 @@ import type {
   StorageUploadPartResult
 } from "../connectStorage.js";
 import type { StorageConnection, StorageProviderConfigDraft, StorageProviderId } from "./profile.js";
-import type { InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketPasswordRotationResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
+import type { ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketPasswordRotationResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
 
 /** Provider 运行状态；由 Coordinator 统一发布。 */
 export type StorageRuntimeStatus = "unselected" | "authentication" | "checking" | "ready" | "degraded" | "incompatible";
@@ -24,7 +24,10 @@ export type StorageRuntimeControllerStatus = "unconfigured" | "locked" | "checki
 export type StorageErrorCode =
   | "storage_not_configured" | "storage_unavailable" | "storage_invalid_path" | "storage_not_found"
   | "storage_conflict" | "storage_forbidden" | "storage_limit_exceeded" | "storage_invalid_upload"
-  | "storage_provider_error" | "storage_identity_required";
+  | "storage_provider_error" | "storage_identity_required"
+  | "storage_remote_not_initialized" | "storage_remote_already_initialized"
+  | "storage_remote_incompatible" | "storage_remote_corrupt"
+  | "storage_remote_unknown_result" | "storage_remote_location_mismatch";
 
 /** Provider 连接摘要。 */
 export interface StorageProviderSummary {
@@ -128,6 +131,8 @@ export interface StorageRuntimeController {
    * Storage/Vault/active Key；页面不得拆成多个持久化调用。
    */
   initialSetup?(plan: InitialSetupPlan): Promise<InitialSetupResult>;
+  /** 明确连接已存在的远端；该流程不会退化为创建。 */
+  connectExistingRemote?(plan: ExistingRemoteStorageConnectPlan): Promise<ExistingRemoteStorageConnectResult>;
   /** 查询响应丢失或 Worker 重启后的同事务结果。 */
   getInitialSetupResult?(transactionId: string): Promise<InitialSetupResult | undefined>;
   /** 页面重载后发现 pending/unconfirmed 初始化；返回值不包含秘密。 */

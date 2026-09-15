@@ -39,7 +39,7 @@ import type {
   StorageRuntimeStatus
 } from "./storage/runtime.js";
 import type { StorageProviderConfigDraft } from "./storage/profile.js";
-import type { InitialSetupPlan, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
+import type { ExistingRemoteStorageConnectPlan, InitialSetupPlan, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
 import type {
   P2pkhProviderSettings,
   P2pkhProviderRegistrySnapshot,
@@ -148,6 +148,8 @@ export type CoordinatorStorageControl =
   | { type: "unlock-bucket"; password: string }
   /** 最终确认后的首桶 + 首 Key 单一事务；密码和材料只在本次请求内存在。 */
   | { type: "initial-setup"; plan: InitialSetupPlan }
+  /** 明确的只读发现/认证已有远端入口；不得隐式创建。 */
+  | { type: "connect-existing-remote"; plan: ExistingRemoteStorageConnectPlan }
   /** 响应丢失后的同事务结果查询；只携带公开事务 ID。 */
   | { type: "initial-setup-result"; transactionId: string }
   /** 页面重载后列出公开的初始化恢复记录；不含密码、凭据或私钥。 */

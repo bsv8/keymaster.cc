@@ -113,6 +113,7 @@ import {
   __testInitialSetupBucketId,
   __testInitialSetupCatalogEntryFingerprint,
   __testPrepareInitialSetup,
+  __testSeedInitialSetupRecoveryRecord,
   __testInstallCatalogLocalBinding,
   __testReleaseCatalogLocalBinding,
   __testSwitchCatalogBucket,
@@ -139,8 +140,7 @@ import {
   __testSeedCoordinatorKeyValueGarbage,
   __testCoordinatorKeyValueObjectExists,
 } from "./keymasterSessionCoordinator.worker.js";
-import { __testParseInitialSetupRecoveryRecord } from "./keymasterSessionCoordinatorClient.js";
-import { createBucketCryptoContext, encryptBucketConfig, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
+import { createBucketCryptoContext, encryptBucketConfig, createDeviceBootstrapRepository, createLocalStorageBucketProvider } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageLike, LocalStorageLocks } from "@keymaster/platform-storage";
 import type { PeerController } from "webloom-framework";
@@ -259,8 +259,8 @@ function installCoordinatorSessionInitializationBridge(): void {
   // 会清除 override，再让 LocalStorage 请求经由 fake peer capability 走真实
   // requestLocalStorageBridge pending/response/fence 路径。
   __testSetLocalStorageBridgeOverride(async (input) => {
-    if (input.type === "initial-setup-recovery-list") {
-      return { type: "initial-setup-recovery", records: [] };
+    if (input.type === "device-bootstrap-read") {
+      return { type: "device-bootstrap", catalog: null };
     }
     if (input.type === "catalog-read") {
       return { type: "catalog-state", catalog: structuredClone(EMPTY_STORAGE_CATALOG) };
@@ -293,6 +293,7 @@ class CatalogBridgeStorage implements LocalStorageLike {
   getItem(key: string): string | null { return this.values.get(key) ?? null; }
   setItem(key: string, value: string): void { this.values.set(key, value); }
   removeItem(key: string): void { this.values.delete(key); }
+  snapshot(): ReadonlyArray<readonly [string, string]> { return [...this.values.entries()].sort(([left], [right]) => left.localeCompare(right)); }
 }
 
 const catalogBridgeLocks = {
@@ -420,21 +421,21 @@ function makeInitialSetupWorkerBridge(initialCatalog: StorageCatalogV2 = { forma
   let catalog: StorageCatalogV2 = structuredClone(initialCatalog);
   const recovery = new Map<string, InitialSetupRecoveryRecordV1>();
   const events: string[] = [];
+  const writeOperations: Array<{ type: "put" | "delete"; path: string }> = [];
   const conflict = (message: string): Error & { code: string } => Object.assign(new Error(message), { code: "storage_conflict" });
-  const recoveryRecords = (): InitialSetupRecoveryRecordV1[] => [...recovery.values()]
-    .map((record) => __testParseInitialSetupRecoveryRecord(structuredClone(record)));
   const bridge = async (input: LocalStorageBridgeRequest): Promise<LocalStorageBridgeResponse> => {
+    if (input.type === "device-bootstrap-read"
+      || input.type === "device-bootstrap-connection-upsert"
+      || input.type === "device-bootstrap-recovery-upsert"
+      || input.type === "device-bootstrap-recovery-delete") {
+      const repository = createDeviceBootstrapRepository({ storage, locks: catalogBridgeLocks });
+      let deviceCatalog;
+      if (input.type === "device-bootstrap-connection-upsert") await repository.upsertConnection(input.connection, input.select ?? true);
+      else if (input.type === "device-bootstrap-recovery-upsert") await repository.upsertRecovery(input.recovery);
+      else if (input.type === "device-bootstrap-recovery-delete") deviceCatalog = await repository.removeRecovery(input.operationId);
+      return { type: "device-bootstrap", catalog: deviceCatalog ?? repository.read() };
+    }
     if (input.type === "catalog-read") return { type: "catalog-state", catalog: structuredClone(catalog) };
-    if (input.type === "initial-setup-recovery-list") return { type: "initial-setup-recovery", records: recoveryRecords() };
-    if (input.type === "initial-setup-recovery-write") {
-      const checked = __testParseInitialSetupRecoveryRecord(structuredClone(input.record));
-      recovery.set(checked.transactionId, structuredClone(checked));
-      return { type: "initial-setup-recovery", records: recoveryRecords() };
-    }
-    if (input.type === "initial-setup-recovery-delete") {
-      recovery.delete(input.transactionId);
-      return { type: "initial-setup-recovery", records: recoveryRecords() };
-    }
     if (input.type === "catalog-commit") {
       if (input.rollback) {
         events.push("catalog-rollback");
@@ -453,7 +454,8 @@ function makeInitialSetupWorkerBridge(initialCatalog: StorageCatalogV2 = { forma
       return { type: "catalog", bucket: input.targetBucket };
     }
     if (input.type === "get" || input.type === "list" || input.type === "put" || input.type === "delete") {
-      if (input.type === "delete") events.push("delete");
+      if (input.type === "put") { events.push("put"); writeOperations.push({ type: "put", path: input.path }); }
+      if (input.type === "delete") { events.push("delete"); writeOperations.push({ type: "delete", path: input.path }); }
       const provider = createLocalStorageBucketProvider({ storage, locks: catalogBridgeLocks, bucketId: input.bucketId, bucketGeneration: input.bucketGeneration });
       try {
         if (input.type === "get") return { type: "object", object: await provider.get(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {}) };
@@ -465,7 +467,15 @@ function makeInitialSetupWorkerBridge(initialCatalog: StorageCatalogV2 = { forma
     }
     throw new Error(`unsupported initial setup bridge request: ${input.type}`);
   };
-  return { storage, recovery, events, getCatalog: () => structuredClone(catalog), bridge };
+  return {
+    storage,
+    recovery,
+    events,
+    writeOperations,
+    getCatalog: () => structuredClone(catalog),
+    setCatalog: (next: StorageCatalogV2) => { catalog = structuredClone(next); },
+    bridge,
+  };
 }
 
 describe("Coordinator ChannelProtocol 私信编码边界", () => {
@@ -2061,6 +2071,95 @@ describe("Session Coordinator initial setup transaction", () => {
     expect(plan.bucketPassword).toBe("");
   }, 20_000);
 
+  it("真实 Coordinator 连接入口调用只读 lifecycle 并在认证后安装运行态", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const createResponse = await __testDispatchStorageControl({
+      type: "initial-setup",
+      plan: makePlan("initial-setup-connect-source-001"),
+    });
+    const created = createResponse.operationResult as InitialSetupResult;
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error(created.error.summary);
+
+    await __testReleaseCatalogLocalBinding();
+    __testResetState();
+    __testPrepareInitialSetup();
+    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const remoteWriteCount = fixture.writeOperations.length;
+    const plan = {
+      operationId: "connect-existing-remote-001",
+      remoteStorageId: created.bucket.bucketId,
+      displayName: "重新连接的远端",
+      backend: "local" as const,
+      connection: { kind: "local" as const },
+      bucketPassword: "initial-setup-password",
+    };
+
+    const connectResponse = await __testDispatchStorageControl({ type: "connect-existing-remote", plan });
+    expect(connectResponse.ack.status).toBe("ok");
+    expect(connectResponse.operationResult).toMatchObject({
+      ok: true,
+      bucket: { bucketId: created.bucket.bucketId, label: "重新连接的远端" },
+      activeKey: { publicKeyHex: created.firstKey.publicKeyHex },
+    });
+    expect(__testGetSnapshot()).toMatchObject({
+      storageBucketId: created.bucket.bucketId,
+      vaultStatus: "locked",
+    });
+    expect(__testGetSnapshot().activePublicKeyHex).toBeUndefined();
+    expect(fixture.writeOperations.slice(remoteWriteCount)).toEqual([]);
+    expect(plan.bucketPassword).toBe("");
+  }, 30_000);
+
+  it("已有远端缺少 schema namespace 时连接失败且对象与 ETag 完全不变", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const createdResponse = await __testDispatchStorageControl({
+      type: "initial-setup",
+      plan: makePlan("initial-setup-connect-schema-gap-001"),
+    });
+    const created = createdResponse.operationResult as InitialSetupResult;
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error(created.error.summary);
+
+    const provider = createLocalStorageBucketProvider({
+      storage: fixture.storage,
+      locks: catalogBridgeLocks,
+      bucketId: created.bucket.bucketId,
+      bucketGeneration: 1,
+    });
+    const schema = await provider.get(".keymaster/schema");
+    if (!schema?.etag) throw new Error("created schema is missing an ETag");
+    const parsed = JSON.parse(new TextDecoder().decode(schema.bytes)) as { namespaces: Record<string, number> };
+    const removed = Object.keys(parsed.namespaces)[0];
+    if (!removed) throw new Error("created schema has no namespace");
+    delete parsed.namespaces[removed];
+    await provider.put(".keymaster/schema", new TextEncoder().encode(JSON.stringify(parsed)), { ifMatch: schema.etag });
+    provider.dispose();
+
+    await __testReleaseCatalogLocalBinding();
+    __testResetState();
+    __testPrepareInitialSetup();
+    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const before = fixture.storage.snapshot();
+    const response = await __testDispatchStorageControl({
+      type: "connect-existing-remote",
+      plan: {
+        operationId: "connect-existing-schema-gap-001",
+        remoteStorageId: created.bucket.bucketId,
+        displayName: "缺少 schema 的远端",
+        backend: "local",
+        connection: { kind: "local" },
+        bucketPassword: "initial-setup-password",
+      },
+    });
+    expect(response.operationResult).toMatchObject({ ok: false, error: { code: "storage_remote_corrupt" } });
+    expect(fixture.storage.snapshot()).toEqual(before);
+  }, 30_000);
+
   it("initial-setup adopted Local provider follows the current owner after tab handoff", async () => {
     const fixture = makeInitialSetupWorkerBridge();
     const first = makeCoordinatorTestPeer("test", (input) => fixture.bridge(input as LocalStorageBridgeRequest));
@@ -2087,7 +2186,7 @@ describe("Session Coordinator initial setup transaction", () => {
     expect(second.bridgeCalls.length).toBeGreaterThan(0);
   }, 20_000);
 
-  it("运行态安装后的 Coordinator meta 失败会回滚目录、Root 和候选对象", async () => {
+  it("Root 发布后运行态安装失败会保留远端与目录并要求同事务重试", async () => {
     const fixture = makeInitialSetupWorkerBridge();
     __testSetLocalStorageBridgeOverride(fixture.bridge);
     const plan = makePlan("initial-setup-runtime-failure-001");
@@ -2095,13 +2194,94 @@ describe("Session Coordinator initial setup transaction", () => {
 
     const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
     expect(response.ack.status).toBe("ok");
-    expect(response.operationResult).toMatchObject({ ok: false, error: { phase: "runtime", rollback: "confirmed" } });
-    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    expect(fixture.storage.length).toBe(0);
-    expect(__testGetSnapshot()).toMatchObject({ vaultStatus: "uninitialized" });
-    expect(__testGetSnapshot().storageBucketId).toBeUndefined();
+    expect(response.operationResult).toMatchObject({ ok: false, error: { phase: "runtime", rollback: "not-started" } });
+    expect(fixture.getCatalog()).toMatchObject({ format: "keymaster.storage.catalog", version: 2, buckets: [expect.any(Object)] });
+    expect(fixture.storage.length).toBeGreaterThan(0);
     expect(plan.bucketPassword).toBe("");
   }, 20_000);
+
+  it("root 已发布但设备提交丢失后跨 Worker 重启按同一事务恢复且不生成第二把 Key", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    let rejectDeviceConnection = true;
+    __testSetLocalStorageBridgeOverride(async (input) => {
+      if (rejectDeviceConnection && input.type === "device-bootstrap-connection-upsert") {
+        throw new Error("injected device connection loss");
+      }
+      return fixture.bridge(input);
+    });
+    const transactionId = "initial-setup-published-restart-001";
+    __testFailNextCoordinatorSnapshotPersist();
+    const first = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
+    expect(first.operationResult).toMatchObject({ ok: false, error: { rollback: "not-started" } });
+    const bootstrapBeforeRestart = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read();
+    expect(bootstrapBeforeRestart?.connections).toHaveLength(0);
+    expect(bootstrapBeforeRestart?.recoveries).toEqual([
+      expect.objectContaining({ operationId: transactionId, remoteStorageId: __testInitialSetupBucketId(transactionId), status: "attention-required" }),
+    ]);
+    const writesAfterPublication = fixture.writeOperations.length;
+
+    await __testReleaseCatalogLocalBinding();
+    __testResetState();
+    __testPrepareInitialSetup();
+    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
+    rejectDeviceConnection = false;
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const retry = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
+    expect(retry.operationResult).toMatchObject({
+      ok: true,
+      bucket: { bucketId: __testInitialSetupBucketId(transactionId) },
+      firstKey: { publicKeyHex: expect.stringMatching(/^[0-9a-f]{66}$/u) },
+    });
+    expect(fixture.writeOperations).toHaveLength(writesAfterPublication);
+    const bootstrapAfterRecovery = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read();
+    expect(bootstrapAfterRecovery?.connections).toHaveLength(1);
+    expect(bootstrapAfterRecovery?.recoveries).toEqual([]);
+  }, 30_000);
+
+  it("成功响应丢失后跨 Worker 重启从设备连接恢复同一首 Key且不写远端", async () => {
+    const fixture = makeInitialSetupWorkerBridge();
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    const transactionId = "initial-setup-success-response-loss-001";
+    const first = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
+    const firstResult = first.operationResult as InitialSetupResult;
+    expect(firstResult.ok).toBe(true);
+    if (!firstResult.ok) throw new Error(firstResult.error.summary);
+    const writesAfterSuccess = fixture.writeOperations.length;
+
+    await __testReleaseCatalogLocalBinding();
+    __testResetState();
+    __testPrepareInitialSetup();
+    __testSetLocalStorageBridgeOverride(async (input) => {
+      const response = await fixture.bridge(input);
+      if (input.type === "device-bootstrap-connection-upsert") {
+        const current = fixture.getCatalog().buckets.find((candidate) => candidate.bucketId === input.connection.remoteStorageId);
+        if (!current) throw new Error("response-loss fixture lost its committed catalog projection");
+        fixture.setCatalog({
+          format: "keymaster.storage.catalog",
+          version: 2,
+          selectedBucketId: input.connection.remoteStorageId,
+          buckets: [{
+            ...current,
+            label: input.connection.displayName,
+            backend: input.connection.providerId,
+            keyDerivation: structuredClone(input.connection.keyDerivation),
+            encryptedConfig: structuredClone(input.connection.encryptedConfig),
+            updatedAt: input.connection.updatedAt,
+          }],
+        });
+      }
+      return response;
+    });
+    const retry = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
+    const retryResult = retry.operationResult as InitialSetupResult;
+    if (!retryResult.ok) throw new Error(JSON.stringify(retryResult.error));
+    expect(retry.operationResult).toMatchObject({
+      ok: true,
+      bucket: { bucketId: firstResult.bucket.bucketId },
+      firstKey: { publicKeyHex: firstResult.firstKey.publicKeyHex },
+    });
+    expect(fixture.writeOperations).toHaveLength(writesAfterSuccess);
+  }, 30_000);
 
   it("响应丢失后按同一 transactionId 返回已提交结果，不重新暂存第二把 Key", async () => {
     const transactionId = "initial-setup-recovery-001";
@@ -2112,7 +2292,7 @@ describe("Session Coordinator initial setup transaction", () => {
       selectedBucketId: entry.bucketId,
       buckets: [entry],
     });
-    fixture.recovery.set(transactionId, makeSucceededRecord(entry, transactionId));
+    __testSeedInitialSetupRecoveryRecord(makeSucceededRecord(entry, transactionId));
     __testSetLocalStorageBridgeOverride(fixture.bridge);
 
     const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
@@ -2130,7 +2310,7 @@ describe("Session Coordinator initial setup transaction", () => {
     const transactionId = "initial-setup-recovery-mismatch-001";
     const entry = await makeEncryptedLocalCatalogEntry("setup-recovery-mismatch-001", "缺失目录首桶", "recovery-password");
     const fixture = makeInitialSetupWorkerBridge();
-    fixture.recovery.set(transactionId, makeSucceededRecord(entry, transactionId));
+    __testSeedInitialSetupRecoveryRecord(makeSucceededRecord(entry, transactionId));
     __testSetLocalStorageBridgeOverride(fixture.bridge);
 
     const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
@@ -2148,7 +2328,7 @@ describe("Session Coordinator initial setup transaction", () => {
   it("恢复记录读取失败时 fail-closed，不把未知 transactionId 当成新事务重跑", async () => {
     const fixture = makeInitialSetupWorkerBridge();
     __testSetLocalStorageBridgeOverride(async (input) => {
-      if (input.type === "initial-setup-recovery-list") throw new Error("recovery bridge unavailable");
+      if (input.type === "device-bootstrap-read") throw new Error("recovery bridge unavailable");
       return fixture.bridge(input);
     });
     const plan = makePlan("initial-setup-recovery-unavailable-001");
@@ -2184,7 +2364,7 @@ describe("Session Coordinator initial setup transaction", () => {
       updatedAt: Date.now(),
     };
     delete blockingRecord.success;
-    fixture.recovery.set(blockingTransactionId, blockingRecord);
+    __testSeedInitialSetupRecoveryRecord(blockingRecord);
     __testSetLocalStorageBridgeOverride(fixture.bridge);
 
     const plan = makePlan("initial-setup-bypass-block-001");
@@ -2221,7 +2401,7 @@ describe("Session Coordinator initial setup transaction", () => {
       selectedBucketId: winner.bucketId,
       buckets: [winner],
     });
-    fixture.recovery.set(loserTransactionId, {
+    __testSeedInitialSetupRecoveryRecord({
       format: "keymaster.storage.initial-setup-recovery",
       version: 1,
       transactionId: loserTransactionId,
@@ -2289,7 +2469,7 @@ describe("Session Coordinator initial setup transaction", () => {
       buckets: [entry],
     });
     const succeeded = makeSucceededRecord(entry, "initial-setup-recovery-success-result-001");
-    fixture.recovery.set(succeeded.transactionId, succeeded);
+    __testSeedInitialSetupRecoveryRecord(succeeded);
     __testSetLocalStorageBridgeOverride(fixture.bridge);
 
     const succeededResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: succeeded.transactionId });
@@ -2309,8 +2489,8 @@ describe("Session Coordinator initial setup transaction", () => {
     };
     delete pending.success;
     delete pending.error;
-    fixture.recovery.set(pending.transactionId, pending);
-    const cleanupResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: pending.transactionId });
+    __testSeedInitialSetupRecoveryRecord(pending);
+    const cleanupResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: pending.transactionId, password: "recovery-password" });
     expect(cleanupResponse.operationResult).toEqual({ status: "cleanup-confirmed" });
   });
 
@@ -2340,7 +2520,7 @@ describe("Session Coordinator initial setup transaction", () => {
       },
     } satisfies InitialSetupRecoveryRecordV1;
     delete record.success;
-    fixture.recovery.set(record.transactionId, record);
+    __testSeedInitialSetupRecoveryRecord(record);
     fixture.storage.setItem(`keymaster.bucket.${entry.bucketId}.candidate`, btoa("candidate"));
     __testSetLocalStorageBridgeOverride(fixture.bridge);
 
@@ -2354,13 +2534,12 @@ describe("Session Coordinator initial setup transaction", () => {
     expect(fixture.events.indexOf("delete")).toBeGreaterThan(fixture.events.indexOf("catalog-rollback"));
     expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
     expect(fixture.storage.length).toBe(0);
-    expect(fixture.recovery.get(record.transactionId)).toMatchObject({ status: "failed", cleanup: "confirmed", error: expect.any(Object) });
   });
 
   it("S3 恢复清理拒绝未匹配物理目标，不触碰候选对象", async () => {
     const transactionId = "initial-setup-recovery-s3-fingerprint-001";
     const fixture = makeInitialSetupWorkerBridge();
-    fixture.recovery.set(transactionId, {
+    __testSeedInitialSetupRecoveryRecord({
       format: "keymaster.storage.initial-setup-recovery",
       version: 1,
       transactionId,

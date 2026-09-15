@@ -14,6 +14,7 @@ import {
   KEYSPACE_SERVICE_CAPABILITY,
   STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
+  deviceRemoteStorageLocationFingerprint,
   type ActiveKeyState,
   type KeyRef,
   type KeyspaceService,
@@ -21,7 +22,7 @@ import {
   type StorageRuntimeController,
   type VaultService,
 } from "@keymaster/contracts";
-import { writeStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
+import { writeDeviceBootstrap } from "../bootstrap/deviceBootstrapRepository.js";
 import { StorageBucketManagerEntry, StorageBucketManagerPage } from "./StorageBucketManagerPage.js";
 
 const KEY_A = `02${"a".repeat(64)}`;
@@ -42,6 +43,18 @@ function bucket(bucketId: string, label: string): StorageBucketCatalogEntryV2 {
     createdAt: 1,
     updatedAt: 1
   };
+}
+
+function seedBucket(entry: StorageBucketCatalogEntryV2): void {
+  const location = { providerId: "local" as const, namespace: entry.bucketId };
+  writeDeviceBootstrap({
+    format: "keymaster.device-bootstrap",
+    version: 1,
+    selectedRemoteStorageId: entry.bucketId,
+    connections: [{ remoteStorageId: entry.bucketId, displayName: entry.label, providerId: "local", location, physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location), encryptedConfig: entry.encryptedConfig, keyDerivation: entry.keyDerivation, source: "created", createdAt: entry.createdAt, updatedAt: entry.updatedAt }],
+    recoveries: [],
+    workerProfileId: "profile-storage-manager-test",
+  });
 }
 
 function mount() {
@@ -74,7 +87,7 @@ function mount() {
     isCatalogBucket: () => true
   } as unknown as StorageRuntimeController & { selectedBucketId(): string; isCatalogBucket(): boolean };
 
-  writeStorageCatalog({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: "bucket-a", buckets: [bucket("bucket-a", "工作桶")] });
+  seedBucket(bucket("bucket-a", "工作桶"));
   const host = createKeymasterPluginHost({ disableConfigPersistence: true, i18nDebug: false });
   host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
   host.provide(VAULT_SERVICE_CAPABILITY, vault);
@@ -98,7 +111,7 @@ function mountManagerPage() {
     selectedBucketId: () => "bucket-a",
     isCatalogBucket: () => true
   } as unknown as StorageRuntimeController;
-  writeStorageCatalog({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: "bucket-a", buckets: [bucket("bucket-a", "工作桶")] });
+  seedBucket(bucket("bucket-a", "工作桶"));
   host.provide(VAULT_SERVICE_CAPABILITY, vault);
   host.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, storage);
   return render(<PluginHostProvider host={host}><StorageBucketManagerPage /></PluginHostProvider>);

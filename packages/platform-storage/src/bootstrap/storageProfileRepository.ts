@@ -1,22 +1,36 @@
-import type { StorageBootstrapState } from "@keymaster/contracts";
-import { StorageRuntimeError } from "../runtime/storageError.js";
-import { STORAGE_CATALOG_KEY, validateStorageCatalog } from "./storageCatalogRepository.js";
+import type { StorageBootstrapState, StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
+import { defaultDeviceBootstrapStorage, readDeviceBootstrap, type DeviceBootstrapStorage } from "./deviceBootstrapRepository.js";
+
+function bootstrapEntryFromDeviceConnection(connection: import("@keymaster/contracts").DeviceRemoteConnectionV1): StorageBucketCatalogEntryV2 {
+  return {
+    bucketId: connection.remoteStorageId,
+    label: connection.displayName,
+    backend: connection.providerId,
+    configRevision: 0,
+    keyDerivation: structuredClone(connection.keyDerivation),
+    encryptedConfig: structuredClone(connection.encryptedConfig),
+    // The device layer intentionally has no remote revision/cache fields. The
+    // Worker must read the authenticated remote head and treat this projection
+    // as a bootstrap hint only.
+    snapshotRevision: 0,
+    createdAt: connection.createdAt,
+    updatedAt: connection.updatedAt,
+  };
+}
 
 /** 从 V1 多桶目录读取当前桶的最小启动快照。 */
-export function readStorageBootstrap(storage: Storage = localStorage): StorageBootstrapState | null {
-  const catalogRaw = storage.getItem(STORAGE_CATALOG_KEY);
-  if (catalogRaw === null) return null;
-  let catalog;
-  try { catalog = validateStorageCatalog(JSON.parse(catalogRaw) as unknown); }
-  catch (caught) {
-    if (caught instanceof StorageRuntimeError) throw caught;
-    throw new StorageRuntimeError("storage_provider_error", "Storage catalog JSON is invalid");
+export function readStorageBootstrap(storage: DeviceBootstrapStorage = defaultDeviceBootstrapStorage()): StorageBootstrapState | null {
+  const deviceBootstrap = readDeviceBootstrap(storage);
+  if (deviceBootstrap?.selectedRemoteStorageId) {
+    const selected = deviceBootstrap.connections.find((connection) => connection.remoteStorageId === deviceBootstrap.selectedRemoteStorageId);
+    if (selected) {
+      const selectedBucket = bootstrapEntryFromDeviceConnection(selected);
+      return {
+        selectedBackend: selected.providerId,
+        selectedProfileId: selected.remoteStorageId,
+        selectedBucket,
+      };
+    }
   }
-  const selected = catalog.selectedBucketId ? catalog.buckets.find((bucket) => bucket.bucketId === catalog.selectedBucketId) : undefined;
-  if (!selected) return null;
-  return {
-    selectedBackend: selected.backend,
-    selectedProfileId: selected.bucketId,
-    selectedBucket: structuredClone(selected)
-  };
+  return null;
 }

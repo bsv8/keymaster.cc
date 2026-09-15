@@ -6,3 +6,5 @@ export * from "./profile.js";
 export * from "./runtime.js";
 export * from "./catalog.js";
 export * from "./snapshot.js";
+export * from "./deviceBootstrap.js";
+export * from "./remoteRoot.js";

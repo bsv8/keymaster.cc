@@ -3,6 +3,8 @@ import { createLocalStorageBucketProvider } from "../bucket-providers/local/loca
 import { createStorageHoldSnapshotRepository } from "./storageHoldSnapshotRepository.js";
 import { createStorageBucketManagementService } from "./storageBucketManagement.js";
 import { createStorageCatalogRepository } from "../bootstrap/storageCatalogRepository.js";
+import { createDeviceBootstrapRepository } from "../bootstrap/deviceBootstrapRepository.js";
+import { deviceRemoteStorageLocationFingerprint } from "@keymaster/contracts";
 import { decryptBucketConfig, decryptBucketKey, deriveBucketCryptoContext, parseBucketDocument, verifyBucketDocument } from "./keymasterHoldAdapter.js";
 import type { LocalStorageLike, LocalStorageLocks } from "../bucket-providers/local/localStorageBucketProvider.js";
 import type { StorageBucketProvider } from "@keymaster/contracts";
@@ -55,7 +57,24 @@ function managementFixture() {
   const storage = new MemoryStorage();
   let id = 0;
   const catalog = createStorageCatalogRepository({ storage, locks, generateId: () => `catalog-bucket-${++id}` });
-  return { storage, catalog, manager: createStorageBucketManagementService({ catalog }) };
+  const deviceBootstrap = createDeviceBootstrapRepository({ storage, locks, generateId: () => "hold-tests" });
+  const commit = async (entry: ReturnType<typeof catalog.createBucketEntry>) => {
+    const location = { providerId: "local" as const, namespace: entry.bucketId };
+    await deviceBootstrap.upsertConnection({
+      remoteStorageId: entry.bucketId,
+      displayName: entry.label,
+      providerId: "local",
+      location,
+      physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location),
+      encryptedConfig: entry.encryptedConfig,
+      keyDerivation: entry.keyDerivation,
+      source: "created",
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    }, catalog.read().selectedBucketId === undefined);
+    return catalog.commitBucket(entry);
+  };
+  return { storage, catalog, commit, manager: createStorageBucketManagementService({ catalog, deviceBootstrap }) };
 }
 
 describe("Storage Hold snapshot", () => {
@@ -157,12 +176,12 @@ describe("Storage Hold snapshot", () => {
     });
 
     expect(catalogSeenBeforeSnapshot).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    expect(catalog.read()).toMatchObject({ selectedBucketId: entry.bucketId, buckets: [{ bucketId: entry.bucketId, snapshotRevision: 1 }] });
+    expect(catalog.read()).toMatchObject({ selectedBucketId: entry.bucketId, buckets: [{ bucketId: entry.bucketId, snapshotRevision: 0 }] });
   }, 15_000);
 
   it("does not compensate a failed new-bucket initialization by deleting another tab's catalog bucket", async () => {
-    const { catalog, manager } = managementFixture();
-    const existing = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("已绑定桶")));
+    const { catalog, commit, manager } = managementFixture();
+    const existing = await commit(catalog.createBucketEntry(catalogBucketInput("已绑定桶")));
     const seenBeforeFailure: string[] = [];
 
     await expect(manager.prepareBucketConfig({ kind: "local" }, "bucket-password", {
@@ -184,7 +203,7 @@ describe("Storage Hold snapshot", () => {
     })).rejects.toThrow("first Hold write failed");
 
     expect(seenBeforeFailure).toEqual([existing.bucketId]);
-    expect(catalog.read()).toEqual({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: existing.bucketId, buckets: [existing] });
+    expect(catalog.read()).toMatchObject({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: existing.bucketId, buckets: [{ bucketId: existing.bucketId, configRevision: 0, snapshotRevision: 0 }] });
   }, 15_000);
 
   it("changes the bucket password as one catalog and full-snapshot revision", async () => {
@@ -218,7 +237,7 @@ describe("Storage Hold snapshot", () => {
     } finally {
       oldContext.dispose();
     }
-    expect(catalog.read().buckets[0]?.configRevision).toBe(2);
+    expect(catalog.read().buckets[0]?.configRevision).toBe(0);
     provider.dispose();
   }, 15_000);
 
@@ -256,7 +275,7 @@ describe("Storage Hold snapshot", () => {
     expect(updated.configRevision).toBe(2);
     expect(updated.snapshotRevision).toBe(2);
     expect(updated.label).toBe("更新后的配置桶");
-    expect(catalog.read().buckets[0]?.configRevision).toBe(2);
+    expect(catalog.read().buckets[0]?.configRevision).toBe(0);
     const context = await deriveBucketCryptoContext("bucket-password", updated.keyDerivation);
     try {
       await expect(decryptBucketConfig(updated.encryptedConfig, context)).resolves.toMatchObject({ endpoint: "https://new.example.com", forcePathStyle: true });
@@ -271,9 +290,9 @@ describe("Storage Hold snapshot", () => {
   });
 
   it("keeps connection removal separate from destructive data cleanup", async () => {
-    const { catalog, manager } = managementFixture();
-    const current = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("当前桶")));
-    const other = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("待销毁桶")));
+    const { catalog, commit, manager } = managementFixture();
+    const current = await commit(catalog.createBucketEntry(catalogBucketInput("当前桶")));
+    const other = await commit(catalog.createBucketEntry(catalogBucketInput("待销毁桶")));
     const objects = new Map([
       ["keys/a", new Uint8Array([1])],
       ["data/b", new Uint8Array([2, 3])]
@@ -295,11 +314,11 @@ describe("Storage Hold snapshot", () => {
     await expect(manager.destroyBucketData({ entry: current, provider: { ...provider, bucketId: current.bucketId } })).rejects.toMatchObject({ code: "storage_forbidden" });
     await expect(manager.catalog.removeBucket(other.bucketId, other)).resolves.toBeTruthy();
     // 连接移除不会触碰 Provider 数据；重新加回目录后，销毁动作才执行物理删除。
-    const restored = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("待销毁桶")));
+    const restored = await commit(catalog.createBucketEntry(catalogBucketInput("待销毁桶")));
     expect(restored.bucketId).not.toBe(other.bucketId);
     // 使用原 entry 仍能验证真实销毁语义，目录 CAS 会拒绝过时条目，故先
     // 只保留一个独立的数据销毁夹具并直接检查 Provider 清空。
-    const dataEntry = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("数据桶")));
+    const dataEntry = await commit(catalog.createBucketEntry(catalogBucketInput("数据桶")));
     const dataProvider: StorageBucketProvider = { ...provider, bucketId: dataEntry.bucketId };
     await expect(manager.destroyBucketData({ entry: dataEntry, provider: dataProvider })).resolves.toEqual({ deletedObjects: 2, scope: "all-local-objects" });
     expect(objects.size).toBe(0);
@@ -307,9 +326,9 @@ describe("Storage Hold snapshot", () => {
   });
 
   it("checks the latest catalog entry before listing or deleting data", async () => {
-    const { catalog, manager } = managementFixture();
-    await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("当前桶")));
-    const stale = await catalog.commitBucket(catalog.createBucketEntry(catalogBucketInput("旧名称")));
+    const { catalog, commit, manager } = managementFixture();
+    await commit(catalog.createBucketEntry(catalogBucketInput("当前桶")));
+    const stale = await commit(catalog.createBucketEntry(catalogBucketInput("旧名称")));
     await catalog.updateBucket(stale.bucketId, { label: "并发更新后的桶" }, stale);
     let listCalls = 0;
     let deleteCalls = 0;

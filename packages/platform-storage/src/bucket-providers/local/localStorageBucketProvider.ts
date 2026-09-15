@@ -1,5 +1,6 @@
 import type {
-  InitialSetupRecoveryRecordV1,
+  DeviceRemoteConnectionV1,
+  DeviceRemoteRecoveryPointerV1,
   StorageBucketCatalogEntryV2,
   StorageBucketListPage,
   StorageBucketObject,
@@ -14,7 +15,7 @@ import { StorageRuntimeError, storageErrorCode } from "../../runtime/storageErro
 import { browserStorageLocks, type BrowserStorageLocks } from "../../runtime/browserLocks.js";
 import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
 
-/** localStorage 的最小同步接口，便于页面桥和单元测试注入。 */
+/** 开发适配器的最小同步键值接口，仅允许测试或显式宿主注入。 */
 export interface LocalStorageLike {
   readonly length: number;
   key(index: number): string | null;
@@ -54,7 +55,7 @@ export interface LocalStorageBridgeCandidateBucket {
   cleanupOnly?: boolean;
 }
 
-/** 页面桥的窄操作协议；桥在真正执行 localStorage I/O 前必须重新校验租约。 */
+/** 页面桥的窄操作协议；桥在真正执行设备 I/O 前必须重新校验租约。 */
 export type LocalStorageBridgeRequest =
   | { type: "get"; bucketId: string; bucketGeneration: number; path: string; authorityInstanceId?: string; leaseId?: string; candidateBucket?: LocalStorageBridgeCandidateBucket; ifMatch?: string; signal?: AbortSignal }
   | { type: "list"; bucketId: string; bucketGeneration: number; path?: never; authorityInstanceId?: string; leaseId?: string; candidateBucket?: LocalStorageBridgeCandidateBucket; prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }
@@ -71,12 +72,10 @@ export type LocalStorageBridgeRequest =
   | { type: "catalog-select"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; expectedSelectedBucketId?: string; /** CAS 请求丢失响应时允许按目标桶回收；页面仍会在 Web Lock 内确认目录当前值。 */ rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2; signal?: AbortSignal }
   /** 读取当前目录；用于并发初始化回滚前重新确认权威引用。 */
   | { type: "catalog-read"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
-  /** 读取不含秘密的初始化恢复记录。 */
-  | { type: "initial-setup-recovery-list"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
-  /** 写入不含秘密的初始化恢复记录。 */
-  | { type: "initial-setup-recovery-write"; authorityInstanceId?: string; leaseId?: string; record: InitialSetupRecoveryRecordV1; signal?: AbortSignal }
-  /** 删除一条已完成或已确认清理的恢复记录。 */
-  | { type: "initial-setup-recovery-delete"; authorityInstanceId?: string; leaseId?: string; transactionId: string; signal?: AbortSignal };
+  | { type: "device-bootstrap-read"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
+  | { type: "device-bootstrap-connection-upsert"; authorityInstanceId?: string; leaseId?: string; connection: DeviceRemoteConnectionV1; select?: boolean; signal?: AbortSignal }
+  | { type: "device-bootstrap-recovery-upsert"; authorityInstanceId?: string; leaseId?: string; recovery: DeviceRemoteRecoveryPointerV1; signal?: AbortSignal }
+  | { type: "device-bootstrap-recovery-delete"; authorityInstanceId?: string; leaseId?: string; operationId: string; signal?: AbortSignal };
 
 export type LocalStorageBridgeResponse =
   | { type: "object"; object?: LocalStorageBridgeObject }
@@ -85,16 +84,16 @@ export type LocalStorageBridgeResponse =
   | { type: "void" }
   | { type: "catalog"; bucket: StorageBucketCatalogEntryV2 }
   | { type: "catalog-state"; catalog: StorageCatalogV2 }
-  | { type: "initial-setup-recovery"; records: InitialSetupRecoveryRecordV1[] };
+  | { type: "device-bootstrap"; catalog: import("@keymaster/contracts").DeviceBootstrapCatalogV1 | null };
 
 export interface LocalStorageBucketProviderOptions {
-  /** 页面侧直接注入 localStorage；Worker 生产路径应使用 bridge。 */
+  /** 测试/开发宿主显式注入的同步键值设施。 */
   storage?: LocalStorageLike;
-  /** 页面桥；存在时不触碰当前执行上下文的 localStorage。 */
+  /** 页面桥；存在时不触碰当前执行上下文的任何持久化设施。 */
   bridge?: (request: LocalStorageBridgeRequest) => Promise<LocalStorageBridgeResponse>;
   /** Web Locks；不注入时尝试使用当前 Window 的 navigator.locks。 */
   locks?: LocalStorageLocks;
-  /** 抽象桶身份，不是 localStorage key 前缀。 */
+  /** 抽象桶身份，不是物理 key 前缀。 */
   bucketId: string;
   /** 当前桶世代；桥和 Provider 都在执行点校验它。 */
   bucketGeneration?: number;
@@ -162,19 +161,19 @@ function mapStorageError(caught: unknown): StorageRuntimeError {
     const message = transportedCode === "storage_conflict"
       ? "Local storage object changed"
       : transportedCode === "storage_limit_exceeded"
-        ? "localStorage quota was exceeded"
+        ? "Injected local provider quota was exceeded"
         : transportedCode === "storage_forbidden"
           ? "Local storage operation is forbidden"
           : transportedCode === "storage_unavailable"
-            ? "localStorage is unavailable"
+            ? "Injected local provider storage is unavailable"
             : "Local storage operation failed";
     return fail(transportedCode, message);
   }
   const name = caught && typeof caught === "object" ? (caught as { name?: unknown }).name : undefined;
-  if (name === "QuotaExceededError") return fail("storage_limit_exceeded", "localStorage quota was exceeded");
+  if (name === "QuotaExceededError") return fail("storage_limit_exceeded", "Injected local provider quota was exceeded");
   if (name === "AbortError") return fail("storage_unavailable", "Storage operation was cancelled");
-  if (name === "SecurityError") return fail("storage_unavailable", "localStorage is unavailable");
-  return fail("storage_provider_error", "localStorage operation failed");
+  if (name === "SecurityError") return fail("storage_unavailable", "Injected local provider storage is unavailable");
+  return fail("storage_provider_error", "Injected local provider operation failed");
 }
 
 function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStorageBridgeRequest {
@@ -194,9 +193,9 @@ function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStor
 }
 
 /**
- * localStorage 桶 Provider。
+ * 仅供开发/测试的 Local Provider。
  *
- * localStorage 本身没有事务；所有 compare-and-write 必须经过同桶 Web Lock，
+ * 注入的同步键值设施本身没有事务；所有 compare-and-write 必须经过同桶 Web Lock，
  * 因此安全上下文优先使用 Web Locks；任意主机 HTTP 页面没有 Web Locks 时
  * 使用当前页面内的兼容队列。该队列不提供跨标签页互斥，不能作为多标签页
  * 安全保证。Worker 不能直接访问 Window，生产 Worker 通过 `bridge` 把已经
@@ -206,11 +205,10 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
   const bucketId = options.bucketId;
   const bucketGeneration = options.bucketGeneration ?? 1;
   assertBucketId(bucketId);
-  // Window 侧的管理页/连接测试可以直接使用 localStorage；SharedWorker
-  // 侧必须显式传入 bridge。不要把“未注入 storage”误判成不可用，否则
-  // 页面上的 Local 测试和新桶初始化会在第一次调用前就失败。
-  const storage = options.storage ?? (options.bridge ? undefined : (globalThis as typeof globalThis & { localStorage?: LocalStorageLike }).localStorage);
-  if (!storage && !options.bridge) throw fail("storage_unavailable", "localStorage bridge is unavailable");
+  // Local Provider 不得自行取得浏览器持久化设施。测试/开发宿主必须显式
+  // 注入 storage，Worker 则必须注入受租约保护的 bridge。
+  const storage = options.storage;
+  if (!storage && !options.bridge) throw fail("storage_unavailable", "Injected Local Provider storage or bridge is required");
   let closed = false;
   const now = options.now ?? (() => Date.now());
   const prefix = `keymaster.bucket.${bucketId}.`;
@@ -224,7 +222,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
   async function withWriter<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     assertOpen();
     if (signal?.aborted) throw fail("storage_unavailable", "Storage operation was cancelled");
-    // Worker 侧的 bridge 不持有页面锁；真正执行 localStorage I/O 的页面
+    // Worker 侧的 bridge 不持有页面锁；真正执行设备 I/O 的页面
     // Provider 会再次进入同桶 Web Lock。若 Worker 也申请同名锁会形成跨
     // 全局的嵌套锁等待，因此 bridge 模式把锁边界留在页面侧。
     if (options.bridge) return operation();
@@ -333,10 +331,10 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
       try {
         await put(probePath, bytes, { ifNoneMatch: "*", signal });
         const readback = await get(probePath, { signal });
-        if (!readback || readback.etag !== etagFor(bytes)) throw fail("storage_provider_error", "localStorage probe readback failed");
+        if (!readback || readback.etag !== etagFor(bytes)) throw fail("storage_provider_error", "Injected local provider probe readback failed");
         try {
           await put(probePath, bytes, { ifMatch: "keymaster-invalid-etag", signal });
-          throw fail("storage_provider_error", "localStorage provider ignored If-Match");
+          throw fail("storage_provider_error", "Injected local provider ignored If-Match");
         } catch (caught) {
           if (!(caught instanceof StorageRuntimeError) || caught.code !== "storage_conflict") throw caught;
         }

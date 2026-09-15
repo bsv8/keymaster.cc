@@ -28,13 +28,7 @@ const forbiddenText = [
 const violations = [];
 const productionRoots = /^(?:packages|apps)\//u;
 const localStorageAllowlist = new Set([
-  "apps/web/src/theme/themeStore.ts",
-  "packages/runtime/src/i18n/i18nStore.ts",
-  "packages/platform-storage/src/bootstrap/storageProfileRepository.ts",
-  "packages/platform-storage/src/bootstrap/storageCatalogRepository.ts",
-  "packages/platform-storage/src/bucket-providers/local/localStorageBucketProvider.ts",
-  "packages/platform-storage/src/ui/StorageBucketManagerPage.tsx",
-  "apps/web/src/keymasterSessionCoordinatorClient.ts"
+  "packages/platform-storage/src/bootstrap/deviceBootstrapRepository.ts",
 ]);
 // E2E Node 侧清理适配器只把 AWS SDK 转成最小的测试 Resource 接口，不会
 // 进入发布产物；生产 S3 访问仍必须位于 platform-storage/s3 Provider。
@@ -89,6 +83,14 @@ for (const scanRoot of scanRoots) {
         if (pattern.test(content)) violations.push(`${relativeFile}: 命中${label}`);
       }
       const executable = withoutComments(content);
+      const removedDeviceBootstrapBypasses = [
+        ["旧本机 catalog 键", /keymaster\.storage\.catalog\.v2/u],
+        ["旧初始化恢复账本键", /keymaster\.storage\.initial-setup\.recovery\.v1/u],
+        ["旧设备存储旁路 API", /\b(?:readLegacyStorageValue|writeLegacyStorageValue|clearLegacyStorageValue)\b/u],
+      ];
+      for (const [label, pattern] of removedDeviceBootstrapBypasses) {
+        if (pattern.test(executable)) violations.push(`${relativeFile}: 禁止${label}`);
+      }
       if (/Repository\.(?:ts|tsx|js|jsx)$/u.test(relativeFile)
         && !repositoryFixtureDirectory.test(relativeFile)
         && /\bcreateInMemoryKeyValueStore\b/u.test(executable)) {

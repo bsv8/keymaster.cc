@@ -39,10 +39,10 @@ export { createProviderBackedBucketObjectStore } from "./bucket-providers/provid
 export { createS3BucketProvider } from "./bucket-providers/s3/s3BucketProvider.js";
 export { createS3BucketObjectStore } from "./bucket-providers/s3/s3BucketObjectStore.js";
 export type { S3BucketProviderOptions } from "./bucket-providers/s3/s3BucketProvider.js";
-export { createStorageCatalogRepository, readStorageCatalog, writeStorageCatalog, clearStorageCatalog, validateStorageCatalog, sameStorageCatalogEntry, STORAGE_CATALOG_KEY, STORAGE_CATALOG_LOCK } from "./bootstrap/storageCatalogRepository.js";
+export { createStorageCatalogRepository, readStorageCatalog, writeStorageCatalog, clearStorageCatalog, validateStorageCatalog, sameStorageCatalogEntry, sameStorageCatalogDeviceProjection, STORAGE_CATALOG_LOCK } from "./bootstrap/storageCatalogRepository.js";
 export type { CreateStorageBucketInput, StorageCatalogRepositoryOptions } from "./bootstrap/storageCatalogRepository.js";
 export { createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, encryptBucketKey, decryptBucketKey, sealBucketDocument, verifyBucketDocument, parseBucketDocument, serializeBucketDocument } from "./hold/keymasterHoldAdapter.js";
-export { createStorageHoldSnapshotRepository } from "./hold/storageHoldSnapshotRepository.js";
+export { createStorageHoldSnapshotRepository, createStorageHoldSnapshotReadOnlyRepository, STORAGE_HOLD_HEAD_PATH } from "./hold/storageHoldSnapshotRepository.js";
 export type { StorageHoldSnapshotWriteInput, StorageHoldCommittedSnapshot } from "./hold/storageHoldSnapshotRepository.js";
 export { createStorageBucketManagementService } from "./hold/storageBucketManagement.js";
 export type { BucketManagementDependencies, PreparedBucketConfig } from "./hold/storageBucketManagement.js";
@@ -50,8 +50,37 @@ export { createKeyValueStore } from "./kv-engine/partitionedKvEngine.js";
 export type { KeyValueStoreOptions, KeyValueStoreMaintenance, KeyValueGarbageCollectionResult } from "./kv-engine/partitionedKvEngine.js";
 export { createFixedCasSnapshotStore } from "./snapshot/fixedCasSnapshotStore.js";
 export type { FixedCasSnapshotStoreOptions } from "./snapshot/fixedCasSnapshotStore.js";
-export { createPlatformRootStore } from "./storage-access/platform-root/platformRootStore.js";
+export { createPlatformRootStore, validatePublishedPlatformBucketSchema } from "./storage-access/platform-root/platformRootStore.js";
 export type { PlatformRootStoreOptions } from "./storage-access/platform-root/platformRootStore.js";
 export { createOwnerAppStore } from "./storage-access/owner-app/ownerAppStore.js";
 export type { OwnerAppStoreOptions } from "./storage-access/owner-app/ownerAppStore.js";
 export { readStorageBootstrap } from "./bootstrap/storageProfileRepository.js";
+export {
+  createDeviceBootstrapRepository,
+  readDeviceBootstrap,
+  writeDeviceBootstrap,
+  clearDeviceBootstrap,
+  defaultDeviceBootstrapStorage,
+  DEVICE_BOOTSTRAP_KEY,
+  DEVICE_BOOTSTRAP_LOCK,
+} from "./bootstrap/deviceBootstrapRepository.js";
+export type { DeviceBootstrapRepository, DeviceBootstrapRepositoryOptions, DeviceBootstrapStorage, DeviceBootstrapLocks } from "./bootstrap/deviceBootstrapRepository.js";
+export {
+  discoverRemoteStorageRoot,
+  validateRemoteRootManifest,
+  sealRemoteRootManifest,
+  verifyRemoteRootManifest,
+  encodeRemoteRootManifest,
+  decodeRemoteRootManifest,
+  remoteRootManifestFingerprint,
+  physicalLocationFingerprint,
+  remoteInitializationTransactionPath,
+  remoteInitializationStagingPath,
+  createHmacRemoteRootAuthenticator,
+  deriveRemoteRootAuthenticator,
+  REMOTE_ROOT_MANIFEST_MAX_BYTES,
+  REMOTE_INITIALIZATION_RECORD_MAX_BYTES,
+} from "./bootstrap/remoteRootProtocol.js";
+export type { RemoteRootAuthenticator, RemoteRootDiscoveryResult, RemoteRootObject, RemoteStorageRootManifestInput } from "./bootstrap/remoteRootProtocol.js";
+export { createRemoteStorage, connectExistingRemoteStorage } from "./bootstrap/remoteStorageLifecycle.js";
+export type { RemoteStorageCreatePlan, RemoteStorageConnectPlan, RemoteStorageLifecycleSuccess, RemoteStorageCreatePhase, RemoteStorageConnectPhase } from "./bootstrap/remoteStorageLifecycle.js";

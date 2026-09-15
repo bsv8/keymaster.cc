@@ -11,6 +11,7 @@ import type {
   StorageRecordV1,
   StorageBucketProvider
 } from "@keymaster/contracts";
+import { deviceRemoteStorageLocationFingerprint } from "@keymaster/contracts";
 import type { HoldDocument, KeyRecord } from "keymaster-hold/browser";
 import {
   createBucketCryptoContext,
@@ -26,12 +27,14 @@ import {
   toContractStorageRecord,
   verifyBucketDocument
 } from "./keymasterHoldAdapter.js";
-import { createStorageCatalogRepository, removeStorageCatalogEntry, sameStorageCatalogEntry, type CreateStorageBucketInput } from "../bootstrap/storageCatalogRepository.js";
+import { createStorageCatalogRepository, removeStorageCatalogEntry, sameStorageCatalogDeviceProjection, sameStorageCatalogEntry, type CreateStorageBucketInput } from "../bootstrap/storageCatalogRepository.js";
 import { createStorageHoldSnapshotRepository } from "./storageHoldSnapshotRepository.js";
 import { StorageRuntimeError } from "../runtime/storageError.js";
+import { createDeviceBootstrapRepository, type DeviceBootstrapRepository } from "../bootstrap/deviceBootstrapRepository.js";
 
 export interface BucketManagementDependencies {
   catalog?: ReturnType<typeof createStorageCatalogRepository>;
+  deviceBootstrap?: DeviceBootstrapRepository;
 }
 
 export interface PreparedBucketConfig {
@@ -63,6 +66,37 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
   function getCatalog() {
     return catalog ?? (catalog = createStorageCatalogRepository());
   }
+  let deviceBootstrap = deps.deviceBootstrap;
+  function getDeviceBootstrap(): DeviceBootstrapRepository {
+    return deviceBootstrap ?? (deviceBootstrap = createDeviceBootstrapRepository());
+  }
+  async function commitConnection(entry: StorageBucketCatalogEntryV2, config: StorageBucketConnectionConfigV1): Promise<StorageBucketCatalogEntryV2> {
+    const prefix = config.kind === "s3" ? config.prefix?.replace(/^\/+|\/+$/gu, "") : undefined;
+    const location = config.kind === "local"
+      ? { providerId: "local" as const, namespace: entry.bucketId }
+      : {
+          providerId: "s3" as const,
+          endpoint: new URL(config.endpoint).toString().replace(/\/$/u, ""),
+          region: config.region,
+          bucket: config.bucket,
+          ...(!prefix ? {} : { prefix }),
+          ...(config.forcePathStyle === undefined ? {} : { forcePathStyle: config.forcePathStyle }),
+        };
+    const select = getCatalog().read().selectedBucketId === undefined;
+    await getDeviceBootstrap().upsertConnection({
+      remoteStorageId: entry.bucketId,
+      displayName: entry.label,
+      providerId: entry.backend,
+      location,
+      physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location),
+      encryptedConfig: structuredClone(entry.encryptedConfig),
+      keyDerivation: structuredClone(entry.keyDerivation),
+      source: "created",
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    }, select);
+    return getCatalog().commitBucket(entry);
+  }
 
   async function prepareBucketConfig(
     config: StorageBucketConnectionConfigV1,
@@ -82,13 +116,13 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
       // 这里只构造目录条目，不写入 localStorage。新桶必须先完成首个
       // Hold 快照，最后才通过一次目录 CAS 暴露给其他标签页。
       const entry = getCatalog().createBucketEntry({ ...catalogInput, keyDerivation, encryptedConfig });
-      if (!createProvider) return getCatalog().commitBucket(entry);
+      if (!createProvider) return commitConnection(entry, config);
       const provider = createProvider(entry.bucketId);
       try {
         const committed = await initializeBucketSnapshot({ entry, password, provider, bucketGeneration, persistCatalog: false });
         // 这是新桶唯一一次目录写入点：Hold 已经完整提交后，才让
         // bootstrap、切桶和 Header 看到它。
-        return getCatalog().commitBucket({ ...entry, snapshotRevision: committed.header.snapshotRevision });
+        return commitConnection({ ...entry, snapshotRevision: committed.header.snapshotRevision }, config);
       } finally {
         provider.dispose();
       }
@@ -332,7 +366,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
         bucketGeneration: input.bucketGeneration ?? 1,
         expectedHead: { kind: "absent" }
       });
-      return await getCatalog().commitBucket({ ...entry, snapshotRevision: committed.header.snapshotRevision });
+      return await commitConnection({ ...entry, snapshotRevision: committed.header.snapshotRevision }, config);
     } catch (error) {
       // 失败时目录中从未出现 entry，因此不能调用“按目录状态推断未绑定”
       // 的补偿删除；其他标签页的 Coordinator 绑定不会被误删。
@@ -495,7 +529,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
       // 任何 Provider 删除前都必须确认调用方看到的完整目录版本仍然
       // 有效。尤其是 S3 Endpoint/Bucket/Prefix 并发修改时，不能用旧连接
       // 配置先删除物理数据，再在最后一步才发现 CAS 冲突。
-      if (!sameStorageCatalogEntry(latestEntry, input.entry)) {
+      if (!sameStorageCatalogDeviceProjection(latestEntry, input.entry)) {
         throw new StorageRuntimeError("storage_conflict", "Storage bucket changed concurrently; reload and retry");
       }
       const current = catalog.selectedBucketId;
