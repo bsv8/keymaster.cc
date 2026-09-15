@@ -12,7 +12,8 @@ import type {
   StorageUploadPartResult
 } from "../connectStorage.js";
 import type { StorageConnection, StorageProviderConfigDraft, StorageProviderId } from "./profile.js";
-import type { ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketPasswordRotationResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
+import type { ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketPasswordRotationResultV1, StorageBucketPasswordRotationResumeResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
+import type { PendingPasswordRotationViewV1 } from "./deviceBootstrap.js";
 
 /** Provider 运行状态；由 Coordinator 统一发布。 */
 export type StorageRuntimeStatus = "unselected" | "authentication" | "checking" | "ready" | "degraded" | "incompatible";
@@ -142,6 +143,10 @@ export interface StorageRuntimeController {
   cancelProbe(): void;
   /** 当前新版桶的配置、Hold 快照和桶内 Key records 全量改密。 */
   changeBucketPassword?(oldPassword: string, newPassword: string): Promise<StorageBucketPasswordRotationResultV1>;
+  /** 页面重载或 Worker 重启后查询尚未收敛的密码轮转安全投影；不含内部恢复字段。 */
+  listPendingPasswordRotations?(): Promise<PendingPasswordRotationViewV1[]>;
+  /** 使用用户本次输入的新旧密码收敛指定的密码轮转事务。 */
+  resumeBucketPasswordRotation?(operationId: string, oldPassword: string, newPassword: string): Promise<StorageBucketPasswordRotationResumeResultV1>;
   /** 先认证目标桶，再原子切换 Coordinator 与本机目录的当前桶。 */
   switchBucket?(bucket: StorageBucketCatalogEntryV2, password: string): Promise<StorageBucketSwitchResultV1>;
   /** 当前桶连接配置与名称的原子重配置。 */

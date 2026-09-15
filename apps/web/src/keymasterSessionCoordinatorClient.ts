@@ -37,6 +37,7 @@ import type {
   CoordinatorSessionBinding,
   StorageBootstrapState,
   DeviceBootstrapCatalogV1,
+  DevicePasswordRotationRecordV1,
   DeviceRemoteConnectionV1,
   DeviceRemoteRecoveryPointerV1,
 } from "@keymaster/contracts";
@@ -699,7 +700,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (request.type === "device-bootstrap-read"
         || request.type === "device-bootstrap-connection-upsert"
         || request.type === "device-bootstrap-recovery-upsert"
-        || request.type === "device-bootstrap-recovery-delete") {
+        || request.type === "device-bootstrap-recovery-delete"
+        || request.type === "device-bootstrap-rotation-upsert"
+        || request.type === "device-bootstrap-rotation-delete") {
         if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
         const storage = defaultDeviceBootstrapStorage();
         const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
@@ -712,6 +715,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           await repository.upsertConnection(request.connection as DeviceRemoteConnectionV1, request.select ?? true);
         } else if (request.type === "device-bootstrap-recovery-upsert") {
           await repository.upsertRecovery(request.recovery as DeviceRemoteRecoveryPointerV1);
+        } else if (request.type === "device-bootstrap-rotation-upsert") {
+          await repository.upsertRotation(request.rotation as DevicePasswordRotationRecordV1);
+        } else if (request.type === "device-bootstrap-rotation-delete") {
+          catalog = await repository.removeRotation(request.operationId);
         } else {
           catalog = await repository.removeRecovery(request.operationId);
         }

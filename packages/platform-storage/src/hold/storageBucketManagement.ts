@@ -44,6 +44,14 @@ export interface PreparedBucketConfig {
   config: StorageBucketConnectionConfigV1;
 }
 
+/** 桶改密发布结果；ETag 必须沿着发布调用直接返回给事务协调者。 */
+export interface StorageBucketPasswordChangeResult {
+  /** 新版桶目录条目。 */
+  bucket: StorageBucketCatalogEntryV2;
+  /** Hold 提交头写入返回的 ETag；缺失时调用方不能把发布当成可回滚。 */
+  publishedHeadEtag?: string;
+}
+
 function wipe(bytes: Uint8Array | undefined): void {
   try { bytes?.fill(0); } catch { /* 仅尽力清零可控缓冲区 */ }
 }
@@ -392,7 +400,7 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
     bucketGeneration?: number;
     /** Worker 改密时由调用方负责把目录更新提交回页面。 */
     persistCatalog?: boolean;
-  }): Promise<StorageBucketCatalogEntryV2> {
+  }): Promise<StorageBucketPasswordChangeResult> {
     let oldPassword = input.oldPassword;
     let newPassword = input.newPassword;
     const repository = createStorageHoldSnapshotRepository(input.provider);
@@ -447,13 +455,20 @@ export function createStorageBucketManagementService(deps: BucketManagementDepen
           encryptedConfig,
           snapshotRevision: published.header.snapshotRevision
         };
-        if (input.persistCatalog === false) return nextEntry;
-        return await getCatalog().updateBucket(input.entry.bucketId, {
+        if (input.persistCatalog === false) return {
+          bucket: nextEntry,
+          ...(published.headEtag === undefined ? {} : { publishedHeadEtag: published.headEtag }),
+        };
+        const updatedEntry = await getCatalog().updateBucket(input.entry.bucketId, {
           configRevision: nextConfigRevision,
           keyDerivation: { ...document.keyDerivation },
           encryptedConfig,
           snapshotRevision: published.header.snapshotRevision
         }, input.entry);
+        return {
+          bucket: updatedEntry,
+          ...(published.headEtag === undefined ? {} : { publishedHeadEtag: published.headEtag }),
+        };
       } catch (error) {
         if (published.headEtag) {
           try {

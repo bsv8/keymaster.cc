@@ -5,7 +5,7 @@ import type {
   StorageBucketProvider,
   StorageProviderConfigDraft,
 } from "@keymaster/contracts";
-import { createLocalStorageBucketProvider, type LocalStorageLike } from "../bucket-providers/local/localStorageBucketProvider.js";
+import { createBrowserLocalBucketProvider } from "../browser/browserBucketProvider.js";
 import { awsS3EndpointForRegion, normalizeProviderConfig, r2EndpointForAccount, R2_ENDPOINT_VARIANTS, type R2EndpointVariant } from "../bucket-providers/s3/s3ClientFactory.js";
 import { createS3BucketProvider } from "../bucket-providers/s3/s3BucketProvider.js";
 import { StorageRuntimeError } from "../runtime/storageError.js";
@@ -238,25 +238,10 @@ function isBucketDraft(input: BucketProviderInput): input is BucketDraft {
 }
 
 /**
- * 页面侧的浏览器本地存储（localStorage）。
- *
- * 页面草稿助手只在浏览器主线程使用，可以显式拿 localStorage；
- * Worker 则必须走 bridge，不能用这个助手（Provider 本体保持严格，
- * 无 storage/bridge 直接报错，避免 Worker 误触页面存储）。
- */
-function pageLocalStorage(): LocalStorageLike {
-  let candidate: LocalStorageLike | undefined;
-  try {
-    candidate = (globalThis as typeof globalThis & { localStorage?: LocalStorageLike }).localStorage;
-  } catch {
-    throw new StorageRuntimeError("storage_unavailable", "Local browser storage is unavailable");
-  }
-  if (!candidate) throw new StorageRuntimeError("storage_unavailable", "Local browser storage is unavailable");
-  return candidate;
-}
-
-/**
  * 构造页面用的桶 Provider 入口（Local 直连页面存储 / S3 直连远端）。
+ *
+ * 页面存储句柄来自设备引导模块的统一浏览器入口；UI 侧不得直接解析
+ * 浏览器存储对象，存储门禁用它（见 check-storage-hard-switch）。
  *
  * 新草稿先按页面模板转换成通用 S3 Provider 配置；已提交的通用连接没有再携带
  * UI 配置方式，因此只按最终 HTTPS endpoint 构造兼容 Provider。这不改变
@@ -264,10 +249,10 @@ function pageLocalStorage(): LocalStorageLike {
  */
 export function createBucketProvider(input: BucketProviderInput, bucketId: string): StorageBucketProvider {
   if (isBucketDraft(input)) {
-    if (input.backend === "local") return createLocalStorageBucketProvider({ bucketId, storage: pageLocalStorage() });
+    if (input.backend === "local") return createBrowserLocalBucketProvider(bucketId);
     return createS3BucketProvider(normalizedProviderConfigFromBucketDraft(input), { bucketId });
   }
-  if (input.kind === "local") return createLocalStorageBucketProvider({ bucketId, storage: pageLocalStorage() });
+  if (input.kind === "local") return createBrowserLocalBucketProvider(bucketId);
   return createS3BucketProvider(normalizedProviderConfigFromConnection(input), { bucketId });
 }
 

@@ -1,4 +1,5 @@
 import type {
+  DevicePasswordRotationRecordV1,
   DeviceRemoteConnectionV1,
   DeviceRemoteRecoveryPointerV1,
   StorageBucketCatalogEntryV2,
@@ -75,7 +76,9 @@ export type LocalStorageBridgeRequest =
   | { type: "device-bootstrap-read"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
   | { type: "device-bootstrap-connection-upsert"; authorityInstanceId?: string; leaseId?: string; connection: DeviceRemoteConnectionV1; select?: boolean; signal?: AbortSignal }
   | { type: "device-bootstrap-recovery-upsert"; authorityInstanceId?: string; leaseId?: string; recovery: DeviceRemoteRecoveryPointerV1; signal?: AbortSignal }
-  | { type: "device-bootstrap-recovery-delete"; authorityInstanceId?: string; leaseId?: string; operationId: string; signal?: AbortSignal };
+  | { type: "device-bootstrap-recovery-delete"; authorityInstanceId?: string; leaseId?: string; operationId: string; signal?: AbortSignal }
+  | { type: "device-bootstrap-rotation-upsert"; authorityInstanceId?: string; leaseId?: string; rotation: DevicePasswordRotationRecordV1; signal?: AbortSignal }
+  | { type: "device-bootstrap-rotation-delete"; authorityInstanceId?: string; leaseId?: string; operationId: string; signal?: AbortSignal };
 
 export type LocalStorageBridgeResponse =
   | { type: "object"; object?: LocalStorageBridgeObject }
@@ -249,8 +252,9 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
   }
 
   function listLocal(input: { prefix?: string; cursor?: string; limit?: number } = {}): StorageBucketListPage {
-    assertOpen(input.prefix, { allowEmptyPath: true });
     const prefixValue = input.prefix ?? "";
+    // 目录前缀允许以 `/` 结尾（例如 owner namespace）；校验时剥离末尾斜杠。
+    assertOpen(prefixValue && prefixValue.endsWith("/") ? prefixValue.slice(0, -1) : prefixValue, { allowEmptyPath: true });
     if (prefixValue) assertProviderPath(prefixValue.endsWith("/") ? prefixValue.slice(0, -1) : prefixValue);
     const objects: StorageBucketObject[] = [];
     for (let index = 0; index < storage!.length; index += 1) {
@@ -347,7 +351,10 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
     },
     get,
     async list(input = {}): Promise<StorageBucketListPage> {
-      assertOpen(input.prefix, { allowEmptyPath: true });
+      // 目录前缀允许以 `/` 结尾（例如 owner namespace）；校验时剥离末尾
+      // 斜杠，与 listLocal 和 S3 Provider 的语义保持一致。
+      const listPrefix = input.prefix ?? "";
+      assertOpen(listPrefix && listPrefix.endsWith("/") ? listPrefix.slice(0, -1) : listPrefix, { allowEmptyPath: true });
       if (options.bridge) {
         const result = await bridgeRequest({ type: "list", bucketId, bucketGeneration, ...(options.candidateBucket ? { candidateBucket: options.candidateBucket } : {}), ...input });
         if (result.type !== "list") throw fail("storage_provider_error", "Local storage bridge returned an invalid list result");

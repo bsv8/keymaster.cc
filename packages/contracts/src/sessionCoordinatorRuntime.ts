@@ -98,16 +98,19 @@ import type {
   InitialSetupResult,
   InitialSetupRecoveryResult,
   StorageBucketPasswordRotationResultV1,
+  StorageBucketPasswordRotationResumeResultV1,
   StorageBucketSwitchResultV1,
   StorageBucketCatalogEntryV2,
   StorageCatalogV2,
 } from "./storage/catalog.js";
 import type {
   DeviceBootstrapCatalogV1,
+  DevicePasswordRotationRecordV1,
+  PendingPasswordRotationViewV1,
   DeviceRemoteConnectionV1,
   DeviceRemoteRecoveryPointerV1,
 } from "./storage/deviceBootstrap.js";
-import { validateDeviceBootstrapCatalog, validateDeviceRemoteConnection, validateDeviceRemoteRecoveryPointer } from "./storage/deviceBootstrap.js";
+import { validateDeviceBootstrapCatalog, validateDevicePasswordRotationRecord, validatePendingPasswordRotationView, validateDeviceRemoteConnection, validateDeviceRemoteRecoveryPointer } from "./storage/deviceBootstrap.js";
 import type { StorageBucketWriteCondition } from "./storage/bucket.js";
 import type { InitialSetupRecoveryRecordV1 } from "./storage/catalog.js";
 import { STORAGE_MAX_PARTS, STORAGE_PART_SIZE_BYTES } from "./storage/kv.js";
@@ -185,7 +188,7 @@ const STORAGE_CONTROL_TYPES = [
   "initial-setup-result", "initial-setup-recovery-list", "initial-setup-cleanup",
   "switch-bucket",
   "change-bucket-config", "rename-bucket", "retry",
-  "change-bucket-password", "cancel-probe",
+  "change-bucket-password", "list-pending-password-rotations", "resume-bucket-password-rotation", "cancel-probe",
   "capabilities", "probe-capabilities", "cold-export",
 ] as const satisfies readonly CoordinatorStorageControl["type"][];
 
@@ -271,6 +274,8 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
   C extends { type: "switch-bucket" } ? StorageBucketSwitchResultV1 :
   C extends { type: "change-bucket-config" | "rename-bucket" } ? StorageBucketCatalogEntryV2 :
   C extends { type: "change-bucket-password" } ? StorageBucketPasswordRotationResultV1 :
+  C extends { type: "list-pending-password-rotations" } ? PendingPasswordRotationViewV1[] :
+  C extends { type: "resume-bucket-password-rotation" } ? StorageBucketPasswordRotationResumeResultV1 :
   C extends { type: "unlock-bucket" } ? CoordinatorStorageUnlockBucketResult :
   C extends { type: "cold-export" } ? Uint8Array :
   C extends { type: "capabilities" } ? BucketConditionalCapabilitiesView | null :
@@ -817,7 +822,7 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
   const type = enumValue(control.type, STORAGE_CONTROL_TYPES, "storage control.type");
   switch (type) {
     case "status": case "summary": case "connection": case "retry":
-    case "initial-setup-recovery-list": case "cancel-probe": case "capabilities": case "probe-capabilities": case "cold-export":
+    case "initial-setup-recovery-list": case "list-pending-password-rotations": case "cancel-probe": case "capabilities": case "probe-capabilities": case "cold-export":
       return { type };
     case "unlock-bucket":
       return { type, password: text(control.password, "storage control." + type + ".password", 4_096) };
@@ -846,6 +851,8 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
       return { type, label: text(control.label, "storage control.rename-bucket.label", 256) };
     case "change-bucket-password":
       return { type, oldPassword: text(control.oldPassword, "storage control.change-bucket-password.oldPassword", 4_096), newPassword: text(control.newPassword, "storage control.change-bucket-password.newPassword", 4_096) };
+    case "resume-bucket-password-rotation":
+      return { type, operationId: text(control.operationId, "storage control.resume-bucket-password-rotation.operationId", 128), oldPassword: text(control.oldPassword, "storage control.resume-bucket-password-rotation.oldPassword", 4_096), newPassword: text(control.newPassword, "storage control.resume-bucket-password-rotation.newPassword", 4_096) };
     default:
       throw new TypeError("Coordinator storage control type " + type + " is unsupported");
   }
@@ -1498,7 +1505,9 @@ export type CoordinatorLocalStorageRequest =
   | (CoordinatorSessionBinding & { type: "device-bootstrap-read" })
   | (CoordinatorSessionBinding & { type: "device-bootstrap-connection-upsert"; connection: DeviceRemoteConnectionV1; select?: boolean })
   | (CoordinatorSessionBinding & { type: "device-bootstrap-recovery-upsert"; recovery: DeviceRemoteRecoveryPointerV1 })
-  | (CoordinatorSessionBinding & { type: "device-bootstrap-recovery-delete"; operationId: string });
+  | (CoordinatorSessionBinding & { type: "device-bootstrap-recovery-delete"; operationId: string })
+  | (CoordinatorSessionBinding & { type: "device-bootstrap-rotation-upsert"; rotation: DevicePasswordRotationRecordV1 })
+  | (CoordinatorSessionBinding & { type: "device-bootstrap-rotation-delete"; operationId: string });
 
 export type CoordinatorLocalStorageResponse =
   | { type: "object"; object?: CoordinatorLocalStorageObject }
@@ -1893,7 +1902,24 @@ function parseStorageBucketSwitchResult(value: unknown, field: string): StorageB
 function parseStorageBucketRotationResult(value: unknown, field: string): StorageBucketPasswordRotationResultV1 {
   const result = expectRecord(value, field);
   if (result.ok !== true) throw new TypeError(`Coordinator ${field}.ok is invalid`);
-  return { ok: true, bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket") };
+  const publishedHeadEtag = optionalText(result.publishedHeadEtag, field + ".publishedHeadEtag", 512);
+  return { ok: true, bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket"), ...(publishedHeadEtag === undefined ? {} : { publishedHeadEtag }) };
+}
+
+function parseStoragePendingPasswordRotations(value: unknown, field: string): PendingPasswordRotationViewV1[] {
+  if (!Array.isArray(value)) throw new TypeError(`Coordinator ${field} must be an array`);
+  return value.map((item, index) => {
+    try { return validatePendingPasswordRotationView(item); }
+    catch { throw new TypeError(`Coordinator ${field}[${index}] is an invalid password rotation view`); }
+  });
+}
+
+function parseStorageBucketRotationResumeResult(value: unknown, field: string): StorageBucketPasswordRotationResumeResultV1 {
+  const result = expectRecord(value, field);
+  if (result.ok !== true) throw new TypeError(`Coordinator ${field}.ok is invalid`);
+  const outcome = result.outcome;
+  if (outcome !== "completed" && outcome !== "revoked") throw new TypeError(`Coordinator ${field}.outcome is invalid`);
+  return { ok: true, outcome, bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket") };
 }
 
 function parseStorageUnlockBucketResult(value: unknown, field: string): CoordinatorStorageUnlockBucketResult {
@@ -2478,6 +2504,10 @@ function parseStorageControlResultFor(control: CoordinatorStorageControl, value:
       return parseLocalStorageCatalogEntry(value, field);
     case "change-bucket-password":
       return parseStorageBucketRotationResult(value, field);
+    case "list-pending-password-rotations":
+      return parseStoragePendingPasswordRotations(value, field);
+    case "resume-bucket-password-rotation":
+      return parseStorageBucketRotationResumeResult(value, field);
     case "unlock-bucket":
       return parseStorageUnlockBucketResult(value, field);
     case "cold-export":
@@ -3566,6 +3596,17 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
     };
   }
   if (type === "device-bootstrap-recovery-delete") return { ...binding, type, operationId: localStorageText(value.operationId, "operationId", 128) };
+  if (type === "device-bootstrap-rotation-upsert") {
+    return {
+      ...binding,
+      type,
+      rotation: (() => {
+        try { return validateDevicePasswordRotationRecord(value.rotation); }
+        catch { throw new TypeError("Coordinator local-storage device bootstrap rotation is invalid"); }
+      })(),
+    };
+  }
+  if (type === "device-bootstrap-rotation-delete") return { ...binding, type, operationId: localStorageText(value.operationId, "operationId", 128) };
   if (type === "catalog-update") return {
     ...binding,
     type,

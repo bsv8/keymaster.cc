@@ -16,6 +16,7 @@ import {
   VAULT_SERVICE_CAPABILITY,
   deviceRemoteStorageLocationFingerprint,
   type ActiveKeyState,
+  type PendingPasswordRotationViewV1,
   type KeyRef,
   type KeyspaceService,
   type StorageBucketCatalogEntryV2,
@@ -45,16 +46,22 @@ function bucket(bucketId: string, label: string): StorageBucketCatalogEntryV2 {
   };
 }
 
-function seedBucket(entry: StorageBucketCatalogEntryV2): void {
-  const location = { providerId: "local" as const, namespace: entry.bucketId };
+function seedBuckets(entries: StorageBucketCatalogEntryV2[], selectedBucketId = entries[0]?.bucketId): void {
   writeDeviceBootstrap({
     format: "keymaster.device-bootstrap",
     version: 1,
-    selectedRemoteStorageId: entry.bucketId,
-    connections: [{ remoteStorageId: entry.bucketId, displayName: entry.label, providerId: "local", location, physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location), encryptedConfig: entry.encryptedConfig, keyDerivation: entry.keyDerivation, source: "created", createdAt: entry.createdAt, updatedAt: entry.updatedAt }],
+    ...(selectedBucketId === undefined ? {} : { selectedRemoteStorageId: selectedBucketId }),
+    connections: entries.map((entry) => {
+      const location = { providerId: "local" as const, namespace: entry.bucketId };
+      return { remoteStorageId: entry.bucketId, displayName: entry.label, providerId: "local", location, physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location), encryptedConfig: entry.encryptedConfig, keyDerivation: entry.keyDerivation, source: "created", createdAt: entry.createdAt, updatedAt: entry.updatedAt };
+    }),
     recoveries: [],
     workerProfileId: "profile-storage-manager-test",
   });
+}
+
+function seedBucket(entry: StorageBucketCatalogEntryV2): void {
+  seedBuckets([entry]);
 }
 
 function mount() {
@@ -95,8 +102,15 @@ function mount() {
   return { activateKey, ...render(<PluginHostProvider host={host}><StorageBucketManagerEntry /></PluginHostProvider>) };
 }
 
-function mountManagerPage() {
+function mountManagerPage(options: { pendingRotation?: PendingPasswordRotationViewV1; buckets?: StorageBucketCatalogEntryV2[] } = {}) {
   let activePublicKeyHex = KEY_A;
+  const pageBuckets = options.buckets ?? [bucket("bucket-a", "工作桶")];
+  let pendingRotations = options.pendingRotation ? [options.pendingRotation] : [];
+  const listPendingPasswordRotations = vi.fn(async () => pendingRotations);
+  const resumeBucketPasswordRotation = vi.fn(async (_operationId: string, _oldPassword: string, _newPassword: string) => {
+    pendingRotations = [];
+    return { ok: true as const, outcome: "completed" as const, bucket: bucket("bucket-a", "工作桶") };
+  });
   const host = createKeymasterPluginHost({ disableConfigPersistence: true, i18nDebug: false });
   const vault = {
     status: () => "unlocked" as const,
@@ -108,13 +122,19 @@ function mountManagerPage() {
   const storage = {
     status: () => "ready" as const,
     subscribe: () => () => undefined,
-    selectedBucketId: () => "bucket-a",
-    isCatalogBucket: () => true
+    selectedBucketId: () => pageBuckets[0]?.bucketId,
+    isCatalogBucket: () => true,
+    listPendingPasswordRotations,
+    resumeBucketPasswordRotation,
   } as unknown as StorageRuntimeController;
-  seedBucket(bucket("bucket-a", "工作桶"));
+  seedBuckets(pageBuckets);
   host.provide(VAULT_SERVICE_CAPABILITY, vault);
   host.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, storage);
-  return render(<PluginHostProvider host={host}><StorageBucketManagerPage /></PluginHostProvider>);
+  return {
+    ...render(<PluginHostProvider host={host}><StorageBucketManagerPage /></PluginHostProvider>),
+    listPendingPasswordRotations,
+    resumeBucketPasswordRotation,
+  };
 }
 
 afterEach(() => {
@@ -170,5 +190,48 @@ describe("StorageBucketManagerPage structure", () => {
     await user.click(screen.getByRole("button", { name: /添加桶|Add a bucket/ }));
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(screen.getByLabelText(/桶名称|Bucket name/)).toBeTruthy();
+  });
+
+  it("显示待恢复轮转并通过密码提示提交恢复", async () => {
+    const rotation: PendingPasswordRotationViewV1 = {
+      format: "keymaster.storage.password-rotation-view",
+      version: 1,
+      operationId: "rotation-ui-001",
+      bucketId: "bucket-a",
+      backend: "local",
+      phase: "hold-published",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const { resumeBucketPasswordRotation } = mountManagerPage({ pendingRotation: rotation });
+    const prompt = vi.spyOn(window, "prompt")
+      .mockReturnValueOnce("old-password")
+      .mockReturnValueOnce("new-password")
+      .mockReturnValueOnce("new-password");
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole("heading", { name: "待恢复的密码轮转" })).toBeTruthy();
+    expect(screen.getByText(/Hold 已发布，等待收敛/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "恢复此轮转" }));
+
+    await waitFor(() => expect(resumeBucketPasswordRotation).toHaveBeenCalledWith("rotation-ui-001", "old-password", "new-password"));
+    expect(await screen.findByText(/密码轮转已恢复完成/)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "待恢复的密码轮转" })).toBeNull();
+    prompt.mockRestore();
+  });
+
+  it("双桶场景禁止从当前桶直接修改非当前桶密码", async () => {
+    mountManagerPage({ buckets: [bucket("bucket-a", "当前桶 A"), bucket("bucket-b", "目标桶 B")] });
+    const prompt = vi.spyOn(window, "prompt").mockImplementation(() => { throw new Error("非当前桶不应弹出密码提示"); });
+    const user = userEvent.setup();
+
+    const moreMenus = screen.getAllByLabelText("更多桶操作");
+    await user.click(moreMenus[1]!);
+    const changeButtons = screen.getAllByRole("button", { name: "修改密码" });
+    await user.click(changeButtons[1]!);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("请先切换并解锁目标桶");
+    expect(prompt).not.toHaveBeenCalled();
+    prompt.mockRestore();
   });
 });

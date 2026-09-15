@@ -495,6 +495,33 @@ describe("Coordinator runtime contract parsers", () => {
     }).operationResult).toEqual({ endpoint: "https://example.test", limits: [1, 2] });
   });
 
+  it("只接受不含内部恢复字段的密码轮转安全投影", () => {
+    const request = rpcRequest("storage.control", { control: { type: "list-pending-password-rotations" } });
+    const view = {
+      format: "keymaster.storage.password-rotation-view",
+      version: 1,
+      operationId: "rotation-view-0001",
+      bucketId: "bucket-view-0001",
+      backend: "local",
+      phase: "hold-published",
+      createdAt: 1,
+      updatedAt: 2,
+    } as const;
+    expect(parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: [view],
+    }).operationResult).toEqual([view]);
+
+    // 内部事务保存的恢复密文/指纹不能借用公共投影返回；多余字段必须
+    // 在真实 response parser 边界被拒绝，而不是传到页面再猜测如何清理。
+    expect(() => parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: [{ ...view, restoredDeviceCiphertextFingerprint: "a".repeat(64) }],
+    })).toThrow(/password rotation view/iu);
+  });
+
   it("rejects transport identity on both sides of the Coordinator RPC boundary", () => {
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, {
       kind: "session.close", clientId: "forged",

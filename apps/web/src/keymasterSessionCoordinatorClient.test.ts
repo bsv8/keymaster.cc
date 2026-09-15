@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, deviceRemoteStorageLocationFingerprint, type CoordinatorLocalStorageRequest, type CoordinatorLocalStorageResponse, type CoordinatorTopicEvent, type InitialSetupRecoveryRecordV1, type SessionCoordinatorClient, type StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
+import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, deviceRemoteStorageLocationFingerprint, type CoordinatorLocalStorageRequest, type CoordinatorLocalStorageResponse, type CoordinatorTopicEvent, type DevicePasswordRotationRecordV1, type InitialSetupRecoveryRecordV1, type PendingPasswordRotationViewV1, type SessionCoordinatorClient, type StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
 import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
+import { StorageRpcProxy } from "@keymaster/platform-storage";
 import { createCoordinatorClient as createRawCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
 import { DEVICE_BOOTSTRAP_KEY, readStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest } from "@keymaster/platform-storage/coordinator";
@@ -636,6 +637,42 @@ describe("KeymasterSessionCoordinatorClient", () => {
       await client.storageData({ type: "put", grantId: "g", input: { path: "x", content: { $type: "binary", bytes } } }, [bytes]);
       expect(receivedLength).toBe(3);
       expect(bytes.byteLength).toBe(0);
+    } finally { globalThis.SharedWorker = original; }
+  });
+
+  it("parses the pending-rotation safety projection through the real client response boundary", async () => {
+    const view: PendingPasswordRotationViewV1 = {
+      format: "keymaster.storage.password-rotation-view",
+      version: 1,
+      operationId: "rotation-client-0001",
+      bucketId: "bucket-client-0001",
+      backend: "local",
+      phase: "hold-published",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    let wireResult: unknown;
+    const port = createTestMessagePort();
+    port.postMessage.mockImplementation((message: unknown) => {
+      const request = message as { kind: string; requestId: string; control?: { type?: string } };
+      const operationResult = request.kind === "storage.control"
+        && request.control?.type === "list-pending-password-rotations"
+        ? [view]
+        : { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } };
+      if (request.kind === "storage.control") wireResult = operationResult;
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
+    });
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "pending-rotation-client" });
+      await client.connect();
+      const proxy = new StorageRpcProxy(client);
+      await expect(proxy.listPendingPasswordRotations()).resolves.toEqual([view]);
+      proxy.dispose();
+      expect(wireResult).toEqual([view]);
+      expect(JSON.stringify(wireResult)).not.toContain("restoredDeviceEncryptedConfig");
+      expect(JSON.stringify(wireResult)).not.toContain("restoredDeviceCiphertextFingerprint");
     } finally { globalThis.SharedWorker = original; }
   });
 
@@ -1589,6 +1626,59 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally {
       second.client.disconnect();
       second.workerPort.close();
+      restoreGlobals();
+    }
+  });
+
+  it("设备引导轮转记录经页面桥写入、读取与删除", async () => {
+    const storage = new BridgeMemoryStorage();
+    const restoreGlobals = installBridgeGlobals(storage);
+    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
+    try {
+      const keyDerivation = { algorithm: "pbkdf2-hmac-sha-256" as const, passwordEncoding: "utf-8" as const, iterations: 100000, outputLengthBits: 256 as const, saltB64Url: "AAAAAAAAAAAAAAAAAAAAAA" };
+      const rotation: DevicePasswordRotationRecordV1 = {
+        format: "keymaster.storage.password-rotation",
+        version: 1,
+        operationId: "rotation-bridge-0001",
+        bucketId: "rotation-bucket-1",
+        backend: "local",
+        phase: "manifest-unconfirmed",
+        oldKeyDerivation: keyDerivation,
+        oldManifestFingerprint: "c".repeat(64),
+        oldConfigRevision: 1,
+        deviceCiphertextFingerprint: "d".repeat(64),
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      const upserted = await sendBridgeRequest(workerPort, "rotation-upsert", {
+        type: "device-bootstrap-rotation-upsert",
+        authorityInstanceId,
+        leaseId,
+        rotation,
+      }) as { ok?: boolean; response?: { catalog?: { rotations?: Array<{ operationId: string }> } } };
+      expect(upserted).toMatchObject({ ok: true });
+      const read = await sendBridgeRequest(workerPort, "rotation-read", {
+        type: "device-bootstrap-read",
+        authorityInstanceId,
+        leaseId,
+      }) as { ok?: boolean; response?: { catalog?: { rotations?: Array<{ operationId: string }> } } };
+      expect(read.response?.catalog?.rotations?.map((record) => record.operationId)).toEqual([rotation.operationId]);
+      const deleted = await sendBridgeRequest(workerPort, "rotation-delete", {
+        type: "device-bootstrap-rotation-delete",
+        authorityInstanceId,
+        leaseId,
+        operationId: rotation.operationId,
+      }) as { ok?: boolean };
+      expect(deleted).toMatchObject({ ok: true });
+      const reread = await sendBridgeRequest(workerPort, "rotation-reread", {
+        type: "device-bootstrap-read",
+        authorityInstanceId,
+        leaseId,
+      }) as { ok?: boolean; response?: { catalog?: { rotations?: Array<{ operationId: string }> } } };
+      expect(reread.response?.catalog?.rotations ?? []).toEqual([]);
+    } finally {
+      client.disconnect();
+      workerPort.close();
       restoreGlobals();
     }
   });

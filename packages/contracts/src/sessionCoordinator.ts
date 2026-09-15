@@ -172,6 +172,10 @@ export type CoordinatorStorageControl =
   | { type: "retry" }
   /** 当前新版桶的全量改密；Worker 同时更新 Hold 快照与桶内 Vault records。 */
   | { type: "change-bucket-password"; oldPassword: string; newPassword: string }
+  /** 页面重载或 Worker 重启后列出未完成的密码轮转；返回值不含密码或凭据。 */
+  | { type: "list-pending-password-rotations" }
+  /** 未完成的密码轮转恢复；用户重新提供新旧密码，由 Worker 按持久化事务收敛。 */
+  | { type: "resume-bucket-password-rotation"; operationId: string; oldPassword: string; newPassword: string }
   | { type: "cancel-probe" }
   | { type: "capabilities" }
   | { type: "probe-capabilities" }

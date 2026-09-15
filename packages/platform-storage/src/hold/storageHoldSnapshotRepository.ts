@@ -221,7 +221,17 @@ export function createStorageHoldSnapshotRepository(provider: StorageBucketProvi
         ? { ifMatch: input.expectedHead.etag }
         : { ifNoneMatch: "*" as const };
       const written = await provider.put(STORAGE_HOLD_HEAD_PATH, jsonBytes(head), condition);
-      return readSnapshot(head, written.etag);
+      // 提交头写入已经返回了本次发布的 ETag；这里直接用内存中的已规范化
+      // 文档组装结果，不能再通过 readHead/readSnapshot 追加一次网络读取。
+      // 这样“发布成功但紧接着读取 ETag 失败”不会把已发布结果误判为未发布。
+      return {
+        header,
+        bucketGeneration: head.bucketGeneration,
+        storage: toContractStorageRecord(document.storage),
+        keys: document.keys,
+        document,
+        ...(written.etag === undefined ? {} : { headEtag: written.etag }),
+      };
     } catch (caught) {
       if (caught instanceof StorageRuntimeError && caught.code === "storage_conflict") throw snapshotError("Storage Hold snapshot publish conflicted; retry from the latest snapshot", "storage_conflict");
       throw caught;

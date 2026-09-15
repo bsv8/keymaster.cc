@@ -218,13 +218,14 @@ describe("Storage Hold snapshot", () => {
     });
     const provider = createLocalStorageBucketProvider({ storage, locks, bucketId: entry.bucketId });
     const updated = await manager.changeBucketPassword({ entry, provider, oldPassword: "old-password", newPassword: "new-password" });
-    expect(updated.configRevision).toBe(2);
-    expect(updated.snapshotRevision).toBe(2);
+    expect(updated.bucket.configRevision).toBe(2);
+    expect(updated.bucket.snapshotRevision).toBe(2);
+    expect(updated.publishedHeadEtag).toBeDefined();
     const committed = await createStorageHoldSnapshotRepository(provider).readCommitted();
-    const newContext = await deriveBucketCryptoContext("new-password", updated.keyDerivation);
+    const newContext = await deriveBucketCryptoContext("new-password", updated.bucket.keyDerivation);
     try {
       await verifyBucketDocument(committed.document, newContext);
-      await expect(decryptBucketConfig(updated.encryptedConfig, newContext)).resolves.toEqual({ kind: "local" });
+      await expect(decryptBucketConfig(updated.bucket.encryptedConfig, newContext)).resolves.toEqual({ kind: "local" });
       const unlocked = await decryptBucketKey(committed.document.keys[0]!, newContext);
       expect(unlocked.label).toBe("改密 Key");
       unlocked.privateKey.fill(0);

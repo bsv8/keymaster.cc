@@ -25,6 +25,7 @@ import type {
   StorageBucketCatalogEntryV2,
   StorageBucketConnectionConfigV1,
   StorageBucketSwitchResultV1,
+  PendingPasswordRotationViewV1,
 } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageError.js";
 import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
@@ -139,6 +140,14 @@ export class StorageRpcProxy implements StorageRuntimeController {
   /** 当前桶全量改密；页面只负责把返回的目录条目写回本机目录。 */
   changeBucketPassword(oldPassword: string, newPassword: string): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResultV1> {
     return this.control({ type: "change-bucket-password", oldPassword, newPassword });
+  }
+  /** 查询页面可恢复的密码轮转安全投影；返回值不含内部恢复字段。 */
+  listPendingPasswordRotations(): Promise<PendingPasswordRotationViewV1[]> {
+    return this.control({ type: "list-pending-password-rotations" });
+  }
+  /** 未完成的密码轮转恢复；用户重新提供新旧密码，由 Worker 按持久化事务收敛。 */
+  resumeBucketPasswordRotation(operationId: string, oldPassword: string, newPassword: string): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResumeResultV1> {
+    return this.control({ type: "resume-bucket-password-rotation", operationId, oldPassword, newPassword });
   }
   /**
    * 冷导出当前 Coordinator 已绑定桶的已提交 Hold 快照。

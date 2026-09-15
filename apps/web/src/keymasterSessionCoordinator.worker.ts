@@ -92,7 +92,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_SCHEMA_PATH, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, REMOTE_STORAGE_SCHEMA_PATH, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -154,7 +154,7 @@ import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordi
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { DeviceBootstrapCatalogV1, DeviceRemoteConnectionV1, DeviceRemoteRecoveryPointerV1, DeviceRemoteStorageLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupResult, KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageCatalogV2, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService } from "@keymaster/contracts";
+import type { DeviceBootstrapCatalogV1, DevicePasswordRotationRecordV1, DeviceRemoteConnectionV1, DeviceRemoteRecoveryPointerV1, DeviceRemoteStorageLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupResult, KeyspaceService, KeyValueStore, PendingPasswordRotationViewV1, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageCatalogV2, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -167,7 +167,7 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
 } from "@keymaster/contracts";
-import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageHoldSnapshotReadOnlyRepository, createStorageBucketManagementService, serializeBucketDocument, createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog, createRemoteStorage, connectExistingRemoteStorage, deriveRemoteRootAuthenticator, discoverRemoteStorageRoot, physicalLocationFingerprint, validatePublishedPlatformBucketSchema } from "@keymaster/platform-storage/coordinator";
+import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageHoldSnapshotReadOnlyRepository, createStorageBucketManagementService, serializeBucketDocument, createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog, createRemoteStorage, connectExistingRemoteStorage, deriveRemoteRootAuthenticator, discoverRemoteStorageRoot, physicalLocationFingerprint, validatePublishedPlatformBucketSchema, sealRemoteRootManifest, encodeRemoteRootManifest, decodeRemoteRootManifest, validateRemoteRootManifest, verifyRemoteRootManifest, remoteRootManifestFingerprint } from "@keymaster/platform-storage/coordinator";
 import type { DeviceBootstrapRepository, LocalStorageBridgeCandidateBucket, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
@@ -311,6 +311,274 @@ function selectedCatalogBucket(): StorageBucketCatalogEntryV2 | undefined {
 }
 
 /**
+ * 当前桶的设备目录投影。
+ *
+ * 页面设备引导只保存本机连接密文（每次加密使用随机 IV），运行态条目则绑定
+ * 远端 Hold 权威 storage record。页面目录 CAS 按密文比较，因此 Worker 发起
+ * 目录更新必须用这份投影做 expected/next：纯元数据更新保留本机连接密文，
+ * 只有配置/改密流程显式发布新密文时才让两者收敛。
+ */
+async function currentCatalogDeviceProjection(): Promise<StorageBucketCatalogEntryV2 | undefined> {
+  const entry = selectedCatalogBucket();
+  if (!entry) return undefined;
+  let catalog: DeviceBootstrapCatalogV1 | null;
+  try {
+    catalog = await createWorkerDeviceBootstrapRepository().read();
+  } catch {
+    // 设备引导暂不可读时由调用方回退到运行态条目；目录 CAS 会自行
+    // fail-closed，不能静默覆盖本机目录。
+    return undefined;
+  }
+  const connection = catalog?.connections.find((candidate) => candidate.remoteStorageId === entry.bucketId);
+  if (!connection || connection.providerId !== entry.backend) return undefined;
+  return {
+    ...entry,
+    label: connection.displayName,
+    keyDerivation: structuredClone(connection.keyDerivation),
+    encryptedConfig: structuredClone(connection.encryptedConfig),
+    updatedAt: connection.updatedAt,
+  };
+}
+
+/** 设备 encryptedConfig 密文版本指纹：只覆盖随机 IV 与密文，不含密码。 */
+function deviceCiphertextFingerprint(encryptedConfig: StorageRecordV1): string {
+  return bytesToHex(sha256Bytes(new TextEncoder().encode(
+    `keymaster.rotation-device-ciphertext.v1:${encryptedConfig.cipher.ivB64Url}:${encryptedConfig.cipher.ciphertextAndTagB64Url}`,
+  )));
+}
+
+function manifestBytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+type RotationUnconfirmedStage = "hold" | "manifest";
+
+function rotationUnconfirmedError(stage: RotationUnconfirmedStage, message: string): StorageRuntimeError {
+  const error = new StorageRuntimeError(
+    "storage_remote_unknown_result",
+    message,
+  );
+  Object.assign(error as object, { rotationPending: true, rotationPendingStage: stage });
+  return error;
+}
+
+function rotationManifestUnconfirmedError(): StorageRuntimeError {
+  return rotationUnconfirmedError("manifest", "Password rotation manifest write is unconfirmed and left pending recovery");
+}
+
+function rotationHoldUnconfirmedError(): StorageRuntimeError {
+  return rotationUnconfirmedError("hold", "Password rotation Hold publication is unconfirmed and left pending recovery");
+}
+
+function isRotationManifestUnconfirmed(error: unknown): boolean {
+  return error instanceof StorageRuntimeError
+    && (error as unknown as { rotationPending?: unknown }).rotationPending === true;
+}
+
+function rotationUnconfirmedStage(error: unknown): RotationUnconfirmedStage {
+  return (error as { rotationPendingStage?: unknown } | undefined)?.rotationPendingStage === "hold" ? "hold" : "manifest";
+}
+
+/**
+ * 远端条件写共享协议：CAS 写入 → 逐字节读回确认。
+ *
+ * - 读回与期望字节完全一致：视为本次写入，返回回滚 token。
+ * - 读回与旧字节一致：本次写入没有落地，调用方可以安全回滚其它层。
+ * - 其它情况（并发替换/读回失败）：无法确认，抛 rotation-pending 错误，
+ *   调用方禁止任何单边回滚，必须进入可恢复的 degraded 状态。
+ */
+async function conditionalPutWithReadbackConfirm(
+  provider: StorageBucketProvider,
+  path: string,
+  expectedBytes: Uint8Array,
+  previousBytes: Uint8Array,
+  casEtag: string,
+): Promise<{ previousBytes: Uint8Array; writtenEtag: string }> {
+  const previous = previousBytes.slice();
+  let result: { etag?: string } | undefined;
+  try {
+    result = await provider.put(path, expectedBytes, { ifMatch: casEtag });
+  } catch (putError) {
+    const reread = await provider.get(path).catch(() => undefined);
+    if (reread && manifestBytesEqual(reread.bytes, expectedBytes)) {
+      if (!reread.etag) throw rotationManifestUnconfirmedError();
+      return { previousBytes: previous, writtenEtag: reread.etag };
+    }
+    if (reread && manifestBytesEqual(reread.bytes, previous)) throw putError;
+    throw rotationManifestUnconfirmedError();
+  }
+  if (result.etag !== undefined) {
+    return { previousBytes: previous, writtenEtag: result.etag };
+  }
+  const reread = await provider.get(path).catch(() => undefined);
+  if (reread && reread.etag && manifestBytesEqual(reread.bytes, expectedBytes)) {
+    return { previousBytes: previous, writtenEtag: reread.etag };
+  }
+  throw rotationManifestUnconfirmedError();
+}
+
+/**
+ * 设备目录层的独立重加密：用旧密码/旧 KDF 解出本机连接，再用新密码/新
+ * KDF 重新加密。远端 Hold 的 committed.storage 绝不写入设备引导。
+ */
+async function reencryptDeviceConnectionForNewPassword(
+  deviceEntry: StorageBucketCatalogEntryV2,
+  oldPassword: string,
+  nextKeyDerivation: StorageKeyDerivationV1,
+  newPassword: string,
+): Promise<StorageRecordV1> {
+  const oldContext = await deriveBucketCryptoContext(oldPassword, deviceEntry.keyDerivation);
+  let config: StorageBucketConnectionConfigV1;
+  try {
+    config = await decryptBucketConfig(deviceEntry.encryptedConfig, oldContext);
+  } finally {
+    oldContext.dispose();
+  }
+  const newContext = await deriveBucketCryptoContext(newPassword, nextKeyDerivation);
+  try {
+    return await encryptBucketConfig(config, newContext);
+  } finally {
+    newContext.dispose();
+  }
+}
+
+/**
+ * 密码轮转的前置根认证：用旧密码对远端做完整发现/认证，并核对目标 ID、
+ * 平台固定入口及 Hold 身份。未经认证就用新密码重签 manifest，会把被篡改
+ * 或 HMAC 无效的 root 合法化。
+ *
+ * 返回的 manifest/bytes/etag 来自同一次已认证读取；后续 CAS 与重签只能
+ * 使用这一份对象，调用方不得再做第二次未经认证的读取。
+ */
+async function verifyRemoteRootForPasswordRotation(
+  provider: StorageBucketProvider,
+  password: string,
+  entry: StorageBucketCatalogEntryV2,
+): Promise<{
+  manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1;
+  manifestBytes: Uint8Array;
+  manifestEtag: string;
+}> {
+  let object: Awaited<ReturnType<StorageBucketProvider["get"]>>;
+  try {
+    object = await provider.get(REMOTE_STORAGE_ROOT_MANIFEST_PATH);
+  } catch (error) {
+    if (error instanceof StorageRuntimeError) throw error;
+    throw new StorageRuntimeError("storage_unavailable", "The remote storage root could not be reached");
+  }
+  if (!object) {
+    throw new StorageRuntimeError("storage_remote_not_initialized", "The remote storage namespace is not initialized");
+  }
+  if (!object.etag) {
+    throw new StorageRuntimeError("storage_unavailable", "Password rotation cannot start without a manifest CAS token");
+  }
+  let manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1;
+  try {
+    manifest = validateRemoteRootManifest(decodeRemoteRootManifest(object.bytes));
+  } catch (error) {
+    throw new StorageRuntimeError("storage_remote_corrupt", "The remote storage root manifest is corrupt", "provider");
+  }
+  const authenticator = await deriveRemoteRootAuthenticator(password, manifest.keyDerivation);
+  try {
+    await verifyRemoteRootManifest(manifest, authenticator);
+  } catch (error) {
+    if (error instanceof StorageRuntimeError && error.code === "storage_remote_incompatible") {
+      throw new StorageRuntimeError("storage_remote_incompatible", "The remote storage root manifest is incompatible", "provider");
+    }
+    if (error instanceof StorageRuntimeError && error.code === "storage_forbidden") {
+      throw new StorageRuntimeError("storage_forbidden", "The remote storage provider denied root discovery", error.diagnostic === "authentication" ? "authentication" : undefined);
+    }
+    throw new StorageRuntimeError("storage_remote_corrupt", "The remote storage root manifest is corrupt", "provider");
+  } finally {
+    authenticator.dispose?.();
+  }
+  if (manifest.remoteStorageId !== entry.bucketId) {
+    throw new StorageRuntimeError("storage_remote_incompatible", "The remote storage root manifest is incompatible", "provider");
+  }
+  // 认证过的 manifest 还必须使用平台固定入口；路径对不上说明远端被替换。
+  if (manifest.rootHead.path !== REMOTE_STORAGE_HOLD_HEAD_PATH
+    || manifest.system.holdHeadPath !== REMOTE_STORAGE_HOLD_HEAD_PATH
+    || manifest.system.schemaPath !== REMOTE_STORAGE_SCHEMA_PATH) {
+    throw new StorageRuntimeError("storage_remote_corrupt", "Remote root entrypoints do not match the platform layout");
+  }
+  const readOnly = asColdStartReadOnlyProvider(provider);
+  for (const path of [manifest.rootHead.path, manifest.system.schemaPath, manifest.system.holdHeadPath]) {
+    const entrypoint = await readOnly.get(path);
+    if (!entrypoint) throw new StorageRuntimeError("storage_remote_corrupt", `Remote root entrypoint is missing: ${path}`, "provider");
+  }
+  const committed = await createStorageHoldSnapshotReadOnlyRepository(readOnly).readCommitted();
+  if (!remoteRootMatchesCommittedHold(manifest, committed.header)) {
+    throw new StorageRuntimeError("storage_remote_corrupt", "Remote root and committed Hold identity do not match");
+  }
+  return { manifest, manifestBytes: object.bytes.slice(), manifestEtag: object.etag };
+}
+
+/**
+ * 密码轮转时重新签名 root manifest。
+ *
+ * root manifest 是跨设备冷启动发现/认证的入口；它用 password + manifest
+ * keyDerivation 做 HMAC。密码轮转后必须用新密码/KDF 重签同一 namespace 的
+ * manifest，否则重启或另一台设备将无法再发现远端。
+ *
+ * 只能对前置认证返回的同一份对象做 CAS 写入；条件写结果未知时读回并逐
+ * 字节确认，只有与期望新 manifest 完全一致才视为本次写入。与旧 manifest
+ * 一致说明未写入；其它情况（并发替换）无法确认，必须进入
+ * rotation-pending，绝不能单边回滚 Hold。
+ */
+async function sealManifestWithPassword(
+  manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1,
+  keyDerivation: StorageKeyDerivationV1,
+  password: string,
+): Promise<Uint8Array> {
+  const authenticator = await deriveRemoteRootAuthenticator(password, keyDerivation);
+  try {
+    return encodeRemoteRootManifest(await sealRemoteRootManifest({
+      remoteStorageId: manifest.remoteStorageId,
+      namespaceVersion: manifest.namespaceVersion,
+      createdAt: manifest.createdAt,
+      keyDerivation,
+      rootHead: manifest.rootHead,
+      system: manifest.system,
+      initializationTransactionId: manifest.initializationTransactionId,
+    }, authenticator));
+  } finally {
+    authenticator.dispose?.();
+  }
+}
+
+async function verifyManifestBytesWithPassword(
+  bytes: Uint8Array,
+  password: string,
+  keyDerivation: StorageKeyDerivationV1,
+): Promise<import("@keymaster/contracts").RemoteStorageRootManifestV1 | undefined> {
+  let manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1;
+  try {
+    manifest = validateRemoteRootManifest(decodeRemoteRootManifest(bytes));
+  } catch {
+    return undefined;
+  }
+  if (!sameStorageKeyDerivation(manifest.keyDerivation, keyDerivation)) return undefined;
+  let authenticator: Awaited<ReturnType<typeof deriveRemoteRootAuthenticator>> | undefined;
+  try {
+    authenticator = await deriveRemoteRootAuthenticator(password, keyDerivation);
+  } catch {
+    return undefined;
+  }
+  try {
+    await verifyRemoteRootManifest(manifest, authenticator);
+    return manifest;
+  } catch {
+    return undefined;
+  } finally {
+    authenticator.dispose?.();
+  }
+}
+
+/**
  * 新版桶的 Key 公共索引句柄。
  *
  * Hold 是私钥密文的唯一真值；key-index 只提供公开列表和身份查找。
@@ -441,6 +709,65 @@ async function exportCatalogKeyBackup(publicKeyHex: string): Promise<string> {
 }
 
 type CatalogCommittedSnapshot = Awaited<ReturnType<ReturnType<typeof createStorageHoldSnapshotRepository>["readCommitted"]>>;
+
+/** 轮转恢复只接受平台定义的 manifest 固定入口，不能把任意 HMAC 文档当成桶根。 */
+function hasFixedRotationManifestLayout(
+  manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1,
+  bucketId: string,
+): boolean {
+  return manifest.remoteStorageId === bucketId
+    && manifest.rootHead.path === REMOTE_STORAGE_HOLD_HEAD_PATH
+    && manifest.system.holdHeadPath === REMOTE_STORAGE_HOLD_HEAD_PATH
+    && manifest.system.schemaPath === REMOTE_STORAGE_SCHEMA_PATH;
+}
+
+/** 用对应密码认证完整 Hold，并验证其配置密文确实属于目标后端。 */
+async function verifyRotationHoldCandidate(
+  committed: CatalogCommittedSnapshot,
+  password: string,
+  keyDerivation: StorageKeyDerivationV1,
+  configRevision: number,
+  backend: "local" | "s3",
+): Promise<boolean> {
+  if (committed.header.configRevision !== configRevision
+    || !sameStorageKeyDerivation(committed.header.keyDerivation, keyDerivation)) return false;
+  let context: Awaited<ReturnType<typeof deriveBucketCryptoContext>> | undefined;
+  try {
+    context = await deriveBucketCryptoContext(password, keyDerivation);
+    await verifyBucketDocument(committed.document, context);
+    const config = await decryptBucketConfig(committed.storage, context);
+    return (config.kind === "local" ? "local" : "s3") === backend;
+  } catch {
+    return false;
+  } finally {
+    context?.dispose();
+  }
+}
+
+/** 用指定密码验证 manifest，并核对轮转记录绑定的桶身份、入口和指纹。 */
+async function verifyRotationManifestCandidate(
+  bytes: Uint8Array,
+  password: string,
+  keyDerivation: StorageKeyDerivationV1,
+  bucketId: string,
+  expectedFingerprint?: string,
+): Promise<import("@keymaster/contracts").RemoteStorageRootManifestV1 | undefined> {
+  const manifest = await verifyManifestBytesWithPassword(bytes, password, keyDerivation);
+  if (!manifest || !hasFixedRotationManifestLayout(manifest, bucketId)) return undefined;
+  if (expectedFingerprint !== undefined && remoteRootManifestFingerprint(bytes) !== expectedFingerprint) return undefined;
+  return manifest;
+}
+
+/** 检查 manifest 与当前 Hold 版本的关系；同 KDF 必须完整匹配，跨 KDF 只允许向已提交版本以内的入口。 */
+function rotationManifestMatchesCommittedHold(
+  manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1,
+  committed: CatalogCommittedSnapshot,
+): boolean {
+  if (sameStorageKeyDerivation(manifest.keyDerivation, committed.header.keyDerivation)) {
+    return remoteRootMatchesCommittedHold(manifest, committed.header);
+  }
+  return manifest.rootHead.revision <= committed.header.snapshotRevision;
+}
 
 function expectedHoldHead(headEtag: string | undefined): StorageHoldHeadExpectation {
   return headEtag === undefined ? { kind: "absent" } : { kind: "etag", etag: headEtag };
@@ -1169,7 +1496,7 @@ async function hydrateCatalogVaultFromSnapshot(password: string): Promise<boolea
 }
 
 /** 当前新版桶的跨目录/桶内全量改密；失败时尽量回到旧 Hold 提交头。 */
-async function changeSelectedCatalogBucketPassword(oldPassword: string, newPassword: string): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResultV1> {
+async function changeSelectedCatalogBucketPassword(oldPassword: string, newPassword: string, peerId?: string): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResultV1> {
   const entry = selectedCatalogBucket();
   const provider = platformBucketProvider;
   const root = platformRootStore;
@@ -1180,19 +1507,73 @@ async function changeSelectedCatalogBucketPassword(oldPassword: string, newPassw
   if (oldPassword.length < 8 || newPassword.length < 8) throw new Error("Bucket password must contain at least 8 characters");
   if (oldPassword === newPassword) throw new Error("The new bucket password must be different");
 
+  const deviceBootstrap = createWorkerDeviceBootstrapRepository(peerId);
+  // 并发轮转守卫必须在任何远端读取之前：同一桶已有未决事务时必须先恢复。
+  const pendingRotationForBucket = (await deviceBootstrap.read())?.rotations?.find(
+    (candidate) => candidate.bucketId === entry.bucketId,
+  );
+  if (pendingRotationForBucket) {
+    throw new StorageRuntimeError("storage_conflict", "A password rotation for this bucket requires recovery before a new rotation can begin");
+  }
+
   const repository = createStorageHoldSnapshotRepository(provider);
   const previous = await repository.readCommitted();
   // Hold 保存全部私钥密文；K-V 只保存公开索引和 verifier 元数据。
   const previousMeta = await getVaultMeta();
   if (previousMeta && !(await verifyPassword(oldPassword, previousMeta))) throw new Error("Bucket password does not match its Vault metadata");
+  // 轮转前双门禁：先用旧密码完整认证 root（目标 ID、固定入口、Hold 身份），
+  // 返回的 manifest/bytes/etag 是同一次已认证读取；后续 CAS 与重签只能用
+  // 这一份对象。再确认 Provider 有可靠条件写。认证在任何新快照发布之前
+  // 完成；条件写缺失时绝不能开始轮转。
+  const rotationRoot = await verifyRemoteRootForPasswordRotation(provider, oldPassword, entry);
+  const rotationProbe = await provider.probe();
+  if (!rotationProbe.ok || rotationProbe.conditionalWrites !== "native") {
+    throw new StorageRuntimeError("storage_provider_error", "Password rotation requires a provider with native conditional writes");
+  }
   const manager = createStorageBucketManagementService();
+  // 设备目录投影在任何写入前固定：它保存本机连接凭据。远端 Hold 的
+  // committed.storage 只是权威记录，密码轮转不能让设备回退到其中的旧连接。
+  const previousDeviceEntry = await currentCatalogDeviceProjection() ?? entry;
+  const deviceDiverged = !sameStorageRecord(previousDeviceEntry.encryptedConfig, entry.encryptedConfig)
+    || !sameStorageKeyDerivation(previousDeviceEntry.keyDerivation, entry.keyDerivation);
+  // 持久化轮转事务（任何 Hold 写入之前）：记录操作 ID、阶段、旧 KDF、
+  // 旧 manifest 指纹、旧 Hold 版本与设备密文版本。
+  const rotationStartedAt = Date.now();
+  let rotationRecord: DevicePasswordRotationRecordV1 = {
+    format: "keymaster.storage.password-rotation",
+    version: 1,
+    operationId: `rotation-${randomIdentifierSuffix()}`,
+    bucketId: entry.bucketId,
+    backend: entry.backend,
+    phase: "started",
+    oldKeyDerivation: structuredClone(entry.keyDerivation),
+    oldVaultAuthMetadataPresent: previousMeta !== undefined,
+    oldManifestFingerprint: remoteRootManifestFingerprint(rotationRoot.manifestBytes),
+    oldConfigRevision: previous.header.configRevision,
+    ...(previous.headEtag === undefined ? {} : { oldHoldHeadEtag: previous.headEtag }),
+    deviceCiphertextFingerprint: deviceCiphertextFingerprint(previousDeviceEntry.encryptedConfig),
+    createdAt: rotationStartedAt,
+    updatedAt: rotationStartedAt,
+  };
+  rotationRecord = await deviceBootstrap.upsertRotation(rotationRecord);
+  const updateRotationRecord = async (patch: Partial<DevicePasswordRotationRecordV1>): Promise<DevicePasswordRotationRecordV1> => {
+    rotationRecord = await deviceBootstrap.upsertRotation({ ...rotationRecord, ...patch, updatedAt: Date.now() });
+    return rotationRecord;
+  };
+  const noteRotationPhase = async (phase: DevicePasswordRotationRecordV1["phase"]): Promise<void> => {
+    try {
+      await updateRotationRecord({ phase });
+    } catch (updateError) {
+      console.warn("[coordinator] password rotation record update failed", updateError instanceof Error ? updateError.message : updateError);
+    }
+  };
   let updated: StorageBucketCatalogEntryV2 | undefined;
+  let nextDeviceEntry: StorageBucketCatalogEntryV2 | undefined;
   let publishedHeadEtag: string | undefined;
-  let catalogCandidate: StorageBucketCatalogEntryV2 | undefined;
-  let catalogUpdated: StorageBucketCatalogEntryV2 | undefined;
   let vaultWriteAttempted = false;
+  let rotatedManifest: { previousBytes: Uint8Array; writtenEtag: string; sealedBytes: Uint8Array } | undefined;
   try {
-    updated = await manager.changeBucketPassword({
+    const publishedRotation = await manager.changeBucketPassword({
       entry,
       provider,
       oldPassword,
@@ -1200,7 +1581,35 @@ async function changeSelectedCatalogBucketPassword(oldPassword: string, newPassw
       bucketGeneration: root.bucket.bucketGeneration,
       persistCatalog: false
     });
-    publishedHeadEtag = (await repository.readHead()).etag;
+    updated = publishedRotation.bucket;
+    // 改密管理服务直接转交 publish 返回的 ETag；这里不能再 readHead，
+    // 否则“Hold 已发布但第二次读取失败”会丢失可恢复事务。
+    publishedHeadEtag = publishedRotation.publishedHeadEtag;
+    rotationRecord = await updateRotationRecord({
+      phase: "hold-published",
+      newKeyDerivation: structuredClone(updated.keyDerivation),
+      newConfigRevision: updated.configRevision,
+      ...(publishedHeadEtag === undefined ? {} : { holdHeadEtag: publishedHeadEtag }),
+    });
+    if (publishedHeadEtag === undefined) {
+      // 已拿到管理服务的发布结果，但没有可靠 CAS token，不能继续做
+      // manifest/设备/Vault 的单边变更；保留记录，重启后由恢复流程分类。
+      throw rotationHoldUnconfirmedError();
+    }
+    // root manifest 也要用新密码/KDF 重签：它是跨设备发现/认证的入口。
+    // 只能对前置认证的同一份 manifest 做 CAS 写入与回滚，取消第二次读取。
+    // 先密封并记录期望指纹，再写入：写入结果未知时恢复流程仍能分类远端。
+    const sealedManifestBytes = await sealManifestWithPassword(rotationRoot.manifest, updated.keyDerivation, newPassword);
+    rotationRecord = await updateRotationRecord({
+      newManifestFingerprint: remoteRootManifestFingerprint(sealedManifestBytes),
+    });
+    rotatedManifest = await conditionalPutWithReadbackConfirm(
+      provider,
+      REMOTE_STORAGE_ROOT_MANIFEST_PATH,
+      sealedManifestBytes,
+      rotationRoot.manifestBytes,
+      rotationRoot.manifestEtag,
+    ).then((written) => ({ ...written, sealedBytes: sealedManifestBytes }));
     // Vault meta 只承担“已有 Vault 的密码 verifier”职责。Key 密文已经
     // 由 manager 在上面的 Hold 快照中全部用新密码重加密；这里绝不能再
     // 生成/保存一份 KeyHold 文档。
@@ -1208,32 +1617,68 @@ async function changeSelectedCatalogBucketPassword(oldPassword: string, newPassw
       vaultWriteAttempted = true;
       await vaultStorageRepository.putAuthMetadata(await createCatalogVaultMeta(newPassword));
     }
-    // 目录更新也属于这次跨存储提交的一部分。页面桥在真正写入前会
-    // 重新读取目录并校验 expectedBucket，不能让一个旧标签页覆盖新版本。
-    catalogCandidate = { ...updated, updatedAt: Date.now() };
-    catalogUpdated = await updateLocalStorageCatalogEntry(entry, catalogCandidate, root.bucket.bucketGeneration);
-    updated = catalogUpdated;
+    // 设备引导与远端 Hold 分别重加密：设备层用旧密码解出本机连接，再用
+    // 新 KDF/密码独立加密；只有两者本来就相同才复用远端新密文。正向和
+    // 回滚 CAS 都使用各自层的记录，绝不把 committed.storage 写回设备。
+    const deviceEncryptedConfig = deviceDiverged
+      ? await reencryptDeviceConnectionForNewPassword(previousDeviceEntry, oldPassword, updated.keyDerivation, newPassword)
+      : updated.encryptedConfig;
+    nextDeviceEntry = {
+      ...previousDeviceEntry,
+      configRevision: updated.configRevision,
+      keyDerivation: structuredClone(updated.keyDerivation),
+      encryptedConfig: deviceEncryptedConfig,
+      snapshotRevision: updated.snapshotRevision,
+      updatedAt: Date.now(),
+    };
+    await updateLocalStorageCatalogEntry(previousDeviceEntry, nextDeviceEntry, root.bucket.bucketGeneration);
+    if (testFailAfterBucketPasswordCatalogUpdate) {
+      testFailAfterBucketPasswordCatalogUpdate = false;
+      throw new Error("injected bucket password rotation failure after catalog update");
+    }
     // 旋转成功后不能继续让内存中的旧密码保护会话运行；用户需用新桶
     // 密码重新进入，当前 Key 私钥和所有旧 owner 句柄一并释放。
     await performGlobalLock("bucket-password-change");
+    // 运行态保持 Hold 权威记录。
     storageBootstrapState = storageBootstrapState
       ? { ...storageBootstrapState, selectedBucket: updated }
       : null;
-    return { ok: true, bucket: updated };
+    await deviceBootstrap.removeRotation(rotationRecord.operationId);
+    return { ok: true, bucket: updated, ...(publishedHeadEtag === undefined ? {} : { publishedHeadEtag }) };
   } catch (error) {
     const rollbackErrors: string[] = [];
+    // manifest 写入结果无法确认时，远端可能已经是新密码形态：禁止任何
+    // 单边回滚（否则制造新旧密码混合态），记录 pending 后进入
+    // degraded/rotation-pending 让用户显式恢复。
+    if (isRotationManifestUnconfirmed(error)) {
+      await noteRotationPhase(rotationUnconfirmedStage(error) === "hold" ? "hold-unconfirmed" : "manifest-unconfirmed");
+      storageStartupFailure = true;
+      storageHealthController.setStatus("degraded", "Password rotation result is unconfirmed; rotation is pending recovery");
+      emitStorageState();
+      throw error;
+    }
     // 桥请求可能在页面完成写入后才断开，不能仅依赖本地 boolean 判断；
-    // 用新版条目做 expected 值尝试回滚，CAS 不匹配时安全地保持现状。
-    if (catalogCandidate) {
+    // 用设备层的新条目做 expected 值尝试回滚，CAS 不匹配时安全地保持现状。
+    if (nextDeviceEntry) {
       try {
-        await updateLocalStorageCatalogEntry(catalogUpdated ?? catalogCandidate, entry, root.bucket.bucketGeneration, true);
+        if (testFailNextBucketPasswordDeviceRollback) {
+          testFailNextBucketPasswordDeviceRollback = false;
+          throw new Error("injected bucket password device rollback failure");
+        }
+        await updateLocalStorageCatalogEntry(nextDeviceEntry, previousDeviceEntry, root.bucket.bucketGeneration, true);
       } catch (rollbackError) {
         rollbackErrors.push(`catalog: ${rollbackError instanceof Error ? rollbackError.message : "unknown error"}`);
       }
     }
     if (vaultWriteAttempted) {
       try {
-        if (previousMeta) await vaultStorageRepository.putAuthMetadata(previousMeta);
+        if (previousMeta) {
+          if (testFailNextVaultAuthMetadataRollback) {
+            testFailNextVaultAuthMetadataRollback = false;
+            throw new Error("injected Vault auth metadata rollback failure");
+          }
+          await vaultStorageRepository.putAuthMetadata(previousMeta);
+        }
         else await vaultStorageRepository.deleteAuthMetadata();
       } catch (rollbackError) {
         rollbackErrors.push(`Vault: ${rollbackError instanceof Error ? rollbackError.message : "unknown error"}`);
@@ -1251,10 +1696,412 @@ async function changeSelectedCatalogBucketPassword(oldPassword: string, newPassw
         rollbackErrors.push(`Hold: ${rollbackError instanceof Error ? rollbackError.message : "unknown rollback error"}`);
       }
     }
+    if (rotatedManifest) {
+      // manifest 回滚与正向写共用同一协议：CAS 写入 → 逐字节读回确认。
+      // 读回未知时同样进入 pending，禁止继续单边处理。
+      try {
+        await conditionalPutWithReadbackConfirm(
+          provider,
+          REMOTE_STORAGE_ROOT_MANIFEST_PATH,
+          rotatedManifest.previousBytes,
+          rotatedManifest.sealedBytes,
+          rotatedManifest.writtenEtag,
+        );
+      } catch (rollbackError) {
+        if (isRotationManifestUnconfirmed(rollbackError)) {
+          await noteRotationPhase("manifest-rollback-unconfirmed");
+          storageStartupFailure = true;
+          storageHealthController.setStatus("degraded", "Password rotation rollback is unconfirmed; rotation is pending recovery");
+          emitStorageState();
+          throw rollbackError;
+        }
+        rollbackErrors.push(`root manifest: ${rollbackError instanceof Error ? rollbackError.message : "unknown rollback error"}`);
+      }
+    }
     if (rollbackErrors.length > 0) {
       throw new Error(`Bucket password rotation failed; rollback was not fully confirmed (${rollbackErrors.join("; ")})`);
     }
+    // 管理服务可能在发布前失败，也可能在发布结果返回前失败；没有
+    // “未发布”的强证明时一律保留事务，避免错误删除恢复凭据。
+    if (updated === undefined) throw error;
+    // 只有 Hold、manifest、Vault、设备和目录均已确认回滚时才清理事务。
+    try {
+      await deviceBootstrap.removeRotation(rotationRecord.operationId);
+    } catch (removeError) {
+      console.warn("[coordinator] password rotation record cleanup failed", removeError instanceof Error ? removeError.message : removeError);
+    }
     throw error;
+  }
+}
+
+/**
+ * 未完成的密码轮转恢复：用户重新提供新旧密码，按持久化事务收敛远端与本机。
+ *
+ * 远端新 manifest + 新 Hold：补齐 Vault verifier、设备重加密与目录，completed。
+ * 远端旧 manifest + 新 Hold：manifest 写入从未落地，重试密封写入后补齐，completed。
+ * 远端旧 manifest + 旧 Hold：无任何生效变更，确保设备仍是旧密码可用后 revoked。
+ * 远端新 manifest + 旧 Hold：把 manifest 安全改回旧版后 revoked。
+ * 其它（并发替换/密码不对）：保持 pending，不做任何破坏性写入。
+ */
+async function resumeBucketPasswordRotation(
+  operationId: string,
+  oldPassword: string,
+  newPassword: string,
+  peerId?: string,
+): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResumeResultV1> {
+  if (oldPassword.length < 8 || newPassword.length < 8) throw new Error("Bucket passwords must contain at least 8 characters");
+  if (oldPassword === newPassword) throw new Error("The new bucket password must be different");
+  const deviceBootstrap = createWorkerDeviceBootstrapRepository(peerId);
+  const catalog = await deviceBootstrap.read();
+  const record = catalog?.rotations?.find((candidate) => candidate.operationId === operationId);
+  if (!record) throw new StorageRuntimeError("storage_not_found", "Password rotation transaction was not found");
+  const connection = catalog?.connections.find((candidate) => candidate.remoteStorageId === record.bucketId);
+  if (!connection || connection.providerId !== record.backend) {
+    throw new StorageRuntimeError("storage_not_found", "Device bootstrap connection is unavailable for rotation recovery");
+  }
+  // 设备连接只能用旧密码或新密码解开；否则密码不对，不做任何写入。
+  let deviceConfig: StorageBucketConnectionConfigV1 | undefined;
+  let deviceMatchesNew = false;
+  try {
+    const oldContext = await deriveBucketCryptoContext(oldPassword, connection.keyDerivation);
+    try {
+      deviceConfig = await decryptBucketConfig(connection.encryptedConfig, oldContext);
+    } finally {
+      oldContext.dispose();
+    }
+  } catch {
+    deviceConfig = undefined;
+  }
+  if (deviceConfig === undefined && record.newKeyDerivation
+    && sameStorageKeyDerivation(connection.keyDerivation, record.newKeyDerivation)) {
+    try {
+      const newContext = await deriveBucketCryptoContext(newPassword, record.newKeyDerivation);
+      try {
+        deviceConfig = await decryptBucketConfig(connection.encryptedConfig, newContext);
+        deviceMatchesNew = true;
+      } finally {
+        newContext.dispose();
+      }
+    } catch {
+      deviceConfig = undefined;
+    }
+  }
+  if (!deviceConfig) throw new StorageRuntimeError("storage_identity_required", "Passwords do not match the rotation transaction");
+  const currentDeviceCiphertextFingerprint = deviceCiphertextFingerprint(connection.encryptedConfig);
+  const deviceMatchesRecordedRestore = !deviceMatchesNew
+    && record.restoredDeviceCiphertextFingerprint !== undefined
+    && record.restoredDeviceEncryptedConfig !== undefined
+    && currentDeviceCiphertextFingerprint === record.restoredDeviceCiphertextFingerprint
+    && sameStorageRecord(connection.encryptedConfig, record.restoredDeviceEncryptedConfig);
+  if (!deviceMatchesNew
+    && currentDeviceCiphertextFingerprint !== record.deviceCiphertextFingerprint
+    && !deviceMatchesRecordedRestore) {
+    // 设备连接在事务建立后被其它流程改动：不能假设它仍是轮转前版本。
+    // 但本事务可能已经成功写回一份随机 IV 的旧密码密文，重试时必须识别它。
+    throw new StorageRuntimeError("storage_conflict", "Device connection changed during rotation recovery");
+  }
+  if ((deviceConfig.kind === "local" ? "local" : "s3") !== record.backend) {
+    throw new StorageRuntimeError("storage_provider_error", "Device connection backend does not match the rotation transaction");
+  }
+  // 撤销恢复会生成随机 IV；先把这次 CAS 的完整预期密文和指纹写进事务，
+  // 再执行设备写入。这样即使写入成功但响应丢失，下一次 resume 也能幂等识别。
+  const persistExpectedDeviceRestore = async (restored: StorageRecordV1, fingerprint: string): Promise<void> => {
+    await deviceBootstrap.upsertRotation({
+      ...record,
+      restoredDeviceEncryptedConfig: structuredClone(restored),
+      restoredDeviceCiphertextFingerprint: fingerprint,
+      updatedAt: Date.now(),
+    });
+  };
+  let provider: StorageBucketProvider | undefined;
+  try {
+    provider = createCatalogProviderFromConnection(deviceConfig, record.bucketId, 1, undefined, peerId);
+    const manifestObject = await provider.get(REMOTE_STORAGE_ROOT_MANIFEST_PATH);
+    if (!manifestObject) throw new StorageRuntimeError("storage_remote_corrupt", "Remote root manifest is missing");
+    if (!manifestObject.etag) throw rotationManifestUnconfirmedError();
+    let committed: CatalogCommittedSnapshot;
+    try {
+      committed = await createStorageHoldSnapshotReadOnlyRepository(asColdStartReadOnlyProvider(provider)).readCommitted();
+    } catch (error) {
+      // Hold 结构损坏/缺失时不能凭头部字段作出 revoked/completed 判断；
+      // 保留事务，等待用户修复远端或再次恢复。
+      if (error instanceof StorageRuntimeError
+        && (error.code === "storage_remote_corrupt" || error.code === "storage_not_found")) {
+        throw rotationHoldUnconfirmedError();
+      }
+      throw error;
+    }
+    // 记录可能停在 Hold 发布之前：若 Hold 已是未知新 KDF，用提交头补齐
+    // （新密码验证文档）。验证失败说明远端不可识别，保持 pending。
+    let effectiveNewKDF = record.newKeyDerivation;
+    let effectiveNewConfigRevision = record.newConfigRevision;
+    let effectiveNewManifestFingerprint = record.newManifestFingerprint;
+    if (!effectiveNewKDF && !sameStorageKeyDerivation(committed.header.keyDerivation, record.oldKeyDerivation)) {
+      const holdHasNewPassword = await verifyRotationHoldCandidate(
+        committed,
+        newPassword,
+        committed.header.keyDerivation,
+        committed.header.configRevision,
+        record.backend,
+      );
+      if (!holdHasNewPassword) throw rotationHoldUnconfirmedError();
+      effectiveNewKDF = structuredClone(committed.header.keyDerivation);
+      effectiveNewConfigRevision = committed.header.configRevision;
+    }
+    const verifiedNewManifest = effectiveNewKDF === undefined
+      ? undefined
+      : await verifyRotationManifestCandidate(
+        manifestObject.bytes,
+        newPassword,
+        effectiveNewKDF,
+        record.bucketId,
+        effectiveNewManifestFingerprint,
+      );
+    const verifiedOldManifest = await verifyRotationManifestCandidate(
+      manifestObject.bytes,
+      oldPassword,
+      record.oldKeyDerivation,
+      record.bucketId,
+      record.oldManifestFingerprint,
+    );
+    const manifestIsNew = verifiedNewManifest !== undefined
+      && rotationManifestMatchesCommittedHold(verifiedNewManifest, committed);
+    const manifestIsOld = verifiedOldManifest !== undefined
+      && rotationManifestMatchesCommittedHold(verifiedOldManifest, committed);
+    // 不能只比较 configRevision/KDF：必须用对应密码验证完整 Hold HMAC，
+    // 同时解密 storage 配置确认候选文档确实属于本桶后端。
+    const holdIsNew = effectiveNewKDF !== undefined
+      && effectiveNewConfigRevision !== undefined
+      && await verifyRotationHoldCandidate(
+        committed,
+        newPassword,
+        effectiveNewKDF,
+        effectiveNewConfigRevision,
+        record.backend,
+      );
+    const holdIsOld = await verifyRotationHoldCandidate(
+      committed,
+      oldPassword,
+      record.oldKeyDerivation,
+      record.oldConfigRevision,
+      record.backend,
+    );
+    if ((!manifestIsNew && !manifestIsOld) || (!holdIsNew && !holdIsOld)) {
+      throw rotationManifestUnconfirmedError();
+    }
+    if (manifestIsOld && holdIsOld) {
+      // 从未生效：确保设备仍是旧密码可用后清理事务，报告撤销。
+      await ensureRotationDeviceAtOldPassword(record, connection, deviceConfig, deviceMatchesNew, oldPassword, persistExpectedDeviceRestore);
+      await restoreVaultAuthMetadataAfterRotationRevoked(provider, record, connection, committed, oldPassword);
+      await deviceBootstrap.removeRotation(record.operationId);
+      storageStartupFailure = false;
+      emitStorageState();
+      return { ok: true, outcome: "revoked", bucket: authoritativeEntryFromCommitted(record, connection, committed) };
+    }
+    if (manifestIsNew && holdIsOld) {
+      // 安全撤销：把 manifest 改回旧版（当前字段已用新密码验证过，用旧
+      // 密码/KDF 重签），再确保设备。读回必须精确回到旧指纹。
+      const currentFields = validateRemoteRootManifest(decodeRemoteRootManifest(manifestObject.bytes));
+      const restoredBytes = await sealManifestWithPassword(currentFields, record.oldKeyDerivation, oldPassword);
+      await conditionalPutWithReadbackConfirm(provider, REMOTE_STORAGE_ROOT_MANIFEST_PATH, restoredBytes, manifestObject.bytes, manifestObject.etag);
+      const reread = await provider.get(REMOTE_STORAGE_ROOT_MANIFEST_PATH).catch(() => undefined);
+      if (!reread || remoteRootManifestFingerprint(reread.bytes) !== record.oldManifestFingerprint) {
+        throw rotationManifestUnconfirmedError();
+      }
+      await ensureRotationDeviceAtOldPassword(record, connection, deviceConfig, deviceMatchesNew, oldPassword, persistExpectedDeviceRestore);
+      await restoreVaultAuthMetadataAfterRotationRevoked(provider, record, connection, committed, oldPassword);
+      await deviceBootstrap.removeRotation(record.operationId);
+      storageStartupFailure = false;
+      emitStorageState();
+      return { ok: true, outcome: "revoked", bucket: authoritativeEntryFromCommitted(record, connection, committed) };
+    }
+    // manifest 旧 + Hold 新：manifest 写入从未落地，重试密封写入后补齐。
+    // manifest 新 + Hold 新：直接补齐本机。两者都走向完成。
+    if (manifestIsOld && holdIsNew) {
+      if (!effectiveNewKDF) throw rotationManifestUnconfirmedError();
+      const currentManifest = verifiedOldManifest;
+      if (!currentManifest) throw rotationManifestUnconfirmedError();
+      const sealedBytes = await sealManifestWithPassword(currentManifest, effectiveNewKDF, newPassword);
+      await conditionalPutWithReadbackConfirm(provider, REMOTE_STORAGE_ROOT_MANIFEST_PATH, sealedBytes, manifestObject.bytes, manifestObject.etag);
+    }
+    await finishPasswordRotationRecovery(provider, record, connection, deviceConfig, deviceMatchesNew, committed, newPassword);
+    await deviceBootstrap.removeRotation(record.operationId);
+    storageStartupFailure = false;
+    emitStorageState();
+    return { ok: true, outcome: "completed", bucket: authoritativeEntryFromCommitted(record, connection, committed) };
+  } finally {
+    provider?.dispose();
+  }
+}
+
+/** 从已提交 Hold 重建运行态权威条目（resume 完成/撤销的返回载荷）。 */
+function authoritativeEntryFromCommitted(
+  record: Pick<DevicePasswordRotationRecordV1, "bucketId">,
+  connection: DeviceRemoteConnectionV1,
+  committed: { header: { configRevision: number; snapshotRevision: number; keyDerivation: StorageKeyDerivationV1 }; storage: StorageRecordV1 },
+): StorageBucketCatalogEntryV2 {
+  return {
+    bucketId: record.bucketId,
+    label: connection.displayName,
+    backend: connection.providerId,
+    configRevision: committed.header.configRevision,
+    keyDerivation: structuredClone(committed.header.keyDerivation),
+    encryptedConfig: structuredClone(committed.storage),
+    snapshotRevision: committed.header.snapshotRevision,
+    createdAt: connection.createdAt,
+    updatedAt: Date.now(),
+  };
+}
+
+/**
+ * 撤销路径确保设备仍是旧密码可用：设备已是新密文时，用旧密码/KDF 把
+ * 当前设备配置重加密回去并 CAS 写回；已是旧密文则不动。
+ */
+async function ensureRotationDeviceAtOldPassword(
+  record: DevicePasswordRotationRecordV1,
+  connection: DeviceRemoteConnectionV1,
+  deviceConfig: StorageBucketConnectionConfigV1,
+  deviceMatchesNew: boolean,
+  oldPassword: string,
+  persistExpectedRestore?: (restored: StorageRecordV1, fingerprint: string) => Promise<void>,
+): Promise<void> {
+  if (!deviceMatchesNew) return;
+  const oldContext = await deriveBucketCryptoContext(oldPassword, record.oldKeyDerivation);
+  let restoredCipher: StorageRecordV1;
+  try {
+    restoredCipher = await encryptBucketConfig(deviceConfig, oldContext);
+  } finally {
+    oldContext.dispose();
+  }
+  const restoredFingerprint = deviceCiphertextFingerprint(restoredCipher);
+  await persistExpectedRestore?.(restoredCipher, restoredFingerprint);
+  const restored: StorageBucketCatalogEntryV2 = {
+    ...catalogEntryFromDeviceConnection(connection),
+    configRevision: record.oldConfigRevision,
+    keyDerivation: structuredClone(record.oldKeyDerivation),
+    encryptedConfig: restoredCipher,
+  };
+  const current: StorageBucketCatalogEntryV2 = {
+    ...restored,
+    keyDerivation: structuredClone(connection.keyDerivation),
+    encryptedConfig: structuredClone(connection.encryptedConfig),
+  };
+  await updateLocalStorageCatalogEntry(current, restored, platformRootStore?.bucket.bucketGeneration ?? 1);
+}
+
+/** 撤销轮转时恢复 Vault verifier；没有旧 verifier 的旧记录则删除它。 */
+async function restoreVaultAuthMetadataAfterRotationRevoked(
+  provider: StorageBucketProvider,
+  record: DevicePasswordRotationRecordV1,
+  connection: DeviceRemoteConnectionV1,
+  committed: CatalogCommittedSnapshot,
+  oldPassword: string,
+): Promise<void> {
+  const ephemeralRoot = createPlatformRootStore({
+    provider,
+    bucket: Object.freeze({ bucketId: record.bucketId, bucketGeneration: 1, provider: record.backend }),
+    isCurrent: () => true,
+  });
+  let vaultStores: CoordinatorVaultStorageStores | undefined;
+  try {
+    vaultStores = await openCoordinatorVaultStorageStores(ephemeralRoot);
+    const repository = createVaultStorageRepository({
+      stores: vaultStores as unknown as VaultPurposeStores,
+      hold: createCatalogHoldAdapter(provider, authoritativeEntryFromCommitted(record, connection, committed)),
+    });
+    if (record.oldVaultAuthMetadataPresent === false) {
+      await repository.deleteAuthMetadata();
+    } else {
+      if (testFailNextVaultAuthMetadataRestore) {
+        testFailNextVaultAuthMetadataRestore = false;
+        throw new Error("injected Vault auth metadata restore failure");
+      }
+      await repository.putAuthMetadata(await createCatalogVaultMeta(oldPassword));
+    }
+  } finally {
+    if (vaultStores) closeCoordinatorVaultStorageStores(vaultStores);
+  }
+}
+
+/**
+ * 恢复完成：写新 verifier、设备重加密、目录 CAS，并清理可能残留的旧绑定。
+ * 调用方负责移除事务记录；失败时记录保留，远端已确认一致，可重试。
+ */
+async function finishPasswordRotationRecovery(
+  provider: StorageBucketProvider,
+  record: DevicePasswordRotationRecordV1,
+  connection: DeviceRemoteConnectionV1,
+  deviceConfig: StorageBucketConnectionConfigV1,
+  deviceMatchesNew: boolean,
+  committed: {
+    header: { configRevision: number; snapshotRevision: number; keyDerivation: StorageKeyDerivationV1 };
+    storage: StorageRecordV1;
+  },
+  newPassword: string,
+): Promise<void> {
+  const newKeyDerivation = record.newKeyDerivation
+    && sameStorageKeyDerivation(committed.header.keyDerivation, record.newKeyDerivation)
+    ? record.newKeyDerivation
+    : committed.header.keyDerivation;
+  // Vault verifier：用临时 Root 打开存储后写入，不发布全局绑定。
+  const ephemeralRoot = createPlatformRootStore({
+    provider,
+    bucket: Object.freeze({ bucketId: record.bucketId, bucketGeneration: 1, provider: record.backend }),
+    isCurrent: () => true,
+  });
+  let vaultStores: CoordinatorVaultStorageStores | undefined;
+  try {
+    vaultStores = await openCoordinatorVaultStorageStores(ephemeralRoot);
+    const repository = createVaultStorageRepository({
+      stores: vaultStores as unknown as VaultPurposeStores,
+      hold: createCatalogHoldAdapter(provider, authoritativeEntryFromCommitted(record, connection, committed)),
+    });
+    await repository.putAuthMetadata(await createCatalogVaultMeta(newPassword));
+  } finally {
+    if (vaultStores) closeCoordinatorVaultStorageStores(vaultStores);
+  }
+  // 设备重加密：已是新密文则复用，否则用新 KDF/密码独立加密本机连接。
+  let deviceNextCipher: StorageRecordV1;
+  if (deviceMatchesNew) {
+    deviceNextCipher = structuredClone(connection.encryptedConfig);
+  } else {
+    const newContext = await deriveBucketCryptoContext(newPassword, newKeyDerivation);
+    try {
+      deviceNextCipher = await encryptBucketConfig(deviceConfig, newContext);
+    } finally {
+      newContext.dispose();
+    }
+  }
+  const expectedDevice: StorageBucketCatalogEntryV2 = {
+    ...catalogEntryFromDeviceConnection(connection),
+    configRevision: committed.header.configRevision,
+    keyDerivation: structuredClone(connection.keyDerivation),
+    encryptedConfig: structuredClone(connection.encryptedConfig),
+    snapshotRevision: committed.header.snapshotRevision,
+  };
+  const nextDevice: StorageBucketCatalogEntryV2 = {
+    ...expectedDevice,
+    keyDerivation: structuredClone(newKeyDerivation),
+    encryptedConfig: deviceNextCipher,
+    updatedAt: Date.now(),
+  };
+  await updateLocalStorageCatalogEntry(expectedDevice, nextDevice, platformRootStore?.bucket.bucketGeneration ?? 1);
+  // 旧绑定已 stale：锁定后丢弃，下一次解锁重新认证。
+  if (platformRootStore?.bucket.bucketId === record.bucketId
+    || storageBootstrapState?.selectedBucket?.bucketId === record.bucketId) {
+    try {
+      if (coordinatorState.vaultStatus === "unlocked" || coordinatorState.activePublicKeyHex) {
+        await performGlobalLock("bucket-password-rotation-resume");
+      }
+    } catch {
+      // fencing 失败仍继续释放本地句柄；远端已确认一致。
+    }
+    if (platformRootStore?.bucket.bucketId === record.bucketId) discardCurrentPlatformStorageBinding();
+    if (storageBootstrapState?.selectedBucket?.bucketId === record.bucketId) storageBootstrapState = null;
+    coordinatorState.vaultStatus = "uninitialized";
+    coordinatorState.activePublicKeyHex = undefined;
+    dropActivePrivateKey();
+    storageStartupFailure = false;
   }
 }
 
@@ -1452,6 +2299,12 @@ let p2pkhJungleBusClient: ReturnType<typeof createJungleBusClient> | undefined;
 let p2pkhProviderRevision = 0;
 let testP2pkhBroadcastProvider: P2pkhTransactionBroadcastProvider | undefined;
 let testPersistCoordinatorSnapshotFailure = false;
+let testFailColdStartInstall = false;
+let testFailAfterBucketPasswordCatalogUpdate = false;
+let testFailAfterBucketConfigCatalogUpdate = false;
+let testFailNextVaultAuthMetadataRollback = false;
+let testFailNextVaultAuthMetadataRestore = false;
+let testFailNextBucketPasswordDeviceRollback = false;
 let platformRootStore: PlatformRootStore | undefined;
 /** 当前统一抽象桶 Provider；所有 K-V 与文件运行时共用这一实例。 */
 let platformBucketProvider: StorageBucketProvider | undefined;
@@ -1896,9 +2749,238 @@ async function ensureStorageProfileSaltSnapshot(snapshot: SnapshotStore<{ saltHe
   throw storageUnavailableError("Storage Profile salt initialization conflicted repeatedly");
 }
 
+/**
+ * 设备引导投影只是启动提示：configRevision/snapshotRevision 为 0，不携带远端
+ * 真实版本。运行态只能使用从已认证 Hold 得到的 revision。
+ */
+function isBootstrapHintEntry(entry: StorageBucketCatalogEntryV2 | undefined): boolean {
+  if (!entry) return false;
+  return entry.configRevision === 0 || entry.snapshotRevision === 0;
+}
+
+function asColdStartReadOnlyProvider(provider: StorageBucketProvider): import("@keymaster/contracts").StorageBucketReadOnlyProvider {
+  return Object.freeze({
+    provider: provider.provider,
+    bucketId: provider.bucketId,
+    probe: (signal?: AbortSignal) => provider.probe(signal),
+    get: (path: string, options?: { signal?: AbortSignal; ifMatch?: string }) => provider.get(path, options),
+    list: (input?: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }) => provider.list(input),
+  });
+}
+
+type WorkerS3ProviderConfig = Parameters<typeof createS3BucketProvider>[0];
+type WorkerS3ProviderOptions = NonNullable<Parameters<typeof createS3BucketProvider>[1]>;
+type WorkerS3ProviderOptionsFactory = (config: WorkerS3ProviderConfig) => WorkerS3ProviderOptions | undefined;
+
+let testS3BucketProviderOptionsFactory: WorkerS3ProviderOptionsFactory | undefined;
+
+/** 测试专用：注入 S3 Provider 的对象存储/能力状态，验证凭据来源。 */
+export function __testSetS3BucketProviderOptionsFactory(factory: WorkerS3ProviderOptionsFactory | undefined): void {
+  testS3BucketProviderOptionsFactory = factory;
+}
+
+function workerS3ProviderOptions(config: WorkerS3ProviderConfig, bucketId: string): WorkerS3ProviderOptions {
+  const override = testS3BucketProviderOptionsFactory?.(config);
+  return override ? { ...override, bucketId: override.bucketId ?? bucketId } : { bucketId };
+}
+
+/** 冷启动候选 Provider：只解密设备连接，不触碰远端。 */
+async function createColdStartCandidateProvider(
+  connection: DeviceRemoteConnectionV1,
+  password: string,
+  peerId?: string,
+): Promise<StorageBucketProvider> {
+  if (connection.providerId === "local") {
+    const bridgeState = createCoordinatorLocalStorageBridgeState(peerId);
+    const provider = createLocalStorageBucketProvider({
+      bucketId: connection.remoteStorageId,
+      bucketGeneration: 1,
+      bridge: (request) => requestLocalStorageBridge(request, bridgeState.targetPeerId()),
+    });
+    coordinatorLocalStorageProviderPublishers.set(provider, bridgeState.publish);
+    return provider;
+  }
+  const context = await deriveBucketCryptoContext(password, connection.keyDerivation);
+  try {
+    const config = await decryptBucketConfig(connection.encryptedConfig, context);
+    if (config.kind !== "s3") throw new StorageRuntimeError("storage_provider_error", "S3 bucket configuration is invalid");
+    const normalized: WorkerS3ProviderConfig = {
+      version: 1,
+      providerId: "s3-compatible",
+      connection: {
+        endpoint: config.endpoint,
+        region: config.region,
+        bucket: config.bucket,
+        forcePathStyle: config.forcePathStyle === true,
+        ...(config.sessionToken === undefined ? {} : { sessionToken: config.sessionToken }),
+        ...(config.prefix === undefined ? {} : { prefix: config.prefix }),
+      },
+      credentials: { kind: "access-key", accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+    };
+    return createS3BucketProvider(normalized, workerS3ProviderOptions(normalized, connection.remoteStorageId));
+  } finally {
+    context.dispose();
+  }
+}
+
+/**
+ * 读取设备引导中的完整连接记录，并核对物理位置指纹。
+ *
+ * 冷启动只接受设备层已经认证过的连接（它是本机可用凭据的唯一来源）；
+ * 记录缺失或指纹不一致必须 fail closed，不能退回 Hold 中的旧连接。
+ */
+async function readSelectedDeviceConnection(
+  remoteStorageId: string,
+  backend: "local" | "s3",
+): Promise<DeviceRemoteConnectionV1> {
+  let catalog: DeviceBootstrapCatalogV1 | null;
+  try {
+    catalog = await createWorkerDeviceBootstrapRepository().read();
+  } catch (error) {
+    throw storageUnavailableError(error instanceof Error ? error.message : "Device bootstrap connection could not be read");
+  }
+  const connection = catalog?.connections.find((candidate) => candidate.remoteStorageId === remoteStorageId);
+  if (!connection || connection.providerId !== backend) {
+    throw new StorageRuntimeError("storage_provider_error", "Device bootstrap connection is unavailable for cold start");
+  }
+  if (connection.physicalLocationFingerprint !== physicalLocationFingerprint(connection.location)) {
+    throw new StorageRuntimeError("storage_remote_location_mismatch", "Device bootstrap physical location fingerprint is invalid");
+  }
+  return connection;
+}
+
+/**
+ * 冷启动认证：复用“连接已有远端”的发现、认证、validate-only schema 与最小
+ * 索引装配语义，只做远端读，认证前不安装可写 Root、不补 schema/profile salt。
+ * 返回的条目 revision/storage 全部来自已认证 Hold。
+ */
+async function authenticateColdStartEntry(
+  candidate: StorageBucketProvider,
+  hint: StorageBucketCatalogEntryV2,
+  password: string,
+): Promise<{ authoritativeEntry: StorageBucketCatalogEntryV2; manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1 }> {
+  const readOnly = asColdStartReadOnlyProvider(candidate);
+  const discovered = await discoverRemoteStorageRoot(candidate, {
+    password,
+    expectedRemoteStorageId: hint.bucketId,
+  });
+  if (discovered.status === "absent") {
+    throw new StorageRuntimeError("storage_remote_not_initialized", "The remote storage namespace is not initialized");
+  }
+  if (discovered.status !== "present") {
+    if (discovered.status === "forbidden") throw new StorageRuntimeError("storage_forbidden", "The remote storage provider denied root discovery", discovered.diagnostic);
+    if (discovered.status === "unavailable") throw new StorageRuntimeError("storage_unavailable", "The remote storage root could not be reached", discovered.diagnostic === "timeout" ? "network" : discovered.diagnostic === "unknown" ? undefined : discovered.diagnostic);
+    if (discovered.status === "corrupt") throw new StorageRuntimeError("storage_remote_corrupt", "The remote storage root manifest is corrupt", "provider");
+    throw new StorageRuntimeError("storage_remote_incompatible", "The remote storage root manifest is incompatible", "provider");
+  }
+  const manifest = discovered.object.manifest;
+  // 可见性边界：manifest 宣告的最小入口必须存在，只读验证不修复。
+  for (const path of [manifest.rootHead.path, manifest.system.schemaPath, manifest.system.holdHeadPath]) {
+    const object = await readOnly.get(path);
+    if (!object) throw new StorageRuntimeError("storage_remote_corrupt", `Remote root entrypoint is missing: ${path}`, "provider");
+  }
+  await validatePublishedPlatformBucketSchema(readOnly, [
+    CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata,
+    CENTRAL_STORAGE_DECLARATIONS.vaultKeyIndex,
+    CENTRAL_STORAGE_DECLARATIONS.vaultKeyLifecycleJournals,
+    CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection,
+    CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings,
+    CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent,
+    CENTRAL_STORAGE_DECLARATIONS.storageProfileSalt,
+    CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
+    CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
+    CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory,
+    CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads,
+  ]);
+  const committed = await createStorageHoldSnapshotReadOnlyRepository(readOnly).readCommitted();
+  if (!remoteRootMatchesCommittedHold(manifest, committed.header)) {
+    throw new StorageRuntimeError("storage_remote_corrupt", "Remote root and committed Hold identity do not match");
+  }
+  const context = await deriveBucketCryptoContext(password, manifest.keyDerivation);
+  try {
+    await verifyBucketDocument(committed.document, context);
+    const config = await decryptBucketConfig(committed.storage, context);
+    if ((config.kind === "local" ? "local" : "s3") !== hint.backend) {
+      throw new StorageRuntimeError("storage_provider_error", "Storage Hold snapshot backend does not match the bucket catalog");
+    }
+  } finally {
+    context.dispose();
+  }
+  const authoritativeEntry: StorageBucketCatalogEntryV2 = {
+    ...hint,
+    configRevision: committed.header.configRevision,
+    snapshotRevision: committed.header.snapshotRevision,
+    keyDerivation: structuredClone(committed.header.keyDerivation),
+    encryptedConfig: structuredClone(committed.storage),
+  };
+  return { authoritativeEntry, manifest };
+}
+
+/**
+ * 带密码的冷启动：先只读认证远端，拿到权威条目后再安装可写 Root。
+ * 认证前零远端写入；运行态 Vault 适配器绑定的是权威条目，不再是 revision=0 提示。
+ * Provider 继续使用设备层已验证的候选连接，绝不回退到 Hold 中的旧凭据。
+ */
+async function bootstrapColdStartAuthenticated(password: string, peerId?: string): Promise<void> {
+  const hint = storageBootstrapState?.selectedBucket;
+  if (!hint) throw storageUnavailableError("Storage bootstrap selection is unavailable");
+  // 已有可写运行态且已是权威版本时直接复用，避免重复认证。
+  if (platformRootStore && !isBootstrapHintEntry(hint)) return;
+  if (platformRootStore) discardCurrentPlatformStorageBinding();
+  const connection = await readSelectedDeviceConnection(hint.bucketId, hint.backend);
+  let candidate = await createColdStartCandidateProvider(connection, password, peerId);
+  let candidateOwned = true;
+  try {
+    const { authoritativeEntry } = await authenticateColdStartEntry(candidate, hint, password);
+    if (testFailColdStartInstall) {
+      testFailColdStartInstall = false;
+      throw new StorageRuntimeError("storage_unavailable", "injected cold start install failure after authentication");
+    }
+    storageRootInstallationActive = true;
+    try {
+      // 认证成功的设备候选 Provider 就是运行态 Provider：Hold 的
+      // committed.storage 只是权威记录，不能覆盖设备上已验证可用的凭据。
+      // Vault 绑定显式传入权威条目，不依赖尚在 hint 状态的全局 state。
+      await installPlatformStorage(candidate, {
+        bucketId: candidate.bucketId,
+        bucketGeneration: 1,
+        provider: authoritativeEntry.backend,
+      }, { vaultEntry: authoritativeEntry });
+    } finally {
+      storageRootInstallationActive = false;
+    }
+    // 安装成功后才提交权威条目；打开快照或写 salt 失败会直接走到
+    // finally 释放候选 Provider，state 仍保持原设备提示，下一次解锁
+    // 会重新走只读发现→认证，而不是落到普通 bootstrap。
+    storageBootstrapState = {
+      ...(storageBootstrapState ?? { selectedBackend: authoritativeEntry.backend }),
+      selectedBackend: authoritativeEntry.backend,
+      selectedProfileId: authoritativeEntry.bucketId,
+      selectedBucket: authoritativeEntry,
+    };
+    candidateOwned = false;
+  } finally {
+    if (candidateOwned) candidate.dispose();
+  }
+}
+
 /** Storage-first：先验证抽象桶，再打开 keys/ 与平台状态区。 */
 async function bootstrapPlatformStorage(profilePassword?: string, peerId?: string): Promise<void> {
   if (platformRootStore) return;
+  // 冷启动提示必须先认证：revision=0 的设备投影绝不能直接绑定 Vault 或安装
+  // 任何 Root（即使 validate-only 的 Store 本身仍可写）。设备引导条目存在
+  // 但没有密码时，Local 和 S3 都只进入 authentication 并结束初始化；收到
+  // 密码后由 bootstrapColdStartAuthenticated 认证成功才安装可写运行态。
+  const coldHint = storageBootstrapState?.selectedBucket;
+  if (coldHint && isBootstrapHintEntry(coldHint)) {
+    if (profilePassword) {
+      await bootstrapColdStartAuthenticated(profilePassword, peerId);
+      return;
+    }
+    storageHealthController.setStatus("authentication", "Bucket password is required");
+    emitStorageState();
+    throw Object.assign(new Error("Bucket password is required"), { code: "storage_identity_required" });
+  }
   const hadPlatformRoot = Boolean(platformRootStore);
   storageBootstrapController?.dispose();
   const controller = new StorageBootstrapController({
@@ -2001,6 +3083,21 @@ function sameStorageKeyDerivation(left: StorageKeyDerivationV1, right: StorageKe
     && left.saltB64Url === right.saltB64Url;
 }
 
+/**
+ * 远端 root manifest 与已提交 Hold 的同一性。
+ *
+ * root manifest 只记录创建时的 Hold head revision，之后每次 Hold 发布都
+ * 不会改写 manifest。因此“同一性”只能要求提交头不早于 manifest 记录点，
+ * 不能要求严格相等，否则任何后续 Key/配置提交都会让远端无法再被连接。
+ */
+function remoteRootMatchesCommittedHold(
+  manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1,
+  committedHeader: { keyDerivation: StorageKeyDerivationV1; snapshotRevision: number },
+): boolean {
+  return sameStorageKeyDerivation(committedHeader.keyDerivation, manifest.keyDerivation)
+    && committedHeader.snapshotRevision >= manifest.rootHead.revision;
+}
+
 function createCatalogProviderFromConnection(
   config: StorageBucketConnectionConfigV1,
   bucketId: string,
@@ -2035,7 +3132,7 @@ function createCatalogProviderFromConnection(
       secretAccessKey: config.secretAccessKey,
     },
   });
-  return createS3BucketProvider(normalized, { bucketId });
+  return createS3BucketProvider(normalized, workerS3ProviderOptions(normalized, bucketId));
 }
 
 async function createCatalogProviderForSwitch(
@@ -2073,7 +3170,7 @@ async function createCatalogProviderForSwitch(
   try {
     const config = await decryptBucketConfig(entry.encryptedConfig, context);
     if (config.kind !== "s3") throw new StorageRuntimeError("storage_provider_error", "S3 bucket configuration is invalid");
-    return (await import("@keymaster/platform-storage/coordinator")).createS3BucketProvider({
+    const normalized: WorkerS3ProviderConfig = {
       version: 1,
       providerId: "s3-compatible",
       connection: {
@@ -2085,7 +3182,11 @@ async function createCatalogProviderForSwitch(
         ...(config.prefix === undefined ? {} : { prefix: config.prefix }),
       },
       credentials: { kind: "access-key", accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
-    }, { bucketId: entry.bucketId });
+    };
+    return (await import("@keymaster/platform-storage/coordinator")).createS3BucketProvider(
+      normalized,
+      workerS3ProviderOptions(normalized, entry.bucketId),
+    );
   } finally {
     context.dispose();
   }
@@ -2128,16 +3229,21 @@ async function stageCatalogVaultSession(
     || committed.bucketGeneration < 1)) {
     throw new StorageRuntimeError("storage_provider_error", "Storage Hold snapshot does not match the target bucket catalog");
   }
+  // 运行态条目必须以远端 Hold 为权威：revision 与 storage 记录都来自已认证
+  // 提交，不能保留调用方传入的重新加密密文（随机 IV 必然不同）。否则只读
+  // 连接阶段跳过比较后，后续 unlock 又恢复密文逐字段比较，会拒绝刚连接的远端。
   const authoritativeEntry = committed
     ? {
         ...entry,
         configRevision: committed.header.configRevision,
         snapshotRevision: committed.header.snapshotRevision,
+        keyDerivation: structuredClone(committed.header.keyDerivation),
+        encryptedConfig: structuredClone(committed.storage),
       }
     : entry;
   const targetVault = createVaultStorageRepository({
     stores: vaultStores as unknown as VaultPurposeStores,
-    hold: createCatalogHoldAdapter(provider, entry),
+    hold: createCatalogHoldAdapter(provider, authoritativeEntry),
   });
   const existingMeta = await targetVault.getAuthMetadata();
   const existingIndex = new Map((await targetVault.listKeyIndex()).map((record) => [record.publicKeyHex.toLowerCase(), record]));
@@ -2163,7 +3269,9 @@ async function stageCatalogVaultSession(
       vaultStatus: "uninitialized",
     };
   }
-  const context = await deriveBucketCryptoContext(password, entry.keyDerivation);
+  // 认证必须使用 Hold 权威 KDF，不能用调用方传入的旧条目 KDF；否则远端轮转后
+  // 会用错盐派生导致误报损坏。authoritativeEntry 已在上一步收敛到 Hold。
+  const context = await deriveBucketCryptoContext(password, authoritativeEntry.keyDerivation);
   const snapshotRecords: StorageCatalogKeyIndexRecordV1[] = [];
   let activePrivateKeyBytes: Uint8Array | undefined;
   try {
@@ -2222,7 +3330,7 @@ async function stageCatalogVaultSession(
     const selectedKey = committed.document.keys.find((key) => key.publicKeyHex.toLowerCase() === selected.publicKeyHex.toLowerCase());
     if (!selectedKey) throw new StorageRuntimeError("storage_provider_error", "Target active Key is missing from its Hold snapshot");
     try {
-      const selectedContext = await deriveBucketCryptoContext(password, entry.keyDerivation);
+      const selectedContext = await deriveBucketCryptoContext(password, authoritativeEntry.keyDerivation);
       try {
         const plain = await decryptBucketKey(selectedKey, selectedContext);
         try {
@@ -2522,6 +3630,70 @@ function ownsInitialSetupRuntime(transactionId: string, rootToken: object | unde
     && initialSetupRuntimeOwner?.transactionId === transactionId
     && initialSetupRuntimeOwner.rootToken === rootToken
     && platformRootToken === rootToken;
+}
+
+/**
+ * 同进程同 transaction 重试的幂等门禁。
+ *
+ * Root 已发布后运行态安装失败会保留绑定并进入 degraded；同一事务在同一
+ * Worker 内重试时，不能被自身的残留运行态以“Storage is already initialized”
+ * 阻断。bucketId 由 transactionId 确定性派生，命中自身部分绑定时才允许
+ * fencing 后释放并走只读重建；其它事务的绑定仍按冲突拒绝，避免偷走赢家运行态。
+ */
+function isOwnInitialSetupPartialBinding(transactionId: string): boolean {
+  if (!transactionId) return false;
+  let expectedBucketId: string;
+  try {
+    expectedBucketId = initialSetupBucketId(transactionId);
+  } catch {
+    return false;
+  }
+  // 已成功事务走恢复缓存，不进入这里的释放路径。
+  const cached = initialSetupTransactions.get(transactionId);
+  if (cached && !(cached instanceof Promise) && cached.ok) return false;
+  if (initialSetupRecoveryRecords.get(transactionId)?.status === "succeeded") return false;
+  if (platformRootStore?.bucket.bucketId === expectedBucketId) return true;
+  if (storageBootstrapState?.selectedBucket?.bucketId === expectedBucketId) return true;
+  if (initialSetupRuntimeOwner?.transactionId === transactionId
+    && initialSetupRuntimeOwner.bucketId === expectedBucketId) return true;
+  return false;
+}
+
+async function fenceAndReleaseOwnInitialSetupBinding(transactionId: string): Promise<void> {
+  try {
+    if (coordinatorState.vaultStatus === "unlocked" || coordinatorState.activePublicKeyHex) {
+      await performGlobalLock("initial-setup-same-process-retry");
+    }
+  } catch {
+    // fencing 失败仍继续释放本地句柄；远端已发布 namespace 不受影响。
+  }
+  let expectedBucketId: string | undefined;
+  try {
+    expectedBucketId = initialSetupBucketId(transactionId);
+  } catch {
+    expectedBucketId = undefined;
+  }
+  // 只释放命中自身 transaction 的绑定；其它桶的运行态绝不能在这里丢弃。
+  if (expectedBucketId !== undefined
+    && platformRootStore?.bucket.bucketId === expectedBucketId) {
+    discardCurrentPlatformStorageBinding();
+  } else if (platformRootStore
+    && initialSetupRuntimeOwner?.transactionId === transactionId) {
+    discardCurrentPlatformStorageBinding();
+  }
+  if (expectedBucketId !== undefined
+    && storageBootstrapState?.selectedBucket?.bucketId === expectedBucketId) {
+    storageBootstrapState = null;
+  } else if (initialSetupRuntimeOwner?.transactionId === transactionId) {
+    storageBootstrapState = null;
+  }
+  // 释放后回到“尚未初始化”前置态，让同一事务能走只读恢复重建；
+  // 恢复记录与设备引导指针保留，不会被清理。
+  coordinatorState.vaultStatus = "uninitialized";
+  coordinatorState.activePublicKeyHex = undefined;
+  dropActivePrivateKey();
+  if (initialSetupRuntimeOwner?.transactionId === transactionId) initialSetupRuntimeOwner = undefined;
+  storageStartupFailure = false;
 }
 
 type InitialSetupCatalogObservation =
@@ -2852,6 +4024,11 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
   };
   try {
     validateInitialSetupPlan(plan);
+    // 同 transaction 同进程重试：先识别自身残留绑定并 fencing 后释放，再走
+    // 只读恢复重建；其它事务的已初始化运行态仍按冲突拒绝。
+    if (transactionId && isOwnInitialSetupPartialBinding(transactionId)) {
+      await fenceAndReleaseOwnInitialSetupBinding(transactionId);
+    }
     if (platformRootStore || storageBootstrapState?.selectedBucket || coordinatorState.vaultStatus === "unlocked" || coordinatorState.vaultStatus === "locked") {
       throw new StorageRuntimeError("storage_conflict", "Storage is already initialized");
     }
@@ -3266,8 +4443,26 @@ async function executeExistingRemoteStorageConnect(
   let staged: StagedCatalogBucket | undefined;
   let adopted = false;
   let entry: StorageBucketCatalogEntryV2 | undefined;
+  /** 设备目录投影：远端权威 revision + 重新加密的本机连接密文。 */
+  let deviceProjectionEntry: StorageBucketCatalogEntryV2 | undefined;
   try {
     validateExistingRemoteStorageConnectPlan(plan);
+    // 只有同一初始化事务在自身失败运行态下的恢复才允许 fencing 后释放绑定：
+    // expectedInitializationTransactionId、runtime owner、bucket ID 与失败状态
+    // 必须全部匹配。普通 connect-existing-remote 遇到任何现有绑定都返回
+    // storage_conflict，旧页面或错误密码请求不能拆掉健康运行态。
+    {
+      const expectedInitId = options.expectedInitializationTransactionId;
+      const failedStatus = storageStartupFailure
+        || storageHealthController.status() === "degraded"
+        || (expectedInitId !== undefined && initialSetupRecoveryRecords.get(expectedInitId)?.status === "failed");
+      if (expectedInitId !== undefined
+        && initialSetupRuntimeOwner?.transactionId === expectedInitId
+        && initialSetupRuntimeOwner.bucketId === plan.remoteStorageId
+        && failedStatus) {
+        await fenceAndReleaseOwnInitialSetupBinding(expectedInitId);
+      }
+    }
     if (platformRootStore || storageBootstrapState?.selectedBucket || coordinatorState.vaultStatus === "unlocked" || coordinatorState.vaultStatus === "locked") {
       throw new StorageRuntimeError("storage_conflict", "Storage is already initialized");
     }
@@ -3286,26 +4481,37 @@ async function executeExistingRemoteStorageConnect(
           throw new StorageRuntimeError("storage_conflict", "Remote root belongs to another initialization transaction");
         }
         const committed = await createStorageHoldSnapshotReadOnlyRepository(readOnly).readCommitted();
-        if (committed.header.snapshotRevision !== manifest.rootHead.revision
-          || !sameStorageKeyDerivation(committed.header.keyDerivation, manifest.keyDerivation)) {
+        if (!remoteRootMatchesCommittedHold(manifest, committed.header)) {
           throw new StorageRuntimeError("storage_remote_corrupt", "Remote root and committed Hold identity do not match");
         }
         const context = await deriveBucketCryptoContext(plan.bucketPassword, manifest.keyDerivation);
         try {
           await verifyBucketDocument(committed.document, context);
           await decryptBucketConfig(committed.storage, context);
-          const encryptedConfig = await encryptBucketConfig(plan.connection, context);
+          // 设备本机连接与远端权威 Hold 记录必须分离：AES-GCM 每次加密使用随机
+          // IV，重新加密的本机密文必然与 Hold 中的 committed.storage 不同。
+          // 运行态（含 Vault Hold 适配器与本地目录投影）只能使用远端权威记录；
+          // 设备引导保存的才是重新加密的本机连接，避免下一次 unlock 因密文逐
+          // 字段比较而拒绝刚刚成功连接的远端。
+          const deviceEncryptedConfig = await encryptBucketConfig(plan.connection, context);
           const now = Date.now();
           entry = {
             bucketId: manifest.remoteStorageId,
             label: plan.displayName.trim(),
             backend: plan.backend,
             configRevision: committed.header.configRevision,
-            keyDerivation: structuredClone(manifest.keyDerivation),
-            encryptedConfig,
+            keyDerivation: structuredClone(committed.header.keyDerivation),
+            encryptedConfig: structuredClone(committed.storage),
             snapshotRevision: committed.header.snapshotRevision,
             createdAt: manifest.createdAt,
             updatedAt: now,
+          };
+          // 设备目录只保存本机重新加密的连接密文；远端权威 storage 记录
+          // 只进入运行态 entry。两者分离后，下一次 unlock 用 Hold 权威
+          // 记录做密文比较，不会因为随机 IV 被误判成另一个桶。
+          deviceProjectionEntry = {
+            ...entry,
+            encryptedConfig: structuredClone(deviceEncryptedConfig),
           };
           lifecyclePlan.deviceConnection = {
             remoteStorageId: manifest.remoteStorageId,
@@ -3313,7 +4519,7 @@ async function executeExistingRemoteStorageConnect(
             providerId: plan.backend,
             location,
             physicalLocationFingerprint: physicalLocationFingerprint(location),
-            encryptedConfig: structuredClone(encryptedConfig),
+            encryptedConfig: structuredClone(deviceEncryptedConfig),
             keyDerivation: structuredClone(manifest.keyDerivation),
             source: options.connectionSource ?? "connected",
             createdAt: manifest.createdAt,
@@ -3337,16 +4543,20 @@ async function executeExistingRemoteStorageConnect(
       installWorkerRuntime: async () => {
         if (!entry || !staged) throw new StorageRuntimeError("storage_remote_corrupt", "Existing remote minimum runtime index was not loaded");
         // Transitional catalog projection is committed only after all remote
-        // reads succeed. It performs no remote Provider write.
-        const selected = await commitInitialStorageCatalogBucket(entry, 1, false, peerId);
+        // reads succeed. It performs no remote Provider write. The catalog
+        // stores the device projection (re-encrypted local connection); the
+        // runtime below binds the authoritative Hold record, so a later
+        // unlock compares against committed.storage instead of random-IV
+        // ciphertext.
+        await commitInitialStorageCatalogBucket(deviceProjectionEntry ?? entry, 1, false, peerId);
         const nextKeyspaceGeneration = coordinatorState.keyspaceGeneration + 1;
         adoptStagedCatalogBinding(staged);
         adopted = true;
         storageBootstrapState = {
-          ...(storageBootstrapState ?? { selectedBackend: selected.backend }),
-          selectedBackend: selected.backend,
-          selectedProfileId: selected.bucketId,
-          selectedBucket: selected,
+          ...(storageBootstrapState ?? { selectedBackend: entry.backend }),
+          selectedBackend: entry.backend,
+          selectedProfileId: entry.bucketId,
+          selectedBucket: entry,
         };
         replaceCoordinatorMeta(staged.coordinatorMeta);
         coordinatorState.keyspaceGeneration = nextKeyspaceGeneration;
@@ -3430,7 +4640,11 @@ async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string):
   }
   const persisted = initialSetupRecoveryRecords.get(transactionId);
   const hasDeviceRecoveryPointer = deviceRecoveryOperationIds.has(transactionId);
-  if (!hasDeviceRecoveryPointer && (persisted?.status === "succeeded" || persisted?.status === "failed")) {
+  // 同进程部分绑定的失败事务必须允许重试：即使设备恢复指针写入失败，
+  // 也要进入 executeInitialSetupTransaction 的 fencing/只读重建路径，
+  // 不能把上一次运行态安装失败当成终态重放。
+  const ownsPartialRuntime = !hasDeviceRecoveryPointer && isOwnInitialSetupPartialBinding(transactionId);
+  if (!hasDeviceRecoveryPointer && !ownsPartialRuntime && (persisted?.status === "succeeded" || persisted?.status === "failed")) {
     const recovered = await resultFromInitialSetupRecovery(persisted, peerId);
     if (recovered) return recovered;
     if (persisted.status === "failed") {
@@ -4247,6 +5461,10 @@ async function changeSelectedCatalogBucketConnection(
     throw new StorageRuntimeError("storage_conflict", "Storage bucket configuration changed; reload and retry");
   }
 
+  // 配置更新前先固定设备层投影：回滚必须恢复设备保存的本机连接，
+  // 不能把运行态兼容的 Hold 记录写回设备引导。
+  const previousDeviceEntry = await currentCatalogDeviceProjection() ?? currentEntry;
+
   let encryptedConfig!: StorageRecordV1;
   let document!: Awaited<ReturnType<typeof sealBucketDocument>>;
   const context = await deriveBucketCryptoContext(password, currentEntry.keyDerivation);
@@ -4298,16 +5516,22 @@ async function changeSelectedCatalogBucketConnection(
     };
 
     // 先锁旧会话再更新目录，避免 Local 桥看到新目录后让仍在运行的旧
-    // Provider 请求落入“旧配置 + 新目录”的混合状态。
+    // Provider 请求落入“旧配置 + 新目录”的混合状态。expected 必须是
+    // 设备投影（本机连接密文）；next 使用新发布密文，更新后目录与运行态
+    // 收敛到同一份权威 storage record。
     await performGlobalLock(previousVaultStatus === "uninitialized" ? "recover-empty" : "bucket-reconfigure");
     await waitForPendingOwnerStorageDrain();
     catalogUpdateAttempted = true;
     const selected = await updateLocalStorageCatalogEntry(
-      currentEntry,
+      previousDeviceEntry,
       nextEntryForCatalog,
       currentBinding.root.bucket.bucketGeneration,
     );
     catalogUpdated = true;
+    if (testFailAfterBucketConfigCatalogUpdate) {
+      testFailAfterBucketConfigCatalogUpdate = false;
+      throw new Error("injected bucket configuration update failure after catalog update");
+    }
 
     // 目录已指向新密文后，Local 候选桥才允许读取新条目；这一步完成
     // 新 Provider/Root/Vault 索引的完整验证，失败会走下面的 CAS 回滚。
@@ -4366,7 +5590,7 @@ async function changeSelectedCatalogBucketConnection(
       try {
         await updateLocalStorageCatalogEntry(
           nextEntryForCatalog ?? nextEntryBase,
-          currentEntry,
+          previousDeviceEntry,
           currentBinding.root.bucket.bucketGeneration,
           true,
         );
@@ -4472,22 +5696,25 @@ async function renameSelectedCatalogBucket(nextLabel: string): Promise<StorageBu
   if (!currentEntry || !root) throw new StorageRuntimeError("storage_unavailable", "The current catalog bucket is not available");
   const label = nextLabel.trim();
   if (!label || label.length > 128) throw new StorageRuntimeError("storage_provider_error", "Storage bucket label is invalid");
-  const nextEntry = { ...currentEntry, label, updatedAt: Date.now() };
+  // 改名只改变目录元数据：页面目录用设备投影保持本机连接密文，运行态
+  // 继续绑定 Hold 权威 storage record，只同步 label/revision 元数据。
+  const deviceEntry = await currentCatalogDeviceProjection() ?? currentEntry;
+  const nextDevice = { ...deviceEntry, label, updatedAt: Date.now() };
   let updated: StorageBucketCatalogEntryV2;
   try {
     updated = await updateLocalStorageCatalogEntry(
-      currentEntry,
-      nextEntry,
+      deviceEntry,
+      nextDevice,
       root.bucket.bucketGeneration,
     );
   } catch (error) {
     // 目录 CAS 可能已经成功但桥响应在返回途中丢失。用 rollback 的幂等
-    // 语义重试：目录仍是旧条目时继续更新，已经是 nextEntry 时确认成功；
+    // 语义重试：目录仍是旧条目时继续更新，已经是 nextDevice 时确认成功；
     // 若被第三方改成其它版本则仍返回原始冲突，不覆盖并发修改。
     try {
       updated = await updateLocalStorageCatalogEntry(
-        currentEntry,
-        nextEntry,
+        deviceEntry,
+        nextDevice,
         root.bucket.bucketGeneration,
         true,
       );
@@ -4495,14 +5722,25 @@ async function renameSelectedCatalogBucket(nextLabel: string): Promise<StorageBu
       throw error;
     }
   }
+  const updatedRuntime = { ...currentEntry, label, snapshotRevision: updated.snapshotRevision, updatedAt: updated.updatedAt };
   storageBootstrapState = storageBootstrapState
-    ? { ...storageBootstrapState, selectedBucket: updated }
+    ? { ...storageBootstrapState, selectedBucket: updatedRuntime }
     : storageBootstrapState;
-  return updated;
+  return updatedRuntime;
 }
 
-/** 把已探测通过的 Provider 安装成 Coordinator-owned Root。 */
-async function installPlatformStorage(provider: StorageBucketProvider, bucket: StorageBucketRef): Promise<void> {
+/**
+ * 把已探测通过的 Provider 安装成 Coordinator-owned Root。
+ *
+ * 只允许在远端认证成功后调用：这里会补写缺失的 schema/profile salt，
+ * 认证前的设备引导投影绝不能走到这里。Vault Hold 绑定优先使用调用方
+ * 显式传入的权威条目，允许全局 state 仍保持原设备提示直到安装成功。
+ */
+async function installPlatformStorage(
+  provider: StorageBucketProvider,
+  bucket: StorageBucketRef,
+  options: { vaultEntry?: StorageBucketCatalogEntryV2 } = {},
+): Promise<void> {
   const previousRootToken = platformRootToken;
   const rootToken = {};
   let candidatePublished = false;
@@ -4552,7 +5790,7 @@ async function installPlatformStorage(provider: StorageBucketProvider, bucket: S
     disposeVaultStorageRepository();
     platformRootToken = rootToken;
     candidatePublished = true;
-    const selectedEntry = storageBootstrapState?.selectedBucket;
+    const selectedEntry = options.vaultEntry ?? storageBootstrapState?.selectedBucket;
     if (selectedEntry && selectedEntry.bucketId === bucket.bucketId) {
       configureCoordinatorVaultStorage(vaultStores, provider, selectedEntry);
     } else {
@@ -7293,7 +8531,35 @@ function createWorkerDeviceBootstrapRepository(peerId?: string): DeviceBootstrap
       if (!response.catalog) throw storageUnavailableError("Device bootstrap catalog disappeared during recovery cleanup");
       return structuredClone(response.catalog);
     },
+    async upsertRotation(rotation) {
+      const response = await requestLocalStorageBridge({ type: "device-bootstrap-rotation-upsert", rotation: structuredClone(rotation) }, peerId);
+      if (response.type !== "device-bootstrap") throw storageUnavailableError("Device bootstrap bridge returned an invalid rotation result");
+      const persisted = response.catalog?.rotations?.find((candidate) => candidate.operationId === rotation.operationId);
+      if (!persisted) throw new StorageRuntimeError("storage_provider_error", "Device bootstrap rotation record was not returned after commit");
+      return structuredClone(persisted);
+    },
+    async removeRotation(operationId) {
+      const response = await requestLocalStorageBridge({ type: "device-bootstrap-rotation-delete", operationId }, peerId);
+      if (response.type !== "device-bootstrap") throw storageUnavailableError("Device bootstrap bridge returned an invalid rotation cleanup result");
+      if (!response.catalog) throw storageUnavailableError("Device bootstrap catalog disappeared during rotation cleanup");
+      return structuredClone(response.catalog);
+    },
   };
+}
+
+/** 返回设备引导中可公开展示的未完成密码轮转安全投影；不返回任何内部事务字段。 */
+async function listPendingPasswordRotations(peerId?: string): Promise<PendingPasswordRotationViewV1[]> {
+  const catalog = await createWorkerDeviceBootstrapRepository(peerId).read();
+  return (catalog?.rotations ?? []).map((rotation) => ({
+    format: "keymaster.storage.password-rotation-view",
+    version: 1,
+    operationId: rotation.operationId,
+    bucketId: rotation.bucketId,
+    backend: rotation.backend,
+    phase: rotation.phase,
+    createdAt: rotation.createdAt,
+    updatedAt: rotation.updatedAt,
+  }));
 }
 
 /**
@@ -7363,13 +8629,17 @@ async function updateCurrentCatalogSnapshotRevision(snapshotRevision: number): P
   const root = platformRootStore;
   if (!entry || !root) throw storageUnavailableError("The selected catalog bucket is unavailable");
   if (entry.snapshotRevision === snapshotRevision) return;
-  const updated = await updateLocalStorageCatalogEntry(
-    entry,
-    { ...entry, snapshotRevision },
+  // 只推进页面目录 revision：设备引导保持本机连接密文，运行态保持 Hold
+  // 权威 storage record，两者通过 revision 元数据同步。
+  const deviceEntry = await currentCatalogDeviceProjection() ?? entry;
+  const updatedDevice = await updateLocalStorageCatalogEntry(
+    deviceEntry,
+    { ...deviceEntry, snapshotRevision, updatedAt: Date.now() },
     root.bucket.bucketGeneration,
   );
+  const updatedEntry = { ...entry, snapshotRevision: updatedDevice.snapshotRevision, updatedAt: updatedDevice.updatedAt };
   storageBootstrapState = storageBootstrapState
-    ? { ...storageBootstrapState, selectedBucket: updated }
+    ? { ...storageBootstrapState, selectedBucket: updatedEntry }
     : storageBootstrapState;
 }
 
@@ -8618,6 +9888,10 @@ function clearStorageRequestSecrets(request: CoordinatorClientRequest): void {
       control.oldPassword = "";
       control.newPassword = "";
     }
+    if (control.type === "resume-bucket-password-rotation") {
+      control.oldPassword = "";
+      control.newPassword = "";
+    }
   }
 }
 
@@ -8669,6 +9943,10 @@ async function executeStorageControl(
 ): Promise<CoordinatorResponse> {
   if (signal?.aborted) throw storageUnavailableError("Storage control request was cancelled");
   const control = request.control;
+  if (control.type === "list-pending-password-rotations") {
+    const rotations = await listPendingPasswordRotations(peerId);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: rotations };
+  }
   if (control.type === "status") {
     if (storageStartupFailure) {
       const detail = coordinatorAuthorityRecoveryOperationNames.length > 0
@@ -8780,15 +10058,40 @@ async function executeStorageControl(
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   }
   if (control.type === "change-bucket-password") {
-    const result = await changeSelectedCatalogBucketPassword(control.oldPassword, control.newPassword);
-    emitStorageState();
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    try {
+      const result = await changeSelectedCatalogBucketPassword(control.oldPassword, control.newPassword, peerId);
+      emitStorageState();
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } finally {
+      // 新旧桶密码只属于本次改密调用，返回前必须清零。
+      control.oldPassword = "";
+      control.newPassword = "";
+    }
+  }
+  if (control.type === "resume-bucket-password-rotation") {
+    try {
+      const result = await resumeBucketPasswordRotation(control.operationId, control.oldPassword, control.newPassword, peerId);
+      emitStorageState();
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } finally {
+      // 恢复用的新旧密码同样只属于本次调用，返回前必须清零。
+      control.oldPassword = "";
+      control.newPassword = "";
+    }
   }
   if (control.type === "unlock-bucket") {
     const hadPlatformRoot = Boolean(platformRootStore);
     try {
       if (!storageBootstrapState?.selectedBucket) throw Object.assign(new Error("No selected storage bucket"), { code: "storage_not_configured" });
-      if (!platformRootStore) await bootstrapPlatformStorage(control.password, peerId);
+      // 冷启动提示（revision=0）必须先走只读发现→认证→权威条目→可写安装，
+      // 认证前不得使用可写 Root，运行态只能使用 Hold 权威 revision。
+      const unlockHint = storageBootstrapState.selectedBucket;
+      if (isBootstrapHintEntry(unlockHint)) {
+        if (platformRootStore) discardCurrentPlatformStorageBinding();
+        await bootstrapColdStartAuthenticated(control.password, peerId);
+      } else if (!platformRootStore) {
+        await bootstrapPlatformStorage(control.password, peerId);
+      }
       await runStorageRecoveryOrchestrator(peerId);
       // Hold 冷导入文件可能已经带有完整 Keys；首次解锁桶时恢复到
       // Coordinator 的 canonical Vault 索引，空快照则仍保留 uninitialized
@@ -8854,6 +10157,7 @@ function storageControlIoKind(control: Extract<CoordinatorClientRequest, { kind:
     case "summary":
     case "connection":
     case "initial-setup-recovery-list":
+    case "list-pending-password-rotations":
     case "capabilities":
     case "probe-capabilities":
     case "cold-export":
@@ -8890,7 +10194,8 @@ async function executeStorageControlAtFinalBoundary(
         // 桶首次解锁可能同时把 Hold 快照中的 Key 恢复到 Coordinator，
         // 然后进入同一把 Key 的 unlocked owner。这个有意的本地状态迁移
         // 必须允许当前 storage control 的 final lease 观察到新 gate。
-        allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
+        // 密码轮转同样会主动锁定当前 Vault，需要同一豁免。
+        allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config" || request.control.type === "change-bucket-password" || request.control.type === "resume-bucket-password-rotation",
         allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
         allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "connect-existing-remote" || request.control.type === "initial-setup-cleanup",
         // status/summary/connection 等控制读取只观察本地状态；probe 也
@@ -14680,6 +15985,12 @@ export function __testResetState(): void {
   // satRuntimeRelease；下一次测试创建 runtime 时会等待该 Promise。
   void releaseSatRuntime("test");
   testPersistCoordinatorSnapshotFailure = false;
+  testFailColdStartInstall = false;
+    testFailAfterBucketPasswordCatalogUpdate = false;
+    testFailAfterBucketConfigCatalogUpdate = false;
+    testFailNextVaultAuthMetadataRollback = false;
+    testFailNextVaultAuthMetadataRestore = false;
+    testFailNextBucketPasswordDeviceRollback = false;
   testFailAfterCatalogBindingPublish = false;
   testFailKeyLifecycleJournalAfterHold = false;
   testFailNextOwnerStorageActivation = false;
@@ -14818,6 +16129,36 @@ export function __testFailAfterCatalogBindingPublish(): void {
   testFailAfterCatalogBindingPublish = true;
 }
 
+/** 测试专用：在冷启动认证成功、Root 安装前注入一次安装失败。 */
+export function __testFailColdStartInstall(): void {
+  testFailColdStartInstall = true;
+}
+
+/** 测试专用：在密码轮转目录更新成功后注入一次失败以触发设备层回滚。 */
+export function __testFailAfterBucketPasswordCatalogUpdate(): void {
+  testFailAfterBucketPasswordCatalogUpdate = true;
+}
+
+/** 测试专用：在配置更新目录提交后注入一次失败以触发设备层回滚。 */
+export function __testFailAfterBucketConfigCatalogUpdate(): void {
+  testFailAfterBucketConfigCatalogUpdate = true;
+}
+
+/** 测试专用：让密码轮转的 Vault verifier 回滚失败一次，验证事务会保留到重启恢复。 */
+export function __testFailNextVaultAuthMetadataRollback(): void {
+  testFailNextVaultAuthMetadataRollback = true;
+}
+
+/** 测试专用：让 revoked 恢复的 Vault verifier 写入失败一次。 */
+export function __testFailNextVaultAuthMetadataRestore(): void {
+  testFailNextVaultAuthMetadataRestore = true;
+}
+
+/** 测试专用：让密码轮转失败后的设备回滚 CAS 失败一次。 */
+export function __testFailNextBucketPasswordDeviceRollback(): void {
+  testFailNextBucketPasswordDeviceRollback = true;
+}
+
 /** 测试专用：模拟 Hold 已发布后，生命周期 Journal 的阶段推进写入失败。 */
 export function __testFailKeyLifecycleJournalAfterHold(): void {
   testFailKeyLifecycleJournalAfterHold = true;
@@ -14909,6 +16250,25 @@ export function __testPrepareInitialSetup(): void {
 /** 测试专用：验证不同 transactionId 不会因可见字符截断而共享桶命名空间。 */
 export function __testInitialSetupBucketId(transactionId: string): string {
   return initialSetupBucketId(transactionId);
+}
+
+/**
+ * 测试专用：模拟 Worker 真重启后的 session.open 冷启动。
+ *
+ * 页面只提供设备引导投影（revision=0）；本接缝通过真实
+ * initializeCoordinator 执行 Storage-first 装配与 Vault metadata 恢复，
+ * 不提前安装可写 Root。返回后重置 single-flight，避免污染后续用例。
+ */
+export async function __testColdStartFromDeviceHint(
+  state: StorageBootstrapState | null,
+  peerId = "test",
+): Promise<void> {
+  coordinatorInitialization = undefined;
+  try {
+    await startCoordinatorInitialization(state ?? undefined, peerId);
+  } finally {
+    coordinatorInitialization = undefined;
+  }
 }
 
 /** 测试专用：构造与生产恢复账本一致的目录条目指纹。 */

@@ -5,6 +5,7 @@
 
 import type {
   DeviceBootstrapCatalogV1,
+  DevicePasswordRotationRecordV1,
   DeviceRemoteConnectionV1,
   DeviceRemoteRecoveryPointerV1,
 } from "@keymaster/contracts";
@@ -13,6 +14,7 @@ import {
   DEVICE_BOOTSTRAP_LIMITS,
   deviceRemoteStorageLocationFingerprint,
   validateDeviceBootstrapCatalog,
+  validateDevicePasswordRotationRecord,
   validateDeviceRemoteStorageLocation,
   validateDeviceRemoteConnection,
   validateDeviceRemoteRecoveryPointer,
@@ -165,6 +167,8 @@ export interface DeviceBootstrapRepository {
   upsertConnection(input: DeviceRemoteConnectionV1, select?: boolean): Promise<DeviceRemoteConnectionV1>;
   upsertRecovery(input: DeviceRemoteRecoveryPointerV1): Promise<DeviceRemoteRecoveryPointerV1>;
   removeRecovery(operationId: string): Promise<DeviceBootstrapCatalogV1>;
+  upsertRotation(input: DevicePasswordRotationRecordV1): Promise<DevicePasswordRotationRecordV1>;
+  removeRotation(operationId: string): Promise<DeviceBootstrapCatalogV1>;
 }
 
 export function createDeviceBootstrapRepository(options: DeviceBootstrapRepositoryOptions = {}) {
@@ -281,6 +285,37 @@ export function createDeviceBootstrapRepository(options: DeviceBootstrapReposito
     })) ?? createEmptyDeviceBootstrapCatalog(profileId(generateId));
   }
 
+  function validateRotationInput(input: unknown): DevicePasswordRotationRecordV1 {
+    try {
+      return validateDevicePasswordRotationRecord(input);
+    } catch {
+      throw bootstrapError("Device bootstrap password rotation record is invalid");
+    }
+  }
+
+  async function upsertRotation(input: DevicePasswordRotationRecordV1): Promise<DevicePasswordRotationRecordV1> {
+    const checked = validateRotationInput(input);
+    let result: DevicePasswordRotationRecordV1 | undefined;
+    await mutate((current) => {
+      const catalog = current ?? createEmptyDeviceBootstrapCatalog(profileId(generateId));
+      const rotations = [...(catalog.rotations ?? [])];
+      const index = rotations.findIndex((rotation) => rotation.operationId === checked.operationId);
+      if (index < 0) rotations.push(checked);
+      else rotations[index] = checked;
+      result = checked;
+      return { ...catalog, rotations };
+    });
+    if (!result) throw bootstrapError("Device bootstrap password rotation record was not committed");
+    return result;
+  }
+
+  async function removeRotation(operationId: string): Promise<DeviceBootstrapCatalogV1> {
+    return (await mutate((current) => {
+      if (!current) return null;
+      return { ...current, rotations: (current.rotations ?? []).filter((rotation) => rotation.operationId !== operationId) };
+    })) ?? createEmptyDeviceBootstrapCatalog(profileId(generateId));
+  }
+
   return {
     read: () => readDeviceBootstrap(storage),
     write: (catalog: DeviceBootstrapCatalogV1) => writeDeviceBootstrap(catalog, storage),
@@ -293,5 +328,7 @@ export function createDeviceBootstrapRepository(options: DeviceBootstrapReposito
     removeConnection,
     upsertRecovery,
     removeRecovery,
+    upsertRotation,
+    removeRotation,
   };
 }

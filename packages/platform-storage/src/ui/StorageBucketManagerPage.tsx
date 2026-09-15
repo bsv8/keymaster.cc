@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Check, ChevronDown, HardDrive, KeyRound, LockKeyhole, MoreHorizontal, Plus } from "lucide-react";
-import { KEYSPACE_SERVICE_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type ActiveKeyState, type KeyRef, type StorageBucketCatalogEntryV2, type StorageBucketConnectionConfigV1, type StorageCatalogV2, type VaultService } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type ActiveKeyState, type KeyRef, type PendingPasswordRotationViewV1, type StorageBucketCatalogEntryV2, type StorageBucketConnectionConfigV1, type StorageCatalogV2, type VaultService } from "@keymaster/contracts";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import { router, useI18n } from "@keymaster/runtime";
 import { useOptionalCapability } from "webloom-framework/react";
@@ -62,6 +62,17 @@ function download(name: string, bytes: Uint8Array): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** 把持久化阶段翻译成页面可读的中文，避免用户猜测英文状态含义。 */
+function passwordRotationPhaseLabel(phase: PendingPasswordRotationViewV1["phase"]): string {
+  switch (phase) {
+    case "started": return "已创建事务";
+    case "hold-unconfirmed": return "Hold 发布结果待确认";
+    case "hold-published": return "Hold 已发布，等待收敛";
+    case "manifest-unconfirmed": return "根入口发布结果待确认";
+    case "manifest-rollback-unconfirmed": return "根入口回滚结果待确认";
+  }
+}
+
 /**
  * 外层存储桶管理页。
  *
@@ -85,18 +96,32 @@ export function StorageBucketManagerPage() {
   const [activePublicKeyHex, setActivePublicKeyHex] = useState<string | undefined>();
   const [pendingKey, setPendingKey] = useState<KeyRef | null>(null);
   const [testedFingerprint, setTestedFingerprint] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"test" | "save" | "import" | "edit" | "change-password" | "switch" | "export" | "rename" | "remove" | "destroy" | null>(null);
+  const [busy, setBusy] = useState<"test" | "save" | "import" | "edit" | "change-password" | "resume-password-rotation" | "switch" | "export" | "rename" | "remove" | "destroy" | null>(null);
   const [message, setMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState(storage?.status() ?? "unconfigured");
   const [unlockPassword, setUnlockPassword] = useState("");
   const [unlockBusy, setUnlockBusy] = useState(false);
   const [reloadRequired, setReloadRequired] = useState(false);
+  const [pendingRotations, setPendingRotations] = useState<PendingPasswordRotationViewV1[]>([]);
   const importInputRef = useRef<HTMLInputElement>(null);
   const vaultStatus = vault?.status();
+  const selectedBucketId = storage?.selectedBucketId?.() ?? catalog.selectedBucketId;
 
   const reload = useCallback(() => {
     setCatalogState(readCatalogState());
   }, []);
+
+  const loadPendingRotations = useCallback(async () => {
+    if (!storage?.listPendingPasswordRotations) {
+      setPendingRotations([]);
+      return;
+    }
+    try {
+      setPendingRotations(await storage.listPendingPasswordRotations());
+    } catch {
+      // 查询失败时保留已显示的记录，避免一次临时通信错误把恢复入口隐藏。
+    }
+  }, [storage]);
 
   useEffect(() => {
     const onStorage = () => reload();
@@ -109,6 +134,12 @@ export function StorageBucketManagerPage() {
     setRuntimeStatus(storage.status());
     return storage.subscribe(() => setRuntimeStatus(storage.status()));
   }, [storage]);
+
+  // 待恢复记录存放在设备引导目录中；页面首次打开、Worker 状态变化或
+  // 目录跨标签页变化后都重新查询，确保 Worker 重启后入口仍然可见。
+  useEffect(() => {
+    void loadPendingRotations();
+  }, [loadPendingRotations, runtimeStatus, catalogState]);
 
   useEffect(() => {
     if (!vault || vault.status() !== "unlocked") {
@@ -288,6 +319,10 @@ export function StorageBucketManagerPage() {
   }
 
   async function changeBucketPassword(entry: StorageBucketCatalogEntryV2) {
+    if (selectedBucketId !== entry.bucketId) {
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.passwordChangeCurrentOnly", { defaultValue: "请先切换并解锁目标桶，再修改它的密码；非当前桶不能直接改密。" }) });
+      return;
+    }
     if (!manager || catalogError) {
       setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
@@ -308,22 +343,13 @@ export function StorageBucketManagerPage() {
       return;
     }
     setBusy("change-password"); setMessage(null);
-    let provider: ReturnType<typeof createBucketProvider> | undefined;
     try {
-      if (catalog.selectedBucketId === entry.bucketId) {
-        if (runtimeStatus !== "ready" || !storage?.changeBucketPassword) {
-          throw new Error("Select and unlock this bucket before changing its password");
-        }
-        // 当前桶的 Worker 还要同时旋转 canonical Vault meta/Key records，
-        // 所以必须走 Coordinator 的跨存储事务；页面不直接碰当前会话。
-        await storage.changeBucketPassword(oldPassword, newPassword);
-      } else {
-        // 未选中的桶没有当前会话，可在本次管理操作中短暂解密其配置，
-        // 由无状态管理服务旋转该桶已提交快照并 CAS 更新本机目录。
-        const config = await manager.unlockBucketConfig(entry, oldPassword);
-        provider = createBucketProvider(config, entry.bucketId);
-        await manager.changeBucketPassword({ entry, provider, oldPassword, newPassword });
+      if (runtimeStatus !== "ready" || !storage?.changeBucketPassword) {
+        throw new Error("Select and unlock this bucket before changing its password");
       }
+      // 当前桶的 Worker 还要同时旋转 canonical Vault meta/Key records、
+      // root manifest、设备目录和恢复事务；页面不直接碰 Hold 管理服务。
+      await storage.changeBucketPassword(oldPassword, newPassword);
       reload();
       setReloadRequired(true);
       setMessage({ kind: "success", text: t("storage.bucketManager.passwordChanged", { defaultValue: "桶密码和全部 Key 快照已更新；重新加载后使用新密码。" }) });
@@ -332,7 +358,42 @@ export function StorageBucketManagerPage() {
     } finally {
       oldPassword = "";
       newPassword = "";
-      provider?.dispose();
+      setBusy(null);
+    }
+  }
+
+  async function resumePasswordRotation(rotation: PendingPasswordRotationViewV1) {
+    if (!storage?.resumeBucketPasswordRotation) {
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.rotationUnavailable", { defaultValue: "当前页面不支持密码轮转恢复，请刷新后重试" }) });
+      return;
+    }
+    const bucket = catalog.buckets.find((entry) => entry.bucketId === rotation.bucketId);
+    const bucketLabel = bucket?.label ?? rotation.bucketId;
+    let oldPassword = window.prompt(t("storage.bucketManager.rotationOldPassword", { label: bucketLabel, defaultValue: `输入“${bucketLabel}”的旧桶密码` }));
+    if (!oldPassword) return;
+    let newPassword = window.prompt(t("storage.bucketManager.rotationNewPassword", { defaultValue: "输入轮转事务中的新桶密码" }));
+    if (!newPassword) { oldPassword = ""; return; }
+    const confirmation = window.prompt(t("storage.bucketManager.rotationNewPasswordConfirm", { defaultValue: "再次输入新的桶密码" }));
+    if (confirmation !== newPassword) {
+      oldPassword = ""; newPassword = "";
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.passwordMismatch", { defaultValue: "两次桶密码不一致" }) });
+      return;
+    }
+    setBusy("resume-password-rotation"); setMessage(null);
+    try {
+      const result = await storage.resumeBucketPasswordRotation(rotation.operationId, oldPassword, newPassword);
+      reload();
+      await loadPendingRotations();
+      setReloadRequired(true);
+      setMessage({ kind: "success", text: result.outcome === "completed"
+        ? t("storage.bucketManager.rotationCompleted", { defaultValue: "密码轮转已恢复完成；请重新加载页面并使用新密码。" })
+        : t("storage.bucketManager.rotationRevoked", { defaultValue: "密码轮转已安全撤销；请重新加载页面并使用旧密码。" }) });
+    } catch (error) {
+      setMessage({ kind: "error", text: error instanceof Error ? error.message : t("storage.bucketManager.err.rotationResume", { defaultValue: "密码轮转仍未完成，请确认新旧密码和远端状态" }) });
+      await loadPendingRotations();
+    } finally {
+      oldPassword = "";
+      newPassword = "";
       setBusy(null);
     }
   }
@@ -515,6 +576,24 @@ export function StorageBucketManagerPage() {
       {message ? <p className={`storage-bucket-manager__message is-${message.kind}`} role={message.kind === "error" ? "alert" : "status"}>{message.text}</p> : null}
       {catalogError ? <p className="storage-bucket-manager__message is-error" role="alert">{t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复浏览器存储权限后重试" })}</p> : null}
       {reloadRequired ? <p className="storage-bucket-manager__reload"><span>{t("storage.bucketManager.reloadHint", { defaultValue: "新桶已成为当前桶；重新加载后会进入新的桶会话。" })}</span><Button variant="secondary" size="sm" onClick={() => window.location.reload()}>{t("storage.bucketManager.reload", { defaultValue: "重新加载" })}</Button></p> : null}
+
+      {pendingRotations.length > 0 ? <section className="storage-bucket-manager__section storage-bucket-manager__rotation-recovery" aria-labelledby="storage-password-rotation-title">
+        <div className="storage-bucket-manager__section-heading">
+          <div><h2 id="storage-password-rotation-title">{t("storage.bucketManager.rotationTitle", { defaultValue: "待恢复的密码轮转" })}</h2><p className="storage-bucket-manager__hint">{t("storage.bucketManager.rotationDescription", { defaultValue: "上次修改密码没有完成。请提供旧密码和新密码，让系统安全完成或撤销这次事务。" })}</p></div>
+          <span className="storage-bucket-manager__hint">{pendingRotations.length} {t("storage.bucketManager.rotationCount", { defaultValue: "个事务" })}</span>
+        </div>
+        <ul className="storage-bucket-manager__list">
+          {pendingRotations.map((rotation) => {
+            const bucket = catalog.buckets.find((entry) => entry.bucketId === rotation.bucketId);
+            return <li key={rotation.operationId}>
+              <div className="storage-bucket-manager__bucket-row">
+                <div className="storage-bucket-manager__bucket"><span className="storage-bucket-manager__bucket-mark">!</span><span><strong>{bucket?.label ?? rotation.bucketId}</strong><small>操作编号：{rotation.operationId} · {passwordRotationPhaseLabel(rotation.phase)}</small></span></div>
+                <Button variant="secondary" size="sm" onClick={() => void resumePasswordRotation(rotation)} disabled={busy !== null}>{t("storage.bucketManager.rotationResume", { defaultValue: "恢复此轮转" })}</Button>
+              </div>
+            </li>;
+          })}
+        </ul>
+      </section> : null}
 
       <section className="storage-bucket-manager__section" aria-labelledby="storage-bucket-list-title">
         <div className="storage-bucket-manager__section-heading">

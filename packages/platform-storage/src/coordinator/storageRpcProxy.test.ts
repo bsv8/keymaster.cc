@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
-import type { SessionCoordinatorClient, OwnerAppStorageGrant } from "@keymaster/contracts";
+import type { PendingPasswordRotationViewV1, SessionCoordinatorClient, OwnerAppStorageGrant, StorageBucketPasswordRotationResumeResultV1 } from "@keymaster/contracts";
 import { StorageRpcProxy } from "./storageRpcProxy.js";
 
 const context: OwnerAppStorageGrant = {
@@ -80,6 +80,43 @@ describe("StorageRpcProxy grant boundary", () => {
     await proxy.renameBucket("新名称");
 
     expect(client.storageControl).toHaveBeenCalledWith({ type: "rename-bucket", label: "新名称" });
+    proxy.dispose();
+  });
+
+  it("通过 Coordinator 暴露待恢复轮转并提交恢复命令", async () => {
+    const client = coordinator();
+    const rotation: PendingPasswordRotationViewV1 = {
+      format: "keymaster.storage.password-rotation-view",
+      version: 1,
+      operationId: "rotation-proxy-001",
+      bucketId: "bucket-proxy-001",
+      backend: "local",
+      phase: "manifest-unconfirmed",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const resumeResult = { ok: true, outcome: "completed", bucket: {} } as unknown as StorageBucketPasswordRotationResumeResultV1;
+    vi.mocked(client.storageControl).mockImplementation(async (control) => {
+      if (control.type === "list-pending-password-rotations") {
+        return { status: "ok", value: [rotation], sessionEpoch: "epoch-a" } as never;
+      }
+      if (control.type === "resume-bucket-password-rotation") {
+        return { status: "ok", value: resumeResult, sessionEpoch: "epoch-a" } as never;
+      }
+      return { status: "ok", value: null, sessionEpoch: "epoch-a" } as never;
+    });
+    const proxy = new StorageRpcProxy(client);
+
+    await expect(proxy.listPendingPasswordRotations()).resolves.toEqual([rotation]);
+    await expect(proxy.resumeBucketPasswordRotation("rotation-proxy-001", "old-password", "new-password"))
+      .resolves.toBe(resumeResult);
+    expect(client.storageControl).toHaveBeenNthCalledWith(1, { type: "list-pending-password-rotations" });
+    expect(client.storageControl).toHaveBeenNthCalledWith(2, {
+      type: "resume-bucket-password-rotation",
+      operationId: "rotation-proxy-001",
+      oldPassword: "old-password",
+      newPassword: "new-password",
+    });
     proxy.dispose();
   });
 

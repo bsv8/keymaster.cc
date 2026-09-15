@@ -144,6 +144,18 @@ export interface StorageBucketPasswordRotationResultV1 {
   ok: true;
   /** 需要由页面目录按 Web Lock 写回的新版桶条目。 */
   bucket: StorageBucketCatalogEntryV2;
+  /** Hold 提交头发布时由 Provider 直接返回的 ETag；缺失表示发布结果不能用于安全回滚。 */
+  publishedHeadEtag?: string;
+}
+
+/** 未完成的密码轮转恢复结果；只返回公开条目与收敛方向。 */
+export interface StorageBucketPasswordRotationResumeResultV1 {
+  /** 操作结果。 */
+  ok: true;
+  /** completed：远端已是新密码形态并补齐本机；revoked：已安全撤销回旧密码形态。 */
+  outcome: "completed" | "revoked";
+  /** 收敛后的权威桶条目。 */
+  bucket: StorageBucketCatalogEntryV2;
 }
 
 /** 跨桶切换成功后的 Coordinator 结果；不返回密码、配置明文或私钥。 */

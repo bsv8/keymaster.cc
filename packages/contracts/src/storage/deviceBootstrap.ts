@@ -93,6 +93,81 @@ export interface DeviceRemoteRecoveryPointerV1 {
   updatedAt: number;
 }
 
+/** 密码轮转事务的持久化阶段；只记录已确认的远端事实。 */
+export type DevicePasswordRotationPhase =
+  | "started"
+  | "hold-unconfirmed"
+  | "hold-published"
+  | "manifest-unconfirmed"
+  | "manifest-rollback-unconfirmed";
+
+/** 未完成的桶密码轮转事务；没有它不得开始需要回滚的轮转。 */
+export interface DevicePasswordRotationRecordV1 {
+  format: "keymaster.storage.password-rotation";
+  version: 1;
+  /** 本机唯一操作 ID。 */
+  operationId: string;
+  /** 轮转目标桶。 */
+  bucketId: string;
+  /** 桶后端。 */
+  backend: DeviceRemoteProviderId;
+  /** 当前已确认阶段。 */
+  phase: DevicePasswordRotationPhase;
+  /** 轮转前的公开 KDF 参数。 */
+  oldKeyDerivation: StorageKeyDerivationV1;
+  /** 轮转前是否存在 Vault 密码 verifier；旧记录缺失该字段时按 true 保守处理。 */
+  oldVaultAuthMetadataPresent?: boolean;
+  /** 轮转后的公开 KDF 参数；Hold 发布后才有。 */
+  newKeyDerivation?: StorageKeyDerivationV1;
+  /** 轮转前 root manifest 指纹。 */
+  oldManifestFingerprint: string;
+  /** 期望的新 root manifest 指纹；密封后才有。 */
+  newManifestFingerprint?: string;
+  /** 轮转前的 Hold 配置版本。 */
+  oldConfigRevision: number;
+  /** 已发布的 Hold 新配置版本；发布后才有。 */
+  newConfigRevision?: number;
+  /** 已发布的 Hold 新提交头 ETag；已知时才有。 */
+  holdHeadEtag?: string;
+  /** 轮转前的 Hold 提交头 ETag；已知时才有。 */
+  oldHoldHeadEtag?: string;
+  /** 轮转前设备 encryptedConfig 密文指纹。 */
+  deviceCiphertextFingerprint: string;
+  /** 撤销恢复前准备写回设备的旧密码密文；只供 Worker 幂等识别，不返回页面。 */
+  restoredDeviceEncryptedConfig?: StorageRecordV1;
+  /** 上述撤销恢复密文的指纹；设备 CAS 前必须先持久化。 */
+  restoredDeviceCiphertextFingerprint?: string;
+  /** 创建时间（毫秒）。 */
+  createdAt: number;
+  /** 最近更新时间（毫秒）。 */
+  updatedAt: number;
+}
+
+/**
+ * 页面可见的未完成密码轮转安全投影。
+ *
+ * 这是设备事务记录的独立公共 DTO；它故意不包含 KDF、ETag、指纹、密文
+ * 或任何其它恢复内部字段。页面只能用 operationId 重新提交恢复请求。
+ */
+export interface PendingPasswordRotationViewV1 {
+  /** 公共安全投影的格式标识。 */
+  format: "keymaster.storage.password-rotation-view";
+  /** 公共安全投影版本。 */
+  version: 1;
+  /** 要恢复的轮转事务 ID。 */
+  operationId: string;
+  /** 轮转目标桶 ID。 */
+  bucketId: string;
+  /** 桶后端类型。 */
+  backend: DeviceRemoteProviderId;
+  /** 当前已确认的轮转阶段。 */
+  phase: DevicePasswordRotationPhase;
+  /** 事务创建时间（毫秒）。 */
+  createdAt: number;
+  /** 事务最近更新时间（毫秒）。 */
+  updatedAt: number;
+}
+
 /** 唯一的设备引导目录。 */
 export interface DeviceBootstrapCatalogV1 {
   format: "keymaster.device-bootstrap";
@@ -103,6 +178,8 @@ export interface DeviceBootstrapCatalogV1 {
   connections: DeviceRemoteConnectionV1[];
   /** 只用于恢复未决事务。 */
   recoveries: DeviceRemoteRecoveryPointerV1[];
+  /** 未完成的桶密码轮转事务。 */
+  rotations?: DevicePasswordRotationRecordV1[];
   /** 同一浏览器存储上下文的稳定 Worker profile 标识。 */
   workerProfileId: string;
 }
@@ -111,6 +188,7 @@ export interface DeviceBootstrapCatalogV1 {
 export const DEVICE_BOOTSTRAP_LIMITS = Object.freeze({
   maxConnections: 32,
   maxRecoveries: 32,
+  maxRotations: 8,
   maxDisplayNameLength: 128,
   maxSerializedBytes: 128 * 1024,
   maxEncryptedConfigBytes: 32 * 1024,
@@ -141,7 +219,39 @@ const RECOVERY_KEYS = [
   "transactionFingerprint",
   "updatedAt",
 ] as const;
-const CATALOG_KEYS = ["connections", "format", "recoveries", "selectedRemoteStorageId", "version", "workerProfileId"] as const;
+const ROTATION_KEYS = [
+  "backend",
+  "bucketId",
+  "createdAt",
+  "deviceCiphertextFingerprint",
+  "format",
+  "holdHeadEtag",
+  "newConfigRevision",
+  "newKeyDerivation",
+  "newManifestFingerprint",
+  "oldConfigRevision",
+  "oldHoldHeadEtag",
+  "oldKeyDerivation",
+  "oldVaultAuthMetadataPresent",
+  "oldManifestFingerprint",
+  "operationId",
+  "phase",
+  "restoredDeviceCiphertextFingerprint",
+  "restoredDeviceEncryptedConfig",
+  "updatedAt",
+  "version",
+] as const;
+const PENDING_ROTATION_VIEW_KEYS = [
+  "backend",
+  "bucketId",
+  "createdAt",
+  "format",
+  "operationId",
+  "phase",
+  "updatedAt",
+  "version",
+] as const;
+const CATALOG_KEYS = ["connections", "format", "recoveries", "rotations", "selectedRemoteStorageId", "version", "workerProfileId"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -301,6 +411,86 @@ function assertSerializedSize(value: DeviceBootstrapCatalogV1): void {
   if (new TextEncoder().encode(JSON.stringify(value)).byteLength > DEVICE_BOOTSTRAP_LIMITS.maxSerializedBytes) fail("catalog size");
 }
 
+/** 校验单条密码轮转事务记录。 */
+export function validateDevicePasswordRotationRecord(value: unknown): DevicePasswordRotationRecordV1 {
+  if (!isRecord(value)) fail("rotation");
+  assertExactKeys(value, ROTATION_KEYS, "rotation");
+  if (value.format !== "keymaster.storage.password-rotation" || value.version !== 1) fail("rotation.format");
+  const operationId = text(value.operationId, "rotation.operationId", 128, /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u);
+  const bucketId = text(value.bucketId, "rotation.bucketId", 128, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
+  const backend = value.backend;
+  if (backend !== "local" && backend !== "s3") fail("rotation.backend");
+  const phase = value.phase;
+  if (phase !== "started" && phase !== "hold-unconfirmed" && phase !== "hold-published" && phase !== "manifest-unconfirmed" && phase !== "manifest-rollback-unconfirmed") fail("rotation.phase");
+  const oldKeyDerivation = validateDerivation(value.oldKeyDerivation);
+  const oldVaultAuthMetadataPresent = value.oldVaultAuthMetadataPresent === undefined ? true : value.oldVaultAuthMetadataPresent;
+  if (typeof oldVaultAuthMetadataPresent !== "boolean") fail("rotation.oldVaultAuthMetadataPresent");
+  const newKeyDerivation = value.newKeyDerivation === undefined ? undefined : validateDerivation(value.newKeyDerivation);
+  const oldManifestFingerprint = text(value.oldManifestFingerprint, "rotation.oldManifestFingerprint", 64, /^[0-9a-f]{64}$/u);
+  const newManifestFingerprint = value.newManifestFingerprint === undefined
+    ? undefined
+    : text(value.newManifestFingerprint, "rotation.newManifestFingerprint", 64, /^[0-9a-f]{64}$/u);
+  const oldConfigRevision = integer(value.oldConfigRevision, "rotation.oldConfigRevision", 0);
+  const newConfigRevision = value.newConfigRevision === undefined ? undefined : integer(value.newConfigRevision, "rotation.newConfigRevision", 0);
+  const holdHeadEtag = value.holdHeadEtag === undefined ? undefined : text(value.holdHeadEtag, "rotation.holdHeadEtag", 512);
+  const oldHoldHeadEtag = value.oldHoldHeadEtag === undefined ? undefined : text(value.oldHoldHeadEtag, "rotation.oldHoldHeadEtag", 512);
+  const deviceCiphertextFingerprint = text(value.deviceCiphertextFingerprint, "rotation.deviceCiphertextFingerprint", 64, /^[0-9a-f]{64}$/u);
+  const restoredDeviceEncryptedConfig = value.restoredDeviceEncryptedConfig === undefined
+    ? undefined
+    : validateEncryptedConfig(value.restoredDeviceEncryptedConfig);
+  const restoredDeviceCiphertextFingerprint = value.restoredDeviceCiphertextFingerprint === undefined
+    ? undefined
+    : text(value.restoredDeviceCiphertextFingerprint, "rotation.restoredDeviceCiphertextFingerprint", 64, /^[0-9a-f]{64}$/u);
+  if ((restoredDeviceEncryptedConfig === undefined) !== (restoredDeviceCiphertextFingerprint === undefined)) {
+    fail("rotation restored device ciphertext");
+  }
+  return {
+    format: "keymaster.storage.password-rotation",
+    version: 1,
+    operationId,
+    bucketId,
+    backend,
+    phase,
+    oldKeyDerivation,
+    oldVaultAuthMetadataPresent,
+    ...(newKeyDerivation === undefined ? {} : { newKeyDerivation }),
+    oldManifestFingerprint,
+    ...(newManifestFingerprint === undefined ? {} : { newManifestFingerprint }),
+    oldConfigRevision,
+    ...(newConfigRevision === undefined ? {} : { newConfigRevision }),
+    ...(holdHeadEtag === undefined ? {} : { holdHeadEtag }),
+    ...(oldHoldHeadEtag === undefined ? {} : { oldHoldHeadEtag }),
+    deviceCiphertextFingerprint,
+    ...(restoredDeviceEncryptedConfig === undefined ? {} : { restoredDeviceEncryptedConfig }),
+    ...(restoredDeviceCiphertextFingerprint === undefined ? {} : { restoredDeviceCiphertextFingerprint }),
+    createdAt: integer(value.createdAt, "rotation.createdAt"),
+    updatedAt: integer(value.updatedAt, "rotation.updatedAt"),
+  };
+}
+
+/** 严格校验页面可见的密码轮转安全投影；拒绝任何内部事务字段。 */
+export function validatePendingPasswordRotationView(value: unknown): PendingPasswordRotationViewV1 {
+  if (!isRecord(value)) fail("rotation view");
+  assertExactKeys(value, PENDING_ROTATION_VIEW_KEYS, "rotation view");
+  if (value.format !== "keymaster.storage.password-rotation-view" || value.version !== 1) fail("rotation view.format");
+  const operationId = text(value.operationId, "rotation view.operationId", 128, /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u);
+  const bucketId = text(value.bucketId, "rotation view.bucketId", 128, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
+  const backend = value.backend;
+  if (backend !== "local" && backend !== "s3") fail("rotation view.backend");
+  const phase = value.phase;
+  if (phase !== "started" && phase !== "hold-unconfirmed" && phase !== "hold-published" && phase !== "manifest-unconfirmed" && phase !== "manifest-rollback-unconfirmed") fail("rotation view.phase");
+  return {
+    format: "keymaster.storage.password-rotation-view",
+    version: 1,
+    operationId,
+    bucketId,
+    backend,
+    phase,
+    createdAt: integer(value.createdAt, "rotation view.createdAt"),
+    updatedAt: integer(value.updatedAt, "rotation view.updatedAt"),
+  };
+}
+
 /** 严格解析设备引导目录；未知字段和重复身份都会失败。 */
 export function validateDeviceBootstrapCatalog(value: unknown): DeviceBootstrapCatalogV1 {
   if (!isRecord(value)) fail("catalog");
@@ -309,6 +499,8 @@ export function validateDeviceBootstrapCatalog(value: unknown): DeviceBootstrapC
   const workerProfileId = text(value.workerProfileId, "catalog.workerProfileId", 128, /^profile-[A-Za-z0-9_-]{1,120}$/u);
   if (!Array.isArray(value.connections) || value.connections.length > DEVICE_BOOTSTRAP_LIMITS.maxConnections) fail("catalog.connections");
   if (!Array.isArray(value.recoveries) || value.recoveries.length > DEVICE_BOOTSTRAP_LIMITS.maxRecoveries) fail("catalog.recoveries");
+  const rotationsValue = value.rotations === undefined ? [] : value.rotations;
+  if (!Array.isArray(rotationsValue) || rotationsValue.length > DEVICE_BOOTSTRAP_LIMITS.maxRotations) fail("catalog.rotations");
   const connections = value.connections.map(validateDeviceRemoteConnection);
   const remoteIds = new Set<string>();
   const physicalLocationIds = new Set<string>();
@@ -324,6 +516,11 @@ export function validateDeviceBootstrapCatalog(value: unknown): DeviceBootstrapC
     if (operationIds.has(recovery.operationId)) fail("catalog duplicate operationId");
     operationIds.add(recovery.operationId);
   }
+  const rotations = rotationsValue.map(validateDevicePasswordRotationRecord);
+  for (const rotation of rotations) {
+    if (operationIds.has(rotation.operationId)) fail("catalog duplicate operationId");
+    operationIds.add(rotation.operationId);
+  }
   const selectedRemoteStorageId = optionalText(value.selectedRemoteStorageId, "catalog.selectedRemoteStorageId", 128, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
   if (selectedRemoteStorageId !== undefined && !remoteIds.has(selectedRemoteStorageId)) fail("catalog.selectedRemoteStorageId");
   const catalog: DeviceBootstrapCatalogV1 = {
@@ -332,6 +529,7 @@ export function validateDeviceBootstrapCatalog(value: unknown): DeviceBootstrapC
     ...(selectedRemoteStorageId === undefined ? {} : { selectedRemoteStorageId }),
     connections,
     recoveries,
+    rotations,
     workerProfileId,
   };
   assertSerializedSize(catalog);
@@ -340,5 +538,5 @@ export function validateDeviceBootstrapCatalog(value: unknown): DeviceBootstrapC
 
 /** 创建没有连接的引导目录；调用方应随后以一次受保护写入提交它。 */
 export function createEmptyDeviceBootstrapCatalog(workerProfileId: string): DeviceBootstrapCatalogV1 {
-  return validateDeviceBootstrapCatalog({ format: "keymaster.device-bootstrap", version: 1, connections: [], recoveries: [], workerProfileId });
+  return validateDeviceBootstrapCatalog({ format: "keymaster.device-bootstrap", version: 1, connections: [], recoveries: [], rotations: [], workerProfileId });
 }
