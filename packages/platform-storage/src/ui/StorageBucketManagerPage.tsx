@@ -172,7 +172,7 @@ export function StorageBucketManagerPage() {
 
   async function saveDraft() {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     const invalid = validateDraft();
@@ -232,7 +232,7 @@ export function StorageBucketManagerPage() {
 
   async function editBucket(entry: StorageBucketCatalogEntryV2) {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     let password = window.prompt(t("storage.bucketManager.editPassword", { defaultValue: "输入当前桶密码以编辑连接配置" }));
@@ -257,7 +257,7 @@ export function StorageBucketManagerPage() {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file || !manager || catalogError) {
-      if (catalogError) setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      if (catalogError) setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复浏览器存储权限后重试" }) });
       return;
     }
     const suggestedLabel = file.name.replace(/\.keymaster\.hold\.json$/iu, "").trim() || "导入的存储桶";
@@ -289,7 +289,7 @@ export function StorageBucketManagerPage() {
 
   async function changeBucketPassword(entry: StorageBucketCatalogEntryV2) {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     let oldPassword = window.prompt(t("storage.bucketManager.oldPassword", { defaultValue: "输入当前桶密码" }));
@@ -351,7 +351,7 @@ export function StorageBucketManagerPage() {
 
   async function selectBucket(bucketId: string) {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     if (catalog.selectedBucketId === bucketId) return;
@@ -380,7 +380,7 @@ export function StorageBucketManagerPage() {
 
   async function renameBucket(entry: StorageBucketCatalogEntryV2) {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     const label = window.prompt(t("storage.bucketManager.renamePrompt", { defaultValue: "输入新的桶名称" }), entry.label)?.trim();
@@ -402,7 +402,7 @@ export function StorageBucketManagerPage() {
 
   async function removeBucket(entry: StorageBucketCatalogEntryV2) {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     if (catalog.selectedBucketId === entry.bucketId) {
@@ -422,7 +422,7 @@ export function StorageBucketManagerPage() {
 
   async function destroyBucketData(entry: StorageBucketCatalogEntryV2) {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     if (catalog.selectedBucketId === entry.bucketId) {
@@ -462,7 +462,7 @@ export function StorageBucketManagerPage() {
 
   async function exportBucket(entry: StorageBucketCatalogEntryV2) {
     if (!manager || catalogError) {
-      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" }) });
+      setMessage({ kind: "error", text: t("storage.bucketManager.err.catalog", { defaultValue: "本机设备引导目录不可用，请恢复浏览器存储权限后重试" }) });
       return;
     }
     setBusy("export"); setMessage(null);
@@ -513,7 +513,7 @@ export function StorageBucketManagerPage() {
       />
 
       {message ? <p className={`storage-bucket-manager__message is-${message.kind}`} role={message.kind === "error" ? "alert" : "status"}>{message.text}</p> : null}
-      {catalogError ? <p className="storage-bucket-manager__message is-error" role="alert">{t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复 localStorage 后重试" })}</p> : null}
+      {catalogError ? <p className="storage-bucket-manager__message is-error" role="alert">{t("storage.bucketManager.err.catalog", { defaultValue: "本机存储桶目录不可用，请先恢复浏览器存储权限后重试" })}</p> : null}
       {reloadRequired ? <p className="storage-bucket-manager__reload"><span>{t("storage.bucketManager.reloadHint", { defaultValue: "新桶已成为当前桶；重新加载后会进入新的桶会话。" })}</span><Button variant="secondary" size="sm" onClick={() => window.location.reload()}>{t("storage.bucketManager.reload", { defaultValue: "重新加载" })}</Button></p> : null}
 
       <section className="storage-bucket-manager__section" aria-labelledby="storage-bucket-list-title">
@@ -758,7 +758,7 @@ export function StorageBucketManagerEntry() {
         return <div key={entry.bucketId} className={`storage-bucket-tree__bucket ${current ? "is-current" : ""}`} role="none">
           <button type="button" role="menuitem" className="storage-bucket-tree__bucket-button" onClick={() => void switchBucket(entry)} disabled={busyBucketId !== undefined}>
             <HardDrive size={14} aria-hidden="true" />
-            <span><strong>{entry.label}</strong><small>{entry.backend === "local" ? "localStorage" : "S3-compatible"}</small></span>
+            <span><strong>{entry.label}</strong><small>{entry.backend === "local" ? "浏览器本机存储" : "S3-compatible"}</small></span>
             {busyBucketId === entry.bucketId ? <small>{t("common.status.loading", { defaultValue: "处理中…" })}</small> : current ? <small>{t("storage.bucketManager.selected", { defaultValue: "当前" })}</small> : null}
           </button>
           <div className="storage-bucket-tree__keys">

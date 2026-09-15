@@ -5,6 +5,7 @@
 
 import type {
   StorageHoldHeadExpectation,
+  StorageBucketReadOnlyProvider,
   StorageBucketProvider,
   StorageHoldCommitHeadV1,
   StorageHoldSnapshotHeaderV1,
@@ -22,7 +23,7 @@ import {
 import type { KeyRecord as HoldKeyRecord, StorageRecord as HoldStorageRecord } from "keymaster-hold/browser";
 
 const HOLD_ROOT = ".keymaster/hold/v1";
-const HEAD_PATH = `${HOLD_ROOT}/head.json`;
+export const STORAGE_HOLD_HEAD_PATH = `${HOLD_ROOT}/head.json`;
 
 export interface StorageHoldSnapshotWriteInput {
   /** 已由 SDK sealDocument 生成的完整认证文档。 */
@@ -91,10 +92,51 @@ function validateHeader(value: unknown): StorageHoldSnapshotHeaderV1 {
   } as StorageHoldSnapshotHeaderV1;
 }
 
-async function readJson<T>(provider: StorageBucketProvider, path: string, missingMessage: string): Promise<{ value: T; etag?: string }> {
+async function readJson<T>(provider: Pick<StorageBucketProvider, "get">, path: string, missingMessage: string): Promise<{ value: T; etag?: string }> {
   const object = await provider.get(path);
   if (!object) throw snapshotError(missingMessage, "storage_not_found");
   return { value: parseJson<T>(object.bytes, missingMessage), etag: object.etag };
+}
+
+/**
+ * 只读 Hold 读取器。连接已有远端时，生命周期必须在类型和运行时上都
+ * 无法取得 put/delete；写入型快照 Repository 不能作为该阶段的依赖。
+ */
+export function createStorageHoldSnapshotReadOnlyRepository(provider: StorageBucketReadOnlyProvider) {
+  async function readHead(): Promise<{ value?: StorageHoldCommitHeadV1; etag?: string }> {
+    const object = await provider.get(STORAGE_HOLD_HEAD_PATH);
+    if (!object) return {};
+    return { value: validateHead(parseJson(object.bytes, "Storage Hold commit head is invalid")), etag: object.etag };
+  }
+
+  async function readSnapshot(head: StorageHoldCommitHeadV1, headEtag?: string): Promise<StorageHoldCommittedSnapshot> {
+    const headerResult = await readJson(provider, snapshotPath(head.snapshotId, "header.json"), "Storage Hold snapshot header is missing");
+    const header = validateHeader(headerResult.value);
+    if (header.snapshotId !== head.snapshotId || header.snapshotRevision !== head.snapshotRevision || header.configRevision !== head.configRevision || header.storagePath !== snapshotPath(head.snapshotId, "storage.json") || header.keysPath !== snapshotPath(head.snapshotId, "keys.json")) throw snapshotError("Storage Hold snapshot head does not match its records");
+    const storageResult = await readJson<HoldStorageRecord>(provider, header.storagePath, "Storage Hold storage record is missing");
+    const keysResult = await readJson<HoldKeyRecord[]>(provider, header.keysPath, "Storage Hold key records are missing");
+    if (!Array.isArray(keysResult.value) || keysResult.value.length !== header.keyCount) throw snapshotError("Storage Hold key records are incomplete");
+    const document = parseBucketDocument(JSON.stringify({ format: "keymaster-hold", version: 1, keyDerivation: header.keyDerivation, storage: storageResult.value, keys: keysResult.value, integrity: header.integrity }));
+    const publicKeys = document.keys.map((key) => key.publicKeyHex);
+    if (JSON.stringify(publicKeys) !== JSON.stringify(header.keyPublicKeys)) throw snapshotError("Storage Hold key order does not match the snapshot header");
+    return {
+      header,
+      bucketGeneration: head.bucketGeneration,
+      storage: toContractStorageRecord(document.storage),
+      keys: document.keys,
+      document,
+      ...(headEtag ? { headEtag } : {})
+    };
+  }
+
+  return {
+    readHead,
+    async readCommitted(): Promise<StorageHoldCommittedSnapshot> {
+      const head = await readHead();
+      if (!head.value) throw snapshotError("Storage Hold committed snapshot is missing", "storage_not_found");
+      return readSnapshot(head.value, head.etag);
+    },
+  };
 }
 
 /** 在一个已经绑定的桶 Provider 上维护 Hold 配置快照。 */
@@ -103,7 +145,7 @@ export function createStorageHoldSnapshotRepository(provider: StorageBucketProvi
   const generateId = options.generateId ?? (() => crypto.randomUUID());
 
   async function readHead(): Promise<{ value?: StorageHoldCommitHeadV1; etag?: string }> {
-    const object = await provider.get(HEAD_PATH);
+    const object = await provider.get(STORAGE_HOLD_HEAD_PATH);
     if (!object) return {};
     return { value: validateHead(parseJson(object.bytes, "Storage Hold commit head is invalid")), etag: object.etag };
   }
@@ -178,7 +220,7 @@ export function createStorageHoldSnapshotRepository(provider: StorageBucketProvi
       const condition = input.expectedHead.kind === "etag"
         ? { ifMatch: input.expectedHead.etag }
         : { ifNoneMatch: "*" as const };
-      const written = await provider.put(HEAD_PATH, jsonBytes(head), condition);
+      const written = await provider.put(STORAGE_HOLD_HEAD_PATH, jsonBytes(head), condition);
       return readSnapshot(head, written.etag);
     } catch (caught) {
       if (caught instanceof StorageRuntimeError && caught.code === "storage_conflict") throw snapshotError("Storage Hold snapshot publish conflicted; retry from the latest snapshot", "storage_conflict");

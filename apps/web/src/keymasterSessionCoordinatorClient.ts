@@ -36,12 +36,9 @@ import type {
   CoordinatorWorkerUnitStateEvent,
   CoordinatorSessionBinding,
   StorageBootstrapState,
-  InitialSetupRecoveryRecordV1,
-  InitialSetupPhase,
-  InitialSetupRecoveryCatalogState,
-  InitialSetupRecoverySuccessV1,
-  InitialSetupRollbackState,
-  StorageUserFacingError,
+  DeviceBootstrapCatalogV1,
+  DeviceRemoteConnectionV1,
+  DeviceRemoteRecoveryPointerV1,
 } from "@keymaster/contracts";
 import {
   COORDINATOR_RPC_CAPABILITY,
@@ -69,8 +66,8 @@ import type {
 } from "@keymaster/contracts/storage-internal";
 import { parseCoordinatorResponseFor, toCoordinatorRpcRequest } from "@keymaster/contracts";
 import { readStorageBootstrap } from "@keymaster/platform-storage/coordinator/bootstrap";
-import { browserStorageLocks, createLocalStorageBucketProvider, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
-import { createStorageCatalogRepository, readStorageCatalog, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
+import { createDeviceBootstrapRepository, createLocalStorageBucketProvider, defaultDeviceBootstrapStorage, readDeviceBootstrap, StorageRuntimeError, type LocalStorageLike } from "@keymaster/platform-storage/coordinator";
+import { createStorageCatalogRepository, readStorageCatalog, sameStorageCatalogDeviceProjection, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import {
   connectSharedWorker,
   definePlugin,
@@ -87,26 +84,11 @@ import {
 import * as WebLoomFramework from "webloom-framework";
 import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?sharedworker&url";
 
-const INITIAL_SETUP_RECOVERY_STORAGE_KEY = "keymaster.storage.initial-setup.recovery.v1";
-const INITIAL_SETUP_RECOVERY_LOCK = "keymaster.storage.initial-setup.recovery";
 /**
- * SharedWorker 的共享边界必须与 localStorage profile 一致：同一个 profile
+ * SharedWorker 的共享边界必须与设备引导 profile 一致：同一个 profile
  * 的多个 tab 继续共享 Coordinator，而不同的 Chromium storage context
  * 不能因为 URL 相同而互相污染首次初始化状态。
  */
-const COORDINATOR_WORKER_PROFILE_ID_KEY = "keymaster.coordinator.worker-profile-id.v1";
-const COORDINATOR_WORKER_PROFILE_ID_LOCK = "keymaster.coordinator.worker-profile-id";
-
-type InitialSetupRecoveryLocks = {
-  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
-  request<T>(name: string, options: { signal?: AbortSignal }, callback: () => Promise<T>): Promise<T>;
-};
-
-const INITIAL_SETUP_PHASES = ["validate", "stage", "hold", "catalog-commit", "runtime", "rollback", "complete"] as const satisfies readonly InitialSetupPhase[];
-const INITIAL_SETUP_CATALOG_STATES = ["not-started", "committed", "rolled-back", "competing", "empty", "unknown"] as const satisfies readonly InitialSetupRecoveryCatalogState[];
-const INITIAL_SETUP_ROLLBACK_STATES = ["not-started", "confirmed", "unconfirmed"] as const satisfies readonly InitialSetupRollbackState[];
-const RECOVERY_RECORD_LIMIT = 32;
-const RECOVERY_DIAGNOSTIC_LIMIT = 12_000;
 
 /**
  * 旧 registry 包可能没有浏览器运行锁。不能把未知 runtimeLock 字段传给它
@@ -130,253 +112,12 @@ function runtimeLockUserMessage(snapshot: unknown): string | undefined {
   return undefined;
 }
 
-function recoveryLedgerError(field: string): never {
-  throw new StorageRuntimeError("storage_provider_error", `Initialization recovery ledger contains an invalid ${field}`);
-}
-
-function isOneOf(values: readonly string[], value: unknown): boolean {
-  return typeof value === "string" && values.includes(value);
-}
-
-function assertRecoveryString(value: unknown, field: string, maxLength: number, required = true): asserts value is string {
-  if (typeof value !== "string" || value.length > maxLength || (required && !value.trim())) recoveryLedgerError(field);
-}
-
-function parseInitialSetupRecoverySuccess(value: unknown): InitialSetupRecoverySuccessV1 {
-  if (!value || typeof value !== "object" || Array.isArray(value)) recoveryLedgerError("success");
-  const success = value as Partial<InitialSetupRecoverySuccessV1>;
-  assertRecoveryString(success.bucketLabel, "success.bucketLabel", 128);
-  assertRecoveryString(success.publicKeyHex, "success.publicKeyHex", 66);
-  if (!/^0[23][0-9a-f]{64}$/iu.test(success.publicKeyHex)) recoveryLedgerError("success.publicKeyHex");
-  assertRecoveryString(success.label, "success.label", 128);
-  assertRecoveryString(success.address, "success.address", 256);
-  assertRecoveryString(success.format, "success.format", 128);
-  if (!Array.isArray(success.capabilities) || success.capabilities.length === 0 || success.capabilities.length > 32 || !success.capabilities.every((item) => typeof item === "string" && item.length > 0 && item.length <= 128)) {
-    recoveryLedgerError("success.capabilities");
-  }
-  assertRecoveryString(success.createdAt, "success.createdAt", 128);
-  if (Number.isNaN(Date.parse(success.createdAt))) recoveryLedgerError("success.createdAt");
-  if (success.source !== undefined) assertRecoveryString(success.source, "success.source", 128, false);
-  return {
-    bucketLabel: success.bucketLabel,
-    publicKeyHex: success.publicKeyHex,
-    label: success.label,
-    address: success.address,
-    format: success.format,
-    capabilities: [...success.capabilities],
-    createdAt: success.createdAt,
-    ...(success.source === undefined ? {} : { source: success.source }),
-  };
-}
-
-function parseInitialSetupRecoveryError(value: unknown, transactionId: string): StorageUserFacingError {
-  if (!value || typeof value !== "object" || Array.isArray(value)) recoveryLedgerError("error");
-  const error = value as Partial<StorageUserFacingError>;
-  assertRecoveryString(error.title, "error.title", 256);
-  assertRecoveryString(error.summary, "error.summary", 2048);
-  if (error.action !== undefined) assertRecoveryString(error.action, "error.action", 512, false);
-  assertRecoveryString(error.code, "error.code", 128);
-  assertRecoveryString(error.incidentId, "error.incidentId", 128);
-  if (error.transactionId !== undefined) {
-    assertRecoveryString(error.transactionId, "error.transactionId", 128);
-    if (error.transactionId !== transactionId) recoveryLedgerError("error.transactionId");
-  }
-  assertRecoveryString(error.diagnostic, "error.diagnostic", RECOVERY_DIAGNOSTIC_LIMIT);
-  if (!isOneOf(INITIAL_SETUP_PHASES, error.phase)) recoveryLedgerError("error.phase");
-  if (!isOneOf(INITIAL_SETUP_ROLLBACK_STATES, error.rollback)) recoveryLedgerError("error.rollback");
-  return {
-    title: error.title,
-    summary: error.summary,
-    ...(error.action === undefined ? {} : { action: error.action }),
-    code: error.code,
-    incidentId: error.incidentId,
-    ...(error.transactionId === undefined ? {} : { transactionId: error.transactionId }),
-    diagnostic: error.diagnostic,
-    phase: error.phase as InitialSetupPhase,
-    rollback: error.rollback as InitialSetupRollbackState,
-  };
-}
-
-function parseInitialSetupRecoveryRecord(value: unknown): InitialSetupRecoveryRecordV1 {
-  if (!value || typeof value !== "object" || Array.isArray(value)) recoveryLedgerError("record");
-  const record = value as Partial<InitialSetupRecoveryRecordV1>;
-  const allowedKeys = new Set([
-    "format", "version", "transactionId", "bucketId", "catalogEntryFingerprint",
-    "configRevision", "snapshotRevision", "backend", "connectionFingerprint",
-    "phase", "catalog", "runtimeInstalled", "cleanup", "status", "updatedAt",
-    ...(record.status === "succeeded" ? ["success"] : record.status === "failed" ? ["error"] : []),
-  ]);
-  if (Object.keys(record).some((key) => !allowedKeys.has(key))) recoveryLedgerError("record fields");
-  if (record.format !== "keymaster.storage.initial-setup-recovery" || record.version !== 1) recoveryLedgerError("format");
-  assertRecoveryString(record.transactionId, "transactionId", 128);
-  if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(record.transactionId)) recoveryLedgerError("transactionId");
-  assertRecoveryString(record.bucketId, "bucketId", 128);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(record.bucketId)) recoveryLedgerError("bucketId");
-  if (!Number.isSafeInteger(record.configRevision) || (record.configRevision as number) < 0) recoveryLedgerError("configRevision");
-  if (!Number.isSafeInteger(record.snapshotRevision) || (record.snapshotRevision as number) < 0) recoveryLedgerError("snapshotRevision");
-  if (record.backend !== "local" && record.backend !== "s3") recoveryLedgerError("backend");
-  assertRecoveryString(record.catalogEntryFingerprint, "catalogEntryFingerprint", 64);
-  if (!/^[0-9a-f]{64}$/u.test(record.catalogEntryFingerprint)) recoveryLedgerError("catalogEntryFingerprint");
-  assertRecoveryString(record.connectionFingerprint, "connectionFingerprint", 64);
-  if (!/^[0-9a-f]{64}$/u.test(record.connectionFingerprint)) recoveryLedgerError("connectionFingerprint");
-  if (!isOneOf(INITIAL_SETUP_PHASES, record.phase)) recoveryLedgerError("phase");
-  if (!isOneOf(INITIAL_SETUP_CATALOG_STATES, record.catalog)) recoveryLedgerError("catalog");
-  if (typeof record.runtimeInstalled !== "boolean") recoveryLedgerError("runtimeInstalled");
-  if (!isOneOf(INITIAL_SETUP_ROLLBACK_STATES, record.cleanup)) recoveryLedgerError("cleanup");
-  if (!isOneOf(["pending", "succeeded", "failed"], record.status)) recoveryLedgerError("status");
-  if (!Number.isSafeInteger(record.updatedAt) || (record.updatedAt as number) < 0) recoveryLedgerError("updatedAt");
-
-  const success = record.success === undefined ? undefined : parseInitialSetupRecoverySuccess(record.success);
-  const error = record.error === undefined ? undefined : parseInitialSetupRecoveryError(record.error, record.transactionId);
-  if (record.status === "pending") {
-    if (success !== undefined || error !== undefined || record.cleanup === "confirmed" || record.phase === "complete") recoveryLedgerError("pending status");
-  } else if (record.status === "succeeded") {
-    if (success === undefined || error !== undefined || record.phase !== "complete" || record.catalog !== "committed" || !record.runtimeInstalled || record.cleanup !== "confirmed") recoveryLedgerError("succeeded status");
-  } else if (success !== undefined || error === undefined || record.phase !== "rollback" || record.cleanup === "not-started") {
-    recoveryLedgerError("failed status");
-  }
-
-  return {
-    format: record.format,
-    version: 1,
-    transactionId: record.transactionId,
-    bucketId: record.bucketId,
-    catalogEntryFingerprint: record.catalogEntryFingerprint,
-    configRevision: record.configRevision as number,
-    snapshotRevision: record.snapshotRevision as number,
-    backend: record.backend,
-    connectionFingerprint: record.connectionFingerprint,
-    phase: record.phase as InitialSetupPhase,
-    catalog: record.catalog as InitialSetupRecoveryCatalogState,
-    runtimeInstalled: record.runtimeInstalled,
-    cleanup: record.cleanup as InitialSetupRollbackState,
-    status: record.status as "pending" | "succeeded" | "failed",
-    ...(success === undefined ? {} : { success }),
-    ...(error === undefined ? {} : { error }),
-    updatedAt: record.updatedAt as number,
-  };
-}
-
-/** 测试桥复用生产账本成员校验，避免 Worker fixture 放宽实际写入边界。 */
-export function __testParseInitialSetupRecoveryRecord(value: unknown): InitialSetupRecoveryRecordV1 {
-  return parseInitialSetupRecoveryRecord(value);
-}
-
-function isInitialSetupRecoveryRecord(value: unknown): value is InitialSetupRecoveryRecordV1 {
-  try {
-    parseInitialSetupRecoveryRecord(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function readInitialSetupRecoveryRecords(): InitialSetupRecoveryRecordV1[] {
-  const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
-  if (!storage) throw new StorageRuntimeError("storage_unavailable", "localStorage is unavailable");
-  let raw: string | null;
-  try {
-    raw = storage.getItem(INITIAL_SETUP_RECOVERY_STORAGE_KEY);
-  } catch {
-    throw new StorageRuntimeError("storage_unavailable", "Initialization recovery records are unavailable");
-  }
-  if (raw === null) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch {
-    throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger JSON is invalid");
-  }
-  if (!Array.isArray(parsed)) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger must be an array");
-  if (parsed.length > RECOVERY_RECORD_LIMIT) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger exceeds its record limit");
-  const records = parsed.map((value) => parseInitialSetupRecoveryRecord(value));
-  const transactionIds = new Set<string>();
-  for (const record of records) {
-    if (transactionIds.has(record.transactionId)) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger contains duplicate transaction IDs");
-    transactionIds.add(record.transactionId);
-  }
-  return records;
-}
-
-function isEvictableInitialSetupRecoveryRecord(record: InitialSetupRecoveryRecordV1): boolean {
-  return record.status === "succeeded" || record.cleanup === "confirmed";
-}
-
-function writeInitialSetupRecoveryRecords(records: InitialSetupRecoveryRecordV1[]): void {
-  const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
-  if (!storage) throw new StorageRuntimeError("storage_unavailable", "localStorage is unavailable");
-  const checked = records.map((record) => parseInitialSetupRecoveryRecord(record));
-  const transactionIds = new Set<string>();
-  for (const record of checked) {
-    if (transactionIds.has(record.transactionId)) throw new StorageRuntimeError("storage_provider_error", "Initialization recovery ledger contains duplicate transaction IDs");
-    transactionIds.add(record.transactionId);
-  }
-  let retained = checked;
-  if (checked.length > RECOVERY_RECORD_LIMIT) {
-    const requiredEvictions = checked.length - RECOVERY_RECORD_LIMIT;
-    const evictable = checked.filter(isEvictableInitialSetupRecoveryRecord).slice(0, requiredEvictions);
-    if (evictable.length < requiredEvictions) {
-      throw new StorageRuntimeError("storage_limit_exceeded", "Initialization recovery ledger has no confirmed terminal record available for eviction");
-    }
-    const evictIds = new Set(evictable.map((record) => record.transactionId));
-    retained = checked.filter((record) => !evictIds.has(record.transactionId));
-  }
-  try {
-    storage.setItem(INITIAL_SETUP_RECOVERY_STORAGE_KEY, JSON.stringify(retained));
-  } catch {
-    throw new StorageRuntimeError("storage_unavailable", "Initialization recovery records could not be saved");
-  }
-}
-
-async function withInitialSetupRecoveryLock<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
-  const locks = browserStorageLocks() as InitialSetupRecoveryLocks | undefined;
-  if (!locks) throw new StorageRuntimeError("storage_unavailable", "Web Locks are required for initialization recovery records");
-  try {
-    return await locks.request(INITIAL_SETUP_RECOVERY_LOCK, { signal }, async () => {
-      if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-      return operation();
-    });
-  } catch (caught) {
-    if (caught instanceof StorageRuntimeError) throw caught;
-    const name = caught && typeof caught === "object" ? (caught as { name?: unknown }).name : undefined;
-    if (name === "AbortError") throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-    throw new StorageRuntimeError("storage_unavailable", "Initialization recovery records are unavailable");
-  }
-}
-
-type WorkerProfileLocks = {
-  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
-};
-
-/** 为同一 localStorage profile 原子分配稳定的 SharedWorker 名称片段。 */
+/** 为同一设备引导 profile 原子分配稳定的 SharedWorker 名称片段。 */
 async function ensureCoordinatorWorkerProfileId(): Promise<string | undefined> {
-  const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
-  if (!storage) return undefined;
-  const read = (): string | undefined => {
-    try {
-      const current = storage.getItem(COORDINATOR_WORKER_PROFILE_ID_KEY);
-      return current && /^profile-[A-Za-z0-9_-]{1,128}$/u.test(current) ? current : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-  const create = (): string | undefined => {
-    const existing = read();
-    if (existing) return existing;
-    const generated = `profile-${randomIdentifierSuffix()}`;
-    try {
-      storage.setItem(COORDINATOR_WORKER_PROFILE_ID_KEY, generated);
-      return read() ?? generated;
-    } catch {
-      return undefined;
-    }
-  };
-  const locks = browserStorageLocks() as WorkerProfileLocks | undefined;
-  if (!locks) return create();
   try {
-    return await locks.request(COORDINATOR_WORKER_PROFILE_ID_LOCK, async () => create());
+    return await createDeviceBootstrapRepository().ensureWorkerProfileId();
   } catch {
-    return create();
+    return undefined;
   }
 }
 
@@ -893,7 +634,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (this.localStorageBridgeLease) return;
     let selectedBucketId: string | undefined;
     try {
-      selectedBucketId = readStorageCatalog().selectedBucketId;
+      selectedBucketId = readDeviceBootstrap(defaultDeviceBootstrapStorage())?.selectedRemoteStorageId
+        ?? readStorageCatalog().selectedBucketId;
     } catch {
       // 目录错误由实际 I/O 返回；这里不能把它伪装成一个合法桶。
     }
@@ -954,27 +696,26 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         const catalog = readStorageCatalog();
         return { type: "catalog-state", catalog };
       }
-      if (request.type === "initial-setup-recovery-list" || request.type === "initial-setup-recovery-write" || request.type === "initial-setup-recovery-delete") {
+      if (request.type === "device-bootstrap-read"
+        || request.type === "device-bootstrap-connection-upsert"
+        || request.type === "device-bootstrap-recovery-upsert"
+        || request.type === "device-bootstrap-recovery-delete") {
         if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        // 恢复记录独立于桶目录，必须使用自己的锁。每次 mutation 都在锁内
-        // 重新读取完整数组，避免两个页面桥的 read-modify-write 互相覆盖。
-        const nextRecords = await withInitialSetupRecoveryLock(signal, async () => {
-          const records = readInitialSetupRecoveryRecords();
-          if (request.type === "initial-setup-recovery-write") {
-            if (!isInitialSetupRecoveryRecord(request.record)) throw new StorageRuntimeError("storage_provider_error", "Initial setup recovery record is invalid");
-            const updated = [...records.filter((record) => record.transactionId !== request.record.transactionId), structuredClone(request.record)];
-            writeInitialSetupRecoveryRecords(updated);
-            return readInitialSetupRecoveryRecords();
-          }
-          if (request.type === "initial-setup-recovery-delete") {
-            const updated = records.filter((record) => record.transactionId !== request.transactionId);
-            if (updated.length !== records.length) writeInitialSetupRecoveryRecords(updated);
-            return readInitialSetupRecoveryRecords();
-          }
-          return records;
-        });
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        return { type: "initial-setup-recovery", records: nextRecords };
+        const storage = defaultDeviceBootstrapStorage();
+        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
+        const repository = createDeviceBootstrapRepository({ storage, locks });
+        if (request.type === "device-bootstrap-read") {
+          return { type: "device-bootstrap", catalog: repository.read() as DeviceBootstrapCatalogV1 | null };
+        }
+        let catalog: DeviceBootstrapCatalogV1 | null | undefined;
+        if (request.type === "device-bootstrap-connection-upsert") {
+          await repository.upsertConnection(request.connection as DeviceRemoteConnectionV1, request.select ?? true);
+        } else if (request.type === "device-bootstrap-recovery-upsert") {
+          await repository.upsertRecovery(request.recovery as DeviceRemoteRecoveryPointerV1);
+        } else {
+          catalog = await repository.removeRecovery(request.operationId);
+        }
+        return { type: "device-bootstrap", catalog: catalog ?? repository.read() as DeviceBootstrapCatalogV1 | null };
       }
       const candidate = "candidateBucket" in request ? request.candidateBucket : undefined;
       const isCatalogCommit = request.type === "catalog-commit";
@@ -1001,7 +742,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       }
       if (request.type === "catalog-update") {
         if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+        const storage = defaultDeviceBootstrapStorage();
         const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
         const repository = createStorageCatalogRepository({ storage, locks });
         const updatedCatalog = await repository.mutate((catalog) => {
@@ -1009,8 +750,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
             throw new StorageRuntimeError("storage_conflict", "The selected storage bucket changed during password rotation");
           }
           const current = catalog.buckets.find((bucket) => bucket.bucketId === request.bucketId);
-          const alreadyRestored = request.rollback === true && current && sameStorageCatalogEntry(current, request.nextBucket);
-          if (!current || (!sameStorageCatalogEntry(current, request.expectedBucket) && !alreadyRestored)) {
+          const alreadyRestored = request.rollback === true && current && sameStorageCatalogDeviceProjection(current, request.nextBucket);
+          if (!current || (!sameStorageCatalogDeviceProjection(current, request.expectedBucket) && !alreadyRestored)) {
             throw new StorageRuntimeError("storage_conflict", "The storage bucket catalog changed during password rotation");
           }
           const next = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [request.nextBucket] }).buckets[0];
@@ -1031,7 +772,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         if (!Number.isSafeInteger(request.bucketGeneration) || request.bucketGeneration < 1) {
           throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is invalid");
         }
-        const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+        const storage = defaultDeviceBootstrapStorage();
         const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
         const repository = createStorageCatalogRepository({ storage, locks });
         const updatedCatalog = await repository.mutate((catalog) => {
@@ -1039,7 +780,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           if (!target) throw new StorageRuntimeError("storage_provider_error", "The initial storage bucket catalog entry is invalid");
           const alreadyCommitted = catalog.selectedBucketId === target.bucketId
             && catalog.buckets.length === 1
-            && sameStorageCatalogEntry(catalog.buckets[0]!, target);
+            && sameStorageCatalogDeviceProjection(catalog.buckets[0]!, target);
           if (request.rollback === true) {
             if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return catalog;
             if (!alreadyCommitted) throw new StorageRuntimeError("storage_conflict", "The initial storage bucket was changed before rollback");
@@ -1092,7 +833,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
             throw new StorageRuntimeError("storage_forbidden", "Local storage bridge rollback generation is invalid");
           }
         }
-        const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+        const storage = defaultDeviceBootstrapStorage();
         const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
         const repository = createStorageCatalogRepository({ storage, locks });
         const updatedCatalog = await repository.mutate((catalog) => {
@@ -1105,7 +846,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
             throw new StorageRuntimeError("storage_conflict", "The selected storage bucket changed during bucket switching");
           }
           const target = catalog.buckets.find((bucket) => bucket.bucketId === request.targetBucket.bucketId);
-          if (!target || !sameStorageCatalogEntry(target, request.targetBucket)) {
+          if (!target || !sameStorageCatalogDeviceProjection(target, request.targetBucket)) {
             throw new StorageRuntimeError("storage_conflict", "The target storage bucket catalog changed during bucket switching");
           }
           return alreadyRestored ? catalog : { ...catalog, selectedBucketId: target.bucketId };
@@ -1131,7 +872,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
               if (candidate.cleanupOnly === true) {
                 // 竞争失败后允许原事务只清理自己生成的命名空间；不能把
                 // 另一个事务的目录条目当成自己的候选对象。
-                if (target && !sameStorageCatalogEntry(target, candidate.bucket)) return undefined;
+                if (target && !sameStorageCatalogDeviceProjection(target, candidate.bucket)) return undefined;
                 return target ?? candidate.bucket;
               }
               // 首次初始化的候选桶在目录提交前故意不存在；只要目录仍为空，
@@ -1144,10 +885,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
               const committedInitialSelection = catalog.selectedBucketId === candidate.bucket.bucketId
                 && lease.bucketId === candidate.bucket.bucketId
                 && target !== undefined
-                && sameStorageCatalogEntry(target, candidate.bucket);
+                && sameStorageCatalogDeviceProjection(target, candidate.bucket);
               return committedInitialSelection ? target : undefined;
             }
-            if (!target || !sameStorageCatalogEntry(target, candidate.bucket)) return undefined;
+            if (!target || !sameStorageCatalogDeviceProjection(target, candidate.bucket)) return undefined;
             // 暂存阶段：目录仍选中旧桶；提交阶段：目录已经选中目标桶，
             // 页面租约也已经随 catalog-select 原子更新为目标桶。
             const stagingSelection = candidate.expectedSelectedBucketId === lease.bucketId
@@ -1162,7 +903,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (!selected || selected.backend !== "local") {
         throw new StorageRuntimeError("storage_unavailable", "Local storage bridge lease is no longer current");
       }
-      const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
+      const storage = defaultDeviceBootstrapStorage() as LocalStorageLike;
       const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
       const provider = createLocalStorageBucketProvider({
         storage,

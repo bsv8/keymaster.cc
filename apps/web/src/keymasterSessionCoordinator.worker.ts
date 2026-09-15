@@ -92,7 +92,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_SCHEMA_PATH, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -154,7 +154,7 @@ import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordi
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupResult, KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageCatalogV2, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService } from "@keymaster/contracts";
+import type { DeviceBootstrapCatalogV1, DeviceRemoteConnectionV1, DeviceRemoteRecoveryPointerV1, DeviceRemoteStorageLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupResult, KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageCatalogV2, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -167,8 +167,8 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
 } from "@keymaster/contracts";
-import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageBucketManagementService, serializeBucketDocument, createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
-import type { LocalStorageBridgeCandidateBucket, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
+import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageBootstrapController, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, createStorageHoldSnapshotRepository, createStorageHoldSnapshotReadOnlyRepository, createStorageBucketManagementService, serializeBucketDocument, createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, decryptBucketKey, encryptBucketKey, sealBucketDocument, verifyBucketDocument, sameStorageCatalogEntry, validateStorageCatalog, createRemoteStorage, connectExistingRemoteStorage, deriveRemoteRootAuthenticator, discoverRemoteStorageRoot, physicalLocationFingerprint, validatePublishedPlatformBucketSchema } from "@keymaster/platform-storage/coordinator";
+import type { DeviceBootstrapRepository, LocalStorageBridgeCandidateBucket, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
 
@@ -1581,6 +1581,8 @@ let catalogBindingDiscardDeferred = false;
 let initialSetupRuntimeOwner: { transactionId: string; bucketId: string; rootToken: object } | undefined;
 /** Worker 内缓存的公开恢复记录；业务恢复记录仍由业务 K-V 正式持久化。 */
 const initialSetupRecoveryRecords = new Map<string, InitialSetupRecoveryRecordV1>();
+/** 只有这些 operationId 跨 Worker 重启；完整阶段账本始终只在 Worker 内存。 */
+const deviceRecoveryOperationIds = new Set<string>();
 let coordinatorInitializationInProgress = false;
 /** 仅供下方 Worker test seam 使用；生产路径没有 active-key 密码缓存。 */
 let testHarnessActivationSecret: string | undefined;
@@ -2109,7 +2111,8 @@ async function stageCatalogVaultSession(
   settingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot>,
   pluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot>,
   password: string,
-): Promise<Pick<StagedCatalogBucket, "coordinatorMeta" | "vaultStatus" | "activePublicKeyHex" | "activePrivateKeyBytes">> {
+  options: { readOnlyExisting?: boolean } = {},
+): Promise<Pick<StagedCatalogBucket, "entry" | "coordinatorMeta" | "vaultStatus" | "activePublicKeyHex" | "activePrivateKeyBytes">> {
   const repository = createStorageHoldSnapshotRepository(provider);
   let committed: Awaited<ReturnType<typeof repository.readCommitted>> | undefined;
   try {
@@ -2120,12 +2123,18 @@ async function stageCatalogVaultSession(
     // 表示 uninitialized；其它情况一律拒绝，避免把损坏桶当成空桶。
     if (!(error instanceof StorageRuntimeError) || error.code !== "storage_not_found") throw error;
   }
-  if (committed && (committed.header.configRevision !== entry.configRevision
-    || !sameStorageKeyDerivation(committed.header.keyDerivation, entry.keyDerivation)
-    || !sameStorageRecord(committed.storage, entry.encryptedConfig)
+  if (committed && (!sameStorageKeyDerivation(committed.header.keyDerivation, entry.keyDerivation)
+    || (!options.readOnlyExisting && !sameStorageRecord(committed.storage, entry.encryptedConfig))
     || committed.bucketGeneration < 1)) {
     throw new StorageRuntimeError("storage_provider_error", "Storage Hold snapshot does not match the target bucket catalog");
   }
+  const authoritativeEntry = committed
+    ? {
+        ...entry,
+        configRevision: committed.header.configRevision,
+        snapshotRevision: committed.header.snapshotRevision,
+      }
+    : entry;
   const targetVault = createVaultStorageRepository({
     stores: vaultStores as unknown as VaultPurposeStores,
     hold: createCatalogHoldAdapter(provider, entry),
@@ -2149,6 +2158,7 @@ async function stageCatalogVaultSession(
       selectedPublicKeyHex: undefined,
     };
     return {
+      entry: authoritativeEntry,
       coordinatorMeta: targetCoordinatorMeta,
       vaultStatus: "uninitialized",
     };
@@ -2178,10 +2188,18 @@ async function stageCatalogVaultSession(
   if (snapshotRecords.length === 0 && existingIndex.size > 0) {
     throw new StorageRuntimeError("storage_provider_error", "Target bucket has Key metadata but its Hold snapshot is empty");
   }
-  await targetVault.replaceKeyIndex(snapshotRecords);
+  if (options.readOnlyExisting) {
+    if (existingIndex.size !== snapshotRecords.length
+      || snapshotRecords.some((record) => !existingIndex.has(record.publicKeyHex.toLowerCase()))) {
+      throw new StorageRuntimeError("storage_remote_corrupt", "Remote Vault index does not match the committed Hold");
+    }
+  } else {
+    await targetVault.replaceKeyIndex(snapshotRecords);
+  }
 
   let targetMeta = existingMeta;
   if (snapshotRecords.length > 0 && !targetMeta) {
+    if (options.readOnlyExisting) throw new StorageRuntimeError("storage_remote_corrupt", "Remote Vault authentication metadata is missing");
     targetMeta = await createCatalogVaultMeta(password);
     await targetVault.putAuthMetadata(targetMeta);
   }
@@ -2223,6 +2241,7 @@ async function stageCatalogVaultSession(
     }
   }
   return {
+    entry: authoritativeEntry,
     coordinatorMeta: targetCoordinatorMeta,
     vaultStatus: targetMeta ? "locked" : "uninitialized",
     ...(selected ? { activePublicKeyHex: selected.publicKeyHex } : {}),
@@ -2235,7 +2254,7 @@ async function stageCatalogBucket(
   password: string,
   expectedSelectedBucketId: string | undefined,
   bucketGeneration: number,
-  options: { provider?: StorageBucketProvider } = {},
+  options: { provider?: StorageBucketProvider; readOnlyExisting?: boolean } = {},
 ): Promise<StagedCatalogBucket> {
   const entry = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [input] }).buckets[0]!;
   const ownsProvider = options.provider === undefined;
@@ -2257,6 +2276,7 @@ async function stageCatalogBucket(
     const root = createPlatformRootStore({
       provider,
       bucket,
+      ...(options.readOnlyExisting ? { schemaMode: "validate-only" as const } : {}),
       isCurrent: ({ bucketGeneration: currentGeneration }) =>
         (candidatePublished ? platformRootToken === rootToken : true) && currentGeneration === bucketGeneration,
     });
@@ -2265,12 +2285,16 @@ async function stageCatalogBucket(
     settingsSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validate: validateCoordinatorSettingsSnapshot });
     pluginIntentSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validate: validatePluginIntentSnapshot });
     profileSaltSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageProfileSalt, validate: validateStorageProfileSaltSnapshot });
-    await ensureStorageProfileSaltSnapshot(profileSaltSnapshot!);
+    if (options.readOnlyExisting) {
+      if (!(await profileSaltSnapshot!.read())) throw new StorageRuntimeError("storage_remote_corrupt", "Remote storage profile salt is missing");
+    } else {
+      await ensureStorageProfileSaltSnapshot(profileSaltSnapshot!);
+    }
     protocol = await openCoordinatorProtocolStorageStores(root);
     storageStore = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
     storageRepository = await openMultipartUploadRepository(storageStore);
 
-    const stagedSession = await stageCatalogVaultSession(entry, provider, vaultStores!, selectionSnapshot!, settingsSnapshot!, pluginIntentSnapshot!, password);
+    const stagedSession = await stageCatalogVaultSession(entry, provider, vaultStores!, selectionSnapshot!, settingsSnapshot!, pluginIntentSnapshot!, password, { readOnlyExisting: options.readOnlyExisting });
     activePrivateKeyBytes = stagedSession.activePrivateKeyBytes;
     runtime = await createStorageRuntimeController({
       multipartUploadRepository: storageRepository,
@@ -2279,7 +2303,6 @@ async function stageCatalogBucket(
       logger: { warn: () => undefined },
     });
     return {
-      entry,
       provider,
       bucket,
       root,
@@ -2360,17 +2383,51 @@ function initialSetupRecoveryRecord(input: {
 
 async function loadInitialSetupRecoveryRecords(signal?: AbortSignal, peerId?: string): Promise<boolean> {
   try {
-    const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-list", signal }, peerId);
-    if (response.type !== "initial-setup-recovery") return false;
-    initialSetupRecoveryRecords.clear();
-    for (const record of response.records) initialSetupRecoveryRecords.set(record.transactionId, structuredClone(record));
+    const response = await requestLocalStorageBridge({ type: "device-bootstrap-read", signal }, peerId);
+    if (response.type !== "device-bootstrap") return false;
+    const nextPointerIds = new Set((response.catalog?.recoveries ?? []).map((pointer) => pointer.operationId));
+    for (const operationId of deviceRecoveryOperationIds) {
+      if (!nextPointerIds.has(operationId)) {
+        const record = initialSetupRecoveryRecords.get(operationId);
+        // 只删除上一轮由设备指针投影的非终态记录；当前 Worker 内存中的
+        // 成功/失败结果仍供响应丢失后的页面查询使用。
+        if (record?.status === "pending") initialSetupRecoveryRecords.delete(operationId);
+      }
+    }
+    deviceRecoveryOperationIds.clear();
+    for (const pointer of response.catalog?.recoveries ?? []) {
+      deviceRecoveryOperationIds.add(pointer.operationId);
+      if (initialSetupRecoveryRecords.has(pointer.operationId)) continue;
+      const connection = pointer.remoteStorageId === undefined
+        ? undefined
+        : response.catalog?.connections.find((candidate) => candidate.remoteStorageId === pointer.remoteStorageId);
+      const bucketId = pointer.remoteStorageId ?? initialSetupBucketId(pointer.operationId);
+      initialSetupRecoveryRecords.set(pointer.operationId, {
+        format: "keymaster.storage.initial-setup-recovery",
+        version: 1,
+        transactionId: pointer.operationId,
+        bucketId,
+        catalogEntryFingerprint: pointer.manifestFingerprint ?? "0".repeat(64),
+        configRevision: 1,
+        snapshotRevision: 0,
+        backend: connection?.providerId ?? "s3",
+        connectionFingerprint: pointer.physicalLocationFingerprint,
+        phase: "runtime",
+        catalog: connection ? "committed" : "unknown",
+        runtimeInstalled: false,
+        cleanup: "unconfirmed",
+        status: "pending",
+        updatedAt: pointer.updatedAt,
+      });
+    }
     return true;
   } catch (error) {
     if ((error as { code?: unknown })?.code === "service_reference_stale") throw error;
     // 恢复记录只用于恢复/诊断，不得把正常的未配置入口升级成 Fatal。
     // 但一旦账本读取失败，旧缓存也不能继续作为恢复事实使用；否则损坏
     // 账本可能被误判为空，或旧缓存可能继续允许危险的清理/新事务。
-    initialSetupRecoveryRecords.clear();
+    for (const operationId of deviceRecoveryOperationIds) initialSetupRecoveryRecords.delete(operationId);
+    deviceRecoveryOperationIds.clear();
     return false;
   }
 }
@@ -2384,10 +2441,14 @@ async function listInitialSetupRecoveries(peerId?: string): Promise<InitialSetup
 }
 
 async function persistInitialSetupRecoveryRecord(record: InitialSetupRecoveryRecordV1, peerId?: string): Promise<void> {
-  const response = await requestLocalStorageBridge({ type: "initial-setup-recovery-write", record }, peerId);
-  if (response.type !== "initial-setup-recovery") throw new StorageRuntimeError("storage_unavailable", "Initial setup recovery record could not be saved");
-  initialSetupRecoveryRecords.clear();
-  for (const persisted of response.records) initialSetupRecoveryRecords.set(persisted.transactionId, structuredClone(persisted));
+  initialSetupRecoveryRecords.set(record.transactionId, structuredClone(record));
+  // 终态只清理 lifecycle 在结果未知时写入的最小指针。完整目录条目、
+  // 阶段、公开 Key 摘要和诊断从不跨过 Worker→Window 边界。
+  if (record.status === "succeeded" || (record.status === "failed" && record.cleanup === "confirmed")) {
+    const repository = createWorkerDeviceBootstrapRepository(peerId);
+    await repository.removeRecovery(record.transactionId);
+    deviceRecoveryOperationIds.delete(record.transactionId);
+  }
 }
 
 async function readInitialSetupCatalog(peerId?: string): Promise<StorageCatalogV2> {
@@ -2539,6 +2600,76 @@ function initialSetupConnectionFingerprint(connection: StorageBucketConnectionCo
   return bytesToHex(sha256Bytes(new TextEncoder().encode(`keymaster.initial-setup-target.v1:${target}`)));
 }
 
+function deviceLocationFromConnection(connection: StorageBucketConnectionConfigV1, remoteStorageId: string): DeviceRemoteStorageLocationV1 {
+  if (connection.kind === "local") return { providerId: "local", namespace: remoteStorageId };
+  const normalized = normalizeProviderConfig({
+    providerId: "s3-compatible",
+    connection: {
+      endpoint: connection.endpoint,
+      region: connection.region,
+      bucket: connection.bucket,
+      ...(connection.prefix === undefined ? {} : { prefix: connection.prefix }),
+      ...(connection.sessionToken === undefined ? {} : { sessionToken: connection.sessionToken }),
+      forcePathStyle: connection.forcePathStyle === true,
+    },
+    credentials: {
+      mode: "replace",
+      accessKeyId: connection.accessKeyId,
+      secretAccessKey: connection.secretAccessKey,
+    },
+  });
+  const target = normalized.connection as {
+    endpoint: string;
+    region: string;
+    bucket: string;
+    prefix?: string;
+    forcePathStyle?: boolean;
+  };
+  const prefix = target.prefix?.replace(/^\/+|\/+$/gu, "");
+  return {
+    providerId: "s3",
+    endpoint: target.endpoint,
+    region: target.region,
+    bucket: target.bucket,
+    ...(!prefix ? {} : { prefix }),
+    ...(target.forcePathStyle === undefined ? {} : { forcePathStyle: target.forcePathStyle }),
+  };
+}
+
+function initialSetupDeviceConnection(
+  entry: StorageBucketCatalogEntryV2,
+  plan: InitialSetupPlan,
+  source: DeviceRemoteConnectionV1["source"],
+): DeviceRemoteConnectionV1 {
+  const location = deviceLocationFromConnection(plan.connection, entry.bucketId);
+  return {
+    remoteStorageId: entry.bucketId,
+    displayName: entry.label,
+    providerId: entry.backend,
+    location,
+    physicalLocationFingerprint: physicalLocationFingerprint(location),
+    encryptedConfig: structuredClone(entry.encryptedConfig),
+    keyDerivation: structuredClone(entry.keyDerivation),
+    source,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+  };
+}
+
+function catalogEntryFromDeviceConnection(connection: DeviceRemoteConnectionV1): StorageBucketCatalogEntryV2 {
+  return {
+    bucketId: connection.remoteStorageId,
+    label: connection.displayName,
+    backend: connection.providerId,
+    configRevision: 1,
+    keyDerivation: structuredClone(connection.keyDerivation),
+    encryptedConfig: structuredClone(connection.encryptedConfig),
+    snapshotRevision: 0,
+    createdAt: connection.createdAt,
+    updatedAt: connection.updatedAt,
+  };
+}
+
 function validateInitialSetupPlan(plan: InitialSetupPlan): void {
   if (!plan || typeof plan !== "object") throw new StorageRuntimeError("storage_provider_error", "Initial setup plan is invalid");
   if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(plan.transactionId)) throw new StorageRuntimeError("storage_provider_error", "Initial setup transaction ID is invalid");
@@ -2685,6 +2816,9 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
   let recovery: InitialSetupRecoveryRecordV1 | undefined;
   let recoveryCatalog: InitialSetupRecoveryRecordV1["catalog"] = "not-started";
   let catalogDetachedForCleanup = false;
+  let remoteNamespaceCommitted = false;
+  let deviceBootstrap: DeviceBootstrapRepository | undefined;
+  let finalResult: Extract<InitialSetupResult, { ok: true }> | undefined;
   const bucketGeneration = 1;
   const transactionId = typeof plan?.transactionId === "string" ? plan.transactionId : undefined;
   const saveRecovery = async (input: {
@@ -2722,7 +2856,39 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
       throw new StorageRuntimeError("storage_conflict", "Storage is already initialized");
     }
     phase = "stage";
-    entry = await createInitialSetupEntry(plan);
+    deviceBootstrap = createWorkerDeviceBootstrapRepository(peerId);
+    const resumedRemoteStorageId = initialSetupBucketId(plan.transactionId);
+    const bootstrapCatalog = await deviceBootstrap.read();
+    const recoveryPointer = bootstrapCatalog?.recoveries.find((candidate) => candidate.operationId === plan.transactionId);
+    const resumedConnection = bootstrapCatalog?.connections.find((candidate) => candidate.remoteStorageId === resumedRemoteStorageId);
+    if (recoveryPointer?.remoteStorageId === resumedRemoteStorageId || resumedConnection) {
+      // A minimal pointer deliberately carries no KDF or encrypted catalog
+      // projection. Recover those values from the authenticated root/Hold so
+      // a Worker restart cannot generate a second KDF or first Key. A durable
+      // created connection is also a success-tail receipt: retry it through
+      // the read-only connect path before any new key material is generated.
+      const resumed = await executeExistingRemoteStorageConnect({
+        operationId: plan.transactionId,
+        remoteStorageId: resumedRemoteStorageId,
+        displayName: plan.bucketLabel,
+        backend: plan.backend,
+        connection: structuredClone(plan.connection),
+        bucketPassword: plan.bucketPassword,
+      }, peerId, {
+        expectedInitializationTransactionId: plan.transactionId,
+        connectionSource: "created",
+      });
+      if (resumed.ok) {
+        if (!resumed.activeKey) {
+          return initialSetupFailure("runtime", new StorageRuntimeError("storage_remote_corrupt", "Recovered remote has no initial Key"), "not-started", plan.transactionId, { recovery: "published-root-missing-first-key" });
+        }
+        await deviceBootstrap.removeRecovery(plan.transactionId);
+        deviceRecoveryOperationIds.delete(plan.transactionId);
+        return { ok: true, bucket: resumed.bucket, firstKey: resumed.activeKey };
+      }
+      if (resumed.error.code !== "storage_remote_not_initialized" || resumedConnection) return { ok: false, error: resumed.error };
+    }
+    entry = resumedConnection ? catalogEntryFromDeviceConnection(resumedConnection) : await createInitialSetupEntry(plan);
     await saveRecovery({ phase, catalog: "not-started", cleanup: "not-started", status: "pending" });
     privateKey = await privateKeyForInitialSetup(plan.firstKey);
     const publicKeyHex = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(privateKey, true)).toLowerCase();
@@ -2734,110 +2900,219 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
     // cleanupOnly Provider，避免并发赢家提交后失败事务仍持有写权限。
     provider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, false, peerId);
 
-    phase = "hold";
-    await saveRecovery({ phase });
-    const context = await deriveBucketCryptoContext(plan.bucketPassword, entry.keyDerivation);
-    let committed: Awaited<ReturnType<ReturnType<typeof createStorageHoldSnapshotRepository>["publish"]>>;
+    const rootAuthenticator = await deriveRemoteRootAuthenticator(plan.bucketPassword, entry.keyDerivation);
     try {
-      const encryptedKey = await encryptBucketKey({ label: plan.firstKey.label.trim(), privateKey }, context);
-      const document = await sealBucketDocument(entry.encryptedConfig, [encryptedKey], context);
-      committed = await createStorageHoldSnapshotRepository(provider).publish({
-        document,
-        configRevision: entry.configRevision,
-        bucketGeneration,
-        expectedHead: { kind: "absent" },
-      });
+      const lifecyclePlan = {
+        provider,
+        remoteStorageId: entry.bucketId,
+        transactionId: plan.transactionId,
+        authenticator: rootAuthenticator,
+        manifest: {
+          remoteStorageId: entry.bucketId,
+          namespaceVersion: 1 as const,
+          createdAt: entry.createdAt,
+          keyDerivation: structuredClone(entry.keyDerivation),
+          rootHead: { path: REMOTE_STORAGE_HOLD_HEAD_PATH, revision: 1 },
+          system: { schemaPath: REMOTE_STORAGE_SCHEMA_PATH, holdHeadPath: REMOTE_STORAGE_HOLD_HEAD_PATH },
+          initializationTransactionId: plan.transactionId,
+        },
+        deviceConnection: initialSetupDeviceConnection(entry, plan, "created"),
+        deviceBootstrap,
+        stageInitialData: async ({ provider: target }: { provider: StorageBucketProvider }) => {
+          phase = "hold";
+          await saveRecovery({ phase });
+          const context = await deriveBucketCryptoContext(plan.bucketPassword, entry!.keyDerivation);
+          let committed: Awaited<ReturnType<ReturnType<typeof createStorageHoldSnapshotRepository>["publish"]>>;
+          try {
+            const encryptedKey = await encryptBucketKey({ label: plan.firstKey.label.trim(), privateKey: privateKey! }, context);
+            const document = await sealBucketDocument(entry!.encryptedConfig, [encryptedKey], context);
+            committed = await createStorageHoldSnapshotRepository(target).publish({
+              document,
+              configRevision: entry!.configRevision,
+              bucketGeneration,
+              expectedHead: { kind: "absent" },
+            });
+          } finally {
+            context.dispose();
+          }
+          privateKey!.fill(0);
+          privateKey = undefined;
+          entry = { ...entry!, snapshotRevision: committed.header.snapshotRevision };
+          lifecyclePlan.deviceConnection = initialSetupDeviceConnection(entry, plan, "created");
+          lifecyclePlan.manifest.rootHead.revision = committed.header.snapshotRevision;
+          await saveRecovery({ phase, catalog: "not-started" });
+
+          const refreshedProvider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, false, peerId);
+          target.dispose();
+          provider = refreshedProvider;
+          lifecyclePlan.provider = refreshedProvider;
+
+          phase = "stage";
+          await saveRecovery({ phase });
+          staged = await stageCatalogBucket(entry, plan.bucketPassword, undefined, bucketGeneration, { provider: refreshedProvider });
+          await createVaultStorageRepository({
+            stores: staged.vaultStores as unknown as VaultPurposeStores,
+            hold: createCatalogHoldAdapter(staged.provider, staged.entry),
+          }).replaceKeyIndex([{
+            format: "keymaster.storage.catalog-key-index",
+            publicKeyHex,
+            label: plan.firstKey.label.trim(),
+            address: deriveP2pkhAddress(publicKeyHex, "main"),
+            network: "main",
+            keyFormat,
+            capabilities: keyCapabilities,
+            createdAt: keyCreatedAt,
+            ...(keySource === undefined ? {} : { source: keySource }),
+          }]);
+          // The initial active owner's lifecycle marker is part of the
+          // published remote data set. A later connect must only read it;
+          // installing that existing remote is not allowed to repair or
+          // synthesize owner state after the root manifest is visible.
+          await staged.root.activateOwnerStorage({ ownerPublicKeyHex: publicKeyHex });
+        },
+        verifyRemoteResult: async ({ provider: readOnly }: { provider: StorageBucketReadOnlyProvider }) => {
+          // 进入该回调意味着 lifecycle 已经重新读到本事务发布的 root，且
+          // manifest 宣告的最小入口都存在。之后任何本机安装失败都不能再
+          // 删除这个已经对其它设备可见的远端 namespace。
+          remoteNamespaceCommitted = true;
+          await validatePublishedPlatformBucketSchema(readOnly, [
+            CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata,
+            CENTRAL_STORAGE_DECLARATIONS.vaultKeyIndex,
+            CENTRAL_STORAGE_DECLARATIONS.vaultKeyLifecycleJournals,
+            CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection,
+            CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings,
+            CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent,
+            CENTRAL_STORAGE_DECLARATIONS.storageProfileSalt,
+            CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
+            CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
+            CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory,
+            CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads,
+          ]);
+          const committed = await createStorageHoldSnapshotReadOnlyRepository(readOnly).readCommitted();
+          const context = await deriveBucketCryptoContext(plan.bucketPassword, committed.header.keyDerivation);
+          try {
+            await verifyBucketDocument(committed.document, context);
+            await decryptBucketConfig(committed.storage, context);
+          } finally {
+            context.dispose();
+          }
+        },
+        installWorkerRuntime: async () => {
+          // 响应丢失后的同 transaction 重试会直接从已发布 root 进入这里，
+          // 不会再次执行 stageInitialData。此时从远端权威 Hold 重建候选
+          // runtime；首次执行则复用刚刚完成的 staged binding。
+          staged ??= await stageCatalogBucket(entry!, plan.bucketPassword, undefined, bucketGeneration, { provider: provider! });
+          provider = undefined;
+
+          phase = "catalog-commit";
+          await saveRecovery({ phase, catalog: "not-started" });
+          const selected = await commitInitialStorageCatalogBucket(entry!, bucketGeneration, false, peerId);
+          catalogCommitted = true;
+          await saveRecovery({ phase, catalog: "committed" });
+
+          phase = "runtime";
+          await saveRecovery({ phase, catalog: "committed" });
+          const nextKeyspaceGeneration = coordinatorState.keyspaceGeneration + 1;
+          staged.coordinatorMeta.selectedPublicKeyHex = staged.activePublicKeyHex;
+          adoptStagedCatalogBinding(staged);
+          bindingAdopted = true;
+          adoptedRootToken = staged.rootToken;
+          initialSetupRuntimeOwner = { transactionId: plan.transactionId, bucketId: entry!.bucketId, rootToken: staged.rootToken };
+          storageBootstrapState = {
+            ...(storageBootstrapState ?? { selectedBackend: selected.backend }),
+            selectedBackend: selected.backend,
+            selectedProfileId: selected.bucketId,
+            selectedBucket: selected,
+          };
+          replaceCoordinatorMeta(staged.coordinatorMeta);
+          coordinatorState.keyspaceGeneration = nextKeyspaceGeneration;
+          coordinatorState.sessionEpoch = generateEpoch();
+          coordinatorState.vaultStatus = staged.vaultStatus;
+          coordinatorState.activePublicKeyHex = undefined;
+          coordinatorState.autoLockDeadline = undefined;
+          if (staged.coordinatorMeta.selectedPublicKeyHex) await persistCoordinatorSelection(staged.coordinatorMeta.selectedPublicKeyHex);
+          if (coordinatorState.taskRuntimes.size === 0) await registerCoordinatorTasks();
+          activateCoordinatorRootWorkerUnits();
+          const activePrivateKeyBytes = staged.activePrivateKeyBytes;
+          staged.activePrivateKeyBytes = undefined;
+          if (!staged.activePublicKeyHex || !activePrivateKeyBytes) throw new StorageRuntimeError("storage_provider_error", "Initial setup active Key is unavailable");
+          await enterUnlockedState(staged.activePublicKeyHex, activePrivateKeyBytes, "create-initial-key");
+          storageHealthController.setStatus("ready");
+          storageStartupFailure = false;
+          emitStorageState();
+          const firstKey = await currentCatalogKeyIndex().getKey(staged.activePublicKeyHex);
+          if (!firstKey) throw new StorageRuntimeError("storage_provider_error", "Initial setup public Key index is unavailable");
+          finalResult = {
+            ok: true,
+            bucket: selected,
+            firstKey: {
+              publicKeyHex: firstKey.publicKeyHex,
+              label: firstKey.label,
+              address: firstKey.address ?? deriveP2pkhAddress(firstKey.publicKeyHex, "main"),
+              format: firstKey.keyFormat,
+              capabilities: [...firstKey.capabilities],
+              createdAt: firstKey.createdAt,
+              ...(firstKey.source === undefined ? {} : { source: firstKey.source }),
+            },
+          };
+          await saveRecovery({ phase: "complete", catalog: "committed", runtimeInstalled: true, cleanup: "confirmed", status: "succeeded", success: recoverySuccessFromResult(selected, finalResult) });
+        },
+      };
+      try {
+        await createRemoteStorage(lifecyclePlan);
+        remoteNamespaceCommitted = true;
+      } catch (lifecycleError) {
+        // publication may have succeeded before entrypoint verification or a
+        // local callback failed. Resolve that boundary while the authenticator
+        // is still alive; a matching root is durable and must be retained.
+        remoteNamespaceCommitted = initialSetupErrorCode(lifecycleError) === "storage_remote_unknown_result";
+        try {
+          const discovered = await discoverRemoteStorageRoot(lifecyclePlan.provider, {
+            authenticator: rootAuthenticator,
+            expectedRemoteStorageId: entry.bucketId,
+          });
+          remoteNamespaceCommitted ||= discovered.status === "present"
+            && discovered.object.manifest.initializationTransactionId === plan.transactionId;
+        } catch {
+          // Unknown publication outcome is also non-destructive. The lifecycle
+          // has already written a minimal recovery pointer for explicit retry.
+        }
+        throw lifecycleError;
+      }
     } finally {
-      context.dispose();
+      rootAuthenticator.dispose?.();
     }
-    privateKey.fill(0);
-    privateKey = undefined;
-    entry = { ...entry, snapshotRevision: committed.header.snapshotRevision };
-    await saveRecovery({ phase, catalog: "not-started" });
-    // Hold 发布会把 snapshotRevision 写回目录条目；Local Provider 在创建时
-    // 捕获了候选目录快照，因此必须在进入 Vault/Root 暂存前换成带最新
-    // revision 的候选 Provider。否则目录 commit 后页面桥会把后续 I/O
-    // 误判成“候选条目已失效”。旧 Provider 仍保留到新 Provider 创建成功，
-    // 这样新建 Provider 失败时，下面的回滚清理仍能访问已写入的 Hold。
-    const refreshedProvider = await createCatalogProviderForSwitch(entry, plan.bucketPassword, bucketGeneration, undefined, false, peerId);
-    provider.dispose();
-    provider = refreshedProvider;
-
-    phase = "stage";
-    await saveRecovery({ phase });
-    staged = await stageCatalogBucket(entry, plan.bucketPassword, undefined, bucketGeneration, { provider });
-    // Hold KeyRecord 只携带加密私钥和 label；V1 默认展示值不得覆盖首次创建时明确提供的真实元数据。
-    await createVaultStorageRepository({
-      stores: staged.vaultStores as unknown as VaultPurposeStores,
-      hold: createCatalogHoldAdapter(staged.provider, staged.entry),
-    }).replaceKeyIndex([{
-      format: "keymaster.storage.catalog-key-index",
-      publicKeyHex,
-      label: plan.firstKey.label.trim(),
-      address: deriveP2pkhAddress(publicKeyHex, "main"),
-      network: "main",
-      keyFormat,
-      capabilities: keyCapabilities,
-      createdAt: keyCreatedAt,
-      ...(keySource === undefined ? {} : { source: keySource }),
-    }]);
-    provider = undefined;
-
-    phase = "catalog-commit";
-    await saveRecovery({ phase, catalog: "not-started" });
-    const selected = await commitInitialStorageCatalogBucket(entry, bucketGeneration, false, peerId);
-    catalogCommitted = true;
-    await saveRecovery({ phase, catalog: "committed" });
-
-    phase = "runtime";
-    await saveRecovery({ phase, catalog: "committed" });
-    const nextKeyspaceGeneration = coordinatorState.keyspaceGeneration + 1;
-    staged.coordinatorMeta.selectedPublicKeyHex = staged.activePublicKeyHex;
-    adoptStagedCatalogBinding(staged);
-    bindingAdopted = true;
-    adoptedRootToken = staged.rootToken;
-    initialSetupRuntimeOwner = { transactionId: plan.transactionId, bucketId: entry.bucketId, rootToken: staged.rootToken };
-    storageBootstrapState = {
-      ...(storageBootstrapState ?? { selectedBackend: selected.backend }),
-      selectedBackend: selected.backend,
-      selectedProfileId: selected.bucketId,
-      selectedBucket: selected,
-    };
-    replaceCoordinatorMeta(staged.coordinatorMeta);
-    coordinatorState.keyspaceGeneration = nextKeyspaceGeneration;
-    coordinatorState.sessionEpoch = generateEpoch();
-    coordinatorState.vaultStatus = staged.vaultStatus;
-    coordinatorState.activePublicKeyHex = undefined;
-    coordinatorState.autoLockDeadline = undefined;
-    if (staged.coordinatorMeta.selectedPublicKeyHex) await persistCoordinatorSelection(staged.coordinatorMeta.selectedPublicKeyHex);
-    if (coordinatorState.taskRuntimes.size === 0) await registerCoordinatorTasks();
-    activateCoordinatorRootWorkerUnits();
-    const activePrivateKeyBytes = staged.activePrivateKeyBytes;
-    staged.activePrivateKeyBytes = undefined;
-    if (!staged.activePublicKeyHex || !activePrivateKeyBytes) throw new StorageRuntimeError("storage_provider_error", "Initial setup active Key is unavailable");
-    await enterUnlockedState(staged.activePublicKeyHex, activePrivateKeyBytes, "create-initial-key");
-    storageHealthController.setStatus("ready");
-    storageStartupFailure = false;
-    emitStorageState();
-    const firstKey = await currentCatalogKeyIndex().getKey(staged.activePublicKeyHex);
-    if (!firstKey) throw new StorageRuntimeError("storage_provider_error", "Initial setup public Key index is unavailable");
-    const result: Extract<InitialSetupResult, { ok: true }> = {
-      ok: true,
-      bucket: selected,
-      firstKey: {
-        publicKeyHex: firstKey.publicKeyHex,
-        label: firstKey.label,
-        address: firstKey.address ?? deriveP2pkhAddress(firstKey.publicKeyHex, "main"),
-        format: firstKey.keyFormat,
-        capabilities: [...firstKey.capabilities],
-        createdAt: firstKey.createdAt,
-        ...(firstKey.source === undefined ? {} : { source: firstKey.source }),
-      },
-    };
-    await saveRecovery({ phase: "complete", catalog: "committed", runtimeInstalled: true, cleanup: "confirmed", status: "succeeded", success: recoverySuccessFromResult(selected, result) });
-    return result;
+    if (!finalResult) throw new StorageRuntimeError("storage_provider_error", "Remote initialization completed without installing the Worker runtime");
+    return finalResult;
   } catch (error) {
     const ownsRuntime = bindingAdopted && transactionId !== undefined && ownsInitialSetupRuntime(transactionId, adoptedRootToken);
+    if (remoteNamespaceCommitted) {
+      // Root manifest 是跨设备可见性边界。越过边界后只保留连接/恢复指针
+      // 并允许同 transaction 重试完成本机安装，绝不能回滚目录后删除远端。
+      if (ownsRuntime && (coordinatorState.vaultStatus === "unlocked" || coordinatorState.activePublicKeyHex)) {
+        await performGlobalLock("initial-setup-runtime-install-failed").catch(() => undefined);
+      }
+      if (staged && !ownsRuntime) disposeStagedCatalogBucket(staged);
+      else if (!staged) provider?.dispose();
+      if (ownsRuntime) {
+        storageStartupFailure = true;
+        storageHealthController.setStatus("degraded", "Remote storage is committed but Worker runtime installation requires retry");
+        emitStorageState();
+      }
+      const failure = initialSetupFailure(phase, error, "not-started", transactionId, {
+        catalog: catalogCommitted ? "committed" : recoveryCatalog,
+        remoteNamespace: "committed",
+        runtimeOwned: ownsRuntime,
+      });
+      await saveRecovery({
+        phase,
+        catalog: catalogCommitted ? "committed" : recoveryCatalog,
+        cleanup: "not-started",
+        status: "failed",
+        error: failure.error,
+      }).catch(() => undefined);
+      return failure;
+    }
     if (ownsRuntime && (coordinatorState.vaultStatus === "unlocked" || coordinatorState.activePublicKeyHex)) {
       await performGlobalLock("initial-setup-rollback").catch(() => undefined);
     }
@@ -2961,6 +3236,180 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
   }
 }
 
+function validateExistingRemoteStorageConnectPlan(plan: ExistingRemoteStorageConnectPlan): void {
+  if (!plan || typeof plan !== "object") throw new StorageRuntimeError("storage_provider_error", "Existing remote connection plan is invalid");
+  if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(plan.operationId)) throw new StorageRuntimeError("storage_provider_error", "Existing remote connection operation ID is invalid");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(plan.remoteStorageId)) throw new StorageRuntimeError("storage_provider_error", "Existing remote storage ID is invalid");
+  if (!plan.displayName.trim() || plan.displayName.trim().length > 128) throw new StorageRuntimeError("storage_provider_error", "Existing remote display name is invalid");
+  if (plan.backend !== "local" && plan.backend !== "s3") throw new StorageRuntimeError("storage_provider_error", "Existing remote backend is invalid");
+  if (plan.connection.kind !== plan.backend) throw new StorageRuntimeError("storage_provider_error", "Existing remote backend and connection disagree");
+  if (typeof plan.bucketPassword !== "string" || plan.bucketPassword.length < 8) throw new StorageRuntimeError("storage_identity_required", "Bucket password must contain at least 8 characters");
+  if (plan.connection.kind === "s3") {
+    if (!plan.connection.endpoint || !plan.connection.region || !plan.connection.bucket || !plan.connection.accessKeyId || !plan.connection.secretAccessKey) {
+      throw new StorageRuntimeError("storage_provider_error", "Existing remote S3 connection is incomplete");
+    }
+    try {
+      if (new URL(plan.connection.endpoint).protocol !== "https:") throw new Error();
+    } catch {
+      throw new StorageRuntimeError("storage_provider_error", "Existing remote S3 endpoint must be HTTPS");
+    }
+  }
+}
+
+/** 生产“连接已有远端”入口：远端阶段只读，成功后才提交设备连接并接管运行态。 */
+async function executeExistingRemoteStorageConnect(
+  plan: ExistingRemoteStorageConnectPlan,
+  peerId?: string,
+  options: { expectedInitializationTransactionId?: string; connectionSource?: "created" | "connected" } = {},
+): Promise<ExistingRemoteStorageConnectResult> {
+  let provider: StorageBucketProvider | undefined;
+  let staged: StagedCatalogBucket | undefined;
+  let adopted = false;
+  let entry: StorageBucketCatalogEntryV2 | undefined;
+  try {
+    validateExistingRemoteStorageConnectPlan(plan);
+    if (platformRootStore || storageBootstrapState?.selectedBucket || coordinatorState.vaultStatus === "unlocked" || coordinatorState.vaultStatus === "locked") {
+      throw new StorageRuntimeError("storage_conflict", "Storage is already initialized");
+    }
+    const deviceBootstrap = createWorkerDeviceBootstrapRepository(peerId);
+    provider = createCatalogProviderFromConnection(plan.connection, plan.remoteStorageId, 1, undefined, peerId);
+    const location = deviceLocationFromConnection(plan.connection, plan.remoteStorageId);
+    const lifecyclePlan = {
+      provider,
+      remoteStorageId: plan.remoteStorageId,
+      password: plan.bucketPassword,
+      deviceBootstrap,
+      deviceConnection: undefined as DeviceRemoteConnectionV1 | undefined,
+      authenticateHold: async ({ provider: readOnly, manifest }: { provider: StorageBucketReadOnlyProvider; manifest: import("@keymaster/contracts").RemoteStorageRootManifestV1 }) => {
+        if (options.expectedInitializationTransactionId !== undefined
+          && manifest.initializationTransactionId !== options.expectedInitializationTransactionId) {
+          throw new StorageRuntimeError("storage_conflict", "Remote root belongs to another initialization transaction");
+        }
+        const committed = await createStorageHoldSnapshotReadOnlyRepository(readOnly).readCommitted();
+        if (committed.header.snapshotRevision !== manifest.rootHead.revision
+          || !sameStorageKeyDerivation(committed.header.keyDerivation, manifest.keyDerivation)) {
+          throw new StorageRuntimeError("storage_remote_corrupt", "Remote root and committed Hold identity do not match");
+        }
+        const context = await deriveBucketCryptoContext(plan.bucketPassword, manifest.keyDerivation);
+        try {
+          await verifyBucketDocument(committed.document, context);
+          await decryptBucketConfig(committed.storage, context);
+          const encryptedConfig = await encryptBucketConfig(plan.connection, context);
+          const now = Date.now();
+          entry = {
+            bucketId: manifest.remoteStorageId,
+            label: plan.displayName.trim(),
+            backend: plan.backend,
+            configRevision: committed.header.configRevision,
+            keyDerivation: structuredClone(manifest.keyDerivation),
+            encryptedConfig,
+            snapshotRevision: committed.header.snapshotRevision,
+            createdAt: manifest.createdAt,
+            updatedAt: now,
+          };
+          lifecyclePlan.deviceConnection = {
+            remoteStorageId: manifest.remoteStorageId,
+            displayName: entry.label,
+            providerId: plan.backend,
+            location,
+            physicalLocationFingerprint: physicalLocationFingerprint(location),
+            encryptedConfig: structuredClone(encryptedConfig),
+            keyDerivation: structuredClone(manifest.keyDerivation),
+            source: options.connectionSource ?? "connected",
+            createdAt: manifest.createdAt,
+            updatedAt: now,
+          };
+        } finally {
+          context.dispose();
+        }
+      },
+      loadMinimumRemoteIndex: async () => {
+        if (!entry || !provider) throw new StorageRuntimeError("storage_remote_corrupt", "Remote Hold authentication did not produce a runtime entry");
+        staged = await stageCatalogBucket(entry, plan.bucketPassword, undefined, 1, { provider, readOnlyExisting: true });
+        return {
+          selectedPublicKeyHex: staged.coordinatorMeta.selectedPublicKeyHex,
+          keyCount: (await createVaultStorageRepository({
+            stores: staged.vaultStores as unknown as VaultPurposeStores,
+            hold: createCatalogHoldAdapter(staged.provider, staged.entry),
+          }).listKeyIndex()).length,
+        };
+      },
+      installWorkerRuntime: async () => {
+        if (!entry || !staged) throw new StorageRuntimeError("storage_remote_corrupt", "Existing remote minimum runtime index was not loaded");
+        // Transitional catalog projection is committed only after all remote
+        // reads succeed. It performs no remote Provider write.
+        const selected = await commitInitialStorageCatalogBucket(entry, 1, false, peerId);
+        const nextKeyspaceGeneration = coordinatorState.keyspaceGeneration + 1;
+        adoptStagedCatalogBinding(staged);
+        adopted = true;
+        storageBootstrapState = {
+          ...(storageBootstrapState ?? { selectedBackend: selected.backend }),
+          selectedBackend: selected.backend,
+          selectedProfileId: selected.bucketId,
+          selectedBucket: selected,
+        };
+        replaceCoordinatorMeta(staged.coordinatorMeta);
+        coordinatorState.keyspaceGeneration = nextKeyspaceGeneration;
+        coordinatorState.sessionEpoch = generateEpoch();
+        coordinatorState.vaultStatus = staged.vaultStatus;
+        coordinatorState.activePublicKeyHex = undefined;
+        coordinatorState.autoLockDeadline = undefined;
+        if (coordinatorState.taskRuntimes.size === 0) await registerCoordinatorTasks();
+        activateCoordinatorRootWorkerUnits();
+        const activePrivateKeyBytes = staged.activePrivateKeyBytes;
+        staged.activePrivateKeyBytes = undefined;
+        // Connecting an existing remote is a zero-write operation. Entering an
+        // unlocked owner session would acquire durable owner-operation leases
+        // and therefore mutate the remote lifecycle record. Keep the adopted
+        // runtime locked; the next explicit unlock owns that write boundary.
+        activePrivateKeyBytes?.fill(0);
+        coordinatorState.vaultStatus = staged.vaultStatus === "uninitialized" ? "uninitialized" : "locked";
+        coordinatorState.activePublicKeyHex = undefined;
+        storageHealthController.setStatus("ready");
+        storageStartupFailure = false;
+        emitStorageState();
+      },
+    };
+    await connectExistingRemoteStorage(lifecyclePlan);
+    if (!entry || !staged || !adopted) throw new StorageRuntimeError("storage_provider_error", "Existing remote connection completed without installing the Worker runtime");
+    provider = undefined;
+    const active = staged.activePublicKeyHex ? await currentCatalogKeyIndex().getKey(staged.activePublicKeyHex) : undefined;
+    return {
+      ok: true,
+      bucket: entry,
+      ...(active === undefined ? {} : {
+        activeKey: {
+          publicKeyHex: active.publicKeyHex,
+          label: active.label,
+          address: active.address ?? deriveP2pkhAddress(active.publicKeyHex, "main"),
+          format: active.keyFormat,
+          capabilities: [...active.capabilities],
+          createdAt: active.createdAt,
+          ...(active.source === undefined ? {} : { source: active.source }),
+        },
+      }),
+    };
+  } catch (error) {
+    if (staged && !adopted) disposeStagedCatalogBucket(staged);
+    else if (!staged) provider?.dispose();
+    if (adopted) {
+      storageStartupFailure = true;
+      storageHealthController.setStatus("degraded", error instanceof Error ? error.message : "Existing remote runtime installation failed");
+      emitStorageState();
+    }
+    return initialSetupFailure("runtime", error, "not-started", plan?.operationId, { mode: "connect-existing" });
+  } finally {
+    if (plan && typeof plan === "object") {
+      plan.bucketPassword = "";
+      if (plan.connection?.kind === "s3") {
+        plan.connection.accessKeyId = "";
+        plan.connection.secretAccessKey = "";
+        plan.connection.sessionToken = undefined;
+      }
+    }
+  }
+}
+
 async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string): Promise<InitialSetupResult> {
   const transactionId = plan && typeof plan === "object" && typeof plan.transactionId === "string"
     ? plan.transactionId
@@ -2968,7 +3417,7 @@ async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string):
   if (!transactionId) return executeInitialSetupTransaction(plan, peerId);
   const existing = initialSetupTransactions.get(transactionId);
   if (existing instanceof Promise) return existing;
-  if (existing) return Promise.resolve(existing);
+  if (existing?.ok || (existing && existing.error.rollback === "confirmed")) return Promise.resolve(existing);
   const loaded = await loadInitialSetupRecoveryRecords(undefined, peerId);
   if (!loaded) {
     return initialSetupFailure(
@@ -2980,7 +3429,8 @@ async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string):
     );
   }
   const persisted = initialSetupRecoveryRecords.get(transactionId);
-  if (persisted?.status === "succeeded" || persisted?.status === "failed") {
+  const hasDeviceRecoveryPointer = deviceRecoveryOperationIds.has(transactionId);
+  if (!hasDeviceRecoveryPointer && (persisted?.status === "succeeded" || persisted?.status === "failed")) {
     const recovered = await resultFromInitialSetupRecovery(persisted, peerId);
     if (recovered) return recovered;
     if (persisted.status === "failed") {
@@ -2992,7 +3442,7 @@ async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string):
         { recovery: "missing-result" },
       );
     }
-  } else if (persisted?.status === "pending") {
+  } else if (!hasDeviceRecoveryPointer && persisted?.status === "pending") {
     return initialSetupFailure(
       persisted.phase,
       new StorageRuntimeError("storage_unavailable", "An earlier initialization transaction is still awaiting recovery"),
@@ -3023,7 +3473,8 @@ async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string):
     );
   }
   const run = executeInitialSetupTransaction(plan, peerId).then((result) => {
-    initialSetupTransactions.set(transactionId, result);
+    if (result.ok || result.error.rollback === "confirmed") initialSetupTransactions.set(transactionId, result);
+    else initialSetupTransactions.delete(transactionId);
     return result;
   }, (error) => {
     initialSetupTransactions.delete(transactionId);
@@ -3221,6 +3672,59 @@ async function retryInitialSetupCleanupTransaction(
         peerId,
       );
       providerOwned = true;
+    }
+
+    // A cleanup pointer is never proof that the remote root was not
+    // published. Re-authenticate the visibility boundary before revoking any
+    // local reference or deleting candidate objects. A matching published
+    // root is resumed through the normal read-only connect/install path.
+    if (!input.password) {
+      return failRecovery(new StorageRuntimeError("storage_identity_required", "Recovery requires the original bucket password before remote cleanup can be authorized"), { reason: "cleanup-root-authentication-required" });
+    }
+    const root = await discoverRemoteStorageRoot(provider, {
+      password: input.password,
+      expectedRemoteStorageId: current.bucketId,
+    });
+    if (root.status === "present") {
+      if (root.object.manifest.initializationTransactionId !== current.transactionId) {
+        return failRecovery(new StorageRuntimeError("storage_conflict", "Published remote root belongs to another initialization transaction"), { reason: "cleanup-published-root-transaction-mismatch" }, "competing");
+      }
+      if (current.catalogEntryFingerprint !== "0".repeat(64)
+        && current.catalogEntryFingerprint !== root.object.fingerprint) {
+        return failRecovery(new StorageRuntimeError("storage_conflict", "Published remote root fingerprint does not match the recovery pointer"), { reason: "cleanup-published-root-fingerprint-mismatch" }, "competing");
+      }
+      provider.dispose();
+      provider = undefined;
+      providerOwned = false;
+      const connection = current.backend === "local" ? { kind: "local" as const } : input.connection;
+      if (!connection) {
+        return failRecovery(new StorageRuntimeError("storage_identity_required", "S3 recovery requires the original connection"), { reason: "published-root-connection-required" });
+      }
+      const resumed = await executeExistingRemoteStorageConnect({
+        operationId: current.transactionId,
+        remoteStorageId: current.bucketId,
+        displayName: catalogEntry?.label ?? `Recovered ${current.bucketId}`,
+        backend: current.backend,
+        connection: structuredClone(connection),
+        bucketPassword: input.password,
+      }, peerId, {
+        expectedInitializationTransactionId: current.transactionId,
+        connectionSource: "created",
+      });
+      if (!resumed.ok) return { status: "cleanup-required", error: resumed.error };
+      if (!resumed.activeKey) {
+        return failRecovery(new StorageRuntimeError("storage_remote_corrupt", "Published remote has no initial Key"), { reason: "published-root-missing-first-key" });
+      }
+      await createWorkerDeviceBootstrapRepository(peerId).removeRecovery(current.transactionId);
+      deviceRecoveryOperationIds.delete(current.transactionId);
+      return { status: "setup-succeeded", result: { ok: true, bucket: resumed.bucket, firstKey: resumed.activeKey } };
+    }
+    if (root.status !== "absent") {
+      const code = root.status === "corrupt" ? "storage_remote_corrupt"
+        : root.status === "incompatible" ? "storage_remote_incompatible"
+          : root.status === "forbidden" ? "storage_forbidden"
+            : "storage_unavailable";
+      return failRecovery(new StorageRuntimeError(code, "Remote root could not be proven absent; cleanup is forbidden"), { reason: `cleanup-root-${root.status}` });
     }
 
     // 目录仍精确指向本事务时，必须先 CAS 撤销权威引用；只有确认目录
@@ -3499,7 +4003,7 @@ async function switchSelectedCatalogBucket(
     wipePreviousActive();
     throw new StorageRuntimeError("storage_conflict", "The current storage bucket selection is stale");
   }
-  const target = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [targetInput] }).buckets[0]!;
+  let target = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [targetInput] }).buckets[0]!;
   if (target.bucketId === currentEntry.bucketId) {
     wipePreviousActive();
     throw new StorageRuntimeError("storage_conflict", "The target bucket is already selected");
@@ -3514,6 +4018,7 @@ async function switchSelectedCatalogBucket(
   let staged: StagedCatalogBucket;
   try {
     staged = await stageCatalogBucket(target, password, expectedSelectedBucketId, targetBucketGeneration);
+    target = staged.entry;
   } catch (error) {
     wipePreviousActive();
     throw error;
@@ -6753,6 +7258,45 @@ function requestLocalStorageBridge(input: LocalStorageBridgeRequest, peerId?: st
 }
 
 /**
+ * Worker 不能直接读取 Window 的设备引导存储；生命周期只依赖这组最小
+ * 异步能力。所有数据在 Window handler 中再次经过设备引导契约校验，Worker
+ * 这里不缓存完整目录，也不把旧 catalog/recovery ledger 当作事实。
+ */
+function createWorkerDeviceBootstrapRepository(peerId?: string): DeviceBootstrapRepository {
+  const read = async (): Promise<DeviceBootstrapCatalogV1 | null> => {
+    const response = await requestLocalStorageBridge({ type: "device-bootstrap-read" }, peerId);
+    if (response.type !== "device-bootstrap") throw storageUnavailableError("Device bootstrap bridge returned an invalid read result");
+    return response.catalog ? structuredClone(response.catalog) : null;
+  };
+  const connectionFrom = (catalog: DeviceBootstrapCatalogV1 | null, remoteStorageId: string): DeviceRemoteConnectionV1 => {
+    const connection = catalog?.connections.find((candidate) => candidate.remoteStorageId === remoteStorageId);
+    if (!connection) throw new StorageRuntimeError("storage_provider_error", "Device bootstrap connection was not returned after commit");
+    return structuredClone(connection);
+  };
+  return {
+    read,
+    async upsertConnection(connection, select = true) {
+      const response = await requestLocalStorageBridge({ type: "device-bootstrap-connection-upsert", connection: structuredClone(connection), select }, peerId);
+      if (response.type !== "device-bootstrap") throw storageUnavailableError("Device bootstrap bridge returned an invalid connection result");
+      return connectionFrom(response.catalog, connection.remoteStorageId);
+    },
+    async upsertRecovery(recovery) {
+      const response = await requestLocalStorageBridge({ type: "device-bootstrap-recovery-upsert", recovery: structuredClone(recovery) }, peerId);
+      if (response.type !== "device-bootstrap") throw storageUnavailableError("Device bootstrap bridge returned an invalid recovery result");
+      const persisted = response.catalog?.recoveries.find((candidate) => candidate.operationId === recovery.operationId);
+      if (!persisted) throw new StorageRuntimeError("storage_provider_error", "Device bootstrap recovery pointer was not returned after commit");
+      return structuredClone(persisted);
+    },
+    async removeRecovery(operationId) {
+      const response = await requestLocalStorageBridge({ type: "device-bootstrap-recovery-delete", operationId }, peerId);
+      if (response.type !== "device-bootstrap") throw storageUnavailableError("Device bootstrap bridge returned an invalid recovery cleanup result");
+      if (!response.catalog) throw storageUnavailableError("Device bootstrap catalog disappeared during recovery cleanup");
+      return structuredClone(response.catalog);
+    },
+  };
+}
+
+/**
  * 让页面在同一把目录 Web Lock 中完成 Coordinator-owned 目录 CAS。
  * 改密不能只靠 RPC 返回后再由页面“顺手 updateBucket”，否则页面写目录
  * 失败时 Worker 已经可能发布了新快照。这个窄桥只传输新旧加密条目，
@@ -8049,6 +8593,14 @@ function clearStorageRequestSecrets(request: CoordinatorClientRequest): void {
         control.plan.firstKey.material.wif = undefined;
       }
     }
+    if (control.type === "connect-existing-remote") {
+      control.plan.bucketPassword = "";
+      if (control.plan.connection.kind === "s3") {
+        control.plan.connection.accessKeyId = "";
+        control.plan.connection.secretAccessKey = "";
+        control.plan.connection.sessionToken = undefined;
+      }
+    }
     if (control.type === "initial-setup-cleanup") {
       if (control.password !== undefined) control.password = "";
       if (control.connection?.kind === "s3") {
@@ -8178,6 +8730,10 @@ async function executeStorageControl(
   }
   if (control.type === "initial-setup") {
     const result = await executeInitialSetupOnce(control.plan, peerId);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+  }
+  if (control.type === "connect-existing-remote") {
+    const result = await executeExistingRemoteStorageConnect(control.plan, peerId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   }
   if (control.type === "initial-setup-result") {
@@ -8336,7 +8892,7 @@ async function executeStorageControlAtFinalBoundary(
         // 必须允许当前 storage control 的 final lease 观察到新 gate。
         allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
         allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
-        allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "initial-setup-cleanup",
+        allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "connect-existing-remote" || request.control.type === "initial-setup-cleanup",
         // status/summary/connection 等控制读取只观察本地状态；probe 也
         // 不提交配置或远端不可逆结果。它们仍经过本地运行世代/epoch
         // 栅栏，不写入跨 Worker 的临时租约。

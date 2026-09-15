@@ -76,3 +76,22 @@ export interface StorageBucketProvider {
   /** 释放 Provider 资源。 */
   dispose(): void;
 }
+
+/**
+ * 只读远端生命周期回调可以拿到的最小 Provider 能力。
+ *
+ * 这个类型故意不包含 put/delete/dispose；连接已有 namespace 的认证和
+ * 最小索引读取不能借助调用约定获得“零写入”保证。
+ */
+export interface StorageBucketReadOnlyProvider {
+  /** Provider 类型。 */
+  readonly provider: StorageBucketProviderId;
+  /** 抽象桶身份。 */
+  readonly bucketId: string;
+  /** 只探测能力，不改变远端数据。 */
+  probe(signal?: AbortSignal): Promise<StorageBucketProbeResult>;
+  /** 读取固定对象。 */
+  get(path: string, options?: { signal?: AbortSignal; ifMatch?: string }): Promise<StorageBucketObject | undefined>;
+  /** 分页列出对象；回调不得据此执行迁移或补写。 */
+  list(input?: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<StorageBucketListPage>;
+}

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { HardDrive, KeyRound, Upload } from "lucide-react";
 import type {
+  ExistingRemoteStorageConnectPlan,
+  ExistingRemoteStorageConnectResult,
   InitialSetupPlan,
   InitialSetupRecoveryRecordV1,
   InitialSetupResult,
@@ -28,6 +30,7 @@ import { buildDiagnosticText, sanitizeDiagnosticText } from "../diagnostics/sani
 import { copyDiagnosticText } from "../diagnostics/copyDiagnostic.js";
 
 type SetupStep = "type" | "parameters" | "password" | "key-choice" | "new-key" | "import-key" | "confirm";
+type SetupMode = "create" | "connect";
 
 const SETUP_STEPS: ReadonlyArray<StepDefinition> = [
   { id: "type", labelKey: "shell.setup.step.type", defaultLabel: "桶类型" },
@@ -195,6 +198,8 @@ export function InitialSetupPage() {
   const managerReady = Boolean(storage?.initialSetup);
   const [step, setStep] = useState<SetupStep>("type");
   const [draft, setDraft] = useState<BucketDraft>(() => ({ ...EMPTY_BUCKET_DRAFT }));
+  const [setupMode, setSetupMode] = useState<SetupMode>("create");
+  const [existingRemoteStorageId, setExistingRemoteStorageId] = useState("");
   const [keyDraft, setKeyDraft] = useState<InitialSetupKeyDraft | undefined>();
   const [tagName, setTagName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -225,6 +230,8 @@ export function InitialSetupPage() {
     setRecoveryUnavailable(false);
     setStep("type");
     setDraft({ ...EMPTY_BUCKET_DRAFT });
+    setSetupMode("create");
+    setExistingRemoteStorageId("");
     setKeyDraft(undefined);
     setTagName("");
     setSetupTransactionId(undefined);
@@ -307,9 +314,11 @@ export function InitialSetupPage() {
     setError(null);
   }
 
-  function chooseBackend(backend: BucketBackend) {
+  function chooseBackend(backend: BucketBackend, mode: SetupMode = "create") {
     if (recoveryLoading || recoveryUnavailable || recoveryRecord) return;
     setDraft((current) => ({ ...EMPTY_BUCKET_DRAFT, label: current.label, backend }));
+    setSetupMode(mode);
+    setExistingRemoteStorageId("");
     setKeyDraft(undefined);
     setSetupTransactionId(undefined);
     setError(null);
@@ -318,7 +327,11 @@ export function InitialSetupPage() {
 
   function validateParameters(): string | undefined {
     const invalid = validateBucketDraft(draft);
-    return invalid ? t(`shell.setup.error.${invalid.code}`, { defaultValue: invalid.message }) : undefined;
+    if (invalid) return t(`shell.setup.error.${invalid.code}`, { defaultValue: invalid.message });
+    if (setupMode === "connect" && !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(existingRemoteStorageId.trim())) {
+      return "请输入已有远端 root manifest 中的 Remote Storage ID。";
+    }
+    return undefined;
   }
 
   async function testParameters() {
@@ -344,7 +357,12 @@ export function InitialSetupPage() {
     if (draft.password.length < 8) { setError(errorFromException(new Error(t("shell.setup.error.passwordLength", { defaultValue: "密码至少 8 位。" })))); return; }
     if (draft.password !== draft.passwordConfirm) { setError(errorFromException(new Error(t("shell.setup.error.passwordMismatch", { defaultValue: "两次输入的密码不一致。" })))); return; }
     setError(null);
-    setStep("key-choice");
+    if (setupMode === "connect") {
+      setSetupTransactionId((current) => current ?? transactionId());
+      setStep("confirm");
+    } else {
+      setStep("key-choice");
+    }
   }
 
   function chooseGeneratedKey() {
@@ -375,7 +393,7 @@ export function InitialSetupPage() {
       setError(errorFromException(new Error("请先完成已有初始化事务的恢复或清理。"), setupTransactionId));
       return;
     }
-    if (!storage?.initialSetup || !keyDraft) {
+    if (!storage?.initialSetup || (setupMode === "create" && !keyDraft) || (setupMode === "connect" && !storage.connectExistingRemote)) {
       setError(errorFromException(new Error("存储初始化服务尚未就绪，无法提交。")));
       return;
     }
@@ -385,6 +403,39 @@ export function InitialSetupPage() {
       return;
     }
     const currentTransactionId = setupTransactionId ?? transactionId();
+    if (setupMode === "connect") {
+      let connectPlan: ExistingRemoteStorageConnectPlan;
+      try {
+        connectPlan = {
+          operationId: currentTransactionId,
+          remoteStorageId: existingRemoteStorageId.trim(),
+          displayName: draft.label.trim(),
+          backend: draft.backend,
+          connection: connectionFromBucketDraft(draft),
+          bucketPassword: draft.password,
+        };
+      } catch (caught) {
+        setError(errorFromException(caught));
+        setStep("parameters");
+        return;
+      }
+      if (!setupTransactionId) setSetupTransactionId(connectPlan.operationId);
+      setBusy(true); setError(null);
+      try {
+        const result: ExistingRemoteStorageConnectResult = await storage.connectExistingRemote!(connectPlan);
+        clearSensitiveDraft();
+        if (result.ok) router.push("/settings/vault");
+        else { setError(result.error); setStep("password"); }
+      } catch (caught) {
+        clearSensitiveDraft();
+        setStep("password");
+        setError(errorFromException(caught, connectPlan.operationId));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (!keyDraft) return;
     let plan: InitialSetupPlan;
     try {
       plan = {
@@ -493,10 +544,10 @@ export function InitialSetupPage() {
     } else if (recoveryRecord) {
       content = <><PageHeader title={recoveryRecord.status === "succeeded" ? "验证已完成的初始化" : "恢复未完成的初始化"} description="必须先处理已有事务，不能创建新的 transactionId。" /><p>事务 ID：<code>{recoveryRecord.transactionId}</code></p>{recoveryRecord.backend === "s3" ? <p>清理 S3 候选需要重新输入完整物理目标和访问凭据；页面不会保存这些秘密。</p> : <p>请在下方输入本次候选桶密码，然后重试清理。</p>}{recoveryRecord.status === "succeeded" ? <p role="alert">已提交结果正在校验目录；校验完成前不会允许重新初始化。</p> : null}</>;
     } else {
-      content = <><PageHeader title={t("shell.setup.type.title", { defaultValue: "选择桶类型" })} description={t("shell.setup.type.description", { defaultValue: "桶决定 Key 和应用数据保存在哪里。所有步骤完成后才会创建桶。" })} /><div className="initial-setup__choices"><button type="button" onClick={() => chooseBackend("local")}><HardDrive size={22} /><span><strong>Local</strong><small>{t("shell.setup.type.local", { defaultValue: "保存在当前浏览器，适合单设备使用" })}</small></span></button><button type="button" onClick={() => chooseBackend("s3")}><HardDrive size={22} /><span><strong>S3</strong><small>{t("shell.setup.type.s3", { defaultValue: "连接兼容 S3 的远程对象存储" })}</small></span></button></div></>;
+      content = <><PageHeader title={t("shell.setup.type.title", { defaultValue: "选择桶类型" })} description="新建和连接已有远端是两条明确流程，不会自动互相切换。" /><div className="initial-setup__choices"><button type="button" onClick={() => chooseBackend("local", "create")}><HardDrive size={22} /><span><strong>新建 Local 开发存储</strong><small>仅用于开发与测试适配</small></span></button><button type="button" onClick={() => chooseBackend("s3", "create")}><HardDrive size={22} /><span><strong>S3 新建远端</strong><small>要求目标 Keymaster namespace 尚不存在</small></span></button><button type="button" onClick={() => chooseBackend("s3", "connect")}><HardDrive size={22} /><span><strong>连接已有 S3 远端</strong><small>只读认证并恢复已有数据，不创建或迁移对象</small></span></button></div></>;
     }
   } else if (step === "parameters") {
-    content = <><PageHeader title={t("shell.setup.parameters.title", { defaultValue: "填写桶参数" })} description={draft.backend === "local" ? t("shell.setup.parameters.local", { defaultValue: "给本地桶设置一个容易识别的名称。" }) : t("shell.setup.parameters.s3", { defaultValue: "填写对象存储位置和访问凭据；这里只做临时连接探测。" })} /><BucketConnectionFields draft={draft} onChange={updateDraft} section="parameters" /><div className="initial-setup__actions"><Button onClick={() => void testParameters()} loading={busy}>{draft.backend === "local" ? t("common.action.next", { defaultValue: "继续" }) : t("shell.setup.parameters.testNext", { defaultValue: "测试连接并继续" })}</Button><Button variant="ghost" onClick={() => setStep("type")} disabled={busy}>{t("common.action.back", { defaultValue: "返回" })}</Button></div></>;
+    content = <><PageHeader title={t("shell.setup.parameters.title", { defaultValue: "填写桶参数" })} description={setupMode === "connect" ? "填写已有远端的位置、临时凭据和 root manifest 中的稳定 ID。" : draft.backend === "local" ? t("shell.setup.parameters.local", { defaultValue: "给开发存储设置一个容易识别的名称。" }) : t("shell.setup.parameters.s3", { defaultValue: "填写对象存储位置和访问凭据；这里只做临时连接探测。" })} /><BucketConnectionFields draft={draft} onChange={updateDraft} section="parameters" />{setupMode === "connect" ? <TextInput label="Remote Storage ID" value={existingRemoteStorageId} onChange={(event) => { setExistingRemoteStorageId(event.currentTarget.value); setError(null); }} autoComplete="off" /> : null}<div className="initial-setup__actions"><Button onClick={() => void testParameters()} loading={busy}>{draft.backend === "local" ? t("common.action.next", { defaultValue: "继续" }) : t("shell.setup.parameters.testNext", { defaultValue: "测试连接并继续" })}</Button><Button variant="ghost" onClick={() => setStep("type")} disabled={busy}>{t("common.action.back", { defaultValue: "返回" })}</Button></div></>;
   } else if (step === "password") {
     content = <><PageHeader title={t("shell.setup.password.title", { defaultValue: "设置密码" })} description={t("shell.setup.password.description", { defaultValue: "密码只在最终初始化事务期间使用，不会写入本机目录、URL 或日志。" })} /><BucketConnectionFields draft={draft} onChange={updateDraft} section="password" /><div className="initial-setup__actions"><Button onClick={continuePassword} disabled={busy || !draft.password || !draft.passwordConfirm}>{t("shell.setup.password.next", { defaultValue: "继续" })}</Button><Button variant="ghost" onClick={() => setStep("parameters")} disabled={busy}>{t("common.action.back", { defaultValue: "返回" })}</Button></div></>;
   } else if (step === "key-choice") {
@@ -508,7 +559,7 @@ export function InitialSetupPage() {
   } else {
     const key = keyDraft;
     const connection = recoveryConnectionFromDraft(draft);
-    content = <><PageHeader title={t("shell.setup.confirm.title", { defaultValue: "确认并初始化" })} description={t("shell.setup.confirm.description", { defaultValue: "确认后会一次性创建桶、提交包含第一把 Key 的 Hold 快照，并安装完整运行态。" })} /><dl className="initial-setup__summary"><dt>桶类型</dt><dd>{draft.backend === "local" ? "Local（浏览器本地存储）" : `S3 / ${s3ConfigModeLabel(draft.s3ConfigMode)}`}</dd><dt>桶名称</dt><dd>{draft.label.trim()}</dd>{connection?.kind === "s3" ? <><dt>S3 目标摘要</dt><dd>{connectionTargetHint(draft, connection)}</dd></> : null}<dt>第一把 Key</dt><dd>{key?.label ?? "未完成"}{key?.kind === "import" ? `（${key.format}）` : "（新建）"}</dd></dl><p className="initial-setup__hint">不会显示或复制完整 Endpoint、Account ID、访问凭据、Session Token、桶密码或私钥材料。</p>{draft.backend === "s3" && !connection ? <p role="alert">S3 连接信息已清理或尚未完成校验，请返回参数步骤重新确认。</p> : null}<div className="initial-setup__actions"><Button onClick={() => void submitInitialSetup()} loading={busy} disabled={!managerReady || !key || !connection}>{busy ? "正在完成初始化…" : "创建桶和第一把 Key"}</Button><Button variant="ghost" onClick={() => setStep(key?.kind === "import" ? "key-choice" : "new-key")} disabled={busy}>{t("common.action.back", { defaultValue: "返回" })}</Button></div>{busy ? <p role="status">正在验证、写入完整快照并安装运行态，请不要关闭页面。</p> : null}</>;
+    content = <><PageHeader title={setupMode === "connect" ? "确认连接已有远端" : t("shell.setup.confirm.title", { defaultValue: "确认并初始化" })} description={setupMode === "connect" ? "确认后只读认证 root、Hold 和最小系统索引；不会创建、迁移、覆盖或删除远端对象。" : t("shell.setup.confirm.description", { defaultValue: "确认后会一次性创建远端、提交包含第一把 Key 的 Hold 快照，并安装完整运行态。" })} /><dl className="initial-setup__summary"><dt>操作</dt><dd>{setupMode === "connect" ? "连接已有远端" : "新建远端"}</dd><dt>Provider</dt><dd>{draft.backend === "local" ? "Local（开发适配）" : `S3 / ${s3ConfigModeLabel(draft.s3ConfigMode)}`}</dd><dt>显示名称</dt><dd>{draft.label.trim()}</dd>{setupMode === "connect" ? <><dt>Remote Storage ID</dt><dd>{existingRemoteStorageId.trim()}</dd></> : null}{connection?.kind === "s3" ? <><dt>S3 目标摘要</dt><dd>{connectionTargetHint(draft, connection)}</dd></> : null}{setupMode === "create" ? <><dt>第一把 Key</dt><dd>{key?.label ?? "未完成"}{key?.kind === "import" ? `（${key.format}）` : "（新建）"}</dd></> : null}</dl><p className="initial-setup__hint">不会显示或复制完整 Endpoint、Account ID、访问凭据、Session Token、桶密码或私钥材料。</p>{draft.backend === "s3" && !connection ? <p role="alert">S3 连接信息已清理或尚未完成校验，请返回参数步骤重新确认。</p> : null}<div className="initial-setup__actions"><Button onClick={() => void submitInitialSetup()} loading={busy} disabled={!managerReady || (setupMode === "create" && !key) || !connection}>{busy ? "正在完成…" : setupMode === "connect" ? "认证并连接已有远端" : "创建桶和第一把 Key"}</Button><Button variant="ghost" onClick={() => setStep(setupMode === "connect" ? "password" : key?.kind === "import" ? "key-choice" : "new-key")} disabled={busy}>{t("common.action.back", { defaultValue: "返回" })}</Button></div>{busy ? <p role="status">{setupMode === "connect" ? "正在只读认证远端并安装运行态，请不要关闭页面。" : "正在验证、写入完整快照并安装运行态，请不要关闭页面。"}</p> : null}</>;
   }
 
   return <OnboardingShell width="wizard"><div className="initial-setup">{progress}{content}{error ? <InitialSetupError error={error} onRetryCleanup={error.rollback === "unconfirmed" ? retryCleanup : undefined} recoveryDraft={recoveryRecord?.backend === "s3" || draft.backend === "s3" ? draft : undefined} onRecoveryDraftChange={updateRecoveryDraft} retryBusy={cleanupBusy} /> : null}</div></OnboardingShell>;

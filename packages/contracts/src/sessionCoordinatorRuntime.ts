@@ -92,6 +92,8 @@ import type {
 } from "./connectStorage.js";
 import type {
   StorageBucketConnectionConfigV1,
+  ExistingRemoteStorageConnectPlan,
+  ExistingRemoteStorageConnectResult,
   InitialSetupPlan,
   InitialSetupResult,
   InitialSetupRecoveryResult,
@@ -100,6 +102,12 @@ import type {
   StorageBucketCatalogEntryV2,
   StorageCatalogV2,
 } from "./storage/catalog.js";
+import type {
+  DeviceBootstrapCatalogV1,
+  DeviceRemoteConnectionV1,
+  DeviceRemoteRecoveryPointerV1,
+} from "./storage/deviceBootstrap.js";
+import { validateDeviceBootstrapCatalog, validateDeviceRemoteConnection, validateDeviceRemoteRecoveryPointer } from "./storage/deviceBootstrap.js";
 import type { StorageBucketWriteCondition } from "./storage/bucket.js";
 import type { InitialSetupRecoveryRecordV1 } from "./storage/catalog.js";
 import { STORAGE_MAX_PARTS, STORAGE_PART_SIZE_BYTES } from "./storage/kv.js";
@@ -173,7 +181,7 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
 ]);
 
 const STORAGE_CONTROL_TYPES = [
-  "status", "summary", "connection", "unlock-bucket", "initial-setup",
+  "status", "summary", "connection", "unlock-bucket", "initial-setup", "connect-existing-remote",
   "initial-setup-result", "initial-setup-recovery-list", "initial-setup-cleanup",
   "switch-bucket",
   "change-bucket-config", "rename-bucket", "retry",
@@ -256,6 +264,7 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
   C extends { type: "summary" } ? StorageProviderSummary | null :
   C extends { type: "connection" } ? StorageProviderConnectionView | null :
   C extends { type: "initial-setup" } ? InitialSetupResult :
+  C extends { type: "connect-existing-remote" } ? ExistingRemoteStorageConnectResult :
   C extends { type: "initial-setup-result" } ? InitialSetupResult | undefined :
   C extends { type: "initial-setup-recovery-list" } ? InitialSetupRecoveryRecordV1[] :
   C extends { type: "initial-setup-cleanup" } ? InitialSetupRecoveryResult :
@@ -787,6 +796,22 @@ function parseInitialSetupPlan(value: unknown): InitialSetupPlan {
   };
 }
 
+function parseExistingRemoteStorageConnectPlan(value: unknown): ExistingRemoteStorageConnectPlan {
+  const plan = expectRecord(value, "storage connect-existing-remote plan");
+  const backend = plan.backend;
+  if (backend !== "local" && backend !== "s3") throw new TypeError("Coordinator connect-existing-remote backend is invalid");
+  const connection = parseBucketConnection(plan.connection);
+  if (connection.kind !== backend) throw new TypeError("Coordinator connect-existing-remote backend and connection disagree");
+  return {
+    operationId: text(plan.operationId, "storage connect-existing-remote operationId", 128),
+    remoteStorageId: text(plan.remoteStorageId, "storage connect-existing-remote remoteStorageId", 128),
+    displayName: text(plan.displayName, "storage connect-existing-remote displayName", 256),
+    backend,
+    connection,
+    bucketPassword: text(plan.bucketPassword, "storage connect-existing-remote bucketPassword", 4_096),
+  };
+}
+
 function parseStorageControl(value: unknown): CoordinatorStorageControl {
   const control = expectRecord(value, "storage control");
   const type = enumValue(control.type, STORAGE_CONTROL_TYPES, "storage control.type");
@@ -798,6 +823,8 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
       return { type, password: text(control.password, "storage control." + type + ".password", 4_096) };
     case "initial-setup":
       return { type, plan: parseInitialSetupPlan(control.plan) };
+    case "connect-existing-remote":
+      return { type, plan: parseExistingRemoteStorageConnectPlan(control.plan) };
     case "initial-setup-result":
       return { type, transactionId: text(control.transactionId, "storage control." + type + ".transactionId", 128) };
     case "initial-setup-cleanup": {
@@ -1467,9 +1494,11 @@ export type CoordinatorLocalStorageRequest =
   | (CoordinatorSessionBinding & { type: "catalog-commit"; bucketId: string; bucketGeneration: number; targetBucket: StorageBucketCatalogEntryV2; rollback?: boolean })
   | (CoordinatorSessionBinding & { type: "catalog-select"; bucketId: string; bucketGeneration: number; expectedSelectedBucketId?: string; rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2 })
   | (CoordinatorSessionBinding & { type: "catalog-read" })
-  | (CoordinatorSessionBinding & { type: "initial-setup-recovery-list" })
-  | (CoordinatorSessionBinding & { type: "initial-setup-recovery-write"; record: InitialSetupRecoveryRecordV1 })
-  | (CoordinatorSessionBinding & { type: "initial-setup-recovery-delete"; transactionId: string });
+  /** 设备引导是页面唯一允许持久化的 Coordinator 控制面。 */
+  | (CoordinatorSessionBinding & { type: "device-bootstrap-read" })
+  | (CoordinatorSessionBinding & { type: "device-bootstrap-connection-upsert"; connection: DeviceRemoteConnectionV1; select?: boolean })
+  | (CoordinatorSessionBinding & { type: "device-bootstrap-recovery-upsert"; recovery: DeviceRemoteRecoveryPointerV1 })
+  | (CoordinatorSessionBinding & { type: "device-bootstrap-recovery-delete"; operationId: string });
 
 export type CoordinatorLocalStorageResponse =
   | { type: "object"; object?: CoordinatorLocalStorageObject }
@@ -1478,7 +1507,7 @@ export type CoordinatorLocalStorageResponse =
   | { type: "void" }
   | { type: "catalog"; bucket: StorageBucketCatalogEntryV2 }
   | { type: "catalog-state"; catalog: StorageCatalogV2 }
-  | { type: "initial-setup-recovery"; records: InitialSetupRecoveryRecordV1[] };
+  | { type: "device-bootstrap"; catalog: DeviceBootstrapCatalogV1 | null };
 
 /** 事件 stream 的订阅请求。一次订阅可以覆盖多个 Coordinator topic。 */
 export interface CoordinatorTopicSubscription {
@@ -1826,6 +1855,19 @@ function parseInitialSetupResult(value: unknown, field: string): InitialSetupRes
     bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket"),
     firstKey: parseInitialSetupKeyResult(result.firstKey, field + ".firstKey"),
   };
+  if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, field + ".error") };
+  throw new TypeError(`Coordinator ${field}.ok is invalid`);
+}
+
+function parseExistingRemoteStorageConnectResult(value: unknown, field: string): ExistingRemoteStorageConnectResult {
+  const result = expectRecord(value, field);
+  if (result.ok === true) {
+    return {
+      ok: true,
+      bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket"),
+      ...(result.activeKey === undefined ? {} : { activeKey: parseInitialSetupKeyResult(result.activeKey, field + ".activeKey") }),
+    };
+  }
   if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, field + ".error") };
   throw new TypeError(`Coordinator ${field}.ok is invalid`);
 }
@@ -2420,6 +2462,8 @@ function parseStorageControlResultFor(control: CoordinatorStorageControl, value:
       return value === null ? null : parseStorageProviderConnection(value, field);
     case "initial-setup":
       return parseInitialSetupResult(value, field);
+    case "connect-existing-remote":
+      return parseExistingRemoteStorageConnectResult(value, field);
     case "initial-setup-result":
       return value === undefined ? undefined : parseInitialSetupResult(value, field);
     case "initial-setup-recovery-list":
@@ -3499,9 +3543,29 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
   assertNoLocalStorageTransportFields(value);
   const binding = parseLocalStorageBinding(value);
   const type = localStorageText(value.type, "request.type", 64);
-  if (type === "catalog-read" || type === "initial-setup-recovery-list") return { ...binding, type };
-  if (type === "initial-setup-recovery-delete") return { ...binding, type, transactionId: localStorageText(value.transactionId, "transactionId", 128) };
-  if (type === "initial-setup-recovery-write") return { ...binding, type, record: parseLocalStorageRecoveryRecord(value.record, "record") };
+  if (type === "catalog-read" || type === "device-bootstrap-read") return { ...binding, type };
+  if (type === "device-bootstrap-connection-upsert") {
+    return {
+      ...binding,
+      type,
+      connection: (() => {
+        try { return validateDeviceRemoteConnection(value.connection); }
+        catch { throw new TypeError("Coordinator local-storage device bootstrap connection is invalid"); }
+      })(),
+      ...(value.select === undefined ? {} : { select: optionalLocalStorageBoolean(value.select, "select") }),
+    };
+  }
+  if (type === "device-bootstrap-recovery-upsert") {
+    return {
+      ...binding,
+      type,
+      recovery: (() => {
+        try { return validateDeviceRemoteRecoveryPointer(value.recovery); }
+        catch { throw new TypeError("Coordinator local-storage device bootstrap recovery is invalid"); }
+      })(),
+    };
+  }
+  if (type === "device-bootstrap-recovery-delete") return { ...binding, type, operationId: localStorageText(value.operationId, "operationId", 128) };
   if (type === "catalog-update") return {
     ...binding,
     type,
@@ -3563,6 +3627,15 @@ function parseLocalStorageObject(value: unknown, field: string): CoordinatorLoca
   return { path, bytes, ...(size === undefined ? {} : { size }), ...(etag === undefined ? {} : { etag }), ...(lastModified === undefined ? {} : { lastModified }) };
 }
 
+function parseLocalStorageDeviceBootstrap(value: unknown, field: string): DeviceBootstrapCatalogV1 | null {
+  if (value === null) return null;
+  try {
+    return validateDeviceBootstrapCatalog(value);
+  } catch {
+    throw new TypeError(`Coordinator local-storage ${field} is invalid`);
+  }
+}
+
 function parseLocalStorageResponse(value: unknown): CoordinatorLocalStorageResponse {
   if (!record(value)) throw new TypeError("Coordinator local-storage response must be an object");
   const type = localStorageText(value.type, "response.type", 64);
@@ -3581,10 +3654,7 @@ function parseLocalStorageResponse(value: unknown): CoordinatorLocalStorageRespo
   }
   if (type === "catalog") return { type, bucket: parseLocalStorageCatalogEntry(value.bucket, "response.bucket") };
   if (type === "catalog-state") return { type, catalog: parseLocalStorageCatalog(value.catalog) };
-  if (type === "initial-setup-recovery") {
-    if (!Array.isArray(value.records)) throw new TypeError("Coordinator local-storage response.records is invalid");
-    return { type, records: value.records.map((item, index) => parseLocalStorageRecoveryRecord(item, `response.records[${index}]`)) };
-  }
+  if (type === "device-bootstrap") return { type, catalog: parseLocalStorageDeviceBootstrap(value.catalog, "response.catalog") };
   throw new TypeError("Coordinator local-storage response type is unsupported");
 }
 

@@ -5,6 +5,8 @@
 // “读目录 → 改目录 → 无条件覆盖”互相踩写。
 
 import type {
+  DeviceBootstrapCatalogV1,
+  DeviceRemoteConnectionV1,
   StorageBucketCatalogEntryV2,
   StorageCatalogV2,
   StorageCipherEnvelopeV1,
@@ -14,15 +16,18 @@ import type {
 import { STORAGE_CATALOG_CHANGED_EVENT } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageError.js";
 import { browserStorageLocks } from "../runtime/browserLocks.js";
+import {
+  DEVICE_BOOTSTRAP_LOCK,
+  defaultDeviceBootstrapStorage,
+  readDeviceBootstrap,
+  writeDeviceBootstrap,
+  type DeviceBootstrapStorage,
+} from "./deviceBootstrapRepository.js";
 
-export const STORAGE_CATALOG_KEY = "keymaster.storage.catalog.v2";
-export const STORAGE_CATALOG_LOCK = "keymaster.storage.catalog.v2.lock";
+export const STORAGE_CATALOG_LOCK = DEVICE_BOOTSTRAP_LOCK;
 
-export interface StorageCatalogStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-}
+/** 兼容旧目录 API 的类型别名；物理设备存储由 deviceBootstrapRepository 统一访问。 */
+export type StorageCatalogStorage = DeviceBootstrapStorage;
 
 export interface StorageCatalogLocks {
   request<T>(name: string, callback: () => Promise<T>): Promise<T>;
@@ -162,7 +167,10 @@ export function removeStorageCatalogEntry(
 ): StorageCatalogV2 {
   const current = catalog.buckets.find((bucket) => bucket.bucketId === bucketId);
   if (!current) throw new StorageRuntimeError("storage_not_found", "Storage bucket was not found");
-  if (expectedEntry && !sameStorageCatalogEntry(current, expectedEntry)) {
+  // Device bootstrap deliberately does not persist remote revision/cache
+  // fields. Compare only the authenticated device projection or every
+  // non-zero remote revision would look stale after a fresh catalog read.
+  if (expectedEntry && !sameStorageCatalogDeviceProjection(current, expectedEntry)) {
     throw new StorageRuntimeError("storage_conflict", "Storage bucket changed concurrently; reload and retry");
   }
   if (catalog.selectedBucketId === bucketId) {
@@ -196,27 +204,78 @@ export function sameStorageCatalogEntry(left: StorageBucketCatalogEntryV2, right
     && left.updatedAt === right.updatedAt;
 }
 
-function browserStorage(): StorageCatalogStorage {
-  const storage = (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage;
-  if (!storage) throw new StorageRuntimeError("storage_unavailable", "localStorage is unavailable");
-  return storage;
+function browserStorage(): StorageCatalogStorage { return defaultDeviceBootstrapStorage(); }
+
+function catalogEntryFromConnection(connection: DeviceRemoteConnectionV1): StorageBucketCatalogEntryV2 {
+  return {
+    bucketId: connection.remoteStorageId,
+    label: connection.displayName,
+    backend: connection.providerId,
+    // Remote revisions are intentionally absent from device bootstrap. These
+    // values are non-authoritative placeholders replaced from the authenticated
+    // Hold before a Worker runtime is installed.
+    configRevision: 0,
+    keyDerivation: structuredClone(connection.keyDerivation),
+    encryptedConfig: structuredClone(connection.encryptedConfig),
+    snapshotRevision: 0,
+    createdAt: connection.createdAt,
+    updatedAt: connection.updatedAt,
+  };
+}
+
+export function sameStorageCatalogDeviceProjection(left: StorageBucketCatalogEntryV2, right: StorageBucketCatalogEntryV2): boolean {
+  return left.bucketId === right.bucketId
+    && left.label === right.label
+    && left.backend === right.backend
+    && left.keyDerivation.algorithm === right.keyDerivation.algorithm
+    && left.keyDerivation.passwordEncoding === right.keyDerivation.passwordEncoding
+    && left.keyDerivation.iterations === right.keyDerivation.iterations
+    && left.keyDerivation.outputLengthBits === right.keyDerivation.outputLengthBits
+    && left.keyDerivation.saltB64Url === right.keyDerivation.saltB64Url
+    && JSON.stringify(left.encryptedConfig) === JSON.stringify(right.encryptedConfig);
+}
+
+function catalogFromDeviceBootstrap(catalog: DeviceBootstrapCatalogV1 | null): StorageCatalogV2 {
+  if (!catalog) return { format: "keymaster.storage.catalog", version: 2, buckets: [] };
+  return {
+    format: "keymaster.storage.catalog",
+    version: 2,
+    ...(catalog.selectedRemoteStorageId === undefined ? {} : { selectedBucketId: catalog.selectedRemoteStorageId }),
+    buckets: catalog.connections.map(catalogEntryFromConnection),
+  };
 }
 
 /** 读本机目录；没有目录时返回空目录，而不是把旧业务数据当成桶。 */
 export function readStorageCatalog(storage: StorageCatalogStorage = browserStorage()): StorageCatalogV2 {
-  const raw = storage.getItem(STORAGE_CATALOG_KEY);
-  if (!raw) return { format: "keymaster.storage.catalog", version: 2, buckets: [] };
-  try { return validateStorageCatalog(JSON.parse(raw) as unknown); }
-  catch (caught) {
-    if (caught instanceof StorageRuntimeError) throw caught;
-    throw catalogError("Storage catalog JSON is invalid");
-  }
+  return catalogFromDeviceBootstrap(readDeviceBootstrap(storage));
 }
 
 export function writeStorageCatalog(catalog: StorageCatalogV2, storage: StorageCatalogStorage = browserStorage()): void {
   const checked = validateStorageCatalog(catalog);
   try {
-    storage.setItem(STORAGE_CATALOG_KEY, JSON.stringify(checked));
+    const current = readDeviceBootstrap(storage);
+    if (!current) {
+      if (checked.buckets.length === 0) return;
+      throw new StorageRuntimeError("storage_conflict", "Device connections must be authenticated before they can appear in the catalog view");
+    }
+    const byId = new Map(current.connections.map((connection) => [connection.remoteStorageId, connection] as const));
+    const connections = checked.buckets.map((entry) => {
+      const existing = byId.get(entry.bucketId);
+      if (!existing) throw new StorageRuntimeError("storage_conflict", "Catalog entry has no authenticated device connection");
+      if (existing.providerId !== entry.backend) throw new StorageRuntimeError("storage_remote_location_mismatch", "Catalog backend does not match the authenticated device connection");
+      return {
+        ...existing,
+        displayName: entry.label,
+        keyDerivation: structuredClone(entry.keyDerivation),
+        encryptedConfig: structuredClone(entry.encryptedConfig),
+        updatedAt: entry.updatedAt,
+      } satisfies DeviceRemoteConnectionV1;
+    });
+    writeDeviceBootstrap({
+      ...current,
+      connections,
+      ...(checked.selectedBucketId === undefined ? { selectedRemoteStorageId: undefined } : { selectedRemoteStorageId: checked.selectedBucketId }),
+    }, storage);
     if (typeof window !== "undefined") window.dispatchEvent(new Event(STORAGE_CATALOG_CHANGED_EVENT));
   }
   catch (caught) {
@@ -227,7 +286,11 @@ export function writeStorageCatalog(catalog: StorageCatalogV2, storage: StorageC
 }
 
 export function clearStorageCatalog(storage: StorageCatalogStorage = browserStorage()): void {
-  storage.removeItem(STORAGE_CATALOG_KEY);
+  const current = readDeviceBootstrap(storage);
+  if (!current) return;
+  const next = { ...current, connections: [] } as DeviceBootstrapCatalogV1;
+  delete next.selectedRemoteStorageId;
+  writeDeviceBootstrap(next, storage);
 }
 
 /** 目录修改优先使用 Web Locks；HTTP fallback 只保证当前页面内串行。 */
@@ -279,12 +342,12 @@ export function createStorageCatalogRepository(options: StorageCatalogRepository
   async function commitBucket(entry: StorageBucketCatalogEntryV2): Promise<StorageBucketCatalogEntryV2> {
     const checked = validateBucket(entry);
     await mutate((catalog) => {
-      if (catalog.buckets.some((item) => item.bucketId === checked.bucketId)) {
-        throw new StorageRuntimeError("storage_conflict", "Storage bucket ID already exists");
-      }
+      const existing = catalog.buckets.find((item) => item.bucketId === checked.bucketId);
+      if (!existing) throw new StorageRuntimeError("storage_conflict", "Storage bucket has no authenticated device connection");
+      if (!sameStorageCatalogDeviceProjection(existing, checked)) throw new StorageRuntimeError("storage_conflict", "Device connection changed before catalog commit");
       return {
         ...catalog,
-        buckets: [...catalog.buckets, checked],
+        buckets: catalog.buckets.map((item) => item.bucketId === checked.bucketId ? checked : item),
         selectedBucketId: catalog.selectedBucketId ?? checked.bucketId
       };
     });
@@ -302,7 +365,7 @@ export function createStorageCatalogRepository(options: StorageCatalogRepository
       const index = catalog.buckets.findIndex((item) => item.bucketId === bucketId);
       if (index < 0) throw new StorageRuntimeError("storage_not_found", "Storage bucket was not found");
       const current = catalog.buckets[index]!;
-      if (expectedEntry && !sameStorageCatalogEntry(current, expectedEntry)) {
+      if (expectedEntry && !sameStorageCatalogDeviceProjection(current, expectedEntry)) {
         throw new StorageRuntimeError("storage_conflict", "Storage bucket changed concurrently; reload and retry");
       }
       updated = validateBucket({ ...current, ...update, bucketId, updatedAt: now() });

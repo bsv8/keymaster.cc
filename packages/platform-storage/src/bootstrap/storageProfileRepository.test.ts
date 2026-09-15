@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
+import { deviceRemoteStorageLocationFingerprint, type StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
 import { readStorageBootstrap } from "./storageProfileRepository.js";
-import { STORAGE_CATALOG_KEY } from "./storageCatalogRepository.js";
+import { DEVICE_BOOTSTRAP_KEY } from "./deviceBootstrapRepository.js";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -18,16 +18,39 @@ const bucket: StorageBucketCatalogEntryV2 = {
 };
 
 describe("V1 storage bootstrap", () => {
-  it("fails closed when the catalog is malformed", () => {
+  it("fails closed when the device bootstrap is malformed", () => {
     const storage = new MemoryStorage();
-    storage.setItem(STORAGE_CATALOG_KEY, "{broken");
-    expect(() => readStorageBootstrap(storage as unknown as Storage)).toThrow(/catalog/i);
+    storage.setItem(DEVICE_BOOTSTRAP_KEY, "{broken");
+    expect(() => readStorageBootstrap(storage as unknown as Storage)).toThrow(/bootstrap/i);
   });
 
-  it("returns only the selected Local/S3 catalog entry", () => {
+  it("projects only the selected authenticated device connection", () => {
     const storage = new MemoryStorage();
-    storage.setItem(STORAGE_CATALOG_KEY, JSON.stringify({ format: "keymaster.storage.catalog", version: 2, selectedBucketId: bucket.bucketId, buckets: [bucket] }));
-    expect(readStorageBootstrap(storage as unknown as Storage)).toEqual({ selectedBackend: "local", selectedProfileId: bucket.bucketId, selectedBucket: bucket });
+    const location = { providerId: "local" as const, namespace: bucket.bucketId };
+    storage.setItem(DEVICE_BOOTSTRAP_KEY, JSON.stringify({
+      format: "keymaster.device-bootstrap",
+      version: 1,
+      selectedRemoteStorageId: bucket.bucketId,
+      connections: [{
+        remoteStorageId: bucket.bucketId,
+        displayName: bucket.label,
+        providerId: "local",
+        location,
+        physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location),
+        encryptedConfig: bucket.encryptedConfig,
+        keyDerivation: bucket.keyDerivation,
+        source: "connected",
+        createdAt: bucket.createdAt,
+        updatedAt: bucket.updatedAt,
+      }],
+      recoveries: [],
+      workerProfileId: "profile-storage-bootstrap-test",
+    }));
+    expect(readStorageBootstrap(storage as unknown as Storage)).toMatchObject({
+      selectedBackend: "local",
+      selectedProfileId: bucket.bucketId,
+      selectedBucket: { bucketId: bucket.bucketId, configRevision: 0, snapshotRevision: 0 },
+    });
   });
 
   it("does not inspect unrelated localStorage records", () => {

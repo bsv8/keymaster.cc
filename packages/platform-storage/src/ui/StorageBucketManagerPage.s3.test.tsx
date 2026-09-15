@@ -3,7 +3,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { writeStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
+import { deviceRemoteStorageLocationFingerprint } from "@keymaster/contracts";
+import { writeDeviceBootstrap } from "../bootstrap/deviceBootstrapRepository.js";
 import { StorageBucketManagerPage } from "./StorageBucketManagerPage.js";
 
 const state = vi.hoisted(() => ({
@@ -62,6 +63,18 @@ function s3CatalogEntry() {
     createdAt: 1,
     updatedAt: 1
   };
+}
+
+function seedS3CatalogEntry(): void {
+  const entry = s3CatalogEntry();
+  const location = { providerId: "s3" as const, endpoint: "https://objects.example.test", region: "custom-region", bucket: "workspace", prefix: "tenant", forcePathStyle: true };
+  writeDeviceBootstrap({
+    format: "keymaster.device-bootstrap",
+    version: 1,
+    connections: [{ remoteStorageId: entry.bucketId, displayName: entry.label, providerId: "s3", location, physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location), encryptedConfig: entry.encryptedConfig, keyDerivation: entry.keyDerivation, source: "connected", createdAt: entry.createdAt, updatedAt: entry.updatedAt }],
+    recoveries: [],
+    workerProfileId: "profile-storage-manager-s3-test",
+  });
 }
 
 function mount() {
@@ -129,7 +142,7 @@ describe("StorageBucketManagerPage S3 configuration regression", () => {
   });
 
   it("opens every persisted S3 connection as ordinary S3-compatible instead of guessing AWS or R2", async () => {
-    writeStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [s3CatalogEntry()] });
+    seedS3CatalogEntry();
     vi.spyOn(window, "prompt").mockReturnValue("bucket-password");
     const user = userEvent.setup();
     mount();

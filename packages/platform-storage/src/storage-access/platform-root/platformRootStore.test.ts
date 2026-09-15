@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { StorageBucketProvider, StorageBucketRef } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
-import { createOwnerLifecycleGuardedProvider, createPlatformRootStore } from "./platformRootStore.js";
+import { createOwnerLifecycleGuardedProvider, createPlatformRootStore, validatePublishedPlatformBucketSchema } from "./platformRootStore.js";
 
 interface TestObject {
   bytes: Uint8Array;
@@ -169,6 +169,27 @@ describe("PlatformRoot bucket schema", () => {
     await expect(root.openPlatformStore({ declaration: { ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, schemaVersion: 2 } })).rejects.toMatchObject({
       code: "storage_forbidden"
     });
+  });
+
+  it("validates published schema through the read-only provider surface", async () => {
+    const provider = makeProvider();
+    const root = createPlatformRootStore({ provider, bucket });
+    await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
+    const readOnly = {
+      provider: provider.provider,
+      bucketId: provider.bucketId,
+      probe: provider.probe.bind(provider),
+      get: provider.get.bind(provider),
+      list: provider.list.bind(provider),
+    };
+    await expect(validatePublishedPlatformBucketSchema(readOnly, [CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads])).resolves.toBeUndefined();
+
+    const schemaObject = await provider.get(".keymaster/schema");
+    if (!schemaObject?.etag) throw new Error("schema object is missing");
+    const schema = JSON.parse(new TextDecoder().decode(schemaObject.bytes)) as { namespaces: Record<string, number> };
+    delete schema.namespaces[Object.keys(schema.namespaces)[0]!];
+    await provider.put(".keymaster/schema", new TextEncoder().encode(JSON.stringify(schema)), { ifMatch: schemaObject.etag });
+    await expect(validatePublishedPlatformBucketSchema(readOnly, [CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads])).rejects.toMatchObject({ code: "storage_remote_corrupt" });
   });
 
   it("keeps key namespaces independent while still locking each owner directory version", async () => {

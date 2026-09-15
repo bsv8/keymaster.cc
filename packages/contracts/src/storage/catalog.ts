@@ -177,6 +177,34 @@ export interface InitialSetupPlan {
   firstKey: InitialSetupFirstKey;
 }
 
+/** 明确的“连接已有远端”计划；不会创建 Hold、默认设置或首 Key。 */
+export interface ExistingRemoteStorageConnectPlan {
+  /** 本机连接操作 ID，只用于最小恢复指针。 */
+  operationId: string;
+  /** 由用户/外部发现明确提供的既有远端稳定身份。 */
+  remoteStorageId: string;
+  /** 本机设备引导中的显示名称。 */
+  displayName: string;
+  /** 与 connection.kind 对齐的 Provider。 */
+  backend: StorageBucketBackend;
+  /** 仅在本次 Worker 调用期间存在的连接位置与凭据。 */
+  connection: StorageBucketConnectionConfigV1;
+  /** 用于认证 root、Hold 并解密已有运行态。 */
+  bucketPassword: string;
+}
+
+/** 连接已有远端成功后公开的最小运行态摘要。 */
+export type ExistingRemoteStorageConnectResult =
+  | {
+      ok: true;
+      bucket: StorageBucketCatalogEntryV2;
+      activeKey?: InitialSetupKeyResult;
+    }
+  | {
+      ok: false;
+      error: StorageUserFacingError;
+    };
+
 /** 首次初始化提交的第一把 Key 草稿。 */
 export type InitialSetupFirstKey =
   | {

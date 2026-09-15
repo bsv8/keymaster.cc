@@ -102,6 +102,9 @@ export class StorageRpcProxy implements StorageRuntimeController {
   initialSetup(plan: import("@keymaster/contracts").InitialSetupPlan): Promise<import("@keymaster/contracts").InitialSetupResult> {
     return this.control({ type: "initial-setup", plan });
   }
+  connectExistingRemote(plan: import("@keymaster/contracts").ExistingRemoteStorageConnectPlan): Promise<import("@keymaster/contracts").ExistingRemoteStorageConnectResult> {
+    return this.control({ type: "connect-existing-remote", plan });
+  }
   getInitialSetupResult(transactionId: string): Promise<import("@keymaster/contracts").InitialSetupResult | undefined> {
     return this.control({ type: "initial-setup-result", transactionId });
   }

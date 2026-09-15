@@ -6,6 +6,7 @@ import type {
   PluginStorageDeclaration,
   SnapshotStore,
   StorageBucketProvider,
+  StorageBucketReadOnlyProvider,
   StorageBucketRef,
   StorageNamespaceBinding,
   StorageSnapshotJsonCompatible,
@@ -25,6 +26,8 @@ export interface PlatformRootStoreOptions {
   platformStorageDeclarations?: readonly PluginStorageDeclaration[];
   /** 切桶/切 Key/切 keyspace 世代后让旧句柄 fail closed。 */
   isCurrent?: (binding: { ownerPublicKeyHex?: string; bucketGeneration: number; keyspaceGeneration?: number }) => boolean;
+  /** 已有远端装配只校验 schema，缺项或版本不符时禁止补写。 */
+  schemaMode?: "ensure" | "validate-only";
 }
 
 const DEFAULT_PLATFORM_DECLARATIONS: readonly PluginStorageDeclaration[] = Object.freeze([
@@ -708,6 +711,48 @@ async function ensureBucketNamespaceSchema(
   throw new StorageRuntimeError("storage_conflict", "Storage bucket schema changed concurrently");
 }
 
+/** 已有远端只读接入使用的 schema 检查；绝不创建或修补登记。 */
+async function validateBucketNamespaceSchema(
+  provider: Pick<StorageBucketProvider, "get">,
+  binding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex">,
+  schemaVersion: number,
+): Promise<void> {
+  const object = await provider.get(BUCKET_SCHEMA_PATH);
+  if (!object) throw new StorageRuntimeError("storage_remote_corrupt", "Remote bucket schema is missing");
+  let current: BucketSchemaRecord;
+  try {
+    current = decodeBucketSchema(object.bytes);
+  } catch {
+    throw new StorageRuntimeError("storage_remote_corrupt", "Remote bucket schema is invalid");
+  }
+  const recorded = current.namespaces[namespaceSchemaKey(binding)];
+  if (recorded === undefined) throw new StorageRuntimeError("storage_remote_corrupt", "Remote bucket schema namespace is missing");
+  if (recorded !== schemaVersion) throw new StorageRuntimeError("storage_remote_incompatible", "Remote bucket schema namespace version is incompatible");
+}
+
+/**
+ * Re-read and validate the schema registrations required by a published
+ * bucket. This helper accepts only the read-only Provider surface so callers
+ * can verify the root visibility boundary without accidentally repairing it.
+ */
+export async function validatePublishedPlatformBucketSchema(
+  provider: StorageBucketReadOnlyProvider,
+  declarations: readonly PluginStorageDeclaration[],
+): Promise<void> {
+  const allowed = new Map(DEFAULT_PLATFORM_DECLARATIONS.map((declaration) => [
+    [declaration.moduleId, declaration.purposeId, declaration.scope, declaration.authority, declaration.model, declaration.schemaVersion].join("|"),
+    declaration,
+  ] as const));
+  for (const input of declarations) {
+    const declaration = validatePluginStorageDeclaration(input);
+    const key = [declaration.moduleId, declaration.purposeId, declaration.scope, declaration.authority, declaration.model, declaration.schemaVersion].join("|");
+    if (declaration.scope !== "bucket" || declaration.authority === "third-party-app" || !allowed.has(key)) {
+      throw new StorageRuntimeError("storage_forbidden", "Published bucket schema declaration is not authorized");
+    }
+    await validateBucketNamespaceSchema(provider, declaration, declaration.schemaVersion);
+  }
+}
+
 /**
  * Storage 平台层。
  *
@@ -744,6 +789,9 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
     bucketGeneration: binding.bucketGeneration,
     keyspaceGeneration,
   }) ?? true;
+  const checkNamespaceSchema = options.schemaMode === "validate-only"
+    ? validateBucketNamespaceSchema
+    : ensureBucketNamespaceSchema;
   const openPlatformNamespace = async (input: PluginStorageDeclaration): Promise<KeyValueStore> => {
     const declaration = validatePluginStorageDeclaration(input);
     if (declaration.scope !== "bucket" || declaration.authority === "third-party-app" || declaration.model !== "kv") {
@@ -754,7 +802,7 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       throw new StorageRuntimeError("storage_forbidden", "Platform storage namespace is not authorized");
     }
     const binding = bindingFor(declaration);
-    await ensureBucketNamespaceSchema(options.provider, binding, declaration.schemaVersion);
+    await checkNamespaceSchema(options.provider, binding, declaration.schemaVersion);
     buildStorageNamespaceRoot(binding);
     return createKeyValueStore({ provider: options.provider, binding, isCurrent: currentFor(binding) });
   };
@@ -768,7 +816,7 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       throw new StorageRuntimeError("storage_forbidden", "Platform snapshot declaration is not authorized");
     }
     const binding = bindingFor(declaration);
-    await ensureBucketNamespaceSchema(options.provider, binding, declaration.schemaVersion);
+    await checkNamespaceSchema(options.provider, binding, declaration.schemaVersion);
     return createFixedCasSnapshotStore({
       provider: options.provider,
       binding,
