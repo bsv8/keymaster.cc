@@ -186,4 +186,116 @@ describe("createSatWorkerChannelRuntime", () => {
     expect(received).toEqual([]);
     off();
   });
+
+  it("forwards physical subscription status without exposing the Connect facade", async () => {
+    const eventHandlers = new Map<string, Set<(event: unknown) => void>>();
+    const epoch = "epoch-a";
+    const coordinator = {
+      getIsConnected: () => true,
+      getBootstrapSnapshot: () => ({ activePublicKeyHex: OWNER, sessionEpoch: epoch }),
+      getActivePublicKeyHex: () => OWNER,
+      getSessionEpoch: () => epoch,
+      channelOperation: vi.fn(async (operation: { type: string }) => ({
+        status: "ok" as const,
+        value: operation.type === "subscription-set" ? { channels: ["topic"] } : { messageId: "message-1" }
+      })),
+      subscribeTopic: (topic: string, handler: (event: unknown) => void) => {
+        const handlers = eventHandlers.get(topic) ?? new Set();
+        handlers.add(handler);
+        eventHandlers.set(topic, handlers);
+        return () => handlers.delete(handler);
+      }
+    } as unknown as SessionCoordinatorClient;
+    const runtime = createSatWorkerChannelRuntime(coordinator, { kind: "plugin", pluginId: "bsv-price" });
+    const statuses: string[] = [];
+    const off = runtime.subscribeSubscriptionStatus((status) => statuses.push(`${status.phase}:${status.errorCode ?? ""}`));
+    await runtime.subscriptionSet(["topic"]);
+    const event = {
+      sessionEpoch: epoch,
+      type: "channel.subscription.changed",
+      subscriptionStatus: {
+        channel: "topic",
+        phase: "blocked",
+        errorCode: "balance",
+        errorMessage: "No fee balance",
+        updatedAtMs: Date.now()
+      }
+    };
+    for (const handler of eventHandlers.get("channel.events") ?? []) handler(event);
+    expect(statuses).toEqual(["subscribing:", "blocked:balance"]);
+    expect(runtime.subscriptionStatus("topic")).toMatchObject({ phase: "blocked", errorCode: "balance" });
+    off();
+  });
+
+  it("applies the authoritative status snapshot returned with a new caller's set", async () => {
+    const epoch = "epoch-a";
+    const subscribed = {
+      channel: "topic",
+      phase: "subscribed" as const,
+      errorCode: null,
+      errorMessage: null,
+      updatedAtMs: 42
+    };
+    const channelOperation = vi.fn(async () => ({
+      status: "ok" as const,
+      value: { channels: ["topic"], statuses: [subscribed] }
+    }));
+    const coordinator = {
+      getIsConnected: () => true,
+      getBootstrapSnapshot: () => ({ activePublicKeyHex: OWNER, sessionEpoch: epoch }),
+      getActivePublicKeyHex: () => OWNER,
+      getSessionEpoch: () => epoch,
+      channelOperation,
+      subscribeTopic: (_topic: string, _handler: (event: unknown) => void) => () => undefined
+    } as unknown as SessionCoordinatorClient;
+    const runtime = createSatWorkerChannelRuntime(coordinator, { kind: "plugin", pluginId: "bsv-price" });
+    const statuses: string[] = [];
+    const off = runtime.subscribeSubscriptionStatus((status) => statuses.push(status.phase));
+
+    await expect(runtime.subscriptionSet(["topic"])).resolves.toMatchObject({
+      channels: ["topic"],
+      statuses: [subscribed]
+    });
+    expect(statuses).toEqual(["subscribed"]);
+    expect(runtime.subscriptionStatus("topic")).toMatchObject({ phase: "subscribed", updatedAtMs: 42 });
+    off();
+  });
+
+  it("reads an already-subscribed channel from the Coordinator baseline without setting it first", () => {
+    const epoch = "epoch-a";
+    const subscribed = {
+      channel: "topic",
+      phase: "subscribed" as const,
+      errorCode: null,
+      errorMessage: null,
+      updatedAtMs: 42
+    };
+    const coordinator = {
+      getIsConnected: () => true,
+      getBootstrapSnapshot: () => ({ activePublicKeyHex: OWNER, sessionEpoch: epoch }),
+      getActivePublicKeyHex: () => OWNER,
+      getSessionEpoch: () => epoch,
+      channelOperation: vi.fn(),
+      subscribeTopic: vi.fn((topic: string, handler: (event: unknown) => void) => {
+        if (topic === "channel.events") {
+          handler({
+            topic: "channel.events",
+            type: "channel.subscription.changed",
+            channelRevision: 7,
+            sessionEpoch: epoch,
+            subscriptionStatuses: [subscribed]
+          });
+        }
+        return () => undefined;
+      })
+    } as unknown as SessionCoordinatorClient;
+    const runtime = createSatWorkerChannelRuntime(coordinator, { kind: "plugin", pluginId: "bsv-price" });
+
+    expect(runtime.subscriptionStatus("topic")).toMatchObject({
+      phase: "subscribed",
+      errorCode: null,
+      updatedAtMs: 42
+    });
+    expect(coordinator.subscribeTopic).toHaveBeenCalledWith("channel.events", expect.any(Function));
+  });
 });

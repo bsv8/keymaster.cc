@@ -86,22 +86,47 @@ function BsvPriceSettingsPageInner({
   const channelPreview = snap.configured ? snap.channelId : NOT_CONFIGURED_LABEL;
   const statusLabel = (() => {
     switch (snap.status) {
-      case "ready":
-        return t("bsv-price.settings.status.ready", { defaultValue: "正在订阅" });
       case "offline":
         return t("bsv-price.settings.status.offline", { defaultValue: "已断开" });
       case "idle":
         return t("bsv-price.settings.status.idle", { defaultValue: "空闲" });
-      case "no_publisher_key":
-        return t("bsv-price.settings.status.noPublisherKey", {
-          defaultValue: "广播源不可用"
-        });
       case "not_configured":
         return t("bsv-price.settings.status.notConfigured", {
           defaultValue: "未配置"
         });
+      case "sat_not_configured":
+        return t("bsv-price.settings.status.satNotConfigured", { defaultValue: "SatSubscription 未配置" });
+      case "sat_connecting":
+        return t("bsv-price.settings.status.satConnecting", { defaultValue: "正在连接 SatSubscription" });
+      case "sat_balance_required":
+        return t("bsv-price.settings.status.satBalanceRequired", { defaultValue: "SatSubscription 余额不足" });
+      case "sat_identity_error":
+        return t("bsv-price.settings.status.satIdentityError", { defaultValue: "SatSubscription 身份错误" });
+      case "sat_subscription_error":
+        return t("bsv-price.settings.status.satSubscriptionError", { defaultValue: "SatSubscription 订阅失败" });
+      case "subscription_unknown":
+        return t("bsv-price.settings.status.subscriptionUnknown", { defaultValue: "订阅结果未知，请等待重试" });
+      case "waiting_snapshot":
+        return t("bsv-price.settings.status.waitingSnapshot", { defaultValue: "等待 BSV 价格快照" });
+      case "receiving":
+        return t("bsv-price.settings.status.receiving", { defaultValue: "正在接收" });
       default:
         return snap.status;
+    }
+  })();
+  const statusHint = (() => {
+    switch (snap.status) {
+      case "not_configured": return t("bsv-price.settings.action.notConfigured", { defaultValue: "请填写 PriceCast 发布器公钥。" });
+      case "offline": return t("bsv-price.settings.action.offline", { defaultValue: "请解锁或重新进入当前 Owner。" });
+      case "sat_not_configured": return t("bsv-price.settings.action.satNotConfigured", { defaultValue: "请配置并启用接收 Supplier。" });
+      case "sat_connecting": return t("bsv-price.settings.action.satConnecting", { defaultValue: "请检查 Supplier 地址及连接状态。" });
+      case "sat_balance_required": return t("bsv-price.settings.action.satBalanceRequired", { defaultValue: "请刷新 SPI 余额并为 SatSubscription 充值。" });
+      case "sat_identity_error": return t("bsv-price.settings.action.satIdentityError", { defaultValue: "请检查 Supplier 公钥、Peer ID 和地址。" });
+      case "subscription_unknown": return t("bsv-price.settings.action.subscriptionUnknown", { defaultValue: "请勿重复发起收费订阅，等待系统对账。" });
+      case "sat_subscription_error": return t("bsv-price.settings.action.satSubscriptionError", { defaultValue: "请根据稳定错误码前往 SatSubscription 设置处理。" });
+      case "waiting_snapshot": return t("bsv-price.settings.action.waitingSnapshot", { defaultValue: "无需操作，等待首个价格快照。" });
+      case "receiving": return t("bsv-price.settings.action.receiving", { defaultValue: "无需操作。" });
+      default: return t("bsv-price.settings.action.idle", { defaultValue: "价格订阅处于空闲状态。" });
     }
   })();
 
@@ -159,6 +184,9 @@ function BsvPriceSettingsPageInner({
         </div>
 
         <p className="km-bsv-price-settings-page__hint">
+          {statusHint}
+        </p>
+        <p className="km-bsv-price-settings-page__hint">
           {t("bsv-price.settings.clearHint", {
             defaultValue: "清空后会取消当前订阅，/bsv-price 会进入未配置状态。"
           })}
@@ -167,6 +195,22 @@ function BsvPriceSettingsPageInner({
         {saveMessage ? (
           <p className="km-bsv-price-settings-page__message" data-bsv-price-settings-message>
             {saveMessage}
+          </p>
+        ) : null}
+        {snap.subscriptionErrorCode ? (
+          <p className="km-bsv-price-settings-page__error" data-bsv-price-settings-error>
+            {t("bsv-price.settings.subscriptionError", { defaultValue: "订阅错误" })} ({snap.subscriptionErrorCode})
+            {snap.subscriptionErrorMessage ? `: ${snap.subscriptionErrorMessage}` : ""}
+          </p>
+        ) : null}
+        {snap.status === "sat_balance_required" ? (
+          <p className="km-bsv-price-settings-page__hint" data-bsv-price-settings-balance-hint>
+            {t("bsv-price.settings.balanceHint", { defaultValue: "请先为 SatSubscription 充值。" })}
+          </p>
+        ) : null}
+        {snap.status === "subscription_unknown" ? (
+          <p className="km-bsv-price-settings-page__hint" data-bsv-price-settings-unknown-hint>
+            {t("bsv-price.settings.unknownHint", { defaultValue: "请勿手动重复扣费，等待系统对账。" })}
           </p>
         ) : null}
       </div>

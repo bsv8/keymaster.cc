@@ -225,6 +225,31 @@ describe("Coordinator runtime contract parsers", () => {
       sessionEpoch: "epoch-1",
     });
     expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      topic: "channel.events",
+      type: "channel.subscription.changed",
+      channelRevision: 1,
+      sessionEpoch: "epoch-1",
+      subscriptionStatuses: [{
+        channel: "topic",
+        phase: "subscribed",
+        errorCode: null,
+        errorMessage: null,
+        updatedAtMs: 1,
+      }],
+    })).toEqual({
+      topic: "channel.events",
+      type: "channel.subscription.changed",
+      channelRevision: 1,
+      sessionEpoch: "epoch-1",
+      subscriptionStatuses: [{
+        channel: "topic",
+        phase: "subscribed",
+        errorCode: null,
+        errorMessage: null,
+        updatedAtMs: 1,
+      }],
+    });
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
       topic: "sat.events",
       type: "sat.events.changed",
       satRevision: 1,

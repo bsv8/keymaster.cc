@@ -22,6 +22,10 @@
   color: var(--danger);
 }
 
+.bsv-price-home-widget__error {
+  color: var(--danger);
+}
+
 .bsv-price-home-widget__list li {
   gap: 12px;
 }

@@ -8,6 +8,7 @@ import type {
   ChannelPrivateMessageEvent,
   ChannelRuntime,
   ChannelSubscriptionSetResult,
+  ChannelSubscriptionStatus,
   CoordinatorChannelOperation,
   CoordinatorSatOperation,
   SatIncomingPublish,
@@ -98,16 +99,66 @@ export function createSatWorkerChannelRuntime(
   caller: { kind: "plugin"; pluginId: string } | { kind: "system"; systemId: string }
 ): ChannelRuntime {
   const subscribedChannels = new Set<string>();
+  const subscriptionStatuses = new Map<string, ChannelSubscriptionStatus>();
+  const subscriptionStatusListeners = new Set<(status: ChannelSubscriptionStatus) => void>();
+  let offSubscriptionStatusTopic: (() => void) | undefined;
+  let offSubscriptionStatusSession: (() => void) | undefined;
   let subscribedOwner: string | undefined;
   let subscribedSessionEpoch: string | undefined;
   const ownerForRequest = (): string => {
     const owner = currentOwner(coordinator);
     if (subscribedOwner !== owner) {
       subscribedChannels.clear();
+      subscriptionStatuses.clear();
       subscribedOwner = owner;
     }
     subscribedSessionEpoch = coordinator.getSessionEpoch();
+    if (subscriptionStatusListeners.size > 0) {
+      try { ensureSubscriptionStatusTopic(); } catch { /* 订阅前尚未解锁；下一次请求再建立总线。 */ }
+    }
     return owner;
+  };
+  const publishLocalSubscriptionStatus = (status: ChannelSubscriptionStatus): void => {
+    const snapshot = { ...status };
+    subscriptionStatuses.set(snapshot.channel, snapshot);
+    for (const listener of [...subscriptionStatusListeners]) {
+      try { listener({ ...snapshot }); } catch { /* 单个插件观察者不能打断总线。 */ }
+    }
+  };
+  const ensureSubscriptionStatusTopic = (): void => {
+    if (offSubscriptionStatusTopic) return;
+    subscribedOwner = currentOwner(coordinator);
+    subscribedSessionEpoch = coordinator.getSessionEpoch();
+    offSubscriptionStatusTopic = coordinator.subscribeTopic("channel.events", (raw: {
+      sessionEpoch?: unknown;
+      subscriptionStatus?: ChannelSubscriptionStatus;
+      subscriptionStatuses?: ChannelSubscriptionStatus[];
+    }) => {
+      if (raw.sessionEpoch !== subscribedSessionEpoch) return;
+      const status = raw.subscriptionStatus;
+      if (status && typeof status.channel === "string") publishLocalSubscriptionStatus(status);
+      if (Array.isArray(raw.subscriptionStatuses)) {
+        for (const snapshot of raw.subscriptionStatuses) {
+          if (snapshot && typeof snapshot.channel === "string") publishLocalSubscriptionStatus(snapshot);
+        }
+      }
+    });
+    offSubscriptionStatusSession = coordinator.subscribeTopic("session.state", (raw: { sessionEpoch?: unknown; activePublicKeyHex?: unknown }) => {
+      const owner = typeof raw.activePublicKeyHex === "string" ? raw.activePublicKeyHex : undefined;
+      const epoch = typeof raw.sessionEpoch === "string" ? raw.sessionEpoch : undefined;
+      if (owner !== subscribedOwner || epoch !== subscribedSessionEpoch) {
+        subscribedChannels.clear();
+        subscriptionStatuses.clear();
+        subscribedOwner = owner;
+        subscribedSessionEpoch = epoch;
+      }
+    });
+  };
+  const stopSubscriptionStatusTopic = (): void => {
+    offSubscriptionStatusTopic?.();
+    offSubscriptionStatusSession?.();
+    offSubscriptionStatusTopic = undefined;
+    offSubscriptionStatusSession = undefined;
   };
   const listen = <T>(handler: (value: T) => void, select: (event: { publicMessage?: ChannelMessageReceivedEventData; privateMessage?: ChannelPrivateMessageEvent }) => T | null): (() => void) =>
     (() => {
@@ -170,6 +221,7 @@ export function createSatWorkerChannelRuntime(
     subscriptionSet: async (channels, signal): Promise<ChannelSubscriptionSetResult> => {
       const owner = ownerForRequest();
       const requestSessionEpoch = coordinator.getSessionEpoch();
+      const previousChannels = [...subscribedChannels];
       // 只有 Coordinator 返回的 result.channels 才是“已接受的逻辑订阅
       // 集合”。请求尚未完成前不能先放宽本地过滤，否则 Coordinator 拒绝
       // owner inbox 等保留频道时，插件仍会从全局 channel.events 收到私信。
@@ -186,18 +238,84 @@ export function createSatWorkerChannelRuntime(
         // 不能写入新 owner 的过滤集合，否则全局 channel.events 会形成
         // 跨 owner 的私信泄漏窗口。
         subscribedChannels.clear();
+        subscriptionStatuses.clear();
         subscribedOwner = currentOwner;
         subscribedSessionEpoch = currentSessionEpoch;
         throw new Error("Channel subscription result became stale");
       }
       subscribedChannels.clear();
       for (const channel of result.channels) subscribedChannels.add(channel);
+      for (const channel of previousChannels) {
+        if (!subscribedChannels.has(channel)) {
+          publishLocalSubscriptionStatus({ channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: Date.now() });
+        }
+      }
+      const authoritativeStatuses = new Map(
+        (result.statuses ?? [])
+          .filter((status) => subscribedChannels.has(status.channel))
+          .map((status) => [status.channel, status] as const)
+      );
+      for (const channel of subscribedChannels) {
+        const status = authoritativeStatuses.get(channel);
+        if (status) {
+          // The result is an atomic snapshot from the Coordinator/Mux. Apply
+          // it even when a previous caller already emitted a different status;
+          // this is the handoff path for a newly-created runtime.
+          publishLocalSubscriptionStatus(status);
+        } else if (!subscriptionStatuses.has(channel) || subscriptionStatuses.get(channel)?.phase === "idle") {
+          // Keep compatibility with an older Coordinator that only returns
+          // channels. An accepted channel is at least being reconciled until
+          // its status event arrives.
+          publishLocalSubscriptionStatus({ channel, phase: "subscribing", errorCode: null, errorMessage: null, updatedAtMs: Date.now() });
+        }
+      }
       subscribedSessionEpoch = currentSessionEpoch;
       return result;
+    },
+    subscriptionStatus: (channel: string): ChannelSubscriptionStatus => {
+      validateExactChannelForRuntime(channel);
+      const snapshot = coordinator.getBootstrapSnapshot();
+      if (snapshot.activePublicKeyHex !== subscribedOwner || snapshot.sessionEpoch !== subscribedSessionEpoch) {
+        subscriptionStatuses.clear();
+        subscribedChannels.clear();
+        subscribedOwner = snapshot.activePublicKeyHex;
+        subscribedSessionEpoch = snapshot.sessionEpoch;
+      }
+      // The Coordinator's channel.events baseline is the only synchronous
+      // source for a current physical status. Attach before reading the local
+      // cache so a fresh runtime can answer for an already-subscribed channel.
+      try { ensureSubscriptionStatusTopic(); } catch { /* locked/disconnected: idle is the safe fallback */ }
+      const status = subscriptionStatuses.get(channel);
+      return status ? { ...status } : idleChannelStatus(channel);
+    },
+    subscribeSubscriptionStatus: (handler: (status: ChannelSubscriptionStatus) => void): (() => void) => {
+      subscriptionStatusListeners.add(handler);
+      try { ensureSubscriptionStatusTopic(); } catch { /* 尚未解锁时保持监听，随后由 subscriptionSet 建立。 */ }
+      return () => {
+        subscriptionStatusListeners.delete(handler);
+        if (subscriptionStatusListeners.size === 0) stopSubscriptionStatusTopic();
+      };
     },
     subscribe: (handler) => listen(handler, (event) => event.publicMessage ?? null),
     subscribePrivate: (handler) => listen(handler, (event) => event.privateMessage ?? null)
   };
+}
+
+function validateExactChannelForRuntime(channel: string): void {
+  if (
+    typeof channel !== "string" ||
+    channel.length === 0 ||
+    channel === "*" ||
+    new TextEncoder().encode(channel).byteLength > 256 ||
+    [...channel].some((char) => {
+      const code = char.codePointAt(0) ?? 0;
+      return code < 0x20 || code === 0x7f;
+    })
+  ) throw new Error("Channel must be a non-empty exact UTF-8 channel");
+}
+
+function idleChannelStatus(channel: string): ChannelSubscriptionStatus {
+  return { channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 };
 }
 
 /** 页面 trusted Sat 管理 facade；仍然只传语义化参数。 */

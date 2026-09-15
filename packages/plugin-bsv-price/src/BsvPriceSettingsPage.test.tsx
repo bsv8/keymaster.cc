@@ -55,6 +55,8 @@ function makeSnapshot(partial: Partial<BsvPriceServiceSnapshot>): BsvPriceServic
     status: "not_configured",
     snapshot: null,
     lastError: null,
+    subscriptionErrorCode: null,
+    subscriptionErrorMessage: null,
     configured: false,
     ...partial
   };
@@ -86,7 +88,7 @@ function makeFakeService(): BsvPriceService {
       currentHex = next;
       currentSnap = makeSnapshot({
         channelId: next.length > 0 ? `bsvprice.${next}` : "(not configured)",
-        status: next.length > 0 ? "ready" : "not_configured",
+        status: next.length > 0 ? "sat_connecting" : "not_configured",
         configured: next.length > 0
       });
       for (const handler of subs) handler();

@@ -246,6 +246,8 @@ function makeChannel(ready = true, ownerPublicKeyHex = OWNER): ChannelRuntime & 
       return { messageId: "private-message" };
     }),
     subscriptionSet: vi.fn(async (channels: string[]) => ({ channels })),
+    subscriptionStatus: (channel) => ({ channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 }),
+    subscribeSubscriptionStatus: () => () => undefined,
     subscribe: (handler) => {
       publicHandler = handler;
       return () => { publicHandler = undefined; };

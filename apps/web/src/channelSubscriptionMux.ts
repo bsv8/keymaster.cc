@@ -4,6 +4,12 @@
 // subscribe/unsubscribe 的地方。caller 自己只拥有一份 set；物理频道是所有
 // caller 的 union，不能因为某一个 caller 释放就误取消另一个 caller 仍在使用的频道。
 
+import type {
+  ChannelSubscriptionErrorCode,
+  ChannelSubscriptionPhase,
+  ChannelSubscriptionStatus,
+} from "@keymaster/contracts";
+
 export interface ChannelSubscriptionDriver {
   /** 向当前 SSP 连接订阅一个精确频道。 */
   subscribe(channel: string, signal?: AbortSignal): Promise<void>;
@@ -17,6 +23,7 @@ export interface ChannelSubscriptionMuxOptions {
 
 const RETRY_BASE_DELAY_MS = 250;
 const RETRY_MAX_DELAY_MS = 30_000;
+const MAX_ERROR_MESSAGE_LENGTH = 512;
 
 export function validateExactChannel(channel: string): void {
   if (
@@ -56,6 +63,8 @@ export class ChannelSubscriptionMux {
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private retryAttempts = 0;
   private disposed = false;
+  private readonly statuses = new Map<string, ChannelSubscriptionStatus>();
+  private readonly statusListeners = new Set<(status: ChannelSubscriptionStatus) => void>();
   /** 当前物理对账操作的取消控制器；owner 切换时会立即中断网络请求。 */
   private operationController = new AbortController();
 
@@ -71,6 +80,27 @@ export class ChannelSubscriptionMux {
     return [...this.physical].sort();
   }
 
+  /** 返回当前频道物理订阅状态；永不返回内部可变对象。 */
+  subscriptionStatus(channel: string): ChannelSubscriptionStatus {
+    validateExactChannel(channel);
+    const status = this.statuses.get(channel) ?? idleStatus(channel);
+    return { ...status };
+  }
+
+  /** 返回当前已知频道的物理状态快照；永不返回内部可变对象。 */
+  subscriptionStatuses(): readonly ChannelSubscriptionStatus[] {
+    return [...this.statuses.values()]
+      .sort((left, right) => left.channel.localeCompare(right.channel))
+      .map((status) => ({ ...status }));
+  }
+
+  /** 订阅状态变化；单个监听器异常不能打断物理对账。 */
+  subscribeSubscriptionStatus(handler: (status: ChannelSubscriptionStatus) => void): () => void {
+    if (this.disposed) return () => undefined;
+    this.statusListeners.add(handler);
+    return () => this.statusListeners.delete(handler);
+  }
+
   /** 替换 caller 集合；空数组释放 caller。 */
   async set(callerId: string, channels: readonly string[], signal?: AbortSignal): Promise<readonly string[]> {
     if (this.disposed) throw new Error("Channel subscription mux is disposed");
@@ -78,8 +108,22 @@ export class ChannelSubscriptionMux {
       throw new Error("callerId must be non-empty");
     }
     const normalized = normalizeChannels(channels);
+    const previous = this.desiredChannels();
     if (normalized.length === 0) this.callers.delete(callerId);
     else this.callers.set(callerId, new Set(normalized));
+    const desired = this.desiredChannels();
+    for (const channel of desired) {
+      const status = this.statuses.get(channel);
+      // physical 只表示上一次成功调用 driver 的本地记忆。退订失败或
+      // 退订进行中重新出现逻辑需求时，必须重新确认远端订阅，不能因
+      // physical.has() 仍为 true 而把新 caller 永久留在 idle/retrying。
+      if (!this.physical.has(channel) || status?.phase !== "subscribed") {
+        this.setStatus(channel, "subscribing", null, null);
+      }
+    }
+    for (const channel of previous) {
+      if (!desired.includes(channel)) this.setStatus(channel, "idle", null, null);
+    }
     try {
       await this.reconcile(signal);
       this.resetRetry();
@@ -98,7 +142,12 @@ export class ChannelSubscriptionMux {
   /** 释放 caller，不保存任何 session 信息；返回本次物理对账结果。 */
   async release(callerId: string, signal?: AbortSignal): Promise<void> {
     if (this.disposed) return;
+    const previous = this.desiredChannels();
     this.callers.delete(callerId);
+    const desired = this.desiredChannels();
+    for (const channel of previous) {
+      if (!desired.includes(channel)) this.setStatus(channel, "idle", null, null);
+    }
     try {
       await this.reconcile(signal);
       this.resetRetry();
@@ -113,7 +162,9 @@ export class ChannelSubscriptionMux {
   /** 释放所有逻辑 caller；用于锁屏、owner 切换和 Worker teardown。 */
   async clear(signal?: AbortSignal): Promise<void> {
     if (this.disposed) return;
+    const previous = this.desiredChannels();
     this.callers.clear();
+    for (const channel of previous) this.setStatus(channel, "idle", null, null);
     try {
       await this.reconcile(signal);
       this.resetRetry();
@@ -137,6 +188,8 @@ export class ChannelSubscriptionMux {
     this.resetRetry();
     this.callers.clear();
     this.physical.clear();
+    this.statuses.clear();
+    this.statusListeners.clear();
   }
 
   /**
@@ -165,11 +218,24 @@ export class ChannelSubscriptionMux {
           for (const channel of [...desired].sort()) {
             throwIfAborted(linked.signal);
             if (this.disposed) throw new ChannelSubscriptionAbortError();
-            if (this.physical.has(channel)) continue;
-            await this.options.driver.subscribe(channel, linked.signal);
+            // physical 是成功调用 driver 的缓存，不是远端真值。若频道
+            // 在退订失败/未完成后重新进入 desired，状态不是 subscribed，
+            // 必须重新 subscribe 以确认远端状态。
+            if (this.physical.has(channel) && this.statuses.get(channel)?.phase === "subscribed") continue;
+            this.setStatus(channel, "subscribing", null, null);
+            try {
+              await this.options.driver.subscribe(channel, linked.signal);
+            } catch (error) {
+              if (!isAbortError(error) && !linked.signal.aborted && !this.disposed) {
+                const failure = subscriptionFailure(error);
+                this.setStatus(channel, failure.phase, failure.errorCode, failure.errorMessage);
+              }
+              throw error;
+            }
             throwIfAborted(linked.signal);
             if (this.disposed) throw new ChannelSubscriptionAbortError();
             this.physical.add(channel);
+            this.setStatus(channel, "subscribed", null, null);
           }
 
           // 只有最后一个 caller 释放该频道时才执行物理取消。
@@ -177,10 +243,19 @@ export class ChannelSubscriptionMux {
             throwIfAborted(linked.signal);
             if (this.disposed) throw new ChannelSubscriptionAbortError();
             if (desired.has(channel)) continue;
-            await this.options.driver.unsubscribe(channel, linked.signal);
+            try {
+              await this.options.driver.unsubscribe(channel, linked.signal);
+            } catch (error) {
+              if (!isAbortError(error) && !linked.signal.aborted && !this.disposed) {
+                const failure = subscriptionFailure(error);
+                this.setStatus(channel, failure.phase, failure.errorCode, failure.errorMessage);
+              }
+              throw error;
+            }
             throwIfAborted(linked.signal);
             if (this.disposed) throw new ChannelSubscriptionAbortError();
             this.physical.delete(channel);
+            this.setStatus(channel, "idle", null, null);
           }
         } finally {
           linked.dispose();
@@ -218,6 +293,88 @@ export class ChannelSubscriptionMux {
     this.retryTimer = undefined;
   }
 
+  private desiredChannels(): string[] {
+    const desired = new Set<string>();
+    for (const channels of this.callers.values()) {
+      for (const channel of channels) desired.add(channel);
+    }
+    return [...desired].sort();
+  }
+
+  private setStatus(
+    channel: string,
+    phase: ChannelSubscriptionPhase,
+    errorCode: ChannelSubscriptionErrorCode | null,
+    errorMessage: string | null,
+  ): void {
+    if (this.disposed) return;
+    const next: ChannelSubscriptionStatus = {
+      channel,
+      phase,
+      errorCode,
+      errorMessage: errorMessage === null ? null : boundErrorMessage(errorMessage),
+      updatedAtMs: Date.now(),
+    };
+    const previous = this.statuses.get(channel);
+    if (
+      previous &&
+      previous.phase === next.phase &&
+      previous.errorCode === next.errorCode &&
+      previous.errorMessage === next.errorMessage
+    ) return;
+    // idle 只表示该频道当前没有物理订阅，也没有待处理错误；它不是
+    // 需要跨生命周期保留的状态。删除 idle 快照可以避免每个曾经出现
+    // 过的频道永久占用 baseline，并确保状态快照始终反映当前活动集合。
+    if (next.phase === "idle") this.statuses.delete(channel);
+    else this.statuses.set(channel, next);
+    for (const listener of [...this.statusListeners]) {
+      try { listener({ ...next }); } catch { /* 状态观察者不能打断订阅对账。 */ }
+    }
+  }
+
+}
+
+function idleStatus(channel: string): ChannelSubscriptionStatus {
+  return {
+    channel,
+    phase: "idle",
+    errorCode: null,
+    errorMessage: null,
+    updatedAtMs: 0,
+  };
+}
+
+function subscriptionFailure(error: unknown): {
+  phase: ChannelSubscriptionPhase;
+  errorCode: ChannelSubscriptionErrorCode;
+  errorMessage: string;
+} {
+  const rawCode = typeof error === "object" && error !== null && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  const errorCode: ChannelSubscriptionErrorCode = isSubscriptionErrorCode(rawCode)
+    ? rawCode
+    : "unknown_result";
+  const phase: ChannelSubscriptionPhase =
+    errorCode === "connect" || errorCode === "unavailable" || errorCode === "unknown_result"
+      ? "retrying"
+      : "blocked";
+  const rawMessage = error instanceof Error ? error.message : "Subscription failed";
+  return { phase, errorCode, errorMessage: boundErrorMessage(rawMessage) };
+}
+
+function isSubscriptionErrorCode(value: unknown): value is ChannelSubscriptionErrorCode {
+  return value === "config" || value === "connect" || value === "identity" ||
+    value === "protocol" || value === "balance" || value === "unknown_result" ||
+    value === "validation" || value === "unavailable" || value === "conflict";
+}
+
+function boundErrorMessage(value: string): string {
+  const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  if (normalized.length === 0) return "Subscription failed";
+  return normalized.length > MAX_ERROR_MESSAGE_LENGTH
+    ? normalized.slice(0, MAX_ERROR_MESSAGE_LENGTH)
+    : normalized;
 }
 
 /** 物理请求已被 owner/页面生命周期取消；不能按 Supplier 失败重试。 */

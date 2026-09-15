@@ -39,6 +39,41 @@ export interface ChannelSubscriptionSetParams {
 export interface ChannelSubscriptionSetResult {
   /** Coordinator 已接受的当前 caller 逻辑期望集合；不代表 Supplier 物理订阅已完成。 */
   channels: string[];
+  /**
+   * Coordinator/Mux 返回的当前物理状态快照。
+   * 旧 runtime 可以省略该字段；当前 Coordinator 会为每个 accepted
+   * channel 返回一份权威快照，使新 caller 不必等待下一次状态事件。
+   */
+  statuses?: ChannelSubscriptionStatus[];
+}
+
+/** 当前 caller union 在 Coordinator/SSP 侧的物理订阅阶段。 */
+export type ChannelSubscriptionPhase =
+  | "idle"
+  | "subscribing"
+  | "subscribed"
+  | "retrying"
+  | "blocked";
+
+/** 订阅失败的稳定业务错误码；不得把底层异常/堆栈直接暴露给插件。 */
+export type ChannelSubscriptionErrorCode =
+  | "config"
+  | "connect"
+  | "identity"
+  | "protocol"
+  | "balance"
+  | "unknown_result"
+  | "validation"
+  | "unavailable"
+  | "conflict";
+
+/** Channel 物理订阅状态快照。 */
+export interface ChannelSubscriptionStatus {
+  channel: string;
+  phase: ChannelSubscriptionPhase;
+  errorCode: ChannelSubscriptionErrorCode | null;
+  errorMessage: string | null;
+  updatedAtMs: number;
 }
 
 /** Connect App 收到的已验签 Channel 事件数据。 */
@@ -111,6 +146,10 @@ export interface ChannelRuntime {
   }, signal?: AbortSignal): Promise<ChannelPublishResult>;
   /** 替换本 caller 的订阅集合。 */
   subscriptionSet(channels: string[], signal?: AbortSignal): Promise<ChannelSubscriptionSetResult>;
+  /** 查询某个精确频道当前的物理订阅状态。 */
+  subscriptionStatus(channel: string): ChannelSubscriptionStatus;
+  /** 订阅物理订阅状态变化；回调收到的是防御性快照。 */
+  subscribeSubscriptionStatus(handler: (status: ChannelSubscriptionStatus) => void): () => void;
   /** 订阅已验签的入站事件。 */
   subscribe(handler: (event: ChannelMessageReceivedEventData) => void): () => void;
   /** 订阅固定 owner-inbox 已路由的私有协议消息。 */

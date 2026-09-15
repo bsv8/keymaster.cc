@@ -3,7 +3,12 @@
 // 价格订阅是普通 Channel 公共消息：插件只知道精确频道和自己的业务内容，
 // 不接触 Supplier、SSP Wire、签名壳或远端历史。
 
-import type { BorrowedKeyValueStore, ChannelRuntime } from "@keymaster/contracts";
+import type {
+  BorrowedKeyValueStore,
+  ChannelRuntime,
+  ChannelSubscriptionErrorCode,
+  ChannelSubscriptionStatus,
+} from "@keymaster/contracts";
 import { parsePublicKey } from "bsv8-channel-protocol";
 import { bsvPriceChannel } from "bsv8-channel-protocol/bsv-price";
 import { decodePriceContent, type BsvPriceSnapshot } from "./bsvPriceProtocol.js";
@@ -17,10 +22,16 @@ import {
 /** service 对外状态。 */
 export type BsvPriceServiceStatus =
   | "idle"
-  | "ready"
   | "offline"
-  | "no_publisher_key"
-  | "not_configured";
+  | "not_configured"
+  | "sat_not_configured"
+  | "sat_connecting"
+  | "sat_balance_required"
+  | "sat_identity_error"
+  | "sat_subscription_error"
+  | "subscription_unknown"
+  | "waiting_snapshot"
+  | "receiving";
 
 /** service 对外快照。 */
 export interface BsvPriceServiceSnapshot {
@@ -34,6 +45,10 @@ export interface BsvPriceServiceSnapshot {
   snapshot: BsvPriceSnapshot | null;
   /** 最近一次业务内容解析错误。 */
   lastError: string | null;
+  /** 最近一次物理订阅业务错误码。 */
+  subscriptionErrorCode: ChannelSubscriptionErrorCode | null;
+  /** 最近一次物理订阅业务错误消息（已由 Channel runtime 限长）。 */
+  subscriptionErrorMessage: string | null;
   /** 当前是否有有效 publisher 配置。 */
   configured: boolean;
 }
@@ -80,6 +95,7 @@ export function createBsvPriceService(
   const isExplicitMemoryStore = "settingsStore" in options;
   const listeners = new Set<() => void>();
   let offMessage: (() => void) | null = null;
+  let offSubscriptionStatus: (() => void) | null = null;
   let subscriptionGeneration = 0;
   let bound = false;
   let currentConfig = store.load();
@@ -94,9 +110,11 @@ export function createBsvPriceService(
       ? bsvPriceChannel(parsePublicKey(currentConfig.pricePublisherPublicKeyHex))
       : NOT_CONFIGURED_LABEL,
     coreState: channel.isReady() ? "ready" : "offline",
-    status: deriveStatus(channel, currentConfig.pricePublisherPublicKeyHex),
+    status: deriveInitialStatus(channel, currentConfig.pricePublisherPublicKeyHex),
     snapshot: null,
     lastError: null,
+    subscriptionErrorCode: null,
+    subscriptionErrorMessage: null,
     configured: currentConfig.pricePublisherPublicKeyHex.length > 0,
     configHex: currentConfig.pricePublisherPublicKeyHex
   };
@@ -109,13 +127,25 @@ export function createBsvPriceService(
 
   function updateRuntimeState(): void {
     state.coreState = channel.isReady() ? "ready" : "offline";
-    state.status = deriveStatus(channel, state.configured ? state.configHex : "");
+    if (!state.configured) state.status = "not_configured";
+    else if (!channel.isReady()) state.status = "offline";
+    else if (state.status === "offline") state.status = "sat_connecting";
   }
 
   function unbind(): void {
     offMessage?.();
     offMessage = null;
+    offSubscriptionStatus?.();
+    offSubscriptionStatus = null;
     subscriptionGeneration++;
+  }
+
+  function applySubscriptionStatus(status: ChannelSubscriptionStatus): void {
+    if (!state.configured || status.channel !== state.channelId) return;
+    state.subscriptionErrorCode = status.errorCode;
+    state.subscriptionErrorMessage = status.errorMessage;
+    state.status = deriveServiceStatus(channel, status, state.snapshot !== null);
+    emit();
   }
 
   function bind(): void {
@@ -126,19 +156,35 @@ export function createBsvPriceService(
       state.status = "not_configured";
       state.snapshot = null;
       state.lastError = null;
+      state.subscriptionErrorCode = null;
+      state.subscriptionErrorMessage = null;
+      void channel.subscriptionSet([]).catch(() => undefined);
       emit();
       return;
     }
     state.channelId = bsvPriceChannel(parsePublicKey(state.configHex));
     state.snapshot = null;
     state.lastError = null;
+    state.subscriptionErrorCode = null;
+    state.subscriptionErrorMessage = null;
     updateRuntimeState();
     const generation = subscriptionGeneration;
+    offSubscriptionStatus = channel.subscribeSubscriptionStatus((status) => {
+      if (generation !== subscriptionGeneration || status.channel !== state.channelId) return;
+      applySubscriptionStatus(status);
+    });
+    try {
+      applySubscriptionStatus(channel.subscriptionStatus(state.channelId));
+    } catch {
+      if (channel.isReady()) state.status = "sat_connecting";
+    }
     // 每个插件 caller 只有一套虚拟订阅；实际 SSP 订阅由 Coordinator mux 合并。
     void channel.subscriptionSet([state.channelId]).catch((error: unknown) => {
       if (generation !== subscriptionGeneration) return;
-      state.status = "offline";
-      state.lastError = error instanceof Error ? error.message : String(error);
+      const code = errorCodeFrom(error);
+      state.subscriptionErrorCode = code;
+      state.subscriptionErrorMessage = boundedMessage(error);
+      state.status = code === "unavailable" || code === "connect" ? "offline" : "sat_subscription_error";
       emit();
     });
     offMessage = channel.subscribe((message) => {
@@ -155,7 +201,7 @@ export function createBsvPriceService(
       if (state.snapshot && decoded.snapshotAtMs <= state.snapshot.snapshotAtMs) return;
       state.snapshot = decoded;
       state.lastError = null;
-      state.status = "ready";
+      state.status = "receiving";
       emit();
     });
     emit();
@@ -200,6 +246,8 @@ export function createBsvPriceService(
       status: state.status,
       snapshot: cloneSnapshot(state.snapshot),
       lastError: state.lastError,
+      subscriptionErrorCode: state.subscriptionErrorCode,
+      subscriptionErrorMessage: state.subscriptionErrorMessage,
       configured: state.configured
     }),
     subscribe(handler) {
@@ -234,13 +282,55 @@ interface InternalState {
   status: BsvPriceServiceStatus;
   snapshot: BsvPriceSnapshot | null;
   lastError: string | null;
+  subscriptionErrorCode: ChannelSubscriptionErrorCode | null;
+  subscriptionErrorMessage: string | null;
   configured: boolean;
   configHex: string;
 }
 
-function deriveStatus(channel: ChannelRuntime, configHex: string): BsvPriceServiceStatus {
+function deriveInitialStatus(channel: ChannelRuntime, configHex: string): BsvPriceServiceStatus {
   if (!configHex) return "not_configured";
-  return channel.isReady() ? "ready" : "offline";
+  return channel.isReady() ? "sat_connecting" : "offline";
+}
+
+function deriveServiceStatus(
+  channel: ChannelRuntime,
+  status: ChannelSubscriptionStatus,
+  hasSnapshot: boolean,
+): BsvPriceServiceStatus {
+  if (!channel.isReady()) return "offline";
+  if (status.phase === "blocked") {
+    if (status.errorCode === "config") return "sat_not_configured";
+    if (status.errorCode === "balance") return "sat_balance_required";
+    if (status.errorCode === "identity") return "sat_identity_error";
+    return "sat_subscription_error";
+  }
+  if (status.phase === "retrying") {
+    if (status.errorCode === "unknown_result") return "subscription_unknown";
+    return "sat_connecting";
+  }
+  if (status.phase === "subscribing") return "sat_connecting";
+  if (status.phase === "subscribed") return hasSnapshot ? "receiving" : "waiting_snapshot";
+  return "sat_connecting";
+}
+
+function isSubscriptionErrorCode(value: unknown): value is ChannelSubscriptionErrorCode {
+  return value === "config" || value === "connect" || value === "identity" ||
+    value === "protocol" || value === "balance" || value === "unknown_result" ||
+    value === "validation" || value === "unavailable" || value === "conflict";
+}
+
+function errorCodeFrom(error: unknown): ChannelSubscriptionErrorCode {
+  const value = typeof error === "object" && error !== null && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  return isSubscriptionErrorCode(value) ? value : "unavailable";
+}
+
+function boundedMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "Subscription unavailable";
+  const normalized = message.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  return normalized.length > 512 ? normalized.slice(0, 512) : normalized || "Subscription unavailable";
 }
 
 function cloneSnapshot(input: BsvPriceSnapshot | null): BsvPriceSnapshot | null {

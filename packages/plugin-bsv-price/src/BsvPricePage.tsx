@@ -67,19 +67,46 @@ function BsvPricePageInner({
         Object.entries(pairs).map(([pair, price]) => ({ market, pair, price }))
       )
     : [];
+  const emptyMessage = (() => {
+    switch (snap.status) {
+      case "waiting_snapshot": return i18n.t("bsv-price.page.empty.waitingSnapshot");
+      case "receiving": return i18n.t("bsv-price.page.empty.receiving");
+      case "not_configured": return i18n.t("bsv-price.page.empty.notConfigured");
+      case "offline": return i18n.t("bsv-price.page.empty.offline");
+      case "sat_not_configured": return i18n.t("bsv-price.page.empty.satNotConfigured");
+      case "sat_connecting": return i18n.t("bsv-price.page.empty.satConnecting");
+      case "sat_balance_required": return i18n.t("bsv-price.page.empty.satBalanceRequired");
+      case "sat_identity_error": return i18n.t("bsv-price.page.empty.satIdentityError");
+      case "sat_subscription_error": return i18n.t("bsv-price.page.empty.satSubscriptionError");
+      case "subscription_unknown": return i18n.t("bsv-price.page.empty.subscriptionUnknown");
+      default: return i18n.t("bsv-price.page.empty.idle");
+    }
+  })();
 
   const connectionLabel = (() => {
     switch (snap.status) {
-      case "ready":
-        return i18n.t("bsv-price.page.connection.ready");
       case "offline":
         return i18n.t("bsv-price.page.connection.offline");
       case "idle":
         return i18n.t("bsv-price.page.connection.idle");
-      case "no_publisher_key":
-        return i18n.t("bsv-price.page.connection.noPublisherKey");
       case "not_configured":
         return i18n.t("bsv-price.page.connection.notConfigured");
+      case "sat_not_configured":
+        return i18n.t("bsv-price.page.connection.satNotConfigured");
+      case "sat_connecting":
+        return i18n.t("bsv-price.page.connection.satConnecting");
+      case "sat_balance_required":
+        return i18n.t("bsv-price.page.connection.satBalanceRequired");
+      case "sat_identity_error":
+        return i18n.t("bsv-price.page.connection.satIdentityError");
+      case "sat_subscription_error":
+        return i18n.t("bsv-price.page.connection.satSubscriptionError");
+      case "subscription_unknown":
+        return i18n.t("bsv-price.page.connection.subscriptionUnknown");
+      case "waiting_snapshot":
+        return i18n.t("bsv-price.page.connection.waitingSnapshot");
+      case "receiving":
+        return i18n.t("bsv-price.page.connection.receiving");
       default:
         return snap.status;
     }
@@ -116,7 +143,7 @@ function BsvPricePageInner({
         </h2>
         {quotes.length === 0 ? (
           <p className="km-bsv-price-page__empty">
-            {i18n.t("bsv-price.page.empty")}
+            {emptyMessage}
           </p>
         ) : (
           <table className="km-bsv-price-page__table">
@@ -145,6 +172,14 @@ function BsvPricePageInner({
       {snap.lastError !== null ? (
         <p className="km-bsv-price-page__error">
           {i18n.t("bsv-price.page.error.lastParse")} {snap.lastError}
+        </p>
+      ) : null}
+      {snap.subscriptionErrorCode !== null ? (
+        <p className="km-bsv-price-page__error" data-bsv-price-subscription-error>
+          {i18n.t("bsv-price.page.error.subscription")} [{snap.subscriptionErrorCode}]
+          {snap.subscriptionErrorMessage ? `: ${snap.subscriptionErrorMessage}` : ""}
+          {snap.status === "sat_balance_required" ? ` ${i18n.t("bsv-price.page.error.balanceHint")}` : ""}
+          {snap.status === "subscription_unknown" ? ` ${i18n.t("bsv-price.page.error.unknownHint")}` : ""}
         </p>
       ) : null}
     </section>

@@ -21,7 +21,8 @@ vi.mock("@keymaster/runtime", async () => {
       t: (key: string) => ({
         "bsv-price.page.title": "BSV 价格",
         "bsv-price.page.connection.label": "连接状态",
-        "bsv-price.page.connection.ready": "正在订阅",
+        "bsv-price.page.connection.receiving": "正在接收",
+        "bsv-price.page.empty.receiving": "当前快照没有报价",
         "bsv-price.page.channel.label": "订阅频道",
         "bsv-price.page.quotes.label": "报价",
         "bsv-price.page.empty": "等待报价",
@@ -46,13 +47,15 @@ function makeSnapshot(overrides: Partial<BsvPriceServiceSnapshot> = {}): BsvPric
   return {
     channelId: `bsvprice.${PUBLISHER}`,
     coreState: "ready",
-    status: "ready",
+    status: "receiving",
     snapshot: {
       protocol: "bsv8.bsv-price.v1",
       snapshotAtMs: 1_000,
       markets: {}
     },
     lastError: null,
+    subscriptionErrorCode: null,
+    subscriptionErrorMessage: null,
     configured: true,
     ...overrides
   };
@@ -127,6 +130,7 @@ describe("BsvPricePage", () => {
     expect(screen.getByRole("table")).toBeTruthy();
 
     fake.setSnapshot(makeSnapshot({
+      status: "receiving",
       snapshot: {
         protocol: "bsv8.bsv-price.v1",
         snapshotAtMs: 1_001,
@@ -136,7 +140,7 @@ describe("BsvPricePage", () => {
 
     await waitFor(() => {
       expect(screen.queryByRole("table")).toBeNull();
-      expect(screen.getByText("等待报价")).toBeTruthy();
+      expect(screen.getByText("当前快照没有报价")).toBeTruthy();
     });
     expect(screen.queryByText("45.1200")).toBeNull();
   });

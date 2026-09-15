@@ -47,6 +47,33 @@ function BsvPriceHomeWidgetContent({ service }: { service: BsvPriceService }): R
         Object.entries(pairs).map(([pair, price]) => ({ market, pair, price }))
       )
     : [];
+  const emptyMessage = (() => {
+    switch (snapshot.status) {
+      case "waiting_snapshot": return t("bsv-price.home.empty.waitingSnapshot", { defaultValue: "等待 BSV 价格快照" });
+      case "receiving": return t("bsv-price.home.empty.receiving", { defaultValue: "当前快照没有报价" });
+      case "not_configured": return t("bsv-price.home.empty.notConfigured", { defaultValue: "请先配置价格发布者公钥" });
+      case "offline": return t("bsv-price.home.empty.offline", { defaultValue: "钱包或订阅频道当前不可用" });
+      case "sat_not_configured": return t("bsv-price.home.empty.satNotConfigured", { defaultValue: "SatSubscription 尚未配置" });
+      case "sat_connecting": return t("bsv-price.home.empty.satConnecting", { defaultValue: "正在连接 SatSubscription" });
+      case "sat_balance_required": return t("bsv-price.home.empty.satBalanceRequired", { defaultValue: "请先为 SatSubscription 充值" });
+      case "sat_identity_error": return t("bsv-price.home.empty.satIdentityError", { defaultValue: "请修复 SatSubscription 身份配置" });
+      case "sat_subscription_error": return t("bsv-price.home.empty.satSubscriptionError", { defaultValue: "SatSubscription 订阅失败" });
+      case "subscription_unknown": return t("bsv-price.home.empty.subscriptionUnknown", { defaultValue: "订阅结果未知，等待系统对账" });
+      default: return t("bsv-price.home.empty.idle", { defaultValue: "价格订阅处于空闲状态" });
+    }
+  })();
+  const subscriptionError = snapshot.subscriptionErrorCode !== null ? (
+    <p className="home-widget__status bsv-price-home-widget__error" data-bsv-price-home-subscription-error>
+      {t("bsv-price.home.error.subscription", { defaultValue: "Subscription error" })} [{snapshot.subscriptionErrorCode}]
+      {snapshot.subscriptionErrorMessage ? `: ${snapshot.subscriptionErrorMessage}` : ""}
+      {snapshot.status === "sat_balance_required"
+        ? ` ${t("bsv-price.home.error.balanceHint", { defaultValue: "Top up SatSubscription before retrying." })}`
+        : ""}
+      {snapshot.status === "subscription_unknown"
+        ? ` ${t("bsv-price.home.error.unknownHint", { defaultValue: "Wait for reconciliation before retrying." })}`
+        : ""}
+    </p>
+  ) : null;
 
   return (
     <div className="home-widget bsv-price-home-widget">
@@ -67,9 +94,10 @@ function BsvPriceHomeWidgetContent({ service }: { service: BsvPriceService }): R
         </ul>
       ) : (
         <p className="home-widget__status">
-          {t("bsv-price.home.empty", { defaultValue: "等待 BSV 价格快照" })}
+          {emptyMessage}
         </p>
       )}
+      {subscriptionError}
     </div>
   );
 }

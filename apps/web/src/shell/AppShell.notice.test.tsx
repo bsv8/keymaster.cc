@@ -135,6 +135,8 @@ function makeWebrtcNoticeFixture(noticeRegistry: NoticeRegistry) {
     },
     publishPrivate: async () => ({ messageId: "private-message" }),
     subscriptionSet: async (channels) => ({ channels }),
+    subscriptionStatus: (channel) => ({ channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 }),
+    subscribeSubscriptionStatus: () => () => undefined,
     subscribe: () => () => undefined,
     subscribePrivate: (handler) => {
       privateHandler = handler;

@@ -45,7 +45,7 @@ import type {
   WindowP2pExecutorTransferResult,
   WindowP2pIdentitySignResult,
 } from "./sessionCoordinator.js";
-import type { ChannelOperationCaller, ChannelPublishResult, ChannelSubscriptionSetResult, JSONValue } from "./channel.js";
+import type { ChannelOperationCaller, ChannelPublishResult, ChannelSubscriptionSetResult, ChannelSubscriptionStatus, JSONValue } from "./channel.js";
 import type { I18nText, I18nValues } from "./i18n.js";
 import type { ContactPresenceMap } from "./contacts.js";
 import type { P2pkhBroadcastResult, P2pkhProviderRegistrySnapshot } from "./bsvP2pkhProviders.js";
@@ -2533,7 +2533,17 @@ function parseChannelPublishResult(value: unknown, field: string): ChannelPublis
 
 function parseChannelSubscriptionSetResult(value: unknown, field: string): ChannelSubscriptionSetResult {
   const result = expectRecord(value, field);
-  return { channels: stringList(result.channels, field + ".channels", 256, 2_048) };
+  const channels = stringList(result.channels, field + ".channels", 256, 2_048);
+  if (result.statuses === undefined) return { channels };
+  if (!Array.isArray(result.statuses) || result.statuses.length > 2_048) {
+    throw new TypeError(`Coordinator ${field}.statuses is invalid`);
+  }
+  return {
+    channels,
+    statuses: result.statuses.map((status, index) =>
+      parseChannelSubscriptionStatus(status, `${field}.statuses[${index}]`)
+    ),
+  };
 }
 
 function parseChannelOperationResultFor(operation: CoordinatorChannelOperation, value: unknown, field: string): unknown {
@@ -3040,7 +3050,49 @@ function parsePrivateChannelMessage(value: unknown, field: string): { channel: s
   };
 }
 
+function parseChannelSubscriptionStatus(value: unknown, field: string): ChannelSubscriptionStatus {
+  const status = expectRecord(value, field);
+  const errorCode = status.errorCode === null
+    ? null
+    : enumValue(status.errorCode, ["config", "connect", "identity", "protocol", "balance", "unknown_result", "validation", "unavailable", "conflict"] as const, `${field}.errorCode`);
+  return {
+    channel: text(status.channel, `${field}.channel`, 256),
+    phase: enumValue(status.phase, ["idle", "subscribing", "subscribed", "retrying", "blocked"] as const, `${field}.phase`),
+    errorCode,
+    errorMessage: status.errorMessage === null ? null : text(status.errorMessage, `${field}.errorMessage`, 512),
+    updatedAtMs: boundedNumber(status.updatedAtMs, `${field}.updatedAtMs`),
+  };
+}
+
+function parseChannelSubscriptionStatuses(value: unknown, field: string): ChannelSubscriptionStatus[] {
+  if (!Array.isArray(value) || value.length > 2_048) {
+    throw new TypeError(`Coordinator ${field} is invalid`);
+  }
+  return value.map((status, index) => parseChannelSubscriptionStatus(status, `${field}[${index}]`));
+}
+
 function parseChannelStateEvent(value: unknown): CoordinatorChannelStateEvent {
+  const recordValue = expectRecord(value, "Coordinator channel event");
+  if (recordValue.topic !== "channel.events") throw new TypeError("Coordinator channel event topic is invalid");
+  if (recordValue.type === "channel.subscription.changed") {
+    const subscriptionStatus = recordValue.subscriptionStatus === undefined
+      ? undefined
+      : parseChannelSubscriptionStatus(recordValue.subscriptionStatus, "event.subscriptionStatus");
+    const subscriptionStatuses = recordValue.subscriptionStatuses === undefined
+      ? undefined
+      : parseChannelSubscriptionStatuses(recordValue.subscriptionStatuses, "event.subscriptionStatuses");
+    if (subscriptionStatus === undefined && subscriptionStatuses === undefined) {
+      throw new TypeError("Coordinator channel event has no subscription status");
+    }
+    return {
+      topic: "channel.events",
+      type: "channel.subscription.changed",
+      channelRevision: boundedNumber(recordValue.channelRevision, "event.channelRevision"),
+      sessionEpoch: text(recordValue.sessionEpoch, "event.sessionEpoch", 256),
+      ...(subscriptionStatus === undefined ? {} : { subscriptionStatus }),
+      ...(subscriptionStatuses === undefined ? {} : { subscriptionStatuses }),
+    };
+  }
   const event = topicEnvelope(value, "channel.events", "channel.message.received");
   const publicMessage = event.publicMessage === undefined ? undefined : parseChannelMessage(event.publicMessage, "event.publicMessage");
   const privateMessage = event.privateMessage === undefined ? undefined : parsePrivateChannelMessage(event.privateMessage, "event.privateMessage");

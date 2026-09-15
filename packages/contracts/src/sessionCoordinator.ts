@@ -11,7 +11,7 @@
 
 import type { AssetDataInvalidationEvent } from "./assets.js";
 import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
-import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller } from "./channel.js";
+import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller, ChannelSubscriptionStatus } from "./channel.js";
 import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundTaskProgress } from "./background.js";
@@ -468,10 +468,13 @@ export interface PluginIntentStateEvent {
 /** Coordinator 已验签并完成固定 inbox 分派的 Channel 事件。 */
 export interface CoordinatorChannelStateEvent {
   topic: "channel.events";
-  type: "channel.message.received";
+  type: "channel.message.received" | "channel.subscription.changed";
   /** 事件序号，用于跨 Tab 去重和乱序防护。 */
   channelRevision: number;
   sessionEpoch: SessionEpoch;
+  subscriptionStatus?: ChannelSubscriptionStatus;
+  /** 新订阅者的原子物理状态快照；live 事件通常只携带 subscriptionStatus。 */
+  subscriptionStatuses?: ChannelSubscriptionStatus[];
   publicMessage?: {
     channel: string;
     publisherPublicKeyHex: string;

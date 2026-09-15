@@ -16,6 +16,7 @@ import type {
   ChannelPublishParams,
   ChannelPublishResult,
   ChannelRuntime,
+  ChannelSubscriptionStatus,
   ChannelSubscriptionSetResult,
 } from "@keymaster/contracts";
 import type { LifecycleScope } from "webloom-framework";
@@ -24,6 +25,11 @@ import { LifecycleScopeRevokedError } from "webloom-framework";
 interface LinkedSignal {
   signal: AbortSignal;
   dispose(): void;
+}
+
+interface SubscriptionLease {
+  generation: number;
+  releasePromise?: Promise<void>;
 }
 
 function linkSignals(scopeSignal: AbortSignal, requestSignal?: AbortSignal): LinkedSignal {
@@ -81,23 +87,45 @@ function registerCallback(
 
 /** 创建绑定一个插件实例的 Channel 视图；不改变 Coordinator 的物理连接。 */
 export function createScopedChannelRuntime(base: ChannelRuntime, scope: LifecycleScope): ChannelRuntime {
-  let subscriptionUsed = false;
-  let subscriptionRelease: Promise<void> | undefined;
+  let subscriptionGeneration = 0;
+  let subscriptionLease: SubscriptionLease | undefined;
 
-  const releaseSubscription = (): Promise<void> => {
-    if (!subscriptionUsed) return Promise.resolve();
-    if (subscriptionRelease) return subscriptionRelease;
+  const releaseSubscription = (lease = subscriptionLease): Promise<void> => {
+    if (!lease) return Promise.resolve();
+    if (lease.releasePromise) return lease.releasePromise;
     // 直接调用而不是放进 Promise.then：scope.revoke() 后页面可能马上关闭
     // MessagePort，必须在同一个同步调用栈内把“释放 caller”消息 post 出去。
+    let releasePromise: Promise<void>;
     try {
-      subscriptionRelease = Promise.resolve(base.subscriptionSet([])).then(() => undefined);
+      releasePromise = Promise.resolve(base.subscriptionSet([])).then(() => {
+        // A newer non-empty subscription may have started while this release
+        // was in flight. Only retire the lease that actually completed.
+        if (subscriptionLease?.generation === lease.generation) subscriptionLease = undefined;
+      });
     } catch (error) {
-      subscriptionRelease = Promise.reject(error);
+      releasePromise = Promise.reject(error);
     }
+    const retryableRelease = releasePromise.catch((error) => {
+      // Do not permanently cache a rejected cleanup. A later teardown or
+      // explicit empty set can retry this same lease.
+      if (lease.releasePromise === retryableRelease) lease.releasePromise = undefined;
+      throw error;
+    });
+    lease.releasePromise = retryableRelease;
     // revoke() 不等待异步结果；接住迟到失败，让 scope.dispose() 或调用方
     // 继续观察同一个 Promise，而不是制造 unhandled rejection。
-    subscriptionRelease.catch(() => undefined);
-    return subscriptionRelease;
+    retryableRelease.catch(() => undefined);
+    return retryableRelease;
+  };
+  const releaseSubscriptionForDispose = async (): Promise<void> => {
+    try {
+      await releaseSubscription();
+    } catch {
+      // onRevoke and onDispose can observe the same failed attempt. Start a
+      // fresh attempt here so a transient Coordinator/transport failure does
+      // not leave the scope's caller permanently registered.
+      await releaseSubscription();
+    }
   };
 
   // revoke 是同步权限边界，必须在 scope.dispose() 之前释放逻辑 caller。
@@ -106,7 +134,7 @@ export function createScopedChannelRuntime(base: ChannelRuntime, scope: Lifecycl
   });
   scope.onDispose(async () => {
     removeScopeRevoke();
-    await releaseSubscription();
+    await releaseSubscriptionForDispose();
   }, `channel-runtime:${scope.identity.instanceId}`);
 
   const call = async <T>(
@@ -154,8 +182,28 @@ export function createScopedChannelRuntime(base: ChannelRuntime, scope: Lifecycl
         await releaseSubscription();
         return { channels: [] };
       }
-      subscriptionUsed = true;
+      // A non-empty set starts a fresh logical lease. This is important after
+      // an earlier set([]): the eventual scope revoke must release this new
+      // caller generation as well.
+      subscriptionLease = { generation: ++subscriptionGeneration };
       return call(signal, (linkedSignal) => base.subscriptionSet(channels, linkedSignal));
+    },
+
+    subscriptionStatus: (channel: string): ChannelSubscriptionStatus => {
+      scope.assertActive();
+      return { ...base.subscriptionStatus(channel) };
+    },
+
+    subscribeSubscriptionStatus: (handler: (status: ChannelSubscriptionStatus) => void): (() => void) => {
+      scope.assertActive();
+      let active = true;
+      const unsubscribe = base.subscribeSubscriptionStatus((status) => {
+        if (!active || scope.state !== "active") return;
+        handler({ ...status });
+      });
+      return registerCallback(scope, () => {
+        try { unsubscribe(); } finally { active = false; }
+      }, `channel-subscription-status:${scope.identity.instanceId}`);
     },
 
     subscribe: (handler: (event: ChannelMessageReceivedEventData) => void): (() => void) => {

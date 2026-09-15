@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import type { BorrowedKeyValueStore, ChannelMessageReceivedEventData, ChannelRuntime } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, ChannelMessageReceivedEventData, ChannelRuntime, ChannelSubscriptionStatus } from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { parsePublicKey } from "bsv8-channel-protocol";
 import { BSV_PRICE_PROTOCOL, bsvPriceChannel } from "bsv8-channel-protocol/bsv-price";
@@ -12,12 +12,33 @@ import { createMemoryBsvPriceSettingsStore } from "./bsvPriceSettings.js";
 class FakeChannel implements ChannelRuntime {
   readonly subscriptionCalls: string[][] = [];
   private readonly handlers = new Set<(event: ChannelMessageReceivedEventData) => void>();
+  private readonly statusHandlers = new Set<(status: ChannelSubscriptionStatus) => void>();
+  private readonly statuses = new Map<string, ChannelSubscriptionStatus>();
   isReady(): boolean { return true; }
   async publish(): Promise<{ messageId: string }> { return { messageId: "unused" }; }
   async publishPrivate(): Promise<{ messageId: string }> { return { messageId: "unused" }; }
   async subscriptionSet(channels: string[]): Promise<{ channels: string[] }> {
     this.subscriptionCalls.push([...channels]);
+    const active = new Set(channels);
+    for (const channel of new Set([...this.statuses.keys(), ...channels])) {
+      const status: ChannelSubscriptionStatus = {
+        channel,
+        phase: active.has(channel) ? "subscribed" : "idle",
+        errorCode: null,
+        errorMessage: null,
+        updatedAtMs: Date.now(),
+      };
+      this.statuses.set(channel, status);
+      for (const handler of this.statusHandlers) handler({ ...status });
+    }
     return { channels: [...channels] };
+  }
+  subscriptionStatus(channel: string): ChannelSubscriptionStatus {
+    return this.statuses.get(channel) ?? { channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 };
+  }
+  subscribeSubscriptionStatus(handler: (status: ChannelSubscriptionStatus) => void): () => void {
+    this.statusHandlers.add(handler);
+    return () => this.statusHandlers.delete(handler);
   }
   subscribe(handler: (event: ChannelMessageReceivedEventData) => void): () => void {
     this.handlers.add(handler);
@@ -26,6 +47,10 @@ class FakeChannel implements ChannelRuntime {
   subscribePrivate(): () => void { return () => undefined; }
   emit(event: ChannelMessageReceivedEventData): void {
     for (const handler of this.handlers) handler(event);
+  }
+  emitStatus(status: ChannelSubscriptionStatus): void {
+    this.statuses.set(status.channel, { ...status });
+    for (const handler of this.statusHandlers) handler({ ...status });
   }
 }
 
@@ -60,6 +85,23 @@ describe("createBsvPriceService", () => {
     expect(service.configured()).toBe(true);
     expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_A);
     expect(channel.subscriptionCalls).toEqual([[bsvPriceChannel(parsePublicKey(PUBLISHER_A))]]);
+    expect(service.snapshot().status).toBe("waiting_snapshot");
+    service.dispose();
+  });
+
+  it("maps SatSubscription balance/config errors instead of reporting receiving", async () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: createMemoryBsvPriceSettingsStore()
+    });
+    await service.ready();
+    const channelId = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
+
+    channel.emitStatus({ channel: channelId, phase: "blocked", errorCode: "balance", errorMessage: "No fee balance", updatedAtMs: Date.now() });
+    expect(service.snapshot()).toMatchObject({ status: "sat_balance_required", subscriptionErrorCode: "balance", subscriptionErrorMessage: "No fee balance" });
+    channel.emitStatus({ channel: channelId, phase: "blocked", errorCode: "config", errorMessage: "No receive Supplier", updatedAtMs: Date.now() });
+    expect(service.snapshot()).toMatchObject({ status: "sat_not_configured", subscriptionErrorCode: "config" });
     service.dispose();
   });
 
@@ -84,6 +126,7 @@ describe("createBsvPriceService", () => {
     const newChannel = bsvPriceChannel(parsePublicKey(PUBLISHER_B));
     channel.emit(makeMessage(oldChannel, "100.01"));
     expect(service.snapshot().snapshot?.markets.gate?.bsvusdt).toBe("100.01");
+    expect(service.snapshot().status).toBe("receiving");
 
     await service.savePublisherPublicKeyHex(PUBLISHER_B);
     expect(channel.subscriptionCalls).toEqual([[oldChannel], [newChannel]]);
@@ -92,6 +135,7 @@ describe("createBsvPriceService", () => {
     expect(service.snapshot().snapshot).toBeNull();
     channel.emit({ ...makeMessage(newChannel, "101.23"), publisherPublicKeyHex: PUBLISHER_B });
     expect(service.snapshot().snapshot?.markets.gate?.bsvusdt).toBe("101.23");
+    expect(service.snapshot().status).toBe("receiving");
     service.dispose();
   });
 

@@ -2149,6 +2149,41 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && Boolean(event.event);
     }
     if (event.topic === "channel.events") {
+      if (event.type === "channel.subscription.changed") {
+        const status = event.subscriptionStatus as {
+          channel?: unknown;
+          phase?: unknown;
+          errorCode?: unknown;
+          errorMessage?: unknown;
+          updatedAtMs?: unknown;
+        } | undefined;
+        const statuses = event.subscriptionStatuses as Array<{
+          channel?: unknown;
+          phase?: unknown;
+          errorCode?: unknown;
+          errorMessage?: unknown;
+          updatedAtMs?: unknown;
+        }> | undefined;
+        const validStatus = status !== undefined
+          && typeof status.channel === "string"
+          && ["idle", "subscribing", "subscribed", "retrying", "blocked"].includes(String(status.phase))
+          && (status.errorCode === null || ["config", "connect", "identity", "protocol", "balance", "unknown_result", "validation", "unavailable", "conflict"].includes(String(status.errorCode)))
+          && (status.errorMessage === null || (typeof status.errorMessage === "string" && status.errorMessage.length <= 512))
+          && typeof status.updatedAtMs === "number"
+          && Number.isFinite(status.updatedAtMs);
+        const validStatuses = Array.isArray(statuses)
+          && statuses.length <= 2_048
+          && statuses.every((snapshot) => snapshot !== null
+            && typeof snapshot.channel === "string"
+            && ["idle", "subscribing", "subscribed", "retrying", "blocked"].includes(String(snapshot.phase))
+            && (snapshot.errorCode === null || ["config", "connect", "identity", "protocol", "balance", "unknown_result", "validation", "unavailable", "conflict"].includes(String(snapshot.errorCode)))
+            && (snapshot.errorMessage === null || (typeof snapshot.errorMessage === "string" && snapshot.errorMessage.length <= 512))
+            && typeof snapshot.updatedAtMs === "number"
+            && Number.isFinite(snapshot.updatedAtMs));
+        return Number.isSafeInteger(event.channelRevision)
+          && event.channelRevision >= 0
+          && (validStatus || validStatuses);
+      }
       return event.type === "channel.message.received"
         && Number.isSafeInteger(event.channelRevision)
         && event.channelRevision >= 0

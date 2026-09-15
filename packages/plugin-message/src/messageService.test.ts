@@ -57,6 +57,8 @@ function channel(input: {
     publish: async () => ({ messageId: `public-${++sequence}` }),
     publishPrivate,
     subscriptionSet: async (channels) => ({ channels }),
+    subscriptionStatus: (channel) => ({ channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 }),
+    subscribeSubscriptionStatus: () => () => undefined,
     subscribe: () => () => undefined,
     subscribePrivate: (handler) => {
       privateHandler = handler;

@@ -35,6 +35,8 @@ test(GATE_ID + "：撤权先于 drain 并隔离迟到资源结果", async () => 
       calls.push(channels.length === 0 ? "unsubscribe" : "subscribe");
       return { channels };
     },
+    subscriptionStatus: (channel) => ({ channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 }),
+    subscribeSubscriptionStatus: () => () => undefined,
     subscribe: (handler) => {
       subscriptions.add(handler);
       return () => subscriptions.delete(handler);

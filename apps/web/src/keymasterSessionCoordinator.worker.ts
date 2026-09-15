@@ -53,6 +53,7 @@ import type {
   CoordinatorSatStateEvent,
   CoordinatorChannelOperation,
   CoordinatorChannelStateEvent,
+  ChannelSubscriptionStatus,
   CoordinatorContactsPresenceEvent,
   CoordinatorWorkerUnitStateEvent,
   CoordinatorWorkerUnitSnapshot,
@@ -5141,6 +5142,11 @@ let lastSatState: CoordinatorSatStateEvent | undefined;
 /** Coordinator 内唯一的逻辑 caller -> SSP 物理订阅复用器。 */
 let channelSubscriptionMux: ChannelSubscriptionMux | undefined;
 let channelMuxOwnerPublicKeyHex: string | undefined;
+let channelSubscriptionMuxStatusOff: (() => void) | undefined;
+const channelSubscriptionStatusSubscribers = new Set<{
+  sessionEpoch: string;
+  handler: (status: ChannelSubscriptionStatus) => void;
+}>();
 /** 旧 owner runtime 的异步清理；新 owner 必须等待它完成。 */
 let satRuntimeRelease: Promise<void> = Promise.resolve();
 /** 锁屏/切 owner 的远端 Sat 清理上限；安全边界不能依赖网络返回。 */
@@ -5783,6 +5789,8 @@ async function releaseSatRuntime(
   // 先中断 owner inbox/插件订阅的在途网络请求；锁屏仍会在第二阶段
   // 用一个新的 Mux 对账清理，最后一个页面离开则只保存领域清理意图。
   mux?.cancelInFlight();
+  channelSubscriptionMuxStatusOff?.();
+  channelSubscriptionMuxStatusOff = undefined;
   channelSubscriptionMux = undefined;
   channelMuxOwnerPublicKeyHex = undefined;
   channelSubscriptionMuxGeneration += 1;
@@ -7908,15 +7916,17 @@ async function buildTopicBaselines(
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
     }
     if (topic === "channel.events") {
+      const subscriptionStatuses = channelSubscriptionStatusBaseline();
       return [{
         topic,
         baselineRevision: channelRevision,
         sessionEpoch: coordinatorState.sessionEpoch,
         snapshot: {
           topic: "channel.events" as const,
-          type: "channel.message.received" as const,
+          type: "channel.subscription.changed" as const,
           channelRevision,
-          sessionEpoch: coordinatorState.sessionEpoch
+          sessionEpoch: coordinatorState.sessionEpoch,
+          subscriptionStatuses,
         }
       }];
     }
@@ -8929,6 +8939,10 @@ async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Pro
     });
     channelSubscriptionMux = mux;
     channelMuxOwnerPublicKeyHex = runtime.ownerPublicKeyHex;
+    channelSubscriptionMuxStatusOff?.();
+    channelSubscriptionMuxStatusOff = mux.subscribeSubscriptionStatus((status) => {
+      emitChannelSubscriptionStatus(status, runtime.ownerPublicKeyHex);
+    });
     const ownerInbox = inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex));
     try {
       await mux.set(`${coordinatorState.sessionEpoch}:system:owner-inbox`, [ownerInbox], runtime.signal);
@@ -9130,7 +9144,27 @@ function createCoordinatorChannelRuntime(): ChannelRuntime {
         || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
         throw new Error("Channel subscription became stale");
       }
-      return { channels: [...result] };
+      return {
+        channels: [...result],
+        // `channels` is only the logical caller result. Include the current
+        // Mux status in the same response so a newly-created caller does not
+        // have to win a race with the global status event stream.
+        statuses: result.map((channel) => mux.subscriptionStatus(channel)),
+      };
+    },
+    subscriptionStatus(channel) {
+      validateExactChannel(channel);
+      const mux = channelSubscriptionMux;
+      if (!mux || channelMuxOwnerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
+        return idleChannelSubscriptionStatus(channel);
+      }
+      return mux.subscriptionStatus(channel);
+    },
+    subscribeSubscriptionStatus(handler) {
+      assertContactsEnabled();
+      const subscriber = { sessionEpoch: coordinatorState.sessionEpoch, handler };
+      channelSubscriptionStatusSubscribers.add(subscriber);
+      return () => channelSubscriptionStatusSubscribers.delete(subscriber);
     },
     subscribe(handler) {
       const subscriber = (event: { channel: string; publisherPublicKeyHex: string; messageId: string; content: import("@keymaster/contracts").JSONValue }) => handler(event);
@@ -9142,6 +9176,29 @@ function createCoordinatorChannelRuntime(): ChannelRuntime {
       return () => channelPrivateSubscribers.delete(handler);
     }
   };
+}
+
+function idleChannelSubscriptionStatus(channel: string): ChannelSubscriptionStatus {
+  validateExactChannel(channel);
+  return { channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 };
+}
+
+function channelSubscriptionStatusBaseline(): ChannelSubscriptionStatus[] {
+  const mux = channelSubscriptionMux;
+  if (!mux || channelMuxOwnerPublicKeyHex !== coordinatorState.activePublicKeyHex) return [];
+  return [...mux.subscriptionStatuses()];
+}
+
+function emitChannelSubscriptionStatus(status: ChannelSubscriptionStatus, ownerPublicKeyHex: string): void {
+  if (channelMuxOwnerPublicKeyHex !== ownerPublicKeyHex) return;
+  for (const subscriber of [...channelSubscriptionStatusSubscribers]) {
+    if (subscriber.sessionEpoch !== coordinatorState.sessionEpoch) continue;
+    try { subscriber.handler({ ...status }); } catch { /* 状态观察者不能打断 Coordinator。 */ }
+  }
+  publishTopicEvent("channel.events", {
+    type: "channel.subscription.changed",
+    subscriptionStatus: { ...status },
+  });
 }
 
 function emitChannelPublicMessage(message: { channel: string; publisherPublicKeyHex: string; messageId: string; content: import("@keymaster/contracts").JSONValue }): void {
@@ -9642,7 +9699,18 @@ async function executeChannelRequest(
             throw new Error("Channel Connect session was revoked during subscription reconciliation");
           }
         }
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { channels } };
+        return {
+          requestId: request.requestId,
+          sessionEpoch: coordinatorState.sessionEpoch,
+          ack: { status: "ok" },
+          operationResult: {
+            channels,
+            // Return the authoritative state observed by this Mux after the
+            // logical set. This also covers a caller joining an already
+            // physically subscribed channel.
+            statuses: channels.map((channel) => mux.subscriptionStatus(channel)),
+          }
+        };
       }
       case "release":
         await mux.release(callerId, requestSignal);
@@ -14159,6 +14227,9 @@ export function __testResetState(): void {
   contactsPresencePublishTail = Promise.resolve();
   channelPublicSubscribers.clear();
   channelPrivateSubscribers.clear();
+  channelSubscriptionStatusSubscribers.clear();
+  channelSubscriptionMuxStatusOff?.();
+  channelSubscriptionMuxStatusOff = undefined;
   testSatInboundResponseDispatcher = undefined;
   satRevision = 0;
   lastSatState = undefined;
