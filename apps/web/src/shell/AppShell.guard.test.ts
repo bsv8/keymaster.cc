@@ -14,15 +14,13 @@
 //   - listKeys() 抛错**绝不**走 empty-vault-recovery 路径。
 //   - listKeys() 返回失败 key 列表**不**走 empty-vault-recovery。
 //   - empty-vault-recovery 路径下必须**实际**调用 onEmpty 副作用。
-//   - 修复态组件层在 KEY_MANAGEMENT_PATH 上应让 RouteRenderer 渲染——
-//     这条是组件层不变量，依赖 KEY_MANAGEMENT_PATH 字符串；本测试
+//   - 修复态只阻断普通业务页并显示恢复提示（Key 管理页已删除）。
 //     锁定该字符串以防被改坏。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { areShellGuardStatesEqual, evaluateShellGuard } from "./AppShell.js";
 import type { KeyIdentity } from "@keymaster/contracts";
 
-const KEY_MANAGEMENT_PATH = "/settings/vault";
 
 const READY_KEY: KeyIdentity = {
   publicKeyHex: "02".padEnd(66, "1"),
@@ -225,16 +223,5 @@ describe("evaluateShellGuard: diagnostic 状态（硬切换 005 反馈修复）"
     if (result.state.kind === "diagnostic") {
       expect(result.state.error).toBe("string error");
     }
-  });
-});
-
-describe("AppShell KEY_MANAGEMENT_PATH 不变量", () => {
-  // 硬切换 005 反馈修复 #1：修复态（needs-repair）下点击"前往 Key 管理"
-  // 按钮 router.push(KEY_MANAGEMENT_PATH) 后，必须能让 RouteRenderer
-  // 渲染 VaultSettingsPage——否则用户会被锁死。组件层的判断是
-  // `path === KEY_MANAGEMENT_PATH`，本测试锁定该路径字符串与判定
-  // 逻辑使用的字符串一致。
-  it("KEY_MANAGEMENT_PATH 字符串是 /settings/vault（与 VaultSettingsPage 注册路径一致）", () => {
-    expect(KEY_MANAGEMENT_PATH).toBe("/settings/vault");
   });
 });

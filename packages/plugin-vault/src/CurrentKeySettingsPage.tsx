@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { router, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
 import { VAULT_SERVICE_CAPABILITY, formatShortPublicKey } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
@@ -53,8 +53,7 @@ export function CurrentKeySettingsPage() {
         />
         <EmptyState
           title={t("vault.currentKey.empty.title", { defaultValue: "当前没有可管理的私钥" })}
-          description={t("vault.currentKey.empty.description", { defaultValue: "请先到 Key 管理中创建、导入或激活一把 Key。" })}
-          action={<Button onClick={() => router.push("/settings/vault")}>{t("vault.currentKey.empty.action", { defaultValue: "前往 Key 管理" })}</Button>}
+          description={t("vault.currentKey.empty.description", { defaultValue: "当前没有可用的 active Key。" })}
         />
       </div>
     );

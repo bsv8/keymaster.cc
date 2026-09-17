@@ -1412,6 +1412,19 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const staleOrRevoked = code === "service_reference_stale"
       || code === "service_revoked"
       || code === "transport_disconnected";
+    // 远端 handler 抛出的业务错误（例如存储根尚未就绪时的 owner bind 失败）
+    // 不是本连接断线：把它按普通失败返回给调用方，绝不销毁 Runtime/会话。
+    // 否则一次可重试的业务失败会被升级成整条会话重建，窗口在此期间会
+    // 回落锁定并让插件装配失败。
+    if (code === "handler_failed" || code === "capability_unavailable") {
+      this.reportRecoverableCoordinatorFailure(kind, cause);
+      return {
+        status: "transport-error",
+        message: cause instanceof Error ? cause.message : "Coordinator remote operation failed",
+        retryable: true,
+        dispatchStatus: "unknown",
+      };
+    }
     if (this.connectionState !== "fatal") this.connectionState = "recoverable";
     this.isConnected = false;
     this.removeRuntimeSubscription?.();

@@ -17,9 +17,7 @@
 //     uninitialized 的恢复路径（让用户进入首启 welcome）。
 //   - vault.status === "unlocked" + activePublicKeyHex 缺失 +
 //     listKeys() 读成功且 length > 0 → "修复/管理态"：阻断普通业务页，
-//     但 `/settings/vault`（VaultSettingsPage）**始终**允许渲染——
-//     用户必须能在该页面导出 / 删除失败 / uninitialized key 才能脱离
-//     修复态。
+//     只显示恢复提示。Key 管理页已删除（等待并入桶管理），暂不提供跳转。
 //   - listKeys() 抛错：进 "diagnostic" 态——渲染报错 + 重试按钮，**不**
 //     触发空 Vault 收敛（把"读失败"误判为"0 key"会误删 meta）。
 //   - 这几类都是壳层守卫，**不**引入新的全局 mode 概念。
@@ -30,7 +28,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
 import { countRender, useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
+import { useI18n, usePluginHost, router } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   InitialActivationNotice,
@@ -74,7 +72,6 @@ export function areShellGuardStatesEqual(a: ShellGuardState, b: ShellGuardState)
   });
 }
 
-const KEY_MANAGEMENT_PATH = "/settings/vault";
 const AUTO_LOCK_IDLE_MS = 5 * 60 * 1000;
 const AUTO_LOCK_ACTIVITY_EVENTS: Array<keyof WindowEventMap> = [
   "pointerdown",
@@ -151,7 +148,6 @@ export function AppShell() {
   const guard = guardResource as ShellGuardState;
   const vault = useCapability(VAULT_SERVICE_CAPABILITY);
   const vaultStatus = useResourceSelector<VaultStatus, VaultStatus>(host.resourceStore, "shell.vault-status", [], (s) => s.data ?? "uninitialized");
-  const path = useCurrentPath();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
 
@@ -262,31 +258,10 @@ export function AppShell() {
     );
   }
 
-  // "修复/管理态"：阻断普通业务页。但当用户已经在 Vault Key 管理页
-  // 上时，**必须**允许 RouteRenderer 渲染 VaultSettingsPage——否则
-  // 用户会被锁死：点击"前往 Key 管理"按钮 router.push 改了 URL，
-  // 但当前分支根本不渲染 RouteRenderer，URL 变了 UI 也不动。
-  //
-  // 设计缘由：硬切换 005 反馈修复——修复态的"阻断"目标是把普通业务页
-  // （assets / transfer / contacts / p2pkh / poker）挡在外面，而不是
-  // 把唯一能修复的 Key 管理页也挡掉。
+  // "修复/管理态"：active key 缺失时必须阻断普通业务页，避免用户在
+  // 没有身份的情况下继续操作。Key 管理页已删除（等待并入桶管理），
+  // 这里只给出恢复提示，不再提供跳转。
   if (guard.kind === "needs-repair") {
-    const isOnKeyManagement = path === KEY_MANAGEMENT_PATH;
-    if (isOnKeyManagement) {
-      // 在 Key 管理页：渲染正常壳层，让 VaultSettingsPage 显示并允许
-      // 用户导出 / 删除失败 / uninitialized key。failure 列表仍通过
-      // activationNotice 之外的方式显示——本分支直接渲染 RouteRenderer
-      // 即可，VaultSettingsPage 自己会列出所有 keys。
-      return renderNormalShell({
-        mobileOpen,
-        setMobileOpen,
-        activationNotice,
-        dismissNotice,
-        host,
-        notices,
-        t
-      });
-    }
     return (
       <div className={`app-shell app-shell--repair ${mobileOpen ? "is-mobile-nav-open" : ""}`}>
         <Topbar
@@ -305,11 +280,7 @@ export function AppShell() {
           ) : null}
           <main className="app-shell__main">
             <NoticeRail host={host} notices={notices} />
-            <RepairGuard
-              keys={guard.keys}
-              onGoToKeyManagement={() => router.push(KEY_MANAGEMENT_PATH)}
-              t={t}
-            />
+            <RepairGuard keys={guard.keys} t={t} />
           </main>
         </div>
         <SiteFooter variant="app" />
@@ -503,11 +474,10 @@ function NoticeCard(props: {
 
 interface RepairGuardProps {
   keys: KeyIdentity[];
-  onGoToKeyManagement(): void;
   t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string;
 }
 
-function RepairGuard({ keys, onGoToKeyManagement, t }: RepairGuardProps) {
+function RepairGuard({ keys, t }: RepairGuardProps) {
   // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready；
   // RepairGuard 永远不会再展示"failed / uninitialized"行；保留入口
   // 仅为兜底 0-key 护栏。
@@ -526,13 +496,8 @@ function RepairGuard({ keys, onGoToKeyManagement, t }: RepairGuardProps) {
         title={t("shell.appShell.repair.emptyTitle", { defaultValue: "无可用 active key" })}
         description={t("shell.appShell.repair.emptyDesc", {
           defaultValue:
-            "检测到 Vault 内的 key 全部不可用（身份失败 / 初始化中）。请前往 Key 管理处理。"
+            "检测到 Vault 内的 key 全部不可用（身份失败 / 初始化中）。Key 管理入口暂未开放（正在并入桶管理）。"
         })}
-        action={
-          <Button onClick={onGoToKeyManagement}>
-            {t("shell.appShell.repair.cta", { defaultValue: "前往 Key 管理" })}
-          </Button>
-        }
       />
       <ul className="app-shell__repair-list">
         {keys.map((k) => (

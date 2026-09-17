@@ -9825,6 +9825,15 @@ async function handleUnlockUnsafe(
     //    不能进入无锁状态（规范：使用某把 Key 必须持有锁）。
     const provider = platformBucketProvider;
     if (provider) {
+      // 页面刷新会复用同一个 SharedWorker：上一次会话持有的锁可能仍然
+      // “存活”（s3 心跳不依赖页面桥），而 release() 是异步删除。必须先
+      // 释放旧锁，再写新锁，否则旧锁的删除会把刚写入的 lock.json 删掉，
+      // 造成“已解锁但桶里没有锁”的非法状态。
+      const previousLock = activeKeyLock.current;
+      if (previousLock) {
+        activeKeyLock.current = undefined;
+        await previousLock.release().catch(() => undefined);
+      }
       const session = await ensureWorkerSession();
       const keyLock = createKeyLock(provider, { ownerPublicKeyHex: activeKey.publicKeyHex, holder: session.sessionId });
       try {
@@ -10015,9 +10024,33 @@ function executeKeyDeletion(publicKeyHex: string, confirmationLabel: string, pas
 
 async function executeVaultOperation(operation: CoordinatorVaultOperation, internalActivationSecret?: string): Promise<unknown> {
   switch (operation.type) {
-    case "listKeys": return (await listPublicVaultKeys()).map(({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }) => ({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }));
+    case "listKeys": {
+      let keys = await listPublicVaultKeys();
+      // 慢速远端（例如 s3）冷启动恢复后，索引可能因绑定世代切换被判空；
+      // 已解锁时按 keys/ 真实文件自愈重建，避免 UI 误显示“还没有 Key”。
+      if (keys.length === 0 && coordinatorState.vaultStatus === "unlocked" && hasVaultHoldBinding()) {
+        try {
+          const hold = await readVaultHoldSnapshot("");
+          if (hold.keys.length > 0) keys = await rebuildVaultHoldKeyIndex(hold.keys);
+        } catch {
+          // 读取失败保持原结果；下一次资源失效会再次尝试。
+        }
+      }
+      return keys.map(({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }) => ({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }));
+    }
     case "getKey": {
-      const key = await getPublicVaultKey(operation.publicKeyHex);
+      let key = await getPublicVaultKey(operation.publicKeyHex);
+      if (!key && coordinatorState.vaultStatus === "unlocked" && hasVaultHoldBinding()) {
+        try {
+          const hold = await readVaultHoldSnapshot("");
+          if (hold.keys.length > 0) {
+            await rebuildVaultHoldKeyIndex(hold.keys);
+            key = await getPublicVaultKey(operation.publicKeyHex);
+          }
+        } catch {
+          // 同上：读取失败保持原结果。
+        }
+      }
       if (!key) return undefined;
       const { publicKeyHex, label, capabilities, createdAt, address, network, format, source } = key;
       return { publicKeyHex, label, capabilities, createdAt, address, network, format, source };

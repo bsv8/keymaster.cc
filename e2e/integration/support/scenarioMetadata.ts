@@ -8,7 +8,7 @@ export const LOCAL_INIT_MENU_SCENARIO = {
   startingState: "全新 Chromium context，没有 Local catalog、Vault 或 active Key。",
   successCriteria: [
     "初始化事务只提交一次并创建一把带标签的 Key。",
-    "运行态安装完成后进入 Key 管理，Local catalog 只有一个选中桶。",
+    "运行态安装完成后进入首页，Local catalog 只有一个选中桶。",
     "刷新页面后仍能读取同一桶和 active Key。",
   ],
   resourceProfile: "local-browser",
@@ -174,7 +174,7 @@ export const LOCAL_IMPORTED_KEY_SCENARIO = {
   startingState: "全新 Chromium context，没有 Local catalog、Vault 或 active Key，使用一次性测试 Hex Key。",
   successCriteria: [
     "用户可以在首次初始化中解析并导入 Hex Key，而不是只能生成 Key。",
-    "导入后的 Key 标签、公钥归属和 Key 管理页结果可观察。",
+    "导入后的 Key 标签、公钥归属由 session 与桶文件真值可观察。",
     "桶密码和一次性私钥原文不进入 localStorage 或测试附件。",
   ],
   resourceProfile: "local-browser",

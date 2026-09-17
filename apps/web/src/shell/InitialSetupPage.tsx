@@ -322,7 +322,7 @@ export function InitialSetupPage() {
     try {
       const result: ExistingRemoteStorageConnectResult = await storage.connectExistingRemote(plan);
       clearSecrets();
-      if (result.ok) router.push("/settings/vault");
+      if (result.ok) router.push("/");
       else { setError(result.error); setStep("unlock"); }
     } catch (caught) {
       clearSecrets();
@@ -368,12 +368,12 @@ export function InitialSetupPage() {
         return;
       }
       clearSecrets();
-      router.push("/settings/vault");
+      router.push("/");
     } catch (caught) {
       // 响应可能丢失但事务已完成；用同一 transactionId 查询结果。
       let recovered: InitialSetupResult | undefined;
       try { recovered = await storage.getInitialSetupResult?.(plan.transactionId); } catch { recovered = undefined; }
-      if (recovered?.ok) { clearSecrets(); router.push("/settings/vault"); return; }
+      if (recovered?.ok) { clearSecrets(); router.push("/"); return; }
       if (recovered && !recovered.ok) { clearSecrets(); setError(recovered.error); setStep("confirm"); return; }
       clearSecrets();
       setError(errorFromException(caught, plan.transactionId));

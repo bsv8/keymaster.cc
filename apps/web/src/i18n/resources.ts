@@ -65,7 +65,6 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.appShell.repair.desc": "No usable active key remains in the Vault. Resolve failed or uninitialized keys before continuing.",
       "shell.appShell.repair.emptyTitle": "No usable active key",
       "shell.appShell.repair.emptyDesc": "All keys in the Vault are unavailable (identity failure or initializing). Open Key management to resolve this.",
-      "shell.appShell.repair.cta": "Open Key management",
       "shell.appShell.repair.summary": "{{total}} keys: {{failed}} failed / {{init}} initializing. Other business pages are disabled.",
       // 硬切换 010：首启导入向导文案。业务顺序固定为：先选导入方式 →
       // 输入 / 解析 → 确认 → 设置本机系统锁屏密码。导入源密码与本机
@@ -256,8 +255,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.appShell.repair.title": "需要修复 Key 状态",
       "shell.appShell.repair.desc": "当前 Vault 内已无可用的 active key。处理完失败或未初始化的 key 后再继续。",
       "shell.appShell.repair.emptyTitle": "无可用 active key",
-      "shell.appShell.repair.emptyDesc": "检测到 Vault 内的 key 全部不可用（身份失败 / 初始化中）。请前往 Key 管理处理。",
-      "shell.appShell.repair.cta": "前往 Key 管理",
+      "shell.appShell.repair.emptyDesc": "检测到 Vault 内的 key 全部不可用（身份失败 / 初始化中）。Key 管理入口暂未开放（正在并入桶管理）。",
       "shell.appShell.repair.summary": "共 {{total}} 把 key：{{failed}} 失败 / {{init}} 初始化中。其它业务页已禁用。",
       "shell.import.wizard.pickImporterTitle": "导入私钥：1. 选择导入方式",
       "shell.import.wizard.pickImporterDesc": "请先选择一种导入格式。私钥材料在本地解析，不会上传到任何服务器。",

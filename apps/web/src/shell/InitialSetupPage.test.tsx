@@ -129,7 +129,7 @@ describe("InitialSetupPage（初始化流程规范）", () => {
     expect(state.initialSetup.mock.calls[0]![0]).toMatchObject(plan);
     expect((state.initialSetup.mock.calls[0]![0] as InitialSetupPlan).remoteStorageId).toBeUndefined();
     expect((state.initialSetup.mock.calls[0]![0] as InitialSetupPlan).startupPassword).toBeUndefined();
-    expect(state.routerPush).toHaveBeenCalledWith("/settings/vault");
+    expect(state.routerPush).toHaveBeenCalledWith("/");
   });
 
   it("探测到已有 Key：进入解锁，提交连接计划只带该 Key 密码", async () => {

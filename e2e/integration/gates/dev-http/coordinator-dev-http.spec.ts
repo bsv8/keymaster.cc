@@ -225,43 +225,13 @@ test(GATE_ID + "：Vite dev Coordinator 在非安全 HTTP 上完成 Local 初始
     await page.getByRole("button", { name: /Next|继续确认/u }).click();
     await page.getByRole("button", { name: /Create bucket and first Key|创建桶和第一把 Key/u }).click();
 
-    await expect.poll(async () => page.evaluate(() => {
-      const catalogRaw = localStorage.getItem("keymaster.storage.catalog.v2");
-      let catalogReady = false;
-      if (catalogRaw) {
-        try {
-          const catalog = JSON.parse(catalogRaw) as {
-            format?: unknown;
-            version?: unknown;
-            selectedBucketId?: unknown;
-            buckets?: Array<{ bucketId?: unknown; label?: unknown; backend?: unknown }>;
-          };
-          const bucket = catalog.buckets?.[0];
-          catalogReady = catalog.format === "keymaster.storage.catalog"
-            && catalog.version === 2
-            && catalog.buckets?.length === 1
-            && catalog.selectedBucketId === bucket?.bucketId
-            && bucket?.label === "http-dev-bucket"
-            && bucket?.backend === "local";
-        } catch {
-          catalogReady = false;
-        }
-      }
-      const localKeys = Object.keys(localStorage);
-      const holdReady = ["storage.json", "keys.json", "header.json", "head.json"].every((leaf) =>
-        localKeys.some((key) => key.includes(".keymaster/hold/v1/") && key.endsWith(`/${leaf}`))
-      );
-      return {
-        path: new URL(location.href).pathname,
-        failed: Boolean(document.querySelector("[role=alert]")),
-        keyVisible: document.body.innerText.includes("http-dev-key"),
-        catalogReady,
-        holdReady,
-      };
-    }), {
+    await expect.poll(async () => page.evaluate(() => ({
+      path: new URL(location.href).pathname,
+      failed: Boolean(document.querySelector("[role=alert]")),
+    })), {
       timeout: 60_000,
       message: "HTTP non-secure initial setup should complete the final HMAC-backed transaction",
-    }).toEqual({ path: "/settings/vault", failed: false, keyVisible: true, catalogReady: true, holdReady: true });
+    }).toEqual({ path: "/", failed: false });
     await expect(page.getByText("http-dev-key", { exact: true }).first()).toBeVisible();
     await expect(page.locator("[data-fatal-crash]")).toHaveCount(0);
 

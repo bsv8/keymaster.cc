@@ -8,12 +8,11 @@
 //     切换由 keyspace 维护，shell 与业务插件只读不写。
 //
 // 硬切换 003：
-//   - /settings/vault 不再走旧菜单注册；
+//   - /settings/vault（Key 管理页）已删除，等待并入桶管理；
 //     改为通过 settings.registry.register() 注册单一真值。
 //   - breadcrumb 第一段改为不可点击"设置"分类节点（不带 path）。
 //
 // 硬切换 002：
-//   - /settings/vault 路由 label 改为"Key 管理"，与 VaultSettingsPage 标题一致。
 
 import type {
   BreadcrumbRegistry,
@@ -52,7 +51,6 @@ import {
   type VaultCoordinatorControl,
 } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
-import { VaultSettingsPage } from "./VaultSettingsPage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
 import { VaultUnlockPage } from "./VaultUnlockPage.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
@@ -73,7 +71,7 @@ type CoordinatorClientLike = VaultCoordinatorControl;
 export const VAULT_CAPABILITY = VAULT_SERVICE_CAPABILITY;
 
 /** vault i18n 资源。覆盖 route / breadcrumb / command
- * 的 label 与 VaultSettingsPage 内的展示文案。 */
+ * 的 label 与页面内展示文案。 */
 const vaultResources: I18nPluginResources = {
   namespace: "vault",
   resources: {
@@ -414,8 +412,11 @@ const vaultPluginDefinition = {
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<VaultKeyResourceState, readonly string[]>({
       id: "vault.key-state",
-      scope: "global",
-      key: () => ["vault.key-state"],
+      // 作用域绑定 active key：解锁/切换 Key 会改变资源键,注册表必须重新
+      // 加载（本地磁盘慢恢复时,session 状态事件可能落在插件实例替换的
+      // 窗口里,global 键会让“还没有 Key”的旧结果一直留在 UI 上）。
+      scope: "active-key",
+      key: (_args, context) => ["vault.key-state", context.activePublicKeyHex ?? "no-active-key"],
       load: async (_args, context) => {
         const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY.id);
         const vault = context.getCapability<VaultService>(VAULT_CAPABILITY.id);
@@ -476,19 +477,6 @@ const vaultPluginDefinition = {
       icon: "ShieldCheck",
       visibleWhen: ({ unlocked }) => unlocked
     });
-    settings.register({
-      id: "vault.settings",
-      path: "/settings/vault",
-      label: { key: "vault.route.settings", fallback: "Key management" },
-      description: {
-        key: "vault.settings.description",
-        fallback: "Manage local Vault keys, the active identity, and encrypted backups."
-      },
-      component: VaultSettingsPage,
-      order: 0,
-      icon: "KeyRound",
-      visibleWhen: ({ unlocked }) => unlocked
-    });
 
     // 密钥管理沿用 settings.registry 作为页面路由真值，同时作为一个 feature
     // 挂入新的「设置」业务域。vault 在 settings 之前启动，因此 registry 支持
@@ -505,17 +493,6 @@ const vaultPluginDefinition = {
       icon: "ShieldCheck",
       entry: { path: "/settings/current-key", component: CurrentKeySettingsPage }
     });
-    business.registerFeature("vault", "settings", {
-      id: "settings.vault",
-      label: { key: "vault.route.settings", fallback: "Key management" },
-      description: {
-        key: "vault.settings.description",
-        fallback: "Manage local Vault keys, the active identity, and encrypted backups."
-      },
-      order: 15,
-      icon: "KeyRound",
-      entry: { path: "/settings/vault", component: VaultSettingsPage }
-    });
 
     // 硬切换 003：面包屑第一段固定为不可点击的"设置"分类节点。
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
@@ -526,15 +503,6 @@ const vaultPluginDefinition = {
       resolve: () => [
         { label: { key: "vault.crumb.settings", fallback: "Settings" } },
         { label: { key: "vault.crumb.currentKey", fallback: "Current private key" } }
-      ]
-    });
-    breadcrumbs.register({
-      id: "breadcrumb.vault.keys",
-      order: 0,
-      match: (path) => path === "/settings/vault",
-      resolve: () => [
-        { label: { key: "vault.crumb.settings", fallback: "Settings" } },
-        { label: { key: "vault.crumb.keys", fallback: "Key management" } }
       ]
     });
 

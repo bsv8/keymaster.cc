@@ -119,8 +119,6 @@ test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async 
       expect(catalog?.buckets).toHaveLength(1);
       expect(catalog?.buckets?.[0]).toMatchObject({ label: LOGICAL_BUCKET_LABEL, backend: "s3" });
       expect(catalog?.selectedBucketId).toBe(catalog?.buckets?.[0]?.bucketId);
-      await expect(page.getByText(FIRST_KEY_LABEL, { exact: true }).first()).toBeVisible();
-
       const sessionId = await readS3SessionId(page);
       await assertS3IdentityStorage(page, { bucketId: ready.bucketId, ownerPublicKeyHex: ready.publicKeyHex, sessionId });
       // 恢复后锁必须重新被本 session 持有；同一条 Node 真值校验再跑一次。

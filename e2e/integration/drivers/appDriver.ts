@@ -66,19 +66,47 @@ export async function readLocalCatalog(page: Page): Promise<LocalCatalogSnapshot
   });
 }
 
-/** 初始化完成必须以业务页和 Key 同时出现为准，不能只看 URL。 */
-export async function waitForReadyVaultPage(page: Page, keyLabel: string, timeoutMs = 20_000): Promise<void> {
+/**
+ * 初始化/解锁完成 = 已解锁壳层可用（主导航可见，且不在任何安全入口页）。
+ *
+ * Key 管理页（/settings/vault）已删除，初始化后落在首页；这里不再依赖
+ * 具体业务页或 Key 标签文案，Key 真值由 readSessionPublicKey 与
+ * KeymasterFormats 文件校验负责。
+ */
+export async function waitForUnlockedHome(page: Page, timeoutMs = 20_000): Promise<void> {
   const outcome = async (): Promise<"ready" | "failed" | "pending"> => {
     if (await page.getByRole("heading", { name: /启动\/运行失败/ }).isVisible().catch(() => false)) return "failed";
     if (await page.getByRole("alert").first().isVisible().catch(() => false)) return "failed";
-    if (new URL(page.url()).pathname !== "/settings/vault") return "pending";
-    return (await page.getByText(keyLabel, { exact: true }).first().isVisible().catch(() => false)) ? "ready" : "pending";
+    const gateway = page.getByRole("heading", {
+      name: /Choose a bucket type|选择桶类型|存储需要认证|Storage authentication required|钱包已锁定|Wallet locked/u,
+    });
+    if (await gateway.first().isVisible().catch(() => false)) return "pending";
+    const navigation = page.getByRole("navigation", { name: /Primary navigation|主导航/ });
+    if (!(await navigation.isVisible().catch(() => false))) return "pending";
+    return "ready";
   };
   await expect.poll(outcome, {
     timeout: timeoutMs,
-    message: "只有 Key 管理页和第一把 Key 同时可见，才算初始化完成",
+    message: "只有已解锁壳层可用，才算初始化/解锁完成",
   }).not.toBe("pending");
-  expect(await outcome(), "初始化失败必须保留可诊断错误，不能假装成功").toBe("ready");
+  expect(await outcome(), "初始化/解锁失败必须保留可诊断错误，不能假装成功").toBe("ready");
+  // 解锁瞬间窗口仍可能在重建 owner 插件实例；给一个很短的稳定窗口，避免
+  // 紧接着的点击/导航落在实例替换的空档里。
+  await page.waitForTimeout(600);
+}
+
+/** 读取浏览器 session 的 active Key（存储真值；不读私钥）。 */
+export async function readSessionPublicKey(page: Page): Promise<string> {
+  const activeKey = await page.evaluate(() => {
+    try {
+      const session = JSON.parse(window.localStorage.getItem("keymaster.session") ?? "null") as { activeKey?: unknown } | null;
+      return session && typeof session === "object" && typeof session.activeKey === "string" ? session.activeKey : null;
+    } catch {
+      return null;
+    }
+  });
+  expect(activeKey, "session 必须记录 active Key 公钥").toMatch(/^(02|03)[0-9a-f]{64}$/u);
+  return (activeKey ?? "").toLowerCase();
 }
 
 /** Local 初始化成功后，确认密码没有进入浏览器持久化目录。 */

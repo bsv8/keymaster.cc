@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
 import { lockWallet, unlockWallet } from "../../drivers/vaultDriver.js";
-import { readLocalCatalog, waitForReadyVaultPage } from "../../drivers/appDriver.js";
+import { readLocalCatalog, readSessionPublicKey, waitForUnlockedHome } from "../../drivers/appDriver.js";
 import { assertLocalBucketLockReleased, assertLocalBucketStorage, identityFileMap, readRawLocalStorage } from "../../support/localBucketFormats.js";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
@@ -85,8 +85,9 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
       const unlockButton = page.getByRole("button", { name: /解锁|Unlock/ });
       await expect(unlockButton).toBeEnabled();
       await unlockButton.click();
-      await waitForReadyVaultPage(page, ready.keyLabel);
-      await expect(page.getByText(ready.keyLabel, { exact: true }).first()).toBeVisible();
+      await waitForUnlockedHome(page);
+      // 解锁后 session 必须还是同一把 Key（存储真值,不再依赖页面文案）。
+      await expect(readSessionPublicKey(page)).resolves.toBe(ready.publicKeyHex);
       // 解锁成功后重新持锁，KeyHold 文件不变。
       await assertLocalBucketStorage(page, {
         bucketId: ready.bucketId,
@@ -103,7 +104,7 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
         ownerPublicKeyHex: ready.publicKeyHex,
       });
       await unlockWallet(page, password, ready.keyLabel);
-      await expect(page.getByText(ready.keyLabel, { exact: true }).first()).toBeVisible();
+      await expect(readSessionPublicKey(page)).resolves.toBe(ready.publicKeyHex);
       await assertLocalBucketStorage(page, {
         bucketId: ready.bucketId,
         ownerPublicKeyHex: ready.publicKeyHex,

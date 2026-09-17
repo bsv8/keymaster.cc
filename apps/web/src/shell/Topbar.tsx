@@ -28,8 +28,20 @@ export function Topbar({ mobileOpen, onToggleMobileNav }: TopbarProps) {
   const items = useRegistry((h) => h.topbar.list());
 
   async function lock() {
-    if (vault === "unlocked") {
-      await host.commands.run("vault.lock");
+    if (vault !== "unlocked") return;
+    // 解锁刚完成时窗口运行态可能仍在身份切换：首个 lock 请求可能落在
+    // 旧 Runtime 句柄上并以 transport 错误失败。这里必须吞掉并短延迟
+    // 重试一次——async onClick 的 rejection 会变成 unhandledrejection，
+    // 被全局致命接管误判为崩溃页。
+    const deadline = Date.now() + 6_000;
+    for (;;) {
+      try {
+        await host.commands.run("vault.lock");
+        return;
+      } catch {
+        if (Date.now() >= deadline) return;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
     }
   }
 
