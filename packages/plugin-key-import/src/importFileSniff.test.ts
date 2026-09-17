@@ -33,8 +33,8 @@ const ENVELOPE = {
 };
 
 const KEYHOLD_DOCUMENT = {
-  format: "keymaster",
-  version: 2,
+  format: "keyhold",
+  version: 1,
   label: "Primary key",
   publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
   keyDerivation: {
@@ -75,14 +75,14 @@ describe("isBsv8KeyEnvelopeShape", () => {
   });
 });
 
-describe("KeyHold v2 encrypted document sniff", () => {
-  it("recognizes the canonical KeyHold v2 shape", () => {
+describe("KeyHold v1 encrypted document sniff", () => {
+  it("recognizes the canonical KeyHold v1 shape", () => {
     expect(isKeyHoldDocumentShape(KEYHOLD_DOCUMENT)).toBe(true);
   });
 
   it("rejects lookalikes missing required top-level fields", () => {
-    expect(isKeyHoldDocumentShape({ format: "keymaster", version: 2 })).toBe(false);
-    expect(isKeyHoldDocumentShape({ ...KEYHOLD_DOCUMENT, version: 1 })).toBe(false);
+    expect(isKeyHoldDocumentShape({ format: "keyhold", version: 2 })).toBe(false);
+    expect(isKeyHoldDocumentShape({ ...KEYHOLD_DOCUMENT, format: "keymaster" })).toBe(false);
   });
 
   it("raises the generic encrypted-document sniff for file and text inputs", () => {

@@ -240,7 +240,7 @@ const contactsPluginDefinition = {
     if (!coordinator) throw new Error("Contacts Coordinator control is unavailable");
     ctx.provide(CONTACTS_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     // 页面侧只保留联系人 CRUD；Ping/Pong 与唯一后台任务均归 Coordinator Worker。
-    const service = createContactsService({ keyspace, messageBus, storage: ctx.storageFor("address-book") });
+    const service = createContactsService({ keyspace, messageBus, storage: ctx.filesFor("address-book") });
     ctx.provide(CONTACTS_CAPABILITY, service);
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<Contact[], readonly string[]>({
@@ -259,7 +259,7 @@ const contactsPluginDefinition = {
       id: "contacts.detail",
       scope: "active-key",
       key: (args, context) => ["contacts.detail", context.activePublicKeyHex ?? "none", args[0] ?? ""],
-      load: async (args) => (await service.listContacts()).find((contact) => contact.id === args[0]),
+      load: async (args) => (await service.listContacts()).find((contact) => contact.publicKeyHex === args[0]),
       subscribe: (_args, _context, invalidate) => {
         const offChange = service.onChange(invalidate);
         const offActive = keyspace.onActiveKeyChanged(invalidate);
@@ -353,7 +353,7 @@ const contactsPluginDefinition = {
         let c;
         try {
           const list = await service.listContacts();
-          c = list.find((x) => x.id === id);
+          c = list.find((x) => x.publicKeyHex === id.toLowerCase());
         } catch {
           c = undefined;
         }

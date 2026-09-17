@@ -177,8 +177,7 @@ async function ensureStorageReady(coordinator: ReturnType<typeof getCoordinatorC
         bucketLabel: "MSFile Spike Local",
         backend: "local",
         connection: { kind: "local" },
-        bucketPassword: SPIKE_PASSWORD,
-        firstKey: { kind: "generate", label: "MSFile executor spike", capabilities: ["p2pkh"] },
+        firstKey: { kind: "generate", label: "MSFile executor spike", capabilities: ["p2pkh"], password: SPIKE_PASSWORD },
       } });
       if (selected.status !== "ok") throw new Error(`spike Local setup failed: ${selected.status}`);
     } else if (status.status === "ok" && status.value === "authentication") {

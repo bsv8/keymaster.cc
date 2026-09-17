@@ -354,7 +354,6 @@ describe("MessagePage in PluginHostProvider", () => {
   it("shows a known contact name and opens the contact info page", async () => {
     const peer = "03dddd".padEnd(66, "d");
     const contact: Contact = {
-      id: "contact-alice",
       publicKeyHex: peer,
       name: "Alice",
       tags: [],
@@ -394,7 +393,7 @@ describe("MessagePage in PluginHostProvider", () => {
 
     fireEvent.click(contactLink);
     await waitFor(() => {
-      expect(window.location.pathname).toBe("/contacts/contact-alice");
+      expect(window.location.pathname).toBe(`/contacts/${peer}`);
     });
   });
 

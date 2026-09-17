@@ -217,7 +217,7 @@ export function LockedShell() {
     setError(null);
     setBusy(true);
     try {
-      const result = await vault.unlock(password);
+      const result = await vault.unlock(password, selectedKey?.publicKeyHex);
       if (result.status !== "accepted" && result.status !== "already-unlocked") {
         setError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Unlock failed: ${result.status}`);
       }

@@ -2,11 +2,12 @@
 import { defineCapability } from "webloom-framework";
 //
 // 这个状态与 Vault 状态、Storage 健康状态分开。启动不是一个简单的
-// loading/ready 二态，而是四个有明确前置条件的门禁：Storage onboarding、
-// Vault selection、owner apps、Connect apps。
+// loading/ready 二态，而是几个有明确前置条件的门禁：Storage onboarding、
+// Storage authentication、Vault selection、owner apps、Connect apps。
 
 export type ApplicationBootstrapPhase =
   | "storage-onboarding"
+  | "storage-authentication"
   | "vault-selection"
   | "owner-apps-ready"
   | "connect-apps-ready"

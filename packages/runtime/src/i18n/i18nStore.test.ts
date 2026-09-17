@@ -1,7 +1,7 @@
 // packages/runtime/src/i18n/i18nStore.test.ts
-// i18nStore 单元测试：覆盖 localStorage 写入失败、订阅、auto / manual 切换语义。
+// i18nStore 单元测试：覆盖订阅、auto / manual 切换与浏览器语言解析。
 //
-// 注意：vitest.setup.ts 注入了 fake localStorage；这里仅测试 store 自身行为。
+// 语言偏好不再落 localStorage:跨客户端偏好由远端设置负责。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -14,33 +14,15 @@ import {
   subscribe
 } from "./i18nStore.js";
 
-const STORAGE_KEY = "keymaster.languageMode";
-
 describe("i18nStore", () => {
   beforeEach(() => {
-    // 注意：vitest.setup.ts 把 MemoryStorage 装到 globalThis.localStorage 上，
-    // 而非 window.localStorage。这里必须清掉 globalThis 这一份；否则
-    // 前面用例写入的 STORAGE_KEY 会污染后续用例（applyInitialLanguage
-    // 会读到残留值，导致 mode/language 进入 "manual/zh-CN" 状态）。
-    const ls = (globalThis as { localStorage?: Storage }).localStorage;
-    if (ls) {
-      try {
-        ls.removeItem(STORAGE_KEY);
-      } catch {
-        // 忽略
-      }
-    }
-    if (typeof window !== "undefined" && window.localStorage && window.localStorage !== ls) {
-      try {
-        window.localStorage.removeItem(STORAGE_KEY);
-      } catch {
-        // 忽略
-      }
-    }
+    // applyInitialLanguage() 会读取浏览器语言;测试必须与运行机器的 locale 无关。
+    vi.stubGlobal("navigator", { languages: ["en-US"], language: "en-US" });
     __resetForTest();
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     __resetForTest();
   });
 
@@ -50,38 +32,20 @@ describe("i18nStore", () => {
     expect(getLanguageMode()).toBe("auto");
   });
 
-  it("setLanguage persists manual selection", () => {
+  it("setLanguage switches to manual selection", () => {
     applyInitialLanguage();
     setLanguage("zh-CN");
     expect(getLanguage()).toBe("zh-CN");
     expect(getLanguageMode()).toBe("manual");
-    const ls = (globalThis as { localStorage?: Storage }).localStorage;
-    if (ls) {
-      expect(ls.getItem(STORAGE_KEY)).toBe("zh-CN");
-    }
   });
 
-  it("setAutoLanguage reverts to auto", () => {
+  it("setAutoLanguage reverts to auto and resolves browser language", () => {
     applyInitialLanguage();
     setLanguage("zh-CN");
     expect(getLanguageMode()).toBe("manual");
     setAutoLanguage();
     expect(getLanguageMode()).toBe("auto");
-    const ls = (globalThis as { localStorage?: Storage }).localStorage;
-    if (ls) {
-      // auto 模式：key 写为 "auto"
-      expect(ls.getItem(STORAGE_KEY)).toBe("auto");
-    }
-  });
-
-  it("applyInitialLanguage reads stored manual language", () => {
-    const ls = (globalThis as { localStorage?: Storage }).localStorage;
-    if (ls) {
-      ls.setItem(STORAGE_KEY, "zh-CN");
-    }
-    applyInitialLanguage();
-    expect(getLanguage()).toBe("zh-CN");
-    expect(getLanguageMode()).toBe("manual");
+    expect(getLanguage()).toBe("en");
   });
 
   it("subscribe receives changes", () => {
@@ -96,37 +60,4 @@ describe("i18nStore", () => {
     expect(seen[0]).toEqual({ mode: "manual", language: "zh-CN" });
   });
 
-  it("localStorage write failure does not break in-memory state", () => {
-    const ls = (globalThis as { localStorage?: Storage }).localStorage;
-    if (!ls) return;
-    applyInitialLanguage();
-    const setItemSpy = vi
-      .spyOn(ls, "setItem")
-      .mockImplementation(() => {
-        throw new Error("QuotaExceeded");
-      });
-    try {
-      // 不抛错
-      setLanguage("zh-CN");
-      expect(getLanguage()).toBe("zh-CN");
-    } finally {
-      setItemSpy.mockRestore();
-    }
-  });
-
-  it("localStorage read failure uses default", () => {
-    const ls = (globalThis as { localStorage?: Storage }).localStorage;
-    if (!ls) return;
-    const getItemSpy = vi
-      .spyOn(ls, "getItem")
-      .mockImplementation(() => {
-        throw new Error("blocked");
-      });
-    try {
-      applyInitialLanguage();
-      expect(getLanguage()).toBe("en");
-    } finally {
-      getItemSpy.mockRestore();
-    }
-  });
 });

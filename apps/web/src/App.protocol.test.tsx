@@ -70,7 +70,7 @@ vi.mock("webloom-framework/react", () => ({
 }));
 
 vi.mock("@keymaster/platform-storage", () => ({
-  StorageBucketManagerPage: () => <div data-testid="storage-buckets">storage</div>,
+  readStorageBootstrap: () => null,
   StorageUnavailableGuard: ({ children }: { children: ReactNode }) => children
 }));
 
@@ -144,16 +144,5 @@ describe("App protocol path", () => {
     render(<App />);
     expect(screen.getByTestId("unlocked-shell")).toBeTruthy();
     expect(screen.queryByTestId("protocol-popup")).toBeNull();
-  });
-
-  it("switches directly from the app shell to the full-page bucket manager", () => {
-    render(<App />);
-    expect(screen.getByTestId("unlocked-shell")).toBeTruthy();
-    act(() => {
-      window.history.pushState(null, "", "/storage/buckets");
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-    expect(screen.getByTestId("storage-buckets")).toBeTruthy();
-    expect(screen.queryByTestId("unlocked-shell")).toBeNull();
   });
 });

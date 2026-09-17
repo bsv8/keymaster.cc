@@ -63,7 +63,7 @@ test(JOURNEY_ID + "：从正式菜单查看设置并持久化语言", async ({ p
       const current = await page.locator("html").getAttribute("lang");
       const next = current === "zh-CN" ? "en" : "zh-CN";
       await changeLanguage(page, next);
-      // 页面刷新会按安全契约撤销 Window runtime 并回到锁定态；先验证
+      // 页面刷新会按安全契约撤销 Window runtime 并回到已有桶认证页；先验证
       // html/lang 的持久化结果，再按真实恢复 Flow 解锁，不能把“刷新后仍
       // 假设 unlocked”当作设置页的成功条件。
       await reloadAndAssertSameKey(page, ready.keyLabel);

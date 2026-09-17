@@ -404,6 +404,78 @@ function createDeferredOwnerAppStore(
   };
 }
 
+/** 创建延迟 owner 文件句柄（model: "files"）；authority 在最终 I/O 边界复核绑定。 */
+function createDeferredOwnerFileStore(
+  authority: StorageBindingAuthority,
+  pluginId: string,
+  declaration: PluginStorageDeclaration,
+  scope: import("webloom-framework").LifecycleScope,
+): import("@keymaster/contracts").OwnerFileStore {
+  let closed = false;
+  let current: import("@keymaster/contracts").OwnerFileStore | undefined;
+
+  const invalidateCurrent = (): void => {
+    current = undefined;
+  };
+
+  const removeScopeRevoke = scope.onRevoke(() => {
+    closed = true;
+    invalidateCurrent();
+  });
+  scope.onDispose(() => {
+    removeScopeRevoke();
+    closed = true;
+    invalidateCurrent();
+  }, "owner-file-storage");
+
+  async function resolve(): Promise<import("@keymaster/contracts").OwnerFileStore> {
+    scope.assertActive();
+    if (closed) throw new Error("Owner file storage handle is closed");
+    if (!current) {
+      current = await authority.openOwnerFileStore({ pluginId, declaration });
+      scope.assertActive();
+      if (closed) {
+        current = undefined;
+        throw new Error("Owner file storage handle is closed");
+      }
+    }
+    return current;
+  }
+
+  const run = async <T>(operation: (store: import("@keymaster/contracts").OwnerFileStore) => Promise<T>): Promise<T> => {
+    const store = await resolve();
+    try {
+      scope.assertActive();
+      const result = await operation(store);
+      scope.assertActive();
+      return result;
+    } catch (error) {
+      if (isStaleOwnerStorageBinding(error)) invalidateCurrent();
+      throw error;
+    }
+  };
+
+  return {
+    list: (input) => run((store) => store.list(input)),
+    get: (path, options) => run((store) => store.get(path, options)),
+    put: (path, bytes, condition) => run((store) => store.put(path, bytes, condition)),
+    delete: (path, options) => { return run((store) => store.delete(path, options)); },
+  };
+}
+
+function requireStorageBindingAuthority(
+  options: LegacyCreatePluginHostOptions,
+  host: WebLoomPluginHost,
+  pluginId: string,
+): StorageBindingAuthority {
+  const authority = options.storageBindingAuthority
+    ?? (host.capabilities.has(STORAGE_BINDING_AUTHORITY_CAPABILITY)
+      ? host.capabilities.get(STORAGE_BINDING_AUTHORITY_CAPABILITY)
+      : undefined);
+  if (!authority) throw new Error(`Plugin "${pluginId}" requires the storage binding authority`);
+  return authority;
+}
+
 async function bindStorageDeclaration(
   options: LegacyCreatePluginHostOptions,
   host: WebLoomPluginHost,
@@ -411,11 +483,7 @@ async function bindStorageDeclaration(
   declaration: PluginStorageDeclaration,
   scope: import("webloom-framework").LifecycleScope,
 ): Promise<KeyValueStore | undefined> {
-  const authority = options.storageBindingAuthority
-    ?? (host.capabilities.has(STORAGE_BINDING_AUTHORITY_CAPABILITY)
-      ? host.capabilities.get(STORAGE_BINDING_AUTHORITY_CAPABILITY)
-      : undefined);
-  if (!authority) throw new Error(`Plugin "${pluginId}" requires the storage binding authority`);
+  const authority = requireStorageBindingAuthority(options, host, pluginId);
   if (declaration.scope === "bucket") {
     return authority.openPlatformStore({ pluginId, declaration });
   }
@@ -975,6 +1043,7 @@ export function createKeymasterPluginHost(
     manifest: PluginManifest,
     storage: import("@keymaster/contracts").BorrowedKeyValueStore | undefined,
     storages: ReadonlyMap<string, import("@keymaster/contracts").BorrowedKeyValueStore>,
+    files: ReadonlyMap<string, import("@keymaster/contracts").BorrowedOwnerFileStore>,
   ): KeymasterPluginContext {
     const scopedCache = new Map<string, unknown>();
     let scopedChannelFactory: ChannelRuntimeFactory | undefined;
@@ -1022,6 +1091,11 @@ export function createKeymasterPluginHost(
       storageFor: (purposeId: string) => {
         const selected = storages.get(purposeId);
         if (!selected) throw new Error(`Plugin "${manifest.id}" did not declare storage purpose "${purposeId}" for this runtime unit`);
+        return selected;
+      },
+      filesFor: (purposeId: string) => {
+        const selected = files.get(purposeId);
+        if (!selected) throw new Error(`Plugin "${manifest.id}" did not declare file storage purpose "${purposeId}" for this runtime unit`);
         return selected;
       },
       coordinator,
@@ -1080,6 +1154,7 @@ export function createKeymasterPluginHost(
       })(),
       storage,
       storageFor: extension.storageFor,
+      filesFor: extension.filesFor,
       coordinator,
       extension,
       capability,
@@ -1112,14 +1187,20 @@ export function createKeymasterPluginHost(
       }
       const declared = storagesOfManifest(manifest, options.runtime);
       const bound = new Map<string, import("@keymaster/contracts").BorrowedKeyValueStore>();
+      const boundFiles = new Map<string, import("@keymaster/contracts").BorrowedOwnerFileStore>();
       for (const declaration of declared) {
+        if (declaration.model === "files") {
+          const ownedFiles = createDeferredOwnerFileStore(requireStorageBindingAuthority(options, coreHost!, manifest.id), manifest.id, declaration, context.scope);
+          boundFiles.set(declaration.purposeId, ownedFiles);
+          continue;
+        }
         let owned = await bindStorageDeclaration(options, coreHost!, manifest.id, declaration, context.scope);
         if (!owned) continue;
         owned = context.scope.track(owned, (value) => value.close(), `storage:${declaration.purposeId}`);
         bound.set(declaration.purposeId, borrowKeyValueStore(owned));
       }
       const storage = declared.length === 1 ? bound.get(declared[0]!.purposeId) : undefined;
-      const result = await setup(createLegacyContext(context, manifest, storage, bound));
+      const result = await setup(createLegacyContext(context, manifest, storage, bound, boundFiles));
       return typeof result === "function" ? async () => { await result(); } : async () => undefined;
     };
   }
@@ -1548,9 +1629,12 @@ export function createKeymasterPluginHost(
             ?? startupPolicy(plugin).defaultEnabled;
           const policy = startupPolicy(plugin);
           const desired = policy.startup === "required" || policy.canDisable === false || intent;
-          if (desired && state.kind === "error-disabled") await coreHost!.retry(plugin.id);
-          else if (desired && state.kind === "blocked") await coreHost!.enable(plugin.id);
-          else if (desired && state.kind === "disabled") await coreHost!.enable(plugin.id);
+          // 这里的 desired 已经是 Coordinator 的当前真值；重新注册只是
+          // 补做本地实例装配，不应再次提交“启用”命令。否则两个异步
+          // 装配入口可能用同一个旧 revision 提交，后一个会被正确拒绝。
+          if (desired && (state.kind === "error-disabled" || state.kind === "blocked" || state.kind === "disabled")) {
+            await coreHost!.retry(plugin.id);
+          }
           return;
         }
         await coreHost!.register(convertManifest(plugin));
@@ -1655,7 +1739,7 @@ export function createKeymasterPluginHost(
       const ownerChanged = previousIdentity?.vaultStatus !== next.vaultStatus
         || (previousIdentity?.ownerPublicKeyHex ?? "") !== (next.ownerPublicKeyHex ?? "")
         || previousIdentity?.sessionEpoch !== next.sessionEpoch;
-      const toSuspend: { pluginId: string; scopeKind: RuntimeUnitDescriptor["scopeKind"] }[] = [];
+      const toSuspend: { pluginId: string; scopeKind: RuntimeUnitDescriptor["scopeKind"]; shouldRestart: boolean }[] = [];
       for (const [pluginId, manifest] of [...manifests].reverse()) {
         const unit = currentUnit(manifest, hostRuntime);
         if (!unit) continue;
@@ -1664,15 +1748,25 @@ export function createKeymasterPluginHost(
           : unit.scopeKind === "owner-session" || unit.scopeKind === "connect-session"
             ? ownerChanged
             : false;
-        if (identityBound) toSuspend.push({ pluginId, scopeKind: unit.scopeKind });
+        if (identityBound) {
+          // suspend() 会保留用户意图；只为原本想运行的实例安排重启，
+          // 禁用的可选插件不能因桶切换被意外打开。
+          toSuspend.push({
+            pluginId,
+            scopeKind: unit.scopeKind,
+            shouldRestart: coreHost!.state(pluginId).desiredEnabled,
+          });
+        }
       }
       runtimeIdentity = { ...next };
       // WebLoom 负责当前实例的 Scope；身份边界变化时先同步撤权，再等待
       // 有界清理。desiredEnabled 保持不变，解锁/重绑后由分阶段装配重新启动。
       for (const item of toSuspend) {
         await coreHost!.suspend(item.pluginId, "runtime identity changed");
-        if (item.scopeKind === "storage") {
-          await coreHost!.enable(item.pluginId);
+        if (item.scopeKind === "storage" && item.shouldRestart) {
+          // retry() 只启动当前已确认启用的本地实例，不改写 Coordinator
+          // 的插件意图 revision；身份重绑不是一次用户启停操作。
+          await coreHost!.retry(item.pluginId);
         }
       }
       // Locked/booting/uninitialized runtimes intentionally leave owner-session

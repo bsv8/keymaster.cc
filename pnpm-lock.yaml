@@ -220,8 +220,8 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
       keyhold:
-        specifier: 2.0.0
-        version: 2.0.0
+        specifier: 2.1.0
+        version: 2.1.0
       sat-subscription-protocol:
         specifier: 0.2.0
         version: 0.2.0
@@ -273,18 +273,24 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@noble/ciphers':
+        specifier: ^2.2.0
+        version: 2.2.0
       '@noble/hashes':
         specifier: ^2.0.1
         version: 2.2.0
+      '@noble/secp256k1':
+        specifier: ^2.2.0
+        version: 2.3.0
       '@smithy/fetch-http-handler':
         specifier: ^5.6.13
         version: 5.6.13
       '@xmldom/xmldom':
         specifier: ^0.9.10
         version: 0.9.10
-      keymaster-hold:
-        specifier: 0.1.0
-        version: 0.1.0
+      keyhold:
+        specifier: 2.1.0
+        version: 2.1.0
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)
@@ -439,8 +445,8 @@ importers:
         specifier: ^2.2.0
         version: 2.3.0
       keyhold:
-        specifier: 2.0.0
-        version: 2.0.0
+        specifier: 2.1.0
+        version: 2.1.0
 
   packages/plugin-importer-wif:
     dependencies:
@@ -481,8 +487,8 @@ importers:
         specifier: '*'
         version: link:../ui
       keyhold:
-        specifier: 2.0.0
-        version: 2.0.0
+        specifier: 2.1.0
+        version: 2.1.0
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)
@@ -722,8 +728,8 @@ importers:
         specifier: ^2.2.0
         version: 2.3.0
       keyhold:
-        specifier: 2.0.0
-        version: 2.0.0
+        specifier: 2.1.0
+        version: 2.1.0
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)
@@ -3014,11 +3020,8 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
-  keyhold@2.0.0:
-    resolution: {integrity: sha512-8yijaP9pA83feaeqKw3epj3eWB152Br4Q31bsuhFwSa4HE0ET4R4+HFWLDIJeNPj7AJO2JouqdMWfJNfDGN2yA==}
-
-  keymaster-hold@0.1.0:
-    resolution: {integrity: sha512-ETKUIJ2Q03NdyNNvA6obM3evxE6LNlAv5hl4BFVCvuLGjbtAaeRY6ftZn5LzJZoLuLFYnufXLSBnfrVrbLKn9A==}
+  keyhold@2.1.0:
+    resolution: {integrity: sha512-MsphUUVSp9VcpNuO5m7Ug4kd1yhUSr8HUBgZ22EzM0PwwzA1SU8fbf0omgy2apBW7yiVY5yX/7ITd2ow5BDvSQ==}
 
   keymaster-multisig-pool@1.5.0:
     resolution: {integrity: sha512-858FmzP0wK7KuOPosuH3dso//PNI+7VIqgx62swqyA+Hnco4nlnDEdqEPCwpIpwB/3qHyBNRt3RkGRd+ys6soQ==}
@@ -6852,13 +6855,9 @@ snapshots:
 
   json5@2.2.3: {}
 
-  keyhold@2.0.0:
+  keyhold@2.1.0:
     dependencies:
       '@noble/curves': 2.2.0
-
-  keymaster-hold@0.1.0:
-    dependencies:
-      tr46: 5.1.1
 
   keymaster-multisig-pool@1.5.0:
     dependencies:

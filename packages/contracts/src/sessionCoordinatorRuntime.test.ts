@@ -51,18 +51,18 @@ describe("Coordinator runtime contract parsers", () => {
     const request = {
       kind: "storage.platform.bind",
       pluginId: "vault",
-      declaration: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata,
+      declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads,
       expectedSessionEpoch: "epoch-1",
     } as const satisfies CoordinatorRpcRequest;
     const grant = {
       platformGrantId: "platform-1",
       bucketId: "bucket-1",
       bucketGeneration: 1,
-      moduleId: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.moduleId,
-      purposeId: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.purposeId,
-      authority: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.authority,
-      model: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.model,
-      schemaVersion: CENTRAL_STORAGE_DECLARATIONS.vaultAuthMetadata.schemaVersion,
+      moduleId: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.moduleId,
+      purposeId: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.purposeId,
+      authority: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.authority,
+      model: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.model,
+      schemaVersion: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.schemaVersion,
       sessionEpoch: "epoch-1",
     };
     const response = { sessionEpoch: "epoch-1", ack: { status: "ok" }, operationResult: grant };
@@ -105,29 +105,6 @@ describe("Coordinator runtime contract parsers", () => {
       storageGrantId: "grant",
       key: "settings",
       value: { invalid: 1n },
-    })).toThrow();
-  });
-
-  it("validates LocalStorage rollback and emits a sanitized catalog entry", () => {
-    const entry = catalogEntry();
-    const binding = { peerGeneration: 1, sessionEpoch: "epoch-1", leaseId: "lease-1" };
-    const result = parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
-      ...binding,
-      type: "catalog-commit",
-      bucketId: "bucket-1",
-      bucketGeneration: 1,
-      targetBucket: { ...entry, untrusted: "discard" },
-      rollback: false,
-    }) as Record<string, unknown>;
-    expect(result).toMatchObject({ type: "catalog-commit", rollback: false });
-    expect(result.targetBucket).not.toHaveProperty("untrusted");
-    expect(() => parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
-      ...binding,
-      type: "catalog-commit",
-      bucketId: "bucket-1",
-      bucketGeneration: 1,
-      targetBucket: entry,
-      rollback: "false",
     })).toThrow();
   });
 
@@ -493,33 +470,6 @@ describe("Coordinator runtime contract parsers", () => {
       endpoint: "https://example.test",
       limits: [1, 2],
     }).operationResult).toEqual({ endpoint: "https://example.test", limits: [1, 2] });
-  });
-
-  it("只接受不含内部恢复字段的密码轮转安全投影", () => {
-    const request = rpcRequest("storage.control", { control: { type: "list-pending-password-rotations" } });
-    const view = {
-      format: "keymaster.storage.password-rotation-view",
-      version: 1,
-      operationId: "rotation-view-0001",
-      bucketId: "bucket-view-0001",
-      backend: "local",
-      phase: "hold-published",
-      createdAt: 1,
-      updatedAt: 2,
-    } as const;
-    expect(parseCoordinatorResponseFor(request, {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: [view],
-    }).operationResult).toEqual([view]);
-
-    // 内部事务保存的恢复密文/指纹不能借用公共投影返回；多余字段必须
-    // 在真实 response parser 边界被拒绝，而不是传到页面再猜测如何清理。
-    expect(() => parseCoordinatorResponseFor(request, {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: [{ ...view, restoredDeviceCiphertextFingerprint: "a".repeat(64) }],
-    })).toThrow(/password rotation view/iu);
   });
 
   it("rejects transport identity on both sides of the Coordinator RPC boundary", () => {

@@ -21,7 +21,7 @@ import { contactsResources } from "./manifest.js";
 
 const OWNER = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CONTACT: Contact = {
-  id: "contact-1", publicKeyHex: "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", name: "Bob", tags: [],
+  publicKeyHex: "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", name: "Bob", tags: [],
   createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z"
 };
 
@@ -77,7 +77,7 @@ describe("ContactsPage public-key actions", () => {
     render(<PluginHostProvider host={host}><ContactsPage /></PluginHostProvider>);
     fireEvent.click(await screen.findByRole("link", { name: "Bob" }));
 
-    await waitFor(() => expect(window.location.pathname).toBe("/contacts/contact-1"));
+    await waitFor(() => expect(window.location.pathname).toBe(`/contacts/${CONTACT.publicKeyHex}`));
   });
 
   it("shows Message only while message is enabled, while Transfer remains after its owner is removed", async () => {

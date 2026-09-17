@@ -755,6 +755,34 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   .initial-setup__choices, .initial-setup .bucket-connection-fields { grid-template-columns: 1fr; }
   .initial-setup .bucket-connection-fields label.is-wide, .initial-setup .bucket-connection-fields .is-wide { grid-column: auto; }
 }
+
+/* 已有桶认证是单独的冷启动门禁，不能复用首次初始化向导的步骤样式。 */
+.storage-authentication { display: flex; flex-direction: column; gap: 16px; }
+.storage-authentication__target {
+  display: grid;
+  grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.storage-authentication__target dt { color: var(--text-dim); font-size: 12px; }
+.storage-authentication__target dd { margin: 0; overflow-wrap: anywhere; font-size: 13px; }
+.storage-authentication__form { display: flex; flex-direction: column; gap: 4px; }
+.storage-authentication__form .ui-button { align-self: flex-start; }
+.storage-authentication__hint,
+.storage-authentication__status,
+.storage-authentication__error { margin: 0; font-size: 12px; line-height: 1.5; }
+.storage-authentication__hint { color: var(--text-dim); }
+.storage-authentication__status { color: var(--primary); }
+.storage-authentication__error {
+  padding: 10px 12px;
+  border-left: 3px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+  color: var(--danger);
+}
 .first-time-import__reuse-toggle {
   display: flex;
   align-items: center;

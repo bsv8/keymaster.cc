@@ -1,7 +1,7 @@
 // packages/runtime/src/i18n/createI18nService.test.ts
 // I18nService 单元测试：覆盖 key 解析、I18nText 处理、namespace、setLanguage 热切换。
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_LANGUAGE, type I18nPluginResources } from "@keymaster/contracts";
 import { createI18nService } from "./createI18nService.js";
 
@@ -21,6 +21,15 @@ const sampleResources: I18nPluginResources = {
 };
 
 describe("createI18nService", () => {
+  beforeEach(() => {
+    // setAuto() 会按浏览器语言解析;测试必须与运行机器的 locale 无关。
+    vi.stubGlobal("navigator", { languages: ["en-US"], language: "en-US" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("starts with default language (en) and serves common resources", () => {
     const svc = createI18nService({ debug: false });
     expect(svc.language()).toBe(DEFAULT_LANGUAGE);

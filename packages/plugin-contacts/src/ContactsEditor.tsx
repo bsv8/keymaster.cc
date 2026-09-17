@@ -17,7 +17,6 @@ export interface ContactsEditorProps {
   open: boolean;
   mode: "create" | "edit";
   publicKeyHex?: string;
-  contactId?: string;
   onClose: () => void;
   onSaved: (contact: Contact) => void;
 }
@@ -59,10 +58,7 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
       .listContacts()
       .then((list) => {
         if (cancelled) return;
-        const found =
-          props.contactId ? list.find((c) => c.id === props.contactId) : undefined;
-        const next =
-          found ?? (props.publicKeyHex ? list.find((c) => c.publicKeyHex === props.publicKeyHex) : undefined);
+        const next = props.publicKeyHex ? list.find((c) => c.publicKeyHex === props.publicKeyHex) : undefined;
         setCurrent(next ?? null);
         if (props.mode === "edit") {
           if (!next) {
@@ -108,7 +104,7 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
     return () => {
       cancelled = true;
     };
-  }, [keyspace, props.contactId, props.mode, props.open, props.publicKeyHex, service, t]);
+  }, [keyspace, props.mode, props.open, props.publicKeyHex, service, t]);
 
   useEffect(() => {
     if (!props.open) {
@@ -158,7 +154,7 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
       }
       const saved =
         props.mode === "edit"
-          ? await service.updateContact(current!.id, input)
+          ? await service.updateContact(current!.publicKeyHex, input)
           : await service.addContact(input);
       props.onSaved(saved);
     } catch (err) {

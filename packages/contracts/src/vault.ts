@@ -339,8 +339,11 @@ export interface VaultService {
       source?: string;
     };
   }): Promise<KeyRef>;
-  /** 用密码解锁选中的 KeyHold v2 记录；旧记录返回 Unsupported。 */
-  unlock(password: string): Promise<CoordinatorCommandResult>;
+  /**
+   * 用该 Key 自己的密码解锁 KeyHold 文档。
+   * `publicKeyHex` 省略时解锁当前选中的 Key（无选择则第一把）。
+   */
+  unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
   /** 锁定，丢弃内存中的明文。 */
   lock(): Promise<CoordinatorCommandResult>;
   /**

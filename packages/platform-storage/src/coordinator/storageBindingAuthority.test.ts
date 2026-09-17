@@ -11,7 +11,7 @@ function grant(): StorageOwnerGrant {
     bucketId: "bucket:1",
     bucketGeneration: 1,
     ownerPublicKeyHex: OWNER.toLowerCase(),
-    ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
+    ...CENTRAL_STORAGE_DECLARATIONS.messageHistory,
     ownerStorageGeneration: 1,
     sessionEpoch: "session:1",
   };
@@ -36,14 +36,61 @@ describe("storage binding authority", () => {
 
     const authority = createStorageBindingAuthority(client);
     const store = await authority.openOwnerAppStore({
-      pluginId: "contacts",
-      declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
+      pluginId: "message",
+      declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory,
     });
 
     await expect(store.put("hello", "world")).resolves.toMatchObject({ revision: 1 });
     await expect(store.get("hello")).resolves.toMatchObject({ value: "world" });
     expect(ownerData).toHaveBeenCalledTimes(2);
     store.close();
+  });
+
+  it("通过 owner 文件数据面映射 model files 的 list/get/put/delete", async () => {
+    const bytes = new TextEncoder().encode("{}");
+    const ownerData = vi.fn(async (request: { type: string }) => {
+      if (request.type === "owner.file-list") return { status: "ok" as const, value: { files: [{ path: "a.json", size: 2 }] } };
+      if (request.type === "owner.file-get") return { status: "ok" as const, value: { path: "a.json", bytes } };
+      if (request.type === "owner.file-put") return { status: "ok" as const, value: { etag: "etag-1" } };
+      return { status: "ok" as const, value: undefined };
+    });
+    const client = {
+      getActivePublicKeyHex: () => OWNER,
+      storageBindOwner: vi.fn(async () => ({
+        status: "ok" as const,
+        value: {
+          storageGrantId: "owner-file-grant:1",
+          bucketId: "bucket:1",
+          bucketGeneration: 1,
+          ownerPublicKeyHex: OWNER.toLowerCase(),
+          ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
+          ownerStorageGeneration: 1,
+          sessionEpoch: "session:1",
+        } satisfies StorageOwnerGrant,
+      })),
+      storageOwnerData: ownerData,
+      storageBindPlatform: vi.fn(),
+      storagePlatformData: vi.fn(),
+      storageDeleteOwner: vi.fn(),
+    } as unknown as StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined };
+
+    const authority = createStorageBindingAuthority(client);
+    const files = await authority.openOwnerFileStore({
+      pluginId: "contacts",
+      declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
+    });
+
+    await expect(files.list({ prefix: "" })).resolves.toEqual({ files: [{ path: "a.json", size: 2 }] });
+    await expect(files.get("a.json")).resolves.toMatchObject({ path: "a.json" });
+    await expect(files.put("a.json", bytes, { ifNoneMatch: "*" })).resolves.toEqual({ etag: "etag-1" });
+    await expect(files.delete("a.json")).resolves.toBeUndefined();
+    expect(ownerData).toHaveBeenCalledWith({
+      type: "owner.file-put",
+      storageGrantId: "owner-file-grant:1",
+      path: "a.json",
+      bytes,
+      ifNoneMatch: true,
+    });
   });
 
   it("只在远端授权校验尚未进入物理 I/O 时重绑 platform grant", async () => {

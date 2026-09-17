@@ -14,6 +14,8 @@ export interface StorageBindingAuthority {
   /** 当前 active owner；锁定或切 key 时返回最新状态，供 Host 使句柄失效。 */
   getActivePublicKeyHex?(): string | undefined;
   openOwnerAppStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<OwnerAppStore>;
+  /** 打开 owner 文件根（model: "files"）；数据面仍走 storageOwnerData 的文件操作。 */
+  openOwnerFileStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<import("./files.js").OwnerFileStore>;
   openPlatformStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<KeyValueStore>;
   deleteOwnerStorage(input: { ownerPublicKeyHex: string }): Promise<void>;
 }
@@ -30,7 +32,12 @@ export type CoordinatorOwnerStorageData =
   | { type: "owner.list"; storageGrantId: string; input?: { prefix?: string; cursor?: string; limit?: number; partition?: string } }
   | { type: "owner.put"; storageGrantId: string; key: string; value: unknown; condition?: { ifRevision?: number; partition?: string } }
   | { type: "owner.delete"; storageGrantId: string; key: string; condition?: { ifRevision?: number; partition?: string } }
-  | { type: "owner.commit"; storageGrantId: string; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] };
+  | { type: "owner.commit"; storageGrantId: string; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] }
+  /** owner 文件根（model: "files"）：一文件一对象,路径都是模块根下的相对路径。 */
+  | { type: "owner.file-list"; storageGrantId: string; input?: { prefix?: string; cursor?: string; limit?: number } }
+  | { type: "owner.file-get"; storageGrantId: string; path: string }
+  | { type: "owner.file-put"; storageGrantId: string; path: string; bytes: Uint8Array; ifNoneMatch?: boolean; ifMatch?: string }
+  | { type: "owner.file-delete"; storageGrantId: string; path: string; ifMatch?: string };
 
 export type CoordinatorPlatformStorageData =
   | { type: "platform.get"; platformGrantId: string; key: string; partition?: string }
@@ -69,7 +76,8 @@ export interface StorageOwnerGrant {
   moduleId: string;
   purposeId: string;
   authority: "built-in-module" | "third-party-app";
-  model: "kv";
+  /** owner 数据模型：K-V 或文件根。 */
+  model: "kv" | "files";
   schemaVersion: number;
   /** 发放时绑定的桶级 owner 世代；重导入后旧授权不能写入新世代。 */
   ownerStorageGeneration: number;

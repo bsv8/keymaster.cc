@@ -40,30 +40,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "snapshot",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  vaultAuthMetadata: Object.freeze({
-    moduleId: "vault",
-    purposeId: "auth-metadata",
-    scope: "bucket",
-    authority: "platform-only",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  vaultKeyIndex: Object.freeze({
-    moduleId: "vault",
-    purposeId: "key-index",
-    scope: "bucket",
-    authority: "platform-only",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  vaultKeyLifecycleJournals: Object.freeze({
-    moduleId: "vault",
-    purposeId: "key-lifecycle-journals",
-    scope: "bucket",
-    authority: "platform-only",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   protocolDurablePolicy: Object.freeze({
     moduleId: "protocol",
     purposeId: "durable-policy",
@@ -117,7 +93,8 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     purposeId: "address-book",
     scope: "owner",
     authority: "built-in-module",
-    model: "kv",
+    // 一联系人一文件（KeymasterFormats《联系人文件》），使用扁平 owner 文件根。
+    model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   messageHistory: Object.freeze({
@@ -134,6 +111,18 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     scope: "owner",
     authority: "built-in-module",
     model: "kv",
+    schemaVersion: 1,
+  } satisfies PluginStorageDeclaration),
+  /**
+   * P2PKH 桶内文件根（空 purpose = 模块根，见 KeymasterFormats《P2PKH》）。
+   * 布局：`p2pkh/setting.json`、`p2pkh/<net>/tx|height/…`。
+   */
+  p2pkhFiles: Object.freeze({
+    moduleId: "p2pkh",
+    purposeId: "",
+    scope: "owner",
+    authority: "built-in-module",
+    model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   pokerSettings: Object.freeze({
@@ -240,7 +229,7 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
   contacts: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook]),
   message: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.messageHistory]),
-  p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
+  p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
   poker: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.pokerSettings, CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory]),
   protocol: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,

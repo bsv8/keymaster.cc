@@ -14,7 +14,7 @@ export function ContactPublicKeyActions({ contact }: { contact: Contact }) {
   const valid = COMPRESSED_PUBLIC_KEY.test(contact.publicKeyHex);
 
   if (!valid) {
-    console.warn("Invalid contact publicKeyHex", contact.id);
+    console.warn("Invalid contact publicKeyHex", contact.publicKeyHex);
     return null;
   }
 

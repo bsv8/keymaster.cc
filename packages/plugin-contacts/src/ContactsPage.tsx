@@ -48,7 +48,7 @@ export function ContactsPage() {
   async function remove(c: Contact) {
     if (!confirm(t("contacts.page.confirmDelete", { defaultValue: "Delete " }) + c.name + "?")) return;
     try {
-      await service.removeContact(c.id);
+      await service.removeContact(c.publicKeyHex);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("contacts.page.err.delete", { defaultValue: "Delete failed" }));
     }
@@ -59,7 +59,7 @@ export function ContactsPage() {
       key: "name",
       header: t("contacts.page.col.name", { defaultValue: "Name" }),
       render: (r) => (
-        <AppLink to={`/contacts/${encodeURIComponent(r.id)}`}>
+        <AppLink to={`/contacts/${encodeURIComponent(r.publicKeyHex)}`}>
           {r.name}
         </AppLink>
       )
@@ -125,12 +125,11 @@ export function ContactsPage() {
           description={t("contacts.page.empty.desc", { defaultValue: "Click \"New\" in the top right to add one." })}
         />
       ) : (
-        <DataTable columns={columns} rows={rows} rowKey={(r) => r.id} />
+        <DataTable columns={columns} rows={rows} rowKey={(r) => r.publicKeyHex} />
       )}
       <ContactsEditor
         open={open}
         mode={editing ? "edit" : "create"}
-        contactId={editing?.id}
         publicKeyHex={editing?.publicKeyHex}
         onClose={() => setOpen(false)}
         onSaved={async () => {

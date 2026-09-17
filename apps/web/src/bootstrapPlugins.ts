@@ -1,7 +1,7 @@
 // apps/web/src/bootstrapPlugins.ts
 // 装配插件：按 manifest 声明的四阶段门禁注册。
 // 设计缘由：apps/web 是装配层，只 import manifest，不 import 内部服务。
-// 阶段顺序：storage-onboarding -> vault-selection -> owner-apps-ready
+// 插件注册阶段顺序：storage-onboarding -> vault-selection -> owner-apps-ready
 // -> connect-apps-ready。每个阶段内部仍按 catalog 的依赖顺序执行。
 //
 // 硬切换 003：把 shell 自身 i18n 资源（apps/web 装配层）通过 initialI18nResources
@@ -155,9 +155,29 @@ const EMPTY_PLUGIN_INTENT_SNAPSHOT: PluginIntentSnapshot = {
  * 否则 App 会把合法的首次存储选择误判成启动不一致。
  */
 export function applicationBootstrapPhaseForStorageReadiness(
-  storageReadyForBootstrap: boolean
+  storageReadyForBootstrap: boolean,
+  storageAuthenticationRequired = false,
 ): ApplicationBootstrapPhase {
-  return storageReadyForBootstrap ? "vault-selection" : "storage-onboarding";
+  return storageReadyForBootstrap
+    ? "vault-selection"
+    : storageAuthenticationRequired
+      ? "storage-authentication"
+      : "storage-onboarding";
+}
+
+/**
+ * 把 Coordinator 返回的 Storage 状态映射成页面启动阶段。
+ *
+ * `authentication` 表示设备上已有选中的连接，只缺本次密码；它不能和
+ * `unselected` 共用首次初始化入口。其它非 ready 状态仍然保留在首次
+ * Storage 门禁，等待已有恢复/重试逻辑处理。
+ */
+export function applicationBootstrapPhaseForStorageStatus(
+  storageStatus: unknown,
+): ApplicationBootstrapPhase {
+  if (storageStatus === "authentication") return "storage-authentication";
+  if (storageStatus === "ready") return "vault-selection";
+  return "storage-onboarding";
 }
 
 /** 把 Coordinator 的会话快照转换成 Window Host 的作用域身份。 */
@@ -684,8 +704,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     stage: "storage-status",
     operation: "read-storage-status"
   }, () => coordinatorClient.storageControl({ type: "status" }));
-  // Storage 是独立健康域。Provider/CORS/认证暂不可用时，仍需让 Vault
-  // 和设置页启动，以便用户看到恢复入口；此时不能再读取平台配置 K-V。
+  // Storage 是独立健康域。Provider/CORS/认证暂不可用时，仍需让页面看到
+  // 对应的恢复入口；此时不能再读取平台配置 K-V。尤其是 authentication
+  // 只允许已有桶认证页，不能退回首次初始化。
+  const storagePhase = storageStatus.status === "ok"
+    ? applicationBootstrapPhaseForStorageStatus(storageStatus.value)
+    : "storage-onboarding";
   const storageReady = storageStatus.status === "ok" && storageStatus.value === "ready";
   runWithBootstrapErrorContext({
     stage: "transport",
@@ -698,7 +722,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     stage: "storage-status",
     operation: "create-bootstrap-status"
   }, () => createApplicationBootstrapStatus({
-    phase: storageReady ? "vault-selection" : "storage-onboarding",
+    phase: storagePhase,
     storageReady,
     vaultCapabilityReady: false,
     hasUnlockedActiveKey: false,
@@ -1134,7 +1158,10 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         ownerAppsReady: false,
         connectAppsReady: false,
         assetWorkspaceReady: false,
-        phase: applicationBootstrapPhaseForStorageReadiness(storageReadyForBootstrap)
+        phase: applicationBootstrapPhaseForStorageReadiness(
+          storageReadyForBootstrap,
+          storagePhase === "storage-authentication",
+        )
       }, "coordinator");
     }
 

@@ -15,7 +15,7 @@ export type StorageScope = "bucket" | "owner";
 export type StorageAuthority = "platform-only" | "built-in-module" | "third-party-app";
 
 /** 中央存储声明的数据模型。 */
-export type StorageModel = "snapshot" | "kv";
+export type StorageModel = "snapshot" | "kv" | "files";
 
 /**
  * Host/Coordinator 使用的 V1 中央存储声明。
@@ -84,11 +84,16 @@ export function validatePluginStorageDeclaration(input: PluginStorageDeclaration
   if (input.authority !== "platform-only" && input.authority !== "built-in-module" && input.authority !== "third-party-app") {
     throw new Error("storage declaration authority is invalid");
   }
-  if (input.model !== "snapshot" && input.model !== "kv") {
+  if (input.model !== "snapshot" && input.model !== "kv" && input.model !== "files") {
     throw new Error("storage declaration model is invalid");
   }
   const moduleId = validateStorageModuleId(input.moduleId);
-  const purposeId = validateStoragePurposeId(input.purposeId);
+  // files 模型允许空 purposeId,表示"模块根"(例如 <owner>/p2pkh/)；
+  // kv/snapshot 仍必须有具体 purpose 段。
+  if (input.model === "files" && input.purposeId === "") {
+    // 跳过 purpose 校验,保留空串。
+  }
+  const purposeId = input.purposeId === "" && input.model === "files" ? "" : validateStoragePurposeId(input.purposeId);
   if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) {
     throw new Error("storage declaration schemaVersion is invalid");
   }
@@ -97,6 +102,9 @@ export function validatePluginStorageDeclaration(input: PluginStorageDeclaration
   }
   if (input.scope === "owner" && input.authority === "platform-only") {
     throw new Error("owner storage cannot use platform-only authority");
+  }
+  if (input.model === "files" && input.scope !== "owner") {
+    throw new Error("file storage must use owner scope");
   }
   return { moduleId, purposeId, scope: input.scope, authority: input.authority, model: input.model, schemaVersion: input.schemaVersion };
 }
@@ -118,6 +126,24 @@ export function buildOwnerStorageModuleRoot(input: {
   return `${validateOwnerPublicKeyHex(input.ownerPublicKeyHex)}/.keymaster/modules/${validateStorageModuleId(input.moduleId)}/${validateStoragePurposeId(input.purposeId)}/`;
 }
 
+/**
+ * `model: "files"` 的 owner 模块根：`<owner>/<moduleId>/<purposeId>/`。
+ *
+ * purposeId 为空串时表示"模块根"：`<owner>/<moduleId>/`（p2pkh 这类
+ * 整个模块共享一个目录的格式）。文件模型按 KeymasterFormats 的扁平
+ * 布局直接落在 owner 下；K-V 模型继续使用 `.keymaster/modules/…`。
+ */
+export function buildOwnerStorageFileRoot(input: {
+  ownerPublicKeyHex: string;
+  moduleId: string;
+  purposeId: string;
+}): string {
+  const owner = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
+  const moduleId = validateStorageModuleId(input.moduleId);
+  if (input.purposeId === "") return `${owner}/${moduleId}/`;
+  return `${owner}/${moduleId}/${validateStoragePurposeId(input.purposeId)}/`;
+}
+
 /** 构造绑定后的逻辑 namespace 根；Provider 仍由 Coordinator 私有持有。 */
 export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): string {
   const declaration = validatePluginStorageDeclaration(binding);
@@ -129,8 +155,15 @@ export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): str
   }
   if (declaration.scope === "owner") {
     if (!binding.ownerPublicKeyHex) throw new Error("owner storage requires ownerPublicKeyHex");
-    // owner lifecycle 记录在桶根；业务 namespace 统一落在 owner 下的
-    // modules 目录，module/purpose 由中央 path planner 生成。
+    // 文件模型直接落在 owner 下（KeymasterFormats 扁平布局）；K-V/snapshot
+    // 模型继续使用 `.keymaster/modules` 保留区。
+    if (declaration.model === "files") {
+      return buildOwnerStorageFileRoot({
+        ownerPublicKeyHex: binding.ownerPublicKeyHex,
+        moduleId: declaration.moduleId,
+        purposeId: declaration.purposeId,
+      });
+    }
     return buildOwnerStorageModuleRoot({ ownerPublicKeyHex: binding.ownerPublicKeyHex, moduleId: declaration.moduleId, purposeId: declaration.purposeId });
   }
   if (binding.ownerPublicKeyHex !== undefined) throw new Error("bucket storage must not contain an owner");
@@ -178,6 +211,8 @@ export interface PlatformRootStore {
   readonly bucket: StorageBucketRef;
   /** 打开 Host 已预绑定的 owner 模块 K-V。 */
   openKeyValueStore(input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number }): Promise<OwnerAppStore>;
+  /** 打开 Host 已预绑定的 owner 模块文件根（model: "files"，扁平布局）。 */
+  openOwnerFileStore(input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number }): Promise<import("./files.js").OwnerFileStore>;
   /** 打开 bucket 级内置 snapshot；返回值不含 Provider/ETag/path。 */
   openPlatformSnapshot<T>(input: { declaration: PluginStorageDeclaration; validate: (value: unknown) => StorageSnapshotJsonCompatible<T> }): Promise<SnapshotStore<T>>;
   /** 打开 bucket 级平台 K-V（Vault purpose、protocol、multipart 等）。 */

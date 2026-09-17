@@ -211,8 +211,8 @@ export class VaultServiceCoordinator implements VaultService {
     return await this.call({ type: "createVaultWithImportedKey", ...input });
   }
 
-  async unlock(password: string): Promise<CoordinatorCommandResult> {
-    const result = await this.coordinatorClient.unlock(password);
+  async unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult> {
+    const result = await this.coordinatorClient.unlock(password, publicKeyHex);
     if (result.status === "accepted" || result.status === "already-unlocked") return result;
     return result;
   }

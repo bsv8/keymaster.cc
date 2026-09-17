@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { defineCapability } from "webloom-framework";
-import { createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
-import type { PluginSetup } from "@keymaster/contracts";
+import { createPluginIntentController, createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
+import type { PluginIntentCoordinator } from "webloom-framework";
+import { defineRuntimeUnitDependencies, type PluginSetup } from "@keymaster/contracts";
 import { createKeymasterPluginHost } from "./keymasterHostAdapter.js";
 import { getWebLoomHost } from "./pluginHostContract.js";
 
@@ -10,8 +11,89 @@ const LOCAL_CAPABILITY = defineCapability<{ ok: boolean }>({
   id: "adapter.local",
   version: "1",
 });
+const DEPENDENCY_CAPABILITY = defineCapability<{ ready: boolean }>({
+  kind: "local",
+  id: "adapter.dependency",
+  version: "1",
+});
 
 describe("Keymaster WebLoom v4 adapter", () => {
+  it("重新装配已有实例时不重复提交插件启停意图", async () => {
+    const intentController = createPluginIntentController({
+      authorityInstanceId: "authority:adapter-test",
+      initial: { revision: 0, desiredEnabled: {}, desiredRevision: {} },
+    });
+    const pluginIntent: PluginIntentCoordinator = {
+      authorityInstanceId: intentController.authorityInstanceId,
+      snapshot: intentController.snapshot,
+      subscribe: intentController.subscribe,
+      submit: intentController.submit,
+    };
+    let setupCount = 0;
+    const host = createKeymasterPluginHost({
+      runtime: "window-main",
+      disableConfigPersistence: true,
+      pluginIntentCoordinator: pluginIntent,
+      initialRuntimeIdentity: {
+        vaultStatus: "unlocked",
+        ownerPublicKeyHex: "02" + "11".repeat(32),
+        sessionEpoch: "adapter-test:1",
+        bucketGeneration: 1,
+      },
+      runtimeUnitImplementationRegistry: {
+        get: () => (context) => {
+          setupCount += 1;
+          context.provide(LOCAL_CAPABILITY, { ok: true });
+        },
+      },
+    });
+    const plugin = {
+      id: "adapter-reassembly",
+      name: "Adapter reassembly",
+      kind: "platform" as const,
+      startup: "optional" as const,
+      defaultEnabled: true,
+      canDisable: true,
+      bootstrapStage: "vault-selection" as const,
+      displayGroup: "platform" as const,
+      units: [{
+        id: "adapter-reassembly.window",
+        runtime: "window-main" as const,
+        scopeKind: "storage" as const,
+        dependencies: defineRuntimeUnitDependencies([{ capability: DEPENDENCY_CAPABILITY }]),
+        provides: [LOCAL_CAPABILITY],
+      }],
+    };
+
+    // 第一次因依赖未注册而 blocked；依赖恢复后重新 register 只应
+    // 重试本地实例，不能把“启用”再次写入 Coordinator。
+    await host.register(plugin);
+    expect(host.state(plugin.id).kind).toBe("blocked");
+    host.provide(DEPENDENCY_CAPABILITY, { ready: true });
+    await host.register(plugin);
+    expect(host.state(plugin.id).kind).toBe("enabled");
+    expect(intentController.snapshot().revision).toBe(0);
+
+    // 桶世代变化会销毁并重建 storage Scope，同样不能改变持久化意图。
+    await host.transitionRuntimeIdentity({
+      vaultStatus: "unlocked",
+      ownerPublicKeyHex: "02" + "11".repeat(32),
+      sessionEpoch: "adapter-test:1",
+      bucketGeneration: 1,
+    });
+    await host.transitionRuntimeIdentity({
+      vaultStatus: "unlocked",
+      ownerPublicKeyHex: "02" + "11".repeat(32),
+      sessionEpoch: "adapter-test:1",
+      bucketGeneration: 2,
+    });
+    expect(host.state(plugin.id).kind).toBe("enabled");
+    expect(setupCount).toBe(2);
+    expect(intentController.snapshot().revision).toBe(0);
+
+    await host.dispose("test");
+  });
+
   it("allows staged native WebLoom implementations after WindowApp takes ownership", async () => {
     const host = createKeymasterPluginHost({
       runtime: "window-main",

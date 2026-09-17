@@ -21,6 +21,7 @@ export type FinalIoAuditOperation =
   | "storage.control"
   | "storage.platform.data"
   | "storage.owner.data"
+  | "storage.owner.files"
   | "storage.connect.data"
   | "storage.owner.delete"
   | "msfile.data"

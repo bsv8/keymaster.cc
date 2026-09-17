@@ -36,17 +36,18 @@ function captureTabBrowserErrors(
 }
 
 /**
- * 刷新成功的业务结果是“进入锁定态并能看见同一把 Key”，不是保留旧的
- * unlocked Window runtime。这个断言同时排除启动 fatal 和带诊断的崩溃壳。
+ * 冷启动成功的业务结果是“进入已有桶认证页”，不是进入首次初始化向导。
+ * 认证页出现前不能安装可读 Vault Root，因此这里只断言安全入口和无 fatal。
  */
-async function expectLockedTab(page: Page, keyLabel: string, tabLabel: string): Promise<void> {
+async function expectStorageAuthenticationTab(page: Page, tabLabel: string): Promise<void> {
   await expect(
-    page.getByRole("heading", { name: /Wallet locked|钱包已锁定/ }),
-    `${tabLabel} 刷新后必须进入可恢复的锁定态`,
+    page.getByRole("heading", { name: /Storage authentication required|存储需要认证/ }),
+    `${tabLabel} 刷新后必须进入已有桶认证页`,
   ).toBeVisible({ timeout: 20_000 });
-  const selectedKey = page.getByRole("region", { name: /Selected private key|当前选择的私钥/ })
-    .getByText(keyLabel, { exact: false });
-  await expect(selectedKey, `${tabLabel} 刷新后必须仍能读到同一把 Key`).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: /Choose a bucket type|选择桶类型/ }),
+    `${tabLabel} 已有连接不能退回首次初始化向导`,
+  ).toHaveCount(0);
   await expect(
     page.locator("[data-fatal-crash]"),
     `${tabLabel} 刷新不得进入 fatal crash 壳`,
@@ -90,23 +91,23 @@ test(JOURNEY_ID + "：tab1→tab2→tab1 刷新后 Local 运行态可恢复", as
       { bucketLabel: "Multi-tab refresh E2E bucket", keyLabel: "Multi-tab refresh E2E Key", password },
     ));
 
-    await test.step("tab1 首次刷新后恢复到锁定态", async () => {
+    await test.step("tab1 首次刷新后进入已有桶认证页", async () => {
       await reloadAndAssertSameKey(page, ready.keyLabel);
-      await expectLockedTab(page, ready.keyLabel, "tab1");
+      await expectStorageAuthenticationTab(page, "tab1");
     });
 
     await test.step("tab2 打开后刷新，仍使用同一个 Local catalog", async () => {
       await pageTwo.goto("/", { waitUntil: "domcontentloaded" });
       await expect(pageTwo).toHaveTitle("KeyMaster");
-      await expectLockedTab(pageTwo, ready.keyLabel, "tab2 open");
+      await expectStorageAuthenticationTab(pageTwo, "tab2 open");
 
       await pageTwo.reload({ waitUntil: "domcontentloaded" });
-      await expectLockedTab(pageTwo, ready.keyLabel, "tab2");
+      await expectStorageAuthenticationTab(pageTwo, "tab2");
     });
 
     await test.step("回到 tab1 再刷新，旧 tab2 peer 不得破坏恢复", async () => {
       await page.reload({ waitUntil: "domcontentloaded" });
-      await expectLockedTab(page, ready.keyLabel, "tab1 second refresh");
+      await expectStorageAuthenticationTab(page, "tab1 second refresh");
     });
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password]);

@@ -22,6 +22,7 @@ import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import {
   connectCoordinatorWithStartupRetry,
   applicationBootstrapPhaseForStorageReadiness,
+  applicationBootstrapPhaseForStorageStatus,
   bootstrapPhaseForContext,
   CoordinatorStartupError,
   createPublicCoordinatorClient,
@@ -77,6 +78,12 @@ function makeStorageBindingAuthority(): StorageBindingAuthority {
     bucketGeneration: 1
   });
   return {
+    openOwnerFileStore: async () => ({
+      list: async () => ({ files: [] }),
+      get: async () => undefined,
+      put: async () => ({}),
+      delete: async () => undefined,
+    }),
     openOwnerAppStore: async ({ declaration }) => open(declaration, "02" + "11".repeat(32)),
     openPlatformStore: async ({ declaration }) => open(declaration),
     deleteOwnerStorage: async () => undefined
@@ -156,6 +163,13 @@ describe("application bootstrap phase projection", () => {
     // application gate past storage onboarding.
     expect(applicationBootstrapPhaseForStorageReadiness(false)).toBe("storage-onboarding");
     expect(applicationBootstrapPhaseForStorageReadiness(true)).toBe("vault-selection");
+  });
+
+  it("keeps an existing selected bucket on the authentication page", () => {
+    expect(applicationBootstrapPhaseForStorageStatus("unselected")).toBe("storage-onboarding");
+    expect(applicationBootstrapPhaseForStorageStatus("authentication")).toBe("storage-authentication");
+    expect(applicationBootstrapPhaseForStorageStatus("ready")).toBe("vault-selection");
+    expect(applicationBootstrapPhaseForStorageReadiness(false, true)).toBe("storage-authentication");
   });
 });
 

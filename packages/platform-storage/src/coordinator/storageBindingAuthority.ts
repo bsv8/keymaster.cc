@@ -80,6 +80,49 @@ export function createStorageBindingAuthority(
     };
   }
 
+  async function openOwnerFileStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<import("@keymaster/contracts").OwnerFileStore> {
+    if (input.declaration.scope !== "owner" || input.declaration.model !== "files") throw new Error("Owner file storage must use owner files scope");
+    const grant = unwrap<StorageOwnerGrant>(await client.storageBindOwner(input), "owner file storage bind");
+    assertGrantDeclaration(grant, input.declaration);
+    const active = client.getActivePublicKeyHex()?.toLowerCase();
+    if (!active || active !== grant.ownerPublicKeyHex) throw new Error("Owner storage owner changed");
+    let closed = false;
+    const assertOpen = () => { if (closed) throw new Error("Storage handle is closed"); };
+    const call = async <T>(data: CoordinatorOwnerStorageData): Promise<T> => {
+      return unwrap<T>(await client.storageOwnerData(data), "owner file storage");
+    };
+    return {
+      async list(fileInput = {}) {
+        assertOpen();
+        return call<import("@keymaster/contracts").OwnerFileListPage>({ type: "owner.file-list", storageGrantId: grant.storageGrantId, input: fileInput });
+      },
+      async get(path) {
+        assertOpen();
+        return call<import("@keymaster/contracts").OwnerFileObject | undefined>({ type: "owner.file-get", storageGrantId: grant.storageGrantId, path });
+      },
+      async put(path, bytes, condition = {}) {
+        assertOpen();
+        return call<{ etag?: string; lastModified?: string }>({
+          type: "owner.file-put",
+          storageGrantId: grant.storageGrantId,
+          path,
+          bytes,
+          ...(condition.ifNoneMatch === undefined ? {} : { ifNoneMatch: true }),
+          ...(condition.ifMatch === undefined ? {} : { ifMatch: condition.ifMatch }),
+        });
+      },
+      async delete(path, deleteInput = {}) {
+        assertOpen();
+        await call<void>({
+          type: "owner.file-delete",
+          storageGrantId: grant.storageGrantId,
+          path,
+          ...(deleteInput.ifMatch === undefined ? {} : { ifMatch: deleteInput.ifMatch }),
+        });
+      },
+    };
+  }
+
   async function openPlatformStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<KeyValueStore> {
     if (input.declaration.scope !== "bucket" || input.declaration.authority === "third-party-app" || input.declaration.model !== "kv") throw new Error("Platform storage declaration is invalid");
     let currentGrant: StoragePlatformGrant | undefined;
@@ -154,6 +197,7 @@ export function createStorageBindingAuthority(
   return {
     getActivePublicKeyHex: () => client.getActivePublicKeyHex(),
     openOwnerAppStore,
+    openOwnerFileStore,
     openPlatformStore,
     async deleteOwnerStorage(input) { unwrap<void>(await client.storageDeleteOwner(input.ownerPublicKeyHex), "delete owner storage"); }
   };

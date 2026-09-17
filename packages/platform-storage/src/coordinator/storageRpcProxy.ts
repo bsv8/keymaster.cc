@@ -22,13 +22,11 @@ import type {
   StorageUploadAbortResult,
   StorageUploadBeginResult,
   StorageUploadPartResult,
-  StorageBucketCatalogEntryV2,
+  StorageRuntimeBucketV1,
   StorageBucketConnectionConfigV1,
   StorageBucketSwitchResultV1,
-  PendingPasswordRotationViewV1,
 } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageError.js";
-import { readStorageCatalog } from "../bootstrap/storageCatalogRepository.js";
 
 type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: StorageRuntimeControllerStatus; healthStatus?: StorageRuntimeStatus; catalogBucket?: boolean; bucketId?: string; bucketGeneration?: number; authorityRecovery?: CoordinatorAuthorityRecovery; summary: StorageProviderSummary | null; capabilities: BucketConditionalCapabilitiesView | null };
 
@@ -61,8 +59,7 @@ export class StorageRpcProxy implements StorageRuntimeController {
 
   status(): StorageRuntimeControllerStatus { return this.current.status; }
   hasCatalogBuckets(): boolean {
-    try { return readStorageCatalog().buckets.length > 0; }
-    catch { return false; }
+    return this.current.catalogBucket === true;
   }
   healthStatus(): StorageRuntimeStatus { return this.current.healthStatus ?? "degraded"; }
   /** 当前是否为新版桶目录；页面据此决定是否必须再次输入桶密码。 */
@@ -106,6 +103,10 @@ export class StorageRpcProxy implements StorageRuntimeController {
   connectExistingRemote(plan: import("@keymaster/contracts").ExistingRemoteStorageConnectPlan): Promise<import("@keymaster/contracts").ExistingRemoteStorageConnectResult> {
     return this.control({ type: "connect-existing-remote", plan });
   }
+  /** 只读探测：连接并列出 keys/,判定“已有钱包”还是“空桶”。 */
+  probeBucket(plan: import("@keymaster/contracts").BucketProbePlan): Promise<import("@keymaster/contracts").BucketProbeResult> {
+    return this.control({ type: "probe-bucket", plan });
+  }
   getInitialSetupResult(transactionId: string): Promise<import("@keymaster/contracts").InitialSetupResult | undefined> {
     return this.control({ type: "initial-setup-result", transactionId });
   }
@@ -126,28 +127,16 @@ export class StorageRpcProxy implements StorageRuntimeController {
     return this.control({ type: "unlock-bucket", password });
   }
   /** 目标桶先在 Worker 暂存并认证，成功后才更新目录和当前运行时。 */
-  switchBucket(bucket: StorageBucketCatalogEntryV2, password: string): Promise<StorageBucketSwitchResultV1> {
+  switchBucket(bucket: StorageRuntimeBucketV1, password: string): Promise<StorageBucketSwitchResultV1> {
     return this.control({ type: "switch-bucket", bucket, password });
   }
   /** 当前桶配置改动必须由 Coordinator 同步 Provider、快照和目录。 */
-  changeBucketConnectionConfig(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageBucketCatalogEntryV2> {
+  changeBucketConnectionConfig(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageRuntimeBucketV1> {
     return this.control({ type: "change-bucket-config", config, ...(label === undefined ? {} : { label }), password });
   }
   /** 当前桶改名与 Coordinator 运行态/目录保持同一条 CAS 边界。 */
-  renameBucket(label: string): Promise<StorageBucketCatalogEntryV2> {
+  renameBucket(label: string): Promise<StorageRuntimeBucketV1> {
     return this.control({ type: "rename-bucket", label });
-  }
-  /** 当前桶全量改密；页面只负责把返回的目录条目写回本机目录。 */
-  changeBucketPassword(oldPassword: string, newPassword: string): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResultV1> {
-    return this.control({ type: "change-bucket-password", oldPassword, newPassword });
-  }
-  /** 查询页面可恢复的密码轮转安全投影；返回值不含内部恢复字段。 */
-  listPendingPasswordRotations(): Promise<PendingPasswordRotationViewV1[]> {
-    return this.control({ type: "list-pending-password-rotations" });
-  }
-  /** 未完成的密码轮转恢复；用户重新提供新旧密码，由 Worker 按持久化事务收敛。 */
-  resumeBucketPasswordRotation(operationId: string, oldPassword: string, newPassword: string): Promise<import("@keymaster/contracts").StorageBucketPasswordRotationResumeResultV1> {
-    return this.control({ type: "resume-bucket-password-rotation", operationId, oldPassword, newPassword });
   }
   /**
    * 冷导出当前 Coordinator 已绑定桶的已提交 Hold 快照。

@@ -23,7 +23,9 @@ export interface S3BucketProviderOptions {
 function assertBucketId(bucketId: string): void {
   // bucketId 会直接成为物理对象路径的一段；不能允许 `/`、`.` 或 `..`
   // 把一个逻辑桶扩展成别的命名空间。
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(bucketId)) {
+  // device-bootstrap v1 的 remoteStorageId 允许 `:`；它只作为抽象桶
+  // 绑定身份，不会直接拼进 S3 物理 key。
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(bucketId)) {
     throw new StorageRuntimeError("storage_invalid_path", "Storage bucket ID is invalid");
   }
 }
@@ -50,9 +52,10 @@ export function createS3BucketProvider(
     .slice(0, 128);
   const bucketId = options.bucketId ?? (generatedBucketId || "s3-bucket");
   assertBucketId(bucketId);
-  // 每个逻辑桶必须拥有独立的物理根。用户填写的 prefix 只是租户/项目
-  // 前缀，不能成为多个 Keymaster 桶共享 Hold、Keys 和业务数据的根。
-  const root = `${userPrefix}.keymaster/buckets/${bucketId}/`;
+  // v1 规范规定：逻辑桶的固定文件直接位于用户 prefix 下，不能再追加
+  // 旧版的 `.keymaster/buckets/<bucketId>/` 物理根。不同连接由各自的 S3
+  // location（bucket/prefix）区分；固定私钥文件就是 keymaster/keys.json。
+  const root = userPrefix;
   const now = options.now ?? (() => Date.now());
   let disposed = false;
 

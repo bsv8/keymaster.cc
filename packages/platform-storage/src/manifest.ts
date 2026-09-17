@@ -1,8 +1,8 @@
 import type { I18nPluginResources, PluginManifest, PluginSetup, ResourceRegistry, StorageRuntimeController, StorageCoordinatorControl } from "@keymaster/contracts";
-import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, TOPBAR_REGISTRY_CAPABILITY, capabilityDescriptor } from "@keymaster/contracts";
+import { RESOURCE_REGISTRY_CAPABILITY, ROUTE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, TOPBAR_REGISTRY_CAPABILITY, capabilityDescriptor } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
-import { StorageBucketManagerEntry } from "./ui/StorageBucketManagerPage.js";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
+import { StorageBucketManagerPage } from "./ui/StorageBucketManagerPage.js";
 import type { StorageRuntimeSnapshot } from "./runtime/storageController.js";
 
 export const STORAGE_PLATFORM_PLUGIN_ID = "storage";
@@ -380,6 +380,7 @@ const storagePlatformPluginDefinition = {
     provides: [capabilityDescriptor(STORAGE_RUNTIME_CONTROLLER_CAPABILITY)],
     dependencies: defineRuntimeUnitDependencies([
       { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "桶管理页" },
     ]),
   }, {
     id: "storage.coordinator-worker",
@@ -392,6 +393,13 @@ const storagePlatformPluginDefinition = {
     if (!coordinator) throw new Error("Storage Coordinator control is unavailable");
     const service = new StorageRpcProxy(coordinator);
     ctx.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, service);
+    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    routes.register({
+      id: "storage.bucket-manager",
+      path: "/storage/buckets",
+      label: { key: "storage.bucketManager.topbar", fallback: "管理存储桶" },
+      component: StorageBucketManagerPage,
+    });
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     const resourceId = "storage.status";
     resources.register<StorageRuntimeSnapshot, readonly string[]>({
@@ -401,14 +409,6 @@ const storagePlatformPluginDefinition = {
       load: async () => ({ status: service.status(), healthStatus: (service as StorageRuntimeController & { healthStatus?: () => import("@keymaster/contracts").StorageRuntimeStatus }).healthStatus?.(), catalogBucket: (service as StorageRuntimeController & { isCatalogBucket?: () => boolean }).isCatalogBucket?.() === true, hasCatalogBuckets: service.hasCatalogBuckets?.() === true, authorityRecovery: (service as StorageRuntimeController & { authorityRecovery?: () => import("@keymaster/contracts").CoordinatorAuthorityRecovery }).authorityRecovery?.(), summary: await service.getProviderSummary(), capabilities: service.getConditionalCapabilities() }),
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
-    });
-    const topbar = ctx.capability(TOPBAR_REGISTRY_CAPABILITY);
-    const topbarId = "storage.bucket-manager";
-    topbar.register({
-      id: topbarId,
-      label: { key: "storage.bucketManager.topbar", fallback: "Storage buckets" },
-      component: StorageBucketManagerEntry,
-      order: 80
     });
     return () => {
       // topbar/resource 注册均由当前 WebLoom Scope 拥有。身份切换会先撤销

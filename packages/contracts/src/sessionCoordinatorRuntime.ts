@@ -97,23 +97,16 @@ import type {
   InitialSetupPlan,
   InitialSetupResult,
   InitialSetupRecoveryResult,
-  StorageBucketPasswordRotationResultV1,
-  StorageBucketPasswordRotationResumeResultV1,
   StorageBucketSwitchResultV1,
-  StorageBucketCatalogEntryV2,
-  StorageCatalogV2,
 } from "./storage/catalog.js";
-import type {
-  DeviceBootstrapCatalogV1,
-  DevicePasswordRotationRecordV1,
-  PendingPasswordRotationViewV1,
-  DeviceRemoteConnectionV1,
-  DeviceRemoteRecoveryPointerV1,
-} from "./storage/deviceBootstrap.js";
-import { validateDeviceBootstrapCatalog, validateDevicePasswordRotationRecord, validatePendingPasswordRotationView, validateDeviceRemoteConnection, validateDeviceRemoteRecoveryPointer } from "./storage/deviceBootstrap.js";
+import type { StorageRuntimeBucketV1 } from "./storage/profile.js";
+import type { DeviceRecordV1 } from "./storage/device.js";
+import { validateDeviceRecord } from "./storage/device.js";
+import type { KeymasterSessionV1, KeymasterSessionKeyDerivationV1 } from "./storage/session.js";
+import { validateKeymasterSession, validateKeymasterSessionKeyDerivation } from "./storage/session.js";
 import type { StorageBucketWriteCondition } from "./storage/bucket.js";
 import type { InitialSetupRecoveryRecordV1 } from "./storage/catalog.js";
-import { STORAGE_MAX_PARTS, STORAGE_PART_SIZE_BYTES } from "./storage/kv.js";
+import { STORAGE_MAX_PARTS, STORAGE_MAX_PAYLOAD_BYTES, STORAGE_PART_SIZE_BYTES } from "./storage/kv.js";
 import type { KeyValueCommitResult, KeyValueEntry, KeyValueEntryMeta, KeyValueListResult, KeyValueValue } from "./storage/kv.js";
 import type { PluginIntentCommand, PluginIntentSnapshot, PluginIntentSubmissionResult } from "webloom-framework";
 import type { BucketConditionalCapabilityProbeResult, BucketConditionalCapabilitiesView, StorageActivationResult, StorageProviderConnectionView, StorageProbeResult, StorageProviderSummary, StorageRuntimeControllerStatus, StorageRuntimeStatus, StorageSelectedResult } from "./storage/runtime.js";
@@ -184,11 +177,12 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
 ]);
 
 const STORAGE_CONTROL_TYPES = [
+  "probe-bucket",
   "status", "summary", "connection", "unlock-bucket", "initial-setup", "connect-existing-remote",
   "initial-setup-result", "initial-setup-recovery-list", "initial-setup-cleanup",
   "switch-bucket",
   "change-bucket-config", "rename-bucket", "retry",
-  "change-bucket-password", "list-pending-password-rotations", "resume-bucket-password-rotation", "cancel-probe",
+  "cancel-probe",
   "capabilities", "probe-capabilities", "cold-export",
 ] as const satisfies readonly CoordinatorStorageControl["type"][];
 
@@ -218,6 +212,7 @@ export interface CoordinatorSessionOpenRequest {
   kind: "session.open";
   /** 页面为本次 physical peer 分配的 LocalStorage bridge lease。 */
   leaseId: string;
+  /** 当前 Storage 绑定（由页面从 session + 设备记录组装）。 */
   storageBootstrapState?: StorageBootstrapState;
 }
 
@@ -272,10 +267,7 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
   C extends { type: "initial-setup-recovery-list" } ? InitialSetupRecoveryRecordV1[] :
   C extends { type: "initial-setup-cleanup" } ? InitialSetupRecoveryResult :
   C extends { type: "switch-bucket" } ? StorageBucketSwitchResultV1 :
-  C extends { type: "change-bucket-config" | "rename-bucket" } ? StorageBucketCatalogEntryV2 :
-  C extends { type: "change-bucket-password" } ? StorageBucketPasswordRotationResultV1 :
-  C extends { type: "list-pending-password-rotations" } ? PendingPasswordRotationViewV1[] :
-  C extends { type: "resume-bucket-password-rotation" } ? StorageBucketPasswordRotationResumeResultV1 :
+  C extends { type: "change-bucket-config" | "rename-bucket" } ? import("./storage/profile.js").StorageRuntimeBucketV1 :
   C extends { type: "unlock-bucket" } ? CoordinatorStorageUnlockBucketResult :
   C extends { type: "cold-export" } ? Uint8Array :
   C extends { type: "capabilities" } ? BucketConditionalCapabilitiesView | null :
@@ -332,13 +324,17 @@ export type CoordinatorChannelOperationResultFor<O extends CoordinatorChannelOpe
   O extends { type: "release" } ? null :
   never;
 
-/** 依据内部 owner/platform K-V 操作 discriminant 收窄 operationResult。 */
+/** 依据内部 owner/platform 数据操作 discriminant 收窄 operationResult。 */
 export type CoordinatorOwnerStorageResultFor<D extends CoordinatorOwnerStorageData | CoordinatorPlatformStorageData> =
   D extends { type: "owner.get" | "platform.get" } ? KeyValueEntry<unknown> | undefined :
   D extends { type: "owner.list" | "platform.list" } ? KeyValueListResult :
   D extends { type: "owner.put" | "platform.put" } ? KeyValueEntryMeta :
   D extends { type: "owner.delete" | "platform.delete" } ? undefined :
   D extends { type: "owner.commit" | "platform.commit" } ? KeyValueCommitResult :
+  D extends { type: "owner.file-list" } ? import("./storage/files.js").OwnerFileListPage :
+  D extends { type: "owner.file-get" } ? import("./storage/files.js").OwnerFileObject | undefined :
+  D extends { type: "owner.file-put" } ? { etag?: string; lastModified?: string } :
+  D extends { type: "owner.file-delete" } ? undefined :
   never;
 
 /** 依据 Coordinator crypto operation discriminant 收窄 cryptoResult。 */
@@ -682,6 +678,21 @@ function parseBucketConnection(value: unknown): StorageBucketConnectionConfigV1 
   };
 }
 
+function parseRuntimeBucket(value: unknown, field: string): StorageRuntimeBucketV1 {
+  const record = expectRecord(value, field);
+  const bucketId = text(record.bucketId, field + ".bucketId", 128);
+  const backend = enumValue(record.backend, ["local", "s3"] as const, field + ".backend");
+  const label = optionalText(record.label, field + ".label", 128);
+  let deviceRecord: DeviceRecordV1;
+  try { deviceRecord = validateDeviceRecord(record.deviceRecord); } catch { throw new TypeError(`Coordinator ${field}.deviceRecord is invalid`); }
+  if (deviceRecord.location.providerId !== backend) throw new TypeError(`Coordinator ${field}.backend does not match its device record`);
+  let keyDerivation: KeymasterSessionKeyDerivationV1 | undefined;
+  if (record.keyDerivation !== undefined) {
+    try { keyDerivation = validateKeymasterSessionKeyDerivation(record.keyDerivation); } catch { throw new TypeError(`Coordinator ${field}.keyDerivation is invalid`); }
+  }
+  return { bucketId, backend, ...(label === undefined ? {} : { label }), deviceRecord, ...(keyDerivation === undefined ? {} : { keyDerivation }) };
+}
+
 function parseStorageBootstrapState(value: unknown): StorageBootstrapState {
   const state = expectRecord(value, "storageBootstrapState");
   if (state.selectedBackend !== "local" && state.selectedBackend !== "s3") {
@@ -690,7 +701,7 @@ function parseStorageBootstrapState(value: unknown): StorageBootstrapState {
   const selectedProfileId = text(state.selectedProfileId, "storageBootstrapState.selectedProfileId", 256);
   const language = optionalText(state.language, "storageBootstrapState.language", 64);
   const theme = optionalText(state.theme, "storageBootstrapState.theme", 64);
-  const selectedBucket = parseLocalStorageCatalogEntry(state.selectedBucket, "storageBootstrapState.selectedBucket");
+  const selectedBucket = parseRuntimeBucket(state.selectedBucket, "storageBootstrapState.selectedBucket");
   if (selectedBucket.bucketId !== selectedProfileId || selectedBucket.backend !== state.selectedBackend) {
     throw new TypeError("Coordinator storageBootstrapState selection is inconsistent");
   }
@@ -773,8 +784,9 @@ function parseInitialSetupPlan(value: unknown): InitialSetupPlan {
   const keyKind = text(firstKey.kind, "storage initial-setup firstKey.kind", 32);
   const label = text(firstKey.label, "storage initial-setup firstKey.label", 256);
   const capabilities = stringList(firstKey.capabilities, "storage initial-setup firstKey.capabilities", 64, 128);
+  const keyPassword = text(firstKey.password, "storage initial-setup firstKey.password", 4_096);
   const parsedFirstKey = keyKind === "generate"
-    ? { kind: "generate" as const, label, capabilities }
+    ? { kind: "generate" as const, label, capabilities, password: keyPassword }
     : keyKind === "import"
       ? {
         kind: "import" as const,
@@ -789,14 +801,16 @@ function parseInitialSetupPlan(value: unknown): InitialSetupPlan {
         format: text(firstKey.format, "storage initial-setup firstKey.format", 128),
         ...(optionalText(firstKey.source, "storage initial-setup firstKey.source", 512) === undefined ? {} : { source: firstKey.source as string }),
         capabilities,
+        password: keyPassword,
       }
       : (() => { throw new TypeError("Coordinator initial-setup firstKey.kind is invalid"); })();
   return {
     transactionId: text(plan.transactionId, "storage initial-setup transactionId", 128),
     bucketLabel: text(plan.bucketLabel, "storage initial-setup bucketLabel", 256),
+    ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: text(plan.remoteStorageId, "storage initial-setup remoteStorageId", 128) }),
     backend,
     connection,
-    bucketPassword: text(plan.bucketPassword, "storage initial-setup bucketPassword", 4_096),
+    ...(plan.startupPassword === undefined ? {} : { startupPassword: text(plan.startupPassword, "storage initial-setup startupPassword", 4_096) }),
     firstKey: parsedFirstKey,
   };
 }
@@ -809,11 +823,27 @@ function parseExistingRemoteStorageConnectPlan(value: unknown): ExistingRemoteSt
   if (connection.kind !== backend) throw new TypeError("Coordinator connect-existing-remote backend and connection disagree");
   return {
     operationId: text(plan.operationId, "storage connect-existing-remote operationId", 128),
-    remoteStorageId: text(plan.remoteStorageId, "storage connect-existing-remote remoteStorageId", 128),
+    ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: text(plan.remoteStorageId, "storage connect-existing-remote remoteStorageId", 128) }),
     displayName: text(plan.displayName, "storage connect-existing-remote displayName", 256),
     backend,
     connection,
-    bucketPassword: text(plan.bucketPassword, "storage connect-existing-remote bucketPassword", 4_096),
+    ...(plan.publicKeyHex === undefined ? {} : { publicKeyHex: text(plan.publicKeyHex, "storage connect-existing-remote publicKeyHex", 128) }),
+    keyPassword: text(plan.keyPassword, "storage connect-existing-remote keyPassword", 4_096),
+    ...(plan.startupPassword === undefined ? {} : { startupPassword: text(plan.startupPassword, "storage connect-existing-remote startupPassword", 4_096) }),
+  };
+}
+
+function parseBucketProbePlan(value: unknown): import("./storage/catalog.js").BucketProbePlan {
+  const plan = expectRecord(value, "storage probe-bucket plan");
+  const backend = plan.backend;
+  if (backend !== "local" && backend !== "s3") throw new TypeError("Coordinator probe-bucket backend is invalid");
+  const connection = parseBucketConnection(plan.connection);
+  if (connection.kind !== backend) throw new TypeError("Coordinator probe-bucket backend and connection disagree");
+  return {
+    operationId: text(plan.operationId, "storage probe-bucket operationId", 128),
+    backend,
+    connection,
+    ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: text(plan.remoteStorageId, "storage probe-bucket remoteStorageId", 128) }),
   };
 }
 
@@ -822,7 +852,7 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
   const type = enumValue(control.type, STORAGE_CONTROL_TYPES, "storage control.type");
   switch (type) {
     case "status": case "summary": case "connection": case "retry":
-    case "initial-setup-recovery-list": case "list-pending-password-rotations": case "cancel-probe": case "capabilities": case "probe-capabilities": case "cold-export":
+    case "initial-setup-recovery-list": case "cancel-probe": case "capabilities": case "probe-capabilities": case "cold-export":
       return { type };
     case "unlock-bucket":
       return { type, password: text(control.password, "storage control." + type + ".password", 4_096) };
@@ -830,6 +860,8 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
       return { type, plan: parseInitialSetupPlan(control.plan) };
     case "connect-existing-remote":
       return { type, plan: parseExistingRemoteStorageConnectPlan(control.plan) };
+    case "probe-bucket":
+      return { type, plan: parseBucketProbePlan(control.plan) };
     case "initial-setup-result":
       return { type, transactionId: text(control.transactionId, "storage control." + type + ".transactionId", 128) };
     case "initial-setup-cleanup": {
@@ -842,17 +874,13 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
       };
     }
     case "switch-bucket":
-      return { type, bucket: parseLocalStorageCatalogEntry(control.bucket, "storage control.switch-bucket.bucket"), password: text(control.password, "storage control.switch-bucket.password", 4_096) };
+      return { type, bucket: parseRuntimeBucket(control.bucket, "storage control.switch-bucket.bucket"), password: text(control.password, "storage control.switch-bucket.password", 4_096) };
     case "change-bucket-config": {
       const label = optionalText(control.label, "storage control.change-bucket-config.label", 256);
       return { type, config: parseBucketConnection(control.config), ...(label === undefined ? {} : { label }), password: text(control.password, "storage control.change-bucket-config.password", 4_096) };
     }
     case "rename-bucket":
       return { type, label: text(control.label, "storage control.rename-bucket.label", 256) };
-    case "change-bucket-password":
-      return { type, oldPassword: text(control.oldPassword, "storage control.change-bucket-password.oldPassword", 4_096), newPassword: text(control.newPassword, "storage control.change-bucket-password.newPassword", 4_096) };
-    case "resume-bucket-password-rotation":
-      return { type, operationId: text(control.operationId, "storage control.resume-bucket-password-rotation.operationId", 128), oldPassword: text(control.oldPassword, "storage control.resume-bucket-password-rotation.oldPassword", 4_096), newPassword: text(control.newPassword, "storage control.resume-bucket-password-rotation.newPassword", 4_096) };
     default:
       throw new TypeError("Coordinator storage control type " + type + " is unsupported");
   }
@@ -914,7 +942,11 @@ type ParsedInternalStorageData =
   | { operation: "list"; grantId: string; input?: { prefix?: string; cursor?: string; limit?: number; partition?: string } }
   | { operation: "put"; grantId: string; key: string; value: JSONValue; condition?: { ifRevision?: number; partition?: string } }
   | { operation: "delete"; grantId: string; key: string; condition?: { ifRevision?: number; partition?: string } }
-  | { operation: "commit"; grantId: string; partition: string; ifRevision?: number; operations: Array<{ type: "put"; key: string; value: JSONValue } | { type: "delete"; key: string }> };
+  | { operation: "commit"; grantId: string; partition: string; ifRevision?: number; operations: Array<{ type: "put"; key: string; value: JSONValue } | { type: "delete"; key: string }> }
+  | { operation: "file-list"; grantId: string; input?: { prefix?: string; cursor?: string; limit?: number } }
+  | { operation: "file-get"; grantId: string; path: string }
+  | { operation: "file-put"; grantId: string; path: string; bytes: Uint8Array; ifNoneMatch?: boolean; ifMatch?: string }
+  | { operation: "file-delete"; grantId: string; path: string; ifMatch?: string };
 
 function parseInternalStorageData(value: unknown, prefix: "owner" | "platform"): ParsedInternalStorageData {
   const data = expectRecord(value, prefix + " storage data");
@@ -978,6 +1010,37 @@ function parseInternalStorageData(value: unknown, prefix: "owner" | "platform"):
     });
     return { operation: "commit", grantId, partition, ...(ifRevision === undefined ? {} : { ifRevision }), operations };
   }
+  if (type === prefix + ".file-list") {
+    if (prefix !== "owner") throw new TypeError("Coordinator platform storage operation is unsupported");
+    if (data.input === undefined) return { operation: "file-list", grantId };
+    const input = expectRecord(data.input, prefix + " storage.file-list.input");
+    const filePrefix = optionalText(input.prefix, prefix + " storage.file-list.prefix", 4_096);
+    const cursor = optionalText(input.cursor, prefix + " storage.file-list.cursor", 8_192);
+    const limit = optionalBoundedNumber(input.limit, prefix + " storage.file-list.limit", 1, 1_000);
+    return {
+      operation: "file-list",
+      grantId,
+      input: {
+        ...(filePrefix === undefined ? {} : { prefix: filePrefix }),
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(limit === undefined ? {} : { limit }),
+      },
+    };
+  }
+  if (type === prefix + ".file-get" || type === prefix + ".file-put" || type === prefix + ".file-delete") {
+    if (prefix !== "owner") throw new TypeError("Coordinator platform storage operation is unsupported");
+    const path = text(data.path, prefix + " storage." + type.slice(prefix.length + 1) + ".path", 4_096);
+    if (type === prefix + ".file-get") return { operation: "file-get", grantId, path };
+    const ifMatch = optionalText(data.ifMatch, prefix + " storage.file.ifMatch", 1_024);
+    if (type === prefix + ".file-delete") return { operation: "file-delete", grantId, path, ...(ifMatch === undefined ? {} : { ifMatch }) };
+    const bytes = data.bytes;
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > STORAGE_MAX_PAYLOAD_BYTES) {
+      throw new TypeError("Coordinator " + prefix + " storage.file-put.bytes is invalid");
+    }
+    const ifNoneMatch = data.ifNoneMatch;
+    if (ifNoneMatch !== undefined && ifNoneMatch !== true) throw new TypeError("Coordinator " + prefix + " storage.file-put.ifNoneMatch is invalid");
+    return { operation: "file-put", grantId, path, bytes, ...(ifNoneMatch === undefined ? {} : { ifNoneMatch }), ...(ifMatch === undefined ? {} : { ifMatch }) };
+  }
   throw new TypeError("Coordinator " + prefix + " storage operation is unsupported");
 }
 
@@ -996,6 +1059,10 @@ function ownerStorageDataFromParsed(parsed: ParsedInternalStorageData): Coordina
     case "put": return { type: "owner.put", storageGrantId: parsed.grantId, key: parsed.key, value: parsed.value, ...(parsed.condition === undefined ? {} : { condition: parsed.condition }) };
     case "delete": return { type: "owner.delete", storageGrantId: parsed.grantId, key: parsed.key, ...(parsed.condition === undefined ? {} : { condition: parsed.condition }) };
     case "commit": return { type: "owner.commit", storageGrantId: parsed.grantId, partition: parsed.partition, ...(parsed.ifRevision === undefined ? {} : { ifRevision: parsed.ifRevision }), operations: parsed.operations };
+    case "file-list": return { type: "owner.file-list", storageGrantId: parsed.grantId, ...(parsed.input === undefined ? {} : { input: parsed.input }) };
+    case "file-get": return { type: "owner.file-get", storageGrantId: parsed.grantId, path: parsed.path };
+    case "file-put": return { type: "owner.file-put", storageGrantId: parsed.grantId, path: parsed.path, bytes: parsed.bytes, ...(parsed.ifNoneMatch === undefined ? {} : { ifNoneMatch: parsed.ifNoneMatch }), ...(parsed.ifMatch === undefined ? {} : { ifMatch: parsed.ifMatch }) };
+    case "file-delete": return { type: "owner.file-delete", storageGrantId: parsed.grantId, path: parsed.path, ...(parsed.ifMatch === undefined ? {} : { ifMatch: parsed.ifMatch }) };
   }
 }
 
@@ -1006,6 +1073,10 @@ function platformStorageDataFromParsed(parsed: ParsedInternalStorageData): Coord
     case "put": return { type: "platform.put", platformGrantId: parsed.grantId, key: parsed.key, value: parsed.value, ...(parsed.condition === undefined ? {} : { condition: parsed.condition }) };
     case "delete": return { type: "platform.delete", platformGrantId: parsed.grantId, key: parsed.key, ...(parsed.condition === undefined ? {} : { condition: parsed.condition }) };
     case "commit": return { type: "platform.commit", platformGrantId: parsed.grantId, partition: parsed.partition, ...(parsed.ifRevision === undefined ? {} : { ifRevision: parsed.ifRevision }), operations: parsed.operations };
+    case "file-list":
+    case "file-get":
+    case "file-put":
+    case "file-delete": throw new TypeError("Coordinator platform storage operation is unsupported");
   }
 }
 
@@ -1018,9 +1089,12 @@ function parseStorageDeclaration(value: unknown, field: string): PluginStorageDe
     throw new TypeError(`Coordinator ${field}.authority is invalid`);
   }
   const model = declaration.model;
-  if (model !== "snapshot" && model !== "kv") throw new TypeError(`Coordinator ${field}.model is invalid`);
+  if (model !== "snapshot" && model !== "kv" && model !== "files") throw new TypeError(`Coordinator ${field}.model is invalid`);
   const moduleId = text(declaration.moduleId, `${field}.moduleId`, 63);
-  const purposeId = text(declaration.purposeId, `${field}.purposeId`, 63);
+  // files 模型允许空 purposeId（模块根）；其它模型仍必须是合法 purpose。
+  const purposeId = model === "files" && declaration.purposeId === ""
+    ? ""
+    : text(declaration.purposeId, `${field}.purposeId`, 63);
   const schemaVersion = boundedNumber(declaration.schemaVersion, `${field}.schemaVersion`, 1);
   try {
     return validatePluginStorageDeclaration({ moduleId, purposeId, scope, authority, model, schemaVersion });
@@ -1484,39 +1558,29 @@ export interface CoordinatorLocalStorageObject {
   lastModified?: string;
 }
 
-export interface CoordinatorLocalStorageCandidateBucket {
-  bucket: StorageBucketCatalogEntryV2;
-  expectedSelectedBucketId?: string;
-  bucketGeneration?: number;
-  initialSetup?: boolean;
-  cleanupOnly?: boolean;
-}
-
 export type CoordinatorLocalStorageRequest =
-  | (CoordinatorSessionBinding & { type: "get"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; ifMatch?: string })
-  | (CoordinatorSessionBinding & { type: "list"; bucketId: string; bucketGeneration: number; candidateBucket?: CoordinatorLocalStorageCandidateBucket; prefix?: string; cursor?: string; limit?: number })
-  | (CoordinatorSessionBinding & { type: "put"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; bytes: Uint8Array; condition?: StorageBucketWriteCondition })
-  | (CoordinatorSessionBinding & { type: "delete"; bucketId: string; bucketGeneration: number; path: string; candidateBucket?: CoordinatorLocalStorageCandidateBucket; ifMatch?: string })
-  | (CoordinatorSessionBinding & { type: "catalog-update"; bucketId: string; bucketGeneration: number; expectedBucket: StorageBucketCatalogEntryV2; nextBucket: StorageBucketCatalogEntryV2; rollback?: boolean })
-  | (CoordinatorSessionBinding & { type: "catalog-commit"; bucketId: string; bucketGeneration: number; targetBucket: StorageBucketCatalogEntryV2; rollback?: boolean })
-  | (CoordinatorSessionBinding & { type: "catalog-select"; bucketId: string; bucketGeneration: number; expectedSelectedBucketId?: string; rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2 })
-  | (CoordinatorSessionBinding & { type: "catalog-read" })
-  /** 设备引导是页面唯一允许持久化的 Coordinator 控制面。 */
-  | (CoordinatorSessionBinding & { type: "device-bootstrap-read" })
-  | (CoordinatorSessionBinding & { type: "device-bootstrap-connection-upsert"; connection: DeviceRemoteConnectionV1; select?: boolean })
-  | (CoordinatorSessionBinding & { type: "device-bootstrap-recovery-upsert"; recovery: DeviceRemoteRecoveryPointerV1 })
-  | (CoordinatorSessionBinding & { type: "device-bootstrap-recovery-delete"; operationId: string })
-  | (CoordinatorSessionBinding & { type: "device-bootstrap-rotation-upsert"; rotation: DevicePasswordRotationRecordV1 })
-  | (CoordinatorSessionBinding & { type: "device-bootstrap-rotation-delete"; operationId: string });
+  // 对象 I/O：页面桥只按当前 lease 的桶与世代读写 Local 命名空间。
+  | (CoordinatorSessionBinding & { type: "get"; bucketId: string; bucketGeneration: number; path: string; ifMatch?: string; objectPrefix?: string })
+  | (CoordinatorSessionBinding & { type: "list"; bucketId: string; bucketGeneration: number; prefix?: string; cursor?: string; limit?: number; objectPrefix?: string })
+  | (CoordinatorSessionBinding & { type: "put"; bucketId: string; bucketGeneration: number; path: string; bytes: Uint8Array; condition?: StorageBucketWriteCondition; objectPrefix?: string })
+  | (CoordinatorSessionBinding & { type: "delete"; bucketId: string; bucketGeneration: number; path: string; ifMatch?: string; objectPrefix?: string })
+  /** 设备桶记录（keymaster.device.<ID>）的读/写/删/枚举。 */
+  | (CoordinatorSessionBinding & { type: "device-record-list" })
+  | (CoordinatorSessionBinding & { type: "device-record-get"; remoteStorageId: string })
+  | (CoordinatorSessionBinding & { type: "device-record-put"; remoteStorageId: string; record: DeviceRecordV1; replace?: boolean })
+  | (CoordinatorSessionBinding & { type: "device-record-delete"; remoteStorageId: string })
+  /** 浏览器 session（keymaster.session）的读/写。 */
+  | (CoordinatorSessionBinding & { type: "session-read" })
+  | (CoordinatorSessionBinding & { type: "session-write"; session: KeymasterSessionV1 });
 
 export type CoordinatorLocalStorageResponse =
   | { type: "object"; object?: CoordinatorLocalStorageObject }
   | { type: "list"; objects: CoordinatorLocalStorageObject[]; nextCursor?: string }
   | { type: "write"; etag?: string; lastModified?: string }
   | { type: "void" }
-  | { type: "catalog"; bucket: StorageBucketCatalogEntryV2 }
-  | { type: "catalog-state"; catalog: StorageCatalogV2 }
-  | { type: "device-bootstrap"; catalog: DeviceBootstrapCatalogV1 | null };
+  | { type: "device-records"; entries: Array<{ remoteStorageId: string; record: DeviceRecordV1 }>; invalidKeys: string[] }
+  | { type: "device-record"; record?: DeviceRecordV1 }
+  | { type: "session"; session?: KeymasterSessionV1 };
 
 /** 事件 stream 的订阅请求。一次订阅可以覆盖多个 Coordinator topic。 */
 export interface CoordinatorTopicSubscription {
@@ -1861,7 +1925,7 @@ function parseInitialSetupResult(value: unknown, field: string): InitialSetupRes
   const result = expectRecord(value, field);
   if (result.ok === true) return {
     ok: true,
-    bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket"),
+    bucket: parseRuntimeBucket(result.bucket, field + ".bucket"),
     firstKey: parseInitialSetupKeyResult(result.firstKey, field + ".firstKey"),
   };
   if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, field + ".error") };
@@ -1873,7 +1937,7 @@ function parseExistingRemoteStorageConnectResult(value: unknown, field: string):
   if (result.ok === true) {
     return {
       ok: true,
-      bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket"),
+      bucket: parseRuntimeBucket(result.bucket, field + ".bucket"),
       ...(result.activeKey === undefined ? {} : { activeKey: parseInitialSetupKeyResult(result.activeKey, field + ".activeKey") }),
     };
   }
@@ -1896,30 +1960,7 @@ function parseStorageRecoveryResult(value: unknown, field: string): InitialSetup
 function parseStorageBucketSwitchResult(value: unknown, field: string): StorageBucketSwitchResultV1 {
   const result = expectRecord(value, field);
   if (result.ok !== true) throw new TypeError(`Coordinator ${field}.ok is invalid`);
-  return { ok: true, bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket"), vaultUnlocked: booleanValue(result.vaultUnlocked, field + ".vaultUnlocked") };
-}
-
-function parseStorageBucketRotationResult(value: unknown, field: string): StorageBucketPasswordRotationResultV1 {
-  const result = expectRecord(value, field);
-  if (result.ok !== true) throw new TypeError(`Coordinator ${field}.ok is invalid`);
-  const publishedHeadEtag = optionalText(result.publishedHeadEtag, field + ".publishedHeadEtag", 512);
-  return { ok: true, bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket"), ...(publishedHeadEtag === undefined ? {} : { publishedHeadEtag }) };
-}
-
-function parseStoragePendingPasswordRotations(value: unknown, field: string): PendingPasswordRotationViewV1[] {
-  if (!Array.isArray(value)) throw new TypeError(`Coordinator ${field} must be an array`);
-  return value.map((item, index) => {
-    try { return validatePendingPasswordRotationView(item); }
-    catch { throw new TypeError(`Coordinator ${field}[${index}] is an invalid password rotation view`); }
-  });
-}
-
-function parseStorageBucketRotationResumeResult(value: unknown, field: string): StorageBucketPasswordRotationResumeResultV1 {
-  const result = expectRecord(value, field);
-  if (result.ok !== true) throw new TypeError(`Coordinator ${field}.ok is invalid`);
-  const outcome = result.outcome;
-  if (outcome !== "completed" && outcome !== "revoked") throw new TypeError(`Coordinator ${field}.outcome is invalid`);
-  return { ok: true, outcome, bucket: parseLocalStorageCatalogEntry(result.bucket, field + ".bucket") };
+  return { ok: true, bucket: parseRuntimeBucket(result.bucket, field + ".bucket"), vaultUnlocked: booleanValue(result.vaultUnlocked, field + ".vaultUnlocked") };
 }
 
 function parseStorageUnlockBucketResult(value: unknown, field: string): CoordinatorStorageUnlockBucketResult {
@@ -1941,7 +1982,6 @@ function parseStorageControlResult(value: unknown, field: string): CoordinatorSt
   if ("firstKey" in result || (result.ok === false && "error" in result)) return parseInitialSetupResult(result, field);
   if (result.ok === true && "vaultUnlocked" in result) return parseStorageBucketSwitchResult(result, field);
   if (result.ok === false && "diagnostic" in result && !("providerId" in result)) return parseStorageUnlockBucketResult(result, field);
-  if (result.ok === true && "bucket" in result && !("firstKey" in result) && !("vaultUnlocked" in result)) return parseStorageBucketRotationResult(result, field);
   if ("providerId" in result && "connection" in result) return parseStorageProviderConnection(result, field);
   if ("bucketHint" in result) return parseStorageProviderSummary(result, field);
   if ("put" in result && "complete" in result) return parseStorageCapabilities(result, field);
@@ -1950,7 +1990,7 @@ function parseStorageControlResult(value: unknown, field: string): CoordinatorSt
     const complete = enumValue(result.complete, ["native", "best-effort", "inconclusive"] as const, field + ".complete");
     return { generation: boundedNumber(result.generation, field + ".generation"), put, complete, cleanupWarning: booleanValue(result.cleanupWarning, field + ".cleanupWarning") };
   }
-  if ("bucketId" in result && "keyDerivation" in result) return parseLocalStorageCatalogEntry(result, field);
+  if ("bucketId" in result && "deviceRecord" in result) return parseRuntimeBucket(result, field);
   throw new TypeError(`Coordinator ${field} is unsupported`);
 }
 
@@ -2501,13 +2541,7 @@ function parseStorageControlResultFor(control: CoordinatorStorageControl, value:
       return parseStorageBucketSwitchResult(value, field);
     case "change-bucket-config":
     case "rename-bucket":
-      return parseLocalStorageCatalogEntry(value, field);
-    case "change-bucket-password":
-      return parseStorageBucketRotationResult(value, field);
-    case "list-pending-password-rotations":
-      return parseStoragePendingPasswordRotations(value, field);
-    case "resume-bucket-password-rotation":
-      return parseStorageBucketRotationResumeResult(value, field);
+      return parseRuntimeBucket(value, field);
     case "unlock-bucket":
       return parseStorageUnlockBucketResult(value, field);
     case "cold-export":
@@ -3365,80 +3399,6 @@ function localStorageBytes(value: unknown, field: string): Uint8Array {
   return value.slice();
 }
 
-function parseLocalStorageCatalogEntry(value: unknown, field: string): StorageBucketCatalogEntryV2 {
-  if (!record(value)) throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  const entry = value;
-  const bucketId = localStorageText(entry.bucketId, `${field}.bucketId`, 128);
-  const label = localStorageText(entry.label, `${field}.label`, 256);
-  if (entry.backend !== "local" && entry.backend !== "s3") throw new TypeError(`Coordinator local-storage ${field}.backend is invalid`);
-  const configRevision = localStorageInteger(entry.configRevision, `${field}.configRevision`);
-  const snapshotRevision = localStorageInteger(entry.snapshotRevision, `${field}.snapshotRevision`);
-  const createdAt = localStorageInteger(entry.createdAt, `${field}.createdAt`);
-  const updatedAt = localStorageInteger(entry.updatedAt, `${field}.updatedAt`);
-  if (!record(entry.keyDerivation)
-    || entry.keyDerivation.algorithm !== "pbkdf2-hmac-sha-256"
-    || entry.keyDerivation.passwordEncoding !== "utf-8"
-    || entry.keyDerivation.outputLengthBits !== 256) {
-    throw new TypeError(`Coordinator local-storage ${field}.keyDerivation is invalid`);
-  }
-  const iterations = localStorageInteger(entry.keyDerivation.iterations, `${field}.keyDerivation.iterations`, 1);
-  const saltB64Url = localStorageText(entry.keyDerivation.saltB64Url, `${field}.keyDerivation.saltB64Url`, 512);
-  if (!record(entry.encryptedConfig)
-    || !record(entry.encryptedConfig.cipher)
-    || entry.encryptedConfig.cipher.algorithm !== "aes-gcm"
-    || entry.encryptedConfig.cipher.keyLengthBits !== 256
-    || entry.encryptedConfig.cipher.tagLengthBits !== 128) {
-    throw new TypeError(`Coordinator local-storage ${field}.encryptedConfig is invalid`);
-  }
-  const ivB64Url = localStorageText(entry.encryptedConfig.cipher.ivB64Url, `${field}.encryptedConfig.cipher.ivB64Url`, 512);
-  const ciphertextAndTagB64Url = localStorageText(entry.encryptedConfig.cipher.ciphertextAndTagB64Url, `${field}.encryptedConfig.cipher.ciphertextAndTagB64Url`, 1_000_000);
-  return {
-    bucketId,
-    label,
-    backend: entry.backend,
-    configRevision,
-    keyDerivation: {
-      algorithm: "pbkdf2-hmac-sha-256",
-      passwordEncoding: "utf-8",
-      iterations,
-      outputLengthBits: 256,
-      saltB64Url,
-    },
-    encryptedConfig: {
-      cipher: {
-        algorithm: "aes-gcm",
-        keyLengthBits: 256,
-        ivB64Url,
-        tagLengthBits: 128,
-        ciphertextAndTagB64Url,
-      },
-    },
-    snapshotRevision,
-    createdAt,
-    updatedAt,
-  };
-}
-
-function parseLocalStorageCatalog(value: unknown): StorageCatalogV2 {
-  if (!record(value) || value.format !== "keymaster.storage.catalog" || value.version !== 2 || !Array.isArray(value.buckets)) {
-    throw new TypeError("Coordinator local-storage catalog is invalid");
-  }
-  const buckets = value.buckets.map((entry, index) => parseLocalStorageCatalogEntry(entry, `catalog.buckets[${index}]`));
-  if (value.selectedBucketId !== undefined) {
-    localStorageText(value.selectedBucketId, "catalog.selectedBucketId", 128);
-    if (!buckets.some((entry) => entry.bucketId === value.selectedBucketId)) throw new TypeError("Coordinator local-storage catalog selection is invalid");
-  }
-  const selectedBucketId = value.selectedBucketId === undefined
-    ? undefined
-    : localStorageText(value.selectedBucketId, "catalog.selectedBucketId", 128);
-  return {
-    format: "keymaster.storage.catalog",
-    version: 2,
-    ...(selectedBucketId === undefined ? {} : { selectedBucketId }),
-    buckets,
-  };
-}
-
 const LOCAL_SETUP_PHASES = ["validate", "stage", "hold", "catalog-commit", "runtime", "rollback", "complete"] as const;
 const LOCAL_SETUP_CATALOG_STATES = ["not-started", "committed", "rolled-back", "competing", "empty", "unknown"] as const;
 const LOCAL_SETUP_ROLLBACK_STATES = ["not-started", "confirmed", "unconfirmed"] as const;
@@ -3525,23 +3485,6 @@ function parseLocalStorageRecoveryRecord(value: unknown, field: string): Initial
   };
 }
 
-function parseLocalStorageCandidate(value: unknown): CoordinatorLocalStorageCandidateBucket {
-  if (!record(value)) throw new TypeError("Coordinator local-storage candidate is invalid");
-  const bucket = parseLocalStorageCatalogEntry(value.bucket, "candidate.bucket");
-  if (value.expectedSelectedBucketId !== undefined) localStorageText(value.expectedSelectedBucketId, "candidate.expectedSelectedBucketId", 128);
-  if (value.bucketGeneration !== undefined) localStorageInteger(value.bucketGeneration, "candidate.bucketGeneration", 1);
-  if (value.initialSetup !== undefined && typeof value.initialSetup !== "boolean") throw new TypeError("Coordinator local-storage candidate.initialSetup is invalid");
-  if (value.cleanupOnly !== undefined && typeof value.cleanupOnly !== "boolean") throw new TypeError("Coordinator local-storage candidate.cleanupOnly is invalid");
-  const expectedSelectedBucketId = value.expectedSelectedBucketId;
-  return {
-    bucket,
-    ...(expectedSelectedBucketId === undefined ? {} : { expectedSelectedBucketId: expectedSelectedBucketId as string }),
-    ...(value.bucketGeneration === undefined ? {} : { bucketGeneration: value.bucketGeneration as number }),
-    ...(value.initialSetup === undefined ? {} : { initialSetup: value.initialSetup }),
-    ...(value.cleanupOnly === undefined ? {} : { cleanupOnly: value.cleanupOnly }),
-  };
-}
-
 function parseLocalStorageCondition(value: unknown): StorageBucketWriteCondition | undefined {
   if (value === undefined) return undefined;
   if (!record(value)) throw new TypeError("Coordinator local-storage condition is invalid");
@@ -3573,79 +3516,50 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
   assertNoLocalStorageTransportFields(value);
   const binding = parseLocalStorageBinding(value);
   const type = localStorageText(value.type, "request.type", 64);
-  if (type === "catalog-read" || type === "device-bootstrap-read") return { ...binding, type };
-  if (type === "device-bootstrap-connection-upsert") {
+  if (type === "device-record-list" || type === "session-read") return { ...binding, type };
+  if (type === "device-record-get" || type === "device-record-delete") {
+    return { ...binding, type, remoteStorageId: localStorageText(value.remoteStorageId, "remoteStorageId", 128) };
+  }
+  if (type === "device-record-put") {
+    let record: DeviceRecordV1;
+    try {
+      record = validateDeviceRecord(value.record);
+    } catch {
+      throw new TypeError("Coordinator local-storage device record is invalid");
+    }
     return {
       ...binding,
       type,
-      connection: (() => {
-        try { return validateDeviceRemoteConnection(value.connection); }
-        catch { throw new TypeError("Coordinator local-storage device bootstrap connection is invalid"); }
-      })(),
-      ...(value.select === undefined ? {} : { select: optionalLocalStorageBoolean(value.select, "select") }),
+      remoteStorageId: localStorageText(value.remoteStorageId, "remoteStorageId", 128),
+      record,
+      ...(value.replace === undefined ? {} : { replace: optionalLocalStorageBoolean(value.replace, "replace") }),
     };
   }
-  if (type === "device-bootstrap-recovery-upsert") {
-    return {
-      ...binding,
-      type,
-      recovery: (() => {
-        try { return validateDeviceRemoteRecoveryPointer(value.recovery); }
-        catch { throw new TypeError("Coordinator local-storage device bootstrap recovery is invalid"); }
-      })(),
-    };
+  if (type === "session-write") {
+    let session: KeymasterSessionV1;
+    try {
+      session = validateKeymasterSession(value.session);
+    } catch {
+      throw new TypeError("Coordinator local-storage session is invalid");
+    }
+    return { ...binding, type, session };
   }
-  if (type === "device-bootstrap-recovery-delete") return { ...binding, type, operationId: localStorageText(value.operationId, "operationId", 128) };
-  if (type === "device-bootstrap-rotation-upsert") {
-    return {
-      ...binding,
-      type,
-      rotation: (() => {
-        try { return validateDevicePasswordRotationRecord(value.rotation); }
-        catch { throw new TypeError("Coordinator local-storage device bootstrap rotation is invalid"); }
-      })(),
-    };
-  }
-  if (type === "device-bootstrap-rotation-delete") return { ...binding, type, operationId: localStorageText(value.operationId, "operationId", 128) };
-  if (type === "catalog-update") return {
-    ...binding,
-    type,
-    bucketId: localStorageText(value.bucketId, "bucketId", 128),
-    bucketGeneration: localStorageInteger(value.bucketGeneration, "bucketGeneration", 1),
-    expectedBucket: parseLocalStorageCatalogEntry(value.expectedBucket, "expectedBucket"),
-    nextBucket: parseLocalStorageCatalogEntry(value.nextBucket, "nextBucket"),
-    ...(value.rollback === undefined ? {} : { rollback: optionalLocalStorageBoolean(value.rollback, "catalog-update.rollback") }),
-  };
-  if (type === "catalog-commit") return {
-    ...binding,
-    type,
-    bucketId: localStorageText(value.bucketId, "bucketId", 128),
-    bucketGeneration: localStorageInteger(value.bucketGeneration, "bucketGeneration", 1),
-    targetBucket: parseLocalStorageCatalogEntry(value.targetBucket, "targetBucket"),
-    ...(value.rollback === undefined ? {} : { rollback: optionalLocalStorageBoolean(value.rollback, "catalog-commit.rollback") }),
-  };
-  if (type === "catalog-select") return {
-    ...binding,
-    type,
-    bucketId: localStorageText(value.bucketId, "bucketId", 128),
-    bucketGeneration: localStorageInteger(value.bucketGeneration, "bucketGeneration", 1),
-    ...(value.expectedSelectedBucketId === undefined ? {} : { expectedSelectedBucketId: localStorageText(value.expectedSelectedBucketId, "expectedSelectedBucketId", 128) }),
-    ...(value.rollbackFromSelectedBucketId === undefined ? {} : { rollbackFromSelectedBucketId: localStorageText(value.rollbackFromSelectedBucketId, "rollbackFromSelectedBucketId", 128) }),
-    targetBucket: parseLocalStorageCatalogEntry(value.targetBucket, "targetBucket"),
-  };
   if (type !== "get" && type !== "list" && type !== "put" && type !== "delete") throw new TypeError("Coordinator local-storage request type is unsupported");
   const bucketId = localStorageText(value.bucketId, "bucketId", 128);
   const bucketGeneration = localStorageInteger(value.bucketGeneration, "bucketGeneration", 1);
-  const candidate = value.candidateBucket === undefined ? undefined : parseLocalStorageCandidate(value.candidateBucket);
+  const objectPrefix = value.objectPrefix === undefined
+    ? undefined
+    : localStorageText(value.objectPrefix, "objectPrefix", 1_024);
+  const v1Fields = objectPrefix === undefined ? {} : { objectPrefix };
   const path = type === "get" || type === "put" || type === "delete" ? localStorageText(value.path, "path", 4_096) : undefined;
   if (type === "put") {
     const bytes = localStorageBytes(value.bytes, "bytes");
     const condition = parseLocalStorageCondition(value.condition);
-    return { ...binding, type, bucketId, bucketGeneration, path: path!, ...(candidate ? { candidateBucket: candidate } : {}), bytes, ...(condition === undefined ? {} : { condition }) };
+    return { ...binding, type, bucketId, bucketGeneration, path: path!, ...v1Fields, bytes, ...(condition === undefined ? {} : { condition }) };
   }
   if (type === "list") return {
     ...binding, type, bucketId, bucketGeneration,
-    ...(candidate ? { candidateBucket: candidate } : {}),
+    ...v1Fields,
     ...(value.prefix === undefined ? {} : { prefix: localStorageText(value.prefix, "prefix", 4_096) }),
     ...(value.cursor === undefined ? {} : { cursor: localStorageText(value.cursor, "cursor", 8_192) }),
     ...(value.limit === undefined ? {} : { limit: localStorageInteger(value.limit, "limit", 1, 256) }),
@@ -3653,7 +3567,7 @@ function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageReques
   if (path === undefined) throw new TypeError("Coordinator local-storage path is invalid");
   return {
     ...binding, type, bucketId, bucketGeneration, path,
-    ...(candidate ? { candidateBucket: candidate } : {}),
+    ...v1Fields,
     ...(value.ifMatch === undefined ? {} : { ifMatch: localStorageText(value.ifMatch, "ifMatch", 512) }),
   };
 }
@@ -3666,15 +3580,6 @@ function parseLocalStorageObject(value: unknown, field: string): CoordinatorLoca
   const etag = value.etag === undefined ? undefined : localStorageText(value.etag, `${field}.etag`, 512);
   const lastModified = value.lastModified === undefined ? undefined : localStorageText(value.lastModified, `${field}.lastModified`, 128);
   return { path, bytes, ...(size === undefined ? {} : { size }), ...(etag === undefined ? {} : { etag }), ...(lastModified === undefined ? {} : { lastModified }) };
-}
-
-function parseLocalStorageDeviceBootstrap(value: unknown, field: string): DeviceBootstrapCatalogV1 | null {
-  if (value === null) return null;
-  try {
-    return validateDeviceBootstrapCatalog(value);
-  } catch {
-    throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  }
 }
 
 function parseLocalStorageResponse(value: unknown): CoordinatorLocalStorageResponse {
@@ -3693,9 +3598,40 @@ function parseLocalStorageResponse(value: unknown): CoordinatorLocalStorageRespo
     if (!Array.isArray(value.objects)) throw new TypeError("Coordinator local-storage response.objects is invalid");
     return { type, objects: value.objects.map((item, index) => parseLocalStorageObject(item, `response.objects[${index}]`)), ...(value.nextCursor === undefined ? {} : { nextCursor: localStorageText(value.nextCursor, "response.nextCursor", 8_192) }) };
   }
-  if (type === "catalog") return { type, bucket: parseLocalStorageCatalogEntry(value.bucket, "response.bucket") };
-  if (type === "catalog-state") return { type, catalog: parseLocalStorageCatalog(value.catalog) };
-  if (type === "device-bootstrap") return { type, catalog: parseLocalStorageDeviceBootstrap(value.catalog, "response.catalog") };
+  if (type === "device-records") {
+    if (!Array.isArray(value.entries)) throw new TypeError("Coordinator local-storage response.entries is invalid");
+    const entries = value.entries.map((item, index) => {
+      if (!record(item)) throw new TypeError(`Coordinator local-storage response.entries[${index}] is invalid`);
+      const remoteStorageId = localStorageText(item.remoteStorageId, `response.entries[${index}].remoteStorageId`, 128);
+      let deviceRecord: DeviceRecordV1;
+      try {
+        deviceRecord = validateDeviceRecord(item.record);
+      } catch {
+        throw new TypeError(`Coordinator local-storage response.entries[${index}].record is invalid`);
+      }
+      return { remoteStorageId, record: deviceRecord };
+    });
+    if (!Array.isArray(value.invalidKeys)) throw new TypeError("Coordinator local-storage response.invalidKeys is invalid");
+    return { type, entries, invalidKeys: value.invalidKeys.map((item, index) => localStorageText(item, `response.invalidKeys[${index}]`, 256)) };
+  }
+  if (type === "device-record") {
+    if (value.record === undefined) return { type };
+    let deviceRecord: DeviceRecordV1;
+    try {
+      deviceRecord = validateDeviceRecord(value.record);
+    } catch {
+      throw new TypeError("Coordinator local-storage response.record is invalid");
+    }
+    return { type, record: deviceRecord };
+  }
+  if (type === "session") {
+    if (value.session === undefined) return { type };
+    try {
+      return { type, session: validateKeymasterSession(value.session) };
+    } catch {
+      throw new TypeError("Coordinator local-storage response.session is invalid");
+    }
+  }
   throw new TypeError("Coordinator local-storage response type is unsupported");
 }
 

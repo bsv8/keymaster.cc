@@ -96,8 +96,7 @@ async function ensureStorageReady(client: ReturnType<typeof getCoordinatorClient
         bucketLabel: "MSFile E2E Local",
         backend: "local",
         connection: { kind: "local" },
-        bucketPassword: E2E_VAULT_PASSWORD,
-        firstKey: { kind: "generate", label: "MSFile E2E", capabilities: ["p2pkh"] },
+        firstKey: { kind: "generate", label: "MSFile E2E", capabilities: ["p2pkh"], password: E2E_VAULT_PASSWORD },
       } });
       if (selected.status !== "ok") throw new Error(`MSFile E2E Local setup failed: ${selected.status}`);
     } else if (status.status === "ok" && status.value === "authentication") {

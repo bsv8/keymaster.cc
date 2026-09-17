@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StorageBucketConnectionConfigV1 } from "@keymaster/contracts";
 import { configFromBytes, configToBytes } from "../bucket-providers/s3/s3ClientFactory.js";
-import { createStorageBucketManagementService } from "../hold/storageBucketManagement.js";
-import { decryptBucketConfig, deriveBucketCryptoContext, parseBucketDocument, serializeBucketDocument, verifyBucketDocument } from "../hold/keymasterHoldAdapter.js";
 import {
   EMPTY_BUCKET_DRAFT,
   bucketDraftFingerprint,
@@ -120,29 +118,6 @@ describe("BucketDraft S3 conversion", () => {
     expect(local).toMatchObject({ backend: "local", label: "工作桶", password: "bucket-password", accessKeyId: "", secretAccessKey: "" });
     expect(connectionFromBucketDraft(local)).toEqual({ kind: "local" });
   });
-
-  it("round-trips every converted connection through Hold export/import", async () => {
-    const configs: StorageBucketConnectionConfigV1[] = [
-      connectionFromBucketDraft(s3Draft()),
-      connectionFromBucketDraft(s3Draft({ s3ConfigMode: "cloudflare-r2", accountId: ACCOUNT_ID, endpointVariant: "eu" })),
-      connectionFromBucketDraft(s3Draft({ s3ConfigMode: "s3-compatible", endpoint: "https://objects.example.test", region: "custom", forcePathStyle: true, sessionToken: "token", prefix: "tenant" }))
-    ];
-    const manager = createStorageBucketManagementService({ catalog: undefined });
-    for (const config of configs) {
-      const privateKey = new Uint8Array(32);
-      privateKey[31] = 1;
-      const sealed = await manager.sealConfigAndKeys({ config, keys: [{ label: "首 Key", privateKey }], password: "bucket-password" });
-      const exported = serializeBucketDocument(parseBucketDocument(JSON.stringify(sealed.document)));
-      const imported = parseBucketDocument(exported);
-      const context = await deriveBucketCryptoContext("bucket-password", sealed.keyDerivation);
-      try {
-        await verifyBucketDocument(imported, context);
-        await expect(decryptBucketConfig(imported.storage, context)).resolves.toEqual(config);
-      } finally {
-        context.dispose();
-      }
-    }
-  }, 15_000);
 
   it("does not change legacy AWS v1 bytes when UI-only fields are present", () => {
     const legacy = configToBytes({

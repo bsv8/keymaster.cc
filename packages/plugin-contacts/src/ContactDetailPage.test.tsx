@@ -16,7 +16,6 @@ import { contactsResources } from "./manifest.js";
 
 const OWNER = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CONTACT: Contact = {
-  id: "contact-1",
   publicKeyHex: "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   name: "Bob Stone",
   note: "Trusted contact for project work.",
@@ -66,7 +65,7 @@ describe("ContactDetailPage", () => {
       invalidation: "immediate"
     });
     registerPresenceResource(resources);
-    window.history.pushState({}, "", "/contacts/contact-1");
+    window.history.pushState({}, "", `/contacts/${CONTACT.publicKeyHex}`);
 
     const { container } = render(
       <PluginHostProvider host={host}>

@@ -20,7 +20,7 @@ import type {
   ProtectedOutpointRegistry,
   KeyIdentity,
   KeyspaceService,
-  BorrowedKeyValueStore,
+  BorrowedOwnerFileStore,
   VaultService,
   P2pkhCoordinatorControl
 } from "@keymaster/contracts";
@@ -155,7 +155,7 @@ export interface P2pkhServiceDeps {
   messageBus: MessageBus;
   keyspace: KeyspaceService;
   /** Host 已按 manifest 声明绑定的当前 owner K-V 句柄。 */
-  storage: BorrowedKeyValueStore;
+  storage: BorrowedOwnerFileStore;
   protectedOutpoints?: ProtectedOutpointRegistry;
   assetDataNotifier?: AssetDataNotifier;
 }

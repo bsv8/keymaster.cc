@@ -632,7 +632,7 @@ const p2pkhPluginDefinition = {
       runtime: "window-main",
       scopeKind: "owner-session",
       provides: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
-      storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
+      storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
       dependencies: defineRuntimeUnitDependencies([
         { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
         { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
@@ -654,7 +654,7 @@ const p2pkhPluginDefinition = {
       id: "p2pkh.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
-      storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
+      storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
     },
   ],
   i18n: p2pkhResources,
@@ -668,7 +668,7 @@ const p2pkhPluginDefinition = {
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
     const assetDataNotifier = ctx.optionalCapability(ASSET_DATA_NOTIFIER_CAPABILITY);
-    const storage = ctx.storageFor("state");
+    const storage = ctx.filesFor("");
 
     const service = createP2pkhService({
       vault,

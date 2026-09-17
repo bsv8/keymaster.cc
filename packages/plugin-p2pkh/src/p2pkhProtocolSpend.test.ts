@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import type { OwnerAppStore, KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import type { KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, resourceIdFor } from "./storage/p2pkhStateRepository.js";
+import { createMemoryOwnerFileStore } from "./storage/testSupport/memoryOwnerFileStore.js";
 import { calcTxidFromRawTxHex, deriveP2pkhAddress } from "./p2pkhSigner.js";
 
 function hexToBytes(hex: string): Uint8Array {
@@ -134,19 +133,13 @@ function makeService(options?: {
 
 const INTEGRATION_PRIV = "00000000000000000000000000000000000000000000000000000000000000c1";
 const INTEGRATION_OWNER = deriveP2pkhAddress(INTEGRATION_PRIV, "main");
-const integrationStores = new Map<string, OwnerAppStore>();
+const integrationStores = new Map<string, import("./storage/testSupport/memoryOwnerFileStore.js").MemoryOwnerFileStore>();
 
-function openIntegrationStore(publicKeyHex: string): OwnerAppStore {
-    let store = integrationStores.get(publicKeyHex);
-    if (!store) {
-      store = createInMemoryKeyValueStore({
-        ...CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
-        ownerPublicKeyHex: publicKeyHex,
-        bucketId: "test",
-        bucketGeneration: 1
-      }) as OwnerAppStore;
-      integrationStores.set(publicKeyHex, store);
-    }
+function openIntegrationStore(publicKeyHex: string): import("./storage/testSupport/memoryOwnerFileStore.js").MemoryOwnerFileStore {
+    const existing = integrationStores.get(publicKeyHex);
+    if (existing) return existing;
+    const store = createMemoryOwnerFileStore();
+    integrationStores.set(publicKeyHex, store);
     return store;
 }
 

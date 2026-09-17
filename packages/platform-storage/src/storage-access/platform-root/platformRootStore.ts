@@ -1,5 +1,6 @@
 import type {
   OwnerAppStore,
+  OwnerFileStore,
   KeyValueStore,
   OwnerStorageActivation,
   PlatformRootStore,
@@ -15,6 +16,7 @@ import { buildStorageNamespaceRoot, validateOwnerPublicKeyHex, validatePluginSto
 import { createKeyValueStore } from "../../kv-engine/partitionedKvEngine.js";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { createOwnerAppStore } from "../owner-app/ownerAppStore.js";
+import { createOwnerFileStore } from "../owner-app/ownerFileStore.js";
 import { createFixedCasSnapshotStore } from "../../snapshot/fixedCasSnapshotStore.js";
 
 export interface PlatformRootStoreOptions {
@@ -824,52 +826,85 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       validate: input.validate,
     });
   };
+  /**
+   * owner 模块的共享授权/生命周期流程（K-V 与文件模型一致）。
+   *
+   * 内置 owner 模块由 pluginId 预绑定；裸句柄不能自造 module/purpose。
+   */
+  const openOwnerBinding = async (
+    input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number },
+    model: "kv" | "files",
+  ): Promise<{
+    declaration: PluginStorageDeclaration;
+    ownerPublicKeyHex: string;
+    isCurrent: () => boolean;
+    assertCurrent: () => Promise<void>;
+    acquireCurrent: () => Promise<() => Promise<void>>;
+  }> => {
+    const declaration = validatePluginStorageDeclaration(input.declaration);
+    if (declaration.scope !== "owner" || declaration.authority === "platform-only" || declaration.model !== model) {
+      throw new StorageRuntimeError("storage_forbidden", model === "kv" ? "Owner K-V declaration is not authorized" : "Owner file declaration is not authorized");
+    }
+    const expected = Object.values(SYSTEM_STORAGE_DECLARATIONS).flat().find((candidate) =>
+      candidate.moduleId === declaration.moduleId
+      && candidate.purposeId === declaration.purposeId
+      && candidate.scope === "owner"
+      && candidate.authority === "built-in-module"
+      && candidate.model === model);
+    if (!expected || expected.schemaVersion !== declaration.schemaVersion) {
+      throw new StorageRuntimeError("storage_forbidden", "Owner storage namespace is not centrally authorized");
+    }
+    const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
+    const schemaBinding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex"> = {
+      ...declaration,
+      ownerPublicKeyHex
+    };
+    const lifecycle = await ensureOwnerLifecycleActive(options.provider, ownerPublicKeyHex);
+    const assertCurrent = () => assertOwnerLifecycleCurrent(options.provider, ownerPublicKeyHex, lifecycle.generation);
+    const releaseSchemaLease = await acquireOwnerStorageOperation(options.provider, ownerPublicKeyHex, lifecycle.generation);
+    try {
+      await ensureBucketNamespaceSchema(options.provider, schemaBinding, declaration.schemaVersion, assertCurrent);
+      await assertCurrent();
+    } finally {
+      await releaseSchemaLease();
+    }
+    return {
+      declaration,
+      ownerPublicKeyHex,
+      isCurrent: () => options.isCurrent?.({
+        ownerPublicKeyHex,
+        bucketGeneration: options.bucket.bucketGeneration,
+        keyspaceGeneration: input.keyspaceGeneration
+      }) ?? true,
+      assertCurrent,
+      acquireCurrent: () => acquireOwnerStorageOperation(options.provider, ownerPublicKeyHex, lifecycle.generation),
+    };
+  };
+
   return {
     bucket: Object.freeze({ ...options.bucket }),
     async openKeyValueStore(input): Promise<OwnerAppStore> {
-      const declaration = validatePluginStorageDeclaration(input.declaration);
-      if (declaration.scope !== "owner" || declaration.authority === "platform-only" || declaration.model !== "kv") {
-        throw new StorageRuntimeError("storage_forbidden", "Owner K-V declaration is not authorized");
-      }
-      // Built-in owner modules are centrally pre-bound by pluginId. A raw root
-      // handle cannot invent a module/purpose pair. Third-party Connect file
-      // namespaces are opened through their verified identity grant and do not
-      // use this built-in module entry point.
-      const expected = Object.values(SYSTEM_STORAGE_DECLARATIONS).flat().find((candidate) =>
-        candidate.moduleId === declaration.moduleId
-        && candidate.purposeId === declaration.purposeId
-        && candidate.scope === "owner"
-        && candidate.authority === "built-in-module"
-        && candidate.model === "kv");
-      if (!expected || expected.schemaVersion !== declaration.schemaVersion) {
-        throw new StorageRuntimeError("storage_forbidden", "Owner storage namespace is not centrally authorized");
-      }
-      const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
-      const schemaBinding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex"> = {
-        ...declaration,
-        ownerPublicKeyHex
-      };
-      const lifecycle = await ensureOwnerLifecycleActive(options.provider, ownerPublicKeyHex);
-      const assertCurrent = () => assertOwnerLifecycleCurrent(options.provider, ownerPublicKeyHex, lifecycle.generation);
-      const releaseSchemaLease = await acquireOwnerStorageOperation(options.provider, ownerPublicKeyHex, lifecycle.generation);
-      try {
-        await ensureBucketNamespaceSchema(options.provider, schemaBinding, declaration.schemaVersion, assertCurrent);
-        await assertCurrent();
-      } finally {
-        await releaseSchemaLease();
-      }
+      const opened = await openOwnerBinding(input, "kv");
       return createOwnerAppStore({
         provider: options.provider,
         bucket: options.bucket,
-        ownerPublicKeyHex,
-        declaration,
-        isCurrent: () => options.isCurrent?.({
-          ownerPublicKeyHex,
-          bucketGeneration: options.bucket.bucketGeneration,
-          keyspaceGeneration: input.keyspaceGeneration
-        }) ?? true,
-        assertCurrentAsync: assertCurrent,
-        acquireCurrentAsync: () => acquireOwnerStorageOperation(options.provider, ownerPublicKeyHex, lifecycle.generation)
+        ownerPublicKeyHex: opened.ownerPublicKeyHex,
+        declaration: opened.declaration,
+        isCurrent: opened.isCurrent,
+        assertCurrentAsync: opened.assertCurrent,
+        acquireCurrentAsync: opened.acquireCurrent,
+      });
+    },
+    async openOwnerFileStore(input): Promise<OwnerFileStore> {
+      const opened = await openOwnerBinding(input, "files");
+      return createOwnerFileStore({
+        provider: options.provider,
+        bucket: options.bucket,
+        ownerPublicKeyHex: opened.ownerPublicKeyHex,
+        declaration: opened.declaration,
+        isCurrent: opened.isCurrent,
+        assertCurrentAsync: opened.assertCurrent,
+        acquireCurrentAsync: opened.acquireCurrent,
       });
     },
     async activateOwnerStorage(input): Promise<OwnerStorageActivation> {

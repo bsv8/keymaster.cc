@@ -11,9 +11,8 @@ import type {
   StorageUploadBeginResult,
   StorageUploadPartResult
 } from "../connectStorage.js";
-import type { StorageConnection, StorageProviderConfigDraft, StorageProviderId } from "./profile.js";
-import type { ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketPasswordRotationResultV1, StorageBucketPasswordRotationResumeResultV1, StorageBucketSwitchResultV1, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./catalog.js";
-import type { PendingPasswordRotationViewV1 } from "./deviceBootstrap.js";
+import type { StorageConnection, StorageProviderConfigDraft, StorageProviderId, StorageRuntimeBucketV1 } from "./profile.js";
+import type { ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupResult, StorageBucketSwitchResultV1, StorageBucketConnectionConfigV1 } from "./catalog.js";
 
 /** Provider 运行状态；由 Coordinator 统一发布。 */
 export type StorageRuntimeStatus = "unselected" | "authentication" | "checking" | "ready" | "degraded" | "incompatible";
@@ -134,6 +133,8 @@ export interface StorageRuntimeController {
   initialSetup?(plan: InitialSetupPlan): Promise<InitialSetupResult>;
   /** 明确连接已存在的远端；该流程不会退化为创建。 */
   connectExistingRemote?(plan: ExistingRemoteStorageConnectPlan): Promise<ExistingRemoteStorageConnectResult>;
+  /** 只读探测目标桶的 keys/ 目录；失败时不得降级为“空桶”。 */
+  probeBucket?(plan: import("./catalog.js").BucketProbePlan): Promise<import("./catalog.js").BucketProbeResult>;
   /** 查询响应丢失或 Worker 重启后的同事务结果。 */
   getInitialSetupResult?(transactionId: string): Promise<InitialSetupResult | undefined>;
   /** 页面重载后发现 pending/unconfirmed 初始化；返回值不包含秘密。 */
@@ -142,17 +143,12 @@ export interface StorageRuntimeController {
   retryInitialSetupCleanup?(transactionId: string, input?: { password?: string; connection?: StorageBucketConnectionConfigV1 }): Promise<InitialSetupRecoveryResult>;
   cancelProbe(): void;
   /** 当前新版桶的配置、Hold 快照和桶内 Key records 全量改密。 */
-  changeBucketPassword?(oldPassword: string, newPassword: string): Promise<StorageBucketPasswordRotationResultV1>;
-  /** 页面重载或 Worker 重启后查询尚未收敛的密码轮转安全投影；不含内部恢复字段。 */
-  listPendingPasswordRotations?(): Promise<PendingPasswordRotationViewV1[]>;
-  /** 使用用户本次输入的新旧密码收敛指定的密码轮转事务。 */
-  resumeBucketPasswordRotation?(operationId: string, oldPassword: string, newPassword: string): Promise<StorageBucketPasswordRotationResumeResultV1>;
   /** 先认证目标桶，再原子切换 Coordinator 与本机目录的当前桶。 */
-  switchBucket?(bucket: StorageBucketCatalogEntryV2, password: string): Promise<StorageBucketSwitchResultV1>;
+  switchBucket?(bucket: StorageRuntimeBucketV1, password: string): Promise<StorageBucketSwitchResultV1>;
   /** 当前桶连接配置与名称的原子重配置。 */
-  changeBucketConnectionConfig?(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageBucketCatalogEntryV2>;
+  changeBucketConnectionConfig?(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageRuntimeBucketV1>;
   /** 当前桶名称的原子目录 CAS；页面不能直接改当前桶目录。 */
-  renameBucket?(label: string): Promise<StorageBucketCatalogEntryV2>;
+  renameBucket?(label: string): Promise<StorageRuntimeBucketV1>;
   getConditionalCapabilities(): BucketConditionalCapabilitiesView | null;
   probeConditionalCapabilities(signal?: AbortSignal): Promise<BucketConditionalCapabilityProbeResult>;
   abortSession(connectSessionId: string): Promise<void>;

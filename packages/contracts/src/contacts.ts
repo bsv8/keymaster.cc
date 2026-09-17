@@ -22,7 +22,6 @@ export interface ContactsEditorProps {
   open: boolean;
   mode: "create" | "edit";
   publicKeyHex?: string;
-  contactId?: string;
   onClose: () => void;
   onSaved: (contact: Contact) => void;
 }
@@ -56,10 +55,14 @@ export interface ContactPublicKeyActionRegistry {
   _ids(): string[];
 }
 
-/** 联系人。 */
+/**
+ * 联系人（内存投影）。
+ *
+ * 没有 id：canonical 身份就是 `publicKeyHex`，文件名与路由都用它
+ * （见 KeymasterFormats《联系人文件》）。
+ */
 export interface Contact {
-  id: string;
-  /** 联系人身份：压缩公钥 hex。 */
+  /** 联系人身份：压缩公钥 hex（小写）。 */
   publicKeyHex: string;
   name: string;
   note?: string;
@@ -67,6 +70,23 @@ export interface Contact {
   createdAt: string;
   updatedAt: string;
 }
+
+/** 联系人文件格式标识与版本（`contacts/address-book/<公钥>.json`）。 */
+export const CONTACT_FILE_FORMAT = "keymaster.contact";
+export const CONTACT_FILE_VERSION = 1;
+/** 联系人文件硬限制；与格式规范一致。 */
+export const CONTACT_FILE_LIMITS = Object.freeze({
+  /** 单个文件最多 16 KiB。 */
+  maxBytes: 16 * 1024,
+  /** 名称 1~128 字符。 */
+  maxNameLength: 128,
+  /** 备注最多 1024 字符；空字符串视为省略。 */
+  maxNoteLength: 1024,
+  /** 最多 32 个标签。 */
+  maxTags: 32,
+  /** 单个标签 1~64 字符。 */
+  maxTagLength: 64,
+});
 
 /** 联系人输入。 */
 export interface ContactInput {
@@ -99,10 +119,10 @@ export type ContactPresenceMap = Readonly<Record<string, ContactPresence>>;
 export interface ContactsService {
   /** 新增；publicKeyHex 已存在时抛错。 */
   addContact(input: ContactInput): Promise<Contact>;
-  /** 更新。 */
-  updateContact(id: string, input: ContactInput): Promise<Contact>;
-  /** 删除。 */
-  removeContact(id: string): Promise<void>;
+  /** 更新；`publicKeyHex` 是当前身份，`input.publicKeyHex` 变化时等价于改名（移动文件）。 */
+  updateContact(publicKeyHex: string, input: ContactInput): Promise<Contact>;
+  /** 删除；`publicKeyHex` 是 canonical 身份。 */
+  removeContact(publicKeyHex: string): Promise<void>;
   /** 列出全部。 */
   listContacts(): Promise<Contact[]>;
   /** 按 publicKeyHex 查找。第一版约定 publicKeyHex 唯一。 */

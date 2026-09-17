@@ -35,6 +35,7 @@ import type { I18nPluginResources } from "./i18n.js";
 import type { PluginBusinessContribution } from "./business.js";
 import type { PluginStorageDeclaration } from "./storage/access.js";
 import type { BorrowedKeyValueStore } from "./storage/kv.js";
+import type { BorrowedOwnerFileStore } from "./storage/files.js";
 import type { PluginPermission } from "./keymasterLifecycle.js";
 
 /**
@@ -49,6 +50,8 @@ export interface PluginContext extends KeymasterWebLoomContext {
   readonly storage?: BorrowedKeyValueStore;
   /** Resolve a named declaration from the current unit. */
   readonly storageFor: (purposeId: string) => BorrowedKeyValueStore;
+  /** Resolve a named file declaration（model: "files"）from the current unit. */
+  readonly filesFor: (purposeId: string) => BorrowedOwnerFileStore;
   /** 按 pluginId 收窄后的 Coordinator facade。 */
   readonly coordinator?: unknown;
 }

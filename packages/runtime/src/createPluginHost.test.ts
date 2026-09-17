@@ -147,6 +147,12 @@ describe("createPluginHost - runtime resource binding", () => {
     const openPromise = new Promise<KeyValueStore>((resolve) => { resolveOpen = resolve; });
     const authority: StorageBindingAuthority = {
       getActivePublicKeyHex: () => owner,
+      openOwnerFileStore: async () => ({
+        list: async () => ({ files: [] }),
+        get: async () => undefined,
+        put: async () => ({}),
+        delete: async () => undefined,
+      }),
       openOwnerAppStore: async () => openPromise,
       openPlatformStore: async () => createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, bucketId: "bucket", bucketGeneration: 1 }),
       deleteOwnerStorage: async () => undefined,

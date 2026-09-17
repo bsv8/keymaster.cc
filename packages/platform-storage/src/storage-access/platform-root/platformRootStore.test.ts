@@ -134,9 +134,9 @@ const bucket: StorageBucketRef = { bucketId: "schema-test", bucketGeneration: 1,
 describe("PlatformRoot bucket schema", () => {
   it("authorizes every central bucket/platform declaration by default", async () => {
     const root = createPlatformRootStore({ provider: makeProvider(), bucket });
-    await expect(root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.vaultKeyIndex })).resolves.toMatchObject({
-      moduleId: "vault",
-      purposeId: "key-index",
+    await expect(root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads })).resolves.toMatchObject({
+      moduleId: "storage",
+      purposeId: "multipart-uploads",
     });
     await expect(root.openPlatformSnapshot({
       declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings,
@@ -196,11 +196,11 @@ describe("PlatformRoot bucket schema", () => {
     const provider = makeProvider();
     const root = createPlatformRootStore({ provider, bucket });
     const ownerPublicKeyHex = `02${"11".repeat(32)}`;
-    await root.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook });
-    await expect(root.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 2 } })).rejects.toMatchObject({
+    await root.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory });
+    await expect(root.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, schemaVersion: 2 } })).rejects.toMatchObject({
       code: "storage_forbidden"
     });
-    await expect(root.openKeyValueStore({ ownerPublicKeyHex: `03${"22".repeat(32)}`, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
+    await expect(root.openKeyValueStore({ ownerPublicKeyHex: `03${"22".repeat(32)}`, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
   });
 
   it("serializes same-worker owner lease CAS while allowing concurrent stores", async () => {
@@ -210,7 +210,7 @@ describe("PlatformRoot bucket schema", () => {
     const stores = await Promise.all(
       Array.from({ length: 4 }, () => root.openKeyValueStore({
         ownerPublicKeyHex,
-        declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook
+        declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory
       }))
     );
 
@@ -232,7 +232,7 @@ describe("PlatformRoot bucket schema", () => {
     const firstRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const secondRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const ownerPublicKeyHex = `02${"33".repeat(32)}`;
-    const oldStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook });
+    const oldStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory });
     await oldStore.put("before-delete", "value");
 
     const barrier = armOwnerListBarrier(state, ownerPublicKeyHex);
@@ -241,7 +241,7 @@ describe("PlatformRoot bucket schema", () => {
       secondRoot.deleteOwnerStorage({ ownerPublicKeyHex })
     ]);
     await barrier.reached;
-    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook })).rejects.toMatchObject({ code: "storage_unavailable" });
+    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory })).rejects.toMatchObject({ code: "storage_unavailable" });
     await expect(oldStore.put("late", "must-fail")).rejects.toMatchObject({ code: "storage_unavailable" });
     barrier.release();
     await deleting;
@@ -254,9 +254,9 @@ describe("PlatformRoot bucket schema", () => {
     expect(lifecycle).toMatchObject({ status: "deleted", generation: 1 });
     await expect(createOwnerLifecycleGuardedProvider(makeProvider(state)).put(`${ownerPublicKeyHex}/Contacts/file.txt`, new Uint8Array([1]))).rejects.toMatchObject({ code: "storage_unavailable" });
 
-    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
+    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
     await expect(secondRoot.activateOwnerStorage({ ownerPublicKeyHex })).resolves.toEqual({ generation: 2 });
-    const freshStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook, schemaVersion: 1 } });
+    const freshStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, schemaVersion: 1 } });
     await expect(oldStore.put("old-generation", "must-fail")).rejects.toMatchObject({ code: "storage_unavailable" });
     await expect(freshStore.put("new-generation", "works")).resolves.toMatchObject({ key: "new-generation" });
   });
@@ -265,7 +265,7 @@ describe("PlatformRoot bucket schema", () => {
     const state: ProviderState = { objects: new Map(), sequence: 0 };
     const root = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const ownerPublicKeyHex = `03${"44".repeat(32)}`;
-    const store = await root.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook });
+    const store = await root.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory });
     const barrier = armOwnerPutBarrier(state, ownerPublicKeyHex);
     const inflight = store.put("inflight", "late");
     await barrier.reached;

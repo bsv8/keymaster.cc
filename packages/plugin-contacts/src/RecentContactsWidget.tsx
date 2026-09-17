@@ -56,7 +56,7 @@ function RecentContactsWidgetContent() {
       ) : (
         <ul className="home-widget__list">
           {rows.map((c) => (
-            <li key={c.id}>
+            <li key={c.publicKeyHex}>
               <span className="name">{c.name}</span>
               <code className="addr">{formatShortPublicKey(c.publicKeyHex)}</code>
             </li>

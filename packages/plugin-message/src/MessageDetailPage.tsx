@@ -64,7 +64,7 @@ export function MessageDetailPage(): JSX.Element {
     (snapshot) => snapshot.data ?? { messages: [], contact: null },
     (a, b) => {
       if (a.messages.length !== b.messages.length) return false;
-      if (a.contact?.id !== b.contact?.id) return false;
+      if (a.contact?.publicKeyHex !== b.contact?.publicKeyHex) return false;
       return true;
     }
   );

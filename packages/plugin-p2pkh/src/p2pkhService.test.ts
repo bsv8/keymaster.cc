@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import type { KeyspaceService, OwnerAppStore } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import type { KeyspaceService } from "@keymaster/contracts";
+import { createMemoryOwnerFileStore } from "./storage/testSupport/memoryOwnerFileStore.js";
 import { createP2pkhService } from "./p2pkhService.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
@@ -25,13 +24,8 @@ function keyspace(): KeyspaceService {
   } as unknown as KeyspaceService;
 }
 
-function ownerStore(): OwnerAppStore {
-  return createInMemoryKeyValueStore({
-    ...CENTRAL_STORAGE_DECLARATIONS.p2pkhState,
-    ownerPublicKeyHex: OWNER,
-    bucketId: "test",
-    bucketGeneration: 1
-  }) as OwnerAppStore;
+function ownerStore() {
+  return createMemoryOwnerFileStore();
 }
 
 const vault = {

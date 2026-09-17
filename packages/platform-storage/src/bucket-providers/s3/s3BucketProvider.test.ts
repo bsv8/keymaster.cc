@@ -21,7 +21,7 @@ function storeFixture(): BucketObjectStore {
   return {
     probe: vi.fn(async () => undefined),
     list: vi.fn(async () => ({
-      objects: [{ key: "tenant-a/.keymaster/buckets/catalog-bucket/docs/readme.txt", size: 3, etag: "etag" }],
+      objects: [{ key: "tenant-a/docs/readme.txt", size: 3, etag: "etag" }],
       commonPrefixes: []
     })),
     put: vi.fn(async () => ({ etag: "etag" })),
@@ -45,32 +45,22 @@ describe("S3 bucket provider physical prefix", () => {
     await provider.delete("docs/remove.txt");
     await expect(provider.list({ prefix: "docs" })).resolves.toMatchObject({ objects: [{ path: "docs/readme.txt" }] });
 
-    expect(store.get).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/.keymaster/buckets/catalog-bucket/", key: "tenant-a/.keymaster/buckets/catalog-bucket/docs/readme.txt" }));
-    expect(store.put).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/.keymaster/buckets/catalog-bucket/", key: "tenant-a/.keymaster/buckets/catalog-bucket/docs/write.txt" }));
-    expect(store.delete).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/.keymaster/buckets/catalog-bucket/", key: "tenant-a/.keymaster/buckets/catalog-bucket/docs/remove.txt" }));
-    expect(store.list).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/.keymaster/buckets/catalog-bucket/", prefix: "tenant-a/.keymaster/buckets/catalog-bucket/docs" }));
+    expect(store.get).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/", key: "tenant-a/docs/readme.txt" }));
+    expect(store.put).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/", key: "tenant-a/docs/write.txt" }));
+    expect(store.delete).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/", key: "tenant-a/docs/remove.txt" }));
+    expect(store.list).toHaveBeenCalledWith(expect.objectContaining({ namespaceRoot: "tenant-a/", prefix: "tenant-a/docs" }));
     provider.dispose();
   });
 
-  it("isolates two logical buckets that share the same S3 bucket and user prefix", async () => {
-    const firstStore = storeFixture();
-    const secondStore = storeFixture();
-    const first = createS3BucketProvider(config, { store: firstStore, bucketId: "bucket-one" });
-    const second = createS3BucketProvider(config, { store: secondStore, bucketId: "bucket-two" });
-
-    await first.put(".keymaster-test", new Uint8Array([1]));
-    await second.put(".keymaster-test", new Uint8Array([2]));
-
-    expect(firstStore.put).toHaveBeenCalledWith(expect.objectContaining({
-      namespaceRoot: "tenant-a/.keymaster/buckets/bucket-one/",
-      key: "tenant-a/.keymaster/buckets/bucket-one/.keymaster-test"
+  it("does not add the logical bucket ID to the documented physical prefix", async () => {
+    const store = storeFixture();
+    const provider = createS3BucketProvider(config, { store, bucketId: "bucket-one" });
+    await provider.put("keymaster/keys.json", new Uint8Array([1]));
+    expect(store.put).toHaveBeenCalledWith(expect.objectContaining({
+      namespaceRoot: "tenant-a/",
+      key: "tenant-a/keymaster/keys.json"
     }));
-    expect(secondStore.put).toHaveBeenCalledWith(expect.objectContaining({
-      namespaceRoot: "tenant-a/.keymaster/buckets/bucket-two/",
-      key: "tenant-a/.keymaster/buckets/bucket-two/.keymaster-test"
-    }));
-    first.dispose();
-    second.dispose();
+    provider.dispose();
   });
 
   it("rejects a prefix that could escape the physical namespace", () => {

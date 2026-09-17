@@ -145,14 +145,14 @@ describe("FirstTimeImportWizard - JSON importer 输入方式切换", () => {
     expect(screen.getByText(/文件|File/)).toBeTruthy();
   });
 
-  it("选择 KeyHold v2 文件后显示导入源密码框", async () => {
+  it("选择 KeyHold v1 文件后显示导入源密码框", async () => {
     const user = userEvent.setup();
     mount();
     await gotoInputStep(user);
 
     const keyHoldJson = JSON.stringify({
-      format: "keymaster",
-      version: 2,
+      format: "keyhold",
+      version: 1,
       label: "Primary key",
       publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       keyDerivation: {

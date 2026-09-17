@@ -42,6 +42,12 @@ describe("msfilePlugin manifest", () => {
           : undefined,
       },
       storageBindingAuthority: {
+        openOwnerFileStore: async () => ({
+          list: async () => ({ files: [] }),
+          get: async () => undefined,
+          put: async () => ({}),
+          delete: async () => undefined,
+        }),
         openOwnerAppStore: async ({ declaration }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
           ...declaration,
           ownerPublicKeyHex: TEST_OWNER,

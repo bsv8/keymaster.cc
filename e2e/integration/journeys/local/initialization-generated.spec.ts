@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
-import { lockAndUnlockUser, refreshReadyUser } from "../../flows/recoverLocalUser.js";
+import { lockAndUnlockUser } from "../../flows/recoverLocalUser.js";
+import { readLocalCatalog, waitForReadyVaultPage } from "../../drivers/appDriver.js";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
 import { LOCAL_INIT_MENU_SCENARIO } from "../../support/scenarioMetadata.js";
@@ -45,8 +46,25 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
       { bucketLabel: "Local 集成测试桶", keyLabel: "集成测试首 Key", password },
     ));
 
-    await test.step("用户刷新页面后仍能找到原来的身份", async () => {
-      await refreshReadyUser(ready, password);
+    await test.step("用户刷新后先认证已有存储，再恢复原来的身份", async () => {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      const catalogBeforeWrongPassword = await readLocalCatalog(page);
+      await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
+      await expect(page.getByRole("heading", {
+        name: /存储需要认证|Storage authentication required/,
+      })).toBeVisible();
+
+      await page.getByLabel(/密码|Password/).fill(`${password}-wrong`);
+      await page.getByRole("button", { name: /解锁|Unlock/ }).click();
+      await expect(page.getByRole("heading", {
+        name: /存储需要认证|Storage authentication required/,
+      })).toBeVisible();
+      await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
+      await expect(readLocalCatalog(page), "错误密码不能删除设备引导记录").resolves.toEqual(catalogBeforeWrongPassword);
+
+      await page.getByLabel(/密码|Password/).fill(password);
+      await page.getByRole("button", { name: /解锁|Unlock/ }).click();
+      await waitForReadyVaultPage(page, ready.keyLabel);
       await expect(page.getByText(ready.keyLabel, { exact: true }).first()).toBeVisible();
     });
 

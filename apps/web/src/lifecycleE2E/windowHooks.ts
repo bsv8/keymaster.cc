@@ -248,8 +248,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
         bucketLabel: "Lifecycle E2E Local",
         backend: "local",
         connection: { kind: "local" },
-        bucketPassword: E2E_VAULT_PASSWORD,
-        firstKey: { kind: "generate", label: "Lifecycle E2E", capabilities: ["p2pkh"] },
+        firstKey: { kind: "generate", label: "Lifecycle E2E", capabilities: ["p2pkh"], password: E2E_VAULT_PASSWORD },
       } });
       diagnostics.storageSelection = selected.status === "ok" ? selected.value : selected.status;
       if (selected.status !== "ok") throw new Error(`Lifecycle E2E Local setup failed: ${selected.status}`);

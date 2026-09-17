@@ -36,10 +36,6 @@ import type {
   CoordinatorWorkerUnitStateEvent,
   CoordinatorSessionBinding,
   StorageBootstrapState,
-  DeviceBootstrapCatalogV1,
-  DevicePasswordRotationRecordV1,
-  DeviceRemoteConnectionV1,
-  DeviceRemoteRecoveryPointerV1,
 } from "@keymaster/contracts";
 import {
   COORDINATOR_RPC_CAPABILITY,
@@ -66,9 +62,7 @@ import type {
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { parseCoordinatorResponseFor, toCoordinatorRpcRequest } from "@keymaster/contracts";
-import { readStorageBootstrap } from "@keymaster/platform-storage/coordinator/bootstrap";
-import { createDeviceBootstrapRepository, createLocalStorageBucketProvider, defaultDeviceBootstrapStorage, readDeviceBootstrap, StorageRuntimeError, type LocalStorageLike } from "@keymaster/platform-storage/coordinator";
-import { createStorageCatalogRepository, readStorageCatalog, sameStorageCatalogDeviceProjection, validateStorageCatalog } from "@keymaster/platform-storage/coordinator";
+import { createDeviceRecordRepository, createLocalStorageBucketProvider, defaultDeviceStorage, ensureSessionId, readSession, StorageRuntimeError, writeSession, type LocalStorageLike } from "@keymaster/platform-storage/coordinator";
 import {
   connectSharedWorker,
   definePlugin,
@@ -113,10 +107,10 @@ function runtimeLockUserMessage(snapshot: unknown): string | undefined {
   return undefined;
 }
 
-/** 为同一设备引导 profile 原子分配稳定的 SharedWorker 名称片段。 */
+/** 为同一浏览器分配稳定的 SharedWorker 名称片段；身份来自 keymaster.session。 */
 async function ensureCoordinatorWorkerProfileId(): Promise<string | undefined> {
   try {
-    return await createDeviceBootstrapRepository().ensureWorkerProfileId();
+    return ensureSessionId(defaultDeviceStorage());
   } catch {
     return undefined;
   }
@@ -631,12 +625,35 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.pendingSessionBinding = null;
   }
 
+  /** 从 keymaster.session + keymaster.device.<ID> 组装 hello 绑定；不完整时返回 undefined。 */
+  private readStorageBootstrapBinding(): StorageBootstrapState | undefined {
+    try {
+      const storage = defaultDeviceStorage();
+      const session = readSession(storage);
+      if (!session?.activeBucketId) return undefined;
+      const record = createDeviceRecordRepository(storage).read(session.activeBucketId);
+      if (!record) return undefined;
+      return {
+        selectedBackend: record.location.providerId,
+        selectedProfileId: session.activeBucketId,
+        selectedBucket: {
+          bucketId: session.activeBucketId,
+          backend: record.location.providerId,
+          ...(record.displayName === undefined ? {} : { label: record.displayName }),
+          deviceRecord: record,
+          ...(session.keyDerivation === undefined ? {} : { keyDerivation: session.keyDerivation }),
+        },
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   private beginLocalStorageLease(): void {
     if (this.localStorageBridgeLease) return;
     let selectedBucketId: string | undefined;
     try {
-      selectedBucketId = readDeviceBootstrap(defaultDeviceBootstrapStorage())?.selectedRemoteStorageId
-        ?? readStorageCatalog().selectedBucketId;
+      selectedBucketId = readSession(defaultDeviceStorage())?.activeBucketId;
     } catch {
       // 目录错误由实际 I/O 返回；这里不能把它伪装成一个合法桶。
     }
@@ -692,231 +709,52 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       await bridgeBarrier.released;
     }
     try {
-      if (request.type === "catalog-read") {
+      if (request.type === "device-record-list"
+        || request.type === "device-record-get"
+        || request.type === "device-record-put"
+        || request.type === "device-record-delete"
+        || request.type === "session-read"
+        || request.type === "session-write") {
         if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        const catalog = readStorageCatalog();
-        return { type: "catalog-state", catalog };
-      }
-      if (request.type === "device-bootstrap-read"
-        || request.type === "device-bootstrap-connection-upsert"
-        || request.type === "device-bootstrap-recovery-upsert"
-        || request.type === "device-bootstrap-recovery-delete"
-        || request.type === "device-bootstrap-rotation-upsert"
-        || request.type === "device-bootstrap-rotation-delete") {
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        const storage = defaultDeviceBootstrapStorage();
-        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
-        const repository = createDeviceBootstrapRepository({ storage, locks });
-        if (request.type === "device-bootstrap-read") {
-          return { type: "device-bootstrap", catalog: repository.read() as DeviceBootstrapCatalogV1 | null };
+        const storage = defaultDeviceStorage();
+        if (request.type === "session-read") {
+          const session = readSession(storage);
+          return session ? { type: "session", session } : { type: "session" };
         }
-        let catalog: DeviceBootstrapCatalogV1 | null | undefined;
-        if (request.type === "device-bootstrap-connection-upsert") {
-          await repository.upsertConnection(request.connection as DeviceRemoteConnectionV1, request.select ?? true);
-        } else if (request.type === "device-bootstrap-recovery-upsert") {
-          await repository.upsertRecovery(request.recovery as DeviceRemoteRecoveryPointerV1);
-        } else if (request.type === "device-bootstrap-rotation-upsert") {
-          await repository.upsertRotation(request.rotation as DevicePasswordRotationRecordV1);
-        } else if (request.type === "device-bootstrap-rotation-delete") {
-          catalog = await repository.removeRotation(request.operationId);
-        } else {
-          catalog = await repository.removeRecovery(request.operationId);
+        if (request.type === "session-write") {
+          writeSession(request.session, storage);
+          return { type: "void" };
         }
-        return { type: "device-bootstrap", catalog: catalog ?? repository.read() as DeviceBootstrapCatalogV1 | null };
-      }
-      const candidate = "candidateBucket" in request ? request.candidateBucket : undefined;
-      const isCatalogCommit = request.type === "catalog-commit";
-      const isCandidateRequest = candidate !== undefined && request.type !== "catalog-update" && request.type !== "catalog-select" && !isCatalogCommit;
-      const isInitialCandidateRequest = isCandidateRequest && candidate?.initialSetup === true;
-      const isCleanupCandidateRequest = isInitialCandidateRequest && candidate?.cleanupOnly === true;
-      const isCatalogSelect = request.type === "catalog-select";
-      if (isCleanupCandidateRequest && request.type !== "get" && request.type !== "list" && request.type !== "delete") {
-        throw new StorageRuntimeError("storage_forbidden", "Initial setup cleanup candidates are read/delete only");
-      }
-      if (!lease.bucketId && !isInitialCandidateRequest && !isCatalogCommit) {
-        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket is not selected");
-      }
-      if (!isCandidateRequest && !isCatalogSelect && !isCatalogCommit && request.bucketId !== lease.bucketId) {
-        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket is no longer current");
-      }
-      const candidateGenerationValid = isInitialCandidateRequest
-        ? Number.isSafeInteger(candidate?.bucketGeneration) && (candidate?.bucketGeneration ?? 0) >= 1 && request.bucketGeneration === candidate?.bucketGeneration
-        : isCandidateRequest && request.bucketGeneration === candidate?.bucketGeneration;
-      const currentGenerationValid = Number.isSafeInteger(lease.bucketGeneration) && lease.bucketGeneration >= 1
-        && ((!isCandidateRequest && !isCatalogSelect && !isCatalogCommit) ? request.bucketGeneration === lease.bucketGeneration : true);
-      if ((isCandidateRequest && !candidateGenerationValid) || (!isCandidateRequest && !isCatalogSelect && !isCatalogCommit && !currentGenerationValid)) {
-        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is stale");
-      }
-      if (request.type === "catalog-update") {
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        const storage = defaultDeviceBootstrapStorage();
-        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
-        const repository = createStorageCatalogRepository({ storage, locks });
-        const updatedCatalog = await repository.mutate((catalog) => {
-          if (catalog.selectedBucketId !== request.bucketId) {
-            throw new StorageRuntimeError("storage_conflict", "The selected storage bucket changed during password rotation");
-          }
-          const current = catalog.buckets.find((bucket) => bucket.bucketId === request.bucketId);
-          const alreadyRestored = request.rollback === true && current && sameStorageCatalogDeviceProjection(current, request.nextBucket);
-          if (!current || (!sameStorageCatalogDeviceProjection(current, request.expectedBucket) && !alreadyRestored)) {
-            throw new StorageRuntimeError("storage_conflict", "The storage bucket catalog changed during password rotation");
-          }
-          const next = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [request.nextBucket] }).buckets[0];
-          if (!next || next.bucketId !== request.bucketId || next.backend !== current.backend) {
-            throw new StorageRuntimeError("storage_provider_error", "The storage bucket catalog update is invalid");
-          }
-          if (alreadyRestored) return catalog;
-          const buckets = catalog.buckets.map((bucket) => bucket.bucketId === request.bucketId ? next : bucket);
-          return { ...catalog, buckets };
-        });
-        const bucket = updatedCatalog.buckets.find((item) => item.bucketId === request.bucketId);
-        if (!bucket) throw new StorageRuntimeError("storage_not_found", "The storage bucket was removed during password rotation");
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        return { type: "catalog", bucket };
-      }
-      if (request.type === "catalog-commit") {
-        if (request.bucketId !== request.targetBucket.bucketId) throw new StorageRuntimeError("storage_provider_error", "The initial storage bucket ID is inconsistent");
-        if (!Number.isSafeInteger(request.bucketGeneration) || request.bucketGeneration < 1) {
-          throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is invalid");
+        const repository = createDeviceRecordRepository(storage);
+        if (request.type === "device-record-list") {
+          const result = repository.list();
+          return { type: "device-records", entries: result.entries, invalidKeys: result.invalidKeys };
         }
-        const storage = defaultDeviceBootstrapStorage();
-        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
-        const repository = createStorageCatalogRepository({ storage, locks });
-        const updatedCatalog = await repository.mutate((catalog) => {
-          const target = validateStorageCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [request.targetBucket] }).buckets[0];
-          if (!target) throw new StorageRuntimeError("storage_provider_error", "The initial storage bucket catalog entry is invalid");
-          const alreadyCommitted = catalog.selectedBucketId === target.bucketId
-            && catalog.buckets.length === 1
-            && sameStorageCatalogDeviceProjection(catalog.buckets[0]!, target);
-          if (request.rollback === true) {
-            if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return catalog;
-            if (!alreadyCommitted) throw new StorageRuntimeError("storage_conflict", "The initial storage bucket was changed before rollback");
-            return { format: "keymaster.storage.catalog", version: 2, buckets: [] };
-          }
-          if (alreadyCommitted) return catalog;
-          if (catalog.buckets.length !== 0 || catalog.selectedBucketId !== undefined) {
-            throw new StorageRuntimeError("storage_conflict", "Another storage bucket was committed during initial setup");
-          }
-          return { format: "keymaster.storage.catalog", version: 2, selectedBucketId: target.bucketId, buckets: [target] };
-        });
-        const bucket = request.rollback === true
-          ? request.targetBucket
-          : updatedCatalog.buckets.find((item) => item.bucketId === request.targetBucket.bucketId);
-        if (!bucket) throw new StorageRuntimeError("storage_not_found", "The initial storage bucket was not committed");
-        if (request.rollback === true) {
-          this.localStorageBridgeLease = { ...lease, bucketId: undefined, bucketGeneration: 0 };
-        } else {
-          const committed = updatedCatalog.buckets.find((item) => item.bucketId === request.targetBucket.bucketId);
-          if (!committed) throw new StorageRuntimeError("storage_not_found", "The initial storage bucket was not committed");
-          this.localStorageBridgeLease = { ...lease, bucketId: committed.bucketId, bucketGeneration: request.bucketGeneration };
+        if (request.type === "device-record-get") {
+          const deviceRecord = repository.read(request.remoteStorageId);
+          return deviceRecord ? { type: "device-record", record: deviceRecord } : { type: "device-record" };
         }
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        return { type: "catalog", bucket };
-      }
-      if (request.type === "catalog-select") {
-        if (request.bucketId !== request.targetBucket.bucketId) throw new StorageRuntimeError("storage_provider_error", "The target storage bucket ID is inconsistent");
-        const isRollback = request.rollbackFromSelectedBucketId !== undefined;
-        const leaseMatchesSelection = request.expectedSelectedBucketId === lease.bucketId;
-        const leaseMatchesRollbackSource = isRollback
-          && (request.rollbackFromSelectedBucketId === lease.bucketId || request.targetBucket.bucketId === lease.bucketId);
-        if (!leaseMatchesSelection && !leaseMatchesRollbackSource) throw new StorageRuntimeError("storage_conflict", "The current storage bucket changed during bucket switching");
-        if (!Number.isSafeInteger(request.bucketGeneration) || request.bucketGeneration < 1) {
-          throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation is invalid");
+        if (request.type === "device-record-put") {
+          repository.put(request.remoteStorageId, request.record, request.replace === undefined ? {} : { replace: request.replace });
+          return { type: "void" };
         }
-        if (!isRollback) {
-          // 正常切桶只能从当前 authoritative lease 前进一代，不能由
-          // 请求体任意指定世代来取得新的 Local 命名空间写权限。
-          if (request.targetBucket.bucketId === lease.bucketId || lease.bucketGeneration >= Number.MAX_SAFE_INTEGER || request.bucketGeneration !== lease.bucketGeneration + 1) {
-            throw new StorageRuntimeError("storage_forbidden", "Local storage bridge bucket generation transition is invalid");
-          }
-        } else {
-          const leaseIsRollbackTarget = request.targetBucket.bucketId === lease.bucketId;
-          const leaseIsRollbackSource = request.rollbackFromSelectedBucketId === lease.bucketId;
-          const validSameGeneration = leaseIsRollbackTarget && request.bucketGeneration === lease.bucketGeneration;
-          const validPreviousGeneration = leaseIsRollbackSource
-            && lease.bucketGeneration > 1
-            && request.bucketGeneration === lease.bucketGeneration - 1;
-          if (!validSameGeneration && !validPreviousGeneration) {
-            throw new StorageRuntimeError("storage_forbidden", "Local storage bridge rollback generation is invalid");
-          }
-        }
-        const storage = defaultDeviceBootstrapStorage();
-        const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
-        const repository = createStorageCatalogRepository({ storage, locks });
-        const updatedCatalog = await repository.mutate((catalog) => {
-          // 正常选择必须严格匹配旧 selectedBucketId。回滚请求可能是在
-          // CAS 成功但响应丢失后到达，也可能 CAS 根本尚未发生；两种情况
-          // 都只允许在目录仍是“目标桶”或已经回到“旧桶”时完成，不触碰
-          // 其它标签页后来选中的第三个桶。
-          const alreadyRestored = isRollback && catalog.selectedBucketId === request.targetBucket.bucketId;
-          if (catalog.selectedBucketId !== request.expectedSelectedBucketId && !alreadyRestored) {
-            throw new StorageRuntimeError("storage_conflict", "The selected storage bucket changed during bucket switching");
-          }
-          const target = catalog.buckets.find((bucket) => bucket.bucketId === request.targetBucket.bucketId);
-          if (!target || !sameStorageCatalogDeviceProjection(target, request.targetBucket)) {
-            throw new StorageRuntimeError("storage_conflict", "The target storage bucket catalog changed during bucket switching");
-          }
-          return alreadyRestored ? catalog : { ...catalog, selectedBucketId: target.bucketId };
-        });
-        const bucket = updatedCatalog.buckets.find((item) => item.bucketId === request.targetBucket.bucketId);
-        if (!bucket) throw new StorageRuntimeError("storage_not_found", "The target storage bucket was removed during bucket switching");
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        // 目录 CAS 成功后，后续目标 Provider I/O 必须使用同一组页面租约
-        // 身份；失败回滚也会把它切回旧桶和旧世代。
-        this.localStorageBridgeLease = {
-          ...lease,
-          bucketId: bucket.bucketId,
-          bucketGeneration: request.bucketGeneration,
-        };
-        return { type: "catalog", bucket };
+        repository.delete(request.remoteStorageId);
+        return { type: "void" };
       }
-      const catalog = readStorageCatalog();
-      const selected = isCandidateRequest
-        ? (() => {
-            if (!candidate || candidate.bucket.bucketId !== request.bucketId || candidate.bucketGeneration !== request.bucketGeneration) return undefined;
-            const target = catalog.buckets.find((bucket) => bucket.bucketId === candidate.bucket.bucketId);
-            if (candidate.initialSetup === true) {
-              if (candidate.cleanupOnly === true) {
-                // 竞争失败后允许原事务只清理自己生成的命名空间；不能把
-                // 另一个事务的目录条目当成自己的候选对象。
-                if (target && !sameStorageCatalogDeviceProjection(target, candidate.bucket)) return undefined;
-                return target ?? candidate.bucket;
-              }
-              // 首次初始化的候选桶在目录提交前故意不存在；只要目录仍为空，
-              // 当前 authority 租约就可以访问这个由 Worker 生成的命名空间。
-              if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return candidate.bucket;
-              // catalog-commit 之后 Provider 仍可能保留 initialSetup 标记：
-              // 它是在提交前创建的，并不会随 Worker 内部句柄自动重建。此时
-              // 只允许同一租约访问刚刚提交的同一桶，不能把“已提交”误判为
-              // 失效候选，也不能放宽到其它目录条目。
-              const committedInitialSelection = catalog.selectedBucketId === candidate.bucket.bucketId
-                && lease.bucketId === candidate.bucket.bucketId
-                && target !== undefined
-                && sameStorageCatalogDeviceProjection(target, candidate.bucket);
-              return committedInitialSelection ? target : undefined;
-            }
-            if (!target || !sameStorageCatalogDeviceProjection(target, candidate.bucket)) return undefined;
-            // 暂存阶段：目录仍选中旧桶；提交阶段：目录已经选中目标桶，
-            // 页面租约也已经随 catalog-select 原子更新为目标桶。
-            const stagingSelection = candidate.expectedSelectedBucketId === lease.bucketId
-              && catalog.selectedBucketId === lease.bucketId;
-            const committedSelection = catalog.selectedBucketId === candidate.bucket.bucketId
-              && lease.bucketId === candidate.bucket.bucketId;
-            return stagingSelection || committedSelection ? target : undefined;
-          })()
-        : catalog.selectedBucketId === request.bucketId
-          ? catalog.buckets.find((bucket) => bucket.bucketId === request.bucketId)
-          : undefined;
-      if (!selected || selected.backend !== "local") {
-        throw new StorageRuntimeError("storage_unavailable", "Local storage bridge lease is no longer current");
-      }
-      const storage = defaultDeviceBootstrapStorage() as LocalStorageLike;
+      const isObjectRequest = request.type === "get"
+        || request.type === "list"
+        || request.type === "put"
+        || request.type === "delete";
+      if (!isObjectRequest) throw new StorageRuntimeError("storage_provider_error", "Local storage bridge request is invalid");
+      if (request.bucketId !== lease.bucketId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is no longer current");
+      const storage = defaultDeviceStorage() as LocalStorageLike;
       const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
       const provider = createLocalStorageBucketProvider({
         storage,
         locks,
-        bucketId: selected.bucketId,
+        bucketId: request.bucketId,
         bucketGeneration: request.bucketGeneration,
+        objectPrefix: request.objectPrefix ?? (request.bucketId + "/"),
       });
       let response: CoordinatorLocalStorageResponse;
       try {
@@ -926,11 +764,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           response = { type: "list", ...(await provider.list({ prefix: request.prefix, cursor: request.cursor, limit: request.limit, signal })) };
         } else if (request.type === "put") {
           response = { type: "write", ...(await provider.put(request.path, request.bytes, { ...request.condition, signal })) };
-        } else if (request.type === "delete") {
+        } else {
           await provider.delete(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal });
           response = { type: "void" };
-        } else {
-          throw new StorageRuntimeError("storage_provider_error", "Local storage bridge request is invalid");
         }
       } finally {
         provider.dispose();
@@ -999,13 +835,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private async sendHello(): Promise<void> {
     const lease = this.localStorageBridgeLease;
     if (!lease) throw coordinatorSendError("Coordinator LocalStorage lease is unavailable", "not-dispatched");
+    const storageBootstrapState = this.readStorageBootstrapBinding();
     const request: CoordinatorSessionOpenRequest = {
       kind: "session.open",
       leaseId: lease.leaseId,
-      ...(() => {
-        const state = readStorageBootstrap();
-        return state ? { storageBootstrapState: state as StorageBootstrapState } : {};
-      })()
+      ...(storageBootstrapState === undefined ? {} : { storageBootstrapState }),
     };
     const response = await this.sendTypedRequest(request);
     if (response.ack.status !== "ok") {

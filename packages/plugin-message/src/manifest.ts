@@ -71,8 +71,7 @@ function messagesEqual(previous: readonly MessageRecord[], next: readonly Messag
 
 function contactsEqual(previous: Contact | null | undefined, next: Contact | null | undefined): boolean {
   if (!previous || !next) return previous === next;
-  return previous.id === next.id
-    && previous.publicKeyHex === next.publicKeyHex
+  return previous.publicKeyHex === next.publicKeyHex
     && previous.name === next.name
     && previous.updatedAt === next.updatedAt;
 }

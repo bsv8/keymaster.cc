@@ -1,16 +1,29 @@
-// 冷启动桶目录快照与 S3 配置 envelope 契约。
+// 冷启动运行时绑定契约。
 
-/** 本机 bootstrap 只传递当前 V1 桶目录中选中的桶。 */
+/** Worker 冷启动只接收当前 session 选中的设备桶绑定。 */
+export interface StorageRuntimeBucketV1 {
+  /** 桶的逻辑身份；等于设备记录的 `<ID>`，也是 local 对象前缀。 */
+  bucketId: string;
+  /** 公开后端类型。 */
+  backend: "local" | "s3";
+  /** 本机显示名称；省略时读取方按坐标生成默认名。 */
+  label?: string;
+  /** 设备桶记录本体（keymaster.device.v1）。 */
+  deviceRecord: import("./device.js").DeviceRecordV1;
+  /**
+   * 启动密码（会话密码）的公开 KDF 参数，来自 `keymaster.session`；
+   * 仅 s3 绑定需要。密码本身永不落盘。
+   */
+  keyDerivation?: import("./session.js").KeymasterSessionKeyDerivationV1;
+}
+
 export interface StorageBootstrapState {
-  /** 当前 V1 存储后端。 */
+  /** 当前存储后端。 */
   selectedBackend: "local" | "s3";
   /** 当前选中的桶 ID。 */
   selectedProfileId: string;
-  /**
-   * 新版多桶目录选中的桶快照；Worker 只接收这一项，不接收整个本机目录。
-   * 其中只含桶级密文和公开 KDF 参数，不含密码、Keys 或业务数据。
-   */
-  selectedBucket: import("./catalog.js").StorageBucketCatalogEntryV2;
+  /** 当前选中的设备桶绑定；Worker 只接收这一项。 */
+  selectedBucket: StorageRuntimeBucketV1;
   /** 首帧语言镜像。 */
   language?: string;
   /** 首帧主题镜像。 */

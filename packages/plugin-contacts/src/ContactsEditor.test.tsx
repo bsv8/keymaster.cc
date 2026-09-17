@@ -57,7 +57,6 @@ function makeFakeKeyspace(): KeyspaceService {
 
 function makeFakeContactsService() {
   const addContact = vi.fn(async (input: { publicKeyHex: string; name: string; note?: string; tags?: string[] }): Promise<Contact> => ({
-    id: "contact-1",
     publicKeyHex: input.publicKeyHex,
     name: input.name,
     note: input.note,

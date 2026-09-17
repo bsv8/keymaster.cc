@@ -138,7 +138,7 @@ vi.mock("webloom-framework/react", () => ({
 }));
 
 vi.mock("@keymaster/platform-storage", () => ({
-  StorageBucketManagerPage: () => <div data-testid="storage-buckets">storage</div>,
+  readStorageBootstrap: () => null,
   StorageUnavailableGuard: ({ children }: { children: ReactNode }) => children
 }));
 
@@ -150,6 +150,10 @@ vi.mock("./shell/InitialSetupPage.js", () => ({
     testState.setupRecoveryReads += 1;
     return <div data-testid="initial-setup">setup</div>;
   }
+}));
+
+vi.mock("./shell/StorageAuthenticationPage.js", () => ({
+  StorageAuthenticationPage: () => <div data-testid="storage-authentication">authentication</div>
 }));
 
 vi.mock("./shell/LockedShell.js", () => ({
@@ -196,6 +200,21 @@ describe("App startup gate", () => {
     expect(screen.getByTestId("initial-setup")).toBeTruthy();
     expect(screen.queryByRole("status")).toBeNull();
     expect(testState.setupRecoveryReads).toBeGreaterThan(0);
+  });
+
+  it("routes an existing storage authentication snapshot to the authentication page", () => {
+    setResource("ready", bootstrapSnapshot({
+      phase: "storage-authentication",
+      storageReady: false,
+      vaultCapabilityReady: false,
+      vaultSelectionReady: false
+    }));
+
+    render(<App />);
+
+    expect(screen.getByTestId("storage-authentication")).toBeTruthy();
+    expect(screen.queryByTestId("initial-setup")).toBeNull();
+    expect(testState.setupRecoveryReads).toBe(0);
   });
 
   it("enters first setup for a resolved uninitialized vault", () => {
@@ -320,19 +339,6 @@ describe("App startup gate", () => {
     expect(screen.getByTestId("locked-shell")).toBeTruthy();
     expect(screen.queryByTestId("initial-setup")).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
-  });
-
-  it("keeps /storage/buckets available without reading the application bootstrap resource", () => {
-    testState.resourceDefined = false;
-    testState.storageStatusResourceDefined = false;
-    testState.hasStorageController = false;
-    setPath("/storage/buckets");
-
-    render(<App />);
-
-    expect(screen.getByTestId("storage-buckets")).toBeTruthy();
-    expect(testState.resourceReads).toBe(0);
-    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("preserves the protocol popup for an uninitialized vault after startup is resolved", () => {

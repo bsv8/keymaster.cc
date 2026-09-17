@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, deviceRemoteStorageLocationFingerprint, type CoordinatorLocalStorageRequest, type CoordinatorLocalStorageResponse, type CoordinatorTopicEvent, type DevicePasswordRotationRecordV1, type InitialSetupRecoveryRecordV1, type PendingPasswordRotationViewV1, type SessionCoordinatorClient, type StorageBucketCatalogEntryV2 } from "@keymaster/contracts";
+import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, DEVICE_KEY_PREFIX, KEYMASTER_SESSION_KEY, type CoordinatorLocalStorageRequest, type CoordinatorLocalStorageResponse, type CoordinatorTopicEvent, type DeviceRecordV1, type KeymasterSessionV1, type SessionCoordinatorClient } from "@keymaster/contracts";
 import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { StorageRpcProxy } from "@keymaster/platform-storage";
 import { createCoordinatorClient as createRawCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
-import { DEVICE_BOOTSTRAP_KEY, readStorageCatalog } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest } from "@keymaster/platform-storage/coordinator";
 import { createWindowApp, definePlugin, WebLoomError, type HandlerCallContext, type ServiceReference, type WindowApp } from "webloom-framework";
 import { startSharedWorkerAppForTesting, type SharedWorkerScopeLike } from "webloom-framework/testing";
@@ -342,70 +341,22 @@ const bridgeLocks = {
   }
 };
 
-function bridgeCatalogEntry(bucketId: string, label: string): StorageBucketCatalogEntryV2 {
-  return {
-    bucketId,
-    label,
-    backend: "local",
-    configRevision: 1,
-    keyDerivation: {
-      algorithm: "pbkdf2-hmac-sha-256",
-      passwordEncoding: "utf-8",
-      iterations: 100_000,
-      outputLengthBits: 256,
-      saltB64Url: "0123456789ab"
-    },
-    encryptedConfig: {
-      cipher: {
-        algorithm: "aes-gcm",
-        keyLengthBits: 256,
-        ivB64Url: "0123456789ab",
-        tagLengthBits: 128,
-        ciphertextAndTagB64Url: "bridge-test-config"
-      }
-    },
-    snapshotRevision: 1,
-    createdAt: 1,
-    updatedAt: 1
-  };
+function bridgeDeviceRecord(label: string): DeviceRecordV1 {
+  return { format: "keymaster.device", version: 1, displayName: label, location: { providerId: "local" } };
 }
 
-function seedDeviceCatalog(storage: BridgeMemoryStorage, entries: StorageBucketCatalogEntryV2[], selectedBucketId?: string): void {
-  storage.setItem(DEVICE_BOOTSTRAP_KEY, JSON.stringify({
-    format: "keymaster.device-bootstrap",
+function bridgeSession(activeBucketId?: string): KeymasterSessionV1 {
+  return {
+    format: "keymaster.session",
     version: 1,
-    ...(selectedBucketId === undefined ? {} : { selectedRemoteStorageId: selectedBucketId }),
-    connections: entries.map((entry) => ({
-      remoteStorageId: entry.bucketId,
-      displayName: entry.label,
-      providerId: "local",
-      location: { providerId: "local", namespace: entry.bucketId },
-      physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint({ providerId: "local", namespace: entry.bucketId }),
-      encryptedConfig: entry.encryptedConfig,
-      keyDerivation: entry.keyDerivation,
-      source: "connected",
-      createdAt: entry.createdAt,
-      updatedAt: entry.updatedAt,
-    })),
-    recoveries: [],
-    workerProfileId: "profile-client-bridge-test",
-  }));
+    sessionId: "0123456789abcdef0123456789abcdef",
+    ...(activeBucketId === undefined ? {} : { activeBucketId }),
+  };
 }
 
-function bridgeDeviceConnection(entry: StorageBucketCatalogEntryV2) {
-  const location = { providerId: "local" as const, namespace: entry.bucketId };
-  return {
-    remoteStorageId: entry.bucketId,
-    displayName: entry.label,
-    providerId: "local" as const,
-    location,
-    physicalLocationFingerprint: deviceRemoteStorageLocationFingerprint(location),
-    encryptedConfig: structuredClone(entry.encryptedConfig),
-    keyDerivation: structuredClone(entry.keyDerivation),
-    source: "created" as const,
-    createdAt: entry.createdAt,
-    updatedAt: entry.updatedAt,
-  };
+function seedDeviceBinding(storage: BridgeMemoryStorage, current: { bucketId: string; label: string }): void {
+  storage.setItem(`${DEVICE_KEY_PREFIX}${current.bucketId}`, JSON.stringify(bridgeDeviceRecord(current.label)));
+  storage.setItem(KEYMASTER_SESSION_KEY, JSON.stringify(bridgeSession(current.bucketId)));
 }
 
 type LocalBridgeClientInternals = {
@@ -433,7 +384,7 @@ function localBridgeRequestWithoutTransportFields(
     ...businessRequest,
     peerGeneration: value.peerGeneration ?? fallbackBinding.peerGeneration,
     sessionEpoch: value.sessionEpoch ?? fallbackBinding.sessionEpoch,
-    leaseId: fallbackBinding.leaseId,
+    leaseId: typeof value.leaseId === "string" ? value.leaseId : fallbackBinding.leaseId,
   } as CoordinatorLocalStorageRequest;
 }
 
@@ -500,13 +451,13 @@ function installBridgeGlobals(storage: BridgeMemoryStorage): () => void {
   };
 }
 
-async function openTestLocalBridge(storage: BridgeMemoryStorage, current: StorageBucketCatalogEntryV2): Promise<{
+async function openTestLocalBridge(storage: BridgeMemoryStorage, current: { bucketId: string; label: string }): Promise<{
   client: ReturnType<typeof createCoordinatorClient>;
   workerPort: LocalBridgeTestPort;
   authorityInstanceId: string;
   leaseId: string;
 }> {
-  seedDeviceCatalog(storage, [current], current.bucketId);
+  seedDeviceBinding(storage, current);
   const client = createCoordinatorClient({ clientId: "local-bridge-test" });
   const internals = client as unknown as LocalBridgeClientInternals;
   const windowApp = await ensureTestWindowApp(client);
@@ -519,60 +470,11 @@ async function openTestLocalBridge(storage: BridgeMemoryStorage, current: Storag
   return { client, workerPort, authorityInstanceId, leaseId: lease.leaseId };
 }
 
-async function openEmptyTestLocalBridge(storage: BridgeMemoryStorage): Promise<{
-  client: ReturnType<typeof createCoordinatorClient>;
-  workerPort: LocalBridgeTestPort;
-  authorityInstanceId: string;
-  leaseId: string;
-}> {
-  const client = createCoordinatorClient({ clientId: "initial-local-bridge-test" });
-  const internals = client as unknown as LocalBridgeClientInternals;
-  const windowApp = await ensureTestWindowApp(client);
-  const workerPort = createLocalBridgeTestPort(internals, windowApp);
-  const lease = internals.localStorageBridgeLease;
-  if (!lease) throw new Error("Local bridge test lease was not created");
-  const authorityInstanceId = "authority:initial-local-bridge-test";
-  workerPort.start();
-  expect(internals.localStorageBridgeLease).toMatchObject({ bucketGeneration: 0, leaseId: lease.leaseId });
-  return { client, workerPort, authorityInstanceId, leaseId: lease.leaseId };
-}
-
 function sendBridgeRequest(workerPort: LocalBridgeTestPort, requestId: string, request: LocalStorageBridgeRequest | Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve) => {
     workerPort.onmessage = (event) => resolve(event.data);
     workerPort.postMessage({ requestId, request });
   });
-}
-
-function bridgeRecoveryRecord(transactionId: string, updatedAt: number): InitialSetupRecoveryRecordV1 {
-  return {
-    format: "keymaster.storage.initial-setup-recovery",
-    version: 1,
-    transactionId,
-    bucketId: "setup-" + transactionId,
-    catalogEntryFingerprint: "a".repeat(64),
-    configRevision: 1,
-    snapshotRevision: 0,
-    backend: "local",
-    connectionFingerprint: "b".repeat(64),
-    phase: "rollback",
-    catalog: "empty",
-    runtimeInstalled: false,
-    cleanup: "unconfirmed",
-    status: "failed",
-    error: {
-      title: "初始化失败",
-      summary: "候选数据尚未清理",
-      action: "请重试清理",
-      code: "storage_provider_error",
-      incidentId: `bridge-recovery-${transactionId}`,
-      transactionId,
-      diagnostic: "diagnostic",
-      phase: "rollback",
-      rollback: "unconfirmed",
-    },
-    updatedAt,
-  };
 }
 
 describe("KeymasterSessionCoordinatorClient", () => {
@@ -640,43 +542,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally { globalThis.SharedWorker = original; }
   });
 
-  it("parses the pending-rotation safety projection through the real client response boundary", async () => {
-    const view: PendingPasswordRotationViewV1 = {
-      format: "keymaster.storage.password-rotation-view",
-      version: 1,
-      operationId: "rotation-client-0001",
-      bucketId: "bucket-client-0001",
-      backend: "local",
-      phase: "hold-published",
-      createdAt: 1,
-      updatedAt: 2,
-    };
-    let wireResult: unknown;
-    const port = createTestMessagePort();
-    port.postMessage.mockImplementation((message: unknown) => {
-      const request = message as { kind: string; requestId: string; control?: { type?: string } };
-      const operationResult = request.kind === "storage.control"
-        && request.control?.type === "list-pending-password-rotations"
-        ? [view]
-        : { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } };
-      if (request.kind === "storage.control") wireResult = operationResult;
-      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
-    });
-    const original = globalThis.SharedWorker;
-    globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
-    try {
-      const client = createCoordinatorClient({ clientId: "pending-rotation-client" });
-      await client.connect();
-      const proxy = new StorageRpcProxy(client);
-      await expect(proxy.listPendingPasswordRotations()).resolves.toEqual([view]);
-      proxy.dispose();
-      expect(wireResult).toEqual([view]);
-      expect(JSON.stringify(wireResult)).not.toContain("restoredDeviceEncryptedConfig");
-      expect(JSON.stringify(wireResult)).not.toContain("restoredDeviceCiphertextFingerprint");
-    } finally { globalThis.SharedWorker = original; }
-  });
-
-  it("uses the module URL constructor and a profile-scoped Worker name", async () => {
+  it("uses the module URL constructor and a session-scoped Worker name", async () => {
     const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
     const worker = { port } as unknown as SharedWorker;
@@ -687,7 +553,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client = createCoordinatorClient();
       await client.connect();
       expect(Constructor).toHaveBeenCalledWith(expect.anything(), {
-        name: expect.stringMatching(/^keymaster-coordinator-dev:profile-[A-Za-z0-9_-]+$/u),
+        name: expect.stringMatching(/^keymaster-coordinator-dev:([0-9a-f]{32}|default)$/u),
         type: "module"
       });
     }
@@ -1307,45 +1173,37 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally { globalThis.SharedWorker = original; }
   });
 
-  it("在 catalog-select 响应丢失后仍能用幂等回滚恢复旧桶", async () => {
+  it("通过页面桥读写设备记录与 session", async () => {
     const storage = new BridgeMemoryStorage();
     const restoreGlobals = installBridgeGlobals(storage);
-    const current = bridgeCatalogEntry("bucket-old", "旧桶");
-    const target = bridgeCatalogEntry("bucket-new", "新桶");
-    const { client, workerPort, authorityInstanceId, leaseId } = await openTestLocalBridge(storage, current);
+    const { client, workerPort } = await openTestLocalBridge(storage, { bucketId: "bucket-bridge", label: "桥接桶" });
     try {
-      seedDeviceCatalog(storage, [current, target], current.bucketId);
-      const selectRequest = {
-        type: "catalog-select" as const,
-        bucketId: target.bucketId,
-        bucketGeneration: 2,
-        authorityInstanceId,
-        leaseId,
-        expectedSelectedBucketId: current.bucketId,
-        targetBucket: target
-      } satisfies LocalStorageBridgeRequest;
-
-      // 消费掉但故意忽略响应，模拟 CAS 已落盘而 Worker 没收到 response。
-      await new Promise<void>((resolve) => {
-        workerPort.onmessage = () => resolve();
-        workerPort.postMessage({ requestId: "lost-select-response", request: selectRequest });
+      const put = await sendBridgeRequest(workerPort, "device-record-put-1", {
+        type: "device-record-put",
+        remoteStorageId: "bucket-other",
+        record: bridgeDeviceRecord("另一个桶"),
       });
-      expect(readStorageCatalog(storage).selectedBucketId).toBe(target.bucketId);
+      expect(put).toMatchObject({ ok: true, response: { type: "void" } });
+      expect(storage.getItem(`${DEVICE_KEY_PREFIX}bucket-other`)).not.toBeNull();
 
-      const rollback = {
-        type: "catalog-select" as const,
-        bucketId: current.bucketId,
-        bucketGeneration: 1,
-        authorityInstanceId,
-        leaseId,
-        expectedSelectedBucketId: target.bucketId,
-        rollbackFromSelectedBucketId: target.bucketId,
-        targetBucket: current
-      } satisfies LocalStorageBridgeRequest;
-      const response = await sendBridgeRequest(workerPort, "rollback-after-lost-select", rollback) as { ok?: boolean; response?: { type?: string; bucket?: StorageBucketCatalogEntryV2 } };
+      const list = await sendBridgeRequest(workerPort, "device-record-list-1", { type: "device-record-list" }) as { response?: { type?: string; entries?: Array<{ remoteStorageId: string }> } };
+      expect(list.response?.type).toBe("device-records");
+      expect(list.response?.entries?.map((entry) => entry.remoteStorageId).sort()).toEqual(["bucket-bridge", "bucket-other"]);
 
-      expect(response).toMatchObject({ ok: true, response: { type: "catalog", bucket: { bucketId: current.bucketId } } });
-      expect(readStorageCatalog(storage).selectedBucketId).toBe(current.bucketId);
+      const got = await sendBridgeRequest(workerPort, "device-record-get-1", { type: "device-record-get", remoteStorageId: "bucket-other" }) as { response?: { record?: DeviceRecordV1 } };
+      expect(got.response?.record).toMatchObject({ format: "keymaster.device", displayName: "另一个桶" });
+
+      const read = await sendBridgeRequest(workerPort, "session-read-1", { type: "session-read" }) as { response?: { session?: KeymasterSessionV1 } };
+      expect(read.response?.session?.activeBucketId).toBe("bucket-bridge");
+
+      const nextSession = { ...bridgeSession("bucket-other"), activeKey: "02".padEnd(66, "a") };
+      const write = await sendBridgeRequest(workerPort, "session-write-1", { type: "session-write", session: nextSession });
+      expect(write).toMatchObject({ ok: true, response: { type: "void" } });
+      expect(JSON.parse(storage.getItem(KEYMASTER_SESSION_KEY) as string)).toMatchObject({ activeBucketId: "bucket-other" });
+
+      const removed = await sendBridgeRequest(workerPort, "device-record-delete-1", { type: "device-record-delete", remoteStorageId: "bucket-other" });
+      expect(removed).toMatchObject({ ok: true, response: { type: "void" } });
+      expect(storage.getItem(`${DEVICE_KEY_PREFIX}bucket-other`)).toBeNull();
     } finally {
       client.disconnect();
       workerPort.close();
@@ -1353,468 +1211,17 @@ describe("KeymasterSessionCoordinatorClient", () => {
     }
   });
 
-  it("首桶 Root 尚未绑定时不让旧 unselected 事件清空临时 Local 租约", async () => {
+  it("页面桥以服务引用过期错误拒绝旧 lease 绑定", async () => {
     const storage = new BridgeMemoryStorage();
     const restoreGlobals = installBridgeGlobals(storage);
-    const current = bridgeCatalogEntry("bucket-first", "首个桶");
-    const { client, workerPort } = await openTestLocalBridge(storage, current);
+    const { client, workerPort, authorityInstanceId } = await openTestLocalBridge(storage, { bucketId: "bucket-bridge", label: "桥接桶" });
     try {
-      const internals = client as unknown as LocalBridgeClientInternals;
-      internals.applyTopicEvent({
-        topic: "storage.state",
-        type: "storage.state.changed",
-        storageRevision: 1,
-        sessionEpoch: "boot",
-        providerGeneration: null,
-        status: "checking",
-        healthStatus: "unselected",
-        catalogBucket: false,
-        summary: null,
-        capabilities: null
-      });
-
-      expect(internals.localStorageBridgeLease).toMatchObject({
-        bucketId: current.bucketId,
-        bucketGeneration: 1
-      });
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("拒绝跳过世代的 Local lease 回滚，并接受精确的上一世代", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const current = bridgeCatalogEntry("bucket-lease-old", "旧桶");
-    const target = bridgeCatalogEntry("bucket-lease-new", "新桶");
-    const { client, workerPort, authorityInstanceId, leaseId } = await openTestLocalBridge(storage, current);
-    try {
-      seedDeviceCatalog(storage, [current, target], current.bucketId);
-      const select = {
-        type: "catalog-select" as const,
-        bucketId: target.bucketId,
-        bucketGeneration: 2,
+      const stale = await sendBridgeRequest(workerPort, "session-read-stale", {
+        type: "session-read",
         authorityInstanceId,
-        leaseId,
-        expectedSelectedBucketId: current.bucketId,
-        targetBucket: target
-      } satisfies LocalStorageBridgeRequest;
-      await sendBridgeRequest(workerPort, "lease-select", select);
-
-      const forgedRollback = {
-        ...select,
-        bucketId: current.bucketId,
-        bucketGeneration: 3,
-        expectedSelectedBucketId: target.bucketId,
-        rollbackFromSelectedBucketId: target.bucketId,
-        targetBucket: current
-      } as unknown as LocalStorageBridgeRequest;
-      const rejected = await sendBridgeRequest(workerPort, "lease-forged-rollback", forgedRollback) as { ok?: boolean; error?: { code?: string } };
-      expect(rejected).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-
-      const validRollback = {
-        ...forgedRollback,
-        bucketGeneration: 1
-      } as Extract<LocalStorageBridgeRequest, { type: "catalog-select" }>;
-      const accepted = await sendBridgeRequest(workerPort, "lease-valid-rollback", validRollback) as { ok?: boolean; response?: { bucket?: StorageBucketCatalogEntryV2 } };
-      expect(accepted).toMatchObject({ ok: true, response: { bucket: { bucketId: current.bucketId } } });
-      expect(readStorageCatalog(storage).selectedBucketId).toBe(current.bucketId);
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("首次初始化允许空目录暂存，并以幂等 catalog-commit 发布或回滚同一桶", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const target = bridgeCatalogEntry("bucket-initial", "首桶");
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    try {
-      const candidate = {
-        bucket: target,
-        bucketGeneration: 1,
-        initialSetup: true
-      } as const;
-      const stagedRead = await sendBridgeRequest(workerPort, "initial-staged-read", {
-        type: "get",
-        bucketId: target.bucketId,
-        bucketGeneration: 1,
-        authorityInstanceId,
-        leaseId,
-        candidateBucket: candidate,
-        path: ".keymaster/hold/v1/head.json"
-      });
-      expect(stagedRead).toMatchObject({ ok: true, response: { type: "object" } });
-      expect(readStorageCatalog(storage)).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-
-      const commit = {
-        type: "catalog-commit" as const,
-        bucketId: target.bucketId,
-        bucketGeneration: 1,
-        authorityInstanceId,
-        leaseId,
-        targetBucket: target
-      };
-      await sendBridgeRequest(workerPort, "initial-device-connection", {
-        type: "device-bootstrap-connection-upsert",
-        authorityInstanceId,
-        leaseId,
-        connection: bridgeDeviceConnection(target),
-      });
-      await sendBridgeRequest(workerPort, "initial-commit", commit);
-      expect(readStorageCatalog(storage)).toMatchObject({ selectedBucketId: target.bucketId, buckets: [{ bucketId: target.bucketId, configRevision: 0, snapshotRevision: 0 }] });
-      const committedRead = await sendBridgeRequest(workerPort, "initial-committed-read", {
-        type: "get",
-        bucketId: target.bucketId,
-        bucketGeneration: 1,
-        authorityInstanceId,
-        leaseId,
-        candidateBucket: candidate,
-        path: ".keymaster/hold/v1/head.json"
-      });
-      expect(committedRead).toMatchObject({ ok: true, response: { type: "object" } });
-      await sendBridgeRequest(workerPort, "initial-commit-retry", commit);
-      expect(readStorageCatalog(storage)).toMatchObject({ selectedBucketId: target.bucketId, buckets: [{ bucketId: target.bucketId, configRevision: 0, snapshotRevision: 0 }] });
-
-      await sendBridgeRequest(workerPort, "initial-rollback", { ...commit, rollback: true });
-      expect(readStorageCatalog(storage)).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-      await sendBridgeRequest(workerPort, "initial-rollback-retry", { ...commit, rollback: true });
-      expect(readStorageCatalog(storage)).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("把页面 Local 存储领域错误编码为 WebLoom 跨 realm 错误", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const target = bridgeCatalogEntry("bucket-error-code", "错误码桥接桶");
-    const { client, workerPort } = await openEmptyTestLocalBridge(storage);
-    const internals = client as unknown as LocalBridgeClientInternals;
-    const call = {
-      signal: new AbortController().signal,
-      deadlineAt: Date.now() + 30_000,
-      origin: "remote",
-    } as HandlerCallContext;
-    const leaseId = internals.localStorageBridgeLease?.leaseId;
-    if (!leaseId) throw new Error("LocalStorage bridge lease was not installed by the test harness");
-    const request = {
-      type: "put",
-      peerGeneration: 1,
-      sessionEpoch: "boot",
-      leaseId,
-      bucketId: target.bucketId,
-      bucketGeneration: 1,
-      candidateBucket: { bucket: target, bucketGeneration: 1, initialSetup: true },
-      path: "coordinator/value",
-      bytes: new Uint8Array([1]),
-      condition: { ifNoneMatch: "*" as const },
-    } satisfies CoordinatorLocalStorageRequest;
-    try {
-      await internals.handleLocalStorageCapabilityRequest(request, call);
-      const error = await internals.handleLocalStorageCapabilityRequest(request, call).catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(WebLoomError);
-      expect(error).toMatchObject({ code: "storage_conflict", phase: "execute" });
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("目录竞争后 cleanupOnly 只能清理输家候选，不能触碰赢家命名空间", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const winner = bridgeCatalogEntry("bucket-race-winner", "赢家");
-    const loser = bridgeCatalogEntry("bucket-race-loser", "输家");
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    try {
-      const winnerCandidate = { bucket: winner, bucketGeneration: 1, initialSetup: true } as const;
-      const loserCandidate = { bucket: loser, bucketGeneration: 1, initialSetup: true } as const;
-      const base = { authorityInstanceId, leaseId };
-      storage.setItem(`keymaster.bucket.${winner.bucketId}.candidate/winner`, btoa("winner"));
-      storage.setItem(`keymaster.bucket.${loser.bucketId}.candidate/loser`, btoa("loser"));
-      await sendBridgeRequest(workerPort, "race-winner-device-connection", {
-        type: "device-bootstrap-connection-upsert",
-        authorityInstanceId,
-        leaseId,
-        connection: bridgeDeviceConnection(winner),
-      });
-      await sendBridgeRequest(workerPort, "race-winner-commit", {
-        type: "catalog-commit",
-        bucketId: winner.bucketId,
-        bucketGeneration: 1,
-        ...base,
-        targetBucket: winner
-      });
-
-      const cleanupCandidate = { ...loserCandidate, cleanupOnly: true } as const;
-      const listed = await sendBridgeRequest(workerPort, "race-loser-list", {
-        type: "list",
-        bucketId: loser.bucketId,
-        bucketGeneration: 1,
-        ...base,
-        candidateBucket: cleanupCandidate
-      }) as { ok?: boolean; response?: { type?: string; objects?: Array<{ path: string }> } };
-      expect(listed).toMatchObject({ ok: true, response: { type: "list", objects: [{ path: "candidate/loser" }] } });
-      await sendBridgeRequest(workerPort, "race-loser-delete", {
-        type: "delete",
-        bucketId: loser.bucketId,
-        bucketGeneration: 1,
-        ...base,
-        candidateBucket: cleanupCandidate,
-        path: "candidate/loser"
-      });
-
-      const winnerRead = await sendBridgeRequest(workerPort, "race-winner-read", {
-        type: "get",
-        bucketId: winner.bucketId,
-        bucketGeneration: 1,
-        ...base,
-        candidateBucket: winnerCandidate,
-        path: "candidate/winner"
-      }) as { ok?: boolean; response?: { type?: string; object?: { bytes?: Uint8Array } } };
-      expect(winnerRead.ok).toBe(true);
-      expect(winnerRead.response?.object?.bytes).toEqual(new TextEncoder().encode("winner"));
-      expect(readStorageCatalog(storage)).toMatchObject({ selectedBucketId: winner.bucketId });
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("两个页面桥并发写最小恢复指针后，其中一个 Worker 终止也不会丢失另一条指针", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const first = await openEmptyTestLocalBridge(storage);
-    const second = await openEmptyTestLocalBridge(storage);
-    try {
-      const recordA = { operationId: "initial-setup-bridge-worker-a", mode: "create" as const, physicalLocationFingerprint: "a".repeat(64), status: "unknown" as const, updatedAt: 1 };
-      const recordB = { operationId: "initial-setup-bridge-worker-b", mode: "create" as const, physicalLocationFingerprint: "b".repeat(64), status: "unknown" as const, updatedAt: 2 };
-      const [firstResponse, secondResponse] = await Promise.all([
-        sendBridgeRequest(first.workerPort, "recovery-write-a", {
-          type: "device-bootstrap-recovery-upsert",
-          authorityInstanceId: first.authorityInstanceId,
-          leaseId: first.leaseId,
-          recovery: recordA,
-        }) as Promise<{ ok?: boolean; response?: { catalog?: { recoveries?: Array<typeof recordA> } } }>,
-        sendBridgeRequest(second.workerPort, "recovery-write-b", {
-          type: "device-bootstrap-recovery-upsert",
-          authorityInstanceId: second.authorityInstanceId,
-          leaseId: second.leaseId,
-          recovery: recordB,
-        }) as Promise<{ ok?: boolean; response?: { catalog?: { recoveries?: Array<typeof recordB> } } }>,
-      ]);
-      expect(firstResponse).toMatchObject({ ok: true });
-      expect(secondResponse).toMatchObject({ ok: true });
-
-      first.client.disconnect();
-      first.workerPort.close();
-      const afterWorkerTermination = await sendBridgeRequest(second.workerPort, "recovery-list-after-worker-termination", {
-        type: "device-bootstrap-read",
-        authorityInstanceId: second.authorityInstanceId,
-        leaseId: second.leaseId,
-      }) as { ok?: boolean; response?: { catalog?: { recoveries?: Array<{ operationId: string }> } } };
-      expect(afterWorkerTermination.response?.catalog?.recoveries?.map((record) => record.operationId)).toEqual([recordA.operationId, recordB.operationId]);
-    } finally {
-      second.client.disconnect();
-      second.workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("设备引导轮转记录经页面桥写入、读取与删除", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    try {
-      const keyDerivation = { algorithm: "pbkdf2-hmac-sha-256" as const, passwordEncoding: "utf-8" as const, iterations: 100000, outputLengthBits: 256 as const, saltB64Url: "AAAAAAAAAAAAAAAAAAAAAA" };
-      const rotation: DevicePasswordRotationRecordV1 = {
-        format: "keymaster.storage.password-rotation",
-        version: 1,
-        operationId: "rotation-bridge-0001",
-        bucketId: "rotation-bucket-1",
-        backend: "local",
-        phase: "manifest-unconfirmed",
-        oldKeyDerivation: keyDerivation,
-        oldManifestFingerprint: "c".repeat(64),
-        oldConfigRevision: 1,
-        deviceCiphertextFingerprint: "d".repeat(64),
-        createdAt: 1,
-        updatedAt: 2,
-      };
-      const upserted = await sendBridgeRequest(workerPort, "rotation-upsert", {
-        type: "device-bootstrap-rotation-upsert",
-        authorityInstanceId,
-        leaseId,
-        rotation,
-      }) as { ok?: boolean; response?: { catalog?: { rotations?: Array<{ operationId: string }> } } };
-      expect(upserted).toMatchObject({ ok: true });
-      const read = await sendBridgeRequest(workerPort, "rotation-read", {
-        type: "device-bootstrap-read",
-        authorityInstanceId,
-        leaseId,
-      }) as { ok?: boolean; response?: { catalog?: { rotations?: Array<{ operationId: string }> } } };
-      expect(read.response?.catalog?.rotations?.map((record) => record.operationId)).toEqual([rotation.operationId]);
-      const deleted = await sendBridgeRequest(workerPort, "rotation-delete", {
-        type: "device-bootstrap-rotation-delete",
-        authorityInstanceId,
-        leaseId,
-        operationId: rotation.operationId,
-      }) as { ok?: boolean };
-      expect(deleted).toMatchObject({ ok: true });
-      const reread = await sendBridgeRequest(workerPort, "rotation-reread", {
-        type: "device-bootstrap-read",
-        authorityInstanceId,
-        leaseId,
-      }) as { ok?: boolean; response?: { catalog?: { rotations?: Array<{ operationId: string }> } } };
-      expect(reread.response?.catalog?.rotations ?? []).toEqual([]);
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("旧完整恢复账本写入请求已被拒绝", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    try {
-      Object.defineProperty(globalThis, "navigator", { configurable: true, value: {} });
-      const response = await sendBridgeRequest(workerPort, "recovery-write-without-lock", {
-        type: "initial-setup-recovery-write",
-        authorityInstanceId,
-        leaseId,
-        record: bridgeRecoveryRecord("initial-setup-bridge-no-lock", 1),
+        leaseId: "local-storage-stale",
       }) as { ok?: boolean; error?: { code?: string } };
-      expect(response).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-      expect(storage.getItem("keymaster.storage.initial-setup.recovery.v1")).toBeNull();
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("旧完整恢复账本 JSON 不再被设备引导桥读取或覆盖", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    const ledgerKey = "keymaster.storage.initial-setup.recovery.v1";
-    const damaged = "{not-json";
-    storage.setItem(ledgerKey, damaged);
-    try {
-      const listed = await sendBridgeRequest(workerPort, "recovery-list-invalid-json", {
-        type: "initial-setup-recovery-list",
-        authorityInstanceId,
-        leaseId,
-      }) as { ok?: boolean; error?: { code?: string } };
-      expect(listed).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-
-      const written = await sendBridgeRequest(workerPort, "recovery-write-invalid-json", {
-        type: "initial-setup-recovery-write",
-        authorityInstanceId,
-        leaseId,
-        record: bridgeRecoveryRecord("initial-setup-bridge-after-invalid-json", 1),
-      }) as { ok?: boolean; error?: { code?: string } };
-      expect(written).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-      expect(storage.getItem(ledgerKey)).toBe(damaged);
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("旧完整恢复账本中的非法或重复记录不会重新启用旧接口", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    const ledgerKey = "keymaster.storage.initial-setup.recovery.v1";
-    const valid = bridgeRecoveryRecord("initial-setup-bridge-valid-record", 1);
-    try {
-      const mixed = JSON.stringify([valid, { ...valid, phase: "not-a-phase" }]);
-      storage.setItem(ledgerKey, mixed);
-      const mixedResponse = await sendBridgeRequest(workerPort, "recovery-list-mixed-invalid", {
-        type: "initial-setup-recovery-list",
-        authorityInstanceId,
-        leaseId,
-      }) as { ok?: boolean; error?: { code?: string } };
-      expect(mixedResponse).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-
-      const duplicate = JSON.stringify([valid, valid]);
-      storage.setItem(ledgerKey, duplicate);
-      const duplicateResponse = await sendBridgeRequest(workerPort, "recovery-list-duplicate", {
-        type: "initial-setup-recovery-list",
-        authorityInstanceId,
-        leaseId,
-      }) as { ok?: boolean; error?: { code?: string } };
-      expect(duplicateResponse).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-
-      const written = await sendBridgeRequest(workerPort, "recovery-write-duplicate-ledger", {
-        type: "initial-setup-recovery-write",
-        authorityInstanceId,
-        leaseId,
-        record: bridgeRecoveryRecord("initial-setup-bridge-after-duplicate", 2),
-      }) as { ok?: boolean; error?: { code?: string } };
-      expect(written).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-      expect(storage.getItem(ledgerKey)).toBe(duplicate);
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("旧完整恢复账本满载时也不会接受旧写入接口", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    const ledgerKey = "keymaster.storage.initial-setup.recovery.v1";
-    const records = Array.from({ length: 32 }, (_, index) => bridgeRecoveryRecord(`capacity-unconfirmed-${index}`, index));
-    const original = JSON.stringify(records);
-    storage.setItem(ledgerKey, original);
-    try {
-      const response = await sendBridgeRequest(workerPort, "recovery-write-at-capacity", {
-        type: "initial-setup-recovery-write",
-        authorityInstanceId,
-        leaseId,
-        record: bridgeRecoveryRecord("capacity-unconfirmed-new", 33),
-      }) as { ok?: boolean; error?: { code?: string } };
-      expect(response).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-      expect(storage.getItem(ledgerKey)).toBe(original);
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("旧完整恢复账本不会再执行终态淘汰写入", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort, authorityInstanceId, leaseId } = await openEmptyTestLocalBridge(storage);
-    const ledgerKey = "keymaster.storage.initial-setup.recovery.v1";
-    const terminal = { ...bridgeRecoveryRecord("capacity-confirmed-oldest", 0), cleanup: "confirmed" as const };
-    const unconfirmed = Array.from({ length: 31 }, (_, index) => bridgeRecoveryRecord(`capacity-unconfirmed-${index}`, index + 1));
-    storage.setItem(ledgerKey, JSON.stringify([terminal, ...unconfirmed]));
-    try {
-      const response = await sendBridgeRequest(workerPort, "recovery-write-with-terminal-eviction", {
-        type: "initial-setup-recovery-write",
-        authorityInstanceId,
-        leaseId,
-        record: bridgeRecoveryRecord("capacity-unconfirmed-new", 32),
-      }) as { ok?: boolean; response?: { records?: InitialSetupRecoveryRecordV1[] } };
-      expect(response).toMatchObject({ ok: false, error: { code: "storage_forbidden" } });
-      expect(storage.getItem(ledgerKey)).toBe(JSON.stringify([terminal, ...unconfirmed]));
+      expect(stale).toMatchObject({ ok: false, error: { code: "service_reference_stale" } });
     } finally {
       client.disconnect();
       workerPort.close();

@@ -24,7 +24,6 @@ interface ContactsEditorProps {
   open: boolean;
   mode: "create" | "edit";
   publicKeyHex?: string;
-  contactId?: string;
   onClose: () => void;
   onSaved: (contact: Contact) => void;
 }
@@ -82,7 +81,6 @@ function MessagePageInner(): JSX.Element {
     open: boolean;
     mode: "create" | "edit";
     publicKeyHex?: string;
-    contactId?: string;
   }>({ open: false, mode: "create" });
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [newChatPublicKeyHex, setNewChatPublicKeyHex] = useState("");
@@ -182,7 +180,7 @@ function MessagePageInner(): JSX.Element {
                           className="km-message-page__contact-link"
                           onClick={(event) => {
                             event.stopPropagation();
-                            router.push(`/contacts/${encodeURIComponent(contact.id)}`);
+                            router.push(`/contacts/${encodeURIComponent(contact.publicKeyHex)}`);
                           }}
                         >
                           {contactName}
@@ -225,7 +223,6 @@ function MessagePageInner(): JSX.Element {
           open={editorState.open}
           mode={editorState.mode}
           publicKeyHex={editorState.publicKeyHex}
-          contactId={editorState.contactId}
           onClose={() => setEditorState({ open: false, mode: "create" })}
           onSaved={() => {
             setEditorState({ open: false, mode: "create" });

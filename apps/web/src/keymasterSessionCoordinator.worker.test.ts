@@ -3,7 +3,7 @@ import {
   bytesToHex,
   hexToBytes,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorClientRequest, CoordinatorRpcRequest, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupResult, JSONValue, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1, StorageCatalogV2 } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorRpcRequest, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, DeviceRecordV1, ExistingRemoteStorageConnectResult, InitialSetupResult, JSONValue, KeymasterSessionV1, StorageBucketConnectionConfigV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1 } from "@keymaster/contracts";
 import { parseCoordinatorResponseFor } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
@@ -85,8 +85,6 @@ import {
   __testGetSnapshot,
   __testGetVaultStatus,
   __testGetVaultAuthMetadata,
-  __testGetVaultKeyIndex,
-  __testListKeyLifecycleJournals,
   __testOwnerStorageNamespaceExists,
   __testClearVaultHold,
   __testImportKeyBackup,
@@ -100,8 +98,8 @@ import {
   __testRunTask,
   __testSetVaultStatus,
   __testFailNextCoordinatorSnapshotPersist,
+  __testFailNextP2pkhSettingWrite,
   __testFailAfterCatalogBindingPublish,
-  __testFailKeyLifecycleJournalAfterHold,
   __testFailNextOwnerStorageActivation,
   __testMaterializeNextOwnerStorageActivation,
   __testFailNextOwnerStorageDeletion,
@@ -112,7 +110,6 @@ import {
   __testFailNextHoldRollbackCas,
   __testSetLocalStorageBridgeOverride,
   __testInitialSetupBucketId,
-  __testInitialSetupCatalogEntryFingerprint,
   __testPrepareInitialSetup,
   __testColdStartFromDeviceHint,
   __testFailColdStartInstall,
@@ -122,7 +119,6 @@ import {
   __testFailNextVaultAuthMetadataRollback,
   __testFailNextVaultAuthMetadataRestore,
   __testFailNextBucketPasswordDeviceRollback,
-  __testSeedInitialSetupRecoveryRecord,
   __testInstallCatalogLocalBinding,
   __testReleaseCatalogLocalBinding,
   __testSwitchCatalogBucket,
@@ -148,8 +144,9 @@ import {
   __testCoordinatorSnapshotMetrics,
   __testSeedCoordinatorKeyValueGarbage,
   __testCoordinatorKeyValueObjectExists,
+  __testResolveS3BucketStorageId,
 } from "./keymasterSessionCoordinator.worker.js";
-import { createBucketCryptoContext, encryptBucketConfig, createDeviceBootstrapRepository, createLocalStorageBucketProvider, readStorageBootstrap, createS3BucketProvider, sameStorageCatalogDeviceProjection, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
+import { encryptDeviceConfig, createLocalStorageBucketProvider, createS3BucketProvider, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import { type BucketObjectStore, type BucketGetOutput, type LocalStorageLike, type LocalStorageLocks } from "@keymaster/platform-storage";
 import { createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode } from "@keymaster/platform-storage";
@@ -205,6 +202,9 @@ function validPublisherKey(seed: number): string {
 
 const VALID_PUBLISHER_KEYS = [1, 2, 3, 4, 5, 6].map(validPublisherKey);
 
+const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
+const TEST_PRIV_3 = "0000000000000000000000000000000000000000000000000000000000000003";
+
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
 
 type CoordinatorTestPeer = Pick<PeerController, "peerId" | "scope" | "capability" | "exposeGroup">;
@@ -217,15 +217,10 @@ interface CoordinatorTestPeerHarness {
   exposureRevocationCount: number;
 }
 
-const EMPTY_STORAGE_CATALOG: StorageCatalogV2 = {
-  format: "keymaster.storage.catalog",
-  version: 2,
-  buckets: [],
-};
-
 function makeCoordinatorTestPeer(peerId: string, bridgeCall: CoordinatorBridgeCall = async () => ({
-  type: "catalog-state",
-  catalog: structuredClone(EMPTY_STORAGE_CATALOG),
+  type: "device-records",
+  entries: [],
+  invalidKeys: [],
 })): CoordinatorTestPeerHarness {
   const bridgeCalls: CoordinatorTestPeerHarness["bridgeCalls"] = [];
   let exposureCount = 0;
@@ -269,12 +264,10 @@ function installCoordinatorSessionInitializationBridge(): void {
   // 会清除 override，再让 LocalStorage 请求经由 fake peer capability 走真实
   // requestLocalStorageBridge pending/response/fence 路径。
   __testSetLocalStorageBridgeOverride(async (input) => {
-    if (input.type === "device-bootstrap-read") {
-      return { type: "device-bootstrap", catalog: null };
-    }
-    if (input.type === "catalog-read") {
-      return { type: "catalog-state", catalog: structuredClone(EMPTY_STORAGE_CATALOG) };
-    }
+    if (input.type === "session-read") return { type: "session" };
+    if (input.type === "device-record-list") return { type: "device-records", entries: [], invalidKeys: [] };
+    if (input.type === "device-record-get") return { type: "device-record" };
+    if (input.type === "device-record-put" || input.type === "session-write") return { type: "void" };
     throw new Error(`unexpected session initialization bridge request: ${input.type}`);
   });
 }
@@ -310,108 +303,85 @@ const catalogBridgeLocks = {
   request: async <T>(_name: string, callback: () => Promise<T>) => callback()
 } as LocalStorageLocks;
 
-async function makeEncryptedLocalCatalogEntry(
-  bucketId: string,
-  label: string,
-  password: string,
-): Promise<StorageBucketCatalogEntryV2> {
-  const context = await createBucketCryptoContext(password);
-  try {
-    const encryptedConfig = await encryptBucketConfig({ kind: "local" } satisfies StorageBucketConnectionConfigV1, context);
-    return {
-      bucketId,
-      label,
-      backend: "local",
-      configRevision: 1,
-      keyDerivation: { ...context.keyDerivation },
-      encryptedConfig,
-      snapshotRevision: 0,
-      createdAt: 1,
-      updatedAt: 1
-    };
-  } finally {
-    context.dispose();
-  }
+function makeRuntimeLocalBucket(bucketId: string, label: string): StorageRuntimeBucketV1 {
+  return {
+    bucketId,
+    backend: "local",
+    label,
+    deviceRecord: { format: "keymaster.device", version: 1, displayName: label, location: { providerId: "local" } },
+  };
 }
 
-async function makeEncryptedS3CatalogEntry(
-  bucketId: string,
-  label: string,
-  password: string,
-): Promise<StorageBucketCatalogEntryV2> {
-  const context = await createBucketCryptoContext(password);
-  try {
-    const encryptedConfig = await encryptBucketConfig({
-      kind: "s3",
-      endpoint: "https://objects.example.test",
-      region: "us-east-1",
-      bucket: "same-physical-target",
+async function makeRuntimeS3Bucket(bucketId: string, label: string, password: string): Promise<StorageRuntimeBucketV1> {
+  const keyDerivation = {
+    algorithm: "pbkdf2-hmac-sha-256" as const,
+    passwordEncoding: "utf-8" as const,
+    iterations: 100_000,
+    outputLengthBits: 256 as const,
+    saltB64Url: "AAAAAAAAAAAAAAAAAAAAAA",
+  };
+  const location = {
+    providerId: "s3" as const,
+    endpoint: "https://objects.example.test",
+    region: "us-east-1",
+    bucket: "same-physical-target",
+  };
+  const cipher = await encryptDeviceConfig({
+    password,
+    keyDerivation,
+    location,
+    plaintext: {
+      endpoint: location.endpoint,
+      region: location.region,
+      bucket: location.bucket,
       accessKeyId: "access",
       secretAccessKey: "secret",
-    } satisfies StorageBucketConnectionConfigV1, context);
-    return {
-      bucketId,
-      label,
-      backend: "s3",
-      configRevision: 2,
-      keyDerivation: { ...context.keyDerivation },
-      encryptedConfig,
-      snapshotRevision: 1,
-      createdAt: 1,
-      updatedAt: 1
-    };
-  } finally {
-    context.dispose();
-  }
+    },
+  });
+  return {
+    bucketId,
+    backend: "s3",
+    label,
+    keyDerivation,
+    deviceRecord: { format: "keymaster.device", version: 1, displayName: label, location, cipher },
+  };
 }
 
-function makeCatalogBridgeFixture(current: StorageBucketCatalogEntryV2, target: StorageBucketCatalogEntryV2) {
+function makeRuntimeBridgeFixture(current: StorageRuntimeBucketV1, target: StorageRuntimeBucketV1) {
   const storage = new CatalogBridgeStorage();
-  const state = {
-    catalog: {
-      format: "keymaster.storage.catalog" as const,
-      version: 2 as const,
-      selectedBucketId: current.bucketId,
-      buckets: [current, target]
-    },
-    lease: { bucketId: current.bucketId, bucketGeneration: 1 }
+  const records = new Map<string, DeviceRecordV1>([
+    [current.bucketId, structuredClone(current.deviceRecord)],
+    [target.bucketId, structuredClone(target.deviceRecord)],
+  ]);
+  let session: KeymasterSessionV1 = {
+    format: "keymaster.session",
+    version: 1,
+    sessionId: "0123456789abcdef0123456789abcdef",
+    activeBucketId: current.bucketId,
+    ...(current.keyDerivation === undefined ? {} : { keyDerivation: structuredClone(current.keyDerivation) }),
   };
-
+  const writes: string[] = [];
   const bridge = async (input: LocalStorageBridgeRequest): Promise<LocalStorageBridgeResponse> => {
-    if (input.type === "catalog-select") {
-      const isRollback = input.rollbackFromSelectedBucketId !== undefined;
-      const expected = isRollback ? input.rollbackFromSelectedBucketId : input.expectedSelectedBucketId;
-      if (state.catalog.selectedBucketId !== expected) throw new Error("catalog selection conflict");
-      const selected = state.catalog.buckets.find((bucket) => bucket.bucketId === input.targetBucket.bucketId);
-      if (!selected || JSON.stringify(selected) !== JSON.stringify(input.targetBucket)) throw new Error("catalog target conflict");
-      if (!isRollback) {
-        if (state.lease.bucketId !== input.expectedSelectedBucketId || input.bucketGeneration !== state.lease.bucketGeneration + 1) throw new Error("invalid forward lease generation");
-      } else if (state.lease.bucketId !== input.rollbackFromSelectedBucketId || input.bucketGeneration !== state.lease.bucketGeneration - 1) {
-        throw new Error("invalid rollback lease generation");
-      }
-      state.catalog = { ...state.catalog, selectedBucketId: selected.bucketId };
-      state.lease = { bucketId: selected.bucketId, bucketGeneration: input.bucketGeneration };
-      return { type: "catalog", bucket: selected };
+    if (input.type === "session-read") return { type: "session", session: structuredClone(session) };
+    if (input.type === "session-write") { session = structuredClone(input.session); return { type: "void" }; }
+    if (input.type === "device-record-list") {
+      return { type: "device-records", entries: [...records].map(([remoteStorageId, record]) => ({ remoteStorageId, record: structuredClone(record) })), invalidKeys: [] };
     }
-    if (input.type === "catalog-update") {
-      const current = state.catalog.buckets.find((bucket) => bucket.bucketId === input.expectedBucket.bucketId);
-      if (!current || JSON.stringify(current) !== JSON.stringify(input.expectedBucket)) throw new Error("catalog update conflict");
-      state.catalog = {
-        ...state.catalog,
-        buckets: state.catalog.buckets.map((bucket) => bucket.bucketId === input.nextBucket.bucketId ? structuredClone(input.nextBucket) : bucket),
-      };
-      return { type: "catalog", bucket: structuredClone(input.nextBucket) };
+    if (input.type === "device-record-get") {
+      const record = records.get(input.remoteStorageId);
+      return record ? { type: "device-record", record: structuredClone(record) } : { type: "device-record" };
     }
-    if (input.type === "catalog-commit") throw new Error("catalog-commit is not used by this fixture");
+    if (input.type === "device-record-put") { records.set(input.remoteStorageId, structuredClone(input.record)); return { type: "void" }; }
+    if (input.type === "device-record-delete") { records.delete(input.remoteStorageId); return { type: "void" }; }
     if (input.type !== "get" && input.type !== "list" && input.type !== "put" && input.type !== "delete") {
-      throw new Error(`unsupported bridge request: ${input.type}`);
+      throw new Error(`unsupported bridge request: ${String((input as { type?: unknown }).type)}`);
     }
-
+    if (input.type === "put") writes.push(input.path);
     const provider = createLocalStorageBucketProvider({
       storage,
       locks: catalogBridgeLocks,
       bucketId: input.bucketId,
-      bucketGeneration: input.bucketGeneration
+      bucketGeneration: input.bucketGeneration,
     });
     try {
       if (input.type === "get") return { type: "object", object: await provider.get(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {}) };
@@ -423,45 +393,9 @@ function makeCatalogBridgeFixture(current: StorageBucketCatalogEntryV2, target: 
       provider.dispose();
     }
   };
-  return { state, bridge };
+  return { state: { storage, writes, records, session: () => structuredClone(session) }, bridge };
 }
 
-/**
- * 模拟真实页面的设备目录投影：设备连接 upsert 后，目录条目随连接密文更新。
- * 真实实现中目录由设备连接派生；测试夹具把两者分开保存，因此需要在
- * connection upsert 后同步投影，才能覆盖“连接后再次提交目录”的幂等路径。
- */
-function projectCatalogFromDeviceConnection(
-  fixture: ReturnType<typeof makeInitialSetupWorkerBridge>,
-): (input: LocalStorageBridgeRequest) => Promise<LocalStorageBridgeResponse> {
-  return async (input) => {
-    const response = await fixture.bridge(input);
-    if (input.type === "device-bootstrap-connection-upsert") {
-      const current = fixture.getCatalog().buckets.find((candidate) => candidate.bucketId === input.connection.remoteStorageId);
-      if (current) {
-        fixture.setCatalog({
-          format: "keymaster.storage.catalog",
-          version: 2,
-          selectedBucketId: input.connection.remoteStorageId,
-          buckets: [{
-            ...current,
-            label: input.connection.displayName,
-            backend: input.connection.providerId,
-            keyDerivation: structuredClone(input.connection.keyDerivation),
-            encryptedConfig: structuredClone(input.connection.encryptedConfig),
-            updatedAt: input.connection.updatedAt,
-          }],
-        });
-      }
-    }
-    return response;
-  };
-}
-
-/**
- * 最小内存 S3 对象存储：支持条件写、ETag 与分页 list。
- * 每个 Provider 拿到独立实例，但共享同一个对象 Map 以模拟同一物理远端。
- */
 function createMemoryBucketObjectStore(objects: Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>): BucketObjectStore {
   let disposed = false;
   const assertOpen = (): void => { if (disposed) throw new Error("memory bucket object store is disposed"); };
@@ -512,163 +446,6 @@ function createMemoryBucketObjectStore(objects: Map<string, { bytes: Uint8Array;
     async abortMultipart(): Promise<void> { assertOpen(); },
     dispose(): void { disposed = true; },
   } as BucketObjectStore;
-}
-
-type TestS3ProviderConfig = Parameters<typeof createS3BucketProvider>[0];
-
-/**
- * 内存 S3 Provider 选项工厂：同一份对象 Map 按 accessKeyId 共享，
- * 被撤销的凭据返回拒绝所有操作的对象存储。
- */
-function makeFakeS3ProviderOptionsFactory(
-  objects: Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>,
-  revokedKeys: Set<string>,
-  observedKeys: string[],
-  wrapStore?: (store: BucketObjectStore) => BucketObjectStore,
-): (config: TestS3ProviderConfig) => { store: BucketObjectStore; capabilityState: ReturnType<typeof createBucketObjectStoreCapabilityState> } {
-  return (config) => {
-    const accessKeyId = config.credentials.kind === "access-key" ? config.credentials.accessKeyId : "unknown";
-    observedKeys.push(accessKeyId);
-    const capabilityState = createBucketObjectStoreCapabilityState();
-    setBucketObjectStoreCapabilityMode(capabilityState, "put", "native", "manual");
-    setBucketObjectStoreCapabilityMode(capabilityState, "complete", "native", "manual");
-    if (revokedKeys.has(accessKeyId)) {
-      const reject = (): never => { throw new Error("injected revoked S3 credentials"); };
-      const store = {
-        probe: reject, list: reject, put: reject, head: reject, get: reject, delete: reject,
-        createMultipart: reject, uploadPart: reject, completeMultipart: reject, abortMultipart: reject,
-        dispose: () => undefined,
-      } as unknown as BucketObjectStore;
-      return { store, capabilityState };
-    }
-    const store = createMemoryBucketObjectStore(objects);
-    return { store: wrapStore ? wrapStore(store) : store, capabilityState };
-  };
-}
-
-/** 只拦截 manifest 路径的对象存储包装，用于注入并发替换/响应丢失/读回谎言。 */
-function makeHookedManifestStore(
-  base: BucketObjectStore,
-  hook: {
-    armed: boolean;
-    onPut?: (
-      input: { key: string; bytes: Uint8Array; ifMatch?: string },
-      base: BucketObjectStore,
-      manifestPutIndex: number,
-    ) => Promise<void>;
-    onGet?: (
-      input: { key: string },
-      base: BucketObjectStore,
-    ) => Promise<BucketGetOutput | undefined>;
-  },
-): BucketObjectStore {
-  let manifestPuts = 0;
-  return {
-    ...base,
-    async put(input: Parameters<BucketObjectStore["put"]>[0]) {
-      if (hook.armed && input.key.endsWith(".keymaster/root/v1")) {
-        manifestPuts += 1;
-        if (hook.onPut) await hook.onPut(input, base, manifestPuts);
-      }
-      return base.put(input);
-    },
-    async get(input: Parameters<BucketObjectStore["get"]>[0]) {
-      if (hook.armed && hook.onGet && input.key.endsWith(".keymaster/root/v1")) {
-        const override = await hook.onGet(input, base);
-        if (override !== undefined) return override;
-      }
-      return base.get(input);
-    },
-  };
-}
-
-function makeInitialSetupWorkerBridge(initialCatalog: StorageCatalogV2 = { format: "keymaster.storage.catalog", version: 2, buckets: [] }) {
-  const storage = new CatalogBridgeStorage();
-  let catalog: StorageCatalogV2 = structuredClone(initialCatalog);
-  const recovery = new Map<string, InitialSetupRecoveryRecordV1>();
-  const events: string[] = [];
-  const writeOperations: Array<{ type: "put" | "delete"; path: string }> = [];
-  const conflict = (message: string): Error & { code: string } => Object.assign(new Error(message), { code: "storage_conflict" });
-  const bridge = async (input: LocalStorageBridgeRequest): Promise<LocalStorageBridgeResponse> => {
-    if (input.type === "device-bootstrap-read"
-      || input.type === "device-bootstrap-connection-upsert"
-      || input.type === "device-bootstrap-recovery-upsert"
-      || input.type === "device-bootstrap-recovery-delete"
-      || input.type === "device-bootstrap-rotation-upsert"
-      || input.type === "device-bootstrap-rotation-delete") {
-      const repository = createDeviceBootstrapRepository({ storage, locks: catalogBridgeLocks });
-      let deviceCatalog;
-      if (input.type === "device-bootstrap-connection-upsert") await repository.upsertConnection(input.connection, input.select ?? true);
-      else if (input.type === "device-bootstrap-recovery-upsert") await repository.upsertRecovery(input.recovery);
-      else if (input.type === "device-bootstrap-recovery-delete") deviceCatalog = await repository.removeRecovery(input.operationId);
-      else if (input.type === "device-bootstrap-rotation-upsert") await repository.upsertRotation(input.rotation);
-      else if (input.type === "device-bootstrap-rotation-delete") deviceCatalog = await repository.removeRotation(input.operationId);
-      return { type: "device-bootstrap", catalog: deviceCatalog ?? repository.read() };
-    }
-    if (input.type === "catalog-read") return { type: "catalog-state", catalog: structuredClone(catalog) };
-    if (input.type === "catalog-update") {
-      const current = catalog.buckets.find((bucket) => bucket.bucketId === input.expectedBucket.bucketId);
-      // 与真实页面一致：目录 CAS 只比较设备投影（标签/后端/KDF/密文），不比较 revision。
-      if (!current || !sameStorageCatalogDeviceProjection(current, input.expectedBucket)) throw conflict("catalog update conflict");
-      catalog = {
-        ...catalog,
-        buckets: catalog.buckets.map((bucket) => bucket.bucketId === input.nextBucket.bucketId ? structuredClone(input.nextBucket) : bucket),
-      };
-      // 真实页面 writeStorageCatalog 会把设备连接密文更新为 nextBucket 的密文。
-      const repository = createDeviceBootstrapRepository({ storage, locks: catalogBridgeLocks });
-      const deviceCatalog = repository.read();
-      const existing = deviceCatalog?.connections.find((connection) => connection.remoteStorageId === input.nextBucket.bucketId);
-      if (deviceCatalog && existing) {
-        await repository.upsertConnection({
-          ...existing,
-          displayName: input.nextBucket.label,
-          keyDerivation: structuredClone(input.nextBucket.keyDerivation),
-          encryptedConfig: structuredClone(input.nextBucket.encryptedConfig),
-          updatedAt: input.nextBucket.updatedAt,
-        });
-      }
-      return { type: "catalog", bucket: structuredClone(input.nextBucket) };
-    }
-    if (input.type === "catalog-commit") {
-      if (input.rollback) {
-        events.push("catalog-rollback");
-        if (catalog.buckets.length === 0 && catalog.selectedBucketId === undefined) return { type: "catalog", bucket: input.targetBucket };
-        if (catalog.selectedBucketId !== input.targetBucket.bucketId || catalog.buckets.length !== 1 || JSON.stringify(catalog.buckets[0]) !== JSON.stringify(input.targetBucket)) {
-          throw conflict("catalog rollback conflict");
-        }
-        catalog = { format: "keymaster.storage.catalog", version: 2, buckets: [] };
-        return { type: "catalog", bucket: input.targetBucket };
-      }
-      if (catalog.buckets.length > 0 || catalog.selectedBucketId !== undefined) {
-        if (catalog.selectedBucketId === input.targetBucket.bucketId && catalog.buckets.length === 1 && JSON.stringify(catalog.buckets[0]) === JSON.stringify(input.targetBucket)) return { type: "catalog", bucket: input.targetBucket };
-        throw conflict("catalog commit conflict");
-      }
-      catalog = { format: "keymaster.storage.catalog", version: 2, selectedBucketId: input.targetBucket.bucketId, buckets: [structuredClone(input.targetBucket)] };
-      return { type: "catalog", bucket: input.targetBucket };
-    }
-    if (input.type === "get" || input.type === "list" || input.type === "put" || input.type === "delete") {
-      if (input.type === "put") { events.push("put"); writeOperations.push({ type: "put", path: input.path }); }
-      if (input.type === "delete") { events.push("delete"); writeOperations.push({ type: "delete", path: input.path }); }
-      const provider = createLocalStorageBucketProvider({ storage, locks: catalogBridgeLocks, bucketId: input.bucketId, bucketGeneration: input.bucketGeneration });
-      try {
-        if (input.type === "get") return { type: "object", object: await provider.get(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {}) };
-        if (input.type === "list") return { type: "list", ...(await provider.list(input)) } as LocalStorageBridgeResponse;
-        if (input.type === "put") return { type: "write", ...(await provider.put(input.path, input.bytes, input.condition ?? {})) };
-        await provider.delete(input.path, input.ifMatch ? { ifMatch: input.ifMatch } : {});
-        return { type: "void" };
-      } finally { provider.dispose(); }
-    }
-    throw new Error(`unsupported initial setup bridge request: ${input.type}`);
-  };
-  return {
-    storage,
-    recovery,
-    events,
-    writeOperations,
-    getCatalog: () => structuredClone(catalog),
-    setCatalog: (next: StorageCatalogV2) => { catalog = structuredClone(next); },
-    bridge,
-  };
 }
 
 describe("Coordinator ChannelProtocol 私信编码边界", () => {
@@ -855,8 +632,8 @@ describe("Session Coordinator worker", () => {
 
       // 清除初始化 override 后不传 peerId；默认 owner 必须是 fresh lease。
       __testSetLocalStorageBridgeOverride(undefined);
-      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" })).resolves.toMatchObject({
-        type: "catalog-state",
+      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "device-record-list" })).resolves.toMatchObject({
+        type: "device-records",
       });
       expect(harness.bridgeCalls).toHaveLength(1);
       expect(harness.bridgeCalls[0]?.request).toMatchObject(freshBinding);
@@ -888,8 +665,8 @@ describe("Session Coordinator worker", () => {
       await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
 
       __testSetLocalStorageBridgeOverride(undefined);
-      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" })).resolves.toMatchObject({
-        type: "catalog-state",
+      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "device-record-list" })).resolves.toMatchObject({
+        type: "device-records",
       });
       expect(harness.bridgeCalls).toHaveLength(1);
       expect(harness.bridgeCalls[0]?.request).toMatchObject(freshBinding);
@@ -926,8 +703,8 @@ describe("Session Coordinator worker", () => {
       await __testAwaitCoordinatorPeerDrain(second.peer.peerId);
 
       __testSetLocalStorageBridgeOverride(undefined);
-      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" })).resolves.toMatchObject({
-        type: "catalog-state",
+      await expect(__testRequestCoordinatorLocalStorageBridge({ type: "device-record-list" })).resolves.toMatchObject({
+        type: "device-records",
       });
       expect(first.bridgeCalls).toHaveLength(1);
       expect(second.bridgeCalls).toHaveLength(0);
@@ -956,7 +733,7 @@ describe("Session Coordinator worker", () => {
       );
       __testSetLocalStorageBridgeOverride(undefined);
 
-      const oldResponse = __testRequestCoordinatorLocalStorageBridge({ type: "catalog-read" }, harness.peer.peerId);
+      const oldResponse = __testRequestCoordinatorLocalStorageBridge({ type: "device-record-list" }, harness.peer.peerId);
       expect(harness.bridgeCalls).toHaveLength(1);
       const bridgeSignal = harness.bridgeCalls[0]!.signal;
       let closeSettled = false;
@@ -970,13 +747,13 @@ describe("Session Coordinator worker", () => {
       expect(closeSettled).toBe(false);
       expect(bridgeSignal.aborted).toBe(true);
 
-      releaseBridge({ type: "catalog-state", catalog: structuredClone(EMPTY_STORAGE_CATALOG) });
+      releaseBridge({ type: "device-records", entries: [], invalidKeys: [] });
       await expect(oldResponse).rejects.toMatchObject({ code: "service_reference_stale" });
       await closing;
       expect(closeSettled).toBe(true);
     } finally {
       // releaseBridge 在断言失败时也要释放 fake capability，避免 reset 遗留 drain。
-      releaseBridge?.({ type: "catalog-state", catalog: structuredClone(EMPTY_STORAGE_CATALOG) });
+      releaseBridge?.({ type: "device-records", entries: [], invalidKeys: [] });
       await __testAwaitCoordinatorPeerDrain(harness.peer.peerId);
       __testSetLocalStorageBridgeOverride(undefined);
       __testResetState();
@@ -1006,7 +783,7 @@ describe("Session Coordinator worker", () => {
 
     try {
       __testInstallCoordinatorBridgePeer(peer, binding);
-      const request = __testRequestCoordinatorLocalStorageBridge({ type: "catalog-read", signal: source.signal } satisfies LocalStorageBridgeRequest, peerId);
+      const request = __testRequestCoordinatorLocalStorageBridge({ type: "device-record-list", signal: source.signal } satisfies LocalStorageBridgeRequest, peerId);
       expect(request).toBeInstanceOf(Promise);
       await expect(request).rejects.toBe(syncError);
       expect(removeAbortListener).toHaveBeenCalledWith("abort", expect.any(Function));
@@ -1016,22 +793,19 @@ describe("Session Coordinator worker", () => {
     }
   });
 
-  it("绑定已发布后初始化失败时回滚目录、Root 和 Worker 会话", async () => {
+  it("切换桶失败时保持原运行态与 session 不变", async () => {
     __testResetState();
-    const password = "catalog-switch-password";
-    const current = await makeEncryptedLocalCatalogEntry("catalog-current", "当前桶", password);
-    const target = await makeEncryptedLocalCatalogEntry("catalog-target", "目标桶", password);
-    const fixture = makeCatalogBridgeFixture(current, target);
+    const current = makeRuntimeLocalBucket("catalog-current", "当前桶");
+    const target = makeRuntimeLocalBucket("catalog-target", "目标桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
     __testSetLocalStorageBridgeOverride(fixture.bridge);
 
     try {
       await __testInstallCatalogLocalBinding(current);
       __testSetVaultStatus("uninitialized");
-      __testFailAfterCatalogBindingPublish();
 
-      await expect(__testSwitchCatalogBucket(target, password)).rejects.toThrow("injected catalog binding initialization failure");
-      expect(fixture.state.catalog.selectedBucketId).toBe(current.bucketId);
-      expect(fixture.state.lease).toEqual({ bucketId: current.bucketId, bucketGeneration: 1 });
+      await expect(__testSwitchCatalogBucket(target, "catalog-switch-password")).rejects.toThrow();
+      expect(fixture.state.session().activeBucketId).toBe(current.bucketId);
       expect(__testGetSnapshot()).toMatchObject({
         storageBucketId: current.bucketId,
         storageBucketGeneration: 1,
@@ -1095,7 +869,7 @@ describe("Session Coordinator worker", () => {
     await __testLock();
     await __testUnlock("pw", second.publicKeyHex);
     await __testSetActive(first.publicKeyHex!);
-    await expect(__testOwnerStoragePut("after-lock-switch", { owner: "first" })).resolves.toBeUndefined();
+    await expect(__testOwnerStoragePut("after-lock-switch.bin", new Uint8Array([1, 2, 3]))).resolves.toBeUndefined();
   });
 
   it("普通 lock→unlock 不写 Coordinator 固定对象，真实变化只写所属对象", async () => {
@@ -1461,10 +1235,9 @@ describe("Session Coordinator worker", () => {
       pluginIntent: { desiredEnabled: { p2pkh: false } },
     });
 
-    const password = "root-reload-password";
-    const current = await makeEncryptedLocalCatalogEntry("root-reload-current", "重装桶", password);
-    const target = await makeEncryptedLocalCatalogEntry("root-reload-unused", "未使用桶", password);
-    const bridge = makeCatalogBridgeFixture(current, target);
+    const current = makeRuntimeLocalBucket("root-reload-current", "重装桶");
+    const target = makeRuntimeLocalBucket("root-reload-unused", "未使用桶");
+    const bridge = makeRuntimeBridgeFixture(current, target);
     __testSetLocalStorageBridgeOverride(bridge.bridge);
     try {
       await __testInstallCatalogLocalBinding(current);
@@ -1934,6 +1707,7 @@ describe("Session Coordinator worker", () => {
   it("merges provider config updates without clearing the selected provider", async () => {
     __testResetState();
     await __testRestartWorker();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
     const before = __testGetSnapshot();
     await __testP2pkhProviderConfigUpdate("junglebus", {
       enabled: true,
@@ -1954,10 +1728,11 @@ describe("Session Coordinator worker", () => {
   it("keeps provider selection unchanged when its metadata persistence fails", async () => {
     __testResetState();
     await __testRestartWorker();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
     const before = __testGetSnapshot();
     const beforeConfig = await __testP2pkhProviderConfigGet("woc");
-    __testFailNextCoordinatorSnapshotPersist();
-    await expect(__testP2pkhProviderConfigUpdate("woc", { endpoint: "https://should-not-apply.example/v1" })).rejects.toThrow(/persist/i);
+    __testFailNextP2pkhSettingWrite();
+    await expect(__testP2pkhProviderConfigUpdate("woc", { endpoint: "https://should-not-apply.example/v1" })).rejects.toThrow(/setting/iu);
     const after = __testGetSnapshot();
     expect(after.p2pkhProviders?.selection).toEqual(before.p2pkhProviders?.selection);
     expect(await __testP2pkhProviderConfigGet("woc")).toEqual(beforeConfig);
@@ -1966,10 +1741,11 @@ describe("Session Coordinator worker", () => {
   it("keeps provider selection unchanged when a selection persistence fails", async () => {
     __testResetState();
     await __testRestartWorker();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
     const before = __testGetSnapshot();
     const generation = before.p2pkhProviders?.selection.generation ?? 0;
-    __testFailNextCoordinatorSnapshotPersist();
-    await expect(__testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" })).rejects.toThrow(/persist/i);
+    __testFailNextP2pkhSettingWrite();
+    await expect(__testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" })).rejects.toThrow(/setting/iu);
     expect(__testGetSnapshot().p2pkhProviders?.selection).toEqual(before.p2pkhProviders?.selection);
     expect(__testGetSnapshot().p2pkhProviders?.selection.generation).toBe(generation);
   });
@@ -2165,6 +1941,7 @@ describe("Session Coordinator worker", () => {
   it("keeps an explicitly selected provider id while the optional provider is disabled", async () => {
     __testResetState();
     await __testRestartWorker();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
     await __testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" });
     await __testP2pkhProviderConfigUpdate("junglebus", { enabled: false });
     const disabled = __testGetSnapshot().p2pkhProviders;
@@ -2192,2542 +1969,90 @@ describe("Session Coordinator worker", () => {
   });
 });
 
-describe("Session Coordinator initial setup transaction", () => {
-  const makePlan = (transactionId: string): InitialSetupPlan => ({
-    transactionId,
-    bucketLabel: "首个本地桶",
-    backend: "local",
-    connection: { kind: "local" },
-    bucketPassword: "initial-setup-password",
-    firstKey: { kind: "generate", label: "主 Key", capabilities: ["p2pkh"] },
-  });
-
-  const makeSucceededRecord = (entry: StorageBucketCatalogEntryV2, transactionId: string): InitialSetupRecoveryRecordV1 => ({
-    format: "keymaster.storage.initial-setup-recovery",
-    version: 1,
-    transactionId,
-    bucketId: entry.bucketId,
-    catalogEntryFingerprint: __testInitialSetupCatalogEntryFingerprint(entry),
-    configRevision: entry.configRevision,
-    snapshotRevision: entry.snapshotRevision,
-    backend: "local",
-    connectionFingerprint: "b".repeat(64),
-    phase: "complete",
-    catalog: "committed",
-    runtimeInstalled: true,
-    cleanup: "confirmed",
-    status: "succeeded",
-    success: {
-      bucketLabel: entry.label,
-      publicKeyHex: bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true)),
-      label: "恢复的主 Key",
-      address: "recovery-address",
-      format: "hex",
-      capabilities: ["p2pkh"],
-      createdAt: "2026-09-08T00:00:00.000Z",
-    },
-    updatedAt: 1,
-  });
-
-  beforeEach(async () => {
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-  });
-
+describe("S3 桶本机 ID", () => {
   afterEach(async () => {
     await __testReleaseCatalogLocalBinding();
+    await __testDeleteVault();
     __testResetState();
   });
 
-  it("在真实 Coordinator 路径中提交 Local 桶、Hold、Vault 和首 Key", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const plan = makePlan("initial-setup-commit-001");
-
-    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
-    expect(response.ack.status).toBe("ok");
-    const result = response.operationResult as InitialSetupResult;
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error(result.error.summary);
-    expect(fixture.getCatalog()).toMatchObject({
-      selectedBucketId: result.bucket.bucketId,
-      buckets: [result.bucket],
-    });
-    expect(result.bucket.snapshotRevision).toBeGreaterThan(0);
-    expect(__testGetSnapshot()).toMatchObject({
-      storageBucketId: result.bucket.bucketId,
-      vaultStatus: "unlocked",
-      activePublicKeyHex: result.firstKey.publicKeyHex,
-    });
-    expect(fixture.storage.length).toBeGreaterThan(0);
-    expect(plan.bucketPassword).toBe("");
-  }, 20_000);
-
-  it("真实 Coordinator 连接入口调用只读 lifecycle 并在认证后安装运行态", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const createResponse = await __testDispatchStorageControl({
-      type: "initial-setup",
-      plan: makePlan("initial-setup-connect-source-001"),
-    });
-    const created = createResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const remoteWriteCount = fixture.writeOperations.length;
-    const plan = {
-      operationId: "connect-existing-remote-001",
-      remoteStorageId: created.bucket.bucketId,
-      displayName: "重新连接的远端",
-      backend: "local" as const,
-      connection: { kind: "local" as const },
-      bucketPassword: "initial-setup-password",
-    };
-
-    const connectResponse = await __testDispatchStorageControl({ type: "connect-existing-remote", plan });
-    expect(connectResponse.ack.status).toBe("ok");
-    expect(connectResponse.operationResult).toMatchObject({
-      ok: true,
-      bucket: { bucketId: created.bucket.bucketId, label: "重新连接的远端" },
-      activeKey: { publicKeyHex: created.firstKey.publicKeyHex },
-    });
-    expect(__testGetSnapshot()).toMatchObject({
-      storageBucketId: created.bucket.bucketId,
-      vaultStatus: "locked",
-    });
-    expect(__testGetSnapshot().activePublicKeyHex).toBeUndefined();
-    expect(fixture.writeOperations.slice(remoteWriteCount)).toEqual([]);
-    expect(plan.bucketPassword).toBe("");
-  }, 30_000);
-
-  it("已有远端缺少 schema namespace 时连接失败且对象与 ETag 完全不变", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const createdResponse = await __testDispatchStorageControl({
-      type: "initial-setup",
-      plan: makePlan("initial-setup-connect-schema-gap-001"),
-    });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    const provider = createLocalStorageBucketProvider({
-      storage: fixture.storage,
-      locks: catalogBridgeLocks,
-      bucketId: created.bucket.bucketId,
-      bucketGeneration: 1,
-    });
-    const schema = await provider.get(".keymaster/schema");
-    if (!schema?.etag) throw new Error("created schema is missing an ETag");
-    const parsed = JSON.parse(new TextDecoder().decode(schema.bytes)) as { namespaces: Record<string, number> };
-    const removed = Object.keys(parsed.namespaces)[0];
-    if (!removed) throw new Error("created schema has no namespace");
-    delete parsed.namespaces[removed];
-    await provider.put(".keymaster/schema", new TextEncoder().encode(JSON.stringify(parsed)), { ifMatch: schema.etag });
-    provider.dispose();
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const before = fixture.storage.snapshot();
-    const response = await __testDispatchStorageControl({
-      type: "connect-existing-remote",
-      plan: {
-        operationId: "connect-existing-schema-gap-001",
-        remoteStorageId: created.bucket.bucketId,
-        displayName: "缺少 schema 的远端",
-        backend: "local",
-        connection: { kind: "local" },
-        bucketPassword: "initial-setup-password",
-      },
-    });
-    expect(response.operationResult).toMatchObject({ ok: false, error: { code: "storage_remote_corrupt" } });
-    expect(fixture.storage.snapshot()).toEqual(before);
-  }, 30_000);
-
-  it("initial-setup adopted Local provider follows the current owner after tab handoff", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    const first = makeCoordinatorTestPeer("test", (input) => fixture.bridge(input as LocalStorageBridgeRequest));
-    __testInstallCoordinatorBridgePeer(first.peer, {
-      peerGeneration: 1,
-      sessionEpoch: __testGetSnapshot().sessionEpoch,
-      leaseId: "initial-setup-first",
-    });
-
-    const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-handoff-001") });
-    expect(response.operationResult).toMatchObject({ ok: true });
-    const firstCallCount = first.bridgeCalls.length;
-
-    const second = makeCoordinatorTestPeer("test-second", (input) => fixture.bridge(input as LocalStorageBridgeRequest));
-    __testInstallCoordinatorBridgePeer(second.peer, {
-      peerGeneration: 1,
-      sessionEpoch: __testGetSnapshot().sessionEpoch,
-      leaseId: "initial-setup-second",
-    });
-
-    const exportResponse = await __testDispatchStorageControl({ type: "cold-export" });
-    expect(exportResponse.ack.status).toBe("ok");
-    expect(first.bridgeCalls).toHaveLength(firstCallCount);
-    expect(second.bridgeCalls.length).toBeGreaterThan(0);
-  }, 20_000);
-
-  it("Root 发布后运行态安装失败会保留远端与目录并要求同事务重试", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const plan = makePlan("initial-setup-runtime-failure-001");
-    __testFailNextCoordinatorSnapshotPersist();
-
-    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
-    expect(response.ack.status).toBe("ok");
-    expect(response.operationResult).toMatchObject({ ok: false, error: { phase: "runtime", rollback: "not-started" } });
-    expect(fixture.getCatalog()).toMatchObject({ format: "keymaster.storage.catalog", version: 2, buckets: [expect.any(Object)] });
-    expect(fixture.storage.length).toBeGreaterThan(0);
-    expect(plan.bucketPassword).toBe("");
-  }, 20_000);
-
-  it("root 已发布但设备提交丢失后跨 Worker 重启按同一事务恢复且不生成第二把 Key", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    let rejectDeviceConnection = true;
-    __testSetLocalStorageBridgeOverride(async (input) => {
-      if (rejectDeviceConnection && input.type === "device-bootstrap-connection-upsert") {
-        throw new Error("injected device connection loss");
-      }
-      return fixture.bridge(input);
-    });
-    const transactionId = "initial-setup-published-restart-001";
-    __testFailNextCoordinatorSnapshotPersist();
-    const first = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    expect(first.operationResult).toMatchObject({ ok: false, error: { rollback: "not-started" } });
-    const bootstrapBeforeRestart = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read();
-    expect(bootstrapBeforeRestart?.connections).toHaveLength(0);
-    expect(bootstrapBeforeRestart?.recoveries).toEqual([
-      expect.objectContaining({ operationId: transactionId, remoteStorageId: __testInitialSetupBucketId(transactionId), status: "attention-required" }),
-    ]);
-    const writesAfterPublication = fixture.writeOperations.length;
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    rejectDeviceConnection = false;
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const retry = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    expect(retry.operationResult).toMatchObject({
-      ok: true,
-      bucket: { bucketId: __testInitialSetupBucketId(transactionId) },
-      firstKey: { publicKeyHex: expect.stringMatching(/^[0-9a-f]{66}$/u) },
-    });
-    expect(fixture.writeOperations).toHaveLength(writesAfterPublication);
-    const bootstrapAfterRecovery = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read();
-    expect(bootstrapAfterRecovery?.connections).toHaveLength(1);
-    expect(bootstrapAfterRecovery?.recoveries).toEqual([]);
-  }, 30_000);
-
-  it("成功响应丢失后跨 Worker 重启从设备连接恢复同一首 Key且不写远端", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const transactionId = "initial-setup-success-response-loss-001";
-    const first = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    const firstResult = first.operationResult as InitialSetupResult;
-    expect(firstResult.ok).toBe(true);
-    if (!firstResult.ok) throw new Error(firstResult.error.summary);
-    const writesAfterSuccess = fixture.writeOperations.length;
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(async (input) => {
-      const response = await fixture.bridge(input);
-      if (input.type === "device-bootstrap-connection-upsert") {
-        const current = fixture.getCatalog().buckets.find((candidate) => candidate.bucketId === input.connection.remoteStorageId);
-        if (!current) throw new Error("response-loss fixture lost its committed catalog projection");
-        fixture.setCatalog({
-          format: "keymaster.storage.catalog",
-          version: 2,
-          selectedBucketId: input.connection.remoteStorageId,
-          buckets: [{
-            ...current,
-            label: input.connection.displayName,
-            backend: input.connection.providerId,
-            keyDerivation: structuredClone(input.connection.keyDerivation),
-            encryptedConfig: structuredClone(input.connection.encryptedConfig),
-            updatedAt: input.connection.updatedAt,
-          }],
-        });
-      }
-      return response;
-    });
-    const retry = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    const retryResult = retry.operationResult as InitialSetupResult;
-    if (!retryResult.ok) throw new Error(JSON.stringify(retryResult.error));
-    expect(retry.operationResult).toMatchObject({
-      ok: true,
-      bucket: { bucketId: firstResult.bucket.bucketId },
-      firstKey: { publicKeyHex: firstResult.firstKey.publicKeyHex },
-    });
-    expect(fixture.writeOperations).toHaveLength(writesAfterSuccess);
-  }, 30_000);
-
-  it("冷启动只用设备引导做提示：认证前零远端写入并按 Hold 权威 revision 解锁", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const createdResponse = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-cold-start-hint-001") });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-    const writesAfterCreate = fixture.writeOperations.length;
-
-    // Worker 真重启：丢弃全部内存运行态，只保留页面设备引导存储。
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const hint = readStorageBootstrap(fixture.storage);
-    expect(hint).toMatchObject({
-      selectedBackend: "local",
-      selectedBucket: { bucketId: created.bucket.bucketId, configRevision: 0, snapshotRevision: 0 },
-    });
-
-    // 无密码冷启动只能做 validate-only 只读装配，认证前不得有任何远端写入。
-    await __testColdStartFromDeviceHint(hint);
-    expect(fixture.writeOperations).toHaveLength(writesAfterCreate);
-
-    // 解锁必须先重新认证远端 Hold，再按认证得到的 revision 安装可写运行态。
-    const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: "initial-setup-password" });
-    expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    expect(__testGetSnapshot()).toMatchObject({
-      storageBucketId: created.bucket.bucketId,
-      vaultStatus: "unlocked",
-      activePublicKeyHex: created.firstKey.publicKeyHex,
-    });
-
-    // 冷启动后的受保护写入也要成功：目录 revision 必须用设备投影做 CAS。
-    const imported = await __testImportPrivateKey("initial-setup-password", {
-      label: "冷启动后的第二把",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    expect((await __testListVaultKeys()).map((key) => key.publicKeyHex)).toContain(imported.publicKeyHex);
-  }, 30_000);
-
-  it("连接已有远端后运行态绑定 Hold 权威记录，可再次解锁并受保护读取", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const createdResponse = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-reconnect-unlock-001") });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const connect = await __testDispatchStorageControl({
-      type: "connect-existing-remote",
-      plan: {
-        operationId: "connect-existing-unlock-001",
-        remoteStorageId: created.bucket.bucketId,
-        displayName: "再次连接的远端",
-        backend: "local",
-        connection: { kind: "local" },
-        bucketPassword: "initial-setup-password",
-      },
-    });
-    const connected = connect.operationResult as ExistingRemoteStorageConnectResult;
-    expect(connected).toMatchObject({ ok: true, bucket: { bucketId: created.bucket.bucketId } });
-    if (!connected.ok) throw new Error("connect-existing-remote failed");
-
-    // 设备目录只保存本机重新加密的连接密文（随机 IV），运行态必须绑定
-    // Hold 提交的 storage record，否则下一次 unlock 的密文比较会误报冲突。
-    const deviceConnection = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    expect(deviceConnection?.encryptedConfig).not.toEqual(connected.bucket.encryptedConfig);
-
-    const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: "initial-setup-password" });
-    expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    expect(__testGetSnapshot()).toMatchObject({
-      storageBucketId: created.bucket.bucketId,
-      vaultStatus: "unlocked",
-      activePublicKeyHex: created.firstKey.publicKeyHex,
-    });
-    const keys = await __testListVaultKeys();
-    expect(keys.map((key) => key.publicKeyHex)).toContain(created.firstKey.publicKeyHex);
-
-    // 受保护写入必须继续可用：发布 Hold 后目录修订也要成功。
-    const imported = await __testImportPrivateKey("initial-setup-password", {
-      label: "连接后的第二把",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    expect((await __testListVaultKeys()).map((key) => key.publicKeyHex)).toContain(imported.publicKeyHex);
-    // 目录修订只推进 revision，不得把 Hold 权威密文写回设备引导。
-    const deviceAfterWrite = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    expect(deviceAfterWrite?.encryptedConfig).toEqual(deviceConnection?.encryptedConfig);
-
-    // 改名同样属于目录 CAS：标签更新但设备连接密文保持不变。
-    const renamed = await __testDispatchStorageControl({ type: "rename-bucket", label: "连接后改名" });
-    expect(renamed.operationResult).toMatchObject({ bucketId: created.bucket.bucketId, label: "连接后改名" });
-    const deviceAfterRename = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    expect(deviceAfterRename).toMatchObject({ displayName: "连接后改名" });
-    expect(deviceAfterRename?.encryptedConfig).toEqual(deviceConnection?.encryptedConfig);
-  }, 30_000);
-
-  it("Root 发布后同进程按同一事务重试幂等成功且不增加远端写入与 Key 数量", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const transactionId = "initial-setup-same-process-retry-001";
-    __testFailNextCoordinatorSnapshotPersist();
-    const first = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    expect(first.operationResult).toMatchObject({ ok: false, error: { phase: "runtime", rollback: "not-started" } });
-    expect(__testGetSnapshot().vaultStatus).not.toBe("unlocked");
-    const writesAfterFirst = fixture.writeOperations.length;
-
-    // 页面目录由设备连接派生：设备连接 upsert 后目录投影随之更新。
-    __testSetLocalStorageBridgeOverride(projectCatalogFromDeviceConnection(fixture));
-
-    const retry = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    const retried = retry.operationResult as InitialSetupResult;
-    expect(retried.ok).toBe(true);
-    if (!retried.ok) throw new Error(JSON.stringify(retried.error));
-    expect(retried.bucket.bucketId).toBe(__testInitialSetupBucketId(transactionId));
-    // 同事务重试只重建本机运行态，不得重复写远端或生成第二把 Key。
-    expect(fixture.writeOperations).toHaveLength(writesAfterFirst);
-    const keys = await __testListVaultKeys();
-    expect(keys).toHaveLength(1);
-    expect(keys[0]!.publicKeyHex).toBe(retried.firstKey.publicKeyHex);
-  }, 30_000);
-
-  it("设备恢复指针写入失败时同进程重试仍走只读重建而不是重放失败", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    const transactionId = "initial-setup-same-process-no-pointer-001";
-    const failRecoveryPointer = async (input: LocalStorageBridgeRequest): Promise<LocalStorageBridgeResponse> => {
-      if (input.type === "device-bootstrap-recovery-upsert") throw new Error("injected recovery pointer loss");
-      return fixture.bridge(input);
-    };
-    __testSetLocalStorageBridgeOverride(failRecoveryPointer);
-    __testFailNextCoordinatorSnapshotPersist();
-    const first = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    expect(first.operationResult).toMatchObject({ ok: false, error: { phase: "runtime", rollback: "not-started" } });
-    const bootstrapBeforeRetry = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read();
-    expect(bootstrapBeforeRetry?.recoveries ?? []).toHaveLength(0);
-    const writesAfterFirst = fixture.writeOperations.length;
-
-    __testSetLocalStorageBridgeOverride(async (input) => {
-      if (input.type === "device-bootstrap-recovery-upsert") throw new Error("injected recovery pointer loss");
-      return projectCatalogFromDeviceConnection(fixture)(input);
-    });
-
-    // 没有设备恢复指针时，仍必须识别同进程残留绑定并走只读重建。
-    const retry = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    const retried = retry.operationResult as InitialSetupResult;
-    expect(retried.ok).toBe(true);
-    if (!retried.ok) throw new Error(JSON.stringify(retried.error));
-    expect(fixture.writeOperations).toHaveLength(writesAfterFirst);
-    const keys = await __testListVaultKeys();
-    expect(keys).toHaveLength(1);
-    expect(keys[0]!.publicKeyHex).toBe(retried.firstKey.publicKeyHex);
-  }, 30_000);
-
-  it("凭据更新后重启冷启动仍能用新 Hold 记录解锁并写入", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const createdResponse = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-reconfigure-restart-001") });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    // 配置更新会重新加密连接并同时更新 Hold 与目录，设备连接随之收敛。
-    const updated = await __testDispatchStorageControl({
-      type: "change-bucket-config",
-      config: { kind: "local" },
-      label: "凭据更新后",
-      password: "initial-setup-password",
-    });
-    expect(updated.operationResult).toMatchObject({ bucketId: created.bucket.bucketId, label: "凭据更新后" });
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const hint = readStorageBootstrap(fixture.storage);
-    expect(hint?.selectedBucket).toMatchObject({ bucketId: created.bucket.bucketId, configRevision: 0, snapshotRevision: 0 });
-    await __testColdStartFromDeviceHint(hint);
-    const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: "initial-setup-password" });
-    expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    expect(__testGetSnapshot()).toMatchObject({
-      storageBucketId: created.bucket.bucketId,
-      vaultStatus: "unlocked",
-      activePublicKeyHex: created.firstKey.publicKeyHex,
-    });
-    const imported = await __testImportPrivateKey("initial-setup-password", {
-      label: "凭据更新后的第二把",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    expect((await __testListVaultKeys()).map((key) => key.publicKeyHex)).toContain(imported.publicKeyHex);
-  }, 30_000);
-
-  it("设备引导无密码时保持 authentication，不安装 Root 也不恢复 Journal", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const password = "initial-setup-password";
-    const transactionId = "initial-setup-nopassword-journal-001";
-    const createdResponse = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    // 留下一个已提交 Hold、等待 Owner/Journal 清理的删除事务。
-    const second = await __testImportPrivateKey(password, {
-      label: "待恢复删除",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    await __testLock();
-    __testFailKeyLifecycleJournalAfterHold();
-    await expect(__testDeleteKeyMaterial(second.publicKeyHex, password)).rejects.toThrow("injected key lifecycle Journal persist failure");
-    expect(await __testListKeyLifecycleJournals()).toEqual([
-      expect.objectContaining({ publicKeyHex: second.publicKeyHex, operation: "delete" }),
-    ]);
-
-    // 真重启：只保留页面设备引导存储。
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const remoteBefore = fixture.storage.snapshot();
-    const writesBefore = fixture.writeOperations.length;
-
-    const hint = readStorageBootstrap(fixture.storage);
-    expect(hint?.selectedBucket).toMatchObject({ bucketId: created.bucket.bucketId, configRevision: 0, snapshotRevision: 0 });
-    await __testColdStartFromDeviceHint(hint);
-
-    // 无密码：停在 authentication，没有 Root、没有 Vault/Journal 恢复、零远端写入。
-    const status = await __testDispatchStorageControl({ type: "status" });
-    expect(status.operationResult).toBe("authentication");
-    expect(__testGetSnapshot().storageBucketId).toBeUndefined();
-    expect(__testGetVaultStatus()).not.toBe("locked");
-    expect(fixture.storage.snapshot()).toEqual(remoteBefore);
-    expect(fixture.writeOperations).toHaveLength(writesBefore);
-
-    // 认证成功后 Journal 才恢复，删除事务收敛完成。
-    const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password });
-    expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
-    expect((await __testListVaultKeys()).map((key) => key.publicKeyHex)).not.toContain(second.publicKeyHex);
-  }, 30_000);
-
-  it("健康运行态收到同 ID connect 请求返回冲突且保持可用", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const createdResponse = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-healthy-connect-conflict-001") });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-    const keysBefore = (await __testListVaultKeys()).map((key) => key.publicKeyHex);
-
-    const connectPlan = (bucketPassword: string, operationId: string) => ({
-      type: "connect-existing-remote" as const,
-      plan: {
-        operationId,
-        remoteStorageId: created.bucket.bucketId,
-        displayName: "同 ID 连接请求",
-        backend: "local" as const,
-        connection: { kind: "local" as const },
-        bucketPassword,
-      },
-    });
-
-    // 错误密码和正确密码都不得拆除健康运行态。
-    const wrongPassword = await __testDispatchStorageControl(connectPlan("wrong-password", "connect-existing-healthy-wrong-001"));
-    expect(wrongPassword.operationResult).toMatchObject({ ok: false, error: { code: "storage_conflict" } });
-    const correctPassword = await __testDispatchStorageControl(connectPlan("initial-setup-password", "connect-existing-healthy-correct-001"));
-    expect(correctPassword.operationResult).toMatchObject({ ok: false, error: { code: "storage_conflict" } });
-
-    expect(__testGetSnapshot()).toMatchObject({
-      storageBucketId: created.bucket.bucketId,
-      vaultStatus: "unlocked",
-      activePublicKeyHex: created.firstKey.publicKeyHex,
-    });
-    expect((await __testListVaultKeys()).map((key) => key.publicKeyHex)).toEqual(keysBefore);
-
-    // 冲突请求没有把运行态切到 locked：受保护写入仍可用。
-    const imported = await __testImportPrivateKey("initial-setup-password", {
-      label: "冲突后仍可写入",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    expect((await __testListVaultKeys()).map((key) => key.publicKeyHex)).toContain(imported.publicKeyHex);
-  }, 30_000);
-
-  it("S3 冷启动认证后继续使用设备新凭据，不回退 Hold 旧凭据", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const password = "s3-cold-start-password";
-    const newConnection = () => ({
+  function s3Connection(overrides: { endpoint?: string; prefix?: string } = {}) {
+    return {
       kind: "s3" as const,
-      endpoint: "https://new.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "new-key",
-      secretAccessKey: "new-secret",
-    });
-    const oldConnection = () => ({ ...newConnection(), endpoint: "https://old.example.test", accessKeyId: "old-key", secretAccessKey: "old-secret" });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const revokedKeys = new Set<string>();
-    const observedKeys: string[] = [];
-    __testSetS3BucketProviderOptionsFactory(makeFakeS3ProviderOptionsFactory(sharedObjects, revokedKeys, observedKeys));
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-cold-start-001",
-          bucketLabel: "S3 冷启动桶",
-          backend: "s3",
-          connection: newConnection(),
-          bucketPassword: password,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      // 远端换成旧凭据；另一台设备重启并撤销旧凭据。
-      const reconfigured = await __testDispatchStorageControl({ type: "change-bucket-config", config: oldConnection(), password });
-      expect(reconfigured.operationResult).toMatchObject({ bucketId: created.bucket.bucketId });
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      revokedKeys.add("old-key");
-
-      // 用新凭据重新连接：设备目录写回新凭据，运行态绑定 Hold 旧记录。
-      fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-      const connected = await __testDispatchStorageControl({
-        type: "connect-existing-remote",
-        plan: {
-          operationId: "s3-connect-new-creds-001",
-          remoteStorageId: created.bucket.bucketId,
-          displayName: "S3 新凭据",
-          backend: "s3",
-          connection: newConnection(),
-          bucketPassword: password,
-        },
-      });
-      expect(connected.operationResult).toMatchObject({ ok: true });
-
-      // 真重启冷启动：认证必须继续使用设备新凭据。
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      const callsBeforeColdStart = observedKeys.length;
-      const hint = readStorageBootstrap(fixture.storage);
-      await __testColdStartFromDeviceHint(hint);
-      const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password });
-      expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-      expect(observedKeys.slice(callsBeforeColdStart)).toEqual(["new-key"]);
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("S3 冷启动安装失败后重试仍只使用设备新凭据", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const password = "s3-cold-start-retry-password";
-    const newConnection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://new.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "new-key",
-      secretAccessKey: "new-secret",
-    });
-    const oldConnection = () => ({ ...newConnection(), endpoint: "https://old.example.test", accessKeyId: "old-key", secretAccessKey: "old-secret" });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const revokedKeys = new Set<string>();
-    const observedKeys: string[] = [];
-    __testSetS3BucketProviderOptionsFactory(makeFakeS3ProviderOptionsFactory(sharedObjects, revokedKeys, observedKeys));
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-cold-start-retry-001",
-          bucketLabel: "S3 重试桶",
-          backend: "s3",
-          connection: newConnection(),
-          bucketPassword: password,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      const reconfigured = await __testDispatchStorageControl({ type: "change-bucket-config", config: oldConnection(), password });
-      expect(reconfigured.operationResult).toMatchObject({ bucketId: created.bucket.bucketId });
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      revokedKeys.add("old-key");
-
-      fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-      const connected = await __testDispatchStorageControl({
-        type: "connect-existing-remote",
-        plan: {
-          operationId: "s3-connect-retry-setup-001",
-          remoteStorageId: created.bucket.bucketId,
-          displayName: "S3 重试前连接",
-          backend: "s3",
-          connection: newConnection(),
-          bucketPassword: password,
-        },
-      });
-      expect(connected.operationResult).toMatchObject({ ok: true });
-
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-      // 第一次解锁在认证成功后、Root 安装前注入失败；状态必须仍是设备提示。
-      const callsBeforeFirstUnlock = observedKeys.length;
-      const hint = readStorageBootstrap(fixture.storage);
-      await __testColdStartFromDeviceHint(hint);
-      __testFailColdStartInstall();
-      const first = await __testDispatchStorageControl({ type: "unlock-bucket", password });
-      expect(first.operationResult).toMatchObject({ ok: false });
-      expect(observedKeys.slice(callsBeforeFirstUnlock)).not.toContain("old-key");
-
-      // 重试重新走只读发现→认证，只能触碰设备新凭据。
-      const callsBeforeRetry = observedKeys.length;
-      const retry = await __testDispatchStorageControl({ type: "unlock-bucket", password });
-      expect(retry.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-      expect(observedKeys.slice(callsBeforeRetry)).toEqual(["new-key"]);
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("S3 密码轮转后设备仍保留新凭据，冷启动不回退旧凭据", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-rotation-old-password";
-    const newPassword = "s3-rotation-new-password";
-    const newConnection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://new.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "new-key",
-      secretAccessKey: "new-secret",
-    });
-    const oldConnection = () => ({ ...newConnection(), endpoint: "https://old.example.test", accessKeyId: "old-key", secretAccessKey: "old-secret" });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const revokedKeys = new Set<string>();
-    const observedKeys: string[] = [];
-    __testSetS3BucketProviderOptionsFactory(makeFakeS3ProviderOptionsFactory(sharedObjects, revokedKeys, observedKeys));
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rotation-001",
-          bucketLabel: "S3 轮转桶",
-          backend: "s3",
-          connection: newConnection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      const reconfigured = await __testDispatchStorageControl({ type: "change-bucket-config", config: oldConnection(), password: oldPassword });
-      expect(reconfigured.operationResult).toMatchObject({ bucketId: created.bucket.bucketId });
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      revokedKeys.add("old-key");
-
-      fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-      const connected = await __testDispatchStorageControl({
-        type: "connect-existing-remote",
-        plan: {
-          operationId: "s3-connect-before-rotation-001",
-          remoteStorageId: created.bucket.bucketId,
-          displayName: "S3 轮转前连接",
-          backend: "s3",
-          connection: newConnection(),
-          bucketPassword: oldPassword,
-        },
-      });
-      expect(connected.operationResult).toMatchObject({ ok: true });
-
-      // 密码轮转：远端 Hold 重加密旧连接，设备层独立重加密新凭据。
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword });
-      expect(rotated.operationResult).toMatchObject({ ok: true });
-
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      const callsBeforeColdStart = observedKeys.length;
-      const hint = readStorageBootstrap(fixture.storage);
-      await __testColdStartFromDeviceHint(hint);
-      const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: newPassword });
-      expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-      expect(observedKeys.slice(callsBeforeColdStart)).toEqual(["new-key"]);
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("Hold 发布后不再二次读取提交头 ETag", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-head-read-old-password";
-    const newPassword = "s3-head-read-new-password";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://head-read.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "head-read-key",
-      secretAccessKey: "head-read-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    let blockHeadReads = false;
-    let headPublishedAfterBlock = false;
-    let unexpectedHeadRead = false;
-    const holdHeadSuffix = ".keymaster/hold/v1/head.json";
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (base) => ({
-        ...base,
-        async put(input: Parameters<BucketObjectStore["put"]>[0]) {
-          const result = await base.put(input);
-          if (blockHeadReads && input.key.endsWith(holdHeadSuffix)) headPublishedAfterBlock = true;
-          return result;
-        },
-        async get(input: Parameters<BucketObjectStore["get"]>[0]) {
-          if (blockHeadReads && headPublishedAfterBlock && input.key.endsWith(holdHeadSuffix)) {
-            unexpectedHeadRead = true;
-            throw new StorageRuntimeError("storage_unavailable", "injected post-publication Hold head read failure");
-          }
-          return base.get(input);
-        },
-      })),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-head-read-001",
-          bucketLabel: "S3 提交头读取桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      blockHeadReads = true;
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword });
-      expect(rotated.operationResult).toMatchObject({ ok: true, bucket: { bucketId: created.bucket.bucketId } });
-      expect(unexpectedHeadRead).toBe(false);
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(0);
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("密码轮转读回期间并发替换进入 pending，不单边回滚 Hold", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-race-old-password";
-    const newPassword = "s3-race-new-password";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://race.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "race-key",
-      secretAccessKey: "race-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-      ) => Promise<void>;
-    } = {
-      armed: false,
-      onPut: async () => { throw new Error("manifest hook is not armed"); },
+      endpoint: overrides.endpoint ?? "https://objects.example.test",
+      region: "auto",
+      bucket: "keymaster-data",
+      accessKeyId: "access",
+      secretAccessKey: "secret",
+      forcePathStyle: false,
+      ...(overrides.prefix === undefined ? {} : { prefix: overrides.prefix }),
     };
-    let forgedBytes: Uint8Array | undefined;
-    hook.onPut = async (input, base) => {
-      const current = sharedObjects.get(input.key);
-      if (!current) throw new Error("manifest is missing for forgery");
-      const forged = current.bytes.slice();
-      forged[16] = (forged[16] ?? 0) ^ 0xff;
-      forgedBytes = forged;
-      // 并发写入先提交：轮转的 CAS 写入必然冲突，读回看到的是别人的版本。
-      await createMemoryBucketObjectStore(sharedObjects).put({
-        namespaceRoot: "",
-        key: input.key,
-        bytes: forged,
-        ifMatch: current.etag,
-      });
-      void base;
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rotation-race-001",
-          bucketLabel: "S3 并发桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
+  }
 
-      const manifestKey = `.keymaster/buckets/${created.bucket.bucketId}/.keymaster/root/v1`;
-      const headKey = `.keymaster/buckets/${created.bucket.bucketId}/.keymaster/hold/v1/head.json`;
-      const headBefore = JSON.parse(new TextDecoder().decode(sharedObjects.get(headKey)?.bytes ?? new Uint8Array()));
-      const deviceBefore = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-
-      hook.armed = true;
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in rotated) {
-        expect(rotated.ack).toMatchObject({ status: "error" });
-      }
-      const failureText = "ack" in rotated
-        ? JSON.stringify(rotated.ack)
-        : (rotated as { message: string }).message;
-      expect(failureText).toContain("pending");
-
-      // 没有单边回滚：Hold 仍是新文档，manifest 仍是并发版本，设备目录未动。
-      const headAfter = JSON.parse(new TextDecoder().decode(sharedObjects.get(headKey)?.bytes ?? new Uint8Array()));
-      expect(headAfter.configRevision).toBe(headBefore.configRevision + 1);
-      expect(sharedObjects.get(manifestKey)?.bytes).toEqual(forgedBytes);
-      const deviceAfter = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-      expect(deviceAfter?.encryptedConfig).toEqual(deviceBefore?.encryptedConfig);
-
-      // 进入 degraded，可观测。
-      const status = await __testDispatchStorageControl({ type: "status" });
-      expect(status.ack).toMatchObject({ status: "error", code: "storage_unavailable" });
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("密码轮转 manifest 写入响应丢失但已提交时继续完成", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
+  it("全新物理位置生成 bucket_<16位小写hex>,重复调用不重复", async () => {
+    const current = makeRuntimeLocalBucket("catalog-s3-id", "S3 ID 桶");
+    const target = makeRuntimeLocalBucket("catalog-s3-id-target", "备用桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
     __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-lost-old-password";
-    const newPassword = "s3-lost-new-password";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://lost.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "lost-key",
-      secretAccessKey: "lost-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-      ) => Promise<void>;
-    } = {
-      armed: false,
-      onPut: async () => { throw new Error("manifest hook is not armed"); },
-    };
-    hook.onPut = async (input, base) => {
-      // 先真实提交，再丢弃响应：调用方只能读回逐字节确认。
-      await base.put({ namespaceRoot: "", ...input });
-      throw new StorageRuntimeError("storage_unavailable", "injected lost manifest write response");
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rotation-lost-001",
-          bucketLabel: "S3 丢失响应桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
 
-      hook.armed = true;
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword });
-      expect(rotated.operationResult).toMatchObject({ ok: true });
-
-      // 轮转完整成功：新密码冷启动可用。
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      const hint = readStorageBootstrap(fixture.storage);
-      await __testColdStartFromDeviceHint(hint);
-      const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: newPassword });
-      expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("跨 Worker 重启后 resume 真正完成悬挂轮转，新密码可解锁", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-resume-old-password";
-    const newPassword = "s3-resume-new-password";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://resume.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "resume-key",
-      secretAccessKey: "resume-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut?: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-        manifestPutIndex: number,
-      ) => Promise<void>;
-      onGet?: (
-        input: { key: string },
-        base: BucketObjectStore,
-      ) => Promise<BucketGetOutput | undefined>;
-    } = { armed: false };
-    let putDone = false;
-    let liedBytes: Uint8Array | undefined;
-    hook.onPut = async (input, base) => {
-      // manifest 写入真实提交，但调用方收不到响应。
-      await base.put({ namespaceRoot: "", ...input });
-      putDone = true;
-      throw new StorageRuntimeError("storage_unavailable", "injected lost manifest write response");
-    };
-    hook.onGet = async (input, base) => {
-      // 仅对写入后的第一次读回撒谎：看到的既不是新版也不是旧版。
-      if (!putDone || liedBytes) return undefined;
-      const real = await base.get({ namespaceRoot: "", key: input.key });
-      const forged = real.bytes.slice();
-      forged[16] = (forged[16] ?? 0) ^ 0xff;
-      liedBytes = forged;
-      return { ...real, bytes: forged };
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rotation-resume-001",
-          bucketLabel: "S3 恢复桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      hook.armed = true;
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in rotated) {
-        expect(rotated.ack).toMatchObject({ status: "error" });
-      }
-      const failureText = "ack" in rotated
-        ? JSON.stringify(rotated.ack)
-        : (rotated as { message: string }).message;
-      expect(failureText).toContain("pending");
-
-      // 事务已持久化：阶段、KDF、指纹齐全。
-      const persisted = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks })
-        .read()?.rotations?.find((candidate) => candidate.bucketId === created.bucket.bucketId);
-      expect(persisted).toMatchObject({
-        phase: "manifest-unconfirmed",
-        bucketId: created.bucket.bucketId,
-        oldConfigRevision: created.bucket.configRevision,
-        newConfigRevision: created.bucket.configRevision + 1,
-      });
-      expect(persisted?.newManifestFingerprint).toMatch(/^[0-9a-f]{64}$/u);
-      expect(persisted?.deviceCiphertextFingerprint).toMatch(/^[0-9a-f]{64}$/u);
-      const operationId = persisted?.operationId;
-      if (!operationId) throw new Error("rotation record was not persisted");
-
-      // Hold 的 keys.json 保持 JSON 格式但修改业务字段；这样只能破坏完整
-      // 文档 HMAC，不能靠“头部 revision/KDF 看起来正确”把它误判为新版本。
-      const holdHeadKey = `.keymaster/buckets/${created.bucket.bucketId}/.keymaster/hold/v1/head.json`;
-      const holdHead = JSON.parse(new TextDecoder().decode(sharedObjects.get(holdHeadKey)?.bytes ?? new Uint8Array())) as { snapshotId?: string };
-      if (!holdHead.snapshotId) throw new Error("committed Hold head is missing");
-      const holdHeaderKey = `.keymaster/buckets/${created.bucket.bucketId}/.keymaster/hold/v1/snapshots/${holdHead.snapshotId}/header.json`;
-      const holdHeader = JSON.parse(new TextDecoder().decode(sharedObjects.get(holdHeaderKey)?.bytes ?? new Uint8Array())) as { keysPath?: string };
-      if (!holdHeader.keysPath) throw new Error("committed Hold header is missing");
-      const holdKeysKey = `.keymaster/buckets/${created.bucket.bucketId}/${holdHeader.keysPath}`;
-      const holdKeysObject = sharedObjects.get(holdKeysKey);
-      if (!holdKeysObject) throw new Error("committed Hold keys are missing");
-      const originalHoldKeysBytes = holdKeysObject.bytes.slice();
-      const tamperedHoldKeys = JSON.parse(new TextDecoder().decode(originalHoldKeysBytes)) as Array<Record<string, unknown>>;
-      const firstHoldKey = tamperedHoldKeys[0];
-      if (!firstHoldKey || typeof firstHoldKey.label !== "string") throw new Error("committed Hold key is missing");
-      firstHoldKey.label = `${firstHoldKey.label}-tampered`;
-      holdKeysObject.bytes = new TextEncoder().encode(JSON.stringify(tamperedHoldKeys));
-
-      // 真重启：内存 pending 标记丢失，只能靠持久化事务恢复。
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-      const tamperedResume = await __testDispatchStorageControl({
-        type: "resume-bucket-password-rotation",
-        operationId,
-        oldPassword,
-        newPassword,
-      }).catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in tamperedResume) {
-        expect(tamperedResume.ack).toMatchObject({ status: "error" });
-      }
-      const tamperedResumeText = "ack" in tamperedResume
-        ? JSON.stringify(tamperedResume.ack)
-        : (tamperedResume as { message: string }).message;
-      expect(tamperedResumeText).toContain("pending");
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(1);
-
-      // 修复测试注入的数据后再次恢复，证明 pending 不是永久卡死。
-      holdKeysObject.bytes = originalHoldKeysBytes;
-      const resumed = await __testDispatchStorageControl({
-        type: "resume-bucket-password-rotation",
-        operationId,
-        oldPassword,
-        newPassword,
-      });
-      if (!(resumed.operationResult as { ok?: boolean } | undefined)?.ok) throw new Error(JSON.stringify(resumed.ack));
-      expect(resumed.operationResult).toMatchObject({ ok: true, outcome: "completed", bucket: { bucketId: created.bucket.bucketId } });
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(0);
-
-      // 恢复后新密码冷启动可用，旧密码已被替换。
-      const hint = readStorageBootstrap(fixture.storage);
-      await __testColdStartFromDeviceHint(hint);
-      const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: newPassword });
-      expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-      expect(__testGetSnapshot()).toMatchObject({
-        storageBucketId: created.bucket.bucketId,
-        vaultStatus: "unlocked",
-        activePublicKeyHex: created.firstKey.publicKeyHex,
-      });
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("密码轮转回滚 manifest 响应丢失但已提交时确认完成", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-rollback-old-password";
-    const newPassword = "s3-rollback-new-password";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://rollback.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "rollback-key",
-      secretAccessKey: "rollback-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut?: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-        manifestPutIndex: number,
-      ) => Promise<void>;
-    } = { armed: false };
-    // 第二次 manifest 写入才是回滚：先真实提交再丢弃响应。
-    hook.onPut = async (input, base, manifestPutIndex) => {
-      if (manifestPutIndex !== 2) return;
-      await base.put({ namespaceRoot: "", ...input });
-      throw new StorageRuntimeError("storage_unavailable", "injected lost manifest rollback response");
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rollback-lost-001",
-          bucketLabel: "S3 回滚桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      const manifestKey = `.keymaster/buckets/${created.bucket.bucketId}/.keymaster/root/v1`;
-      const manifestBefore = sharedObjects.get(manifestKey)?.bytes.slice();
-      const deviceBefore = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-      if (!manifestBefore || !deviceBefore) throw new Error("rotation precondition is missing");
-
-      hook.armed = true;
-      __testFailAfterBucketPasswordCatalogUpdate();
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in rotated) {
-        expect(rotated.ack).toMatchObject({ status: "error" });
-      }
-      const failureText = "ack" in rotated
-        ? JSON.stringify(rotated.ack)
-        : (rotated as { message: string }).message;
-      expect(failureText).toContain("injected bucket password rotation failure after catalog update");
-
-      // 回滚完整确认：manifest 回到旧字节，事务记录已清理。
-      expect(sharedObjects.get(manifestKey)?.bytes).toEqual(manifestBefore);
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(0);
-      const deviceAfter = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-      expect(deviceAfter?.encryptedConfig).toEqual(deviceBefore.encryptedConfig);
-
-      // 旧密码冷启动仍可用。
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      const hint = readStorageBootstrap(fixture.storage);
-      await __testColdStartFromDeviceHint(hint);
-      const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: oldPassword });
-      expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("密码轮转回滚 manifest 未落地时保留事务，随后 resume 安全撤销", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-rollback-miss-old";
-    const newPassword = "s3-rollback-miss-new";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://rollback-miss.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "rollback-miss-key",
-      secretAccessKey: "rollback-miss-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut?: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-        manifestPutIndex: number,
-      ) => Promise<void>;
-    } = { armed: false };
-    // 第二次 manifest 写入（回滚）直接失败且不落地：读回仍是新版。
-    hook.onPut = async (input, base, manifestPutIndex) => {
-      if (manifestPutIndex !== 2) return;
-      throw new StorageRuntimeError("storage_unavailable", "injected manifest rollback transport failure");
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rollback-miss-001",
-          bucketLabel: "S3 回滚未落地桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      hook.armed = true;
-      __testFailAfterBucketPasswordCatalogUpdate();
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in rotated) {
-        expect(rotated.ack).toMatchObject({ status: "error" });
-      }
-      const failureText = "ack" in rotated
-        ? JSON.stringify(rotated.ack)
-        : (rotated as { message: string }).message;
-      expect(failureText).toContain("rollback was not fully confirmed");
-
-      // 事务保留：Hold 已回滚为旧版，manifest 仍是新版。
-      const persisted = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks })
-        .read()?.rotations?.find((candidate) => candidate.bucketId === created.bucket.bucketId);
-      expect(persisted?.phase).toBe("hold-published");
-      if (!persisted) throw new Error("rotation record was not kept");
-
-      // resume 把 manifest 安全改回旧版后撤销，旧密码冷启动可用。
-      const resumed = await __testDispatchStorageControl({
-        type: "resume-bucket-password-rotation",
-        operationId: persisted.operationId,
-        oldPassword,
-        newPassword,
-      });
-      expect(resumed.operationResult).toMatchObject({ ok: true, outcome: "revoked" });
-
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-      const hint = readStorageBootstrap(fixture.storage);
-      await __testColdStartFromDeviceHint(hint);
-      const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: oldPassword });
-      expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("密码轮转回滚读回期间并发替换进入 pending，resume 保持 pending", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-rollback-race-old";
-    const newPassword = "s3-rollback-race-new";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://rollback-race.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "rollback-race-key",
-      secretAccessKey: "rollback-race-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut?: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-        manifestPutIndex: number,
-      ) => Promise<void>;
-    } = { armed: false };
-    let forgedBytes: Uint8Array | undefined;
-    hook.onPut = async (input, base, manifestPutIndex) => {
-      if (manifestPutIndex !== 2) return;
-      // 回滚写入前先被并发替换：回滚 CAS 冲突，读回是别人的版本。
-      const current = sharedObjects.get(input.key);
-      if (!current) throw new Error("manifest is missing for forgery");
-      const forged = current.bytes.slice();
-      forged[24] = (forged[24] ?? 0) ^ 0xff;
-      forgedBytes = forged;
-      await createMemoryBucketObjectStore(sharedObjects).put({
-        namespaceRoot: "",
-        key: input.key,
-        bytes: forged,
-        ifMatch: current.etag,
-      });
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rollback-race-001",
-          bucketLabel: "S3 回滚并发桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      hook.armed = true;
-      __testFailAfterBucketPasswordCatalogUpdate();
-      const rotated = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in rotated) {
-        expect(rotated.ack).toMatchObject({ status: "error" });
-      }
-      const failureText = "ack" in rotated
-        ? JSON.stringify(rotated.ack)
-        : (rotated as { message: string }).message;
-      expect(failureText).toContain("pending");
-
-      const persisted = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks })
-        .read()?.rotations?.find((candidate) => candidate.bucketId === created.bucket.bucketId);
-      expect(persisted?.phase).toBe("manifest-rollback-unconfirmed");
-      expect(sharedObjects.get(`.keymaster/buckets/${created.bucket.bucketId}/.keymaster/root/v1`)?.bytes).toEqual(forgedBytes);
-      if (!persisted) throw new Error("rotation record was not kept");
-
-      // 外来 manifest 无法分类：resume 同样保持 pending，不做破坏性写入。
-      const before = fixture.storage.snapshot();
-      const resumed = await __testDispatchStorageControl({
-        type: "resume-bucket-password-rotation",
-        operationId: persisted.operationId,
-        oldPassword,
-        newPassword,
-      }).catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in resumed) {
-        expect(resumed.ack).toMatchObject({ status: "error" });
-      }
-      const resumeText = "ack" in resumed
-        ? JSON.stringify(resumed.ack)
-        : (resumed as { message: string }).message;
-      expect(resumeText).toContain("pending");
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations?.length).toBe(1);
-      expect(fixture.storage.snapshot()).toEqual(before);
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("resume 使用错误密码时不做任何写入且保留事务", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-resume-pw-old-password";
-    const newPassword = "s3-resume-pw-new-password";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://resume-pw.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "resume-pw-key",
-      secretAccessKey: "resume-pw-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut?: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-        manifestPutIndex: number,
-      ) => Promise<void>;
-    } = { armed: false };
-    hook.onPut = async (input, base) => {
-      const current = sharedObjects.get(input.key);
-      if (!current) throw new Error("manifest is missing for forgery");
-      const forged = current.bytes.slice();
-      forged[16] = (forged[16] ?? 0) ^ 0xff;
-      await createMemoryBucketObjectStore(sharedObjects).put({
-        namespaceRoot: "",
-        key: input.key,
-        bytes: forged,
-        ifMatch: current.etag,
-      });
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-resume-pw-001",
-          bucketLabel: "S3 密码桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      hook.armed = true;
-      await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch(() => undefined);
-      const persisted = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks })
-        .read()?.rotations?.find((candidate) => candidate.bucketId === created.bucket.bucketId);
-      if (!persisted) throw new Error("rotation record was not persisted");
-      const writesBefore = fixture.writeOperations.length;
-
-      await __testReleaseCatalogLocalBinding();
-      __testResetState();
-      __testPrepareInitialSetup();
-      __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-      // 新旧密码都错：认证设备连接即失败，不触碰远端。
-      const callsBefore = observedKeys.length;
-      const resumed = await __testDispatchStorageControl({
-        type: "resume-bucket-password-rotation",
-        operationId: persisted.operationId,
-        oldPassword: "wrong-old-password-1",
-        newPassword: "wrong-new-password-1",
-      }).catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in resumed) {
-        expect(resumed.ack).toMatchObject({ status: "error" });
-      }
-      const resumeText = "ack" in resumed
-        ? JSON.stringify(resumed.ack)
-        : (resumed as { message: string }).message;
-      expect(resumeText).toMatch(/password|identity/i);
-      expect(observedKeys.slice(callsBefore)).toEqual([]);
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations?.length).toBe(1);
-      expect(fixture.writeOperations).toHaveLength(writesBefore);
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("resume 未知操作 ID 时直接返回不存在", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const resumed = await __testDispatchStorageControl({
-      type: "resume-bucket-password-rotation",
-      operationId: "rotation-unknown-0001",
-      oldPassword: "some-old-password",
-      newPassword: "some-new-password",
-    }).catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-    if ("ack" in resumed) {
-      expect(resumed.ack).toMatchObject({ status: "error" });
-    }
-    const resumeText = "ack" in resumed
-      ? JSON.stringify(resumed.ack)
-      : (resumed as { message: string }).message;
-    expect(resumeText).toMatch(/not found|不存在/i);
+    const first = await __testResolveS3BucketStorageId(s3Connection());
+    const second = await __testResolveS3BucketStorageId(s3Connection());
+    expect(first).toMatch(/^bucket_[0-9a-f]{16}$/u);
+    expect(second).toMatch(/^bucket_[0-9a-f]{16}$/u);
+    expect(second).not.toBe(first);
   });
 
-  it("同一桶已有未决轮转时拒绝开始新轮转", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "s3-dup-old-password";
-    const newPassword = "s3-dup-new-password";
-    const connection = () => ({
-      kind: "s3" as const,
-      endpoint: "https://dup.example.test",
-      region: "us-east-1",
-      bucket: "shared-bucket",
-      accessKeyId: "dup-key",
-      secretAccessKey: "dup-secret",
-    });
-    const sharedObjects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: Date }>();
-    const observedKeys: string[] = [];
-    const hook: {
-      armed: boolean;
-      onPut?: (
-        input: { key: string; bytes: Uint8Array; ifMatch?: string },
-        base: BucketObjectStore,
-        manifestPutIndex: number,
-      ) => Promise<void>;
-    } = { armed: false };
-    hook.onPut = async (input, base) => {
-      const current = sharedObjects.get(input.key);
-      if (!current) throw new Error("manifest is missing for forgery");
-      const forged = current.bytes.slice();
-      forged[16] = (forged[16] ?? 0) ^ 0xff;
-      await createMemoryBucketObjectStore(sharedObjects).put({
-        namespaceRoot: "",
-        key: input.key,
-        bytes: forged,
-        ifMatch: current.etag,
-      });
-    };
-    __testSetS3BucketProviderOptionsFactory(
-      makeFakeS3ProviderOptionsFactory(sharedObjects, new Set<string>(), observedKeys, (store) => makeHookedManifestStore(store, hook)),
-    );
-    try {
-      const createdResponse = await __testDispatchStorageControl({
-        type: "initial-setup",
-        plan: {
-          transactionId: "initial-setup-s3-rotation-dup-001",
-          bucketLabel: "S3 并发轮转桶",
-          backend: "s3",
-          connection: connection(),
-          bucketPassword: oldPassword,
-          firstKey: { kind: "generate", label: "S3 主 Key", capabilities: ["p2pkh"] },
-        },
-      });
-      const created = createdResponse.operationResult as InitialSetupResult;
-      expect(created.ok).toBe(true);
-      if (!created.ok) throw new Error(created.error.summary);
-
-      hook.armed = true;
-      await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch(() => undefined);
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(1);
-
-      // 未决事务未恢复前，同一桶的新轮转必须拒绝，而不是交错写入。
-      const again = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-        .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-      if ("ack" in again) {
-        expect(again.ack).toMatchObject({ status: "error" });
-      }
-      const againText = "ack" in again
-        ? JSON.stringify(again.ack)
-        : (again as { message: string }).message;
-      expect(againText).toMatch(/recovery|conflict|恢复/i);
-      expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(1);
-    } finally {
-      __testSetS3BucketProviderOptionsFactory(undefined);
-    }
-  }, 30_000);
-
-  it("配置更新失败回滚恢复原设备投影而不是 Hold 记录", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const password = "initial-setup-password";
-    const createdResponse = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-config-rollback-001") });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    // 重启后用同一远端连接，产生“设备密文 ≠ 运行态 Hold 记录”。
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const connected = await __testDispatchStorageControl({
-      type: "connect-existing-remote",
-      plan: {
-        operationId: "connect-existing-before-config-rollback-001",
-        remoteStorageId: created.bucket.bucketId,
-        displayName: "配置回滚前连接",
-        backend: "local",
-        connection: { kind: "local" },
-        bucketPassword: password,
-      },
-    });
-    expect(connected.operationResult).toMatchObject({ ok: true });
-    const deviceBefore = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    const runtimeCipher = (connected.operationResult as ExistingRemoteStorageConnectResult & { ok: true }).bucket.encryptedConfig;
-    expect(deviceBefore?.encryptedConfig).not.toEqual(runtimeCipher);
-
-    // 注入配置更新目录提交后的失败：回滚必须把设备层恢复为原投影。
-    __testFailAfterBucketConfigCatalogUpdate();
-    const configResult = await __testDispatchStorageControl({
-      type: "change-bucket-config",
-      config: { kind: "local" },
-      label: "失败后回滚",
-      password,
-    }).catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-    if ("ack" in configResult) {
-      expect(configResult.ack).toMatchObject({ status: "error", message: "injected bucket configuration update failure after catalog update" });
-    } else {
-      expect(configResult.message).toContain("injected bucket configuration update failure after catalog update");
-    }
-
-    const deviceAfter = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    expect(deviceAfter?.encryptedConfig).toEqual(deviceBefore?.encryptedConfig);
-    expect(__testGetSnapshot().storageBucketId).toBe(created.bucket.bucketId);
-  }, 30_000);
-
-  it("密码轮转失败回滚恢复原设备投影，旧密码仍可冷启动解锁", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "initial-setup-password";
-    const newPassword = "initial-setup-rotated-password";
-    const createdResponse = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan("initial-setup-rotation-rollback-001") });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const connected = await __testDispatchStorageControl({
-      type: "connect-existing-remote",
-      plan: {
-        operationId: "connect-existing-before-rotation-rollback-001",
-        remoteStorageId: created.bucket.bucketId,
-        displayName: "轮转回滚前连接",
-        backend: "local",
-        connection: { kind: "local" },
-        bucketPassword: oldPassword,
-      },
-    });
-    expect(connected.operationResult).toMatchObject({ ok: true });
-    const deviceBefore = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-
-    __testFailAfterBucketPasswordCatalogUpdate();
-    const rotationResult = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-      .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-    if ("ack" in rotationResult) {
-      expect(rotationResult.ack).toMatchObject({ status: "error", message: "injected bucket password rotation failure after catalog update" });
-    } else {
-      expect(rotationResult.message).toContain("injected bucket password rotation failure after catalog update");
-    }
-
-    const deviceAfter = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    expect(deviceAfter?.encryptedConfig).toEqual(deviceBefore?.encryptedConfig);
-
-    // 回滚后旧密码、旧设备连接仍可冷启动解锁。
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const hint = readStorageBootstrap(fixture.storage);
-    await __testColdStartFromDeviceHint(hint);
-    const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: oldPassword });
-    expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-    expect(__testGetSnapshot()).toMatchObject({
-      storageBucketId: created.bucket.bucketId,
-      vaultStatus: "unlocked",
-      activePublicKeyHex: created.firstKey.publicKeyHex,
-    });
-  }, 30_000);
-
-  it("Vault verifier 回滚失败后重启恢复并安全撤销，旧密码仍可解锁", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "initial-setup-vault-rollback-old";
-    const newPassword = "initial-setup-vault-rollback-new";
-    const createdResponse = await __testDispatchStorageControl({
-      type: "initial-setup",
-      plan: {
-        transactionId: "initial-setup-vault-rollback-001",
-        bucketLabel: "Verifier 回滚桶",
-        backend: "local",
-        connection: { kind: "local" },
-        bucketPassword: oldPassword,
-        firstKey: { kind: "generate", label: "主 Key", capabilities: ["p2pkh"] },
-      },
-    });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    fixture.setCatalog({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const connected = await __testDispatchStorageControl({
-      type: "connect-existing-remote",
-      plan: {
-        operationId: "connect-existing-before-vault-rollback-001",
-        remoteStorageId: created.bucket.bucketId,
-        displayName: "Verifier 回滚前连接",
-        backend: "local",
-        connection: { kind: "local" },
-        bucketPassword: oldPassword,
-      },
-    });
-    expect(connected.operationResult).toMatchObject({ ok: true });
-    expect(await __testGetVaultAuthMetadata()).toBeDefined();
-
-    __testFailNextVaultAuthMetadataRollback();
-    __testFailAfterBucketPasswordCatalogUpdate();
-    const rotationResult = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-      .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-    const failureText = "ack" in rotationResult
-      ? JSON.stringify(rotationResult.ack)
-      : (rotationResult as { message: string }).message;
-    expect(failureText).toContain("rollback was not fully confirmed");
-
-    const persisted = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks })
-      .read()?.rotations?.find((candidate) => candidate.bucketId === created.bucket.bucketId);
-    expect(persisted?.phase).toBe("hold-published");
-    if (!persisted) throw new Error("rotation record was not persisted");
-
-    // 真重启后只凭事务记录重新分类；旧 Hold/manifest 已恢复，因此结果必须是 revoked。
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const resumed = await __testDispatchStorageControl({
-      type: "resume-bucket-password-rotation",
-      operationId: persisted.operationId,
-      oldPassword,
-      newPassword,
-    });
-    expect(resumed.operationResult).toMatchObject({ ok: true, outcome: "revoked" });
-    expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(0);
-
-    const hint = readStorageBootstrap(fixture.storage);
-    await __testColdStartFromDeviceHint(hint);
-    const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: oldPassword });
-    expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-  }, 30_000);
-
-  it("撤销恢复设备已写回后 verifier 失败，重启再次 resume 仍可完成", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const oldPassword = "initial-setup-device-restore-old";
-    const newPassword = "initial-setup-device-restore-new";
-    const createdResponse = await __testDispatchStorageControl({
-      type: "initial-setup",
-      plan: {
-        transactionId: "initial-setup-device-restore-001",
-        bucketLabel: "设备恢复幂等桶",
-        backend: "local",
-        connection: { kind: "local" },
-        bucketPassword: oldPassword,
-        firstKey: { kind: "generate", label: "主 Key", capabilities: ["p2pkh"] },
-      },
-    });
-    const created = createdResponse.operationResult as InitialSetupResult;
-    expect(created.ok).toBe(true);
-    if (!created.ok) throw new Error(created.error.summary);
-    const deviceBefore = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    if (!deviceBefore) throw new Error("initial device connection is missing");
-
-    // 正向流程已写入新设备密文，但设备回滚 CAS 失败；Hold/manifest 已回到旧版本，
-    // 因而下一次 resume 会进入 revoked 分支并需要把设备写回旧密码。
-    __testFailAfterBucketPasswordCatalogUpdate();
-    __testFailNextBucketPasswordDeviceRollback();
-    const rotationResult = await __testDispatchStorageControl({ type: "change-bucket-password", oldPassword, newPassword })
-      .catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-    const failureText = "ack" in rotationResult
-      ? JSON.stringify(rotationResult.ack)
-      : (rotationResult as { message: string }).message;
-    expect(failureText).toContain("rollback was not fully confirmed");
-    const pending = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations?.[0];
-    expect(pending).toBeDefined();
-    const deviceAfterForwardFailure = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    expect(deviceAfterForwardFailure?.encryptedConfig).not.toEqual(deviceBefore.encryptedConfig);
-    if (!pending) throw new Error("rotation record was not persisted");
-
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    __testFailNextVaultAuthMetadataRestore();
-    const firstResume = await __testDispatchStorageControl({
-      type: "resume-bucket-password-rotation",
-      operationId: pending.operationId,
-      oldPassword,
-      newPassword,
-    }).catch((error: unknown) => ({ message: error instanceof Error ? error.message : String(error) }));
-    const firstResumeText = "ack" in firstResume
-      ? JSON.stringify(firstResume.ack)
-      : (firstResume as { message: string }).message;
-    expect(firstResumeText).toContain("injected Vault auth metadata restore failure");
-
-    const afterDeviceRestoreFailure = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read();
-    const restoredRecord = afterDeviceRestoreFailure?.rotations?.find((candidate) => candidate.operationId === pending.operationId);
-    const restoredConnection = afterDeviceRestoreFailure?.connections.find((candidate) => candidate.remoteStorageId === created.bucket.bucketId);
-    expect(restoredRecord?.restoredDeviceCiphertextFingerprint).toMatch(/^[0-9a-f]{64}$/u);
-    expect(restoredRecord?.restoredDeviceEncryptedConfig).toEqual(restoredConnection?.encryptedConfig);
-    expect(restoredConnection?.encryptedConfig).not.toEqual(deviceBefore.encryptedConfig);
-
-    // 事务内部仍保留两项恢复识别材料，但生产列表只能输出独立安全投影；
-    // 这里沿真实 response parser 再过一次，确保页面重载时恢复入口不会因
-    // 内部字段不成对而整批解析失败。
-    const pendingList = await __testDispatchStorageControl({ type: "list-pending-password-rotations" });
-    const pendingView = (pendingList.operationResult as Array<Record<string, unknown>>)[0];
-    if (!pendingView) throw new Error("pending rotation safety projection is missing");
-    expect(pendingView).toMatchObject({
-      format: "keymaster.storage.password-rotation-view",
+  it("同物理位置(大小写/末尾斜杠差异)复用既有记录 ID", async () => {
+    const current = makeRuntimeLocalBucket("catalog-s3-id-reuse", "S3 复用桶");
+    const target = makeRuntimeLocalBucket("catalog-s3-id-reuse-target", "备用桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
+    fixture.state.records.set("bucket_0123456789abcdef", {
+      format: "keymaster.device",
       version: 1,
-      operationId: pending.operationId,
-      bucketId: pending.bucketId,
-      backend: pending.backend,
-      phase: pending.phase,
-      createdAt: pending.createdAt,
-    });
-    expect(pendingView).toHaveProperty("updatedAt", expect.any(Number));
-    expect(Object.keys(pendingView).sort()).toEqual([
-      "backend", "bucketId", "createdAt", "format", "operationId", "phase", "updatedAt", "version",
-    ]);
-    expect(pendingView).not.toHaveProperty("restoredDeviceEncryptedConfig");
-    expect(pendingView).not.toHaveProperty("restoredDeviceCiphertextFingerprint");
-    const parsedPendingList = parseCoordinatorResponseFor({
-      kind: "storage.control",
-      control: { type: "list-pending-password-rotations" },
-    } as unknown as CoordinatorRpcRequest, {
-      sessionEpoch: pendingList.sessionEpoch,
-      ack: pendingList.ack,
-      operationResult: pendingList.operationResult,
-    });
-    expect(parsedPendingList.operationResult).toEqual([pendingView]);
-
-    // 真正再次重启：本次不重新生成恢复密文，直接识别上一次已经成功的设备 CAS。
-    await __testReleaseCatalogLocalBinding();
-    __testResetState();
-    __testPrepareInitialSetup();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const resumed = await __testDispatchStorageControl({
-      type: "resume-bucket-password-rotation",
-      operationId: pending.operationId,
-      oldPassword,
-      newPassword,
-    });
-    expect(resumed.operationResult).toMatchObject({ ok: true, outcome: "revoked" });
-    expect(createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.rotations ?? []).toHaveLength(0);
-    const finalConnection = createDeviceBootstrapRepository({ storage: fixture.storage, locks: catalogBridgeLocks }).read()?.connections[0];
-    // 撤销恢复使用随机 IV；第二次 resume 应保留第一次已确认写回的
-    // 本事务密文，而不是再次生成另一份密文或回退到旧随机 IV。
-    expect(finalConnection?.encryptedConfig).toEqual(restoredRecord?.restoredDeviceEncryptedConfig);
-
-    const hint = readStorageBootstrap(fixture.storage);
-    await __testColdStartFromDeviceHint(hint);
-    const unlock = await __testDispatchStorageControl({ type: "unlock-bucket", password: oldPassword });
-    expect(unlock.operationResult).toMatchObject({ ok: true, vaultUnlocked: true });
-  }, 30_000);
-
-  it("响应丢失后按同一 transactionId 返回已提交结果，不重新暂存第二把 Key", async () => {
-    const transactionId = "initial-setup-recovery-001";
-    const entry = await makeEncryptedLocalCatalogEntry("setup-recovery-001", "已提交首桶", "recovery-password");
-    const fixture = makeInitialSetupWorkerBridge({
-      format: "keymaster.storage.catalog",
-      version: 2,
-      selectedBucketId: entry.bucketId,
-      buckets: [entry],
-    });
-    __testSeedInitialSetupRecoveryRecord(makeSucceededRecord(entry, transactionId));
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    expect(response.ack.status).toBe("ok");
-    expect(response.operationResult).toMatchObject({
-      ok: true,
-      bucket: entry,
-      firstKey: { label: "恢复的主 Key", format: "hex" },
-    });
-    expect(fixture.storage.length).toBe(0);
-    expect(__testGetSnapshot().storageBucketId).toBeUndefined();
-  });
-
-  it("成功恢复记录无法验证目录时返回不可重试结果，不执行新计划", async () => {
-    const transactionId = "initial-setup-recovery-mismatch-001";
-    const entry = await makeEncryptedLocalCatalogEntry("setup-recovery-mismatch-001", "缺失目录首桶", "recovery-password");
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSeedInitialSetupRecoveryRecord(makeSucceededRecord(entry, transactionId));
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const response = await __testDispatchStorageControl({ type: "initial-setup", plan: makePlan(transactionId) });
-    expect(response.ack.status).toBe("ok");
-    expect(response.operationResult).toMatchObject({
-      ok: false,
-      error: { phase: "runtime", rollback: "not-started", code: "storage_conflict" },
-    });
-    expect((response.operationResult as InitialSetupResult).ok ? "" : (response.operationResult as Extract<InitialSetupResult, { ok: false }>).error.diagnostic)
-      .toContain("succeeded-record-catalog-mismatch");
-    expect(fixture.storage.length).toBe(0);
-    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-  });
-
-  it("恢复记录读取失败时 fail-closed，不把未知 transactionId 当成新事务重跑", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSetLocalStorageBridgeOverride(async (input) => {
-      if (input.type === "device-bootstrap-read") throw new Error("recovery bridge unavailable");
-      return fixture.bridge(input);
-    });
-    const plan = makePlan("initial-setup-recovery-unavailable-001");
-
-    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
-    expect(response.ack.status).toBe("ok");
-    expect(response.operationResult).toMatchObject({ ok: false, error: { code: "storage_unavailable", rollback: "not-started" } });
-    expect(fixture.storage.length).toBe(0);
-    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    expect(plan.bucketPassword).toBe("");
-  });
-
-  it("Worker 端也阻止绕过页面创建新的初始化事务", async () => {
-    const fixture = makeInitialSetupWorkerBridge();
-    const blockingEntry = await makeEncryptedLocalCatalogEntry("setup-blocking-recovery-001", "待恢复桶", "recovery-password");
-    const blockingTransactionId = "initial-setup-blocking-recovery-001";
-    const blockingRecord: InitialSetupRecoveryRecordV1 = {
-      ...makeSucceededRecord(blockingEntry, blockingTransactionId),
-      phase: "rollback",
-      status: "failed",
-      cleanup: "unconfirmed",
-      error: {
-        title: "初始化失败",
-        summary: "候选数据尚未清理",
-        action: "请先重试清理",
-        code: "storage_provider_error",
-        incidentId: "blocking-recovery-incident",
-        transactionId: blockingTransactionId,
-        diagnostic: "diagnostic",
-        phase: "rollback",
-        rollback: "unconfirmed",
-      },
-      updatedAt: Date.now(),
-    };
-    delete blockingRecord.success;
-    __testSeedInitialSetupRecoveryRecord(blockingRecord);
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const plan = makePlan("initial-setup-bypass-block-001");
-    const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
-    expect(response.ack.status).toBe("ok");
-    expect(response.operationResult).toMatchObject({
-      ok: false,
-      error: { code: "storage_conflict", rollback: "not-started" },
-    });
-    expect(fixture.storage.length).toBe(0);
-    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-  });
-
-  it("使用完整 transactionId 的 SHA-256 生成不碰撞的初始化桶 ID", () => {
-    const prefix = "a".repeat(112);
-    const left = prefix + "-winner";
-    const right = prefix + "-loser";
-    expect(__testInitialSetupBucketId(left)).toHaveLength(70);
-    expect(__testInitialSetupBucketId(left)).toBe(__testInitialSetupBucketId(left));
-    expect(__testInitialSetupBucketId(left)).not.toBe(__testInitialSetupBucketId(right));
-  });
-
-  it.each(["local", "s3"] as const)("拒绝 %s 恢复记录中与事务不匹配的桶 ID，且不清理赢家", async (backend) => {
-    const winnerTransactionId = "a".repeat(112) + "-winner";
-    const loserTransactionId = "a".repeat(112) + "-loser";
-    const legacyCollidingBucketId = "setup-" + "a".repeat(112);
-    const winnerBase = backend === "s3"
-      ? await makeEncryptedS3CatalogEntry(legacyCollidingBucketId, "赢家 S3 桶", "recovery-password")
-      : await makeEncryptedLocalCatalogEntry(legacyCollidingBucketId, "赢家 Local 桶", "recovery-password");
-    const winner = { ...winnerBase, configRevision: 1, snapshotRevision: 1 };
-    const fixture = makeInitialSetupWorkerBridge({
-      format: "keymaster.storage.catalog",
-      version: 2,
-      selectedBucketId: winner.bucketId,
-      buckets: [winner],
-    });
-    __testSeedInitialSetupRecoveryRecord({
-      format: "keymaster.storage.initial-setup-recovery",
-      version: 1,
-      transactionId: loserTransactionId,
-      bucketId: legacyCollidingBucketId,
-      catalogEntryFingerprint: "c".repeat(64),
-      configRevision: winner.configRevision,
-      snapshotRevision: winner.snapshotRevision,
-      backend,
-      connectionFingerprint: "d".repeat(64),
-      phase: "rollback",
-      catalog: "committed",
-      runtimeInstalled: false,
-      cleanup: "unconfirmed",
-      status: "failed",
-      error: {
-        title: "初始化失败",
-        summary: "需要清理候选数据",
-        action: "重试清理",
-        code: "storage_provider_error",
-        incidentId: "s3-collision-incident",
-        transactionId: loserTransactionId,
-        diagnostic: "diagnostic",
-        phase: "rollback",
-        rollback: "unconfirmed",
-      },
-      updatedAt: Date.now(),
-    });
-    const sentinelPath = `keymaster.bucket.${winner.bucketId}.candidate/winner-sentinel`;
-    const sentinelValue = btoa("winner-sentinel");
-    fixture.storage.setItem(sentinelPath, sentinelValue);
-    const catalogBeforeCleanup = fixture.getCatalog();
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const response = await __testDispatchStorageControl({
-      type: "initial-setup-cleanup",
-      transactionId: loserTransactionId,
-      password: "recovery-password",
-      ...(backend === "s3" ? {
-        connection: {
-          kind: "s3" as const,
-          endpoint: "https://objects.example.test",
-          region: "us-east-1",
-          bucket: "same-physical-target",
-          accessKeyId: "access",
-          secretAccessKey: "secret",
-        },
-      } : {}),
-    });
-    expect(response.operationResult).toMatchObject({
-      status: "cleanup-required",
-      error: { code: "storage_conflict" },
-    });
-    expect(fixture.events).not.toContain("delete");
-    expect(fixture.getCatalog()).toEqual(catalogBeforeCleanup);
-    expect(fixture.storage.getItem(sentinelPath)).toBe(sentinelValue);
-    expect(__testInitialSetupBucketId(winnerTransactionId)).not.toBe(__testInitialSetupBucketId(loserTransactionId));
-  });
-
-  it("清理接口区分已成功初始化、已确认清理和仍需清理", async () => {
-    const entry = await makeEncryptedLocalCatalogEntry("recovery-result-001", "恢复结果桶", "recovery-password");
-    const fixture = makeInitialSetupWorkerBridge({
-      format: "keymaster.storage.catalog",
-      version: 2,
-      selectedBucketId: entry.bucketId,
-      buckets: [entry],
-    });
-    const succeeded = makeSucceededRecord(entry, "initial-setup-recovery-success-result-001");
-    __testSeedInitialSetupRecoveryRecord(succeeded);
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const succeededResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: succeeded.transactionId });
-    expect(succeededResponse.operationResult).toMatchObject({
-      status: "setup-succeeded",
-      result: { ok: true, bucket: entry, firstKey: { label: "恢复的主 Key" } },
-    });
-
-    const pending = {
-      ...succeeded,
-      transactionId: "initial-setup-recovery-pending-result-001",
-      bucketId: __testInitialSetupBucketId("initial-setup-recovery-pending-result-001"),
-      phase: "rollback" as const,
-      catalog: "empty" as const,
-      cleanup: "not-started" as const,
-      status: "pending" as const,
-    };
-    delete pending.success;
-    delete pending.error;
-    __testSeedInitialSetupRecoveryRecord(pending);
-    const cleanupResponse = await __testDispatchStorageControl({ type: "initial-setup-cleanup", transactionId: pending.transactionId, password: "recovery-password" });
-    expect(cleanupResponse.operationResult).toEqual({ status: "cleanup-confirmed" });
-  });
-
-  it("真实账本校验下恢复清理先撤销目录引用，再删除候选对象", async () => {
-    const entry = await makeEncryptedLocalCatalogEntry(__testInitialSetupBucketId("initial-setup-recovery-order-001"), "清理顺序桶", "recovery-password");
-    const fixture = makeInitialSetupWorkerBridge({
-      format: "keymaster.storage.catalog",
-      version: 2,
-      selectedBucketId: entry.bucketId,
-      buckets: [entry],
-    });
-    const record = {
-      ...makeSucceededRecord(entry, "initial-setup-recovery-order-001"),
-      phase: "rollback" as const,
-      status: "failed" as const,
-      cleanup: "unconfirmed" as const,
-      error: {
-        title: "初始化失败",
-        summary: "需要清理候选数据",
-        action: "重试清理",
-        code: "storage_provider_error",
-        incidentId: "recovery-order-incident",
-        transactionId: "initial-setup-recovery-order-001",
-        diagnostic: "diagnostic",
-        phase: "runtime" as const,
-        rollback: "unconfirmed" as const,
-      },
-    } satisfies InitialSetupRecoveryRecordV1;
-    delete record.success;
-    __testSeedInitialSetupRecoveryRecord(record);
-    fixture.storage.setItem(`keymaster.bucket.${entry.bucketId}.candidate`, btoa("candidate"));
-    __testSetLocalStorageBridgeOverride(fixture.bridge);
-
-    const response = await __testDispatchStorageControl({
-      type: "initial-setup-cleanup",
-      transactionId: record.transactionId,
-      password: "recovery-password",
-    });
-    expect(response.operationResult).toEqual({ status: "cleanup-confirmed" });
-    expect(fixture.events.indexOf("catalog-rollback")).toBeGreaterThanOrEqual(0);
-    expect(fixture.events.indexOf("delete")).toBeGreaterThan(fixture.events.indexOf("catalog-rollback"));
-    expect(fixture.getCatalog()).toEqual({ format: "keymaster.storage.catalog", version: 2, buckets: [] });
-    expect(fixture.storage.length).toBe(0);
-  });
-
-  it("S3 恢复清理拒绝未匹配物理目标，不触碰候选对象", async () => {
-    const transactionId = "initial-setup-recovery-s3-fingerprint-001";
-    const fixture = makeInitialSetupWorkerBridge();
-    __testSeedInitialSetupRecoveryRecord({
-      format: "keymaster.storage.initial-setup-recovery",
-      version: 1,
-      transactionId,
-      bucketId: "recovery-s3-fingerprint-001",
-      catalogEntryFingerprint: "b".repeat(64),
-      configRevision: 1,
-      snapshotRevision: 0,
-      backend: "s3",
-      connectionFingerprint: "a".repeat(64),
-      phase: "rollback",
-      catalog: "empty",
-      runtimeInstalled: false,
-      cleanup: "unconfirmed",
-      status: "failed",
-      error: {
-        title: "初始化失败",
-        summary: "需要清理候选数据",
-        action: "重试清理",
-        code: "storage_provider_error",
-        incidentId: "s3-fingerprint-incident",
-        transactionId,
-        diagnostic: "diagnostic",
-        phase: "rollback",
-        rollback: "unconfirmed",
-      },
-      updatedAt: Date.now(),
+      displayName: "已登记 S3",
+      location: { providerId: "s3", endpoint: "https://Objects.Example.Test/", region: "auto", bucket: "keymaster-data", forcePathStyle: false },
+      cipher: { algorithm: "aes-gcm", keyLengthBits: 256, ivB64Url: "AAAAAAAAAAAAAAAA", tagLengthBits: 128, ciphertextAndTagB64Url: "AAAA" },
     });
     __testSetLocalStorageBridgeOverride(fixture.bridge);
-    const response = await __testDispatchStorageControl({
-      type: "initial-setup-cleanup",
-      transactionId,
-      connection: {
-        kind: "s3",
-        endpoint: "https://objects.example.test",
-        region: "us-east-1",
-        bucket: "different-bucket",
-        accessKeyId: "access",
-        secretAccessKey: "secret",
-      },
-    });
-    expect(response.operationResult).toMatchObject({ status: "cleanup-required", error: { code: "storage_conflict" } });
-    expect(fixture.events).not.toContain("delete");
-  });
 
+    await expect(__testResolveS3BucketStorageId(s3Connection())).resolves.toBe("bucket_0123456789abcdef");
+  });
 });
 
-// ============================================================
-// Backup Import Tests (生产执行路径)
-// ============================================================
-
-const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
-const TEST_PRIV_3 = "0000000000000000000000000000000000000000000000000000000000000003";
-
-describe("Session Coordinator backup import", () => {
-  beforeEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-
+describe("Key 自己的密码", () => {
   afterEach(async () => {
+    await __testReleaseCatalogLocalBinding();
     await __testDeleteVault();
     __testResetState();
   });
 
-  it("cross-vault import succeeds with different passwords", async () => {
-    const sourceResult = await __testCreateVault("source-pw", { label: "source-key" });
-    const backup = await __testExportKeyBackup(sourceResult.publicKeyHex!);
+  it("改密只替换目标 Key 的 KeyHold 文件:旧密码失效,新密码可解锁", async () => {
+    const password = "key-pw-old";
+    const nextPassword = "key-pw-new";
+    const current = makeRuntimeLocalBucket("catalog-change-pw", "改密桶");
+    const target = makeRuntimeLocalBucket("catalog-change-pw-target", "备用桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+    await __testInstallCatalogLocalBinding(current);
 
-    // A second Vault must be a fresh persistent store, rather than merely a
-    // reset Worker session over the source Vault's platform K-V records.
-    await __testDeleteVault();
-    __testResetState();
-    await __testCreateVault("target-pw", { label: "target-key" });
-    const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    expect(imported.publicKeyHex).toBe(sourceResult.publicKeyHex);
+    const first = await __testCreateVault(password, { label: "first-key" });
+    await __testSetActive(first.publicKeyHex!);
+    await __testChangePassword(password, nextPassword);
 
-    const targetMeta = await __testGetVaultAuthMetadata();
-    const targetRecord = await __testGetVaultKeyIndex(imported.publicKeyHex);
-    expect(targetMeta).toBeDefined();
-    expect(targetRecord).toBeDefined();
+    // 其他 Key 不受影响：同一密码仍能新建并保留。
+    await __testImportPrivateKey(password, { label: "second-key", material: { hex: TEST_PRIV_3 }, format: "hex", capabilities: ["p2pkh"] });
+
     await __testLock();
-    const unlocked = await __testUnlock("target-pw", imported.publicKeyHex);
-    expect(unlocked.ack.status).toBe("accepted");
-    expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
-  }, 15_000);
+    await expect(__testUnlock(nextPassword, first.publicKeyHex!)).resolves.toMatchObject({ ack: { status: "accepted" } });
 
-  it("rejects wrong source password without writing any key", async () => {
-    const source = await __testCreateVault("source-pw");
-    const backup = await __testExportKeyBackup(source.publicKeyHex!);
-    await __testDeleteVault();
-    __testResetState();
-    await __testCreateEmptyVault("target-pw");
-
-    await expect(__testImportKeyBackup(backup, "wrong-source-pw", "target-pw")).rejects.toThrow(/record authentication failed/);
-    expect(await __testListVaultKeys()).toHaveLength(0);
+    await __testLock();
+    const failed = await __testUnlock(password, first.publicKeyHex!);
+    expect(failed.ack.status).not.toBe("accepted");
     expect(__testGetVaultStatus()).toBe("locked");
-  });
 
-  it("rejects wrong target password without writing any key", async () => {
-    const source = await __testCreateVault("source-pw");
-    const backup = await __testExportKeyBackup(source.publicKeyHex!);
-    await __testDeleteVault();
-    __testResetState();
-    await __testCreateEmptyVault("target-pw");
-
-    await expect(__testImportKeyBackup(backup, "source-pw", "wrong-target-pw")).rejects.toThrow(/Invalid password/);
-    expect(await __testListVaultKeys()).toHaveLength(0);
-    expect(__testGetVaultStatus()).toBe("locked");
-  });
-
-  it("rejects backup with mismatched public key and material", async () => {
-    const source = await __testCreateVault("source-pw");
-    const backup = await __testExportKeyBackup(source.publicKeyHex!);
-    const parsed = JSON.parse(backup) as Record<string, unknown>;
-    const tamperedPublicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
-    parsed.publicKeyHex = tamperedPublicKeyHex;
-    const tamperedBackup = JSON.stringify(parsed);
-
-    await __testDeleteVault();
-    __testResetState();
-    await __testCreateEmptyVault("target-pw");
-
-    await expect(__testImportKeyBackup(tamperedBackup, "source-pw", "target-pw")).rejects.toThrow();
-    expect(await __testListVaultKeys()).toHaveLength(0);
-  });
-
-  it("rejects duplicate key import with Key already exists", async () => {
-    const source = await __testCreateVault("source-pw");
-    const backup = await __testExportKeyBackup(source.publicKeyHex!);
-    await __testDeleteVault();
-    __testResetState();
-    await __testCreateEmptyVault("target-pw");
-    const first = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    const original = await __testGetVaultKeyIndex(first.publicKeyHex);
-
-    await expect(__testImportKeyBackup(backup, "source-pw", "target-pw")).rejects.toThrow("Key already exists");
-    expect(await __testListVaultKeys()).toHaveLength(1);
-    expect(await __testGetVaultKeyIndex(first.publicKeyHex)).toEqual(original);
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
-  });
-
-  it("imports the first key into a locked empty Vault and activates it after unlock", async () => {
-    const source = await __testCreateVault("source-pw");
-    const backup = await __testExportKeyBackup(source.publicKeyHex!);
-    await __testDeleteVault();
-    __testResetState();
-    await __testCreateEmptyVault("target-pw");
-
-    const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    expect(await __testListVaultKeys()).toHaveLength(1);
-    expect(__testGetVaultStatus()).toBe("locked");
-    expect(__testGetActivePublicKeyHex()).toBeUndefined();
-
-    const unlocked = await __testUnlock("target-pw");
-    expect(unlocked.ack.status).toBe("accepted");
-    expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
-  }, 15_000);
-
-  it("activates the first key in an unlocked Vault and broadcasts it to every tab", async () => {
-    const source = await __testCreateVault("source-pw");
-    const backup = await __testExportKeyBackup(source.publicKeyHex!);
-    await __testDeleteVault();
-    __testResetState();
-
-    const a = attachTestPort("import-a");
-    const b = attachTestPort("import-b");
-    a.send({ kind: "subscribe", clientId: "import-a", requestId: "subscribe-a", topics: ["session.state"] });
-    b.send({ kind: "subscribe", clientId: "import-b", requestId: "subscribe-b", topics: ["session.state"] });
-    await flush();
-    a.messages.length = 0;
-    b.messages.length = 0;
-
-    const placeholder = await __testCreateVault("target-pw", { label: "placeholder" });
-    // Model an unlocked empty Vault without forging session crypto state: remove
-    // the only persisted key while retaining the real unlocked target session.
-    await __testClearVaultHold("target-pw");
-    expect(await __testListVaultKeys()).toHaveLength(0);
-    expect(__testGetVaultStatus()).toBe("unlocked");
-
-    const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
-    for (const port of [a, b]) {
-      expect(port.messages).toContainEqual(expect.objectContaining({
-        type: "session.state.changed",
-        activePublicKeyHex: imported.publicKeyHex,
-      }));
-    }
-  }, 15_000);
-});
-
-describe("Session Coordinator locked deletion and cold export", () => {
-  beforeEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-
-  afterEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-
-  it("recovers a legacy empty Vault to the uninitialized state", async () => {
-    await __testCreateEmptyVault("pw");
-    const result = await __testUnlock("pw");
-    expect(result.ack.status).toBe("accepted");
-    expect(__testGetVaultStatus()).toBe("uninitialized");
-    expect(__testGetActivePublicKeyHex()).toBeUndefined();
-    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
-  });
-
-  it("classifies a legacy empty Vault as uninitialized after a worker restart", async () => {
-    await __testCreateEmptyVault("pw");
-    await __testRestartWorker();
-    expect(__testGetVaultStatus()).toBe("uninitialized");
-    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
-  });
-
-  it("cold-exports the encrypted Hold record while locked", async () => {
-    const key = await __testCreateVault("pw");
-    await __testLock();
-    const backup = await __testExportCurrentKeyBackup();
-    expect(Object.keys(JSON.parse(backup)).sort()).toEqual(["address", "capabilities", "createdAt", "format", "key", "keyDerivation", "keyFormat", "label", "network", "publicKeyHex", "version"]);
-    expect(JSON.parse(backup)).toMatchObject({ format: "keymaster.storage.catalog-key-backup", version: 1 });
-    expect(__testGetVaultStatus()).toBe("locked");
-    expect(__testGetActivePublicKeyHex()).toBeUndefined();
-    expect(key.publicKeyHex).toBeDefined();
-  });
-
-  it("new and hex-imported records keep private material out of the public index", async () => {
-    const first = await __testCreateVault("pw", { label: "first" });
-    const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
-    for (const key of [first, second]) {
-      const index = await __testGetVaultKeyIndex(key.publicKeyHex!);
-      expect(index).toBeDefined();
-      expect(index).not.toHaveProperty("cipher");
-      expect(index).not.toHaveProperty("privateKey");
-    }
-  }, 15_000);
-
-  it("rolls back active bytes and selected state when active metadata persistence fails", async () => {
-    const first = await __testCreateVault("pw", { label: "first" });
-    const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
-    __testFailNextCoordinatorSnapshotPersist();
-    await expect(__testSetActive(first.publicKeyHex!)).rejects.toThrow("injected coordinator snapshot persist failure");
-    expect(__testGetActivePublicKeyHex()).toBe(second.publicKeyHex);
-    expect(__testGetSnapshot().selectedPublicKeyHex).toBe(second.publicKeyHex);
-  });
-
-  it("deletes selected material while locked and repairs selection to the remaining key", async () => {
-    const first = await __testCreateVault("pw", { label: "first" });
-    const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
-    await __testLock();
-    await __testDeleteKeyMaterial(second.publicKeyHex, "pw");
-    const snapshot = __testGetSnapshot();
-    expect(snapshot.vaultStatus).toBe("locked");
-    expect(snapshot.activePublicKeyHex).toBeUndefined();
-    expect(snapshot.selectedPublicKeyHex).toBe(first.publicKeyHex);
-  });
-
-  it("releases a Delete claim when bucket authentication fails before Hold publication", async () => {
-    const key = await __testCreateVault("pw", { label: "delete-auth" });
-    await __testLock();
-
-    await expect(__testDeleteKeyMaterial(key.publicKeyHex!, "wrong-password")).rejects.toThrow("Invalid password");
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
-    expect(await __testListVaultKeys()).toEqual([
-      expect.objectContaining({ publicKeyHex: key.publicKeyHex }),
-    ]);
-  });
-
-  it("recovers a prepared deletion after Hold commit and Journal failure across worker restart", async () => {
-    const key = await __testCreateVault("pw", { label: "crash-delete" });
-    await __testLock();
-    __testFailKeyLifecycleJournalAfterHold();
-
-    await expect(__testDeleteKeyMaterial(key.publicKeyHex!, "pw"))
-      .rejects.toThrow("injected key lifecycle Journal persist failure");
-    expect(await __testListKeyLifecycleJournals()).toEqual([
-      expect.objectContaining({ publicKeyHex: key.publicKeyHex, phase: "prepared" }),
-    ]);
-    expect(await __testListVaultKeys()).toHaveLength(0);
-
-    // __testRestartWorker follows the production order: Journal recovery runs
-    // before an empty public index can make the Vault look uninitialized.
-    await __testRestartWorker();
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
-    expect(await __testListVaultKeys()).toHaveLength(0);
-    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
-    expect(__testGetVaultStatus()).toBe("uninitialized");
-  }, 15_000);
-
-  it("keeps initial auth metadata and fails closed when new Key rollback is unconfirmed", async () => {
-    __testFailNextOwnerStorageActivation();
-    __testFailNextHoldRollbackCas();
-
-    await expect(__testCreateVault("pw", { label: "rollback-unconfirmed" }))
-      .rejects.toThrow(/rollback-unconfirmed/);
-
-    // The new encrypted Key may still be present in Hold/index.  Keeping the
-    // verifier is what makes the degraded state recoverable instead of
-    // destroying the only authentication route.
-    expect(await __testGetVaultAuthMetadata()).toBeDefined();
-    expect(await __testListVaultKeys()).toHaveLength(1);
-    expect(__testGetVaultStatus()).toBe("locked");
-    expect(__testGetActivePublicKeyHex()).toBeUndefined();
-  }, 15_000);
-
-  it("recovers an orphaned new-Key owner namespace after Hold rollback and worker restart", async () => {
-    const first = await __testCreateVault("pw", { label: "existing" });
-    __testMaterializeNextOwnerStorageActivation();
-    __testFailAfterOwnerStorageActivation();
-    __testFailNextOwnerStorageDeletion();
-
-    await expect(__testImportPrivateKey("pw", {
-      label: "rollback-owner-cleanup",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    })).rejects.toThrow(/rollback-unconfirmed/);
-
-    const orphan = (await __testListKeyLifecycleJournals()).find((journal) => journal.publicKeyHex !== first.publicKeyHex);
-    expect(orphan).toEqual(expect.objectContaining({ operation: "add", phase: "hold-committed" }));
-    expect(__testOwnerStorageNamespaceExists(orphan!.publicKeyHex)).toBe(true);
-    expect(await __testListVaultKeys()).toHaveLength(1);
-
-    await __testRestartWorker();
-
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
-    expect(__testOwnerStorageNamespaceExists(orphan!.publicKeyHex)).toBe(false);
-    expect(await __testListVaultKeys()).toEqual([expect.objectContaining({ publicKeyHex: first.publicKeyHex })]);
-  }, 15_000);
-
-  it("finalizes the last material deletion exactly once to uninitialized", async () => {
-    const key = await __testCreateVault("pw");
-    await __testLock();
-    await __testDeleteKeyMaterial(key.publicKeyHex!, "pw");
-    // 删除事务本身已完成最后一把 Key 的 Vault meta 清理，状态直接收敛
-    // 到 uninitialized；旧的显式 finalize 入口仍保持幂等。
-    expect(__testGetVaultStatus()).toBe("uninitialized");
-    await __testFinalizeEmptyVaultAfterLastKeyDeletion();
-    expect(__testGetVaultStatus()).toBe("uninitialized");
-    expect(await __testGetVaultAuthMetadata()).toBeUndefined();
-    expect(await __testListVaultKeys()).toHaveLength(0);
-  });
-
+    // 第二把 Key 仍用原密码解锁。
+    await expect(__testUnlock(password, (await __testListVaultKeys()).find((key) => key.label === "second-key")!.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
+  }, 20_000);
 });
 
 describe("Catalog Hold lifecycle CAS", () => {
@@ -4742,11 +2067,11 @@ describe("Catalog Hold lifecycle CAS", () => {
     __testResetState();
   });
 
-  it("rejects an add based on a stale Hold snapshot instead of overwriting the concurrent key", async () => {
+  it("并发新增不同 Key 时各自写入文件,互不覆盖", async () => {
     const password = "catalog-cas-password";
-    const current = await makeEncryptedLocalCatalogEntry("catalog-cas-current", "CAS 当前桶", password);
-    const target = await makeEncryptedLocalCatalogEntry("catalog-cas-target", "CAS 目标桶", password);
-    const fixture = makeCatalogBridgeFixture(current, target);
+    const current = makeRuntimeLocalBucket("catalog-cas-current", "CAS 当前桶");
+    const target = makeRuntimeLocalBucket("catalog-cas-target", "CAS 目标桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
     __testSetLocalStorageBridgeOverride(fixture.bridge);
     await __testInstallCatalogLocalBinding(current);
     await __testCreateEmptyVault(password);
@@ -4768,36 +2093,35 @@ describe("Catalog Hold lifecycle CAS", () => {
     });
     barrier.release();
 
-    await expect(staleAdd).rejects.toMatchObject({ code: "storage_conflict" });
-    expect(await __testListVaultKeys()).toEqual([
+    await expect(staleAdd).resolves.toEqual(expect.objectContaining({ label: "stale-add" }));
+    expect(await __testListVaultKeys()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "stale-add" }),
       expect.objectContaining({ publicKeyHex: concurrent.publicKeyHex, label: "concurrent-add" }),
-    ]);
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+    ]));
   }, 20_000);
 
-  it("rejects a first empty-Hold publish when another creator wins the absent-Head CAS", async () => {
+  it("并发首次建库各自写入一把 Key,零冲突", async () => {
     const password = "catalog-absent-cas-password";
-    const current = await makeEncryptedLocalCatalogEntry("catalog-absent-cas-current", "CAS 首次桶", password);
-    const target = await makeEncryptedLocalCatalogEntry("catalog-absent-cas-target", "CAS 首次目标桶", password);
-    const fixture = makeCatalogBridgeFixture(current, target);
+    const current = makeRuntimeLocalBucket("catalog-absent-cas-current", "CAS 首次桶");
+    const target = makeRuntimeLocalBucket("catalog-absent-cas-target", "CAS 首次目标桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
     __testSetLocalStorageBridgeOverride(fixture.bridge);
     await __testInstallCatalogLocalBinding(current);
 
     const barrier = __testBlockNextCatalogHoldPublish();
-    const staleCreator = __testCreateVault(password, { label: "stale-first-key" });
+    const firstCreator = __testCreateVault(password, { label: "first-key" });
     await barrier.entered;
 
-    const winner = await __testCreateVault(password, { label: "winner-first-key" });
+    // 一 Key 一文件：后到者写自己的文件,不冲突、不覆盖先到者。
+    const lateCreator = await __testCreateVault(password, { label: "late-first-key" });
     barrier.release();
 
-    await expect(staleCreator).rejects.toMatchObject({ code: "storage_conflict" });
-    expect(await __testListVaultKeys()).toEqual([
-      expect.objectContaining({ publicKeyHex: winner.publicKeyHex, label: "winner-first-key" }),
-    ]);
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
+    await expect(firstCreator).resolves.toEqual(expect.objectContaining({ label: "first-key" }));
+    expect(lateCreator).toEqual(expect.objectContaining({ label: "late-first-key" }));
+    expect((await __testListVaultKeys()).map((key) => key.label).sort()).toEqual(["first-key", "late-first-key"]);
   }, 20_000);
 
-  it("does not let a failed Hold rollback overwrite a newer concurrent Head", async () => {
+  it("失败新增回滚只删除自己的文件,不覆盖并发写入的 Key", async () => {
     const first = await __testCreateVault("pw", { label: "existing" });
     __testMaterializeNextOwnerStorageActivation();
     __testFailAfterOwnerStorageActivation();
@@ -4818,86 +2142,15 @@ describe("Catalog Hold lifecycle CAS", () => {
     });
     rollbackBarrier.release();
 
-    await expect(failedAdd).rejects.toThrow(/rollback-unconfirmed/);
-    expect(await __testListVaultKeys()).toEqual(expect.arrayContaining([
+    await expect(failedAdd).rejects.toThrow("injected post-activation Key mutation failure");
+    const keys = await __testListVaultKeys();
+    expect(keys).toEqual(expect.arrayContaining([
       expect.objectContaining({ publicKeyHex: first.publicKeyHex, label: "existing" }),
       expect.objectContaining({ publicKeyHex: concurrent.publicKeyHex, label: "concurrent-after-publish" }),
     ]));
-    expect(await __testListKeyLifecycleJournals()).toEqual([
-      expect.objectContaining({ operation: "add", phase: "hold-committed" }),
-    ]);
+    const failedPublicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true)).toLowerCase();
+    expect(keys.some((key) => key.publicKeyHex.toLowerCase() === failedPublicKeyHex)).toBe(false);
   }, 20_000);
-
-  it("blocks same-key Delete while Add has committed Hold but not Owner activation", async () => {
-    const first = await __testCreateVault("pw", { label: "existing" });
-    __testMaterializeNextOwnerStorageActivation();
-    const owner = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
-    const ownerBarrier = __testBlockNextKeyLifecycleOwnerSideEffect();
-    const adding = __testImportPrivateKey("pw", {
-      label: "lifecycle-add",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    await ownerBarrier.entered;
-
-    const deleting = __testDeleteKeyMaterial(owner, "pw");
-    await expect(deleting).rejects.toMatchObject({ code: "storage_conflict" });
-    ownerBarrier.release();
-
-    await expect(adding).resolves.toEqual(expect.objectContaining({ publicKeyHex: owner }));
-    expect(await __testListVaultKeys()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ publicKeyHex: first.publicKeyHex }),
-      expect.objectContaining({ publicKeyHex: owner, label: "lifecycle-add" }),
-    ]));
-    expect(__testOwnerStorageNamespaceExists(owner)).toBe(true);
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
-  }, 20_000);
-
-  it("blocks same-key Add while Delete has committed Hold but not Owner deletion", async () => {
-    await __testCreateVault("pw", { label: "existing" });
-    __testMaterializeNextOwnerStorageActivation();
-    const target = await __testImportPrivateKey("pw", {
-      label: "lifecycle-delete",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    const owner = target.publicKeyHex;
-    expect(__testOwnerStorageNamespaceExists(owner)).toBe(true);
-
-    const ownerBarrier = __testBlockNextKeyLifecycleOwnerSideEffect();
-    const deleting = __testDeleteKeyMaterial(owner, "pw");
-    await ownerBarrier.entered;
-
-    const readding = __testImportPrivateKey("pw", {
-      label: "lifecycle-readd",
-      material: { hex: TEST_PRIV_2 },
-      format: "hex",
-      capabilities: ["p2pkh"],
-    });
-    await expect(readding).rejects.toMatchObject({ code: "storage_conflict" });
-    ownerBarrier.release();
-
-    await expect(deleting).resolves.toBeUndefined();
-    expect(await __testListVaultKeys()).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ publicKeyHex: owner }),
-    ]));
-    expect(__testOwnerStorageNamespaceExists(owner)).toBe(false);
-    expect(await __testListKeyLifecycleJournals()).toHaveLength(0);
-  }, 20_000);
-});
-
-describe("Coordinator K-V GC registry enumeration", () => {
-  beforeEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-
-  afterEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
 
   it("reopens a bucket namespace from central declarations after its handle is closed", async () => {
     const orphanPath = await __testSeedCoordinatorKeyValueGarbage("bucket");

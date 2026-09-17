@@ -39,7 +39,7 @@ import type {
   StorageRuntimeStatus
 } from "./storage/runtime.js";
 import type { StorageProviderConfigDraft } from "./storage/profile.js";
-import type { ExistingRemoteStorageConnectPlan, InitialSetupPlan, StorageBucketCatalogEntryV2, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
+import type { ExistingRemoteStorageConnectPlan, InitialSetupPlan, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
 import type {
   P2pkhProviderSettings,
   P2pkhProviderRegistrySnapshot,
@@ -148,7 +148,9 @@ export type CoordinatorStorageControl =
   | { type: "unlock-bucket"; password: string }
   /** 最终确认后的首桶 + 首 Key 单一事务；密码和材料只在本次请求内存在。 */
   | { type: "initial-setup"; plan: InitialSetupPlan }
-  /** 明确的只读发现/认证已有远端入口；不得隐式创建。 */
+  /** 只读探测：连接并列出 keys/,判定“已有钱包”还是“空桶”。 */
+  | { type: "probe-bucket"; plan: import("./storage/catalog.js").BucketProbePlan }
+  /** 连接已有钱包（已有 KeyHold 文件）入口；不得隐式创建。 */
   | { type: "connect-existing-remote"; plan: ExistingRemoteStorageConnectPlan }
   /** 响应丢失后的同事务结果查询；只携带公开事务 ID。 */
   | { type: "initial-setup-result"; transactionId: string }
@@ -164,18 +166,12 @@ export type CoordinatorStorageControl =
       connection?: StorageBucketConnectionConfigV1;
     }
   /** 使用目标桶密码完成 Provider/Root/Keys 会话切换；目录由页面桥原子 CAS。 */
-  | { type: "switch-bucket"; bucket: StorageBucketCatalogEntryV2; password: string }
+  | { type: "switch-bucket"; bucket: import("./storage/profile.js").StorageRuntimeBucketV1; password: string }
   /** 当前桶连接配置的原子重配置；密码只用于本次验证和重新封装。 */
   | { type: "change-bucket-config"; config: StorageBucketConnectionConfigV1; label?: string; password: string }
   /** 当前桶显示名称的目录 CAS；必须由当前 Coordinator 执行。 */
   | { type: "rename-bucket"; label: string }
   | { type: "retry" }
-  /** 当前新版桶的全量改密；Worker 同时更新 Hold 快照与桶内 Vault records。 */
-  | { type: "change-bucket-password"; oldPassword: string; newPassword: string }
-  /** 页面重载或 Worker 重启后列出未完成的密码轮转；返回值不含密码或凭据。 */
-  | { type: "list-pending-password-rotations" }
-  /** 未完成的密码轮转恢复；用户重新提供新旧密码，由 Worker 按持久化事务收敛。 */
-  | { type: "resume-bucket-password-rotation"; operationId: string; oldPassword: string; newPassword: string }
   | { type: "cancel-probe" }
   | { type: "capabilities" }
   | { type: "probe-capabilities" }

@@ -16,28 +16,34 @@ export async function openApplication(page: Page): Promise<void> {
   await expect(page).toHaveTitle("KeyMaster");
 }
 
-/** 从真实页面的 localStorage 读取目录投影，不读取业务私钥。 */
+/**
+ * 从真实页面的 localStorage 读取目录投影，不读取业务私钥。
+ *
+ * 生产真值统一在设备引导记录 `keymaster.device-bootstrap.v1` 中；旧的
+ * `keymaster.storage.catalog.v2` 键已从生产代码删除，测试不能继续读旧键，
+ * 否则会把“本机引导记录丢失”误报成“目录字段缺失”。
+ */
 export async function readLocalCatalog(page: Page): Promise<LocalCatalogSnapshot | null> {
   return page.evaluate(() => {
-    const raw = window.localStorage.getItem("keymaster.storage.catalog.v2");
+    const raw = window.localStorage.getItem("keymaster.device-bootstrap.v1");
     if (!raw) return null;
     try {
       const parsed: unknown = JSON.parse(raw);
       if (!parsed || typeof parsed !== "object") return null;
-      const value = parsed as { selectedBucketId?: unknown; buckets?: unknown };
-      const buckets = Array.isArray(value.buckets)
-        ? value.buckets.map((bucket) => {
-            if (!bucket || typeof bucket !== "object") return {};
-            const item = bucket as { bucketId?: unknown; label?: unknown; backend?: unknown };
+      const value = parsed as { selectedRemoteStorageId?: unknown; connections?: unknown };
+      const buckets = Array.isArray(value.connections)
+        ? value.connections.map((connection) => {
+            if (!connection || typeof connection !== "object") return {};
+            const item = connection as { remoteStorageId?: unknown; displayName?: unknown; providerId?: unknown };
             return {
-              ...(typeof item.bucketId === "string" ? { bucketId: item.bucketId } : {}),
-              ...(typeof item.label === "string" ? { label: item.label } : {}),
-              ...(typeof item.backend === "string" ? { backend: item.backend } : {}),
+              ...(typeof item.remoteStorageId === "string" ? { bucketId: item.remoteStorageId } : {}),
+              ...(typeof item.displayName === "string" ? { label: item.displayName } : {}),
+              ...(typeof item.providerId === "string" ? { backend: item.providerId } : {}),
             };
           })
         : undefined;
       return {
-        ...(typeof value.selectedBucketId === "string" ? { selectedBucketId: value.selectedBucketId } : {}),
+        ...(typeof value.selectedRemoteStorageId === "string" ? { selectedBucketId: value.selectedRemoteStorageId } : {}),
         ...(buckets === undefined ? {} : { buckets }),
       };
     } catch {

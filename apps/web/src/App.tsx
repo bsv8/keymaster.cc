@@ -25,11 +25,12 @@ import {
 } from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResource } from "webloom-framework/react";
 import { useCurrentPath, useHostVersion, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
-import { StorageBucketManagerPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
+import { StorageUnavailableGuard } from "@keymaster/platform-storage";
 import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
 import { LockedShell } from "./shell/LockedShell.js";
 import { UnlockedShell } from "./shell/UnlockedShell.js";
 import { InitialSetupPage } from "./shell/InitialSetupPage.js";
+import { StorageAuthenticationPage } from "./shell/StorageAuthenticationPage.js";
 import { StartupError, StartupPlaceholder } from "./shell/StartupPlaceholder.js";
 
 /** 协议 popup 单一路由。 */
@@ -43,10 +44,6 @@ function isProtocolPopupPath(path: string): boolean {
 
 export function App() {
   const path = useCurrentPath();
-  // 存储桶是系统最外层管理面；即使 Vault 尚未初始化、已锁定或存储
-  // runtime 尚未 ready，也必须能进入这个页面处理桶目录。
-  if (path === "/storage/buckets") return <StorageBucketManagerPage />;
-
   return <ApplicationBootstrapApp path={path} />;
 }
 
@@ -59,8 +56,8 @@ interface ApplicationBootstrapAppProps {
  *
  * WebLoom 的 useResource 会通过 ensure() 启动资源；当 Storage bucket
  * 世代切换正在同步回收定义时，直接调用 ensure 会把一个可恢复的短暂窗口
- * 升级成 fatal。把检查放在独立组件层，既保留 Hook 规则，也让 /storage/buckets
- * 完全绕过应用启动资源。
+ * 升级成 fatal。把检查放在独立组件层，既保留 Hook 规则，也让启动恢复
+ * 页完全绕过应用启动资源。
  */
 function ApplicationBootstrapApp({ path }: ApplicationBootstrapAppProps) {
   const host = usePluginHost();
@@ -175,6 +172,17 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
       <StartupError
         title="存储运行时正在恢复"
         message="存储状态资源暂不可用，已保留当前钱包状态；请稍后重试。"
+        onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
+      />
+    );
+  }
+
+  if (bootstrapSnapshot.phase === "storage-authentication") {
+    if (hasStorageController) return <StorageAuthenticationPage />;
+    return (
+      <StartupError
+        title="存储认证服务未就绪"
+        message="已检测到已有存储连接，但存储认证能力尚未注册。请稍后重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
       />
     );

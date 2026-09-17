@@ -116,7 +116,7 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     taskIds: ["p2pkh.transactions-sync"],
     requiredProductIds: ["background", "p2pkh"],
     serviceIds: ["p2pkh.provider-registry", "p2pkh.asset-service"],
-    storagePurposes: ["state"],
+    storagePurposes: [""],
     finalIoAuditEntries: [{ taskId: "p2pkh.transactions-sync", operation: "p2pkh.sync" }],
   },
   {

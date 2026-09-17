@@ -1,12 +1,7 @@
 import type {
-  DevicePasswordRotationRecordV1,
-  DeviceRemoteConnectionV1,
-  DeviceRemoteRecoveryPointerV1,
-  StorageBucketCatalogEntryV2,
   StorageBucketListPage,
   StorageBucketObject,
   StorageBucketProbeResult,
-  StorageCatalogV2,
   StorageBucketProvider,
   StorageBucketWriteCondition
 } from "@keymaster/contracts";
@@ -39,55 +34,29 @@ export interface LocalStorageBridgeObject {
   lastModified?: string;
 }
 
-/**
- * 切桶暂存阶段的授权范围。目标桶尚未成为目录 selectedBucket，页面桥仍
- * 可以在旧桶保持选中的前提下为 Coordinator 读取/写入目标 Local 命名空间。
- * 该字段由当前 Coordinator 通过 hello 租约传入，页面会在真正 I/O 前重新
- * 校验目录中的目标密文条目和旧 selectedBucketId。
- */
-export interface LocalStorageBridgeCandidateBucket {
-  bucket: StorageBucketCatalogEntryV2;
-  expectedSelectedBucketId?: string;
-  /** Coordinator 为目标 Root 分配的暂存世代；页面桥在 I/O 点校验。 */
-  bucketGeneration?: number;
-  /** 首次初始化专用：目录仍为空时允许暂存候选命名空间。 */
-  initialSetup?: boolean;
-  /** 仅允许清理本事务候选对象；即使目录已被其它事务提交也可 list/delete。 */
-  cleanupOnly?: boolean;
-}
-
 /** 页面桥的窄操作协议；桥在真正执行设备 I/O 前必须重新校验租约。 */
 export type LocalStorageBridgeRequest =
-  | { type: "get"; bucketId: string; bucketGeneration: number; path: string; authorityInstanceId?: string; leaseId?: string; candidateBucket?: LocalStorageBridgeCandidateBucket; ifMatch?: string; signal?: AbortSignal }
-  | { type: "list"; bucketId: string; bucketGeneration: number; path?: never; authorityInstanceId?: string; leaseId?: string; candidateBucket?: LocalStorageBridgeCandidateBucket; prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }
-  | { type: "put"; bucketId: string; bucketGeneration: number; path: string; authorityInstanceId?: string; leaseId?: string; candidateBucket?: LocalStorageBridgeCandidateBucket; bytes: Uint8Array; condition?: StorageBucketWriteCondition; signal?: AbortSignal }
-  | { type: "delete"; bucketId: string; bucketGeneration: number; path: string; authorityInstanceId?: string; leaseId?: string; candidateBucket?: LocalStorageBridgeCandidateBucket; ifMatch?: string; signal?: AbortSignal }
-  /**
-   * Coordinator 改密后的目录 CAS。它只传输已经加密的桶条目，不传密码、
-   * Keys 或明文连接凭据；页面端在同一把目录 Web Lock 中校验 expectedBucket。
-   */
-  | { type: "catalog-update"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; expectedBucket: StorageBucketCatalogEntryV2; nextBucket: StorageBucketCatalogEntryV2; /** CAS 响应丢失后的回滚请求；目标已是 nextBucket 时允许幂等成功。 */ rollback?: boolean; signal?: AbortSignal }
-  /** 首次初始化的唯一目录提交点；正常调用把空目录变成一个 selected 桶，rollback 只移除本次同一条目。 */
-  | { type: "catalog-commit"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; targetBucket: StorageBucketCatalogEntryV2; rollback?: boolean; signal?: AbortSignal }
-  /** 切桶最终目录 CAS；不传密码，仅更新 selectedBucketId。 */
-  | { type: "catalog-select"; bucketId: string; bucketGeneration: number; authorityInstanceId?: string; leaseId?: string; expectedSelectedBucketId?: string; /** CAS 请求丢失响应时允许按目标桶回收；页面仍会在 Web Lock 内确认目录当前值。 */ rollbackFromSelectedBucketId?: string; targetBucket: StorageBucketCatalogEntryV2; signal?: AbortSignal }
-  /** 读取当前目录；用于并发初始化回滚前重新确认权威引用。 */
-  | { type: "catalog-read"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
-  | { type: "device-bootstrap-read"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
-  | { type: "device-bootstrap-connection-upsert"; authorityInstanceId?: string; leaseId?: string; connection: DeviceRemoteConnectionV1; select?: boolean; signal?: AbortSignal }
-  | { type: "device-bootstrap-recovery-upsert"; authorityInstanceId?: string; leaseId?: string; recovery: DeviceRemoteRecoveryPointerV1; signal?: AbortSignal }
-  | { type: "device-bootstrap-recovery-delete"; authorityInstanceId?: string; leaseId?: string; operationId: string; signal?: AbortSignal }
-  | { type: "device-bootstrap-rotation-upsert"; authorityInstanceId?: string; leaseId?: string; rotation: DevicePasswordRotationRecordV1; signal?: AbortSignal }
-  | { type: "device-bootstrap-rotation-delete"; authorityInstanceId?: string; leaseId?: string; operationId: string; signal?: AbortSignal };
+  | { type: "get"; bucketId: string; bucketGeneration: number; path: string; authorityInstanceId?: string; leaseId?: string; ifMatch?: string; objectPrefix?: string; signal?: AbortSignal }
+  | { type: "list"; bucketId: string; bucketGeneration: number; path?: never; authorityInstanceId?: string; leaseId?: string; prefix?: string; cursor?: string; limit?: number; objectPrefix?: string; signal?: AbortSignal }
+  | { type: "put"; bucketId: string; bucketGeneration: number; path: string; authorityInstanceId?: string; leaseId?: string; bytes: Uint8Array; condition?: StorageBucketWriteCondition; objectPrefix?: string; signal?: AbortSignal }
+  | { type: "delete"; bucketId: string; bucketGeneration: number; path: string; authorityInstanceId?: string; leaseId?: string; ifMatch?: string; objectPrefix?: string; signal?: AbortSignal }
+  /** 设备桶记录（keymaster.device.<ID>）的读/写/删/枚举。 */
+  | { type: "device-record-list"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
+  | { type: "device-record-get"; authorityInstanceId?: string; leaseId?: string; remoteStorageId: string; signal?: AbortSignal }
+  | { type: "device-record-put"; authorityInstanceId?: string; leaseId?: string; remoteStorageId: string; record: import("@keymaster/contracts").DeviceRecordV1; replace?: boolean; signal?: AbortSignal }
+  | { type: "device-record-delete"; authorityInstanceId?: string; leaseId?: string; remoteStorageId: string; signal?: AbortSignal }
+  /** 浏览器 session（keymaster.session）的读/写。 */
+  | { type: "session-read"; authorityInstanceId?: string; leaseId?: string; signal?: AbortSignal }
+  | { type: "session-write"; authorityInstanceId?: string; leaseId?: string; session: import("@keymaster/contracts").KeymasterSessionV1; signal?: AbortSignal };
 
 export type LocalStorageBridgeResponse =
   | { type: "object"; object?: LocalStorageBridgeObject }
   | { type: "list"; objects: LocalStorageBridgeObject[]; nextCursor?: string }
   | { type: "write"; etag?: string; lastModified?: string }
   | { type: "void" }
-  | { type: "catalog"; bucket: StorageBucketCatalogEntryV2 }
-  | { type: "catalog-state"; catalog: StorageCatalogV2 }
-  | { type: "device-bootstrap"; catalog: import("@keymaster/contracts").DeviceBootstrapCatalogV1 | null };
+  | { type: "device-records"; entries: Array<{ remoteStorageId: string; record: import("@keymaster/contracts").DeviceRecordV1 }>; invalidKeys: string[] }
+  | { type: "device-record"; record?: import("@keymaster/contracts").DeviceRecordV1 }
+  | { type: "session"; session?: import("@keymaster/contracts").KeymasterSessionV1 };
 
 export interface LocalStorageBucketProviderOptions {
   /** 测试/开发宿主显式注入的同步键值设施。 */
@@ -98,10 +67,10 @@ export interface LocalStorageBucketProviderOptions {
   locks?: LocalStorageLocks;
   /** 抽象桶身份，不是物理 key 前缀。 */
   bucketId: string;
+  /** v1 Local 物理对象前缀；省略时仅兼容旧测试默认值。 */
+  objectPrefix?: string;
   /** 当前桶世代；桥和 Provider 都在执行点校验它。 */
   bucketGeneration?: number;
-  /** 目标桶暂存阶段允许在目录仍选中旧桶时访问该桶。 */
-  candidateBucket?: LocalStorageBridgeCandidateBucket;
   /** 测试时可注入时钟。 */
   now?: () => number;
 }
@@ -111,7 +80,8 @@ function fail(code: StorageErrorCode, message: string): StorageRuntimeError {
 }
 
 function assertBucketId(bucketId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(bucketId)) {
+  // 逻辑桶 ID 允许 `:` 等字符；它不会产生 localStorage 的层级分隔符。
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(bucketId)) {
     throw fail("storage_invalid_path", "Storage bucket ID is invalid");
   }
 }
@@ -180,11 +150,6 @@ function mapStorageError(caught: unknown): StorageRuntimeError {
 }
 
 function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStorageBridgeRequest {
-  if (input.type === "catalog-update" || input.type === "catalog-select") {
-    const { signal, ...request } = input;
-    void signal;
-    return request;
-  }
   if (input.type === "put") {
     const { signal, condition, ...request } = input;
     void signal;
@@ -214,7 +179,13 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
   if (!storage && !options.bridge) throw fail("storage_unavailable", "Injected Local Provider storage or bridge is required");
   let closed = false;
   const now = options.now ?? (() => Date.now());
-  const prefix = `keymaster.bucket.${bucketId}.`;
+  const prefix = options.objectPrefix ?? `keymaster.bucket.${bucketId}.`;
+  // v1 Local 使用 `${remoteStorageId}/` 作为桶根；保留旧的 `.` 形式仅
+  // 让未迁移的测试夹具继续可读，生产 device-bootstrap 路径总是显式传入
+  // slash 前缀。
+  if (!prefix || prefix.length > 1_024 || /[\u0000-\u001f\u007f]/u.test(prefix) || (!prefix.endsWith("/") && !prefix.endsWith("."))) {
+    throw fail("storage_invalid_path", "Local storage object prefix is invalid");
+  }
   const locks: LocalStorageLocks | BrowserStorageLocks | undefined = options.locks ?? browserStorageLocks();
 
   function assertOpen(path?: string, options: { allowEmptyPath?: boolean } = {}): void {
@@ -282,7 +253,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
   async function get(path: string, input: { signal?: AbortSignal; ifMatch?: string } = {}): Promise<StorageBucketObject | undefined> {
     assertOpen(path);
     const result = options.bridge
-      ? await bridgeRequest({ type: "get", bucketId, bucketGeneration, path, ...(options.candidateBucket ? { candidateBucket: options.candidateBucket } : {}), ...(input.ifMatch ? { ifMatch: input.ifMatch } : {}), signal: input.signal })
+      ? await bridgeRequest({ type: "get", bucketId, bucketGeneration, path, objectPrefix: prefix, ...(input.ifMatch ? { ifMatch: input.ifMatch } : {}), signal: input.signal })
       : { type: "object" as const, object: readLocal(path) };
     if (result.type !== "object") throw fail("storage_provider_error", "Local storage bridge returned an invalid read result");
     if (result.object && input.ifMatch && result.object.etag !== input.ifMatch) throw fail("storage_conflict", "Storage object changed");
@@ -295,7 +266,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
     return withWriter(async () => {
       if (condition.signal?.aborted) throw fail("storage_unavailable", "Storage operation was cancelled");
       if (options.bridge) {
-        const result = await bridgeRequest({ type: "put", bucketId, bucketGeneration, path, ...(options.candidateBucket ? { candidateBucket: options.candidateBucket } : {}), bytes: bytes.slice(), condition, signal: condition.signal });
+        const result = await bridgeRequest({ type: "put", bucketId, bucketGeneration, path, objectPrefix: prefix, bytes: bytes.slice(), condition, signal: condition.signal });
         if (result.type !== "write") throw fail("storage_provider_error", "Local storage bridge returned an invalid write result");
         return result;
       }
@@ -313,7 +284,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
     await withWriter(async () => {
       if (input.signal?.aborted) throw fail("storage_unavailable", "Storage operation was cancelled");
       if (options.bridge) {
-        const result = await bridgeRequest({ type: "delete", bucketId, bucketGeneration, path, ...(options.candidateBucket ? { candidateBucket: options.candidateBucket } : {}), ...(input.ifMatch ? { ifMatch: input.ifMatch } : {}), signal: input.signal });
+        const result = await bridgeRequest({ type: "delete", bucketId, bucketGeneration, path, objectPrefix: prefix, ...(input.ifMatch ? { ifMatch: input.ifMatch } : {}), signal: input.signal });
         if (result.type !== "void") throw fail("storage_provider_error", "Local storage bridge returned an invalid delete result");
         return;
       }
@@ -356,7 +327,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
       const listPrefix = input.prefix ?? "";
       assertOpen(listPrefix && listPrefix.endsWith("/") ? listPrefix.slice(0, -1) : listPrefix, { allowEmptyPath: true });
       if (options.bridge) {
-        const result = await bridgeRequest({ type: "list", bucketId, bucketGeneration, ...(options.candidateBucket ? { candidateBucket: options.candidateBucket } : {}), ...input });
+        const result = await bridgeRequest({ type: "list", bucketId, bucketGeneration, objectPrefix: prefix, ...input });
         if (result.type !== "list") throw fail("storage_provider_error", "Local storage bridge returned an invalid list result");
         return { objects: result.objects, nextCursor: result.nextCursor };
       }

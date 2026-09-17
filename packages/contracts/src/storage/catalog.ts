@@ -73,27 +73,6 @@ export interface StorageRecordV1 {
   cipher: StorageCipherEnvelopeV1;
 }
 
-/** 本机目录中的一个桶条目；不保存 Keys 列表。 */
-export interface StorageBucketCatalogEntryV2 {
-  /** 桶的稳定身份，不直接等同于 S3 bucket 名称。 */
-  bucketId: string;
-  /** 桶的显示名称。 */
-  label: string;
-  /** 正式后端：localStorage 或 S3。 */
-  backend: StorageBucketBackend;
-  /** 连接配置版本；关联同版本测试结果。 */
-  configRevision: number;
-  /** 与桶密码对应的公共 KDF 参数。 */
-  keyDerivation: StorageKeyDerivationV1;
-  /** KeymasterHold 加密的连接配置。 */
-  encryptedConfig: StorageRecordV1;
-  /** 最近一次提交的 Hold 快照版本；没有 Key 时仍可以为 0。 */
-  snapshotRevision: number;
-  /** 创建时间（毫秒）。 */
-  createdAt: number;
-  /** 最后修改时间（毫秒）。 */
-  updatedAt: number;
-}
 
 /**
  * 桶内公开 Key 索引；只保存列表展示和选择所需的元数据。
@@ -123,47 +102,12 @@ export interface StorageCatalogKeyIndexRecordV1 {
   source?: string;
 }
 
-/** 本机 localStorage 中的多桶目录。 */
-export interface StorageCatalogV2 {
-  /** 固定目录格式标识。 */
-  format: "keymaster.storage.catalog";
-  /** 目录版本。 */
-  version: 2;
-  /** 当前选中的桶；未选择时为空。 */
-  selectedBucketId?: string;
-  /** 本机连接目录；不复制桶内 Keys。 */
-  buckets: StorageBucketCatalogEntryV2[];
-}
-
-/** 页面内目录写入后的同步通知；跨标签页仍使用原生 storage 事件。 */
-export const STORAGE_CATALOG_CHANGED_EVENT = "keymaster.storage.catalog-changed";
-
-/** 当前桶改密成功后返回给页面的目录更新载荷；不包含密码或明文 Key。 */
-export interface StorageBucketPasswordRotationResultV1 {
-  /** 操作结果。 */
-  ok: true;
-  /** 需要由页面目录按 Web Lock 写回的新版桶条目。 */
-  bucket: StorageBucketCatalogEntryV2;
-  /** Hold 提交头发布时由 Provider 直接返回的 ETag；缺失表示发布结果不能用于安全回滚。 */
-  publishedHeadEtag?: string;
-}
-
-/** 未完成的密码轮转恢复结果；只返回公开条目与收敛方向。 */
-export interface StorageBucketPasswordRotationResumeResultV1 {
-  /** 操作结果。 */
-  ok: true;
-  /** completed：远端已是新密码形态并补齐本机；revoked：已安全撤销回旧密码形态。 */
-  outcome: "completed" | "revoked";
-  /** 收敛后的权威桶条目。 */
-  bucket: StorageBucketCatalogEntryV2;
-}
-
 /** 跨桶切换成功后的 Coordinator 结果；不返回密码、配置明文或私钥。 */
 export interface StorageBucketSwitchResultV1 {
   /** 操作结果。 */
   ok: true;
-  /** 已通过目标桶密码认证并成为当前会话的目录条目。 */
-  bucket: StorageBucketCatalogEntryV2;
+  /** 已成为当前会话的运行时桶绑定。 */
+  bucket: import("./profile.js").StorageRuntimeBucketV1;
   /** 目标桶当前是否已经有可用的 Key 会话。 */
   vaultUnlocked: boolean;
 }
@@ -179,37 +123,69 @@ export interface InitialSetupPlan {
   transactionId: string;
   /** 桶在本机界面显示的名称。 */
   bucketLabel: string;
+  /** local 桶的本机 ID(= namespace,即设备记录键)；省略时由 Coordinator 随机生成，s3 按物理位置派生。 */
+  remoteStorageId?: string;
   /** 与 connection.kind 对齐的正式后端。 */
   backend: StorageBucketBackend;
   /** 尚未持久化的连接配置；S3 凭据只在本次提交调用中出现。 */
   connection: StorageBucketConnectionConfigV1;
-  /** 桶密码；Coordinator 完成提交后立即清零请求对象中的副本。 */
-  bucketPassword: string;
-  /** 要和桶快照一起提交的第一把 Key。 */
+  /**
+   * 启动密码（会话密码）；只有 s3 需要：用于加密设备记录里的连接参数,
+   * 并把 KDF 参数写入 session。local 桶省略。
+   */
+  startupPassword?: string;
+  /** 要和桶快照一起提交的第一把 Key（含它自己的密码）。 */
   firstKey: InitialSetupFirstKey;
 }
 
-/** 明确的“连接已有远端”计划；不会创建 Hold、默认设置或首 Key。 */
+/** 连接已有钱包（桶内已有 KeyHold 文件）的计划；不会创建新 Key。 */
 export interface ExistingRemoteStorageConnectPlan {
-  /** 本机连接操作 ID，只用于最小恢复指针。 */
+  /** 本机连接操作 ID，只用于幂等。 */
   operationId: string;
-  /** 由用户/外部发现明确提供的既有远端稳定身份。 */
-  remoteStorageId: string;
-  /** 本机设备引导中的显示名称。 */
+  /** local 桶的本机 ID(= namespace)；s3 省略时由物理位置派生。 */
+  remoteStorageId?: string;
+  /** 本机显示名称。 */
   displayName: string;
   /** 与 connection.kind 对齐的 Provider。 */
   backend: StorageBucketBackend;
   /** 仅在本次 Worker 调用期间存在的连接位置与凭据。 */
   connection: StorageBucketConnectionConfigV1;
-  /** 用于认证 root、Hold 并解密已有运行态。 */
-  bucketPassword: string;
+  /** 要解锁的 Key；省略时用 session.activeKey,再回退第一把。 */
+  publicKeyHex?: string;
+  /** 该 Key 自己的密码（KeyHold 文档）。 */
+  keyPassword: string;
+  /** 启动密码（会话密码）；s3 用于加密本机设备记录,local 省略。 */
+  startupPassword?: string;
 }
+
+/** 连接前探测：只读 keys/ 目录,判定“已有钱包”还是“空桶”。 */
+export interface BucketProbePlan {
+  /** 探测操作 ID,只用于诊断。 */
+  operationId: string;
+  /** 与 connection.kind 对齐的 Provider。 */
+  backend: StorageBucketBackend;
+  /** 尚未持久化的连接位置与凭据。 */
+  connection: StorageBucketConnectionConfigV1;
+  /** local 桶的本机 ID(= namespace)；新建探测省略，由 Coordinator 按操作 ID 派生。 */
+  remoteStorageId?: string;
+}
+
+/** 探测结果：读到至少一份可解析 KeyHold 文件 = has-keys。 */
+export type BucketProbeResult =
+  | {
+      ok: true;
+      state: "has-keys";
+      /** 公开身份与标签,不含密码或密文。 */
+      keys: Array<{ publicKeyHex: string; label: string }>;
+    }
+  | { ok: true; state: "empty" }
+  | { ok: false; error: StorageUserFacingError };
 
 /** 连接已有远端成功后公开的最小运行态摘要。 */
 export type ExistingRemoteStorageConnectResult =
   | {
       ok: true;
-      bucket: StorageBucketCatalogEntryV2;
+      bucket: import("./profile.js").StorageRuntimeBucketV1;
       activeKey?: InitialSetupKeyResult;
     }
   | {
@@ -226,6 +202,8 @@ export type InitialSetupFirstKey =
       label: string;
       /** 首 Key 的公开能力，例如 p2pkh。 */
       capabilities: string[];
+      /** 这把 Key 自己的密码（KeyHold 文档）；与启动密码无关。 */
+      password: string;
     }
   | {
       /** 导入由页面 importer 解析并校验过的私钥材料。 */
@@ -240,6 +218,8 @@ export type InitialSetupFirstKey =
       source?: string;
       /** 首 Key 的公开能力，例如 p2pkh。 */
       capabilities: string[];
+      /** 这把 Key 自己的密码（KeyHold 文档）；与启动密码无关。 */
+      password: string;
     };
 
 /** 首次初始化可公开给页面的稳定阶段。 */
@@ -293,8 +273,8 @@ export type InitialSetupResult =
   | {
       /** 提交已完成，桶、Hold、Vault、首 Key 和运行态均已安装。 */
       ok: true;
-      /** 已提交并选中的桶目录条目。 */
-      bucket: StorageBucketCatalogEntryV2;
+      /** 已提交并选中的运行时桶绑定。 */
+      bucket: import("./profile.js").StorageRuntimeBucketV1;
       /** 已激活的首 Key 公开摘要。 */
       firstKey: InitialSetupKeyResult;
     }

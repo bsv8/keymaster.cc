@@ -1,6 +1,6 @@
 export { storagePlatformPlugin, storagePlatformSetup, STORAGE_PLATFORM_PLUGIN_ID } from "./manifest.js";
 export { StorageOnboardingPage } from "./ui/StorageOnboardingPage.js";
-export { StorageBucketManagerPage, StorageBucketManagerEntry } from "./ui/StorageBucketManagerPage.js";
+export { StorageBucketManagerPage } from "./ui/StorageBucketManagerPage.js";
 export { BucketConnectionFields } from "./ui/BucketConnectionFields.js";
 export type { BucketConnectionFieldsProps } from "./ui/BucketConnectionFields.js";
 export {
@@ -29,23 +29,14 @@ export { StorageRuntimeError } from "./runtime/storageError.js";
 export { browserStorageLocks, browserStorageLockMode } from "./runtime/browserLocks.js";
 export { StorageHealthController } from "./runtime/storageHealthController.js";
 export type { StorageHealthSnapshot, StorageProbeOptions } from "./runtime/storageHealthController.js";
-export { StorageBootstrapController } from "./bootstrap/storageBootstrapController.js";
-export type { StorageBootstrapControllerOptions, StorageBootstrapResult } from "./bootstrap/storageBootstrapController.js";
 export { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 export type { BucketProvider, BucketObject, BucketListPage, BucketProbeResult } from "./bucket-providers/bucketProvider.js";
 export { createLocalStorageBucketProvider } from "./bucket-providers/local/localStorageBucketProvider.js";
-export type { LocalStorageLike, LocalStorageLocks, LocalStorageBucketProviderOptions, LocalStorageBridgeCandidateBucket, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "./bucket-providers/local/localStorageBucketProvider.js";
+export type { LocalStorageLike, LocalStorageLocks, LocalStorageBucketProviderOptions, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "./bucket-providers/local/localStorageBucketProvider.js";
 export { createProviderBackedBucketObjectStore } from "./bucket-providers/providerBackedBucketObjectStore.js";
 export { createS3BucketProvider } from "./bucket-providers/s3/s3BucketProvider.js";
 export { createS3BucketObjectStore } from "./bucket-providers/s3/s3BucketObjectStore.js";
 export type { S3BucketProviderOptions } from "./bucket-providers/s3/s3BucketProvider.js";
-export { createStorageCatalogRepository, readStorageCatalog, writeStorageCatalog, clearStorageCatalog, validateStorageCatalog, sameStorageCatalogEntry, sameStorageCatalogDeviceProjection, STORAGE_CATALOG_LOCK } from "./bootstrap/storageCatalogRepository.js";
-export type { CreateStorageBucketInput, StorageCatalogRepositoryOptions } from "./bootstrap/storageCatalogRepository.js";
-export { createBucketCryptoContext, deriveBucketCryptoContext, encryptBucketConfig, decryptBucketConfig, encryptBucketKey, decryptBucketKey, sealBucketDocument, verifyBucketDocument, parseBucketDocument, serializeBucketDocument } from "./hold/keymasterHoldAdapter.js";
-export { createStorageHoldSnapshotRepository, createStorageHoldSnapshotReadOnlyRepository, STORAGE_HOLD_HEAD_PATH } from "./hold/storageHoldSnapshotRepository.js";
-export type { StorageHoldSnapshotWriteInput, StorageHoldCommittedSnapshot } from "./hold/storageHoldSnapshotRepository.js";
-export { createStorageBucketManagementService } from "./hold/storageBucketManagement.js";
-export type { BucketManagementDependencies, PreparedBucketConfig } from "./hold/storageBucketManagement.js";
 export { createKeyValueStore } from "./kv-engine/partitionedKvEngine.js";
 export type { KeyValueStoreOptions, KeyValueStoreMaintenance, KeyValueGarbageCollectionResult } from "./kv-engine/partitionedKvEngine.js";
 export { createFixedCasSnapshotStore } from "./snapshot/fixedCasSnapshotStore.js";
@@ -54,33 +45,17 @@ export { createPlatformRootStore, validatePublishedPlatformBucketSchema } from "
 export type { PlatformRootStoreOptions } from "./storage-access/platform-root/platformRootStore.js";
 export { createOwnerAppStore } from "./storage-access/owner-app/ownerAppStore.js";
 export type { OwnerAppStoreOptions } from "./storage-access/owner-app/ownerAppStore.js";
-export { readStorageBootstrap } from "./bootstrap/storageProfileRepository.js";
-export {
-  createDeviceBootstrapRepository,
-  readDeviceBootstrap,
-  writeDeviceBootstrap,
-  clearDeviceBootstrap,
-  defaultDeviceBootstrapStorage,
-  DEVICE_BOOTSTRAP_KEY,
-  DEVICE_BOOTSTRAP_LOCK,
-} from "./bootstrap/deviceBootstrapRepository.js";
-export type { DeviceBootstrapRepository, DeviceBootstrapRepositoryOptions, DeviceBootstrapStorage, DeviceBootstrapLocks } from "./bootstrap/deviceBootstrapRepository.js";
-export {
-  discoverRemoteStorageRoot,
-  validateRemoteRootManifest,
-  sealRemoteRootManifest,
-  verifyRemoteRootManifest,
-  encodeRemoteRootManifest,
-  decodeRemoteRootManifest,
-  remoteRootManifestFingerprint,
-  physicalLocationFingerprint,
-  remoteInitializationTransactionPath,
-  remoteInitializationStagingPath,
-  createHmacRemoteRootAuthenticator,
-  deriveRemoteRootAuthenticator,
-  REMOTE_ROOT_MANIFEST_MAX_BYTES,
-  REMOTE_INITIALIZATION_RECORD_MAX_BYTES,
-} from "./bootstrap/remoteRootProtocol.js";
-export type { RemoteRootAuthenticator, RemoteRootDiscoveryResult, RemoteRootObject, RemoteStorageRootManifestInput } from "./bootstrap/remoteRootProtocol.js";
-export { createRemoteStorage, connectExistingRemoteStorage } from "./bootstrap/remoteStorageLifecycle.js";
-export type { RemoteStorageCreatePlan, RemoteStorageConnectPlan, RemoteStorageLifecycleSuccess, RemoteStorageCreatePhase, RemoteStorageConnectPhase } from "./bootstrap/remoteStorageLifecycle.js";
+export { createOwnerFileStore } from "./storage-access/owner-app/ownerFileStore.js";
+export type { OwnerFileStoreOptions } from "./storage-access/owner-app/ownerFileStore.js";
+export { createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument } from "./keys/keyholdDocument.js";
+export { createKeyHoldRepository, KEYHOLD_KEYS_PREFIX, KEYHOLD_FILE_EXTENSION, KEYHOLD_LIST_LIMIT } from "./keys/keyholdRepository.js";
+export type { KeyHoldRepository, KeyHoldFile, KeyHoldFileSummary, KeyHoldInvalidFile, KeyHoldListResult, UnlockedKeyHold } from "./keys/keyholdRepository.js";
+export { defaultDeviceStorage, listStorageKeys } from "./bootstrap/deviceStorage.js";
+export type { DeviceLocalStorage } from "./bootstrap/deviceStorage.js";
+export { createDeviceRecordRepository } from "./bootstrap/deviceRecordRepository.js";
+export type { DeviceRecordEntry, DeviceRecordListResult, DeviceRecordRepository } from "./bootstrap/deviceRecordRepository.js";
+export { readSession, writeSession, ensureSessionId, updateSession, setActiveBucket, setActiveKey, setSessionKeyDerivation, clearSession, generateSessionId, isValidSessionId } from "./bootstrap/sessionRecord.js";
+export { encryptDeviceConfig, decryptDeviceConfig } from "./bootstrap/deviceConfigCrypto.js";
+export type { DeviceS3LocationV1 } from "./bootstrap/deviceConfigCrypto.js";
+export { createKeyLock } from "./bootstrap/keyLock.js";
+export type { KeyLock, KeyLockOptions, KeyLockReadResult } from "./bootstrap/keyLock.js";

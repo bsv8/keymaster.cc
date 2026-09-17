@@ -35,14 +35,13 @@ export async function unlockWalletInPlace(page: Page, password: string): Promise
   await expect(page.getByRole("button", { name: /^(Lock wallet|Lock|锁定钱包|锁定)$/u })).toBeVisible({ timeout: 20_000 });
 }
 
-/** 刷新后确认冷态仍保留同一身份，再由调用方重新解锁。 */
+/** 刷新后确认冷启动进入已有桶认证页，再由调用方重新解锁。 */
 export async function reloadAndAssertSameKey(page: Page, keyLabel: string): Promise<void> {
+  void keyLabel;
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: /Wallet locked|钱包已锁定/ })).toBeVisible();
-  // 刷新会销毁 Window 运行态，这是安全边界；这里验证的是持久化 Key
-  // 仍可从锁定页读回，而不是把“刷新后仍 unlocked”误当成契约。
-  await expect(
-    page.getByRole("region", { name: /Selected private key|当前选择的私钥/ })
-      .getByText(keyLabel, { exact: false }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Storage authentication required|存储需要认证/ })).toBeVisible();
+  // 刷新会销毁 Window 运行态；已有设备引导记录必须先经过桶密码认证，
+  // 因此这里不能再期待直接显示 Vault 锁定页或首次初始化向导。
+  await expect(page.getByRole("heading", { name: /Choose a bucket type|选择桶类型/ })).toHaveCount(0);
+  await expect(page.getByLabel(/Password|密码/)).toBeVisible();
 }

@@ -17,6 +17,7 @@ import type {
 import type { PluginBusinessContribution } from "./business.js";
 import type { PluginPermission, RuntimeVaultStatus } from "./keymasterLifecycle.js";
 import type { BorrowedKeyValueStore } from "./storage/kv.js";
+import type { BorrowedOwnerFileStore } from "./storage/files.js";
 
 /** WebLoom Scope.attributes 中由 Keymaster 绑定的领域元数据。 */
 export interface KeymasterScopeAttributes extends Readonly<Record<string, unknown>> {
@@ -38,6 +39,8 @@ export interface KeymasterContextExtension extends WebLoomPluginContextExtension
   readonly storage?: BorrowedKeyValueStore;
   /** Resolve one of the current unit's declared storage purposes. */
   readonly storageFor?: (purposeId: string) => BorrowedKeyValueStore;
+  /** Resolve one of the current unit's declared file purposes（model: "files"）. */
+  readonly filesFor?: (purposeId: string) => BorrowedOwnerFileStore;
   /** 按 pluginId 收窄后的 Coordinator facade。 */
   readonly coordinator?: unknown;
 }
