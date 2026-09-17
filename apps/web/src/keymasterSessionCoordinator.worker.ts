@@ -2291,7 +2291,6 @@ async function installPlatformStorage(
       candidateSelectionSnapshot?.close();
       candidateSettingsSnapshot?.close();
       candidatePluginIntentSnapshot?.close();
-      candidateProfileSaltSnapshot?.close();
       // 候选 Provider 由本次 install 创建/传入，失败时不能把 S3 client
       // 和已打开的连接凭据留在 Worker；当前 Provider 若仍是旧实例则由
       // 上层继续持有，避免把正在工作的会话误关掉。
@@ -2503,7 +2502,6 @@ function ensureTestPlatformStorage(): void {
   coordinatorSelectionSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection, validateCoordinatorSelectionSnapshot);
   coordinatorSettingsSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validateCoordinatorSettingsSnapshot);
   coordinatorPluginIntentSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validatePluginIntentSnapshot);
-  storageProfileSaltSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.storageProfileSalt, validateStorageProfileSaltSnapshot);
   coordinatorProtocolStores = protocol;
   configureProtocolStorageRepository(protocol);
   platformStorageReady = true;
