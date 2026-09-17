@@ -10,7 +10,7 @@ export { createS3BucketObjectStore } from "../bucket-providers/s3/s3BucketObject
 export { createKeyValueStore } from "../kv-engine/partitionedKvEngine.js";
 export type { KeyValueStoreOptions, KeyValueStoreMaintenance, KeyValueGarbageCollectionResult } from "../kv-engine/partitionedKvEngine.js";
 export { createFixedCasSnapshotStore } from "../snapshot/fixedCasSnapshotStore.js";
-export { createOwnerLifecycleGuardedProvider, createPlatformRootStore, validatePublishedPlatformBucketSchema } from "../storage-access/platform-root/platformRootStore.js";
+export { createOwnerLifecycleGuardedProvider, createPlatformRootStore } from "../storage-access/platform-root/platformRootStore.js";
 export { createStorageBindingAuthority } from "./storageBindingAuthority.js";
 export type { StorageBindingAuthorityOptions } from "./storageBindingAuthority.js";
 export { createOwnerAppStore } from "../storage-access/owner-app/ownerAppStore.js";

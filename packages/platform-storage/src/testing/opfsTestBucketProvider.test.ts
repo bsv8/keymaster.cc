@@ -107,21 +107,21 @@ describe("OPFS bucket provider", () => {
   it("returns undefined when the final file handle is missing", async () => {
     const provider = createOpfsTestBucketProvider({ root: missingFileRoot() });
 
-    await expect(provider.get(".keymaster/schema")).resolves.toBeUndefined();
+    await expect(provider.get("some/path/object.bin")).resolves.toBeUndefined();
     provider.dispose();
   });
 
   it("returns undefined when the file disappears while being read", async () => {
     const provider = createOpfsTestBucketProvider({ root: existingDirectoryWithMissingFile() });
 
-    await expect(provider.get(".keymaster/schema")).resolves.toBeUndefined();
+    await expect(provider.get("some/path/object.bin")).resolves.toBeUndefined();
     provider.dispose();
   });
 
   it("maps a cross-realm not-found from getFile to an absent object", async () => {
     const provider = createOpfsTestBucketProvider({ root: existingFileWhoseReadDisappears() });
 
-    await expect(provider.get(".keymaster/schema")).resolves.toBeUndefined();
+    await expect(provider.get("some/path/object.bin")).resolves.toBeUndefined();
     provider.dispose();
   });
 });

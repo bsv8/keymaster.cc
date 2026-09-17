@@ -8,8 +8,6 @@ export const REMOTE_STORAGE_ROOT_MANIFEST_PATH = ".keymaster/root/v1";
 export const REMOTE_STORAGE_INITIALIZATION_TRANSACTION_PREFIX = ".keymaster/transactions/initialization/";
 /** 初始化候选对象的固定路径前缀。 */
 export const REMOTE_STORAGE_STAGING_PREFIX = ".keymaster/staging/";
-/** Bucket schema entrypoint authenticated by the root manifest. */
-export const REMOTE_STORAGE_SCHEMA_PATH = ".keymaster/schema";
 /** Committed Hold head authenticated by the root manifest. */
 export const REMOTE_STORAGE_HOLD_HEAD_PATH = ".keymaster/hold/v1/head.json";
 
@@ -27,8 +25,6 @@ export interface RemoteRootHeadV1 {
 }
 
 export interface RemoteRootSystemEntrypointsV1 {
-  /** 系统 schema 入口。 */
-  schemaPath: string;
   /** Hold 提交头入口。 */
   holdHeadPath: string;
 }

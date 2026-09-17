@@ -160,38 +160,6 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
     })).rejects.toMatchObject({ code: "storage_forbidden" });
   });
 
-  it("persists namespace versions and rejects opening the same directory with another version", async () => {
-    const provider = makeProvider();
-    const root = createPlatformRootStore({ provider, bucket });
-    await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
-    expect((await provider.get(".keymaster/schema"))?.bytes.byteLength).toBeGreaterThan(0);
-
-    await expect(root.openPlatformStore({ declaration: { ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, schemaVersion: 2 } })).rejects.toMatchObject({
-      code: "storage_forbidden"
-    });
-  });
-
-  it("validates published schema through the read-only provider surface", async () => {
-    const provider = makeProvider();
-    const root = createPlatformRootStore({ provider, bucket });
-    await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
-    const readOnly = {
-      provider: provider.provider,
-      bucketId: provider.bucketId,
-      probe: provider.probe.bind(provider),
-      get: provider.get.bind(provider),
-      list: provider.list.bind(provider),
-    };
-    await expect(validatePublishedPlatformBucketSchema(readOnly, [CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads])).resolves.toBeUndefined();
-
-    const schemaObject = await provider.get(".keymaster/schema");
-    if (!schemaObject?.etag) throw new Error("schema object is missing");
-    const schema = JSON.parse(new TextDecoder().decode(schemaObject.bytes)) as { namespaces: Record<string, number> };
-    delete schema.namespaces[Object.keys(schema.namespaces)[0]!];
-    await provider.put(".keymaster/schema", new TextEncoder().encode(JSON.stringify(schema)), { ifMatch: schemaObject.etag });
-    await expect(validatePublishedPlatformBucketSchema(readOnly, [CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads])).rejects.toMatchObject({ code: "storage_remote_corrupt" });
-  });
-
   it("keeps key namespaces independent while still locking each owner directory version", async () => {
     const provider = makeProvider();
     const root = createPlatformRootStore({ provider, bucket });
@@ -227,7 +195,7 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
     expect(lifecycle.activeOperations).toBe(0);
   });
 
-  it("fences shared-provider deletion, removes owner schema records, and creates a new generation on reactivation", async () => {
+  it("fences shared-provider deletion, removes owner objects, and creates a new generation on reactivation", async () => {
     const state: ProviderState = { objects: new Map(), sequence: 0 };
     const firstRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const secondRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
@@ -246,10 +214,6 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
     barrier.release();
     await deleting;
 
-    const schemaObject = state.objects.get(".keymaster/schema");
-    expect(schemaObject).toBeDefined();
-    const schema = JSON.parse(new TextDecoder().decode(schemaObject!.bytes)) as { namespaces: Record<string, number> };
-    expect(Object.keys(schema.namespaces).some((key) => key.startsWith(`owner|${ownerPublicKeyHex}|`))).toBe(false);
     const lifecycle = JSON.parse(new TextDecoder().decode(state.objects.get(`.keymaster/owners/${ownerPublicKeyHex}`)!.bytes)) as { status: string; generation: number };
     expect(lifecycle).toMatchObject({ status: "deleted", generation: 1 });
     await expect(createOwnerLifecycleGuardedProvider(makeProvider(state)).put(`${ownerPublicKeyHex}/Contacts/file.txt`, new Uint8Array([1]))).rejects.toMatchObject({ code: "storage_unavailable" });

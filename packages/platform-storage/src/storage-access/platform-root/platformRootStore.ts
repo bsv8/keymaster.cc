@@ -677,19 +677,8 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       throw new StorageRuntimeError("storage_forbidden", "Owner storage namespace is not centrally authorized");
     }
     const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
-    const schemaBinding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex"> = {
-      ...declaration,
-      ownerPublicKeyHex
-    };
     const lifecycle = await ensureOwnerLifecycleActive(options.provider, ownerPublicKeyHex);
     const assertCurrent = () => assertOwnerLifecycleCurrent(options.provider, ownerPublicKeyHex, lifecycle.generation);
-    const releaseSchemaLease = await acquireOwnerStorageOperation(options.provider, ownerPublicKeyHex, lifecycle.generation);
-    try {
-      await ensureBucketNamespaceSchema(options.provider, schemaBinding, declaration.schemaVersion, assertCurrent);
-      await assertCurrent();
-    } finally {
-      await releaseSchemaLease();
-    }
     return {
       declaration,
       ownerPublicKeyHex,
@@ -745,11 +734,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       try {
         if (!await waitForOwnerStorageOperations(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
         if (!await deleteOwnerObjectsUntilEmpty(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
-        // schema 是桶级对象，必须在 owner 数据清理后按 CAS 删除该 owner 的
-        // namespace 锁定记录；重复执行用于覆盖清理期间的迟到写入。
-        if (!await removeOwnerSchemaEntries(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
-        if (!await deleteOwnerObjectsUntilEmpty(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
-        if (!await removeOwnerSchemaEntries(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
       } finally {
         // 只有本次删除者完成全部物理清理后才释放 lease；其它协调器即使
         // 同时进入 deleteOwnerStorage，也不能在此之前发布 deleted。

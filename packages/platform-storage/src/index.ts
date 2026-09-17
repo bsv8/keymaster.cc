@@ -41,7 +41,7 @@ export { createKeyValueStore } from "./kv-engine/partitionedKvEngine.js";
 export type { KeyValueStoreOptions, KeyValueStoreMaintenance, KeyValueGarbageCollectionResult } from "./kv-engine/partitionedKvEngine.js";
 export { createFixedCasSnapshotStore } from "./snapshot/fixedCasSnapshotStore.js";
 export type { FixedCasSnapshotStoreOptions } from "./snapshot/fixedCasSnapshotStore.js";
-export { createPlatformRootStore, validatePublishedPlatformBucketSchema } from "./storage-access/platform-root/platformRootStore.js";
+export { createPlatformRootStore } from "./storage-access/platform-root/platformRootStore.js";
 export type { PlatformRootStoreOptions } from "./storage-access/platform-root/platformRootStore.js";
 export { createOwnerAppStore } from "./storage-access/owner-app/ownerAppStore.js";
 export type { OwnerAppStoreOptions } from "./storage-access/owner-app/ownerAppStore.js";
