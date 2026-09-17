@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { initializeS3User } from "../../drivers/initialSetupDriver.js";
-import { readLocalCatalog } from "../../drivers/appDriver.js";
-import { reloadS3BucketAndUnlock } from "../../drivers/vaultDriver.js";
+import { readLocalCatalog, readSessionPublicKey } from "../../drivers/appDriver.js";
+import { lockWallet, reloadS3BucketAndUnlock, unlockWallet } from "../../drivers/vaultDriver.js";
 import { assertS3BucketStorage, assertS3IdentityStorage, readS3SessionId } from "../../support/s3BucketFormats.js";
 import { loadE2ES3Config, publicS3ConfigFingerprint } from "../../resources/config/loader.js";
 import { S3CleanupResource } from "../../resources/s3/s3CleanupResource.js";
@@ -44,8 +44,8 @@ function clearSecrets(config: LoadedE2ES3Config | undefined): void {
  *
  * 覆盖需求：KM-INIT-002。
  */
-test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async ({ page, context }, testInfo) => {
-  test.setTimeout(180_000);
+test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化、刷新恢复与锁定解锁", async ({ page, context }, testInfo) => {
+  test.setTimeout(240_000);
   const browserErrors = captureBrowserErrors(page, context);
   let config: LoadedE2ES3Config | undefined;
   let accessKeyId = "";
@@ -128,6 +128,35 @@ test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async 
         keyLabel: FIRST_KEY_LABEL,
         sessionId,
       });
+    });
+
+    await test.step("用户主动锁定后只需 Key 密码解锁，桶密码不被遗忘", async () => {
+      const activeKeyBefore = await readSessionPublicKey(page);
+      // 锁定只收口 KeyHold 运行态：桶密码必须保留，否则下次解锁要重填。
+      await lockWallet(page);
+      const activeKeyWhileLocked = await readSessionPublicKey(page);
+      expect(activeKeyWhileLocked).toBe(activeKeyBefore);
+      await unlockWallet(page, SETUP_PASSWORD, FIRST_KEY_LABEL);
+      expect(await readSessionPublicKey(page)).toBe(activeKeyBefore);
+      // 锁定/解锁都不能要求重过存储认证页：那等于把桶密码也忘了。
+      const authHeading = page.getByTestId("storage-authentication");
+      await expect(authHeading).toHaveCount(0);
+    });
+
+    await test.step("锁定后刷新仍走存储认证并可用原桶密码恢复", async () => {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      const authHeading = page.getByTestId("storage-authentication");
+      const lockedHeading = page.getByRole("heading", { name: /钱包已锁定|Wallet locked/ });
+      // 刷新忘记 Key 密码但不该忘记桶密码；桶密码正确时认证一次即回锁定壳。
+      await expect(authHeading).toBeVisible({ timeout: 60_000 });
+      await authHeading.getByLabel(/密码|password/iu).fill(STARTUP_PASSWORD);
+      await authHeading.getByRole("button", { name: /^解锁$|^Unlock$/u }).click();
+      await expect(lockedHeading).toBeVisible({ timeout: 90_000 });
+      await expect(page.getByRole("heading", { name: /Selected private key|已选私钥/u })).toBeVisible({ timeout: 60_000 });
+      await unlockWallet(page, SETUP_PASSWORD, FIRST_KEY_LABEL);
+      const catalog = await readLocalCatalog(page);
+      expect(catalog?.buckets).toHaveLength(1);
+      expect(catalog?.selectedBucketId).toBe(ready.bucketId);
     });
   } catch (error) {
     journeyError = error;

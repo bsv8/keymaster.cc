@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { StorageBucketProvider, StorageBucketRef } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
-import { createOwnerLifecycleGuardedProvider, createPlatformRootStore, validatePublishedPlatformBucketSchema } from "./platformRootStore.js";
+import { createOwnerLifecycleGuardedProvider, createPlatformRootStore } from "./platformRootStore.js";
 
 interface TestObject {
   bytes: Uint8Array;
@@ -131,7 +131,7 @@ function armOwnerPutBarrier(state: ProviderState, owner: string): OwnerPutBarrie
 
 const bucket: StorageBucketRef = { bucketId: "schema-test", bucketGeneration: 1, provider: "local" };
 
-describe("PlatformRoot bucket schema", () => {
+describe("PlatformRoot 授权与 owner 生命周期", () => {
   it("authorizes every central bucket/platform declaration by default", async () => {
     const root = createPlatformRootStore({ provider: makeProvider(), bucket });
     await expect(root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads })).resolves.toMatchObject({

@@ -7,7 +7,6 @@ import type {
   PluginStorageDeclaration,
   SnapshotStore,
   StorageBucketProvider,
-  StorageBucketReadOnlyProvider,
   StorageBucketRef,
   StorageNamespaceBinding,
   StorageSnapshotJsonCompatible,
@@ -28,17 +27,12 @@ export interface PlatformRootStoreOptions {
   platformStorageDeclarations?: readonly PluginStorageDeclaration[];
   /** 切桶/切 Key/切 keyspace 世代后让旧句柄 fail closed。 */
   isCurrent?: (binding: { ownerPublicKeyHex?: string; bucketGeneration: number; keyspaceGeneration?: number }) => boolean;
-  /** 已有远端装配只校验 schema，缺项或版本不符时禁止补写。 */
-  schemaMode?: "ensure" | "validate-only";
 }
 
 const DEFAULT_PLATFORM_DECLARATIONS: readonly PluginStorageDeclaration[] = Object.freeze([
   ...Object.values(CENTRAL_STORAGE_DECLARATIONS).filter((declaration) =>
     declaration.scope === "bucket"),
 ]);
-const BUCKET_SCHEMA_PATH = ".keymaster/schema";
-const BUCKET_SCHEMA_FORMAT = "keymaster.bucket-schema";
-const BUCKET_SCHEMA_FORMAT_VERSION = 1;
 const OWNER_LIFECYCLE_PREFIX = ".keymaster/owners/";
 const OWNER_LIFECYCLE_FORMAT = "keymaster.owner-lifecycle";
 const OWNER_LIFECYCLE_FORMAT_VERSION = 1;
@@ -55,14 +49,6 @@ const OWNER_DELETE_DRAIN_POLL_MS = 10;
 // 在有限重试后误报“lease changed concurrently”。按 owner 串行化的只是这
 // 条生命周期记录的短 CAS，不会把真实 Provider I/O 串行化。
 const ownerLifecycleMutationTails = new Map<string, Promise<void>>();
-
-interface BucketSchemaRecord {
-  /** 桶级 schema 记录格式版本，不是插件 namespace 的 schemaVersion。 */
-  format: typeof BUCKET_SCHEMA_FORMAT;
-  version: typeof BUCKET_SCHEMA_FORMAT_VERSION;
-  /** 每个逻辑目录首次打开时锁定的 schemaVersion。 */
-  namespaces: Record<string, number>;
-}
 
 type OwnerLifecycleStatus = "active" | "deleting" | "deleted";
 
@@ -89,32 +75,8 @@ interface OwnerLifecycleObject {
   etag?: string;
 }
 
-function namespaceSchemaKey(binding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex">): string {
-  return [binding.scope, binding.ownerPublicKeyHex ?? "", binding.moduleId, binding.purposeId, binding.authority, binding.model].join("|");
-}
-
-function decodeBucketSchema(bytes: Uint8Array): BucketSchemaRecord {
-  try {
-    const value = JSON.parse(new TextDecoder().decode(bytes)) as Partial<BucketSchemaRecord>;
-    if (value.format !== BUCKET_SCHEMA_FORMAT || value.version !== BUCKET_SCHEMA_FORMAT_VERSION || !value.namespaces || typeof value.namespaces !== "object") {
-      throw new Error("schema format mismatch");
-    }
-    return { format: BUCKET_SCHEMA_FORMAT, version: BUCKET_SCHEMA_FORMAT_VERSION, namespaces: { ...value.namespaces } };
-  } catch {
-    throw new StorageRuntimeError("storage_provider_error", "Storage bucket schema is invalid or incompatible");
-  }
-}
-
-function encodeBucketSchema(schema: BucketSchemaRecord): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(schema));
-}
-
 function ownerLifecyclePath(ownerPublicKeyHex: string): string {
   return `${OWNER_LIFECYCLE_PREFIX}${validateOwnerPublicKeyHex(ownerPublicKeyHex)}`;
-}
-
-function ownerSchemaPrefix(ownerPublicKeyHex: string): string {
-  return `owner|${validateOwnerPublicKeyHex(ownerPublicKeyHex)}|`;
 }
 
 function isStorageConflict(error: unknown): boolean {
@@ -620,141 +582,6 @@ async function deleteOwnerObjectsUntilEmpty(provider: StorageBucketProvider, own
   throw new StorageRuntimeError("storage_unavailable", "Owner storage did not become empty before deletion timeout");
 }
 
-async function removeOwnerSchemaEntries(provider: StorageBucketProvider, ownerPublicKeyHex: string, generation: number): Promise<boolean> {
-  const prefix = ownerSchemaPrefix(ownerPublicKeyHex);
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const lifecycle = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-    if (!lifecycle) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-    if (lifecycle.record.status === "deleted" || (lifecycle.record.status === "active" && lifecycle.record.generation !== generation)) return false;
-    if (lifecycle.record.status !== "deleting" || lifecycle.record.generation !== generation) throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-    const object = await provider.get(BUCKET_SCHEMA_PATH);
-    const afterRead = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-    if (!afterRead) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-    if (afterRead.record.status === "deleted" || (afterRead.record.status === "active" && afterRead.record.generation !== generation)) return false;
-    if (afterRead.record.status !== "deleting" || afterRead.record.generation !== generation) throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-    if (!object) return true;
-    const current = decodeBucketSchema(object.bytes);
-    const namespaces = Object.fromEntries(Object.entries(current.namespaces).filter(([key]) => !key.startsWith(prefix)));
-    if (Object.keys(namespaces).length === Object.keys(current.namespaces).length) return true;
-    if (!object.etag) throw new StorageRuntimeError("storage_provider_error", "Storage bucket schema CAS is unavailable");
-    try {
-      const beforeWrite = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-      if (!beforeWrite) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-      if (beforeWrite.record.status === "deleted" || (beforeWrite.record.status === "active" && beforeWrite.record.generation !== generation)) return false;
-      if (beforeWrite.record.status !== "deleting" || beforeWrite.record.generation !== generation) throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-      await provider.put(BUCKET_SCHEMA_PATH, encodeBucketSchema({ ...current, namespaces }), { ifMatch: object.etag });
-      const afterWrite = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-      if (!afterWrite) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-      if (afterWrite.record.status === "deleted" || (afterWrite.record.status === "active" && afterWrite.record.generation !== generation)) return false;
-      if (afterWrite.record.status !== "deleting" || afterWrite.record.generation !== generation) throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-      return true;
-    } catch (error) {
-      if (isStorageConflict(error)) continue;
-      throw error;
-    }
-  }
-  throw new StorageRuntimeError("storage_conflict", "Storage bucket schema changed concurrently");
-}
-
-/**
- * 在桶级 `.keymaster/schema` 中登记 namespace 的 schemaVersion。
- * 登记使用 Provider CAS，因此并发首次打开不会互相覆盖；同一逻辑目录
- * 之后只能用原版本打开，避免旧数据被不同格式解释。
- */
-async function ensureBucketNamespaceSchema(
-  provider: StorageBucketProvider,
-  binding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex">,
-  schemaVersion: number,
-  assertCurrent?: () => Promise<void>
-): Promise<void> {
-  const key = namespaceSchemaKey(binding);
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    await assertCurrent?.();
-    const object = await provider.get(BUCKET_SCHEMA_PATH);
-    await assertCurrent?.();
-    if (!object) {
-      const initial: BucketSchemaRecord = {
-        format: BUCKET_SCHEMA_FORMAT,
-        version: BUCKET_SCHEMA_FORMAT_VERSION,
-        namespaces: { [key]: schemaVersion }
-      };
-      try {
-        await assertCurrent?.();
-        await provider.put(BUCKET_SCHEMA_PATH, encodeBucketSchema(initial), { ifNoneMatch: "*" });
-        await assertCurrent?.();
-        return;
-      } catch (error) {
-        if (!isStorageConflict(error)) throw error;
-        // 另一个打开者刚刚创建了 schema；重新读取并按 CAS 合并。
-        continue;
-      }
-    }
-    const current = decodeBucketSchema(object.bytes);
-    const recorded = current.namespaces[key];
-    if (recorded !== undefined) {
-      if (recorded !== schemaVersion) throw new StorageRuntimeError("storage_provider_error", "Storage namespace schema version is incompatible");
-      return;
-    }
-    const next: BucketSchemaRecord = {
-      format: current.format,
-      version: current.version,
-      namespaces: { ...current.namespaces, [key]: schemaVersion }
-    };
-    try {
-      await assertCurrent?.();
-      await provider.put(BUCKET_SCHEMA_PATH, encodeBucketSchema(next), { ifMatch: object.etag });
-      await assertCurrent?.();
-      return;
-    } catch (error) {
-      if (!isStorageConflict(error)) throw error;
-      // schema 被并发修改；下一轮读取最新记录。
-    }
-  }
-  throw new StorageRuntimeError("storage_conflict", "Storage bucket schema changed concurrently");
-}
-
-/** 已有远端只读接入使用的 schema 检查；绝不创建或修补登记。 */
-async function validateBucketNamespaceSchema(
-  provider: Pick<StorageBucketProvider, "get">,
-  binding: Pick<StorageNamespaceBinding, "scope" | "moduleId" | "purposeId" | "authority" | "model" | "ownerPublicKeyHex">,
-  schemaVersion: number,
-): Promise<void> {
-  const object = await provider.get(BUCKET_SCHEMA_PATH);
-  if (!object) throw new StorageRuntimeError("storage_remote_corrupt", "Remote bucket schema is missing");
-  let current: BucketSchemaRecord;
-  try {
-    current = decodeBucketSchema(object.bytes);
-  } catch {
-    throw new StorageRuntimeError("storage_remote_corrupt", "Remote bucket schema is invalid");
-  }
-  const recorded = current.namespaces[namespaceSchemaKey(binding)];
-  if (recorded === undefined) throw new StorageRuntimeError("storage_remote_corrupt", "Remote bucket schema namespace is missing");
-  if (recorded !== schemaVersion) throw new StorageRuntimeError("storage_remote_incompatible", "Remote bucket schema namespace version is incompatible");
-}
-
-/**
- * Re-read and validate the schema registrations required by a published
- * bucket. This helper accepts only the read-only Provider surface so callers
- * can verify the root visibility boundary without accidentally repairing it.
- */
-export async function validatePublishedPlatformBucketSchema(
-  provider: StorageBucketReadOnlyProvider,
-  declarations: readonly PluginStorageDeclaration[],
-): Promise<void> {
-  const allowed = new Map(DEFAULT_PLATFORM_DECLARATIONS.map((declaration) => [
-    [declaration.moduleId, declaration.purposeId, declaration.scope, declaration.authority, declaration.model, declaration.schemaVersion].join("|"),
-    declaration,
-  ] as const));
-  for (const input of declarations) {
-    const declaration = validatePluginStorageDeclaration(input);
-    const key = [declaration.moduleId, declaration.purposeId, declaration.scope, declaration.authority, declaration.model, declaration.schemaVersion].join("|");
-    if (declaration.scope !== "bucket" || declaration.authority === "third-party-app" || !allowed.has(key)) {
-      throw new StorageRuntimeError("storage_forbidden", "Published bucket schema declaration is not authorized");
-    }
-    await validateBucketNamespaceSchema(provider, declaration, declaration.schemaVersion);
-  }
-}
-
 /**
  * Storage 平台层。
  *
@@ -791,9 +618,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
     bucketGeneration: binding.bucketGeneration,
     keyspaceGeneration,
   }) ?? true;
-  const checkNamespaceSchema = options.schemaMode === "validate-only"
-    ? validateBucketNamespaceSchema
-    : ensureBucketNamespaceSchema;
   const openPlatformNamespace = async (input: PluginStorageDeclaration): Promise<KeyValueStore> => {
     const declaration = validatePluginStorageDeclaration(input);
     if (declaration.scope !== "bucket" || declaration.authority === "third-party-app" || declaration.model !== "kv") {
@@ -804,7 +628,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       throw new StorageRuntimeError("storage_forbidden", "Platform storage namespace is not authorized");
     }
     const binding = bindingFor(declaration);
-    await checkNamespaceSchema(options.provider, binding, declaration.schemaVersion);
     buildStorageNamespaceRoot(binding);
     return createKeyValueStore({ provider: options.provider, binding, isCurrent: currentFor(binding) });
   };
@@ -818,7 +641,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       throw new StorageRuntimeError("storage_forbidden", "Platform snapshot declaration is not authorized");
     }
     const binding = bindingFor(declaration);
-    await checkNamespaceSchema(options.provider, binding, declaration.schemaVersion);
     return createFixedCasSnapshotStore({
       provider: options.provider,
       binding,
