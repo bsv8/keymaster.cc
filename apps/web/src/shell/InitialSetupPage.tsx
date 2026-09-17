@@ -147,6 +147,8 @@ export function InitialSetupPage() {
   const [keyDraft, setKeyDraft] = useState<InitialSetupKeyDraft | undefined>();
   const [tagName, setTagName] = useState("");
   const [keyPassword, setKeyPassword] = useState("");
+  // “Key 密码”步骤之后的去向：新建则去确认页,导入则先进导入向导。
+  const [passwordTarget, setPasswordTarget] = useState<"create" | "import">("create");
   const [keyPasswordConfirm, setKeyPasswordConfirm] = useState("");
   const [startupPassword, setStartupPassword] = useState("");
   const [startupPasswordConfirm, setStartupPasswordConfirm] = useState("");
@@ -272,6 +274,7 @@ export function InitialSetupPage() {
   }
 
   function chooseGeneratedKey() {
+    setPasswordTarget("create");
     setKeyDraft({ kind: "generate", label: tagName.trim(), capabilities: ["p2pkh"] });
     setError(null);
     setStep("new-key");
@@ -289,13 +292,15 @@ export function InitialSetupPage() {
     setKeyDraft({ kind: "import", ...imported });
     setTagName(imported.label);
     setError(null);
-    setStep("key-password");
+    setStep("confirm");
   }
 
   function continueKeyPassword(target: "unlock" | "create") {
     if (keyPassword.length < 8) { setError(errorFromException(new Error("这把 Key 的密码至少 8 位。"))); return; }
     if (target === "create" && keyPassword !== keyPasswordConfirm) { setError(errorFromException(new Error("两次输入的 Key 密码不一致。"))); return; }
     setError(null);
+    // 导入路径：先有密码,再让向导解析材料；新建路径直接进入确认。
+    if (target === "create" && passwordTarget === "import") { setStep("import-key"); return; }
     setStep("confirm");
   }
 
@@ -514,7 +519,7 @@ export function InitialSetupPage() {
           <KeyRound size={22} />
           <span><strong>{t("shell.setup.keyChoice.new", { defaultValue: "新建 Key" })}</strong><small>由受信任的 Coordinator 在提交时生成私钥</small></span>
         </button>
-        <button type="button" onClick={() => setStep("import-key")}>
+        <button type="button" onClick={() => { setPasswordTarget("import"); setKeyPassword(""); setKeyPasswordConfirm(""); setError(null); setStep("key-password"); }}>
           <Upload size={22} />
           <span><strong>{t("shell.setup.keyChoice.import", { defaultValue: "导入 Key" })}</strong><small>支持 WIF / Hex / JSON / KeyHold 文件</small></span>
         </button>
@@ -558,7 +563,7 @@ export function InitialSetupPage() {
       />
       <div className="initial-setup__actions">
         <Button onClick={() => continueKeyPassword("create")} disabled={busy || keyPassword.length < 8 || keyPasswordConfirm.length < 8}>继续确认</Button>
-        <Button variant="ghost" onClick={() => setStep(keyDraft?.kind === "import" ? "import-key" : "new-key")} disabled={busy}>{t("common.action.back", { defaultValue: "返回" })}</Button>
+        <Button variant="ghost" onClick={() => setStep(passwordTarget === "import" ? "key-choice" : "new-key")} disabled={busy}>{t("common.action.back", { defaultValue: "返回" })}</Button>
       </div>
     </>;
   } else {

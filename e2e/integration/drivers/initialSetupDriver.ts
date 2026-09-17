@@ -2,11 +2,11 @@ import { expect, type Page } from "@playwright/test";
 import { assertSetupSecretNotPersisted, openApplication, readLocalCatalog, waitForReadyVaultPage } from "./appDriver.js";
 
 export interface LocalInitializationInput {
-  /** 用户看到的逻辑桶名称。 */
+  /** 用户看到的逻辑桶名称（显示名,可改）。 */
   readonly bucketLabel: string;
   /** 第一把 Key 的用户标签。 */
   readonly keyLabel: string;
-  /** 仅在当前调用栈内使用的测试密码。 */
+  /** 仅在当前调用栈内使用的测试密码（Key 自己的密码）。 */
   readonly password: string;
 }
 
@@ -45,27 +45,29 @@ export interface S3InitializationInput {
  *
  * 所有控件定位集中在 Driver；Flow 只表达“用户建立身份”的业务过程。
  */
-export async function initializeLocalUser(page: Page, input: LocalInitializationInput): Promise<{ publicKeyHex: string }> {
+export async function initializeLocalUser(page: Page, input: LocalInitializationInput): Promise<{ publicKeyHex: string; bucketId: string }> {
   await openApplication(page);
   await page.getByRole("button", { name: /Local/ }).click();
-  await page.getByLabel(/Bucket name|桶名称/).fill(input.bucketLabel);
-  await page.getByRole("button", { name: /Next|Continue|继续/ }).click();
+  await page.getByLabel(/桶名称|Bucket name/).fill(input.bucketLabel);
+  // Local 桶 ID 由系统随机生成,页面不提供 ID 输入。
+  await page.getByRole("button", { name: /开始创建|Start creating/ }).click();
 
-  await page.getByLabel(/Password \(at least 8 characters\)|密码（至少 8 位）/).fill(input.password);
-  await page.getByLabel(/Confirm password|确认密码/).fill(input.password);
-  await page.getByRole("button", { name: /Next|Continue|继续/ }).click();
-  await expect(page.getByRole("heading", { name: /Set up your first Key|设置第一把 Key/ })).toBeVisible();
-
+  await expect(page.getByRole("heading", { name: /设置第一把 Key|Set up your first Key/ })).toBeVisible({ timeout: 20_000 });
   await page.getByRole("button", { name: /Create a Key|新建 Key/ }).click();
   await page.getByLabel(/Tag Name|Key 标签名称/).fill(input.keyLabel);
-  await page.getByRole("button", { name: /Next|继续确认/ }).click();
+  await page.getByRole("button", { name: /^继续$|^Next$|^Continue$/u }).click();
+  await page.getByLabel(/^Key 密码（至少 8 位）|Key password \(at least 8 characters\)/u).fill(input.password);
+  await page.getByLabel(/再输入一次 Key 密码|Repeat the Key password/iu).fill(input.password);
+  await page.getByRole("button", { name: /继续确认|Continue to confirm/iu }).click();
   await page.getByRole("button", { name: /Create bucket and first Key|创建桶和第一把 Key/ }).click();
   await waitForReadyVaultPage(page, input.keyLabel);
 
   const catalog = await readLocalCatalog(page);
-  expect(catalog?.buckets, "Local 初始化必须发布一个目录桶").toHaveLength(1);
+  expect(catalog?.buckets, "Local 初始化必须登记一个设备桶记录").toHaveLength(1);
   expect(catalog?.buckets?.[0]).toMatchObject({ label: input.bucketLabel, backend: "local" });
   expect(catalog?.selectedBucketId).toBe(catalog?.buckets?.[0]?.bucketId);
+  const bucketId = catalog?.buckets?.[0]?.bucketId;
+  if (!bucketId) throw new Error("初始化后缺少本机桶 ID");
   await assertSetupSecretNotPersisted(page, input.password);
 
   // Key 管理页默认只显示短公钥；先通过用户可理解的“展开公钥”动作，
@@ -75,7 +77,7 @@ export async function initializeLocalUser(page: Page, input: LocalInitialization
   const publicKeyHex = (await keyRow.locator("code").first().textContent())?.trim() ?? "";
   // 完整公钥是后续联系人/协议归属的技术真值；短标签或 URL 不能替代它。
   expect(publicKeyHex).toMatch(/^(02|03)[0-9a-f]{64}$/iu);
-  return { publicKeyHex };
+  return { publicKeyHex, bucketId };
 }
 
 /**
@@ -97,30 +99,34 @@ export async function initializeS3User(page: Page, input: S3InitializationInput)
   await page.getByLabel(/Secret Access Key/iu).fill(input.secretAccessKey);
   if (input.sessionToken !== undefined) await page.getByLabel(/Session Token/iu).fill(input.sessionToken);
   await page.getByLabel(/Prefix/iu).fill(input.prefix);
-  await page.getByRole("button", { name: /Test connection and continue|测试连接并继续/iu }).click();
+  await page.getByRole("button", { name: /Test connection and continue|测试连接并探测/iu }).click();
 
-  const passwordHeading = page.getByRole("heading", { name: /Set (?:a )?password|设置密码/iu });
+  // 空桶 → 先设置启动密码（只保护本机保存的连接参数）。
+  const startupHeading = page.getByRole("heading", { name: /设置启动密码|Set (?:the )?startup password/iu });
   try {
-    await expect(passwordHeading).toBeVisible({ timeout: 15_000 });
+    await expect(startupHeading).toBeVisible({ timeout: 15_000 });
   } catch (error) {
     const alerts = await page.locator('[role="alert"]').allTextContents();
     const diagnostic = alerts.map((text) => text.trim()).filter(Boolean).join(" | ");
-    throw new Error(`真实 S3 连接探测未进入密码步骤${diagnostic ? `：${diagnostic}` : ""}`, { cause: error });
+    throw new Error(`真实 S3 连接探测未进入启动密码步骤${diagnostic ? `：${diagnostic}` : ""}`, { cause: error });
   }
-  await page.getByLabel(/Password \(at least 8 characters\)|密码（至少 8 位）/u).fill(input.password);
-  await page.getByLabel(/Confirm password|确认密码/iu).fill(input.password);
-  await page.getByRole("button", { name: /Next|Continue|继续/iu }).click();
-  await expect(page.getByRole("heading", { name: /Set up your first Key|设置第一把 Key/iu })).toBeVisible();
+  await page.getByLabel(/启动密码（至少 8 位）|Startup password \(at least 8 characters\)/u).fill(input.password);
+  await page.getByLabel(/再输入一次启动密码|Repeat the startup password/iu).fill(input.password);
+  await page.getByRole("button", { name: /^继续$|^Next$|^Continue$/u }).click();
 
+  await expect(page.getByRole("heading", { name: /Set up your first Key|设置第一把 Key/iu })).toBeVisible();
   await page.getByRole("button", { name: /Create a Key|新建 Key/iu }).click();
   await page.getByLabel(/Tag Name|Key 标签名称/iu).fill(input.keyLabel);
-  await page.getByRole("button", { name: /Next|继续确认/iu }).click();
+  await page.getByRole("button", { name: /^继续$|^Next$|^Continue$/u }).click();
+  await page.getByLabel(/^Key 密码（至少 8 位）|Key password \(at least 8 characters\)/u).fill(input.password);
+  await page.getByLabel(/再输入一次 Key 密码|Repeat the Key password/iu).fill(input.password);
+  await page.getByRole("button", { name: /继续确认|Continue to confirm/iu }).click();
   await page.getByRole("button", { name: /Create bucket and first Key|创建桶和第一把 Key/iu }).click();
   await waitForReadyVaultPage(page, input.keyLabel);
 
   const catalog = await readLocalCatalog(page);
-  expect(catalog?.buckets, "S3 初始化必须发布一个目录桶").toHaveLength(1);
-  expect(catalog?.buckets?.[0], "目录中的后端必须是真实 S3，而不是 Local fallback").toMatchObject({
+  expect(catalog?.buckets, "S3 初始化必须登记一个设备桶记录").toHaveLength(1);
+  expect(catalog?.buckets?.[0], "设备记录中的后端必须是真实 S3，而不是 Local fallback").toMatchObject({
     label: input.bucketLabel,
     backend: "s3",
   });
@@ -151,15 +157,15 @@ export async function initializeLocalUserWithImportedHexKey(
 ): Promise<{ publicKeyHex: string }> {
   await openApplication(page);
   await page.getByRole("button", { name: /Local/ }).click();
-  await page.getByLabel(/Bucket name|桶名称/).fill(input.bucketLabel);
-  await page.getByRole("button", { name: /Next|Continue|继续/ }).click();
-
-  await page.getByLabel(/Password \(at least 8 characters\)|密码（至少 8 位）/).fill(input.password);
-  await page.getByLabel(/Confirm password|确认密码/).fill(input.password);
-  await page.getByRole("button", { name: /Next|Continue|继续/ }).click();
-  await expect(page.getByRole("heading", { name: /Set up your first Key|设置第一把 Key/ })).toBeVisible();
+  await page.getByLabel(/桶名称|Bucket name/).fill(input.bucketLabel);
+  await page.getByRole("button", { name: /开始创建|Start creating/ }).click();
+  await expect(page.getByRole("heading", { name: /设置第一把 Key|Set up your first Key/ })).toBeVisible({ timeout: 20_000 });
 
   await page.getByRole("button", { name: /Import a Key|导入 Key/ }).click();
+  // 导入前先设置这把 Key 自己的密码（向导只负责解析材料）。
+  await page.getByLabel(/^Key 密码（至少 8 位）|Key password \(at least 8 characters\)/u).fill(input.password);
+  await page.getByLabel(/再输入一次 Key 密码|Repeat the Key password/iu).fill(input.password);
+  await page.getByRole("button", { name: /继续确认|Continue to confirm/iu }).click();
   await page.getByRole("button", { name: /Hex/ }).click();
   await page.getByRole("button", { name: /Next|下一步/ }).click();
   const privateKeyField = page.getByLabel(/Text|文本/);
@@ -171,7 +177,7 @@ export async function initializeLocalUserWithImportedHexKey(
   await waitForReadyVaultPage(page, input.keyLabel);
 
   const catalog = await readLocalCatalog(page);
-  expect(catalog?.buckets, "导入一次性 Key 的初始化仍必须发布一个 Local 目录桶").toHaveLength(1);
+  expect(catalog?.buckets, "导入一次性 Key 的初始化仍必须登记一个 Local 设备桶").toHaveLength(1);
   expect(catalog?.buckets?.[0]).toMatchObject({ label: input.bucketLabel, backend: "local" });
   await assertSetupSecretNotPersisted(page, input.password);
   const persisted = await page.evaluate(() => Object.keys(localStorage).map((key) => `${key}=${localStorage.getItem(key) ?? ""}`).join("\n"));

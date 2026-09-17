@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
-import { lockAndUnlockUser } from "../../flows/recoverLocalUser.js";
+import { lockWallet, unlockWallet } from "../../drivers/vaultDriver.js";
 import { readLocalCatalog, waitForReadyVaultPage } from "../../drivers/appDriver.js";
+import { assertLocalBucketLockReleased, assertLocalBucketStorage, identityFileMap, readRawLocalStorage } from "../../support/localBucketFormats.js";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
 import { LOCAL_INIT_MENU_SCENARIO } from "../../support/scenarioMetadata.js";
@@ -46,31 +47,68 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
       { bucketLabel: "Local 集成测试桶", keyLabel: "集成测试首 Key", password },
     ));
 
-    await test.step("用户刷新后先认证已有存储，再恢复原来的身份", async () => {
+    // 存储真值：按 KeymasterFormats 检查桶内实际文件（device 记录、session、
+    // keys/<公钥>.keyhold、lock.json）是否齐全且内容正确。
+    const initialStorage = await test.step("检查桶内实际文件符合 KeymasterFormats", async () =>
+      assertLocalBucketStorage(page, {
+        bucketId: ready.bucketId,
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: ready.keyLabel,
+      }));
+    expect(initialStorage.keyLock, "解锁使用中的 Key 必须持有未过期的应用锁").toBeDefined();
+
+    await test.step("用户刷新后直接回到锁定页,并用该 Key 的密码重新解锁", async () => {
       await page.reload({ waitUntil: "domcontentloaded" });
       const catalogBeforeWrongPassword = await readLocalCatalog(page);
+      const filesBeforeWrongPassword = identityFileMap(await readRawLocalStorage(page));
       await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
       await expect(page.getByRole("heading", {
-        name: /存储需要认证|Storage authentication required/,
+        name: /钱包已锁定|Wallet locked/,
       })).toBeVisible();
 
-      await page.getByLabel(/密码|Password/).fill(`${password}-wrong`);
+      const passwordField = page.getByLabel(/密码|password/iu);
+      await passwordField.fill(`${password}-wrong`);
       await page.getByRole("button", { name: /解锁|Unlock/ }).click();
+      // 失败提交会在 finally 清空密码框；必须等它稳定后再输入新密码,
+      // 否则刚填入的密码会被这次清理一起清掉。
+      await expect(page.getByText(/Invalid password|密码错误|密码不正确/)).toBeVisible();
+      await expect(passwordField).toHaveValue("");
       await expect(page.getByRole("heading", {
-        name: /存储需要认证|Storage authentication required/,
+        name: /钱包已锁定|Wallet locked/,
       })).toBeVisible();
       await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
-      await expect(readLocalCatalog(page), "错误密码不能删除设备引导记录").resolves.toEqual(catalogBeforeWrongPassword);
+      await expect(readLocalCatalog(page), "错误密码不能删除设备记录或 session").resolves.toEqual(catalogBeforeWrongPassword);
+      // 文件真值：错误密码不能改动设备记录/session/KeyHold 中任何一个字节。
+      expect(identityFileMap(await readRawLocalStorage(page)), "错误密码不能改动身份文件").toEqual(filesBeforeWrongPassword);
 
-      await page.getByLabel(/密码|Password/).fill(password);
-      await page.getByRole("button", { name: /解锁|Unlock/ }).click();
+      await passwordField.fill(password);
+      const unlockButton = page.getByRole("button", { name: /解锁|Unlock/ });
+      await expect(unlockButton).toBeEnabled();
+      await unlockButton.click();
       await waitForReadyVaultPage(page, ready.keyLabel);
       await expect(page.getByText(ready.keyLabel, { exact: true }).first()).toBeVisible();
+      // 解锁成功后重新持锁，KeyHold 文件不变。
+      await assertLocalBucketStorage(page, {
+        bucketId: ready.bucketId,
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: ready.keyLabel,
+      });
     });
 
     await test.step("用户锁定后重新解锁自己的钱包", async () => {
-      await lockAndUnlockUser(ready, password);
+      await lockWallet(page);
+      // 主动锁定 = 释放该 Key 的应用锁。
+      await assertLocalBucketLockReleased(page, {
+        bucketId: ready.bucketId,
+        ownerPublicKeyHex: ready.publicKeyHex,
+      });
+      await unlockWallet(page, password, ready.keyLabel);
       await expect(page.getByText(ready.keyLabel, { exact: true }).first()).toBeVisible();
+      await assertLocalBucketStorage(page, {
+        bucketId: ready.bucketId,
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: ready.keyLabel,
+      });
     });
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password]);

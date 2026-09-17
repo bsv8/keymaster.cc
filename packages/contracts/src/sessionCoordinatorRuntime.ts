@@ -523,6 +523,12 @@ function optionalText(value: unknown, field: string, maximum = 4_096): string | 
   return text(value, field, maximum);
 }
 
+function optionalFilePathPrefix(value: unknown, field: string, maximum = 4_096): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > maximum) throw new TypeError(`Coordinator ${field} is invalid`);
+  return value;
+}
+
 function booleanValue(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") throw new TypeError(`Coordinator ${field} is invalid`);
   return value;
@@ -1014,7 +1020,7 @@ function parseInternalStorageData(value: unknown, prefix: "owner" | "platform"):
     if (prefix !== "owner") throw new TypeError("Coordinator platform storage operation is unsupported");
     if (data.input === undefined) return { operation: "file-list", grantId };
     const input = expectRecord(data.input, prefix + " storage.file-list.input");
-    const filePrefix = optionalText(input.prefix, prefix + " storage.file-list.prefix", 4_096);
+    const filePrefix = optionalFilePathPrefix(input.prefix, prefix + " storage.file-list.prefix", 4_096);
     const cursor = optionalText(input.cursor, prefix + " storage.file-list.cursor", 8_192);
     const limit = optionalBoundedNumber(input.limit, prefix + " storage.file-list.limit", 1, 1_000);
     return {
@@ -1890,6 +1896,25 @@ function parseStorageSelectedResult(value: unknown, field: string): StorageSelec
   return { status: "selected", backend: "s3", requiresRuntimeBootstrap: true };
 }
 
+/** 探测结果：has-keys 只暴露公开身份与标签,不含密码或密文。 */
+function parseBucketProbeResultFor(value: unknown, field: string): import("./storage/catalog.js").BucketProbeResult {
+  const result = expectRecord(value, field);
+  if (result.ok === true) {
+    if (result.state === "empty") return { ok: true, state: "empty" };
+    if (result.state !== "has-keys" || !Array.isArray(result.keys)) throw new TypeError(`Coordinator ${field} is invalid`);
+    const keys = result.keys.map((item, index) => {
+      const key = expectRecord(item, `${field}.keys[${index}]`);
+      return {
+        publicKeyHex: text(key.publicKeyHex, `${field}.keys[${index}].publicKeyHex`, 128),
+        label: text(key.label, `${field}.keys[${index}].label`, 256),
+      };
+    });
+    return { ok: true, state: "has-keys", keys };
+  }
+  if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, `${field}.error`) };
+  throw new TypeError(`Coordinator ${field} is invalid`);
+}
+
 function parseStorageUserFacingError(value: unknown, field: string): NonNullable<InitialSetupRecoveryRecordV1["error"]> {
   const error = expectRecord(value, field);
   const action = optionalText(error.action, field + ".action", 512);
@@ -2114,7 +2139,8 @@ function parseStorageOwnerGrant(value: unknown, field: string): StorageOwnerGran
     moduleId: text(grant.moduleId, field + ".moduleId", 63),
     purposeId: text(grant.purposeId, field + ".purposeId", 63),
     authority: enumValue(grant.authority, ["built-in-module", "third-party-app"] as const, field + ".authority"),
-    model: "kv",
+    // owner 数据模型:K-V 或文件根;不能硬编码成 kv,否则 files 声明绑定会被判不匹配。
+    model: enumValue(grant.model, ["kv", "files"] as const, field + ".model"),
     schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
     ownerStorageGeneration: boundedNumber(grant.ownerStorageGeneration, field + ".ownerStorageGeneration"),
     sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
@@ -2530,6 +2556,8 @@ function parseStorageControlResultFor(control: CoordinatorStorageControl, value:
       return parseInitialSetupResult(value, field);
     case "connect-existing-remote":
       return parseExistingRemoteStorageConnectResult(value, field);
+    case "probe-bucket":
+      return parseBucketProbeResultFor(value, field);
     case "initial-setup-result":
       return value === undefined ? undefined : parseInitialSetupResult(value, field);
     case "initial-setup-recovery-list":
@@ -2666,6 +2694,44 @@ function parseChannelOperationResultFor(operation: CoordinatorChannelOperation, 
   }
 }
 
+function parseOwnerFileEntry(value: unknown, field: string): { path: string; size?: number; etag?: string; lastModified?: string } {
+  const entry = expectRecord(value, field);
+  return {
+    path: text(entry.path, field + ".path", 4_096),
+    ...(entry.size === undefined ? {} : { size: boundedNumber(entry.size, field + ".size") }),
+    ...(entry.etag === undefined ? {} : { etag: text(entry.etag, field + ".etag", 1_024) }),
+    ...(entry.lastModified === undefined ? {} : { lastModified: text(entry.lastModified, field + ".lastModified", 1_024) }),
+  };
+}
+
+function parseOwnerFileListPage(value: unknown, field: string): import("./storage/files.js").OwnerFileListPage {
+  const page = expectRecord(value, field);
+  if (!Array.isArray(page.files)) throw new TypeError(`Coordinator ${field}.files is invalid`);
+  return {
+    files: page.files.map((entry, index) => parseOwnerFileEntry(entry, `${field}.files[${index}]`)),
+    ...(page.nextCursor === undefined ? {} : { nextCursor: text(page.nextCursor, field + ".nextCursor", 8_192) }),
+  };
+}
+
+function parseOwnerFileObject(value: unknown, field: string): import("./storage/files.js").OwnerFileObject {
+  const object = expectRecord(value, field);
+  if (!(object.bytes instanceof Uint8Array)) throw new TypeError(`Coordinator ${field}.bytes is invalid`);
+  return {
+    path: text(object.path, field + ".path", 4_096),
+    bytes: object.bytes.slice(),
+    ...(object.etag === undefined ? {} : { etag: text(object.etag, field + ".etag", 1_024) }),
+    ...(object.lastModified === undefined ? {} : { lastModified: text(object.lastModified, field + ".lastModified", 1_024) }),
+  };
+}
+
+function parseOwnerFileWriteResult(value: unknown, field: string): { etag?: string; lastModified?: string } {
+  const result = value === undefined ? {} : expectRecord(value, field);
+  return {
+    ...(result.etag === undefined ? {} : { etag: text(result.etag, field + ".etag", 1_024) }),
+    ...(result.lastModified === undefined ? {} : { lastModified: text(result.lastModified, field + ".lastModified", 1_024) }),
+  };
+}
+
 function parseOwnerStorageResultFor(data: CoordinatorOwnerStorageData | CoordinatorPlatformStorageData, value: unknown, field: string): unknown {
   switch (data.type) {
     case "owner.get":
@@ -2678,6 +2744,10 @@ function parseOwnerStorageResultFor(data: CoordinatorOwnerStorageData | Coordina
     case "platform.delete": return parseUndefinedResult(value, field);
     case "owner.commit":
     case "platform.commit": return parseKeyValueCommit(value, field);
+    case "owner.file-list": return parseOwnerFileListPage(value, field);
+    case "owner.file-get": return value === undefined ? undefined : parseOwnerFileObject(value, field);
+    case "owner.file-put": return parseOwnerFileWriteResult(value, field);
+    case "owner.file-delete": return parseUndefinedResult(value, field);
   }
 }
 

@@ -13,7 +13,9 @@ const state = vi.hoisted(() => ({
   probeBucket: vi.fn(),
   connectExistingRemote: vi.fn(),
   switchBucket: vi.fn(),
-  renameBucket: vi.fn()
+  renameBucket: vi.fn(),
+  // 必须固定对象身份：页面 effect 依赖 host,每次渲染换对象会导致无限重渲染。
+  host: { resourceStore: { subscribe: () => () => undefined } }
 }));
 
 vi.mock("webloom-framework/react", () => ({
@@ -33,7 +35,7 @@ vi.mock("webloom-framework/react", () => ({
 
 vi.mock("@keymaster/runtime", () => ({
   useI18n: () => ({ t: (_key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? _key }),
-  usePluginHost: () => ({ resourceStore: { subscribe: () => () => undefined } })
+  usePluginHost: () => state.host
 }));
 
 beforeEach(() => {
@@ -78,6 +80,7 @@ describe("桶管理页 · 连接已有桶", () => {
 
     await user.click(await screen.findByTestId("connect-existing-toggle"));
     await screen.findByTestId("connect-existing-panel");
+    await user.type(screen.getByLabelText(/桶名称/), "另一个桶");
     await user.type(screen.getByLabelText(/Namespace/), "another-bucket");
     await user.click(screen.getByTestId("probe-existing"));
 
@@ -101,6 +104,7 @@ describe("桶管理页 · 连接已有桶", () => {
     render(<StorageBucketManagerPage />);
 
     await user.click(await screen.findByTestId("connect-existing-toggle"));
+    await user.type(screen.getByLabelText(/桶名称/), "空桶");
     await user.type(screen.getByLabelText(/Namespace/), "empty-bucket");
     await user.click(screen.getByTestId("probe-existing"));
 

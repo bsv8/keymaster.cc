@@ -40,6 +40,8 @@ export interface FreshUserState {
 /** 已完成 Local 初始化、解锁并选中第一把 Key 的业务状态。 */
 export interface ReadyUserState {
   readonly page: Page;
+  /** 本机桶 ID(= device 记录键名,local 也是对象前缀)。 */
+  readonly bucketId: string;
   /** 用户可读的逻辑桶名称，不是物理 S3 目标。 */
   readonly bucketLabel: string;
   /** 用户可读的 Key 标签。 */

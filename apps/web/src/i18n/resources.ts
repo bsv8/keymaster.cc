@@ -128,6 +128,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       // 首次设置状态机：桶类型 → 桶参数 → 密码 → 第一把 Key。
       "shell.setup.step.type": "Bucket type",
       "shell.setup.step.parameters": "Bucket settings",
+      "shell.setup.step.branch": "Unlock / create",
       "shell.setup.step.password": "Set password",
       "shell.setup.step.key": "First Key",
       "shell.storageAuthentication.title": "Storage authentication required",
@@ -152,6 +153,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.setup.parameters.local": "Give the local bucket a recognizable name.",
       "shell.setup.parameters.s3":
         "Enter the object-store location and credentials. Only a temporary connection probe runs here.",
+      "shell.setup.parameters.localIdNote": "The local bucket ID is generated randomly during setup and cannot be entered by hand.",
       "shell.setup.parameters.testNext": "Test connection and continue",
       "shell.setup.password.title": "Set a password",
       "shell.setup.password.resumeTitle": "Enter the password to continue setup",
@@ -300,6 +302,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       // 首次设置状态机：桶类型 → 桶参数 → 密码 → 第一把 Key。
       "shell.setup.step.type": "桶类型",
       "shell.setup.step.parameters": "桶参数",
+      "shell.setup.step.branch": "解锁 / 创建",
       "shell.setup.step.password": "设置密码",
       "shell.setup.step.key": "第一把 Key",
       "shell.storageAuthentication.title": "存储需要认证",
@@ -320,6 +323,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.setup.parameters.title": "填写桶参数",
       "shell.setup.parameters.local": "给本地桶设置一个容易识别的名称。",
       "shell.setup.parameters.s3": "填写对象存储位置和访问凭据；这里仅执行临时连接探测。",
+      "shell.setup.parameters.localIdNote": "本机桶 ID 会在初始化时随机生成，不需要也不能手工填写。",
       "shell.setup.parameters.testNext": "测试连接并继续",
       "shell.setup.password.title": "设置密码",
       "shell.setup.password.resumeTitle": "输入密码继续初始设置",

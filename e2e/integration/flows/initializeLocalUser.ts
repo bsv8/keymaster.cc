@@ -21,8 +21,10 @@ export async function initializeNewLocalUser(
 ): Promise<ReadyUserState> {
   const result = await initializeLocalUser(state.page, input);
   expect(result.publicKeyHex, "初始化结果必须有可归属后续业务的 active publicKeyHex").toMatch(/^(02|03)[0-9a-f]{64}$/iu);
+  expect(result.bucketId, "初始化结果必须能定位本机桶记录").toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
   return {
     page: state.page,
+    bucketId: result.bucketId,
     bucketLabel: input.bucketLabel,
     keyLabel: input.keyLabel,
     publicKeyHex: result.publicKeyHex,

@@ -23,7 +23,7 @@ export async function changeLanguage(page: Page, language: "en" | "zh-CN"): Prom
   await expect(selector).toBeVisible();
   await selector.selectOption(language);
   await expect.poll(() => page.locator("html").getAttribute("lang")).toBe(language);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("keymaster.languageMode"))).toBe(language);
+  // 语言偏好不再写 localStorage：跨客户端偏好由远端设置负责,当前只验证热切换。
 }
 
 /**

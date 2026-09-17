@@ -746,7 +746,12 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         || request.type === "put"
         || request.type === "delete";
       if (!isObjectRequest) throw new StorageRuntimeError("storage_provider_error", "Local storage bridge request is invalid");
-      if (request.bucketId !== lease.bucketId) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is no longer current");
+      // 初始设置/连接阶段 session 还没有 active 桶(lease.bucketId 为空)：
+      // 此时 Worker 只能按未选桶的租约访问它正在创建/探测的命名空间。
+      // 一旦 session 选中了桶,必须严格匹配,拒绝旧租约访问别的桶。
+      if (lease.bucketId !== undefined && request.bucketId !== lease.bucketId) {
+        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is no longer current");
+      }
       const storage = defaultDeviceStorage() as LocalStorageLike;
       const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
       const provider = createLocalStorageBucketProvider({

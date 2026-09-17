@@ -18,7 +18,7 @@
     "status": "已覆盖、部分覆盖、未覆盖或阻断"
   },
   "catalog_plugins": [
-    { "plugin_id": "storage", "package": "@keymaster/platform-storage", "routes": [] },
+    { "plugin_id": "storage", "package": "@keymaster/platform-storage", "routes": ["/storage/buckets"] },
     { "plugin_id": "vault", "package": "@keymaster/plugin-vault", "routes": ["/vault/unlock", "/vault/create", "/settings/current-key", "/settings/vault"] },
     { "plugin_id": "window-p2p", "package": "@keymaster/plugin-window-p2p", "routes": [] },
     { "plugin_id": "msfile", "package": "@keymaster/plugin-msfile", "routes": ["/msfile/files"] },

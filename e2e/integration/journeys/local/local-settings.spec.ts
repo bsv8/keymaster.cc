@@ -41,7 +41,7 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
  *
  * 覆盖需求：KM-NAV-001、KM-SETTINGS-001。
  */
-test(JOURNEY_ID + "：从正式菜单查看设置并持久化语言", async ({ page, context }, testInfo) => {
+test(JOURNEY_ID + "：从正式菜单查看设置并热切换界面语言", async ({ page, context }, testInfo) => {
   test.setTimeout(60_000);
   const password = "settings-e2e-password-123";
   const browserErrors = captureBrowserErrors(page, context);
@@ -63,13 +63,19 @@ test(JOURNEY_ID + "：从正式菜单查看设置并持久化语言", async ({ p
       const current = await page.locator("html").getAttribute("lang");
       const next = current === "zh-CN" ? "en" : "zh-CN";
       await changeLanguage(page, next);
-      // 页面刷新会按安全契约撤销 Window runtime 并回到已有桶认证页；先验证
-      // html/lang 的持久化结果，再按真实恢复 Flow 解锁，不能把“刷新后仍
-      // 假设 unlocked”当作设置页的成功条件。
+      // 页面刷新会按安全契约撤销 Window runtime 并回到安全入口（local 为
+      // 钱包锁定页）；语言是当前 Window runtime 的会话级偏好、不落盘，
+      // 因此刷新后允许回到默认语言，这里只验证解锁后仍能再次热切换。
       await reloadAndAssertSameKey(page, ready.keyLabel);
       await unlockWalletInPlace(page, password);
-      await expect(page.locator("html")).toHaveAttribute("lang", next);
       await expect(page.getByRole("navigation", { name: /Primary navigation|主导航/ })).toBeVisible();
+      await openSettingsPage(page, {
+        label: /^System$|^系统$/,
+        path: /\/settings\/system$/u,
+        heading: /^System$|^系统$/,
+      });
+      const restored = await page.locator("html").getAttribute("lang");
+      await changeLanguage(page, restored === "zh-CN" ? "en" : "zh-CN");
     });
 
     await test.step("用户通过菜单查看应用和插件配置入口", async () => {

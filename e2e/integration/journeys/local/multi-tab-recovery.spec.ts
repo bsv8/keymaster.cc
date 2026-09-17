@@ -36,13 +36,15 @@ function captureTabBrowserErrors(
 }
 
 /**
- * 冷启动成功的业务结果是“进入已有桶认证页”，不是进入首次初始化向导。
- * 认证页出现前不能安装可读 Vault Root，因此这里只断言安全入口和无 fatal。
+ * 冷启动成功的业务结果是“停在安全入口”，不是进入首次初始化向导：
+ * local 桶刷新后停在钱包锁定页（选 Key + 输入该 Key 密码即可恢复），
+ * s3 等需要启动密码的形态才会停在存储认证页。两页出现前都不会安装
+ * 可读 Vault Root，因此这里只断言安全入口和无 fatal。
  */
 async function expectStorageAuthenticationTab(page: Page, tabLabel: string): Promise<void> {
   await expect(
-    page.getByRole("heading", { name: /Storage authentication required|存储需要认证/ }),
-    `${tabLabel} 刷新后必须进入已有桶认证页`,
+    page.getByRole("heading", { name: /Wallet locked|钱包已锁定|Storage authentication required|存储需要认证/ }),
+    `${tabLabel} 刷新后必须进入安全入口（钱包锁定/存储认证）`,
   ).toBeVisible({ timeout: 20_000 });
   await expect(
     page.getByRole("heading", { name: /Choose a bucket type|选择桶类型/ }),
@@ -91,7 +93,7 @@ test(JOURNEY_ID + "：tab1→tab2→tab1 刷新后 Local 运行态可恢复", as
       { bucketLabel: "Multi-tab refresh E2E bucket", keyLabel: "Multi-tab refresh E2E Key", password },
     ));
 
-    await test.step("tab1 首次刷新后进入已有桶认证页", async () => {
+    await test.step("tab1 首次刷新后进入安全入口", async () => {
       await reloadAndAssertSameKey(page, ready.keyLabel);
       await expectStorageAuthenticationTab(page, "tab1");
     });

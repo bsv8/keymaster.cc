@@ -7,6 +7,7 @@ import {
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
   parseCoordinatorResponseFor,
+  toCoordinatorRpcRequest,
 } from "./sessionCoordinatorRuntime.js";
 import type { CoordinatorRpcRequest } from "./sessionCoordinatorRuntime.js";
 
@@ -293,6 +294,40 @@ describe("Coordinator runtime contract parsers", () => {
       ack: { status: "ok" },
       operationResult: false,
     })).toThrow();
+  });
+
+  it("accepts an empty owner file-list prefix and parses owner file results", () => {
+    const request = toCoordinatorRpcRequest({
+      kind: "storage.owner.data",
+      data: { type: "owner.file-list", storageGrantId: "grant-1", input: { prefix: "" } },
+      expectedSessionEpoch: "epoch-1",
+    } as never) as Extract<CoordinatorRpcRequest, { kind: "storage.owner.data" }>;
+    expect(request.data).toEqual({
+      type: "owner.file-list",
+      storageGrantId: "grant-1",
+      input: { prefix: "" },
+    });
+
+    const listed = parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: { files: [{ path: "02aa.json", size: 12 }] },
+    });
+    expect(listed.operationResult).toEqual({ files: [{ path: "02aa.json", size: 12 }] });
+
+    const read = parseCoordinatorResponseFor(
+      rpcRequest("storage.owner.data", { data: { type: "owner.file-get", storageGrantId: "grant-1", path: "02aa.json" } }),
+      {
+        sessionEpoch: "epoch-1",
+        ack: { status: "ok" },
+        operationResult: { path: "02aa.json", bytes: new Uint8Array([1, 2]) },
+      },
+    );
+    expect((read.operationResult as { bytes: Uint8Array }).bytes).toBeInstanceOf(Uint8Array);
+    expect(() => parseCoordinatorResponseFor(
+      rpcRequest("storage.owner.data", { data: { type: "owner.file-get", storageGrantId: "grant-1", path: "02aa.json" } }),
+      { sessionEpoch: "epoch-1", ack: { status: "ok" }, operationResult: { path: "02aa.json" } },
+    )).toThrow(/bytes is invalid/);
   });
 
   it("enforces request-aware result presence, void responses, and failure fencing", () => {

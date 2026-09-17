@@ -1745,10 +1745,12 @@ async function createPlanProvider(plan: { transactionId: string; connection: Sto
 
 const activeKeyLock = { current: undefined as import("@keymaster/platform-storage/coordinator").KeyLock | undefined };
 
-/** 安装新的 Key 锁并停止旧的；同一把 Key 同一时间只有一个浏览器持有。 */
+/** 安装新的 Key 锁并释放旧的；同一把 Key 同一时间只有一个浏览器持有。 */
 function installActiveKeyLock(lock: import("@keymaster/platform-storage/coordinator").KeyLock): void {
-  activeKeyLock.current?.dispose();
+  const previous = activeKeyLock.current;
   activeKeyLock.current = lock;
+  // 切换 Key 按规范“先抢新锁,成功后再释放旧锁”；这里旧锁已被新锁替代。
+  if (previous) void previous.release().catch(() => undefined);
 }
 
 async function readWorkerSession(peerId?: string): Promise<KeymasterSessionV1 | undefined> {
@@ -1910,6 +1912,10 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
       storageRootInstallationActive = false;
     }
     storageBootstrapState = { selectedBackend: binding.backend, selectedProfileId: binding.bucketId, selectedBucket: binding };
+    // 初始创建后装配 Storage 运行态并发布 ready：否则页面停留在初始化向导,
+    // 只有刷新走冷启动才会看到就绪状态。
+    storageController = undefined;
+    await ensureStorageRuntime(peerId);
     coordinatorState.keyspaceGeneration += 1;
     coordinatorState.sessionEpoch = generateEpoch();
     coordinatorState.vaultStatus = "uninitialized";
@@ -2053,13 +2059,15 @@ async function executeExistingRemoteStorageConnect(
       storageRootInstallationActive = false;
     }
     storageBootstrapState = { selectedBackend: binding.backend, selectedProfileId: binding.bucketId, selectedBucket: binding };
+    // 连接成功后同样装配 Storage 运行态,页面无需刷新即可继续。
+    storageController = undefined;
+    await ensureStorageRuntime(peerId);
     coordinatorState.keyspaceGeneration += 1;
     coordinatorState.sessionEpoch = generateEpoch();
     coordinatorState.vaultStatus = "uninitialized";
     coordinatorState.activePublicKeyHex = undefined;
     storageHealthController.setStatus("ready");
     storageStartupFailure = false;
-    emitStorageState();
     installActiveKeyLock(lock);
     lock = undefined;
     const privateKeyBytes = unlocked.privateKeyBytes;
@@ -9781,7 +9789,30 @@ async function handleUnlockUnsafe(
       };
     }
 
-    // 4. 统一进入 unlocked 状态
+    // 4. 验证通过后先抢该 Key 的应用锁：抢不到说明另一个浏览器正在使用,
+    //    不能进入无锁状态（规范：使用某把 Key 必须持有锁）。
+    const provider = platformBucketProvider;
+    if (provider) {
+      const session = await ensureWorkerSession();
+      const keyLock = createKeyLock(provider, { ownerPublicKeyHex: activeKey.publicKeyHex, holder: session.sessionId });
+      try {
+        await keyLock.acquire();
+      } catch (error) {
+        keyLock.dispose();
+        if (isStorageConflictError(error)) {
+          return {
+            requestId,
+            sessionEpoch: coordinatorState.sessionEpoch,
+            ack: { status: "blocked", reason: { key: "vault.locked.keyInUse", fallback: "该 Key 正被另一个浏览器使用" } },
+          };
+        }
+        throw error;
+      }
+      installActiveKeyLock(keyLock);
+    }
+    // 没有物理 Provider（测试注入的 Hold 绑定）时没有可写 lock.json 的介质。
+
+    // 5. 统一进入 unlocked 状态
     await enterUnlockedState(activeKey.publicKeyHex, privateKey, "unlock");
     privateKeyTransferred = true;
 
@@ -10261,6 +10292,10 @@ async function handleLock(
 }
 
 async function performGlobalLock(reason: string): Promise<void> {
+  // 规范：用户主动锁定 = 释放该 Key 的应用锁（删除 lock.json）。
+  const heldKeyLock = activeKeyLock.current;
+  activeKeyLock.current = undefined;
+  if (heldKeyLock) await heldKeyLock.release().catch(() => undefined);
   // 第一阶段必须完全脱离网络：先递增 epoch、撤销 capability、覆盖密钥
   // 并广播 locked。Supplier 永不返回时，锁屏请求也不能被远端拖住。
   closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
