@@ -1707,11 +1707,27 @@ async function privateKeyForInitialSetup(firstKey: InitialSetupFirstKey): Promis
  * 首次初始化事务：Hold、Vault/index、Root 暂存完成后，最后才提交目录引用。
  * 该函数只被 storage.control 的 initial-setup 调用，页面不得复制这条编排。
  */
+/**
+ * 解析初始化/接入计划的本机桶 ID。
+ *
+ * - 显式提供时直接使用；
+ * - Local 桶：物理命名空间就是设备记录 ID,按事务 ID 派生随机桶 ID；
+ * - S3 桶：本机逻辑身份按物理位置复用/随机分配,必须与事务安装阶段
+ *   使用同一个值,否则 Provider 与 Root 的 bucketId 会不一致。
+ */
+async function resolvePlanRemoteStorageId(
+  plan: { transactionId: string; connection: StorageBucketConnectionConfigV1; remoteStorageId?: string },
+  peerId?: string,
+): Promise<string> {
+  if (plan.remoteStorageId !== undefined) return plan.remoteStorageId;
+  return plan.connection.kind === "local"
+    ? initialSetupBucketId(plan.transactionId)
+    : await resolveS3BucketStorageId(plan.connection, peerId);
+}
+
 /** 由初始化/接入计划创建 Provider；凭据只在本调用内存中存在。 */
 async function createPlanProvider(plan: { transactionId: string; connection: StorageBucketConnectionConfigV1; remoteStorageId?: string }, peerId?: string): Promise<StorageBucketProvider> {
-  // Local 桶的物理命名空间就是设备记录 ID；新建计划不提供 ID 时按事务 ID
-  // 派生随机桶 ID。S3 的 bucketId 只是本机逻辑身份，物理位置在连接配置里。
-  const remoteStorageId = plan.remoteStorageId ?? initialSetupBucketId(plan.transactionId);
+  const remoteStorageId = await resolvePlanRemoteStorageId(plan, peerId);
   if (plan.connection.kind === "local") {
     const bridgeState = createCoordinatorLocalStorageBridgeState(peerId);
     const provider = createLocalStorageBucketProvider({
@@ -1858,11 +1874,9 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
   if (platformRootStore || storageBootstrapState?.selectedBucket || coordinatorState.vaultStatus === "unlocked" || coordinatorState.vaultStatus === "locked") {
     throw new StorageRuntimeError("storage_conflict", "Storage is already initialized");
   }
-  // Local 桶不要求页面提供 ID：没有显式 ID 时按事务 ID 派生一个随机桶 ID，
-  // 与 createPlanProvider 使用的物理命名空间保持一致；s3 按物理位置派生。
-  const remoteStorageId = plan.remoteStorageId ?? (plan.connection.kind === "local"
-    ? initialSetupBucketId(plan.transactionId)
-    : await resolveS3BucketStorageId(plan.connection, peerId));
+  // 页面不要求提供桶 ID：统一走 resolvePlanRemoteStorageId,保证 Provider
+  // 与安装阶段使用同一个本机桶 ID。
+  const remoteStorageId = await resolvePlanRemoteStorageId(plan, peerId);
   const displayName = plan.bucketLabel.trim();
   if (plan.connection.kind === "local") {
     // 本机已登记同 ID 桶时不能再建：请走解锁/切换路径。
@@ -1880,7 +1894,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
   let privateKey: Uint8Array | undefined;
   let lock: import("@keymaster/platform-storage/coordinator").KeyLock | undefined;
   try {
-    provider = await createPlanProvider(plan, peerId);
+    provider = await createPlanProvider({ ...plan, remoteStorageId }, peerId);
     privateKey = await privateKeyForInitialSetup(plan.firstKey);
     const publicKeyHex = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(privateKey, true)).toLowerCase();
     const repository = createKeyHoldRepository(provider);
@@ -2007,10 +2021,11 @@ async function executeExistingRemoteStorageConnect(
   let lock: import("@keymaster/platform-storage/coordinator").KeyLock | undefined;
   let unlocked: UnlockedKeyHold | undefined;
   try {
+    const remoteStorageId = await resolvePlanRemoteStorageId({ transactionId: plan.operationId, connection: plan.connection, ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: plan.remoteStorageId }) }, peerId);
     provider = await createPlanProvider({
       transactionId: plan.operationId,
       connection: plan.connection,
-      ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: plan.remoteStorageId }),
+      remoteStorageId,
     }, peerId);
     const repository = createKeyHoldRepository(provider);
     const listed = await repository.list();
@@ -2025,7 +2040,6 @@ async function executeExistingRemoteStorageConnect(
     unlocked = await repository.unlock(publicKeyHex, plan.keyPassword);
     lock = createKeyLock(provider, { ownerPublicKeyHex: publicKeyHex, holder: session.sessionId });
     await lock.acquire();
-    const remoteStorageId = plan.remoteStorageId ?? await resolveS3BucketStorageId(plan.connection, peerId);
     const built = await buildDeviceRecordForConnection({
       connection: plan.connection,
       remoteStorageId,
@@ -2200,6 +2214,7 @@ function discardCurrentPlatformStorageBinding(): void {
   coordinatorMeta.pluginIntent = emptyPluginIntentSnapshot();
   disposePluginIntentController();
 }
+
 
 async function installPlatformStorage(
   provider: StorageBucketProvider,
@@ -5036,6 +5051,18 @@ function currentOwnerWorkerUnitIdentity(): { ownerPublicKeyHex: string; sessionE
   };
 }
 
+/** owner-session 单元：旧世代占用先摘除,再以当前 owner/session 身份激活。 */
+function activateOwnerSessionUnit(
+  unitId: string,
+  identity: ReturnType<typeof currentOwnerWorkerUnitIdentity>,
+): ReturnType<typeof coordinatorWorkerUnitRegistry.activate> {
+  const existing = coordinatorWorkerUnitRegistry.get(unitId);
+  if (existing && (existing.ownerPublicKeyHex !== identity.ownerPublicKeyHex || existing.sessionEpoch !== identity.sessionEpoch)) {
+    coordinatorWorkerUnitRegistry.stop(unitId, existing.instanceId);
+  }
+  return coordinatorWorkerUnitRegistry.activate(unitId, identity);
+}
+
 function activateCoordinatorOwnerWorkerUnit(
   unitId: string,
   instanceId?: string,
@@ -5044,15 +5071,20 @@ function activateCoordinatorOwnerWorkerUnit(
   if (descriptor && !isCoordinatorProductEnabled(descriptor.productId)) {
     throw new Error(`Plugin disabled: ${descriptor.productId}`);
   }
+  const identity = currentOwnerWorkerUnitIdentity();
   const existing = coordinatorWorkerUnitRegistry.get(unitId);
-  if (existing && instanceId !== undefined && existing.instanceId !== instanceId) {
-    // The registry is only a compatibility table. A Host setup owns the real
-    // instance identity, so discard an older compatibility entry before
-    // binding the exact Host context instance.
+  // The registry is only a compatibility table. A Host setup owns the real
+  // instance identity, so discard an older compatibility entry before
+  // binding the exact Host context instance。页面刷新/重新解锁后 session
+  // 世代会前进，旧世代 owner-session 单元即使未被锁定也必须先摘除，
+  // 否则 activate() 会以“已被其它 owner/session 占用”拒绝当前身份。
+  if (existing && ((instanceId !== undefined && existing.instanceId !== instanceId)
+    || existing.ownerPublicKeyHex !== identity.ownerPublicKeyHex
+    || existing.sessionEpoch !== identity.sessionEpoch)) {
     coordinatorWorkerUnitRegistry.stop(unitId, existing.instanceId);
   }
   return coordinatorWorkerUnitRegistry.activate(unitId, {
-    ...currentOwnerWorkerUnitIdentity(),
+    ...identity,
     ...(instanceId !== undefined ? { instanceId } : {}),
   });
 }
@@ -5094,7 +5126,7 @@ function bindCoordinatorTaskUnitsToOwner(snapshot = currentPluginIntentSnapshot(
     if (!isCoordinatorProductEnabled(unit.productId, snapshot) || coordinatorTaskBlockedReason(runtime, snapshot)) continue;
     let unitSnapshot = activated.get(unit.unitId);
     if (!unitSnapshot) {
-      unitSnapshot = coordinatorWorkerUnitRegistry.activate(unit.unitId, identity);
+      unitSnapshot = activateOwnerSessionUnit(unit.unitId, identity);
       unitSnapshot = coordinatorWorkerUnitRegistry.ready(unit.unitId, unitSnapshot.instanceId);
       activated.set(unit.unitId, unitSnapshot);
     }
@@ -5110,7 +5142,7 @@ function bindCoordinatorTaskUnitsToOwner(snapshot = currentPluginIntentSnapshot(
       || (productId === "junglebus" && coordinatorMeta.p2pkhProviderConfigs?.junglebus?.enabled === false)) continue;
     let unitSnapshot = activated.get(unitId);
     if (!unitSnapshot) {
-      unitSnapshot = coordinatorWorkerUnitRegistry.activate(unitId, identity);
+      unitSnapshot = activateOwnerSessionUnit(unitId, identity);
       unitSnapshot = coordinatorWorkerUnitRegistry.ready(unitId, unitSnapshot.instanceId);
       activated.set(unitId, unitSnapshot);
     }
@@ -6434,17 +6466,17 @@ async function executeStorageControl(
       // Coordinator 的 canonical Vault 索引，空快照则仍保留 uninitialized
       // 供用户创建第一把 Key。
       await hydrateCatalogVaultFromSnapshot(control.password);
-      // 对已有快照/已有 Vault，桶密码就是唯一的 Vault 密码。首次进入
-      // 不能只把 Provider 置为 ready 后再要求用户重复输入同一密码；
-      // 直接沿用本次短暂输入完成首个 Key 的解锁。该调用不缓存密码，
-      // 并且在同一个 storage final lease 内完成 owner 迁移。
+      // 启动密码与 Key 密码是两个独立密码域（规范允许取相同值，但互不
+      // 关联）。这里只在两者恰好相同时顺手解锁 Vault；失败只说明启动
+      // 密码不是该 Key 的密码，绝不能把存储认证判成失败——保持锁定态，
+      // 由锁定页继续询问 Key 自己的密码。
       if (coordinatorState.vaultStatus === "locked" && (await listPublicVaultKeys()).length > 0) {
         const unlockResponse = await handleUnlockUnsafe(
           `bucket-unlock-${crypto.randomUUID()}`,
           { kind: "unlock", password: control.password, expectedSessionEpoch: coordinatorState.sessionEpoch },
         );
         if (unlockResponse.ack.status !== "accepted" && unlockResponse.ack.status !== "already-unlocked") {
-          throw new Error("message" in unlockResponse.ack ? unlockResponse.ack.message : "Bucket Key unlock failed");
+          coordinatorState.vaultStatus = "locked";
         }
       }
       emitStorageState();

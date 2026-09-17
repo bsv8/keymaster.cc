@@ -127,6 +127,15 @@ export function s3FetchRequestInit(): RequestInit {
 }
 
 /**
+ * 单次 S3 HTTP 请求超时（毫秒）。
+ *
+ * 浏览器 fetch 没有默认超时；R2/S3 端偶发的连接停滞会让整个初始化或
+ * 读写链路永久挂起。Smithy 的 requestTimeout 会以 TimeoutError 结束请求，
+ * 由标准重试策略接管，而不是把 UI 卡死。
+ */
+export const S3_REQUEST_TIMEOUT_MS = 20_000;
+
+/**
  * AWS SDK v3's browser XML protocol uses DOMParser and Node constants. Those
  * globals exist in Window but not in SharedWorkerGlobalScope, even though
  * fetch/Response are available there. Install the smallest required XML DOM
@@ -321,7 +330,7 @@ export function createS3BucketObjectStore(config: NormalizedStorageProviderConfi
       secretAccessKey: details.secretAccessKey,
       ...(details.sessionToken === undefined ? {} : { sessionToken: details.sessionToken })
     },
-    requestHandler: new FetchHttpHandler({ requestInit: s3FetchRequestInit })
+    requestHandler: new FetchHttpHandler({ requestInit: s3FetchRequestInit, requestTimeout: S3_REQUEST_TIMEOUT_MS })
   }) as unknown as BucketClientAdapter;
   const send = async <T>(command: unknown, signal?: AbortSignal): Promise<T> => {
     try { return await client.send(command as never, signal ? { abortSignal: signal } : undefined) as T; } catch (error) { throw mapS3Error(error); }

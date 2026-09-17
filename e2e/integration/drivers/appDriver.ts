@@ -67,7 +67,7 @@ export async function readLocalCatalog(page: Page): Promise<LocalCatalogSnapshot
 }
 
 /** 初始化完成必须以业务页和 Key 同时出现为准，不能只看 URL。 */
-export async function waitForReadyVaultPage(page: Page, keyLabel: string): Promise<void> {
+export async function waitForReadyVaultPage(page: Page, keyLabel: string, timeoutMs = 20_000): Promise<void> {
   const outcome = async (): Promise<"ready" | "failed" | "pending"> => {
     if (await page.getByRole("heading", { name: /启动\/运行失败/ }).isVisible().catch(() => false)) return "failed";
     if (await page.getByRole("alert").first().isVisible().catch(() => false)) return "failed";
@@ -75,7 +75,7 @@ export async function waitForReadyVaultPage(page: Page, keyLabel: string): Promi
     return (await page.getByText(keyLabel, { exact: true }).first().isVisible().catch(() => false)) ? "ready" : "pending";
   };
   await expect.poll(outcome, {
-    timeout: 20_000,
+    timeout: timeoutMs,
     message: "只有 Key 管理页和第一把 Key 同时可见，才算初始化完成",
   }).not.toBe("pending");
   expect(await outcome(), "初始化失败必须保留可诊断错误，不能假装成功").toBe("ready");

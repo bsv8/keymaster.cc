@@ -22,8 +22,10 @@ export interface S3InitializationInput {
   readonly bucketLabel: string;
   /** 第一把 Key 的用户标签。 */
   readonly keyLabel: string;
-  /** 只用于本次逻辑桶加密和初始化提交的桶密码。 */
+  /** 第一把 Key 自己的密码（保护 KeyHold 文档）。 */
   readonly password: string;
+  /** 可选独立启动密码；缺省与 Key 密码相同（规范允许相同,但两域互不关联）。 */
+  readonly startupPassword?: string;
   /** S3-compatible 服务的 HTTPS 地址，不含凭据。 */
   readonly endpoint: string;
   /** S3 签名区域。 */
@@ -87,7 +89,7 @@ export async function initializeLocalUser(page: Page, input: LocalInitialization
  * endpoint/region；AWS S3 和 R2 只是同一个正式 S3 Provider 的页面模板，
  * 不应在测试中复制三套初始化编排。
  */
-export async function initializeS3User(page: Page, input: S3InitializationInput): Promise<{ publicKeyHex: string }> {
+export async function initializeS3User(page: Page, input: S3InitializationInput): Promise<{ publicKeyHex: string; bucketId: string }> {
   await openApplication(page);
   await page.getByRole("button", { name: /^S3\b/u }).click();
   await page.getByLabel(/Bucket name \(local display name\)|桶名称（本机显示名称）/iu).fill(input.bucketLabel);
@@ -110,8 +112,9 @@ export async function initializeS3User(page: Page, input: S3InitializationInput)
     const diagnostic = alerts.map((text) => text.trim()).filter(Boolean).join(" | ");
     throw new Error(`真实 S3 连接探测未进入启动密码步骤${diagnostic ? `：${diagnostic}` : ""}`, { cause: error });
   }
-  await page.getByLabel(/启动密码（至少 8 位）|Startup password \(at least 8 characters\)/u).fill(input.password);
-  await page.getByLabel(/再输入一次启动密码|Repeat the startup password/iu).fill(input.password);
+  const startupPassword = input.startupPassword ?? input.password;
+  await page.getByLabel(/启动密码（至少 8 位）|Startup password \(at least 8 characters\)/u).fill(startupPassword);
+  await page.getByLabel(/再输入一次启动密码|Repeat the startup password/iu).fill(startupPassword);
   await page.getByRole("button", { name: /^继续$|^Next$|^Continue$/u }).click();
 
   await expect(page.getByRole("heading", { name: /Set up your first Key|设置第一把 Key/iu })).toBeVisible();
@@ -122,7 +125,9 @@ export async function initializeS3User(page: Page, input: S3InitializationInput)
   await page.getByLabel(/再输入一次 Key 密码|Repeat the Key password/iu).fill(input.password);
   await page.getByRole("button", { name: /继续确认|Continue to confirm/iu }).click();
   await page.getByRole("button", { name: /Create bucket and first Key|创建桶和第一把 Key/iu }).click();
-  await waitForReadyVaultPage(page, input.keyLabel);
+  // 真实 S3 首次初始化包含远端 schema/快照建立与多轮条件写，耗时远高于
+  // local；页面已经等待远端确认，这里给出与事务预算一致的窗口。
+  await waitForReadyVaultPage(page, input.keyLabel, 120_000);
 
   const catalog = await readLocalCatalog(page);
   expect(catalog?.buckets, "S3 初始化必须登记一个设备桶记录").toHaveLength(1);
@@ -133,7 +138,9 @@ export async function initializeS3User(page: Page, input: S3InitializationInput)
   expect(catalog?.selectedBucketId).toBe(catalog?.buckets?.[0]?.bucketId);
 
   // 密码、访问身份、访问密钥和临时令牌都不应以明文进入浏览器目录。
-  for (const secret of [input.password, input.accessKeyId, input.secretAccessKey, input.sessionToken ?? ""]) {
+  // 空字符串没有检查意义，必须过滤，否则断言会退化成恒假。
+  const secrets = [input.password, input.accessKeyId, input.secretAccessKey, ...(input.sessionToken ? [input.sessionToken] : [])];
+  for (const secret of [...secrets, startupPassword].filter((value) => value.length > 0)) {
     await assertSetupSecretNotPersisted(page, secret);
   }
 
@@ -141,7 +148,9 @@ export async function initializeS3User(page: Page, input: S3InitializationInput)
   await keyRow.getByRole("button", { name: /Expand public key|展开公钥/iu }).click();
   const publicKeyHex = (await keyRow.locator("code").first().textContent())?.trim() ?? "";
   expect(publicKeyHex).toMatch(/^(02|03)[0-9a-f]{64}$/iu);
-  return { publicKeyHex };
+  const bucketId = catalog?.buckets?.[0]?.bucketId;
+  if (!bucketId) throw new Error("初始化后缺少本机桶 ID");
+  return { publicKeyHex, bucketId };
 }
 
 /**

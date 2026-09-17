@@ -31,14 +31,14 @@ export interface RawEntry {
   readonly value: string;
 }
 
-const PUBLIC_KEY_PATTERN = /^(02|03)[0-9a-f]{64}$/u;
+export const PUBLIC_KEY_PATTERN = /^(02|03)[0-9a-f]{64}$/u;
 const SESSION_ID_PATTERN = /^[0-9a-f]{32}$/u;
 
 function fail(message: string): never {
   throw new Error(message);
 }
 
-function parseJson(raw: string, label: string): Record<string, unknown> {
+export function parseJson(raw: string, label: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) fail(`${label} 必须是 JSON 对象`);
@@ -49,7 +49,7 @@ function parseJson(raw: string, label: string): Record<string, unknown> {
   }
 }
 
-function expectExactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+export function expectExactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const extra = Object.keys(value).filter((key) => !allowed.includes(key));
   if (extra.length > 0) fail(`${label} 含未定义字段: ${extra.join(", ")}`);
 }
@@ -67,7 +67,7 @@ function decodeFileValue(encoded: string, label: string): string {
 }
 
 /** base64url 解码后的字节数;非法返回 undefined。 */
-function base64UrlBytes(value: unknown): number | undefined {
+export function base64UrlBytes(value: unknown): number | undefined {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value)) return undefined;
   const padded = value.replace(/-/gu, "+").replace(/_/gu, "/") + "===".slice((value.length + 3) % 4);
   try {
@@ -77,7 +77,7 @@ function base64UrlBytes(value: unknown): number | undefined {
   }
 }
 
-function assertNonNegativeInteger(value: unknown, label: string): asserts value is number {
+export function assertNonNegativeInteger(value: unknown, label: string): asserts value is number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) fail(`${label} 必须是非负整数`);
 }
 
@@ -90,6 +90,44 @@ export async function readRawLocalStorage(page: Page): Promise<RawEntry[]> {
     }
     return entries;
   });
+}
+
+
+/** 按 KeyHold v1 校验一份 KeyHold 文档；字段/密文封装不符直接失败。 */
+export function assertKeyHoldDocument(value: Record<string, unknown>, expectation: { publicKeyHex: string; label: string }): Record<string, unknown> {
+  expectExactKeys(value, ["format", "version", "label", "publicKeyHex", "keyDerivation", "cipher"], "KeyHold 文档");
+  if (value.format !== "keyhold" || value.version !== 1) fail("KeyHold format/version 必须是 keyhold/1");
+  if (value.label !== expectation.label) fail("KeyHold label 必须等于 Key 标签");
+  if (value.publicKeyHex !== expectation.publicKeyHex) fail("KeyHold publicKeyHex 必须与文件名一致");
+  const derivation = value.keyDerivation as Record<string, unknown>;
+  expectExactKeys(derivation, ["algorithm", "passwordEncoding", "iterations", "outputLengthBits", "saltB64Url"], "KeyHold keyDerivation");
+  if (derivation.algorithm !== "pbkdf2-hmac-sha-256" || derivation.passwordEncoding !== "utf-8" || derivation.outputLengthBits !== 256) {
+    fail("KeyHold keyDerivation 的算法/编码/长度不符合格式");
+  }
+  if (!Number.isSafeInteger(derivation.iterations) || (derivation.iterations as number) < 1 || (derivation.iterations as number) > 2_147_483_647) {
+    fail("KeyHold keyDerivation.iterations 超出 1~2147483647");
+  }
+  if (base64UrlBytes(derivation.saltB64Url) !== 16) fail("KeyHold keyDerivation.saltB64Url 必须是 16 字节");
+  const cipher = value.cipher as Record<string, unknown>;
+  expectExactKeys(cipher, ["algorithm", "keyLengthBits", "ivB64Url", "tagLengthBits", "ciphertextAndTagB64Url"], "KeyHold cipher");
+  if (cipher.algorithm !== "aes-gcm" || cipher.keyLengthBits !== 256 || cipher.tagLengthBits !== 128) fail("KeyHold cipher 算法参数不符合格式");
+  if (base64UrlBytes(cipher.ivB64Url) !== 12) fail("KeyHold cipher.ivB64Url 必须是 12 字节");
+  const cipherBytes = base64UrlBytes(cipher.ciphertextAndTagB64Url);
+  if (cipherBytes === undefined || cipherBytes < 16) fail("KeyHold cipher 密文（含 16 字节 tag）不合法");
+  return value;
+}
+
+/** 按 keymaster.key-lock v1 校验 Key 应用锁文件。 */
+export function assertKeyLockDocument(value: Record<string, unknown>, expectation: { sessionId: string }): Record<string, unknown> {
+  expectExactKeys(value, ["format", "version", "holder", "acquiredAt", "heartbeatAt", "expiresAt"], "Key 锁文件");
+  if (value.format !== "keymaster.key-lock" || value.version !== 1) fail("Key 锁 format/version 必须是 keymaster.key-lock/1");
+  if (value.holder !== expectation.sessionId) fail("Key 锁 holder 必须等于 session.sessionId");
+  assertNonNegativeInteger(value.acquiredAt, "lock.acquiredAt");
+  assertNonNegativeInteger(value.heartbeatAt, "lock.heartbeatAt");
+  assertNonNegativeInteger(value.expiresAt, "lock.expiresAt");
+  if ((value.expiresAt as number) !== (value.heartbeatAt as number) + 60_000) fail("Key 锁 expiresAt 必须等于 heartbeatAt + 60 秒");
+  if ((value.heartbeatAt as number) < (value.acquiredAt as number)) fail("Key 锁 heartbeatAt 不能早于 acquiredAt");
+  return value;
 }
 
 /**
@@ -153,41 +191,17 @@ export async function assertLocalBucketStorage(
   if (!keyHoldEntry) fail(`缺少 KeyHold 文件 ${keyHoldKey}`);
   const keyFiles = entries.filter((entry) => entry.key.startsWith(`keymaster.bucket.${bucketId}.keys/`));
   if (keyFiles.length !== 1) fail(`keys/ 目录应只有 1 个 KeyHold 文件,实际 ${keyFiles.length}`);
-  const keyHold = parseJson(decodeFileValue(keyHoldEntry.value, "KeyHold 文档"), "KeyHold 文档");
-  expectExactKeys(keyHold, ["format", "version", "label", "publicKeyHex", "keyDerivation", "cipher"], "KeyHold 文档");
-  if (keyHold.format !== "keyhold" || keyHold.version !== 1) fail("KeyHold format/version 必须是 keyhold/1");
-  if (keyHold.label !== keyLabel) fail("KeyHold label 必须等于首 Key 标签");
-  if (keyHold.publicKeyHex !== ownerPublicKeyHex) fail("KeyHold publicKeyHex 必须与文件名一致");
-  const derivation = keyHold.keyDerivation as Record<string, unknown>;
-  expectExactKeys(derivation, ["algorithm", "passwordEncoding", "iterations", "outputLengthBits", "saltB64Url"], "KeyHold keyDerivation");
-  if (derivation.algorithm !== "pbkdf2-hmac-sha-256" || derivation.passwordEncoding !== "utf-8" || derivation.outputLengthBits !== 256) {
-    fail("KeyHold keyDerivation 的算法/编码/长度不符合格式");
-  }
-  if (!Number.isSafeInteger(derivation.iterations) || (derivation.iterations as number) < 1 || (derivation.iterations as number) > 2_147_483_647) {
-    fail("KeyHold keyDerivation.iterations 超出 1~2147483647");
-  }
-  if (base64UrlBytes(derivation.saltB64Url) !== 16) fail("KeyHold keyDerivation.saltB64Url 必须是 16 字节");
-  const cipher = keyHold.cipher as Record<string, unknown>;
-  expectExactKeys(cipher, ["algorithm", "keyLengthBits", "ivB64Url", "tagLengthBits", "ciphertextAndTagB64Url"], "KeyHold cipher");
-  if (cipher.algorithm !== "aes-gcm" || cipher.keyLengthBits !== 256 || cipher.tagLengthBits !== 128) fail("KeyHold cipher 算法参数不符合格式");
-  if (base64UrlBytes(cipher.ivB64Url) !== 12) fail("KeyHold cipher.ivB64Url 必须是 12 字节");
-  const cipherBytes = base64UrlBytes(cipher.ciphertextAndTagB64Url);
-  if (cipherBytes === undefined || cipherBytes < 16) fail("KeyHold cipher 密文（含 16 字节 tag）不合法");
+  const keyHold = assertKeyHoldDocument(parseJson(decodeFileValue(keyHoldEntry.value, "KeyHold 文档"), "KeyHold 文档"), {
+    publicKeyHex: ownerPublicKeyHex,
+    label: keyLabel,
+  });
 
   // 4) Key 应用锁:使用中的 Key 必须有未过期的锁,holder 就是 session。
   const lockKey = `keymaster.bucket.${bucketId}.${ownerPublicKeyHex}/lock.json`;
   const lockEntry = entries.find((entry) => entry.key === lockKey);
   let keyLock: Record<string, unknown> | undefined;
   if (lockEntry) {
-    keyLock = parseJson(decodeFileValue(lockEntry.value, "Key 锁文件"), "Key 锁文件");
-    expectExactKeys(keyLock, ["format", "version", "holder", "acquiredAt", "heartbeatAt", "expiresAt"], "Key 锁文件");
-    if (keyLock.format !== "keymaster.key-lock" || keyLock.version !== 1) fail("Key 锁 format/version 必须是 keymaster.key-lock/1");
-    if (keyLock.holder !== sessionId) fail("Key 锁 holder 必须等于 session.sessionId");
-    assertNonNegativeInteger(keyLock.acquiredAt, "lock.acquiredAt");
-    assertNonNegativeInteger(keyLock.heartbeatAt, "lock.heartbeatAt");
-    assertNonNegativeInteger(keyLock.expiresAt, "lock.expiresAt");
-    if ((keyLock.expiresAt as number) !== (keyLock.heartbeatAt as number) + 60_000) fail("Key 锁 expiresAt 必须等于 heartbeatAt + 60 秒");
-    if ((keyLock.heartbeatAt as number) < (keyLock.acquiredAt as number)) fail("Key 锁 heartbeatAt 不能早于 acquiredAt");
+    keyLock = assertKeyLockDocument(parseJson(decodeFileValue(lockEntry.value, "Key 锁文件"), "Key 锁文件"), { sessionId });
   }
 
   // 5) 旧格式键必须彻底消失。

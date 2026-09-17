@@ -988,8 +988,15 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   async storageControl(control: CoordinatorStorageControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     const request = { kind: "storage.control" as const, clientId: this.clientId, requestId: this.generateRequestId(), control, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    // 首次初始化/接入已有桶包含 KDF、远端正则化和多轮条件写；这些事务的
+    // 时长由 Worker 的恢复记录与页面重查保证，不能被通用 RPC 超时中断。
+    const longRunning = control.type === "initial-setup"
+      || control.type === "connect-existing-remote"
+      || control.type === "initial-setup-cleanup"
+      || control.type === "unlock-bucket"
+      || control.type === "switch-bucket";
     try {
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, longRunning ? 120_000 : undefined);
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
@@ -1458,6 +1465,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private async sendRequest<R extends CoordinatorClientCommandRequest>(
     request: R,
+    timeoutMs?: number,
   ): Promise<CoordinatorRpcResponseForRequest<CoordinatorRpcRequestFromClient<R>>> {
     let rpcRequest: CoordinatorRpcRequestFromClient<R>;
     try {
@@ -1468,12 +1476,13 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       failure.requestValidation = true;
       throw failure;
     }
-    return this.sendTypedRequest(rpcRequest, request.requestId);
+    return this.sendTypedRequest(rpcRequest, request.requestId, timeoutMs);
   }
 
   private async sendTypedRequest<R extends CoordinatorRpcRequest>(
     request: R,
     operationId = this.generateRequestId(),
+    timeoutMs = this.requestTimeoutMs,
   ): Promise<CoordinatorRpcResponseForRequest<R>> {
     const runtime = this.runtimeHandle;
     if (!this.isConnected || !runtime) {
@@ -1483,7 +1492,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     try {
       const response = await runtime.capability(COORDINATOR_RPC_CAPABILITY).call(request, {
         operationId,
-        timeoutMs: this.requestTimeoutMs,
+        timeoutMs,
       });
       if (this.runtimeHandle !== runtime || !this.isConnected || this.connectionAttempt !== attempt) {
         throw Object.assign(coordinatorSendError("Coordinator response belongs to a stale Runtime", "unknown"), { code: "service_reference_stale" });

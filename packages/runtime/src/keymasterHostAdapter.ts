@@ -1761,9 +1761,15 @@ export function createKeymasterPluginHost(
       runtimeIdentity = { ...next };
       // WebLoom 负责当前实例的 Scope；身份边界变化时先同步撤权，再等待
       // 有界清理。desiredEnabled 保持不变，解锁/重绑后由分阶段装配重新启动。
+      // 新身份如果没有就绪存储（bucketGeneration 未知，例如冷启动停在存储
+      // 认证页、或切换过程中旧绑定已卸下），storage 作用域单元的 setup 会
+      // 立刻因“Platform storage requires a ready root”失败并把插件打成
+      // error-disabled；这不是用户意图变化。此时保持挂起，等下一个带就绪
+      // 存储的身份事件再重试，避免把安全入口打成启动失败页。
+      const storageReadyForIdentity = next.bucketGeneration !== undefined;
       for (const item of toSuspend) {
         await coreHost!.suspend(item.pluginId, "runtime identity changed");
-        if (item.scopeKind === "storage" && item.shouldRestart) {
+        if (item.scopeKind === "storage" && item.shouldRestart && storageReadyForIdentity) {
           // retry() 只启动当前已确认启用的本地实例，不改写 Coordinator
           // 的插件意图 revision；身份重绑不是一次用户启停操作。
           await coreHost!.retry(item.pluginId);

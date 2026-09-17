@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { initializeS3User } from "../../drivers/initialSetupDriver.js";
-import { readLocalCatalog, waitForReadyVaultPage } from "../../drivers/appDriver.js";
+import { readLocalCatalog } from "../../drivers/appDriver.js";
+import { reloadS3BucketAndUnlock } from "../../drivers/vaultDriver.js";
+import { assertS3BucketStorage, assertS3IdentityStorage, readS3SessionId } from "../../support/s3BucketFormats.js";
 import { loadE2ES3Config, publicS3ConfigFingerprint } from "../../resources/config/loader.js";
 import { S3CleanupResource } from "../../resources/s3/s3CleanupResource.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
@@ -13,6 +15,8 @@ export const JOURNEY_ID = REAL_S3_INITIALIZATION_SCENARIO.id;
 export const JOURNEY_METADATA = REAL_S3_INITIALIZATION_SCENARIO;
 
 const SETUP_PASSWORD = "real-s3-e2e-password-123";
+// 两个密码域必须独立验证：启动密码保护本机连接参数，Key 密码保护 KeyHold。
+const STARTUP_PASSWORD = "real-s3-startup-password-456";
 const LOGICAL_BUCKET_LABEL = "真实 S3 集成测试桶";
 const FIRST_KEY_LABEL = "真实 S3 首 Key";
 
@@ -82,6 +86,7 @@ test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async 
       bucketLabel: LOGICAL_BUCKET_LABEL,
       keyLabel: FIRST_KEY_LABEL,
       password: SETUP_PASSWORD,
+      startupPassword: STARTUP_PASSWORD,
       endpoint: config!.s3.endpoint,
       region: config!.s3.region,
       bucket: config!.s3.bucket,
@@ -95,14 +100,36 @@ test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async 
     // 不是 Node S3 API 的业务成功判定。
     expect(ready.publicKeyHex).toMatch(/^0[23][0-9a-f]{64}$/iu);
 
+    await test.step("S3 桶与本机身份文件符合 KeymasterFormats", async () => {
+      const sessionId = await readS3SessionId(page);
+      await assertS3IdentityStorage(page, { bucketId: ready.bucketId, ownerPublicKeyHex: ready.publicKeyHex, sessionId });
+      // Node 侧直接读取真实 S3 对象：KeyHold 文档、Key 应用锁与旧格式缺席。
+      await assertS3BucketStorage(config!.s3, {
+        prefix: scenarioPrefix,
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: FIRST_KEY_LABEL,
+        sessionId,
+      });
+    });
+
     await test.step("用户刷新页面后从真实 S3 恢复同一逻辑桶和 Key", async () => {
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await waitForReadyVaultPage(page, FIRST_KEY_LABEL);
+      // s3 设备记录由启动密码保护：先过存储认证页，再输入该 Key 自己的密码。
+      await reloadS3BucketAndUnlock(page, STARTUP_PASSWORD, SETUP_PASSWORD, FIRST_KEY_LABEL);
       const catalog = await readLocalCatalog(page);
       expect(catalog?.buckets).toHaveLength(1);
       expect(catalog?.buckets?.[0]).toMatchObject({ label: LOGICAL_BUCKET_LABEL, backend: "s3" });
       expect(catalog?.selectedBucketId).toBe(catalog?.buckets?.[0]?.bucketId);
       await expect(page.getByText(FIRST_KEY_LABEL, { exact: true }).first()).toBeVisible();
+
+      const sessionId = await readS3SessionId(page);
+      await assertS3IdentityStorage(page, { bucketId: ready.bucketId, ownerPublicKeyHex: ready.publicKeyHex, sessionId });
+      // 恢复后锁必须重新被本 session 持有；同一条 Node 真值校验再跑一次。
+      await assertS3BucketStorage(config!.s3, {
+        prefix: scenarioPrefix,
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: FIRST_KEY_LABEL,
+        sessionId,
+      });
     });
   } catch (error) {
     journeyError = error;
@@ -110,7 +137,7 @@ test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化与刷新恢复", async 
     try {
       // 真实资源项目关闭 trace/video/screenshot；浏览器错误也必须经过已知
       // 凭据替换和秘密形状扫描后才允许进入报告。
-      await attachBrowserErrors(testInfo, browserErrors, [SETUP_PASSWORD, accessKeyId, secretAccessKey, sessionToken]);
+      await attachBrowserErrors(testInfo, browserErrors, [SETUP_PASSWORD, STARTUP_PASSWORD, accessKeyId, secretAccessKey, sessionToken]);
     } catch (error) {
       evidenceError = error;
     }

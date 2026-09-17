@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { waitForReadyVaultPage } from "./appDriver.js";
+import { navigateToBusinessPage } from "./navigationDriver.js";
 
 /** 用户主动锁定后，旧运行态必须收口到解锁入口。 */
 export async function lockWallet(page: Page): Promise<void> {
@@ -47,4 +48,36 @@ export async function reloadAndAssertSameKey(page: Page, keyLabel: string): Prom
   await expect(page.getByRole("heading", { name: /钱包已锁定|Wallet locked/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: /Choose a bucket type|选择桶类型/ })).toHaveCount(0);
   await expect(page.getByLabel(/密码|password/iu)).toBeVisible();
+}
+
+/**
+ * S3 桶刷新恢复：设备记录被启动密码保护，所以先过存储认证页，再在锁定
+ * 壳里输入该 Key 自己的密码。恢复后停在 SPA 原路由，驱动再按真实菜单
+ * 回到 Key 管理页，保证调用方看到的是同一把 Key。
+ */
+export async function reloadS3BucketAndUnlock(
+  page: Page,
+  startupPassword: string,
+  keyPassword: string,
+  keyLabel: string,
+): Promise<void> {
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const authHeading = page.getByTestId("storage-authentication").getByRole("heading", { name: /存储需要认证|Storage authentication required/ });
+  const lockedHeading = page.getByRole("heading", { name: /钱包已锁定|Wallet locked/ });
+  await expect.poll(async () => (await authHeading.isVisible().catch(() => false)) || (await lockedHeading.isVisible().catch(() => false)), {
+    timeout: 60_000,
+    message: "S3 刷新后必须进入存储认证页或锁定页",
+  }).toBe(true);
+  if (await authHeading.isVisible().catch(() => false)) {
+    const auth = page.getByTestId("storage-authentication");
+    await auth.getByLabel(/密码|password/iu).fill(startupPassword);
+    await auth.getByRole("button", { name: /^解锁$|^Unlock$/u }).click();
+  }
+  // 启动密码与 Key 密码是两个密码域：认证通过后仍要输入该 Key 的密码。
+  await expect(lockedHeading).toBeVisible({ timeout: 90_000 });
+  await page.getByLabel(/Key password|密码|password/iu).fill(keyPassword);
+  await page.getByRole("button", { name: /^Unlock$|^解锁$/u }).click();
+  await expect(page.getByRole("button", { name: /^(Lock wallet|Lock|锁定钱包|锁定)$/u })).toBeVisible({ timeout: 90_000 });
+  await navigateToBusinessPage(page, { label: /Key management|密钥管理/, path: /\/settings\/vault$/u });
+  await waitForReadyVaultPage(page, keyLabel, 30_000);
 }
