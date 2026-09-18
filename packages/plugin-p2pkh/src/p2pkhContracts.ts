@@ -477,6 +477,11 @@ export interface P2pkhService {
 
   listResources(assetId?: P2pkhAssetId): Promise<P2pkhKeyResource[]>;
   listUtxos(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
+  /**
+   * 施工单 2026-09-18 001：资产是否已在设置里开启。
+   * `bsv` 恒为 true；`bsvtest` 取决于 includeTestnet 开关。
+   */
+  isAssetEnabled(assetId: P2pkhAssetId): boolean;
   /** 不排除 protected outpoint 的原始 UTXO 读口，仅供协议级内部使用。 */
   listUtxosRaw?(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
   listLocalInputClaims(resourceId?: string, limit?: number): Promise<P2pkhLocalInputClaim[]>;

@@ -10,7 +10,7 @@
 //   - `pending op` **不**进 platform K-V repository（operationId 故意只活本会话）。
 //   - 真实签名由 `keymaster-multisig-pool` SDK 完成；本文件只做模型。
 
-import type { ProtocolFeePoolAction, ProtocolFeePoolRecord } from "@keymaster/contracts";
+import type { P2pkhTransferAssetId, ProtocolFeePoolAction, ProtocolFeePoolRecord } from "@keymaster/contracts";
 
 /**
  * feepool prepare 落地、commit 消费的内存 op。
@@ -40,6 +40,11 @@ export interface FeepoolPendingOp {
   ownerPublicKeyHex: string;
   /** prepare 时的对端公钥 hex。 */
   counterpartyPublicKeyHex: string;
+  /**
+   * prepare 时的公开资产标识（施工单 2026-09-18 001）。
+   * commit 阶段必须与 prepare 一致；主网池与 testnet 池互不串用。
+   */
+  assetId: P2pkhTransferAssetId;
   /** 三种 action 之一。 */
   action: ProtocolFeePoolAction;
   /** prepare 完成时间（unix ms）；commit 用来诊断 op 过期。 */

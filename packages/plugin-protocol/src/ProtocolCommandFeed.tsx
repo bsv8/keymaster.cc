@@ -19,12 +19,18 @@ import { useState } from "react";
 import { Button, PageHeader } from "@keymaster/ui";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
+  P2pkhTransferAssetId,
   ProtocolCommandFeedState,
   ProtocolCommandRecord,
   ProtocolMethod,
   ProtocolService,
   ProtocolSessionSnapshot
 } from "@keymaster/contracts";
+
+/** 资产展示名：只区分 bsv-mainnet / bsv-testnet。 */
+function formatAssetLabel(assetId: P2pkhTransferAssetId | undefined): string {
+  return assetId === "bsv-testnet" ? "BSV Testnet" : "BSV";
+}
 
 /* ============== 公开 props ============== */
 
@@ -565,6 +571,14 @@ function ReadOnlyBody({
           </dd>
         </>
       ) : null}
+      {command.assetId ? (
+        <>
+          <dt>{t("protocol.feed.asset", { defaultValue: "资产" })}</dt>
+          <dd>
+            <code>{formatAssetLabel(command.assetId)}</code>
+          </dd>
+        </>
+      ) : null}
       {command.recipientAddress ? (
         <>
           <dt>{t("protocol.feed.recipient", { defaultValue: "收款地址" })}</dt>
@@ -786,6 +800,14 @@ function ConfirmDetails({
               <code>
                 {iat} → {exp}
               </code>
+            </dd>
+          </>
+        ) : null}
+        {command.assetId ? (
+          <>
+            <dt>{t("protocol.confirm.p2pkh.asset", { defaultValue: "资产" })}</dt>
+            <dd>
+              <code>{formatAssetLabel(command.assetId)}</code>
             </dd>
           </>
         ) : null}

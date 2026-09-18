@@ -137,6 +137,7 @@ describe("protocolMultipartUploadRepository stores (smoke)", () => {
       origin: "https://x",
       ownerPublicKeyHex: "a",
       counterpartyPublicKeyHex: "b",
+      assetId: "bsv-mainnet",
       baseTxid: "",
       baseTxHex: "",
       totalAmount: 0,

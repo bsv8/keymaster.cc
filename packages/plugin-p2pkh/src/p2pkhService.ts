@@ -648,6 +648,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const filtered = filterUtxos(withoutTestnet, filter);
       return excludeProtectedUtxos(filtered, deps.protectedOutpoints, filter?.ownerPublicKeyHex);
     },
+    /**
+     * 施工单 2026-09-18 001：protocol 层 accept 阶段用这个判断 testnet
+     * 是否已在设置里开启；`bsv` 恒为可用（mainnet 不依赖开关）。
+     */
+    isAssetEnabled(assetId) {
+      if (assetId === "bsv") return true;
+      if (assetId === "bsvtest") return getCurrentSettings().includeTestnet;
+      return false;
+    },
     async listUtxosRaw(filter) {
       const ownerHex = filter?.ownerPublicKeyHex;
       const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();

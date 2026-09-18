@@ -37,7 +37,7 @@ Connect 是外部网页 App 使用 Keymaster 能力的唯一公开入口。当�
 | --- | --- | --- |
 | `identity.*` | 获取签名身份断言、签署明确意图 | 用户确认，绑定 Owner、origin 和有效期 |
 | `cipher.*` | 加解密二进制内容 | AES-256-GCM，密钥绑定 Owner 和精确 origin |
-| `p2pkh.*` | 受控主网转账 | App 不能指定私钥、找零、网络或确认文案 |
+| `p2pkh.*` | 受控转账（`assetId: "bsv-mainnet" / "bsv-testnet"`，缺省 mainnet） | App 不能指定私钥、找零或确认文案；testnet 需要用户在设置里开启 |
 | `feepool.*` | 准备并提交双端费用池操作 | 两阶段操作绑定 origin、会话和 Owner |
 | `channel.*` | 发布 JSON、替换精确频道订阅 | App 不选择 Supplier，也看不到私密 inbox |
 | `storage.*` | App 隔离目录、对象和 multipart | 需要 `storage` 身份需求；不暴露桶和凭据 |

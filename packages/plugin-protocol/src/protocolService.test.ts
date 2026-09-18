@@ -2663,6 +2663,7 @@ describe("ProtocolServiceImpl", () => {
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
+      assetId: "bsv-mainnet",
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
       totalAmount: 20000,
@@ -2714,6 +2715,7 @@ describe("ProtocolServiceImpl", () => {
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
+      assetId: "bsv-mainnet",
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
       totalAmount: 3000,
@@ -3197,6 +3199,7 @@ describe("ProtocolServiceImpl", () => {
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
+      assetId: "bsv-mainnet",
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
       totalAmount: 3000,
@@ -3269,6 +3272,7 @@ describe("ProtocolServiceImpl", () => {
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
+      assetId: "bsv-mainnet",
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
       totalAmount: 3000,
@@ -6095,6 +6099,200 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
 
     expect(service.feedSnapshot().commands.find((card) => card.requestId === "p2pkh-late-capability"))
       .toMatchObject({ phase: "approved", decision: "approved" });
+  });
+
+  /* ============== 施工单 2026-09-18 001：多资产资产门禁 ============== */
+
+  // 合法 testnet P2PKH（version 0x6f），只做 protocol 层 version 校验。
+  const TESTNET_P2PKH = "mzBc4XEFSdjm9XEV3R3c7x6Q7ZqQ2d1b8e";
+
+  it("p2pkh.transfer bsv-testnet：设置未开启时 accept fail-fast asset_not_enabled", async () => {
+    const assetQueries: string[] = [];
+    const p2pkh = {
+      ...makeP2pkhServiceStub002(),
+      isAssetEnabled(assetId: string) {
+        assetQueries.push(assetId);
+        return false;
+      }
+    };
+    const { service, opener, getResult, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
+      p2pkhService: p2pkh as never
+    });
+    await storageRepository.putConnectSession({
+      sessionId: "sess-asset-off",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "p2pkh-testnet-off",
+          method: "p2pkh.transfer",
+          params: {
+            recipientAddress: TESTNET_P2PKH,
+            amountSatoshis: 1000,
+            assetId: "bsv-testnet",
+            connectSessionId: "sess-asset-off"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("asset_not_enabled");
+    expect(assetQueries).toEqual(["bsvtest"]);
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "p2pkh-testnet-off");
+    expect(card?.errorCode).toBe("asset_not_enabled");
+    expect(card?.decision).toBe("failed");
+    // fail-fast 不进 confirming。
+    expect(service.snapshot().phase).toBe("waiting");
+  });
+
+  it("p2pkh.transfer bsv-testnet：设置已开启时按 bsvtest 执行并回显 assetId", async () => {
+    const preparedAssets: string[] = [];
+    const p2pkh = {
+      async listUtxos() {
+        return [{ txid: "00".repeat(32), vout: 0, value: 100000 }];
+      },
+      isAssetEnabled(assetId: string) {
+        return assetId === "bsvtest";
+      },
+      async prepareTransfer(input: {
+        assetId: string;
+        recipientAddress: string;
+        amountSatoshis: number;
+        feeRateSatoshisPerKb: number;
+      }) {
+        preparedAssets.push(input.assetId);
+        return {
+          assetId: input.assetId,
+          network: "test" as const,
+          recipientAddress: input.recipientAddress,
+          amountSatoshis: input.amountSatoshis,
+          feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
+          allocation: {},
+          changeAddress: TESTNET_P2PKH,
+          outputs: [{ address: input.recipientAddress, value: input.amountSatoshis }],
+          estimatedFeeSatoshis: 200,
+          serializedSizeBytes: 200,
+          txid: "22".repeat(32),
+          rawTxHex: "beef"
+        };
+      },
+      async submitTransfer(preview: { txid: string; rawTxHex: string }) {
+        return {
+          status: "broadcast",
+          txid: preview.txid,
+          rawTxHex: preview.rawTxHex,
+          submissionId: "sub-2",
+          localInputClaimIds: []
+        };
+      }
+    };
+    const { service, opener, getResult, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
+      p2pkhService: p2pkh as never
+    });
+    await storageRepository.putConnectSession({
+      sessionId: "sess-asset-on",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "p2pkh-testnet-on",
+          method: "p2pkh.transfer",
+          params: {
+            recipientAddress: TESTNET_P2PKH,
+            amountSatoshis: 1000,
+            assetId: "bsv-testnet",
+            connectSessionId: "sess-asset-on"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(service.snapshot().phase).toBe("confirming");
+    await service.confirmByUser();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(true);
+    if (r && r.ok) {
+      const result = r.result as { assetId: string; txid: string };
+      expect(result.assetId).toBe("bsv-testnet");
+      expect(result.txid).toBe("22".repeat(32));
+    }
+    expect(preparedAssets).toEqual(["bsvtest"]);
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "p2pkh-testnet-on");
+    expect(card?.assetId).toBe("bsv-testnet");
+    expect(card?.decision).toBe("approved");
+  });
+
+  it("feepool.prepare bsv-testnet：设置未开启时同样 accept fail-fast asset_not_enabled", async () => {
+    const p2pkh = {
+      ...makeP2pkhServiceStub002(),
+      isAssetEnabled() {
+        return false;
+      }
+    };
+    const { service, opener, getResult, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
+      p2pkhService: p2pkh as never
+    });
+    await storageRepository.putConnectSession({
+      sessionId: "sess-fee-off",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "feepool-testnet-off",
+          method: "feepool.prepare",
+          params: {
+            counterpartyPublicKeyHex: "02" + "11".repeat(32),
+            amountSatoshis: 1000,
+            assetId: "bsv-testnet",
+            connectSessionId: "sess-fee-off"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("asset_not_enabled");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "feepool-testnet-off");
+    expect(card?.errorCode).toBe("asset_not_enabled");
   });
 
   it("feepool.prepare / commit 同 origin 不同 owner 不会串池", async () => {

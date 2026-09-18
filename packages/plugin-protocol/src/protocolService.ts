@@ -113,6 +113,7 @@ import {
   type OwnerExecutionRuntime,
   type SessionRuntimeBootstrap,
   type P2pkhProtocolAdapter,
+  type P2pkhTransferAssetId,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
   type ProtocolClosingMessage,
@@ -180,6 +181,29 @@ import {
 
 /** p2pkh auto-approve 缺省 fee rate。 */
 const DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB = 100;
+
+/** 公开资产标识 -> p2pkh 内部 assetId（施工单 2026-09-18 001）。 */
+function toInternalP2pkhAssetId(
+  assetId: P2pkhTransferAssetId
+): "bsv" | "bsvtest" {
+  return assetId === "bsv-testnet" ? "bsvtest" : "bsv";
+}
+
+/**
+ * 费用池 poolKey。
+ *
+ * 设计缘由（施工单 2026-09-18 001）：mainnet 保持旧 3 段 key 形状，
+ * 不迁移历史池；testnet 追加 `::bsv-testnet` 后缀，主网与 testnet 不串池。
+ */
+function feePoolKeyFor(
+  origin: string,
+  ownerPublicKeyHex: string,
+  counterpartyPublicKeyHex: string,
+  assetId: P2pkhTransferAssetId
+): string {
+  const base = `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`;
+  return assetId === "bsv-testnet" ? `${base}::bsv-testnet` : base;
+}
 
 /**
  * 确认超时缺省秒数（施工单 003 硬切换：per-origin 确认超时）。
@@ -2784,6 +2808,16 @@ export class ProtocolServiceImpl implements ProtocolService {
           return;
         }
       }
+      if (method === "p2pkh.transfer" || method.startsWith("feepool.")) {
+        // 施工单 2026-09-18 001：testnet 未开启时 accept 阶段 fail-fast，
+        // 不进确认 / 解锁队列。
+        const assetId = (parsed.params as { assetId?: P2pkhTransferAssetId }).assetId;
+        const assetFail = this.preCheckP2pkhAsset(assetId);
+        if (assetFail !== null) {
+          await this.scheduleFailFastRequest(recordId, assetFail.code, assetFail.reason);
+          return;
+        }
+      }
       if (method === "cipher.encrypt" || method === "cipher.decrypt") {
         // cipher.* session 有效：locked → waiting_unlock_manual；
         // unlocked → confirming（与现有 manual confirm 路径一致）。
@@ -2904,6 +2938,25 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
+   * accept 阶段解析并检查本次请求的资产（施工单 2026-09-18 001）。
+   *
+   * 设计缘由：`bsv-testnet` 只有在 p2pkh 设置开启 testnet 后才可用；
+   * 未开启时 fail-fast `asset_not_enabled`，而不是等 prepare 抛错后被
+   * 统一折叠成 user_rejected（caller 无法区分"用户拒绝"与"资产未开启"）。
+   */
+  private preCheckP2pkhAsset(
+    assetId: P2pkhTransferAssetId | undefined
+  ): { code: ProtocolErrorCode; reason: ProtocolFailureReason } | null {
+    const publicAssetId = assetId ?? "bsv-mainnet";
+    if (publicAssetId !== "bsv-testnet") return null;
+    const p2pkhService = this.currentP2pkhService();
+    if (!p2pkhService || !p2pkhService.isAssetEnabled(toInternalP2pkhAssetId(publicAssetId))) {
+      return { code: "asset_not_enabled", reason: "asset_not_enabled" };
+    }
+    return null;
+  }
+
+  /**
    * 按 sessionId 取 connect session 真值（不区分 origin，由 caller 决定
    * 跨 origin 错误码）。
    *
@@ -2959,7 +3012,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.decision = "failed";
     rec.status = "failed";
     rec.errorCode = code;
-    rec.errorMessage = code === "invalid_origin" ? "invalid origin" : "User rejected";
+    rec.errorMessage =
+      code === "invalid_origin"
+        ? "invalid origin"
+        : code === "asset_not_enabled"
+          ? "Requested asset is not enabled in Keymaster settings"
+          : "User rejected";
     rec.failureReason = reason;
     rec.finishedAt = Date.now();
     rec.updatedAt = rec.finishedAt;
@@ -4918,15 +4976,18 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 失败语义。提前在协议层以「session is no longer bound to
       // active key」显式 fail-closed，让 caller / UI 拿到明确错误。
       this.assertSessionOwnerIsActive(session);
+      const publicAssetId = params.assetId ?? "bsv-mainnet";
+      const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
       const card = this.feedCommands.find((c) => c.id === rec.recordId);
       if (card) {
         card.recipientAddress = params.recipientAddress;
         card.amountSatoshis = params.amountSatoshis;
+        card.assetId = publicAssetId;
         card.autoApproved = rec.autoApproved;
         card.updatedAt = Date.now();
       }
       const preview = await p2pkhService.prepareTransfer({
-        assetId: "bsv",
+        assetId: internalAssetId,
         ownerPublicKeyHex,
         recipientAddress: params.recipientAddress,
         amountSatoshis: params.amountSatoshis,
@@ -4939,6 +5000,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const submitted = await p2pkhService.submitTransfer(previewWithOwner);
       const txid = submitted.txid ?? preview.txid;
       const result: P2pkhTransferResult = {
+        assetId: publicAssetId,
         txid,
         rawTxHex: submitted.rawTxHex,
         feeSatoshis: preview.estimatedFeeSatoshis
@@ -4987,8 +5049,26 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 挡掉时只会冒出「Key storage is not ready」这种偶发错误，不适
       // 合作为协议失败语义。
       this.assertSessionOwnerIsActive(session);
-      const poolKey = `${rec.origin}::${ownerPublicKeyHex}::${params.counterpartyPublicKeyHex}`;
+      const publicAssetId = params.assetId ?? "bsv-mainnet";
+      const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
+      // 施工单 2026-09-18 001：池 key 带上资产维度；mainnet 保持旧 3 段
+      // key 形状（不迁移历史池），testnet 追加 `::bsv-testnet`。
+      const poolKey = feePoolKeyFor(
+        rec.origin,
+        ownerPublicKeyHex,
+        params.counterpartyPublicKeyHex,
+        publicAssetId
+      );
       const prior = await this.deps.storageRepository.getFeePool(poolKey);
+      // 旧记录没有 assetId 字段，按 mainnet 归一化后再比较。
+      const priorAssetId =
+        (prior as { assetId?: P2pkhTransferAssetId } | null)?.assetId ?? "bsv-mainnet";
+      if (prior && priorAssetId !== publicAssetId) {
+        throw localFailure(
+          "internal_error",
+          "fee pool record assetId does not match the requested asset"
+        );
+      }
       const originSettings = await this.getOriginSettingsCached(rec.origin);
 
       let action: ProtocolFeePoolAction;
@@ -5060,7 +5140,8 @@ export class ProtocolServiceImpl implements ProtocolService {
           clientPublicKeyHex,
           params.counterpartyPublicKeyHex,
           poolAmount,
-          ownerPublicKeyHex
+          ownerPublicKeyHex,
+          internalAssetId
         );
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
@@ -5140,7 +5221,8 @@ export class ProtocolServiceImpl implements ProtocolService {
           clientPublicKeyHex,
           params.counterpartyPublicKeyHex,
           newPoolAmount,
-          ownerPublicKeyHex
+          ownerPublicKeyHex,
+          internalAssetId
         );
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
@@ -5175,6 +5257,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         connectSessionId: rec.connectSessionId,
         ownerPublicKeyHex,
         counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+        assetId: publicAssetId,
         action,
         preparedAt,
         baseTxHex,
@@ -5195,12 +5278,14 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.operationId = operationId;
         card.counterpartyPublicKeyHex = params.counterpartyPublicKeyHex;
         card.amountSatoshis = params.amountSatoshis;
+        card.assetId = publicAssetId;
         card.updatedAt = Date.now();
       }
 
       const result: FeepoolPrepareResult = {
         operationId,
         action,
+        assetId: publicAssetId,
         counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
         amountSatoshis: params.amountSatoshis,
         draftSpendTxHex,
@@ -5260,7 +5345,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     clientPublicKeyHex: string,
     serverPublicKeyHex: string,
     poolAmount: number,
-    ownerPublicKeyHex: string
+    ownerPublicKeyHex: string,
+    assetId: "bsv" | "bsvtest"
   ): Promise<{
     baseTxHex: string;
     baseTxOutputIndex: number;
@@ -5273,8 +5359,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 关键（002 硬切换）：UTXO 选币按 owner 走，**不**读全局 active key。
     // plugin-p2pkh 内部 `listUtxos` filter 已支持 `ownerPublicKeyHex`。
+    // 施工单 2026-09-18 001：assetId 由调用方按公开资产映射后传入。
     const utxos = await p2pkhService.listUtxos({
-      assetId: "bsv",
+      assetId,
       ownerPublicKeyHex
     });
     if (utxos.length === 0) {
@@ -5334,6 +5421,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       if (op.counterpartyPublicKeyHex !== params.counterpartyPublicKeyHex) {
         throw localFailure("internal_error", "counterpartyPublicKeyHex mismatch");
+      }
+      // 施工单 2026-09-18 001：commit 的资产必须与 prepare 一致；缺省
+      // `bsv-mainnet`，禁止跨资产复用 operationId。
+      const publicAssetId = params.assetId ?? "bsv-mainnet";
+      if (op.assetId !== publicAssetId) {
+        throw localFailure("internal_error", "operationId bound to a different asset");
       }
       if (params.counterpartySignatures.length === 0) {
         throw localFailure("internal_error", "counterpartySignatures must not be empty");
@@ -5409,7 +5502,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
 
       // 施工单 2026-06-28 002 硬切换：poolKey 补 ownerPublicKeyHex 维度。
-      const poolKey = `${rec.origin}::${session.ownerPublicKeyHex}::${params.counterpartyPublicKeyHex}`;
+      // 施工单 2026-09-18 001：testnet 再追加资产后缀（mainnet 保持旧形状）。
+      const poolKey = feePoolKeyFor(
+        rec.origin,
+        session.ownerPublicKeyHex,
+        params.counterpartyPublicKeyHex,
+        publicAssetId
+      );
       let newRecord: ProtocolFeePoolRecord | null = null;
       const draftTxid = await computeTxidFromHex(op.draftSpendTxHex);
       const draftTxHex = op.draftSpendTxHex;
@@ -5422,6 +5521,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           origin: rec.origin,
           ownerPublicKeyHex: session.ownerPublicKeyHex,
           counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+          assetId: publicAssetId,
           baseTxid,
           baseTxHex: op.baseTxHex ?? "",
           totalAmount: op.draftTotalAmount,
@@ -5440,6 +5540,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           origin: rec.origin,
           ownerPublicKeyHex: session.ownerPublicKeyHex,
           counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+          assetId: publicAssetId,
           baseTxid,
           baseTxHex,
           totalAmount: op.draftTotalAmount,
@@ -5460,12 +5561,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (card) {
         card.action = op.action;
         card.operationId = op.operationId;
+        card.assetId = publicAssetId;
         card.updatedAt = Date.now();
       }
 
       const result: FeepoolCommitResult = {
         operationId: op.operationId,
         action: op.action,
+        assetId: publicAssetId,
         draftTxid,
         draftTxHex,
         poolRecord: newRecord,
@@ -5793,6 +5896,9 @@ export class ProtocolServiceImpl implements ProtocolService {
       ...(this.summarizeAmountSatoshis(rec.params) !== null
         ? { amountSatoshis: this.summarizeAmountSatoshis(rec.params)! }
         : {}),
+      ...(this.summarizeAssetId(rec.params) !== null
+        ? { assetId: this.summarizeAssetId(rec.params)! }
+        : {}),
       ...(this.summarizeCounterpartyPublicKeyHex(rec.params)
         ? { counterpartyPublicKeyHex: this.summarizeCounterpartyPublicKeyHex(rec.params) }
         : {}),
@@ -6000,6 +6106,13 @@ export class ProtocolServiceImpl implements ProtocolService {
   private summarizeAmountSatoshis(params: MethodParams<ProtocolMethod>): number | null {
     const p = params as { amountSatoshis?: unknown };
     return typeof p.amountSatoshis === "number" ? p.amountSatoshis : null;
+  }
+
+  /** 施工单 2026-09-18 001：命令卡资产摘要；只认识两个公开值。 */
+  private summarizeAssetId(params: MethodParams<ProtocolMethod>): P2pkhTransferAssetId | null {
+    const p = params as { assetId?: unknown };
+    if (p.assetId === "bsv-mainnet" || p.assetId === "bsv-testnet") return p.assetId;
+    return null;
   }
 
   private summarizeCounterpartyPublicKeyHex(params: MethodParams<ProtocolMethod>): string {

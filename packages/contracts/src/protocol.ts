@@ -229,6 +229,12 @@ export type ProtocolErrorCode =
   | "user_rejected"
   | "active_key_unavailable"
   | "decrypt_failed"
+  /**
+   * 请求了当前资产但 Keymaster 设置里未开启（施工单 2026-09-18 001）。
+   * 例如 `p2pkh.transfer` / `feepool.*` 传 `assetId: "bsv-testnet"` 而
+   * P2PKH 设置里没有打开 testnet。accept 阶段 fail-fast，不进确认流。
+   */
+  | "asset_not_enabled"
   | "storage_not_configured"
   | "storage_unavailable"
   | "storage_invalid_path"
@@ -546,11 +552,24 @@ export interface CipherDecryptResult {
 /* ============== p2pkh.transfer ============== */
 
 /**
+ * Connect 公开的 P2PKH 资产标识。
+ *
+ * 设计缘由（施工单 2026-09-18 001 多资产硬切换）：
+ *   - 公开命名固定 `bsv-mainnet` / `bsv-testnet`，不暴露 p2pkh 内部
+ *     的 `bsv` / `bsvtest`；
+ *   - `bsv-testnet` 只有在 Keymaster 设置里开启 testnet 后才可用，
+ *     否则 accept 阶段 fail-fast `asset_not_enabled`；
+ *   - 缺省（不传 assetId）等同 `bsv-mainnet`，旧调用方零改动。
+ */
+export type P2pkhTransferAssetId = "bsv-mainnet" | "bsv-testnet";
+
+/**
  * `p2pkh.transfer` 请求参数。
  *
- * 设计缘由（施工单 002 硬切换 + 施工单 2026-06-28 002 硬切换）：
- *   - 本次只支持 `bsv` 主网 P2PKH 转账。不引入 assetId / network / 多币种
- *     / 多网络协商。
+ * 设计缘由（施工单 002 硬切换 + 施工单 2026-06-28 002 硬切换 +
+ * 施工单 2026-09-18 001 多资产硬切换）：
+ *   - 本次只支持 `bsv` 主网 / testnet P2PKH 转账。不引入多币种资产、
+ *     多网络协商之外的链类型。
  *   - site 不允许传 `text` / `confirmMessage`：确认文案由 Keymaster 自己
  *     按方法语义生成；不允许 site 伪装转账为登录确认。
  *   - `aud` 不接受：connect popup 已天然拿到 `event.origin` 真值，origin
@@ -558,17 +577,23 @@ export interface CipherDecryptResult {
  *   - `feeRateSatoshisPerKb` 可选；缺省时由 service 走一个保守默认值。
  *   - amountSatoshis 是整数 satoshis，不接受小数；feeSatoshis 在 result 里
  *     回。
+ *   - `assetId` 可选；缺省 `bsv-mainnet`。`bsv-testnet` 需要 Keymaster
+ *     设置里已开启 testnet。
  *   - `connectSessionId` 是**强制**输入字段（施工单 2026-06-28 002 硬切换）：
  *     资金 owner 取自 session 绑定 owner，**不**读取全局 active key。
  *     旧 session 失效时直接 fail-fast，不再静默 fallback 到 active key。
  */
 export interface P2pkhTransferParams {
-  /** 主网 P2PKH 地址（base58check，version 0x00）；testnet 直接 invalid_request。 */
+  /** 主网或 testnet P2PKH 地址（base58check，version 0x00 / 0x6f）。 */
   recipientAddress: string;
   /** 正整数 satoshis。 */
   amountSatoshis: number;
   /** 可选 fee rate（sat/kB）。>= 1。 */
   feeRateSatoshisPerKb?: number;
+  /**
+   * 可选资产；缺省 `bsv-mainnet`。`bsv-testnet` 需要设置里开启 testnet。
+   */
+  assetId?: P2pkhTransferAssetId;
   /**
    * 由 `connect.login` 返回的 sessionId。**必填**。
    * service 通过此 id 找到绑定 key，不允许 fallback 到 active key。
@@ -578,6 +603,8 @@ export interface P2pkhTransferParams {
 
 /** `p2pkh.transfer` 成功结果。 */
 export interface P2pkhTransferResult {
+  /** 本次实际转账的资产；与 params.assetId 一致（缺省回 `bsv-mainnet`）。 */
+  assetId: P2pkhTransferAssetId;
   /** 已广播交易的 canonical txid。 */
   txid: string;
   /** 已签名交易 raw hex。 */
@@ -634,9 +661,15 @@ export interface FeepoolPrepareParams {
   /** 正整数 satoshis；本次想转给对端的金额（三种 action 语义一致）。 */
   amountSatoshis: number;
   /**
+   * 可选资产；缺省 `bsv-mainnet`。`bsv-testnet` 需要设置里开启 testnet。
+   * 池按 (origin + ownerPublicKeyHex + counterpartyPublicKeyHex + assetId)
+   * 归档；mainnet 与 testnet 不串池。
+   */
+  assetId?: P2pkhTransferAssetId;
+  /**
    * 由 `connect.login` 返回的 sessionId。**必填**。
-   * feepool 是按 (origin + ownerPublicKeyHex + counterpartyPublicKeyHex)
-   * 三个维度归档的；不同 owner 不会串池。
+   * feepool 是按 (origin + ownerPublicKeyHex + counterpartyPublicKeyHex +
+   * assetId) 四个维度归档的；不同 owner / 不同资产不会串池。
    */
   connectSessionId: string;
 }
@@ -669,6 +702,8 @@ export interface FeepoolPrepareResult {
   /** operationId 仅在当前 popup 会话内有效；popup 关闭后失效。 */
   operationId: string;
   action: ProtocolFeePoolAction;
+  /** 本次操作所属资产；与 params.assetId 一致（缺省回 `bsv-mainnet`）。 */
+  assetId: P2pkhTransferAssetId;
   counterpartyPublicKeyHex: string;
   /** 本次 transfer 的 delta（site 请求的 amountSatoshis）。 */
   amountSatoshis: number;
@@ -724,6 +759,11 @@ export interface FeepoolCommitParams {
   /** 33-byte compressed secp256k1 公钥 hex。 */
   counterpartyPublicKeyHex: string;
   /**
+   * 可选资产；缺省 `bsv-mainnet`。必须与 prepare 阶段一致，
+   * 否则 commit fail-closed。
+   */
+  assetId?: P2pkhTransferAssetId;
+  /**
    * 由 `connect.login` 返回的 sessionId。**必填**。
    * `feepool.commit` 校验 operation 与当前 session/owner/origin 一致。
    */
@@ -751,6 +791,8 @@ export interface FeepoolCommitParams {
 export interface FeepoolCommitResult {
   operationId: string;
   action: ProtocolFeePoolAction;
+  /** 本次操作所属资产；与 prepare 阶段一致（缺省回 `bsv-mainnet`）。 */
+  assetId: P2pkhTransferAssetId;
   /** 当前主 B-Tx 草稿的 txid。 */
   draftTxid: string;
   /** 当前主 B-Tx 草稿的 raw tx hex。 */
@@ -856,21 +898,25 @@ export interface ProtocolOriginSettingsRecord {
  *   - key 必须包含 ownerPublicKeyHex + counterpartyPublicKeyHex：
  *       同一 origin 不同 owner 不能串池（不同 connect session 是不同 owner）；
  *       同一 origin 同一 owner 但对端公钥切换 → 新池。
- *   - key 格式：
- *       `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`；
+ *   - key 格式（施工单 2026-09-18 001 多资产硬切换）：
+ *       mainnet：`${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`
+ *         （保持旧 key 形状，不迁移历史池）；
+ *       testnet：上面追加 `::bsv-testnet`。
  *       `::` 不可能出现在 origin / publicKeyHex 字符串里，碰撞风险极低。
  */
 export interface ProtocolFeePoolRecord {
   /**
-   * 复合 key。施工单 2026-06-28 002 硬切换：补 `ownerPublicKeyHex` 维度，
-   * 不再仅按 `origin + counterpartyPublicKeyHex` 归档。
-   * 格式：`${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`。
+   * 复合 key。施工单 2026-06-28 002 硬切换：补 `ownerPublicKeyHex` 维度；
+   * 施工单 2026-09-18 001：testnet 再追加 `::bsv-testnet`。
+   * mainnet 格式：`${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`。
    */
   poolKey: string;
   origin: string;
   /** 绑定该池的 connect session owner 的公钥 hex。 */
   ownerPublicKeyHex: string;
   counterpartyPublicKeyHex: string;
+  /** 池所属资产；旧记录缺失时按 `bsv-mainnet` 归一化。 */
+  assetId: P2pkhTransferAssetId;
   /** base tx txid（2-of-2 multisig output 在这里）。 */
   baseTxid: string;
   /** base tx raw hex。 */
@@ -914,6 +960,13 @@ export type ProtocolFailureReason =
   | "unknown_operation"
   | "cross_origin_operation"
   | "request_timeout"
+  /**
+   * 请求资产在 Keymaster 设置里未开启（施工单 2026-09-18 001）。
+   *
+   * 触发：p2pkh.transfer / feepool.* 传 `assetId: "bsv-testnet"` 但
+   * P2PKH 设置里没有打开 testnet。对外稳定 code = `asset_not_enabled`。
+   */
+  | "asset_not_enabled"
   /**
    * 当前 Session Window 拿不到 owner execution runtime（施工单
    * 2026-06-30 002 硬切换）。
@@ -1847,6 +1900,8 @@ export interface ProtocolCommandRecord {
   recipientAddress?: string;
   /** p2pkh.transfer / feepool.* 转账或池金额（satoshis）。 */
   amountSatoshis?: number;
+  /** p2pkh.transfer / feepool.* 所属资产；UI 用于显示 BSV 或 BSV Testnet。 */
+  assetId?: P2pkhTransferAssetId;
   /** feepool.prepare / feepool.commit 的 action。 */
   action?: ProtocolFeePoolAction;
   /** feepool.commit 的 operationId（指向 prepare 阶段产的 op）。 */
@@ -2200,15 +2255,24 @@ export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
  */
 export interface P2pkhProtocolAdapter {
   /**
-   * 列指定 owner 在指定 assetId 下的 UTXO（mainnet P2PKH）。
+   * 列指定 owner 在指定 assetId 下的 UTXO。
    *
    * `ownerPublicKeyHex` 必填；缺省 = "取 active key namespace"是
    * 兜底路径，**只**为兼容旧调用。002 之后所有调用方都应传 owner。
+   * `assetId` 使用 p2pkh 内部命名（`bsv` / `bsvtest`）。
    */
   listUtxos(filter?: {
     assetId?: string;
     ownerPublicKeyHex?: string;
   }): Promise<Array<{ txid: string; vout: number; value: number }>>;
+  /**
+   * 当前钱包设置是否已开启指定资产（施工单 2026-09-18 001）。
+   *
+   * plugin-protocol 在 accept 阶段用它把"未开启 testnet"fail-fast 成
+   * `asset_not_enabled`，而不是等 prepare 抛错后统一折叠成 user_rejected。
+   * `assetId` 使用 p2pkh 内部命名（`bsv` / `bsvtest`）。
+   */
+  isAssetEnabled(assetId: string): boolean;
   /**
    * 准备 p2pkh 转账预览。
    *
@@ -2216,14 +2280,14 @@ export interface P2pkhProtocolAdapter {
    * UTXO 选币 + 签名都按该 owner 走，**不**读全局 active key。
    */
   prepareTransfer(input: {
-    assetId: "bsv";
+    assetId: string;
     ownerPublicKeyHex: string;
     recipientAddress: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
   }): Promise<{
-    assetId: "bsv";
-    network: "main";
+    assetId: string;
+    network: "main" | "test";
     recipientAddress: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
@@ -2242,8 +2306,8 @@ export interface P2pkhProtocolAdapter {
    * / 签名 key 与该 ownerPublicKeyHex 一致——owner 变了就拒绝广播。
    */
   submitTransfer(preview: {
-    assetId: "bsv";
-    network: "main";
+    assetId: string;
+    network: "main" | "test";
     ownerPublicKeyHex: string;
     recipientAddress: string;
     amountSatoshis: number;

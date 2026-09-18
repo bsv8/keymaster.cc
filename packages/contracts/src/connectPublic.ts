@@ -36,6 +36,7 @@ export type {
   MethodParamsMap,
   MethodResult,
   MethodResultMap,
+  P2pkhTransferAssetId,
   P2pkhTransferParams,
   P2pkhTransferResult,
   ProtocolError,

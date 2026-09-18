@@ -139,3 +139,75 @@ describe("msfile protocol validation", () => {
     })).toThrowError(/connectSessionId/iu);
   });
 });
+
+describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）", () => {
+  // 公开资产标识只区分 `bsv-mainnet` / `bsv-testnet`；地址 version 必须匹配。
+  const MAINNET_P2PKH = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
+  const TESTNET_P2PKH = "mzBc4XEFSdjm9XEV3R3c7x6Q7ZqQ2d1b8e";
+  const baseP2pkh = {
+    v: PROTOCOL_VERSION,
+    type: "request" as const,
+    id: "p2pkh-asset",
+    method: "p2pkh.transfer" as const,
+    params: {
+      recipientAddress: MAINNET_P2PKH,
+      amountSatoshis: 1000,
+      connectSessionId: "session"
+    }
+  };
+  const baseFeepool = {
+    v: PROTOCOL_VERSION,
+    type: "request" as const,
+    id: "feepool-asset",
+    method: "feepool.prepare" as const,
+    params: {
+      counterpartyPublicKeyHex: "02" + "11".repeat(32),
+      amountSatoshis: 1000,
+      connectSessionId: "session"
+    }
+  };
+
+  it("缺省 assetId 保持 undefined（service 层归一化为 bsv-mainnet）并接受 mainnet 地址", () => {
+    const parsed = parseRequestMessage(baseP2pkh);
+    expect(parsed.params).toMatchObject({ recipientAddress: MAINNET_P2PKH, assetId: undefined });
+    const explicit = parseRequestMessage({ ...baseP2pkh, params: { ...baseP2pkh.params, assetId: "bsv-mainnet" } });
+    expect(explicit.params).toMatchObject({ assetId: "bsv-mainnet" });
+  });
+
+  it("bsv-testnet 接受 testnet 地址", () => {
+    const parsed = parseRequestMessage({
+      ...baseP2pkh,
+      params: { ...baseP2pkh.params, recipientAddress: TESTNET_P2PKH, assetId: "bsv-testnet" }
+    });
+    expect(parsed.params).toMatchObject({ recipientAddress: TESTNET_P2PKH, assetId: "bsv-testnet" });
+  });
+
+  it("拒绝资产与地址 version 不匹配", () => {
+    expect(() => parseRequestMessage({
+      ...baseP2pkh,
+      params: { ...baseP2pkh.params, recipientAddress: MAINNET_P2PKH, assetId: "bsv-testnet" }
+    })).toThrowError(/testnet P2PKH/iu);
+    expect(() => parseRequestMessage({
+      ...baseP2pkh,
+      params: { ...baseP2pkh.params, recipientAddress: TESTNET_P2PKH, assetId: "bsv-mainnet" }
+    })).toThrowError(/mainnet P2PKH/iu);
+  });
+
+  it("拒绝未知 assetId 字面量", () => {
+    expect(() => parseRequestMessage({
+      ...baseP2pkh,
+      params: { ...baseP2pkh.params, assetId: "bsv" }
+    })).toThrowError(/assetId/iu);
+    expect(() => parseRequestMessage({
+      ...baseFeepool,
+      params: { ...baseFeepool.params, assetId: "bsvtest" }
+    })).toThrowError(/assetId/iu);
+  });
+
+  it("feepool.prepare 接受 bsv-testnet，缺省时 assetId 为 undefined", () => {
+    const parsed = parseRequestMessage({ ...baseFeepool, params: { ...baseFeepool.params, assetId: "bsv-testnet" } });
+    expect(parsed.params).toMatchObject({ assetId: "bsv-testnet" });
+    const defaults = parseRequestMessage(baseFeepool);
+    expect(defaults.params).toMatchObject({ assetId: undefined });
+  });
+});

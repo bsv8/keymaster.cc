@@ -100,6 +100,7 @@ function makePool(
     origin,
     ownerPublicKeyHex: "02" + "11".repeat(32),
     counterpartyPublicKeyHex: counterparty,
+    assetId: "bsv-mainnet",
     baseTxid: "00".repeat(32),
     baseTxHex: "deadbeef",
     totalAmount: total,

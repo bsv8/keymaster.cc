@@ -8,8 +8,8 @@
 //   - 不允许把"已经经过一轮校验的 request"再做一次隐式归一化。
 //   - `aud` 严格按字节比较；不补默认端口、不 lower host、不改协议。
 //   - 二进制字段必须含 `$type: "binary"` + ArrayBuffer；缺 mime 也接受。
-//   - p2pkh 地址必须是 mainnet（version 0x00）；testnet（0x6f）直接
-//     invalid_request。
+//   - p2pkh 地址按 `assetId` 校验：缺省 `bsv-mainnet`（version 0x00），
+//     `bsv-testnet` 要求 version 0x6f（施工单 2026-09-18 001）。
 //   - 公钥 hex 必须是 33-byte compressed secp256k1（66 个 hex 字符）。
 //   - amountSatoshis 必须是正整数；feeRateSatoshisPerKb 必须 >= 1。
 //   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
@@ -35,6 +35,7 @@ import type {
   IdentityGetParams,
   IntentSignParams,
   MethodParams,
+  P2pkhTransferAssetId,
   P2pkhTransferParams,
   ProtocolErrorCode,
   ProtocolMethod,
@@ -239,8 +240,9 @@ export function assertOriginMatches(aud: string, eventOrigin: string): void {
 
 function validateP2pkhTransferParams(raw: unknown): P2pkhTransferParams {
   const obj = expectObject(raw, "p2pkh.transfer params");
+  const assetId = expectPublicAssetId(obj.assetId, "assetId");
   const recipientAddress = expectString(obj.recipientAddress, "recipientAddress");
-  assertMainnetP2pkhAddress(recipientAddress);
+  assertP2pkhAddressForAsset(recipientAddress, assetId ?? "bsv-mainnet");
   const amountSatoshis = expectPositiveInteger(obj.amountSatoshis, "amountSatoshis");
   let feeRateSatoshisPerKb: number | undefined;
   if (obj.feeRateSatoshisPerKb !== undefined) {
@@ -253,7 +255,7 @@ function validateP2pkhTransferParams(raw: unknown): P2pkhTransferParams {
   // 施工单 2026-06-28 002 硬切换：资金 owner 取自 session 绑定 owner，
   // 不再读取全局 active key。缺 `connectSessionId` 直接 invalid_request。
   const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { recipientAddress, amountSatoshis, feeRateSatoshisPerKb, connectSessionId };
+  return { recipientAddress, amountSatoshis, feeRateSatoshisPerKb, assetId, connectSessionId };
 }
 
 function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
@@ -261,9 +263,10 @@ function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
   const counterpartyPublicKeyHex = expectString(obj.counterpartyPublicKeyHex, "counterpartyPublicKeyHex");
   assertCompressedPubkeyHex(counterpartyPublicKeyHex);
   const amountSatoshis = expectPositiveInteger(obj.amountSatoshis, "amountSatoshis");
+  const assetId = expectPublicAssetId(obj.assetId, "assetId");
   // 施工单 2026-06-28 002 硬切换：feepool 必须绑定 session / owner。
   const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { counterpartyPublicKeyHex, amountSatoshis, connectSessionId };
+  return { counterpartyPublicKeyHex, amountSatoshis, assetId, connectSessionId };
 }
 
 function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
@@ -295,9 +298,11 @@ function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
   const closeCounterpartySignatures = optionalSignatures("closeCounterpartySignatures");
   // 施工单 2026-06-28 002 硬切换：commit 必须按 session / owner 校验 op。
   const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  const assetId = expectPublicAssetId(obj.assetId, "assetId");
   return {
     operationId,
     counterpartyPublicKeyHex,
+    assetId,
     connectSessionId,
     counterpartySignatures,
     closeCounterpartySignatures
@@ -663,6 +668,39 @@ function validateMsFileBlockReadParams(raw: unknown): MsFileBlockReadParams {
  * 真正的 chain-level 校验由 p2pkhTransferService.prepare 在签名时承担。
  */
 export function assertMainnetP2pkhAddress(addr: string): void {
+  assertP2pkhAddressForAsset(addr, "bsv-mainnet");
+}
+
+/**
+ * 校验公开资产标识（施工单 2026-09-18 001 多资产硬切换）。
+ *
+ * 只接受 `bsv-mainnet` / `bsv-testnet`；`undefined` 表示缺省，由调用方
+ * 归一化为 `bsv-mainnet`。
+ */
+function expectPublicAssetId(
+  value: unknown,
+  field: string
+): P2pkhTransferAssetId | undefined {
+  if (value === undefined) return undefined;
+  if (value === "bsv-mainnet" || value === "bsv-testnet") return value;
+  throw new ProtocolValidationError(
+    "invalid_request",
+    `${field} must be "bsv-mainnet" or "bsv-testnet"`
+  );
+}
+
+/**
+ * 按资产校验 P2PKH 地址：mainnet version 0x00，testnet version 0x6f。
+ *
+ * 不做 checksum 校验：base58 解码长度 + version 足够排除绝大多数误传；
+ * 真正的 chain-level 校验由 p2pkhTransferService.prepare 在签名时承担。
+ */
+export function assertP2pkhAddressForAsset(
+  addr: string,
+  assetId: P2pkhTransferAssetId
+): void {
+  const expectedVersion = assetId === "bsv-testnet" ? 0x6f : 0x00;
+  const networkLabel = assetId === "bsv-testnet" ? "testnet" : "mainnet";
   let decoded: Uint8Array;
   try {
     decoded = base58Decode(addr);
@@ -670,10 +708,10 @@ export function assertMainnetP2pkhAddress(addr: string): void {
     throw new ProtocolValidationError("invalid_request", "recipientAddress is not a valid P2PKH address");
   }
   if (decoded.length !== 25) {
-    throw new ProtocolValidationError("invalid_request", "recipientAddress must be a mainnet P2PKH address");
+    throw new ProtocolValidationError("invalid_request", `recipientAddress must be a ${networkLabel} P2PKH address`);
   }
-  if (decoded[0] !== 0x00) {
-    throw new ProtocolValidationError("invalid_request", "recipientAddress must be a mainnet P2PKH address");
+  if (decoded[0] !== expectedVersion) {
+    throw new ProtocolValidationError("invalid_request", `recipientAddress must be a ${networkLabel} P2PKH address`);
   }
 }
 
