@@ -26,6 +26,22 @@ Supplier 的 Noise 身份必须与配置的压缩公钥一致。Vault 锁定、�
 读取请求不接受调用方提供金额上限。全局价格和 App 单独额度由 Keymaster 管理；超额时用户可
 拒绝、仅本次允许或保存新的 App 上限。`0` 表示明确不限金额，不表示字段缺失。
 
+## 桶存储文件
+
+`/msfile/storage`（首页「MSFile 文件」空间）列出当前 Key 桶内 `msfiles/` 下按 MasterSeed
+生成的条目，支持单文件上传、下载、预览、校验与删除。页面只拿受限文件句柄，真实读写由
+Coordinator SharedWorker 执行。
+
+布局与格式以 KeymasterFormats 为准：
+
+- 种子：`<owner>/msfiles/seeds/<seedhash>.ms`，内容为 `keymaster-seed-v1` 原始种子字节；
+- 块：`<owner>/msfiles/storage/<seedhash>/<blockhash>`，文件名为块 SHA-256 小写 hex，重复可覆盖；
+- 元数据：`<owner>/msfiles/meta/<seedhash>.json`，保存文件名、媒体类型、源文件大小、块数、写入时间。
+
+上传先流式计算种子（`masterseed` 官方 SDK），再按种子摘要逐块重算并写入；写入顺序是块 →
+种子 → 元数据，删除顺序相反。下载与预览从本桶读回并逐块校验 SHA-256，复用首页的预览白名单和
+32 MiB / 256 MiB 上限；缺元数据的种子只显示哈希，不提供下载与预览。
+
 ## 并发设置
 
 | 字段 | 中文含义 | 建议值 | 硬上限 |
