@@ -25,6 +25,8 @@ import {
 import { MsFileServiceProxy } from "./msfileServiceProxy.js";
 import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
+import { MsFileBucketPage } from "./MsFileBucketPage.js";
+import { MSFILE_BUCKET_SERVICE_CAPABILITY, createMsFileBucketService } from "./msfileBucketService.js";
 import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
 import { MsFileP2pLane } from "./msfileLane.js";
 
@@ -163,7 +165,62 @@ const resources: I18nPluginResources = {
       "msfile.home.errors.transport": "The supplier is temporarily unavailable. Try again later.",
       "msfile.home.errors.rejected": "The read request was not approved.",
       "msfile.home.errors.download": "The browser could not create a download file.",
-      "msfile.home.errors.default": "File fetching failed. Try again."
+      "msfile.home.errors.default": "File fetching failed. Try again.",
+      "msfile.bucket.title": "Bucket storage files",
+      "msfile.bucket.description": "Seeds and file blocks produced in MasterSeed format and stored in this bucket; download, preview, verify, or delete them here.",
+      "msfile.bucket.unavailable": "MSFile is unavailable right now. Try again later.",
+      "msfile.bucket.upload.label": "Choose a file to upload",
+      "msfile.bucket.upload.cancel": "Cancel upload",
+      "msfile.bucket.upload.hashing": "Computing seed digests…",
+      "msfile.bucket.upload.storing": "Storing file blocks…",
+      "msfile.bucket.upload.failed": "Upload failed. Try again.",
+      "msfile.bucket.upload.cancelled": "Upload cancelled; unfinished blocks are not listed.",
+      "msfile.bucket.list.loading": "Reading stored seeds…",
+      "msfile.bucket.list.retry": "Retry",
+      "msfile.bucket.list.empty": "No stored seeds yet",
+      "msfile.bucket.list.emptyHint": "Choose a file above; it is split into MasterSeed blocks, and the seed file plus blocks are stored in this bucket.",
+      "msfile.bucket.column.seed": "Seed Hash",
+      "msfile.bucket.column.name": "File name",
+      "msfile.bucket.column.type": "Type",
+      "msfile.bucket.column.size": "Size",
+      "msfile.bucket.column.blocks": "Blocks",
+      "msfile.bucket.column.storedAt": "Stored at",
+      "msfile.bucket.column.actions": "Actions",
+      "msfile.bucket.metaMissing": "Metadata missing",
+      "msfile.bucket.action.preview": "Preview",
+      "msfile.bucket.action.download": "Download",
+      "msfile.bucket.action.verify": "Verify",
+      "msfile.bucket.action.delete": "Delete",
+      "msfile.bucket.action.cancel": "Cancel",
+      "msfile.bucket.action.deleteConfirmTitle": "Delete this entry?",
+      "msfile.bucket.action.deleteConfirmBody": "This deletes the seed file, metadata, and every block under that seed's directory; other seeds are unaffected.",
+      "msfile.bucket.action.deleteConfirm": "Delete",
+      "msfile.bucket.status.previewing": "Reading blocks…",
+      "msfile.bucket.status.downloading": "Reading and verifying blocks…",
+      "msfile.bucket.status.verifying": "Verifying the whole entry…",
+      "msfile.bucket.status.deleting": "Deleting…",
+      "msfile.bucket.preview.title": "File preview",
+      "msfile.bucket.preview.htmlTitle": "HTML safe static preview",
+      "msfile.bucket.preview.pdfTitle": "PDF preview",
+      "msfile.bucket.preview.close": "Close preview",
+      "msfile.bucket.notice.uploadDone": "Upload complete: seed and file blocks are stored in the bucket.",
+      "msfile.bucket.notice.downloadTooLarge": "Files over 256 MiB are not read in this browser.",
+      "msfile.bucket.notice.previewTooLarge": "Files over 32 MiB are not previewed automatically; download instead.",
+      "msfile.bucket.notice.previewUnsupported": "This file type is not previewed automatically; download it instead.",
+      "msfile.bucket.notice.verifyOk": "Verified: the seed, {{blocks}} blocks, and source file size all match.",
+      "msfile.bucket.notice.verifySeedOnly": "Seed file verified; metadata is missing, so blocks were not verified.",
+      "msfile.bucket.notice.deleteDone": "Entry deleted: seed, metadata, and file blocks.",
+      "msfile.bucket.error.invalidHash": "Seed Hash must be 64 lower-case hexadecimal characters.",
+      "msfile.bucket.error.invalidSource": "The file cannot be read or exceeds this browser's limit.",
+      "msfile.bucket.error.sourceChanged": "The source file changed while reading; upload was aborted.",
+      "msfile.bucket.error.missingSeed": "The seed file does not exist.",
+      "msfile.bucket.error.missingMeta": "Metadata is missing; file name, type, and size cannot be recovered.",
+      "msfile.bucket.error.missingBlock": "A file block is missing; the content is incomplete.",
+      "msfile.bucket.error.invalidMeta": "Metadata is damaged and was treated as missing.",
+      "msfile.bucket.error.integrity": "Integrity check failed; all bytes were discarded.",
+      "msfile.bucket.error.cancelled": "The operation was cancelled.",
+      "msfile.bucket.error.download": "The browser could not create a download file.",
+      "msfile.bucket.error.default": "Bucket storage operation failed. Try again."
     },
     "zh-CN": {
       "msfile.settings.group": "MSFile",
@@ -294,7 +351,62 @@ const resources: I18nPluginResources = {
       "msfile.home.errors.transport": "供应商暂时不可用，请稍后重试。",
       "msfile.home.errors.rejected": "读取请求未获批准。",
       "msfile.home.errors.download": "浏览器无法创建下载文件。",
-      "msfile.home.errors.default": "文件获取失败，请重试。"
+      "msfile.home.errors.default": "文件获取失败，请重试。",
+      "msfile.bucket.title": "桶存储文件",
+      "msfile.bucket.description": "按 MasterSeed 格式存入本桶的种子与文件块；可直接下载、预览、校验或删除。",
+      "msfile.bucket.unavailable": "MSFile 当前不可用，请稍后重试。",
+      "msfile.bucket.upload.label": "选择文件并上传",
+      "msfile.bucket.upload.cancel": "取消上传",
+      "msfile.bucket.upload.hashing": "正在计算种子摘要…",
+      "msfile.bucket.upload.storing": "正在写入文件块…",
+      "msfile.bucket.upload.failed": "上传失败，请重试。",
+      "msfile.bucket.upload.cancelled": "上传已取消；未完成的块不会进入列表。",
+      "msfile.bucket.list.loading": "正在读取桶内种子…",
+      "msfile.bucket.list.retry": "重试",
+      "msfile.bucket.list.empty": "还没有已存储的种子",
+      "msfile.bucket.list.emptyHint": "选择上面的文件上传；上传完成后会按 MasterSeed 制作种子文件并写入文件块。",
+      "msfile.bucket.column.seed": "Seed Hash",
+      "msfile.bucket.column.name": "文件名",
+      "msfile.bucket.column.type": "类型",
+      "msfile.bucket.column.size": "大小",
+      "msfile.bucket.column.blocks": "块数",
+      "msfile.bucket.column.storedAt": "存入时间",
+      "msfile.bucket.column.actions": "操作",
+      "msfile.bucket.metaMissing": "元数据缺失",
+      "msfile.bucket.action.preview": "预览",
+      "msfile.bucket.action.download": "下载",
+      "msfile.bucket.action.verify": "校验",
+      "msfile.bucket.action.delete": "删除",
+      "msfile.bucket.action.cancel": "取消",
+      "msfile.bucket.action.deleteConfirmTitle": "删除这个条目？",
+      "msfile.bucket.action.deleteConfirmBody": "将删除种子、元数据以及该种子目录下的全部文件块；其它种子不受影响。",
+      "msfile.bucket.action.deleteConfirm": "删除",
+      "msfile.bucket.status.previewing": "正在读取文件块…",
+      "msfile.bucket.status.downloading": "正在读取并校验文件块…",
+      "msfile.bucket.status.verifying": "正在完整校验…",
+      "msfile.bucket.status.deleting": "正在删除…",
+      "msfile.bucket.preview.title": "文件预览",
+      "msfile.bucket.preview.htmlTitle": "HTML 安全静态预览",
+      "msfile.bucket.preview.pdfTitle": "PDF 预览",
+      "msfile.bucket.preview.close": "关闭预览",
+      "msfile.bucket.notice.uploadDone": "上传完成，种子与文件块已写入存储桶。",
+      "msfile.bucket.notice.downloadTooLarge": "文件超过 256 MiB，当前浏览器不会读取。",
+      "msfile.bucket.notice.previewTooLarge": "超过 32 MiB 的文件不会自动预览，请下载后查看。",
+      "msfile.bucket.notice.previewUnsupported": "该文件类型不会自动预览，请下载后使用。",
+      "msfile.bucket.notice.verifyOk": "校验通过：种子、{{blocks}} 个文件块和源文件大小全部匹配。",
+      "msfile.bucket.notice.verifySeedOnly": "种子文件校验通过；元数据缺失，未校验文件块。",
+      "msfile.bucket.notice.deleteDone": "条目已删除：种子、元数据和文件块。",
+      "msfile.bucket.error.invalidHash": "Seed Hash 必须是 64 位小写十六进制字符。",
+      "msfile.bucket.error.invalidSource": "该文件无法读取或超过浏览器可处理的大小。",
+      "msfile.bucket.error.sourceChanged": "读取过程中源文件发生变化，上传已中止。",
+      "msfile.bucket.error.missingSeed": "种子文件不存在。",
+      "msfile.bucket.error.missingMeta": "元数据缺失，无法还原文件名、类型和大小。",
+      "msfile.bucket.error.missingBlock": "文件块缺失，内容不完整。",
+      "msfile.bucket.error.invalidMeta": "元数据损坏，已按缺失处理。",
+      "msfile.bucket.error.integrity": "内容校验失败，已丢弃全部字节。",
+      "msfile.bucket.error.cancelled": "操作已取消。",
+      "msfile.bucket.error.download": "浏览器无法创建下载文件。",
+      "msfile.bucket.error.default": "桶存储操作失败，请重试。"
     }
   }
 };
@@ -317,7 +429,10 @@ const msfilePluginDefinition = {
     id: "msfile.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY],
+    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY],
+    // 桶存储页面直接读写 `<owner>/msfiles/` 文件根（seeds/storage/meta）；
+    // 句柄由 Host 绑定、真实 I/O 仍由 Coordinator Worker 执行。
+    storages: [CENTRAL_STORAGE_DECLARATIONS.msfilesFiles],
     dependencies: defineRuntimeUnitDependencies([
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
       { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "MSFile settings live under Settings -> System" },
@@ -349,6 +464,9 @@ const msfilePluginDefinition = {
     const offLane = laneRegistry.register(new MsFileP2pLane());
     const service = new MsFileServiceProxy(coordinator);
     ctx.provide(MSFILE_SERVICE_CAPABILITY, service);
+    // 桶存储服务复用同一 owner 文件根；MasterSeed 算法来自官方 SDK。
+    const bucketService = createMsFileBucketService(ctx.filesFor(""));
+    ctx.provide(MSFILE_BUCKET_SERVICE_CAPABILITY, bucketService);
 
     const resources_ = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     registerMsFileMediaResource(resources_, service);
@@ -435,6 +553,13 @@ const msfilePluginDefinition = {
       label: { key: "msfile.home.title", fallback: "Get a file by Seed" },
       component: MsFileHomeFileWidget,
     });
+    const bucketRouteId = "msfile.bucket.storage";
+    routes.register({
+      id: bucketRouteId,
+      path: "/msfile/storage",
+      label: { key: "msfile.bucket.title", fallback: "Bucket storage files" },
+      component: MsFileBucketPage,
+    });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
       id: "home.msfile-file",
@@ -451,6 +576,25 @@ const msfilePluginDefinition = {
         space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 },
         order: 10,
         component: MsFileHomeFileWidget,
+        visibleWhen: ({ unlocked }) => unlocked
+      }]
+    });
+    // 桶存储文件：正式页面入口 `/msfile/storage`，首页 MSFile 空间复用同一组件。
+    business.registerFeature(MSFILE_PLUGIN_ID, "home", {
+      id: "home.msfile-bucket",
+      label: { key: "msfile.bucket.title", fallback: "Bucket storage files" },
+      description: { key: "msfile.bucket.description", fallback: "Seeds and blocks stored in this bucket" },
+      order: 610,
+      entry: {
+        path: "/msfile/storage",
+        routeId: bucketRouteId,
+        visibleWhen: ({ unlocked }) => unlocked
+      },
+      home: [{
+        id: "msfile.bucket-storage",
+        space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 },
+        order: 20,
+        component: MsFileBucketPage,
         visibleWhen: ({ unlocked }) => unlocked
       }]
     });

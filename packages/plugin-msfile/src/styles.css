@@ -403,3 +403,126 @@
     margin-left: 0;
   }
 }
+
+/* ---------- 桶存储文件 ---------- */
+
+.msfile-bucket {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.msfile-bucket__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.msfile-bucket__header h3 {
+  margin: 0 0 4px;
+}
+
+.msfile-bucket__header p {
+  color: var(--km-text-muted, #6b7280);
+  margin: 0;
+}
+
+.msfile-bucket__hint {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.msfile-bucket__upload {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.msfile-bucket__file-label {
+  font-size: 0.85rem;
+  color: var(--km-text-muted, #6b7280);
+}
+
+.msfile-bucket__file-input {
+  max-width: 320px;
+}
+
+.msfile-bucket__progress {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.msfile-bucket__error {
+  align-items: center;
+  color: var(--km-danger, #dc2626);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+
+.msfile-bucket__ok {
+  color: var(--km-success, #16a34a);
+  margin: 0;
+}
+
+.msfile-bucket__row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.msfile-bucket__preview {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.msfile-bucket__preview-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.msfile-bucket__preview-head h4 {
+  margin: 0;
+}
+
+.msfile-bucket__text-preview {
+  background: var(--km-surface-subtle, #f3f4f6);
+  border-radius: 7px;
+  font-size: 0.85rem;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msfile-bucket__frame-preview {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 7px;
+  display: block;
+  min-height: 320px;
+  width: 100%;
+}
+
+.msfile-bucket__image-preview,
+.msfile-bucket__media-preview {
+  max-height: 420px;
+  max-width: 100%;
+}
+
+.msfile-bucket__modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
