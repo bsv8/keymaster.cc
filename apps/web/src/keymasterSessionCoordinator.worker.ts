@@ -764,14 +764,6 @@ function snapshotRecord(value: unknown, name: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function validateStorageProfileSaltSnapshot(value: unknown): { saltHex: string } {
-  const record = snapshotRecord(value, "Storage Profile salt");
-  if (Object.keys(record).length !== 1 || typeof record.saltHex !== "string" || !/^[0-9a-f]{32}$/u.test(record.saltHex)) {
-    throw new StorageRuntimeError("storage_provider_error", "Storage Profile salt snapshot value is invalid");
-  }
-  return { saltHex: record.saltHex };
-}
-
 function validateCoordinatorSelectionSnapshot(value: unknown): CoordinatorSelectionSnapshot {
   const record = snapshotRecord(value, "Coordinator selection");
   if (!Object.keys(record).every((key) => key === "selectedPublicKeyHex") || Object.keys(record).length > 1) {
@@ -952,7 +944,6 @@ let platformStorageStore: KeyValueStore | undefined;
 let coordinatorSelectionSnapshot: SnapshotStore<CoordinatorSelectionSnapshot> | undefined;
 let coordinatorSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
 let coordinatorPluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
-let storageProfileSaltSnapshot: SnapshotStore<{ saltHex: string }> | undefined;
 /** 仅测试夹具保留的内存 Store 索引；生产路径没有这个观测入口。 */
 let testPlatformStores: Map<string, KeyValueStore> | undefined;
 let testCoordinatorSnapshots: Map<string, { revision: number; value?: unknown; writes: number }> | undefined;
@@ -1244,31 +1235,6 @@ async function waitForTestKeyLifecycleOwnerBarrier(): Promise<void> {
   testKeyLifecycleOwnerBarrier = undefined;
   barrier.resolveEntered();
   await barrier.released;
-}
-
-/** 以固定 CAS snapshot 初始化 Storage Profile salt。 */
-async function ensureStorageProfileSaltSnapshot(snapshot: SnapshotStore<{ saltHex: string }>): Promise<void> {
-  const maxAttempts = 8;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const persisted = await snapshot.read();
-    if (persisted) {
-      if (!/^[0-9a-f]{32}$/u.test(persisted.value.saltHex)) throw new StorageRuntimeError("storage_provider_error", "Storage Profile salt snapshot is invalid");
-      return;
-    }
-    const generated = crypto.getRandomValues(new Uint8Array(16));
-    try {
-      const result = await snapshot.write({ saltHex: bytesToHex(generated) }, { ifRevision: 0 });
-      if (result.wrote) {
-        generated.fill(0);
-        return;
-      }
-    } catch (error) {
-      generated.fill(0);
-      if (!isStorageConflict(error)) throw error;
-    }
-    generated.fill(0);
-  }
-  throw storageUnavailableError("Storage Profile salt initialization conflicted repeatedly");
 }
 
 function asColdStartReadOnlyProvider(provider: StorageBucketProvider): import("@keymaster/contracts").StorageBucketReadOnlyProvider {
@@ -2143,7 +2109,6 @@ interface CurrentCatalogStorageBinding {
   selectionSnapshot?: SnapshotStore<CoordinatorSelectionSnapshot>;
   settingsSnapshot?: SnapshotStore<CoordinatorSettingsSnapshot>;
   pluginIntentSnapshot?: SnapshotStore<PluginIntentSnapshot>;
-  profileSaltSnapshot?: SnapshotStore<{ saltHex: string }>;
   protocol?: CoordinatorProtocolStorageStores;
   storageRepository?: Awaited<ReturnType<typeof openMultipartUploadRepository>>;
   runtime?: StorageRuntimeController & { dispose?: () => void };
@@ -2158,7 +2123,6 @@ function captureCurrentCatalogStorageBinding(): CurrentCatalogStorageBinding {
     selectionSnapshot: coordinatorSelectionSnapshot,
     settingsSnapshot: coordinatorSettingsSnapshot,
     pluginIntentSnapshot: coordinatorPluginIntentSnapshot,
-    profileSaltSnapshot: storageProfileSaltSnapshot,
     protocol: coordinatorProtocolStores,
     storageRepository,
     runtime: storageController as (StorageRuntimeController & { dispose?: () => void }) | undefined,
@@ -2187,7 +2151,6 @@ function disposeCurrentCatalogBinding(binding: CurrentCatalogStorageBinding): vo
   binding.selectionSnapshot?.close();
   binding.settingsSnapshot?.close();
   binding.pluginIntentSnapshot?.close();
-  binding.profileSaltSnapshot?.close();
   binding.storageStore?.close();
   closeCoordinatorProtocolStorageStores(binding.protocol);
   binding.provider?.dispose();
@@ -2206,7 +2169,6 @@ function discardCurrentPlatformStorageBinding(): void {
   coordinatorSelectionSnapshot = undefined;
   coordinatorSettingsSnapshot = undefined;
   coordinatorPluginIntentSnapshot = undefined;
-  storageProfileSaltSnapshot = undefined;
   coordinatorProtocolStores = undefined;
   storageController = undefined;
   storageRepository = undefined;
@@ -2226,7 +2188,6 @@ async function installPlatformStorage(
   let candidateSelectionSnapshot: SnapshotStore<CoordinatorSelectionSnapshot> | undefined;
   let candidateSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
   let candidatePluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
-  let candidateProfileSaltSnapshot: SnapshotStore<{ saltHex: string }> | undefined;
   let candidateProtocol: CoordinatorProtocolStorageStores | undefined;
   let candidateStorageStore: KeyValueStore | undefined;
   let candidateStorageRepository: Awaited<ReturnType<typeof openMultipartUploadRepository>> | undefined;
@@ -2246,9 +2207,6 @@ async function installPlatformStorage(
     candidateSettingsSnapshot = settingsSnapshot;
     const pluginIntentSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validate: validatePluginIntentSnapshot });
     candidatePluginIntentSnapshot = pluginIntentSnapshot;
-    const profileSaltSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageProfileSalt, validate: validateStorageProfileSaltSnapshot });
-    candidateProfileSaltSnapshot = profileSaltSnapshot;
-    await ensureStorageProfileSaltSnapshot(profileSaltSnapshot);
     const protocol = await openCoordinatorProtocolStorageStores(root);
     candidateProtocol = protocol;
     candidateStorageStore = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
@@ -2260,7 +2218,6 @@ async function installPlatformStorage(
     coordinatorSelectionSnapshot?.close();
     coordinatorSettingsSnapshot?.close();
     coordinatorPluginIntentSnapshot?.close();
-    storageProfileSaltSnapshot?.close();
     disposeVaultStorageRepository();
     platformRootToken = rootToken;
     candidatePublished = true;
@@ -2278,7 +2235,6 @@ async function installPlatformStorage(
     // 固定对象恢复并重建，期间任何惰性读取都只能看到空的默认意图。
     coordinatorMeta.pluginIntent = emptyPluginIntentSnapshot();
     disposePluginIntentController();
-    storageProfileSaltSnapshot = profileSaltSnapshot;
     coordinatorProtocolStores = protocol;
     storageRepository = candidateStorageRepository;
     platformStorageReady = true;

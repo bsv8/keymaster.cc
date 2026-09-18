@@ -32,14 +32,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "snapshot",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  storageProfileSalt: Object.freeze({
-    moduleId: "storage",
-    purposeId: "profile-salt",
-    scope: "bucket",
-    authority: "platform-only",
-    model: "snapshot",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   protocolDurablePolicy: Object.freeze({
     moduleId: "protocol",
     purposeId: "durable-policy",
