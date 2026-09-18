@@ -218,6 +218,15 @@ export function createSatWorkerChannelRuntime(
         content: input.content
       }, "Private Channel publish", signal);
     },
+    openPrivateEnvelope: (input, signal) => {
+      const owner = ownerForRequest();
+      return callChannel(coordinator, {
+        type: "open-private-envelope",
+        ownerPublicKeyHex: owner,
+        caller,
+        envelope: input.envelope
+      }, "Private Channel history open", signal);
+    },
     subscriptionSet: async (channels, signal): Promise<ChannelSubscriptionSetResult> => {
       const owner = ownerForRequest();
       const requestSessionEpoch = coordinator.getSessionEpoch();

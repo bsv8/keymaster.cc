@@ -80,6 +80,7 @@ function makeFakeService(opts?: { messages?: MessageFixture[] }): MessageService
   return {
     isReady: () => true,
     listMessages: async () => messages.slice(),
+    listConversationMessages: async () => messages.slice(),
     getMessage: async (id: string) => messages.find((m) => m.messageId === id) ?? null,
     sendTextMessage: async () => undefined,
     subscribeMessages: () => () => undefined,

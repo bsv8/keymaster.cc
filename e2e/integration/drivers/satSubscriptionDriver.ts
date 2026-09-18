@@ -75,3 +75,20 @@ export async function readSatSupplierRow(page: Page, supplierId: string): Promis
   await expect(row).toBeVisible();
   return (await row.innerText()).replace(/\s+/gu, " ");
 }
+
+/**
+ * 在真实设置页把某个供应商设为接收方和默认发布方。
+ *
+ * 只通过行内按钮完成：接收按钮会在保存后变成“关闭接收”，并以页面行内
+ * 期望订阅出现 `bsv8.inbox.` 作为物理对账已开始的可见证据；默认发布没有
+ * 单独的回显字段，保存成功由后续真实 Publish 结果负责证明。
+ */
+export async function enableSatSupplierReceiveAndDefault(page: Page, supplierId: string): Promise<void> {
+  const settings = satSettings(page);
+  const row = settings.locator(".sat-subscription-settings__supplier").filter({ hasText: supplierId }).first();
+  await row.getByRole("button", { name: /启用接收|Enable receive/iu }).click();
+  await expect(row.getByRole("button", { name: /关闭接收|Disable receive/iu })).toBeVisible({ timeout: 20_000 });
+  await expect(row).toContainText(/bsv8\.inbox\./u, { timeout: 20_000 });
+  await row.getByRole("button", { name: /设为(新消息)?默认发布|Use for new Publish/iu }).click();
+  await expect(settings.getByRole("alert")).toHaveCount(0);
+}

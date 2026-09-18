@@ -559,7 +559,8 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
         privateKeyHex
       });
       expect(signed.expires_at_ms - signed.issued_at_ms).toBe(item.lifetimeMs);
-      expect(() => verifySignedPrivateMessage(signed, nowMs + 1)).not.toThrow();
+      // 0.6.0 起 SDK 不再用本地时钟判断过期；结构合法且签名有效即通过。
+      expect(() => verifySignedPrivateMessage(signed)).not.toThrow();
     }
   });
 

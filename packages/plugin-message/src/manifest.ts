@@ -192,7 +192,8 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.error.transfer_invite_failed": "Failed to start attachment transfer.",
       "message.page.detail.error.local_blob_unavailable": "Attachment blob is unavailable.",
       "message.page.detail.error.transfer_reject": "Attachment transfer was rejected.",
-      "message.page.detail.error.unknown": "Operation failed."
+      "message.page.detail.error.unknown": "Operation failed.",
+      "message.page.detail.rawMissing": "Original message data is missing."
     },
     "zh-CN": {
       "message.action.toContact": "发消息",
@@ -294,7 +295,8 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.error.transfer_invite_failed": "启动附件传输失败。",
       "message.page.detail.error.local_blob_unavailable": "附件内容不可用。",
       "message.page.detail.error.transfer_reject": "附件传输已被拒绝。",
-      "message.page.detail.error.unknown": "操作失败。"
+      "message.page.detail.error.unknown": "操作失败。",
+      "message.page.detail.rawMissing": "原始消息数据缺失。"
     }
   }
 };
@@ -317,7 +319,7 @@ const messagePlatformPluginDefinition = {
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [MESSAGE_SERVICE_CAPABILITY],
-    storage: CENTRAL_STORAGE_DECLARATIONS.messageHistory,
+    storages: [CENTRAL_STORAGE_DECLARATIONS.messagesFiles],
     dependencies: defineRuntimeUnitDependencies([
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "读取 active key 并跟随会话聚合刷新" },
@@ -340,7 +342,7 @@ const messagePlatformPluginDefinition = {
     });
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
     const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
-    const service = createMessageService({ channel, keyspace, storage: ctx.storageFor("history") });
+    const service = createMessageService({ channel, keyspace, files: ctx.filesFor("") });
     ctx.provide(MESSAGE_SERVICE_CAPABILITY, service);
 
     // 注册资源定义（硬切换 003）
@@ -352,7 +354,8 @@ const messagePlatformPluginDefinition = {
       scope: "active-key",
       key: (_args, context) => ["message.conversations", context.activePublicKeyHex ?? "none"],
       load: async (_args, context, _signal) => {
-        const messages = await service.listMessages({ limit: 10_000 });
+        // 首页只需要每个会话最新一条；正文按需从 raw 解码，避免读取全量历史。
+        const messages = await service.listConversationMessages();
         // contacts 是可选插件，可能晚于 message 完成 setup；不能在 setup
         // 阶段把缺失状态永久缓存为 null，必须在每次资源加载时动态解析。
         const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
@@ -403,7 +406,7 @@ const messagePlatformPluginDefinition = {
       key: (args, context) => ["message.detail", context.activePublicKeyHex ?? "none", args[0] ?? "none"],
       load: async (args, context, _signal) => {
         const peerHex = args[0];
-        const messages = await service.listMessages({ limit: 10_000 });
+        const messages = await service.listMessages({ peerPublicKeyHex: peerHex, limit: 10_000 });
         const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
         let contact: Contact | null = null;
         if (contacts && peerHex) {

@@ -15,6 +15,6 @@
     "@keymaster/runtime": "*",
     "webloom-framework": "0.4.3",
     "@keymaster/ui": "*",
-    "bsv8-channel-protocol": "0.5.0"
+    "bsv8-channel-protocol": "0.6.0"
   }
 }

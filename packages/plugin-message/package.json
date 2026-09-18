@@ -13,6 +13,7 @@
     "@keymaster/runtime": "*",
     "webloom-framework": "0.4.3",
     "@keymaster/ui": "*",
-    "@keymaster/plugin-webrtc": "*"
+    "@keymaster/plugin-webrtc": "*",
+    "@noble/hashes": "1.8.0"
   }
 }

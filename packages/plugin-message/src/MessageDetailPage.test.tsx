@@ -89,6 +89,7 @@ function makeFakeService(opts?: {
       opts?.onListMessages?.(input);
       return messages;
     },
+    listConversationMessages: async () => messages,
     getMessage: async (id: string) => messages.find((m) => m.messageId === id) ?? null,
     sendTextMessage: opts?.sendTextMessage ?? (async () => undefined),
     subscribeMessages: () => () => undefined,

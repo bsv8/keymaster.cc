@@ -169,6 +169,7 @@ const EXECUTION_PROFILES = [
   { name: "dev-http", pattern: /^gates\/dev-http\/[^/]+\.spec\.ts$/u },
   { name: "lifecycle", pattern: /^gates\/lifecycle\/[^/]+\.spec\.ts$/u },
   { name: "msfile", pattern: /^gates\/msfile\/[^/]+\.spec\.ts$/u },
+  { name: "satsubscription", pattern: /^journeys\/satsubscription\/[^/]+\.spec\.ts$/u },
   { name: "deployment", pattern: /^(?:journeys\/deployment|gates\/deployment)\/[^/]+\.spec\.ts$/u },
   { name: "real-s3", pattern: /^(?:journeys\/real-resource\/real-s3-(?:initialization|bucket-key-switching)|gates\/real-resource\/resource-safety)\.spec\.ts$/u },
   { name: "real-resource", pattern: /^(?:journeys\/real-resource\/(?:real-testnet-asset|real-satsubscription-health|real-satsubscription-page)|resources\/(?:resource-setup|resource-teardown|real-resource-availability))\.spec\.ts$/u },
@@ -228,7 +229,7 @@ function metadataScenarioLevels() {
 
 function expectedScenarioLevel(relativeFile) {
   if (/^(?:journeys\/local|gates\/(?:local|dev-http|lifecycle|msfile))\//u.test(relativeFile)) return "local-integration";
-  if (/^(?:journeys\/real-resource|gates\/real-resource)\//u.test(relativeFile)) return "real-resource";
+  if (/^(?:journeys\/(?:real-resource|satsubscription)|gates\/real-resource)\//u.test(relativeFile)) return "real-resource";
   if (/^(?:journeys\/deployment|gates\/deployment)\//u.test(relativeFile)) return "deployment-acceptance";
   return undefined;
 }

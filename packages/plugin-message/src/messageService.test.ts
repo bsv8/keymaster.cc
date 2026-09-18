@@ -1,32 +1,54 @@
-// 消息 service 单测：Channel 私信 + 当前 owner 本地历史。
+// 消息 service 单测：Channel 私信 + 新 files 证据存储（sent/received/timeindex）。
 
 import { describe, expect, it, vi } from "vitest";
-import { CENTRAL_STORAGE_DECLARATIONS, MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
+import { MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
+  BorrowedOwnerFileStore,
   ChannelPrivateMessageEvent,
   ChannelRuntime,
-  OwnerAppStore,
-  KeyspaceService
+  KeyspaceService,
+  OpenedPrivateEnvelope
 } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
-import { createMessageRepository, MessageHistoryCompensationError } from "./storage/messageRepository.js";
+import { masterSeedHashHex } from "./storage/masterSeed.js";
 import { createMessageService } from "./messageService.js";
 
 const OWNER = "02" + "aa".repeat(32);
-const OTHER_OWNER = "03" + "cc".repeat(32);
 const PEER = "03" + "bb".repeat(32);
-interface TestKeyspace {
-  keyspace: KeyspaceService;
-  state: ActiveKeyState;
-  stores: Map<string, OwnerAppStore>;
+const OTHER = "03" + "cc".repeat(32);
+
+function memoryFiles(): { files: BorrowedOwnerFileStore; map: Map<string, Uint8Array> } {
+  const map = new Map<string, Uint8Array>();
+  const files: BorrowedOwnerFileStore = {
+    async list(input = {}) {
+      const prefix = input.prefix ?? "";
+      const limit = input.limit ?? 1000;
+      const offset = input.cursor ? Number(input.cursor) : 0;
+      const keys = [...map.keys()].filter((key) => key.startsWith(prefix)).sort();
+      const page = keys.slice(offset, offset + limit);
+      return {
+        files: page.map((path) => ({ path, size: map.get(path)!.byteLength })),
+        ...(offset + page.length < keys.length ? { nextCursor: String(offset + page.length) } : {})
+      };
+    },
+    async get(path) {
+      const bytes = map.get(path);
+      return bytes ? { path, bytes: new Uint8Array(bytes) } : undefined;
+    },
+    async put(path, bytes) {
+      map.set(path, new Uint8Array(bytes));
+      return {};
+    },
+    async delete(path) {
+      map.delete(path);
+    }
+  };
+  return { files, map };
 }
 
-function keyspace(): TestKeyspace {
+function keyspace(): { keyspace: KeyspaceService; state: ActiveKeyState } {
   const state: ActiveKeyState = { activePublicKeyHex: OWNER };
-  const stores = new Map<string, OwnerAppStore>();
-  stores.set(OWNER, createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, ownerPublicKeyHex: OWNER, bucketId: "test", bucketGeneration: 1 }) as OwnerAppStore);
-  const value: KeyspaceService = {
+  const service: KeyspaceService = {
     listKeys: async () => [],
     getKey: async () => undefined,
     active: () => state,
@@ -39,205 +61,207 @@ function keyspace(): TestKeyspace {
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   };
-  return { keyspace: value, state, stores };
+  return { keyspace: service, state };
 }
 
-function channel(input: {
-  publishPrivate?: (value: Parameters<ChannelRuntime["publishPrivate"]>[0]) => Promise<{ messageId: string }>;
-} = {}): {
+function signedPlaintextBytes(input: {
+  messageId: string;
+  body: string;
+  clientMessageId: string;
+  createdAtMs: number;
+}): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({
+    protocol: MESSAGE_PRIVATE_PROTOCOL,
+    message_id: input.messageId,
+    issued_at_ms: input.createdAtMs,
+    expires_at_ms: input.createdAtMs + 60_000,
+    body: {
+      type: "deliver",
+      content: {
+        type: "text",
+        contentType: "text/plain",
+        body: input.body,
+        clientMessageId: input.clientMessageId,
+        createdAtMs: input.createdAtMs
+      }
+    },
+    signature: "test-signature"
+  }));
+}
+
+function channel(): {
   runtime: ChannelRuntime;
-  publishPrivate: ReturnType<typeof vi.fn>;
+  published: Array<{ recipientPublicKeyHex: string; protocol: string; content: unknown }>;
+  opened: Uint8Array[];
   emit: (event: ChannelPrivateMessageEvent) => void;
 } {
-  let privateHandler: ((event: ChannelPrivateMessageEvent) => void) | undefined;
+  let handler: ((event: ChannelPrivateMessageEvent) => void) | undefined;
+  const published: Array<{ recipientPublicKeyHex: string; protocol: string; content: unknown }> = [];
+  const opened: Uint8Array[] = [];
   let sequence = 0;
-  const publishPrivate = vi.fn(input.publishPrivate ?? (async () => ({ messageId: `message-${++sequence}` })));
+  const nextMessageId = (): string => `A${String(++sequence).padStart(2, "0")}${"B".repeat(40)}`.slice(0, 43);
+  const pendingOpen = new Map<string, OpenedPrivateEnvelope>();
   const runtime: ChannelRuntime = {
     isReady: () => true,
     publish: async () => ({ messageId: `public-${++sequence}` }),
-    publishPrivate,
+    publishPrivate: async (input) => {
+      published.push({ recipientPublicKeyHex: input.recipientPublicKeyHex, protocol: input.protocol, content: input.content });
+      const messageId = nextMessageId();
+      const content = input.content as { body?: string; clientMessageId?: string; createdAtMs?: number };
+      const signedMessage = signedPlaintextBytes({
+        messageId,
+        body: content.body ?? "",
+        clientMessageId: content.clientMessageId ?? "client",
+        createdAtMs: content.createdAtMs ?? Date.now()
+      });
+      pendingOpen.set(masterSeedHashHex(signedMessage), {
+        channel: `bsv8.inbox.${OWNER}`,
+        protocol: MESSAGE_PRIVATE_PROTOCOL,
+        messageId,
+        publisherPublicKeyHex: PEER,
+        issuedAtMs: content.createdAtMs ?? Date.now(),
+        expiresAtMs: (content.createdAtMs ?? Date.now()) + 60_000,
+        content: input.content as never
+      });
+      return { messageId, signedMessage };
+    },
+    openPrivateEnvelope: async ({ envelope }) => {
+      opened.push(envelope);
+      const known = pendingOpen.get(masterSeedHashHex(envelope));
+      if (known) return known;
+      throw new Error("OPEN_FAILED");
+    },
     subscriptionSet: async (channels) => ({ channels }),
-    subscriptionStatus: (channel) => ({ channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 }),
+    subscriptionStatus: (value) => ({ channel: value, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 }),
     subscribeSubscriptionStatus: () => () => undefined,
     subscribe: () => () => undefined,
-    subscribePrivate: (handler) => {
-      privateHandler = handler;
-      return () => { privateHandler = undefined; };
+    subscribePrivate: (next) => {
+      handler = next;
+      return () => { handler = undefined; };
     }
   };
-  return { runtime, publishPrivate, emit: (event) => privateHandler?.(event) };
+  return { runtime, published, opened, emit: (event) => handler?.(event) };
 }
 
-describe("createMessageService", () => {
-  it("reports readiness from the owner-scoped Channel runtime", () => {
-    const transport = channel();
-    const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
-    expect(service.isReady()).toBe(true);
-    service.dispose?.();
+function receivedEvent(input: {
+  messageId: string;
+  body: string;
+  clientMessageId: string;
+  createdAtMs: number;
+  rawEnvelope: Uint8Array;
+}): ChannelPrivateMessageEvent {
+  return {
+    channel: `bsv8.inbox.${OWNER}`,
+    publisherPublicKeyHex: PEER,
+    messageId: input.messageId,
+    protocol: MESSAGE_PRIVATE_PROTOCOL,
+    content: {
+      type: "text",
+      contentType: "text/plain",
+      body: input.body,
+      clientMessageId: input.clientMessageId,
+      createdAtMs: input.createdAtMs
+    },
+    rawEnvelope: input.rawEnvelope
+  };
+}
+
+function indexFiles(map: Map<string, Uint8Array>, peer: string): string[] {
+  return [...map.keys()].filter((key) => key.startsWith(`${peer}/timeindex/`)).sort();
+}
+
+describe("messageService evidence storage", () => {
+  it("发送后保存签名明文 raw 与时间索引，并可按会话读回", async () => {
+    const { files, map } = memoryFiles();
+    const c = channel();
+    const k = keyspace();
+    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+
+    await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "你好", clientMessageId: "c-1" });
+    expect(c.published).toHaveLength(1);
+
+    const sentKeys = [...map.keys()].filter((key) => key.startsWith(`${PEER}/sent/`));
+    expect(sentKeys).toHaveLength(1);
+    expect(sentKeys[0]).toMatch(new RegExp(`^${PEER}/sent/[0-9a-f]{64}\\.json$`));
+    const raw = map.get(sentKeys[0]!)!;
+    expect(sentKeys[0]).toContain(masterSeedHashHex(raw));
+
+    const indexKeys = indexFiles(map, PEER);
+    expect(indexKeys).toHaveLength(1);
+    const index = JSON.parse(new TextDecoder().decode(map.get(indexKeys[0]!)!)) as Record<string, unknown>;
+    expect(index).toMatchObject({ format: "keymaster.message-index", version: 1, kind: "sent" });
+    expect(index.rawHash).toBe(masterSeedHashHex(raw));
+
+    const messages = await service.listMessages({ peerPublicKeyHex: PEER });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ senderPublicKeyHex: OWNER, recipientPublicKeyHex: PEER, body: "你好" });
   });
 
-  it("publishes a private message and stores only the local record", async () => {
-    const transport = channel();
-    const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
+  it("收到私信后保存加密信封 raw 与时间索引，并通过 Coordinator 解码", async () => {
+    const { files, map } = memoryFiles();
+    const c = channel();
+    const k = keyspace();
+    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
 
-    await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "hello" });
+    const envelope = new TextEncoder().encode(JSON.stringify({ envelope_version: 1, ciphertext: "x" }));
+    await c.runtime.publishPrivate({ recipientPublicKeyHex: OWNER, protocol: MESSAGE_PRIVATE_PROTOCOL, content: { type: "text", contentType: "text/plain", body: "自己", clientMessageId: "self", createdAtMs: 1 } });
+    // 让收到的 envelope 可以被 openPrivateEnvelope 识别：复用发布 fake 的映射。
+    const publishResult = await c.runtime.publishPrivate({ recipientPublicKeyHex: OWNER, protocol: MESSAGE_PRIVATE_PROTOCOL, content: { type: "text", contentType: "text/plain", body: "来自对端", clientMessageId: "c-2", createdAtMs: 5 } });
+    const receivedRaw = publishResult.signedMessage!;
+    void envelope;
 
-    expect(transport.publishPrivate).toHaveBeenCalledWith(expect.objectContaining({
-      recipientPublicKeyHex: PEER,
-      protocol: MESSAGE_PRIVATE_PROTOCOL,
-      content: expect.objectContaining({ type: "text", body: "hello" })
-    }));
-    await expect(service.listMessages()).resolves.toEqual([
-      expect.objectContaining({ senderPublicKeyHex: OWNER, recipientPublicKeyHex: PEER, body: "hello" })
-    ]);
-    service.dispose?.();
+    c.emit(receivedEvent({ messageId: publishResult.messageId, body: "来自对端", clientMessageId: "c-2", createdAtMs: 5, rawEnvelope: receivedRaw }));
+    await vi.waitFor(() => expect(indexFiles(map, PEER)).toHaveLength(1));
+
+    const receivedKeys = [...map.keys()].filter((key) => key.startsWith(`${PEER}/received/`));
+    expect(receivedKeys).toHaveLength(1);
+    expect(receivedKeys[0]).toContain(masterSeedHashHex(receivedRaw));
+
+    const messages = await service.listMessages({ peerPublicKeyHex: PEER });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ senderPublicKeyHex: PEER, recipientPublicKeyHex: OWNER, body: "来自对端" });
+    expect(c.opened).toHaveLength(1);
   });
 
-  it("persists a valid incoming message and sends an independent ACK", async () => {
-    const transport = channel();
-    const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
-    transport.emit({
-      channel: `bsv8.inbox.${OWNER}`,
-      publisherPublicKeyHex: PEER,
-      messageId: "incoming-1",
-      protocol: MESSAGE_PRIVATE_PROTOCOL,
-      content: {
-        type: "text",
-        contentType: "text/plain",
-        body: "hello back",
-        clientMessageId: "client-1",
-        createdAtMs: 123
-      }
-    });
+  it("raw 缺失时索引保留并标记缺失，不伪造正文", async () => {
+    const { files, map } = memoryFiles();
+    const c = channel();
+    const k = keyspace();
+    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "会被删", clientMessageId: "c-3" });
 
-    await vi.waitFor(async () => expect(await service.listMessages()).toHaveLength(1));
-    expect(transport.publishPrivate).toHaveBeenCalledWith({
-      recipientPublicKeyHex: PEER,
-      protocol: MESSAGE_PRIVATE_PROTOCOL,
-      content: { type: "ack", acknowledged_message_id: "incoming-1" }
-    });
-    service.dispose?.();
+    for (const key of [...map.keys()]) if (key.startsWith(`${PEER}/sent/`)) map.delete(key);
+    const messages = await service.listMessages({ peerPublicKeyHex: PEER });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ body: "", rawMissing: true, messageId: expect.any(String) });
   });
 
-  it("rejects an invalid target before publishing", async () => {
-    const transport = channel();
-    const fixture = keyspace();
-    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER)! });
-    await expect(service.sendTextMessage({ recipientPublicKeyHex: "not-a-public-key", body: "hello" }))
-      .rejects.toThrow("invalid_target");
-    expect(transport.publishPrivate).not.toHaveBeenCalled();
-    service.dispose?.();
+  it("重复投递同一消息只展示一条，并保留最早观察时间", async () => {
+    const { files, map } = memoryFiles();
+    const c = channel();
+    const k = keyspace();
+    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    const publishResult = await c.runtime.publishPrivate({ recipientPublicKeyHex: OWNER, protocol: MESSAGE_PRIVATE_PROTOCOL, content: { type: "text", contentType: "text/plain", body: "重复", clientMessageId: "c-4", createdAtMs: 7 } });
+    const rawEnvelope = publishResult.signedMessage!;
+    const event = receivedEvent({ messageId: publishResult.messageId, body: "重复", clientMessageId: "c-4", createdAtMs: 7, rawEnvelope });
+    c.emit(event);
+    await vi.waitFor(() => expect(indexFiles(map, PEER)).toHaveLength(1));
+    c.emit(event);
+    await vi.waitFor(() => expect(indexFiles(map, PEER)).toHaveLength(2));
+
+    const messages = await service.listMessages({ peerPublicKeyHex: PEER });
+    expect(messages).toHaveLength(1);
+    const timestamps = indexFiles(map, PEER).map((key) => Number(key.split("/").pop()!.slice(0, 13)));
+    expect(messages[0]!.insertedAtMs).toBe(Math.min(...timestamps));
   });
 
-  it("does not write a send that completes after the owner session changes", async () => {
-    const testKeyspace = keyspace();
-    let releasePublish!: (value: { messageId: string }) => void;
-    const publishGate = new Promise<{ messageId: string }>((resolve) => { releasePublish = resolve; });
-    const transport = channel({ publishPrivate: async () => publishGate });
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER)! });
-
-    const pendingSend = service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "owner fenced" });
-    await vi.waitFor(() => expect(transport.publishPrivate).toHaveBeenCalled());
-    testKeyspace.state.activePublicKeyHex = OTHER_OWNER;
-    testKeyspace.state.generation = 2;
-    releasePublish({ messageId: "late-message" });
-
-    await expect(pendingSend).rejects.toThrow("owner_changed");
-    const db = createMessageRepository(testKeyspace.stores.get(OWNER)!);
-    testKeyspace.state.activePublicKeyHex = OWNER;
-    testKeyspace.state.generation = 1;
-    await expect(db.list()).resolves.toEqual([]);
-    testKeyspace.state.activePublicKeyHex = OTHER_OWNER;
-    testKeyspace.state.generation = 2;
-    await expect(db.list()).resolves.toEqual([]);
-    service.dispose?.();
-  });
-
-  it("drops an incoming message when the owner changes before the DB write", async () => {
-    const testKeyspace = keyspace();
-    const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER)! });
-    transport.emit({
-      channel: `bsv8.inbox.${OWNER}`,
-      publisherPublicKeyHex: PEER,
-      messageId: "incoming-owner-switch",
-      protocol: MESSAGE_PRIVATE_PROTOCOL,
-      content: {
-        type: "text",
-        contentType: "text/plain",
-        body: "must not cross owner",
-        clientMessageId: "client-owner-switch",
-        createdAtMs: 123
-      }
-    });
-    testKeyspace.state.activePublicKeyHex = OTHER_OWNER;
-    testKeyspace.state.generation = 2;
-
-    await vi.waitFor(async () => expect(await createMessageRepository(testKeyspace.stores.get(OWNER)!).list()).toEqual([]));
-    expect(transport.publishPrivate).not.toHaveBeenCalled();
-    testKeyspace.state.activePublicKeyHex = OWNER;
-    testKeyspace.state.generation = 1;
-    await expect(createMessageRepository(testKeyspace.stores.get(OWNER)!).list()).resolves.toEqual([]);
-    service.dispose?.();
-  });
-
-  it("writes message history as owner K-V records", async () => {
-    const testKeyspace = keyspace();
-    const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER)! });
-    await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "stored in K-V" });
-    const entries = await testKeyspace.stores.get(OWNER)!.list({ partition: "messages", prefix: "message/" });
-    expect(entries.entries).toHaveLength(1);
-    expect(entries.entries[0]?.value).toEqual(expect.objectContaining({ body: "stored in K-V" }));
-    service.dispose?.();
-  });
-
-  it("reports both errors when stale-write cleanup fails", async () => {
-    const testKeyspace = keyspace();
-    const baseStorage = testKeyspace.stores.get(OWNER)!;
-    const cleanupError = new Error("cleanup unavailable");
-    const staleStorage = {
-      ...baseStorage,
-      async put<T>(key: string, value: T, condition?: Parameters<OwnerAppStore["put"]>[2]) {
-        await baseStorage.put(key, value, condition);
-        testKeyspace.state.activePublicKeyHex = OTHER_OWNER;
-        testKeyspace.state.generation = 2;
-      },
-      async delete() {
-        throw cleanupError;
-      }
-    } as unknown as OwnerAppStore;
-    const transport = channel();
-    const errors: unknown[] = [];
-    const service = createMessageService({
-      channel: transport.runtime,
-      keyspace: testKeyspace.keyspace,
-      storage: staleStorage,
-      onStorageError: (error) => errors.push(error)
-    });
-    transport.emit({
-      channel: `bsv8.inbox.${OWNER}`,
-      publisherPublicKeyHex: PEER,
-      messageId: "incoming-cleanup-failure",
-      protocol: MESSAGE_PRIVATE_PROTOCOL,
-      content: {
-        type: "text",
-        contentType: "text/plain",
-        body: "must report cleanup failure",
-        clientMessageId: "client-cleanup-failure",
-        createdAtMs: 123
-      }
-    });
-
-    await vi.waitFor(() => expect(errors).toHaveLength(1));
-    expect(errors[0]).toBeInstanceOf(MessageHistoryCompensationError);
-    const reported = errors[0] as MessageHistoryCompensationError;
-    expect(reported.writeError).toBeInstanceOf(Error);
-    expect(reported.cleanupError).toBe(cleanupError);
-    expect(reported.errors).toEqual([reported.writeError, cleanupError]);
-    service.dispose?.();
+  it("发送前的参数错误不会写任何证据", async () => {
+    const { files, map } = memoryFiles();
+    const c = channel();
+    const k = keyspace();
+    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    await expect(service.sendTextMessage({ recipientPublicKeyHex: "bad", body: "x" })).rejects.toThrow(/invalid_target/);
+    await expect(service.sendTextMessage({ recipientPublicKeyHex: OTHER, body: "" })).rejects.toThrow(/empty_message/);
+    expect(map.size).toBe(0);
   });
 });

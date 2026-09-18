@@ -5,9 +5,9 @@ import { messagePlatformPlugin } from "./manifest.js";
 describe("messagePlatformPlugin", () => {
   it("depends on the Coordinator Channel path and owner Message storage", () => {
     const unit = messagePlatformPlugin.units?.find((candidate) => candidate.runtime === "window-main");
-    expect(unit?.storage).toEqual(
-      CENTRAL_STORAGE_DECLARATIONS.messageHistory
-    );
+    expect(unit?.storages).toEqual([
+      CENTRAL_STORAGE_DECLARATIONS.messagesFiles
+    ]);
     const dependencies = unit?.dependencies ?? [];
     expect(dependencies.map((dependency) => dependency.capability)).toEqual(
       expect.arrayContaining([

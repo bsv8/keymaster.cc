@@ -373,6 +373,8 @@ export type CoordinatorChannelOperation =
   /** 受信任 WebRTC 插件发布真实 Hash 请求；不能由 Connect App 伪造。 */
   | { type: "hash-request-publish"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; hash: string; locator: "webrtc-sdp" }
   | { type: "private-publish"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; recipientPublicKeyHex: string; protocol: string; content: JSONValue }
+  /** 受信任消息插件按需打开历史入站信封；只读，不发布。 */
+  | { type: "open-private-envelope"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; envelope: Uint8Array }
   | { type: "subscription-set"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; channels: string[] }
   | { type: "release"; ownerPublicKeyHex: string; caller: ChannelOperationCaller };
 

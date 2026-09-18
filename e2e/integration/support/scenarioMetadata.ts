@@ -28,6 +28,22 @@ export const LOCAL_CONTACT_MESSAGE_SCENARIO = {
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 SatSubscription 本地供应商 Journey：正式服务完成 Channel 私信收发。 */
+export const REAL_SATSUB_MESSAGE_SCENARIO = {
+  id: "J-REAL-SATSUB-MESSAGE",
+  level: "real-resource",
+  requirementIds: ["KM-MESSAGE-001", "KM-SATSUB-001"],
+  startingState: "Node 从仓库外 SATS_SUBSCRIPTION_DIR 构建正式 cmd/satsubscription 并启动一次性 PostgreSQL；三个用户各用一个独立浏览器进程和确定性白名单 Hex Key。",
+  successCriteria: [
+    "三个独立浏览器都通过真实页面完成供应商身份 pin 和 online 连接。",
+    "真实账本登记三个 owner inbox 订阅，且 ssp-publish/ssp-subscribe 的 charged_subunits 为 0。",
+    "A 发送后 B 的会话页收到消息，A 保留自己的已发送记录。",
+    "B 刷新并重新解锁后本地历史仍存在。",
+    "独立浏览器 C 打开与 A 的会话看不到这条消息。",
+  ],
+  resourceProfile: "satsubscription",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 本地设置 Journey：验证正式 registry 提供的设置入口和热切换结果。 */
 export const LOCAL_SETTINGS_SCENARIO = {
   id: "J-LOCAL-SETTINGS",

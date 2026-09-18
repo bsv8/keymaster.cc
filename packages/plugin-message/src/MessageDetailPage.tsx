@@ -678,7 +678,11 @@ function renderTimelineItem(
             <span>{fromMe ? handlers.i18n.t("message.page.detail.from.me") : handlers.title}</span>
             <span>{formatTime(item.message.insertedAtMs)}</span>
           </div>
-          <pre className="km-message-detail__body">{item.message.body}</pre>
+          {item.message.rawMissing ? (
+            <p className="km-message-detail__missing">{handlers.i18n.t("message.page.detail.rawMissing")}</p>
+          ) : (
+            <pre className="km-message-detail__body">{item.message.body}</pre>
+          )}
         </div>
       );
     }

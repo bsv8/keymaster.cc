@@ -294,6 +294,27 @@ describe("Coordinator runtime contract parsers", () => {
     })).toThrow();
   });
 
+  it("accepts an empty files purposeId in owner grants", () => {
+    const grant = parseCoordinatorResponseFor(rpcRequest("storage.owner.bind"), {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: {
+        storageGrantId: "grant-1",
+        bucketId: "bucket-1",
+        bucketGeneration: 2,
+        ownerPublicKeyHex: "02" + "11".repeat(32),
+        moduleId: "p2p",
+        // files 模型允许空 purposeId,表示模块根(webRTC p2p/setting.json)。
+        purposeId: "",
+        authority: "built-in-module",
+        model: "files",
+        schemaVersion: 1,
+        sessionEpoch: "epoch-1",
+      },
+    });
+    expect(grant.operationResult).toMatchObject({ moduleId: "p2p", purposeId: "", model: "files" });
+  });
+
   it("accepts an empty owner file-list prefix and parses owner file results", () => {
     const request = toCoordinatorRpcRequest({
       kind: "storage.owner.data",

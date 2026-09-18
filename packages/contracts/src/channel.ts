@@ -19,6 +19,29 @@ export interface ChannelPublishParams {
 export interface ChannelPublishResult {
   /** 由 Keymaster/ChannelProtocol 生成的消息编号。 */
   messageId: string;
+  /**
+   * 出站签名明文的精确字节（已签名、未加密）；只有私密发布返回。
+   * 调用方可把它作为出站证据原样保存，不需要也不允许重新签名。
+   */
+  signedMessage?: Uint8Array;
+}
+
+/** 历史打开一条入站私密信封的结果；只用于本地历史展示，不产生网络副作用。 */
+export interface OpenedPrivateEnvelope {
+  /** 信封所属的 owner inbox 频道。 */
+  channel: string;
+  /** 解密并验签后的子协议标识。 */
+  protocol: string;
+  /** ChannelProtocol 消息编号。 */
+  messageId: string;
+  /** 验签确认后的发送者压缩公钥 hex。 */
+  publisherPublicKeyHex: string;
+  /** 作者声明的签发时间。 */
+  issuedAtMs: number;
+  /** 作者声明的过期时间；是否过期由调用方决定。 */
+  expiresAtMs: number;
+  /** 解密后的业务 JSON（应用消息为 deliver content 或 ack 标记）。 */
+  content: JSONValue;
 }
 
 /** 受信任 WebRTC/内容插件发布的公开 Hash 请求参数。 */
@@ -86,6 +109,11 @@ export interface ChannelMessageReceivedEventData {
   messageId: string;
   /** 已验签的 App JSON 内容。 */
   content: JSONValue;
+  /**
+   * 入站私密消息的加密信封精确字节（受信任插件用于原样留证）。
+   * 公共消息或旧 Coordinator 可以省略。
+   */
+  rawEnvelope?: Uint8Array;
 }
 
 /** 对外事件之外，Coordinator 内部使用的 Channel 事件。 */
@@ -106,6 +134,8 @@ export interface ChannelPrivateMessageEvent {
   protocol: string;
   /** 已验签/解密后的业务 JSON。 */
   content: JSONValue;
+  /** 入站加密信封精确字节；用于本地原样留证。 */
+  rawEnvelope?: Uint8Array;
 }
 
 /** 受信任插件申请 Channel 运行时的 caller 身份。 */
@@ -144,6 +174,13 @@ export interface ChannelRuntime {
     protocol: string;
     content: JSONValue;
   }, signal?: AbortSignal): Promise<ChannelPublishResult>;
+  /**
+   * 受信任插件按需解密并验签一条历史入站信封。
+   *
+   * 只允许当前 owner inbox；不发布、不产生网络副作用，供消息历史在
+   * 本地重新读取 raw 信封。过期与时钟判断由调用方负责。
+   */
+  openPrivateEnvelope?(input: { envelope: Uint8Array }, signal?: AbortSignal): Promise<OpenedPrivateEnvelope>;
   /** 替换本 caller 的订阅集合。 */
   subscriptionSet(channels: string[], signal?: AbortSignal): Promise<ChannelSubscriptionSetResult>;
   /** 查询某个精确频道当前的物理订阅状态。 */

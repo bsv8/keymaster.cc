@@ -26,6 +26,11 @@ export interface MessageRecord {
   createdAtMs: number;
   /** 本地写入时间。 */
   insertedAtMs: number;
+  /**
+   * 时间索引存在但对应的 raw 文件缺失时为 true。
+   * 界面只能显示"原始数据缺失"，不得伪造正文。
+   */
+  rawMissing?: boolean;
 }
 
 /** 消息私信协议标识。 */

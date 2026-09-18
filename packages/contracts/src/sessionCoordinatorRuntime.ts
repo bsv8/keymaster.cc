@@ -199,7 +199,7 @@ const VAULT_OPERATION_TYPES = [
 ] as const satisfies readonly CoordinatorVaultOperation["type"][];
 
 const CHANNEL_OPERATION_TYPES = [
-  "publish", "hash-request-publish", "private-publish", "subscription-set", "release",
+  "publish", "hash-request-publish", "private-publish", "open-private-envelope", "subscription-set", "release",
 ] as const satisfies readonly CoordinatorChannelOperation["type"][];
 
 type CoordinatorCommandRequest = Exclude<
@@ -321,6 +321,7 @@ export type CoordinatorSatOperationResultFor<O extends CoordinatorSatOperation> 
 /** 依据 Channel operation discriminant 收窄 operationResult。 */
 export type CoordinatorChannelOperationResultFor<O extends CoordinatorChannelOperation> =
   O extends { type: "publish" | "hash-request-publish" | "private-publish" } ? ChannelPublishResult :
+  O extends { type: "open-private-envelope" } ? import("./channel.js").OpenedPrivateEnvelope :
   O extends { type: "subscription-set" } ? ChannelSubscriptionSetResult :
   O extends { type: "release" } ? null :
   never;
@@ -1381,6 +1382,7 @@ function parseChannelOperation(value: unknown): CoordinatorChannelOperation {
   if (type === "publish") return { type, ownerPublicKeyHex, caller, channel: text(operation.channel, "Channel operation.channel", 2_048), content: parseJsonValue(operation.content, "Channel operation.content") };
   if (type === "hash-request-publish") return { type, ownerPublicKeyHex, caller, hash: text(operation.hash, "Channel operation.hash", 128), locator: operation.locator === "webrtc-sdp" ? "webrtc-sdp" : (() => { throw new TypeError("Channel operation.locator is invalid"); })() };
   if (type === "private-publish") return { type, ownerPublicKeyHex, caller, recipientPublicKeyHex: text(operation.recipientPublicKeyHex, "Channel operation.recipientPublicKeyHex", 256), protocol: text(operation.protocol, "Channel operation.protocol", 256), content: parseJsonValue(operation.content, "Channel operation.content") };
+  if (type === "open-private-envelope") return { type, ownerPublicKeyHex, caller, envelope: uint8ArrayValue(operation.envelope, "Channel operation.envelope") };
   if (type === "subscription-set") return { type, ownerPublicKeyHex, caller, channels: stringList(operation.channels, "Channel operation.channels", 256, 2_048) };
   if (type === "release") return { type, ownerPublicKeyHex, caller };
   throw new TypeError("Coordinator Channel operation " + type + " is unsupported");
@@ -2171,16 +2173,22 @@ function parseStorageDataResult(value: unknown, field: string): CoordinatorStora
 
 function parseStorageOwnerGrant(value: unknown, field: string): StorageOwnerGrant {
   const grant = expectRecord(value, field);
+  // owner 数据模型:K-V 或文件根;不能硬编码成 kv,否则 files 声明绑定会被判不匹配。
+  const model = enumValue(grant.model, ["kv", "files"] as const, field + ".model");
+  // 与 parseStorageDeclaration 一致:files 模型允许空 purposeId(模块根,
+  // 例如 p2p/setting.json 或 p2pkh 整个模块共享目录),K-V 仍必须有 purpose。
+  const purposeId = model === "files" && grant.purposeId === ""
+    ? ""
+    : text(grant.purposeId, field + ".purposeId", 63);
   return {
     storageGrantId: text(grant.storageGrantId, field + ".storageGrantId", 256),
     bucketId: text(grant.bucketId, field + ".bucketId", 256),
     bucketGeneration: boundedNumber(grant.bucketGeneration, field + ".bucketGeneration"),
     ownerPublicKeyHex: text(grant.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 66),
     moduleId: text(grant.moduleId, field + ".moduleId", 63),
-    purposeId: text(grant.purposeId, field + ".purposeId", 63),
+    purposeId,
     authority: enumValue(grant.authority, ["built-in-module", "third-party-app"] as const, field + ".authority"),
-    // owner 数据模型:K-V 或文件根;不能硬编码成 kv,否则 files 声明绑定会被判不匹配。
-    model: enumValue(grant.model, ["kv", "files"] as const, field + ".model"),
+    model,
     schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
     sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
   };
@@ -2705,7 +2713,25 @@ function parseSatOperationResultFor(operation: CoordinatorSatOperation, value: u
 
 function parseChannelPublishResult(value: unknown, field: string): ChannelPublishResult {
   const result = expectRecord(value, field);
-  return { messageId: text(result.messageId, field + ".messageId", 256) };
+  return {
+    messageId: text(result.messageId, field + ".messageId", 256),
+    ...(result.signedMessage === undefined ? {} : { signedMessage: uint8ArrayValue(result.signedMessage, field + ".signedMessage") }),
+  };
+}
+
+function parseOpenedPrivateEnvelopeResult(value: unknown, field: string): import("./channel.js").OpenedPrivateEnvelope {
+  const result = expectRecord(value, field);
+  const protocol = text(result.protocol, field + ".protocol", 256);
+  const body = result.content;
+  return {
+    channel: text(result.channel, field + ".channel", 512),
+    protocol,
+    messageId: text(result.messageId, field + ".messageId", 256),
+    publisherPublicKeyHex: text(result.publisherPublicKeyHex, field + ".publisherPublicKeyHex", 66),
+    issuedAtMs: boundedNumber(result.issuedAtMs, field + ".issuedAtMs"),
+    expiresAtMs: boundedNumber(result.expiresAtMs, field + ".expiresAtMs"),
+    content: parseJsonValue(body, field + ".content"),
+  };
 }
 
 function parseChannelSubscriptionSetResult(value: unknown, field: string): ChannelSubscriptionSetResult {
@@ -2728,6 +2754,7 @@ function parseChannelOperationResultFor(operation: CoordinatorChannelOperation, 
     case "publish":
     case "hash-request-publish":
     case "private-publish": return parseChannelPublishResult(value, field);
+    case "open-private-envelope": return parseOpenedPrivateEnvelopeResult(value, field);
     case "subscription-set": return parseChannelSubscriptionSetResult(value, field);
     case "release":
       if (value !== null) throw new TypeError(`Coordinator ${field} must be null`);
@@ -3264,11 +3291,12 @@ function parseChannelMessage(value: unknown, field: string): { channel: string; 
   };
 }
 
-function parsePrivateChannelMessage(value: unknown, field: string): { channel: string; publisherPublicKeyHex: string; messageId: string; protocol: string; content: JSONValue } {
+function parsePrivateChannelMessage(value: unknown, field: string): { channel: string; publisherPublicKeyHex: string; messageId: string; protocol: string; content: JSONValue; rawEnvelope?: Uint8Array } {
   const message = expectRecord(value, field);
   return {
     ...parseChannelMessage(message, field),
     protocol: text(message.protocol, field + ".protocol", 256),
+    ...(message.rawEnvelope === undefined ? {} : { rawEnvelope: uint8ArrayValue(message.rawEnvelope, field + ".rawEnvelope") }),
   };
 }
 

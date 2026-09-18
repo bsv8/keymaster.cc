@@ -127,6 +127,26 @@ export async function readRawLocalBucketObjects(page: Page): Promise<RawBucketOb
   }));
 }
 
+/** 删除 Local 桶里的单个对象；只用于验证"raw 缺失"这类失败展示。 */
+export async function deleteRawLocalBucketObject(page: Page, bucketId: string, path: string): Promise<void> {
+  await page.evaluate(({ bucketId: targetBucketId, path: targetPath }) => new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open("keymaster.local", 1);
+    request.onerror = () => reject(new Error("无法打开 IndexedDB keymaster.local"));
+    request.onsuccess = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains("objects")) {
+        database.close();
+        resolve();
+        return;
+      }
+      const transaction = database.transaction("objects", "readwrite");
+      transaction.onerror = () => { database.close(); reject(new Error("删除 IndexedDB 桶对象失败")); };
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.objectStore("objects").delete([targetBucketId, targetPath]);
+    };
+  }), { bucketId, path });
+}
+
 /** 按 KeyHold v1 校验一份 KeyHold 文档；字段/密文封装不符直接失败。 */
 export function assertKeyHoldDocument(value: Record<string, unknown>, expectation: { publicKeyHex: string; label: string }): Record<string, unknown> {
   expectExactKeys(value, ["format", "version", "label", "publicKeyHex", "keyDerivation", "cipher"], "KeyHold 文档");

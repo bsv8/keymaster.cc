@@ -168,6 +168,14 @@ export function createScopedChannelRuntime(base: ChannelRuntime, scope: Lifecycl
       signal?: AbortSignal,
     ): Promise<ChannelPublishResult> => call(signal, (linkedSignal) => base.publishPrivate(input, linkedSignal)),
 
+    openPrivateEnvelope: (
+      input: { envelope: Uint8Array },
+      signal?: AbortSignal,
+    ): Promise<import("@keymaster/contracts").OpenedPrivateEnvelope> => call(signal, (linkedSignal) => {
+      if (!base.openPrivateEnvelope) throw new Error("Channel history open is unavailable");
+      return base.openPrivateEnvelope(input, linkedSignal);
+    }),
+
     subscriptionSet: async (channels: string[], signal?: AbortSignal): Promise<ChannelSubscriptionSetResult> => {
       // 旧 service 的 teardown 可能在 scope 已撤权后才调用；只允许它提交
       // 空集合，不能借这个兼容路径重新订阅或发布。

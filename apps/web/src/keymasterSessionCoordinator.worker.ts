@@ -228,7 +228,7 @@ import {
   parseSHA256Hash,
   publicKeyFromPrivate,
 } from "bsv8-channel-protocol";
-import { marshalEnvelope, signPrivateMessage, sealSigned, verifySignedPrivateMessage, open as openPrivateMessage, validatePongRelation, validateWebRTCRelation, reviewOfferForHashRequest, dedupKey as privateDedupKey, privateMessageMaxLifetimeMs, PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/inbox";
+import { marshalEnvelope, marshalPrivateMessage, signPrivateMessage, sealSigned, verifySignedPrivateMessage, open as openPrivateMessage, validatePongRelation, validateWebRTCRelation, reviewOfferForHashRequest, dedupKey as privateDedupKey, privateMessageMaxLifetimeMs, PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/inbox";
 import { APP_MESSAGE_PROTOCOL, newAck, newDeliver } from "bsv8-channel-protocol/app-message";
 import { PING_PROTOCOL, parseBodyValue as parsePingBodyValue, newPong } from "bsv8-channel-protocol/ping";
 import { WEBRTC_SIGNAL_PROTOCOL, parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
@@ -7446,7 +7446,7 @@ async function publishChannelHashRequestUnsafe(
   const contentJson = marshalHashRequest(signed);
   // Supplier 通常不会把本 owner 的 Publish 回送给自己；本地仍必须保存
   // 这条 SDK 生成的 VerifiedHashRequest，才能审查远端随后发来的 offer。
-  const verified = parseHashRequest(HASH_REQUEST_CHANNEL, contentJson, issuedAtMs);
+  const verified = parseHashRequest(HASH_REQUEST_CHANNEL, contentJson);
   const relationKey = channelHashRequestKey(verified.message_id, verified.from_public_key);
   channelHashRequests.set(relationKey, verified);
   pruneChannelProtocolRelations();
@@ -7524,14 +7524,14 @@ function createCoordinatorChannelRuntime(): ChannelRuntime {
       const runtime = await ensureSatRuntime();
       const protocol = privateProtocol(input.protocol);
       validatePrivateProtocolCaller(contactsCaller, protocol);
-      const messageId = await publishPrivateEnvelope({
+      const published = await publishPrivateEnvelope({
         runtime,
         recipientPublicKeyHex: input.recipientPublicKeyHex,
         protocol,
         body: privateBodyForPublish(protocol, input.content),
         signal: signal ?? runtime.signal
       });
-      return { messageId };
+      return { messageId: published.messageId, signedMessage: published.signedMessage };
     },
     async subscriptionSet(channels, signal) {
       assertContactsEnabled();
@@ -7611,7 +7611,7 @@ function emitChannelPublicMessage(message: { channel: string; publisherPublicKey
   });
 }
 
-function emitChannelPrivateMessage(message: { channel: string; publisherPublicKeyHex: string; messageId: string; protocol: string; content: import("@keymaster/contracts").JSONValue }): void {
+function emitChannelPrivateMessage(message: { channel: string; publisherPublicKeyHex: string; messageId: string; protocol: string; content: import("@keymaster/contracts").JSONValue; rawEnvelope?: Uint8Array }): void {
   for (const subscriber of channelPrivateSubscribers) {
     try { subscriber(message); } catch { /* 单个内部消费者不能打断 Channel 路由。 */ }
   }
@@ -7627,7 +7627,7 @@ async function publishPrivateEnvelope(input: {
   protocol: ChannelPrivateProtocol;
   body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"];
   signal?: AbortSignal;
-}): Promise<string> {
+}): Promise<{ messageId: string; signedMessage: Uint8Array }> {
   // 私密消息也包含签名、加密和不可逆 Publish；这些步骤不能拆成多个
   // 独立边界，否则旧 Worker 仍可能在 authority 接管后发送迟到消息。
   return withCoordinatorFinalIoLease(
@@ -7644,7 +7644,7 @@ async function publishPrivateEnvelopeUnsafe(input: {
   protocol: ChannelPrivateProtocol;
   body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"];
   signal?: AbortSignal;
-}): Promise<string> {
+}): Promise<{ messageId: string; signedMessage: Uint8Array }> {
   if (!CHANNEL_PROTOCOLS.has(input.protocol)) throw new Error("Unsupported private Channel protocol");
   const recipient = parsePublicKey(input.recipientPublicKeyHex);
   const channel = inboxChannel(recipient);
@@ -7671,12 +7671,12 @@ async function publishPrivateEnvelopeUnsafe(input: {
   });
   let verifiedWebrtc: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage | undefined;
   if (input.protocol === WEBRTC_SIGNAL_PROTOCOL) {
-    verifiedWebrtc = verifySignedPrivateMessage(signed, now);
+    verifiedWebrtc = verifySignedPrivateMessage(signed);
     const webrtcBody = verifiedWebrtc.body as import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body;
     if (webrtcBody.signal.type === "offer") {
       const hashRequest = channelHashRequestByMessageId(webrtcBody.request_message_id, recipient);
       if (!hashRequest) throw new Error("WebRTC offer must reference a live public Hash request");
-      reviewOfferForHashRequest(hashRequest, verifiedWebrtc, now);
+      reviewOfferForHashRequest(hashRequest, verifiedWebrtc);
     } else {
       const offer = findChannelWebrtcOffer(webrtcBody, verifiedWebrtc);
       if (!offer) throw new Error("WebRTC signal has no verified offer relation");
@@ -7684,7 +7684,7 @@ async function publishPrivateEnvelopeUnsafe(input: {
     }
   }
   const pingMessage = input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)
-    ? verifySignedPrivateMessage(signed, now)
+    ? verifySignedPrivateMessage(signed)
     : undefined;
   const verifiedWebrtcBody = verifiedWebrtc?.body as import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body | undefined;
   const webrtcOfferKey = verifiedWebrtc && verifiedWebrtcBody?.signal.type === "offer"
@@ -7742,7 +7742,8 @@ async function publishPrivateEnvelopeUnsafe(input: {
     if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
     throw new Error("Channel owner changed while publishing");
   }
-  return messageId;
+  // 出站签名明文由调用方作为本地证据原样保存；不重新序列化，不包含密文。
+  return { messageId, signedMessage: marshalPrivateMessage(signed) };
 }
 
 function signChannelPrivateMessage(input: {
@@ -7793,6 +7794,23 @@ function validatePrivateProtocolCaller(caller: ChannelOperationCaller, protocol:
   }
   if (caller.systemId === "contacts-presence" && protocol === PING_PROTOCOL) return;
   throw new Error("Channel system is not allowed to publish this private protocol");
+}
+
+/** 把已验证历史信封转换成给消息插件的业务 JSON；不投递、不产生副作用。 */
+function privateHistoryContent(opened: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage): import("@keymaster/contracts").JSONValue {
+  if (opened.protocol === APP_MESSAGE_PROTOCOL) {
+    const body = opened.body as import("bsv8-channel-protocol/app-message").MessageV1Body;
+    return body.type === "deliver"
+      ? body.content as import("@keymaster/contracts").JSONValue
+      : { type: "ack", acknowledged_message_id: body.acknowledged_message_id };
+  }
+  if (opened.protocol === PING_PROTOCOL) {
+    return parsePingBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue) as unknown as import("@keymaster/contracts").JSONValue;
+  }
+  if (opened.protocol === WEBRTC_SIGNAL_PROTOCOL) {
+    return parseWebrtcBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue) as unknown as import("@keymaster/contracts").JSONValue;
+  }
+  throw new Error("UNSUPPORTED_PROTOCOL");
 }
 
 function isActiveOwnerInboxChannel(channel: string): boolean {
@@ -7851,7 +7869,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
             || coordinatorState.activePublicKeyHex !== owner) {
             throw new Error("Channel owner changed before private message decrypt");
           }
-          return openPrivateMessage(event.channel, event.contentJson, currentOwnerPrivateKey(), Date.now());
+          return openPrivateMessage(event.channel, event.contentJson, currentOwnerPrivateKey());
         },
         { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.incoming-decrypt" },
       );
@@ -7899,7 +7917,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
             contactPublicKeyHex: opened.from_public_key,
             receivedAtMs: Date.now()
           });
-          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: pingBody as unknown as import("@keymaster/contracts").JSONValue });
+          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: pingBody as unknown as import("@keymaster/contracts").JSONValue, rawEnvelope: event.contentJson.slice() });
           return;
         }
         case APP_MESSAGE_PROTOCOL: {
@@ -7907,7 +7925,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
           const content: import("@keymaster/contracts").JSONValue = appBody.type === "deliver"
             ? appBody.content as import("@keymaster/contracts").JSONValue
             : { type: "ack", acknowledged_message_id: appBody.acknowledged_message_id };
-          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content });
+          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content, rawEnvelope: event.contentJson.slice() });
           return;
         }
         case WEBRTC_SIGNAL_PROTOCOL: {
@@ -7915,7 +7933,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
           if (webrtcBody.signal.type === "offer") {
             const hashRequest = channelHashRequestByMessageId(webrtcBody.request_message_id, owner);
             if (!hashRequest) throw new Error("WebRTC offer references an unknown or expired Hash request");
-            const relation = reviewOfferForHashRequest(hashRequest, opened, Date.now());
+            const relation = reviewOfferForHashRequest(hashRequest, opened);
             channelWebrtcOffers.set(relation.key, opened);
             pruneChannelProtocolRelations();
           } else {
@@ -7923,7 +7941,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
             if (!offer) throw new Error("WebRTC signal has no verified offer relation");
             validateWebRTCRelation(offer, opened);
           }
-          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: webrtcBody as unknown as import("@keymaster/contracts").JSONValue });
+          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: webrtcBody as unknown as import("@keymaster/contracts").JSONValue, rawEnvelope: event.contentJson.slice() });
           return;
         }
         default:
@@ -7937,7 +7955,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
       return;
     }
     if (event.channel === HASH_REQUEST_CHANNEL) {
-      const hashRequest = parseHashRequest(event.channel, event.contentJson, Date.now());
+      const hashRequest = parseHashRequest(event.channel, event.contentJson);
       const relationKey = channelHashRequestKey(hashRequest.message_id, hashRequest.from_public_key);
       const seenKey = channelSeenMessageKey("hash-request", relationKey);
       if (!rememberChannelMessage(seenKey)) return;
@@ -7956,7 +7974,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
       });
       return;
     }
-    const publicMessage = parsePublicMessage(event.channel, event.contentJson, Date.now());
+    const publicMessage = parsePublicMessage(event.channel, event.contentJson);
     const publicDedup = publicDedupKey(publicMessage);
     const key = channelSeenMessageKey("public", publicDedup.channel, publicDedup.from_public_key, publicDedup.message_id);
     if (!rememberChannelMessage(key)) return;
@@ -8066,13 +8084,51 @@ async function executeChannelRequest(
       case "private-publish": {
         const protocol = privateProtocol(operation.protocol);
         validatePrivateProtocolCaller(operation.caller, protocol);
-        const messageId = await publishPrivateEnvelope({ runtime, recipientPublicKeyHex: operation.recipientPublicKeyHex, protocol, body: privateBodyForPublish(protocol, operation.content), signal: requestSignal });
+        const published = await publishPrivateEnvelope({ runtime, recipientPublicKeyHex: operation.recipientPublicKeyHex, protocol, body: privateBodyForPublish(protocol, operation.content), signal: requestSignal });
         if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
           || coordinatorState.vaultStatus !== "unlocked"
           || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
           throw new Error("Private Channel publish became stale after network completion");
         }
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { messageId } };
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { messageId: published.messageId, signedMessage: published.signedMessage } };
+      }
+      case "open-private-envelope": {
+        // 只有受信任消息插件能按需解密历史信封；Connect App 和公共频道不可用。
+        if (operation.caller.kind !== "plugin" || operation.caller.pluginId !== "message") {
+          throw new Error("Only the trusted message plugin may open private envelopes");
+        }
+        if (coordinatorState.vaultStatus !== "unlocked"
+          || !coordinatorState.activePublicKeyHex
+          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
+          throw new Error("Private envelope history open requires the current unlocked owner");
+        }
+        const expectedEpoch = coordinatorState.sessionEpoch;
+        const opened = await withCoordinatorFinalIoLease(
+          "read",
+          requestSignal,
+          () => openPrivateMessage(inboxChannel(parsePublicKey(operation.ownerPublicKeyHex)), operation.envelope, currentOwnerPrivateKey()),
+          { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.history-open" },
+        );
+        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
+          || coordinatorState.vaultStatus !== "unlocked"
+          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex
+          || expectedEpoch !== coordinatorState.sessionEpoch) {
+          throw new Error("Private Channel history open became stale after decrypt");
+        }
+        return {
+          requestId: request.requestId,
+          sessionEpoch: coordinatorState.sessionEpoch,
+          ack: { status: "ok" },
+          operationResult: {
+            channel: opened.channel,
+            protocol: opened.protocol,
+            messageId: opened.message_id,
+            publisherPublicKeyHex: opened.from_public_key,
+            issuedAtMs: opened.issued_at_ms,
+            expiresAtMs: opened.expires_at_ms,
+            content: privateHistoryContent(opened)
+          }
+        };
       }
       case "subscription-set": {
         if (operation.channels.length > CHANNEL_MAX_SUBSCRIPTIONS_PER_CALLER) throw new Error("Too many Channel subscriptions");

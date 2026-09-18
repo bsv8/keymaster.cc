@@ -33,6 +33,7 @@ export type FinalIoAuditOperation =
   | "channel.hash-publish"
   | "channel.private-publish"
   | "channel.incoming-decrypt"
+  | "channel.history-open"
   | "window-p2p.identity.sign"
   | "window-p2p.spike-transfer"
   | "contacts.presence-probe"
