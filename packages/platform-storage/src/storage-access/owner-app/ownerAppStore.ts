@@ -21,10 +21,6 @@ export interface OwnerAppStoreOptions {
   ownerPublicKeyHex: string;
   /** 切桶或切 Key 后让旧句柄 fail closed。 */
   isCurrent?: () => boolean;
-  /** 跨 Coordinator/设备的持久化 owner 世代栅栏。 */
-  assertCurrentAsync?: () => Promise<void>;
-  /** 一次完整 K-V 请求持有的持久化 owner lease。 */
-  acquireCurrentAsync?: () => Promise<() => Promise<void>>;
 }
 
 /**
@@ -53,7 +49,5 @@ export function createOwnerAppStore(options: OwnerAppStoreOptions): OwnerAppStor
     provider: options.provider,
     binding,
     isCurrent: options.isCurrent,
-    assertCurrentAsync: options.assertCurrentAsync,
-    acquireCurrentAsync: options.acquireCurrentAsync
   });
 }

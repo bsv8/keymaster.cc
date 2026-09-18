@@ -199,12 +199,6 @@ export function assertStorageKeyInNamespace(root: string, key: string): void {
 /** 已绑定当前 owner 与内置/三方模块的受限 K-V 句柄。 */
 export interface OwnerAppStore extends KeyValueStore {}
 
-/** 一次 owner 重新导入/重新绑定后的桶级世代。 */
-export interface OwnerStorageActivation {
-  /** 同一公钥每次从 deleted 重新激活都会递增；旧句柄不能跨世代写入。 */
-  generation: number;
-}
-
 /** 平台根存储权威；Provider、ETag 和物理路径不会穿过此接口进入插件。 */
 export interface PlatformRootStore {
   /** 当前抽象桶。 */
@@ -217,12 +211,6 @@ export interface PlatformRootStore {
   openPlatformSnapshot<T>(input: { declaration: PluginStorageDeclaration; validate: (value: unknown) => StorageSnapshotJsonCompatible<T> }): Promise<SnapshotStore<T>>;
   /** 打开 bucket 级平台 K-V（Vault purpose、protocol、multipart 等）。 */
   openPlatformStore(input: { declaration: PluginStorageDeclaration }): Promise<KeyValueStore>;
-  /** 为新导入的 owner 建立/恢复桶级 active 记录；普通解锁不会调用此方法。 */
-  activateOwnerStorage(input: { ownerPublicKeyHex: string }): Promise<OwnerStorageActivation>;
-  /** 读取现有 owner 世代；缺失记录只初始化 active，不会复活 deleted owner。 */
-  getOwnerStorageGeneration(input: { ownerPublicKeyHex: string }): Promise<number>;
-  /** 在文件 API 等非 K-V 请求的物理 I/O 前后检查 owner 生命周期。 */
-  assertOwnerStorageCurrent(input: { ownerPublicKeyHex: string; generation?: number }): Promise<void>;
   /** 删除指定 owner 根下全部模块的 K-V；只由 Key 删除流程调用。 */
   deleteOwnerStorage(input: { ownerPublicKeyHex: string }): Promise<void>;
 }

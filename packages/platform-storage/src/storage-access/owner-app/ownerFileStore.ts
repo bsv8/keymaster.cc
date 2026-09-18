@@ -21,10 +21,6 @@ export interface OwnerFileStoreOptions {
   ownerPublicKeyHex: string;
   /** 切桶或切 Key 后让旧句柄 fail closed。 */
   isCurrent?: () => boolean;
-  /** 跨 Coordinator/设备的持久化 owner 世代栅栏。 */
-  assertCurrentAsync?: () => Promise<void>;
-  /** 一次完整文件请求持有的持久化 owner lease。 */
-  acquireCurrentAsync?: () => Promise<() => Promise<void>>;
 }
 
 function fail(code: "storage_forbidden" | "storage_unavailable" | "storage_provider_error", message: string): StorageRuntimeError {
@@ -59,21 +55,6 @@ export function createOwnerFileStore(options: OwnerFileStoreOptions): OwnerFileS
     if (closed || options.isCurrent?.() === false) throw fail("storage_unavailable", "Storage file handle is stale");
   }
 
-  async function assertCurrentBinding(): Promise<void> {
-    assertOpen();
-    await options.assertCurrentAsync?.();
-    assertOpen();
-  }
-
-  async function withCurrentLease<T>(operation: () => Promise<T>): Promise<T> {
-    const release = options.acquireCurrentAsync ? await options.acquireCurrentAsync() : undefined;
-    try {
-      return await operation();
-    } finally {
-      if (release) await release();
-    }
-  }
-
   /** 校验根下相对文件路径；空路径与目录前缀由调用方先行处理。 */
   function absolutePath(relative: string): string {
     if (typeof relative !== "string") throw fail("storage_provider_error", "File path is invalid");
@@ -100,15 +81,15 @@ export function createOwnerFileStore(options: OwnerFileStoreOptions): OwnerFileS
 
   return {
     async list(input = {}): Promise<OwnerFileListPage> {
-      await assertCurrentBinding();
+      assertOpen();
       const prefix = absolutePrefix(input.prefix);
-      const page = await withCurrentLease(() => options.provider.list({
+      const page = await options.provider.list({
         prefix,
         ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
         ...(input.limit === undefined ? {} : { limit: input.limit }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
-      }));
-      await assertCurrentBinding();
+      });
+      assertOpen();
       return {
         files: page.objects.map((object) => ({
           path: relativePath(object.path),
@@ -120,9 +101,9 @@ export function createOwnerFileStore(options: OwnerFileStoreOptions): OwnerFileS
       };
     },
     async get(path): Promise<OwnerFileObject | undefined> {
-      await assertCurrentBinding();
-      const object = await withCurrentLease(() => options.provider.get(absolutePath(path)));
-      await assertCurrentBinding();
+      assertOpen();
+      const object = await options.provider.get(absolutePath(path));
+      assertOpen();
       if (!object) return undefined;
       return {
         path: relativePath(object.path),
@@ -132,20 +113,20 @@ export function createOwnerFileStore(options: OwnerFileStoreOptions): OwnerFileS
       };
     },
     async put(path, bytes, condition = {}) {
-      await assertCurrentBinding();
-      const result = await withCurrentLease(() => options.provider.put(absolutePath(path), bytes, condition));
-      await assertCurrentBinding();
+      assertOpen();
+      const result = await options.provider.put(absolutePath(path), bytes, condition);
+      assertOpen();
       return result;
     },
     async delete(path, input = {}) {
-      await assertCurrentBinding();
+      assertOpen();
       try {
-        await withCurrentLease(() => options.provider.delete(absolutePath(path), input));
+        await options.provider.delete(absolutePath(path), input);
       } catch (error) {
         // 文件删除不存在视为成功；其它错误（含 CAS 冲突）继续上抛。
         if (!(error instanceof StorageRuntimeError) || error.code !== "storage_not_found") throw error;
       }
-      await assertCurrentBinding();
+      assertOpen();
     },
   };
 }

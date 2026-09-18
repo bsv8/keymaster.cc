@@ -54,10 +54,6 @@ export interface KeyValueStoreOptions {
   binding: StorageNamespaceBinding;
   /** 可选世代判断；切桶/切 key 时由 Coordinator 使旧句柄失效。 */
   isCurrent?: () => boolean;
-  /** 跨 Coordinator/设备的持久化 owner 生命周期栅栏。 */
-  assertCurrentAsync?: () => Promise<void>;
-  /** 为一次完整 K-V 请求持有持久化 owner lease。 */
-  acquireCurrentAsync?: () => Promise<() => Promise<void>>;
   /** 测试时注入时钟和操作 ID。 */
   now?: () => number;
   generateId?: () => string;
@@ -419,25 +415,10 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     if (closed || options.isCurrent?.() === false) throw fail("storage_unavailable", "Storage handle is stale");
   }
 
-  async function assertCurrentBinding(): Promise<void> {
-    assertOpen();
-    await options.assertCurrentAsync?.();
-    assertOpen();
-  }
-
-  async function withCurrentLease<T>(operation: () => Promise<T>): Promise<T> {
-    const release = options.acquireCurrentAsync ? await options.acquireCurrentAsync() : undefined;
-    try {
-      return await operation();
-    } finally {
-      if (release) await release();
-    }
-  }
-
   async function readHead(partition: string): Promise<{ head?: HeadRecord; etag?: string; entries: Map<string, { valueId: string; valueHash: string; updatedAt: number }> }> {
-    await assertCurrentBinding();
+    assertOpen();
     const object = await options.provider.get(headPath(root, partition));
-    await assertCurrentBinding();
+    assertOpen();
     if (!object) return { entries: new Map() };
     const head = parseHead(object.bytes, partition);
     const entries = new Map<string, { valueId: string; valueHash: string; updatedAt: number }>();
@@ -446,9 +427,9 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
   }
 
   async function loadValue(valueId: string, partition: string, valueHash: string): Promise<KeyValueValue> {
-    await assertCurrentBinding();
+    assertOpen();
     const object = await options.provider.get(valuePath(root, valueId));
-    await assertCurrentBinding();
+    assertOpen();
     if (!object) throw fail("storage_provider_error", "K-V value is missing");
     return decodeValue(parseValueObject(object.bytes, valueId, partition, valueHash).payload);
   }
@@ -460,7 +441,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
   }
 
   async function commitUnlocked(input: KeyValueCommitInput): Promise<InternalCommitResult> {
-    await assertCurrentBinding();
+    assertOpen();
     const partition = validatePartition(input.partition);
     if (!Array.isArray(input.operations) || input.operations.length > 10_000) throw fail("storage_limit_exceeded", "K-V commit contains too many operations");
     const state = await readHead(partition);
@@ -524,7 +505,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     const commitId = generateId();
     try {
       for (const [valueId, bytes] of encodedValues) {
-        await assertCurrentBinding();
+        assertOpen();
         try {
           await options.provider.put(valuePath(root, valueId), bytes, { ifNoneMatch: "*" });
         } catch (caught) {
@@ -547,10 +528,10 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([key, reference]) => ({ key, valueId: reference.valueId, valueHash: reference.valueHash, updatedAt: reference.updatedAt })),
       };
-      await assertCurrentBinding();
+      assertOpen();
       const condition = state.etag ? { ifMatch: state.etag } : { ifNoneMatch: "*" as const };
       await options.provider.put(headPath(root, partition), jsonBytes(head), condition);
-      await assertCurrentBinding();
+      assertOpen();
       return { revision, commitId, committedAt, entries: next };
     } catch (caught) {
       throw asStorageError(caught);
@@ -561,7 +542,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     return withMaintenanceLock(async () => {
       for (let attempt = 0; attempt < MAX_AUTOMATIC_COMMIT_RETRIES; attempt += 1) {
         try {
-          return await withCurrentLease(() => commitUnlocked(input));
+          return await commitUnlocked(input);
         } catch (caught) {
           if (input.ifRevision !== undefined || !(caught instanceof StorageRuntimeError)
             || caught.code !== "storage_conflict" || attempt + 1 >= MAX_AUTOMATIC_COMMIT_RETRIES) throw caught;
@@ -588,20 +569,20 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     model: "kv",
     schemaVersion: options.binding.schemaVersion,
     async get<T = KeyValueValue>(key: string, input: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> {
-      return withCurrentLease(async () => {
-        await assertCurrentBinding();
+      return (async () => {
+        assertOpen();
         validateKey(key);
         const state = await readSnapshot(input.partition);
         const reference = state.entries.get(key);
         if (!reference) return undefined;
         const value = await loadValue(reference.valueId, state.partition, reference.valueHash);
-        await assertCurrentBinding();
+        assertOpen();
         return { key, value: value as T, revision: state.revision, updatedAt: reference.updatedAt };
-      });
+      })();
     },
     async list(input: KeyValueListInput = {}): Promise<KeyValueListResult> {
-      return withCurrentLease(async () => {
-        await assertCurrentBinding();
+      return (async () => {
+        assertOpen();
         const partition = validatePartition(input.partition);
         const state = await readSnapshot(partition);
         const prefix = input.prefix ?? "";
@@ -618,17 +599,17 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
         const entries = await Promise.all(pageKeys.map(async (key) => {
           const reference = state.entries.get(key)!;
           const value = await loadValue(reference.valueId, state.partition, reference.valueHash);
-          await assertCurrentBinding();
+          assertOpen();
           return { key, value, revision: state.revision, updatedAt: reference.updatedAt };
         }));
-        await assertCurrentBinding();
+        assertOpen();
         const nextOffset = offset + pageKeys.length;
         return {
           revision: state.revision,
           entries,
           nextCursor: nextOffset < keys.length ? encodeCursor({ version: 1, partition, revision: state.revision, offset: nextOffset, prefix }) : undefined,
         };
-      });
+      })();
     },
     async put<T = KeyValueValue>(key: string, value: T, condition: KeyValueWriteCondition = {}): Promise<KeyValueEntryMeta> {
       const partition = validatePartition(condition.partition);
@@ -655,7 +636,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
       return { revision, entries };
     },
     async inspectGarbageCandidates(input = {}) {
-      return withMaintenanceLock(() => withCurrentLease(() => inspectGarbageCandidatesUnlocked(input)));
+      return withMaintenanceLock(() => inspectGarbageCandidatesUnlocked(input));
     },
     collectGarbage,
   };
@@ -682,7 +663,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     const objects: StorageBucketObject[] = [];
     let cursor: string | undefined;
     do {
-      await assertCurrentBinding();
+      assertOpen();
       const page = await options.provider.list({ prefix, cursor, limit: 1000 });
       objects.push(...page.objects);
       cursor = page.nextCursor;
@@ -721,7 +702,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
   }
 
   async function garbageCandidatesUnlocked(input: { minAgeMs?: number } = {}): Promise<{ scanned: number; candidates: GarbageCandidate[] }> {
-    await assertCurrentBinding();
+    assertOpen();
     const minAgeMs = input.minAgeMs ?? 60_000;
     if (!Number.isSafeInteger(minAgeMs) || minAgeMs < 0) throw fail("storage_provider_error", "K-V garbage inspection age is invalid");
     const prefix = `${root}.keymaster/values/`;
@@ -742,7 +723,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
         ?? providerTimestamp(object, inspected.record.createdAt);
       if (modifiedAt <= cutoff) candidates.push({ object: inspected.object, valueId, createdAt: inspected.record.createdAt, partition: inspected.record.partition });
     }
-    await assertCurrentBinding();
+    assertOpen();
     return { scanned: objects.length, candidates };
   }
 
@@ -762,7 +743,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     let failed = 0;
     for (const candidate of result.candidates) {
       if (deleted >= maxDeletes) break;
-      await assertCurrentBinding();
+      assertOpen();
       // 在每个删除点重新读取所有 head。Provider 没有跨对象事务，
       // 因此必须至少把“扫描时不可达”收紧为“删除前仍不可达”，而
       // minAge grace period 则覆盖正在上传但尚未发布 head 的崩溃窗口。
@@ -791,12 +772,12 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
         throw caught;
       }
     }
-    await assertCurrentBinding();
+    assertOpen();
     return { scanned: result.scanned, candidates: result.candidates.length, deleted, failed };
   }
 
   async function collectGarbage(input: { minAgeMs?: number; maxDeletes?: number } = {}): Promise<KeyValueGarbageCollectionResult> {
-    return withMaintenanceLock(() => withCurrentLease(() => collectGarbageUnlocked(input)));
+    return withMaintenanceLock(() => collectGarbageUnlocked(input));
   }
 
   return store;

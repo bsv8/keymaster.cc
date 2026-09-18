@@ -100,8 +100,6 @@ import {
   __testFailNextCoordinatorSnapshotPersist,
   __testFailNextP2pkhSettingWrite,
   __testFailAfterCatalogBindingPublish,
-  __testFailNextOwnerStorageActivation,
-  __testMaterializeNextOwnerStorageActivation,
   __testFailNextOwnerStorageDeletion,
   __testFailAfterOwnerStorageActivation,
   __testBlockNextCatalogHoldPublish,
@@ -2123,7 +2121,6 @@ describe("Catalog Hold lifecycle CAS", () => {
 
   it("失败新增回滚只删除自己的文件,不覆盖并发写入的 Key", async () => {
     const first = await __testCreateVault("pw", { label: "existing" });
-    __testMaterializeNextOwnerStorageActivation();
     __testFailAfterOwnerStorageActivation();
     const rollbackBarrier = __testBlockNextCatalogHoldRollback();
     const failedAdd = __testImportPrivateKey("pw", {

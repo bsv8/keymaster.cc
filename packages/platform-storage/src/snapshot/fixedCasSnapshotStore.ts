@@ -19,7 +19,6 @@ export interface FixedCasSnapshotStoreOptions<T> {
   binding: StorageNamespaceBinding;
   /** 读取后/写入前后使用的 Root 世代门禁。 */
   isCurrent?: () => boolean;
-  assertCurrentAsync?: () => Promise<void>;
   /** 严格校验并可规范化 snapshot payload。 */
   validate: (value: unknown) => StorageSnapshotJsonCompatible<T>;
 }
@@ -143,14 +142,8 @@ export function createFixedCasSnapshotStore<T>(options: FixedCasSnapshotStoreOpt
     if (closed || options.isCurrent?.() === false) throw new StorageRuntimeError("storage_unavailable", "Storage snapshot handle is stale");
   }
 
-  async function assertCurrent(): Promise<void> {
-    assertOpen();
-    await options.assertCurrentAsync?.();
-    assertOpen();
-  }
-
   async function withLease<R>(operation: () => Promise<R>): Promise<R> {
-    await assertCurrent();
+    assertOpen();
     try {
       return await operation();
     } catch (error) {
@@ -159,9 +152,9 @@ export function createFixedCasSnapshotStore<T>(options: FixedCasSnapshotStoreOpt
   }
 
   async function readInternal(): Promise<{ snapshot?: StorageSnapshot<T>; etag?: string }> {
-    await assertCurrent();
+    assertOpen();
     const object = await options.provider.get(path);
-    await assertCurrent();
+    assertOpen();
     if (!object) return {};
     const envelope = parseEnvelope<T>(object.bytes, declaration);
     const value = validate(envelope.value);
@@ -189,11 +182,11 @@ export function createFixedCasSnapshotStore<T>(options: FixedCasSnapshotStoreOpt
         revision: currentRevision + 1,
         value,
       };
-      await assertCurrent();
+      assertOpen();
       await options.provider.put(path, jsonBytes(envelope), current.etag ? { ifMatch: current.etag } : { ifNoneMatch: "*" });
       // Root 切换/owner generation 改变的写入不能被调用方视为成功；
       // Provider 并没有暴露给调用方，因此这里直接 fail closed。
-      await assertCurrent();
+      assertOpen();
       return { revision: envelope.revision, wrote: true };
     }),
     close() { closed = true; },

@@ -12,7 +12,6 @@ function grant(): StorageOwnerGrant {
     bucketGeneration: 1,
     ownerPublicKeyHex: OWNER.toLowerCase(),
     ...CENTRAL_STORAGE_DECLARATIONS.messageHistory,
-    ownerStorageGeneration: 1,
     sessionEpoch: "session:1",
   };
 }
@@ -64,7 +63,6 @@ describe("storage binding authority", () => {
           bucketGeneration: 1,
           ownerPublicKeyHex: OWNER.toLowerCase(),
           ...CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
-          ownerStorageGeneration: 1,
           sessionEpoch: "session:1",
         } satisfies StorageOwnerGrant,
       })),

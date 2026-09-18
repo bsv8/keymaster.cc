@@ -270,7 +270,6 @@ describe("Coordinator runtime contract parsers", () => {
         purposeId: "history",
         authority: "built-in-module",
         model: "kv",
-        ownerStorageGeneration: 3,
         schemaVersion: 1,
         sessionEpoch: "epoch-1",
         private: "discard",
@@ -285,7 +284,6 @@ describe("Coordinator runtime contract parsers", () => {
       purposeId: "history",
       authority: "built-in-module",
       model: "kv",
-      ownerStorageGeneration: 3,
       schemaVersion: 1,
       sessionEpoch: "epoch-1",
     });

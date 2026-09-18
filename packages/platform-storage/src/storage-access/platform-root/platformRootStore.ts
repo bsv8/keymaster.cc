@@ -2,7 +2,6 @@ import type {
   OwnerAppStore,
   OwnerFileStore,
   KeyValueStore,
-  OwnerStorageActivation,
   PlatformRootStore,
   PluginStorageDeclaration,
   SnapshotStore,
@@ -33,498 +32,12 @@ const DEFAULT_PLATFORM_DECLARATIONS: readonly PluginStorageDeclaration[] = Objec
   ...Object.values(CENTRAL_STORAGE_DECLARATIONS).filter((declaration) =>
     declaration.scope === "bucket"),
 ]);
-const OWNER_LIFECYCLE_PREFIX = ".keymaster/owners/";
-const OWNER_LIFECYCLE_FORMAT = "keymaster.owner-lifecycle";
-const OWNER_LIFECYCLE_FORMAT_VERSION = 1;
 const OWNER_DELETE_MAX_PASSES = 32;
 const OWNER_DELETE_REQUIRED_EMPTY_PASSES = 2;
-const OWNER_DELETE_DRAIN_TIMEOUT_MS = 5_000;
-const OWNER_DELETE_DRAIN_POLL_MS = 10;
-
-// 同一个 Coordinator 内的 owner 请求共享一条生命周期记录。
-//
-// activeOperations/deletionOperations 都是跨 Worker 的 CAS 计数。跨 Worker
-// 竞争仍由下面各自的重试循环处理；但同一 Worker 如果让多个请求同时对同一
-// 条记录做读改写，会在启动高峰中产生无意义的本地 CAS 惊群，甚至让释放方
-// 在有限重试后误报“lease changed concurrently”。按 owner 串行化的只是这
-// 条生命周期记录的短 CAS，不会把真实 Provider I/O 串行化。
-const ownerLifecycleMutationTails = new Map<string, Promise<void>>();
-
-type OwnerLifecycleStatus = "active" | "deleting" | "deleted";
-
-interface OwnerLifecycleRecord {
-  /** owner 生命周期记录格式版本。 */
-  format: typeof OWNER_LIFECYCLE_FORMAT;
-  version: typeof OWNER_LIFECYCLE_FORMAT_VERSION;
-  /** 记录所属 owner，始终为规范化小写公钥。 */
-  ownerPublicKeyHex: string;
-  /** 同一公钥重新导入后的不可复用世代。 */
-  generation: number;
-  /** active：允许打开；deleting：拒绝新请求；deleted：只能显式重新激活。 */
-  status: OwnerLifecycleStatus;
-  /** 已经通过生命周期 CAS、仍在真实 Provider 操作中的请求数。 */
-  activeOperations: number;
-  /** 正在执行 owner 清理的删除事务数；为 0 才能发布 deleted。 */
-  deletionOperations: number;
-  /** 最近一次 CAS 状态变更时间。 */
-  updatedAt: number;
-}
-
-interface OwnerLifecycleObject {
-  record: OwnerLifecycleRecord;
-  etag?: string;
-}
-
-function ownerLifecyclePath(ownerPublicKeyHex: string): string {
-  return `${OWNER_LIFECYCLE_PREFIX}${validateOwnerPublicKeyHex(ownerPublicKeyHex)}`;
-}
 
 function isStorageConflict(error: unknown): boolean {
   return error instanceof StorageRuntimeError && error.code === "storage_conflict"
     || Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "storage_conflict");
-}
-
-function decodeOwnerLifecycle(bytes: Uint8Array, expectedOwner: string): OwnerLifecycleRecord {
-  try {
-    const value = JSON.parse(new TextDecoder().decode(bytes)) as Partial<OwnerLifecycleRecord>;
-    const keys = Object.keys(value).sort();
-    const expectedKeys = ["activeOperations", "deletionOperations", "format", "generation", "ownerPublicKeyHex", "status", "updatedAt", "version"];
-    if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) throw new Error("owner lifecycle record has unexpected fields");
-    const ownerPublicKeyHex = validateOwnerPublicKeyHex(String(value.ownerPublicKeyHex ?? ""));
-    const generation = value.generation;
-    const status = value.status;
-    const updatedAt = value.updatedAt;
-    const activeOperations = value.activeOperations;
-    const deletionOperations = value.deletionOperations;
-    if (
-      value.format !== OWNER_LIFECYCLE_FORMAT ||
-      value.version !== OWNER_LIFECYCLE_FORMAT_VERSION ||
-      ownerPublicKeyHex !== expectedOwner ||
-      (status !== "active" && status !== "deleting" && status !== "deleted") ||
-      !Number.isSafeInteger(generation) ||
-      typeof generation !== "number" ||
-      generation < 1 ||
-      typeof updatedAt !== "number" ||
-      !Number.isFinite(updatedAt) ||
-      typeof activeOperations !== "number" ||
-      !Number.isSafeInteger(activeOperations) ||
-      activeOperations < 0 ||
-      typeof deletionOperations !== "number" ||
-      !Number.isSafeInteger(deletionOperations) ||
-      deletionOperations < 0
-    ) throw new Error("owner lifecycle record is invalid");
-    return {
-      format: OWNER_LIFECYCLE_FORMAT,
-      version: OWNER_LIFECYCLE_FORMAT_VERSION,
-      ownerPublicKeyHex,
-      generation,
-      status,
-      activeOperations,
-      deletionOperations,
-      updatedAt
-    };
-  } catch {
-    throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle record is invalid or incompatible");
-  }
-}
-
-function encodeOwnerLifecycle(record: OwnerLifecycleRecord): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(record));
-}
-
-async function readOwnerLifecycle(provider: StorageBucketProvider, ownerPublicKeyHex: string): Promise<OwnerLifecycleObject | undefined> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  const object = await provider.get(ownerLifecyclePath(owner));
-  return object ? { record: decodeOwnerLifecycle(object.bytes, owner), etag: object.etag } : undefined;
-}
-
-function ownerLifecycleRecord(ownerPublicKeyHex: string, generation: number, status: OwnerLifecycleStatus, deletionOperations = 0): OwnerLifecycleRecord {
-  return {
-    format: OWNER_LIFECYCLE_FORMAT,
-    version: OWNER_LIFECYCLE_FORMAT_VERSION,
-    ownerPublicKeyHex: validateOwnerPublicKeyHex(ownerPublicKeyHex),
-    generation,
-    status,
-    activeOperations: 0,
-    deletionOperations,
-    updatedAt: Date.now()
-  };
-}
-
-function withOwnerLifecycleMutation<T>(ownerPublicKeyHex: string, operation: () => Promise<T>): Promise<T> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  const previous = ownerLifecycleMutationTails.get(owner) ?? Promise.resolve();
-  const run = previous.then(operation, operation);
-  const tail = run.then(() => undefined, () => undefined);
-  ownerLifecycleMutationTails.set(owner, tail);
-  void tail.then(() => {
-    if (ownerLifecycleMutationTails.get(owner) === tail) ownerLifecycleMutationTails.delete(owner);
-  });
-  return run;
-}
-
-function requireOwnerLifecycleEtag(object: OwnerLifecycleObject): string {
-  if (!object.etag) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle CAS is unavailable");
-  return object.etag;
-}
-
-function assertOwnerLifecycleUsable(record: OwnerLifecycleRecord): void {
-  if (record.status === "active") return;
-  if (record.status === "deleting") throw new StorageRuntimeError("storage_unavailable", "Owner storage is being deleted");
-  throw new StorageRuntimeError("storage_unavailable", "Owner storage has been deleted and must be explicitly reactivated");
-}
-
-async function ensureOwnerLifecycleActive(provider: StorageBucketProvider, ownerPublicKeyHex: string): Promise<OwnerLifecycleRecord> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const current = await readOwnerLifecycle(provider, owner);
-    if (!current) {
-      try {
-        const initial = ownerLifecycleRecord(owner, 1, "active");
-        await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(initial), { ifNoneMatch: "*" });
-        return initial;
-      } catch (error) {
-        if (isStorageConflict(error)) continue;
-        throw error;
-      }
-    }
-    assertOwnerLifecycleUsable(current.record);
-    return current.record;
-  }
-  throw new StorageRuntimeError("storage_conflict", "Storage owner lifecycle changed concurrently");
-}
-
-async function activateOwnerLifecycle(provider: StorageBucketProvider, ownerPublicKeyHex: string): Promise<OwnerStorageActivation> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const current = await readOwnerLifecycle(provider, owner);
-    if (!current) {
-      try {
-        const initial = ownerLifecycleRecord(owner, 1, "active");
-        await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(initial), { ifNoneMatch: "*" });
-        return { generation: initial.generation };
-      } catch (error) {
-        if (isStorageConflict(error)) continue;
-        throw error;
-      }
-    }
-    if (current.record.status === "active") return { generation: current.record.generation };
-    if (current.record.status === "deleting") throw new StorageRuntimeError("storage_unavailable", "Owner storage is being deleted");
-    const next = ownerLifecycleRecord(owner, current.record.generation + 1, "active");
-    try {
-      await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(next), { ifMatch: requireOwnerLifecycleEtag(current) });
-      return { generation: next.generation };
-    } catch (error) {
-      if (isStorageConflict(error)) continue;
-      throw error;
-    }
-  }
-  throw new StorageRuntimeError("storage_conflict", "Storage owner lifecycle changed concurrently");
-}
-
-async function assertOwnerLifecycleCurrent(
-  provider: StorageBucketProvider,
-  ownerPublicKeyHex: string,
-  expectedGeneration?: number
-): Promise<void> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  const current = await readOwnerLifecycle(provider, owner);
-  if (!current) throw new StorageRuntimeError("storage_unavailable", "Owner storage lifecycle is unavailable");
-  assertOwnerLifecycleUsable(current.record);
-  if (expectedGeneration !== undefined && current.record.generation !== expectedGeneration) {
-    throw new StorageRuntimeError("storage_unavailable", "Owner storage generation changed");
-  }
-}
-
-type OwnerStorageOperationRelease = () => Promise<void>;
-interface OwnerDeletionLease {
-  record: OwnerLifecycleRecord;
-  release: OwnerStorageOperationRelease;
-}
-
-/**
- * 为一次真实 Provider 操作申请持久化 owner lease。
- *
- * `activeOperations` 让删除不仅能拒绝新请求，还能等待其它设备上已经
- * 通过 active 检查的请求完成；否则迟到 PUT 可能在最后一次扫描之后落盘。
- */
-async function acquireOwnerStorageOperation(
-  provider: StorageBucketProvider,
-  ownerPublicKeyHex: string,
-  expectedGeneration?: number
-): Promise<OwnerStorageOperationRelease> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  return withOwnerLifecycleMutation(owner, () => acquireOwnerStorageOperationUnsafe(provider, owner, expectedGeneration));
-}
-
-async function acquireOwnerStorageOperationUnsafe(
-  provider: StorageBucketProvider,
-  owner: string,
-  expectedGeneration?: number
-): Promise<OwnerStorageOperationRelease> {
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    const current = await readOwnerLifecycle(provider, owner);
-    if (!current) throw new StorageRuntimeError("storage_unavailable", "Owner storage lifecycle is unavailable");
-    assertOwnerLifecycleUsable(current.record);
-    if (expectedGeneration !== undefined && current.record.generation !== expectedGeneration) {
-      throw new StorageRuntimeError("storage_unavailable", "Owner storage generation changed");
-    }
-    if (current.record.activeOperations >= Number.MAX_SAFE_INTEGER) {
-      throw new StorageRuntimeError("storage_limit_exceeded", "Owner storage has too many active operations");
-    }
-    const next: OwnerLifecycleRecord = {
-      ...current.record,
-      activeOperations: current.record.activeOperations + 1,
-      updatedAt: Date.now()
-    };
-    try {
-      await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(next), { ifMatch: requireOwnerLifecycleEtag(current) });
-      let released = false;
-      return async () => {
-        if (released) return;
-        released = true;
-        await withOwnerLifecycleMutation(owner, async () => {
-          for (let releaseAttempt = 0; releaseAttempt < 16; releaseAttempt += 1) {
-            const latest = await readOwnerLifecycle(provider, owner);
-            // 只有同一世代的 active/deleting 记录拥有这笔计数。正常流程
-            // 不会在计数非零时进入 deleted；这些分支只保护崩溃恢复/旧句柄。
-            if (!latest || latest.record.generation !== next.generation || latest.record.status === "deleted" || latest.record.activeOperations === 0) return;
-            const releasedRecord: OwnerLifecycleRecord = {
-              ...latest.record,
-              activeOperations: latest.record.activeOperations - 1,
-              updatedAt: Date.now()
-            };
-            try {
-              await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(releasedRecord), { ifMatch: requireOwnerLifecycleEtag(latest) });
-              return;
-            } catch (error) {
-              if (isStorageConflict(error)) continue;
-              throw error;
-            }
-          }
-          throw new StorageRuntimeError("storage_conflict", "Storage owner operation lease changed concurrently");
-        });
-      };
-    } catch (error) {
-      if (isStorageConflict(error)) continue;
-      throw error;
-    }
-  }
-  throw new StorageRuntimeError("storage_conflict", "Storage owner operation lease changed concurrently");
-}
-
-/**
- * 生成一个删除事务的持久化 release 函数。
- *
- * 删除者本身不能使用普通 owner operation lease（deleting 状态会拒绝新
- * 业务请求），所以单独记录 deletionOperations，防止两个协调器同时清理
- * 时其中一个先发布 deleted，另一个仍拿着旧列表去删除新 generation。
- */
-function createOwnerDeletionRelease(
-  provider: StorageBucketProvider,
-  ownerPublicKeyHex: string,
-  generation: number
-): OwnerStorageOperationRelease {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  let released = false;
-  return async () => {
-    if (released) return;
-    released = true;
-    for (let attempt = 0; attempt < 16; attempt += 1) {
-      const latest = await readOwnerLifecycle(provider, owner);
-      if (!latest || latest.record.generation !== generation || latest.record.status === "deleted" || latest.record.deletionOperations === 0) return;
-      if (latest.record.status !== "deleting") throw new StorageRuntimeError("storage_unavailable", "Owner deletion lifecycle changed while releasing");
-      const next: OwnerLifecycleRecord = {
-        ...latest.record,
-        deletionOperations: latest.record.deletionOperations - 1,
-        updatedAt: Date.now()
-      };
-      try {
-        await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(next), { ifMatch: requireOwnerLifecycleEtag(latest) });
-        return;
-      } catch (error) {
-        if (isStorageConflict(error)) continue;
-        throw error;
-      }
-    }
-    throw new StorageRuntimeError("storage_conflict", "Storage owner deletion lease changed concurrently");
-  };
-}
-
-async function acquireOwnerDeletionOperation(
-  provider: StorageBucketProvider,
-  ownerPublicKeyHex: string,
-  generation: number
-): Promise<OwnerDeletionLease> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    const current = await readOwnerLifecycle(provider, owner);
-    if (!current) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-    if (current.record.status === "deleted") return { record: current.record, release: async () => undefined };
-    if (current.record.status !== "deleting" || current.record.generation !== generation) {
-      throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-    }
-    if (current.record.deletionOperations >= Number.MAX_SAFE_INTEGER) {
-      throw new StorageRuntimeError("storage_limit_exceeded", "Storage owner has too many concurrent deletion operations");
-    }
-    const next: OwnerLifecycleRecord = {
-      ...current.record,
-      deletionOperations: current.record.deletionOperations + 1,
-      updatedAt: Date.now()
-    };
-    try {
-      await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(next), { ifMatch: requireOwnerLifecycleEtag(current) });
-      return { record: next, release: createOwnerDeletionRelease(provider, owner, generation) };
-    } catch (error) {
-      if (isStorageConflict(error)) continue;
-      throw error;
-    }
-  }
-  throw new StorageRuntimeError("storage_conflict", "Storage owner deletion lease changed concurrently");
-}
-
-async function waitForOwnerStorageOperations(
-  provider: StorageBucketProvider,
-  ownerPublicKeyHex: string,
-  generation: number
-): Promise<boolean> {
-  const deadline = Date.now() + OWNER_DELETE_DRAIN_TIMEOUT_MS;
-  while (true) {
-    const current = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-    if (!current) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-    if (current.record.status === "deleted" || (current.record.status === "active" && current.record.generation !== generation)) return false;
-    if (current.record.status !== "deleting" || current.record.generation !== generation) throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-    if (current.record.activeOperations === 0) return true;
-    if (Date.now() >= deadline) throw new StorageRuntimeError("storage_unavailable", "Owner storage requests did not drain before deletion timeout");
-    await new Promise<void>((resolve) => setTimeout(resolve, OWNER_DELETE_DRAIN_POLL_MS));
-  }
-}
-
-async function waitForOwnerDeletionOperations(
-  provider: StorageBucketProvider,
-  ownerPublicKeyHex: string,
-  generation: number
-): Promise<boolean> {
-  const deadline = Date.now() + OWNER_DELETE_DRAIN_TIMEOUT_MS;
-  while (true) {
-    const current = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-    if (!current) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-    if (current.record.status === "deleted" || (current.record.status === "active" && current.record.generation !== generation)) return false;
-    if (current.record.status !== "deleting" || current.record.generation !== generation) throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-    if (current.record.deletionOperations === 0) return true;
-    if (Date.now() >= deadline) throw new StorageRuntimeError("storage_unavailable", "Concurrent owner deletion operations did not drain before deletion timeout");
-    await new Promise<void>((resolve) => setTimeout(resolve, OWNER_DELETE_DRAIN_POLL_MS));
-  }
-}
-
-function ownerFromProviderPath(path: string): string | undefined {
-  const match = /^(02|03)[0-9a-f]{64}(?:\/|$)/u.exec(path);
-  return match ? path.slice(0, 66) : undefined;
-}
-
-/**
- * 给文件运行时使用的 Provider guard。
- *
- * 文件 API 不经过 K-V engine，因此不能只依赖 owner 句柄的异步栅栏。
- * 这个适配器在每次 owner 物理读写前后检查桶级生命周期记录；dispose
- * 只关闭适配器本身，不关闭被 K-V/其它 runtime 共享的真实 Provider。
- */
-export function createOwnerLifecycleGuardedProvider(provider: StorageBucketProvider): StorageBucketProvider {
-  const withPathOwnerLease = async <T>(path: string, operation: () => Promise<T>): Promise<T> => {
-    const owner = ownerFromProviderPath(path);
-    if (!owner) return operation();
-    const release = await acquireOwnerStorageOperation(provider, owner);
-    try {
-      const result = await operation();
-      await assertOwnerLifecycleCurrent(provider, owner);
-      return result;
-    } finally {
-      await release();
-    }
-  };
-  return {
-    provider: provider.provider,
-    bucketId: provider.bucketId,
-    probe: (signal) => provider.probe(signal),
-    async get(path, input) {
-      return withPathOwnerLease(path, () => provider.get(path, input));
-    },
-    async list(input = {}) {
-      return withPathOwnerLease(input.prefix ?? "", () => provider.list(input));
-    },
-    async put(path, bytes, condition) {
-      return withPathOwnerLease(path, () => provider.put(path, bytes, condition));
-    },
-    async delete(path, input) {
-      await withPathOwnerLease(path, () => provider.delete(path, input));
-    },
-    dispose() { /* shared Provider remains owned by the Coordinator Root */ }
-  };
-}
-
-async function beginOwnerDeletion(provider: StorageBucketProvider, ownerPublicKeyHex: string): Promise<OwnerDeletionLease> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const current = await readOwnerLifecycle(provider, owner);
-    if (!current) {
-      // 首次发现旧 owner 数据时也必须把当前删除者计入持久化 lease，
-      // 否则另一个协调器可能在本方第一次扫描后抢先发布 deleted。
-      const deleting = ownerLifecycleRecord(owner, 1, "deleting", 1);
-      try {
-        await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(deleting), { ifNoneMatch: "*" });
-        return { record: deleting, release: createOwnerDeletionRelease(provider, owner, deleting.generation) };
-      } catch (error) {
-        if (isStorageConflict(error)) continue;
-        throw error;
-      }
-    }
-    if (current.record.status === "deleted") return { record: current.record, release: async () => undefined };
-    if (current.record.status === "deleting") return acquireOwnerDeletionOperation(provider, owner, current.record.generation);
-    if (current.record.deletionOperations !== 0) throw new StorageRuntimeError("storage_provider_error", "Active owner has deletion operations");
-    const deleting: OwnerLifecycleRecord = {
-      ...current.record,
-      status: "deleting",
-      deletionOperations: 1,
-      updatedAt: Date.now()
-    };
-    try {
-      await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(deleting), { ifMatch: requireOwnerLifecycleEtag(current) });
-      return { record: deleting, release: createOwnerDeletionRelease(provider, owner, deleting.generation) };
-    } catch (error) {
-      if (isStorageConflict(error)) continue;
-      throw error;
-    }
-  }
-  throw new StorageRuntimeError("storage_conflict", "Storage owner lifecycle changed concurrently");
-}
-
-async function markOwnerDeleted(provider: StorageBucketProvider, ownerPublicKeyHex: string, generation: number): Promise<void> {
-  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
-  const deadline = Date.now() + OWNER_DELETE_DRAIN_TIMEOUT_MS;
-  for (;;) {
-    if (Date.now() >= deadline) throw new StorageRuntimeError("storage_unavailable", "Owner deletion did not finalize before timeout");
-    const current = await readOwnerLifecycle(provider, owner);
-    if (!current) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-    if (current.record.status === "deleted") return;
-    if (current.record.status === "active" && current.record.generation !== generation) return;
-    if (current.record.status !== "deleting" || current.record.generation !== generation) {
-      throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-    }
-    if (current.record.activeOperations !== 0) throw new StorageRuntimeError("storage_unavailable", "Owner storage requests are still active");
-    if (current.record.deletionOperations !== 0) {
-      if (Date.now() >= deadline) throw new StorageRuntimeError("storage_unavailable", "Owner deletion operations did not drain before deletion timeout");
-      await new Promise<void>((resolve) => setTimeout(resolve, OWNER_DELETE_DRAIN_POLL_MS));
-      continue;
-    }
-    const deleted = ownerLifecycleRecord(owner, generation, "deleted");
-    try {
-      await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(deleted), { ifMatch: requireOwnerLifecycleEtag(current) });
-      return;
-    } catch (error) {
-      if (isStorageConflict(error)) continue;
-      throw error;
-    }
-  }
 }
 
 async function listOwnerObjects(provider: StorageBucketProvider, ownerPublicKeyHex: string): Promise<Array<{ path: string; etag?: string }>> {
@@ -539,19 +52,9 @@ async function listOwnerObjects(provider: StorageBucketProvider, ownerPublicKeyH
   return objects;
 }
 
-async function deleteOwnerObjectsUntilEmpty(provider: StorageBucketProvider, ownerPublicKeyHex: string, generation: number): Promise<boolean> {
+async function deleteOwnerObjectsUntilEmpty(provider: StorageBucketProvider, ownerPublicKeyHex: string): Promise<boolean> {
   let emptyPasses = 0;
   for (let pass = 0; pass < OWNER_DELETE_MAX_PASSES; pass += 1) {
-    const lifecycle = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-    if (!lifecycle) {
-      throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-    }
-    if (lifecycle.record.status === "deleted" || (lifecycle.record.status === "active" && lifecycle.record.generation !== generation)) {
-      return false;
-    }
-    if (lifecycle.record.status !== "deleting" || lifecycle.record.generation !== generation) {
-      throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-    }
     const objects = await listOwnerObjects(provider, ownerPublicKeyHex);
     if (objects.length === 0) {
       emptyPasses += 1;
@@ -560,16 +63,6 @@ async function deleteOwnerObjectsUntilEmpty(provider: StorageBucketProvider, own
     }
     emptyPasses = 0;
     for (const object of objects) {
-      const current = await readOwnerLifecycle(provider, ownerPublicKeyHex);
-      if (!current) {
-        throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle disappeared during deletion");
-      }
-      if (current.record.status === "deleted" || (current.record.status === "active" && current.record.generation !== generation)) {
-        return false;
-      }
-      if (current.record.status !== "deleting" || current.record.generation !== generation) {
-        throw new StorageRuntimeError("storage_unavailable", "Storage owner lifecycle changed during deletion");
-      }
       try {
         await provider.delete(object.path, object.etag ? { ifMatch: object.etag } : undefined);
       } catch (error) {
@@ -649,9 +142,11 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
     });
   };
   /**
-   * owner 模块的共享授权/生命周期流程（K-V 与文件模型一致）。
+   * owner 模块的共享授权流程（K-V 与文件模型一致）。
    *
    * 内置 owner 模块由 pluginId 预绑定；裸句柄不能自造 module/purpose。
+   * 单浏览器互斥由 `<owner>/lock.json` Key 应用锁与 Worker 内存栅栏保证，
+   * 桶内不再保存 owner 生命周期记录。
    */
   const openOwnerBinding = async (
     input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number },
@@ -660,8 +155,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
     declaration: PluginStorageDeclaration;
     ownerPublicKeyHex: string;
     isCurrent: () => boolean;
-    assertCurrent: () => Promise<void>;
-    acquireCurrent: () => Promise<() => Promise<void>>;
   }> => {
     const declaration = validatePluginStorageDeclaration(input.declaration);
     if (declaration.scope !== "owner" || declaration.authority === "platform-only" || declaration.model !== model) {
@@ -677,8 +170,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       throw new StorageRuntimeError("storage_forbidden", "Owner storage namespace is not centrally authorized");
     }
     const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
-    const lifecycle = await ensureOwnerLifecycleActive(options.provider, ownerPublicKeyHex);
-    const assertCurrent = () => assertOwnerLifecycleCurrent(options.provider, ownerPublicKeyHex, lifecycle.generation);
     return {
       declaration,
       ownerPublicKeyHex,
@@ -687,8 +178,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
         bucketGeneration: options.bucket.bucketGeneration,
         keyspaceGeneration: input.keyspaceGeneration
       }) ?? true,
-      assertCurrent,
-      acquireCurrent: () => acquireOwnerStorageOperation(options.provider, ownerPublicKeyHex, lifecycle.generation),
     };
   };
 
@@ -702,8 +191,6 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
         ownerPublicKeyHex: opened.ownerPublicKeyHex,
         declaration: opened.declaration,
         isCurrent: opened.isCurrent,
-        assertCurrentAsync: opened.assertCurrent,
-        acquireCurrentAsync: opened.acquireCurrent,
       });
     },
     async openOwnerFileStore(input): Promise<OwnerFileStore> {
@@ -714,34 +201,12 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
         ownerPublicKeyHex: opened.ownerPublicKeyHex,
         declaration: opened.declaration,
         isCurrent: opened.isCurrent,
-        assertCurrentAsync: opened.assertCurrent,
-        acquireCurrentAsync: opened.acquireCurrent,
       });
     },
-    async activateOwnerStorage(input): Promise<OwnerStorageActivation> {
-      return activateOwnerLifecycle(options.provider, input.ownerPublicKeyHex);
-    },
-    async getOwnerStorageGeneration(input): Promise<number> {
-      return (await ensureOwnerLifecycleActive(options.provider, input.ownerPublicKeyHex)).generation;
-    },
-    async assertOwnerStorageCurrent(input): Promise<void> {
-      await assertOwnerLifecycleCurrent(options.provider, input.ownerPublicKeyHex, input.generation);
-    },
     async deleteOwnerStorage(input) {
-      const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
-      const lifecycle = await beginOwnerDeletion(options.provider, ownerPublicKeyHex);
-      if (lifecycle.record.status === "deleted") return;
-      try {
-        if (!await waitForOwnerStorageOperations(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
-        if (!await deleteOwnerObjectsUntilEmpty(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
-      } finally {
-        // 只有本次删除者完成全部物理清理后才释放 lease；其它协调器即使
-        // 同时进入 deleteOwnerStorage，也不能在此之前发布 deleted。
-        await lifecycle.release();
-      }
-      if (!await waitForOwnerStorageOperations(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
-      if (!await waitForOwnerDeletionOperations(options.provider, ownerPublicKeyHex, lifecycle.record.generation)) return;
-      await markOwnerDeleted(options.provider, ownerPublicKeyHex, lifecycle.record.generation);
+      // 物理清理只按列表删除；并发与跨设备互斥由 `<owner>/lock.json`
+      // Key 应用锁和 Worker 内存栅栏负责，这里不再维护桶内生命周期记录。
+      await deleteOwnerObjectsUntilEmpty(options.provider, validateOwnerPublicKeyHex(input.ownerPublicKeyHex));
     },
     openPlatformStore: (input) => openPlatformNamespace(input.declaration),
     openPlatformSnapshot,

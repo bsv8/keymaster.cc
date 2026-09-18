@@ -2,21 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { StorageBucketProvider, StorageBucketRef } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
-import { createOwnerLifecycleGuardedProvider, createPlatformRootStore } from "./platformRootStore.js";
+import { createPlatformRootStore } from "./platformRootStore.js";
 
 interface TestObject {
   bytes: Uint8Array;
   etag: string;
   lastModified: string;
-}
-
-interface OwnerListBarrier {
-  owner: string;
-  reached: Promise<void>;
-  resolveReached(): void;
-  release(): void;
-  released: Promise<void>;
-  triggered: boolean;
 }
 
 interface OwnerPutBarrier {
@@ -31,7 +22,6 @@ interface OwnerPutBarrier {
 interface ProviderState {
   objects: Map<string, TestObject>;
   sequence: number;
-  ownerListBarrier?: OwnerListBarrier;
   ownerPutBarrier?: OwnerPutBarrier;
 }
 
@@ -55,12 +45,6 @@ function makeProvider(state: ProviderState = { objects: new Map(), sequence: 0 }
     },
     async list(input = {}) {
       const prefix = input.prefix ?? "";
-      const barrier = state.ownerListBarrier;
-      if (barrier && !barrier.triggered && prefix === `${barrier.owner}/`) {
-        barrier.triggered = true;
-        barrier.resolveReached();
-        await barrier.released;
-      }
       const paths = [...state.objects.keys()].filter((path) => path.startsWith(prefix)).sort();
       const start = input.cursor ? Number(input.cursor) : 0;
       const limit = input.limit ?? 1000;
@@ -95,23 +79,6 @@ function makeProvider(state: ProviderState = { objects: new Map(), sequence: 0 }
   };
 }
 
-function armOwnerListBarrier(state: ProviderState, owner: string): OwnerListBarrier {
-  let resolveReached!: () => void;
-  let resolveReleased!: () => void;
-  const reached = new Promise<void>((resolve) => { resolveReached = resolve; });
-  const released = new Promise<void>((resolve) => { resolveReleased = resolve; });
-  const barrier: OwnerListBarrier = {
-    owner,
-    reached,
-    resolveReached,
-    release: resolveReleased,
-    released,
-    triggered: false
-  };
-  state.ownerListBarrier = barrier;
-  return barrier;
-}
-
 function armOwnerPutBarrier(state: ProviderState, owner: string): OwnerPutBarrier {
   let resolveReached!: () => void;
   let resolveReleased!: () => void;
@@ -131,7 +98,7 @@ function armOwnerPutBarrier(state: ProviderState, owner: string): OwnerPutBarrie
 
 const bucket: StorageBucketRef = { bucketId: "schema-test", bucketGeneration: 1, provider: "local" };
 
-describe("PlatformRoot 授权与 owner 生命周期", () => {
+describe("PlatformRoot 授权与 owner 目录清理", () => {
   it("authorizes every central bucket/platform declaration by default", async () => {
     const root = createPlatformRootStore({ provider: makeProvider(), bucket });
     await expect(root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads })).resolves.toMatchObject({
@@ -160,7 +127,7 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
     })).rejects.toMatchObject({ code: "storage_forbidden" });
   });
 
-  it("keeps key namespaces independent while still locking each owner directory version", async () => {
+  it("keeps key namespaces independent while locking each owner directory version", async () => {
     const provider = makeProvider();
     const root = createPlatformRootStore({ provider, bucket });
     const ownerPublicKeyHex = `02${"11".repeat(32)}`;
@@ -171,7 +138,7 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
     await expect(root.openKeyValueStore({ ownerPublicKeyHex: `03${"22".repeat(32)}`, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
   });
 
-  it("serializes same-worker owner lease CAS while allowing concurrent stores", async () => {
+  it("does not persist any owner lifecycle record while opening owner stores", async () => {
     const state: ProviderState = { objects: new Map(), sequence: 0 };
     const root = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const ownerPublicKeyHex = `02${"55".repeat(32)}`;
@@ -182,8 +149,7 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
       }))
     );
 
-    // 真实 Worker 启动时会同时打开多个 owner store。生命周期 CAS 应只在
-    // 同一 owner 的短计数更新上排队，不能把这些真实 K-V 请求串成一个。
+    // 桶内不再有 `.keymaster/owners/` 生命周期记录；打开只做声明授权。
     await Promise.all(stores.flatMap((store, storeIndex) => [
       store.put(`concurrent-${storeIndex}-a`, storeIndex),
       store.put(`concurrent-${storeIndex}-b`, storeIndex),
@@ -191,41 +157,24 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
     ]));
     stores.forEach((store) => store.close());
 
-    const lifecycle = JSON.parse(new TextDecoder().decode(state.objects.get(`.keymaster/owners/${ownerPublicKeyHex}`)!.bytes)) as { activeOperations: number };
-    expect(lifecycle.activeOperations).toBe(0);
+    expect([...state.objects.keys()].some((path) => path.startsWith(".keymaster/owners/"))).toBe(false);
   });
 
-  it("fences shared-provider deletion, removes owner objects, and creates a new generation on reactivation", async () => {
+  it("deletes the whole owner directory without a bucket-side lifecycle record", async () => {
     const state: ProviderState = { objects: new Map(), sequence: 0 };
-    const firstRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
-    const secondRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });
+    const root = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const ownerPublicKeyHex = `02${"33".repeat(32)}`;
-    const oldStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory });
-    await oldStore.put("before-delete", "value");
+    const store = await root.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory });
+    await store.put("before-delete", "value");
 
-    const barrier = armOwnerListBarrier(state, ownerPublicKeyHex);
-    const deleting = Promise.all([
-      firstRoot.deleteOwnerStorage({ ownerPublicKeyHex }),
-      secondRoot.deleteOwnerStorage({ ownerPublicKeyHex })
-    ]);
-    await barrier.reached;
-    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: CENTRAL_STORAGE_DECLARATIONS.messageHistory })).rejects.toMatchObject({ code: "storage_unavailable" });
-    await expect(oldStore.put("late", "must-fail")).rejects.toMatchObject({ code: "storage_unavailable" });
-    barrier.release();
-    await deleting;
+    await root.deleteOwnerStorage({ ownerPublicKeyHex });
 
-    const lifecycle = JSON.parse(new TextDecoder().decode(state.objects.get(`.keymaster/owners/${ownerPublicKeyHex}`)!.bytes)) as { status: string; generation: number };
-    expect(lifecycle).toMatchObject({ status: "deleted", generation: 1 });
-    await expect(createOwnerLifecycleGuardedProvider(makeProvider(state)).put(`${ownerPublicKeyHex}/Contacts/file.txt`, new Uint8Array([1]))).rejects.toMatchObject({ code: "storage_unavailable" });
-
-    await expect(secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, schemaVersion: 2 } })).rejects.toMatchObject({ code: "storage_forbidden" });
-    await expect(secondRoot.activateOwnerStorage({ ownerPublicKeyHex })).resolves.toEqual({ generation: 2 });
-    const freshStore = await secondRoot.openKeyValueStore({ ownerPublicKeyHex, declaration: { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, schemaVersion: 1 } });
-    await expect(oldStore.put("old-generation", "must-fail")).rejects.toMatchObject({ code: "storage_unavailable" });
-    await expect(freshStore.put("new-generation", "works")).resolves.toMatchObject({ key: "new-generation" });
+    // owner 目录下的对象被清理；没有桶内生命周期对象。
+    expect([...state.objects.keys()].some((path) => path.startsWith(`${ownerPublicKeyHex}/`))).toBe(false);
+    expect([...state.objects.keys()].some((path) => path.startsWith(".keymaster/owners/"))).toBe(false);
   });
 
-  it("waits for an already-started remote owner operation before finalizing deletion", async () => {
+  it("sweeps objects written concurrently while deletion is listing", async () => {
     const state: ProviderState = { objects: new Map(), sequence: 0 };
     const root = createPlatformRootStore({ provider: makeProvider(state), bucket });
     const ownerPublicKeyHex = `03${"44".repeat(32)}`;
@@ -235,19 +184,10 @@ describe("PlatformRoot 授权与 owner 生命周期", () => {
     await barrier.reached;
 
     const deleting = root.deleteOwnerStorage({ ownerPublicKeyHex });
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const lifecycle = JSON.parse(new TextDecoder().decode(state.objects.get(`.keymaster/owners/${ownerPublicKeyHex}`)!.bytes)) as { status: string };
-      if (lifecycle.status === "deleting") break;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-    let deletionSettled = false;
-    void deleting.then(() => { deletionSettled = true; }, () => { deletionSettled = true; });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(deletionSettled).toBe(false);
-
     barrier.release();
-    await expect(inflight).rejects.toMatchObject({ code: "storage_unavailable" });
-    await deleting;
+    await expect(inflight).resolves.toMatchObject({ key: "inflight" });
+    // 迟到写入会在删除的下一轮扫描里被清掉（删除循环持续到目录为空）。
+    await expect(deleting).resolves.toBeUndefined();
     expect([...state.objects.keys()].some((path) => path.startsWith(`${ownerPublicKeyHex}/`))).toBe(false);
   });
 });

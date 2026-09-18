@@ -167,7 +167,7 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
 } from "@keymaster/contracts";
-import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, encryptDeviceConfig, decryptDeviceConfig, createKeyLock, createKeyHoldRepository, createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument, generateSessionId } from "@keymaster/platform-storage/coordinator";
+import { createStorageRuntimeController, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, encryptDeviceConfig, decryptDeviceConfig, createKeyLock, createKeyHoldRepository, createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument, generateSessionId } from "@keymaster/platform-storage/coordinator";
 import type { KeyHoldFile, KeyHoldRepository, KeyLock, LocalStorageBridgeRequest, LocalStorageBridgeResponse, UnlockedKeyHold } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
@@ -2413,22 +2413,6 @@ function ensureTestPlatformStorage(): void {
         `owner:${ownerPublicKeyHex}:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`,
         { ...declaration, ownerPublicKeyHex, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }
       ) as import("@keymaster/contracts").OwnerAppStore,
-    activateOwnerStorage: async ({ ownerPublicKeyHex }) => {
-      if (testFailNextOwnerStorageActivation) {
-        testFailNextOwnerStorageActivation = false;
-        throw new StorageRuntimeError("storage_provider_error", "injected owner storage activation failure");
-      }
-      if (testMaterializeNextOwnerStorageActivation) {
-        testMaterializeNextOwnerStorageActivation = false;
-        getStore(
-          `owner:${ownerPublicKeyHex}:message:history:1`,
-          { ...CENTRAL_STORAGE_DECLARATIONS.messageHistory, ownerPublicKeyHex, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration },
-        );
-      }
-      return { generation: 1 };
-    },
-    getOwnerStorageGeneration: async () => 1,
-    assertOwnerStorageCurrent: async () => undefined,
     deleteOwnerStorage: async ({ ownerPublicKeyHex }) => {
       if (testFailNextOwnerStorageDeletion) {
         testFailNextOwnerStorageDeletion = false;
@@ -3032,9 +3016,7 @@ let storageRepository: Awaited<ReturnType<typeof openMultipartUploadRepository>>
 let testStorageRuntimeOverride: StorageRuntimeController | undefined;
 let testStorageStartupFailure = false;
 let testFailAfterCatalogBindingPublish = false;
-let testFailNextOwnerStorageActivation = false;
 let testFailNextOwnerStorageDeletion = false;
-let testMaterializeNextOwnerStorageActivation = false;
 let testFailAfterOwnerStorageActivation = false;
 let testFailNextHoldRollbackCas = false;
 let testCatalogHoldPublishBarrier: {
@@ -3064,7 +3046,7 @@ let storageStateTail: Promise<void> = Promise.resolve();
 const storageRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
 const storageRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 const storagePortCounts = new Map<string, number>();
-const storageGrants = new Map<string, { context: import("@keymaster/contracts").OwnerAppStorageGrant; ownerStorageGeneration: number; clientId: string; sessionEpoch: SessionEpoch }>();
+const storageGrants = new Map<string, { context: import("@keymaster/contracts").OwnerAppStorageGrant; clientId: string; sessionEpoch: SessionEpoch }>();
 const ownerStorageGrants = new Map<string, StorageOwnerGrant & { clientId: string }>();
 const platformStorageGrants = new Map<string, StoragePlatformGrant & { clientId: string }>();
 let storageMutationTail: Promise<void> = Promise.resolve();
@@ -4364,9 +4346,7 @@ async function ensureStorageRuntime(peerId?: string): Promise<StorageRuntimeCont
   try {
     runtime = await createStorageRuntimeController({
       multipartUploadRepository,
-      // 文件 API 直接使用 Provider，必须和 owner K-V 一样经过桶级生命
-      // 周期栅栏；否则另一个 Coordinator 删除 owner 时，迟到 PUT 仍可复活文件。
-      bucketProvider: platformBucketProvider ? createOwnerLifecycleGuardedProvider(platformBucketProvider) : undefined,
+      bucketProvider: platformBucketProvider,
       bucketGeneration: platformRootStore?.bucket.bucketGeneration,
       logger: { warn: (event) => undefined }
     });
@@ -6579,7 +6559,6 @@ async function resolveOwnerStorageGrant(grantId: string, actualClientId: string)
   if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch || grant.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex?.toLowerCase()) throw new Error("Owner storage grant is invalid");
   assertOwnerStorageNotFenced(grant.ownerPublicKeyHex);
   if (!platformRootStore || grant.bucketId !== platformRootStore.bucket.bucketId || grant.bucketGeneration !== platformRootStore.bucket.bucketGeneration) throw new Error("Owner storage bucket generation changed");
-  await platformRootStore.assertOwnerStorageCurrent({ ownerPublicKeyHex: grant.ownerPublicKeyHex, generation: grant.ownerStorageGeneration });
   return grant;
 }
 
@@ -6707,7 +6686,6 @@ async function executeStorageDataUnsafe(request: Extract<CoordinatorClientReques
     if ((finalSummary?.generation ?? null) !== capturedProviderGeneration) {
       const error = new Error("storage_unavailable") as Error & { code?: string }; error.code = "storage_unavailable"; throw error;
     }
-    await root.assertOwnerStorageCurrent({ ownerPublicKeyHex: ctx.ownerPublicKeyHex, generation: resolvedGrant.ownerStorageGeneration });
     await resolveStorageGrant(data.grantId, actualClientId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
   } finally {
@@ -6720,7 +6698,7 @@ async function executeStorageData(request: Extract<CoordinatorClientRequest, { k
   return withCoordinatorFinalIoLease(operation, controller.signal, () => executeStorageDataUnsafe(request, controller, actualClientId), { auditOperation: "storage.connect.data" });
 }
 
-async function resolveStorageGrant(grantId: string, actualClientId: string): Promise<{ context: import("@keymaster/contracts").OwnerAppStorageGrant; ownerStorageGeneration: number; connectSessionId: string }> {
+async function resolveStorageGrant(grantId: string, actualClientId: string): Promise<{ context: import("@keymaster/contracts").OwnerAppStorageGrant; connectSessionId: string }> {
   const grant = storageGrants.get(grantId);
   if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch) {
     const error = new Error("Storage grant is invalid") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
@@ -6729,8 +6707,7 @@ async function resolveStorageGrant(grantId: string, actualClientId: string): Pro
   if (!authoritative || authoritative.origin !== grant.context.transportOrigin || authoritative.ownerPublicKeyHex !== grant.context.ownerPublicKeyHex || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity) || grant.context.sessionEpoch !== coordinatorState.sessionEpoch || !platformRootStore || grant.context.bucketId !== platformRootStore.bucket.bucketId || grant.context.bucketGeneration !== platformRootStore.bucket.bucketGeneration || coordinatorState.activePublicKeyHex?.toLowerCase() !== grant.context.ownerPublicKeyHex) {
     const error = new Error("Storage session is invalid or revoked") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
   }
-  await platformRootStore.assertOwnerStorageCurrent({ ownerPublicKeyHex: grant.context.ownerPublicKeyHex, generation: grant.ownerStorageGeneration });
-  return { context: grant.context, ownerStorageGeneration: grant.ownerStorageGeneration, connectSessionId: grant.context.connectSessionId };
+  return { context: grant.context, connectSessionId: grant.context.connectSessionId };
 }
 
 async function abortStorageSession(connectSessionId: string, peerId: string): Promise<void> {
@@ -6752,10 +6729,9 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage requires an unlocked active owner", code: "storage_identity_required" } };
     }
     const moduleId = deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
-    const ownerStorageGeneration = await platformRootStore.getOwnerStorageGeneration({ ownerPublicKeyHex });
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const grantId = `grant-${crypto.randomUUID()}`;
-    storageGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, appIdentity: session.appIdentity, bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration, ownerPublicKeyHex, moduleId, purposeId: "files", sessionEpoch: coordinatorState.sessionEpoch }, ownerStorageGeneration, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
+    storageGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, appIdentity: session.appIdentity, bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration, ownerPublicKeyHex, moduleId, purposeId: "files", sessionEpoch: coordinatorState.sessionEpoch }, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
   }
   if (request.kind === "storage.cancel") {
@@ -6811,7 +6787,6 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     }
     const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
     if (coordinatorState.vaultStatus !== "unlocked" || !ownerPublicKeyHex || !platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage requires an unlocked active key", code: "storage_unavailable" } };
-    const ownerStorageGeneration = await platformRootStore.getOwnerStorageGeneration({ ownerPublicKeyHex });
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const grant: StorageOwnerGrant & { clientId: string } = {
       storageGrantId: `owner-${crypto.randomUUID()}`,
@@ -6823,7 +6798,6 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
       authority: expected.authority,
       model: expected.model,
       schemaVersion: expected.schemaVersion,
-      ownerStorageGeneration,
       sessionEpoch: coordinatorState.sessionEpoch,
       clientId: actualClientId,
     };
@@ -10196,9 +10170,8 @@ async function addCatalogKeyMaterialRpc(
     await waitForTestCatalogHoldPublishBarrier();
     published = await publishVaultHoldSnapshot(password, [...previous.keys, encryptedKey], [], expectedHoldHead(previous.headEtag));
     await waitForTestKeyLifecycleOwnerBarrier();
-    const root = platformRootStore;
-    if (!root) throw new StorageRuntimeError("storage_unavailable", "Platform storage root is unavailable during Key activation");
-    await root.activateOwnerStorage({ ownerPublicKeyHex: publicKeyHex });
+    // 桶内没有 owner 生命周期记录可激活；标记激活成功以保留失败回滚语义。
+    if (!platformRootStore) throw new StorageRuntimeError("storage_unavailable", "Platform storage root is unavailable during Key activation");
     ownerActivated = true;
     if (testFailAfterOwnerStorageActivation) {
       testFailAfterOwnerStorageActivation = false;
@@ -12139,9 +12112,7 @@ export function __testResetState(): void {
     testFailNextVaultAuthMetadataRestore = false;
     testFailNextBucketPasswordDeviceRollback = false;
   testFailAfterCatalogBindingPublish = false;
-  testFailNextOwnerStorageActivation = false;
   testFailNextOwnerStorageDeletion = false;
-  testMaterializeNextOwnerStorageActivation = false;
   testFailAfterOwnerStorageActivation = false;
   testFailNextHoldRollbackCas = false;
   testCatalogHoldPublishBarrier?.release();
@@ -12306,16 +12277,6 @@ export function __testFailNextBucketPasswordDeviceRollback(): void {
 }
 
 /** 测试专用：模拟 Hold 已发布后，生命周期 Journal 的阶段推进写入失败。 */
-
-/** 测试专用：让下一次新 Key 的 owner 激活失败。 */
-export function __testFailNextOwnerStorageActivation(): void {
-  testFailNextOwnerStorageActivation = true;
-}
-
-/** 测试专用：让下一次新增 Key 的 Owner 激活留下可观测 namespace。 */
-export function __testMaterializeNextOwnerStorageActivation(): void {
-  testMaterializeNextOwnerStorageActivation = true;
-}
 
 /** 测试专用：让下一次 Owner namespace 删除失败。 */
 export function __testFailNextOwnerStorageDeletion(): void {

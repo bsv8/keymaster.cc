@@ -2142,7 +2142,6 @@ function parseStorageOwnerGrant(value: unknown, field: string): StorageOwnerGran
     // owner 数据模型:K-V 或文件根;不能硬编码成 kv,否则 files 声明绑定会被判不匹配。
     model: enumValue(grant.model, ["kv", "files"] as const, field + ".model"),
     schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
-    ownerStorageGeneration: boundedNumber(grant.ownerStorageGeneration, field + ".ownerStorageGeneration"),
     sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
   };
 }

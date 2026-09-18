@@ -79,7 +79,5 @@ export interface StorageOwnerGrant {
   /** owner 数据模型：K-V 或文件根。 */
   model: "kv" | "files";
   schemaVersion: number;
-  /** 发放时绑定的桶级 owner 世代；重导入后旧授权不能写入新世代。 */
-  ownerStorageGeneration: number;
   sessionEpoch: SessionEpoch;
 }
