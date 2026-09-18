@@ -144,6 +144,10 @@ export class StorageRpcProxy implements StorageRuntimeController {
   renameBucket(label: string): Promise<StorageRuntimeBucketV1> {
     return this.control({ type: "rename-bucket", label });
   }
+  /** 删除非当前 Local 桶的 Key：KeyHold 文件 + 该 Key 的 owner 数据。 */
+  deleteLocalBucketKey(bucket: StorageRuntimeBucketV1, publicKeyHex: string): Promise<void> {
+    return this.control({ type: "delete-local-bucket-key", bucket, publicKeyHex });
+  }
   /**
    * 冷导出当前 Coordinator 已绑定桶的已提交 Hold 快照。
    * 返回值只允许二进制；页面不会接触桶密码或解密配置。

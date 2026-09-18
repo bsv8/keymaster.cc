@@ -17,8 +17,14 @@ export interface StorageBucketRef {
 export interface StorageBucketProbeResult {
   /** 是否通过全部必需探测。 */
   ok: boolean;
-  /** 是否支持原生条件写；不支持时系统桶不能激活。 */
-  conditionalWrites: "native" | "unsupported";
+  /**
+   * 条件写能力：
+   *   - `native`：服务端原生执行 If-None-Match / If-Match（原子）；
+   *   - `best-effort`：服务端忽略条件头，改用 HEAD 读 ETag 后写入模拟
+   *     （非原子，存在竞态窗口，但产品接受该降级）；
+   *   - `unsupported`：连模拟都无法进行，系统桶不能激活。
+   */
+  conditionalWrites: "native" | "best-effort" | "unsupported";
   /** 探测延迟（毫秒）。 */
   latencyMs: number;
   /** 脱敏诊断分类。 */

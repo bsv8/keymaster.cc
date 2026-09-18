@@ -167,8 +167,8 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
 } from "@keymaster/contracts";
-import { createStorageRuntimeController, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, encryptDeviceConfig, decryptDeviceConfig, createKeyLock, createKeyHoldRepository, createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument, generateSessionId } from "@keymaster/platform-storage/coordinator";
-import type { KeyHoldFile, KeyHoldRepository, KeyLock, LocalStorageBridgeRequest, LocalStorageBridgeResponse, UnlockedKeyHold } from "@keymaster/platform-storage/coordinator";
+import { createStorageRuntimeController, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, encryptDeviceConfig, decryptDeviceConfig, createKeyLock, createKeyHoldRepository, createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument, generateSessionId, createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode } from "@keymaster/platform-storage/coordinator";
+import type { BucketObjectStoreCapabilityState, KeyHoldFile, KeyHoldRepository, KeyLock, LocalStorageBridgeRequest, LocalStorageBridgeResponse, UnlockedKeyHold } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
 
@@ -1258,9 +1258,29 @@ export function __testSetS3BucketProviderOptionsFactory(factory: WorkerS3Provide
   testS3BucketProviderOptionsFactory = factory;
 }
 
-function workerS3ProviderOptions(config: WorkerS3ProviderConfig, bucketId: string): WorkerS3ProviderOptions {
+function workerS3ProviderOptions(
+  config: WorkerS3ProviderConfig,
+  bucketId: string,
+  capabilityState?: BucketObjectStoreCapabilityState,
+): WorkerS3ProviderOptions {
   const override = testS3BucketProviderOptionsFactory?.(config);
-  return override ? { ...override, bucketId: override.bucketId ?? bucketId } : { bucketId };
+  if (override) return { ...override, bucketId: override.bucketId ?? bucketId };
+  return { bucketId, ...(capabilityState === undefined ? {} : { capabilityState }) };
+}
+
+/**
+ * 把设备记录里已探测到的条件写能力灌入新的 Provider 能力状态，冷启动/切桶
+ * 时不再重复发送条件写探针；字段缺失表示尚未探测，由首次连接时探测并写回。
+ */
+function capabilityStateForRecord(record: DeviceRecordV1): BucketObjectStoreCapabilityState | undefined {
+  if (record.location.providerId !== "s3") return undefined;
+  // 判别字段在嵌套 location 上，TS 不会自动收窄整个联合；这里按 s3 形态读取。
+  const mode = (record as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>).capabilities?.conditionalWrites;
+  if (!mode) return undefined;
+  const state = createBucketObjectStoreCapabilityState();
+  setBucketObjectStoreCapabilityMode(state, "put", mode, "automatic");
+  setBucketObjectStoreCapabilityMode(state, "complete", mode, "automatic");
+  return state;
 }
 
 /** 由运行时绑定创建 Provider；s3 用启动密码与 session KDF 解开设备记录密文。 */
@@ -1303,7 +1323,7 @@ async function createRuntimeProvider(
     credentials: { kind: "access-key", accessKeyId: plaintext.accessKeyId, secretAccessKey: plaintext.secretAccessKey },
   };
   try {
-    return createS3BucketProvider(normalized, workerS3ProviderOptions(normalized, binding.bucketId));
+    return createS3BucketProvider(normalized, workerS3ProviderOptions(normalized, binding.bucketId, capabilityStateForRecord(binding.deviceRecord)));
   } finally {
     plaintext.accessKeyId = "";
     plaintext.secretAccessKey = "";
@@ -1392,6 +1412,11 @@ async function switchSelectedRuntimeBucket(
     }
     adopted = true;
     storageBootstrapState = { selectedBackend: binding.backend, selectedProfileId: binding.bucketId, selectedBucket: binding };
+    // 跨桶切换后必须重建 Storage 运行态：顶栏/桶管理页切换不会刷新页面，
+    // 缺少 storageController 时 storage.state 的 status 会停在 checking，
+    // 存储守卫会把用户挡在业务页外。
+    storageController = undefined;
+    await ensureStorageRuntime(peerId);
     await writeWorkerSession({ ...session, activeBucketId: binding.bucketId, activeKey: publicKeyHex }, peerId);
     const lock = createKeyLock(provider, { ownerPublicKeyHex: publicKeyHex, holder: session.sessionId });
     await lock.acquire();
@@ -1454,6 +1479,44 @@ async function changeRuntimeBucketConnection(
     return next;
   } finally {
     if (!adopted && platformBucketProvider !== nextProvider) nextProvider.dispose();
+  }
+}
+
+/**
+ * 删除非当前 Local 桶中的一把 Key：KeyHold 文件 + 该 Key 的 owner 数据。
+ *
+ * Local 桶数据就在本机 localStorage，不需要桶密码；但当前运行态桶不能走
+ * 这条路径（必须走 keyspace.deleteKey 取消任务、关闭句柄并修复 active）。
+ */
+async function deleteLocalBucketKey(
+  binding: StorageRuntimeBucketV1,
+  publicKeyHexInput: string,
+  peerId?: string,
+): Promise<void> {
+  const publicKeyHex = publicKeyHexInput.toLowerCase();
+  if (binding.backend !== "local") {
+    throw new StorageRuntimeError("storage_forbidden", "Only local bucket keys can be deleted without an active session");
+  }
+  if (selectedCatalogBucket()?.bucketId === binding.bucketId) {
+    throw new StorageRuntimeError("storage_conflict", "The current bucket key must be deleted through keyspace.deleteKey");
+  }
+  const provider = await createRuntimeProvider(binding, "", peerId);
+  try {
+    const repository = createKeyHoldRepository(provider);
+    const listed = await repository.list();
+    const target = listed.keys.find((key) => key.publicKeyHex.toLowerCase() === publicKeyHex);
+    if (!target) throw new StorageRuntimeError("storage_not_found", "Key not found");
+    const file = await repository.read(target.publicKeyHex);
+    await repository.delete(target.publicKeyHex, file?.etag);
+    // 一 Key 一文件：删除 KeyHold 后清掉该 Key 的 owner namespace 数据
+    // （含 lock.json 与全部业务 K-V），避免留下无归属数据。
+    const root = createPlatformRootStore({
+      provider,
+      bucket: { bucketId: binding.bucketId, bucketGeneration: 1, provider: binding.backend },
+    });
+    await root.deleteOwnerStorage({ ownerPublicKeyHex: publicKeyHex });
+  } finally {
+    provider.dispose();
   }
 }
 
@@ -1771,6 +1834,24 @@ async function putDeviceRecord(remoteStorageId: string, record: DeviceRecordV1, 
   if (response.type !== "void") throw storageUnavailableError("Device record bridge returned an invalid write result");
 }
 
+/**
+ * 把一次成功的条件写探测结果写回设备记录（整记录替换，保留其它字段）。
+ * 已登记桶专用；未登记桶的探测结果由页面放入提交计划。
+ */
+async function updateDeviceRecordCapabilities(
+  remoteStorageId: string,
+  conditionalWrites: "native" | "best-effort",
+  peerId?: string,
+): Promise<void> {
+  const response = await requestLocalStorageBridge({ type: "device-record-get", remoteStorageId }, peerId);
+  if (response.type !== "device-record" || !response.record) return;
+  const record = response.record;
+  if (record.location.providerId !== "s3") return;
+  const s3Record = record as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>;
+  if (s3Record.capabilities?.conditionalWrites === conditionalWrites) return;
+  await putDeviceRecord(remoteStorageId, { ...s3Record, capabilities: { conditionalWrites } }, true, peerId);
+}
+
 function generateSessionKeyDerivation(): KeymasterSessionKeyDerivationV1 {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   return {
@@ -1789,6 +1870,8 @@ async function buildDeviceRecordForConnection(input: {
   displayName: string;
   password: string;
   keyDerivation: KeymasterSessionKeyDerivationV1 | undefined;
+  /** 页面探测阶段得到的条件写能力；缺失表示尚未探测。 */
+  capabilities?: InitialSetupPlan["capabilities"];
 }): Promise<{ record: DeviceRecordV1; keyDerivation?: KeymasterSessionKeyDerivationV1 }> {
   const location = deviceLocationFromConnection(input.connection, input.remoteStorageId);
   if (location.providerId === "local") {
@@ -1811,7 +1894,17 @@ async function buildDeviceRecordForConnection(input: {
       ...(input.connection.forcePathStyle === undefined ? {} : { forcePathStyle: input.connection.forcePathStyle }),
     },
   });
-  return { record: { format: "keymaster.device", version: 1, displayName: input.displayName, location, cipher }, keyDerivation };
+  return {
+    record: {
+      format: "keymaster.device",
+      version: 1,
+      displayName: input.displayName,
+      location,
+      cipher,
+      ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
+    },
+    keyDerivation,
+  };
 }
 
 function runtimeBinding(input: {
@@ -1888,6 +1981,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
       displayName,
       password: plan.startupPassword ?? "",
       keyDerivation: session.keyDerivation,
+      ...(plan.capabilities === undefined ? {} : { capabilities: plan.capabilities }),
     });
     await putDeviceRecord(remoteStorageId, built.record, false, peerId);
     await writeWorkerSession({
@@ -1987,19 +2081,37 @@ async function executeBucketProbe(plan: import("@keymaster/contracts").BucketPro
       }, peerId);
     }
     try {
-      // S3 桶必须在读取 keys/ 前证明支持原子条件写入；不满足时只允许重试，
-      // 绝不能把"不支持 CAS"的桶当成可用钱包。
+      // S3 桶必须在读取 keys/ 前确认条件写能力：设备记录里已有探测结果时
+      // 直接复用（不再发送写探针）；缺失或要求重新探测时才实测并写回。
+      // 原生条件写优先；服务忽略条件头时降级为 best-effort（HEAD 后写入）。
       const isS3 = plan.binding ? plan.binding.backend === "s3" : plan.connection?.kind === "s3";
+      let conditionalWrites: "native" | "best-effort" | undefined;
       if (isS3) {
-        const probed = await provider.probe();
-        if (!probed.ok || probed.conditionalWrites !== "native") {
-          throw new StorageRuntimeError("storage_provider_error", "该桶不支持 Keymaster 所需的原子条件写入");
+        const cached = plan.binding && plan.binding.deviceRecord.location.providerId === "s3"
+          ? (plan.binding.deviceRecord as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>).capabilities?.conditionalWrites
+          : undefined;
+        if (!plan.forceReprobe && cached) {
+          conditionalWrites = cached;
+        } else {
+          const probed = await provider.probe();
+          if (!probed.ok || probed.conditionalWrites === "unsupported") {
+            throw new StorageRuntimeError("storage_provider_error", "该桶无法提供可用的条件写入（原子或 best-effort 模拟）");
+          }
+          conditionalWrites = probed.conditionalWrites;
+          // 已登记桶：探测结果写回设备记录；未登记桶把结果返回页面，由提交
+          // 计划一并写入，避免提交时重复探测。
+          if (plan.binding) await updateDeviceRecordCapabilities(plan.binding.bucketId, probed.conditionalWrites, peerId);
         }
       }
       const listed = await createKeyHoldRepository(provider).list();
       return listed.keys.length === 0
-        ? { ok: true, state: "empty" }
-        : { ok: true, state: "has-keys", keys: listed.keys.map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label })) };
+        ? { ok: true, state: "empty", ...(conditionalWrites === undefined ? {} : { conditionalWrites }) }
+        : {
+            ok: true,
+            state: "has-keys",
+            keys: listed.keys.map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label })),
+            ...(conditionalWrites === undefined ? {} : { conditionalWrites }),
+          };
     } finally {
       provider.dispose();
     }
@@ -2048,6 +2160,7 @@ async function executeExistingRemoteStorageConnect(
       displayName: plan.displayName,
       password: plan.startupPassword ?? "",
       keyDerivation: session.keyDerivation,
+      ...(plan.capabilities === undefined ? {} : { capabilities: plan.capabilities }),
     });
     // 已初始化时先锁旧 Vault 并卸下旧绑定,再写记录、安装新运行态。
     if (platformRootStore) {
@@ -4178,9 +4291,17 @@ async function probeStorageAndRecover(peerId?: string): Promise<void> {
     async () => {
       const provider = platformBucketProvider;
       if (!provider) throw Object.assign(new Error("Storage provider is unavailable"), { code: "storage_unavailable" });
-      const result = await provider.probe();
-      if (!result.ok || result.conditionalWrites !== "native") {
-        throw Object.assign(new Error("Storage bucket does not support required conditional writes"), { code: "storage_provider_error" });
+      // 已探测过的桶直接复用能力缓存，只做读取健康检查；未探测时实测并写回。
+      const binding = selectedCatalogBucket();
+      const cached = binding && binding.deviceRecord.location.providerId === "s3"
+        ? (binding.deviceRecord as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>).capabilities?.conditionalWrites
+        : undefined;
+      if (!cached) {
+        const result = await provider.probe();
+        if (!result.ok || result.conditionalWrites === "unsupported") {
+          throw Object.assign(new Error("Storage bucket does not support required conditional writes"), { code: "storage_provider_error" });
+        }
+        if (binding) await updateDeviceRecordCapabilities(binding.bucketId, result.conditionalWrites, peerId);
       }
     },
     async () => {
@@ -6433,6 +6554,10 @@ async function executeStorageControl(
     const result = await renameRuntimeBucket(control.label, peerId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   }
+  if (control.type === "delete-local-bucket-key") {
+    await deleteLocalBucketKey(control.bucket, control.publicKeyHex, peerId);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
+  }
   if (control.type === "unlock-bucket") {
     const hadPlatformRoot = Boolean(platformRootStore);
     try {
@@ -6474,7 +6599,14 @@ async function executeStorageControl(
   const service = await ensureStorageRuntime(peerId);
   if (control.type === "capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: typeof service.getConditionalCapabilities === "function" ? service.getConditionalCapabilities() : null };
   if (control.type === "cancel-probe") { service.cancelProbe(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
-  if (control.type === "probe-capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.probeConditionalCapabilities() };
+  if (control.type === "probe-capabilities") {
+    const result = await service.probeConditionalCapabilities();
+    // 手动重新探测：把确定的结果写回当前桶的设备记录，之后不再自动探测。
+    const binding = selectedCatalogBucket();
+    const mode = result.put === "native" || result.put === "best-effort" ? result.put : undefined;
+    if (binding && mode) await updateDeviceRecordCapabilities(binding.bucketId, mode, peerId);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+  }
   return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown storage control" } };
 }
 

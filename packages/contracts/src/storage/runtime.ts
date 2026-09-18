@@ -157,6 +157,15 @@ export interface StorageRuntimeController {
   changeBucketConnectionConfig?(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageRuntimeBucketV1>;
   /** 当前桶名称的原子目录 CAS；页面不能直接改当前桶目录。 */
   renameBucket?(label: string): Promise<StorageRuntimeBucketV1>;
+  /**
+   * 删除非当前 Local 桶中的一把 Key：删除 KeyHold 文件以及该 Key 的
+   * owner namespace 数据。
+   *
+   * - 只允许 `backend === "local"` 且不能用于当前桶；当前桶的删除必须走
+   *   keyspace.deleteKey，才能正确取消任务、关闭句柄并修复 active 选择。
+   * - Local 桶数据就在本机 localStorage，不需要桶密码；标签确认由页面负责。
+   */
+  deleteLocalBucketKey?(bucket: StorageRuntimeBucketV1, publicKeyHex: string): Promise<void>;
   getConditionalCapabilities(): BucketConditionalCapabilitiesView | null;
   probeConditionalCapabilities(signal?: AbortSignal): Promise<BucketConditionalCapabilityProbeResult>;
   abortSession(connectSessionId: string): Promise<void>;

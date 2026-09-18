@@ -245,6 +245,7 @@ export function useBucketSetupFlow(options: BucketSetupFlowOptions): BucketSetup
       selectedKeyHex,
       keyPassword,
       startupPassword,
+      ...(probe?.conditionalWrites === undefined ? {} : { capabilities: { conditionalWrites: probe.conditionalWrites } }),
     });
     if (!transactionId) setTransactionId(plan.operationId);
     setBusy(true); setError(null);
@@ -275,6 +276,7 @@ export function useBucketSetupFlow(options: BucketSetupFlowOptions): BucketSetup
       startupPassword,
       keyDraft,
       keyPassword,
+      ...(probe?.conditionalWrites === undefined ? {} : { capabilities: { conditionalWrites: probe.conditionalWrites } }),
     });
     if (!transactionId) setTransactionId(currentTransactionId);
     setBusy(true); setError(null);

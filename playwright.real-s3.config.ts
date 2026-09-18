@@ -28,7 +28,7 @@ export default defineConfig({
     {
       name: "real-s3",
       dependencies: ["s3-resource-setup"],
-      testMatch: /(?:gates\/real-resource\/resource-safety|journeys\/real-resource\/real-s3-initialization)\.spec\.ts$/u,
+      testMatch: /(?:gates\/real-resource\/resource-safety|journeys\/real-resource\/real-s3-(?:initialization|bucket-key-switching))\.spec\.ts$/u,
       use: { ...devices["Desktop Chrome"] },
     },
     {

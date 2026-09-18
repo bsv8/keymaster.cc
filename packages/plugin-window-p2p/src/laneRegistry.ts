@@ -16,13 +16,23 @@ export function createWindowP2pLaneRegistry(): WindowP2pLaneRegistry {
 
   return {
     register(lane) {
-      if (!lane || typeof lane.laneId !== "string" || lane.laneId.length === 0 || lanes.has(lane.laneId)) {
+      if (!lane || typeof lane.laneId !== "string" || lane.laneId.length === 0) {
         throw new Error("Window P2P lane id is invalid or already registered");
+      }
+      // 身份切换（切换桶/Key）会重建 owner-session 插件；旧实例的 teardown
+      // 可能迟到，此时新实例会注册同一个 laneId。替换而不是拒绝：先停旧
+      // lane，保证同一 laneId 同时最多一个活跃实例，也不让身份切换把插件
+      // 打成 error-disabled。旧实例迟到的注销只能移除它自己。
+      const previous = lanes.get(lane.laneId);
+      if (previous && previous !== lane) {
+        void Promise.resolve(previous.stop()).catch(() => undefined);
       }
       lanes.set(lane.laneId, lane);
       if (context) void Promise.resolve(lane.start(context)).catch(() => undefined);
       return () => {
-        if (!lanes.delete(lane.laneId)) return;
+        // 已经被新实例替换时，旧实例的注销不能误删新 lane。
+        if (lanes.get(lane.laneId) !== lane) return;
+        lanes.delete(lane.laneId);
         void Promise.resolve(lane.stop()).catch(() => undefined);
       };
     },

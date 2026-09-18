@@ -180,6 +180,8 @@ export type CoordinatorStorageControl =
   | { type: "change-bucket-config"; config: StorageBucketConnectionConfigV1; label?: string; password: string }
   /** 当前桶显示名称的目录 CAS；必须由当前 Coordinator 执行。 */
   | { type: "rename-bucket"; label: string }
+  /** 删除非当前 Local 桶的 Key（KeyHold + owner namespace）；不需要桶密码。 */
+  | { type: "delete-local-bucket-key"; bucket: import("./storage/profile.js").StorageRuntimeBucketV1; publicKeyHex: string }
   | { type: "retry" }
   | { type: "cancel-probe" }
   | { type: "capabilities" }

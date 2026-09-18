@@ -59,7 +59,8 @@ export function createProviderBackedBucketObjectStore(
     async probe(_prefix, signal) {
       assertOpen();
       const result = await provider.probe(signal);
-      if (!result.ok || result.conditionalWrites !== "native") throw new StorageRuntimeError("storage_provider_error", "Storage bucket does not support native conditional writes");
+      // 原生条件写优先；服务忽略条件头时允许 best-effort（HEAD 后写入）降级。
+      if (!result.ok || result.conditionalWrites === "unsupported") throw new StorageRuntimeError("storage_provider_error", "Storage bucket does not support conditional writes");
     },
 
     async list(input): Promise<BucketListOutput> {

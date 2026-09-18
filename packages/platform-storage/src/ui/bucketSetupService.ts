@@ -127,14 +127,17 @@ export function buildInitialSetupPlan(input: {
   startupPassword: string;
   keyDraft: BucketSetupKeyDraft;
   keyPassword: string;
+  /** 探测阶段得到的条件写能力；避免提交时重复探测。 */
+  capabilities?: { conditionalWrites: "native" | "best-effort" };
 }): InitialSetupPlan {
-  const { transactionId, draft, connection, startupPassword, keyDraft, keyPassword } = input;
+  const { transactionId, draft, connection, startupPassword, keyDraft, keyPassword, capabilities } = input;
   return {
     transactionId,
     bucketLabel: draft.label.trim() || "钱包",
     backend: draft.backend,
     connection,
     ...(draft.backend === "s3" ? { startupPassword } : {}),
+    ...(capabilities === undefined ? {} : { capabilities }),
     firstKey: keyDraft.kind === "generate"
       ? { kind: "generate", label: keyDraft.label, capabilities: [...keyDraft.capabilities], password: keyPassword }
       : {
@@ -157,8 +160,10 @@ export function buildConnectPlan(input: {
   selectedKeyHex: string | undefined;
   keyPassword: string;
   startupPassword: string;
+  /** 探测阶段得到的条件写能力；避免提交时重复探测。 */
+  capabilities?: { conditionalWrites: "native" | "best-effort" };
 }): ExistingRemoteStorageConnectPlan {
-  const { operationId, draft, connection, selectedKeyHex, keyPassword, startupPassword } = input;
+  const { operationId, draft, connection, selectedKeyHex, keyPassword, startupPassword, capabilities } = input;
   return {
     operationId,
     displayName: draft.label.trim() || "钱包",
@@ -167,6 +172,7 @@ export function buildConnectPlan(input: {
     ...(selectedKeyHex === undefined ? {} : { publicKeyHex: selectedKeyHex }),
     keyPassword,
     ...(draft.backend === "s3" ? { startupPassword } : {}),
+    ...(capabilities === undefined ? {} : { capabilities }),
   };
 }
 

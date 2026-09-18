@@ -905,6 +905,75 @@ describe("Session Coordinator worker", () => {
     }
   }, 20_000);
 
+  it("删除非当前 Local 桶的 Key：删除 KeyHold 与该 Key 的 owner 数据", async () => {
+    __testResetState();
+    const current = makeRuntimeLocalBucket("delete-key-current", "当前桶");
+    const target = makeRuntimeLocalBucket("delete-key-target", "目标 Local 桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const privateKeyBytes = hexToBytes(TEST_PRIV_2);
+    const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true)).toLowerCase();
+    const ownerPath = `${publicKeyHex}/orphan.bin`;
+    const targetProvider = createLocalStorageBucketProvider({
+      storage: fixture.state.storage,
+      locks: catalogBridgeLocks,
+      bucketId: target.bucketId,
+      bucketGeneration: 1,
+    });
+    try {
+      await createKeyHoldRepository(targetProvider).create({
+        label: "待删除 Key",
+        privateKeyBytes,
+        password: "target-key-password",
+      });
+      // 该 Key 的 owner 数据（锁与业务 K-V 同前缀）。
+      await targetProvider.put(ownerPath, new TextEncoder().encode("owner-data"));
+    } finally {
+      targetProvider.dispose();
+    }
+
+    try {
+      await __testInstallCatalogLocalBinding(current);
+      __testSetVaultStatus("uninitialized");
+
+      const response = await __testDispatchStorageControl({
+        type: "delete-local-bucket-key",
+        bucket: target,
+        publicKeyHex,
+      });
+      if (response.ack.status !== "ok") throw new Error(`delete-local-bucket-key ack: ${JSON.stringify(response.ack)}`);
+      expect(response.ack).toMatchObject({ status: "ok" });
+
+      // KeyHold 文件与该 Key 的 owner 数据都被删除，当前桶的运行态不受影响。
+      const verifyProvider = createLocalStorageBucketProvider({
+        storage: fixture.state.storage,
+        locks: catalogBridgeLocks,
+        bucketId: target.bucketId,
+        bucketGeneration: 1,
+      });
+      try {
+        await expect(createKeyHoldRepository(verifyProvider).list()).resolves.toMatchObject({ keys: [] });
+        await expect(verifyProvider.get(ownerPath)).resolves.toBeUndefined();
+      } finally {
+        verifyProvider.dispose();
+      }
+      expect(fixture.state.session().activeBucketId).toBe(current.bucketId);
+      expect(__testGetSnapshot()).toMatchObject({ storageBucketId: current.bucketId, vaultStatus: "uninitialized" });
+
+      // 当前桶不允许走这条路径：必须交给 keyspace.deleteKey。
+      const rejected = await __testDispatchStorageControl({
+        type: "delete-local-bucket-key",
+        bucket: current,
+        publicKeyHex,
+      });
+      expect(rejected.ack).toMatchObject({ status: "error", code: "storage_conflict" });
+    } finally {
+      await __testReleaseCatalogLocalBinding();
+      __testResetState();
+    }
+  }, 20_000);
+
   it("切换 Key 前先排空旧 owner 请求，Provider 忽略 AbortSignal 也不能越过 fence", async () => {
     await __testDeleteVault();
     __testResetState();

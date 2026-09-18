@@ -8,12 +8,16 @@
 //     keys/<公钥>.keyhold 单一真值路径（与初始化首 Key 相同）。
 //
 // 只对"当前桶"提供操作：非当前桶必须先切换并解锁后才能管理 Key。
+//
+// 成功后统一进入首页：新 Key 会成为 active 身份，shell 会在身份切换时
+// 重建路由内容（弹窗无法保留成功提示）；与顶栏切换一致回到 home，让用户
+// 直接看到新身份。
 
 import { useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
-import { VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type KeyRef } from "@keymaster/contracts";
+import { router, useI18n } from "@keymaster/runtime";
+import { VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { KeyImportWizard, type InitialSetupImportedKeyDraft } from "@keymaster/plugin-key-import/KeyImportWizard";
 import { defaultKeyLabel, validateKeyPassword } from "./bucketSetupService.js";
 
@@ -27,7 +31,7 @@ export interface CurrentBucketKeyActionsProps {
 }
 
 type ActionMode = "create" | "import" | null;
-type ImportPhase = "wizard" | "password" | "success";
+type ImportPhase = "wizard" | "password";
 
 const IDLE_IMPORT = {
   phase: "wizard" as ImportPhase,
@@ -36,7 +40,6 @@ const IDLE_IMPORT = {
   passwordConfirm: "",
   error: null as string | null,
   busy: false,
-  created: null as KeyRef | null,
 };
 
 export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: CurrentBucketKeyActionsProps) {
@@ -50,7 +53,6 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [createBusy, setCreateBusy] = useState(false);
-  const [createSuccess, setCreateSuccess] = useState<KeyRef | null>(null);
 
   // 导入 Key 状态。
   const [importState, setImportState] = useState(IDLE_IMPORT);
@@ -59,7 +61,6 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
     setMode(next);
     setCreateError(null);
     setCreateBusy(false);
-    setCreateSuccess(null);
     setLabel(defaultKeyLabel());
     setPassword("");
     setPasswordConfirm("");
@@ -72,7 +73,6 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
     setPassword("");
     setPasswordConfirm("");
     setCreateError(null);
-    setCreateSuccess(null);
     setImportState(IDLE_IMPORT);
   }
 
@@ -85,11 +85,11 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
     setCreateBusy(true);
     setCreateError(null);
     try {
-      const created = await vault.generateKey({ password, label: trimmed, capabilities: ["p2pkh"] });
-      setCreateSuccess(created);
+      await vault.generateKey({ password, label: trimmed, capabilities: ["p2pkh"] });
       setPassword("");
       setPasswordConfirm("");
       onChanged?.();
+      router.push("/");
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : t("storage.bucketKeys.err.create", { defaultValue: "新建 Key 失败" }));
     } finally {
@@ -107,7 +107,7 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
     if (invalid) { setImportState((current) => ({ ...current, error: invalid })); return; }
     setImportState((current) => ({ ...current, busy: true, error: null }));
     try {
-      const created = await vault.importPrivateKey({
+      await vault.importPrivateKey({
         password: importState.password,
         label: importState.draft.label,
         material: importState.draft.material,
@@ -115,8 +115,9 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
         capabilities: importState.draft.capabilities,
         ...(importState.draft.source === undefined ? {} : { source: importState.draft.source }),
       });
-      setImportState((current) => ({ ...current, phase: "success", created, password: "", passwordConfirm: "", busy: false }));
+      setImportState(IDLE_IMPORT);
       onChanged?.();
+      router.push("/");
     } catch (error) {
       setImportState((current) => ({
         ...current,
@@ -156,9 +157,7 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
         open={mode === "create"}
         title={t("storage.bucketKeys.createTitle", { defaultValue: "在当前桶新建 Key" })}
         onClose={() => { if (!createBusy) close(); }}
-        footer={createSuccess ? (
-          <Button onClick={close}>{t("common.action.close", { defaultValue: "关闭" })}</Button>
-        ) : (
+        footer={(
           <>
             <Button variant="ghost" onClick={close} disabled={createBusy}>{t("common.action.cancel", { defaultValue: "取消" })}</Button>
             <Button onClick={() => void submitCreate()} loading={createBusy} disabled={!label.trim() || !password}>
@@ -168,45 +167,33 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
         )}
         data-testid="bucket-create-key"
       >
-        {createSuccess ? (
-          <div className="storage-bucket-manager__key-success" role="status">
-            <p>{t("storage.bucketKeys.created", { defaultValue: "Key 已创建并设为 active。" })}</p>
-            <p><strong>{createSuccess.label}</strong> <code>{formatShortPublicKey(createSuccess.publicKeyHex)}</code></p>
-            <p className="storage-bucket-manager__key-warning">
-              {t("storage.bucketKeys.backupHint", { defaultValue: "请尽快导出加密备份；丢失桶或桶密码可能导致无法恢复。" })}
-            </p>
-          </div>
-        ) : (
-          <>
-            <p className="storage-bucket-manager__key-hint">
-              {t("storage.bucketKeys.createHint", { defaultValue: "私钥在 Vault 内部安全生成，用这把 Key 自己的密码加密保存；创建后自动设为 active。" })}
-              {" "}
-              <code>{bucketLabel}</code>
-            </p>
-            <TextInput
-              label={t("storage.bucketKeys.label", { defaultValue: "Key 标签" })}
-              value={label}
-              onChange={(event) => setLabel(event.currentTarget.value)}
-              placeholder={t("storage.bucketKeys.labelPlaceholder", { defaultValue: "例如：Key 2026-09-18 10:30" })}
-              error={createError ?? undefined}
-              autoFocus
-            />
-            <TextInput
-              label={t("storage.bucketKeys.password", { defaultValue: "Key 密码（至少 8 位）" })}
-              type="password"
-              autoComplete="new-password"
-              value={password}
-              onChange={(event) => setPassword(event.currentTarget.value)}
-            />
-            <TextInput
-              label={t("storage.bucketKeys.passwordConfirm", { defaultValue: "再输入一次 Key 密码" })}
-              type="password"
-              autoComplete="new-password"
-              value={passwordConfirm}
-              onChange={(event) => setPasswordConfirm(event.currentTarget.value)}
-            />
-          </>
-        )}
+        <p className="storage-bucket-manager__key-hint">
+          {t("storage.bucketKeys.createHint", { defaultValue: "私钥在 Vault 内部安全生成，用这把 Key 自己的密码加密保存；创建后自动设为 active。" })}
+          {" "}
+          <code>{bucketLabel}</code>
+        </p>
+        <TextInput
+          label={t("storage.bucketKeys.label", { defaultValue: "Key 标签" })}
+          value={label}
+          onChange={(event) => setLabel(event.currentTarget.value)}
+          placeholder={t("storage.bucketKeys.labelPlaceholder", { defaultValue: "例如：Key 2026-09-18 10:30" })}
+          error={createError ?? undefined}
+          autoFocus
+        />
+        <TextInput
+          label={t("storage.bucketKeys.password", { defaultValue: "Key 密码（至少 8 位）" })}
+          type="password"
+          autoComplete="new-password"
+          value={password}
+          onChange={(event) => setPassword(event.currentTarget.value)}
+        />
+        <TextInput
+          label={t("storage.bucketKeys.passwordConfirm", { defaultValue: "再输入一次 Key 密码" })}
+          type="password"
+          autoComplete="new-password"
+          value={passwordConfirm}
+          onChange={(event) => setPasswordConfirm(event.currentTarget.value)}
+        />
       </Modal>
 
       <Modal
@@ -223,8 +210,6 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
                 {t("storage.bucketKeys.importSubmit", { defaultValue: "保存到当前桶" })}
               </Button>
             </>
-          ) : importState.phase === "success" ? (
-            <Button onClick={close}>{t("common.action.close", { defaultValue: "关闭" })}</Button>
           ) : (
             <Button variant="ghost" onClick={close}>{t("common.action.cancel", { defaultValue: "取消" })}</Button>
           )
@@ -237,7 +222,7 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
             onCancel={close}
             onComplete={acceptImportedKey}
           />
-        ) : importState.phase === "password" && importState.draft ? (
+        ) : importState.draft ? (
           <>
             <p className="storage-bucket-manager__key-hint">
               {t("storage.bucketKeys.importHint", { defaultValue: "导入材料已在本地解析；设置这把 Key 自己的密码后写入当前桶。" })}
@@ -261,14 +246,6 @@ export function CurrentBucketKeyActions({ bucketLabel, unlocked, onChanged }: Cu
               onChange={(event) => setImportState((current) => ({ ...current, passwordConfirm: event.currentTarget.value }))}
             />
           </>
-        ) : importState.phase === "success" && importState.created ? (
-          <div className="storage-bucket-manager__key-success" role="status">
-            <p>{t("storage.bucketKeys.imported", { defaultValue: "Key 已导入并设为 active。" })}</p>
-            <p><strong>{importState.created.label}</strong> <code>{formatShortPublicKey(importState.created.publicKeyHex)}</code></p>
-            <p className="storage-bucket-manager__key-warning">
-              {t("storage.bucketKeys.backupHint", { defaultValue: "请尽快导出加密备份；丢失桶或桶密码可能导致无法恢复。" })}
-            </p>
-          </div>
         ) : null}
       </Modal>
     </>

@@ -356,6 +356,17 @@ export function createS3BucketObjectStore(config: NormalizedStorageProviderConfi
       throw error;
     }
   };
+  /** 读取当前 ETag；对象不存在返回 undefined。 */
+  const headEtag = async (input: { namespaceRoot: string; key: string; signal?: AbortSignal }): Promise<string | undefined> => {
+    assertKeyInRoot(input.namespaceRoot, input.key);
+    try {
+      const result = await send<{ ETag?: string }>(new HeadObjectCommand({ Bucket: bucketName, Key: input.key }), input.signal);
+      return result.ETag?.replace(/^"|"$/gu, "");
+    } catch (error) {
+      if (error instanceof StorageRuntimeError && error.code === "storage_not_found") return undefined;
+      throw error;
+    }
+  };
   return {
     async probe(prefix, signal) {
       await send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: prefix, MaxKeys: 1 }), signal);
@@ -375,10 +386,19 @@ export function createS3BucketObjectStore(config: NormalizedStorageProviderConfi
         const result = await send<{ ETag?: string }>(new PutObjectCommand({ Bucket: bucketName, Key: input.key, Body: input.bytes, ContentType: input.contentType, ...(ifNoneMatch === undefined ? {} : { IfNoneMatch: ifNoneMatch }), ...(ifMatch === undefined ? {} : { IfMatch: ifMatch }) }), input.signal);
         return { etag: result.ETag?.replace(/^"|"$/gu, ""), lastModified: new Date() };
       };
-      // Updating a partition head is a strict CAS operation. It is never
-      // downgraded to HEAD -> PUT because that would allow two writers to
-      // publish different commits over each other.
-      if (input.ifMatch !== undefined) return await put(undefined, input.ifMatch);
+      // CAS 优先使用服务端原生条件写；服务忽略 If-Match 时降级为
+      // best-effort：HEAD 读取当前 ETag，比对一致后再写入。该模拟存在
+      // 竞态窗口（读与写之间可能被其他写入者插入），产品已接受该降级。
+      if (input.ifMatch !== undefined) {
+        const capability = capabilityState.put;
+        if (capability.mode === "best-effort") {
+          const currentEtag = await headEtag({ namespaceRoot: input.namespaceRoot, key: input.key, signal: input.signal });
+          if (currentEtag === undefined) throw conditionalConflictError();
+          if (input.ifMatch !== "*" && currentEtag !== input.ifMatch) throw conditionalConflictError();
+          return await put();
+        }
+        return await put(undefined, input.ifMatch);
+      }
       if (input.ifNoneMatch === undefined) return await put();
       const capability = capabilityState.put;
       const bestEffortPut = async () => {
@@ -459,7 +479,18 @@ export function createS3BucketObjectStore(config: NormalizedStorageProviderConfi
         const result = await send<{ ETag?: string }>(new CompleteMultipartUploadCommand({ Bucket: bucketName, Key: input.key, UploadId: input.uploadId, ...(ifNoneMatch === undefined ? {} : { IfNoneMatch: ifNoneMatch }), ...(ifMatch === undefined ? {} : { IfMatch: ifMatch }), MultipartUpload: { Parts: input.parts.map((part) => ({ PartNumber: part.partNumber, ETag: part.etag })) } }), input.signal);
         return { etag: result.ETag?.replace(/^"|"$/gu, ""), lastModified: new Date() };
       };
-      if (input.ifMatch !== undefined) return await complete(undefined, input.ifMatch);
+      // 与 put 相同：优先原生 If-Match；服务忽略条件头时用 HEAD 读 ETag
+      // 对比后再完成 multipart（非原子模拟）。
+      if (input.ifMatch !== undefined) {
+        const capability = capabilityState.complete;
+        if (capability.mode === "best-effort") {
+          const currentEtag = await headEtag({ namespaceRoot: input.namespaceRoot, key: input.key, signal: input.signal });
+          if (currentEtag === undefined) throw conditionalConflictError();
+          if (input.ifMatch !== "*" && currentEtag !== input.ifMatch) throw conditionalConflictError();
+          return await complete();
+        }
+        return await complete(undefined, input.ifMatch);
+      }
       if (input.ifNoneMatch === undefined) return await complete();
       const capability = capabilityState.complete;
       const bestEffortComplete = async () => {

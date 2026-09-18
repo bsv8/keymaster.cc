@@ -11,6 +11,7 @@ const state = vi.hoisted(() => {
   return {
     generateKey,
     importPrivateKey,
+    push: vi.fn(),
     vaultCapability: { status: () => "unlocked", generateKey, importPrivateKey },
     registry: { list: () => [] }
   };
@@ -28,6 +29,7 @@ vi.mock("webloom-framework/react", () => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
+  router: { push: state.push },
   useI18n: () => ({ t: (_key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? _key }),
   usePluginHost: () => ({
     i18n: {
@@ -40,12 +42,13 @@ vi.mock("@keymaster/runtime", () => ({
 beforeEach(() => {
   state.generateKey.mockReset();
   state.importPrivateKey.mockReset();
+  state.push.mockReset();
 });
 
 afterEach(() => cleanup());
 
 describe("当前桶 Key 操作", () => {
-  it("新建 Key 会调用 vault.generateKey 并提示已激活", async () => {
+  it("新建 Key 会调用 vault.generateKey 并进入新身份首页", async () => {
     state.generateKey.mockResolvedValue({
       publicKeyHex: "02" + "ab".repeat(32),
       label: "主 Key",
@@ -69,7 +72,7 @@ describe("当前桶 Key 操作", () => {
       label: "主 Key",
       capabilities: ["p2pkh"]
     }));
-    expect(await screen.findByText(/已创建并设为 active/)).toBeTruthy();
+    expect(state.push).toHaveBeenCalledWith("/");
     expect(state.importPrivateKey).not.toHaveBeenCalled();
   });
 

@@ -135,6 +135,60 @@ describe("BucketObjectStore namespace guard", () => {
     }
   });
 
+  it("simulates If-Match with HEAD + PUT when the provider ignores conditional writes", async () => {
+    const commands: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const client: BucketClientAdapter = {
+      send: async (command) => {
+        const value = command as { constructor: { name: string }; input: Record<string, unknown> };
+        commands.push({ name: value.constructor.name, input: value.input });
+        if (value.constructor.name === "HeadObjectCommand") return { ETag: '"etag-current"' };
+        return { ETag: '"etag-next"' };
+      },
+      destroy: () => undefined
+    };
+    const capabilityState = createBucketObjectStoreCapabilityState();
+    setBucketObjectStoreCapabilityMode(capabilityState, "put", "best-effort", "automatic");
+    const store = createBucketObjectStore(config, { client, capabilityState });
+    try {
+      // ETag 不匹配：只发 HEAD，不写入，按冲突处理。
+      await expect(store.put({ namespaceRoot: "tenant/", key: "tenant/head.json", bytes: new Uint8Array([1]), ifMatch: "etag-stale" })).rejects.toMatchObject({ code: "storage_conflict" });
+      expect(commands.map((entry) => entry.name)).toEqual(["HeadObjectCommand"]);
+
+      commands.length = 0;
+      // ETag 匹配：HEAD 校验后以无 If-Match 的 PUT 模拟写入。
+      await expect(store.put({ namespaceRoot: "tenant/", key: "tenant/head.json", bytes: new Uint8Array([2]), ifMatch: "etag-current" })).resolves.toMatchObject({ etag: "etag-next" });
+      expect(commands.map((entry) => entry.name)).toEqual(["HeadObjectCommand", "PutObjectCommand"]);
+      expect(Object.prototype.hasOwnProperty.call(commands[1]!.input, "IfMatch")).toBe(false);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  it("simulates multipart If-Match with HEAD when the provider ignores conditional writes", async () => {
+    const commands: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const client: BucketClientAdapter = {
+      send: async (command) => {
+        const value = command as { constructor: { name: string }; input: Record<string, unknown> };
+        commands.push({ name: value.constructor.name, input: value.input });
+        if (value.constructor.name === "HeadObjectCommand") return { ETag: '"etag-current"' };
+        return { ETag: '"etag-next"' };
+      },
+      destroy: () => undefined
+    };
+    const capabilityState = createBucketObjectStoreCapabilityState();
+    setBucketObjectStoreCapabilityMode(capabilityState, "complete", "best-effort", "automatic");
+    const store = createBucketObjectStore(config, { client, capabilityState });
+    try {
+      await expect(store.put({ namespaceRoot: "tenant/", key: "tenant/first", bytes: new Uint8Array([1]), ifNoneMatch: "*" })).resolves.toMatchObject({ etag: "etag-next" });
+      commands.length = 0;
+      await expect(store.completeMultipart({ namespaceRoot: "tenant/", key: "tenant/first", uploadId: "upload-1", parts: [{ partNumber: 1, etag: "part" }], ifMatch: "etag-current" })).resolves.toMatchObject({ etag: "etag-next" });
+      expect(commands.map((entry) => entry.name)).toEqual(["HeadObjectCommand", "CompleteMultipartUploadCommand"]);
+      expect(Object.prototype.hasOwnProperty.call(commands[1]!.input, "IfMatch")).toBe(false);
+    } finally {
+      store.dispose();
+    }
+  });
+
   it("falls back after a precise 501/NotImplemented and caches the capability", async () => {
     const commands: Array<{ name: string; input: Record<string, unknown> }> = [];
     let conditionalAttempt = true;

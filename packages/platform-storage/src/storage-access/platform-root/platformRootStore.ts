@@ -34,6 +34,8 @@ const DEFAULT_PLATFORM_DECLARATIONS: readonly PluginStorageDeclaration[] = Objec
 ]);
 const OWNER_DELETE_MAX_PASSES = 32;
 const OWNER_DELETE_REQUIRED_EMPTY_PASSES = 2;
+/** Local-storage capability DTO 的 limit 上限是 256；owner 清理按游标分页。 */
+const OWNER_LIST_LIMIT = 256;
 
 function isStorageConflict(error: unknown): boolean {
   return error instanceof StorageRuntimeError && error.code === "storage_conflict"
@@ -45,7 +47,7 @@ async function listOwnerObjects(provider: StorageBucketProvider, ownerPublicKeyH
   const objects: Array<{ path: string; etag?: string }> = [];
   let cursor: string | undefined;
   do {
-    const page = await provider.list({ prefix: root, cursor, limit: 1000 });
+    const page = await provider.list({ prefix: root, cursor, limit: OWNER_LIST_LIMIT });
     objects.push(...page.objects.map((object) => ({ path: object.path, etag: object.etag })));
     cursor = page.nextCursor;
   } while (cursor);

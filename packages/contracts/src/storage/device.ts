@@ -85,6 +85,19 @@ export interface DeviceConfigPlaintextV1 {
   forcePathStyle?: boolean;
 }
 
+/**
+ * S3 桶已探测到的条件写能力缓存。
+ *
+ * - `"native"`：服务端原生执行 If-None-Match / If-Match（原子）。
+ * - `"best-effort"`：服务端忽略条件头，改用读 ETag 后写入模拟（非原子）。
+ *
+ * 字段缺失表示尚未探测；不设过期时间，只通过显式“重新探测”更新。
+ */
+export interface DeviceCapabilitiesV1 {
+  /** 条件写能力；只允许已探测成功的两个取值。 */
+  conditionalWrites: "native" | "best-effort";
+}
+
 /** 一条设备桶记录：Local 没有 cipher，S3 必须有 cipher。 */
 export type DeviceRecordV1 =
   | {
@@ -108,13 +121,16 @@ export type DeviceRecordV1 =
       location: Extract<DeviceLocationV1, { providerId: "s3" }>;
       /** 用启动密码（会话密码）派生的 key 加密的凭据密文。 */
       cipher: DeviceCipherV1;
+      /** 已探测到的条件写能力缓存；缺失表示尚未探测。 */
+      capabilities?: DeviceCapabilitiesV1;
     };
 
 const RECORD_LOCAL_KEYS = ["displayName", "format", "location", "version"] as const;
-const RECORD_S3_KEYS = ["cipher", "displayName", "format", "location", "version"] as const;
+const RECORD_S3_KEYS = ["capabilities", "cipher", "displayName", "format", "location", "version"] as const;
 const LOCATION_LOCAL_KEYS = ["providerId"] as const;
 const LOCATION_S3_KEYS = ["bucket", "endpoint", "forcePathStyle", "prefix", "providerId", "region"] as const;
 const CIPHER_KEYS = ["algorithm", "ciphertextAndTagB64Url", "ivB64Url", "keyLengthBits", "tagLengthBits"] as const;
+const CAPABILITIES_KEYS = ["conditionalWrites"] as const;
 const PLAINTEXT_KEYS = ["accessKeyId", "bucket", "endpoint", "forcePathStyle", "prefix", "region", "secretAccessKey", "sessionToken"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -274,7 +290,15 @@ export function validateDeviceConfigPlaintext(value: unknown): DeviceConfigPlain
   };
 }
 
-/** 校验单条设备桶记录；Local 禁止 cipher，S3 必须有 cipher。 */
+/** 校验条件写能力缓存；只允许已探测成功的两种取值。 */
+export function validateDeviceCapabilities(value: unknown): DeviceCapabilitiesV1 {
+  if (!isRecord(value)) fail("capabilities");
+  assertExactKeys(value, CAPABILITIES_KEYS, "capabilities");
+  if (value.conditionalWrites !== "native" && value.conditionalWrites !== "best-effort") fail("capabilities.conditionalWrites");
+  return { conditionalWrites: value.conditionalWrites };
+}
+
+/** 校验单条设备桶记录；Local 禁止 cipher 与 capabilities，S3 必须有 cipher。 */
 export function validateDeviceRecord(value: unknown): DeviceRecordV1 {
   if (!isRecord(value)) fail("record");
   if (value.format !== DEVICE_FORMAT || value.version !== DEVICE_VERSION) fail("format");
@@ -286,7 +310,8 @@ export function validateDeviceRecord(value: unknown): DeviceRecordV1 {
   }
   assertExactKeys(value, RECORD_S3_KEYS, "record");
   const cipher = validateDeviceCipher(value.cipher);
-  const record: DeviceRecordV1 = { format: DEVICE_FORMAT, version: DEVICE_VERSION, ...(displayName === undefined ? {} : { displayName }), location, cipher };
+  const capabilities = value.capabilities === undefined ? undefined : validateDeviceCapabilities(value.capabilities);
+  const record: DeviceRecordV1 = { format: DEVICE_FORMAT, version: DEVICE_VERSION, ...(displayName === undefined ? {} : { displayName }), location, cipher, ...(capabilities === undefined ? {} : { capabilities }) };
   if (new TextEncoder().encode(JSON.stringify(record)).byteLength > DEVICE_LIMITS.maxSerializedBytes) fail("record size");
   return record;
 }

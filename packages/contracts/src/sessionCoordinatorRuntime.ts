@@ -100,7 +100,7 @@ import type {
   StorageBucketSwitchResultV1,
 } from "./storage/catalog.js";
 import type { StorageRuntimeBucketV1 } from "./storage/profile.js";
-import type { DeviceRecordV1 } from "./storage/device.js";
+import type { DeviceCapabilitiesV1, DeviceRecordV1 } from "./storage/device.js";
 import { validateDeviceRecord } from "./storage/device.js";
 import type { KeymasterSessionV1, KeymasterSessionKeyDerivationV1 } from "./storage/session.js";
 import { validateKeymasterSession, validateKeymasterSessionKeyDerivation } from "./storage/session.js";
@@ -181,7 +181,7 @@ const STORAGE_CONTROL_TYPES = [
   "status", "summary", "connection", "unlock-bucket", "initial-setup", "connect-existing-remote",
   "initial-setup-result", "initial-setup-recovery-list", "initial-setup-cleanup",
   "switch-bucket",
-  "change-bucket-config", "rename-bucket", "retry",
+  "change-bucket-config", "rename-bucket", "delete-local-bucket-key", "retry",
   "cancel-probe",
   "capabilities", "probe-capabilities", "cold-export",
 ] as const satisfies readonly CoordinatorStorageControl["type"][];
@@ -269,6 +269,7 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
   C extends { type: "switch-bucket" } ? StorageBucketSwitchResultV1 :
   C extends { type: "change-bucket-config" | "rename-bucket" } ? import("./storage/profile.js").StorageRuntimeBucketV1 :
   C extends { type: "unlock-bucket" } ? CoordinatorStorageUnlockBucketResult :
+  C extends { type: "delete-local-bucket-key" } ? undefined :
   C extends { type: "cold-export" } ? Uint8Array :
   C extends { type: "capabilities" } ? BucketConditionalCapabilitiesView | null :
   C extends { type: "probe-capabilities" } ? BucketConditionalCapabilityProbeResult :
@@ -817,6 +818,7 @@ function parseInitialSetupPlan(value: unknown): InitialSetupPlan {
     backend,
     connection,
     ...(plan.startupPassword === undefined ? {} : { startupPassword: text(plan.startupPassword, "storage initial-setup startupPassword", 4_096) }),
+    ...(plan.capabilities === undefined ? {} : { capabilities: parseDeviceCapabilities(plan.capabilities, "storage initial-setup capabilities") }),
     firstKey: parsedFirstKey,
   };
 }
@@ -836,6 +838,7 @@ function parseExistingRemoteStorageConnectPlan(value: unknown): ExistingRemoteSt
     ...(plan.publicKeyHex === undefined ? {} : { publicKeyHex: text(plan.publicKeyHex, "storage connect-existing-remote publicKeyHex", 128) }),
     keyPassword: text(plan.keyPassword, "storage connect-existing-remote keyPassword", 4_096),
     ...(plan.startupPassword === undefined ? {} : { startupPassword: text(plan.startupPassword, "storage connect-existing-remote startupPassword", 4_096) }),
+    ...(plan.capabilities === undefined ? {} : { capabilities: parseDeviceCapabilities(plan.capabilities, "storage connect-existing-remote capabilities") }),
   };
 }
 
@@ -849,7 +852,8 @@ function parseBucketProbePlan(value: unknown): import("./storage/catalog.js").Bu
     const binding = parseRuntimeBucket(plan.binding, "storage probe-bucket binding");
     if (binding.backend !== backend) throw new TypeError("Coordinator probe-bucket backend and binding disagree");
     const password = optionalText(plan.password, "storage probe-bucket password", 4_096);
-    return { operationId, backend, binding, ...(password === undefined ? {} : { password }) };
+    const forceReprobe = optionalBoolean(plan.forceReprobe, "storage probe-bucket forceReprobe");
+    return { operationId, backend, binding, ...(password === undefined ? {} : { password }), ...(forceReprobe === undefined ? {} : { forceReprobe }) };
   }
   const connection = parseBucketConnection(plan.connection);
   if (connection.kind !== backend) throw new TypeError("Coordinator probe-bucket backend and connection disagree");
@@ -890,10 +894,13 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
     case "switch-bucket": {
       const keyPassword = optionalText(control.keyPassword, "storage control.switch-bucket.keyPassword", 4_096);
       const publicKeyHex = optionalText(control.publicKeyHex, "storage control.switch-bucket.publicKeyHex", 130);
+      // Local 桶没有启动密码：password 允许空字符串；S3 桶的密码正确性由
+      // Worker 在解密设备记录时验证，RPC 层只做类型/长度边界。
+      const password = control.password === "" ? "" : text(control.password, "storage control.switch-bucket.password", 4_096);
       return {
         type,
         bucket: parseRuntimeBucket(control.bucket, "storage control.switch-bucket.bucket"),
-        password: text(control.password, "storage control.switch-bucket.password", 4_096),
+        password,
         ...(keyPassword === undefined ? {} : { keyPassword }),
         ...(publicKeyHex === undefined ? {} : { publicKeyHex }),
       };
@@ -904,6 +911,12 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
     }
     case "rename-bucket":
       return { type, label: text(control.label, "storage control.rename-bucket.label", 256) };
+    case "delete-local-bucket-key":
+      return {
+        type,
+        bucket: parseRuntimeBucket(control.bucket, "storage control.delete-local-bucket-key.bucket"),
+        publicKeyHex: text(control.publicKeyHex, "storage control.delete-local-bucket-key.publicKeyHex", 130),
+      };
     default:
       throw new TypeError("Coordinator storage control type " + type + " is unsupported");
   }
@@ -1914,10 +1927,20 @@ function parseStorageSelectedResult(value: unknown, field: string): StorageSelec
 }
 
 /** 探测结果：has-keys 只暴露公开身份与标签,不含密码或密文。 */
+function parseDeviceCapabilities(value: unknown, field: string): DeviceCapabilitiesV1 {
+  const record = expectRecord(value, field);
+  const mode = record.conditionalWrites;
+  if (mode !== "native" && mode !== "best-effort") throw new TypeError(`Coordinator ${field}.conditionalWrites is invalid`);
+  return { conditionalWrites: mode };
+}
+
 function parseBucketProbeResultFor(value: unknown, field: string): import("./storage/catalog.js").BucketProbeResult {
   const result = expectRecord(value, field);
+  const conditionalWrites = result.conditionalWrites === undefined
+    ? undefined
+    : parseDeviceCapabilities({ conditionalWrites: result.conditionalWrites }, `${field}.conditionalWrites`).conditionalWrites;
   if (result.ok === true) {
-    if (result.state === "empty") return { ok: true, state: "empty" };
+    if (result.state === "empty") return { ok: true, state: "empty", ...(conditionalWrites === undefined ? {} : { conditionalWrites }) };
     if (result.state !== "has-keys" || !Array.isArray(result.keys)) throw new TypeError(`Coordinator ${field} is invalid`);
     const keys = result.keys.map((item, index) => {
       const key = expectRecord(item, `${field}.keys[${index}]`);
@@ -1926,7 +1949,7 @@ function parseBucketProbeResultFor(value: unknown, field: string): import("./sto
         label: text(key.label, `${field}.keys[${index}].label`, 256),
       };
     });
-    return { ok: true, state: "has-keys", keys };
+    return { ok: true, state: "has-keys", keys, ...(conditionalWrites === undefined ? {} : { conditionalWrites }) };
   }
   if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, `${field}.error`) };
   throw new TypeError(`Coordinator ${field} is invalid`);
@@ -2588,6 +2611,8 @@ function parseStorageControlResultFor(control: CoordinatorStorageControl, value:
       return parseRuntimeBucket(value, field);
     case "unlock-bucket":
       return parseStorageUnlockBucketResult(value, field);
+    case "delete-local-bucket-key":
+      return parseUndefinedResult(value, field);
     case "cold-export":
       return uint8ArrayValue(value, field);
     case "capabilities":
@@ -2846,7 +2871,10 @@ function isVoidCoordinatorRequest(request: CoordinatorRpcRequest): boolean {
     case "storage.owner.data":
     case "storage.platform.data":
       return request.data.type === "owner.delete" || request.data.type === "platform.delete";
-    case "storage.control": return request.control.type === "cancel-probe";
+    case "storage.control":
+      // cancel-probe 与 delete-local-bucket-key 的业务结果就是 undefined；
+      // 响应里不携带 operationResult，必须按 void 请求解析。
+      return request.control.type === "cancel-probe" || request.control.type === "delete-local-bucket-key";
     default: return false;
   }
 }

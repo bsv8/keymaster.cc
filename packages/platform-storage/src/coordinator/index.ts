@@ -7,6 +7,8 @@ export { StorageRuntimeError } from "../runtime/storageError.js";
 export { browserStorageLocks, browserStorageLockMode } from "../runtime/browserLocks.js";
 export { createS3BucketProvider } from "../bucket-providers/s3/s3BucketProvider.js";
 export { createS3BucketObjectStore } from "../bucket-providers/s3/s3BucketObjectStore.js";
+export { createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode, commitAutomaticBucketObjectStoreCapability } from "../bucket-providers/bucketObjectStore.js";
+export type { BucketObjectStoreCapabilityState, BucketConditionalWriteMode } from "../bucket-providers/bucketObjectStore.js";
 export { createKeyValueStore } from "../kv-engine/partitionedKvEngine.js";
 export type { KeyValueStoreOptions, KeyValueStoreMaintenance, KeyValueGarbageCollectionResult } from "../kv-engine/partitionedKvEngine.js";
 export { createFixedCasSnapshotStore } from "../snapshot/fixedCasSnapshotStore.js";

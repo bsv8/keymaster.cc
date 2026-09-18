@@ -58,6 +58,23 @@ export const REAL_S3_INITIALIZATION_SCENARIO = {
   resourceProfile: "s3",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 S3 + Local 双桶双 Key 交叉切换 Journey；以首页「我的信息」公钥为准。 */
+export const REAL_S3_BUCKET_KEY_SWITCH_SCENARIO = {
+  id: "J-REAL-S3-BUCKET-KEY-SWITCH",
+  level: "real-resource",
+  requirementIds: ["KM-STORAGE-001"],
+  startingState: "s3.json 指定的真实物理桶已取得本轮 lease 并完成开场清理；浏览器从全新 Local 桶开始建立身份。",
+  successCriteria: [
+    "Local 桶与真实 S3 桶各有两把 Key；第二把 Key 通过 /storage/buckets 的“新建 Key”产生。",
+    "Local↔S3 跨桶与桶内切换后，首页“我的信息”公钥和 session.activeKey 都与目标 Key 一致。",
+    "S3 非当前桶必须先输入桶密码读取 Keys；Local 桶无需桶密码。",
+    "真实 S3 前缀下 keys/ 只有本场景的两把 KeyHold，当前 Key 的应用锁由当前 session 持有。",
+    "条件写能力随设备记录持久化（native/best-effort），连接与列 Keys 不再自动探测；桶管理页可手工重新探测并写回。",
+    "桶管理页直接列出当前 S3 与非当前 Local 桶的 Key；删除非当前 Local Key 会移除 KeyHold 与该 Key 的 owner 数据，且不影响当前身份。",
+  ],
+  resourceProfile: "s3",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 生命周期技术 Gate：验证撤权先于 drain，并阻止旧 owner 的迟到结果回写。 */
 export const LIFECYCLE_BOUNDARY_GATE = {
   id: "G-LIFECYCLE-BOUNDARY",

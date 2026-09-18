@@ -146,7 +146,7 @@ function mapStorageError(caught: unknown): StorageRuntimeError {
   if (name === "QuotaExceededError") return fail("storage_limit_exceeded", "Injected local provider quota was exceeded");
   if (name === "AbortError") return fail("storage_unavailable", "Storage operation was cancelled");
   if (name === "SecurityError") return fail("storage_unavailable", "Injected local provider storage is unavailable");
-  return fail("storage_provider_error", "Injected local provider operation failed");
+  return fail("storage_provider_error", `Injected local provider operation failed: ${caught instanceof Error ? `${caught.name}: ${caught.message}` : String(caught)}`);
 }
 
 function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStorageBridgeRequest {

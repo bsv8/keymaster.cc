@@ -47,9 +47,33 @@ describe("Window P2P lane registry", () => {
     expect(laneA.start).toHaveBeenNthCalledWith(2, expect.objectContaining({ ownerSessionEpoch: "epoch-b" }));
   });
 
-  it("does not accept duplicate lane ids", () => {
+  it("replaces a stale lane with the same id when owner rebuilds race its teardown", async () => {
     const registry = createWindowP2pLaneRegistry();
-    registry.register(lane("sat-subscription"));
-    expect(() => registry.register(lane("sat-subscription"))).toThrow(/already registered/);
+    const context = { host: { id: "single-host" }, ownerSessionEpoch: "epoch-1", emit: vi.fn() };
+    const stale = lane("sat-subscription");
+    const offStale = registry.register(stale);
+    const fresh = lane("sat-subscription");
+    registry.register(fresh);
+
+    // 旧实例立即停用；身份切换不会把新实例打成 error-disabled。
+    expect(stale.stop).toHaveBeenCalledTimes(1);
+    await registry.attach(context);
+    expect(fresh.start).toHaveBeenCalledWith(context);
+    await expect(registry.dispatch("sat-subscription", { type: "requestSsp" }, new AbortController().signal)).resolves.toEqual({
+      laneId: "sat-subscription",
+      operation: { type: "requestSsp" }
+    });
+
+    // 旧实例迟到的注销不能误删新 lane。
+    offStale();
+    await expect(registry.dispatch("sat-subscription", { type: "requestSsp" }, new AbortController().signal)).resolves.toEqual({
+      laneId: "sat-subscription",
+      operation: { type: "requestSsp" }
+    });
+  });
+
+  it("rejects invalid lane ids", () => {
+    const registry = createWindowP2pLaneRegistry();
+    expect(() => registry.register({ ...lane(""), laneId: "" })).toThrow(/invalid/);
   });
 });

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { NormalizedStorageProviderConfig } from "@keymaster/contracts";
 import type { BucketObjectStore } from "../bucketObjectStore.js";
 import { createS3BucketProvider } from "./s3BucketProvider.js";
+import { createBucketObjectStoreCapabilityState } from "../bucketObjectStore.js";
+import { StorageRuntimeError } from "../../runtime/storageError.js";
 
 const config: NormalizedStorageProviderConfig = {
   version: 1,
@@ -60,6 +62,34 @@ describe("S3 bucket provider physical prefix", () => {
       namespaceRoot: "tenant-a/",
       key: "tenant-a/keymaster/keys.json"
     }));
+    provider.dispose();
+  });
+
+  it("probes native conditional writes and records the capability", async () => {
+    const store = storeFixture();
+    (store.get as ReturnType<typeof vi.fn>).mockResolvedValue({ bytes: new TextEncoder().encode("keymaster-s3-probe"), etag: "etag" });
+    (store.put as ReturnType<typeof vi.fn>).mockImplementation(async (input: { ifMatch?: string }) => {
+      if (input.ifMatch !== undefined) throw new StorageRuntimeError("storage_conflict", "Storage object already exists or changed");
+      return { etag: "etag" };
+    });
+    const capabilityState = createBucketObjectStoreCapabilityState();
+    const provider = createS3BucketProvider(config, { store, capabilityState, bucketId: "probe-native" });
+    await expect(provider.probe()).resolves.toMatchObject({ ok: true, conditionalWrites: "native" });
+    expect(capabilityState.put.mode).toBe("native");
+    provider.dispose();
+  });
+
+  it("falls back to best-effort when the provider ignores If-Match", async () => {
+    const store = storeFixture();
+    (store.get as ReturnType<typeof vi.fn>).mockResolvedValue({ bytes: new TextEncoder().encode("keymaster-s3-probe"), etag: "etag" });
+    // put 对错误 ETag 也返回成功 = 服务忽略 If-Match。
+    (store.put as ReturnType<typeof vi.fn>).mockResolvedValue({ etag: "etag" });
+    const capabilityState = createBucketObjectStoreCapabilityState();
+    const provider = createS3BucketProvider(config, { store, capabilityState, bucketId: "probe-best-effort" });
+    await expect(provider.probe()).resolves.toMatchObject({ ok: true, conditionalWrites: "best-effort" });
+    expect(capabilityState.put.mode).toBe("best-effort");
+    // 探针对象必须清理。
+    expect(store.delete).toHaveBeenCalled();
     provider.dispose();
   });
 

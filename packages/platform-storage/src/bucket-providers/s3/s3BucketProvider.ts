@@ -7,7 +7,7 @@ import type {
 } from "@keymaster/contracts";
 import { createS3BucketObjectStore } from "./s3BucketObjectStore.js";
 import type { BucketObjectStore, BucketObjectStoreCapabilityState } from "../bucketObjectStore.js";
-import { createBucketObjectStoreCapabilityState } from "../bucketObjectStore.js";
+import { createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode } from "../bucketObjectStore.js";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { assertProviderPath, normalizeProviderLimit } from "../bucketProvider.js";
 import { normalizeDirectoryPath, stripRoot } from "../bucketPath.js";
@@ -81,24 +81,29 @@ export function createS3BucketProvider(
         await store.probe(root, signal);
         const probePath = `.keymaster/probes/${crypto.randomUUID()}`;
         const bytes = new TextEncoder().encode("keymaster-s3-probe");
-        // This is deliberately strict. The generic S3 ObjectStore may still
-        // support a best-effort mode for the old Connect file API, but a
-        // Keymaster system bucket must prove native CAS before activation.
+        // 1) 写入探针对象。If-None-Match 被服务忽略也只会覆盖自己的探针。
         await store.put({ namespaceRoot: root, key: physicalPath(probePath), bytes, ifNoneMatch: "*", signal });
-        if (capabilityState.put.mode !== "native") {
-          await store.delete({ namespaceRoot: root, key: physicalPath(probePath), signal }).catch(() => undefined);
-          throw new StorageRuntimeError("storage_provider_error", "S3 provider does not support native conditional writes", "provider");
-        }
         const value = await store.get({ namespaceRoot: root, key: physicalPath(probePath), signal });
         if (!value || value.bytes.byteLength !== bytes.byteLength) throw new StorageRuntimeError("storage_provider_error", "S3 provider probe readback failed", "provider");
+        // 2) 能力判定：先强制清理旧的自动探测结论，确保下面的假 If-Match
+        //    走真实条件请求，而不是被 best-effort 的 HEAD 模拟“自证”。
+        setBucketObjectStoreCapabilityMode(capabilityState, "put", "unknown", "automatic");
+        setBucketObjectStoreCapabilityMode(capabilityState, "complete", "unknown", "automatic");
+        let conditionalWrites: "native" | "best-effort";
         try {
           await store.put({ namespaceRoot: root, key: physicalPath(probePath), bytes, ifMatch: "keymaster-invalid-etag", signal });
-          throw new StorageRuntimeError("storage_provider_error", "S3 provider ignored If-Match", "provider");
+          // 服务忽略了 If-Match：降级为 best-effort（HEAD 读 ETag 后写入）。
+          conditionalWrites = "best-effort";
         } catch (caught) {
           if (!(caught instanceof StorageRuntimeError) || caught.code !== "storage_conflict") throw caught;
+          conditionalWrites = "native";
         }
-        await store.delete({ namespaceRoot: root, key: physicalPath(probePath), signal });
-        return { ok: true, conditionalWrites: "native", latencyMs: Math.max(0, now() - started) };
+        // put 与 multipart complete 的条件写支持由同一服务的实现决定，
+        // 一次探测同时落定两者，避免 complete 再做一次会误判的自动探测。
+        setBucketObjectStoreCapabilityMode(capabilityState, "put", conditionalWrites, "automatic");
+        setBucketObjectStoreCapabilityMode(capabilityState, "complete", conditionalWrites, "automatic");
+        await store.delete({ namespaceRoot: root, key: physicalPath(probePath), signal }).catch(() => undefined);
+        return { ok: true, conditionalWrites, latencyMs: Math.max(0, now() - started) };
       } catch (caught) {
         if (caught instanceof StorageRuntimeError) throw caught;
         throw mapError(caught);

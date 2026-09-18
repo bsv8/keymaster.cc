@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ExistingRemoteStorageConnectPlan } from "@keymaster/contracts";
 import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
@@ -127,6 +127,22 @@ describe("桶管理页 · 连接已有桶", () => {
     expect(await screen.findByText(/该桶还没有任何 Key/)).toBeTruthy();
     expect(screen.queryByTestId("submit-existing")).toBeNull();
     expect(state.connectExistingRemote).not.toHaveBeenCalled();
+  });
+
+  it("桶改名通过操作按钮 + 弹出框进行", async () => {
+    state.renameBucket.mockResolvedValue({ bucketId: "bucket-current", backend: "local", deviceRecord: { format: "keymaster.device", version: 1, location: { providerId: "local" } } });
+    const user = userEvent.setup();
+    render(<StorageBucketManagerPage />);
+
+    await user.click(await screen.findByTestId("bucket-rename-open"));
+    const modal = await screen.findByTestId("bucket-rename-modal");
+    const input = within(modal).getByLabelText(/新的桶名称/);
+    await user.clear(input);
+    await user.type(input, "重命名后的桶");
+    await user.click(within(modal).getByRole("button", { name: "保存名称" }));
+
+    await waitFor(() => expect(state.renameBucket).toHaveBeenCalledWith("重命名后的桶"));
+    await waitFor(() => expect(screen.queryByTestId("bucket-rename-modal")).toBeNull());
   });
 
   it("可打开新建桶向导，并在当前桶提供 Key 管理入口", async () => {

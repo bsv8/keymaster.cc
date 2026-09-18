@@ -24,8 +24,7 @@ import {
   type CoordinatorCommandResult,
   type StorageRuntimeBucketV1
 } from "@keymaster/contracts";
-import { createDeviceRecordRepository, defaultDeviceStorage, readSession } from "../index.js";
-import { loadBuckets, type BucketRow } from "./StorageBucketManagerPage.js";
+import { loadBuckets, toBinding, type BucketRow } from "./bucketCatalog.js";
 
 /** 公开 Key 条目：只含列表展示所需字段，不含私钥材料。 */
 interface BucketKeyEntry {
@@ -44,18 +43,6 @@ const IDLE: BucketKeyState = { status: "idle", keys: [] };
 
 function probeOperationId(): string {
   return `probe-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** 由设备目录行构造可序列化的运行时绑定；s3 需要 session 的公开 KDF 参数。 */
-function toBinding(row: BucketRow): StorageRuntimeBucketV1 {
-  const session = readSession(defaultDeviceStorage());
-  return {
-    bucketId: row.bucketId,
-    backend: row.backend,
-    label: row.label,
-    deviceRecord: row.record,
-    ...(row.backend === "s3" && session?.keyDerivation ? { keyDerivation: session.keyDerivation } : {}),
-  };
 }
 
 /** 把 Coordinator 命令结果转成可展示错误；成功返回 null。 */
@@ -325,6 +312,7 @@ export function StorageSwitcherWidget() {
     <div className="storage-bucket-tree">
       <button
         type="button"
+        data-testid="storage-switcher-trigger"
         className="storage-bucket-manager__topbar-entry storage-bucket-tree__trigger"
         onClick={() => (open ? closePanel() : setOpen(true))}
         aria-expanded={open}
@@ -346,7 +334,7 @@ export function StorageSwitcherWidget() {
         <div className="storage-bucket-tree__panel" role="menu">
           <div className="storage-bucket-tree__heading">
             <span>{t("storage.bucketManager.treeTitle", { defaultValue: "桶 / Keys" })}</span>
-            <button type="button" onClick={() => { closePanel(); router.push("/storage/buckets"); }}>
+            <button type="button" data-testid="storage-switcher-manage" onClick={() => { closePanel(); router.push("/storage/buckets"); }}>
               {t("storage.bucketManager.manage", { defaultValue: "管理" })}
             </button>
           </div>
@@ -384,6 +372,7 @@ export function StorageSwitcherWidget() {
                         <button
                           key={key.publicKeyHex}
                           type="button"
+                          data-testid={`storage-switcher-key-${key.publicKeyHex}`}
                           className={active ? "is-active" : undefined}
                           onClick={() => pickKey(row, key)}
                           aria-current={active ? "true" : undefined}

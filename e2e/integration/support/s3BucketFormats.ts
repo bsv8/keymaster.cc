@@ -119,8 +119,13 @@ export async function assertS3IdentityStorage(page: Page, expectation: S3Identit
   const deviceEntry = entries.find((entry) => entry.key === `keymaster.device.${expectation.bucketId}`);
   if (!deviceEntry) fail(`缺少设备桶记录 keymaster.device.${expectation.bucketId}`);
   const device = parseJson(deviceEntry.value, "设备桶记录");
-  expectExactKeys(device, ["format", "version", "displayName", "location", "cipher"], "设备桶记录");
+  expectExactKeys(device, ["format", "version", "displayName", "location", "cipher", "capabilities"], "设备桶记录");
   if (device.format !== "keymaster.device" || device.version !== 1) fail("设备桶记录 format/version 必须是 keymaster.device/1");
+  // 条件写能力在连接/初始化探测后随记录持久化；只允许已探测成功的两种取值。
+  if (device.capabilities !== undefined) {
+    const capabilities = device.capabilities as Record<string, unknown>;
+    if (capabilities.conditionalWrites !== "native" && capabilities.conditionalWrites !== "best-effort") fail("设备桶记录 capabilities.conditionalWrites 非法");
+  }
   const location = device.location as Record<string, unknown>;
   expectExactKeys(location, ["providerId", "endpoint", "region", "bucket", "prefix"], "设备桶记录 location");
   if (location.providerId !== "s3") fail("设备桶记录 location.providerId 必须是 s3");

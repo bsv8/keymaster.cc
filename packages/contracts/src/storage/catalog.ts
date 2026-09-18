@@ -4,6 +4,7 @@
 // 配置放进契约。实现层通过 KeymasterHold SDK 产生/消费这些密文记录。
 
 import type { KeyImportMaterial } from "../keyImport.js";
+import type { DeviceCapabilitiesV1 } from "./device.js";
 
 /** 正式的 V1 桶后端。 */
 export type StorageBucketBackend = "local" | "s3";
@@ -134,6 +135,11 @@ export interface InitialSetupPlan {
    * 并把 KDF 参数写入 session。local 桶省略。
    */
   startupPassword?: string;
+  /**
+   * 页面在探测阶段已得到的条件写能力缓存；写入设备记录时原样保存，
+   * 避免提交时重复探测。省略时由 Coordinator 在提交事务内探测。
+   */
+  capabilities?: DeviceCapabilitiesV1;
   /** 要和桶快照一起提交的第一把 Key（含它自己的密码）。 */
   firstKey: InitialSetupFirstKey;
 }
@@ -156,6 +162,11 @@ export interface ExistingRemoteStorageConnectPlan {
   keyPassword: string;
   /** 启动密码（会话密码）；s3 用于加密本机设备记录,local 省略。 */
   startupPassword?: string;
+  /**
+   * 页面在探测阶段已得到的条件写能力缓存；写入设备记录时原样保存，
+   * 避免提交时重复探测。省略时由 Coordinator 在提交事务内探测。
+   */
+  capabilities?: DeviceCapabilitiesV1;
 }
 
 /** 连接前探测：只读 keys/ 目录,判定“已有钱包”还是“空桶”。 */
@@ -175,6 +186,11 @@ export interface BucketProbePlan {
   binding?: import("./profile.js").StorageRuntimeBucketV1;
   /** 已登记 S3 桶的启动密码；local 桶省略。只用于本次只读探测。 */
   password?: string;
+  /**
+   * 强制重新探测条件写能力：忽略设备记录中的 capabilities 缓存，重新执行
+   * 条件写探针并把结果写回记录（桶管理页的“重新探测”入口）。
+   */
+  forceReprobe?: boolean;
 }
 
 /** 探测结果：读到至少一份可解析 KeyHold 文件 = has-keys。 */
@@ -184,8 +200,10 @@ export type BucketProbeResult =
       state: "has-keys";
       /** 公开身份与标签,不含密码或密文。 */
       keys: Array<{ publicKeyHex: string; label: string }>;
+      /** 本次生效的条件写能力（缓存复用或本次探测结果）；local 桶省略。 */
+      conditionalWrites?: "native" | "best-effort";
     }
-  | { ok: true; state: "empty" }
+  | { ok: true; state: "empty"; conditionalWrites?: "native" | "best-effort" }
   | { ok: false; error: StorageUserFacingError };
 
 /** 连接已有远端成功后公开的最小运行态摘要。 */

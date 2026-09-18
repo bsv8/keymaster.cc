@@ -13,17 +13,17 @@ import {
   STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
   type BucketProbeResult,
-  type DeviceRecordV1,
   type ExistingRemoteStorageConnectPlan,
   type StorageBucketConnectionConfigV1,
   type StorageRuntimeBucketV1
 } from "@keymaster/contracts";
-import { Modal } from "@keymaster/ui";
+import { Button, Modal, TextInput } from "@keymaster/ui";
 import { router, useI18n, usePluginHost } from "@keymaster/runtime";
-import { createDeviceRecordRepository, defaultDeviceStorage, readSession } from "../index.js";
 import { BucketConnectionFields } from "./BucketConnectionFields.js";
+import { BucketKeyList } from "./BucketKeyList.js";
 import { BucketSetupWizard } from "./BucketSetupWizard.js";
 import { CurrentBucketKeyActions } from "./CurrentBucketKeyActions.js";
+import { loadBuckets, toBinding, type BucketRow } from "./bucketCatalog.js";
 import {
   EMPTY_BUCKET_DRAFT,
   connectionFromBucketDraft,
@@ -32,39 +32,10 @@ import {
   type BucketDraft
 } from "./bucketConnectionDraft.js";
 
-export interface BucketRow {
-  bucketId: string;
-  label: string;
-  backend: "local" | "s3";
-  record: DeviceRecordV1;
-  current: boolean;
-}
-
-export function loadBuckets(): BucketRow[] {
-  const storage = defaultDeviceStorage();
-  const session = readSession(storage);
-  const { entries } = createDeviceRecordRepository(storage).list();
-  return entries
-    .map((entry) => ({
-      bucketId: entry.remoteStorageId,
-      label: entry.record.displayName ?? entry.remoteStorageId,
-      backend: entry.record.location.providerId,
-      record: entry.record,
-      current: session?.activeBucketId === entry.remoteStorageId,
-    }))
-    .sort((left, right) => Number(right.current) - Number(left.current) || left.label.localeCompare(right.label));
-}
-
-function toBinding(row: BucketRow): StorageRuntimeBucketV1 {
-  const session = readSession(defaultDeviceStorage());
-  return {
-    bucketId: row.bucketId,
-    backend: row.backend,
-    label: row.label,
-    deviceRecord: row.record,
-    ...(row.backend === "s3" && session?.keyDerivation ? { keyDerivation: session.keyDerivation } : {}),
-  };
-}
+// 桶目录读取集中在 bucketCatalog，这里保持原导出路径兼容（顶栏切换器与
+// e2e 测试都从这里引用）。
+export { loadBuckets } from "./bucketCatalog.js";
+export type { BucketRow } from "./bucketCatalog.js";
 
 export function StorageBucketManagerPage() {
   const { t } = useI18n();
@@ -75,7 +46,16 @@ export function StorageBucketManagerPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [pendingSwitch, setPendingSwitch] = useState<BucketRow | null>(null);
-  const [renameLabel, setRenameLabel] = useState("");
+  // 条件写能力的手工重新探测（s3 桶；非当前桶需要桶密码）。
+  const [reprobeTarget, setReprobeTarget] = useState<BucketRow | null>(null);
+  const [reprobePassword, setReprobePassword] = useState("");
+  const [reprobeError, setReprobeError] = useState<string | null>(null);
+  const [reprobeBusy, setReprobeBusy] = useState(false);
+  // 桶改名以“操作按钮 + 弹出框”进行，不再在页面底部挂一块表单。
+  const [renameTarget, setRenameTarget] = useState<BucketRow | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 新建桶：页内 Modal 分步向导，与初始化共用同一业务状态机。
   const [setupOpen, setSetupOpen] = useState(false);
@@ -106,8 +86,6 @@ export function StorageBucketManagerPage() {
       return undefined;
     }
   }, [host, reload]);
-
-  const current = rows.find((row) => row.current);
 
   async function switchTo(row: BucketRow, secret: string): Promise<void> {
     if (!service.switchBucket) throw new Error("Storage control does not support bucket switching");
@@ -192,6 +170,7 @@ export function StorageBucketManagerPage() {
       ...(connectKeyHex === undefined ? {} : { publicKeyHex: connectKeyHex }),
       keyPassword: connectKeyPassword,
       ...(connectDraft.backend === "s3" ? { startupPassword: connectStartupPassword } : {}),
+      ...(connectProbe.conditionalWrites === undefined ? {} : { capabilities: { conditionalWrites: connectProbe.conditionalWrites } }),
     };
     setBusyId("connect");
     setError(null);
@@ -210,19 +189,104 @@ export function StorageBucketManagerPage() {
     }
   }
 
-  async function renameCurrent(): Promise<void> {
-    const label = renameLabel.trim();
-    if (!label || !service.renameBucket) return;
-    setBusyId("rename");
+  function openRename(row: BucketRow): void {
+    setRenameTarget(row);
+    setRenameValue(row.label);
+    setRenameError(null);
+  }
+
+  function closeRename(): void {
+    if (renameBusy) return;
+    setRenameTarget(null);
+    setRenameValue("");
+    setRenameError(null);
+  }
+
+  function openReprobe(row: BucketRow): void {
+    if (row.current) {
+      if (vault?.status() !== "unlocked") {
+        setError(t("storage.bucketManager.err.reprobeLocked", { defaultValue: "请先解锁当前桶再重新探测条件写。" }));
+        return;
+      }
+      void runCurrentBucketReprobe();
+      return;
+    }
+    setReprobeTarget(row);
+    setReprobePassword("");
+    setReprobeError(null);
+  }
+
+  /** 当前桶已解锁：直接对运行态 Provider 做一次条件写探测并写回记录。 */
+  async function runCurrentBucketReprobe(): Promise<void> {
+    if (!service.probeConditionalCapabilities) {
+      setError(t("storage.bucketManager.err.reprobe", { defaultValue: "当前 Coordinator 不支持条件写探测。" }));
+      return;
+    }
+    setBusyId("reprobe");
     setError(null);
     try {
-      await service.renameBucket(label);
-      setRenameLabel("");
+      await service.probeConditionalCapabilities();
       reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : t("storage.bucketManager.err.reprobe", { defaultValue: "重新探测条件写失败。" }));
     } finally {
       setBusyId(null);
+    }
+  }
+
+  function closeReprobe(): void {
+    if (reprobeBusy) return;
+    setReprobeTarget(null);
+    setReprobePassword("");
+    setReprobeError(null);
+  }
+
+  /** 非当前 s3 桶：用桶密码建立只读连接并强制重新探测，结果写回设备记录。 */
+  async function submitReprobe(): Promise<void> {
+    if (!reprobeTarget || !service.probeBucket || reprobeBusy) return;
+    const row = reprobeTarget;
+    setReprobeBusy(true);
+    setReprobeError(null);
+    try {
+      const result = await service.probeBucket({
+        operationId: "reprobe-" + Date.now().toString(36),
+        backend: "s3",
+        binding: toBinding(row),
+        password: reprobePassword,
+        forceReprobe: true,
+      });
+      if (!result.ok) {
+        setReprobeError(result.error.summary);
+        return;
+      }
+      setReprobeTarget(null);
+      setReprobePassword("");
+      reload();
+    } catch (err) {
+      setReprobeError(err instanceof Error ? err.message : t("storage.bucketManager.err.reprobe", { defaultValue: "重新探测条件写失败。" }));
+    } finally {
+      setReprobeBusy(false);
+    }
+  }
+
+  async function submitRename(): Promise<void> {
+    if (!renameTarget || !service.renameBucket || renameBusy) return;
+    const label = renameValue.trim();
+    if (!label) {
+      setRenameError(t("storage.bucketManager.err.renameEmpty", { defaultValue: "请输入桶名称。" }));
+      return;
+    }
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      await service.renameBucket(label);
+      setRenameTarget(null);
+      setRenameValue("");
+      reload();
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : t("storage.bucketManager.err.rename", { defaultValue: "修改桶名称失败" }));
+    } finally {
+      setRenameBusy(false);
     }
   }
 
@@ -255,34 +319,73 @@ export function StorageBucketManagerPage() {
         <ul className="storage-bucket-manager__list">
           {rows.map((row) => (
             <li key={row.bucketId} className="storage-bucket-manager__row" data-testid={`bucket-row-${row.bucketId}`}>
-              <div className="storage-bucket-manager__meta">
-                <strong>{row.label}</strong>
-                <code>{row.bucketId}</code>
-                <span>{row.backend}</span>
-                {row.current ? <span data-testid="bucket-current">{t("storage.bucketManager.current", { defaultValue: "当前" })}</span> : null}
+              <div className="storage-bucket-manager__row-head">
+                <div className="storage-bucket-manager__meta">
+                  <strong>{row.label}</strong>
+                  <code>{row.bucketId}</code>
+                  <span>{row.backend}</span>
+                  {row.backend === "s3" ? (
+                    <span
+                      className={`storage-bucket-manager__capability storage-bucket-manager__capability--${row.conditionalWrites ?? "unknown"}`}
+                      data-testid={`bucket-capability-${row.bucketId}`}
+                    >
+                      {row.conditionalWrites === "native"
+                        ? t("storage.bucketManager.capability.native", { defaultValue: "原生条件写" })
+                        : row.conditionalWrites === "best-effort"
+                          ? t("storage.bucketManager.capability.bestEffort", { defaultValue: "模拟条件写" })
+                          : t("storage.bucketManager.capability.unknown", { defaultValue: "未探测" })}
+                    </span>
+                  ) : null}
+                  {row.current ? <span data-testid="bucket-current">{t("storage.bucketManager.current", { defaultValue: "当前" })}</span> : null}
+                </div>
+                <div className="storage-bucket-manager__row-actions">
+                  {row.backend === "s3" ? (
+                    <button
+                      type="button"
+                      data-testid={`bucket-reprobe-${row.bucketId}`}
+                      disabled={busyId !== null}
+                      onClick={() => openReprobe(row)}
+                    >
+                      {t("storage.bucketManager.reprobe", { defaultValue: "重新探测条件写" })}
+                    </button>
+                  ) : null}
+                  {!row.current ? (
+                    <button
+                      type="button"
+                      disabled={busyId !== null}
+                      onClick={() => {
+                        if (row.backend === "s3") {
+                          setPendingSwitch(row);
+                          return;
+                        }
+                        void switchTo(row, "");
+                      }}
+                    >
+                      {t("storage.bucketManager.switch", { defaultValue: "切换到此桶" })}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        data-testid="bucket-rename-open"
+                        onClick={() => openRename(row)}
+                        disabled={busyId !== null}
+                      >
+                        {t("storage.bucketManager.rename", { defaultValue: "改名" })}
+                      </button>
+                      {/* Key 管理只对当前桶提供：非当前桶必须先切换解锁。 */}
+                      <CurrentBucketKeyActions
+                        bucketLabel={row.label}
+                        unlocked={vault?.status() === "unlocked"}
+                        onChanged={reload}
+                      />
+                    </>
+                  )}
+                </div>
               </div>
-              {!row.current ? (
-                <button
-                  type="button"
-                  disabled={busyId !== null}
-                  onClick={() => {
-                    if (row.backend === "s3") {
-                      setPendingSwitch(row);
-                      return;
-                    }
-                    void switchTo(row, "");
-                  }}
-                >
-                  {t("storage.bucketManager.switch", { defaultValue: "切换到此桶" })}
-                </button>
-              ) : (
-                // Key 管理只对当前桶提供：非当前桶必须先切换解锁。
-                <CurrentBucketKeyActions
-                  bucketLabel={row.label}
-                  unlocked={vault?.status() === "unlocked"}
-                  onChanged={reload}
-                />
-              )}
+              {/* 当前桶与非当前 Local 桶都直接列出 Key（Local 权限在本机）； 
+                  非当前 S3 桶的读取入口在顶栏切换器。 */}
+              <BucketKeyList row={row} unlocked={vault?.status() === "unlocked"} onChanged={reload} />
             </li>
           ))}
         </ul>
@@ -374,25 +477,64 @@ export function StorageBucketManagerPage() {
           ) : null}
         </section>
       ) : null}
-      {current ? (
-        <section className="storage-bucket-manager__rename" data-testid="bucket-rename">
-          <label>
-            {t("storage.bucketManager.renameLabel", { defaultValue: "当前桶显示名称" })}
-            <input
-              value={renameLabel}
-              placeholder={current.label}
-              onChange={(event) => setRenameLabel(event.currentTarget.value)}
-            />
-          </label>
-          <button
-            type="button"
-            disabled={busyId !== null || renameLabel.trim().length === 0}
-            onClick={() => void renameCurrent()}
-          >
-            {t("storage.bucketManager.rename", { defaultValue: "改名" })}
-          </button>
-        </section>
-      ) : null}
+      <Modal
+        open={reprobeTarget !== null}
+        title={t("storage.bucketManager.reprobeTitle", { defaultValue: "重新探测条件写能力" })}
+        onClose={closeReprobe}
+        footer={(
+          <>
+            <Button variant="ghost" onClick={closeReprobe} disabled={reprobeBusy}>
+              {t("common.action.cancel", { defaultValue: "取消" })}
+            </Button>
+            <Button onClick={() => void submitReprobe()} loading={reprobeBusy} disabled={!reprobePassword}>
+              {t("storage.bucketManager.reprobeSubmit", { defaultValue: "开始探测" })}
+            </Button>
+          </>
+        )}
+        data-testid="bucket-reprobe-modal"
+      >
+        <p className="storage-bucket-manager__key-hint">
+          {t("storage.bucketManager.reprobeHint", { defaultValue: "输入该桶的桶密码，仅用于本次探测；结果会写回本机记录，之后不再自动探测。" })}
+          {reprobeTarget ? <> <code>{reprobeTarget.label}</code></> : null}
+        </p>
+        <TextInput
+          label={t("storage.bucketManager.bucketPassword", { defaultValue: "桶密码" })}
+          type="password"
+          autoComplete="current-password"
+          value={reprobePassword}
+          onChange={(event) => { setReprobePassword(event.currentTarget.value); setReprobeError(null); }}
+          onKeyDown={(event) => { if (event.key === "Enter") void submitReprobe(); }}
+          error={reprobeError ?? undefined}
+          autoFocus
+        />
+      </Modal>
+
+      <Modal
+        open={renameTarget !== null}
+        title={t("storage.bucketManager.renameTitle", { defaultValue: "重命名存储桶" })}
+        onClose={closeRename}
+        footer={(
+          <>
+            <Button variant="ghost" onClick={closeRename} disabled={renameBusy}>
+              {t("common.action.cancel", { defaultValue: "取消" })}
+            </Button>
+            <Button onClick={() => void submitRename()} loading={renameBusy} disabled={!renameValue.trim()}>
+              {t("storage.bucketManager.renameSubmit", { defaultValue: "保存名称" })}
+            </Button>
+          </>
+        )}
+        data-testid="bucket-rename-modal"
+      >
+        <TextInput
+          label={t("storage.bucketManager.renameField", { defaultValue: "新的桶名称" })}
+          value={renameValue}
+          onChange={(event) => { setRenameValue(event.currentTarget.value); setRenameError(null); }}
+          onKeyDown={(event) => { if (event.key === "Enter") void submitRename(); }}
+          error={renameError ?? undefined}
+          placeholder={renameTarget?.label ?? ""}
+          autoFocus
+        />
+      </Modal>
       <Modal
         open={setupOpen}
         title={t("storage.bucketManager.addBucket", { defaultValue: "添加存储桶" })}
