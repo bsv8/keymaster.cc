@@ -295,7 +295,7 @@ test(JOURNEY_ID + "：Local/S3 双桶双 Key 交叉切换以首页我的信息�
       expect(legacy, `S3 桶出现旧格式对象: ${legacy.join(", ")}`).toEqual([]);
     });
 
-    await test.step("桶管理页列出非当前 Local 桶的 Key 并删除一把（本机 localStorage 权限）", async () => {
+    await test.step("桶管理页列出非当前 Local 桶的 Key 并删除一把（本机 IndexedDB 权限）", async () => {
       await openBucketManagerFromSwitcher(page);
       const list = page.getByTestId(`bucket-key-list-${localReady.bucketId}`);
       await expect(list).toBeVisible();
@@ -308,7 +308,7 @@ test(JOURNEY_ID + "：Local/S3 双桶双 Key 交叉切换以首页我的信息�
         publicKeyHex: localKey2,
         keyLabel: LOCAL_KEY_2,
       });
-      // 列表按 localStorage 真值重新加载：只剩第一把 Key。
+      // 列表按本机 IndexedDB 真值重新加载：只剩第一把 Key。
       await expect(list.getByText(LOCAL_KEY_2)).toHaveCount(0);
       await expect(list.getByText(LOCAL_KEY_1)).toBeVisible();
       // 当前桶仍是 S3，删除非当前 Local Key 不影响当前身份。

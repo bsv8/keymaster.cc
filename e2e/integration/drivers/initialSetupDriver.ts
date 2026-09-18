@@ -261,8 +261,7 @@ export async function initializeLocalUserWithImportedHexKey(
   expect(catalog?.buckets, "导入一次性 Key 的初始化仍必须登记一个 Local 设备桶").toHaveLength(1);
   expect(catalog?.buckets?.[0]).toMatchObject({ label: input.bucketLabel, backend: "local" });
   await assertSetupSecretNotPersisted(page, input.password);
-  const persisted = await page.evaluate(() => Object.keys(localStorage).map((key) => `${key}=${localStorage.getItem(key) ?? ""}`).join("\n"));
-  expect(persisted, "一次性 Key 原文不能落入浏览器 localStorage").not.toContain(input.privateKeyHex);
+  await assertSetupSecretNotPersisted(page, input.privateKeyHex);
 
   const publicKeyHex = await readSessionPublicKey(page);
   return { publicKeyHex };

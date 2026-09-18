@@ -184,10 +184,19 @@ test(JOURNEY_ID + "：真实 S3 首次初始化、刷新/锁定恢复与全新�
       expect(keyHoldBefore?.body, "接入前必须能读到初始化写入的 KeyHold").toBeTruthy();
       expect(keyHoldBefore?.etag).toBeTruthy();
 
-      // 先锁定释放 Key 锁（旧浏览器不再持有），再清空本机目录并刷新：
-      // 新 session 会落到一个全新的 SharedWorker，模拟干净浏览器。
+      // 先锁定释放 Key 锁（旧浏览器不再持有），再清空本机目录（localStorage
+      // 引导记录 + Local 桶 IndexedDB）并刷新：新 session 会落到一个全新的
+      // SharedWorker，模拟干净浏览器。
       await lockWallet(page);
-      await page.evaluate(() => { window.localStorage.clear(); });
+      await page.evaluate(async () => {
+        window.localStorage.clear();
+        await new Promise<void>((resolve) => {
+          const request = indexedDB.deleteDatabase("keymaster.local");
+          request.onsuccess = () => resolve();
+          request.onerror = () => resolve();
+          request.onblocked = () => resolve();
+        });
+      });
       await page.reload({ waitUntil: "domcontentloaded" });
       await expect(
         page.getByRole("heading", { name: /Choose a bucket type|选择桶类型/u }),

@@ -152,8 +152,9 @@ export const STORAGE_BROWSER_GATE = {
   requirementIds: ["KM-TECH-001"],
   startingState: "真实 Chromium 打开的生产 preview，未注入 Node 存储替身。",
   successCriteria: [
-    "浏览器提供 localStorage、Web Crypto 和 SharedWorker 能力。",
-    "Local 业务存储的物理入口仍是 localStorage，而不是 IndexedDB。",
+    "浏览器提供 localStorage、IndexedDB、Web Crypto 和 SharedWorker 能力。",
+    "Local 桶对象只写入 IndexedDB；localStorage 只保留 keymaster.device.* 与 keymaster.session 引导记录。",
+    "IndexedDB 未获持久化授权时授权条持续显示，授权后消失且刷新仍保持。",
   ],
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
@@ -194,7 +195,7 @@ export const LOCAL_IMPORTED_KEY_SCENARIO = {
   successCriteria: [
     "用户可以在首次初始化中解析并导入 Hex Key，而不是只能生成 Key。",
     "导入后的 Key 标签、公钥归属由 session 与桶文件真值可观察。",
-    "桶密码和一次性私钥原文不进入 localStorage 或测试附件。",
+    "桶密码和一次性私钥原文不进入 localStorage、IndexedDB 或测试附件。",
   ],
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;

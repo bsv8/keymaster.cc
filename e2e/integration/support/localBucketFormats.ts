@@ -1,12 +1,11 @@
 // 按 KeymasterFormats 校验 Local 桶在浏览器里的实际存储文件。
 //
-// 对 Local 桶而言,"桶内文件"就是 localStorage 里的键:
+// Local 桶的物理介质是 IndexedDB（库 `keymaster.local`、对象仓库
+// `objects`，键为 `[bucketId, path]`）；设备引导记录仍在 localStorage：
 //   - `keymaster.device.<ID>` 设备桶记录(keymaster.device.v1)
 //   - `keymaster.session`      浏览器 session(keymaster.session.v1)
-//   - `keymaster.bucket.<ID>.keys/<公钥>.keyhold`  KeyHold 文档
-//   - `keymaster.bucket.<ID>.<公钥>/lock.json`     Key 应用锁
-//
-// Local 物理键 = 逻辑桶路径加 `keymaster.bucket.<ID>.` 前缀。
+//   - IndexedDB `keys/<公钥>.keyhold`  KeyHold 文档
+//   - IndexedDB `<公钥>/lock.json`     Key 应用锁
 //
 // 这里不读私钥明文;只验证公开结构和密文封装形状。
 
@@ -31,6 +30,13 @@ export interface RawEntry {
   readonly value: string;
 }
 
+/** IndexedDB 里的桶对象：路径 + UTF-8 文本（KeyHold/锁文件都是 JSON）。 */
+export interface RawBucketObjectEntry {
+  readonly bucketId: string;
+  readonly path: string;
+  readonly text: string;
+}
+
 export const PUBLIC_KEY_PATTERN = /^(02|03)[0-9a-f]{64}$/u;
 const SESSION_ID_PATTERN = /^[0-9a-f]{32}$/u;
 
@@ -52,18 +58,6 @@ export function parseJson(raw: string, label: string): Record<string, unknown> {
 export function expectExactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const extra = Object.keys(value).filter((key) => !allowed.includes(key));
   if (extra.length > 0) fail(`${label} 含未定义字段: ${extra.join(", ")}`);
-}
-
-/**
- * 桶内文件的 localStorage 值是原始字节的 base64（Local 适配器的物理编码），
- * 解析前必须先解码回 UTF-8 文本。
- */
-function decodeFileValue(encoded: string, label: string): string {
-  try {
-    return Buffer.from(encoded, "base64").toString("utf8");
-  } catch {
-    fail(`${label} 不是合法的 base64 文件内容`);
-  }
 }
 
 /** base64url 解码后的字节数;非法返回 undefined。 */
@@ -92,6 +86,46 @@ export async function readRawLocalStorage(page: Page): Promise<RawEntry[]> {
   });
 }
 
+/**
+ * 读取 IndexedDB `keymaster.local/objects` 里的全部 Local 桶对象。
+ *
+ * 这是 Local 桶的正式物理真值；设备记录与 session 不在这里。对象值按
+ * UTF-8 文本返回，KeyHold 与锁文件都是 JSON，调用方只校验公开结构。
+ */
+export async function readRawLocalBucketObjects(page: Page): Promise<RawBucketObjectEntry[]> {
+  return page.evaluate(() => new Promise<Array<{ bucketId: string; path: string; text: string }>>((resolve, reject) => {
+    const request = indexedDB.open("keymaster.local", 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains("objects")) database.createObjectStore("objects");
+    };
+    request.onerror = () => reject(new Error("无法打开 IndexedDB keymaster.local"));
+    request.onsuccess = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains("objects")) {
+        database.close();
+        resolve([]);
+        return;
+      }
+      const transaction = database.transaction("objects", "readonly");
+      const cursor = transaction.objectStore("objects").openCursor();
+      const entries: Array<{ bucketId: string; path: string; text: string }> = [];
+      cursor.onerror = () => { database.close(); reject(new Error("读取 IndexedDB 桶对象失败")); };
+      cursor.onsuccess = () => {
+        const position = cursor.result;
+        if (!position) {
+          database.close();
+          resolve(entries);
+          return;
+        }
+        const [bucketId, path] = position.key as [string, string];
+        const record = position.value as { bytes?: Uint8Array };
+        entries.push({ bucketId, path, text: new TextDecoder("utf-8", { fatal: false }).decode(record.bytes ?? new Uint8Array()) });
+        position.continue();
+      };
+    };
+  }));
+}
 
 /** 按 KeyHold v1 校验一份 KeyHold 文档；字段/密文封装不符直接失败。 */
 export function assertKeyHoldDocument(value: Record<string, unknown>, expectation: { publicKeyHex: string; label: string }): Record<string, unknown> {
@@ -131,19 +165,24 @@ export function assertKeyLockDocument(value: Record<string, unknown>, expectatio
 }
 
 /**
- * 身份相关文件的键值映射：设备记录、session、KeyHold 文件。
+ * 身份相关文件的键值映射：设备记录、session（localStorage）与 KeyHold
+ * 文件（IndexedDB）。
  *
  * 锁文件的时间戳、schema/盐等运行态文件会随心跳和装配变化，不在这里比较；
  * 这个映射用于判断一次失败操作是否改动了身份真值。
  */
-export function identityFileMap(entries: readonly RawEntry[]): Record<string, string> {
-  return Object.fromEntries(
-    entries
-      .filter((entry) => entry.key.startsWith("keymaster.device.")
-        || entry.key === "keymaster.session"
-        || entry.key.includes("/keys/"))
-      .map((entry) => [entry.key, entry.value]),
-  );
+export function identityFileMap(
+  entries: readonly RawEntry[],
+  bucketObjects: readonly RawBucketObjectEntry[] = [],
+): Record<string, string> {
+  return Object.fromEntries([
+    ...entries
+      .filter((entry) => entry.key.startsWith("keymaster.device.") || entry.key === "keymaster.session")
+      .map((entry) => [entry.key, entry.value] as const),
+    ...bucketObjects
+      .filter((entry) => entry.path.includes("/keys/"))
+      .map((entry) => [`keymaster.bucket.${entry.bucketId}.${entry.path}`, entry.text] as const),
+  ]);
 }
 
 /**
@@ -185,26 +224,28 @@ export async function assertLocalBucketStorage(
   if (session.activeKey !== ownerPublicKeyHex) fail("session.activeKey 必须等于首 Key 公钥");
   const sessionId = session.sessionId as string;
 
-  // 3) KeyHold 文档:一 Key 一文件,文件名就是公钥。
-  const keyHoldKey = `keymaster.bucket.${bucketId}.keys/${ownerPublicKeyHex}.keyhold`;
-  const keyHoldEntry = entries.find((entry) => entry.key === keyHoldKey);
-  if (!keyHoldEntry) fail(`缺少 KeyHold 文件 ${keyHoldKey}`);
-  const keyFiles = entries.filter((entry) => entry.key.startsWith(`keymaster.bucket.${bucketId}.keys/`));
+  // 3) KeyHold 文档:一 Key 一文件,文件名就是公钥;物理真值是 IndexedDB。
+  const bucketObjects = await readRawLocalBucketObjects(page);
+  const bucketEntries = bucketObjects.filter((entry) => entry.bucketId === bucketId);
+  const keyHoldPath = `keys/${ownerPublicKeyHex}.keyhold`;
+  const keyHoldEntry = bucketEntries.find((entry) => entry.path === keyHoldPath);
+  if (!keyHoldEntry) fail(`缺少 KeyHold 文件 ${keyHoldPath}`);
+  const keyFiles = bucketEntries.filter((entry) => entry.path.startsWith("keys/"));
   if (keyFiles.length !== 1) fail(`keys/ 目录应只有 1 个 KeyHold 文件,实际 ${keyFiles.length}`);
-  const keyHold = assertKeyHoldDocument(parseJson(decodeFileValue(keyHoldEntry.value, "KeyHold 文档"), "KeyHold 文档"), {
+  const keyHold = assertKeyHoldDocument(parseJson(keyHoldEntry.text, "KeyHold 文档"), {
     publicKeyHex: ownerPublicKeyHex,
     label: keyLabel,
   });
 
   // 4) Key 应用锁:使用中的 Key 必须有未过期的锁,holder 就是 session。
-  const lockKey = `keymaster.bucket.${bucketId}.${ownerPublicKeyHex}/lock.json`;
-  const lockEntry = entries.find((entry) => entry.key === lockKey);
+  const lockPath = `${ownerPublicKeyHex}/lock.json`;
+  const lockEntry = bucketEntries.find((entry) => entry.path === lockPath);
   let keyLock: Record<string, unknown> | undefined;
   if (lockEntry) {
-    keyLock = assertKeyLockDocument(parseJson(decodeFileValue(lockEntry.value, "Key 锁文件"), "Key 锁文件"), { sessionId });
+    keyLock = assertKeyLockDocument(parseJson(lockEntry.text, "Key 锁文件"), { sessionId });
   }
 
-  // 5) 旧格式键必须彻底消失。
+  // 5) 旧格式键必须彻底消失,Local 桶对象也不能再写回 localStorage。
   for (const legacy of [
     "keymaster.device-bootstrap.v1",
     "keymaster.storage.catalog.v2",
@@ -213,19 +254,24 @@ export async function assertLocalBucketStorage(
   ]) {
     if (entries.some((entry) => entry.key === legacy)) fail(`旧格式键仍然存在: ${legacy}`);
   }
+  const localStorageBucketKeys = entries.filter((entry) => entry.key.startsWith("keymaster.bucket."));
+  if (localStorageBucketKeys.length > 0) {
+    fail(`Local 桶对象不得再写入 localStorage: ${localStorageBucketKeys.map((entry) => entry.key).join(", ")}`);
+  }
 
   return { deviceRecord, session, sessionId, keyHold, ...(keyLock === undefined ? {} : { keyLock }) };
 }
 
-/** 用户主动锁定后,Key 应用锁必须被释放（文件删除）。 */
+/** 用户主动锁定后,Key 应用锁必须被释放（IndexedDB 文件删除）。 */
 export async function assertLocalBucketLockReleased(
   page: Page,
   expectation: Pick<LocalBucketStorageExpectation, "bucketId" | "ownerPublicKeyHex">,
 ): Promise<void> {
   const entries = await readRawLocalStorage(page);
-  const lockKey = `keymaster.bucket.${expectation.bucketId}.${expectation.ownerPublicKeyHex}/lock.json`;
-  expect(entries.some((entry) => entry.key === lockKey), "锁定后 Key 应用锁必须被删除").toBe(false);
+  const bucketEntries = (await readRawLocalBucketObjects(page)).filter((entry) => entry.bucketId === expectation.bucketId);
+  const lockPath = `${expectation.ownerPublicKeyHex}/lock.json`;
+  expect(bucketEntries.some((entry) => entry.path === lockPath), "锁定后 Key 应用锁必须被删除").toBe(false);
   // 锁定不改变私钥文件与设备记录,只释放锁。
-  expect(entries.some((entry) => entry.key === `keymaster.bucket.${expectation.bucketId}.keys/${expectation.ownerPublicKeyHex}.keyhold`)).toBe(true);
+  expect(bucketEntries.some((entry) => entry.path === `keys/${expectation.ownerPublicKeyHex}.keyhold`)).toBe(true);
   expect(entries.some((entry) => entry.key === `keymaster.device.${expectation.bucketId}`)).toBe(true);
 }

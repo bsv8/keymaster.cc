@@ -105,6 +105,12 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.onboarding.brandSubtitle": "Local key vault",
       "shell.onboarding.securityNote":
         "Your keys never leave the browser. The password is never uploaded.",
+      "shell.persistence.label": "IndexedDB persistent storage authorization",
+      "shell.persistence.message":
+        "This browser has not granted persistent IndexedDB storage yet. Local data may be cleared when storage is tight.",
+      "shell.persistence.denied":
+        "Storage was not granted. Local data can still be cleared when storage is tight. Allow persistent storage for this site and try again.",
+      "shell.persistence.authorize": "Allow persistent storage",
       "shell.onboarding.theme.toggle": "Switch theme",
       "shell.onboarding.theme.auto": "Auto",
       "shell.onboarding.theme.autoHint": "Follow the system",
@@ -281,6 +287,10 @@ export const SHELL_RESOURCES: I18nPluginResources = {
         "此密码将取代导入源密码，仅保存在本机设备。",
       "shell.onboarding.brandSubtitle": "本地私钥保险箱",
       "shell.onboarding.securityNote": "私钥不会离开浏览器，密码不会上传到任何服务器。",
+      "shell.persistence.label": "IndexedDB 永久存储授权",
+      "shell.persistence.message": "浏览器尚未授予 IndexedDB 永久存储权限，存储空间紧张时本地数据可能被清理。",
+      "shell.persistence.denied": "未获授权，浏览器仍可能在存储空间紧张时清理本地数据。请允许本站持久化存储后重试。",
+      "shell.persistence.authorize": "授权永久存储",
       "shell.onboarding.theme.toggle": "切换主题",
       "shell.onboarding.theme.auto": "跟随系统",
       "shell.onboarding.theme.autoHint": "跟随系统当前设置",

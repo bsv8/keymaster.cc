@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
 import { lockWallet, unlockWallet } from "../../drivers/vaultDriver.js";
 import { readLocalCatalog, readSessionPublicKey, waitForUnlockedHome } from "../../drivers/appDriver.js";
-import { assertLocalBucketLockReleased, assertLocalBucketStorage, identityFileMap, readRawLocalStorage } from "../../support/localBucketFormats.js";
+import { assertLocalBucketLockReleased, assertLocalBucketStorage, identityFileMap, readRawLocalBucketObjects, readRawLocalStorage } from "../../support/localBucketFormats.js";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
 import { LOCAL_INIT_MENU_SCENARIO } from "../../support/scenarioMetadata.js";
@@ -60,7 +60,7 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
     await test.step("用户刷新后直接回到锁定页,并用该 Key 的密码重新解锁", async () => {
       await page.reload({ waitUntil: "domcontentloaded" });
       const catalogBeforeWrongPassword = await readLocalCatalog(page);
-      const filesBeforeWrongPassword = identityFileMap(await readRawLocalStorage(page));
+      const filesBeforeWrongPassword = identityFileMap(await readRawLocalStorage(page), await readRawLocalBucketObjects(page));
       await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
       await expect(page.getByRole("heading", {
         name: /钱包已锁定|Wallet locked/,
@@ -78,8 +78,8 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
       })).toBeVisible();
       await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
       await expect(readLocalCatalog(page), "错误密码不能删除设备记录或 session").resolves.toEqual(catalogBeforeWrongPassword);
-      // 文件真值：错误密码不能改动设备记录/session/KeyHold 中任何一个字节。
-      expect(identityFileMap(await readRawLocalStorage(page)), "错误密码不能改动身份文件").toEqual(filesBeforeWrongPassword);
+      // 文件真值：错误密码不能改动设备记录/session（localStorage）或 KeyHold（IndexedDB）中任何一个字节。
+      expect(identityFileMap(await readRawLocalStorage(page), await readRawLocalBucketObjects(page)), "错误密码不能改动身份文件").toEqual(filesBeforeWrongPassword);
 
       await passwordField.fill(password);
       const unlockButton = page.getByRole("button", { name: /解锁|Unlock/ });

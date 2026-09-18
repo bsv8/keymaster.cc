@@ -62,7 +62,7 @@ import type {
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { parseCoordinatorResponseFor, toCoordinatorRpcRequest } from "@keymaster/contracts";
-import { createDeviceRecordRepository, createLocalStorageBucketProvider, defaultDeviceStorage, ensureSessionId, readSession, StorageRuntimeError, writeSession, type LocalStorageLike } from "@keymaster/platform-storage/coordinator";
+import { createDeviceRecordRepository, createIndexedDbBucketProvider, defaultDeviceStorage, ensureSessionId, readSession, StorageRuntimeError, writeSession } from "@keymaster/platform-storage/coordinator";
 import {
   connectSharedWorker,
   definePlugin,
@@ -752,15 +752,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (lease.bucketId !== undefined && request.bucketId !== lease.bucketId) {
         throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is no longer current");
       }
-      const storage = defaultDeviceStorage() as LocalStorageLike;
-      const locks = (globalThis as typeof globalThis & { navigator?: { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } } }).navigator?.locks;
-      const provider = createLocalStorageBucketProvider({
-        storage,
-        locks,
-        bucketId: request.bucketId,
-        bucketGeneration: request.bucketGeneration,
-        objectPrefix: request.objectPrefix ?? (request.bucketId + "/"),
-      });
+      // Local 桶的物理介质是 IndexedDB；页面是唯一执行点，Worker 只持
+      // 有受 lease 保护的桥。设备记录与 session 仍走上面的 localStorage
+      // 引导分支，两者不混用同一介质。
+      const provider = createIndexedDbBucketProvider({ bucketId: request.bucketId });
       let response: CoordinatorLocalStorageResponse;
       try {
         if (request.type === "get") {

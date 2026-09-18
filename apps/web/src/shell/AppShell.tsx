@@ -40,6 +40,7 @@ import type {
 } from "@keymaster/contracts";
 import { COORDINATOR_ACTIVITY_CAPABILITY, VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { Breadcrumbs } from "./Breadcrumbs.js";
+import { IndexedDbPersistenceBar } from "./IndexedDbPersistenceBar.js";
 import { RouteRenderer } from "./RouteRenderer.js";
 import { Sidebar } from "./Sidebar.js";
 import { SiteFooter } from "./SiteFooter.js";
@@ -264,6 +265,7 @@ export function AppShell() {
   if (guard.kind === "needs-repair") {
     return (
       <div className={`app-shell app-shell--repair ${mobileOpen ? "is-mobile-nav-open" : ""}`}>
+        <IndexedDbPersistenceBar />
         <Topbar
           mobileOpen={mobileOpen}
           onToggleMobileNav={() => setMobileOpen((v) => !v)}
@@ -320,6 +322,7 @@ function renderNormalShell({
 }: NormalShellArgs) {
   return (
     <div className={`app-shell ${mobileOpen ? "is-mobile-nav-open" : ""}`}>
+      <IndexedDbPersistenceBar />
       <Topbar
         mobileOpen={mobileOpen}
         onToggleMobileNav={() => setMobileOpen((v) => !v)}

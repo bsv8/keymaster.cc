@@ -13,6 +13,7 @@
 //     与已解锁态是两种完全不同的 IA。
 
 import type { ReactNode } from "react";
+import { IndexedDbPersistenceBar } from "./IndexedDbPersistenceBar.js";
 import { OnboardingHeader } from "./OnboardingHeader.js";
 import { SiteFooter } from "./SiteFooter.js";
 
@@ -39,6 +40,7 @@ export function OnboardingShell({
 }: OnboardingShellProps) {
   return (
     <div className="onboarding-shell">
+      <IndexedDbPersistenceBar />
       <OnboardingHeader hideSecurityNote={hideHeaderSecurityNote} />
       <main className="onboarding-shell__main">
         <div className={`onboarding-shell__panel onboarding-shell__panel--${width}`}>

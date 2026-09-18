@@ -28,11 +28,16 @@ const forbiddenText = [
 const violations = [];
 const productionRoots = /^(?:packages|apps)\//u;
 const localStorageAllowlist = new Set([
-  "packages/platform-storage/src/bootstrap/deviceBootstrapRepository.ts",
+  "packages/platform-storage/src/bootstrap/deviceStorage.ts",
   // 浏览器组合边界：唯一允许解析浏览器存储对象的位置，且只允许导出
   // 按桶隔离的受限 Provider 工厂，不得导出通用存储能力。
   "packages/platform-storage/src/browser/browserBucketProvider.ts",
 ]);
+// Local 桶的正式物理介质是 IndexedDB：只有这个受限 Provider 可以直接使用
+// IndexedDB API；其它生产代码仍禁止直接打开浏览器数据库。
+const indexedDbAllowlist = new Set([
+  "packages/platform-storage/src/bucket-providers/local/indexedDbBucketProvider.ts",
+])
 // E2E Node 侧清理适配器只把 AWS SDK 转成最小的测试 Resource 接口，不会
 // 进入发布产物；生产 S3 访问仍必须位于 platform-storage/s3 Provider。
 const s3TestingAllowlist = new Set([
@@ -67,6 +72,7 @@ for (const scanRoot of scanRoots) {
     if (!sourceExtensions.test(file)) continue;
     const content = readFileSync(file, "utf8");
     for (const [label, pattern] of forbiddenText) {
+      if (indexedDbAllowlist.has(relativeFile) && label === "旧数据库后缀符号") continue;
       if (pattern.test(content)) violations.push(`${relativeFile}: 命中${label}`);
     }
     if (productionRoots.test(relativeFile) && !/\.(?:test|spec)\.[^.]+$/u.test(relativeFile)) {
@@ -74,7 +80,7 @@ for (const scanRoot of scanRoots) {
       // 数据库语义或固定的 IndexedDB namespace。测试夹具可以明确提及
       // 历史 API，但不能进入可发布源码。
       const legacyStorageSemantics = [
-        ["旧 IndexedDB 语义", /\b(?:IndexedDB|indexedDB|IDB(?:Database|Transaction|Request|ObjectStore|Index|KeyRange|VersionChangeEvent)|IDB)\b/u],
+        ["旧 IndexedDB 标识符", /\b(?:IDB(?:Database|Transaction|Request|ObjectStore|Index|KeyRange|VersionChangeEvent)|IDB)\b/u],
         ["旧 DB 缩写语义", /\bDB\b/u],
         ["旧 DB 常量命名", /\b[A-Z][A-Z0-9]*_DB(?:_|\b)/u],
         ["模糊 db Repository 别名", /\bdb\b/u],
@@ -83,6 +89,7 @@ for (const scanRoot of scanRoots) {
         ["snapshot/namespace DB 语义", /\b(?:snapshot|namespace)\s+DB\b/iu]
       ];
       for (const [label, pattern] of legacyStorageSemantics) {
+        if (indexedDbAllowlist.has(relativeFile)) continue;
         if (pattern.test(content)) violations.push(`${relativeFile}: 命中${label}`);
       }
       const executable = withoutComments(content);
@@ -111,7 +118,8 @@ for (const scanRoot of scanRoots) {
           if (pattern.test(executable)) violations.push(`${relativeFile}: V1 禁止${label}`);
         }
       }
-      if (/\bindexedDB\b|\bIDB(?:Database|Transaction|Request|ObjectStore|Index|KeyRange|VersionChangeEvent)\b/gu.test(executable)) {
+      if (!indexedDbAllowlist.has(relativeFile)
+        && /\bindexedDB\b|\bIDB(?:Database|Transaction|Request|ObjectStore|Index|KeyRange|VersionChangeEvent)\b/gu.test(executable)) {
         violations.push(`${relativeFile}: 生产代码禁止直接使用 IndexedDB API`);
       }
       if (/\bsessionStorage\b/gu.test(executable)) {

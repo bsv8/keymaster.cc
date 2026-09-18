@@ -451,6 +451,34 @@ function installBridgeGlobals(storage: BridgeMemoryStorage): () => void {
   };
 }
 
+/** 测试侧直读正式 IndexedDB 真值，验证 Local 桶对象不再进入 localStorage。 */
+function readIndexedDbBucketRecord(bucketId: string, path: string): Promise<{ bytes?: Uint8Array } | undefined> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("keymaster.local", 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains("objects")) database.createObjectStore("objects");
+    };
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB open failed"));
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction("objects", "readonly");
+      const get = transaction.objectStore("objects").get([bucketId, path]);
+      get.onsuccess = () => { database.close(); resolve(get.result as { bytes?: Uint8Array } | undefined); };
+      get.onerror = () => { database.close(); reject(get.error ?? new Error("IndexedDB get failed")); };
+    };
+  });
+}
+
+function localStorageKeys(storage: BridgeMemoryStorage): string[] {
+  const keys: string[] = [];
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index);
+    if (key) keys.push(key);
+  }
+  return keys;
+}
+
 async function openTestLocalBridge(storage: BridgeMemoryStorage, current: { bucketId: string; label: string }): Promise<{
   client: ReturnType<typeof createCoordinatorClient>;
   workerPort: LocalBridgeTestPort;
@@ -1204,6 +1232,42 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const removed = await sendBridgeRequest(workerPort, "device-record-delete-1", { type: "device-record-delete", remoteStorageId: "bucket-other" });
       expect(removed).toMatchObject({ ok: true, response: { type: "void" } });
       expect(storage.getItem(`${DEVICE_KEY_PREFIX}bucket-other`)).toBeNull();
+    } finally {
+      client.disconnect();
+      workerPort.close();
+      restoreGlobals();
+    }
+  });
+
+  it("通过页面桥把 Local 桶对象写入 IndexedDB，而不是 localStorage", async () => {
+    const storage = new BridgeMemoryStorage();
+    const restoreGlobals = installBridgeGlobals(storage);
+    const { client, workerPort } = await openTestLocalBridge(storage, { bucketId: "bucket-objects", label: "对象桥接桶" });
+    try {
+      const bytes = new Uint8Array([1, 2, 3]);
+      const put = await sendBridgeRequest(workerPort, "object-put-1", {
+        type: "put",
+        bucketId: "bucket-objects",
+        bucketGeneration: 1,
+        path: "keys/key-1",
+        bytes,
+      });
+      expect(put).toMatchObject({ ok: true, response: { type: "write", etag: expect.stringMatching(/^[0-9a-f]{64}$/u) } });
+
+      const stored = await readIndexedDbBucketRecord("bucket-objects", "keys/key-1");
+      expect(stored?.bytes).toEqual(bytes);
+
+      const read = await sendBridgeRequest(workerPort, "object-get-1", {
+        type: "get",
+        bucketId: "bucket-objects",
+        bucketGeneration: 1,
+        path: "keys/key-1",
+      }) as { response?: { object?: { bytes?: Uint8Array } } };
+      expect(read.response?.object?.bytes).toEqual(bytes);
+
+      // 设备记录/session 仍走 localStorage 引导层；桶对象绝不能再落进去。
+      expect(storage.getItem(`keymaster.bucket.bucket-objects.keys/key-1`)).toBeNull();
+      expect(localStorageKeys(storage).some((key) => key.startsWith("keymaster.bucket."))).toBe(false);
     } finally {
       client.disconnect();
       workerPort.close();

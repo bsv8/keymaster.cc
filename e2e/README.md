@@ -50,7 +50,7 @@ Journey(6 项，跑在真实 Chromium 生产 preview 上，独立 BrowserContext
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
 | J-LOCAL-INIT-MENU | `journeys/local/initialization-generated.spec.ts` | 新用户生成 Key 完成初始化 → 刷新恢复 → 锁定 → 正确密码重新解锁同一身份 | KM-INIT-001、KM-VAULT-001、KM-NAV-001 |
-| J-LOCAL-INIT-IMPORTED | `journeys/local/initialization-imported-key.spec.ts` | 首次初始化走正式导入入口建立第一把 Hex Key，桶密码和私钥不落 localStorage | KM-INIT-001、KM-VAULT-001 |
+| J-LOCAL-INIT-IMPORTED | `journeys/local/initialization-imported-key.spec.ts` | 首次初始化走正式导入入口建立第一把 Hex Key，桶密码和私钥不落 localStorage/IndexedDB | KM-INIT-001、KM-VAULT-001 |
 | J-LOCAL-CONTACT-MESSAGE | `journeys/local/local-contact-message.spec.ts` | 保存联系人并归属当前 active Key；非法公钥在表单内失败，合法公钥打开正确会话 | KM-INIT-001、KM-CONTACT-001、KM-MESSAGE-001 |
 | J-LOCAL-SETTINGS | `journeys/local/local-settings.spec.ts` | 从正式菜单打开系统/应用/插件设置；切换语言立即生效且刷新后持久化 | KM-NAV-001、KM-SETTINGS-001 |
 | J-LOCAL-P2PKH-NAVIGATION | `journeys/local/p2pkh-navigation.spec.ts` | 真实 provider 下打开链上交易和本地交易页面；无余额只验证导航，不冒充转账成功 | KM-ASSET-001、KM-NAV-001 |
@@ -60,7 +60,7 @@ Gate(4 项)：
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
-| G-STORAGE-BROWSER-BOUNDARY | `gates/local/storage-browser-boundary.spec.ts` | 真实浏览器内 localStorage/Web Crypto/SharedWorker 边界；物理后端是 localStorage 而非 IndexedDB | KM-TECH-001 |
+| G-STORAGE-BROWSER-BOUNDARY | `gates/local/storage-browser-boundary.spec.ts` | 真实浏览器内 IndexedDB/localStorage/Web Crypto/SharedWorker 边界；Local 桶对象落在 IndexedDB，未授权时永久存储授权条持续显示，授权后消失 | KM-TECH-001 |
 | G-LIFECYCLE-BOUNDARY | `gates/local/lifecycle-boundary.spec.ts` | 2 个用例：撤权同步先于 drain 并拒绝新操作；provider 注销后迟到刷新不能复活受保护 outpoint | KM-TECH-001、KM-LIFECYCLE-001 |
 | G-REDACTION-BOUNDARY | `gates/local/redaction-boundary.spec.ts` | SecretString 默认脱敏；私钥形状进入附件时在上传前被阻断 | KM-TECH-002 |
 | G-CONFIG-SAFETY | `gates/local/config-safety.spec.ts` | 2 个用例：合法仓库外配置只以 SecretString 载入；目录权限过宽时读取资源前 fail-closed | KM-TECH-002 |

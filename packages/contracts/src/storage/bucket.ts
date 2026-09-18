@@ -1,4 +1,4 @@
-// 抽象桶 Provider 契约：Local（localStorage）与 S3 只在这一层对外呈现统一对象接口。
+// 抽象桶 Provider 契约：Local（IndexedDB）与 S3 只在这一层对外呈现统一对象接口。
 
 /** V1 统一存储支持的物理 Provider 类型。 */
 export type StorageBucketProviderId = "local" | "s3";

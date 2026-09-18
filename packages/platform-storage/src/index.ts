@@ -39,6 +39,8 @@ export { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 export type { BucketProvider, BucketObject, BucketListPage, BucketProbeResult } from "./bucket-providers/bucketProvider.js";
 export { createLocalStorageBucketProvider } from "./bucket-providers/local/localStorageBucketProvider.js";
 export type { LocalStorageLike, LocalStorageLocks, LocalStorageBucketProviderOptions, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "./bucket-providers/local/localStorageBucketProvider.js";
+export { createIndexedDbBucketProvider, LOCAL_INDEXED_DATABASE_NAME, LOCAL_INDEXED_OBJECT_STORE, LOCAL_INDEXED_SCHEMA_VERSION } from "./bucket-providers/local/indexedDbBucketProvider.js";
+export type { IndexedDbBucketProviderOptions } from "./bucket-providers/local/indexedDbBucketProvider.js";
 export { createProviderBackedBucketObjectStore } from "./bucket-providers/providerBackedBucketObjectStore.js";
 export { createS3BucketProvider } from "./bucket-providers/s3/s3BucketProvider.js";
 export { createS3BucketObjectStore } from "./bucket-providers/s3/s3BucketObjectStore.js";

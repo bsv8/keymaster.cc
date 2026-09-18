@@ -35,3 +35,5 @@ export { StorageHealthController } from "../runtime/storageHealthController.js";
 export type { StorageHealthSnapshot, StorageProbeOptions } from "../runtime/storageHealthController.js";
 export { createLocalStorageBucketProvider } from "../bucket-providers/local/localStorageBucketProvider.js";
 export type { LocalStorageLike, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "../bucket-providers/local/localStorageBucketProvider.js";
+export { createIndexedDbBucketProvider, LOCAL_INDEXED_DATABASE_NAME, LOCAL_INDEXED_OBJECT_STORE, LOCAL_INDEXED_SCHEMA_VERSION } from "../bucket-providers/local/indexedDbBucketProvider.js";
+export type { IndexedDbBucketProviderOptions } from "../bucket-providers/local/indexedDbBucketProvider.js";

@@ -1,4 +1,5 @@
 import { expect, type Page } from "@playwright/test";
+import { readRawLocalBucketObjects } from "../support/localBucketFormats.js";
 
 /**
  * 本机桶的最小非敏感投影（新模型）。
@@ -109,7 +110,7 @@ export async function readSessionPublicKey(page: Page): Promise<string> {
   return (activeKey ?? "").toLowerCase();
 }
 
-/** Local 初始化成功后，确认密码没有进入浏览器持久化目录。 */
+/** Local 初始化成功后，确认密码没有进入浏览器持久化目录（localStorage + IndexedDB）。 */
 export async function assertSetupSecretNotPersisted(page: Page, password: string): Promise<void> {
   const persisted = await page.evaluate(() => {
     const entries: string[] = [];
@@ -120,4 +121,7 @@ export async function assertSetupSecretNotPersisted(page: Page, password: string
     return entries.join("\n");
   });
   expect(persisted, "初始化密码不能写入浏览器 localStorage").not.toContain(password);
+  const bucketObjects = await readRawLocalBucketObjects(page);
+  const persistedObjects = bucketObjects.map((entry) => `${entry.bucketId}/${entry.path}=${entry.text}`).join("\n");
+  expect(persistedObjects, "初始化密码不能写入浏览器 IndexedDB").not.toContain(password);
 }
