@@ -168,7 +168,7 @@ const EXECUTION_PROFILES = [
   { name: "local-core", pattern: /^(?:journeys\/local|gates\/local)\/[^/]+\.spec\.ts$/u },
   { name: "dev-http", pattern: /^gates\/dev-http\/[^/]+\.spec\.ts$/u },
   { name: "lifecycle", pattern: /^gates\/lifecycle\/[^/]+\.spec\.ts$/u },
-  { name: "msfile", pattern: /^gates\/msfile\/[^/]+\.spec\.ts$/u },
+  { name: "msfile", pattern: /^(?:gates|journeys)\/msfile\/[^/]+\.spec\.ts$/u },
   { name: "satsubscription", pattern: /^journeys\/satsubscription\/[^/]+\.spec\.ts$/u },
   { name: "deployment", pattern: /^(?:journeys\/deployment|gates\/deployment)\/[^/]+\.spec\.ts$/u },
   { name: "real-s3", pattern: /^(?:journeys\/real-resource\/real-s3-(?:initialization|bucket-key-switching)|gates\/real-resource\/resource-safety)\.spec\.ts$/u },
@@ -228,7 +228,7 @@ function metadataScenarioLevels() {
 }
 
 function expectedScenarioLevel(relativeFile) {
-  if (/^(?:journeys\/local|gates\/(?:local|dev-http|lifecycle|msfile))\//u.test(relativeFile)) return "local-integration";
+  if (/^(?:journeys\/(?:local|msfile)|gates\/(?:local|dev-http|lifecycle|msfile))\//u.test(relativeFile)) return "local-integration";
   if (/^(?:journeys\/(?:real-resource|satsubscription)|gates\/real-resource)\//u.test(relativeFile)) return "real-resource";
   if (/^(?:journeys\/deployment|gates\/deployment)\//u.test(relativeFile)) return "deployment-acceptance";
   return undefined;
@@ -387,7 +387,7 @@ function generatedMarkdown(matrix) {
   }
   lines.push("", "## 资源与清理索引", "", "| 编号 | 资源声明 | 清理规则 |", "| --- | --- | --- |");
   for (const row of rows) lines.push(`| ${escapeCell(row.requirement_id)} | ${escapeCell(row.resource_profile)} | ${escapeCell(row.cleanup_policy)} |`);
-  lines.push("", "## 执行档边界", "", "| 执行档 | 目录 | 中文含义 |", "| --- | --- | --- |", "| local-core | `journeys/local`、`gates/local` | 普通本地浏览器 Journey 与本地 Gate |", "| dev-http | `gates/dev-http` | 非安全 HTTP 开发服务器回归 |", "| lifecycle | `gates/lifecycle` | 本地/registry Coordinator 生命周期验收 |", "| msfile | `gates/msfile` | 需要临时 Go supplier 的 MSFile 技术 Gate |", "| real-resource | `journeys/real-resource`、`resources` | 受保护 testnet/SatSubscription 真实资源 |", "| real-s3 | `journeys/real-resource/real-s3-initialization`、`gates/real-resource/resource-safety` 与 S3 resource | 受保护真实 S3 资源 |", "| deployment | `journeys/deployment`、`gates/deployment` | 目标部署和不可逆 I/O 验收 |");
+  lines.push("", "## 执行档边界", "", "| 执行档 | 目录 | 中文含义 |", "| --- | --- | --- |", "| local-core | `journeys/local`、`gates/local` | 普通本地浏览器 Journey 与本地 Gate |", "| dev-http | `gates/dev-http` | 非安全 HTTP 开发服务器回归 |", "| lifecycle | `gates/lifecycle` | 本地/registry Coordinator 生命周期验收 |", "| msfile | `journeys/msfile`、`gates/msfile` | 需要临时 Go supplier 的 MSFile 页面 Journey 与技术 Gate |", "| real-resource | `journeys/real-resource`、`resources` | 受保护 testnet/SatSubscription 真实资源 |", "| real-s3 | `journeys/real-resource/real-s3-initialization`、`gates/real-resource/resource-safety` 与 S3 resource | 受保护真实 S3 资源 |", "| deployment | `journeys/deployment`、`gates/deployment` | 目标部署和不可逆 I/O 验收 |");
   return lines.join("\n");
 }
 

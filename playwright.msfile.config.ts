@@ -1,10 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * MSFile 本地技术 Gate 执行档。
+ * MSFile 本地执行档。
  *
- * 这些场景会启动仓库外（或临时构建的）Go supplier，验证真实 P2P、Range、
- * Service Worker 和生命周期边界；它们不应被普通 local-core PR 扫描到。
+ * 这些场景会启动仓库外（或临时构建的）Go supplier：`gates/msfile` 验证真实
+ * P2P、Range、Service Worker 和生命周期边界，`journeys/msfile` 从正式页面
+ * 配置真实 NAS 并完成文件获取；它们不应被普通 local-core PR 扫描到。
  */
 export default defineConfig({
   testDir: "./e2e/integration",
@@ -27,7 +28,7 @@ export default defineConfig({
   },
   projects: [{
     name: "msfile",
-    testMatch: /gates\/msfile\/[^/]+\.spec\.ts$/u,
+    testMatch: /(?:gates|journeys)\/msfile\/[^/]+\.spec\.ts$/u,
     use: { ...devices["Desktop Chrome"], launchOptions: { args: ["--enable-precise-memory-info"] } },
   }],
 });

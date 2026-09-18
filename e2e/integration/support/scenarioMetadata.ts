@@ -286,6 +286,23 @@ export const PLUGIN_LIFECYCLE_PRODUCTION_GATE = {
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 msfile-nas 页面 Journey：正式 UI 从真实 Go NAS 获取并下载文件。 */
+export const REAL_MSFILE_NAS_SCENARIO = {
+  id: "J-REAL-MSFILE-NAS",
+  level: "local-integration",
+  requirementIds: ["KM-MSFILE-001"],
+  startingState: "Node 从仓库外 MSFile-Proxy-Protocol 构建正式 cmd/msfile-nas，用一次性 NAS 目录、确定性供应商身份和 WebRTC Direct listener 发布夹具文件；浏览器是全新 Chromium context。",
+  successCriteria: [
+    "设置页保存全局金额上限并保存真实 NAS 公钥与地址，Test connection 显示连接成功且协议协商通过。",
+    "文本 Seed 通过正式文件入口显示可获取，预览内容与 NAS 磁盘源文件完全一致。",
+    "二进制文件下载后的 SHA-256 与长度等于 NAS 源文件，证明跨 Block 装配和完整性校验成立。",
+    "未知 Seed 只显示没有文件，不出现下载入口，也不会被当成成功的读取。",
+    "供应商 Read 计数证明读取到达真实 NAS 且没有悬挂请求。",
+    "刷新并重新解锁后同一身份仍能用持久化供应商配置再次取得同一文件。",
+  ],
+  resourceProfile: "p2p",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** MSFile Window executor Gate：保留 Noise、签名、接管和传输边界技术证据。 */
 export const MSFILE_EXECUTOR_GATE = {
   id: "G-MSFILE-EXECUTOR",

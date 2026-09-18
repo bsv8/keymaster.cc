@@ -33,7 +33,7 @@ support/ 场景元数据、脱敏、诊断等横切能力
 | dev-http | `playwright.dev-http.config.ts` | `pnpm test:e2e:dev-http` | `gates/dev-http` | 非安全 HTTP + 非 loopback 域名，真实 Vite dev server，不复用旧进程 |
 | lifecycle-local | `playwright.lifecycle.config.ts` | `pnpm test:e2e:lifecycle:local` | `gates/lifecycle` | 本地 WebLoom 0.4.3 tarball 的临时副本验收 |
 | lifecycle-registry | `playwright.lifecycle.registry.config.ts` | `pnpm test:e2e:lifecycle:registry` | `gates/lifecycle` | npm registry 0.4.3 的临时副本验收，`workers: 1` 串行 |
-| msfile | `playwright.msfile.config.ts` | `pnpm test:e2e:msfile` | `gates/msfile` | 需临时 Go supplier，360s 超时，`workers: 1` |
+| msfile | `playwright.msfile.config.ts` | `pnpm test:e2e:msfile` | `gates/msfile`、`journeys/msfile` | 需临时 Go supplier，360s 超时，`workers: 1` |
 | satsubscription | `playwright.satsubscription.config.ts` | `pnpm test:e2e:satsubscription` | `journeys/satsubscription` | 从仓库外 SatSubscription 构建正式服务 + 一次性 PostgreSQL；需 `SATS_SUBSCRIPTION_DIR`、Go、PostgreSQL，360s 超时，`workers: 1` |
 | real-resource | `playwright.real-resource.config.ts` | `pnpm test:e2e:real-resource` | `resources/*`、`journeys/real-resource/*` | 受保护真实资源；setup → 场景 → teardown 投影，`trace/screenshot/video` 全关 |
 | real-s3 | `playwright.real-s3.config.ts` | `pnpm test:e2e:real-s3` | `resources/s3-*`、`gates/real-resource/resource-safety`、`real-s3-initialization` | 只读取仓库外 `s3.json`，不碰 testnet/Sat 秘密 |
@@ -91,6 +91,14 @@ Gate(4 项)：
 ## 4. msfile
 
 需临时 Go supplier，只使用临时测试对象，结束关闭 lease 和远端连接。所有用例 `serial`。
+
+Journey(1 项，真实页面 + 真实 `cmd/msfile-nas`)：
+
+| 编号 | 文件 | 中文说明 | 覆盖需求 |
+| --- | --- | --- | --- |
+| J-REAL-MSFILE-NAS | `journeys/msfile/real-nas-file.spec.ts` | 全新 Local 身份在 /settings/system 保存金额上限并 pin 真实 NAS 的 WebRTC Direct 地址；Test connection 成功后从正式文件入口按 Seed Hash 获取文本预览（与源文件完全一致）、下载跨 Block 二进制并做 SHA-256 对账、未知 Seed 只显示没有文件；供应商 Read 计数证明读取到达真实 NAS；刷新重新解锁后同一身份仍能再次取得文件 | KM-MSFILE-001 |
+
+Gate(3 项)：
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
@@ -162,7 +170,7 @@ Gate(4 项)：
 ```bash
 pnpm test:e2e                    # 本地核心 + 非安全 HTTP 边界
 pnpm test:e2e:integration        # 完整本地集成
-pnpm test:e2e:msfile             # 本地/临时 Go supplier 的 MSFile Gate
+pnpm test:e2e:msfile             # 本地/临时 Go supplier 的 MSFile Journey 与 Gate
 pnpm test:e2e:satsubscription    # 真实 SatSubscription 源码 + 一次性 PostgreSQL 的 Channel 消息
 pnpm test:e2e:real-s3            # 真实 S3
 pnpm test:e2e:real-resource      # 真实资源集合
