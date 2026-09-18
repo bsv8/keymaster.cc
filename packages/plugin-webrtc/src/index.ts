@@ -51,10 +51,18 @@ export {
   validateStunUrl,
   validateStunServers,
   coerceWebrtcConfig,
-  createKeyValueWebrtcConfigStore,
-  createMemoryWebrtcConfigStore,
-  WEBRTC_CONFIG_STORAGE_KEY
+  createMemoryWebrtcConfigStore
 } from "./webrtcConfig.js";
+export {
+  createFileWebrtcConfigStore
+} from "./storage/p2pSettingFileRepository.js";
+export {
+  P2P_SETTING_FILE_NAME,
+  P2P_SETTING_FORMAT,
+  P2P_SETTING_VERSION,
+  parseP2pSettingFile,
+  serializeP2pSettingFile
+} from "./storage/p2pSettingFileFormats.js";
 export {
   WEBRTC_SIGNAL_SCHEMA,
   DEFAULT_SIGNAL_TTL_MS,

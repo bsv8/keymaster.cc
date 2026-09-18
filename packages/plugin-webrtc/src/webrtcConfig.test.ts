@@ -1,19 +1,18 @@
 // packages/plugin-webrtc/src/webrtcConfig.test.ts
-// STUN 配置校验 / owner K-V 持久化 / 内存 store 单测。
+// STUN 配置校验 / owner 文件持久化 / 内存 store 单测。
 
 import { describe, expect, it, vi } from "vitest";
-import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
-import type { BorrowedKeyValueStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 import {
   DEFAULT_STUN_SERVERS,
-  WEBRTC_CONFIG_STORAGE_KEY,
   coerceWebrtcConfig,
-  createKeyValueWebrtcConfigStore,
   createMemoryWebrtcConfigStore,
   validateStunServers,
   validateStunUrl
 } from "./webrtcConfig.js";
+import { createFileWebrtcConfigStore } from "./storage/p2pSettingFileRepository.js";
+import { P2P_SETTING_FORMAT } from "./storage/p2pSettingFileFormats.js";
+import { createMemoryOwnerFileStore } from "./storage/testSupport/memoryOwnerFileStore.js";
 
 describe("validateStunUrl", () => {
   it("accepts plain stun URL", () => {
@@ -106,43 +105,68 @@ describe("coerceWebrtcConfig", () => {
   });
 });
 
-describe("createKeyValueWebrtcConfigStore", () => {
-  function createTestStore() {
-    const storage = createInMemoryKeyValueStore({
-      ...CENTRAL_STORAGE_DECLARATIONS.webrtcSettings,
-      ownerPublicKeyHex: "a".repeat(64),
-      bucketId: "test-memory",
-      bucketGeneration: 1
-    });
-    return { storage, store: createKeyValueWebrtcConfigStore(storage) };
+describe("createFileWebrtcConfigStore", () => {
+  function createTestStore(seed?: Iterable<readonly [string, string]>) {
+    const files = createMemoryOwnerFileStore(seed);
+    return { files, store: createFileWebrtcConfigStore(files) };
   }
 
-  it("loads default when storage is empty", () => {
-    const { store: s } = createTestStore();
-    const c = s.load();
-    expect(c.stunServers).toEqual([...DEFAULT_STUN_SERVERS]);
+  const settingFile = (stunServers: string[]): string => JSON.stringify({
+    format: P2P_SETTING_FORMAT,
+    version: 1,
+    stunServers
   });
 
-  it("blur-save persists and notifies subscribers", async () => {
+  it("loads default when setting.json is missing", async () => {
     const { store: s } = createTestStore();
+    await s.ready();
+    expect(s.load().stunServers).toEqual([...DEFAULT_STUN_SERVERS]);
+  });
+
+  it("ready reads an existing setting.json", async () => {
+    const { store: s } = createTestStore([["setting.json", settingFile(["stun:a.example.com:3478"])]]);
+    await s.ready();
+    expect(s.snapshot().stunServers).toEqual(["stun:a.example.com:3478"]);
+  });
+
+  it("falls back to defaults for a corrupt file", async () => {
+    const { store: s } = createTestStore([["setting.json", "{ not json"]]);
+    await s.ready();
+    expect(s.snapshot().stunServers).toEqual([...DEFAULT_STUN_SERVERS]);
+  });
+
+  it("falls back to defaults for an unknown field", async () => {
+    const { store: s } = createTestStore([["setting.json", JSON.stringify({ format: P2P_SETTING_FORMAT, version: 1, savedAtMs: 1 })]]);
+    await s.ready();
+    expect(s.snapshot().stunServers).toEqual([...DEFAULT_STUN_SERVERS]);
+  });
+
+  it("blur-save writes p2p/setting.json and notifies subscribers", async () => {
+    const { files, store: s } = createTestStore();
+    await s.ready();
     const seen: string[][] = [];
     const off = s.subscribe((c) => seen.push(c.stunServers));
     await s.save({ stunServers: ["stun:a.example.com:3478"] });
     expect(seen).toEqual([["stun:a.example.com:3478"]]);
     off();
+    const written = JSON.parse(new TextDecoder().decode(files.__files.get("setting.json")!)) as { format: string; version: number; stunServers: string[] };
+    expect(written.format).toBe(P2P_SETTING_FORMAT);
+    expect(written.version).toBe(1);
+    expect(written.stunServers).toEqual(["stun:a.example.com:3478"]);
   });
 
   it("rollback on save-failure: throws and does not update memory", async () => {
-    const { storage } = createTestStore();
+    const { files } = createTestStore();
     let fail = true;
-    const failingStorage: BorrowedKeyValueStore = {
-      ...storage,
-      async put<T>(...args: Parameters<BorrowedKeyValueStore["put"]>): ReturnType<BorrowedKeyValueStore["put"]> {
+    const failingFiles: BorrowedOwnerFileStore = {
+      ...files,
+      async put(...args: Parameters<BorrowedOwnerFileStore["put"]>): ReturnType<BorrowedOwnerFileStore["put"]> {
         if (fail) throw new Error("injected WebRTC storage failure");
-        return storage.put<T>(...args);
+        return files.put(...args);
       }
-    } as BorrowedKeyValueStore;
-    const s = createKeyValueWebrtcConfigStore(failingStorage);
+    };
+    const s = createFileWebrtcConfigStore(failingFiles);
+    await s.ready();
     const before = s.snapshot();
     const seen: unknown[] = [];
     s.subscribe((c) => seen.push(c));
@@ -156,6 +180,7 @@ describe("createKeyValueWebrtcConfigStore", () => {
 
   it("validation failure does not update memory", async () => {
     const { store: s } = createTestStore();
+    await s.ready();
     await s.save({ stunServers: ["stun:a.example.com:3478"] });
     const before = s.snapshot();
     expect(() =>
@@ -166,18 +191,12 @@ describe("createKeyValueWebrtcConfigStore", () => {
 
   it("save notify does not include save calls themselves twice", async () => {
     const { store: s } = createTestStore();
+    await s.ready();
     let count = 0;
     s.subscribe(() => count++);
     count = 0;
     await s.save({ stunServers: ["stun:abc.example.com:19302"] });
     expect(count).toBe(1);
-  });
-
-  it("uses WEBRTC_CONFIG_STORAGE_KEY in the owner K-V namespace", async () => {
-    const { storage, store: s } = createTestStore();
-    await s.save({ stunServers: ["stun:abc.example.com:19302"] });
-    const entry = await storage.get<{ stunServers: string[] }>(WEBRTC_CONFIG_STORAGE_KEY, { partition: "settings" });
-    expect(entry?.value.stunServers).toEqual(["stun:abc.example.com:19302"]);
   });
 });
 

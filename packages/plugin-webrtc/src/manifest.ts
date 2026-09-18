@@ -31,8 +31,8 @@ import { WebrtcSettingsPage } from "./WebrtcSettingsPage.js";
 import type { WebrtcService, WebrtcSessionSnapshot } from "./webrtcService.js";
 import type { WebrtcHistoryItem } from "./webrtcHistoryService.js";
 import {
-  createKeyValueWebrtcConfigStore
-} from "./webrtcConfig.js";
+  createFileWebrtcConfigStore
+} from "./storage/p2pSettingFileRepository.js";
 import { createWebrtcHistoryService } from "./webrtcHistoryService.js";
 import { createWebrtcService } from "./webrtcService.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
@@ -204,7 +204,7 @@ const webrtcPluginDefinition = {
     runtime: "window-main",
     scopeKind: "owner-session",
     provides: [WEBRTC_SERVICE_CAPABILITY],
-    storages: [CENTRAL_STORAGE_DECLARATIONS.webrtcSettings, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory],
+    storages: [CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory],
     dependencies: defineRuntimeUnitDependencies([
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel 私信" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "打开 key-scoped 历史库" },
@@ -221,7 +221,7 @@ const webrtcPluginDefinition = {
     const contacts = ctx.capability(CONTACTS_SERVICE_CAPABILITY);
     const noticeRegistry = ctx.capability(NOTICE_REGISTRY_CAPABILITY);
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
-    const configStore = createKeyValueWebrtcConfigStore(ctx.storageFor("settings"));
+    const configStore = createFileWebrtcConfigStore(ctx.filesFor(""));
     await configStore.ready();
     const historyStorage = ctx.storageFor("history");
     const historyService = createWebrtcHistoryService({

@@ -1,8 +1,8 @@
 // packages/plugin-webrtc/src/webrtcConfig.ts
-// WebRTC STUN 配置存储（施工单 2026-07-04 002 硬切换）。
+// WebRTC STUN 配置（KeymasterFormats《桶/<owner>/p2p/setting.json》）。
 //
 // 设计缘由：
-//   - STUN 配置由 Host 注入的 WebRTC owner/App K-V 句柄承载；
+//   - STUN 配置由 owner 文件句柄承载，落盘在 `p2p/setting.json`；
 //   - 形状固定：`{ stunServers: string[] }`；
 //   - 缺省值：`stun:stun.l.google.com:19302`；
 //   - 合法性校验：每条必须以 `stun:` 开头且为合法 URI；
@@ -10,7 +10,7 @@
 //     展示给用户做 rollback，参考 `OriginSettingsTray`）；
 //   - 内存态 + 持久态分离：
 //       * `loadConfig()` = 从内存同步读 → 合法性净化；
-//       * `saveConfig(next)` = 同步校验 → 排队写 K-V → 通知订阅者；
+//       * `saveConfig(next)` = 同步校验 → 排队写文件 → 通知订阅者；
 //   - 订阅接口：`subscribe(handler)`：订阅者接收最新配置对象。
 
 /** 配置结构。 */
@@ -22,9 +22,6 @@ export interface WebrtcConfig {
 export const DEFAULT_STUN_SERVERS: readonly string[] = [
   "stun:stun.l.google.com:19302"
 ];
-
-/** K-V 中的相对配置键。 */
-export const WEBRTC_CONFIG_STORAGE_KEY = "settings";
 
 /** 单条 STUN URL 默认长度上限。 */
 const MAX_STUN_URL_LENGTH = 256;
@@ -151,11 +148,12 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 /* ============================================================
- * ConfigStore：Host 绑定的 K-V-backed 单例（per plugin enable）
+ * 配置存储抽象：生产实现是文件-backed store
+ * （`storage/p2pSettingFileRepository.ts`）；测试可以注入内存版。
  * ============================================================ */
 
 /**
- * 配置存储抽象。生产实现是 `KeyValueConfigStore`；测试可以注入内存版。
+ * 配置存储抽象。生产实现是 `createFileWebrtcConfigStore`；测试可以注入内存版。
  */
 export interface WebrtcConfigStore {
   /** 同步读当前配置；缺省值兜底。 */
@@ -166,76 +164,8 @@ export interface WebrtcConfigStore {
   subscribe(handler: (config: WebrtcConfig) => void): () => void;
   /** 当前内存真值（最近一次成功 load / save）。 */
   snapshot(): WebrtcConfig;
-  /** 等待 K-V 配置完成首次加载。 */
+  /** 等待文件配置完成首次加载。 */
   ready(): Promise<void>;
-}
-
-/**
- * K-V-backed 配置存储。**单例**——一个 plugin-webrtc enable 周期
- * 内只持有一份内存真值。
- *
- * 设计要点：
- *   - 构造时只建立内存默认值，首次读取由 `ready()` 完成；
- *   - `save` 串行写 K-V，远端成功后才提交内存并通知订阅者；
- *   - 内存态与持久态分离：save 失败抛错时内存态仍保留**上次成功**的
- *     真值，避免脏读。
- */
-export function createKeyValueWebrtcConfigStore(
-  storage: import("@keymaster/contracts").BorrowedKeyValueStore,
-  now: () => number = () => Date.now()
-): WebrtcConfigStore {
-  if (!storage) throw new Error("WebRTC settings central storage binding is required");
-  let current: WebrtcConfig = { stunServers: [...DEFAULT_STUN_SERVERS] };
-  const subscribers = new Set<(c: WebrtcConfig) => void>();
-  let writeQueue = Promise.resolve();
-
-  async function ready(): Promise<void> {
-    const entry = await storage.get<unknown>(WEBRTC_CONFIG_STORAGE_KEY, { partition: "settings" });
-    if (entry) current = coerceWebrtcConfig(entry.value);
-  }
-
-  function snapshot(): WebrtcConfig {
-    return { stunServers: [...current.stunServers] };
-  }
-
-  function notify(): void {
-    for (const handler of subscribers) {
-      try {
-        handler(snapshot());
-      } catch {
-        // 防御性吞掉 handler 异常——配置订阅不影响持久结果。
-      }
-    }
-  }
-
-  function save(next: WebrtcConfig): Promise<void> {
-    const validated = validateStunServers(next.stunServers);
-    if (!validated.ok || validated.value === undefined) {
-      throw new Error(validated.error ?? "invalid_config");
-    }
-    const normalized: WebrtcConfig = { stunServers: validated.value };
-    const persisted = { ...normalized, savedAtMs: now() };
-    const result = writeQueue.then(async () => {
-      await storage.put(WEBRTC_CONFIG_STORAGE_KEY, persisted, { partition: "settings" });
-      current = normalized;
-      notify();
-    });
-    writeQueue = result.then(() => undefined, () => undefined);
-    return result;
-  }
-
-  return {
-    load: () => ({ ...current, stunServers: [...current.stunServers] }),
-    save,
-    subscribe(handler) {
-      subscribers.add(handler);
-      return () => {
-        subscribers.delete(handler);
-      };
-    },
-    snapshot,
-    ready
-  };
 }
 
 /**

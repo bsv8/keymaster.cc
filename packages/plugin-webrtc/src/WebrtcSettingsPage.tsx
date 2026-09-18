@@ -2,7 +2,7 @@
 // WebRTC 设置页（施工单 2026-07-04 002 硬切换）。
 //
 // 设计缘由：
-//   - STUN 配置是**浏览器网络配置**，**不**走 key-scoped storage；
+//   - STUN 配置随 active owner 保存（`p2p/setting.json`）；
 //   - 每条 STUN 服务器一行；新增 / 删除 / blur 自动保存——**无 Save 按钮**；
 //   - 提交失败回滚到上一个已落库的真值（与 `OriginSettingsTray` 同样模式）；
 //   - "批量测试"按钮只在本地做 ICE gather 自检，**不**宣称任意两端网络

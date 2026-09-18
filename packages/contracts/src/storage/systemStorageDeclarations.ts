@@ -157,12 +157,16 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  webrtcSettings: Object.freeze({
-    moduleId: "webrtc",
-    purposeId: "settings",
-    scope: "bucket",
+  /**
+   * P2P（WebRTC）设置文件根（空 purpose = 模块根，见 KeymasterFormats
+   * 《桶/<owner>/p2p/setting.json》）。布局：`p2p/setting.json`。
+   */
+  p2pFiles: Object.freeze({
+    moduleId: "p2p",
+    purposeId: "",
+    scope: "owner",
     authority: "built-in-module",
-    model: "kv",
+    model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   webrtcHistory: Object.freeze({
@@ -223,7 +227,7 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   "sat-subscription": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.satSubscriptionState]),
   "token-bsv21": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, CENTRAL_STORAGE_DECLARATIONS.tokenBsv21MintHistory]),
   "token-stas": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenStasState]),
-  webrtc: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.webrtcSettings, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory]),
+  webrtc: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory]),
   msfile: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.msfileSettings,
     CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers,
