@@ -43,4 +43,22 @@ describe("central storage declarations", () => {
       schemaVersion: 1,
     })).not.toThrow();
   });
+
+  it("keeps MSFile settings on the owner file formats", () => {
+    expect(SYSTEM_STORAGE_DECLARATIONS.msfile).toHaveLength(2);
+    expect(CENTRAL_STORAGE_DECLARATIONS.msfilesFiles).toMatchObject({
+      moduleId: "msfiles",
+      purposeId: "",
+      scope: "owner",
+      model: "files",
+    });
+    expect(CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles).toMatchObject({
+      moduleId: "app",
+      purposeId: "app-settings",
+      scope: "owner",
+      model: "files",
+    });
+    // 旧桶级 K-V 声明必须彻底移除，避免新旧两套路径并存。
+    expect(Object.values(CENTRAL_STORAGE_DECLARATIONS).some((declaration) => declaration.moduleId === "msfile")).toBe(false);
+  });
 });

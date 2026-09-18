@@ -92,11 +92,12 @@ Gate(4 项)：
 
 需临时 Go supplier，只使用临时测试对象，结束关闭 lease 和远端连接。所有用例 `serial`。
 
-Journey(1 项，真实页面 + 真实 `cmd/msfile-nas`)：
+Journey(2 项，真实页面 + 真实 `cmd/msfile-nas` 或 BSV8 官方服务)：
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
 | J-REAL-MSFILE-NAS | `journeys/msfile/real-nas-file.spec.ts` | 全新 Local 身份在 /settings/system 保存金额上限并 pin 真实 NAS 的 WebRTC Direct 地址；Test connection 成功后从正式文件入口按 Seed Hash 获取文本预览（与源文件完全一致）、下载跨 Block 二进制并做 SHA-256 对账、未知 Seed 只显示没有文件；供应商 Read 计数证明读取到达真实 NAS；刷新重新解锁后同一身份仍能再次取得文件 | KM-MSFILE-001 |
+| J-REAL-MSFILE-OFFICIAL | `journeys/msfile/official-nas-files.spec.ts` | 系统内置 BSV8 官方供应商（不可删除）经真实 WSS 完成 Test connection；sample-15s.wav/mp3 与 sample-30s.mp4 按原生 Range 方式打开并播放（虚拟媒体 URL + 真实 Block 读取 + Range/206 证据），Hello.md 按文本预览打开；不把下载当成打开 | KM-MSFILE-001 |
 
 Gate(3 项)：
 

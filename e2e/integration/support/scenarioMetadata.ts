@@ -303,6 +303,21 @@ export const REAL_MSFILE_NAS_SCENARIO = {
   resourceProfile: "p2p",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 BSV8 官方 msfiles 服务 Journey：四个官方示例按正确方式打开。 */
+export const REAL_MSFILE_OFFICIAL_SCENARIO = {
+  id: "J-REAL-MSFILE-OFFICIAL",
+  level: "local-integration",
+  requirementIds: ["KM-MSFILE-001"],
+  startingState: "全新 Chromium context 已完成 Local 初始化；MSFile 系统内置 BSV8 官方供应商（公钥 039da3…26，WSS /dns4/msfiles.bsv8.com/tcp/443/tls/ws）。",
+  successCriteria: [
+    "内置官方供应商无需手工添加：设置页标记为系统内置且不能删除，Test connection 完成真实 WSS 连接和协议协商。",
+    "sample-15s.wav、sample-15s.mp3、sample-30s.mp4 都通过虚拟媒体 URL 进入原生 Range 播放，产生真实 Block 读取，而不是整文件 Blob 下载。",
+    "Hello.md 以文本预览打开并显示与源文件一致的内容。",
+    "媒体虚拟 URL 的请求携带真实 Range 并由 Service Worker 返回 206。",
+  ],
+  resourceProfile: "p2p",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** MSFile Window executor Gate：保留 Noise、签名、接管和传输边界技术证据。 */
 export const MSFILE_EXECUTOR_GATE = {
   id: "G-MSFILE-EXECUTOR",

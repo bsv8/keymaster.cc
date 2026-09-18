@@ -2633,7 +2633,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
 
   beforeEach(async () => {
     await __testDeleteVault();
-    await __testClearCentralNamespace("MSFile");
+    await __testClearCentralNamespace("msfiles");
     __testResetState();
   });
 
@@ -2641,7 +2641,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     __testSetStorageSessionResolver(undefined);
     await __testReleaseMsfileRuntime();
     await __testDeleteVault();
-    await __testClearCentralNamespace("MSFile");
+    await __testClearCentralNamespace("msfiles");
     __testResetState();
   });
 
@@ -2776,7 +2776,9 @@ describe("Session Coordinator MSFile RPC lane", () => {
     const outcomes = [first.ack.status, second.ack.status].sort();
     expect(outcomes).toEqual(["ok", "validation-error"]);
     const snapshot = await __testDispatchMsfileControl({ type: "settings.get" });
-    expect((snapshot.operationResult as { suppliers: unknown[] }).suppliers).toHaveLength(1);
+    const suppliers = (snapshot.operationResult as { suppliers: Array<{ builtin?: boolean }> }).suppliers;
+    // 系统内置官方供应商始终存在；用户供应商只提交成功一个。
+    expect(suppliers.filter((entry) => !entry.builtin)).toHaveLength(1);
   });
 
   it("rejects mutations queued before a lock/unlock cycle with stale-epoch and leaves the DB untouched（审查修复）", async () => {
@@ -2940,10 +2942,13 @@ describe("Session Coordinator MSFile RPC lane", () => {
     }, "port-b");
     expect(forged.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
 
-    // Stat 不受金额设置阻断：无启用供应商时返回空聚合（不是错误）。
+    // Stat 不受金额设置阻断：没有用户供应商时只剩系统内置官方供应商；
+    // Window executor transport 未就绪，内置供应商如实报告 network-error。
     const trustedStat = await __testDispatchMsfileData({ type: "stat", seedHashHex: "ab".repeat(32) }, "port-a");
     expect(trustedStat.ack.status).toBe("ok");
-    expect((trustedStat.operationResult as { suppliers: unknown[] }).suppliers).toEqual([]);
+    const trustedSuppliers = (trustedStat.operationResult as { suppliers: Array<{ status: string }> }).suppliers;
+    expect(trustedSuppliers).toHaveLength(1);
+    expect(trustedSuppliers[0]).toMatchObject({ status: "network-error" });
 
     // Read fail closed（三道闸）：全局设置未保存 → msfile_not_configured。
     const unconfigured = await __testDispatchMsfileData({ type: "read-seed", supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-a");

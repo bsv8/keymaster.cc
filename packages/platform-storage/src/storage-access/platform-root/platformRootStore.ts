@@ -151,16 +151,20 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
    * 桶内不再保存 owner 生命周期记录。
    */
   const openOwnerBinding = async (
-    input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number },
+    input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; appPublisherPublicKeyHex?: string; keyspaceGeneration?: number },
     model: "kv" | "files",
   ): Promise<{
     declaration: PluginStorageDeclaration;
     ownerPublicKeyHex: string;
+    appPublisherPublicKeyHex?: string;
     isCurrent: () => boolean;
   }> => {
     const declaration = validatePluginStorageDeclaration(input.declaration);
     if (declaration.scope !== "owner" || declaration.authority === "platform-only" || declaration.model !== model) {
       throw new StorageRuntimeError("storage_forbidden", model === "kv" ? "Owner K-V declaration is not authorized" : "Owner file declaration is not authorized");
+    }
+    if (input.appPublisherPublicKeyHex !== undefined && declaration.model !== "files") {
+      throw new StorageRuntimeError("storage_forbidden", "App publisher root requires the files model");
     }
     const expected = Object.values(SYSTEM_STORAGE_DECLARATIONS).flat().find((candidate) =>
       candidate.moduleId === declaration.moduleId
@@ -172,9 +176,13 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       throw new StorageRuntimeError("storage_forbidden", "Owner storage namespace is not centrally authorized");
     }
     const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
+    const appPublisherPublicKeyHex = input.appPublisherPublicKeyHex === undefined
+      ? undefined
+      : validateOwnerPublicKeyHex(input.appPublisherPublicKeyHex);
     return {
       declaration,
       ownerPublicKeyHex,
+      ...(appPublisherPublicKeyHex === undefined ? {} : { appPublisherPublicKeyHex }),
       isCurrent: () => options.isCurrent?.({
         ownerPublicKeyHex,
         bucketGeneration: options.bucket.bucketGeneration,
@@ -202,8 +210,27 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
         bucket: options.bucket,
         ownerPublicKeyHex: opened.ownerPublicKeyHex,
         declaration: opened.declaration,
+        ...(opened.appPublisherPublicKeyHex === undefined ? {} : { appPublisherPublicKeyHex: opened.appPublisherPublicKeyHex }),
         isCurrent: opened.isCurrent,
       });
+    },
+    async listOwnerAppPublishers(input): Promise<string[]> {
+      const ownerPublicKeyHex = validateOwnerPublicKeyHex(input.ownerPublicKeyHex);
+      const prefix = `${ownerPublicKeyHex}/app.`;
+      const publishers = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const page = await options.provider.list({ prefix, ...(cursor === undefined ? {} : { cursor }), limit: OWNER_LIST_LIMIT });
+        for (const object of page.objects) {
+          const relative = object.path.slice(ownerPublicKeyHex.length + 1);
+          const segment = relative.split("/", 1)[0] ?? "";
+          if (!segment.startsWith("app.")) continue;
+          const publisher = segment.slice("app.".length);
+          if (/^(02|03)[0-9a-f]{64}$/u.test(publisher)) publishers.add(publisher);
+        }
+        cursor = page.nextCursor;
+      } while (cursor);
+      return [...publishers].sort();
     },
     async deleteOwnerStorage(input) {
       // 物理清理只按列表删除；并发与跨设备互斥由 `<owner>/lock.json`

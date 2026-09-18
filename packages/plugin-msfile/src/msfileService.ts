@@ -46,6 +46,11 @@ import { MsFileServiceError } from "./msfileErrors.js";
 import { validateBlockContent, validateSeedContent } from "./contentValidation.js";
 import { toArrayBuffer } from "./sha256.js";
 import { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
+import {
+  MSFILE_BUILTIN_SUPPLIERS,
+  isBuiltinMsFileSupplier,
+  mergeBuiltinMsFileSuppliers,
+} from "./builtinSuppliers.js";
 
 export interface MsFileServiceImplDeps {
   repository: MsFileRepository | Promise<MsFileRepository>;
@@ -55,6 +60,8 @@ export interface MsFileServiceImplDeps {
   notifyStateChange?(state: MsFileServiceEventState): void;
   /** 测试接缝：替换 supplierConfig 动态导入，用于挂起地址校验构造异步窗口。 */
   validatorLoader?: () => Promise<Pick<typeof import("./supplierConfig.js"), "validatePersistedSupplier">>;
+  /** 测试接缝：覆盖平台内置供应商；缺省使用 MSFILE_BUILTIN_SUPPLIERS。 */
+  builtinSuppliers?: readonly MsFileSupplierConfig[];
 }
 
 export interface MsFileServiceEventState {
@@ -157,12 +164,15 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.randomId = deps.randomId ?? DEFAULT_RANDOM_ID;
     this.notifyStateChange = deps.notifyStateChange;
     this.validatorLoader = deps.validatorLoader ?? (() => import("./supplierConfig.js"));
+    this.builtinSuppliers = deps.builtinSuppliers ?? MSFILE_BUILTIN_SUPPLIERS;
     // 审查修复（P1）：所有公开方法先等待初始化完成，杜绝“重启后立即 stat
     // 误报无供应商”与“迟到 refresh 覆盖 mutation 已发布快照”。
     this.ready = this.refreshCaches();
   }
 
   private readonly validatorLoader: () => Promise<Pick<typeof import("./supplierConfig.js"), "validatePersistedSupplier">>;
+
+  private readonly builtinSuppliers: readonly MsFileSupplierConfig[];
 
   private readonly ready: Promise<void>;
 
@@ -249,10 +259,11 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     try {
       const generationAtStart = this.supplierGeneration;
       const repository = await this.repository;
-      const [settingsRow, suppliers] = await Promise.all([repository.getGlobalSettings(), repository.listSuppliers()]);
+      const [settingsRow, persistedSuppliers] = await Promise.all([repository.getGlobalSettings(), repository.listSuppliers()]);
       // CAS 提交（审查修复）：等待期间若发生 mutation（世代已推进），
       // 本次迟到 refresh 不得覆盖 mutation 发布的新快照。
       if (this.supplierGeneration !== generationAtStart) return;
+      const suppliers = mergeBuiltinMsFileSuppliers(persistedSuppliers, this.builtinSuppliers);
       this.cachedSettings = settingsRow
         ? canonicalSettingsRow(settingsRow)
         : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
@@ -271,7 +282,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     await this.ensureReady();
     const repository = await this.repository;
     const row = await repository.getGlobalSettings();
-    const suppliers = await repository.listSuppliers();
+    const persistedSuppliers = await repository.listSuppliers();
+    const suppliers = mergeBuiltinMsFileSuppliers(persistedSuppliers, this.builtinSuppliers);
     this.cachedSettings = row
       ? canonicalSettingsRow(row)
       : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
@@ -356,6 +368,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     const normalized = normalizeSupplierDraft(input);
     if (!normalized.ok) throw new Error(`invalid supplier config: ${normalized.failure.message}`);
     const key = normalized.config.supplierPublicKeyHex;
+    if (isBuiltinMsFileSupplier(key, this.builtinSuppliers)) {
+      throw new Error("builtin MSFile supplier cannot be modified");
+    }
     // 显式状态机：idle → mutating(pre-commit) → committed-invalidating → ready | failed。
     // 保存 previousBarrier：pre-commit 失败时恢复原状（含既有 failed 隔离）。
     const previousBarrier = this.supplierBarriers.get(key);
@@ -406,6 +421,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     await this.ensureReady();
     assertSupplierKey(supplierPublicKeyHex);
     const key = supplierPublicKeyHex;
+    if (isBuiltinMsFileSupplier(key, this.builtinSuppliers)) {
+      throw new Error("builtin MSFile supplier cannot be deleted");
+    }
     const previousBarrier = this.supplierBarriers.get(key);
     this.setBarrier(key, { failed: false });
     let committed = false;
@@ -447,12 +465,13 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   async probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult> {
     await this.ensureReady();
     assertSupplierKey(supplierPublicKeyHex);
-    const repository = await this.repository;
-    const supplierGenerationAtStart = this.supplierGeneration;
+    // 与 stat/read 同源：只消费原子供应商快照，内置供应商也必须可探测。
+    const snapshot = this.supplierSnapshot;
+    const supplierGenerationAtStart = snapshot.generation;
     const fenceAtStart = this.supplierFence;
     // barrier：mutation 窗口内不拨号（审查修复）。
     this.assertNotInvalidating(supplierPublicKeyHex);
-    const supplier = await repository.getSupplier(supplierPublicKeyHex);
+    const supplier = snapshot.suppliers.find((entry) => entry.supplierPublicKeyHex === supplierPublicKeyHex);
     if (!supplier) throw new MsFileServiceError("msfile_supplier_not_found");
     if (!supplier.enabled) throw new MsFileServiceError("msfile_supplier_disabled");
     // 与 stat/read 同源的持久化地址严格校验（审查修复）。

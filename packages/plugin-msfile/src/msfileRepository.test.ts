@@ -1,37 +1,45 @@
 // packages/plugin-msfile/src/msfileRepository.test.ts
-// `keymaster.msfile` schema：全局设置 / 供应商 / App 策略 / App 使用摘要。
+// KeymasterFormats 文件 Repository：`msfiles/setting.json` 与
+// `app.<publisher>/settings.json` 的解析、严格校验和整文件读-改-写。
 
-import { afterEach, describe, expect, it } from "vitest";
-import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import { describe, expect, it } from "vitest";
 import { openMsFileRepository, sanitizeAppOverride } from "./storage/msfileRepository.js";
-import { OWNER_PUBKEY, SUPPLIER_PUBKEY } from "./supplierConfig.test.js";
+import {
+  createInMemoryMsFileRepositoryStores,
+  IN_MEMORY_OWNER_PUBKEY,
+} from "./storage/inMemoryOwnerFileStore.testutil.js";
+import { SUPPLIER_PUBKEY } from "./supplierConfig.test.js";
 
-const PUBLISHER = OWNER_PUBKEY;
+const PUBLISHER = SUPPLIER_PUBKEY;
+const SUPPLIER_ADDRESS = `/ip4/127.0.0.1/udp/4001/webrtc-direct/certhash/uEiDu8SJ7IdK9W_PfRJfV0clhOP6mG0zNXcZQ8bBhC9ipwg/p2p/16Uiu2HAmPGLn8pLWrSTqidMuq5P1rQBo9UhRwdAUjNVyjSwurtvH`;
 
-async function freshRepository() {
-  const store = (declaration: (typeof CENTRAL_STORAGE_DECLARATIONS)[keyof typeof CENTRAL_STORAGE_DECLARATIONS]) =>
-    createInMemoryKeyValueStore({ ...declaration, bucketId: "msfile-test", bucketGeneration: 1 });
-  return openMsFileRepository({
-    settings: store(CENTRAL_STORAGE_DECLARATIONS.msfileSettings),
-    suppliers: store(CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers),
-    appPolicies: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies),
-    appUsage: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage),
-  });
+function freshRepository() {
+  const stores = createInMemoryMsFileRepositoryStores();
+  return { stores, open: () => openMsFileRepository(stores) };
 }
 
-afterEach(async () => {
-  await Promise.resolve();
-});
+function decodeSetting(stores: ReturnType<typeof createInMemoryMsFileRepositoryStores>): Record<string, unknown> {
+  const bytes = stores.settings.objects.get("setting.json");
+  if (!bytes) throw new Error("setting.json is missing");
+  return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+}
 
-describe("global settings", () => {
-  it("requires an explicit central store", async () => {
-    await expect(openMsFileRepository(undefined as never)).rejects.toThrow("MSFile central storage bindings are required");
+function writeRawSetting(stores: ReturnType<typeof createInMemoryMsFileRepositoryStores>, value: unknown): void {
+  stores.settings.objects.set("setting.json", new TextEncoder().encode(JSON.stringify(value)));
+}
+
+describe("global settings（msfiles/setting.json）", () => {
+  it("requires explicit file bindings with a valid owner", async () => {
+    await expect(openMsFileRepository(undefined as never)).rejects.toThrow("MSFile file storage bindings are required");
+    const stores = createInMemoryMsFileRepositoryStores();
+    await expect(openMsFileRepository({ ...stores, ownerPublicKeyHex: "not-a-key" })).rejects.toThrow("owner public key is invalid");
   });
 
-  it("starts unconfigured and persists explicit saves", async () => {
-    const db = await freshRepository();
+  it("starts unconfigured and persists price limits in the documented format", async () => {
+    const { stores, open } = freshRepository();
+    const db = await open();
     expect(await db.getGlobalSettings()).toBeNull();
+
     await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" }, 1234);
     expect(await db.getGlobalSettings()).toEqual({
       settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" },
@@ -39,13 +47,21 @@ describe("global settings", () => {
       globalSeedReadConcurrency: 4,
       globalBlockReadConcurrency: 8,
       globalStatConcurrency: 4,
-      updatedAt: 1234,
+      updatedAt: null,
     });
+    const file = decodeSetting(stores);
+    expect(file).toMatchObject({
+      format: "keymaster.msfiles-setting",
+      version: 1,
+      priceLimits: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" },
+    });
+    expect(file.suppliers).toBeUndefined();
     db.close();
   });
 
-  it("atomically persists the four read concurrency values and preserves prices", async () => {
-    const db = await freshRepository();
+  it("persists concurrency atomically and preserves price limits", async () => {
+    const { open } = freshRepository();
+    const db = await open();
     await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" }, 10);
     await db.putReadConcurrencySettings({
       mediaBlockReadConcurrency: 4,
@@ -59,7 +75,6 @@ describe("global settings", () => {
       globalSeedReadConcurrency: 6,
       globalBlockReadConcurrency: 12,
       globalStatConcurrency: 7,
-      updatedAt: 20,
     });
     await expect(db.putReadConcurrencySettings({
       mediaBlockReadConcurrency: 13,
@@ -70,47 +85,149 @@ describe("global settings", () => {
     expect((await db.getGlobalSettings())?.mediaBlockReadConcurrency).toBe(4);
     db.close();
   });
-});
 
-describe("suppliers", () => {
-  it("roundtrips configs keyed by public key", async () => {
-    const db = await freshRepository();
-    const config = { name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: ["/dns4/n/tcp/443/tls/ws/p2p/x"], enabled: true };
-    await db.upsertSupplier(config);
-    expect((await db.listSuppliers()).length).toBe(1);
-    expect(await db.getSupplier(SUPPLIER_PUBKEY)).toMatchObject({ name: "nas" });
-    await db.deleteSupplier(SUPPLIER_PUBKEY);
-    expect(await db.getSupplier(SUPPLIER_PUBKEY)).toBeNull();
+  it("rejects unknown top-level fields and invalid amounts instead of guessing", async () => {
+    const { stores, open } = freshRepository();
+    const db = await open();
+    writeRawSetting(stores, {
+      format: "keymaster.msfiles-setting",
+      version: 1,
+      priceLimits: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" },
+      extra: true,
+    });
+    await expect(db.getGlobalSettings()).rejects.toThrow(/unknown field/);
+    writeRawSetting(stores, {
+      format: "keymaster.msfiles-setting",
+      version: 1,
+      priceLimits: { seedMaxPriceSatoshis: "01", blockMaxPriceSatoshis: "1000" },
+    });
+    await expect(db.getGlobalSettings()).rejects.toThrow(/priceLimits/);
     db.close();
   });
 });
 
-describe("app policies and usage", () => {
-  it("stores override rows per stable app key", async () => {
-    const db = await freshRepository();
-    const key = { ownerPublicKeyHex: OWNER_PUBKEY, publisherPublicKeyHex: PUBLISHER, appId: "player.example" };
-    await db.putAppPolicy({
-      policyKey: `${OWNER_PUBKEY}|${PUBLISHER}|player.example`,
-      key,
-      override: { seedMaxPriceSatoshis: "100" },
-      updatedAt: 42,
+describe("suppliers（msfiles/setting.json suppliers[]）", () => {
+  it("roundtrips user suppliers and keeps them out of the builtin identity", async () => {
+    const { stores, open } = freshRepository();
+    const db = await open();
+    const config = { name: "nas", supplierPublicKeyHex: PUBLISHER, addresses: [SUPPLIER_ADDRESS], enabled: true };
+    await db.upsertSupplier(config);
+    expect(await db.listSuppliers()).toEqual([config]);
+    expect(await db.getSupplier(PUBLISHER)).toEqual(config);
+    expect(decodeSetting(stores).suppliers).toEqual([
+      { name: "nas", publicKeyHex: PUBLISHER, addresses: [SUPPLIER_ADDRESS], enabled: true },
+    ]);
+    await db.deleteSupplier(PUBLISHER);
+    expect(await db.getSupplier(PUBLISHER)).toBeNull();
+    db.close();
+  });
+
+  it("rejects duplicate supplier public keys in a persisted file", async () => {
+    const { stores, open } = freshRepository();
+    const db = await open();
+    writeRawSetting(stores, {
+      format: "keymaster.msfiles-setting",
+      version: 1,
+      suppliers: [
+        { name: "a", publicKeyHex: PUBLISHER, addresses: [SUPPLIER_ADDRESS], enabled: true },
+        { name: "b", publicKeyHex: PUBLISHER, addresses: [SUPPLIER_ADDRESS], enabled: true },
+      ],
     });
-    const loaded = await db.getAppPolicy(key);
-    expect(loaded?.override).toEqual({ seedMaxPriceSatoshis: "100" });
-    expect((await db.listAppPolicies()).length).toBe(1);
+    await expect(db.listSuppliers()).rejects.toThrow(/duplicate/);
+    db.close();
+  });
+});
+
+describe("app settings（app.<publisher>/settings.json）", () => {
+  const key = { ownerPublicKeyHex: IN_MEMORY_OWNER_PUBKEY, publisherPublicKeyHex: PUBLISHER, appId: "player.example" };
+
+  it("stores override rows per stable app key and lists usages from the same file", async () => {
+    const { stores, open } = freshRepository();
+    const db = await open();
+    await db.touchAppUsage(key, "Player", 10);
+    await db.putAppPolicy({ policyKey: `${IN_MEMORY_OWNER_PUBKEY}|${PUBLISHER}|player.example`, key, override: { seedMaxPriceSatoshis: "100" }, updatedAt: 42 });
+
+    expect((await db.getAppPolicy(key))?.override).toEqual({ seedMaxPriceSatoshis: "100" });
+    expect((await db.listAppPolicies()).map((row) => row.key)).toEqual([key]);
+    const usages = await db.listAppUsages();
+    expect(usages).toHaveLength(1);
+    // putAppPolicy 只补缺失字段，不改写已有观察时间。
+    expect(usages[0]).toMatchObject({ appName: "Player", firstSeenAt: 10, lastSeenAt: 10 });
+
+    const file = JSON.parse(new TextDecoder().decode(stores.appSettings(PUBLISHER).objects.get("settings.json"))) as Record<string, unknown>;
+    expect(file).toMatchObject({
+      format: "keymaster.app-settings",
+      version: 1,
+      publisherPublicKeyHex: PUBLISHER,
+      apps: { "player.example": { name: "Player", msfiles: { seedMaxPriceSatoshis: "100" } } },
+    });
+
     await db.deleteAppPolicy(key);
     expect(await db.getAppPolicy(key)).toBeNull();
+    expect(await db.listAppUsages()).toHaveLength(1);
     db.close();
   });
 
   it("touchAppUsage preserves firstSeenAt and updates lastSeenAt", async () => {
-    const db = await freshRepository();
-    const key = { ownerPublicKeyHex: OWNER_PUBKEY, publisherPublicKeyHex: PUBLISHER, appId: "app" };
-    await db.touchAppUsage(key, "App", 10);
-    await db.touchAppUsage(key, "App v2", 20);
+    const { open } = freshRepository();
+    const db = await open();
+    const usageKey = { ownerPublicKeyHex: IN_MEMORY_OWNER_PUBKEY, publisherPublicKeyHex: PUBLISHER, appId: "app" };
+    await db.touchAppUsage(usageKey, "App", 10);
+    await db.touchAppUsage(usageKey, "App v2", 20);
     const usages = await db.listAppUsages();
     expect(usages).toHaveLength(1);
     expect(usages[0]).toMatchObject({ appName: "App v2", firstSeenAt: 10, lastSeenAt: 20 });
+    db.close();
+  });
+
+  it("preserves unknown module sections when writing known fields", async () => {
+    const { stores, open } = freshRepository();
+    const db = await open();
+    const appStore = stores.appSettings(PUBLISHER);
+    appStore.objects.set("settings.json", new TextEncoder().encode(JSON.stringify({
+      format: "keymaster.app-settings",
+      version: 1,
+      publisherPublicKeyHex: PUBLISHER,
+      apps: {
+        "player.example": {
+          name: "Player",
+          firstSeenAt: "2026-09-19T00:00:00.000Z",
+          lastSeenAt: "2026-09-19T00:00:00.000Z",
+          otherModule: { keep: true },
+        },
+      },
+    })));
+
+    await db.putAppPolicy({ policyKey: `${IN_MEMORY_OWNER_PUBKEY}|${PUBLISHER}|player.example`, key, override: { blockMaxPriceSatoshis: "60" }, updatedAt: 1 });
+    const raw = JSON.parse(new TextDecoder().decode(appStore.objects.get("settings.json"))) as {
+      apps: Record<string, Record<string, unknown>>;
+    };
+    expect(raw.apps["player.example"]).toMatchObject({
+      otherModule: { keep: true },
+      msfiles: { blockMaxPriceSatoshis: "60" },
+    });
+    db.close();
+  });
+
+  it("rejects publisher mismatch and invalid app ids", async () => {
+    const { stores, open } = freshRepository();
+    const db = await open();
+    const appStore = stores.appSettings(PUBLISHER);
+    appStore.objects.set("settings.json", new TextEncoder().encode(JSON.stringify({
+      format: "keymaster.app-settings",
+      version: 1,
+      publisherPublicKeyHex: IN_MEMORY_OWNER_PUBKEY,
+      apps: {},
+    })));
+    await expect(db.listAppUsages()).rejects.toThrow(/publisher/);
+
+    appStore.objects.set("settings.json", new TextEncoder().encode(JSON.stringify({
+      format: "keymaster.app-settings",
+      version: 1,
+      publisherPublicKeyHex: PUBLISHER,
+      apps: { "Bad App": { name: "x", firstSeenAt: "2026-09-19T00:00:00.000Z", lastSeenAt: "2026-09-19T00:00:00.000Z" } },
+    })));
+    await expect(db.listAppUsages()).rejects.toThrow(/appId/);
     db.close();
   });
 });

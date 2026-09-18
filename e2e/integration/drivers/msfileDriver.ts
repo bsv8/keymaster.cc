@@ -109,11 +109,78 @@ export async function downloadMsFileBySeedHash(page: Page, seedHashHex: string):
   return download;
 }
 
+/**
+ * 查询音频/视频 Seed 并按正式打开方式进入原生媒体播放器。
+ *
+ * 正确打开方式的判定：原生 `audio`/`video` 绑定由 Service Worker 承载的
+ * 虚拟媒体 URL（`/__keymaster/msfile-media/...`），而不是把整个文件读成
+ * Blob 或直接下载。返回的 Locator 指向 `data-msfile-media-*` 所在容器。
+ */
+export async function openMsFileMediaBySeedHash(page: Page, seedHashHex: string): Promise<Locator> {
+  const widget = msfileHomeFile(page);
+  await submitSeedHashQuery(page, seedHashHex);
+  await expect(widget.getByText(/^Available$|^可获取$/u).first()).toBeVisible({ timeout: 120_000 });
+  const player = widget.locator(".msfile-home-file__streaming-player").last();
+  await expect(player).toBeVisible({ timeout: 120_000 });
+  const media = player.locator("audio, video");
+  await expect(media).toHaveAttribute("src", /\/__keymaster\/msfile-media\/[0-9a-f]{32}/u, { timeout: 30_000 });
+  return player;
+}
+
+const MEDIA_EVENTS = [
+  "play", "waiting", "loadstart", "loadedmetadata", "canplay", "playing",
+  "seeking", "seeked", "progress", "pause", "ended", "error", "abort",
+];
+
+/**
+ * 用原生元素实际播放并等待“播放中”。
+ *
+ * 只断言点击成功不算打开成功：必须观察到 `playing`、时长可读、没有媒体
+ * 错误，并且真实 Block 读取计数大于 0（证明按 Range 按需读取）。
+ */
+export async function playMsFileMedia(
+  page: Page,
+  player: Locator,
+): Promise<{ durationSeconds: number; readBlocks: number; phase: string; events: string[] }> {
+  const media = player.locator("audio, video");
+  await media.evaluate((element, eventTypes) => {
+    const target = element as HTMLMediaElement;
+    const state = { events: [] as string[] };
+    for (const eventType of eventTypes) target.addEventListener(eventType, () => state.events.push(eventType));
+    Object.defineProperty(window, "__msfileE2EMediaEvents", { configurable: true, value: state });
+  }, MEDIA_EVENTS);
+  await media.evaluate(async (element) => {
+    const target = element as HTMLMediaElement;
+    target.muted = true;
+    await target.play().catch(() => undefined);
+  });
+  await expect.poll(() => player.getAttribute("data-msfile-media-phase"), {
+    timeout: 120_000,
+    message: "媒体必须在原生 Range 打开方式下进入播放",
+  }).toBe("playing");
+  await expect.poll(
+    () => player.getAttribute("data-msfile-media-read-blocks").then((value) => Number(value ?? "0")),
+    { timeout: 60_000, message: "播放必须产生真实 Block 读取" },
+  ).toBeGreaterThan(0);
+  const durationSeconds = await media.evaluate((element) => (element as HTMLMediaElement).duration);
+  expect(Number.isFinite(durationSeconds)).toBe(true);
+  expect(durationSeconds).toBeGreaterThan(0);
+  expect(await media.evaluate((element) => (element as HTMLMediaElement).error?.code ?? null)).toBeNull();
+  const events = await page.evaluate(() => (window as Window & { __msfileE2EMediaEvents?: { events?: string[] } })
+    .__msfileE2EMediaEvents?.events ?? []);
+  expect(events).toContain("playing");
+  const readBlocks = Number(await player.getAttribute("data-msfile-media-read-blocks") ?? "0");
+  const phase = (await player.getAttribute("data-msfile-media-phase")) ?? "";
+  await media.evaluate((element) => (element as HTMLMediaElement).pause());
+  return { durationSeconds, readBlocks, phase, events };
+}
+
 /** 未知 Seed 必须只显示“没有文件”，且不出现任何下载入口。 */
 export async function expectMsFileAbsent(page: Page, seedHashHex: string): Promise<void> {
   const widget = msfileHomeFile(page);
   await submitSeedHashQuery(page, seedHashHex);
-  await expect(widget.getByText(/^No file$|^没有文件$/u)).toBeVisible({ timeout: 60_000 });
-  await expect(widget.getByText(/This supplier does not have the file|该供应商没有此文件/)).toBeVisible();
+  // 内置官方供应商始终参与 Stat，因此 absent 结果可能按供应商多行显示。
+  await expect(widget.getByText(/^No file$|^没有文件$/u).first()).toBeVisible({ timeout: 60_000 });
+  await expect(widget.getByText(/This supplier does not have the file|该供应商没有此文件/).first()).toBeVisible();
   await expect(widget.getByRole("button", { name: /^Download$|^下载$/u })).toHaveCount(0);
 }

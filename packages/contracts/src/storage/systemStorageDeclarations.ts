@@ -189,36 +189,29 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  msfileSettings: Object.freeze({
-    moduleId: "msfile",
-    purposeId: "settings",
-    scope: "bucket",
+  /**
+   * MSFile 设置与供应商（KeymasterFormats《msfiles/setting.json》）：
+   * `<owner>/msfiles/setting.json`，每个 owner 一份，整文件替换。
+   */
+  msfilesFiles: Object.freeze({
+    moduleId: "msfiles",
+    purposeId: "",
+    scope: "owner",
     authority: "built-in-module",
-    model: "kv",
+    model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  msfileSuppliers: Object.freeze({
-    moduleId: "msfile",
-    purposeId: "suppliers",
-    scope: "bucket",
+  /**
+   * 三方 App 设置（KeymasterFormats《app.publickeyhex/settings.json》）：
+   * `<owner>/app.<publisher 公钥>/settings.json`。绑定必须携带 publisher，
+   * 因此不通过 filesFor(purposeId) 暴露给普通插件 setup。
+   */
+  appSettingsFiles: Object.freeze({
+    moduleId: "app",
+    purposeId: "app-settings",
+    scope: "owner",
     authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  msfileAppPolicies: Object.freeze({
-    moduleId: "msfile",
-    purposeId: "app-policies",
-    scope: "bucket",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  msfileAppUsage: Object.freeze({
-    moduleId: "msfile",
-    purposeId: "app-usage",
-    scope: "bucket",
-    authority: "built-in-module",
-    model: "kv",
+    model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
 });
@@ -241,10 +234,8 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   "token-stas": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenStasState]),
   webrtc: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory]),
   msfile: Object.freeze([
-    CENTRAL_STORAGE_DECLARATIONS.msfileSettings,
-    CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers,
-    CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies,
-    CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage,
+    CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,
+    CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles,
   ]),
 });
 

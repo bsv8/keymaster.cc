@@ -93,7 +93,8 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     unitId: "msfile.coordinator-worker",
     taskIds: [],
     serviceIds: ["msfile.service"],
-    storagePurposes: ["settings", "suppliers", "app-policies", "app-usage"],
+    // `<owner>/msfiles/` 文件根；App 覆盖额度按 publisher 惰性打开，不在此列举。
+    storagePurposes: [""],
     finalIoAuditEntries: [],
   },
   {

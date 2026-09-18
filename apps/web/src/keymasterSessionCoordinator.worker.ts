@@ -2587,21 +2587,35 @@ function ensureTestPlatformStorage(): void {
   };
   const root: PlatformRootStore = {
     bucket,
-    openOwnerFileStore: async ({ ownerPublicKeyHex }) => {
-      const prefix = `${ownerPublicKeyHex.toLowerCase()}::`;
+    openOwnerFileStore: async ({ ownerPublicKeyHex, declaration, appPublisherPublicKeyHex }) => {
+      // 测试存根按 owner/module/purpose 隔离；三方 App 文件根落在
+      // `<owner>/app.<publisher>/`，与生产路径语义一致。
+      const base = appPublisherPublicKeyHex === undefined
+        ? `${ownerPublicKeyHex.toLowerCase()}::${declaration.moduleId}::${declaration.purposeId}::`
+        : `${ownerPublicKeyHex.toLowerCase()}::app.${appPublisherPublicKeyHex.toLowerCase()}::`;
       return {
         list: async (input = {}) => ({
           files: [...testOwnerFileObjects.keys()]
-            .filter((key) => key.startsWith(prefix) && key.slice(prefix.length).startsWith(input.prefix ?? ""))
-            .map((key) => ({ path: key.slice(prefix.length), size: testOwnerFileObjects.get(key)!.byteLength })),
+            .filter((key) => key.startsWith(base) && key.slice(base.length).startsWith(input.prefix ?? ""))
+            .map((key) => ({ path: key.slice(base.length), size: testOwnerFileObjects.get(key)!.byteLength })),
         }),
         get: async (path) => {
-          const value = testOwnerFileObjects.get(prefix + path);
+          const value = testOwnerFileObjects.get(base + path);
           return value ? { path, bytes: new Uint8Array(value) } : undefined;
         },
-        put: async (path, bytes) => { testOwnerFileObjects.set(prefix + path, new Uint8Array(bytes)); return {}; },
-        delete: async (path) => { testOwnerFileObjects.delete(prefix + path); },
+        put: async (path, bytes) => { testOwnerFileObjects.set(base + path, new Uint8Array(bytes)); return {}; },
+        delete: async (path) => { testOwnerFileObjects.delete(base + path); },
       };
+    },
+    listOwnerAppPublishers: async ({ ownerPublicKeyHex }) => {
+      const prefix = `${ownerPublicKeyHex.toLowerCase()}::app.`;
+      const publishers = new Set<string>();
+      for (const key of testOwnerFileObjects.keys()) {
+        if (!key.startsWith(prefix)) continue;
+        const segment = key.slice(prefix.length).split("::", 1)[0] ?? "";
+        if (/^(02|03)[0-9a-f]{64}$/u.test(segment)) publishers.add(segment);
+      }
+      return [...publishers].sort();
     },
     openKeyValueStore: async ({ ownerPublicKeyHex, declaration }) => isTestGarbageOwnerDeclaration(declaration)
       ? openTestGarbageStore(declaration, ownerPublicKeyHex) as import("@keymaster/contracts").OwnerAppStore
@@ -3453,12 +3467,12 @@ let msfileRuntimeStarting: Promise<MsFileServiceImpl> | undefined;
 /** 释放/切换 owner 时递增，阻止迟到的候选实例重新发布。 */
 let msfileRuntimeStartToken = 0;
 type MsFileRuntimeStores = {
-  settings: KeyValueStore;
-  suppliers: KeyValueStore;
-  appPolicies: KeyValueStore;
-  appUsage: KeyValueStore;
+  ownerPublicKeyHex: string;
+  settings: BorrowedOwnerFileStore;
+  appSettings(publisherPublicKeyHex: string): BorrowedOwnerFileStore;
+  listAppPublishers(): Promise<string[]>;
 };
-/** MSFile 的四个中央 purpose 句柄；由 Coordinator 打开和关闭。 */
+/** MSFile 的 owner 文件句柄与 App publisher 枚举；句柄由 worker 缓存与失效。 */
 let msfileRuntimeStores: MsFileRuntimeStores | undefined;
 let lastMsFileState: CoordinatorMsFileStateEvent | undefined;
 
@@ -3869,28 +3883,24 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
     try {
       const root = platformRootStore;
       if (!root) throw msfileError("msfile_unavailable", "Platform storage has not been bootstrapped");
-      const opened: KeyValueStore[] = [];
-      try {
-        const settings = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.msfileSettings });
-        opened.push(settings);
-        const suppliers = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers });
-        opened.push(suppliers);
-        const appPolicies = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies });
-        opened.push(appPolicies);
-        const appUsage = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage });
-        opened.push(appUsage);
-        stores = { settings, suppliers, appPolicies, appUsage };
-      } catch (error) {
-        for (const store of opened) store.close();
-        throw error;
-      }
+      const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+      if (!ownerPublicKeyHex) throw msfileError("msfile_unavailable", "MSFile runtime requires an unlocked active key");
+      // 设置与供应商是 owner 文件；App 覆盖额度按 publisher 惰性打开
+      // `<owner>/app.<publisher>/settings.json`。句柄由 worker 统一缓存、
+      // 切 owner/世代时失效，因此这里不 close，也不持有 K-V 生命周期。
+      stores = {
+        ownerPublicKeyHex,
+        settings: createWorkerOwnerFileStore("msfile", ""),
+        appSettings: (publisherPublicKeyHex: string) => createWorkerOwnerFileStore("msfile", "app-settings", publisherPublicKeyHex),
+        listAppPublishers: listWorkerOwnerAppPublishers,
+      };
       const repository = await openMsFileRepository(stores);
       service = createMsFileService({
         repository: repository,
         transport: windowP2pExecutorTransport,
         notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
       });
-      // 服务构造会异步读取 owner K-V；必须等首轮读取完成后再发布实例。
+      // 服务构造会异步读取 owner 文件；必须等首轮读取完成后再发布实例。
       // 初始化失败的候选实例在这里释放，下一次 control/recovery 可以重试，
       // 不把一次 Storage 竞态变成永久 unavailable。
       await service.waitUntilInitialized();
@@ -3898,7 +3908,7 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       if (
         startToken !== msfileRuntimeStartToken
         || coordinatorState.vaultStatus !== "unlocked"
-        || !coordinatorState.activePublicKeyHex
+        || coordinatorState.activePublicKeyHex?.trim().toLowerCase() !== ownerPublicKeyHex
         || !isCoordinatorProductEnabled("msfile")
       ) {
         throw msfileError("msfile_unavailable", "MSFile runtime startup was superseded");
@@ -3913,9 +3923,6 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       coordinatorWorkerUnitRegistry.fail(workerUnit.unitId, workerUnit.instanceId, error);
       stopCoordinatorWorkerUnit(workerUnit.unitId, workerUnit.instanceId);
       try { service?.dispose?.(); } catch { /* 启动失败时尽力释放服务 */ }
-      if (stores && msfileRuntimeStores !== stores) {
-        for (const store of Object.values(stores)) store.close();
-      }
       throw error;
     }
   })();
@@ -4205,11 +4212,9 @@ function releaseMsfileRuntime(_reason: string): void {
   windowP2pExecutorIdentityRequests.clear();
   msfileGrants.clear();
   const workerUnit = coordinatorWorkerUnitRegistry.get("msfile.coordinator-worker");
-  const stores = msfileRuntimeStores;
-  msfileRuntimeStores = undefined;
   (msfileRuntime as unknown as { dispose?: () => void } | undefined)?.dispose?.();
   msfileRuntime = undefined;
-  if (stores) for (const store of Object.values(stores)) store.close();
+  msfileRuntimeStores = undefined;
   lastMsFileState = undefined;
   if (workerUnit) stopCoordinatorWorkerUnit(workerUnit.unitId, workerUnit.instanceId);
 }
@@ -5705,12 +5710,18 @@ function createWorkerKeyspace(): KeyspaceService {
  */
 const workerOwnerFileHandles = new Map<string, BorrowedOwnerFileStore>();
 
-function createWorkerOwnerFileStore(pluginId: string, purposeId?: string): BorrowedOwnerFileStore {
-  const handleKey = `${pluginId}\u0000${purposeId ?? "*"}`;
+function createWorkerOwnerFileStore(
+  pluginId: string,
+  purposeId?: string,
+  appPublisherPublicKeyHex?: string,
+): BorrowedOwnerFileStore {
+  const publisherKey = appPublisherPublicKeyHex?.trim().toLowerCase();
+  const handleKey = `${pluginId}\u0000${purposeId ?? "*"}\u0000${publisherKey ?? "*"}`;
   const cachedHandle = workerOwnerFileHandles.get(handleKey);
   if (cachedHandle) return cachedHandle;
   const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId]?.find((candidate) => candidate.scope === "owner" && candidate.model === "files" && (purposeId === undefined || candidate.purposeId === purposeId));
   if (!declaration || declaration.scope !== "owner" || declaration.authority !== "built-in-module" || declaration.model !== "files") throw new Error(`Unknown owner file storage declaration: ${pluginId}`);
+  if (publisherKey !== undefined && !/^(02|03)[0-9a-f]{64}$/u.test(publisherKey)) throw new Error("App publisher public key is invalid");
   let closed = false;
   let ownerPublicKeyHex: string | undefined;
   let current: OwnerFileStore | undefined;
@@ -5735,7 +5746,12 @@ function createWorkerOwnerFileStore(pluginId: string, purposeId?: string): Borro
       invalidateBinding();
       if (!platformRootStore) throw new Error("Owner storage is not ready");
       const root = platformRootStore;
-      const opened = await root.openOwnerFileStore({ ownerPublicKeyHex: owner, declaration, keyspaceGeneration: expectedGeneration });
+      const opened = await root.openOwnerFileStore({
+        ownerPublicKeyHex: owner,
+        declaration,
+        ...(publisherKey === undefined ? {} : { appPublisherPublicKeyHex: publisherKey }),
+        keyspaceGeneration: expectedGeneration,
+      });
       if (
         closed ||
         platformRootStore !== root ||
@@ -5804,6 +5820,31 @@ function createWorkerOwnerFileStore(pluginId: string, purposeId?: string): Borro
   workerOwnerStores.add(binding);
   workerOwnerFileHandles.set(handleKey, handle);
   return handle;
+}
+
+/**
+ * 枚举当前 owner 下已存在的三方 App publisher（`app.<publisher>/` 目录）。
+ * 只返回目录名；用于 MSFile 设置页列出 App 授权，不读取 App 文件内容。
+ */
+async function listWorkerOwnerAppPublishers(): Promise<string[]> {
+  assertStorageDataAvailable();
+  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner) throw new Error("Owner storage requires an unlocked active key");
+  assertOwnerStorageNotFenced(owner);
+  if (!platformRootStore) throw new Error("Owner storage is not ready");
+  const root = platformRootStore;
+  const rootToken = platformRootToken;
+  const generation = coordinatorState.keyspaceGeneration;
+  const publishers = await root.listOwnerAppPublishers({ ownerPublicKeyHex: owner, keyspaceGeneration: generation });
+  if (
+    platformRootStore !== root
+    || platformRootToken !== rootToken
+    || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
+    || coordinatorState.keyspaceGeneration !== generation
+  ) {
+    throw storageUnavailableError("Owner app publisher listing became stale");
+  }
+  return publishers;
 }
 
 function createWorkerOwnerStore(pluginId: string, purposeId?: string): KeyValueStore {
@@ -12473,10 +12514,7 @@ export function __testResetState(): void {
   windowP2pExecutorConfigSync?.reject(windowP2pError("ERR_WORKER_RESTARTED", "Window P2P Coordinator runtime restarted"));
   windowP2pExecutorConfigSync = undefined;
   msfileRuntime = undefined;
-  if (msfileRuntimeStores) {
-    for (const store of Object.values(msfileRuntimeStores)) store.close();
-    msfileRuntimeStores = undefined;
-  }
+  msfileRuntimeStores = undefined;
   lastMsFileState = undefined;
   satIncomingHandlers.clear();
   channelSeenMessages.clear();
@@ -13568,28 +13606,35 @@ export async function __testDeleteVault(): Promise<void> {
   autoLockTimer = undefined;
 }
 
-/** 测试专用：清空一个中央 bucket K-V namespace，不连接浏览器持久化 API。 */
+/** 测试专用：清空一个中央 namespace，不连接浏览器持久化 API。 */
 export async function __testClearCentralNamespace(moduleId: string): Promise<void> {
   ensureTestPlatformStorage();
   if (!platformRootStore) throw new Error("Test platform storage is not ready");
   const normalizedModuleId = moduleId.toLowerCase();
   const declarations = Object.values(CENTRAL_STORAGE_DECLARATIONS).filter(
-    (candidate) => candidate.moduleId === normalizedModuleId && candidate.model === "kv",
+    (candidate) => candidate.moduleId === normalizedModuleId,
   );
-  if (declarations.length === 0) throw new Error(`Unknown central platform K-V module: ${moduleId}`);
+  if (declarations.length === 0) throw new Error(`Unknown central module: ${moduleId}`);
+  // owner 声明（含 owner 文件模型）没有 bucket 级 store 可清；这里直接
+  // 清掉内存 owner 文件对象与 owner K-V 句柄，保持测试隔离。
   if (declarations.some((declaration) => declaration.scope === "owner")) {
     const stores = testPlatformStores;
-    if (!stores) return;
-    const suffix = `:${normalizedModuleId}:`;
-    for (const key of [...stores.keys()]) {
-      if (key.includes(suffix)) {
-        stores.get(key)?.close();
-        stores.delete(key);
+    if (stores) {
+      const suffix = `:${normalizedModuleId}:`;
+      for (const key of [...stores.keys()]) {
+        if (key.includes(suffix)) {
+          stores.get(key)?.close();
+          stores.delete(key);
+        }
       }
+    }
+    for (const key of [...testOwnerFileObjects.keys()]) {
+      if (key.includes(`::${normalizedModuleId}::`)) testOwnerFileObjects.delete(key);
     }
     return;
   }
   for (const declaration of declarations) {
+    if (declaration.model !== "kv") continue;
     const store = await platformRootStore.openPlatformStore({ declaration });
     for (const partition of ["default", "settings", "suppliers", "policies", "usages"]) {
       for (;;) {

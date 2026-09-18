@@ -30,6 +30,7 @@ export const MSFILE_HOME_PREVIEW_MIME_TYPES = [
   "video/webm",
   "video/ogg",
   "text/plain",
+  "text/markdown",
   "application/pdf",
   "text/html",
 ] as const;
@@ -69,6 +70,8 @@ function previewKindOf(normalizedMediaType: string): MsFileHomePreviewKind | nul
   if (normalizedMediaType.startsWith("audio/")) return "audio";
   if (normalizedMediaType.startsWith("video/")) return "video";
   if (normalizedMediaType === "text/plain") return "text";
+  // Markdown 只按纯文本 `<pre>` 展示，不解析也不执行任何标记。
+  if (normalizedMediaType === "text/markdown") return "text";
   if (normalizedMediaType === "application/pdf") return "pdf";
   if (normalizedMediaType === "text/html") return "html";
   return null;
@@ -182,6 +185,7 @@ export function hasMsFilePreviewSignature(
     case "application/pdf":
       return asciiAt(firstBytes, 0, 5) === "%PDF-";
     case "text/plain":
+    case "text/markdown":
     case "text/html":
       return true;
     default:

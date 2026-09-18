@@ -464,23 +464,36 @@ export function MsFileSettings() {
           <li key={supplier.supplierPublicKeyHex}>
             <div className="msfile-settings__supplier-line">
               <strong>{supplier.name}</strong>
+              {supplier.builtin ? (
+                <span className="msfile-settings__badge">{t("msfile.settings.supplier.builtin", { defaultValue: "System default" })}</span>
+              ) : null}
               <code title={supplier.supplierPublicKeyHex}>{supplier.supplierPublicKeyHex.slice(0, 12)}…</code>
               <span>{supplier.addresses.length} addr</span>
-              <label className="msfile-settings__checkbox">
-                <input type="checkbox" checked={supplier.enabled} onChange={() => void toggleSupplier(supplier)} />
-                <span>{t("msfile.settings.supplier.enabled", { defaultValue: "Enabled" })}</span>
-              </label>
-              <Button variant="secondary" onClick={() => startEditSupplier(supplier)}>
-                {t("msfile.settings.supplier.edit", { defaultValue: "Edit" })}
-              </Button>
+              {supplier.builtin ? (
+                <span className="msfile-settings__fixed">
+                  {t("msfile.settings.supplier.builtinFixed", { defaultValue: "Always enabled; cannot be edited or deleted" })}
+                </span>
+              ) : (
+                <>
+                  <label className="msfile-settings__checkbox">
+                    <input type="checkbox" checked={supplier.enabled} onChange={() => void toggleSupplier(supplier)} />
+                    <span>{t("msfile.settings.supplier.enabled", { defaultValue: "Enabled" })}</span>
+                  </label>
+                  <Button variant="secondary" onClick={() => startEditSupplier(supplier)}>
+                    {t("msfile.settings.supplier.edit", { defaultValue: "Edit" })}
+                  </Button>
+                </>
+              )}
               <Button variant="secondary" onClick={() => void testSupplier(supplier)} disabled={probingKey === supplier.supplierPublicKeyHex}>
                 {probingKey === supplier.supplierPublicKeyHex
                   ? t("msfile.settings.supplier.testing", { defaultValue: "Testing…" })
                   : t("msfile.settings.supplier.test", { defaultValue: "Test connection" })}
               </Button>
-              <Button variant="danger" onClick={() => void removeSupplier(supplier)}>
-                {t("msfile.settings.supplier.delete", { defaultValue: "Delete" })}
-              </Button>
+              {supplier.builtin ? null : (
+                <Button variant="danger" onClick={() => void removeSupplier(supplier)}>
+                  {t("msfile.settings.supplier.delete", { defaultValue: "Delete" })}
+                </Button>
+              )}
             </div>
             {probeResult?.key === supplier.supplierPublicKeyHex ? (
               <p className={probeResult.ok ? "msfile-settings__ok" : "msfile-settings__error"}>{probeResult.detail}</p>

@@ -60,6 +60,8 @@ const resources: I18nPluginResources = {
       "msfile.settings.supplier.publicKey": "Supplier public key (66 hex chars)",
       "msfile.settings.supplier.addresses": "Dialable addresses (one per line, in try order)",
       "msfile.settings.supplier.enabled": "Enabled",
+      "msfile.settings.supplier.builtin": "System default",
+      "msfile.settings.supplier.builtinFixed": "Always enabled; cannot be edited or deleted",
       "msfile.settings.supplier.peerId": "PeerId derived from public key",
       "msfile.settings.supplier.add": "Add supplier",
       "msfile.settings.supplier.edit": "Edit",
@@ -189,6 +191,8 @@ const resources: I18nPluginResources = {
       "msfile.settings.supplier.publicKey": "供应商公钥（66 位 hex）",
       "msfile.settings.supplier.addresses": "可拨号地址（每行一个，按尝试顺序）",
       "msfile.settings.supplier.enabled": "启用",
+      "msfile.settings.supplier.builtin": "系统内置",
+      "msfile.settings.supplier.builtinFixed": "始终启用，不可编辑或删除",
       "msfile.settings.supplier.peerId": "由公钥派生的 PeerId",
       "msfile.settings.supplier.add": "新增供应商",
       "msfile.settings.supplier.edit": "编辑",
@@ -327,11 +331,11 @@ const msfilePluginDefinition = {
     id: "msfile.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
+    // 设置与供应商是 `<owner>/msfiles/setting.json`；App 覆盖额度按 publisher
+    // 打开 `<owner>/app.<publisher>/settings.json`（绑定需要 publisher，不能
+    // 通过 filesFor(purposeId) 预绑定，因此不出现在这里）。
     storages: [
-      CENTRAL_STORAGE_DECLARATIONS.msfileSettings,
-      CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers,
-      CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies,
-      CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage,
+      CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,
     ],
   }],
   i18n: resources,

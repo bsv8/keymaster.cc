@@ -60,6 +60,20 @@
   gap: 10px;
 }
 
+.msfile-settings__badge {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.75rem;
+  color: var(--km-text-muted, #6b7280);
+  background: var(--km-surface-subtle, #f3f4f6);
+}
+
+.msfile-settings__fixed {
+  font-size: 0.8rem;
+  color: var(--km-text-muted, #6b7280);
+}
+
 .msfile-settings__form {
   display: flex;
   flex-direction: column;

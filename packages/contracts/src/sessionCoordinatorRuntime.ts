@@ -1168,11 +1168,15 @@ function parseMsFileSupplier(value: unknown): MsFileSupplierConfig {
   const supplier = expectRecord(value, "MSFile supplier");
   const supplierPublicKeyHex = text(supplier.supplierPublicKeyHex, "MSFile supplier.supplierPublicKeyHex", 66);
   if (!isValidMsFileSupplierPublicKeyHex(supplierPublicKeyHex)) throw new TypeError("Coordinator MSFile supplier public key is invalid");
+  const builtin = supplier.builtin === undefined
+    ? undefined
+    : booleanValue(supplier.builtin, "MSFile supplier.builtin");
   return {
     name: text(supplier.name, "MSFile supplier.name", 256),
     supplierPublicKeyHex,
     addresses: stringList(supplier.addresses, "MSFile supplier.addresses", 64, 2_048),
     enabled: booleanValue(supplier.enabled, "MSFile supplier.enabled"),
+    ...(builtin === undefined ? {} : { builtin }),
   };
 }
 

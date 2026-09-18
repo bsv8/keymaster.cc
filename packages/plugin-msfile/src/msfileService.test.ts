@@ -9,9 +9,9 @@ import type {
   MsFileGlobalPriceSettings,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import { MsFileServiceError } from "./msfileErrors.js";
+import { MSFILE_BUILTIN_SUPPLIERS } from "./builtinSuppliers.js";
+import { createInMemoryMsFileRepositoryStores } from "./storage/inMemoryOwnerFileStore.testutil.js";
 import { sha256 } from "./sha256.js";
 import { OWNER_PUBKEY, SUPPLIER_PUBKEY, SUPPLIER_PEER_ID } from "./supplierConfig.test.js";
 import { validatePersistedSupplier } from "./supplierConfig.js";
@@ -21,18 +21,9 @@ export const OWNER_PEER_ID = "16Uiu2HAm7jWZvRQWjW8LpPRXqyGJqpb4rqLkX7FUu53zoQG9o
 const OTHER_KEY = "02b6de0e542ca933c790eb27e7d759abf2947233552fd0f942c4cd391186286e72";
 
 function createMsFileService(deps: Omit<MsFileServiceImplDeps, "repository"> & { repository?: MsFileServiceImplDeps["repository"] }): MsFileServiceImpl {
-  const repository = deps.repository ?? openMsFileRepository((() => {
-    const bucketId = `msfile-service-test-${crypto.randomUUID()}`;
-    const store = (declaration: (typeof CENTRAL_STORAGE_DECLARATIONS)[keyof typeof CENTRAL_STORAGE_DECLARATIONS]) =>
-      createInMemoryKeyValueStore({ ...declaration, bucketId, bucketGeneration: 1 });
-    return {
-      settings: store(CENTRAL_STORAGE_DECLARATIONS.msfileSettings),
-      suppliers: store(CENTRAL_STORAGE_DECLARATIONS.msfileSuppliers),
-      appPolicies: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppPolicies),
-      appUsage: store(CENTRAL_STORAGE_DECLARATIONS.msfileAppUsage),
-    };
-  })());
-  return createBoundMsFileService({ ...deps, repository });
+  const repository = deps.repository ?? openMsFileRepository(createInMemoryMsFileRepositoryStores(OWNER_PUBKEY));
+  // 单测默认关闭平台内置供应商，保持既有用例的隔离；内置语义由专门用例覆盖。
+  return createBoundMsFileService({ builtinSuppliers: [], ...deps, repository });
 }
 
 async function hashOf(bytes: Uint8Array): Promise<string> {
@@ -630,6 +621,59 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
     const result = await service.stat({ seedHashHex: "ab".repeat(32) });
     expect(result.suppliers).toHaveLength(1);
     expect(result.suppliers[0]).toMatchObject({ status: "absent", supplierPublicKeyHex: SUPPLIER_PUBKEY });
+  });
+
+  it("always exposes the builtin supplier, overriding a persisted duplicate", async () => {
+    const transport = makeTransport();
+    const official = MSFILE_BUILTIN_SUPPLIERS[0]!;
+    const impersonation: MsFileSupplierConfig = {
+      name: "hijacked",
+      supplierPublicKeyHex: official.supplierPublicKeyHex,
+      addresses: [...official.addresses],
+      enabled: false,
+    };
+    const service = createMsFileService({
+      builtinSuppliers: MSFILE_BUILTIN_SUPPLIERS,
+      repository: makeFakeRepository([impersonation]),
+      transport: transport as unknown as MsFileTransport,
+    });
+    openServices.push(service);
+
+    const snapshot = await service.getSettingsSnapshot();
+    const entries = snapshot.suppliers.filter((entry) => entry.supplierPublicKeyHex === official.supplierPublicKeyHex);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: official.name, enabled: true, builtin: true });
+    expect(service.status()).toBe("ready");
+
+    // stat/probe 都来自同一快照：内置供应商参与广播且可测试连接。
+    const stat = await service.stat({ seedHashHex: "ab".repeat(32) });
+    expect(stat.suppliers).toContainEqual(expect.objectContaining({ supplierPublicKeyHex: official.supplierPublicKeyHex, status: "absent" }));
+    await expect(service.probeSupplier(official.supplierPublicKeyHex)).resolves.toMatchObject({ connected: true });
+  });
+
+  it("rejects upsert and delete for the builtin supplier", async () => {
+    const transport = makeTransport();
+    const official = MSFILE_BUILTIN_SUPPLIERS[0]!;
+    const repository = makeFakeRepository([]);
+    const service = createMsFileService({
+      builtinSuppliers: MSFILE_BUILTIN_SUPPLIERS,
+      repository,
+      transport: transport as unknown as MsFileTransport,
+    });
+    openServices.push(service);
+
+    await expect(service.upsertSupplier({
+      name: "rewritten",
+      supplierPublicKeyHex: official.supplierPublicKeyHex,
+      addresses: [...official.addresses],
+      enabled: false,
+    })).rejects.toThrow(/builtin/i);
+    await expect(service.deleteSupplier(official.supplierPublicKeyHex)).rejects.toThrow(/builtin/i);
+    expect(repository.rows.size).toBe(0);
+
+    const snapshot = await service.getSettingsSnapshot();
+    expect(snapshot.suppliers).toHaveLength(1);
+    expect(snapshot.suppliers[0]).toMatchObject({ builtin: true, enabled: true });
   });
 
   it("lets a late refresh never resurrect a pre-mutation snapshot", async () => {

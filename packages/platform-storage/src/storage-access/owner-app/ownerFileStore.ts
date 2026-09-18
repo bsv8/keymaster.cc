@@ -19,6 +19,8 @@ export interface OwnerFileStoreOptions {
   declaration: PluginStorageDeclaration;
   /** 当前 owner 的压缩公钥。 */
   ownerPublicKeyHex: string;
+  /** 三方 App 身份根：`<owner>/app.<publisher 公钥>/`；只有 files 模型允许。 */
+  appPublisherPublicKeyHex?: string;
   /** 切桶或切 Key 后让旧句柄 fail closed。 */
   isCurrent?: () => boolean;
 }
@@ -46,7 +48,8 @@ export function createOwnerFileStore(options: OwnerFileStoreOptions): OwnerFileS
     ...declaration,
     bucketId: options.bucket.bucketId,
     bucketGeneration: options.bucket.bucketGeneration,
-    ownerPublicKeyHex
+    ownerPublicKeyHex,
+    ...(options.appPublisherPublicKeyHex === undefined ? {} : { appPublisherPublicKeyHex: options.appPublisherPublicKeyHex }),
   });
   const root = buildStorageNamespaceRoot(binding);
   let closed = false;

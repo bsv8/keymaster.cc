@@ -282,6 +282,11 @@ export interface MsFileSupplierConfig {
   supplierPublicKeyHex: string;
   addresses: string[];
   enabled: boolean;
+  /**
+   * 系统内置供应商：由平台常量提供，始终存在且启用。
+   * 不能删除或改写；持久化的同名 Key 记录不得覆盖它。
+   */
+  builtin?: boolean;
 }
 
 export interface MsFileSupplierAddressProbeResult {

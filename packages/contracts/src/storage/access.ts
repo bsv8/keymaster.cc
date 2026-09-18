@@ -46,6 +46,11 @@ export interface StorageNamespaceBinding extends PluginStorageDeclaration {
   bucketGeneration: number;
   /** owner 作用域的当前压缩公钥；bucket 作用域不得携带 owner。 */
   ownerPublicKeyHex?: string;
+  /**
+   * 三方 App 身份作用域：app settings 等 Keymaster 管理的文件落在
+   * `<owner>/app.<publisherPublicKeyHex>/`；只有 model "files" 允许。
+   */
+  appPublisherPublicKeyHex?: string;
 }
 
 const STORAGE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/u;
@@ -144,6 +149,20 @@ export function buildOwnerStorageFileRoot(input: {
   return `${owner}/${moduleId}/${validateStoragePurposeId(input.purposeId)}/`;
 }
 
+/**
+ * 三方 App 的 Keymaster 管理文件根：`<owner>/app.<publisherPublicKeyHex>/`。
+ *
+ * `settings.json` 由 Keymaster 读写；`storage/` 留给 App 自己（见
+ * KeymasterFormats 的 app.publickeyhex 目录）。publisher 公钥必须是
+ * 33 字节压缩公钥的小写 hex。
+ */
+export function buildOwnerAppPublisherRoot(input: {
+  ownerPublicKeyHex: string;
+  appPublisherPublicKeyHex: string;
+}): string {
+  return `${validateOwnerPublicKeyHex(input.ownerPublicKeyHex)}/app.${validateOwnerPublicKeyHex(input.appPublisherPublicKeyHex)}/`;
+}
+
 /** 构造绑定后的逻辑 namespace 根；Provider 仍由 Coordinator 私有持有。 */
 export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): string {
   const declaration = validatePluginStorageDeclaration(binding);
@@ -155,6 +174,14 @@ export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): str
   }
   if (declaration.scope === "owner") {
     if (!binding.ownerPublicKeyHex) throw new Error("owner storage requires ownerPublicKeyHex");
+    // 三方 App 身份根优先于模块/用途根；只有文件模型允许携带 publisher。
+    if (binding.appPublisherPublicKeyHex !== undefined) {
+      if (declaration.model !== "files") throw new Error("app publisher storage requires the files model");
+      return buildOwnerAppPublisherRoot({
+        ownerPublicKeyHex: binding.ownerPublicKeyHex,
+        appPublisherPublicKeyHex: binding.appPublisherPublicKeyHex,
+      });
+    }
     // 文件模型直接落在 owner 下（KeymasterFormats 扁平布局）；K-V/snapshot
     // 模型继续使用 `.keymaster/modules` 保留区。
     if (declaration.model === "files") {
@@ -206,7 +233,18 @@ export interface PlatformRootStore {
   /** 打开 Host 已预绑定的 owner 模块 K-V。 */
   openKeyValueStore(input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number }): Promise<OwnerAppStore>;
   /** 打开 Host 已预绑定的 owner 模块文件根（model: "files"，扁平布局）。 */
-  openOwnerFileStore(input: { ownerPublicKeyHex: string; declaration: PluginStorageDeclaration; keyspaceGeneration?: number }): Promise<import("./files.js").OwnerFileStore>;
+  openOwnerFileStore(input: {
+    ownerPublicKeyHex: string;
+    declaration: PluginStorageDeclaration;
+    /** 三方 App 身份根：落在 `<owner>/app.<publisher>/`，只有 files 模型允许。 */
+    appPublisherPublicKeyHex?: string;
+    keyspaceGeneration?: number;
+  }): Promise<import("./files.js").OwnerFileStore>;
+  /**
+   * 枚举 owner 下已存在的三方 App publisher 公钥（`app.<publisher>/` 目录）。
+   * 只读取目录名，不返回 App 文件内容；平台内部使用。
+   */
+  listOwnerAppPublishers(input: { ownerPublicKeyHex: string; keyspaceGeneration?: number }): Promise<string[]>;
   /** 打开 bucket 级内置 snapshot；返回值不含 Provider/ETag/path。 */
   openPlatformSnapshot<T>(input: { declaration: PluginStorageDeclaration; validate: (value: unknown) => StorageSnapshotJsonCompatible<T> }): Promise<SnapshotStore<T>>;
   /** 打开 bucket 级平台 K-V（Vault purpose、protocol、multipart 等）。 */
