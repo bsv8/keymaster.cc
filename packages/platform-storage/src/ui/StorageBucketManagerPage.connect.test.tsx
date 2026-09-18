@@ -9,27 +9,43 @@ import { createDeviceRecordRepository, defaultDeviceStorage } from "../index.js"
 import { writeSession } from "../bootstrap/sessionRecord.js";
 import { StorageBucketManagerPage } from "./StorageBucketManagerPage.js";
 
-const state = vi.hoisted(() => ({
-  probeBucket: vi.fn(),
-  connectExistingRemote: vi.fn(),
-  switchBucket: vi.fn(),
-  renameBucket: vi.fn(),
-  // 必须固定对象身份：页面 effect 依赖 host,每次渲染换对象会导致无限重渲染。
-  host: { resourceStore: { subscribe: () => () => undefined } }
-}));
+const state = vi.hoisted(() => {
+  // 必须固定对象身份：组件 effect 依赖 capability / host，每次渲染换对象
+  // 会导致无限重渲染。
+  const probeBucket = vi.fn();
+  const connectExistingRemote = vi.fn();
+  const switchBucket = vi.fn();
+  const renameBucket = vi.fn();
+  const storageCapability = {
+    probeBucket,
+    connectExistingRemote,
+    switchBucket,
+    renameBucket,
+    status: () => "ready",
+    subscribe: () => () => undefined
+  };
+  return {
+    probeBucket,
+    connectExistingRemote,
+    switchBucket,
+    renameBucket,
+    storageCapability,
+    vaultCapability: { status: () => "unlocked" },
+    host: { resourceStore: { subscribe: () => () => undefined } }
+  };
+});
 
 vi.mock("webloom-framework/react", () => ({
   useCapability: (requested: string | { id: string }) => {
     const id = typeof requested === "string" ? requested : requested.id;
     if (id !== STORAGE_RUNTIME_CONTROLLER_CAPABILITY.id) throw new Error(`unexpected capability ${id}`);
-    return {
-      probeBucket: state.probeBucket,
-      connectExistingRemote: state.connectExistingRemote,
-      switchBucket: state.switchBucket,
-      renameBucket: state.renameBucket,
-      status: () => "ready",
-      subscribe: () => () => undefined
-    };
+    return state.storageCapability;
+  },
+  useOptionalCapability: (requested: string | { id: string }) => {
+    const id = typeof requested === "string" ? requested : requested.id;
+    if (id === STORAGE_RUNTIME_CONTROLLER_CAPABILITY.id) return state.storageCapability;
+    if (id === "vault.service") return state.vaultCapability;
+    return undefined;
   }
 }));
 
@@ -111,5 +127,17 @@ describe("桶管理页 · 连接已有桶", () => {
     expect(await screen.findByText(/该桶还没有任何 Key/)).toBeTruthy();
     expect(screen.queryByTestId("submit-existing")).toBeNull();
     expect(state.connectExistingRemote).not.toHaveBeenCalled();
+  });
+
+  it("可打开新建桶向导，并在当前桶提供 Key 管理入口", async () => {
+    const user = userEvent.setup();
+    render(<StorageBucketManagerPage />);
+
+    // 当前桶（已解锁）显示新建/导入 Key 入口；非当前桶不显示。
+    expect(await screen.findByRole("button", { name: "新建 Key" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "导入 Key" })).toBeTruthy();
+
+    await user.click(screen.getByTestId("bucket-setup-toggle"));
+    expect(await screen.findByText("选择桶类型")).toBeTruthy();
   });
 });

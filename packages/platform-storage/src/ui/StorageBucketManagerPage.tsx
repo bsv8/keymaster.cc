@@ -8,18 +8,22 @@
 //     切换 s3 桶需要输入启动密码解密连接参数。
 
 import { useCallback, useEffect, useState } from "react";
-import { useCapability } from "webloom-framework/react";
+import { useCapability, useOptionalCapability } from "webloom-framework/react";
 import {
   STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
+  VAULT_SERVICE_CAPABILITY,
   type BucketProbeResult,
   type DeviceRecordV1,
   type ExistingRemoteStorageConnectPlan,
   type StorageBucketConnectionConfigV1,
   type StorageRuntimeBucketV1
 } from "@keymaster/contracts";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { Modal } from "@keymaster/ui";
+import { router, useI18n, usePluginHost } from "@keymaster/runtime";
 import { createDeviceRecordRepository, defaultDeviceStorage, readSession } from "../index.js";
 import { BucketConnectionFields } from "./BucketConnectionFields.js";
+import { BucketSetupWizard } from "./BucketSetupWizard.js";
+import { CurrentBucketKeyActions } from "./CurrentBucketKeyActions.js";
 import {
   EMPTY_BUCKET_DRAFT,
   connectionFromBucketDraft,
@@ -66,12 +70,15 @@ export function StorageBucketManagerPage() {
   const { t } = useI18n();
   const host = usePluginHost();
   const service = useCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
+  const vault = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const [rows, setRows] = useState<BucketRow[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [pendingSwitch, setPendingSwitch] = useState<BucketRow | null>(null);
   const [renameLabel, setRenameLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // 新建桶：页内 Modal 分步向导，与初始化共用同一业务状态机。
+  const [setupOpen, setSetupOpen] = useState(false);
   // 连接已有桶（本页新增入口）：探测 → 选 Key + 密码 → 连接。
   const [connectOpen, setConnectOpen] = useState(false);
   const [connectDraft, setConnectDraft] = useState<BucketDraft>(() => ({ ...EMPTY_BUCKET_DRAFT }));
@@ -228,6 +235,13 @@ export function StorageBucketManagerPage() {
         </button>
         <button
           type="button"
+          data-testid="bucket-setup-toggle"
+          onClick={() => setSetupOpen(true)}
+        >
+          {t("storage.bucketManager.addBucket", { defaultValue: "添加存储桶" })}
+        </button>
+        <button
+          type="button"
           data-testid="connect-existing-toggle"
           onClick={() => { setConnectOpen((open) => !open); if (connectOpen) resetConnectPanel(); }}
         >
@@ -261,7 +275,14 @@ export function StorageBucketManagerPage() {
                 >
                   {t("storage.bucketManager.switch", { defaultValue: "切换到此桶" })}
                 </button>
-              ) : null}
+              ) : (
+                // Key 管理只对当前桶提供：非当前桶必须先切换解锁。
+                <CurrentBucketKeyActions
+                  bucketLabel={row.label}
+                  unlocked={vault?.status() === "unlocked"}
+                  onChanged={reload}
+                />
+              )}
             </li>
           ))}
         </ul>
@@ -372,6 +393,25 @@ export function StorageBucketManagerPage() {
           </button>
         </section>
       ) : null}
+      <Modal
+        open={setupOpen}
+        title={t("storage.bucketManager.addBucket", { defaultValue: "添加存储桶" })}
+        onClose={() => setSetupOpen(false)}
+        data-testid="bucket-setup-modal"
+      >
+        {setupOpen ? (
+          <BucketSetupWizard
+            variant="modal"
+            onCancel={() => setSetupOpen(false)}
+            onDone={() => {
+              // 新建桶会安装并解锁新桶运行态；与初始化一致直接进入 home。
+              setSetupOpen(false);
+              reload();
+              router.push("/");
+            }}
+          />
+        ) : null}
+      </Modal>
     </div>
   );
 }

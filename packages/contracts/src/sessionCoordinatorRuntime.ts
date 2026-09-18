@@ -843,10 +843,18 @@ function parseBucketProbePlan(value: unknown): import("./storage/catalog.js").Bu
   const plan = expectRecord(value, "storage probe-bucket plan");
   const backend = plan.backend;
   if (backend !== "local" && backend !== "s3") throw new TypeError("Coordinator probe-bucket backend is invalid");
+  const operationId = text(plan.operationId, "storage probe-bucket operationId", 128);
+  // 已登记桶：用设备记录绑定 + 启动密码探测；页面不再传明文连接。
+  if (plan.binding !== undefined) {
+    const binding = parseRuntimeBucket(plan.binding, "storage probe-bucket binding");
+    if (binding.backend !== backend) throw new TypeError("Coordinator probe-bucket backend and binding disagree");
+    const password = optionalText(plan.password, "storage probe-bucket password", 4_096);
+    return { operationId, backend, binding, ...(password === undefined ? {} : { password }) };
+  }
   const connection = parseBucketConnection(plan.connection);
   if (connection.kind !== backend) throw new TypeError("Coordinator probe-bucket backend and connection disagree");
   return {
-    operationId: text(plan.operationId, "storage probe-bucket operationId", 128),
+    operationId,
     backend,
     connection,
     ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: text(plan.remoteStorageId, "storage probe-bucket remoteStorageId", 128) }),
@@ -879,8 +887,17 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
         ...(control.connection === undefined ? {} : { connection: parseBucketConnection(control.connection) }),
       };
     }
-    case "switch-bucket":
-      return { type, bucket: parseRuntimeBucket(control.bucket, "storage control.switch-bucket.bucket"), password: text(control.password, "storage control.switch-bucket.password", 4_096) };
+    case "switch-bucket": {
+      const keyPassword = optionalText(control.keyPassword, "storage control.switch-bucket.keyPassword", 4_096);
+      const publicKeyHex = optionalText(control.publicKeyHex, "storage control.switch-bucket.publicKeyHex", 130);
+      return {
+        type,
+        bucket: parseRuntimeBucket(control.bucket, "storage control.switch-bucket.bucket"),
+        password: text(control.password, "storage control.switch-bucket.password", 4_096),
+        ...(keyPassword === undefined ? {} : { keyPassword }),
+        ...(publicKeyHex === undefined ? {} : { publicKeyHex }),
+      };
+    }
     case "change-bucket-config": {
       const label = optionalText(control.label, "storage control.change-bucket-config.label", 256);
       return { type, config: parseBucketConnection(control.config), ...(label === undefined ? {} : { label }), password: text(control.password, "storage control.change-bucket-config.password", 4_096) };

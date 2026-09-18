@@ -1352,22 +1352,34 @@ async function bootstrapColdStartAuthenticated(password: string, peerId?: string
   }
 }
 
-/** 切换到另一个已登记桶：解凭据、列 keys、抢 Key 锁并安装运行态。 */
+/** 切换到另一个已登记桶：先验证目标 Key 密码，再抢 Key 锁并安装运行态。 */
 async function switchSelectedRuntimeBucket(
   binding: StorageRuntimeBucketV1,
   password: string,
   peerId?: string,
+  options: { keyPassword?: string; publicKeyHex?: string } = {},
 ): Promise<StorageBucketSwitchResultV1> {
   if (!binding || typeof binding !== "object" || !binding.bucketId) throw new StorageRuntimeError("storage_provider_error", "Switch bucket binding is invalid");
   const provider = await createRuntimeProvider(binding, password, peerId);
+  const repository = createKeyHoldRepository(provider);
   let adopted = false;
   try {
-    const listed = await createKeyHoldRepository(provider).list();
+    const listed = await repository.list();
     if (listed.keys.length === 0) throw new StorageRuntimeError("storage_remote_not_initialized", "The remote storage namespace is not initialized");
     const session = await ensureWorkerSession(peerId);
-    const publicKeyHex = session.activeKey !== undefined && listed.keys.some((key) => key.publicKeyHex === session.activeKey)
-      ? session.activeKey
-      : listed.keys[0]!.publicKeyHex;
+    const requested = options.publicKeyHex?.toLowerCase();
+    if (requested !== undefined && !listed.keys.some((key) => key.publicKeyHex.toLowerCase() === requested)) {
+      throw new StorageRuntimeError("storage_not_found", "The selected Key does not exist in this bucket");
+    }
+    const publicKeyHex = requested
+      ?? (session.activeKey !== undefined && listed.keys.some((key) => key.publicKeyHex === session.activeKey)
+        ? session.activeKey
+        : listed.keys[0]!.publicKeyHex);
+    const keyPassword = options.keyPassword ?? password;
+    // 先在临时 Provider 上验证目标 Key 密码。验证失败时当前运行态、桶
+    // 目录和 session 都没有被触碰，用户可以安全重试或取消。
+    const verification = await repository.unlock(publicKeyHex, keyPassword);
+    verification.privateKeyBytes.fill(0);
     if (platformRootStore) {
       await performGlobalLock("switch-bucket");
       discardCurrentPlatformStorageBinding();
@@ -1384,7 +1396,7 @@ async function switchSelectedRuntimeBucket(
     const lock = createKeyLock(provider, { ownerPublicKeyHex: publicKeyHex, holder: session.sessionId });
     await lock.acquire();
     installActiveKeyLock(lock);
-    const unlocked = await createKeyHoldRepository(provider).unlock(publicKeyHex, password);
+    const unlocked = await repository.unlock(publicKeyHex, keyPassword);
     const privateKeyBytes = unlocked.privateKeyBytes;
     unlocked.privateKeyBytes = new Uint8Array(0);
     await enterUnlockedState(publicKeyHex, privateKeyBytes, "unlock");
@@ -1837,9 +1849,9 @@ function initialSetupKeyResult(publicKeyHex: string, plan: InitialSetupPlan): In
  */
 async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: string): Promise<InitialSetupResult> {
   validateInitialSetupPlan(plan);
-  if (platformRootStore || storageBootstrapState?.selectedBucket || coordinatorState.vaultStatus === "unlocked" || coordinatorState.vaultStatus === "locked") {
-    throw new StorageRuntimeError("storage_conflict", "Storage is already initialized");
-  }
+  // 已初始化时允许"新建桶并切换"（桶管理页入口）：新桶的 KeyHold、设备
+  // 记录与 session 先完整写入，安装阶段才锁定并替换旧运行态。失败不会
+  // 删除已写好的新桶数据，用户可用同一 Key 密码重新接入。
   // 页面不要求提供桶 ID：统一走 resolvePlanRemoteStorageId,保证 Provider
   // 与安装阶段使用同一个本机桶 ID。
   const remoteStorageId = await resolvePlanRemoteStorageId(plan, peerId);
@@ -1885,6 +1897,12 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
       ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }),
     }, peerId);
     const binding = runtimeBinding({ remoteStorageId, backend: plan.backend, displayName, record: built.record, ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }) });
+    // 已有运行态时先全局锁定并卸下旧绑定，再把新桶安装为当前运行态；
+    // 此时新桶数据已完整落盘，安装失败也不会破坏旧桶数据。
+    if (platformRootStore) {
+      await performGlobalLock("initial-setup");
+      discardCurrentPlatformStorageBinding();
+    }
     storageRootInstallationActive = true;
     try {
       await installPlatformStorage(provider, { bucketId: remoteStorageId, bucketGeneration: 1, provider: plan.backend });
@@ -1953,13 +1971,31 @@ async function executeBucketProbe(plan: import("@keymaster/contracts").BucketPro
     // 探测是只读的,已初始化时也允许：桶管理页用它来连接已有桶。
     // Local 新建探测不要求页面提供桶 ID：命名空间按操作 ID 派生；管理页
     // 连接已有桶时仍会显式传入 remoteStorageId。
-    if (plan.connection.kind !== plan.backend) throw new StorageRuntimeError("storage_provider_error", "Probe connection backend is inconsistent");
-    const provider = await createPlanProvider({
-      transactionId: plan.operationId,
-      connection: plan.connection,
-      ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: plan.remoteStorageId }),
-    }, peerId);
+    //
+    // 已登记桶（plan.binding）直接用设备记录 + 启动密码建立只读连接；
+    // S3 凭据密文只在本次探测内解密，结束后 Provider 立即释放。
+    let provider: StorageBucketProvider;
+    if (plan.binding) {
+      provider = await createRuntimeProvider(plan.binding, plan.password, peerId);
+    } else {
+      if (!plan.connection) throw new StorageRuntimeError("storage_provider_error", "Probe connection is required");
+      if (plan.connection.kind !== plan.backend) throw new StorageRuntimeError("storage_provider_error", "Probe connection backend is inconsistent");
+      provider = await createPlanProvider({
+        transactionId: plan.operationId,
+        connection: plan.connection,
+        ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: plan.remoteStorageId }),
+      }, peerId);
+    }
     try {
+      // S3 桶必须在读取 keys/ 前证明支持原子条件写入；不满足时只允许重试，
+      // 绝不能把"不支持 CAS"的桶当成可用钱包。
+      const isS3 = plan.binding ? plan.binding.backend === "s3" : plan.connection?.kind === "s3";
+      if (isS3) {
+        const probed = await provider.probe();
+        if (!probed.ok || probed.conditionalWrites !== "native") {
+          throw new StorageRuntimeError("storage_provider_error", "该桶不支持 Keymaster 所需的原子条件写入");
+        }
+      }
       const listed = await createKeyHoldRepository(provider).list();
       return listed.keys.length === 0
         ? { ok: true, state: "empty" }
@@ -6356,8 +6392,13 @@ async function executeStorageControl(
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   }
   if (control.type === "probe-bucket") {
-    const result = await executeBucketProbe(control.plan, peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    try {
+      const result = await executeBucketProbe(control.plan, peerId);
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } finally {
+      // 只读探测的启动密码同样只在本次调用内存在。
+      if (control.plan.password !== undefined) control.plan.password = "";
+    }
   }
   if (control.type === "initial-setup-result") {
     const result = await getInitialSetupResult(control.transactionId, peerId);
@@ -6369,10 +6410,14 @@ async function executeStorageControl(
   }
   if (control.type === "switch-bucket") {
     try {
-      const result = await switchSelectedRuntimeBucket(control.bucket, control.password, peerId);
+      const result = await switchSelectedRuntimeBucket(control.bucket, control.password, peerId, {
+        ...(control.keyPassword === undefined ? {} : { keyPassword: control.keyPassword }),
+        ...(control.publicKeyHex === undefined ? {} : { publicKeyHex: control.publicKeyHex }),
+      });
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
     } finally {
       control.password = "";
+      control.keyPassword = "";
     }
   }
   if (control.type === "change-bucket-config") {
@@ -6481,8 +6526,9 @@ async function executeStorageControlAtFinalBoundary(
         // 然后进入同一把 Key 的 unlocked owner。这个有意的本地状态迁移
         // 必须允许当前 storage control 的 final lease 观察到新 gate。
         // 密码轮转同样会主动锁定当前 Vault，需要同一豁免。
-        allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
-        allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config",
+        // initial-setup 在已初始化时也会先锁定旧运行态再安装新桶。
+        allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config" || request.control.type === "initial-setup",
+        allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config" || request.control.type === "initial-setup",
         allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "connect-existing-remote" || request.control.type === "initial-setup-cleanup",
         // status/summary/connection 等控制读取只观察本地状态；probe 也
         // 不提交配置或远端不可逆结果。它们仍经过本地运行世代/epoch
@@ -12412,8 +12458,9 @@ export async function __testReleaseCatalogLocalBinding(): Promise<void> {
 export async function __testSwitchCatalogBucket(
   target: StorageRuntimeBucketV1,
   password: string,
+  options: { keyPassword?: string; publicKeyHex?: string } = {},
 ): Promise<StorageBucketSwitchResultV1> {
-  return switchSelectedRuntimeBucket(target, password);
+  return switchSelectedRuntimeBucket(target, password, undefined, options);
 }
 
 /** Test-only seams for the worker-owned P2PKH provider state machine. */

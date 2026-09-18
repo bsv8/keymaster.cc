@@ -142,9 +142,17 @@ export interface StorageRuntimeController {
   /** 重试同一事务的候选清理；密码/连接只在本次调用中使用，不进入恢复记录。 */
   retryInitialSetupCleanup?(transactionId: string, input?: { password?: string; connection?: StorageBucketConnectionConfigV1 }): Promise<InitialSetupRecoveryResult>;
   cancelProbe(): void;
-  /** 当前新版桶的配置、Hold 快照和桶内 Key records 全量改密。 */
-  /** 先认证目标桶，再原子切换 Coordinator 与本机目录的当前桶。 */
-  switchBucket?(bucket: StorageRuntimeBucketV1, password: string): Promise<StorageBucketSwitchResultV1>;
+  /**
+   * 先认证目标桶，再原子切换 Coordinator 与本机目录的当前桶。
+   *
+   * - `password`：启动密码（s3 用于解密设备记录；local 省略）。
+   * - `options.keyPassword`：目标 Key 自己的 KeyHold 密码；省略时沿用
+   *   `password`（兼容旧调用）。
+   * - `options.publicKeyHex`：要激活的目标 Key；省略时沿用 session active
+   *   Key 或桶内第一把 Key。
+   * 目标 Key 密码验证失败时返回错误，且不触碰当前运行态。
+   */
+  switchBucket?(bucket: StorageRuntimeBucketV1, password: string, options?: { keyPassword?: string; publicKeyHex?: string }): Promise<StorageBucketSwitchResultV1>;
   /** 当前桶连接配置与名称的原子重配置。 */
   changeBucketConnectionConfig?(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageRuntimeBucketV1>;
   /** 当前桶名称的原子目录 CAS；页面不能直接改当前桶目录。 */

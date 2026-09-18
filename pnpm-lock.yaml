@@ -267,6 +267,9 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
+      '@keymaster/plugin-key-import':
+        specifier: '*'
+        version: link:../plugin-key-import
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
@@ -489,6 +492,9 @@ importers:
       keyhold:
         specifier: 2.1.0
         version: 2.1.0
+      lucide-react:
+        specifier: ^0.468.0
+        version: 0.468.0(react@18.3.1)
       webloom-framework:
         specifier: 0.4.3
         version: 0.4.3(react@18.3.1)

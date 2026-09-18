@@ -3,7 +3,7 @@ import {
   bytesToHex,
   hexToBytes,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorClientRequest, CoordinatorRpcRequest, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, DeviceRecordV1, ExistingRemoteStorageConnectResult, InitialSetupResult, JSONValue, KeymasterSessionV1, StorageBucketConnectionConfigV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1 } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorRpcRequest, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, DeviceRecordV1, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupResult, JSONValue, KeymasterSessionV1, StorageBucketConnectionConfigV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1 } from "@keymaster/contracts";
 import { parseCoordinatorResponseFor } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
@@ -144,7 +144,7 @@ import {
   __testCoordinatorKeyValueObjectExists,
   __testResolveS3BucketStorageId,
 } from "./keymasterSessionCoordinator.worker.js";
-import { encryptDeviceConfig, createLocalStorageBucketProvider, createS3BucketProvider, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
+import { encryptDeviceConfig, createLocalStorageBucketProvider, createS3BucketProvider, createKeyHoldRepository, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
 import type { LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "@keymaster/platform-storage/coordinator";
 import { type BucketObjectStore, type BucketGetOutput, type LocalStorageLike, type LocalStorageLocks } from "@keymaster/platform-storage";
 import { createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode } from "@keymaster/platform-storage";
@@ -809,6 +809,96 @@ describe("Session Coordinator worker", () => {
         storageBucketGeneration: 1,
         vaultStatus: "uninitialized"
       });
+    } finally {
+      await __testReleaseCatalogLocalBinding();
+      __testResetState();
+    }
+  }, 20_000);
+
+  it("已初始化时 initialSetup 可以新建并切换到新桶", async () => {
+    __testResetState();
+    const current = makeRuntimeLocalBucket("setup-again-current", "当前桶");
+    const target = makeRuntimeLocalBucket("setup-again-unused", "备用桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    try {
+      await __testInstallCatalogLocalBinding(current);
+      __testSetVaultStatus("uninitialized");
+
+      const plan: InitialSetupPlan = {
+        transactionId: "setup-again-1",
+        bucketLabel: "新桶",
+        backend: "local",
+        connection: { kind: "local" },
+        firstKey: { kind: "generate", label: "新 Key", capabilities: ["p2pkh"], password: "key-password-1" },
+      };
+      const response = await __testDispatchStorageControl({ type: "initial-setup", plan });
+      if (response.ack.status !== "ok") throw new Error(`initial setup ack: ${JSON.stringify(response.ack)}`);
+      expect(response.ack).toMatchObject({ status: "ok" });
+      const result = response.operationResult as InitialSetupResult;
+      expect(result).toMatchObject({ ok: true, firstKey: { label: "新 Key" } });
+      if (!result.ok) throw new Error("initial setup failed");
+      // 新桶已成为当前桶，且新 Key 已激活。
+      expect(fixture.state.session().activeBucketId).toBe(result.bucket.bucketId);
+      expect(fixture.state.session().activeBucketId).not.toBe(current.bucketId);
+      expect(__testGetActivePublicKeyHex()).toBe(result.firstKey.publicKeyHex);
+      expect(__testGetSnapshot()).toMatchObject({ vaultStatus: "unlocked", storageBucketId: result.bucket.bucketId });
+    } finally {
+      await __testReleaseCatalogLocalBinding();
+      __testResetState();
+    }
+  }, 20_000);
+
+  it("切换桶时 Key 密码错误保持当前环境,指定 publicKeyHex 后激活目标 Key", async () => {    __testResetState();
+    const current = makeRuntimeLocalBucket("catalog-key-switch-current", "当前桶");
+    const target = makeRuntimeLocalBucket("catalog-key-switch-target", "目标桶");
+    const fixture = makeRuntimeBridgeFixture(current, target);
+    __testSetLocalStorageBridgeOverride(fixture.bridge);
+
+    const privateKeyBytes = hexToBytes(TEST_PRIV_2);
+    const targetPublicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true)).toLowerCase();
+    const targetProvider = createLocalStorageBucketProvider({
+      storage: fixture.state.storage,
+      locks: catalogBridgeLocks,
+      bucketId: target.bucketId,
+      bucketGeneration: 1,
+    });
+    try {
+      await createKeyHoldRepository(targetProvider).create({
+        label: "target-key",
+        privateKeyBytes,
+        password: "target-key-password",
+      });
+    } finally {
+      targetProvider.dispose();
+    }
+
+    try {
+      await __testInstallCatalogLocalBinding(current);
+      __testSetVaultStatus("uninitialized");
+
+      // Key 密码错误：在临时 Provider 上验证失败，当前桶和 session 都不变。
+      await expect(__testSwitchCatalogBucket(target, "", {
+        keyPassword: "wrong-password",
+        publicKeyHex: targetPublicKeyHex,
+      })).rejects.toThrow();
+      expect(fixture.state.session().activeBucketId).toBe(current.bucketId);
+      expect(__testGetSnapshot()).toMatchObject({
+        storageBucketId: current.bucketId,
+        storageBucketGeneration: 1,
+        vaultStatus: "uninitialized"
+      });
+
+      // Key 密码正确：安装目标桶，并把指定 Key 设为 active。
+      const result = await __testSwitchCatalogBucket(target, "", {
+        keyPassword: "target-key-password",
+        publicKeyHex: targetPublicKeyHex,
+      });
+      expect(result).toMatchObject({ ok: true, vaultUnlocked: true });
+      expect(fixture.state.session().activeBucketId).toBe(target.bucketId);
+      expect(fixture.state.session().activeKey).toBe(targetPublicKeyHex);
+      expect(__testGetActivePublicKeyHex()).toBe(targetPublicKeyHex);
     } finally {
       await __testReleaseCatalogLocalBinding();
       __testResetState();

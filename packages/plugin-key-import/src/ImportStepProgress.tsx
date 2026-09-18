@@ -1,13 +1,15 @@
-// apps/web/src/shell/StepProgress.tsx
-// 首启导入向导步骤进度：有状态的步骤指示器，**不是**可任意跳转的 tabs。
+// packages/plugin-key-import/src/ImportStepProgress.tsx
+// 导入向导步骤进度：有状态的步骤指示器，**不是**可任意跳转的 tabs。
 //
 // 设计缘由：
-//   - 业务顺序固定为 4 步（选择方式 → 输入材料 → 确认结果 → 设置锁屏密码）。
+//   - 业务顺序固定（选择方式 → 输入材料 → 确认结果 → 设置密码）。
 //   - 当前步骤高亮，已完成步骤显示完成态，未到达步骤显示未激活态。
 //   - 允许点击返回到**已完成**步骤；不允许点击跳转到**未来**步骤——
 //     UI 必须真实反映状态机，而不是诱导用户绕过验证。
-//   - 文案进入 i18n；视觉与 onboarding 主面板一体化（暖色圆角、圆点、
-//     连线）。
+//   - 文案进入 i18n。
+//
+// 从 apps/web/src/shell/StepProgress.tsx 迁移到本包：初始化的桶/Key 向导与
+// 桶管理页的导入步骤共用同一实现，避免两份步骤条行为漂移。
 
 import { Check } from "lucide-react";
 import { useI18n } from "@keymaster/runtime";
@@ -17,7 +19,7 @@ export type StepState = "done" | "current" | "upcoming";
 export interface StepDefinition {
   /** 内部 ID，仅用于 React key。 */
   id: string;
-  /** i18n key，resources.ts 里 step label。 */
+  /** i18n key。 */
   labelKey: string;
   /** i18n key 的默认 fallback。 */
   defaultLabel: string;
@@ -49,7 +51,6 @@ export function StepProgress({
   onStepClick
 }: StepProgressProps) {
   const { t } = useI18n();
-  // 触发 languageChanged 重渲染。
 
   return (
     <nav

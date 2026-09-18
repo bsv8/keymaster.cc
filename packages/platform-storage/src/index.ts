@@ -1,6 +1,12 @@
 export { storagePlatformPlugin, storagePlatformSetup, STORAGE_PLATFORM_PLUGIN_ID } from "./manifest.js";
 export { StorageOnboardingPage } from "./ui/StorageOnboardingPage.js";
 export { StorageBucketManagerPage } from "./ui/StorageBucketManagerPage.js";
+export { StorageSwitcherWidget } from "./ui/StorageSwitcherWidget.js";
+export { BucketSetupWizard } from "./ui/BucketSetupWizard.js";
+export type { BucketSetupWizardProps } from "./ui/BucketSetupWizard.js";
+export { useBucketSetupFlow } from "./ui/useBucketSetupFlow.js";
+export type { BucketSetupFlowApi, BucketSetupFlowOptions } from "./ui/useBucketSetupFlow.js";
+export * from "./ui/bucketSetupService.js";
 export { BucketConnectionFields } from "./ui/BucketConnectionFields.js";
 export type { BucketConnectionFieldsProps } from "./ui/BucketConnectionFields.js";
 export {

@@ -3,6 +3,7 @@ import { RESOURCE_REGISTRY_CAPABILITY, ROUTE_REGISTRY_CAPABILITY, STORAGE_RUNTIM
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 import { StorageBucketManagerPage } from "./ui/StorageBucketManagerPage.js";
+import { StorageSwitcherWidget } from "./ui/StorageSwitcherWidget.js";
 import type { StorageRuntimeSnapshot } from "./runtime/storageController.js";
 
 export const STORAGE_PLATFORM_PLUGIN_ID = "storage";
@@ -192,7 +193,34 @@ Object.assign(resources.resources.en as Record<string, string>, {
       "storage.bucketManager.err.s3-bucket-invalid": "Bucket must be a valid 3–63 character lowercase S3 bucket name.",
       "storage.bucketManager.err.s3-credentials-required": "Enter Access Key ID and Secret Access Key.",
       "storage.bucketManager.err.s3-session-token-invalid": "Session Token cannot contain control characters.",
-      "storage.bucketManager.err.s3-prefix-invalid": "Prefix must be a safe relative object path without . or .. segments."
+      "storage.bucketManager.err.s3-prefix-invalid": "Prefix must be a safe relative object path without . or .. segments.",
+      "storage.bucketManager.bucketUnlockTitle": "Enter the bucket password to read Keys",
+      "storage.bucketManager.readKeysSubmit": "Read Keys",
+      "storage.bucketManager.keyPassword": "Key password",
+      "storage.bucketManager.lockedKeys": "Unlock to show Keys",
+      "storage.bucketManager.emptyBucket": "This bucket has no available Key.",
+      "storage.bucketManager.err.bucketProbe": "Failed to read the Key list. Check the bucket password.",
+      "storage.bucketManager.err.bucketNotUnlocked": "Enter the bucket password to read this bucket's Keys first.",
+      "storage.bucketManager.addBucket": "Add a bucket",
+      "storage.bucketKeys.create": "New Key",
+      "storage.bucketKeys.import": "Import Key",
+      "storage.bucketKeys.createTitle": "Create a Key in the current bucket",
+      "storage.bucketKeys.importTitle": "Import a Key into the current bucket",
+      "storage.bucketKeys.createHint": "The private key is generated inside the Vault and encrypted with this Key's own password; it becomes active after creation.",
+      "storage.bucketKeys.importHint": "The import material was parsed locally. Set this Key's own password to write it into the current bucket.",
+      "storage.bucketKeys.label": "Key label",
+      "storage.bucketKeys.labelPlaceholder": "e.g. Key 2026-09-18 10:30",
+      "storage.bucketKeys.password": "Key password (at least 8 characters)",
+      "storage.bucketKeys.passwordConfirm": "Enter the Key password again",
+      "storage.bucketKeys.createSubmit": "Create Key",
+      "storage.bucketKeys.importSubmit": "Save to current bucket",
+      "storage.bucketKeys.created": "Key created and set as active.",
+      "storage.bucketKeys.imported": "Key imported and set as active.",
+      "storage.bucketKeys.backupHint": "Export an encrypted backup soon; losing the bucket or its password can make the Key unrecoverable.",
+      "storage.bucketKeys.lockedHint": "Unlock the current bucket before managing Keys.",
+      "storage.bucketKeys.err.label": "Enter a Key label.",
+      "storage.bucketKeys.err.create": "Failed to create the Key",
+      "storage.bucketKeys.err.import": "Failed to import the Key"
 });
 
 Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
@@ -366,6 +394,33 @@ Object.assign(resources.resources["zh-CN"] as Record<string, string>, {
       "storage.bucketManager.err.s3-credentials-required": "请填写 Access Key ID（访问身份）和 Secret Access Key（访问密钥）。",
       "storage.bucketManager.err.s3-session-token-invalid": "Session Token 不能包含控制字符。",
       "storage.bucketManager.err.s3-prefix-invalid": "Prefix 必须是安全的相对对象路径，不能包含 . 或 .. 段。",
+      "storage.bucketManager.bucketUnlockTitle": "输入桶密码读取 Keys",
+      "storage.bucketManager.readKeysSubmit": "读取 Keys",
+      "storage.bucketManager.keyPassword": "Key 密码",
+      "storage.bucketManager.lockedKeys": "解锁后显示 Keys",
+      "storage.bucketManager.emptyBucket": "该桶里没有可用的 Key。",
+      "storage.bucketManager.err.bucketProbe": "读取 Key 列表失败，请检查桶密码。",
+      "storage.bucketManager.err.bucketNotUnlocked": "请先输入桶密码读取该桶的 Keys。",
+      "storage.bucketManager.addBucket": "添加存储桶",
+      "storage.bucketKeys.create": "新建 Key",
+      "storage.bucketKeys.import": "导入 Key",
+      "storage.bucketKeys.createTitle": "在当前桶新建 Key",
+      "storage.bucketKeys.importTitle": "在当前桶导入 Key",
+      "storage.bucketKeys.createHint": "私钥在 Vault 内部安全生成，用这把 Key 自己的密码加密保存；创建后自动设为 active。",
+      "storage.bucketKeys.importHint": "导入材料已在本地解析；设置这把 Key 自己的密码后写入当前桶。",
+      "storage.bucketKeys.label": "Key 标签",
+      "storage.bucketKeys.labelPlaceholder": "例如：Key 2026-09-18 10:30",
+      "storage.bucketKeys.password": "Key 密码（至少 8 位）",
+      "storage.bucketKeys.passwordConfirm": "再输入一次 Key 密码",
+      "storage.bucketKeys.createSubmit": "创建 Key",
+      "storage.bucketKeys.importSubmit": "保存到当前桶",
+      "storage.bucketKeys.created": "Key 已创建并设为 active。",
+      "storage.bucketKeys.imported": "Key 已导入并设为 active。",
+      "storage.bucketKeys.backupHint": "请尽快导出加密备份；丢失桶或桶密码可能导致无法恢复。",
+      "storage.bucketKeys.lockedHint": "请先解锁当前桶后再管理 Key。",
+      "storage.bucketKeys.err.label": "请输入 Key 标签。",
+      "storage.bucketKeys.err.create": "新建 Key 失败",
+      "storage.bucketKeys.err.import": "导入 Key 失败"
 });
 
 const storagePlatformPluginDefinition = {
@@ -409,6 +464,14 @@ const storagePlatformPluginDefinition = {
       load: async () => ({ status: service.status(), healthStatus: (service as StorageRuntimeController & { healthStatus?: () => import("@keymaster/contracts").StorageRuntimeStatus }).healthStatus?.(), catalogBucket: (service as StorageRuntimeController & { isCatalogBucket?: () => boolean }).isCatalogBucket?.() === true, hasCatalogBuckets: service.hasCatalogBuckets?.() === true, authorityRecovery: (service as StorageRuntimeController & { authorityRecovery?: () => import("@keymaster/contracts").CoordinatorAuthorityRecovery }).authorityRecovery?.(), summary: await service.getProviderSummary(), capabilities: service.getConditionalCapabilities() }),
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
+    });
+    // 顶栏「桶 → Keys」快捷入口：桶切换 + Key 切换。
+    const topbar = ctx.capability(TOPBAR_REGISTRY_CAPABILITY);
+    topbar.register({
+      id: "storage.bucket-switcher",
+      label: { key: "storage.bucketManager.topbar", fallback: "Storage buckets" },
+      component: StorageSwitcherWidget,
+      order: 80
     });
     return () => {
       // topbar/resource 注册均由当前 WebLoom Scope 拥有。身份切换会先撤销

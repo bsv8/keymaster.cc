@@ -1,61 +1,23 @@
-// apps/web/src/shell/FirstTimeImportWizard.tsx
-// 首启"导入私钥"向导（硬切换 011 + 012）：
+// packages/plugin-key-import/src/KeyImportWizard.tsx
+// Key 导入向导（原 apps/web/src/shell/FirstTimeImportWizard.tsx 迁移）：
 //   业务流程固定为：
 //     1) 选择导入类型（importer）
 //     2) 输入 / 解析导入材料
-//     3) 解析成功后决定本机系统锁屏密码
-//     4) 调 vault.createVaultWithImportedKey(...)：一次性建 Vault +
-//        落首把导入 Key + 切 active
-//   整个流程在用户**没有创建 Vault**之前完成；首启导入完成后 vault
-//   自动进入 unlocked，App 切到 UnlockedShell，本向导自然卸载。
+//     3) 解析成功后决定标签（以及 LockedShell 模式下的本机锁屏密码）
+//     4) 回调 onComplete：draft 模式只交还内存草稿；首启模式直接落库
 //
-// 硬切换 011：密码状态机重新拆分为：
-//   - importPasswordDraft：第 2 步输入框的未提交草稿。
-//   - resolvedImportPassword：parse 成功后保存在本次 wizard 内存中的
-//     "已实际用于导入解析的密码"。**只活在 wizard 生命周期内**。
-//   - vaultPasswordDraft / vaultPasswordConfirmDraft：用户**新设**的
-//     本机系统锁屏密码（双输入框，仅在取消"使用同一密码"时使用）。
-//
-// 第 4 步复用规则（硬切换 011）：
-//   - importRequiredPassword === true 且 useSamePassword === true：
-//       复用 resolvedImportPassword。**不**渲染任何密码输入框，
-//       仅展示"将复用第 2 步已输入的解密密码"说明。
-//   - importRequiredPassword === true 且 useSamePassword === false：
-//       必须输入"新密码 + 确认密码"。
-//   - importRequiredPassword === false（明文路径）：
-//       强制"新密码 + 确认密码"；不显示"使用同一密码"勾选。
-//
-// 硬切换 012（施工单 001）：JSON importer 同时支持 file 与 text 两种来源；
-// 第 2 步先让用户选"输入方式"，再渲染对应控件；切换方式 / 切换 importer /
-// 重新解析时必须清掉旧模式残留的所有状态。`resolvedImportPassword` 的复用
-// 语义对文本 / 文件完全一致。
-//
-// 硬切换 012 验收修复（施工单 001 复审）：
-//   - 状态机拆分为两层 reducer：importState（plugin-key-import 提供的
-//     纯函数 reducer）+ wizard 顶层 reducer（包裹 step / 密码决策 /
-//     vaultPassword*）。所有验收关键不变量都用纯函数测试覆盖。
-//   - 密码 label 不再固定"备份文件密码"：JSON 文本模式下显示"导入源密码"。
-//   - isJsonImporter 走显式 id 判断（不再靠 supports 启发式）。
+// 双模式：
+//   - `vaultPassword + onComplete(draft)`（draft 模式）：只解析并把材料草稿
+//     交还宿主；真正的持久化由宿主事务完成（初始化 / 新建桶 / 桶内导入共用）。
+//   - 无 `vaultPassword`（首启模式）：解析后用 `createVaultWithImportedKey`
+//     一次性建 Vault + 落首把 Key + 切 active。
 //
 // 设计缘由：
-//   - 解析失败时 importPasswordDraft 必须保留以便用户重试；
-//     解析成功时才把草稿"转存"为 resolvedImportPassword。
-//   - 重新选 importer / 重新选文件 / 重新解析后，必须清掉旧的
-//     resolvedImportPassword、旧的 importRequiredPassword，否则第 4 步
-//     会基于已失效的"曾经用过的密码"复用。
-//   - 关闭向导 / 刷新页面 / 返回欢迎页：本次导入会话整体丢弃。
+//   - 解析失败时导入源密码草稿必须保留以便重试；解析成功时才转存为
+//     resolvedImportPassword，且只活在向导内存里。
 //   - 私钥材料**不**写 localStorage / platform K-V repository / URL / 长期 React state。
-//   - 主题/语言切换不影响当前 step、已选 importer、文件、解析结果和
-//     密码内存态——只切换展示。
-//
-// 不能怎么做：
-//   - 不能在 parse 成功后立刻清空 importPasswordDraft，然后让第 4 步
-//     重新索取同一密码——那是伪复用。
-//   - 不能把 importPasswordDraft / resolvedImportPassword 写到
-//     localStorage、platform K-V repository、URL、MessageBus payload。
-//   - 不能让用户通过 step progress 跳到尚未满足前置条件的步骤。
-//   - 不能在第 4 步复用时仍渲染密码输入框。
-//   - 不能在"明文导入"路径下保留"单输入框无 confirm"的新密码流程。
+//   - 主题/语言切换不影响当前 step、已选 importer、文件、解析结果和密码内存态。
+//   - 不能把私钥材料或密码写到持久化介质；不能跳过 steps 的前置条件。
 
 import { useEffect, useReducer } from "react";
 import { Button, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
@@ -67,32 +29,28 @@ import { useOptionalCapability } from "webloom-framework/react";
 import {
   KeyPersistedButActivationFailedError,
   VAULT_SERVICE_CAPABILITY,
-  type KeyImportMaterial,
-  type KeyImportResult,
-  type KeyImporter,
-  type VaultService
+  type KeyImportMaterial
 } from "@keymaster/contracts";
-import { ImporterPicker } from "@keymaster/plugin-key-import/ImporterPicker";
+import { ImporterPicker } from "./ImporterPicker.js";
 import {
   peekEncryptedKeyDocumentBytes,
   peekEncryptedKeyDocumentText
-} from "@keymaster/plugin-key-import/importFileSniff";
+} from "./importFileSniff.js";
 import {
   buildImportInput,
   isJsonImporter,
   type JsonInputMode
-} from "@keymaster/plugin-key-import/jsonImportStateMachine";
+} from "./jsonImportStateMachine.js";
 import {
   initialWizardState,
   prevStepFor,
   reduceWizard,
-  STEP_ORDER,
-  type WizardState
-} from "@keymaster/plugin-key-import/wizardImportStateMachine";
+  STEP_ORDER
+} from "./wizardImportStateMachine.js";
 import {
   StepProgress,
   type StepDefinition
-} from "./StepProgress.js";
+} from "./ImportStepProgress.js";
 
 /** 与 wizard 状态机的 step 顺序一一对应的 label 定义。 */
 const STEP_DEFINITIONS: ReadonlyArray<StepDefinition> = [
@@ -118,23 +76,27 @@ const STEP_DEFINITIONS: ReadonlyArray<StepDefinition> = [
   }
 ];
 
-export interface FirstTimeImportWizardProps {
-  /** 用户点"返回"回到欢迎页时触发。 */
+export interface KeyImportWizardProps {
+  /** 用户点"返回"回到上一步 / 宿主页面时触发。 */
   onCancel(): void;
-  /** 初始设置页已收集的统一密码；提供后不再重复显示 Vault 密码步骤。 */
+  /** 首启模式：宿主已收集的统一密码；draft 模式下不使用。 */
   vaultPassword?: string;
   /**
-   * 首把 Key 已导入并激活；在 InitialSetupPage 模式下回调只返回内存草稿，
-   * 不调用 Vault RPC，真正持久化由最终确认页的 Storage 事务完成。
+   * draft 模式：只把解析结果交还宿主（不调用 Vault RPC）。
+   * 省略时按 `vaultPassword` 是否存在推断（存在即 draft 模式）。
+   */
+  draftMode?: boolean;
+  /**
+   * draft 模式回调：交还解析后的 Key 草稿，由宿主事务完成持久化。
    */
   onComplete?(draft?: InitialSetupImportedKeyDraft): void;
 }
 
-/** importer 解析后的首 Key 草稿；不包含桶密码或导入源密码。 */
+/** importer 解析后的 Key 草稿；不包含桶密码或导入源密码。 */
 export interface InitialSetupImportedKeyDraft {
   /** 页面显示标签。 */
   label: string;
-  /** 临时私钥材料，只在初始化最终提交前留在内存。 */
+  /** 临时私钥材料，只在最终提交前留在内存。 */
   material: KeyImportMaterial;
   /** importer 识别出的格式。 */
   format: string;
@@ -144,25 +106,22 @@ export interface InitialSetupImportedKeyDraft {
   capabilities: string[];
 }
 
-export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: FirstTimeImportWizardProps) {
-  // 首次 Storage 初始化时 Vault 还没有安装；导入步骤只负责解析并把
-  // 内存草稿交还给父页面，不能因为缺少 vault.service 让整个向导 fatal。
+export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete }: KeyImportWizardProps) {
+  // draft / 初始化时 Vault 可能还没有安装；导入步骤只负责解析并把内存草稿
+  // 交还给宿主页面，不能因为缺少 vault.service 让整个向导 fatal。
   const vault = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
-  // 触发 languageChanged 重渲染。
+  // draft 模式：只解析并交还草稿；首启模式才创建 Vault。
+  const isDraftMode = draftMode ?? Boolean(vaultPassword);
 
-  // 硬切换 012 验收修复：所有 wizard 状态机收敛到 reducer；
-  // 组件本身只负责发起 async parse + 调用 vault.createVaultWithImportedKey。
+  // 所有 wizard 状态机收敛到 reducer；组件本身只负责发起 async parse +
+  // 首启模式下的 createVaultWithImportedKey。
   const [state, dispatch] = useReducer(reduceWizard, initialWizardState);
   const step = state.step;
   const importer = state.importState.importer;
   const jsonInputMode = state.importState.jsonInputMode;
   const importPasswordDraft = state.importState.password;
-
-  // 解析成功后由 useEffect 把 importPasswordDraft 转存为
-  // resolvedImportPassword 的逻辑已并入 reducer 的 `parse-resolved`
-  // action；这里只剩一个无害的 language() 订阅用于触发重渲染。
 
   useEffect(() => {
     // 仅用于在语言切换时强制 wizard 重渲染。
@@ -233,7 +192,6 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
         err instanceof Error
           ? err.message
           : t("keyImport.page.err.parse", { defaultValue: "解析失败" });
-      // fail-open：parse-failure reducer 已会处理 PASSWORD_REQUIRED_MSG。
       dispatch({ type: "import", action: { type: "parse-failure", error: msg } });
     }
   }
@@ -253,9 +211,9 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
   async function finish() {
     if (!state.importState.result) return;
 
-    // InitialSetupPage 模式只把解析结果交还父页面；这里绝不创建空 Vault，
-    // 也不写入 keys/、Hold 或目录。父页面会在最终确认时调用单一事务入口。
-    if (vaultPassword && onComplete) {
+    // draft 模式只把解析结果交还宿主；这里绝不创建空 Vault，也不写入
+    // keys/、Hold 或目录。宿主会在最终确认时调用单一事务入口。
+    if (isDraftMode && onComplete) {
       const parsed = state.importState.result;
       const label = state.label.trim() || `key-${Date.now()}`;
       onComplete({
@@ -272,16 +230,12 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
       return;
     }
 
-    // 硬切换 011：根据 useSamePassword 显式选择最终的 vaultPassword：
-    //   - useSamePassword === true ⇒ 复用 resolvedImportPassword。
-    //   - useSamePassword === false ⇒ 用户新设密码。
+    // 首启模式：根据 useSamePassword 显式选择最终的 vaultPassword。
     let finalVaultPassword: string;
     if (vaultPassword) {
       finalVaultPassword = vaultPassword;
     } else if (state.importRequiredPassword && state.useSamePassword) {
       if (!state.resolvedImportPassword) {
-        // 理论不可能到这里：useSamePassword === true 但解析时没有
-        // 保存密码——保留一条防御性提示。
         dispatch({
           type: "import",
           action: {
@@ -368,7 +322,7 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
   }
 
   // ---- step progress 派生 ----
-  const visibleSteps = vaultPassword ? STEP_DEFINITIONS.slice(0, 3) : STEP_DEFINITIONS;
+  const visibleSteps = isDraftMode ? STEP_DEFINITIONS.slice(0, 3) : STEP_DEFINITIONS;
   const currentIndex = STEP_ORDER.indexOf(step);
   const doneUpToIndex = Math.max(currentIndex, 0);
 
@@ -384,7 +338,7 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
   function gotoPrev() {
     const prev = prevStepFor(step);
     if (!prev) {
-      // 第 1 步返回：用户点"返回"回到欢迎页。**不**写 vault_meta，
+      // 第 1 步返回：用户点"返回"回到宿主页面。**不**写 vault_meta，
       // 状态保持 uninitialized。私钥材料（如果已解析）随组件卸载。
       onCancel();
       return;
@@ -407,7 +361,6 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
   })();
 
   // ----------------- 渲染 -----------------
-  // 派生 boolean：方便 JSX 内 if-else 风格写法。
   const showJsonModeToggle = isJsonImporter(importer);
   const showTextInput =
     Boolean(importer) && !showJsonModeToggle && importer!.supports.includes("text");
@@ -640,7 +593,7 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
             defaultValue: "导入私钥：3. 确认解析结果"
           })}
           description={t("shell.import.wizard.confirmKeyDesc", {
-            defaultValue: vaultPassword ? "确认解析结果并填写这把 Key 的标签名称。" : "解析成功后，确认标签后继续设置本机系统锁屏密码。"
+            defaultValue: isDraftMode ? "确认解析结果并填写这把 Key 的标签名称。" : "解析成功后，确认标签后继续设置本机系统锁屏密码。"
           })}
         />
         <section className="first-time-import__confirm">
@@ -665,8 +618,8 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
         </section>
         {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
         <div className="first-time-import__actions">
-          <Button onClick={vaultPassword ? finish : gotoPassword} loading={state.importState.busy} disabled={!parsed || (Boolean(vaultPassword) && !state.label.trim())}>
-            {vaultPassword ? t("shell.import.wizard.confirmInitial", { defaultValue: "使用这把 Key" }) : t("common.action.next", { defaultValue: "下一步" })}
+          <Button onClick={isDraftMode ? finish : gotoPassword} loading={state.importState.busy} disabled={!parsed || (isDraftMode && !state.label.trim())}>
+            {isDraftMode ? t("shell.import.wizard.confirmInitial", { defaultValue: "使用这把 Key" }) : t("common.action.next", { defaultValue: "下一步" })}
           </Button>
           <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
             {t("common.action.back", { defaultValue: "返回" })}
@@ -676,7 +629,7 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
     );
   }
 
-  // step === "set-password"
+  // step === "set-password"（首启模式）
   const isReuseMode =
     state.importRequiredPassword &&
     state.useSamePassword &&
@@ -802,7 +755,3 @@ export function FirstTimeImportWizard({ onCancel, vaultPassword, onComplete }: F
     </div>
   );
 }
-
-// 抑制未用变量警告 — `WizardState` 类型在签名中已使用，TS 编译期不报错；
-// 但保留类型导出供调用方 / 测试使用。
-export type { WizardState };

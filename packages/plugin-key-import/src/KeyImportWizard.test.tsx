@@ -1,5 +1,5 @@
-// apps/web/src/shell/FirstTimeImportWizard.test.tsx
-// FirstTimeImportWizard 页面级验收测试（硬切换 011 + 012 / 施工单 001 复审）。
+// packages/plugin-key-import/src/KeyImportWizard.test.tsx
+// KeyImportWizard 页面级验收测试（原 apps/web FirstTimeImportWizard 测试迁移）。
 //
 // 关键不变量（页面层）：
 //   1. JSON importer 选中后，step 2 显示输入方式切换。
@@ -31,15 +31,14 @@ import {
   RUNTIME_MESSAGE_BUS,
   VAULT_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
-import { FirstTimeImportWizard } from "./FirstTimeImportWizard.js";
-import { keyImportResources } from "@keymaster/plugin-key-import/manifest";
-import { SHELL_RESOURCES } from "../i18n/resources";
+import { KeyImportWizard } from "./KeyImportWizard.js";
+import { keyImportResources } from "./manifest.js";
 
 /** 构造一个最小 host，包含一个用于测试的 JSON importer 与可断言的 vault。 */
 function createWizardHost() {
   const host = createPluginHost({
     disableConfigPersistence: true,
-    initialI18nResources: [keyImportResources, SHELL_RESOURCES]
+    initialI18nResources: [keyImportResources]
   });
   const vault: VaultService = makeStubVault();
   host.provide(VAULT_SERVICE_CAPABILITY, vault);
@@ -108,7 +107,7 @@ function mount() {
     ...handle,
     unmount: render(
       <PluginHostProvider host={handle.host}>
-        <FirstTimeImportWizard onCancel={() => {}} />
+        <KeyImportWizard onCancel={() => {}} />
       </PluginHostProvider>
     ).unmount
   };

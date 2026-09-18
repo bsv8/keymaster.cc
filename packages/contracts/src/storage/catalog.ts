@@ -164,10 +164,17 @@ export interface BucketProbePlan {
   operationId: string;
   /** 与 connection.kind 对齐的 Provider。 */
   backend: StorageBucketBackend;
-  /** 尚未持久化的连接位置与凭据。 */
-  connection: StorageBucketConnectionConfigV1;
+  /** 尚未持久化的连接位置与凭据；使用 binding 探测已登记桶时可省略。 */
+  connection?: StorageBucketConnectionConfigV1;
   /** local 桶的本机 ID(= namespace)；新建探测省略，由 Coordinator 按操作 ID 派生。 */
   remoteStorageId?: string;
+  /**
+   * 已登记桶（本机设备记录）的运行时绑定；提供时 Worker 在内部解密设备
+   * 记录来建立只读连接，页面无需再次提供明文连接凭据。
+   */
+  binding?: import("./profile.js").StorageRuntimeBucketV1;
+  /** 已登记 S3 桶的启动密码；local 桶省略。只用于本次只读探测。 */
+  password?: string;
 }
 
 /** 探测结果：读到至少一份可解析 KeyHold 文件 = has-keys。 */

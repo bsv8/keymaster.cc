@@ -127,8 +127,14 @@ export class StorageRpcProxy implements StorageRuntimeController {
     return this.control({ type: "unlock-bucket", password });
   }
   /** 目标桶先在 Worker 暂存并认证，成功后才更新目录和当前运行时。 */
-  switchBucket(bucket: StorageRuntimeBucketV1, password: string): Promise<StorageBucketSwitchResultV1> {
-    return this.control({ type: "switch-bucket", bucket, password });
+  switchBucket(bucket: StorageRuntimeBucketV1, password: string, options: { keyPassword?: string; publicKeyHex?: string } = {}): Promise<StorageBucketSwitchResultV1> {
+    return this.control({
+      type: "switch-bucket",
+      bucket,
+      password,
+      ...(options.keyPassword === undefined ? {} : { keyPassword: options.keyPassword }),
+      ...(options.publicKeyHex === undefined ? {} : { publicKeyHex: options.publicKeyHex }),
+    });
   }
   /** 当前桶配置改动必须由 Coordinator 同步 Provider、快照和目录。 */
   changeBucketConnectionConfig(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageRuntimeBucketV1> {

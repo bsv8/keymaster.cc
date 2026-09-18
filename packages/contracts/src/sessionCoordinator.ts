@@ -166,7 +166,16 @@ export type CoordinatorStorageControl =
       connection?: StorageBucketConnectionConfigV1;
     }
   /** 使用目标桶密码完成 Provider/Root/Keys 会话切换；目录由页面桥原子 CAS。 */
-  | { type: "switch-bucket"; bucket: import("./storage/profile.js").StorageRuntimeBucketV1; password: string }
+  | {
+      type: "switch-bucket";
+      bucket: import("./storage/profile.js").StorageRuntimeBucketV1;
+      /** 启动密码：s3 用于解密设备记录；local 可空。 */
+      password: string;
+      /** 目标 Key 自己的 KeyHold 密码；省略时沿用 password。 */
+      keyPassword?: string;
+      /** 切换后要激活的目标 Key；省略时沿用 session active Key 或第一把 Key。 */
+      publicKeyHex?: string;
+    }
   /** 当前桶连接配置的原子重配置；密码只用于本次验证和重新封装。 */
   | { type: "change-bucket-config"; config: StorageBucketConnectionConfigV1; label?: string; password: string }
   /** 当前桶显示名称的目录 CAS；必须由当前 Coordinator 执行。 */

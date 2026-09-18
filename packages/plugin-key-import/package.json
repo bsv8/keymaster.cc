@@ -7,6 +7,8 @@
     ".": "./src/index.ts",
     "./manifest": "./src/manifest.ts",
     "./ImporterPicker": "./src/ImporterPicker.tsx",
+    "./KeyImportWizard": "./src/KeyImportWizard.tsx",
+    "./ImportStepProgress": "./src/ImportStepProgress.tsx",
     "./importFileSniff": "./src/importFileSniff.ts",
     "./jsonImportStateMachine": "./src/jsonImportStateMachine.ts",
     "./wizardImportStateMachine": "./src/wizardImportStateMachine.ts"
@@ -17,6 +19,7 @@
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",
     "keyhold": "2.1.0",
+    "lucide-react": "^0.468.0",
     "webloom-framework": "0.4.3"
   }
 }

@@ -1,8 +1,9 @@
+// packages/plugin-key-import/src/ImportStepProgress.test.tsx
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import { StepProgress, type StepDefinition } from "./StepProgress.js";
+import { StepProgress, type StepDefinition } from "./ImportStepProgress.js";
 
 vi.mock("@keymaster/runtime", () => ({
   useI18n: () => ({

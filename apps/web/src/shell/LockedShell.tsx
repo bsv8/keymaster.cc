@@ -48,7 +48,7 @@ import {
   VAULT_SERVICE_CAPABILITY,
   type VaultService
 } from "@keymaster/contracts";
-import { FirstTimeImportWizard } from "./FirstTimeImportWizard.js";
+import { KeyImportWizard } from "@keymaster/plugin-key-import/KeyImportWizard";
 import { OnboardingShell } from "./OnboardingShell.js";
 import { VaultKeyDeleteModal } from "@keymaster/plugin-vault";
 
@@ -335,7 +335,7 @@ export function LockedShell() {
     return (
       <OnboardingShell width="wizard">
         <div className="locked-shell locked-shell--wizard">
-          <FirstTimeImportWizard
+          <KeyImportWizard
             onCancel={backToWelcome}
           />
         </div>

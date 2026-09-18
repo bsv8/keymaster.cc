@@ -17,14 +17,18 @@ const state = vi.hoisted(() => ({
   connectExistingRemote: vi.fn(),
   getInitialSetupResult: vi.fn(async (): Promise<InitialSetupResult | undefined> => undefined),
   probeBucket: vi.fn(),
-  probe: vi.fn(async () => ({ ok: true, conditionalWrites: "native" })),
-  createProvider: vi.fn((_input: unknown) => ({ probe: state.probe, dispose: () => undefined })),
   routerPush: vi.fn()
 }));
 
 vi.mock("@keymaster/runtime", () => ({
   router: { push: state.routerPush },
-  useI18n: () => ({ t: (_key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? _key })
+  useI18n: () => ({ t: (_key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? _key }),
+  usePluginHost: () => ({
+    i18n: {
+      language: () => "zh-CN",
+      text: (value: string | { fallback: string }) => typeof value === "string" ? value : value.fallback
+    }
+  })
 }));
 
 vi.mock("webloom-framework/react", () => ({
@@ -44,24 +48,7 @@ vi.mock("webloom-framework/react", () => ({
   })()
 }));
 
-vi.mock("@keymaster/platform-storage", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@keymaster/platform-storage")>();
-  return {
-    ...actual,
-    // 真实渲染 BucketConnectionFields；只替换网络探测。
-    createBucketProvider: state.createProvider,
-    createDeviceRecordRepository: actual.createDeviceRecordRepository,
-    defaultDeviceStorage: actual.defaultDeviceStorage
-  };
-});
-
 vi.mock("./OnboardingShell.js", () => ({ OnboardingShell: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
-vi.mock("./StepProgress.js", () => ({ StepProgress: () => <div data-testid="setup-progress" /> }));
-vi.mock("./FirstTimeImportWizard.js", () => ({
-  FirstTimeImportWizard: ({ onComplete }: { onComplete(draft: { label: string; material: { hex: string }; format: string; capabilities: string[] }): void }) => (
-    <button type="button" onClick={() => onComplete({ label: "导入 Key", material: { hex: "11".repeat(32) }, format: "hex", capabilities: ["p2pkh"] })}>完成单 Key 导入</button>
-  )
-}));
 
 const setupSuccess: SetupSuccess = {
   ok: true,
@@ -84,8 +71,6 @@ beforeEach(() => {
   state.connectExistingRemote.mockReset().mockResolvedValue(connectSuccess);
   state.getInitialSetupResult.mockReset().mockResolvedValue(undefined);
   state.probeBucket.mockReset().mockResolvedValue({ ok: true, state: "empty" } satisfies BucketProbeResult);
-  state.probe.mockClear();
-  state.createProvider.mockClear();
   state.routerPush.mockClear();
 });
 
