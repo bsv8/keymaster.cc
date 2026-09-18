@@ -17,7 +17,6 @@ pageClass: capability-map-page
 | `intent.sign` | 在明确用户意图下签署 App 提供的字节 |
 | `cipher.encrypt` / `cipher.decrypt` | 在当前 Owner 和精确 origin 下加解密二进制内容 |
 | `p2pkh.transfer` | 请求受控 P2PKH 转账；`assetId` 缺省 `bsv-mainnet`，`bsv-testnet` 需用户在 Keymaster 设置里开启 |
-| `feepool.prepare` / `feepool.commit` | 准备并提交两阶段费用池操作 |
 | `channel.publish` | 向精确频道发布已签名 JSON |
 | `channel.subscription_set` | 替换当前会话贡献的精确订阅集合 |
 | `storage.list` | 列出 App 隔离命名空间中的目录和对象 |

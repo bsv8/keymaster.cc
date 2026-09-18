@@ -9,7 +9,7 @@ const capabilities = [
   ["通信", "发布和订阅已签名频道消息", "channel.*"],
   ["存储", "在 App 隔离对象空间中读写", "storage.*"],
   ["文件", "查询并读取 MSFile 内容", "msfile.*"],
-  ["支付", "请求受控 BSV 转账和费用池操作", "p2pkh.* · feepool.*"]
+  ["支付", "请求受控 BSV 转账", "p2pkh.*"]
 ];
 </script>
 

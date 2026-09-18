@@ -14,10 +14,6 @@ import {
   type ConnectLoginResult,
   type ConnectLogoutResult,
   type ConnectResumeResult,
-  type FeepoolCommitParams,
-  type FeepoolCommitResult,
-  type FeepoolPrepareParams,
-  type FeepoolPrepareResult,
   type IdentityGetParams,
   type IdentityGetResult,
   type IntentSignParams,
@@ -197,7 +193,7 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * Encrypt and decrypt origin-bound application data.
  *
  * @groupDescription Transfer
- * Transfer BSV or negotiate a fee-pool operation.
+ * Request a controlled BSV transfer.
  *
  * @groupDescription Channel
  * Publish JSON content and manage exact-channel subscriptions. Incoming
@@ -413,25 +409,6 @@ export class KeymasterConnectClient {
    */
   p2pkhTransfer(params: P2pkhTransferParams, options?: KeymasterRequestOptions): Promise<P2pkhTransferResult> {
     return this.request("p2pkh.transfer", params, options);
-  }
-
-  /**
-   * Calls `feepool.prepare` to prepare the next fee-pool operation.
-   *
-   * @group Transfer
-   */
-  feepoolPrepare(params: FeepoolPrepareParams, options?: KeymasterRequestOptions): Promise<FeepoolPrepareResult> {
-    return this.request("feepool.prepare", params, options);
-  }
-
-  /**
-   * Calls `feepool.commit` to verify counterparty signatures and commit a
-   * prepared fee-pool operation.
-   *
-   * @group Transfer
-   */
-  feepoolCommit(params: FeepoolCommitParams, options?: KeymasterRequestOptions): Promise<FeepoolCommitResult> {
-    return this.request("feepool.commit", params, options);
   }
 
   /**
