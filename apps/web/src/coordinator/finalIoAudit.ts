@@ -7,7 +7,6 @@
 
 export type FinalIoAuditOperation =
   | "coordinator.bootstrap.recover"
-  | "coordinator.selection.persist"
   | "coordinator.settings.persist"
   | "coordinator.plugin-intent.persist"
   | "keyspace.delete-journal.recover"

@@ -140,6 +140,7 @@ import {
   __testUpdateScheduleSettings,
   __testReloadCoordinatorMeta,
   __testCoordinatorSnapshotMetrics,
+  __testGetWorkerSession,
   __testSeedCoordinatorKeyValueGarbage,
   __testCoordinatorKeyValueObjectExists,
   __testResolveS3BucketStorageId,
@@ -1029,7 +1030,7 @@ describe("Session Coordinator worker", () => {
     await expect(__testOwnerStoragePut("after-lock-switch.bin", new Uint8Array([1, 2, 3]))).resolves.toBeUndefined();
   });
 
-  it("普通 lock→unlock 不写 Coordinator 固定对象，真实变化只写所属对象", async () => {
+  it("普通 lock→unlock 不写 Coordinator 固定对象，Key 切换只更新本机 session.activeKey", async () => {
     await __testDeleteVault();
     __testResetState();
     const first = await __testCreateVault("pw", { label: "snapshot-first" });
@@ -1040,22 +1041,24 @@ describe("Session Coordinator worker", () => {
       capabilities: ["p2pkh"],
     });
     await __testSetActive(first.publicKeyHex!);
+    expect(__testGetWorkerSession()?.activeKey).toBe(first.publicKeyHex!.toLowerCase());
 
     const beforeLifecycle = __testCoordinatorSnapshotMetrics();
+    const selectedBeforeLock = __testGetWorkerSession()?.activeKey;
     await __testLock();
     await __testUnlock("pw", first.publicKeyHex);
     expect(__testCoordinatorSnapshotMetrics()).toEqual(beforeLifecycle);
+    expect(__testGetWorkerSession()?.activeKey).toBe(selectedBeforeLock);
 
     await __testSetActive(second.publicKeyHex);
     const afterSelection = __testCoordinatorSnapshotMetrics();
-    expect(afterSelection.selection).toEqual({ revision: beforeLifecycle.selection.revision + 1, writes: beforeLifecycle.selection.writes + 1 });
-    expect(afterSelection.settings).toEqual(beforeLifecycle.settings);
-    expect(afterSelection.pluginIntent).toEqual(beforeLifecycle.pluginIntent);
+    // 选中 Key 不再写桶内固定对象，只收敛到浏览器 session。
+    expect(afterSelection).toEqual(beforeLifecycle);
+    expect(__testGetWorkerSession()).toMatchObject({ activeKey: second.publicKeyHex.toLowerCase() });
 
     await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 61_000 });
     const afterSettings = __testCoordinatorSnapshotMetrics();
     expect(afterSettings.settings).toEqual({ revision: afterSelection.settings.revision + 1, writes: afterSelection.settings.writes + 1 });
-    expect(afterSettings.selection).toEqual(afterSelection.selection);
     expect(afterSettings.pluginIntent).toEqual(afterSelection.pluginIntent);
 
     const messages: unknown[] = [];
@@ -1076,8 +1079,24 @@ describe("Session Coordinator worker", () => {
     expect(messages.find((message) => (message as { requestId?: string }).requestId === "snapshot-intent-change")).toMatchObject({ operationResult: { status: "accepted" } });
     const afterIntent = __testCoordinatorSnapshotMetrics();
     expect(afterIntent.pluginIntent).toEqual({ revision: afterSettings.pluginIntent.revision + 1, writes: afterSettings.pluginIntent.writes + 1 });
-    expect(afterIntent.selection).toEqual(afterSettings.selection);
     expect(afterIntent.settings).toEqual(afterSettings.settings);
+  });
+
+  it("Worker 重启后从本机 session.activeKey 恢复选中 Key，而不是退回首把 Key", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    await __testCreateVault("pw", { label: "session-first" });
+    const second = await __testImportPrivateKey("pw", {
+      label: "session-second",
+      material: { hex: "4".padStart(64, "0") },
+      format: "hex",
+      capabilities: ["p2pkh"],
+    });
+    await __testSetActive(second.publicKeyHex);
+    expect(__testGetWorkerSession()).toMatchObject({ activeKey: second.publicKeyHex.toLowerCase() });
+
+    await __testRestartWorker();
+    expect(__testGetSnapshot()).toMatchObject({ selectedPublicKeyHex: second.publicKeyHex.toLowerCase() });
   });
 
   it("Provider 忽略 AbortSignal 时，lock→unlock 仍等待真实 storage.data 结束", async () => {

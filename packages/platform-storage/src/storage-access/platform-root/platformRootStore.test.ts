@@ -119,7 +119,7 @@ describe("PlatformRoot 授权与 owner 目录清理", () => {
     });
     await expect(root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads })).resolves.toBeDefined();
     await expect(root.openPlatformSnapshot({
-      declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection,
+      declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings,
       validate: (value) => value === null ? null : (() => { throw new Error("invalid"); })(),
     })).rejects.toMatchObject({ code: "storage_forbidden" });
     await expect(root.openPlatformStore({

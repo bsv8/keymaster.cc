@@ -92,7 +92,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -281,7 +281,7 @@ async function getActiveKey(): Promise<PublicVaultKeyRecord | undefined> {
   const first = keys[0];
   if (first) {
     coordinatorMeta.selectedPublicKeyHex = first.publicKeyHex;
-    await persistCoordinatorSelection();
+    await persistSelectedPublicKey();
   }
   return first;
 }
@@ -293,7 +293,7 @@ async function reconcileSelectedPublicKey(): Promise<boolean> {
 
   // 没有 Key 就是空状态，回到首启流程。
   coordinatorMeta.selectedPublicKeyHex = undefined;
-  await persistCoordinatorSelection();
+  await persistSelectedPublicKey();
   return false;
 }
 
@@ -746,7 +746,7 @@ async function hydrateCatalogVaultFromSnapshot(_password: string): Promise<boole
   coordinatorState.vaultStatus = "locked";
   coordinatorState.activePublicKeyHex = undefined;
   coordinatorMeta.selectedPublicKeyHex = records[0]!.publicKeyHex;
-  await persistCoordinatorSelection();
+  await persistSelectedPublicKey();
   publishSessionState("bootstrap");
   return true;
 }
@@ -762,18 +762,6 @@ function snapshotRecord(value: unknown, name: string): Record<string, unknown> {
     throw new StorageRuntimeError("storage_provider_error", `${name} snapshot value is invalid`);
   }
   return value as Record<string, unknown>;
-}
-
-function validateCoordinatorSelectionSnapshot(value: unknown): CoordinatorSelectionSnapshot {
-  const record = snapshotRecord(value, "Coordinator selection");
-  if (!Object.keys(record).every((key) => key === "selectedPublicKeyHex") || Object.keys(record).length > 1) {
-    throw new StorageRuntimeError("storage_provider_error", "Coordinator selection snapshot value is invalid");
-  }
-  if (record.selectedPublicKeyHex !== undefined
-    && (typeof record.selectedPublicKeyHex !== "string" || !/^(02|03)[0-9a-f]{64}$/u.test(record.selectedPublicKeyHex))) {
-    throw new StorageRuntimeError("storage_provider_error", "Coordinator selection snapshot value is invalid");
-  }
-  return record.selectedPublicKeyHex === undefined ? {} : { selectedPublicKeyHex: record.selectedPublicKeyHex.toLowerCase() };
 }
 
 function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSettingsSnapshot {
@@ -809,7 +797,6 @@ interface CoordinatorRuntimeSettings {
   p2pkhSettings: { includeTestnet: boolean };
   pluginIntent: PluginIntentSnapshot;
 }
-type CoordinatorSelectionSnapshot = Pick<CoordinatorRuntimeSettings, "selectedPublicKeyHex">;
 /** 桶级 Coordinator snapshot 只持久化调度设置；P2PKH 偏好归 owner 的 setting.json。 */
 type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings">;
 function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
@@ -941,12 +928,13 @@ let platformRootToken: object | undefined;
 /** 仅供 Worker 单元测试使用的 Hold 替身；生产启动永远由当前桶 Provider 装配。 */
 let testVaultHoldBinding: { adapter: VaultCatalogHoldAdapter; snapshot(): VaultCatalogHoldSnapshot; reset(): void } | undefined;
 let platformStorageStore: KeyValueStore | undefined;
-let coordinatorSelectionSnapshot: SnapshotStore<CoordinatorSelectionSnapshot> | undefined;
 let coordinatorSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
 let coordinatorPluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
 /** 仅测试夹具保留的内存 Store 索引；生产路径没有这个观测入口。 */
 let testPlatformStores: Map<string, KeyValueStore> | undefined;
 let testCoordinatorSnapshots: Map<string, { revision: number; value?: unknown; writes: number }> | undefined;
+/** 仅测试夹具：模拟浏览器 LocalStorage 里跨 Worker 重启保留的 session。 */
+let testWorkerSession: KeymasterSessionV1 | undefined;
 /** 当前桶 Protocol 的三个 purpose K-V；切桶回滚时必须整体保留旧句柄。 */
 interface CoordinatorProtocolStorageStores {
   durablePolicy: KeyValueStore;
@@ -1810,15 +1798,53 @@ function installActiveKeyLock(lock: import("@keymaster/platform-storage/coordina
   if (previous) void previous.release().catch(() => undefined);
 }
 
+/**
+ * 浏览器 session 的 Worker 内存缓存（见《浏览器session》）。
+ *
+ * 选中 Key / 切换桶 / 连接桶都是低频固定动作：读取一次后常驻内存，每次
+ * 写透 LocalStorage 再原地更新缓存；业务路径不再逐次反向读取页面。
+ * Worker 重启（模块重载）后缓存丢失，下一次读取自然回到持久化 session。
+ */
+let workerSessionCache: KeymasterSessionV1 | undefined;
+let workerSessionCacheLoaded = false;
+let workerSessionMutationTail: Promise<unknown> = Promise.resolve();
+
+function invalidateWorkerSessionCache(): void {
+  workerSessionCache = undefined;
+  workerSessionCacheLoaded = false;
+}
+
+/** 单元测试没有页面 LocalStorage bridge 时，用内存 session 夹具代替。 */
+function useTestWorkerSession(): boolean {
+  return testPlatformStores !== undefined && testLocalStorageBridgeOverride === undefined;
+}
+
 async function readWorkerSession(peerId?: string): Promise<KeymasterSessionV1 | undefined> {
+  if (workerSessionCacheLoaded) return workerSessionCache;
+  if (useTestWorkerSession()) {
+    workerSessionCache = testWorkerSession ? structuredClone(testWorkerSession) : undefined;
+    workerSessionCacheLoaded = true;
+    return workerSessionCache;
+  }
   const response = await requestLocalStorageBridge({ type: "session-read" }, peerId);
   if (response.type !== "session") throw storageUnavailableError("Session bridge returned an invalid read result");
-  return response.session;
+  workerSessionCache = response.session;
+  workerSessionCacheLoaded = true;
+  return workerSessionCache;
 }
 
 async function writeWorkerSession(session: KeymasterSessionV1, peerId?: string): Promise<void> {
-  const response = await requestLocalStorageBridge({ type: "session-write", session }, peerId);
+  const checked = validateKeymasterSession(session);
+  if (useTestWorkerSession()) {
+    testWorkerSession = structuredClone(checked);
+    workerSessionCache = structuredClone(checked);
+    workerSessionCacheLoaded = true;
+    return;
+  }
+  const response = await requestLocalStorageBridge({ type: "session-write", session: checked }, peerId);
   if (response.type !== "void") throw storageUnavailableError("Session bridge returned an invalid write result");
+  workerSessionCache = checked;
+  workerSessionCacheLoaded = true;
 }
 
 async function ensureWorkerSession(peerId?: string): Promise<KeymasterSessionV1> {
@@ -1827,6 +1853,31 @@ async function ensureWorkerSession(peerId?: string): Promise<KeymasterSessionV1>
   const session = createKeymasterSession(generateSessionId());
   await writeWorkerSession(session, peerId);
   return session;
+}
+
+/**
+ * 把「当前选中 Key」收敛到 session.activeKey（浏览器本地真值）。
+ *
+ * 只有值变化时才写透一次；`activeKey` 必须与 `activeBucketId` 成对，
+ * 因此未选桶时不落盘。多次变更通过串行尾链提交，避免读-改-写互相覆盖。
+ */
+function updateWorkerSessionSelection(selectedPublicKeyHex: string | undefined, peerId?: string): Promise<void> {
+  const run = workerSessionMutationTail.then(async () => {
+    if (selectedPublicKeyHex === undefined) {
+      const current = await readWorkerSession(peerId);
+      if (!current?.activeKey) return;
+      const { activeKey: _activeKey, ...rest } = current;
+      await writeWorkerSession(rest, peerId);
+      return;
+    }
+    const nextKey = selectedPublicKeyHex.toLowerCase();
+    const current = await ensureWorkerSession(peerId);
+    if (current.activeKey === nextKey) return;
+    if (current.activeBucketId === undefined) return;
+    await writeWorkerSession({ ...current, activeKey: nextKey }, peerId);
+  });
+  workerSessionMutationTail = run.catch(() => undefined);
+  return run;
 }
 
 async function putDeviceRecord(remoteStorageId: string, record: DeviceRecordV1, replace: boolean, peerId?: string): Promise<void> {
@@ -2255,7 +2306,6 @@ interface CurrentCatalogStorageBinding {
   root?: PlatformRootStore;
   rootToken?: object;
   storageStore?: KeyValueStore;
-  selectionSnapshot?: SnapshotStore<CoordinatorSelectionSnapshot>;
   settingsSnapshot?: SnapshotStore<CoordinatorSettingsSnapshot>;
   pluginIntentSnapshot?: SnapshotStore<PluginIntentSnapshot>;
   protocol?: CoordinatorProtocolStorageStores;
@@ -2269,7 +2319,6 @@ function captureCurrentCatalogStorageBinding(): CurrentCatalogStorageBinding {
     root: platformRootStore,
     rootToken: platformRootToken,
     storageStore: platformStorageStore,
-    selectionSnapshot: coordinatorSelectionSnapshot,
     settingsSnapshot: coordinatorSettingsSnapshot,
     pluginIntentSnapshot: coordinatorPluginIntentSnapshot,
     protocol: coordinatorProtocolStores,
@@ -2297,7 +2346,6 @@ function disposeCurrentCatalogBinding(binding: CurrentCatalogStorageBinding): vo
   unregisterCoordinatorProtocolMaintenanceStores(binding.protocol);
   try { binding.runtime?.dispose?.(); } catch { /* best effort */ }
   if (!binding.runtime) binding.storageRepository?.close();
-  binding.selectionSnapshot?.close();
   binding.settingsSnapshot?.close();
   binding.pluginIntentSnapshot?.close();
   binding.storageStore?.close();
@@ -2315,7 +2363,6 @@ function discardCurrentPlatformStorageBinding(): void {
   platformRootToken = undefined;
   resetVaultKeyIndexCache();
   platformStorageStore = undefined;
-  coordinatorSelectionSnapshot = undefined;
   coordinatorSettingsSnapshot = undefined;
   coordinatorPluginIntentSnapshot = undefined;
   coordinatorProtocolStores = undefined;
@@ -2334,7 +2381,6 @@ async function installPlatformStorage(
   const previousRootToken = platformRootToken;
   const rootToken = {};
   let candidatePublished = false;
-  let candidateSelectionSnapshot: SnapshotStore<CoordinatorSelectionSnapshot> | undefined;
   let candidateSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
   let candidatePluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
   let candidateProtocol: CoordinatorProtocolStorageStores | undefined;
@@ -2350,8 +2396,6 @@ async function installPlatformStorage(
         (keyspaceGeneration === undefined || keyspaceGeneration === coordinatorState.keyspaceGeneration) &&
         (!ownerPublicKeyHex || ownerPublicKeyHex.toLowerCase() === coordinatorState.activePublicKeyHex?.toLowerCase())
     });
-    const selectionSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection, validate: validateCoordinatorSelectionSnapshot });
-    candidateSelectionSnapshot = selectionSnapshot;
     const settingsSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validate: validateCoordinatorSettingsSnapshot });
     candidateSettingsSnapshot = settingsSnapshot;
     const pluginIntentSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validate: validatePluginIntentSnapshot });
@@ -2364,7 +2408,6 @@ async function installPlatformStorage(
     // 到这里为止只使用候选 Provider/Root；Hold、Vault 和后续恢复仍未能
     // 看到半成品。提交前才切换全局句柄，并释放上一代平台句柄。
     if (storageRepository && storageRepository !== candidateStorageRepository) storageRepository.close();
-    coordinatorSelectionSnapshot?.close();
     coordinatorSettingsSnapshot?.close();
     coordinatorPluginIntentSnapshot?.close();
     disposeVaultStorageRepository();
@@ -2377,7 +2420,6 @@ async function installPlatformStorage(
     platformStorageStore = candidateStorageStore;
     registerCoordinatorKeyValueMaintenanceStore(candidateStorageStore);
     registerCoordinatorProtocolMaintenanceStores(protocol);
-    coordinatorSelectionSnapshot = selectionSnapshot;
     coordinatorSettingsSnapshot = settingsSnapshot;
     coordinatorPluginIntentSnapshot = pluginIntentSnapshot;
     // 新 Root 提交后先撤销旧桶意图控制器；loadCoordinatorMeta 会从本次
@@ -2393,7 +2435,6 @@ async function installPlatformStorage(
       candidateStorageRepository?.close();
       candidateStorageStore?.close();
       closeCoordinatorProtocolStorageStores(candidateProtocol);
-      candidateSelectionSnapshot?.close();
       candidateSettingsSnapshot?.close();
       candidatePluginIntentSnapshot?.close();
       // 候选 Provider 由本次 install 创建/传入，失败时不能把 S3 client
@@ -2485,6 +2526,12 @@ function ensureTestCoordinatorGarbageProvider(): TestCoordinatorGarbageProviderS
 }
 
 function ensureTestPlatformStorage(): void {
+  testWorkerSession ??= {
+    format: "keymaster.session",
+    version: 1,
+    sessionId: "0123456789abcdef0123456789abcdef",
+    activeBucketId: "test-memory",
+  };
   if (platformRootStore) return;
   const bucket: StorageBucketRef = Object.freeze({ bucketId: "test-memory", bucketGeneration: 1, provider: "local" });
   platformRootToken = {};
@@ -2588,7 +2635,6 @@ function ensureTestPlatformStorage(): void {
     commandHistory: getStore(`bucket:${CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory.moduleId}:${CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory.purposeId}:1`, { ...CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }),
   };
   platformRootStore = root;
-  coordinatorSelectionSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection, validateCoordinatorSelectionSnapshot);
   coordinatorSettingsSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validateCoordinatorSettingsSnapshot);
   coordinatorPluginIntentSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validatePluginIntentSnapshot);
   coordinatorProtocolStores = protocol;
@@ -2600,18 +2646,20 @@ function ensureTestPlatformStorage(): void {
 
 
 async function loadCoordinatorMeta(): Promise<void> {
-  const [selection, settings, pluginIntent] = await Promise.all([
-    coordinatorSelectionSnapshot?.read(),
+  const [session, settings, pluginIntent] = await Promise.all([
+    readWorkerSession(),
     coordinatorSettingsSnapshot?.read(),
     coordinatorPluginIntentSnapshot?.read(),
   ]);
-  // 每个固定对象都是独立的恢复单元；缺失对象表示其 V1 默认值，而不是
-  // 重新创建一个聚合 Coordinator K-V 记录。
+  // 桶级固定对象和浏览器 session 都是独立的恢复单元；缺失表示各自的
+  // V1 默认值，而不是重新创建一个聚合 Coordinator K-V 记录。
+  // 「当前选中 Key」的真值是浏览器 session.activeKey（见《浏览器session》），
+  // 不再从桶内 snapshot 恢复，两个浏览器因此互不覆盖。
   const defaults = defaultCoordinatorRuntimeSettings();
   replaceCoordinatorMeta({
     ...defaults,
     ...(settings?.value ?? {}),
-    selectedPublicKeyHex: selection?.value.selectedPublicKeyHex,
+    selectedPublicKeyHex: session?.activeKey,
     pluginIntent: pluginIntent?.value ?? defaults.pluginIntent,
   });
   coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings;
@@ -2633,12 +2681,14 @@ async function writeCoordinatorSnapshot<T>(
   }, { auditOperation });
 }
 
-async function persistCoordinatorSelection(selectedPublicKeyHex = coordinatorMeta.selectedPublicKeyHex): Promise<void> {
-  await writeCoordinatorSnapshot(
-    coordinatorSelectionSnapshot,
-    selectedPublicKeyHex === undefined ? {} : { selectedPublicKeyHex },
-    "coordinator.selection.persist",
-  );
+/**
+ * 持久化当前选中 Key：写浏览器 session.activeKey，桶内不再有固定对象。
+ *
+ * 切换 / 删除 Key 都是低频固定动作，写透后 Worker 直接复用内存缓存，
+ * 不产生逐次远程 I/O。
+ */
+async function persistSelectedPublicKey(selectedPublicKeyHex = coordinatorMeta.selectedPublicKeyHex): Promise<void> {
+  await updateWorkerSessionSelection(selectedPublicKeyHex);
 }
 
 async function persistCoordinatorSettings(settings: CoordinatorSettingsSnapshot = {
@@ -5549,10 +5599,12 @@ async function enterUnlockedState(
     coordinatorState.activePublicKeyHex = activePublicKeyHex;
     coordinatorMeta.selectedPublicKeyHex = activePublicKeyHex;
     replaceActivePrivateKey(activePrivateKeyBytes);
-    // 普通 unlock 只发布内存会话；selection/settings/plugin-intent 各自的
-    // 固定对象不会因为锁定/解锁而产生写入。
+    // 锁 / 解锁本身只发布内存会话，不写桶内固定对象；但“当前使用的 Key”
+    // 是浏览器 session.activeKey 的真值，固定动作结束时写透一次（值未变
+    // 则跳过），刷新后仍回到这把 Key。
     // 只有新的 owner 状态准备好后，才重新打开最终 I/O 门禁。
     await ensureCoordinatorUpgradeSession();
+    await persistSelectedPublicKey(activePublicKeyHex);
     completeActiveStorageOwnerTransition(transition);
   } catch (error) {
     const failedClosed = previous.vaultStatus === "unlocked" && coordinatorState.vaultStatus !== "unlocked";
@@ -10192,9 +10244,10 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation, inter
         if (previousActive?.toLowerCase() === key.publicKeyHex.toLowerCase()) coordinatorState.keyspaceGeneration++;
         coordinatorState.sessionEpoch = generateEpoch();
         coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
-        await persistCoordinatorSelection(key.publicKeyHex);
-        // Key 切换只有在 selection snapshot 和当前 authority 都通过最终边界后，
-        // 才允许提交 owner transition；否则旧实例可能继续持有可用 owner。
+        await persistSelectedPublicKey(key.publicKeyHex);
+        // Key 切换只有在本地 session.activeKey 和当前 authority 都通过最终
+        // 边界后，才允许提交 owner transition；否则旧实例可能继续持有
+        // 可用 owner。
         await ensureCoordinatorUpgradeSession();
         completeActiveStorageOwnerTransition(transition);
       } catch (error) {
@@ -10287,13 +10340,13 @@ async function repairSelectedAfterDelete(deleted: string): Promise<void> {
   const remaining = await listPublicVaultKeys();
   if (remaining.length === 0) {
     coordinatorMeta.selectedPublicKeyHex = undefined;
-    await persistCoordinatorSelection();
+    await persistSelectedPublicKey();
     return;
   }
   if (coordinatorMeta.selectedPublicKeyHex?.toLowerCase() === deleted.toLowerCase() || !await getPublicVaultKey(coordinatorMeta.selectedPublicKeyHex ?? "")) {
     coordinatorMeta.selectedPublicKeyHex = remaining[0]!.publicKeyHex;
     coordinatorState.keyspaceGeneration++;
-    await persistCoordinatorSelection();
+    await persistSelectedPublicKey();
     publishSessionState("delete-active-key");
   }
 }
@@ -10362,6 +10415,7 @@ async function addCatalogKeyMaterialRpc(
       coordinatorState.activePublicKeyHex = undefined;
       coordinatorMeta.selectedPublicKeyHex = undefined;
       dropActivePrivateKey();
+      await persistSelectedPublicKey(undefined);
     } else {
       coordinatorState.keyspaceGeneration++;
       try {
@@ -10529,12 +10583,12 @@ async function performGlobalLock(reason: string): Promise<void> {
     snapshots: getTaskSnapshots(),
   });
 
-  // 普通 lock/unlock 不写 bucket。只有清空 Vault 这种业务状态变化需要
-  // 把 selection 固定对象收敛到“无选择”；安全锁定本身始终只改内存。
+  // 普通 lock/unlock 不写持久化：只有清空 Vault 这种业务状态变化需要
+  // 把本机 session.activeKey 收敛到“无选择”；安全锁定本身始终只改内存。
   if (reason === "empty-vault" || reason === "recover-empty") {
-    await persistCoordinatorSelection().catch((error) => {
+    await persistSelectedPublicKey().catch((error) => {
       markStorageIoFailure(error);
-      console.warn("[coordinator] selection snapshot persistence failed", error instanceof Error ? error.message : String(error));
+      console.warn("[coordinator] session activeKey persistence failed", error instanceof Error ? error.message : String(error));
     });
   }
 
@@ -10602,7 +10656,7 @@ async function handleActivateKeyUnsafe(
       if (previousActive?.toLowerCase() === key.publicKeyHex.toLowerCase()) coordinatorState.keyspaceGeneration++;
       coordinatorState.sessionEpoch = generateEpoch();
       coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
-      await persistCoordinatorSelection(key.publicKeyHex);
+      await persistSelectedPublicKey(key.publicKeyHex);
       await ensureCoordinatorUpgradeSession();
       completeActiveStorageOwnerTransition(transition);
     } catch (error) {
@@ -12300,6 +12354,7 @@ export function __testResetState(): void {
   testKeyLifecycleOwnerBarrier?.release();
   testKeyLifecycleOwnerBarrier = undefined;
   testLocalStorageBridgeOverride = undefined;
+  invalidateWorkerSessionCache();
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     runtime.controller?.abort();
     if (runtime.timer) clearTimeout(runtime.timer);
@@ -12509,6 +12564,8 @@ export function __testSetLocalStorageBridgeOverride(
   bridge: ((input: LocalStorageBridgeRequest) => Promise<LocalStorageBridgeResponse>) | undefined,
 ): void {
   testLocalStorageBridgeOverride = bridge;
+  // 桥切换后不能复用上一条 session 缓存的真值。
+  invalidateWorkerSessionCache();
 }
 
 /** 测试专用：清空内存 Root，进入真正的“尚未初始化”首桶事务前置态。 */
@@ -13404,7 +13461,7 @@ export async function __testReloadCoordinatorMeta(): Promise<void> {
   await loadCoordinatorMeta();
 }
 
-export function __testCoordinatorSnapshotMetrics(): Record<"selection" | "settings" | "pluginIntent", { revision: number; writes: number }> {
+export function __testCoordinatorSnapshotMetrics(): Record<"settings" | "pluginIntent", { revision: number; writes: number }> {
   ensureTestPlatformStorage();
   const metric = (declaration: PluginStorageDeclaration) => {
     const key = `snapshot:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`;
@@ -13412,10 +13469,15 @@ export function __testCoordinatorSnapshotMetrics(): Record<"selection" | "settin
     return { revision: current?.revision ?? 0, writes: current?.writes ?? 0 };
   };
   return {
-    selection: metric(CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection),
     settings: metric(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings),
     pluginIntent: metric(CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent),
   };
+}
+
+/** 测试专用：读取 Worker 缓存/测试夹具中的浏览器 session（含 activeKey）。 */
+export function __testGetWorkerSession(): KeymasterSessionV1 | undefined {
+  const session = workerSessionCacheLoaded ? workerSessionCache : testWorkerSession;
+  return session ? structuredClone(session) : undefined;
 }
 
 export async function __testRestartWorker(): Promise<void> {

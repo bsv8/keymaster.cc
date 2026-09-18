@@ -8,14 +8,6 @@ import type { PluginStorageDeclaration } from "./access.js";
  * 坐标再拼物理路径。
  */
 export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
-  coordinatorSelection: Object.freeze({
-    moduleId: "coordinator",
-    purposeId: "selection",
-    scope: "bucket",
-    authority: "platform-only",
-    model: "snapshot",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   coordinatorSettings: Object.freeze({
     moduleId: "coordinator",
     purposeId: "settings",

@@ -38,13 +38,13 @@ function fixture() {
   return { provider, objects, puts };
 }
 
-const declaration = CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection;
+const declaration = CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings;
 const binding: StorageNamespaceBinding = {
   ...declaration,
   bucketId: "snapshot-bucket",
   bucketGeneration: 7,
 };
-const path = ".keymaster/system/coordinator/selection/current";
+const path = ".keymaster/system/coordinator/settings/current";
 
 function validateRecord(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("payload invalid");
@@ -69,7 +69,7 @@ function envelope(value: unknown, overrides: Record<string, unknown> = {}): Uint
 }
 
 describe("fixed CAS snapshot store", () => {
-  it("keeps Coordinator selection, settings, and plugin intent on independent provider objects", async () => {
+  it("keeps Coordinator settings and plugin intent on independent provider objects", async () => {
     const state = fixture();
     const openCoordinatorObject = (coordinatorDeclaration: PluginStorageDeclaration) => createFixedCasSnapshotStore<Record<string, unknown>>({
       provider: state.provider,
@@ -79,22 +79,18 @@ describe("fixed CAS snapshot store", () => {
         return structuredClone(value as Record<string, unknown>);
       },
     });
-    const selection = openCoordinatorObject(CENTRAL_STORAGE_DECLARATIONS.coordinatorSelection);
     const settings = openCoordinatorObject(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings);
     const pluginIntent = openCoordinatorObject(CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent);
 
-    await selection.write({ selectedPublicKeyHex: "02" + "11".repeat(32) });
-    expect(state.puts.map((put) => put.path)).toEqual([".keymaster/system/coordinator/selection/current"]);
-    await Promise.all([selection.read(), settings.read(), pluginIntent.read()]);
+    await settings.write({ scheduleSettings: { assetHoldingsIntervalMs: 60_000 } });
+    expect(state.puts.map((put) => put.path)).toEqual([".keymaster/system/coordinator/settings/current"]);
+    await Promise.all([settings.read(), pluginIntent.read()]);
     expect(state.puts).toHaveLength(1);
 
-    await settings.write({ scheduleSettings: { assetHoldingsIntervalMs: 60_000 } });
-    expect(state.puts.at(-1)?.path).toBe(".keymaster/system/coordinator/settings/current");
     await pluginIntent.write({ revision: 1, desiredEnabled: { background: false }, desiredRevision: { background: 1 } });
     expect(state.puts.at(-1)?.path).toBe(".keymaster/system/coordinator/plugin-intent/current");
     expect([...state.objects.keys()].sort()).toEqual([
       ".keymaster/system/coordinator/plugin-intent/current",
-      ".keymaster/system/coordinator/selection/current",
       ".keymaster/system/coordinator/settings/current",
     ]);
   });
@@ -139,7 +135,7 @@ describe("fixed CAS snapshot store", () => {
     ["corrupt JSON", new TextEncoder().encode("{")],
     ["extra envelope field", envelope({}, { extra: true })],
     ["extra declaration field", envelope({}, { declaration: { ...declaration, extra: true } })],
-    ["mismatched declaration", envelope({}, { declaration: { ...declaration, purposeId: "settings" } })],
+    ["mismatched declaration", envelope({}, { declaration: { ...declaration, purposeId: "plugin-intent" } })],
   ])("fails closed for %s", async (_name, bytes) => {
     const state = fixture();
     state.objects.set(path, { bytes, etag: "bad" });
