@@ -126,51 +126,59 @@ export class S3CleanupResource {
     const scope = prefix === undefined ? undefined : validatePrefix(safeRunId, prefix);
     const inScope = (key: string): boolean => key !== LEASE_KEY && (scope === undefined || key.startsWith(scope));
     let deletedObjects = 0;
-    let cursor: string | undefined;
-    do {
-      const page = await this.#api.listObjectsV2(cursor);
-      const keys = page.keys.filter(inScope);
-      if (keys.length) {
-        await this.#api.deleteObjects(keys.map((key) => ({ key })));
-        deletedObjects += keys.length;
-      }
-      cursor = page.nextCursor;
-    } while (cursor);
-
     let deletedVersions = 0;
-    let versionCursor: { key?: string; version?: string } | undefined;
-    do {
-      let page;
-      try { page = await this.#api.listObjectVersions(versionCursor); }
-      catch (error) {
-        if (isOptionalS3OperationUnsupported(error)) break;
-        throw error;
-      }
-      const objects = page.objects.filter((object) => inScope(object.key));
-      if (objects.length) {
-        await this.#api.deleteObjects(objects);
-        deletedVersions += objects.length;
-      }
-      versionCursor = page.nextCursor;
-    } while (versionCursor);
-
     let abortedMultipartUploads = 0;
-    let uploadCursor: { key?: string; uploadId?: string } | undefined;
-    do {
-      let page;
-      try { page = await this.#api.listMultipartUploads(uploadCursor); }
-      catch (error) {
-        if (isOptionalS3OperationUnsupported(error)) break;
-        throw error;
-      }
-      for (const upload of page.uploads) {
-        if (inScope(upload.key)) {
-          await this.#api.abortMultipartUpload(upload.key, upload.uploadId);
-          abortedMultipartUploads += 1;
+    // 页面/Worker 仍可能解锁运行：Key 锁心跳、后台同步任务会在清理扫描期间
+    // 写入迟到对象。单轮扫描后直接断言会把合法迟到写误报成清理失败；这里
+    // 按 owner 删除同样的语义做有界多轮收口，只有连续一轮观测为空才算干净。
+    for (let pass = 0; pass < 4; pass += 1) {
+      let cursor: string | undefined;
+      do {
+        const page = await this.#api.listObjectsV2(cursor);
+        const keys = page.keys.filter(inScope);
+        if (keys.length) {
+          await this.#api.deleteObjects(keys.map((key) => ({ key })));
+          deletedObjects += keys.length;
         }
-      }
-      uploadCursor = page.nextCursor;
-    } while (uploadCursor);
+        cursor = page.nextCursor;
+      } while (cursor);
+
+      let versionCursor: { key?: string; version?: string } | undefined;
+      do {
+        let page;
+        try { page = await this.#api.listObjectVersions(versionCursor); }
+        catch (error) {
+          if (isOptionalS3OperationUnsupported(error)) break;
+          throw error;
+        }
+        const objects = page.objects.filter((object) => inScope(object.key));
+        if (objects.length) {
+          await this.#api.deleteObjects(objects);
+          deletedVersions += objects.length;
+        }
+        versionCursor = page.nextCursor;
+      } while (versionCursor);
+
+      let uploadCursor: { key?: string; uploadId?: string } | undefined;
+      do {
+        let page;
+        try { page = await this.#api.listMultipartUploads(uploadCursor); }
+        catch (error) {
+          if (isOptionalS3OperationUnsupported(error)) break;
+          throw error;
+        }
+        for (const upload of page.uploads) {
+          if (inScope(upload.key)) {
+            await this.#api.abortMultipartUpload(upload.key, upload.uploadId);
+            abortedMultipartUploads += 1;
+          }
+        }
+        uploadCursor = page.nextCursor;
+      } while (uploadCursor);
+
+      const page = await this.#api.listObjectsV2();
+      if (!page.keys.some(inScope)) break;
+    }
 
     await this.assertNoBusinessObjects(scope);
     return { deletedObjects, deletedVersions, abortedMultipartUploads };

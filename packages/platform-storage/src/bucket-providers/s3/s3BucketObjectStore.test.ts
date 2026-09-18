@@ -12,8 +12,9 @@ const config: NormalizedStorageProviderConfig = {
 };
 
 describe("BucketObjectStore namespace guard", () => {
-  it("rejects provider redirects at the fetch boundary", () => {
-    expect(s3FetchRequestInit()).toEqual({ redirect: "error" });
+  it("rejects provider redirects and browser caching at the fetch boundary", () => {
+    // no-store 防止删除/条件写之后的 GET 命中启发式缓存，返回旧字节和旧 ETag。
+    expect(s3FetchRequestInit()).toEqual({ redirect: "error", cache: "no-store" });
   });
 
   it("installs the XML DOM surface required by S3 inside a SharedWorker", () => {

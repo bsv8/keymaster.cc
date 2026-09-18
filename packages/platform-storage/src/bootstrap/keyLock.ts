@@ -45,6 +45,21 @@ export interface KeyLock {
 
 const providerWriteTails = new WeakMap<object, Promise<void>>();
 
+/**
+ * 条件写冲突后的有界重试上限。
+ *
+ * 冲突不等于“另一个浏览器”：上一个 Worker 的迟到心跳、刷新窗口内的旧
+ * 会话或远程一致性延迟都可能让读到的 ETag 失效，而锁文件仍属于本
+ * holder。此时必须重读 ETag 再抢，不能把本浏览器误报成其它浏览器。
+ */
+const ACQUIRE_CONFLICT_RETRY_LIMIT = 4;
+const RELEASE_CONFLICT_RETRY_LIMIT = 3;
+
+/** 退避等待；让迟到的条件写先落地，再重读最新锁状态。 */
+function waitBeforeRetry(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+}
+
 function withProviderWrite<T>(provider: StorageBucketProvider, operation: () => Promise<T>): Promise<T> {
   const previous = providerWriteTails.get(provider) ?? Promise.resolve();
   let release!: () => void;
@@ -125,22 +140,34 @@ export function createKeyLock(provider: StorageBucketProvider, options: KeyLockO
 
   async function acquire(): Promise<KeymasterKeyLockV1> {
     if (released) throw lockError("storage_unavailable", "Key lock is disposed");
-    const current = await read();
-    const timestamp = now();
-    if (current.record && current.record.expiresAt > timestamp && current.record.holder !== options.holder) {
-      throw lockError("storage_conflict", "Key is being used by another browser");
+    for (let attempt = 0; ; attempt += 1) {
+      const current = await read();
+      const timestamp = now();
+      if (current.record && current.record.expiresAt > timestamp && current.record.holder !== options.holder) {
+        throw lockError("storage_conflict", "Key is being used by another browser");
+      }
+      const record = nextRecord(options.holder, timestamp, current.record?.holder === options.holder ? current.record.acquiredAt : timestamp);
+      try {
+        await write(record, current.etag, !current.record && !current.invalid);
+      } catch (caught) {
+        if (!(caught instanceof StorageRuntimeError) || caught.code !== "storage_conflict") throw caught;
+        // 读-写之间锁文件被改动：重读判定真实持有者，再决定重试或失败。
+        if (released) throw lockError("storage_unavailable", "Key lock is disposed");
+        if (attempt >= ACQUIRE_CONFLICT_RETRY_LIMIT) {
+          throw lockError("storage_conflict", "Key lock was acquired by another browser");
+        }
+        const fresh = await read();
+        if (fresh.record && fresh.record.expiresAt > now() && fresh.record.holder !== options.holder) {
+          throw lockError("storage_conflict", "Key is being used by another browser");
+        }
+        await waitBeforeRetry(attempt);
+        continue;
+      }
+      held = true;
+      stopHeartbeat();
+      timer = setInterval(() => { void heartbeat().catch(() => undefined); }, KEYMASTER_KEY_LOCK_TIMING.heartbeatIntervalMs);
+      return record;
     }
-    const record = nextRecord(options.holder, timestamp, current.record?.holder === options.holder ? current.record.acquiredAt : timestamp);
-    try {
-      await write(record, current.etag, !current.record && !current.invalid);
-    } catch (caught) {
-      if (caught instanceof StorageRuntimeError && caught.code === "storage_conflict") throw lockError("storage_conflict", "Key lock was acquired by another browser");
-      throw caught;
-    }
-    held = true;
-    stopHeartbeat();
-    timer = setInterval(() => { void heartbeat().catch(() => undefined); }, KEYMASTER_KEY_LOCK_TIMING.heartbeatIntervalMs);
-    return record;
   }
 
   async function heartbeat(): Promise<KeymasterKeyLockV1> {
@@ -164,13 +191,22 @@ export function createKeyLock(provider: StorageBucketProvider, options: KeyLockO
     stopHeartbeat();
     if (!held || released) { held = false; return; }
     held = false;
-    const current = await read();
-    if (!current.record || current.record.holder !== options.holder) return;
-    try {
-      await withProviderWrite(provider, () => provider.delete(path, current.etag === undefined ? {} : { ifMatch: current.etag }));
-    } catch (caught) {
-      if (caught instanceof StorageRuntimeError && caught.code === "storage_not_found") return;
-      throw caught instanceof StorageRuntimeError ? caught : lockError("storage_provider_error", "Key lock release failed");
+    for (let attempt = 0; ; attempt += 1) {
+      const current = await read();
+      if (!current.record || current.record.holder !== options.holder) return;
+      try {
+        await withProviderWrite(provider, () => provider.delete(path, current.etag === undefined ? {} : { ifMatch: current.etag }));
+        return;
+      } catch (caught) {
+        if (caught instanceof StorageRuntimeError && caught.code === "storage_not_found") return;
+        // 同 holder 的迟到心跳可能刚换了 ETag；删除失败不等于锁已易主，
+        // 重读一次，只要仍是本 holder 就继续删。
+        if (caught instanceof StorageRuntimeError && caught.code === "storage_conflict" && attempt < RELEASE_CONFLICT_RETRY_LIMIT && !released) {
+          await waitBeforeRetry(attempt);
+          continue;
+        }
+        throw caught instanceof StorageRuntimeError ? caught : lockError("storage_provider_error", "Key lock release failed");
+      }
     }
   }
 

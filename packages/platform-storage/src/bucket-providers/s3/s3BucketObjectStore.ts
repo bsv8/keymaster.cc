@@ -121,9 +121,15 @@ export function commitAutomaticBucketObjectStoreCapability(state: BucketObjectSt
  * redirects is intentionally stricter than the cross-origin requirement: a
  * legitimate S3 endpoint should answer the signed request directly, while even
  * a same-origin redirect can change the canonical path covered by SigV4.
+ *
+ * `cache: "no-store"` 同样是硬性要求：S3/R2 的 GET 响应通常不带
+ * Cache-Control，浏览器会按启发式规则缓存 200。对象删除或条件写之后，
+ * 随后的 GET 可能继续返回旧字节和旧 ETag，使条件写（If-Match）对已不存在
+ * 的对象反复 412，被误判成"另一个浏览器正在使用"。存储客户端必须每次
+ * 读回服务端真值，不能使用 HTTP 缓存。
  */
 export function s3FetchRequestInit(): RequestInit {
-  return { redirect: "error" };
+  return { redirect: "error", cache: "no-store" };
 }
 
 /**

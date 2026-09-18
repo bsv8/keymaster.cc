@@ -124,7 +124,7 @@ Gate(4 项)：
 | --- | --- | --- | --- |
 | 资源准备 | `resources/s3-resource-setup.spec.ts` | 真实 S3 专用 setup：取得 lease 并执行非前缀全量开场清理，不读 testnet/Sat 秘密 | KM-RESOURCE-001、KM-INIT-002 |
 | G-RESOURCE-SAFETY | `gates/real-resource/resource-safety.spec.ts` | 真实业务对象只在本场景 `run_id/scenario_id` prefix 内；prefix 清理不越界，路径越界 fail-closed | KM-RESOURCE-001 |
-| J-REAL-S3-INIT | `journeys/real-resource/real-s3-initialization.spec.ts` | 真实 S3 表单连接探测 → 创建逻辑桶 → 首把 Key 提交到 run 隔离前缀 → 刷新恢复；凭据不进 localStorage | KM-INIT-002 |
+| J-REAL-S3-INIT | `journeys/real-resource/real-s3-initialization.spec.ts` | 真实 S3 表单连接探测 → 创建逻辑桶 → 首把 Key 提交到 run 隔离前缀 → 刷新恢复 → 主动锁定/仅 Key 密码解锁 → 清空本机目录的全新浏览器接入已有桶（解锁既有 Key 不覆盖）；凭据不进 localStorage | KM-INIT-002 |
 | 资源收尾 | `resources/s3-resource-teardown.spec.ts` | 全量业务清理确认后才释放 lease | KM-RESOURCE-001 |
 
 ---

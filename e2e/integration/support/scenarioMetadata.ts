@@ -52,6 +52,8 @@ export const REAL_S3_INITIALIZATION_SCENARIO = {
     "页面通过正式 S3-compatible 表单完成连接探测，并创建一个真实 S3 后端的逻辑桶。",
     "首个 Hold、Vault 和第一把 Key 提交到本轮 run_id/scenario_id 隔离的远端对象前缀。",
     "刷新后目录、选中桶和第一把 Key 仍可从真实 S3 恢复，访问凭据和桶密码不进入 localStorage。",
+    "主动锁定只释放 Key 应用锁，桶认证保留；仅凭 Key 密码即可重新解锁。",
+    "清空本机目录的全新浏览器连接同一已有数据的桶时必须走“解锁已有钱包”，远端 KeyHold 不被改写。",
   ],
   resourceProfile: "s3",
 } as const satisfies IntegrationScenarioMetadata;

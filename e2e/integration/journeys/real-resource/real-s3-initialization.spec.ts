@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { initializeS3User } from "../../drivers/initialSetupDriver.js";
+import { connectExistingS3User, initializeS3User } from "../../drivers/initialSetupDriver.js";
 import { readLocalCatalog, readSessionPublicKey } from "../../drivers/appDriver.js";
-import { lockWallet, reloadS3BucketAndUnlock, unlockWallet } from "../../drivers/vaultDriver.js";
+import { lockWallet, reloadS3BucketAndUnlock, unlockWallet, unlockWalletWithReplay } from "../../drivers/vaultDriver.js";
 import { assertS3BucketStorage, assertS3IdentityStorage, readS3SessionId } from "../../support/s3BucketFormats.js";
 import { loadE2ES3Config, publicS3ConfigFingerprint } from "../../resources/config/loader.js";
-import { S3CleanupResource } from "../../resources/s3/s3CleanupResource.js";
+import { S3CleanupResource, createAwsS3Api } from "../../resources/s3/s3CleanupResource.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
 import { readS3ResourceRunState } from "../../support/s3ResourceState.js";
 import { REAL_S3_INITIALIZATION_SCENARIO } from "../../support/scenarioMetadata.js";
@@ -19,6 +19,8 @@ const SETUP_PASSWORD = "real-s3-e2e-password-123";
 const STARTUP_PASSWORD = "real-s3-startup-password-456";
 const LOGICAL_BUCKET_LABEL = "真实 S3 集成测试桶";
 const FIRST_KEY_LABEL = "真实 S3 首 Key";
+// 全新浏览器重新登记本机记录时可以换显示名；桶内数据不变。
+const FRESH_BROWSER_BUCKET_LABEL = "全新浏览器接入的 S3 桶";
 
 function clearSecrets(config: LoadedE2ES3Config | undefined): void {
   config?.s3.secretAccessKey.clear();
@@ -34,8 +36,10 @@ function clearSecrets(config: LoadedE2ES3Config | undefined): void {
  * 创建，页面只在本轮隔离前缀下创建 Keymaster 逻辑桶对象。
  *
  * 成功标准：页面的正式 S3 provider probe 和初始化事务成功，页面显示真实
- * 逻辑桶、首 Key，并在刷新后恢复同一目录和身份。Node Resource 只负责租约、
- * 本场景 prefix 的清理和生命周期安全，不把直接 S3 API 观察当作页面成功。
+ * 逻辑桶、首 Key，并在刷新后恢复同一目录和身份。随后清空本机目录模拟
+ * 全新浏览器，再次连接同一个已有数据的桶时必须走“解锁已有钱包”，用 Key
+ * 自己的密码确认后进入首页，且远端 KeyHold 不被改写。Node Resource 只负责
+ * 租约、本场景 prefix 的清理和生命周期安全，不把直接 S3 API 观察当作页面成功。
  *
  * 外部资源与收尾：只使用 setup 已取得的 S3 lease；Journey 只清理自己的
  * prefix，resource-teardown 再负责非前缀的全量收口、版本、delete marker
@@ -44,8 +48,8 @@ function clearSecrets(config: LoadedE2ES3Config | undefined): void {
  *
  * 覆盖需求：KM-INIT-002。
  */
-test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化、刷新恢复与锁定解锁", async ({ page, context }, testInfo) => {
-  test.setTimeout(240_000);
+test(JOURNEY_ID + "：真实 S3 首次初始化、刷新/锁定恢复与全新浏览器接入", async ({ page, context }, testInfo) => {
+  test.setTimeout(420_000);
   const browserErrors = captureBrowserErrors(page, context);
   let config: LoadedE2ES3Config | undefined;
   let accessKeyId = "";
@@ -132,31 +136,96 @@ test(JOURNEY_ID + "：真实 S3 逻辑桶首次初始化、刷新恢复与锁定
 
     await test.step("用户主动锁定后只需 Key 密码解锁，桶密码不被遗忘", async () => {
       const activeKeyBefore = await readSessionPublicKey(page);
-      // 锁定只收口 KeyHold 运行态：桶密码必须保留，否则下次解锁要重填。
+      expect(activeKeyBefore, "锁定前应使用初始化的同一把 Key").toBe(ready.publicKeyHex);
+      const catalogBefore = await readLocalCatalog(page);
+      const sessionId = await readS3SessionId(page);
       await lockWallet(page);
-      const activeKeyWhileLocked = await readSessionPublicKey(page);
-      expect(activeKeyWhileLocked).toBe(activeKeyBefore);
+      await expect(page.getByRole("heading", { name: /钱包已锁定|Wallet locked/u })).toBeVisible();
+      await expect(page.getByTestId("storage-authentication"), "主动锁定不能要求重新认证桶").toHaveCount(0);
+      await expect(page.getByRole("navigation", { name: /Primary navigation|主导航/u })).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: /Selected private key|已选私钥|当前选择的私钥/u })).toBeVisible({ timeout: 60_000 });
+      await expect(page.getByLabel(/密码|password/iu), "Key 密码输入必须清空").toHaveValue("");
+      await expect(page.getByRole("button", { name: /^Unlock$|^解锁$/u })).toBeDisabled();
+      expect(await readLocalCatalog(page), "锁定不能改变已选桶").toEqual(catalogBefore);
+      expect(await readSessionPublicKey(page)).toBe(activeKeyBefore);
       await unlockWallet(page, SETUP_PASSWORD, FIRST_KEY_LABEL);
       expect(await readSessionPublicKey(page)).toBe(activeKeyBefore);
-      // 锁定/解锁都不能要求重过存储认证页：那等于把桶密码也忘了。
-      const authHeading = page.getByTestId("storage-authentication");
-      await expect(authHeading).toHaveCount(0);
+      await expect(page.getByTestId("storage-authentication")).toHaveCount(0);
+      await assertS3IdentityStorage(page, { bucketId: ready.bucketId, ownerPublicKeyHex: ready.publicKeyHex, sessionId });
+      await assertS3BucketStorage(config!.s3, {
+        prefix: scenarioPrefix,
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: FIRST_KEY_LABEL,
+        sessionId,
+      });
     });
 
-    await test.step("锁定后刷新仍走存储认证并可用原桶密码恢复", async () => {
+    await test.step("重新解锁后刷新会忘记桶认证，需要再次输入桶密码和 Key 密码", async () => {
       await page.reload({ waitUntil: "domcontentloaded" });
       const authHeading = page.getByTestId("storage-authentication");
       const lockedHeading = page.getByRole("heading", { name: /钱包已锁定|Wallet locked/ });
-      // 刷新忘记 Key 密码但不该忘记桶密码；桶密码正确时认证一次即回锁定壳。
       await expect(authHeading).toBeVisible({ timeout: 60_000 });
       await authHeading.getByLabel(/密码|password/iu).fill(STARTUP_PASSWORD);
       await authHeading.getByRole("button", { name: /^解锁$|^Unlock$/u }).click();
       await expect(lockedHeading).toBeVisible({ timeout: 90_000 });
       await expect(page.getByRole("heading", { name: /Selected private key|已选私钥/u })).toBeVisible({ timeout: 60_000 });
-      await unlockWallet(page, SETUP_PASSWORD, FIRST_KEY_LABEL);
+      await unlockWalletWithReplay(page, SETUP_PASSWORD);
       const catalog = await readLocalCatalog(page);
       expect(catalog?.buckets).toHaveLength(1);
       expect(catalog?.selectedBucketId).toBe(ready.bucketId);
+    });
+
+    await test.step("全新浏览器清空本机目录后接入已有 S3 桶：只解锁既有 Key，不新建覆盖", async () => {
+      // scenarioObjectPrefix 带尾斜杠；Node 侧直接读对象时必须去掉，避免 `//`。
+      const prefixBase = scenarioPrefix.replace(/\/+$/u, "");
+      const keyHoldPath = `${prefixBase}/keys/${ready.publicKeyHex}.keyhold`;
+      const api = createAwsS3Api(config!.s3);
+      const keyHoldBefore = await api.getObject(keyHoldPath);
+      expect(keyHoldBefore?.body, "接入前必须能读到初始化写入的 KeyHold").toBeTruthy();
+      expect(keyHoldBefore?.etag).toBeTruthy();
+
+      // 先锁定释放 Key 锁（旧浏览器不再持有），再清空本机目录并刷新：
+      // 新 session 会落到一个全新的 SharedWorker，模拟干净浏览器。
+      await lockWallet(page);
+      await page.evaluate(() => { window.localStorage.clear(); });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await expect(
+        page.getByRole("heading", { name: /Choose a bucket type|选择桶类型/u }),
+        "清空本机目录后必须回到首次初始化入口",
+      ).toBeVisible({ timeout: 60_000 });
+
+      const connected = await connectExistingS3User(page, {
+        bucketLabel: FRESH_BROWSER_BUCKET_LABEL,
+        keyLabel: FIRST_KEY_LABEL,
+        keyPassword: SETUP_PASSWORD,
+        startupPassword: STARTUP_PASSWORD,
+        endpoint: config!.s3.endpoint,
+        region: config!.s3.region,
+        bucket: config!.s3.bucket,
+        accessKeyId,
+        secretAccessKey,
+        ...(sessionToken ? { sessionToken } : {}),
+        prefix: scenarioPrefix,
+      });
+
+      // 页面必须解锁桶里已有的同一把 Key，而不是生成新 Key。
+      expect(connected.publicKeyHex, "接入已有桶必须解锁原有 Key").toBe(ready.publicKeyHex);
+      const sessionId = await readS3SessionId(page);
+      await assertS3IdentityStorage(page, { bucketId: connected.bucketId, ownerPublicKeyHex: ready.publicKeyHex, sessionId });
+      // keys/ 下仍然只有原 KeyHold，锁由新 session 持有。
+      await assertS3BucketStorage(config!.s3, {
+        prefix: scenarioPrefix,
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: FIRST_KEY_LABEL,
+        sessionId,
+      });
+      // 解锁既有钱包不得改写远端 KeyHold：字节与 ETag 必须保持原样。
+      const keyHoldAfter = await api.getObject(keyHoldPath);
+      expect(keyHoldAfter?.body, "接入已有桶不能改写 KeyHold 内容").toBe(keyHoldBefore?.body);
+      expect(keyHoldAfter?.etag, "接入已有桶不能覆写 KeyHold 对象").toBe(keyHoldBefore?.etag);
+      const catalog = await readLocalCatalog(page);
+      expect(catalog?.buckets, "全新浏览器只登记一条设备记录").toHaveLength(1);
+      expect(catalog?.selectedBucketId).toBe(connected.bucketId);
     });
   } catch (error) {
     journeyError = error;

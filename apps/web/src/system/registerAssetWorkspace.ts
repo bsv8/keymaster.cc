@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import type {
   AssetDataNotifier,
   AssetRegistry,
@@ -523,26 +524,26 @@ export async function registerAssetWorkspace(host: PluginHost): Promise<() => vo
     if (disposed) return;
     disposed = true;
     const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
-    // 资源记录先停，再移除定义；否则已挂载的 React 订阅可能继续持有
-    // 旧 key 的 provider listener。
+    flushSync(() => {
+      for (const id of host.business._ids().features.filter((item) => !beforeBusinessFeatureIds.has(item))) {
+        host.business.unregisterFeature(id);
+      }
+      for (const id of host.business._ids().domains.filter((item) => !beforeBusinessDomainIds.has(item))) {
+        host.business.unregisterDomain(id);
+      }
+      for (const id of host.routes._ids().filter((item) => !beforeRouteIds.has(item))) {
+        host.routes.unregister(id);
+      }
+      for (const id of host.home._ids().filter((item) => !beforeHomeIds.has(item))) {
+        host.home.unregister(id);
+      }
+      for (const id of host.contactPublicKeyActions._ids().filter((item) => !beforeContactActionIds.has(item))) {
+        host.contactPublicKeyActions.unregister(id);
+      }
+    });
     host.resourceStore.disposeOwner("asset-workspace");
     for (const id of resources._ids().filter((item) => !beforeResourceIds.has(item))) {
       resources.unregister(id);
-    }
-    for (const id of host.business._ids().features.filter((item) => !beforeBusinessFeatureIds.has(item))) {
-      host.business.unregisterFeature(id);
-    }
-    for (const id of host.business._ids().domains.filter((item) => !beforeBusinessDomainIds.has(item))) {
-      host.business.unregisterDomain(id);
-    }
-    for (const id of host.routes._ids().filter((item) => !beforeRouteIds.has(item))) {
-      host.routes.unregister(id);
-    }
-    for (const id of host.home._ids().filter((item) => !beforeHomeIds.has(item))) {
-      host.home.unregister(id);
-    }
-    for (const id of host.contactPublicKeyActions._ids().filter((item) => !beforeContactActionIds.has(item))) {
-      host.contactPublicKeyActions.unregister(id);
     }
     if (!hadTransferFeature) host.capabilities.revoke(TRANSFER_FEATURE_CAPABILITY);
     for (const pluginId of ["assets", "collectibles", "collectibleTransfer", "transfer"]) {

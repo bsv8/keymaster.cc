@@ -61,6 +61,20 @@ class MemoryS3Api implements S3CleanupApi {
   }
 }
 
+/** 第一次删除扫描之后才出现迟到写入的桶：模拟 Key 心跳/后台任务。 */
+class LateWriteS3Api extends MemoryS3Api {
+  lateObject?: string;
+  readonly #deleteCalls = { count: 0 };
+  override async deleteObjects(objects: readonly { key: string; versionId?: string }[]): Promise<void> {
+    await super.deleteObjects(objects);
+    this.#deleteCalls.count += 1;
+    if (this.#deleteCalls.count === 1 && this.lateObject) {
+      this.objects.set(this.lateObject, { body: "late", etag: "late-v1" });
+      this.lateObject = undefined;
+    }
+  }
+}
+
 function resourceConfig() {
   return {
     endpoint: "https://s3.example.test",
@@ -95,5 +109,18 @@ describe("S3CleanupResource 作用域和 lease", () => {
 
     await resource.releaseLease("run-resource-safety");
     expect(api.objects.has(".keymaster-e2e/lease.json")).toBe(false);
+  });
+
+  it("清理期间出现的迟到写入必须多轮收口，不能误报残留", async () => {
+    const api = new LateWriteS3Api();
+    api.lateObject = "run-resource-safety/business/late";
+    const resource = new S3CleanupResource(resourceConfig(), api);
+    await resource.acquireLease("run-resource-safety");
+
+    const summary = await resource.cleanup("run-resource-safety", "run-resource-safety/business/");
+    // 第一轮删除两个既有对象；迟到对象在下一轮被观测并清理。
+    expect(summary.deletedObjects).toBe(3);
+    expect(api.objects.has("run-resource-safety/business/late")).toBe(false);
+    await resource.releaseLease("run-resource-safety");
   });
 });

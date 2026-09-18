@@ -50,6 +50,28 @@ export async function reloadAndAssertSameKey(page: Page, keyLabel: string): Prom
 }
 
 /**
+ * 在锁定壳里用 Key 密码解锁，并容忍 S3 冷启动的已知身份切换窗口。
+ *
+ * 已知产品待办：S3 冷启动解锁的第一条 session.state 可能落在窗口身份
+ * 切换窗口内，RPC 已 accepted 但 UI 仍停在锁定壳。真实用户会再点一次
+ * 解锁；自动化必须显式重放（有界一次），否则冒烟会随机失败。
+ */
+export async function unlockWalletWithReplay(page: Page, keyPassword: string): Promise<void> {
+  const lockedHeading = page.getByRole("heading", { name: /钱包已锁定|Wallet locked/ });
+  // 已解锁后顶栏“Lock”与可能的页面级“Lock wallet”会同时匹配；这里只要求
+  // 任意一个锁定入口出现，用 first() 避免 strict mode 冲突。
+  const unlockedShellEntry = page.getByRole("button", { name: /^(Lock wallet|Lock|锁定钱包|锁定)$/u }).first();
+  let reachedUnlocked = false;
+  for (let attempt = 1; attempt <= 2 && !reachedUnlocked; attempt += 1) {
+    await page.getByLabel(/Key password|密码|password/iu).fill(keyPassword);
+    await page.getByRole("button", { name: /^Unlock$|^解锁$/u }).click();
+    reachedUnlocked = await unlockedShellEntry.waitFor({ state: "visible", timeout: 45_000 }).then(() => true).catch(() => false);
+    if (!reachedUnlocked) await expect(lockedHeading).toBeVisible({ timeout: 20_000 });
+  }
+  if (!reachedUnlocked) throw new Error("S3 解锁被接受后仍未进入已解锁壳层");
+}
+
+/**
  * S3 桶刷新恢复：设备记录被启动密码保护，所以先过存储认证页，再在锁定
  * 壳里输入该 Key 自己的密码；解锁完成的 UI 结果就是已解锁壳层本身。
  */
@@ -76,20 +98,7 @@ export async function reloadS3BucketAndUnlock(
   // 锁定壳出现不等于恢复完成：必须等当前 Key 已经从桶里读回并选中，
   // 否则自动化会在窗口会话尚未重新接管时提交解锁（真实用户的手速不会）。
   await expect(page.getByRole("heading", { name: /Selected private key|已选私钥/u })).toBeVisible({ timeout: 60_000 });
-  // 已解锁后顶栏“Lock”与可能的页面级“Lock wallet”会同时匹配；这里只要求
-  // 任意一个锁定入口出现，用 first() 避免 strict mode 冲突。
-  const unlockedShellEntry = page.getByRole("button", { name: /^(Lock wallet|Lock|锁定钱包|锁定)$/u }).first();
-  // 已知产品待办：S3 冷启动解锁的第一条 session.state 可能落在窗口
-  // 身份切换窗口内，RPC 已 accepted 但 UI 仍停在锁定壳。真实用户会再点
-  // 一次解锁；自动化必须显式重放（有界一次），否则冒烟会随机失败。
-  let reachedUnlocked = false;
-  for (let attempt = 1; attempt <= 2 && !reachedUnlocked; attempt += 1) {
-    await page.getByLabel(/Key password|密码|password/iu).fill(keyPassword);
-    await page.getByRole("button", { name: /^Unlock$|^解锁$/u }).click();
-    reachedUnlocked = await unlockedShellEntry.waitFor({ state: "visible", timeout: 45_000 }).then(() => true).catch(() => false);
-    if (!reachedUnlocked) await expect(lockedHeading).toBeVisible({ timeout: 20_000 });
-  }
-  if (!reachedUnlocked) throw new Error("S3 解锁被接受后仍未进入已解锁壳层");
+  await unlockWalletWithReplay(page, keyPassword);
   // Key 管理页已删除：解锁完成的 UI 结果就是已解锁壳层本身；
   // Key 的存在性与内容由调用方的 KeymasterFormats 文件真值校验负责。
   void keyLabel;
