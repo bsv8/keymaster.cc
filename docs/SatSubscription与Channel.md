@@ -17,6 +17,11 @@ SatSubscription 管理多个 SSP Supplier（订阅服务供应商）、SPI 资�
 默认发布 Supplier，也可以选择多个接收 Supplier。配置变化推进 `supplierGeneration`（供应商
 代际），旧连接和请求不能复用。
 
+首次配置（或用户清空供应商列表后）会写入缺省供应商 `bsv8`：`npm run dev` 使用 testnet
+网关，`npm run build` / `npm run build:production` 使用 mainnet 网关。缺省供应商是**出口**
+（新消息默认从它发布）；**入口**不做单一化，所有被选为接收方的供应商都会侦听。用户可以
+在系统设置里追加更多供应商并调整出口与接收选择。
+
 ## Channel 语义
 
 - `channel.publish` 发布到区分大小写的精确频道，不接受通配符。

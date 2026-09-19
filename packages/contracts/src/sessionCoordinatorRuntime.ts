@@ -2375,12 +2375,24 @@ function parseSatOwnerSettings(value: unknown, field: string): SatOwnerSupplierS
   return { ownerPublicKeyHex, defaultPublishSupplierId, receiveSupplierIds: stringList(settings.receiveSupplierIds, field + ".receiveSupplierIds", 64, 256) };
 }
 
+/**
+ * 受控可空文本：允许空串。
+ *
+ * 设计缘由：SatSubscription 审计里空串是合法业务值——失败的订阅/发布
+ * 记录 `chargedAmount: ""` 表示"本次没有可展示的扣费"，`subscriptions`
+ * 动作的 `channel` 也是空串。校验器必须按领域语义放行。
+ */
+function allowEmptyText(value: unknown, field: string, maximum = 4_096): string {
+  if (typeof value !== "string" || value.length > maximum) throw new TypeError(`Coordinator ${field} is invalid`);
+  return value;
+}
+
 function parseSatSupplierView(value: unknown, field: string): SatSubscriptionSettingsSnapshot["supplierViews"][number] {
   const view = expectRecord(value, field);
   const supplierPublicKeyHex = text(view.supplierPublicKeyHex, field + ".supplierPublicKeyHex", 66);
   if (!/^(02|03)[0-9a-f]{64}$/iu.test(supplierPublicKeyHex)) throw new TypeError(`Coordinator ${field}.supplierPublicKeyHex is invalid`);
   const inboxChannel = view.inboxChannel === null ? null : text(view.inboxChannel, field + ".inboxChannel", 2_048);
-  const lastChargedAmount = view.lastChargedAmount === null ? null : text(view.lastChargedAmount, field + ".lastChargedAmount", 64);
+  const lastChargedAmount = view.lastChargedAmount === null ? null : allowEmptyText(view.lastChargedAmount, field + ".lastChargedAmount", 64);
   const lastErrorCode = view.lastErrorCode === null ? null : enumValue(view.lastErrorCode, ["config", "connect", "identity", "protocol", "balance", "unknown_result", "validation", "unavailable", "conflict"] as const, field + ".lastErrorCode");
   return {
     supplierId: text(view.supplierId, field + ".supplierId", 256),
@@ -2411,8 +2423,9 @@ function parseSatSettingsSnapshot(value: unknown, field: string): SatSubscriptio
       return {
         supplierId: text(audit.supplierId, `${field}.feeAudit[${index}].supplierId`, 256),
         action: text(audit.action, `${field}.feeAudit[${index}].action`, 128),
-        channel: text(audit.channel, `${field}.feeAudit[${index}].channel`, 2_048),
-        chargedAmount: text(audit.chargedAmount, `${field}.feeAudit[${index}].chargedAmount`, 64),
+        // `subscriptions` 动作没有单一频道；失败动作没有扣费金额。
+        channel: allowEmptyText(audit.channel, `${field}.feeAudit[${index}].channel`, 2_048),
+        chargedAmount: allowEmptyText(audit.chargedAmount, `${field}.feeAudit[${index}].chargedAmount`, 64),
         result: text(audit.result, `${field}.feeAudit[${index}].result`, 256),
         ...(errorCode === undefined ? {} : { errorCode }),
         createdAtMs: boundedNumber(audit.createdAtMs, `${field}.feeAudit[${index}].createdAtMs`),

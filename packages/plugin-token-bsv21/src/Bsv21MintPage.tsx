@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, Select, TextInput } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
+import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
 import type { BsvNetwork } from "@keymaster/contracts";
 import type { Bsv21MintPreview, Bsv21MintService } from "./bsv21MintService.js";
@@ -36,7 +36,22 @@ function statusLabel(status: string, t: (key: string, values?: { defaultValue?: 
 
 export function Bsv21MintPage() {
   const { t } = useI18n();
-  const service = useCapability(BSV21_MINT_SERVICE_CAPABILITY);
+  // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
+  // 一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(BSV21_MINT_SERVICE_CAPABILITY);
+  if (!service) {
+    return (
+      <EmptyState
+        title={t("bsv21.mint.locked.title", { defaultValue: "钱包已锁定" })}
+        description={t("bsv21.mint.locked.description", { defaultValue: "解锁后可继续铸造代币。" })}
+      />
+    );
+  }
+  return <Bsv21MintPageInner service={service} />;
+}
+
+function Bsv21MintPageInner({ service }: { service: Bsv21MintService }) {
+  const { t } = useI18n();
   const [network, setNetwork] = useState<BsvNetwork>("main");
   const [amount, setAmount] = useState("1");
   const [sym, setSym] = useState("TOK");

@@ -17,8 +17,8 @@
 
 import React, { useEffect, useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import {
   formatShortPublicKey,
   POKER_SERVICE_CAPABILITY,
@@ -51,11 +51,26 @@ function describeSession(state: PokerSessionKeyState): {
 
 export function PokerSettingsPage(): React.ReactElement {
   const { t } = useI18n();
-  const service = useCapability(POKER_SERVICE_CAPABILITY);
+  // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
+  // 一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(POKER_SERVICE_CAPABILITY);
+  if (!service) {
+    return (
+      <PageHeader
+        title={t("poker.settings.label", { defaultValue: "Poker" })}
+        description={t("poker.settings.locked", { defaultValue: "钱包已锁定；解锁后可继续配置。" })}
+      />
+    );
+  }
+  return <PokerSettingsPageInner service={service} />;
+}
+
+function PokerSettingsPageInner({ service }: { service: PokerService }): React.ReactElement {
+  const { t } = useI18n();
   const host = usePluginHost();
-  const settings = useResourceSelector<ReturnType<PokerService["getSettings"]>, ReturnType<PokerService["getSettings"]>>(host.resourceStore, "poker.settings", [], (s) => s.data ?? { proxyEndpoint: "", allowFallbackBroadcast: true });
-  const statusResource = useResourceSelector<PokerConnectionStatus, PokerConnectionStatus>(host.resourceStore, "poker.connection", [], (s) => s.data ?? "idle");
-  const sessionResource = useResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState));
+  const settings = useOptionalResourceSelector<ReturnType<PokerService["getSettings"]>, ReturnType<PokerService["getSettings"]>>(host.resourceStore, "poker.settings", [], (s) => s.data ?? { proxyEndpoint: "", allowFallbackBroadcast: true }, { proxyEndpoint: "", allowFallbackBroadcast: true });
+  const statusResource = useOptionalResourceSelector<PokerConnectionStatus, PokerConnectionStatus>(host.resourceStore, "poker.connection", [], (s) => s.data ?? "idle", "idle");
+  const sessionResource = useOptionalResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState), { kind: "vaultLocked" } as PokerSessionKeyState);
   const [endpoint, setEndpoint] = useState("");
   const [p2pNodeAnnounce, setP2pNodeAnnounce] = useState("");
   const [txLinkAnnounce, setTxLinkAnnounce] = useState("");

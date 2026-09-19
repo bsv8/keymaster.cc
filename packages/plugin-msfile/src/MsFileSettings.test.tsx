@@ -27,10 +27,27 @@ vi.mock("@keymaster/runtime", () => ({
   useI18n: () => ({ t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key }),
   usePluginHost: () => ({ resourceStore: {} }),
   useRuntimeStatus: () => ({ vault: "unlocked" }),
+  // 模拟可选资源选择器的引用稳定性：内容不变返回同一引用。
+  useOptionalResourceSelector: <T,>(
+    _store: unknown,
+    _id: string,
+    _args: readonly string[],
+    selector: (snapshot: { data?: unknown }) => T,
+    _fallback: T
+  ): T => {
+    const selected = selector({ data: state.resource }) as unknown;
+    const json = JSON.stringify(selected);
+    if (json !== state.lastJson || state.lastSelected === undefined) {
+      state.lastJson = json;
+      state.lastSelected = selected;
+    }
+    return state.lastSelected as T;
+  }
 }));
 
 vi.mock("webloom-framework/react", () => ({
   useCapability: <T,>(_key: string): T => state.service as unknown as T,
+  useOptionalCapability: <T,>(_key: string): T => state.service as unknown as T,
   // 模拟真实 useResourceSelector 的 equality 语义：内容不变返回同一引用，
   // 否则组件的 effect 会因对象身份变化而无限重跑。
   useResourceSelector: <T,>(_store: unknown, _id: string, _args: readonly string[], selector: (snapshot: { data?: unknown }) => T): T => {

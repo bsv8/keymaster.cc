@@ -44,6 +44,24 @@ export const REAL_SATSUB_MESSAGE_SCENARIO = {
   resourceProfile: "satsubscription",
 } as const satisfies IntegrationScenarioMetadata;
 
+/**
+ * 本地缺省 SatSubscription Journey：
+ * 验证缺省供应商可见、刷新锁定边界与多 tab 共享解锁/全局锁定。
+ */
+export const LOCAL_SATSUBSCRIPTION_DEFAULT_SCENARIO = {
+  id: "J-LOCAL-SATSUB-DEFAULT",
+  level: "local-integration",
+  requirementIds: ["KM-SETTINGS-001", "KM-LIFECYCLE-001"],
+  startingState: "全新 Chromium context 完成 Local 初始化；缺省 SatSubscription 供应商由运行时写入。",
+  successCriteria: [
+    "解锁后系统设置中的 SatSubscription 显示缺省 bsv8 供应商。",
+    "单页面刷新必须回到锁定页，重新输入 Key 密码后才能进入。",
+    "多个 tab 共享解锁：其它页面在场时刷新不回锁定页，且缺省供应商仍可读。",
+    "任一 tab 手动锁定后，所有 tab 都必须回到锁定页。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 本地设置 Journey：验证正式 registry 提供的设置入口和热切换结果。 */
 export const LOCAL_SETTINGS_SCENARIO = {
   id: "J-LOCAL-SETTINGS",

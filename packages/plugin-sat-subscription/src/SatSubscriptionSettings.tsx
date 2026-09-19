@@ -15,8 +15,8 @@ import type {
   SatSpiCurrencyBalance
 } from "@keymaster/contracts";
 import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 
 function emptyDraft(): SatSupplierConfigV1 {
@@ -52,11 +52,32 @@ function bsvNetworkLabel(network: string): string {
 
 export function SatSubscriptionSettings() {
   const { t } = useI18n();
+  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统设置
+  // 页面上，必须按"暂不可用"渲染而不是抛错。
+  const service = useOptionalCapability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
+  const spi = useOptionalCapability(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY);
+  if (!service || !spi) {
+    return (
+      <p className="sat-subscription-settings__unavailable">
+        {t("sat.settings.unavailable", { defaultValue: "钱包已锁定或 SatSubscription 服务暂不可用；解锁后可继续配置。" })}
+      </p>
+    );
+  }
+  return <SatSubscriptionSettingsInner service={service} spi={spi} />;
+}
+
+function SatSubscriptionSettingsInner({
+  service,
+  spi
+}: {
+  service: SatSubscriptionAdminService;
+  spi: SatSubscriptionSpiService;
+}) {
+  const { t } = useI18n();
   const tr = (key: string, fallback: string) => t(key, { defaultValue: fallback });
   const host = usePluginHost();
-  const service = useCapability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
-  const spi = useCapability(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY);
-  const snapshot = useResourceSelector<
+  // 锁定时资源定义会被注销，选择器必须能降级为 null 而不是抛错。
+  const snapshot = useOptionalResourceSelector<
     SatSubscriptionSettingsSnapshot,
     SatSubscriptionSettingsSnapshot | null
   >(
@@ -64,7 +85,7 @@ export function SatSubscriptionSettings() {
     "sat-subscription.settings",
     [],
     (resource) => resource.data ?? null,
-    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    null
   );
   const [draft, setDraft] = useState<SatSupplierConfigV1>(emptyDraft);
   const [message, setMessage] = useState<string | null>(null);

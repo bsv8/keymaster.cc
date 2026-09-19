@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPrice, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { router, useBsvPrice, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { router, useBsvPrice, useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhSyncStatus, P2pkhTransactionFact, P2pkhTransactionSyncState } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
@@ -51,17 +51,68 @@ function amountLabel(value: number | undefined): string {
   return value === undefined ? "—" : formatSats(value);
 }
 
-export function P2pkhWalletPage({ view = "transactions", network = "main" }: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
+const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
+  resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], protectedOutpoints: [],
+  sync: [], syncStatus: "idle", balances: {}, providers: null, factCursors: {}, ownedCursors: {},
+  localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {}
+};
+
+export function P2pkhWalletPage(props: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
+  const { t } = useI18n();
+  // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
+  // 一次渲染，必须按"暂不可用"降级而不是抛错。
+  const coordinator = useOptionalCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
+  const service = useOptionalCapability(P2PKH_CAPABILITY);
+  if (!service || !coordinator) {
+    return (
+      <div className="p2pkh-wallet">
+        <EmptyState
+          title={t("p2pkh.wallet.locked.title", { defaultValue: "钱包已锁定" })}
+          description={t("p2pkh.wallet.locked.description", { defaultValue: "解锁后可继续查看交易。" })}
+        />
+      </div>
+    );
+  }
+  return <P2pkhWalletPageInner {...props} service={service} coordinator={coordinator} />;
+}
+
+function P2pkhWalletPageInner({
+  view = "transactions",
+  network = "main",
+  service,
+  coordinator
+}: {
+  view?: P2pkhWalletView;
+  network?: P2pkhNetwork;
+  service: P2pkhService;
+  coordinator: P2pkhCoordinatorControl;
+}) {
   const host = usePluginHost();
   const { t } = useI18n();
   const locale = useLocale();
   const price = useBsvPrice();
-  const coordinator = useCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
-  const service = useCapability(P2PKH_CAPABILITY);
   const [page, setPage] = useState(() => readPage());
   const [rebroadcasting, setRebroadcasting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const wallet = useResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string }>(host.resourceStore, "p2pkh.wallet", [], (snapshot) => snapshot.data ? { ...snapshot.data, factCursors: snapshot.data.factCursors ?? {}, ownedCursors: snapshot.data.ownedCursors ?? {}, localCursors: snapshot.data.localCursors ?? {}, localOutpointCursors: snapshot.data.localOutpointCursors ?? {}, claimCursors: snapshot.data.claimCursors ?? {}, inputValues: snapshot.data.inputValues ?? {}, inputValuesByResource: snapshot.data.inputValuesByResource ?? {}, error: snapshot.error?.message } : { resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null, factCursors: {}, ownedCursors: {}, localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {}, error: snapshot.error?.message }, (left, right) => JSON.stringify(left) === JSON.stringify(right));
+  const wallet = useOptionalResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string }>(
+    host.resourceStore,
+    "p2pkh.wallet",
+    [],
+    (snapshot) => snapshot.data
+      ? {
+          ...snapshot.data,
+          factCursors: snapshot.data.factCursors ?? {},
+          ownedCursors: snapshot.data.ownedCursors ?? {},
+          localCursors: snapshot.data.localCursors ?? {},
+          localOutpointCursors: snapshot.data.localOutpointCursors ?? {},
+          claimCursors: snapshot.data.claimCursors ?? {},
+          inputValues: snapshot.data.inputValues ?? {},
+          inputValuesByResource: snapshot.data.inputValuesByResource ?? {},
+          error: snapshot.error?.message
+        }
+      : { ...EMPTY_WALLET_SNAPSHOT, error: snapshot.error?.message },
+    EMPTY_WALLET_SNAPSHOT
+  );
   const [loadedFacts, setLoadedFacts] = useState<P2pkhTransactionFact[]>(wallet.facts);
   const [loadedOwned, setLoadedOwned] = useState<P2pkhOwnedOutpointProjection[]>(wallet.owned);
   const [loadedLocals, setLoadedLocals] = useState<P2pkhLocalTransaction[]>(wallet.locals);
@@ -78,12 +129,12 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
   const [localLoadFailed, setLocalLoadFailed] = useState(false);
   const [ownedLoadFailed, setOwnedLoadFailed] = useState(false);
 
-  const settings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
+  const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     host.resourceStore,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? { includeTestnet: false },
-    (left, right) => left.includeTestnet === right.includeTestnet
+    { includeTestnet: false }
   );
 
   useEffect(() => {

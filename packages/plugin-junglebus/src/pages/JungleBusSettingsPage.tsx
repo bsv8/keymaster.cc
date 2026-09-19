@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { TextInput } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
+import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
 import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl } from "@keymaster/contracts";
 import { DEFAULT_JUNGLEBUS_CONFIG } from "../jungleBusClient.js";
@@ -18,12 +18,15 @@ function toDraft(value: Record<string, unknown>): JungleBusDraft {
 }
 
 export function JungleBusSettingsPage() {
-  const coordinator = useCapability(JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY);
+  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统
+  // 设置页面上，必须按"暂不可用"渲染而不是抛错。
+  const coordinator = useOptionalCapability(JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
   const [draft, setDraft] = useState<JungleBusDraft>(() => toDraft({}));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!coordinator) return;
     let alive = true;
     void coordinator.p2pkhProviderConfigGet("junglebus").then((result) => {
       if (alive && result.status === "ok") setDraft(toDraft(result.value));
@@ -32,6 +35,7 @@ export function JungleBusSettingsPage() {
   }, [coordinator]);
 
   async function save() {
+    if (!coordinator) return;
     setError(null);
     const endpoints: URL[] = [];
     for (const value of [draft.mainEndpoint, draft.testEndpoint]) {
@@ -46,6 +50,10 @@ export function JungleBusSettingsPage() {
     if (!Number.isFinite(requestsPerSecond) || requestsPerSecond <= 0 || !Number.isFinite(timeoutMs) || timeoutMs < 1 || !Number.isInteger(maxRetries) || maxRetries < 0) { setError("Rate, timeout, and retry values are invalid"); return; }
     const result = await coordinator.p2pkhProviderConfigUpdate("junglebus", { mainEndpoint: endpoints[0]!.toString().replace(/\/$/, ""), testEndpoint: endpoints[1]!.toString().replace(/\/$/, ""), requestsPerSecond, timeoutMs, maxRetries });
     if (result.status !== "accepted" && result.status !== "ok") setError("message" in result ? result.message : "Coordinator configuration update failed");
+  }
+
+  if (!coordinator) {
+    return <p className="junglebus-settings__unavailable">{t("junglebus.settings.unavailable", { defaultValue: "钱包已锁定或 JungleBus 服务暂不可用；解锁后可继续配置。" })}</p>;
   }
 
   return <div className="junglebus-settings">

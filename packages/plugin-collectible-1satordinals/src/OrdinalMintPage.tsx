@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
+import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
 import type { BsvNetwork } from "@keymaster/contracts";
 import type { OrdinalEnvelopeEntry } from "./ordinalScript.js";
@@ -46,7 +46,22 @@ function statusLabel(status: string, t: (key: string, values?: { defaultValue?: 
 
 export function OrdinalMintPage() {
   const { t } = useI18n();
-  const service = useCapability(ORDINAL_MINT_SERVICE_CAPABILITY);
+  // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
+  // 一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(ORDINAL_MINT_SERVICE_CAPABILITY);
+  if (!service) {
+    return (
+      <PageHeader
+        title={t("oneSat.mint.locked.title", { defaultValue: "钱包已锁定" })}
+        description={t("oneSat.mint.locked.description", { defaultValue: "解锁后可继续创建藏品。" })}
+      />
+    );
+  }
+  return <OrdinalMintPageInner service={service} />;
+}
+
+function OrdinalMintPageInner({ service }: { service: OrdinalMintService }) {
+  const { t } = useI18n();
   const [network, setNetwork] = useState<BsvNetwork>("main");
   const [contentType, setContentType] = useState("image/png");
   const [name, setName] = useState("");

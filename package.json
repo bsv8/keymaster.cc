@@ -40,6 +40,7 @@
     "test:e2e": "pnpm test:e2e:local-core && pnpm test:e2e:dev-http",
     "test:e2e:local-core": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.config.ts --project=local-core",
     "test:e2e:dev-http": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.dev-http.config.ts --project=dev-http",
+    "test:e2e:dev-local": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.dev-local.config.ts",
     "test:e2e:initial-setup-smoke": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.integration.config.ts e2e/integration/journeys/local/initialization-generated.spec.ts --project=local-integration",
     "test:e2e:multi-tab-refresh-smoke": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.integration.config.ts e2e/integration/journeys/local/multi-tab-recovery.spec.ts --project=local-integration",
     "test:e2e:integration": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=playwright.integration.config.ts --project=local-integration",

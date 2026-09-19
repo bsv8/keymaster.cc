@@ -12,8 +12,8 @@
 //
 import { useEffect, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import type { KeyIdentity, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhFeeRateTier, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY, assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
@@ -25,8 +25,27 @@ interface FormState {
   feeTier: P2pkhFeeRateTier;
 }
 
-export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex }: TransferWidgetProps) {
-  const service = useCapability(P2PKH_CAPABILITY);
+export function P2pkhTransferWidget(props: TransferWidgetProps) {
+  const { t } = useI18n();
+  // owner 作用域 capability 会在锁定时撤销；路由/首页组件在锁定瞬间仍可能
+  // 完成一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(P2PKH_CAPABILITY);
+  if (!service) {
+    return (
+      <p className="p2pkh-transfer-widget__unavailable">
+        {t("p2pkh.transfer.locked", { defaultValue: "钱包已锁定；解锁后可继续转账。" })}
+      </p>
+    );
+  }
+  return <P2pkhTransferWidgetInner {...props} service={service} />;
+}
+
+function P2pkhTransferWidgetInner({
+  offer,
+  onCompleted,
+  recipientPublicKeyHex,
+  service
+}: TransferWidgetProps & { service: P2pkhService }) {
   const host = usePluginHost();
   const { t } = useI18n();
   const locale = useLocale();
@@ -35,26 +54,22 @@ export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex 
   const assetId: P2pkhAssetId = offer.assetId as P2pkhAssetId;
   const network = assetIdToNetwork(assetId);
 
-  const context = useResourceSelector<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, { activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }>(
+  const context = useOptionalResourceSelector<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, { activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }>(
     host.resourceStore,
     "p2pkh.transfer-context",
     [assetId],
     (s) => s.data ?? {},
-    (a, b) => a?.activePublicKeyHex === b?.activePublicKeyHex
-      && a?.identity?.publicKeyHex === b?.identity?.publicKeyHex
-      && a?.resource?.resourceId === b?.resource?.resourceId
-      && a?.resource?.generation === b?.resource?.generation
+    {}
   );
   const activeKey = { activePublicKeyHex: context.activePublicKeyHex };
   const activeIdentity = context.identity;
   const resource = context.resource;
-  const globalSettings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
+  const globalSettings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     host.resourceStore,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? { includeTestnet: false },
-    (a, b) => a.includeTestnet === b.includeTestnet
-      && JSON.stringify(a.feeRateSatoshisPerKb ?? {}) === JSON.stringify(b.feeRateSatoshisPerKb ?? {})
+    { includeTestnet: false }
   );
   const feeRates = resolveP2pkhFeeRateSatoshisPerKb(globalSettings);
   const [form, setForm] = useState<FormState>({

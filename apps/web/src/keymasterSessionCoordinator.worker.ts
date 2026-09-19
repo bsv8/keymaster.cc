@@ -239,6 +239,7 @@ import { PendingPingRegistry } from "./channelPendingPingRegistry.js";
 import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
 import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
 import {
+  applyDefaultSatSupplier,
   createSatSubscriptionProvider,
   createSatSubscriptionRepository,
   createSatSubscriptionState,
@@ -247,6 +248,7 @@ import {
   type SatSubscriptionStateStore,
   type SatSubscriptionRepository,
   type SatSubscriptionTransport,
+  type SatDefaultNetwork,
   type SatSupplierConnection,
   SatSubscriptionHandle,
   type SatP2pkhService,
@@ -2417,6 +2419,10 @@ async function installPlatformStorage(
     configureProtocolStorageRepository(protocol);
     platformRootStore = root;
     platformBucketProvider = provider;
+    // 安装完成后，Local Provider 的反向 bridge 必须跟随当前 storageIoOwner，
+    // 而不是创建它的那个页面 peer；否则页面刷新/关闭后旧 peer 被回收，
+    // 后续解锁会去找一个不再存在的页面。
+    publishCoordinatorLocalStorageProvider(provider);
     platformStorageStore = candidateStorageStore;
     registerCoordinatorKeyValueMaintenanceStore(candidateStorageStore);
     registerCoordinatorProtocolMaintenanceStores(protocol);
@@ -3478,6 +3484,19 @@ let lastMsFileState: CoordinatorMsFileStateEvent | undefined;
 
 /* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
 const SAT_WINDOW_LANE_ID = "sat-subscription";
+
+/**
+ * 缺省 SatSubscription 供应商网络选择。
+ *
+ * 设计缘由：
+ *   - `npm run dev` 使用 testnet 网关；
+ *   - `npm run build` / `npm run build:production` 使用 mainnet 网关；
+ *   - Worker 与页面由同一次 Vite 构建处理，`import.meta.env.DEV` 语义一致。
+ */
+function satDefaultNetwork(): SatDefaultNetwork {
+  const meta = import.meta as ImportMeta & { env?: { DEV?: boolean } };
+  return meta.env?.DEV === true ? "testnet" : "mainnet";
+}
 interface SatWorkerRuntimeState {
   ownerPublicKeyHex: string;
   ownerGeneration: number;
@@ -4008,14 +4027,9 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
     let handle: SatSubscriptionHandle | undefined;
     try {
       const loaded = await repository.load();
-      const initial = {
-        ...loaded,
-        ownerSettings: loaded.ownerSettings ?? {
-          ownerPublicKeyHex,
-          defaultPublishSupplierId: null,
-          receiveSupplierIds: [],
-        },
-      };
+      // 缺省供应商：dev 用 testnet 网关，正式构建用 mainnet 网关。
+      // 已有供应商时保持用户配置；只在供应商为空时补默认出口/入口。
+      const initial = applyDefaultSatSupplier(loaded, satDefaultNetwork());
       const state = createSatSubscriptionState({ ownerPublicKeyHex, initial, persistence: repository });
       provider = createSatSubscriptionProvider({
         stateForOwner: async (requestedOwner) => {

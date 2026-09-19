@@ -19,6 +19,15 @@ export {
   type SatSubscriptionStateSnapshot
 } from "./satState.js";
 export {
+  applyDefaultSatSupplier,
+  createDefaultSatSupplierConfig,
+  SAT_DEFAULT_SUPPLIER_ID,
+  SAT_DEFAULT_SUPPLIER_MULTIADDRS,
+  SAT_DEFAULT_SUPPLIER_NAME,
+  SAT_DEFAULT_SUPPLIER_PUBLIC_KEY_HEX,
+  type SatDefaultNetwork
+} from "./defaults.js";
+export {
   SatSpiService,
   createSatSpiService,
   mapSpiBsvNetwork,

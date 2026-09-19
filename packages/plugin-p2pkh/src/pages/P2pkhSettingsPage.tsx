@@ -8,8 +8,8 @@
 
 import { useEffect, useState } from "react";
 import { Select, TextInput } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 import { resolveP2pkhFeeRateSatoshisPerKb, type P2pkhFeeRateTier, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
@@ -18,20 +18,22 @@ const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
 
 export function P2pkhSettingsPage() {
   const host = usePluginHost();
-  const service = useCapability(P2PKH_CAPABILITY);
-  const coordinator = useCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
+  // owner 作用域 capability 会在锁定时被撤销；设置区可能正好挂载在系统设置
+  // 页面上，这里必须按"暂不可用"渲染，而不是让 useCapability 抛异常。
+  const service = useOptionalCapability(P2PKH_CAPABILITY);
+  const coordinator = useOptionalCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
-  const resourceSettings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
+  // 锁定时资源定义会被注销；可选选择器降级到默认值而不是抛错。
+  const resourceSettings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     host.resourceStore,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? DEFAULT_SETTINGS,
-    (a, b) => a.includeTestnet === b.includeTestnet
-      && JSON.stringify(a.feeRateSatoshisPerKb ?? {}) === JSON.stringify(b.feeRateSatoshisPerKb ?? {})
+    DEFAULT_SETTINGS
   );
   const [settings, setSettings] = useState<P2pkhGlobalSettings>(resourceSettings);
   const [feeRates, setFeeRates] = useState(() => Object.fromEntries(
-    Object.entries(resolveP2pkhFeeRateSatoshisPerKb(resourceSettings)).map(([tier, rate]) => [tier, String(rate)])
+    Object.entries(resolveP2pkhFeeRateSatoshisPerKb(DEFAULT_SETTINGS)).map(([tier, rate]) => [tier, String(rate)])
   ) as Record<P2pkhFeeRateTier, string>);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<P2pkhProviderRegistrySnapshot | null>(null);
@@ -44,6 +46,7 @@ export function P2pkhSettingsPage() {
   }, [resourceSettings]);
 
   useEffect(() => {
+    if (!coordinator) return;
     let alive = true;
     void coordinator.p2pkhProvidersGet().then((result) => {
       if (alive && result.status === "ok") setProviders(result.value);
@@ -55,7 +58,7 @@ export function P2pkhSettingsPage() {
   }, [coordinator]);
 
   async function updateProvider(network: "main" | "test", field: "syncProviderId" | "broadcastProviderId", value: string) {
-    if (!providers) return;
+    if (!providers || !coordinator) return;
     const selection = { ...providers.selection[network], [field]: value || null };
     const result = await coordinator.p2pkhProvidersUpdate(network, selection, providers.selection.generation);
     if (result.status !== "accepted" && result.status !== "ok") {
@@ -67,6 +70,7 @@ export function P2pkhSettingsPage() {
   }
 
   async function applySettings(next: P2pkhGlobalSettings) {
+    if (!service) return;
     setSettings(next);
     setError(null);
     try {
@@ -88,6 +92,16 @@ export function P2pkhSettingsPage() {
       ...settings,
       feeRateSatoshisPerKb: { ...resolveP2pkhFeeRateSatoshisPerKb(settings), [tier]: value }
     });
+  }
+
+  if (!service || !coordinator) {
+    return (
+      <div className="p2pkh-settings p2pkh-settings--unavailable">
+        <p className="p2pkh-settings__hint">
+          {t("p2pkh.settings.unavailable", { defaultValue: "钱包已锁定或 P2PKH 服务暂不可用；解锁后可继续配置。" })}
+        </p>
+      </div>
+    );
   }
 
   return (

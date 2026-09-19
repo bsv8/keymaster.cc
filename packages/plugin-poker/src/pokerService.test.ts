@@ -630,7 +630,7 @@ describe("pokerService (active-key-driven)", () => {
     fail = false;
     await local.updateSettings({ proxyEndpoint: "wss://recovered.example" });
     expect(local.getSettings().proxyEndpoint).toBe("wss://recovered.example");
-    local.dispose();
+    local.dispose?.();
   });
 
   // ------------------------------------------------------------------------

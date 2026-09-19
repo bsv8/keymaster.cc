@@ -278,6 +278,19 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private requestTimeoutMs: number;
   private reconnectIntervalMs: number;
 
+  /**
+   * 本页面的"在场"共享锁。
+   *
+   * 设计缘由：刷新后是否回锁定页不能依赖浏览器回收 SharedWorker——只要
+   * Worker 里有挂起定时器/连接（例如 Sat 重连），它就不会被回收，新页面
+   * 会继承已解锁会话。同一 Worker profile 的每个页面持有一把 shared
+   * Web Lock；新页面首次连接成功后查询该锁持有者，只有自己是唯一页面时
+   * 才把共享会话显式锁回锁定页。
+   */
+  private pagePresence: { name: string; acquired: Promise<boolean>; release: () => void } | null = null;
+  /** 初始锁定判定只在本文档首次连接时执行一次；重连不重复判定。 */
+  private pageInitialLockEvaluated = false;
+
   private bootstrapSnapshotCache: CoordinatorBootstrapSnapshot = {
     authorityInstanceId: "authority:boot",
     sessionEpoch: "boot",
@@ -401,6 +414,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const workerName = this.workerName ?? (!this.workerUrl
         ? `${isDevelopment ? "keymaster-coordinator-dev" : "keymaster-coordinator"}:${workerProfileId ?? "default"}`
         : undefined);
+      // 页面在场锁要在连接会话之前取得，且同一 profile 跨刷新/tab 稳定。
+      await this.beginPagePresence(workerName ?? workerUrl.toString());
       let runtimePublishedReady = false;
       const runtime = connectSharedWorker({
         id: "keymaster-coordinator",
@@ -432,6 +447,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.isConnected = true;
       await this.sendHello();
       await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
+      await this.lockSolePageOnFirstConnect();
 
       if (this.shutdownRequested || attempt !== this.connectionAttempt || this.runtimeHandle !== runtime) {
         throw new Error("Coordinator connection attempt was cancelled");
@@ -462,6 +478,69 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       // 生成可操作诊断，不能用随后 hello call 的 timeout 覆盖它。若只有
       // call 层错误，则保留原有错误。
       throw observedFailure ?? err;
+    }
+  }
+
+  /**
+   * 取得本页面"在场"共享锁；同一 profile 的多个 tab 可同时持有。
+   *
+   * 失败/超时（无 Web Locks、被独占锁阻塞）时按"非唯一页面"处理，保持
+   * 原有共享解锁行为，不阻断启动。
+   */
+  private async beginPagePresence(namespace: string): Promise<void> {
+    if (isTestBuild()) return;
+    if (this.pagePresence) {
+      await this.pagePresence.acquired;
+      return;
+    }
+    const name = `keymaster.page-presence:${namespace}`;
+    const locks = globalThis.navigator?.locks;
+    if (!locks?.request) {
+      this.pagePresence = { name, acquired: Promise.resolve(false), release: () => undefined };
+      return;
+    }
+    let releaseHolder: (() => void) | null = null;
+    let settle: (value: boolean) => void = () => undefined;
+    const acquired = new Promise<boolean>((resolve) => { settle = resolve; });
+    const timer = globalThis.setTimeout(() => settle(false), 1_000);
+    void locks.request(name, { mode: "shared" }, async () => {
+      globalThis.clearTimeout(timer);
+      settle(true);
+      await new Promise<void>((release) => { releaseHolder = release; });
+    }).catch(() => settle(false));
+    this.pagePresence = {
+      name,
+      acquired,
+      release: () => {
+        globalThis.clearTimeout(timer);
+        releaseHolder?.();
+        releaseHolder = null;
+      }
+    };
+    await acquired;
+  }
+
+  /**
+   * 首次连接后判定：如果本文档是唯一页面，把仍然解锁的共享会话显式锁回。
+   *
+   * 多 tab（还存在其它在场页面）时不动会话，保持共享解锁。判定与操作都是
+   * 尽力而为；失败时保持原状，不阻断应用启动。
+   */
+  private async lockSolePageOnFirstConnect(): Promise<void> {
+    if (isTestBuild()) return;
+    if (this.pageInitialLockEvaluated) return;
+    this.pageInitialLockEvaluated = true;
+    if (this.bootstrapSnapshotCache.vaultStatus !== "unlocked") return;
+    const presence = this.pagePresence;
+    const locks = globalThis.navigator?.locks;
+    if (!presence || !locks?.query) return;
+    try {
+      const locksSnapshot = await locks.query();
+      const holders = (locksSnapshot.held ?? []).filter((lock) => lock.name === presence.name);
+      if (holders.length > 1) return;
+      await this.lock();
+    } catch {
+      // 判定失败时保持旧行为（由 Worker 生命周期决定），不阻断启动。
     }
   }
 
@@ -499,6 +578,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   shutdown(): void {
     if (this.shutdownRequested) return;
     this.shutdownRequested = true;
+    this.pagePresence?.release();
     // 这是页面/Worker 的永久生命周期边界，不是可重用的业务断线。
     // 不在这里定时 close 端口，给 unload 场景中的 disconnect 控制消息
     // 留出浏览器实现允许的投递机会。

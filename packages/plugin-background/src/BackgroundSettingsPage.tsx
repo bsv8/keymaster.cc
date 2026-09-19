@@ -11,8 +11,8 @@
 // 硬切换 003：使用 Resource Store 读取后台设置，跨标签同步由 resource subscribe 处理。
 
 import { useEffect, useState } from "react";
-import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { BACKGROUND_SERVICE_CAPABILITY, type BackgroundSyncSettings } from "@keymaster/contracts";
 
 /** 预设选项。 */
@@ -42,12 +42,12 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
   const store = host.resourceStore;
 
   // 使用 Resource Store 读取后台设置（跨标签同步由 resource subscribe 处理）
-  const settings = useResourceSelector<BackgroundSyncSettings, BackgroundSyncSettings>(
+  const settings = useOptionalResourceSelector<BackgroundSyncSettings, BackgroundSyncSettings>(
     store,
     "background.scheduleSettings",
     [],
     (snapshot) => snapshot.data ?? DEFAULT_SETTINGS,
-    (a, b) => a.assetHoldingsIntervalMs === b.assetHoldingsIntervalMs
+    DEFAULT_SETTINGS
   );
 
   // 本地交互 state：表单值

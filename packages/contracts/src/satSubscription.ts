@@ -173,7 +173,12 @@ export interface SatSubscriptionSettingsSnapshot {
   ownerSettings: SatOwnerSupplierSettingsV1 | null;
   /** 供应商连接与订阅摘要。 */
   supplierViews: SatSupplierRuntimeView[];
-  /** 最近有界扣费审计。金额仍是精确字符串。 */
+  /**
+   * 最近有界扣费审计。
+   *
+   * 金额仍是非负精确字符串；失败/未扣费的动作记录空串（设置页显示为"未知"），
+   * `subscriptions` 动作的 `channel` 也是空串。
+   */
   feeAudit: Array<{ supplierId: string; action: string; channel: string; chargedAmount: string; result: string; errorCode?: SatErrorCode; createdAtMs: number }>;
 }
 

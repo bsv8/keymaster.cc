@@ -13,8 +13,8 @@ import type {
   MsFileSettingsSnapshot,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import { MSFILE_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import {
@@ -66,28 +66,36 @@ function toDraft(value: MsFileSatoshiAmount | undefined): AmountDraft {
 
 export function MsFileSettings() {
   const { t } = useI18n();
-  const service = useCapability(MSFILE_SERVICE_CAPABILITY);
+  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统设置
+  // 页面上，必须按"暂不可用"渲染而不是抛错。
+  const service = useOptionalCapability(MSFILE_SERVICE_CAPABILITY);
+  if (!service) {
+    return (
+      <p className="msfile-settings__unavailable">
+        {t("msfile.settings.unavailable", { defaultValue: "钱包已锁定或 MSFile 服务暂不可用；解锁后可继续配置。" })}
+      </p>
+    );
+  }
+  return <MsFileSettingsInner service={service} />;
+}
+
+function MsFileSettingsInner({ service }: { service: MsFileService }) {
+  const { t } = useI18n();
   const host = usePluginHost();
   // 订阅一律走 Resource Store（react 资源边界门禁）；manifest 已注册 msfile.status。
-  const statusResource = useResourceSelector<MsFileStatusResourceSnapshot, MsFileStatusResourceSnapshot>(
+  // 锁定时资源定义会被注销，选择器必须能降级为本地推荐值。
+  const statusFallback: MsFileStatusResourceSnapshot = {
+    status: service.status(),
+    globalSettings: null,
+    ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
+    approvals: [],
+  };
+  const statusResource = useOptionalResourceSelector<MsFileStatusResourceSnapshot, MsFileStatusResourceSnapshot>(
     host.resourceStore,
     "msfile.status",
     [],
-    (snapshot) =>
-      snapshot.data ?? {
-        status: service.status(),
-        globalSettings: null,
-        ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
-        approvals: [],
-      },
-    (a, b) =>
-      a.status === b.status &&
-      JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings) &&
-      a.mediaBlockReadConcurrency === b.mediaBlockReadConcurrency &&
-      a.globalSeedReadConcurrency === b.globalSeedReadConcurrency &&
-      a.globalBlockReadConcurrency === b.globalBlockReadConcurrency &&
-      a.globalStatConcurrency === b.globalStatConcurrency &&
-      JSON.stringify(a.approvals) === JSON.stringify(b.approvals)
+    (snapshot) => snapshot.data ?? statusFallback,
+    statusFallback
   );
   const [snapshot, setSnapshot] = useState<MsFileSettingsSnapshot | null>(null);
   const [authorizations, setAuthorizations] = useState<MsFileAppAuthorizationView[]>([]);

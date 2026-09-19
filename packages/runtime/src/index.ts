@@ -31,6 +31,7 @@ export * from "./react/useRegistry.js";
 export * from "./react/useRuntimeStatus.js";
 export * from "./react/useI18n.js";
 export * from "./react/useBsvPrice.js";
+export * from "./react/useOptionalResource.js";
 export * from "./react/useCurrentPath.js";
 export * from "./react/usePluginRuntime.js";
 export * from "./react/AppLink.js";

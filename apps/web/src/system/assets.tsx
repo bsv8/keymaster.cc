@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import type { AssetRegistry, AssetSummary, BsvNetwork, I18nText, KeyIdentity, TokenRegistry } from "@keymaster/contracts";
 import { ASSET_REGISTRY_CAPABILITY, TOKEN_REGISTRY_CAPABILITY } from "@keymaster/contracts";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useBsvPrice, useCurrentPath, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
+import { useBsvPrice, useCurrentPath, useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader, formatSatsWithPrice } from "@keymaster/ui";
 import type { HoldingRowsResult } from "./assets/holdingsFlow.js";
 
@@ -67,25 +67,30 @@ export function AssetsPage() {
   const locale = useLocale();
   const price = useBsvPrice();
   const host = usePluginHost();
-  const assets = useCapability(ASSET_REGISTRY_CAPABILITY);
-  const tokens = useCapability(TOKEN_REGISTRY_CAPABILITY);
-  const rows = useResourceSelector<HoldingRowsResult, HoldingRowsResult>(
+  // owner 会话回收时资产/代币 registry 与资源定义会一起撤销；路由组件在
+  // 锁定瞬间可能还要完成一次渲染，必须按"暂不可用"降级而不是抛错。
+  const assets = useOptionalCapability(ASSET_REGISTRY_CAPABILITY);
+  const tokens = useOptionalCapability(TOKEN_REGISTRY_CAPABILITY);
+  const rows = useOptionalResourceSelector<HoldingRowsResult, HoldingRowsResult>(
     host.resourceStore,
     "assets.holdings",
     [],
-    (snapshot) => snapshot.data ?? { assets: [], tokens: [] }
+    (snapshot) => snapshot.data ?? { assets: [], tokens: [] },
+    { assets: [], tokens: [] }
   );
-  const settings = useResourceSelector<{ includeTestnet: boolean }, { includeTestnet: boolean }>(
+  const settings = useOptionalResourceSelector<{ includeTestnet: boolean }, { includeTestnet: boolean }>(
     host.resourceStore,
     "p2pkh.settings",
     [],
-    (snapshot) => snapshot.data ?? { includeTestnet: false }
+    (snapshot) => snapshot.data ?? { includeTestnet: false },
+    { includeTestnet: false }
   );
-  const activeIdentity = useResourceSelector<KeyIdentity | null, KeyIdentity | null>(
+  const activeIdentity = useOptionalResourceSelector<KeyIdentity | null, KeyIdentity | null>(
     host.resourceStore,
     "assets.active-context",
     [],
-    (snapshot) => snapshot.data ?? null
+    (snapshot) => snapshot.data ?? null,
+    null
   );
   const includeTestnet = settings.includeTestnet;
   const assetTotal = rows.assets.reduce((sum, provider) => sum + provider.assets.length, 0);
@@ -96,6 +101,17 @@ export function AssetsPage() {
     if (!activeIdentity) return t("assets.context.noKey", { defaultValue: "无 key" });
     return `${activeIdentity.label ?? t("assets.context.unnamed", { defaultValue: "未命名" })} (${activeIdentity.publicKeyHex.slice(0, 12)}…)`;
   }, [activeIdentity, t]);
+
+  if (!assets || !tokens) {
+    return (
+      <div className="asset-workspace-page assets-page">
+        <EmptyState
+          title={t("assets.page.empty.providers.title", { defaultValue: "暂无资产 provider" })}
+          description={t("assets.status.unavailable", { defaultValue: "钱包已锁定或资产服务暂不可用；解锁后会自动恢复。" })}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="asset-workspace-page assets-page">
@@ -293,11 +309,12 @@ export function AssetDetailRedirect() {
 export function AssetsHomeWidget() {
   const host = usePluginHost();
   const { t } = useI18n();
-  const data = useResourceSelector<HoldingRowsResult, HoldingRowsResult>(
+  const data = useOptionalResourceSelector<HoldingRowsResult, HoldingRowsResult>(
     host.resourceStore,
     "assets.holdings",
     [],
-    (snapshot) => snapshot.data ?? { assets: [], tokens: [] }
+    (snapshot) => snapshot.data ?? { assets: [], tokens: [] },
+    { assets: [], tokens: [] }
   );
   return (
     <section className="asset-workspace-home">

@@ -1,5 +1,5 @@
 import { TOKEN_REGISTRY_CAPABILITY, type TokenRegistry, type TransferOffer, type TransferOfferStatus, type TransferProvider } from "@keymaster/contracts";
-import { useCapability } from "webloom-framework/react";
+import { useCapability, useOptionalCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
 import { Button, EmptyState, Select, TextInput } from "@keymaster/ui";
 import { ripemd160 } from "@noble/hashes/ripemd160";
@@ -66,9 +66,28 @@ interface FormState {
   feeRate: string;
 }
 
-function Bsv21TransferWidget({ offer, onCompleted, recipientPublicKeyHex }: import("@keymaster/contracts").TransferWidgetProps) {
+function Bsv21TransferWidget(props: import("@keymaster/contracts").TransferWidgetProps) {
   const { t } = useI18n();
-  const service = useCapability(BSV21_TRANSFER_SERVICE_CAPABILITY);
+  // owner 作用域 capability 会在锁定时撤销；路由/弹窗组件在锁定瞬间仍可能
+  // 完成一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(BSV21_TRANSFER_SERVICE_CAPABILITY);
+  if (!service) {
+    return (
+      <p className="bsv21-transfer-widget__unavailable">
+        {t("bsv21.transfer.locked", { defaultValue: "钱包已锁定；解锁后可继续转移。" })}
+      </p>
+    );
+  }
+  return <Bsv21TransferWidgetInner {...props} service={service} />;
+}
+
+function Bsv21TransferWidgetInner({
+  offer,
+  onCompleted,
+  recipientPublicKeyHex,
+  service
+}: import("@keymaster/contracts").TransferWidgetProps & { service: Bsv21TransferService }) {
+  const { t } = useI18n();
   const registry = useCapability(TOKEN_REGISTRY_CAPABILITY);
   const [tokens, setTokens] = useState<Array<{ tokenId: string; label: string; balance: string }>>([]);
   const [busy, setBusy] = useState(false);

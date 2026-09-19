@@ -6,14 +6,34 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
+import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n, useLocale } from "@keymaster/runtime";
-import { WOC_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY, type WocConfig, type WocQueueSnapshot } from "@keymaster/contracts";
+import { WOC_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
 import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } from "../wocSettings.js";
 
 export function WocSettingsPage() {
-  const service = useCapability(WOC_CAPABILITY);
-  const coordinator = useCapability(WOC_COORDINATOR_CONTROL_CAPABILITY);
+  const { t } = useI18n();
+  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统设置
+  // 页面上，必须按"暂不可用"渲染而不是抛错。
+  const service = useOptionalCapability(WOC_CAPABILITY);
+  const coordinator = useOptionalCapability(WOC_COORDINATOR_CONTROL_CAPABILITY);
+  if (!service || !coordinator) {
+    return (
+      <p className="woc-settings__unavailable">
+        {t("woc.settings.unavailable", { defaultValue: "钱包已锁定或 WOC 服务暂不可用；解锁后可继续配置。" })}
+      </p>
+    );
+  }
+  return <WocSettingsPageInner service={service} coordinator={coordinator} />;
+}
+
+function WocSettingsPageInner({
+  service,
+  coordinator
+}: {
+  service: WocService;
+  coordinator: P2pkhCoordinatorControl;
+}) {
   const { t } = useI18n();
   const locale = useLocale();
   const timeFmt = useMemo(

@@ -15,8 +15,8 @@
 
 import React, { useEffect, useState } from "react";
 import { Button, PageHeader } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { router, useI18n, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { router, useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { useParams } from "react-router";
 import {
   POKER_SERVICE_CAPABILITY,
@@ -26,13 +26,28 @@ import {
 
 export function PokerTable(): React.ReactElement {
   const { t } = useI18n();
+  // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
+  // 一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(POKER_SERVICE_CAPABILITY);
+  if (!service) {
+    return (
+      <PageHeader
+        title={t("poker.table.title", { defaultValue: "Poker table" })}
+        description={t("poker.table.locked", { defaultValue: "钱包已锁定；解锁后可继续。" })}
+      />
+    );
+  }
+  return <PokerTableInner service={service} />;
+}
+
+function PokerTableInner({ service }: { service: PokerService }): React.ReactElement {
+  const { t } = useI18n();
   const { tableId } = useParams<{ tableId: string }>();
-  const service = useCapability(POKER_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const [joined, setJoined] = useState(false);
   const [frames, setFrames] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
-  const session = useResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState));
+  const session = useOptionalResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState), { kind: "vaultLocked" } as PokerSessionKeyState);
   /** 当前订阅时锁定的 session key hash；若 activeKey 改变则视为失效。 */
   const [joinedKeyHash, setJoinedKeyHash] = useState<string | null>(null);
 

@@ -46,6 +46,7 @@ const resources: I18nPluginResources = {
     en: {
       "sat.settings.title": "SatSubscription",
       "sat.settings.description": "Multi-supplier SSP subscriptions and SPI account management.",
+      "sat.settings.unavailable": "Wallet is locked or SatSubscription is temporarily unavailable; unlock to continue configuring.",
       "sat.settings.suppliers": "Suppliers",
       "sat.settings.identity": "Authenticated public key",
       "sat.settings.connection": "Connection",
@@ -90,6 +91,7 @@ const resources: I18nPluginResources = {
     "zh-CN": {
       "sat.settings.title": "SatSubscription",
       "sat.settings.description": "多供应商 SSP 订阅与 SPI 账户管理。",
+      "sat.settings.unavailable": "钱包已锁定或 SatSubscription 暂不可用；解锁后可继续配置。",
       "sat.settings.suppliers": "供应商",
       "sat.settings.identity": "认证公钥",
       "sat.settings.connection": "连接状态",

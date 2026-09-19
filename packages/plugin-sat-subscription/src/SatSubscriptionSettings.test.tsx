@@ -25,11 +25,23 @@ vi.mock("@keymaster/runtime", () => ({
   useI18n: () => ({
     t: (_key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? ""
   }),
-  usePluginHost: () => ({ resourceStore: { invalidate: vi.fn(() => { state.invalidated += 1; }) } })
+  usePluginHost: () => ({ resourceStore: { invalidate: vi.fn(() => { state.invalidated += 1; }) } }),
+  useOptionalResourceSelector: <T,>(
+    _store: unknown,
+    _id: string,
+    _args: readonly string[],
+    selector: (resource: { data?: unknown }) => T,
+    _fallback: T
+  ): T => selector({ data: state.snapshot })
 }));
 
 vi.mock("webloom-framework/react", () => ({
   useCapability: <T,>(key: { id?: string }): T => {
+    if (key.id === SAT_SUBSCRIPTION_SERVICE_CAPABILITY.id) return state.admin as unknown as T;
+    if (key.id === SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY.id) return state.spi as unknown as T;
+    throw new Error(`unexpected capability: ${key}`);
+  },
+  useOptionalCapability: <T,>(key: { id?: string }): T => {
     if (key.id === SAT_SUBSCRIPTION_SERVICE_CAPABILITY.id) return state.admin as unknown as T;
     if (key.id === SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY.id) return state.spi as unknown as T;
     throw new Error(`unexpected capability: ${key}`);

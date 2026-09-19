@@ -1,4 +1,3 @@
-import { flushSync } from "react-dom";
 import type {
   AssetDataNotifier,
   AssetRegistry,
@@ -79,7 +78,8 @@ const assetsResources: I18nPluginResources = {
       "assets.status.syncing": "Syncing",
       "assets.status.stale": "Stale",
       "assets.status.failed": "Failed",
-      "assets.status.unsupported": "Unsupported"
+      "assets.status.unsupported": "Unsupported",
+      "assets.status.unavailable": "Wallet is locked or asset services are temporarily unavailable; unlock to restore."
     },
     "zh-CN": {
       "assets.domain.label": "钱包",
@@ -114,7 +114,8 @@ const assetsResources: I18nPluginResources = {
       "assets.status.syncing": "同步中",
       "assets.status.stale": "已过期",
       "assets.status.failed": "失败",
-      "assets.status.unsupported": "不支持"
+      "assets.status.unsupported": "不支持",
+      "assets.status.unavailable": "钱包已锁定或资产服务暂不可用；解锁后会自动恢复。"
     }
   }
 };
@@ -524,23 +525,24 @@ export async function registerAssetWorkspace(host: PluginHost): Promise<() => vo
     if (disposed) return;
     disposed = true;
     const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
-    flushSync(() => {
-      for (const id of host.business._ids().features.filter((item) => !beforeBusinessFeatureIds.has(item))) {
-        host.business.unregisterFeature(id);
-      }
-      for (const id of host.business._ids().domains.filter((item) => !beforeBusinessDomainIds.has(item))) {
-        host.business.unregisterDomain(id);
-      }
-      for (const id of host.routes._ids().filter((item) => !beforeRouteIds.has(item))) {
-        host.routes.unregister(id);
-      }
-      for (const id of host.home._ids().filter((item) => !beforeHomeIds.has(item))) {
-        host.home.unregister(id);
-      }
-      for (const id of host.contactPublicKeyActions._ids().filter((item) => !beforeContactActionIds.has(item))) {
-        host.contactPublicKeyActions.unregister(id);
-      }
-    });
+    // 卸载必须走正常的外部 store 通知，不能在渲染过程中 flushSync 强制
+    // 卸载 React root：owner 锁定时插件 teardown 与页面渲染会重叠，
+    // 同步卸载会触发 React 的嵌套更新告警和 removeChild 竞态。
+    for (const id of host.business._ids().features.filter((item) => !beforeBusinessFeatureIds.has(item))) {
+      host.business.unregisterFeature(id);
+    }
+    for (const id of host.business._ids().domains.filter((item) => !beforeBusinessDomainIds.has(item))) {
+      host.business.unregisterDomain(id);
+    }
+    for (const id of host.routes._ids().filter((item) => !beforeRouteIds.has(item))) {
+      host.routes.unregister(id);
+    }
+    for (const id of host.home._ids().filter((item) => !beforeHomeIds.has(item))) {
+      host.home.unregister(id);
+    }
+    for (const id of host.contactPublicKeyActions._ids().filter((item) => !beforeContactActionIds.has(item))) {
+      host.contactPublicKeyActions.unregister(id);
+    }
     host.resourceStore.disposeOwner("asset-workspace");
     for (const id of resources._ids().filter((item) => !beforeResourceIds.has(item))) {
       resources.unregister(id);

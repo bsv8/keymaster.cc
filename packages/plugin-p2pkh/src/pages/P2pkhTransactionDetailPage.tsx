@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader, formatSats } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { router, useI18n, usePluginHost } from "@keymaster/runtime";
+import { useOptionalCapability } from "webloom-framework/react";
+import { router, useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import type { P2pkhGlobalSettings, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionFact } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { formatLocalTime, inputAmount, listPath, parseStoredTransaction, readPage, readTransactionId, readTransactionNetwork, readTransactionSource, readTransactionSubmissionId } from "./p2pkhTransactionView.js";
@@ -33,23 +33,58 @@ function OutputRow({ vout, value, scriptHex, owned }: { vout: number; value: num
 }
 
 export function P2pkhTransactionDetailPage() {
+  const { t } = useI18n();
+  // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
+  // 一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(P2PKH_CAPABILITY);
+  if (!service) {
+    return (
+      <EmptyState
+        title={t("p2pkh.detail.locked.title", { defaultValue: "钱包已锁定" })}
+        description={t("p2pkh.detail.locked.description", { defaultValue: "解锁后可继续查看交易详情。" })}
+      />
+    );
+  }
+  return <P2pkhTransactionDetailPageInner service={service} />;
+}
+
+function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService }) {
   const host = usePluginHost();
   const { t } = useI18n();
-  const service = useCapability(P2PKH_CAPABILITY);
   const network = readTransactionNetwork();
   const page = readPage();
   const source = readTransactionSource();
   const txid = readTransactionId();
   const submissionId = readTransactionSubmissionId();
   const routeResourceId = `p2pkh:${network}`;
-  const settings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
+  const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     host.resourceStore,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? { includeTestnet: false },
-    (left, right) => left.includeTestnet === right.includeTestnet
+    { includeTestnet: false }
   );
-  const wallet = useResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(host.resourceStore, "p2pkh.wallet", [], (snapshot) => snapshot.data ? { ...snapshot.data, factCursors: snapshot.data.factCursors ?? {}, ownedCursors: snapshot.data.ownedCursors ?? {}, localCursors: snapshot.data.localCursors ?? {}, localOutpointCursors: snapshot.data.localOutpointCursors ?? {}, claimCursors: snapshot.data.claimCursors ?? {}, inputValues: snapshot.data.inputValues ?? {}, inputValuesByResource: snapshot.data.inputValuesByResource ?? {}, error: snapshot.error?.message, loaded: true } : { ...emptyWallet(), error: snapshot.error?.message, loaded: false }, (left, right) => JSON.stringify(left) === JSON.stringify(right));
+  const walletFallback: WalletSnapshot & { error?: string; loaded: boolean } = { ...emptyWallet(), loaded: false };
+  const wallet = useOptionalResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(
+    host.resourceStore,
+    "p2pkh.wallet",
+    [],
+    (snapshot) => snapshot.data
+      ? {
+          ...snapshot.data,
+          factCursors: snapshot.data.factCursors ?? {},
+          ownedCursors: snapshot.data.ownedCursors ?? {},
+          localCursors: snapshot.data.localCursors ?? {},
+          localOutpointCursors: snapshot.data.localOutpointCursors ?? {},
+          claimCursors: snapshot.data.claimCursors ?? {},
+          inputValues: snapshot.data.inputValues ?? {},
+          inputValuesByResource: snapshot.data.inputValuesByResource ?? {},
+          error: snapshot.error?.message,
+          loaded: true
+        }
+      : { ...emptyWallet(), error: snapshot.error?.message, loaded: false },
+    walletFallback
+  );
   const networkEnabled = network === "main" || settings.includeTestnet;
   const snapshotFact = useMemo(() => source === "transactions" && txid ? wallet.facts.find((row) => row.network === network && row.txid.toLowerCase() === txid.toLowerCase()) : undefined, [wallet.facts, network, txid, source]);
   const snapshotLocal = useMemo(() => {

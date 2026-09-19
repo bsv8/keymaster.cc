@@ -8,26 +8,41 @@
 
 import { useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { AppLink, useI18n, usePluginHost } from "@keymaster/runtime";
-import { CONTACTS_SERVICE_CAPABILITY, formatShortPublicKey, type Contact, type ContactPresenceMap } from "@keymaster/contracts";
+import { useOptionalCapability } from "webloom-framework/react";
+import { AppLink, useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { CONTACTS_SERVICE_CAPABILITY, formatShortPublicKey, type Contact, type ContactPresenceMap, type ContactsService } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
 export function ContactsPage() {
-  const service = useCapability(CONTACTS_SERVICE_CAPABILITY);
+  const { t } = useI18n();
+  // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
+  // 一次渲染，必须按"暂不可用"降级而不是抛错。
+  const service = useOptionalCapability(CONTACTS_SERVICE_CAPABILITY);
+  if (!service) {
+    return (
+      <EmptyState
+        title={t("contacts.locked.title", { defaultValue: "钱包已锁定" })}
+        description={t("contacts.locked.description", { defaultValue: "解锁后可继续管理联系人。" })}
+      />
+    );
+  }
+  return <ContactsPageInner service={service} />;
+}
+
+function ContactsPageInner({ service }: { service: ContactsService }) {
   const host = usePluginHost();
   const { t } = useI18n();
-  const listState = useResourceSelector<Contact[], { rows: Contact[]; active: boolean; error?: string }>(
+  const listState = useOptionalResourceSelector<Contact[], { rows: Contact[]; active: boolean; error?: string }>(
     host.resourceStore, "contacts.list", [],
     (snapshot) => ({ rows: snapshot.data ?? [], active: snapshot.key[2] !== "none", error: snapshot.error?.message }),
-    (a, b) => a.active === b.active && a.error === b.error && a.rows === b.rows
+    { rows: [], active: false }
   );
   const { rows, active } = listState;
-  const presenceByPublicKey = useResourceSelector<ContactPresenceMap, ContactPresenceMap>(
+  const presenceByPublicKey = useOptionalResourceSelector<ContactPresenceMap, ContactPresenceMap>(
     host.resourceStore, "contacts.presence", [],
     (snapshot) => snapshot.data ?? {},
-    (a, b) => a === b
+    {}
   );
   const [editing, setEditing] = useState<Contact | null>(null);
   const [error, setError] = useState<string | null>(null);

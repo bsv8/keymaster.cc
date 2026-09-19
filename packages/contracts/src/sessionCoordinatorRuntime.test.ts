@@ -532,6 +532,56 @@ describe("Coordinator runtime contract parsers", () => {
     }).operationResult).toEqual({ endpoint: "https://example.test", limits: [1, 2] });
   });
 
+  it("accepts SatSubscription audit entries with no charged amount or channel", () => {
+    const response = (request: CoordinatorRpcRequest, operationResult: unknown) => parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult,
+    });
+    const owner = "02" + "11".repeat(32);
+    const supplier = "03" + "22".repeat(32);
+    const snapshot = {
+      ownerPublicKeyHex: owner,
+      supplierGeneration: 2,
+      suppliers: [{
+        supplierId: "bsv8",
+        name: "bsv8",
+        supplierPublicKeyHex: supplier,
+        multiaddrs: ["/dns/us-gateway.bsv8.com/tcp/443/tls/ws/p2p/16Uiu2HAmEhfHraPUP1YrYQFy6M8TTbtCZq6A7BGcXi77ZwCS5jxj"],
+        enabled: true,
+      }],
+      ownerSettings: { ownerPublicKeyHex: owner, defaultPublishSupplierId: "bsv8", receiveSupplierIds: ["bsv8"] },
+      supplierViews: [{
+        supplierId: "bsv8",
+        name: "bsv8",
+        supplierPublicKeyHex: supplier,
+        connectionState: "disconnected",
+        inboxChannel: `bsv8.inbox.${owner}`,
+        desiredChannels: [`bsv8.inbox.${owner}`],
+        observedChannels: [],
+        // 失败的订阅动作没有扣费金额，上一条审计的 chargedAmount 是空串。
+        lastChargedAmount: "",
+        lastErrorCode: "connect",
+      }],
+      feeAudit: [
+        { supplierId: "bsv8", action: "subscribe", channel: `bsv8.inbox.${owner}`, chargedAmount: "", result: "error", errorCode: "connect", createdAtMs: 1 },
+        // `subscriptions` 动作没有单一频道，也没有扣费。
+        { supplierId: "bsv8", action: "subscriptions", channel: "", chargedAmount: "", result: "error", createdAtMs: 2 },
+        { supplierId: "bsv8", action: "publish", channel: "bsvprice.test", chargedAmount: "0.01", result: "ok", createdAtMs: 3 },
+      ],
+    };
+
+    const parsed = response(rpcRequest("sat.operation", { operation: { type: "admin.getSettings" } }), snapshot);
+    expect(parsed.operationResult).toMatchObject({
+      supplierViews: [{ lastChargedAmount: "" }],
+      feeAudit: [
+        { action: "subscribe", channel: `bsv8.inbox.${owner}`, chargedAmount: "" },
+        { action: "subscriptions", channel: "", chargedAmount: "" },
+        { action: "publish", chargedAmount: "0.01" },
+      ],
+    });
+  });
+
   it("parses the bucket block write control and bounds it to one 256 KiB block", () => {
     const control = { type: "bucket.put-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32), bytes: new Uint8Array([1, 2, 3]).buffer };
     const valid = { kind: "msfile.control", expectedSessionEpoch: "epoch-1", control };
