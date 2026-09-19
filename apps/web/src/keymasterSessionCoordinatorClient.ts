@@ -235,6 +235,25 @@ export function __testArmCoordinatorBridgeBarrier(): CoordinatorTestBridgeBarrie
   });
 }
 
+/** 页面对象字节 -> RPC DTO：TypedArray 的 DTO 校验是 O(bytes)，用 ArrayBuffer。 */
+function storageObjectDto(object: {
+  path: string;
+  bytes: Uint8Array;
+  size?: number;
+  etag?: string;
+  lastModified?: string;
+}): import("@keymaster/contracts").CoordinatorLocalStorageObject {
+  return {
+    path: object.path,
+    bytes: object.bytes.byteOffset === 0 && object.bytes.byteLength === object.bytes.buffer.byteLength
+      ? object.bytes.buffer as ArrayBuffer
+      : object.bytes.slice().buffer as ArrayBuffer,
+    ...(object.size === undefined ? {} : { size: object.size }),
+    ...(object.etag === undefined ? {} : { etag: object.etag }),
+    ...(object.lastModified === undefined ? {} : { lastModified: object.lastModified }),
+  };
+}
+
 // ============================================================
 // 2. Coordinator Client
 // ============================================================
@@ -759,11 +778,17 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       let response: CoordinatorLocalStorageResponse;
       try {
         if (request.type === "get") {
-          response = { type: "object", object: await provider.get(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal }) };
+          const object = await provider.get(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal });
+          response = object === undefined ? { type: "object" } : { type: "object", object: storageObjectDto(object) };
         } else if (request.type === "list") {
-          response = { type: "list", ...(await provider.list({ prefix: request.prefix, cursor: request.cursor, limit: request.limit, signal })) };
+          const page = await provider.list({ prefix: request.prefix, cursor: request.cursor, limit: request.limit, signal });
+          response = {
+            type: "list",
+            objects: page.objects.map((object) => storageObjectDto(object)),
+            ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+          };
         } else if (request.type === "put") {
-          response = { type: "write", ...(await provider.put(request.path, request.bytes, { ...request.condition, signal })) };
+          response = { type: "write", ...(await provider.put(request.path, new Uint8Array(request.bytes), { ...request.condition, signal })) };
         } else {
           await provider.delete(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal });
           response = { type: "void" };

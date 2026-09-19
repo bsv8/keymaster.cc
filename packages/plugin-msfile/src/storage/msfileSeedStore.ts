@@ -22,7 +22,6 @@ import {
   isMasterSeedError,
   readBlockHash,
   verifyBlock,
-  verifySeed,
   verifySeedForSourceSize,
   type RandomAccessSeed,
 } from "masterseed";
@@ -34,9 +33,10 @@ export const MSFILE_SEED_META_FORMAT = "keymaster.msfiles-meta";
 export const MSFILE_SEED_META_VERSION = 1;
 export const MSFILE_SEED_META_MAX_BYTES = 4 * 1024;
 export const MSFILE_SEED_BLOCK_WRITE_CONCURRENCY = 4;
+/** 经 Worker 直读/直写块时的并行度；Provider 往返延迟是主要成本。 */
+export const MSFILE_SEED_WORKER_BLOCK_CONCURRENCY = 8;
 export const MSFILE_SEED_BLOCK_READ_CONCURRENCY = 4;
 
-const SEED_FILE_PATTERN = /^seeds\/([0-9a-f]{64})\.ms$/u;
 const META_FILE_PATTERN = /^meta\/([0-9a-f]{64})\.json$/u;
 const HASH_HEX_PATTERN = /^[0-9a-f]{64}$/u;
 const MEDIA_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u;
@@ -82,12 +82,20 @@ export interface MsFileSeedMeta {
   storedAt: string;
 }
 
-/** 列表条目：种子存在为准，元数据缺失/损坏时为 null。 */
+/**
+ * 列表条目：`meta/` 是列表真值，一个 meta 文件就是一个条目。
+ *
+ * 列表阶段只读 `meta/`：不检查种子、不检查块，避免“一来就翻整桶”。
+ * 缺失检查是懒的：读取/校验失败后调用方可以把 `seedPresent` 标记为 false；
+ * undefined 表示“尚未检查”，不是“存在”。
+ */
 export interface MsFileSeedEntry {
   seedHashHex: string;
-  /** Provider 报告的种子文件字节数；Provider 不提供时省略。 */
-  seedFileSizeBytes?: string;
   meta: MsFileSeedMeta | null;
+  /**
+   * 种子是否存在：懒检测。列表不填；读取/校验/删除发现种子缺失后由调用方标记。
+   */
+  seedPresent?: boolean;
 }
 
 /** 上传源。核心逻辑不依赖浏览器 File，测试用内存实现。 */
@@ -120,11 +128,23 @@ export interface MsFileSeedReadResult {
   parts: Uint8Array[];
 }
 
+/**
+ * 桶内“校验”结果：只做存在性与结构完整性检查，不计算任何 SHA-256。
+ *
+ * 检查项：meta 是否可用且与种子一致、种子是否存在且长度合法、
+ * 种子引用的每个块 hash 文件是否存在。内容是否与 hash 相符留给下载路径。
+ */
 export interface MsFileSeedVerifyResult {
-  /** 元数据是否存在且合法；缺失时只验证种子本身。 */
   metaAvailable: boolean;
+  seedPresent: boolean;
+  /** 种子长度是 32 的整数倍（结构性合法）。 */
+  seedValid: boolean;
+  /** 元数据存在时与种子长度/块数一致；元数据缺失时视为未检查（true）。 */
+  metaConsistent: boolean;
   blockCount: string;
-  verifiedBlocks: number;
+  /** 缺失的块文件个数（按去重后的 hash 位置统计）。 */
+  missingBlocks: number;
+  complete: boolean;
 }
 
 function fail(code: MsFileSeedStoreErrorCode, message: string): never {
@@ -417,8 +437,13 @@ export async function storeMsFileSeed(input: {
   signal?: AbortSignal;
   onProgress?(progress: MsFileSeedStoreProgress): void;
   now?(): number;
+  /**
+   * 可选块写入通道：由 Coordinator 直写 owner 文件根。缺省时逐块写
+   * `store`（测试与降级路径）。无论哪条通道，块路径都由本模块决定。
+   */
+  putBlock?(seedHashHex: string, blockHashHex: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>;
 }): Promise<MsFileSeedUploadResult> {
-  const { store, source, signal, onProgress } = input;
+  const { store, source, signal, onProgress, putBlock } = input;
   const now = input.now ?? Date.now;
   try {
     assertSource(source);
@@ -427,15 +452,25 @@ export async function storeMsFileSeed(input: {
     const randomAccess = createSeedRandomAccess(seed.seedBytes);
     const totalBlocks = Number(seed.blockCount);
     const totalBytes = seed.sourceSize.toString();
+    const writeBlock = putBlock === undefined
+      ? (seedHash: string, blockHash: string, bytes: Uint8Array, blockSignal: AbortSignal) => putFile(store, blockPath(seedHash, blockHash), bytes, blockSignal)
+      : async (seedHash: string, blockHash: string, bytes: Uint8Array, blockSignal: AbortSignal) => {
+        try {
+          await putBlock(seedHash, blockHash, bytes, blockSignal);
+        } catch (cause) {
+          throw toStoreError(cause, "storage");
+        }
+      };
+    const writeConcurrency = putBlock === undefined ? MSFILE_SEED_BLOCK_WRITE_CONCURRENCY : MSFILE_SEED_WORKER_BLOCK_CONCURRENCY;
     let completedBlocks = 0;
-    await runPool(totalBlocks, MSFILE_SEED_BLOCK_WRITE_CONCURRENCY, signal, async (index, blockSignal) => {
+    await runPool(totalBlocks, writeConcurrency, signal, async (index, blockSignal) => {
       const blockIndex = BigInt(index);
       const digest = await readBlockHash(randomAccess, seed.seedSize, blockIndex, blockSignal);
       const expectedSize = Number(expectedBlockSize(seed.sourceSize, blockIndex));
       const bytes = await source.read(blockIndex * BLOCK_SIZE_BIGINT, expectedSize, { signal: blockSignal });
       if (bytes.byteLength !== expectedSize) throw new MsFileSeedStoreError("source-changed", "source block size changed while storing");
       verifyBlock(bytes, digest, blockSignal);
-      await putFile(store, blockPath(seedHashHex, digest.toHex()), bytes, blockSignal);
+      await writeBlock(seedHashHex, digest.toHex(), bytes, blockSignal);
       completedBlocks += 1;
       onProgress?.({
         phase: "storing-blocks",
@@ -456,51 +491,47 @@ export async function storeMsFileSeed(input: {
       storedAt: new Date(now()).toISOString(),
     };
     await putFile(store, metaPath(seedHashHex), serializeMsFileSeedMeta(meta), signal);
-    return { entry: { seedHashHex, seedFileSizeBytes: meta.seedSizeBytes, meta }, meta };
+    return { entry: { seedHashHex, seedPresent: true, meta }, meta };
   } catch (cause) {
     throw toStoreError(cause, "storage");
   }
 }
 
-/** 列出全部种子条目：`seeds/` 为真值，`meta/` 按 hash join，损坏按缺失处理。 */
+/**
+ * 列出全部条目：只读 `meta/` 前缀，一个 meta 文件对应一个条目。
+ *
+ * 列表阶段不做任何缺失检查：不列 `seeds/`、不读种子、不读块。seeds/ 与
+ * storage/ 的存在性、块是否完整都留到读取/校验时懒检测。
+ */
 export async function listMsFileSeeds(input: {
   store: OwnerFileStore;
   signal?: AbortSignal;
 }): Promise<MsFileSeedEntry[]> {
   const { store, signal } = input;
   try {
-    const [seedFiles, metaFiles] = await Promise.all([
-      listPrefix(store, "seeds/", signal),
-      listPrefix(store, "meta/", signal),
-    ]);
-    const seedSizes = new Map<string, number | undefined>();
-    for (const file of seedFiles) {
-      const match = SEED_FILE_PATTERN.exec(file.path);
-      if (match?.[1]) seedSizes.set(match[1], file.size);
-    }
-    const metaHashes = new Set<string>();
+    const metaFiles = await listPrefix(store, "meta/", signal);
+    const hashes: string[] = [];
     for (const file of metaFiles) {
       const match = META_FILE_PATTERN.exec(file.path);
-      if (match?.[1] && seedSizes.has(match[1])) metaHashes.add(match[1]);
+      if (match?.[1]) hashes.push(match[1]);
     }
-    const metas = new Map<string, MsFileSeedMeta>();
-    const hashes = [...metaHashes];
+    const metas = new Map<string, MsFileSeedMeta | null>();
     await runPool(hashes.length, MSFILE_SEED_BLOCK_READ_CONCURRENCY, signal, async (index, itemSignal) => {
       const hash = hashes[index]!;
       try {
         const bytes = await getFile(store, metaPath(hash), itemSignal);
-        if (!bytes) return;
-        const meta = parseMsFileSeedMeta(bytes, hash);
-        const seedSize = seedSizes.get(hash);
-        if (seedSize !== undefined && BigInt(meta.seedSizeBytes) !== BigInt(seedSize)) return;
-        metas.set(hash, meta);
+        if (!bytes) {
+          metas.set(hash, null);
+          return;
+        }
+        metas.set(hash, parseMsFileSeedMeta(bytes, hash));
       } catch {
-        // 损坏或不可读的元数据按缺失处理；不影响其它条目。
+        // 损坏或不可读的元数据：条目保留为 meta = null，不影响其它条目。
+        metas.set(hash, null);
       }
     });
-    const entries: MsFileSeedEntry[] = [...seedSizes.entries()].map(([hash, size]) => ({
+    const entries: MsFileSeedEntry[] = hashes.map((hash) => ({
       seedHashHex: hash,
-      ...(size === undefined ? {} : { seedFileSizeBytes: String(size) }),
       meta: metas.get(hash) ?? null,
     }));
     entries.sort((a, b) => {
@@ -523,8 +554,10 @@ export async function readMsFileSeed(input: {
   seedHashHex: string;
   signal?: AbortSignal;
   onProgress?(progress: MsFileSeedStoreProgress): void;
+  /** 可选块读取通道：由 Coordinator 直读 owner 文件根，绕过页面端口并发上限。 */
+  getBlock?(seedHashHex: string, blockHashHex: string, signal?: AbortSignal): Promise<Uint8Array | undefined>;
 }): Promise<MsFileSeedReadResult> {
-  const { store, signal, onProgress } = input;
+  const { store, signal, onProgress, getBlock } = input;
   const seedHashHex = assertSeedHashHex(input.seedHashHex);
   try {
     const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
@@ -537,13 +570,23 @@ export async function readMsFileSeed(input: {
     const totalBlocks = Number(info.blockCount);
     const randomAccess = createSeedRandomAccess(seedBytes);
     const totalBytes = sourceSize.toString();
+    const readBlock = getBlock === undefined
+      ? (seedHash: string, blockHash: string, blockSignal: AbortSignal) => getFile(store, blockPath(seedHash, blockHash), blockSignal)
+      : async (seedHash: string, blockHash: string, blockSignal: AbortSignal) => {
+        try {
+          return await getBlock(seedHash, blockHash, blockSignal);
+        } catch (cause) {
+          throw toStoreError(cause, "storage");
+        }
+      };
+    const readConcurrency = getBlock === undefined ? MSFILE_SEED_BLOCK_READ_CONCURRENCY : MSFILE_SEED_WORKER_BLOCK_CONCURRENCY;
     const parts: Uint8Array[] = new Array(totalBlocks);
     let completedBlocks = 0;
-    await runPool(totalBlocks, MSFILE_SEED_BLOCK_READ_CONCURRENCY, signal, async (index, blockSignal) => {
+    await runPool(totalBlocks, readConcurrency, signal, async (index, blockSignal) => {
       const blockIndex = BigInt(index);
       const digest = await readBlockHash(randomAccess, info.seedSize, blockIndex, blockSignal);
       const expectedSize = Number(expectedBlockSize(sourceSize, blockIndex));
-      const bytes = await getFile(store, blockPath(seedHashHex, digest.toHex()), blockSignal);
+      const bytes = await readBlock(seedHashHex, digest.toHex(), blockSignal);
       if (!bytes) throw new MsFileSeedStoreError("missing-block", `block ${index} is missing`);
       if (bytes.byteLength !== expectedSize) throw new MsFileSeedStoreError("integrity", `block ${index} has an unexpected size`);
       verifyBlock(bytes, digest, blockSignal);
@@ -563,31 +606,87 @@ export async function readMsFileSeed(input: {
   }
 }
 
-/** 校验条目。元数据缺失时只验证种子文件本身；返回块数供 UI 展示。 */
+/**
+ * 校验条目：只做存在性与结构完整性检查，不计算 SHA-256。
+ *
+ * 1. 读 meta（缺失或损坏时按未检查处理，不当作失败）；
+ * 2. 读种子：存在性 + 长度必须是 32 的整数倍；只有拿到合法种子才能解析块路径；
+ * 3. 与 meta 交叉校验块数/种子长度（meta 存在时）；
+ * 4. 列 `storage/<seedhash>/` 一次，按种子里的去重 hash 逐一比对块文件是否存在。
+ */
 export async function verifyMsFileSeed(input: {
   store: OwnerFileStore;
   seedHashHex: string;
   signal?: AbortSignal;
-  onProgress?(progress: MsFileSeedStoreProgress): void;
 }): Promise<MsFileSeedVerifyResult> {
-  const { store, signal, onProgress } = input;
+  const { store, signal } = input;
   const seedHashHex = assertSeedHashHex(input.seedHashHex);
   try {
     const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
-    if (!metaBytes) {
-      const seedBytes = await getFile(store, seedPath(seedHashHex), signal);
-      if (!seedBytes) throw new MsFileSeedStoreError("missing-seed", "seed file is missing");
-      const info = await verifySeed([seedBytes], Digest.fromHex(seedHashHex), signal);
-      return { metaAvailable: false, blockCount: info.blockCount.toString(), verifiedBlocks: 0 };
+    let meta: MsFileSeedMeta | null = null;
+    if (metaBytes) {
+      try {
+        meta = parseMsFileSeedMeta(metaBytes, seedHashHex);
+      } catch {
+        meta = null;
+      }
     }
-    const result = await readMsFileSeed({ store, seedHashHex, signal, ...(onProgress === undefined ? {} : { onProgress }) });
-    return { metaAvailable: true, blockCount: String(result.meta.blockCount), verifiedBlocks: result.meta.blockCount };
+    const seedBytes = await getFile(store, seedPath(seedHashHex), signal);
+    if (!seedBytes) {
+      return {
+        metaAvailable: meta !== null,
+        seedPresent: false,
+        seedValid: false,
+        metaConsistent: meta !== null,
+        blockCount: meta?.blockCount !== undefined ? String(meta.blockCount) : "0",
+        missingBlocks: 0,
+        complete: false,
+      };
+    }
+    const seedValid = seedBytes.byteLength % 32 === 0;
+    const blockCount = seedValid ? seedBytes.byteLength / 32 : 0;
+    const metaConsistent = meta === null
+      || (meta.blockCount === blockCount && BigInt(meta.seedSizeBytes) === BigInt(seedBytes.byteLength));
+    if (!seedValid) {
+      return { metaAvailable: meta !== null, seedPresent: true, seedValid: false, metaConsistent, blockCount: "0", missingBlocks: 0, complete: false };
+    }
+    const randomAccess = createSeedRandomAccess(seedBytes);
+    const seedSize = BigInt(seedBytes.byteLength);
+    const files = await listPrefix(store, `storage/${seedHashHex}/`, signal);
+    const prefix = `storage/${seedHashHex}/`;
+    const present = new Set<string>();
+    for (const file of files) {
+      if (file.path.startsWith(prefix)) present.add(file.path.slice(prefix.length));
+    }
+    const seen = new Set<string>();
+    let missingBlocks = 0;
+    for (let index = 0; index < blockCount; index += 1) {
+      const digest = await readBlockHash(randomAccess, seedSize, BigInt(index), signal);
+      const hex = digest.toHex();
+      if (seen.has(hex)) continue;
+      seen.add(hex);
+      if (!present.has(hex)) missingBlocks += 1;
+    }
+    return {
+      metaAvailable: meta !== null,
+      seedPresent: true,
+      seedValid: true,
+      metaConsistent,
+      blockCount: String(blockCount),
+      missingBlocks,
+      complete: metaConsistent && missingBlocks === 0,
+    };
   } catch (cause) {
     throw toStoreError(cause, "storage");
   }
 }
 
-/** 删除条目：先种子、再元数据、最后该种子目录下的全部块。 */
+/**
+ * 删除条目：先读种子（块路径的唯一权威），再删种子与元数据，最后按种子里的
+ * 摘要逐个删除块。用摘要而不是列举 `storage/<hash>/`，避免一次性把所有块
+ * 字节读进内存（Local IndexedDB 的列表会加载匹配对象的完整字节）。
+ * 种子缺失或结构损坏时退回前缀列举。
+ */
 export async function deleteMsFileSeed(input: {
   store: OwnerFileStore;
   seedHashHex: string;
@@ -596,8 +695,27 @@ export async function deleteMsFileSeed(input: {
   const { store, signal } = input;
   const seedHashHex = assertSeedHashHex(input.seedHashHex);
   try {
-    await deleteFile(store, seedPath(seedHashHex), signal);
+    const seedBytes = await getFile(store, seedPath(seedHashHex), signal);
+    // 列表真值是 meta：先删它，条目立即从列表消失；再删种子和块。
     await deleteFile(store, metaPath(seedHashHex), signal);
+    await deleteFile(store, seedPath(seedHashHex), signal);
+    if (seedBytes && seedBytes.byteLength % 32 === 0) {
+      const randomAccess = createSeedRandomAccess(seedBytes);
+      const blockCount = seedBytes.byteLength / 32;
+      const paths: string[] = [];
+      const seen = new Set<string>();
+      for (let index = 0; index < blockCount; index += 1) {
+        const digest = await readBlockHash(randomAccess, BigInt(seedBytes.byteLength), BigInt(index), signal);
+        const path = blockPath(seedHashHex, digest.toHex());
+        if (seen.has(path)) continue;
+        seen.add(path);
+        paths.push(path);
+      }
+      await runPool(paths.length, MSFILE_SEED_BLOCK_WRITE_CONCURRENCY, signal, async (index, blockSignal) => {
+        await deleteFile(store, paths[index]!, blockSignal);
+      });
+      return;
+    }
     const blocks = await listPrefix(store, `storage/${seedHashHex}/`, signal);
     await runPool(blocks.length, MSFILE_SEED_BLOCK_WRITE_CONCURRENCY, signal, async (index, blockSignal) => {
       await deleteFile(store, blocks[index]!.path, blockSignal);

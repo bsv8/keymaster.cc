@@ -52,6 +52,28 @@ describe("indexedDB bucket provider", () => {
     }
   });
 
+  it("lists with a bounded key range and returns the stored etag without rehashing", async () => {
+    const databaseName = uniqueDatabaseName("range");
+    const provider = createIndexedDbBucketProvider({ bucketId: "bucket-range", databaseName });
+    try {
+      // 大对象放在 sibling 前缀下；列 seeds/ 不应触碰它。
+      await provider.put("storage/seed-1/block", new Uint8Array(64 * 1024).fill(3));
+      await provider.put("seeds/seed-1.ms", new Uint8Array([1]));
+      await provider.put("keys2/not-selected", new Uint8Array([2]));
+
+      const seeds = await provider.list({ prefix: "seeds/" });
+      expect(seeds.objects.map((object) => object.path)).toEqual(["seeds/seed-1.ms"]);
+      // `keys/` 不能误收 `keys2/...`。
+      expect((await provider.list({ prefix: "keys/" })).objects).toEqual([]);
+
+      const written = await provider.put("etag/a", new Uint8Array([5, 6]));
+      const listed = await provider.list({ prefix: "etag/" });
+      expect(listed.objects[0]?.etag).toBe(written.etag);
+    } finally {
+      provider.dispose();
+    }
+  });
+
   it("deletes with conditions and rejects writes after dispose", async () => {
     const databaseName = uniqueDatabaseName("delete");
     const provider = createIndexedDbBucketProvider({ bucketId: "bucket-delete", databaseName });

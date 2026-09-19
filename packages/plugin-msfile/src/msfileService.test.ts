@@ -1098,4 +1098,27 @@ describe("settings control plane", () => {
     const probe = await service.probeSupplier(SUPPLIER_PUBKEY);
     expect(probe.connected).toBe(true);
   });
+
+  it("只在快照变化时广播：读设置不会产生状态事件（审查修复）", async () => {
+    const events: import("./msfileService.js").MsFileServiceEventState[] = [];
+    const service = createMsFileService({
+      transport: makeTransport() as unknown as MsFileTransport,
+      notifyStateChange: (state) => { events.push(state); },
+    });
+    openServices.push(service);
+    await service.waitUntilInitialized();
+    const baseline = events.length;
+    expect(baseline).toBeGreaterThan(0);
+
+    // 连续回读不改变快照：不得再广播，否则会与页面资源订阅形成死循环。
+    await service.getSettingsSnapshot();
+    await service.getSettingsSnapshot();
+    expect(events.length).toBe(baseline);
+
+    // 真正的 mutation 只广播一次，且事件自带新数据。
+    await service.updateGlobalPriceSettings({ seedMaxPriceSatoshis: "5", blockMaxPriceSatoshis: "0" });
+    expect(events.length).toBe(baseline + 1);
+    expect(events.at(-1)!.globalSettings).toEqual({ seedMaxPriceSatoshis: "5", blockMaxPriceSatoshis: "0" });
+    expect(events.at(-1)!.supplierGeneration).toBe(0);
+  });
 });

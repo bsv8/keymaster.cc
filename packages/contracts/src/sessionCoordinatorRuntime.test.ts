@@ -497,6 +497,12 @@ describe("Coordinator runtime contract parsers", () => {
     expect(response(rpcRequest("storage.platform.data", { data: { type: "platform.get" } }), ownerEntry).operationResult).toEqual(ownerEntry);
 
     expect(response(rpcRequest("msfile.control", { control: { type: "settings.mediaBlockReadConcurrency.get" } }), 2).operationResult).toBe(2);
+    expect(response(rpcRequest("msfile.control", {
+      control: { type: "bucket.put-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32), bytes: new Uint8Array([1, 2, 3]).buffer },
+    }), null).operationResult).toBeNull();
+    expect(response(rpcRequest("msfile.control", {
+      control: { type: "bucket.get-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32) },
+    }), new Uint8Array([4, 5, 6]).buffer).operationResult).toEqual(new Uint8Array([4, 5, 6]).buffer);
     expect(response(rpcRequest("msfile.data", { data: { type: "read-seed" } }), {
       contentHashHex: "aa",
       content: { $type: "binary", bytes: new ArrayBuffer(0) },
@@ -524,6 +530,49 @@ describe("Coordinator runtime contract parsers", () => {
       endpoint: "https://example.test",
       limits: [1, 2],
     }).operationResult).toEqual({ endpoint: "https://example.test", limits: [1, 2] });
+  });
+
+  it("parses the bucket block write control and bounds it to one 256 KiB block", () => {
+    const control = { type: "bucket.put-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32), bytes: new Uint8Array([1, 2, 3]).buffer };
+    const valid = { kind: "msfile.control", expectedSessionEpoch: "epoch-1", control };
+    expect(parse(COORDINATOR_RPC_CAPABILITY.request, valid)).toMatchObject({
+      control: { type: "bucket.put-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32) },
+    });
+    expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, {
+      ...valid,
+      control: { ...control, bytes: new Uint8Array(256 * 1024 + 1).buffer },
+    })).toThrow(/bytes/);
+    expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, {
+      ...valid,
+      control: { ...control, seedHashHex: "AA".repeat(32) },
+    })).toThrow(/hash/);
+
+    expect(parse(COORDINATOR_RPC_CAPABILITY.request, {
+      ...valid,
+      control: { type: "bucket.get-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32) },
+    })).toMatchObject({ control: { type: "bucket.get-block" } });
+  });
+
+  it("requires ArrayBuffer for bulk bytes so DTO validation stays O(1)", () => {
+    const binding = { peerGeneration: 1, sessionEpoch: "epoch-1", leaseId: "lease-1" };
+    const putRequest = { type: "put", bucketId: "bucket-1", bucketGeneration: 1, path: "a/b", ...binding };
+    expect(parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
+      ...putRequest,
+      bytes: new Uint8Array([1, 2, 3]).buffer,
+    })).toMatchObject({ type: "put", path: "a/b" });
+    expect(() => parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
+      ...putRequest,
+      bytes: new Uint8Array([1, 2, 3]),
+    })).toThrow(/ArrayBuffer/);
+    expect(parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.response, {
+      type: "object",
+      object: { path: "a/b", bytes: new Uint8Array([1, 2, 3]).buffer },
+    })).toMatchObject({ type: "object", object: { path: "a/b" } });
+    expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, {
+      kind: "msfile.control",
+      expectedSessionEpoch: "epoch-1",
+      control: { type: "bucket.put-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32), bytes: new Uint8Array([1]) },
+    })).toThrow(/ArrayBuffer/);
   });
 
   it("rejects transport identity on both sides of the Coordinator RPC boundary", () => {

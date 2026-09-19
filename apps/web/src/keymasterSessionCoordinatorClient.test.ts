@@ -1262,8 +1262,10 @@ describe("KeymasterSessionCoordinatorClient", () => {
         bucketId: "bucket-objects",
         bucketGeneration: 1,
         path: "keys/key-1",
-      }) as { response?: { object?: { bytes?: Uint8Array } } };
-      expect(read.response?.object?.bytes).toEqual(bytes);
+      }) as { response?: { object?: { bytes?: ArrayBuffer } } };
+      // 跨 RPC 的批量字节必须是 ArrayBuffer，DTO 校验才不会逐元素遍历。
+      expect(read.response?.object?.bytes).toBeInstanceOf(ArrayBuffer);
+      expect(new Uint8Array(read.response?.object?.bytes as ArrayBuffer)).toEqual(bytes);
 
       // 设备记录/session 仍走 localStorage 引导层；桶对象绝不能再落进去。
       expect(storage.getItem(`keymaster.bucket.bucket-objects.keys/key-1`)).toBeNull();

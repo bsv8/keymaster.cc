@@ -526,3 +526,26 @@
   gap: 8px;
   justify-content: flex-end;
 }
+
+.msfile-bucket__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.msfile-bucket__badge {
+  border: 1px solid var(--km-warning, #d97706);
+  border-radius: 999px;
+  color: var(--km-warning, #d97706);
+  font-size: 0.72rem;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.msfile-bucket__actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}

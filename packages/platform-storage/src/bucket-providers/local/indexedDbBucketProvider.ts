@@ -33,6 +33,12 @@ interface StoredObjectRecord {
   path: string;
   bytes: Uint8Array;
   lastModified: string;
+  /**
+   * 写入时算好的内容 ETag。list() 必须能廉价返回 ETag，不能为每个对象
+   * 重新哈希全量字节（大文件桶会让一次列表遍历几百 MB）。旧记录缺省，
+   * 读取时按需回退计算。
+   */
+  etag?: string;
 }
 
 function fail(code: StorageErrorCode, message: string): StorageRuntimeError {
@@ -157,7 +163,13 @@ export function createIndexedDbBucketProvider(options: IndexedDbBucketProviderOp
 
   function toObject(record: StoredObjectRecord): StorageBucketObject {
     const bytes = record.bytes instanceof Uint8Array ? record.bytes : new Uint8Array(record.bytes as ArrayBufferLike);
-    return { path: record.path, bytes, size: bytes.byteLength, etag: etagFor(bytes), lastModified: record.lastModified };
+    return {
+      path: record.path,
+      bytes,
+      size: bytes.byteLength,
+      etag: record.etag ?? etagFor(bytes),
+      lastModified: record.lastModified,
+    };
   }
 
   async function readRecord(store: IDBObjectStore, path: string): Promise<StoredObjectRecord | undefined> {
@@ -190,9 +202,15 @@ export function createIndexedDbBucketProvider(options: IndexedDbBucketProviderOp
     try {
       const db = await database();
       const transaction = db.transaction(storeName, "readonly");
-      // `[bucketId]` 到 `[bucketId, []]` 精确覆盖本桶的全部字符串 path：
-      // IDB key 类型排序中字符串小于数组，因此上界不会误收其它桶。
-      const range = IDBKeyRange.bound([bucketId], [bucketId, []]);
+      // 直接用前缀构造主键范围，而不是先读出整桶再过滤：大文件桶的块对象
+      // 会让「列出 seeds/」这种请求读取并哈希几百 MB。
+      //
+      // `[bucketId]` 到 `[bucketId, []]` 覆盖本桶全部字符串 path（IDB 键排序
+      // 中字符串小于数组，上界不会误收其它桶）；带前缀时用
+      // `prefix + "\uffff"` 作为字符串上界，前缀内的 path 全部落在范围内。
+      const range = prefix === ""
+        ? IDBKeyRange.bound([bucketId], [bucketId, []])
+        : IDBKeyRange.bound([bucketId, prefix], [bucketId, `${prefix}\uffff`]);
       const records = await requestToPromise<StoredObjectRecord[]>(transaction.objectStore(storeName).getAll(range));
       await transactionDone(transaction);
       const objects = records
@@ -222,10 +240,11 @@ export function createIndexedDbBucketProvider(options: IndexedDbBucketProviderOp
         throw fail("storage_conflict", "Storage object changed");
       }
       const lastModified = new Date(now()).toISOString();
-      const record: StoredObjectRecord = { path, bytes: bytes.slice(), lastModified };
+      const etag = etagFor(bytes);
+      const record: StoredObjectRecord = { path, bytes: bytes.slice(), lastModified, etag };
       await requestToPromise(store.put(record, recordKey(path)));
       await transactionDone(transaction);
-      return { etag: etagFor(bytes), lastModified };
+      return { etag, lastModified };
     } catch (caught) {
       try { transaction.abort(); } catch { /* transaction already finished */ }
       throw mapIndexedDbError(caught);

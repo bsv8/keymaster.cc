@@ -79,6 +79,18 @@ export interface MsFileServiceEventState {
   pendingApprovals: MsFilePendingApprovalView[];
 }
 
+/** 快照等价比较（含审批列表内容）；只用于决定是否广播/通知。 */
+export function isSameMsFileServiceEventState(a: MsFileServiceEventState, b: MsFileServiceEventState): boolean {
+  return a.status === b.status
+    && a.supplierGeneration === b.supplierGeneration
+    && a.mediaBlockReadConcurrency === b.mediaBlockReadConcurrency
+    && a.globalSeedReadConcurrency === b.globalSeedReadConcurrency
+    && a.globalBlockReadConcurrency === b.globalBlockReadConcurrency
+    && a.globalStatConcurrency === b.globalStatConcurrency
+    && JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings)
+    && JSON.stringify(a.pendingApprovals) === JSON.stringify(b.pendingApprovals);
+}
+
 interface PendingApprovalEntry {
   record: MsFilePendingApproval;
   resolve(decision: MsFileApprovalDecision): void;
@@ -155,6 +167,12 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
   };
   private cachedSuppliers: MsFileSupplierConfig[] = [];
+  /**
+   * 最近一次广播的快照（审查修复）：emit() 只有内容真的变化才广播。
+   * 读取路径（getSettingsSnapshot）也会调用 emit 做“读时发现变化才同步”，
+   * 若无条件广播，会与页面资源订阅形成读→广播→失效→再读的死循环。
+   */
+  private lastEmittedState: MsFileServiceEventState | undefined;
   private disposed = false;
 
   constructor(deps: MsFileServiceImplDeps) {
@@ -251,6 +269,10 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
 
   private emit(): void {
     const state = this.describeState();
+    // 变更驱动：只有快照真的变化才广播并通知页面。读设置时发现的“没变”
+    // 不得产生事件，否则页面资源订阅会立即失效并回读，形成死循环。
+    if (this.lastEmittedState !== undefined && isSameMsFileServiceEventState(this.lastEmittedState, state)) return;
+    this.lastEmittedState = state;
     this.notifyStateChange?.(state);
     for (const listener of this.listeners) listener();
   }

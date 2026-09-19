@@ -18,7 +18,7 @@ import {
   type MsFileBucketService,
 } from "./msfileBucketService.js";
 import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
+import { AppLink, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
 import { Button, DataTable, EmptyState, Modal } from "@keymaster/ui";
 import {
   createMsFileIsolatedHtmlBlobUrl,
@@ -260,6 +260,16 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
     setUploadState({ phase: "cancelled" });
   }, []);
 
+  /**
+   * 懒检测结果回写：读取/校验发现种子缺失时，只把这一行标记为“种子丢失”；
+   * 列表本身不做任何缺失检查。
+   */
+  const markSeedMissing = useCallback((seedHashHex: string) => {
+    setEntries((previous) => previous.map((entry) => entry.seedHashHex === seedHashHex
+      ? { ...entry, seedPresent: false }
+      : entry));
+  }, []);
+
   const runRead = useCallback(async (
     entry: MsFileSeedEntry,
     action: "preview" | "download",
@@ -279,6 +289,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
       return result;
     } catch (cause) {
       if (!controller.signal.aborted && !isCancellation(cause)) {
+        if (isMsFileSeedStoreError(cause) && cause.code === "missing-seed") markSeedMissing(entry.seedHashHex);
         setNotice({ kind: "error", text: bucketError(cause).message });
       }
       return undefined;
@@ -288,9 +299,13 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
         setBusy(null);
       }
     }
-  }, [bucketError, service]);
+  }, [bucketError, markSeedMissing, service]);
 
   const handleDownload = useCallback(async (entry: MsFileSeedEntry) => {
+    if (entry.seedPresent === false) {
+      setNotice({ kind: "error", text: t("msfile.bucket.notice.seedMissing", { defaultValue: "种子文件已丢失，无法读取内容。" }) });
+      return;
+    }
     if (!entry.meta) {
       setNotice({ kind: "error", text: bucketError(new Error("missing-meta")).message });
       return;
@@ -320,6 +335,10 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
   }, [bucketError, runRead, t]);
 
   const handlePreview = useCallback(async (entry: MsFileSeedEntry) => {
+    if (entry.seedPresent === false) {
+      setNotice({ kind: "error", text: t("msfile.bucket.notice.seedMissing", { defaultValue: "种子文件已丢失，无法读取内容。" }) });
+      return;
+    }
     if (!entry.meta) {
       setNotice({ kind: "error", text: bucketError(new Error("missing-meta")).message });
       return;
@@ -372,28 +391,56 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
   }, [bucketError, releasePreview, runRead, t]);
 
   const handleVerify = useCallback(async (entry: MsFileSeedEntry) => {
+    if (entry.seedPresent === false) {
+      setNotice({ kind: "error", text: t("msfile.bucket.notice.seedMissing", { defaultValue: "种子文件已丢失，无法读取内容。" }) });
+      return;
+    }
     opControllerRef.current?.abort();
     const controller = new AbortController();
     opControllerRef.current = controller;
     setBusy({ action: "verify", seedHashHex: entry.seedHashHex });
     try {
+      // 桶内校验只查存在性与完整性，不做 hash 计算；内容校验留给下载路径。
       const result = await service.verify(entry.seedHashHex, { signal: controller.signal });
       if (controller.signal.aborted) return;
+      if (!result.seedPresent) {
+        markSeedMissing(entry.seedHashHex);
+        setNotice({ kind: "error", text: t("msfile.bucket.notice.seedMissing", { defaultValue: "种子文件已丢失，无法读取内容。" }) });
+        return;
+      }
+      if (!result.seedValid) {
+        setNotice({ kind: "error", text: t("msfile.bucket.notice.verifySeedInvalid", { defaultValue: "种子文件损坏（长度不是 32 的整数倍）。" }) });
+        return;
+      }
+      if (!result.metaConsistent) {
+        setNotice({ kind: "error", text: t("msfile.bucket.notice.verifyMetaMismatch", { defaultValue: "元数据与种子不一致。" }) });
+        return;
+      }
+      if (result.missingBlocks > 0) {
+        setNotice({
+          kind: "error",
+          text: t("msfile.bucket.notice.verifyMissingBlocks", { defaultValue: "内容不完整：缺少 {{missing}} 个块文件。", missing: result.missingBlocks }),
+        });
+        return;
+      }
       setNotice({
         kind: "ok",
         text: result.metaAvailable
-          ? t("msfile.bucket.notice.verifyOk", { defaultValue: "校验通过：种子、{{blocks}} 个文件块和源文件大小全部匹配。", blocks: result.blockCount })
-          : t("msfile.bucket.notice.verifySeedOnly", { defaultValue: "种子文件校验通过；元数据缺失，未校验文件块。" }),
+          ? t("msfile.bucket.notice.verifyOk", { defaultValue: "校验通过：种子存在，{{blocks}} 个块文件齐全。", blocks: result.blockCount })
+          : t("msfile.bucket.notice.verifySeedOnly", { defaultValue: "校验通过：种子存在，{{blocks}} 个块文件齐全（元数据缺失）。", blocks: result.blockCount }),
       });
     } catch (cause) {
-      if (!controller.signal.aborted && !isCancellation(cause)) setNotice({ kind: "error", text: bucketError(cause).message });
+      if (!controller.signal.aborted && !isCancellation(cause)) {
+        if (isMsFileSeedStoreError(cause) && cause.code === "missing-seed") markSeedMissing(entry.seedHashHex);
+        setNotice({ kind: "error", text: bucketError(cause).message });
+      }
     } finally {
       if (opControllerRef.current === controller) {
         opControllerRef.current = null;
         setBusy(null);
       }
     }
-  }, [bucketError, service, t]);
+  }, [bucketError, markSeedMissing, service, t]);
 
   const confirmDelete = useCallback(async () => {
     const entry = deleteTarget;
@@ -517,9 +564,16 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
             {
               key: "name",
               header: t("msfile.bucket.column.name", { defaultValue: "文件名" }),
-              render: (entry) => entry.meta
-                ? entry.meta.fileName
-                : <em>{t("msfile.bucket.metaMissing", { defaultValue: "元数据缺失" })}</em>,
+              render: (entry) => (
+                <span className="msfile-bucket__name">
+                  {entry.meta
+                    ? entry.meta.fileName
+                    : <em>{t("msfile.bucket.metaMissing", { defaultValue: "元数据缺失" })}</em>}
+                  {entry.seedPresent === false
+                    ? <span className="msfile-bucket__badge">{t("msfile.bucket.seedMissing", { defaultValue: "种子丢失" })}</span>
+                    : null}
+                </span>
+              ),
             },
             {
               key: "type",
@@ -529,7 +583,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
             {
               key: "size",
               header: t("msfile.bucket.column.size", { defaultValue: "大小" }),
-              render: (entry) => entry.meta ? formatBytes(entry.meta.fileSizeBytes) : (entry.seedFileSizeBytes ? formatBytes(entry.seedFileSizeBytes) : "—"),
+              render: (entry) => entry.meta ? formatBytes(entry.meta.fileSizeBytes) : "—",
             },
             {
               key: "blocks",
@@ -546,13 +600,13 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
               header: t("msfile.bucket.column.actions", { defaultValue: "操作" }),
               render: (entry) => (
                 <div className="msfile-bucket__row-actions">
-                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null} onClick={() => { void handlePreview(entry); }}>
+                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handlePreview(entry); }}>
                     {t("msfile.bucket.action.preview", { defaultValue: "预览" })}
                   </Button>
-                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null} onClick={() => { void handleDownload(entry); }}>
+                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handleDownload(entry); }}>
                     {t("msfile.bucket.action.download", { defaultValue: "下载" })}
                   </Button>
-                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null} onClick={() => { void handleVerify(entry); }}>
+                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handleVerify(entry); }}>
                     {t("msfile.bucket.action.verify", { defaultValue: "校验" })}
                   </Button>
                   <Button variant="danger" size="sm" disabled={!canOperate || busy !== null} onClick={() => setDeleteTarget(entry)}>
@@ -603,6 +657,29 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
           </p>
         ) : null}
       </Modal>
+    </section>
+  );
+}
+
+/**
+ * 首页 MSFile 空间里的桶存储入口：默认折叠，不读取桶。
+ *
+ * 桶读取效率不高，首页没看之前不做任何 list；用户点击“查看存储文件”后
+ * 才挂载完整页面（此时才会加载 `meta/` 列表）。完整页面入口仍然保留，
+ * 用户也可以直接进入 `/msfile/storage`。
+ */
+export function MsFileBucketHomeWidget() {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  if (expanded) return <MsFileBucketPage />;
+  return (
+    <section className="msfile-bucket msfile-bucket--collapsed" data-msfile-bucket="collapsed">
+      <h3>{t("msfile.bucket.title", { defaultValue: "桶存储文件" })}</h3>
+      <p className="msfile-bucket__hint">{t("msfile.bucket.description", { defaultValue: "按 MasterSeed 格式存入本桶的种子与文件块。" })}</p>
+      <div className="msfile-bucket__actions">
+        <Button size="sm" onClick={() => setExpanded(true)}>{t("msfile.bucket.load", { defaultValue: "查看存储文件" })}</Button>
+        <AppLink to="/msfile/storage">{t("msfile.bucket.openPage", { defaultValue: "打开完整页面" })}</AppLink>
+      </div>
     </section>
   );
 }

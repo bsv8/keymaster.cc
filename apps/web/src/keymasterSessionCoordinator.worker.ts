@@ -5018,11 +5018,43 @@ function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStor
   return request;
 }
 
+/** TypedArray 的 RPC DTO 校验是 O(bytes)；跨桥字节统一用精确 ArrayBuffer。 */
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes.buffer as ArrayBuffer
+    : bytes.slice().buffer as ArrayBuffer;
+}
+
+/** Window reverse capability 返回的 ArrayBuffer 字节 -> Provider 内部 Uint8Array。 */
+function localStorageResponseFromDto(response: CoordinatorLocalStorageResponse): LocalStorageBridgeResponse {
+  const object = (value: import("@keymaster/contracts").CoordinatorLocalStorageObject): { path: string; bytes: Uint8Array; size?: number; etag?: string; lastModified?: string } => ({
+    path: value.path,
+    bytes: new Uint8Array(value.bytes),
+    ...(value.size === undefined ? {} : { size: value.size }),
+    ...(value.etag === undefined ? {} : { etag: value.etag }),
+    ...(value.lastModified === undefined ? {} : { lastModified: value.lastModified }),
+  });
+  if (response.type === "object") {
+    return response.object === undefined ? { type: "object" } : { type: "object", object: object(response.object) };
+  }
+  if (response.type === "list") {
+    return {
+      type: "list",
+      objects: response.objects.map(object),
+      ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }),
+    };
+  }
+  return response;
+}
+
 /** 将旧 Provider 内部请求收窄为 Window reverse capability 的纯 DTO。 */
 function coordinatorLocalStorageRequest(input: LocalStorageBridgeRequest, binding: CoordinatorSessionBinding): CoordinatorLocalStorageRequest {
   const withoutSignal = bridgeRequestWithoutSignal(input) as unknown as Record<string, unknown>;
   const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, peerGeneration: _peerGeneration, sessionEpoch: _sessionEpoch, ...request } = withoutSignal;
-  return { ...request, ...binding } as unknown as CoordinatorLocalStorageRequest;
+  const wire = request.type === "put" && request.bytes instanceof Uint8Array
+    ? { ...request, bytes: exactArrayBuffer(request.bytes) }
+    : request;
+  return { ...wire, ...binding } as unknown as CoordinatorLocalStorageRequest;
 }
 
 /**
@@ -5068,10 +5100,10 @@ function requestLocalStorageBridge(input: LocalStorageBridgeRequest, peerId?: st
     const call = state.peer.capability(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY).call(request, {
       signal: controller.signal,
       operationId: generateRequestId(),
-    }) as Promise<LocalStorageBridgeResponse>;
+    }) as Promise<CoordinatorLocalStorageResponse>;
     return Promise.resolve(call).then((response) => {
       assertCoordinatorBridgeFresh(state, binding, opening);
-      return response;
+      return localStorageResponseFromDto(response);
     }).finally(cleanup);
   } catch (error) {
     cleanup();
@@ -9377,6 +9409,30 @@ async function executeMsfileControl(
   return run;
 }
 
+/**
+ * 桶内文件块写入的 Worker 侧并发上限。
+ *
+ * 页面 storage 数据面每个端口只允许 3 个并发请求；批量上传如果逐块走
+ * 那条通道，远端一次 PUT 的延迟就是瓶颈。桶块由 Coordinator 直接写
+ * OwnerFileStore，这里给出一个有界并发，既提高吞吐又不放大内存。
+ */
+const MSFILE_BUCKET_BLOCK_WRITE_MAX_CONCURRENCY = 16;
+let msfileBucketBlockWritesActive = 0;
+const msfileBucketBlockWriteWaiters: Array<() => void> = [];
+
+async function withMsfileBucketBlockWriteSlot<T>(run: () => Promise<T>): Promise<T> {
+  while (msfileBucketBlockWritesActive >= MSFILE_BUCKET_BLOCK_WRITE_MAX_CONCURRENCY) {
+    await new Promise<void>((resolve) => { msfileBucketBlockWriteWaiters.push(resolve); });
+  }
+  msfileBucketBlockWritesActive += 1;
+  try {
+    return await run();
+  } finally {
+    msfileBucketBlockWritesActive = Math.max(0, msfileBucketBlockWritesActive - 1);
+    msfileBucketBlockWriteWaiters.shift()?.();
+  }
+}
+
 async function executeMsfileControlNow(
   request: Extract<CoordinatorClientRequest, { kind: "msfile.control" }>,
   signal?: AbortSignal,
@@ -9422,6 +9478,25 @@ async function executeMsfileControlNow(
     case "app-authorizations.list": value = await service.listAppAuthorizations(); break;
     case "approvals.pending": value = service.listPendingApprovals(); break;
     case "approval.resolve": await service.resolveApproval(control.approvalId, control.decision); value = null; break;
+    case "bucket.put-block": {
+      // 直接写 owner 文件根，不经过页面 storage 数据面的每端口并发上限；
+      // 路径由 Worker 拼接，页面只给 hash 和字节。
+      const files = createWorkerOwnerFileStore("msfile", "");
+      await withMsfileBucketBlockWriteSlot(() => files.put(
+        `storage/${control.seedHashHex}/${control.blockHashHex}`,
+        new Uint8Array(control.bytes),
+      ));
+      value = null;
+      break;
+    }
+    case "bucket.get-block": {
+      const files = createWorkerOwnerFileStore("msfile", "");
+      const object = await files.get(`storage/${control.seedHashHex}/${control.blockHashHex}`);
+      if (!object) throw msfileError("msfile_content_not_found", "MSFile bucket block is missing");
+      // 响应同样走 ArrayBuffer，避免 TypedArray 的逐元素 DTO 校验开销。
+      value = object.bytes.slice().buffer;
+      break;
+    }
     default: return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown MSFile control" } };
   }
   if (signal?.aborted) throw msfileError("msfile_unavailable", "MSFile control request was cancelled");

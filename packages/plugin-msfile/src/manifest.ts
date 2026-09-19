@@ -25,7 +25,7 @@ import {
 import { MsFileServiceProxy } from "./msfileServiceProxy.js";
 import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
-import { MsFileBucketPage } from "./MsFileBucketPage.js";
+import { MsFileBucketHomeWidget, MsFileBucketPage } from "./MsFileBucketPage.js";
 import { MSFILE_BUCKET_SERVICE_CAPABILITY, createMsFileBucketService } from "./msfileBucketService.js";
 import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
 import { MsFileP2pLane } from "./msfileLane.js";
@@ -168,6 +168,8 @@ const resources: I18nPluginResources = {
       "msfile.home.errors.default": "File fetching failed. Try again.",
       "msfile.bucket.title": "Bucket storage files",
       "msfile.bucket.description": "Seeds and file blocks produced in MasterSeed format and stored in this bucket; download, preview, verify, or delete them here.",
+      "msfile.bucket.load": "View stored files",
+      "msfile.bucket.openPage": "Open full page",
       "msfile.bucket.unavailable": "MSFile is unavailable right now. Try again later.",
       "msfile.bucket.upload.label": "Choose a file to upload",
       "msfile.bucket.upload.cancel": "Cancel upload",
@@ -187,6 +189,7 @@ const resources: I18nPluginResources = {
       "msfile.bucket.column.storedAt": "Stored at",
       "msfile.bucket.column.actions": "Actions",
       "msfile.bucket.metaMissing": "Metadata missing",
+      "msfile.bucket.seedMissing": "Seed lost",
       "msfile.bucket.action.preview": "Preview",
       "msfile.bucket.action.download": "Download",
       "msfile.bucket.action.verify": "Verify",
@@ -207,9 +210,13 @@ const resources: I18nPluginResources = {
       "msfile.bucket.notice.downloadTooLarge": "Files over 256 MiB are not read in this browser.",
       "msfile.bucket.notice.previewTooLarge": "Files over 32 MiB are not previewed automatically; download instead.",
       "msfile.bucket.notice.previewUnsupported": "This file type is not previewed automatically; download it instead.",
-      "msfile.bucket.notice.verifyOk": "Verified: the seed, {{blocks}} blocks, and source file size all match.",
-      "msfile.bucket.notice.verifySeedOnly": "Seed file verified; metadata is missing, so blocks were not verified.",
+      "msfile.bucket.notice.verifyOk": "Verified: seed present, all {{blocks}} block files accounted for.",
+      "msfile.bucket.notice.verifySeedOnly": "Verified: seed present, all {{blocks}} block files accounted for (metadata missing).",
+      "msfile.bucket.notice.verifyMissingBlocks": "Incomplete: {{missing}} block file(s) are missing.",
+      "msfile.bucket.notice.verifySeedInvalid": "The seed file is damaged (length is not a multiple of 32).",
+      "msfile.bucket.notice.verifyMetaMismatch": "Metadata does not match the seed.",
       "msfile.bucket.notice.deleteDone": "Entry deleted: seed, metadata, and file blocks.",
+      "msfile.bucket.notice.seedMissing": "The seed file is missing; content cannot be read.",
       "msfile.bucket.error.invalidHash": "Seed Hash must be 64 lower-case hexadecimal characters.",
       "msfile.bucket.error.invalidSource": "The file cannot be read or exceeds this browser's limit.",
       "msfile.bucket.error.sourceChanged": "The source file changed while reading; upload was aborted.",
@@ -354,6 +361,8 @@ const resources: I18nPluginResources = {
       "msfile.home.errors.default": "文件获取失败，请重试。",
       "msfile.bucket.title": "桶存储文件",
       "msfile.bucket.description": "按 MasterSeed 格式存入本桶的种子与文件块；可直接下载、预览、校验或删除。",
+      "msfile.bucket.load": "查看存储文件",
+      "msfile.bucket.openPage": "打开完整页面",
       "msfile.bucket.unavailable": "MSFile 当前不可用，请稍后重试。",
       "msfile.bucket.upload.label": "选择文件并上传",
       "msfile.bucket.upload.cancel": "取消上传",
@@ -373,6 +382,7 @@ const resources: I18nPluginResources = {
       "msfile.bucket.column.storedAt": "存入时间",
       "msfile.bucket.column.actions": "操作",
       "msfile.bucket.metaMissing": "元数据缺失",
+      "msfile.bucket.seedMissing": "种子丢失",
       "msfile.bucket.action.preview": "预览",
       "msfile.bucket.action.download": "下载",
       "msfile.bucket.action.verify": "校验",
@@ -393,9 +403,13 @@ const resources: I18nPluginResources = {
       "msfile.bucket.notice.downloadTooLarge": "文件超过 256 MiB，当前浏览器不会读取。",
       "msfile.bucket.notice.previewTooLarge": "超过 32 MiB 的文件不会自动预览，请下载后查看。",
       "msfile.bucket.notice.previewUnsupported": "该文件类型不会自动预览，请下载后使用。",
-      "msfile.bucket.notice.verifyOk": "校验通过：种子、{{blocks}} 个文件块和源文件大小全部匹配。",
-      "msfile.bucket.notice.verifySeedOnly": "种子文件校验通过；元数据缺失，未校验文件块。",
+      "msfile.bucket.notice.verifyOk": "校验通过：种子存在，{{blocks}} 个块文件齐全。",
+      "msfile.bucket.notice.verifySeedOnly": "校验通过：种子存在，{{blocks}} 个块文件齐全（元数据缺失）。",
+      "msfile.bucket.notice.verifyMissingBlocks": "内容不完整：缺少 {{missing}} 个块文件。",
+      "msfile.bucket.notice.verifySeedInvalid": "种子文件损坏（长度不是 32 的整数倍）。",
+      "msfile.bucket.notice.verifyMetaMismatch": "元数据与种子不一致。",
       "msfile.bucket.notice.deleteDone": "条目已删除：种子、元数据和文件块。",
+      "msfile.bucket.notice.seedMissing": "种子文件已丢失，无法读取内容。",
       "msfile.bucket.error.invalidHash": "Seed Hash 必须是 64 位小写十六进制字符。",
       "msfile.bucket.error.invalidSource": "该文件无法读取或超过浏览器可处理的大小。",
       "msfile.bucket.error.sourceChanged": "读取过程中源文件发生变化，上传已中止。",
@@ -465,7 +479,8 @@ const msfilePluginDefinition = {
     const service = new MsFileServiceProxy(coordinator);
     ctx.provide(MSFILE_SERVICE_CAPABILITY, service);
     // 桶存储服务复用同一 owner 文件根；MasterSeed 算法来自官方 SDK。
-    const bucketService = createMsFileBucketService(ctx.filesFor(""));
+    // 块写入经 Coordinator 直写，避免页面 storage 数据面的端口并发上限。
+    const bucketService = createMsFileBucketService({ store: ctx.filesFor(""), coordinator });
     ctx.provide(MSFILE_BUCKET_SERVICE_CAPABILITY, bucketService);
 
     const resources_ = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
@@ -594,7 +609,8 @@ const msfilePluginDefinition = {
         id: "msfile.bucket-storage",
         space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 },
         order: 20,
-        component: MsFileBucketPage,
+        // 首页入口默认折叠，不读取桶；点开才加载 meta 列表。
+        component: MsFileBucketHomeWidget,
         visibleWhen: ({ unlocked }) => unlocked
       }]
     });

@@ -6,6 +6,7 @@ import type { SessionCoordinatorClient, WindowP2pExecutorLaneRegistry, WindowP2p
 import { CENTRAL_STORAGE_DECLARATIONS, KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, VAULT_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { msfilePlugin, msfileSetup } from "./manifest.js";
+import { MSFILE_BUCKET_SERVICE_CAPABILITY } from "./msfileBucketService.js";
 
 const TEST_OWNER = `02${"11".repeat(32)}`;
 
@@ -85,8 +86,11 @@ describe("msfilePlugin manifest", () => {
 
     expect(host.state("msfile").kind).toBe("enabled");
     expect(host.routes.byId("msfile.home.file")?.path).toBe("/msfile/files");
+    expect(host.routes.byId("msfile.bucket.storage")?.path).toBe("/msfile/storage");
     expect(host.business.listHomeProjections().map((projection) => projection.id)).toContain("msfile.file-fetch");
+    expect(host.business.listHomeProjections().map((projection) => projection.id)).toContain("msfile.bucket-storage");
     expect(host.capabilities.has(MSFILE_SERVICE_CAPABILITY)).toBe(true);
+    expect(host.capabilities.has(MSFILE_BUCKET_SERVICE_CAPABILITY)).toBe(true);
     expect(laneRegistry.register).toHaveBeenCalledWith(expect.objectContaining({ laneId: "msfile" }));
 
     expect(await host.disable("msfile")).toEqual({ ok: false, reason: "Plugin is marked canDisable=false" });

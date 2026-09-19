@@ -5,8 +5,9 @@
 // OwnerFileStore 完成。MasterSeed 算法全部来自 `masterseed` 官方 SDK。
 
 import { defineCapability } from "webloom-framework";
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { MsFileCoordinatorControl, OwnerFileStore } from "@keymaster/contracts";
 import {
+  MsFileSeedStoreError,
   deleteMsFileSeed,
   listMsFileSeeds,
   readMsFileSeed,
@@ -19,6 +20,7 @@ import {
   type MsFileSeedUploadResult,
   type MsFileSeedVerifyResult,
 } from "./storage/msfileSeedStore.js";
+import { toArrayBuffer } from "./sha256.js";
 
 /** 单次上传/读取的浏览器分片大小。 */
 export const MSFILE_BUCKET_READ_CHUNK_BYTES = 1024 * 1024;
@@ -71,22 +73,68 @@ export function createBrowserMsFileSeedSource(file: File): MsFileSeedSource {
   };
 }
 
+export interface MsFileBucketServiceDeps {
+  /** Host 预绑定的 owner 文件根句柄（`<owner>/msfiles/`）。 */
+  store: OwnerFileStore;
+  /** Coordinator 控制面：块写入绕过页面 storage 数据面的端口并发上限。 */
+  coordinator: MsFileCoordinatorControl;
+  now?(): number;
+}
+
 /** 用 Host 预绑定的文件句柄构造服务；句柄生命周期由 Host 拥有。 */
-export function createMsFileBucketService(
-  store: OwnerFileStore,
-  options: { now?(): number } = {},
-): MsFileBucketService {
+export function createMsFileBucketService(deps: MsFileBucketServiceDeps): MsFileBucketService {
+  const { store, coordinator } = deps;
   if (!store || typeof store.put !== "function" || typeof store.list !== "function") {
     throw new Error("MSFile bucket file storage handle is required");
   }
-  const now = options.now;
+  // 生产环境始终提供 msfileControl；旧夹具缺省时退回句柄逐块写入。
+  const canUseWorkerBlocks = typeof coordinator?.msfileControl === "function";
+  const now = deps.now;
   const withSignal = (signal: AbortSignal | undefined): { signal?: AbortSignal } =>
     signal === undefined ? {} : { signal };
+  const putBlock = async (
+    seedHashHex: string,
+    blockHashHex: string,
+    bytes: Uint8Array,
+    signal: AbortSignal | undefined,
+  ): Promise<void> => {
+    if (signal?.aborted) throw new MsFileSeedStoreError("cancelled", "block write was cancelled");
+    // 块字节必须以 ArrayBuffer 过 RPC：Uint8Array 的 DTO 校验是 O(bytes)。
+    const result = await coordinator.msfileControl({ type: "bucket.put-block", seedHashHex, blockHashHex, bytes: toArrayBuffer(bytes) });
+    if (result.status === "ok") return;
+    if (result.status === "locked" || result.status === "stale-epoch") {
+      throw new MsFileSeedStoreError("cancelled", "MSFile session changed during block write");
+    }
+    const message = "message" in result && typeof result.message === "string" ? result.message : "MSFile block write failed";
+    throw new MsFileSeedStoreError("storage", message);
+  };
+  const getBlock = async (
+    seedHashHex: string,
+    blockHashHex: string,
+    signal: AbortSignal | undefined,
+  ): Promise<Uint8Array | undefined> => {
+    if (signal?.aborted) throw new MsFileSeedStoreError("cancelled", "block read was cancelled");
+    const result = await coordinator.msfileControl({ type: "bucket.get-block", seedHashHex, blockHashHex });
+    if (result.status === "ok") {
+      const value = (result as { value?: unknown }).value;
+      if (value instanceof ArrayBuffer) return new Uint8Array(value);
+      throw new MsFileSeedStoreError("storage", "MSFile block read returned an invalid payload");
+    }
+    if (result.status === "locked" || result.status === "stale-epoch") {
+      throw new MsFileSeedStoreError("cancelled", "MSFile session changed during block read");
+    }
+    if ("code" in result && result.code === "msfile_content_not_found") return undefined;
+    const message = "message" in result && typeof result.message === "string" ? result.message : "MSFile block read failed";
+    throw new MsFileSeedStoreError("storage", message);
+  };
   return {
     list: (listOptions = {}) => listMsFileSeeds({ store, ...withSignal(listOptions.signal) }),
     upload: (source, uploadOptions = {}) => storeMsFileSeed({
       store,
       source,
+      ...(canUseWorkerBlocks
+        ? { putBlock: (seedHashHex: string, blockHashHex: string, bytes: Uint8Array, signal: AbortSignal | undefined) => putBlock(seedHashHex, blockHashHex, bytes, signal) }
+        : {}),
       ...withSignal(uploadOptions.signal),
       ...(uploadOptions.onProgress === undefined ? {} : { onProgress: uploadOptions.onProgress }),
       ...(now === undefined ? {} : { now }),
@@ -94,12 +142,18 @@ export function createMsFileBucketService(
     read: (seedHashHex, readOptions = {}) => readMsFileSeed({
       store,
       seedHashHex,
+      ...(canUseWorkerBlocks
+        ? { getBlock: (hash: string, blockHash: string, signal: AbortSignal | undefined) => getBlock(hash, blockHash, signal) }
+        : {}),
       ...withSignal(readOptions.signal),
       ...(readOptions.onProgress === undefined ? {} : { onProgress: readOptions.onProgress }),
     }),
     verify: (seedHashHex, verifyOptions = {}) => verifyMsFileSeed({
       store,
       seedHashHex,
+      ...(canUseWorkerBlocks
+        ? { getBlock: (hash: string, blockHash: string, signal: AbortSignal | undefined) => getBlock(hash, blockHash, signal) }
+        : {}),
       ...withSignal(verifyOptions.signal),
       ...(verifyOptions.onProgress === undefined ? {} : { onProgress: verifyOptions.onProgress }),
     }),

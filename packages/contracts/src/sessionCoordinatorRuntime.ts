@@ -69,6 +69,7 @@ import type {
   MsFileSupplierConfig,
 } from "./msfile.js";
 import {
+  MSFILE_MAX_BLOCK_BYTES,
   isValidMsFileHashHex,
   isValidMsFileSupplierPublicKeyHex,
   normalizeMsFileSatoshiAmount,
@@ -298,6 +299,8 @@ export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult :
   C extends { type: "app-authorizations.list" } ? MsFileAppAuthorizationView[] :
   C extends { type: "approvals.pending" } ? CoordinatorMsFileStateEvent["pendingApprovals"] :
+  C extends { type: "bucket.put-block" } ? null :
+  C extends { type: "bucket.get-block" } ? ArrayBuffer :
   never;
 
 /** 依据 msfile.data 内层 data discriminant 收窄 operationResult。 */
@@ -1280,6 +1283,26 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
     approvalId: text(control.approvalId, "MSFile control.approval.resolve.approvalId", 256),
     decision: parseMsFileApprovalDecision(control.decision),
   };
+  if (type === "bucket.put-block") {
+    const seedHashHex = text(control.seedHashHex, "MSFile control.bucket.put-block.seedHashHex", 64);
+    const blockHashHex = text(control.blockHashHex, "MSFile control.bucket.put-block.blockHashHex", 64);
+    if (!isValidMsFileHashHex(seedHashHex) || !isValidMsFileHashHex(blockHashHex)) {
+      throw new TypeError("Coordinator MSFile control.bucket.put-block hash is invalid");
+    }
+    const bytes = arrayBufferValue(control.bytes, "MSFile control.bucket.put-block.bytes");
+    if (bytes.byteLength < 1 || bytes.byteLength > MSFILE_MAX_BLOCK_BYTES) {
+      throw new TypeError("Coordinator MSFile control.bucket.put-block bytes is invalid");
+    }
+    return { type, seedHashHex, blockHashHex, bytes };
+  }
+  if (type === "bucket.get-block") {
+    const seedHashHex = text(control.seedHashHex, "MSFile control.bucket.get-block.seedHashHex", 64);
+    const blockHashHex = text(control.blockHashHex, "MSFile control.bucket.get-block.blockHashHex", 64);
+    if (!isValidMsFileHashHex(seedHashHex) || !isValidMsFileHashHex(blockHashHex)) {
+      throw new TypeError("Coordinator MSFile control.bucket.get-block hash is invalid");
+    }
+    return { type, seedHashHex, blockHashHex };
+  }
   throw new TypeError("Coordinator MSFile control " + type + " is unsupported");
 }
 
@@ -1594,7 +1617,11 @@ export function coordinatorClientRequestFromRpc<K extends CoordinatorRpcCommandR
  */
 export interface CoordinatorLocalStorageObject {
   path: string;
-  bytes: Uint8Array;
+  /**
+   * 字节必须用 `ArrayBuffer`：RPC DTO 校验对 TypedArray 是 O(bytes)，
+   * 逐元素检查会让 256 KiB 块和普通文件 I/O 都付出数百毫秒级开销。
+   */
+  bytes: ArrayBuffer;
   size?: number;
   etag?: string;
   lastModified?: string;
@@ -1604,7 +1631,7 @@ export type CoordinatorLocalStorageRequest =
   // 对象 I/O：页面桥只按当前 lease 的桶与世代读写 Local 命名空间。
   | (CoordinatorSessionBinding & { type: "get"; bucketId: string; bucketGeneration: number; path: string; ifMatch?: string; objectPrefix?: string })
   | (CoordinatorSessionBinding & { type: "list"; bucketId: string; bucketGeneration: number; prefix?: string; cursor?: string; limit?: number; objectPrefix?: string })
-  | (CoordinatorSessionBinding & { type: "put"; bucketId: string; bucketGeneration: number; path: string; bytes: Uint8Array; condition?: StorageBucketWriteCondition; objectPrefix?: string })
+  | (CoordinatorSessionBinding & { type: "put"; bucketId: string; bucketGeneration: number; path: string; bytes: ArrayBuffer; condition?: StorageBucketWriteCondition; objectPrefix?: string })
   | (CoordinatorSessionBinding & { type: "delete"; bucketId: string; bucketGeneration: number; path: string; ifMatch?: string; objectPrefix?: string })
   /** 设备桶记录（keymaster.device.<ID>）的读/写/删/枚举。 */
   | (CoordinatorSessionBinding & { type: "device-record-list" })
@@ -2656,6 +2683,11 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "settings.get": return parseMsFileSettingsSnapshot(value, field);
     case "settings.readConcurrency.get": return parseMsFileReadConcurrency(value);
     case "settings.mediaBlockReadConcurrency.get": return boundedNumber(value, field, 1, 16);
+    case "bucket.get-block": {
+      const bytes = arrayBufferValue(value, field);
+      if (bytes.byteLength < 1 || bytes.byteLength > MSFILE_MAX_BLOCK_BYTES) throw new TypeError(`Coordinator ${field} is invalid`);
+      return bytes;
+    }
     case "supplier.probe": return parseMsFileSupplierProbeResult(value, field);
     case "app-authorizations.list": {
       if (!Array.isArray(value)) throw new TypeError(`Coordinator ${field} must be an array`);
@@ -2674,6 +2706,7 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "app-policy.update":
     case "app-policy.clear":
     case "approval.resolve":
+    case "bucket.put-block":
       if (value !== null) throw new TypeError(`Coordinator ${field} must be null`);
       return null;
   }
@@ -3540,9 +3573,8 @@ function optionalLocalStorageBoolean(value: unknown, field: string): boolean | u
   return value;
 }
 
-function localStorageBytes(value: unknown, field: string): Uint8Array {
-  if (!(value instanceof Uint8Array)) throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  return value.slice();
+function localStorageBytes(value: unknown, field: string): ArrayBuffer {
+  return arrayBufferValue(value, `local-storage ${field}`);
 }
 
 const LOCAL_SETUP_PHASES = ["validate", "stage", "hold", "catalog-commit", "runtime", "rollback", "complete"] as const;

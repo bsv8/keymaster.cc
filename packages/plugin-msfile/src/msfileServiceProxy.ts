@@ -61,6 +61,25 @@ function cloneStatResult(value: MsFileStatResult): MsFileStatResult {
   };
 }
 
+/**
+ * 状态事件等价比较（含审批列表内容）。
+ *
+ * 页面资源（如 `msfile.status`）订阅代理并在通知时失效回读；如果代理对
+ * 每个 topic 事件都无条件通知，冗余事件会变成“通知→回读→再广播”的
+ * 死循环。只有内容变化才算一次新状态。
+ */
+function isSameStateEvent(a: StateEvent, b: StateEvent): boolean {
+  return a.sessionEpoch === b.sessionEpoch
+    && a.status === b.status
+    && a.supplierGeneration === b.supplierGeneration
+    && a.mediaBlockReadConcurrency === b.mediaBlockReadConcurrency
+    && a.globalSeedReadConcurrency === b.globalSeedReadConcurrency
+    && a.globalBlockReadConcurrency === b.globalBlockReadConcurrency
+    && a.globalStatConcurrency === b.globalStatConcurrency
+    && JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings)
+    && JSON.stringify(a.pendingApprovals) === JSON.stringify(b.pendingApprovals);
+}
+
 function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
   if (result.status === "ok") return Promise.resolve(result.value as T);
   if (result.status === "transport-error") {
@@ -99,8 +118,13 @@ export class MsFileServiceProxy implements MsFileService {
       // 兼容旧 Worker 的 baseline：四项并发设置必须以完整快照进入页面。
       const concurrency = normalizeMsFileReadConcurrencySettings(event)
         ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
-      this.current = { ...event, ...concurrency };
-      for (const listener of this.listeners) listener();
+      const next: StateEvent = { ...event, ...concurrency };
+      const changed = !isSameStateEvent(this.current, next);
+      this.current = next;
+      // 变更驱动：内容相同的重复事件不得让资源订阅者失效回读。
+      if (changed) {
+        for (const listener of this.listeners) listener();
+      }
     });
   }
 
@@ -143,7 +167,7 @@ export class MsFileServiceProxy implements MsFileService {
       globalBlockReadConcurrency: snapshot.globalBlockReadConcurrency,
       globalStatConcurrency: snapshot.globalStatConcurrency,
     };
-    const changed = JSON.stringify(this.current) !== JSON.stringify(next);
+    const changed = !isSameStateEvent(this.current, next);
     this.current = next;
     if (changed) {
       for (const listener of this.listeners) listener();

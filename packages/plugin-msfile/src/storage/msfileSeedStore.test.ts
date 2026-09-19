@@ -130,6 +130,8 @@ describe("MSFile bucket seed storage", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!.seedHashHex).toBe(ABC_SEED_HASH);
     expect(entries[0]!.meta?.fileName).toBe("abc.txt");
+    // 列表不做任何存在性检查，缺失留给读取时懒检测。
+    expect(entries[0]!.seedPresent).toBeUndefined();
 
     const read = await readMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
     expect(read.meta.fileSizeBytes).toBe("3");
@@ -137,7 +139,15 @@ describe("MSFile bucket seed storage", () => {
     expect(new TextDecoder().decode(read.parts[0]!)).toBe("abc");
 
     const verified = await verifyMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
-    expect(verified).toEqual({ metaAvailable: true, blockCount: "1", verifiedBlocks: 1 });
+    expect(verified).toEqual({
+      metaAvailable: true,
+      seedPresent: true,
+      seedValid: true,
+      metaConsistent: true,
+      blockCount: "1",
+      missingBlocks: 0,
+      complete: true,
+    });
   });
 
   it("keeps empty files legal", async () => {
@@ -163,6 +173,53 @@ describe("MSFile bucket seed storage", () => {
     expect(new Uint8Array(read.parts[2]!).every((byte) => byte === 0x61)).toBe(true);
   });
 
+  it("verifies by presence and structure only, without hashing content", async () => {
+    const store = createInMemoryOwnerFileStore();
+    await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
+
+    // 块内容被替换为错误字节：存在性校验仍通过，下载路径才会报完整性错误。
+    store.objects.set(`storage/${ABC_SEED_HASH}/${ABC_BLOCK_HASH}`, new TextEncoder().encode("abd"));
+    const verified = await verifyMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
+    expect(verified).toMatchObject({ seedPresent: true, seedValid: true, missingBlocks: 0, complete: true });
+    await expect(readMsFileSeed({ store, seedHashHex: ABC_SEED_HASH })).rejects.toMatchObject({ code: "integrity" });
+
+    // 缺少块文件：校验报完整性缺口。
+    store.objects.delete(`storage/${ABC_SEED_HASH}/${ABC_BLOCK_HASH}`);
+    const missing = await verifyMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
+    expect(missing).toMatchObject({ missingBlocks: 1, complete: false });
+
+    // 种子缺失：只返回状态，不抛错。
+    store.objects.delete(`seeds/${ABC_SEED_HASH}.ms`);
+    const seedLost = await verifyMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
+    expect(seedLost).toMatchObject({ seedPresent: false, complete: false });
+
+    // 元数据与种子不一致：metaConsistent = false。
+    store.objects.set(`seeds/${ABC_SEED_HASH}.ms`, ABC_BYTES.slice(0, 0)); // 0 字节种子仍然结构合法
+    store.objects.set(`meta/${ABC_SEED_HASH}.json`, serializeMsFileSeedMeta(sampleMeta()));
+    const mismatched = await verifyMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
+    expect(mismatched).toMatchObject({ seedValid: true, metaConsistent: false, complete: false });
+  });
+
+  it("lists from meta only and leaves seed presence to lazy checks", async () => {
+    const store = createInMemoryOwnerFileStore();
+    await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
+
+    // 只有种子、没有 meta：不进入列表。
+    store.objects.delete(`meta/${ABC_SEED_HASH}.json`);
+    expect(await listMsFileSeeds({ store })).toEqual([]);
+
+    // 恢复 meta、删掉种子：条目仍在列表里，但列表不检查种子存在性。
+    store.objects.set(`meta/${ABC_SEED_HASH}.json`, serializeMsFileSeedMeta(sampleMeta()));
+    store.objects.delete(`seeds/${ABC_SEED_HASH}.ms`);
+    const entries = await listMsFileSeeds({ store });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ seedHashHex: ABC_SEED_HASH, meta: { fileName: "abc.txt" } });
+    expect(entries[0]!.seedPresent).toBeUndefined();
+
+    // 懒检测发生在真正读取时。
+    await expect(readMsFileSeed({ store, seedHashHex: ABC_SEED_HASH })).rejects.toMatchObject({ code: "missing-seed" });
+  });
+
   it("drops damaged metadata from the list and rejects damaged blocks on read", async () => {
     const store = createInMemoryOwnerFileStore();
     await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
@@ -176,6 +233,64 @@ describe("MSFile bucket seed storage", () => {
     await expect(readMsFileSeed({ store, seedHashHex: ABC_SEED_HASH })).rejects.toMatchObject({ code: "integrity" });
   });
 
+  it("routes block writes through the Coordinator putBlock channel", async () => {
+    const store = createInMemoryOwnerFileStore();
+    const calls: Array<{ seedHashHex: string; blockHashHex: string; bytes: Uint8Array }> = [];
+    const result = await storeMsFileSeed({
+      store,
+      source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }),
+      putBlock: async (seedHashHex, blockHashHex, bytes) => {
+        calls.push({ seedHashHex, blockHashHex, bytes: bytes.slice() });
+      },
+    });
+    expect(result.entry.seedHashHex).toBe(ABC_SEED_HASH);
+    expect(calls).toEqual([{
+      seedHashHex: ABC_SEED_HASH,
+      blockHashHex: ABC_BLOCK_HASH,
+      bytes: ABC_BYTES.slice(),
+    }]);
+    expect(store.objects.has(`storage/${ABC_SEED_HASH}/${ABC_BLOCK_HASH}`)).toBe(false);
+    expect(store.objects.has(`seeds/${ABC_SEED_HASH}.ms`)).toBe(true);
+    expect(store.objects.has(`meta/${ABC_SEED_HASH}.json`)).toBe(true);
+  });
+
+  it("reads blocks through the Coordinator getBlock channel", async () => {
+    const store = createInMemoryOwnerFileStore();
+    await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
+    // 删除句柄中的块，证明内容来自 getBlock 通道而不是文件根。
+    store.objects.delete(`storage/${ABC_SEED_HASH}/${ABC_BLOCK_HASH}`);
+    const requested: string[] = [];
+    const read = await readMsFileSeed({
+      store,
+      seedHashHex: ABC_SEED_HASH,
+      getBlock: async (_seedHashHex, blockHashHex) => {
+        requested.push(blockHashHex);
+        return ABC_BYTES.slice();
+      },
+    });
+    expect(requested).toEqual([ABC_BLOCK_HASH]);
+    expect(new TextDecoder().decode(read.parts[0]!)).toBe("abc");
+  });
+
+  it("reports missing blocks from the getBlock channel with the stable code", async () => {
+    const store = createInMemoryOwnerFileStore();
+    await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
+    await expect(readMsFileSeed({
+      store,
+      seedHashHex: ABC_SEED_HASH,
+      getBlock: async () => undefined,
+    })).rejects.toMatchObject({ code: "missing-block" });
+  });
+
+  it("maps putBlock failures to the storage code", async () => {
+    const store = createInMemoryOwnerFileStore();
+    await expect(storeMsFileSeed({
+      store,
+      source: createMemorySource(ABC_BYTES),
+      putBlock: async () => { throw new Error("provider down"); },
+    })).rejects.toMatchObject({ code: "storage" });
+  });
+
   it("fails closed when a block is missing and reports the stable code", async () => {
     const store = createInMemoryOwnerFileStore();
     await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
@@ -186,6 +301,24 @@ describe("MSFile bucket seed storage", () => {
   it("deletes seed, metadata and blocks in order", async () => {
     const store = createInMemoryOwnerFileStore();
     await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
+    await deleteMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
+    expect(store.objects.size).toBe(0);
+  });
+
+  it("deletes blocks by seed digests (including duplicates) without listing", async () => {
+    const store = createInMemoryOwnerFileStore();
+    const bytes = new Uint8Array(BLOCK_SIZE * 2 + 100);
+    bytes.fill(0x61, BLOCK_SIZE * 2);
+    const result = await storeMsFileSeed({ store, source: createMemorySource(bytes, { name: "repeat.bin" }) });
+    expect([...store.objects.keys()].filter((path) => path.startsWith("storage/"))).toHaveLength(2);
+    await deleteMsFileSeed({ store, seedHashHex: result.entry.seedHashHex });
+    expect(store.objects.size).toBe(0);
+  });
+
+  it("falls back to prefix listing when the seed file is missing", async () => {
+    const store = createInMemoryOwnerFileStore();
+    await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
+    store.objects.delete(`seeds/${ABC_SEED_HASH}.ms`);
     await deleteMsFileSeed({ store, seedHashHex: ABC_SEED_HASH });
     expect(store.objects.size).toBe(0);
   });

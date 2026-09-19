@@ -234,7 +234,18 @@ export type CoordinatorMsFileControl =
   | { type: "app-policy.clear"; key: MsFileAppIdentityKey }
   | { type: "app-authorizations.list" }
   | { type: "approvals.pending" }
-  | { type: "approval.resolve"; approvalId: string; decision: MsFileApprovalDecision };
+  | { type: "approval.resolve"; approvalId: string; decision: MsFileApprovalDecision }
+  /**
+   * 桶内文件块写入：页面只有 owner 文件句柄，但页面 storage 数据面
+   * 每个端口只允许少量并发；批量上传直接由 Coordinator 写入，避免
+   * 每个 256 KiB 块都排队等待页面存储槽位。
+   *
+   * 字节必须用 `ArrayBuffer` 而不是 `Uint8Array`：RPC DTO 校验会逐元素
+   * 检查 TypedArray（O(bytes)），256 KiB 块会让每个请求耗时数百毫秒。
+   */
+  | { type: "bucket.put-block"; seedHashHex: string; blockHashHex: string; bytes: ArrayBuffer }
+  /** 桶内文件块读取：下载/预览的块也由 Coordinator 直读，避免端口并发上限。 */
+  | { type: "bucket.get-block"; seedHashHex: string; blockHashHex: string };
 
 /**
  * MSFile 数据面。grantId 缺失表示受信任内部插件调用（只使用全局额度）；
