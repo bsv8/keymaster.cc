@@ -1,18 +1,32 @@
 // packages/plugin-bsv-price/src/BsvPriceSettingsPage.test.tsx
-// 设置页交互测试：保存、清空、校验错误提示。
+// 设置页交互测试：服务器管理、激活选项、恢复原始设置与校验错误。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";
 import { useSyncExternalStore } from "react";
+import { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";
+import type { PriceValue } from "@keymaster/contracts";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
+import { createDefaultBsvPriceConfig, deriveUnitFromPair } from "./bsvPriceSettings.js";
+import type { BsvPriceGlobalConfig } from "./bsvPriceSettings.js";
 
 interface ActiveTestService {
   service: BsvPriceService;
 }
 
+const DEFAULT_KEY = "03c95123471587fbb4690fe85e748b39bd09d97a7c92ebe539530d454b2b8ef53a";
+const PUBLISHER_A = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const PUBLISHER_B = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+
 const activeTestService: ActiveTestService = {
   service: undefined as unknown as BsvPriceService
+};
+
+/** 只翻译本测试断言的校验错误键；其余走 defaultValue。 */
+const ERROR_TEXT: Record<string, string> = {
+  "bsv-price.settings.error.invalid_length": "输入过长",
+  "bsv-price.settings.error.invalid_empty": "该字段必填",
+  "bsv-price.settings.error.server_exists": "该公钥的服务器已存在"
 };
 
 vi.mock("@keymaster/runtime", async () => {
@@ -21,9 +35,10 @@ vi.mock("@keymaster/runtime", async () => {
   return {
     ...actual,
     usePluginHost: () => ({ resourceStore: {} }),
+    useLocale: () => "zh-CN",
     useI18n: () => ({
-      t: (_key: string, opts?: { defaultValue?: string }) =>
-        opts?.defaultValue ?? _key,
+      t: (key: string, opts?: { defaultValue?: string }) =>
+        ERROR_TEXT[key] ?? opts?.defaultValue ?? key,
       text: (input: unknown) =>
         typeof input === "string"
           ? input
@@ -37,9 +52,7 @@ vi.mock("@keymaster/runtime", async () => {
 });
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: <T,>(_key: string): T =>
-    activeTestService.service as unknown as T,
-  useOptionalCapability: <T,>(_key: { id: string }): T | undefined =>
+  useOptionalCapability: <T,>(): T | undefined =>
     activeTestService.service as unknown as T,
   useResource: () => {
     const service = activeTestService.service;
@@ -48,50 +61,88 @@ vi.mock("webloom-framework/react", () => ({
   }
 }));
 
-function makeSnapshot(partial: Partial<BsvPriceServiceSnapshot>): BsvPriceServiceSnapshot {
+function makeSnapshot(config: BsvPriceGlobalConfig, partial: Partial<BsvPriceServiceSnapshot> = {}): BsvPriceServiceSnapshot {
+  const server = config.servers.find(
+    (item) => item.publisherPublicKeyHex === config.active.publisherPublicKeyHex
+  );
   return {
-    channelId: "(not configured)",
-    coreState: "bound",
-    status: "not_configured",
+    channelId: server ? `bsvprice.${server.publisherPublicKeyHex}` : "(not configured)",
+    coreState: "ready",
+    status: "waiting_snapshot",
     snapshot: null,
     lastError: null,
     subscriptionErrorCode: null,
     subscriptionErrorMessage: null,
-    configured: false,
+    configured: server !== undefined,
+    servers: config.servers.map((item) => ({ ...item })),
+    active: { ...config.active },
+    price: { amount: "0.00", unit: deriveUnitFromPair(config.active.pair), updatedAtMs: 0 },
     ...partial
   };
 }
 
-function makeFakeService(): BsvPriceService {
-  let currentHex = "";
-  let currentSnap = makeSnapshot({ status: "not_configured" });
-  const subs = new Set<() => void>();
+function makeFakeService(initial: BsvPriceGlobalConfig): BsvPriceService {
+  let config: BsvPriceGlobalConfig = {
+    servers: initial.servers.map((server) => ({ ...server })),
+    active: { ...initial.active },
+    savedAtMs: initial.savedAtMs
+  };
+  let snap = makeSnapshot(config);
+  const subs = new Set<(price: PriceValue) => void>();
+  const emit = () => {
+    snap = makeSnapshot(config);
+    for (const handler of subs) handler(snap.price);
+  };
   return {
-    snapshot: () => currentSnap,
+    snapshot: () => snap,
+    get: () => snap.price,
     subscribe: (handler) => {
       subs.add(handler);
       return () => {
         subs.delete(handler);
       };
     },
-    currentMarkets: () => ({}),
-    getPublisherPublicKeyHex: () => currentHex,
-    configured: () => currentHex.length > 0,
-    savePublisherPublicKeyHex: async (input) => {
-      const next = input.trim().toLowerCase();
-      if (next.length > 0 && next.length !== 66) {
-        throw new Error("invalid_length");
+    getConfig: () => config,
+    async addServer(input) {
+      const name = input.name.trim();
+      if (name.length === 0) throw new Error("invalid_empty");
+      const key = input.publisherPublicKeyHex.trim().toLowerCase();
+      if (key.length !== 66) throw new Error("invalid_length");
+      if (config.servers.some((server) => server.publisherPublicKeyHex === key)) {
+        throw new Error("server_exists");
       }
-      if (next.length > 0 && !next.startsWith("02") && !next.startsWith("03")) {
-        throw new Error("invalid_prefix");
+      config = {
+        servers: [...config.servers, { name, publisherPublicKeyHex: key }],
+        active: { ...config.active },
+        savedAtMs: config.savedAtMs + 1
+      };
+      emit();
+      return config;
+    },
+    async removeServer(key) {
+      if (key === "03c95123471587fbb4690fe85e748b39bd09d97a7c92ebe539530d454b2b8ef53a") {
+        throw new Error("default_server_required");
       }
-      currentHex = next;
-      currentSnap = makeSnapshot({
-        channelId: next.length > 0 ? `bsvprice.${next}` : "(not configured)",
-        status: next.length > 0 ? "sat_connecting" : "not_configured",
-        configured: next.length > 0
-      });
-      for (const handler of subs) handler();
+      config = {
+        servers: config.servers.filter((server) => server.publisherPublicKeyHex !== key),
+        active: { ...config.active },
+        savedAtMs: config.savedAtMs + 1
+      };
+      emit();
+      return config;
+    },
+    async setActiveOption(input) {
+      if (!config.servers.some((server) => server.publisherPublicKeyHex === input.publisherPublicKeyHex)) {
+        throw new Error("server_not_found");
+      }
+      config = { servers: config.servers, active: { ...input }, savedAtMs: config.savedAtMs + 1 };
+      emit();
+      return config;
+    },
+    async restoreOriginalSettings() {
+      config = createDefaultBsvPriceConfig(PUBLISHER_A);
+      emit();
+      return config;
     },
     dispose: () => undefined
   };
@@ -102,53 +153,106 @@ afterEach(() => {
 });
 
 describe("BsvPriceSettingsPage", () => {
-  it("renders and saves the normalized publisher key", async () => {
-    activeTestService.service = makeFakeService();
+  it("lists servers and applies the active option", async () => {
+    activeTestService.service = makeFakeService({
+      servers: [{ name: "bsv8", publisherPublicKeyHex: DEFAULT_KEY }],
+      active: { publisherPublicKeyHex: DEFAULT_KEY, market: "gate", pair: "bsvusdt" },
+      savedAtMs: 0
+    });
     render(<BsvPriceSettingsPage />);
 
-    const input = screen.getByDisplayValue("") as HTMLInputElement;
-    fireEvent.change(input, {
-      target: {
-        value: " 0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798 "
-      }
-    });
-    fireEvent.click(screen.getByRole("button", { name: /保存/ }));
+    expect(screen.getByText("默认")).toBeTruthy();
+    expect(screen.getAllByText("bsv8").length).toBeGreaterThan(0);
+    expect(screen.getByText("USDT")).toBeTruthy();
 
+    fireEvent.click(screen.getByRole("button", { name: "应用选项" }));
     await waitFor(() => {
-      expect(screen.getByText("已保存")).toBeTruthy();
+      expect(screen.getByText("已保存激活选项")).toBeTruthy();
     });
-    expect(screen.getByDisplayValue(
-      "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    )).toBeTruthy();
-    expect(screen.getByText(
-      "bsvprice.0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    )).toBeTruthy();
   });
 
-  it("saving empty string clears the channel preview", async () => {
-    activeTestService.service = makeFakeService();
+  it("adds a server with a name and public key", async () => {
+    activeTestService.service = makeFakeService({
+      servers: [{ name: "bsv8", publisherPublicKeyHex: DEFAULT_KEY }],
+      active: { publisherPublicKeyHex: DEFAULT_KEY, market: "gate", pair: "bsvusdt" },
+      savedAtMs: 0
+    });
     render(<BsvPriceSettingsPage />);
 
-    const input = screen.getByDisplayValue("") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "   " } });
-    fireEvent.click(screen.getByRole("button", { name: /保存/ }));
+    fireEvent.change(document.querySelector("[data-bsv-price-server-name]") as HTMLInputElement, {
+      target: { value: "alt" }
+    });
+    fireEvent.change(document.querySelector("[data-bsv-price-server-key]") as HTMLInputElement, {
+      target: { value: PUBLISHER_B.toUpperCase() }
+    });
+    fireEvent.click(document.querySelector("[data-bsv-price-server-add]") as HTMLElement);
 
     await waitFor(() => {
-      expect(screen.getByText("已清空配置")).toBeTruthy();
+      expect(screen.getByText("已添加服务器")).toBeTruthy();
     });
-    expect(screen.getByText("(not configured)")).toBeTruthy();
+    expect(screen.getAllByText("alt").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("bsv8").length).toBeGreaterThan(0);
   });
 
-  it("invalid input shows validation error", async () => {
-    activeTestService.service = makeFakeService();
+  it("maps validation failures to readable messages", async () => {
+    activeTestService.service = makeFakeService({
+      servers: [{ name: "bsv8", publisherPublicKeyHex: DEFAULT_KEY }],
+      active: { publisherPublicKeyHex: DEFAULT_KEY, market: "gate", pair: "bsvusdt" },
+      savedAtMs: 0
+    });
     render(<BsvPriceSettingsPage />);
 
-    const input = screen.getByDisplayValue("") as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "bad" } });
-    fireEvent.click(screen.getByRole("button", { name: /保存/ }));
+    fireEvent.change(document.querySelector("[data-bsv-price-server-name]") as HTMLInputElement, {
+      target: { value: "alt" }
+    });
+    fireEvent.change(document.querySelector("[data-bsv-price-server-key]") as HTMLInputElement, {
+      target: { value: "bad" }
+    });
+    fireEvent.click(document.querySelector("[data-bsv-price-server-add]") as HTMLElement);
 
     await waitFor(() => {
-      expect(screen.getByText("公钥必须是 66 位压缩 hex")).toBeTruthy();
+      expect(screen.getByText("输入过长")).toBeTruthy();
     });
+  });
+
+  it("restores the original settings", async () => {
+    activeTestService.service = makeFakeService({
+      servers: [
+        { name: "bsv8", publisherPublicKeyHex: PUBLISHER_A },
+        { name: "alt", publisherPublicKeyHex: PUBLISHER_B }
+      ],
+      active: { publisherPublicKeyHex: PUBLISHER_B, market: "okx", pair: "bsvusdt" },
+      savedAtMs: 0
+    });
+    render(<BsvPriceSettingsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复原始设置" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("已恢复原始设置")).toBeTruthy();
+    });
+    expect(screen.queryByText("alt")).toBeNull();
+  });
+
+  it("hides the delete action for the default server only", async () => {
+    activeTestService.service = makeFakeService({
+      servers: [
+        { name: "bsv8", publisherPublicKeyHex: DEFAULT_KEY },
+        { name: "alt", publisherPublicKeyHex: PUBLISHER_B }
+      ],
+      active: { publisherPublicKeyHex: DEFAULT_KEY, market: "gate", pair: "bsvusdt" },
+      savedAtMs: 0
+    });
+    render(<BsvPriceSettingsPage />);
+
+    const rows = Array.from(document.querySelectorAll("[data-bsv-price-server]"));
+    expect(rows).toHaveLength(2);
+    const deleteButtons = document.querySelectorAll("[data-bsv-price-server-delete]");
+    // 缺省 bsv8 服务器不提供删除操作，用户添加的服务器才有。
+    expect(deleteButtons).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("bsv8");
+    expect(rows[0]?.querySelector("[data-bsv-price-server-delete]")).toBeNull();
+    expect(rows[1]?.textContent).toContain("alt");
+    expect(rows[1]?.querySelector("[data-bsv-price-server-delete]")).not.toBeNull();
   });
 });

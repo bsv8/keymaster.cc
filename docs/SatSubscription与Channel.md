@@ -30,6 +30,16 @@ SatSubscription 管理多个 SSP Supplier（订阅服务供应商）、SPI 资�
 联系人在线状态使用 `bsv8.ping.v1` 的 Ping/Pong。它表达最近一次可达性，不是永久在线保证，
 也不提供远端历史查询。
 
+## BSV 价格展示
+
+Keymaster 与 Connect App 通过 `price.get`（一次）和 `price.changed`（先
+`price.subscribe`）读取 BSV 展示价：只有金额 + 单位，不暴露发布服务器、频道或交易对。
+设置里可以登记多个 PriceCast 发布服务器，但只订阅当前激活服务器的频道；交易对选项来自
+已收到的行情列表，缺省为生产公钥 + `gate/bsvusdt`。
+
+价格只用于和 sats 相乘做参考显示，不进入业务判断。mainnet 使用实时价，testnet 固定显示
+0；未配置、未收到快照或订阅出错时显示 `0.00`，错误详情只在 BSV Price 页面呈现。
+
 ## SPI 资金
 
 - SPI Information 返回货币、网络、充值地址和余额；金额使用 `bigint`，不能用 JS `number`。

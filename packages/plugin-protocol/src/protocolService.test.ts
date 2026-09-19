@@ -25,7 +25,9 @@ import {
   type ProtocolMethod,
   type ProtocolOriginSettingsRecord,
   type ProtocolResultMessage,
-  type ProtocolStorageRepository
+  type ProtocolStorageRepository,
+  type BsvPriceReader,
+  type PriceValue
 } from "@keymaster/contracts";
 import { ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
 import type { ResolvedClaimValue } from "@keymaster/contracts";
@@ -8503,5 +8505,170 @@ describe("ProtocolServiceImpl signDigest format mismatch rejection", () => {
     // compact 字节是 64 字节，应通过
     const result = await signCompactSecp256k1(async () => compactSig, new Uint8Array(32).fill(0xcd));
     expect(result.length).toBe(64);
+  });
+});
+
+
+/* ============== price.*（BSV 价格展示：get / subscribe / changed） ============== */
+
+class FakePriceReader implements BsvPriceReader {
+  private current: PriceValue = { amount: "45.12", unit: "USDT", updatedAtMs: 111 };
+  private readonly handlers = new Set<(price: PriceValue) => void>();
+  get(): PriceValue {
+    return { ...this.current };
+  }
+  subscribe(handler: (price: PriceValue) => void): () => void {
+    this.handlers.add(handler);
+    return () => this.handlers.delete(handler);
+  }
+  set(value: PriceValue): void {
+    this.current = { ...value };
+    for (const handler of this.handlers) handler({ ...value });
+  }
+}
+
+function priceRequest(
+  id: string,
+  method: "price.get" | "price.subscribe" | "price.unsubscribe",
+  connectSessionId: string
+) {
+  return {
+    v: PROTOCOL_VERSION,
+    type: "request" as const,
+    id,
+    method,
+    params: { connectSessionId }
+  };
+}
+
+function priceChangedEvents(opener: FakeWindow): PriceValue[] {
+  return opener.messages
+    .map((entry) => entry.msg as { type?: string; event?: string; data?: PriceValue })
+    .filter((message) => message.type === "event" && message.event === "price.changed")
+    .map((message) => message.data as PriceValue);
+}
+
+async function loginPriceSession(harness: ServiceHarness): Promise<string> {
+  await harness.service.handleMessage(makeEvent({
+    v: PROTOCOL_VERSION,
+    type: "request",
+    id: "login-price",
+    method: "connect.login",
+    params: { text: "login" }
+  }, ORIGIN, harness.opener));
+  const view = harness.service.connectLoginRecord();
+  expect(view).not.toBeNull();
+  await harness.service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const result = harness.getResult();
+  expect(result?.ok).toBe(true);
+  if (!result || !result.ok) throw new Error("price login failed");
+  return (result.result as { connectSessionId: string }).connectSessionId;
+}
+
+describe("ProtocolServiceImpl price.*", () => {
+  it("price.get returns the current display price for a session without an app identity", async () => {
+    const reader = new FakePriceReader();
+    const repository = makeFakeMultipartUploadRepository();
+    await seedConnectSession(repository, "sess-price", TEST_PUB_HEX);
+    const harness = makeService(TEST_PUB_HEX, repository, {
+      priceReader: reader,
+      getPriceReader: () => reader
+    });
+    harness.service.startSession();
+    await harness.service.handleMessage(makeEvent(priceRequest("price-get", "price.get", "sess-price"), ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const result = harness.getResult();
+    expect(result).toMatchObject({ ok: true, result: { amount: "45.12", unit: "USDT", updatedAtMs: 111 } });
+  });
+
+  it("price.get returns zero when the price capability is missing", async () => {
+    const repository = makeFakeMultipartUploadRepository();
+    await seedConnectSession(repository, "sess-price-zero", TEST_PUB_HEX);
+    const harness = makeService(TEST_PUB_HEX, repository, {});
+    harness.service.startSession();
+    await harness.service.handleMessage(makeEvent(priceRequest("price-get-zero", "price.get", "sess-price-zero"), ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const result = harness.getResult();
+    expect(result).toMatchObject({ ok: true, result: { amount: "0.00", unit: "USDT", updatedAtMs: 0 } });
+  });
+
+  it("pushes price.changed only to sessions that subscribed and dedupes equal values", async () => {
+    const reader = new FakePriceReader();
+    const repository = makeFakeMultipartUploadRepository();
+    const harness = makeService(TEST_PUB_HEX, repository, {
+      priceReader: reader,
+      getPriceReader: () => reader
+    });
+    harness.service.startSession();
+    const sessionId = await loginPriceSession(harness);
+
+    await harness.service.handleMessage(makeEvent(priceRequest("price-sub", "price.subscribe", sessionId), ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(harness.getResult()).toMatchObject({ ok: true, result: { subscribed: true } });
+
+    reader.set({ amount: "46.00", unit: "USDT", updatedAtMs: 222 });
+    expect(priceChangedEvents(harness.opener)).toEqual([
+      { amount: "46.00", unit: "USDT", updatedAtMs: 222 }
+    ]);
+    // 相同值重复推送被去重。
+    reader.set({ amount: "46.00", unit: "USDT", updatedAtMs: 222 });
+    expect(priceChangedEvents(harness.opener)).toHaveLength(1);
+
+    await harness.service.handleMessage(makeEvent(priceRequest("price-unsub", "price.unsubscribe", sessionId), ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(harness.getResult()).toMatchObject({ ok: true, result: { subscribed: false } });
+    reader.set({ amount: "47.00", unit: "USDT", updatedAtMs: 333 });
+    expect(priceChangedEvents(harness.opener)).toHaveLength(1);
+  });
+
+  it("stops pushing after connect.logout releases the price subscription", async () => {
+    const reader = new FakePriceReader();
+    const repository = makeFakeMultipartUploadRepository();
+    const harness = makeService(TEST_PUB_HEX, repository, {
+      priceReader: reader,
+      getPriceReader: () => reader
+    });
+    harness.service.startSession();
+    const sessionId = await loginPriceSession(harness);
+    await harness.service.handleMessage(makeEvent(priceRequest("price-sub", "price.subscribe", sessionId), ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    reader.set({ amount: "46.00", unit: "USDT", updatedAtMs: 222 });
+    expect(priceChangedEvents(harness.opener)).toHaveLength(1);
+
+    await harness.service.handleMessage(makeEvent({
+      v: PROTOCOL_VERSION,
+      type: "request",
+      id: "logout-price",
+      method: "connect.logout",
+      params: { connectSessionId: sessionId }
+    }, ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(harness.getResult()).toMatchObject({ ok: true });
+
+    reader.set({ amount: "47.00", unit: "USDT", updatedAtMs: 333 });
+    expect(priceChangedEvents(harness.opener)).toHaveLength(1);
+  });
+
+  it("resubscribes to a replacement price capability instance", async () => {
+    const first = new FakePriceReader();
+    const second = new FakePriceReader();
+    second.set({ amount: "88.00", unit: "CNY", updatedAtMs: 888 });
+    let current: BsvPriceReader = first;
+    const repository = makeFakeMultipartUploadRepository();
+    const harness = makeService(TEST_PUB_HEX, repository, {
+      getPriceReader: () => current
+    });
+    harness.service.startSession();
+    const sessionId = await loginPriceSession(harness);
+    await harness.service.handleMessage(makeEvent(priceRequest("price-sub", "price.subscribe", sessionId), ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    current = second;
+    await harness.service.handleMessage(makeEvent(priceRequest("price-sub-2", "price.subscribe", sessionId), ORIGIN, harness.opener));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    second.set({ amount: "89.00", unit: "CNY", updatedAtMs: 999 });
+    const events = priceChangedEvents(harness.opener);
+    expect(events.at(-1)).toEqual({ amount: "89.00", unit: "CNY", updatedAtMs: 999 });
   });
 });

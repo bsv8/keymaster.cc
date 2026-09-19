@@ -51,7 +51,8 @@ import type {
   StorageUploadPartParams,
   MsFileBlockReadParams,
   MsFileSeedReadParams,
-  MsFileStatParams
+  MsFileStatParams,
+  PriceSubscribeParams
 } from "@keymaster/contracts";
 import {
   PROTOCOL_METHODS,
@@ -134,6 +135,11 @@ function validateParams(
       return validateChannelPublishParams(raw);
     case "channel.subscription_set":
       return validateChannelSubscriptionSetParams(raw);
+    // price.get / price.subscribe / price.unsubscribe 同参：只要求 session。
+    case "price.get":
+    case "price.subscribe":
+    case "price.unsubscribe":
+      return validatePriceParams(raw);
     case "storage.list":
       return validateStorageListParams(raw);
     case "storage.directory.create":
@@ -402,6 +408,14 @@ function validateChannelSubscriptionSetParams(raw: unknown): ChannelSubscription
     throw new ProtocolValidationError("invalid_request", "channels must not contain duplicates");
   }
   return { channels };
+}
+
+/** price.get / price.subscribe / price.unsubscribe 共用校验：只接受 session。 */
+function validatePriceParams(raw: unknown): PriceSubscribeParams {
+  const obj = expectObject(raw, "price params");
+  requireExactKeys(obj, ["connectSessionId"], "price params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { connectSessionId };
 }
 
 export function validateExactChannel(value: unknown, field = "channel"): string {

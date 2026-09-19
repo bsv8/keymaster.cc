@@ -35,6 +35,42 @@ describe("storage protocol validation", () => {
   });
 });
 
+describe("price protocol validation", () => {
+  it.each(["price.get", "price.subscribe", "price.unsubscribe"] as const)(
+    "%s accepts exactly connectSessionId",
+    (method) => {
+      const parsed = parseRequestMessage({
+        v: PROTOCOL_VERSION,
+        type: "request",
+        id: "price-1",
+        method,
+        params: { connectSessionId: "session" }
+      });
+      expect(parsed.params).toEqual({ connectSessionId: "session" });
+    }
+  );
+
+  it("rejects extra caller-supplied fields", () => {
+    expect(() => parseRequestMessage({
+      v: PROTOCOL_VERSION,
+      type: "request",
+      id: "price-extra",
+      method: "price.get",
+      params: { connectSessionId: "session", assetId: "bsv-mainnet" }
+    })).toThrowError(/unsupported field/iu);
+  });
+
+  it("rejects a missing session id", () => {
+    expect(() => parseRequestMessage({
+      v: PROTOCOL_VERSION,
+      type: "request",
+      id: "price-missing-session",
+      method: "price.subscribe",
+      params: {}
+    })).toThrowError(/price params/iu);
+  });
+});
+
 describe("connect.login local catalog trust boundary", () => {
   const proof = { version: 1 as const, publisherPublicKey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", app: { id: "stable-app-id", name: "Stable App", description: "Description" }, requirements: [] as ("private-key" | "storage")[], signature: "ba7206e5617360697c0199ffdb3c82a2728b2e46a5b48b39d405ec65009bc3c34a3a91e0acf1f37ff88654a7a60d3f4da8532875d3f333859a22c8eb9feb7af7" };
   const base = {

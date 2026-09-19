@@ -2,8 +2,8 @@ import { useMemo } from "react";
 import type { AssetRegistry, AssetSummary, BsvNetwork, I18nText, KeyIdentity, TokenRegistry } from "@keymaster/contracts";
 import { ASSET_REGISTRY_CAPABILITY, TOKEN_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { useCurrentPath, useI18n, usePluginHost } from "@keymaster/runtime";
-import { Button, EmptyState, PageHeader } from "@keymaster/ui";
+import { useBsvPrice, useCurrentPath, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { Button, EmptyState, PageHeader, formatSatsWithPrice } from "@keymaster/ui";
 import type { HoldingRowsResult } from "./assets/holdingsFlow.js";
 
 function labelOf(value: string | I18nText): string {
@@ -64,6 +64,8 @@ function groupByNetwork<T extends { network?: BsvNetwork }>(items: readonly T[],
 export function AssetsPage() {
   useCurrentPath();
   const { t } = useI18n();
+  const locale = useLocale();
+  const price = useBsvPrice();
   const host = usePluginHost();
   const assets = useCapability(ASSET_REGISTRY_CAPABILITY);
   const tokens = useCapability(TOKEN_REGISTRY_CAPABILITY);
@@ -178,7 +180,7 @@ export function AssetsPage() {
                           <div className="asset-workspace-row__meta">
                                 <span className={`asset-workspace-pill is-${asset.status}`}>{statusLabel(asset.status, t)}</span>
                                 <span className={`asset-workspace-pill is-${group.network}`}>{networkLabel(group.network, t)}</span>
-                                {asset.balance ? <strong>{asset.balance.display ?? `${asset.balance.amount} ${asset.balance.unit}`}</strong> : null}
+                                {asset.balance ? <strong>{balanceText(asset, price, locale, group.network)}</strong> : null}
                               </div>
                         </div>
                           </li>
@@ -251,6 +253,21 @@ export function AssetsPage() {
       </div>
     </div>
   );
+}
+
+/** BSV coin（sats）显示 sats / 价格；其他资产保持 provider 预格式化文本。 */
+function balanceText(
+  asset: AssetSummary,
+  price: { amount: string; unit: string } | null,
+  locale: string,
+  network: Network
+): string {
+  const balance = asset.balance;
+  if (!balance) return "";
+  if (asset.kind === "coin" && balance.unit === "sats" && typeof balance.amount === "number") {
+    return formatSatsWithPrice(balance.amount, price, { locale, network });
+  }
+  return balance.display ?? `${balance.amount} ${balance.unit}`;
 }
 
 function readQuery(name: string): string {

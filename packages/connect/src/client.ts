@@ -27,6 +27,10 @@ import {
   type MsFileStatResult,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
+  type PriceGetParams,
+  type PriceGetResult,
+  type PriceSubscribeParams,
+  type PriceSubscriptionResult,
   type ProtocolErrorCode,
   type ProtocolEventMessage,
   type ProtocolMethod,
@@ -198,6 +202,10 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * @groupDescription Channel
  * Publish JSON content and manage exact-channel subscriptions. Incoming
  * messages arrive as `channel.message_received` events.
+ *
+ * @groupDescription Price
+ * Read the Keymaster display price (amount + unit) once, or subscribe to
+ * `price.changed` pushes. The price is display-only reference data.
  *
  * @groupDescription Storage
  * Manage app-scoped directories, objects, and multipart uploads.
@@ -433,6 +441,42 @@ export class KeymasterConnectClient {
     options?: KeymasterRequestOptions
   ): Promise<ChannelSubscriptionSetResult> {
     return this.request("channel.subscription_set", params, options);
+  }
+
+  /**
+   * 一次读取 Keymaster 当前的 BSV 展示价格（金额 + 单位）。
+   *
+   * 未就绪（未配置 / 未收到快照 / 订阅出错）时返回 `amount: "0.00"`；
+   * 价格只作显示参考，不用于业务判断。
+   *
+   * @group Price
+   */
+  priceGet(params: PriceGetParams, options?: KeymasterRequestOptions): Promise<PriceGetResult> {
+    return this.request("price.get", params, options);
+  }
+
+  /**
+   * 订阅 `price.changed` 推送；订阅前不会收到价格事件。
+   *
+   * @group Price
+   */
+  priceSubscribe(
+    params: PriceSubscribeParams,
+    options?: KeymasterRequestOptions
+  ): Promise<PriceSubscriptionResult> {
+    return this.request("price.subscribe", params, options);
+  }
+
+  /**
+   * 取消当前会话的 `price.changed` 推送。
+   *
+   * @group Price
+   */
+  priceUnsubscribe(
+    params: PriceSubscribeParams,
+    options?: KeymasterRequestOptions
+  ): Promise<PriceSubscriptionResult> {
+    return this.request("price.unsubscribe", params, options);
   }
 
   /**

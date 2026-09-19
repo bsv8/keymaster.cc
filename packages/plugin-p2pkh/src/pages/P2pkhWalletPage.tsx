@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
+import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPrice, type DataTableColumn } from "@keymaster/ui";
 import { useCapability, useResourceSelector } from "webloom-framework/react";
-import { router, useI18n, usePluginHost } from "@keymaster/runtime";
+import { router, useBsvPrice, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
 import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhSyncStatus, P2pkhTransactionFact, P2pkhTransactionSyncState } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
@@ -54,6 +54,8 @@ function amountLabel(value: number | undefined): string {
 export function P2pkhWalletPage({ view = "transactions", network = "main" }: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
   const host = usePluginHost();
   const { t } = useI18n();
+  const locale = useLocale();
+  const price = useBsvPrice();
   const coordinator = useCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
   const service = useCapability(P2PKH_CAPABILITY);
   const [page, setPage] = useState(() => readPage());
@@ -361,7 +363,7 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
       />
       {wallet.error ? <EmptyState title={t("p2pkh.wallet.loadFailed", { defaultValue: "Wallet data unavailable" })} description={wallet.error} /> : null}
       {networkEnabled ? <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
-        <article><h2>{networkTitle}</h2><strong>{networkBalance === undefined ? "—" : formatSats(networkBalance)}</strong><BalanceBreakdown breakdown={wallet.balances[network]?.breakdown} /></article>
+        <article><h2>{networkTitle}</h2><strong>{networkBalance === undefined ? "—" : formatSatsWithPrice(networkBalance, price, { locale, network })}</strong><BalanceBreakdown breakdown={wallet.balances[network]?.breakdown} /></article>
       </section> : <EmptyState title={t("p2pkh.wallet.networkDisabled", { defaultValue: "Testnet is disabled" })} description={t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "Enable testnet in P2PKH settings before viewing testnet data." })} />}
       <section className="p2pkh-wallet__sync" aria-label={t("p2pkh.wallet.syncStatus", { defaultValue: "Confirmed synchronization status" })}>
         {wallet.providers ? <p>{t("p2pkh.wallet.provider", { defaultValue: "Confirmed: {{sync}} · Broadcast: {{broadcast}}", sync: wallet.providers.selection[network].syncProviderId ?? "—", broadcast: wallet.providers.selection[network].broadcastProviderId ?? "—" })}</p> : null}

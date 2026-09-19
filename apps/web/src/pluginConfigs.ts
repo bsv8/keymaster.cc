@@ -12,7 +12,8 @@
  *
  * 优先级：
  *   1) `globalThis.__PRICECAST_PUBLISHER_PUBKEY__`（启动脚本注入 seed）；
- *   2) 默认空串 → 仅作为首次 seed 候选；旧浏览器设置不参与新桶初始化。
+ *   2) 缺省返回空串 → plugin 使用内置生产 PriceCast 发布器默认值；
+ *      设置里可以登记更多发布服务器，运行时真值由 owner/App K-V 承担。
  *
  * 注：本文件里的 `__PRICECAST_PUBLISHER_PUBKEY__` 是**装配层**读
  * （用于桥接到 Window unit.config seed），不是 plugin 自己的入口。

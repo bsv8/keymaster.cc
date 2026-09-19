@@ -49,6 +49,7 @@ export * from "./bsvP2pkhProviders.js";
 export * from "./resource.js";
 export * from "./webrtc.js";
 export * from "./channel.js";
+export * from "./price.js";
 export * from "./message.js";
 export * from "./msfile.js";
 export * from "./applicationBootstrap.js";

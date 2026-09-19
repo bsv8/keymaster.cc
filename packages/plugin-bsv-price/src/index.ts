@@ -1,5 +1,5 @@
 // packages/plugin-bsv-price/src/index.ts
-// BSV 价格业务插件统一入口（施工单 2026-07-08 001）。
+// BSV 价格业务插件统一入口。
 
 export {
   bsvPricePlugin,
@@ -15,23 +15,38 @@ export {
 } from "./bsvPriceService.js";
 export {
   BSV_PRICE_SETTINGS_STORAGE_KEY,
+  createDefaultBsvPriceConfig,
   createKeyValueBsvPriceSettingsStore,
   createMemoryBsvPriceSettingsStore,
+  deriveUnitFromPair,
+  normalizeMarketIdentifier,
   normalizePublisherPublicKeyHex,
+  normalizeServerName,
+  type BsvPriceActiveOption,
   type BsvPriceGlobalConfig,
   type BsvPricePublicKeyCheck,
-  type BsvPriceSettingsStore
+  type BsvPriceServerConfig,
+  type BsvPriceSettingsStore,
+  type BsvPriceTextCheck
 } from "./bsvPriceSettings.js";
 export {
   decodePriceContent,
   decodePriceBody,
+  formatPriceAmount,
+  PRICE_DISPLAY_DECIMALS,
+  PRICE_DISPLAY_ZERO,
+  selectMarketPrice,
   type BsvPriceSnapshot
 } from "./bsvPriceProtocol.js";
 export {
   BSV_PRICE_CHANNEL_PREFIX,
   BSV_PRICE_PROTOCOL,
   BSV_PRICE_SETTINGS_PATH,
-  BSV_PRICE_CONFIG_KEY
+  BSV_PRICE_CONFIG_KEY,
+  DEFAULT_PRICE_MARKET,
+  DEFAULT_PRICE_PAIR,
+  DEFAULT_PRICE_PUBLISHER_PUBLIC_KEY_HEX,
+  DEFAULT_PRICE_SERVER_NAME
 } from "./constants.js";
 export { BsvPricePage } from "./BsvPricePage.js";
 export { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";

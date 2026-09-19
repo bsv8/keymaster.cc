@@ -1,38 +1,49 @@
 /* packages/plugin-bsv-price/src/styles.css
- * BSV 价格页样式（施工单 2026-07-08 001）。
+ * BSV 价格业务页 / 设置页 / 首页 widget 样式。
+ *
+ * 设计缘由：
+ *   - 统一使用 shell 主题 token（--border / --text-dim / --surface /
+ *     --surface-2 / --danger），深浅色主题都能正确取色；
+ *   - 设置页由多张卡片组成，页面负责卡片间距，卡片负责内部字段间距；
+ *   - 服务器列表 / 添加行 / 激活选项在窄屏折行，不出现横向滚动。
  */
 
-.km-bsv-price-page {
-  padding: 24px;
-  max-width: 720px;
-  margin: 0 auto;
-}
+/* ---------- 首页 widget ---------- */
 
 .bsv-price-home-widget__status {
-  color: var(--text-dim);
+  color: var(--text-dim, #6b7280);
   font-size: 11px;
 }
 
-.bsv-price-home-widget__status--ready {
-  color: var(--primary);
+.bsv-price-home-widget__status--receiving {
+  color: var(--primary, #f7b955);
 }
 
 .bsv-price-home-widget__status--offline,
-.bsv-price-home-widget__status--no_publisher_key {
-  color: var(--danger);
+.bsv-price-home-widget__status--not_configured,
+.bsv-price-home-widget__status--sat_not_configured,
+.bsv-price-home-widget__status--sat_balance_required,
+.bsv-price-home-widget__status--sat_identity_error,
+.bsv-price-home-widget__status--sat_subscription_error,
+.bsv-price-home-widget__status--subscription_unknown {
+  color: var(--danger, #e35a5a);
 }
 
 .bsv-price-home-widget__error {
-  color: var(--danger);
-}
-
-.bsv-price-home-widget__list li {
-  gap: 12px;
+  color: var(--danger, #e35a5a);
 }
 
 .bsv-price-home-widget__price {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+}
+
+/* ---------- 业务页 ---------- */
+
+.km-bsv-price-page {
+  padding: 24px;
+  max-width: 720px;
+  margin: 0 auto;
 }
 
 .km-bsv-price-page__title {
@@ -46,11 +57,11 @@
   grid-template-columns: 200px 1fr;
   gap: 12px;
   padding: 10px 0;
-  border-bottom: 1px solid var(--km-divider, #e2e2e2);
+  border-bottom: 1px solid var(--border, #e2e2e2);
 }
 
 .km-bsv-price-page__label {
-  color: var(--km-text-muted, #777);
+  color: var(--text-dim, #6b7280);
   font-size: 0.9rem;
 }
 
@@ -74,7 +85,7 @@
 }
 
 .km-bsv-price-page__empty {
-  color: var(--km-text-muted, #999);
+  color: var(--text-dim, #999);
   font-style: italic;
 }
 
@@ -88,12 +99,16 @@
 .km-bsv-price-page__table td {
   text-align: left;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--km-divider, #eee);
+  border-bottom: 1px solid var(--border, #eee);
 }
 
 .km-bsv-price-page__table th {
   font-weight: 600;
-  background: var(--km-bg-subtle, #f7f7f9);
+  background: var(--surface-2, #f7f7f9);
+}
+
+.km-bsv-price-page__table tr[data-bsv-price-quote-active="true"] {
+  background: color-mix(in srgb, var(--primary, #f7b955) 14%, transparent);
 }
 
 .km-bsv-price-page__exchange {
@@ -106,17 +121,26 @@
 
 .km-bsv-price-page__error {
   margin-top: 16px;
-  padding: 8px;
-  background: var(--km-bg-error, #fff2f2);
-  border-left: 3px solid var(--km-danger, #c33);
-  color: var(--km-danger, #c33);
+  padding: 8px 10px;
+  background: var(--surface-2, #f7f7f9);
+  border-left: 3px solid var(--danger, #c33);
+  color: var(--danger, #c33);
   font-size: 0.85rem;
 }
 
+/* ---------- 设置页 ---------- */
+
+/* 应用设置页由 shell 提供内容区 padding；这里只负责列间距与最大宽度，
+ * 与其它应用设置页（如 poker）保持一致。 */
 .km-bsv-price-settings-page {
-  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   max-width: 760px;
-  margin: 0 auto;
+}
+
+.km-bsv-price-settings-page--missing {
+  padding: 24px;
 }
 
 .km-bsv-price-settings-page__title {
@@ -127,12 +151,22 @@
 
 .km-bsv-price-settings-page__card {
   display: grid;
-  gap: 18px;
+  gap: 16px;
   padding: 20px;
-  border: 1px solid var(--km-divider, #e2e2e2);
-  border-radius: 14px;
-  background: var(--km-bg-surface, #fff);
+  border: 1px solid var(--border, #e2e2e2);
+  border-radius: var(--radius, 14px);
+  background: var(--surface, #fff);
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+}
+
+.km-bsv-price-settings-page__section-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.km-bsv-price-settings-page__card > .ui-button {
+  justify-self: start;
 }
 
 .km-bsv-price-settings-page__row {
@@ -143,7 +177,7 @@
 }
 
 .km-bsv-price-settings-page__label {
-  color: var(--km-text-muted, #777);
+  color: var(--text-dim, #6b7280);
   font-size: 0.92rem;
   padding-top: 2px;
 }
@@ -159,7 +193,7 @@
 
 .km-bsv-price-settings-page__hint {
   margin: 0;
-  color: var(--km-text-muted, #666);
+  color: var(--text-dim, #6b7280);
   font-size: 0.9rem;
 }
 
@@ -167,21 +201,143 @@
   margin: 0;
   padding: 10px 12px;
   border-radius: 10px;
-  background: var(--km-bg-subtle, #f7f7f9);
-  color: var(--km-text, #222);
+  background: var(--surface-2, #f3f4f6);
+  color: var(--text, #111827);
+}
+
+.km-bsv-price-settings-page__error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2, #f3f4f6);
+  border-left: 3px solid var(--danger, #e35a5a);
+  color: var(--danger, #e35a5a);
+  font-size: 0.9rem;
 }
 
 .km-bsv-price-settings-page__empty {
-  color: var(--km-text-muted, #999);
+  color: var(--text-dim, #999);
   font-style: italic;
 }
 
-.km-bsv-price-settings-page--missing {
-  padding: 24px;
+/* 服务器列表 */
+
+.km-bsv-price-settings-page__servers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.km-bsv-price-settings-page__server {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  min-width: 0;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.km-bsv-price-settings-page__server:hover {
+  background: var(--surface-2, #f3f4f6);
+}
+
+.km-bsv-price-settings-page__server.is-active {
+  border-color: var(--primary, #f7b955);
+}
+
+.km-bsv-price-settings-page__server-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+  cursor: pointer;
+}
+
+.km-bsv-price-settings-page__server-main input[type="radio"] {
+  flex: 0 0 auto;
+}
+
+.km-bsv-price-settings-page__server-name {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.km-bsv-price-settings-page__server-badge {
+  flex: 0 0 auto;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.72rem;
+  color: var(--text-dim, #6b7280);
+  background: var(--surface-2, #f3f4f6);
+  white-space: nowrap;
+}
+
+.km-bsv-price-settings-page__server > .ui-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 添加服务器 */
+
+.km-bsv-price-settings-page__add-server {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(0, 2fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.km-bsv-price-settings-page__add-server .ui-field {
+  margin-bottom: 0;
+}
+
+/* 激活选项 */
+
+.km-bsv-price-settings-page__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.km-bsv-price-settings-page__grid .ui-field {
+  margin-bottom: 0;
+}
+
+.km-bsv-price-settings-page__unit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.km-bsv-price-settings-page__unit .ui-field__label {
+  margin: 0;
 }
 
 @media (max-width: 720px) {
   .km-bsv-price-settings-page__row {
     grid-template-columns: 1fr;
+  }
+
+  .km-bsv-price-settings-page__add-server,
+  .km-bsv-price-settings-page__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .km-bsv-price-settings-page__server {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 }

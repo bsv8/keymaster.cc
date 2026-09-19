@@ -60,6 +60,13 @@ import type {
   ChannelSubscriptionSetParams,
   ChannelSubscriptionSetResult
 } from "./channel.js";
+import type {
+  PriceChangedEventData,
+  PriceGetParams,
+  PriceGetResult,
+  PriceSubscribeParams,
+  PriceSubscriptionResult
+} from "./price.js";
 //   - **命令流展示投影**（施工单 2026-06-27 002 硬切换）：
 //       `ProtocolCommandFeedState.commands` **不**再承诺
 //       "全局按 updatedAt desc"，而是 service 派生的"活请求区 +
@@ -178,6 +185,12 @@ export const PROTOCOL_METHODS = [
   // Channel 是唯一的公开频道 API，见 docs/SatSubscription与Channel.md。
   "channel.publish",
   "channel.subscription_set",
+  // BSV 价格只读展示能力：金额 + 单位，不暴露行情源 / 频道 / 交易对。
+  // `price.get` 一次获取；`price.subscribe` / `price.unsubscribe` 控制
+  // `price.changed` 推送。
+  "price.get",
+  "price.subscribe",
+  "price.unsubscribe",
   "storage.list",
   "storage.directory.create",
   "storage.directory.delete",
@@ -320,24 +333,34 @@ export interface ProtocolCancelMessage {
 /**
  * 协议对外 event 名常量集合（server-pushed 事件）。
  *
- * 设计缘由：Channel 只保留一个入站事件；事件内容是已验签的 JSON，
- * 由具体 App 自己定义业务协议。
+ * 设计缘由：
+ *   - `channel.message_received` 是已验签的 Channel 公开消息，只发送给
+ *     当前 session 已精确订阅的频道；
+ *   - `price.changed` 是 Keymaster 当前 BSV 价格展示值变化，向所有活跃
+ *     session 推送；未就绪时也可能推送 amount "0"。
  */
-export type ProtocolEventName = "channel.message_received";
+export type ProtocolEventName = "channel.message_received" | "price.changed";
 
 /**
  * 顶层 `event` 报文（server-pushed）。
  *
- * 事件是单向推送，不回 result；只发送给当前 session 已精确订阅的频道。
+ * 事件是单向推送，不回 result。
  */
-export interface ProtocolEventMessage {
-  v: typeof PROTOCOL_VERSION;
-  type: "event";
-  /** 事件名；按 `data` 形状区分。 */
-  event: ProtocolEventName;
-  /** 已验签的 Channel 事件数据。 */
-  data: ChannelMessageReceivedEventData;
-}
+export type ProtocolEventMessage =
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: "event";
+      event: "channel.message_received";
+      /** 已验签的 Channel 事件数据。 */
+      data: ChannelMessageReceivedEventData;
+    }
+  | {
+      v: typeof PROTOCOL_VERSION;
+      type: "event";
+      event: "price.changed";
+      /** 当前展示价格（金额 + 单位）；未就绪时为 amount "0"。 */
+      data: PriceChangedEventData;
+    };
 
 /** 顶层 request 报文。 */
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
@@ -1716,6 +1739,9 @@ export interface MethodParamsMap {
   "connect.launch": ConnectLaunchParams;
   "channel.publish": ChannelPublishParams;
   "channel.subscription_set": ChannelSubscriptionSetParams;
+  "price.get": PriceGetParams;
+  "price.subscribe": PriceSubscribeParams;
+  "price.unsubscribe": PriceSubscribeParams;
   "storage.list": StorageListParams;
   "storage.directory.create": StorageDirectoryParams;
   "storage.directory.delete": StorageDirectoryParams;
@@ -1749,6 +1775,9 @@ export interface MethodResultMap {
   "connect.launch": ConnectLaunchResult;
   "channel.publish": ChannelPublishResult;
   "channel.subscription_set": ChannelSubscriptionSetResult;
+  "price.get": PriceGetResult;
+  "price.subscribe": PriceSubscriptionResult;
+  "price.unsubscribe": PriceSubscriptionResult;
   "storage.list": StorageListResult;
   "storage.directory.create": StorageDirectoryResult;
   "storage.directory.delete": StorageDirectoryResult;

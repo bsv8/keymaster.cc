@@ -9,7 +9,7 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { KEYSPACE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { BSV_PRICE_READER_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
 import { P2PKH_CAPABILITY, type P2pkhBalance, type P2pkhService } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";
@@ -262,5 +262,28 @@ describe("P2pkhBalanceWidget", () => {
     expect(() => {
       fake.emitDataChanged();
     }).not.toThrow();
+  });
+
+  it("shows the sats / price display when the price reader is available", async () => {
+    const fake = makeFakeService({ getAssetBalance: async () => ({ total: 100_000_000 }) });
+    const keyspace = makeFakeKeyspace();
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
+    host.provide(BSV_PRICE_READER_CAPABILITY, {
+      get: () => ({ amount: "45.12", unit: "USDT", updatedAtMs: 1 }),
+      subscribe: () => () => undefined
+    });
+    registerP2pkhResources(host, fake.service);
+
+    render(
+      <PluginHostProvider host={host}>
+        <P2pkhBalanceWidget />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("100,000,000 sats / 45.12 USDT")).toBeTruthy();
+    });
   });
 });

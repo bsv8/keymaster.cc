@@ -7,9 +7,9 @@
 // 硬切换 003：使用 Resource Store 读取余额和设置数据。
 // 跨标签同步、请求去重、失效批处理由 resource 处理。
 
-import { formatSats } from "@keymaster/ui";
+import { formatSats, formatSatsWithPrice } from "@keymaster/ui";
 import { countRender, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useBsvPrice, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
 import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus } from "../p2pkhContracts.js";
 
 const DEFAULT_BALANCES: { bsv: P2pkhBalance | null; bsvtest: P2pkhBalance | null } = { bsv: null, bsvtest: null };
@@ -21,6 +21,8 @@ export function P2pkhBalanceWidget() {
   countRender("plugin-p2pkh/P2pkhBalanceWidget");
   const host = usePluginHost();
   const { t } = useI18n();
+  const locale = useLocale();
+  const price = useBsvPrice();
   const store = host.resourceStore;
 
   const readiness = useResourceSelector<ReadinessState, ReadinessState>(
@@ -49,7 +51,8 @@ export function P2pkhBalanceWidget() {
   );
 
   const stale = status === "failed" || status === "rate-limited";
-  const showAmount = (b: P2pkhBalance | null) => (b ? formatSats(b.total) : "—");
+  const showAmount = (b: P2pkhBalance | null, network: "main" | "test") =>
+    b ? formatSatsWithPrice(b.total, price, { locale, network }) : "—";
   const breakdown = (b: P2pkhBalance | null) => b?.breakdown ? <dl className="home-widget__breakdown"><dt>Block confirmed</dt><dd>{formatSats(b.breakdown.blockConfirmed)}</dd><dt>Isolated</dt><dd>{formatSats(b.breakdown.isolated)}</dd></dl> : null;
   const statusText = computeStatusText(readiness, status, t);
 
@@ -61,7 +64,7 @@ export function P2pkhBalanceWidget() {
       <section className="home-widget__row">
         <div>
           <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvMain", { defaultValue: "BSV (main)" })}</p>
-          <p className="home-widget__amount">{showAmount(balances.bsv)}</p>
+          <p className="home-widget__amount">{showAmount(balances.bsv, "main")}</p>
           {breakdown(balances.bsv)}
         </div>
       </section>
@@ -69,7 +72,7 @@ export function P2pkhBalanceWidget() {
         <section className="home-widget__row">
           <div>
             <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
-            <p className="home-widget__amount">{showAmount(balances.bsvtest)}</p>
+            <p className="home-widget__amount">{showAmount(balances.bsvtest, "test")}</p>
             {breakdown(balances.bsvtest)}
           </div>
         </section>

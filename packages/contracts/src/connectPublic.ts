@@ -75,6 +75,15 @@ export type {
 } from "./channel.js";
 
 export type {
+  PriceChangedEventData,
+  PriceGetParams,
+  PriceGetResult,
+  PriceSubscribeParams,
+  PriceSubscriptionResult,
+  PriceValue
+} from "./price.js";
+
+export type {
   AppIdentityProofV1,
   AppIdentitySnapshot,
   AppRequirement,

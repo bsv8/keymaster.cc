@@ -2,7 +2,13 @@
 
 import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import type { BorrowedKeyValueStore, ChannelMessageReceivedEventData, ChannelRuntime, ChannelSubscriptionStatus } from "@keymaster/contracts";
+import type {
+  BorrowedKeyValueStore,
+  ChannelMessageReceivedEventData,
+  ChannelRuntime,
+  ChannelSubscriptionStatus,
+  PriceValue
+} from "@keymaster/contracts";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { parsePublicKey } from "bsv8-channel-protocol";
 import { BSV_PRICE_PROTOCOL, bsvPriceChannel } from "bsv8-channel-protocol/bsv-price";
@@ -57,15 +63,21 @@ class FakeChannel implements ChannelRuntime {
 const PUBLISHER_A = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const PUBLISHER_B = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 
-function makeMessage(channel: string, price = "100.00", snapshotAtMs = 1000): ChannelMessageReceivedEventData {
+function makeMessage(
+  channel: string,
+  price = "100.00",
+  snapshotAtMs = 1000,
+  markets: Record<string, Record<string, string>> = { gate: { bsvusdt: price } },
+  publisherPublicKeyHex = PUBLISHER_A
+): ChannelMessageReceivedEventData {
   return {
     channel,
-    publisherPublicKeyHex: PUBLISHER_A,
-    messageId: `message-${price}`,
+    publisherPublicKeyHex,
+    messageId: `message-${snapshotAtMs}-${price}`,
     content: {
       protocol: BSV_PRICE_PROTOCOL,
       snapshot_at_ms: snapshotAtMs,
-      markets: { gate: { bsvusdt: price } }
+      markets
     }
   };
 }
@@ -74,18 +86,26 @@ function makeStorage() {
   return createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.bsvPrice, ownerPublicKeyHex: PUBLISHER_A, bucketId: "test", bucketGeneration: 1 });
 }
 
+function seedStore(): ReturnType<typeof createMemoryBsvPriceSettingsStore> {
+  return createMemoryBsvPriceSettingsStore();
+}
+
 describe("createBsvPriceService", () => {
-  it("starts from stored config and subscribes to one exact Channel", async () => {
+  it("starts from stored legacy config, upgrades it, and subscribes to one exact Channel", async () => {
     const storage = makeStorage();
     await storage.put("settings", { pricePublisherPublicKeyHex: PUBLISHER_A, savedAtMs: 1 }, { partition: "settings" });
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, { storage });
     await service.ready();
 
-    expect(service.configured()).toBe(true);
-    expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_A);
+    expect(service.snapshot().configured).toBe(true);
+    expect(service.getConfig()).toMatchObject({
+      servers: [{ name: "bsv8", publisherPublicKeyHex: PUBLISHER_A }],
+      active: { publisherPublicKeyHex: PUBLISHER_A, market: "gate", pair: "bsvusdt" }
+    });
     expect(channel.subscriptionCalls).toEqual([[bsvPriceChannel(parsePublicKey(PUBLISHER_A))]]);
     expect(service.snapshot().status).toBe("waiting_snapshot");
+    expect(service.get()).toEqual({ amount: "0.00", unit: "USDT", updatedAtMs: 0 });
     service.dispose();
   });
 
@@ -93,7 +113,7 @@ describe("createBsvPriceService", () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
     const channelId = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
@@ -108,18 +128,27 @@ describe("createBsvPriceService", () => {
   it("uses the seed when an explicit memory store is injected", async () => {
     const service = createBsvPriceService(new FakeChannel(), {
       seedPublisherPublicKeyHex: PUBLISHER_B,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
-    expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_B);
+    expect(service.getConfig().active.publisherPublicKeyHex).toBe(PUBLISHER_B);
+    expect(service.getConfig().servers).toEqual([{ name: "bsv8", publisherPublicKeyHex: PUBLISHER_B }]);
     service.dispose();
   });
 
-  it("switches exact subscriptions and ignores messages from the old Channel", async () => {
+  it("falls back to the built-in publisher when no seed is provided", async () => {
+    const service = createBsvPriceService(new FakeChannel(), { settingsStore: seedStore() });
+    await service.ready();
+    expect(service.getConfig().active.publisherPublicKeyHex)
+      .toBe("03c95123471587fbb4690fe85e748b39bd09d97a7c92ebe539530d454b2b8ef53a");
+    service.dispose();
+  });
+
+  it("subscribes only to the active server and ignores messages from the old Channel", async () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
     const oldChannel = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
@@ -128,14 +157,79 @@ describe("createBsvPriceService", () => {
     expect(service.snapshot().snapshot?.markets.gate?.bsvusdt).toBe("100.01");
     expect(service.snapshot().status).toBe("receiving");
 
-    await service.savePublisherPublicKeyHex(PUBLISHER_B);
+    await service.addServer({ name: "alt", publisherPublicKeyHex: PUBLISHER_B });
+    // 只添加候选服务器不触发重订阅。
+    expect(channel.subscriptionCalls).toEqual([[oldChannel]]);
+
+    await service.setActiveOption({ publisherPublicKeyHex: PUBLISHER_B, market: "gate", pair: "bsvusdt" });
     expect(channel.subscriptionCalls).toEqual([[oldChannel], [newChannel]]);
     expect(service.snapshot().snapshot).toBeNull();
     channel.emit(makeMessage(oldChannel, "999.99"));
     expect(service.snapshot().snapshot).toBeNull();
-    channel.emit({ ...makeMessage(newChannel, "101.23"), publisherPublicKeyHex: PUBLISHER_B });
+    channel.emit(makeMessage(newChannel, "101.23", 2000, { gate: { bsvusdt: "101.23" } }, PUBLISHER_B));
     expect(service.snapshot().snapshot?.markets.gate?.bsvusdt).toBe("101.23");
     expect(service.snapshot().status).toBe("receiving");
+    service.dispose();
+  });
+
+  it("changes the active pair without resubscribing and recomputes the display price", async () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: seedStore()
+    });
+    await service.ready();
+    const subscribed = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
+    channel.emit(makeMessage(subscribed, "100.00", 1000, {
+      gate: { bsvusdt: "100.00", bsvcny: "700.004" },
+      okx: { bsvusdt: "99.50" }
+    }));
+    expect(service.get()).toEqual({ amount: "100.00", unit: "USDT", updatedAtMs: 1000 });
+
+    await service.setActiveOption({ publisherPublicKeyHex: PUBLISHER_A, market: "gate", pair: "bsvcny" });
+    expect(channel.subscriptionCalls).toEqual([[subscribed]]);
+    expect(service.get()).toEqual({ amount: "700.00", unit: "CNY", updatedAtMs: 1000 });
+
+    await service.setActiveOption({ publisherPublicKeyHex: PUBLISHER_A, market: "okx", pair: "bsvusdt" });
+    expect(service.get()).toEqual({ amount: "99.50", unit: "USDT", updatedAtMs: 1000 });
+    // 未收到的激活选项回落到 0。
+    await service.setActiveOption({ publisherPublicKeyHex: PUBLISHER_A, market: "okx", pair: "bsvcny" });
+    expect(service.get()).toEqual({ amount: "0.00", unit: "CNY", updatedAtMs: 0 });
+    service.dispose();
+  });
+
+  it("rounds the display price to two decimals as a string", async () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: seedStore()
+    });
+    await service.ready();
+    const subscribed = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
+    channel.emit(makeMessage(subscribed, "100.005", 1000));
+    expect(service.get().amount).toBe("100.01");
+    channel.emit(makeMessage(subscribed, "100.004", 1001));
+    expect(service.get().amount).toBe("100.00");
+    channel.emit(makeMessage(subscribed, "0.999", 1002));
+    expect(service.get().amount).toBe("1.00");
+    service.dispose();
+  });
+
+  it("notifies subscribers with the current price", async () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: seedStore()
+    });
+    await service.ready();
+    const seen: PriceValue[] = [];
+    const off = service.subscribe((price) => seen.push(price));
+    const subscribed = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
+    channel.emit(makeMessage(subscribed, "100.00", 1000));
+    expect(seen.at(-1)).toEqual({ amount: "100.00", unit: "USDT", updatedAtMs: 1000 });
+    off();
+    channel.emit(makeMessage(subscribed, "101.00", 1001));
+    expect(seen.at(-1)?.amount).toBe("100.00");
     service.dispose();
   });
 
@@ -143,7 +237,7 @@ describe("createBsvPriceService", () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
     const subscribed = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
@@ -160,58 +254,34 @@ describe("createBsvPriceService", () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
     const subscribed = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
-    channel.emit({
-      ...makeMessage(subscribed, "100.00", 1000),
-      content: {
-        protocol: BSV_PRICE_PROTOCOL,
-        snapshot_at_ms: 1000,
-        markets: {
-          gate: { bsvusdt: "100.00" },
-          okx: { bsvusdt: "99.50" }
-        }
-      }
-    });
-    channel.emit({
-      ...makeMessage(subscribed, "101.00", 1001),
-      content: {
-        protocol: BSV_PRICE_PROTOCOL,
-        snapshot_at_ms: 1001,
-        markets: { gate: { bsvusdt: "101.00" } }
-      }
-    });
+    channel.emit(makeMessage(subscribed, "100.00", 1000, {
+      gate: { bsvusdt: "100.00" },
+      okx: { bsvusdt: "99.50" }
+    }));
+    channel.emit(makeMessage(subscribed, "101.00", 1001, { gate: { bsvusdt: "101.00" } }));
     expect(service.snapshot().snapshot?.markets).toEqual({ gate: { bsvusdt: "101.00" } });
     service.dispose();
   });
 
-  it("accepts an empty full snapshot and clears all displayed markets", async () => {
+  it("accepts an empty full snapshot and clears the display price", async () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
     const subscribed = bsvPriceChannel(parsePublicKey(PUBLISHER_A));
     channel.emit(makeMessage(subscribed, "100.00", 1000));
-    expect(service.currentMarkets()).toEqual({ gate: { bsvusdt: "100.00" } });
+    expect(service.get().amount).toBe("100.00");
 
-    channel.emit({
-      ...makeMessage(subscribed, "0", 1001),
-      content: {
-        protocol: BSV_PRICE_PROTOCOL,
-        snapshot_at_ms: 1001,
-        markets: {}
-      }
-    });
+    channel.emit(makeMessage(subscribed, "0", 1001, {}));
 
-    expect(service.snapshot().snapshot).toMatchObject({
-      snapshotAtMs: 1001,
-      markets: {}
-    });
-    expect(service.currentMarkets()).toEqual({});
+    expect(service.snapshot().snapshot).toMatchObject({ snapshotAtMs: 1001, markets: {} });
+    expect(service.get()).toEqual({ amount: "0.00", unit: "USDT", updatedAtMs: 0 });
     service.dispose();
   });
 
@@ -219,27 +289,66 @@ describe("createBsvPriceService", () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
-    channel.emit({
-      ...makeMessage(bsvPriceChannel(parsePublicKey(PUBLISHER_A)), "999.99"),
-      publisherPublicKeyHex: PUBLISHER_B
-    });
+    channel.emit(makeMessage(bsvPriceChannel(parsePublicKey(PUBLISHER_A)), "999.99", 1000, { gate: { bsvusdt: "999.99" } }, PUBLISHER_B));
     expect(service.snapshot().snapshot).toBeNull();
     service.dispose();
   });
 
-  it("clears the configured Channel and rejects invalid publisher keys", async () => {
+  it("validates server registration and deletion rules", async () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
-    await service.savePublisherPublicKeyHex("");
-    expect(service.snapshot()).toMatchObject({ status: "not_configured", configured: false, channelId: "(not configured)" });
-    await expect(service.savePublisherPublicKeyHex("bad")).rejects.toThrow("invalid_length");
+
+    await expect(service.addServer({ name: "", publisherPublicKeyHex: PUBLISHER_B }))
+      .rejects.toThrow("invalid_empty");
+    await expect(service.addServer({ name: "alt", publisherPublicKeyHex: "bad" }))
+      .rejects.toThrow("invalid_length");
+    // 只剩一个服务器时不能删除。
+    await expect(service.removeServer(PUBLISHER_A)).rejects.toThrow("last_server_required");
+    await expect(service.removeServer(PUBLISHER_B)).rejects.toThrow("server_not_found");
+
+    await service.addServer({ name: "alt", publisherPublicKeyHex: PUBLISHER_B });
+    await expect(service.addServer({ name: "dup", publisherPublicKeyHex: PUBLISHER_B }))
+      .rejects.toThrow("server_exists");
+    // 默认 bsv8 服务器永远不能删除。
+    await service.addServer({
+      name: "prod",
+      publisherPublicKeyHex: "03c95123471587fbb4690fe85e748b39bd09d97a7c92ebe539530d454b2b8ef53a"
+    });
+    await expect(service.removeServer("03c95123471587fbb4690fe85e748b39bd09d97a7c92ebe539530d454b2b8ef53a"))
+      .rejects.toThrow("default_server_required");
+    await service.setActiveOption({ publisherPublicKeyHex: PUBLISHER_B, market: "okx", pair: "bsvusdt" });
+    await service.removeServer(PUBLISHER_B);
+    expect(service.getConfig().active).toMatchObject({ publisherPublicKeyHex: PUBLISHER_A, market: "gate", pair: "bsvusdt" });
+    service.dispose();
+  });
+
+  it("restores the original settings", async () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, {
+      seedPublisherPublicKeyHex: PUBLISHER_A,
+      settingsStore: seedStore()
+    });
+    await service.ready();
+    await service.addServer({ name: "alt", publisherPublicKeyHex: PUBLISHER_B });
+    await service.setActiveOption({ publisherPublicKeyHex: PUBLISHER_B, market: "okx", pair: "bsvusdt" });
+    await service.restoreOriginalSettings();
+    const config = service.getConfig();
+    expect(config.servers).toEqual([{
+      name: "bsv8",
+      publisherPublicKeyHex: "03c95123471587fbb4690fe85e748b39bd09d97a7c92ebe539530d454b2b8ef53a"
+    }]);
+    expect(config.active).toEqual({
+      publisherPublicKeyHex: "03c95123471587fbb4690fe85e748b39bd09d97a7c92ebe539530d454b2b8ef53a",
+      market: "gate",
+      pair: "bsvusdt"
+    });
     service.dispose();
   });
 
@@ -247,7 +356,7 @@ describe("createBsvPriceService", () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: PUBLISHER_A,
-      settingsStore: createMemoryBsvPriceSettingsStore()
+      settingsStore: seedStore()
     });
     await service.ready();
     channel.emit({
@@ -261,7 +370,7 @@ describe("createBsvPriceService", () => {
     service.dispose();
   });
 
-  it("propagates storage failures without changing the configured publisher", async () => {
+  it("propagates storage failures without changing the active configuration", async () => {
     const storage = makeStorage();
     let fail = true;
     const failingStorage = {
@@ -277,14 +386,14 @@ describe("createBsvPriceService", () => {
       storage: failingStorage
     });
     await service.ready();
-    const before = service.getPublisherPublicKeyHex();
-    await expect(service.savePublisherPublicKeyHex(PUBLISHER_B))
+    const before = service.getConfig().active.publisherPublicKeyHex;
+    await expect(service.addServer({ name: "alt", publisherPublicKeyHex: PUBLISHER_B }))
       .rejects.toThrow("injected BSV Price storage failure");
-    expect(service.getPublisherPublicKeyHex()).toBe(before);
+    expect(service.getConfig().active.publisherPublicKeyHex).toBe(before);
     expect(channel.subscriptionCalls).toEqual([[bsvPriceChannel(parsePublicKey(PUBLISHER_A))]]);
     fail = false;
-    await service.savePublisherPublicKeyHex(PUBLISHER_B);
-    expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_B);
+    await service.addServer({ name: "alt", publisherPublicKeyHex: PUBLISHER_B });
+    expect(service.getConfig().servers.map((server) => server.publisherPublicKeyHex)).toContain(PUBLISHER_B);
     service.dispose();
   });
 });

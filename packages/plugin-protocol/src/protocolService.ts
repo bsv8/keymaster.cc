@@ -138,6 +138,12 @@ import {
   type ProtocolStorageRepository,
   type StorageRuntimeController,
   type OwnerAppStorageGrant,
+  type BsvPriceReader,
+  type PriceGetParams,
+  type PriceGetResult,
+  type PriceSubscribeParams,
+  type PriceSubscriptionResult,
+  type PriceValue,
   type MsFileService,
   type MsFileConnectAppContext,
   type MsFileStatResult,
@@ -306,6 +312,12 @@ export interface ProtocolServiceDeps {
   appCatalogResolver?: AppCatalogResolver;
   /** 延迟读取 resolver，避免 protocol -> apps capability 初始化循环。 */
   getAppCatalogResolver?: () => AppCatalogResolver | undefined;
+  /**
+   * 可选 BSV 价格只读能力。缺失时 `price.get` 仍成功返回 0；`price.changed`
+   * 不推送。价格能力随 owner-session 装配，必须用 resolver 延迟解析。
+   */
+  priceReader?: BsvPriceReader;
+  getPriceReader?: () => BsvPriceReader | undefined;
   /** 自定义 source window（默认取 `window.opener`）。 */
   resolveOpener?: () => Window | null;
   /** 自定义 ready 发送目标（默认 `target.postMessage(msg, "*")`）。 */
@@ -687,6 +699,16 @@ export class ProtocolServiceImpl implements ProtocolService {
   /** 每个 Connect session 的虚拟精确频道集合。物理订阅由 Coordinator 统一复用。 */
   private readonly channelSubscriptionsBySessionId: Map<string, string[]> = new Map();
   private channelRuntimeUnsubscribe: (() => void) | undefined;
+  /**
+   * 订阅 `price.changed` 推送的 Connect session 集合。
+   *
+   * 设计缘由：`price.subscribe` / `price.unsubscribe` 是显式订阅；只有
+   * 集合内的会话会收到事件；logout / 会话重置时释放。
+   */
+  private readonly priceSubscribedSessionIds: Set<string> = new Set();
+  private priceReaderUnsubscribe: (() => void) | undefined;
+  private priceReaderInstance: BsvPriceReader | undefined;
+  private lastPriceBroadcast: PriceValue | undefined;
   private readonly channelQuotaBySessionId: Map<string, { publishes: number[]; bytes: Array<{ at: number; size: number }>; inFlight: number }> = new Map();
   private channelSessionEpoch = 0;
 
@@ -803,6 +825,18 @@ export class ProtocolServiceImpl implements ProtocolService {
     return this.deps.msfileService;
   }
 
+  /** BSV 价格只读能力是可选依赖；缺失时 price.* 返回 0 且不推送。 */
+  private currentPriceReader(): BsvPriceReader | undefined {
+    if (this.deps.getPriceReader) {
+      try {
+        return this.deps.getPriceReader();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.deps.priceReader;
+  }
+
   /** P2PKH capability 是 owner-apps-ready 才保证存在的可选依赖。 */
   private currentP2pkhService(): P2pkhProtocolAdapter | undefined {
     if (this.deps.getP2pkhService) {
@@ -879,6 +913,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.channelSessionBySource.clear();
     this.channelSubscriptionsBySessionId.clear();
     this.channelQuotaBySessionId.clear();
+    this.priceSubscribedSessionIds.clear();
+    this.releasePriceReaderSubscription();
     this.channelSessionEpoch++;
     // 1. 先 clearInterval 所有 timer，避免旧会话的 setInterval 继续跑回调。
     this.timersByRecordId.forEach((t) => clearInterval(t.tickHandle));
@@ -941,6 +977,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.channelSessionBySource.clear();
     this.channelSubscriptionsBySessionId.clear();
     this.channelQuotaBySessionId.clear();
+    this.priceSubscribedSessionIds.clear();
+    this.releasePriceReaderSubscription();
     this.channelSessionEpoch++;
     const sessionIds = new Set<string>();
     for (const rec of this.requestsByRecordId.values()) {
@@ -2847,7 +2885,14 @@ export class ProtocolServiceImpl implements ProtocolService {
     // storage.* is an auto-execute session capability. It never opens a
     // confirmation card, but a locked Vault still queues it until unlock so
     // the Storage plugin can open its sealed provider config.
-    if (parsed.method.startsWith("storage.") || parsed.method.startsWith("msfile.")) {
+    //
+    // price.* 与 storage.* / msfile.* 同为自动执行的会话能力：价格是
+    // 公开展示数据，不需要 verified App Identity，也不需要确认 UI。
+    if (
+      parsed.method.startsWith("storage.") ||
+      parsed.method.startsWith("msfile.") ||
+      parsed.method.startsWith("price.")
+    ) {
       // msfile.* 与 storage.* 同为 auto-execute session capability；价格确认
       // 由 msfile.service gateway 内部处理，不占用 popup 命令流 confirm UI。
       rec.autoApproved = true;
@@ -3828,6 +3873,12 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeChannelPublish(rec);
         case "channel.subscription_set":
           return await this.executeChannelSubscriptionSet(rec);
+        case "price.get":
+          return await this.executePriceGet(rec);
+        case "price.subscribe":
+          return await this.executePriceSubscribe(rec);
+        case "price.unsubscribe":
+          return await this.executePriceUnsubscribe(rec);
         case "storage.list":
           return await this.executeStorageList(rec);
         case "storage.directory.create":
@@ -4624,6 +4675,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 这一步不依赖 vault.lock 成功与否：session 一旦 logout，旧 owner
     // capability 就不应继续常驻内存。
     this.clearSessionRuntimeBootstrap(result.connectSessionId, "logout");
+    this.priceSubscribedSessionIds.delete(result.connectSessionId);
     await this.currentStorageController()?.abortSession(result.connectSessionId);
     await this.currentMsfileService()?.abortSession(result.connectSessionId);
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
@@ -4943,6 +4995,102 @@ export class ProtocolServiceImpl implements ProtocolService {
         data
       });
     }
+  }
+
+  /* ============== price.* ============== */
+
+  /** 释放当前价格能力订阅；owner-session 切换或会话重置时调用。 */
+  private releasePriceReaderSubscription(): void {
+    this.priceReaderUnsubscribe?.();
+    this.priceReaderUnsubscribe = undefined;
+    this.priceReaderInstance = undefined;
+    this.lastPriceBroadcast = undefined;
+  }
+
+  /**
+   * 惰性订阅当前 BSV 价格能力。
+   *
+   * 设计缘由：价格能力随 owner-session 装配 / 撤销；这里按实例去重，
+   * 新实例（切换 owner）出现时自动换订阅；缺失能力时静默降级为 0。
+   */
+  private ensurePriceReaderSubscription(): void {
+    const reader = this.currentPriceReader();
+    if (!reader || reader === this.priceReaderInstance) return;
+    this.priceReaderUnsubscribe?.();
+    this.priceReaderUnsubscribe = undefined;
+    this.lastPriceBroadcast = undefined;
+    this.priceReaderInstance = reader;
+    try {
+      this.priceReaderUnsubscribe = reader.subscribe((price) => this.dispatchPriceChanged(price));
+    } catch {
+      this.priceReaderInstance = undefined;
+      this.priceReaderUnsubscribe = undefined;
+    }
+  }
+
+  /** 把价格变化投影成 `price.changed`，只推给显式订阅的会话。 */
+  private dispatchPriceChanged(price: PriceValue): void {
+    const next: PriceValue = {
+      amount: typeof price?.amount === "string" ? price.amount : "0.00",
+      unit: typeof price?.unit === "string" ? price.unit : "USDT",
+      updatedAtMs: Number.isFinite(price?.updatedAtMs) ? price.updatedAtMs : 0
+    };
+    const previous = this.lastPriceBroadcast;
+    if (
+      previous &&
+      previous.amount === next.amount &&
+      previous.unit === next.unit &&
+      previous.updatedAtMs === next.updatedAtMs
+    ) {
+      return;
+    }
+    this.lastPriceBroadcast = next;
+    if (this.priceSubscribedSessionIds.size === 0) return;
+    for (const [source, context] of this.channelSessionBySource) {
+      if (context.epoch !== this.channelSessionEpoch) continue;
+      if (!this.priceSubscribedSessionIds.has(context.sessionId)) continue;
+      this.postEventMessage(source, context.origin, {
+        v: PROTOCOL_VERSION,
+        type: "event",
+        event: "price.changed",
+        data: next
+      });
+    }
+  }
+
+  /** `price.get` 一次获取当前展示价；能力缺失也返回 0，不报错。 */
+  private async executePriceGet(rec: RequestRecord): Promise<PriceGetResult> {
+    const params = rec.params as PriceGetParams;
+    await this.requireConnectSession(rec, params.connectSessionId);
+    const reader = this.currentPriceReader();
+    if (!reader) return { amount: "0.00", unit: "USDT", updatedAtMs: 0 };
+    try {
+      const price = reader.get();
+      return {
+        amount: typeof price?.amount === "string" ? price.amount : "0.00",
+        unit: typeof price?.unit === "string" ? price.unit : "USDT",
+        updatedAtMs: Number.isFinite(price?.updatedAtMs) ? price.updatedAtMs : 0
+      };
+    } catch {
+      return { amount: "0.00", unit: "USDT", updatedAtMs: 0 };
+    }
+  }
+
+  /** `price.subscribe` 把当前会话加入价格推送集合。 */
+  private async executePriceSubscribe(rec: RequestRecord): Promise<PriceSubscriptionResult> {
+    const params = rec.params as PriceSubscribeParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    this.priceSubscribedSessionIds.add(session.sessionId);
+    this.ensurePriceReaderSubscription();
+    return { subscribed: true };
+  }
+
+  /** `price.unsubscribe` 把当前会话移出价格推送集合。 */
+  private async executePriceUnsubscribe(rec: RequestRecord): Promise<PriceSubscriptionResult> {
+    const params = rec.params as PriceSubscribeParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    this.priceSubscribedSessionIds.delete(session.sessionId);
+    return { subscribed: false };
   }
 
   /* ============== p2pkh.transfer ============== */
