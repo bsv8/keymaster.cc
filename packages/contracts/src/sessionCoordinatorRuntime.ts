@@ -314,6 +314,7 @@ export type CoordinatorSatOperationResultFor<O extends CoordinatorSatOperation> 
   O extends { type: "ensure" | "admin.upsertSupplier" | "admin.deleteSupplier" | "admin.setOwnerSettings" } ? null :
   O extends { type: "admin.getSettings" } ? SatSubscriptionSettingsSnapshot :
   O extends { type: "admin.refreshSubscriptions" } ? CoordinatorSatRefreshSubscriptionsResult :
+  O extends { type: "admin.getBilling" } ? import("./satSubscription.js").SatBillingPage :
   O extends { type: "service.publish" } ? CoordinatorSatPublishResult :
   O extends { type: "spi.getInformation" } ? SatSpiInformation :
   O extends { type: "spi.prepareTopUp" } ? SatTopUpPreview :
@@ -1450,6 +1451,24 @@ function parseSatOperation(value: unknown): CoordinatorSatOperation {
     const input = expectRecord(operation.input, "Sat operation.admin.refreshSubscriptions.input");
     return { type, input: { supplierId: text(input.supplierId, "Sat operation.admin.refreshSubscriptions.supplierId", 256) } };
   }
+  if (type === "admin.getBilling") {
+    const input = expectRecord(operation.input, "Sat operation.admin.getBilling.input");
+    const fromMs = satBigInt(input.fromMs, "Sat operation.admin.getBilling.fromMs");
+    const toMs = satBigInt(input.toMs, "Sat operation.admin.getBilling.toMs");
+    if (toMs < fromMs) throw new TypeError("Coordinator Sat billing toMs must be >= fromMs");
+    const limit = boundedNumber(input.limit, "Sat operation.admin.getBilling.limit", 1);
+    if (!Number.isInteger(limit) || limit > 100) throw new TypeError("Coordinator Sat billing limit is invalid");
+    return {
+      type,
+      input: {
+        supplierId: text(input.supplierId, "Sat operation.admin.getBilling.supplierId", 256),
+        fromMs,
+        toMs,
+        limit,
+        cursor: allowEmptyText(input.cursor, "Sat operation.admin.getBilling.cursor", 2_048),
+      },
+    };
+  }
   if (type === "spi.getInformation") {
     const input = expectRecord(operation.input, "Sat operation.spi.getInformation.input");
     return { type, input: { supplierId: text(input.supplierId, "Sat operation.spi.getInformation.supplierId", 256) } };
@@ -2409,7 +2428,7 @@ function parseSatSupplierView(value: unknown, field: string): SatSubscriptionSet
 
 function parseSatSettingsSnapshot(value: unknown, field: string): SatSubscriptionSettingsSnapshot {
   const snapshot = expectRecord(value, field);
-  if (!Array.isArray(snapshot.suppliers) || !Array.isArray(snapshot.supplierViews) || !Array.isArray(snapshot.feeAudit)) throw new TypeError(`Coordinator ${field} arrays are invalid`);
+  if (!Array.isArray(snapshot.suppliers) || !Array.isArray(snapshot.supplierViews)) throw new TypeError(`Coordinator ${field} arrays are invalid`);
   const ownerSettings = snapshot.ownerSettings === null ? null : parseSatOwnerSettings(snapshot.ownerSettings, field + ".ownerSettings");
   return {
     ownerPublicKeyHex: snapshot.ownerPublicKeyHex === null ? null : text(snapshot.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 66),
@@ -2417,20 +2436,33 @@ function parseSatSettingsSnapshot(value: unknown, field: string): SatSubscriptio
     suppliers: snapshot.suppliers.map((item, index) => parseSatSupplierConfig(item, `${field}.suppliers[${index}]`)),
     ownerSettings,
     supplierViews: snapshot.supplierViews.map((item, index) => parseSatSupplierView(item, `${field}.supplierViews[${index}]`)),
-    feeAudit: snapshot.feeAudit.map((item, index) => {
-      const audit = expectRecord(item, `${field}.feeAudit[${index}]`);
-      const errorCode = audit.errorCode === undefined ? undefined : enumValue(audit.errorCode, ["config", "connect", "identity", "protocol", "balance", "unknown_result", "validation", "unavailable", "conflict"] as const, `${field}.feeAudit[${index}].errorCode`);
+  };
+}
+
+function parseSatBillingPage(value: unknown, field: string): import("./satSubscription.js").SatBillingPage {
+  const page = expectRecord(value, field);
+  if (!Array.isArray(page.records)) throw new TypeError(`Coordinator ${field}.records is invalid`);
+  return {
+    supplierId: text(page.supplierId, field + ".supplierId", 256),
+    currency: text(page.currency, field + ".currency", 128),
+    network: text(page.network, field + ".network", 128),
+    records: page.records.map((item, index) => {
+      const record = expectRecord(item, `${field}.records[${index}]`);
       return {
-        supplierId: text(audit.supplierId, `${field}.feeAudit[${index}].supplierId`, 256),
-        action: text(audit.action, `${field}.feeAudit[${index}].action`, 128),
-        // `subscriptions` 动作没有单一频道；失败动作没有扣费金额。
-        channel: allowEmptyText(audit.channel, `${field}.feeAudit[${index}].channel`, 2_048),
-        chargedAmount: allowEmptyText(audit.chargedAmount, `${field}.feeAudit[${index}].chargedAmount`, 64),
-        result: text(audit.result, `${field}.feeAudit[${index}].result`, 256),
-        ...(errorCode === undefined ? {} : { errorCode }),
-        createdAtMs: boundedNumber(audit.createdAtMs, `${field}.feeAudit[${index}].createdAtMs`),
+        supplierId: text(record.supplierId, `${field}.records[${index}].supplierId`, 256),
+        chargeId: text(record.chargeId, `${field}.records[${index}].chargeId`, 256),
+        occurredAtMs: satBigInt(record.occurredAtMs, `${field}.records[${index}].occurredAtMs`),
+        action: text(record.action, `${field}.records[${index}].action`, 128),
+        channel: text(record.channel, `${field}.records[${index}].channel`, 2_048),
+        sourceRequestIdHex: (() => {
+          const sourceRequestIdHex = text(record.sourceRequestIdHex, `${field}.records[${index}].sourceRequestIdHex`, 64);
+          if (!/^[0-9a-f]{64}$/u.test(sourceRequestIdHex)) throw new TypeError(`${field}.records[${index}].sourceRequestIdHex is invalid`);
+          return sourceRequestIdHex;
+        })(),
+        chargedAmount: text(record.chargedAmount, `${field}.records[${index}].chargedAmount`, 64),
       };
     }),
+    nextCursor: allowEmptyText(page.nextCursor, field + ".nextCursor", 2_048),
   };
 }
 
@@ -2491,7 +2523,8 @@ function parseSatCollectResult(value: unknown, field: string): SatCollectResult 
 function parseSatOperationResult(value: unknown, field: string): CoordinatorSatOperationResult {
   if (value === null) return null;
   const result = expectRecord(value, field);
-  if ("supplierViews" in result && "feeAudit" in result) return parseSatSettingsSnapshot(result, field);
+  if ("supplierViews" in result) return parseSatSettingsSnapshot(result, field);
+  if ("records" in result && "nextCursor" in result && "currency" in result && "network" in result) return parseSatBillingPage(result, field);
   if ("currencies" in result && "projectInfoCbor" in result) return parseSatSpiInformation(result, field);
   if ("p2pkhPreview" in result) return parseSatTopUpPreview(result, field);
   if ("requestWire" in result || ("state" in result && "amount" in result)) return parseSatCollectResult(result, field);
@@ -2751,6 +2784,7 @@ function parseSatOperationResultFor(operation: CoordinatorSatOperation, value: u
       return null;
     case "admin.getSettings": return parseSatSettingsSnapshot(value, field);
     case "admin.refreshSubscriptions": return parseSatRefreshSubscriptionsResult(value, field);
+    case "admin.getBilling": return parseSatBillingPage(value, field);
     case "service.publish": return parseSatPublishResult(value, field);
     case "spi.getInformation": return parseSatSpiInformation(value, field);
     case "spi.prepareTopUp": return parseSatTopUpPreview(value, field);

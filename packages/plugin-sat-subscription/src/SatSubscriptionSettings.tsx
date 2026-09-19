@@ -6,6 +6,7 @@
 import { useCallback, useState } from "react";
 import type {
   SatOwnerSupplierSettingsV1,
+  SatBillingPage,
   SatSubscriptionAdminService,
   SatSubscriptionSpiService,
   SatSubscriptionSettingsSnapshot,
@@ -18,6 +19,7 @@ import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPAB
 import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
+import { SAT_DEFAULT_SUPPLIER_ID } from "./defaults.js";
 
 function emptyDraft(): SatSupplierConfigV1 {
   return { supplierId: "", name: "", supplierPublicKeyHex: "", multiaddrs: [""], enabled: true };
@@ -92,6 +94,7 @@ function SatSubscriptionSettingsInner({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [spiInfo, setSpiInfo] = useState<Record<string, SatSpiInformation>>({});
+  const [billing, setBilling] = useState<Record<string, SatBillingPage>>({});
   const [topUpAmount, setTopUpAmount] = useState("1000");
   const [collectAmount, setCollectAmount] = useState("1000");
   const [topUpPreview, setTopUpPreview] = useState<SatTopUpPreview | null>(null);
@@ -169,6 +172,23 @@ function SatSubscriptionSettingsInner({
       const result = await service.refreshSubscriptions({ supplierId });
       setMessage(tr("sat.settings.subscriptions.refreshed", `已刷新远端订阅（${result.channels.length} 个频道）`));
       await reload();
+    } catch (cause) { setError(satErrorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+
+  const refreshBilling = async (supplierId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const page = await service.getBilling({
+        supplierId,
+        fromMs: 0n,
+        toMs: BigInt(Date.now() + 1),
+        limit: 20,
+        cursor: ""
+      });
+      setBilling((current) => ({ ...current, [supplierId]: page }));
+      setMessage(tr("sat.settings.billing.refreshed", `已从 SS server 查询 ${page.records.length} 条账单`));
     } catch (cause) { setError(satErrorMessage(cause)); }
     finally { setBusy(false); }
   };
@@ -252,6 +272,7 @@ function SatSubscriptionSettingsInner({
       {error ? <p role="alert">{error}</p> : null}
       <h2>{tr("sat.settings.suppliers", "供应商")}</h2>
       {snapshot?.suppliers.length ? snapshot.suppliers.map((supplier) => {
+        const builtIn = supplier.supplierId === SAT_DEFAULT_SUPPLIER_ID;
         const receiving = snapshot.ownerSettings?.receiveSupplierIds.includes(supplier.supplierId) ?? false;
         const view = snapshot.supplierViews.find((item) => item.supplierId === supplier.supplierId);
         return (
@@ -263,6 +284,7 @@ function SatSubscriptionSettingsInner({
             <div>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => void refreshSpi(supplier.supplierId)}>{tr("sat.settings.spi.refresh", "刷新 SPI 余额")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshSubscriptions(supplier.supplierId)}>{tr("sat.settings.subscriptions.refresh", "刷新远端订阅")}</Button>
+              <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshBilling(supplier.supplierId)}>{tr("sat.settings.billing.refresh", "查询服务器账单")}</Button>
               {spiInfo[supplier.supplierId]?.currencies.map((currency) => <span key={`${currency.currency}-${currency.network}`} className="sat-subscription-settings__spi-account"> {currency.currency}/{currency.network}: <code>{currency.balance.toString(10)}</code>（充值地址 <code>{currency.paymentAddress}</code>）{currency.currency === "BSV" ? <> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void prepareTopUp(supplier.supplierId, currency)}>{tr("sat.settings.spi.prepare", "生成充值预览")}</Button> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void collect(supplier.supplierId, currency)}>{tr("sat.settings.spi.collect", "回收余额")}</Button></> : null}</span>)}
             </div>
             <div>
@@ -270,7 +292,7 @@ function SatSubscriptionSettingsInner({
               <input aria-label={tr("sat.settings.spi.collectAmount", "回收 satoshis")} value={collectAmount} onChange={(event) => setCollectAmount(event.target.value)} inputMode="numeric" />
               <span>请先刷新 SPI 并在对应 BSV 账户行操作</span>
             </div>
-            <div>{tr("sat.settings.actions", "操作")}: <Button size="sm" variant="secondary" disabled={busy} onClick={() => editSupplier(supplier)}>{tr("sat.settings.edit", "编辑")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy} onClick={() => void toggleEnabled(supplier)}>{supplier.enabled ? tr("sat.settings.disable", "停用") : tr("sat.settings.enable", "启用")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void setDefault(supplier.supplierId)}>{tr("sat.settings.default", "设为默认发布")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void toggleReceive(supplier.supplierId)}>{receiving ? tr("sat.settings.receive.off", "关闭接收") : tr("sat.settings.receive.on", "启用接收（可能收费）")}</Button>{" "}<Button size="sm" variant="danger" disabled={busy} onClick={() => void deleteSupplier(supplier)}>{tr("sat.settings.delete", "删除")}</Button></div>
+            <div>{tr("sat.settings.actions", "操作")}: {builtIn ? <span>内置默认 Supplier（不能编辑、停用或删除）</span> : <><Button size="sm" variant="secondary" disabled={busy} onClick={() => editSupplier(supplier)}>{tr("sat.settings.edit", "编辑")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy} onClick={() => void toggleEnabled(supplier)}>{supplier.enabled ? tr("sat.settings.disable", "停用") : tr("sat.settings.enable", "启用")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void setDefault(supplier.supplierId)}>{tr("sat.settings.default", "设为默认发布")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void toggleReceive(supplier.supplierId)}>{receiving ? tr("sat.settings.receive.off", "关闭接收") : tr("sat.settings.receive.on", "启用接收（可能收费）")}</Button>{" "}<Button size="sm" variant="danger" disabled={busy} onClick={() => void deleteSupplier(supplier)}>{tr("sat.settings.delete", "删除")}</Button></>}</div>
           </div>
         );
       }) : <p>{tr("sat.settings.empty", "尚未配置供应商。")}</p>}
@@ -287,8 +309,9 @@ function SatSubscriptionSettingsInner({
         <Button disabled={busy} onClick={() => void submitTopUp()}>{tr("sat.settings.spi.confirm", "确认并广播")}</Button>
         <Button disabled={busy} variant="secondary" onClick={() => setTopUpPreview(null)}>{tr("sat.settings.spi.cancel", "取消")}</Button>
       </div> : null}
-      <h2>{tr("sat.settings.audit", "最近费用")}</h2>
-      <ul>{snapshot?.feeAudit.slice(-20).reverse().map((item, index) => <li key={`${item.createdAtMs}-${index}`}>{item.supplierId} / {item.action} / {item.chargedAmount || tr("sat.settings.unknown", "未知")}</li>)}</ul>
+      <h2>{tr("sat.settings.billing", "服务器账单")}</h2>
+      <p>{tr("sat.settings.billing.description", "账单直接来自 SS server，不写入本地 setting.json。")}</p>
+      <ul>{Object.values(billing).flatMap((page) => page.records.map((item) => ({ item, currency: page.currency }))).slice(-20).reverse().map(({ item, currency }) => <li key={item.chargeId}>{item.supplierId} / {item.action} / {item.chargedAmount} / {currency}</li>)}</ul>
     </section>
   );
 }

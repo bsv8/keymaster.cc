@@ -19,6 +19,7 @@ import {
 } from "bitcoin-libp2p/stream";
 import {
   parseActionResult,
+  parseBillingResponse,
   parsePublish,
   parseSubscriptionsResponse
 } from "sat-subscription-protocol/client";
@@ -451,6 +452,11 @@ export class SatLibp2pConnection {
     try {
       const subscriptions = parseSubscriptionsResponse(wire);
       this.resolvePending(subscriptions.requestId, wire, stream);
+      return;
+    } catch { /* 继续尝试 BillingResponse */ }
+    try {
+      const billing = parseBillingResponse(wire);
+      this.resolvePending(billing.requestId, wire, stream);
       return;
     } catch { /* 继续尝试入站 Publish */ }
     let publishRequestId: Uint8Array;

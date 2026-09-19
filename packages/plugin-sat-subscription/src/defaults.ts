@@ -34,6 +34,17 @@ export const SAT_DEFAULT_SUPPLIER_MULTIADDRS: Readonly<Record<SatDefaultNetwork,
     ])
   });
 
+/** 判断设置输入是否试图伪装、覆盖或禁用编译内置 Supplier。 */
+export function isBuiltInDefaultSupplierConfig(config: SatSupplierConfigV1): boolean {
+  const addresses = new Set([
+    ...SAT_DEFAULT_SUPPLIER_MULTIADDRS.mainnet,
+    ...SAT_DEFAULT_SUPPLIER_MULTIADDRS.testnet,
+  ]);
+  return config.supplierId === SAT_DEFAULT_SUPPLIER_ID
+    || config.supplierPublicKeyHex === SAT_DEFAULT_SUPPLIER_PUBLIC_KEY_HEX
+    || config.multiaddrs.some((address) => addresses.has(address));
+}
+
 /** 构造指定网络的缺省供应商配置。 */
 export function createDefaultSatSupplierConfig(network: SatDefaultNetwork): SatSupplierConfigV1 {
   return {
@@ -46,39 +57,41 @@ export function createDefaultSatSupplierConfig(network: SatDefaultNetwork): SatS
 }
 
 /**
- * 把缺省供应商应用到 owner 快照。
+ * 把缺省供应商注入运行时快照。
  *
  * 规则：
- *   - 已有供应商：保持用户配置，只补齐缺失的 ownerSettings；
- *   - 供应商为空：写入缺省供应商，并把它设为默认发布（出口）与接收方
- *     （入口）；入口本身允许用户继续追加更多接收供应商；
- *   - owner 公钥缺失时不落任何配置（调用方应先绑定 owner）。
+ *   - bsv8 是编译内置能力，永远只在内存中出现，不由 setting.json 配置；
+ *   - setting.json 只提供用户新增 Supplier 和新增 Supplier 的当前选择；
+ *   - 缺少默认发布选择时使用 bsv8，接收入口总是包含 bsv8，再追加用户选择的
+ *     已启用 Supplier；
+ *   - owner 公钥缺失时不注入任何配置（调用方应先绑定 owner）。
  *
- * 结果只作为运行时初始快照；真正持久化仍发生在用户修改设置时。
+ * 结果只作为运行时初始快照；Repository 保存时会再次过滤 bsv8 和默认值。
  */
 export function applyDefaultSatSupplier(
   snapshot: SatSubscriptionStateSnapshot,
   network: SatDefaultNetwork
 ): SatSubscriptionStateSnapshot {
   if (!snapshot.ownerPublicKeyHex) return snapshot;
-  if (snapshot.suppliers.length > 0) {
-    return {
-      ...snapshot,
-      ownerSettings: snapshot.ownerSettings ?? {
-        ownerPublicKeyHex: snapshot.ownerPublicKeyHex,
-        defaultPublishSupplierId: null,
-        receiveSupplierIds: []
-      }
-    };
-  }
   const supplier = createDefaultSatSupplierConfig(network);
+  const customSuppliers = snapshot.suppliers.filter((item) => item.supplierId !== SAT_DEFAULT_SUPPLIER_ID);
+  const customById = new Map(customSuppliers.map((item) => [item.supplierId, item]));
+  const previousSettings = snapshot.ownerSettings;
+  const customDefault = previousSettings?.defaultPublishSupplierId
+    && previousSettings.defaultPublishSupplierId !== SAT_DEFAULT_SUPPLIER_ID
+    && customById.get(previousSettings.defaultPublishSupplierId)?.enabled === true
+    ? previousSettings.defaultPublishSupplierId
+    : null;
+  const customReceive = (previousSettings?.receiveSupplierIds ?? [])
+    .filter((supplierId) => supplierId !== SAT_DEFAULT_SUPPLIER_ID)
+    .filter((supplierId) => customById.get(supplierId)?.enabled === true);
   return {
     ...snapshot,
-    suppliers: [supplier],
+    suppliers: [supplier, ...customSuppliers],
     ownerSettings: {
       ownerPublicKeyHex: snapshot.ownerPublicKeyHex,
-      defaultPublishSupplierId: supplier.supplierId,
-      receiveSupplierIds: [supplier.supplierId]
+      defaultPublishSupplierId: customDefault ?? supplier.supplierId,
+      receiveSupplierIds: [supplier.supplierId, ...new Set(customReceive)]
     }
   };
 }

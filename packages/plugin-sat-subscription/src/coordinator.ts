@@ -7,7 +7,8 @@ export {
   SAT_DEFAULT_SUPPLIER_ID,
   SAT_DEFAULT_SUPPLIER_MULTIADDRS,
   SAT_DEFAULT_SUPPLIER_NAME,
-  SAT_DEFAULT_SUPPLIER_PUBLIC_KEY_HEX
+  SAT_DEFAULT_SUPPLIER_PUBLIC_KEY_HEX,
+  isBuiltInDefaultSupplierConfig
 } from "./defaults.js";
 export type { SatDefaultNetwork } from "./defaults.js";
 export type { SatSubscriptionStateStore, SatSubscriptionStateSnapshot, SatSubscriptionStatePersistence } from "./satState.js";

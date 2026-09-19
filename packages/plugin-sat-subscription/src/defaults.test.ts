@@ -41,7 +41,7 @@ describe("SatSubscription default supplier", () => {
     expect(SAT_DEFAULT_SUPPLIER_MULTIADDRS.testnet[0]).toContain("ustest-gateway.bsv8.com");
   });
 
-  it("seeds an empty owner with a default publish exit and receive ingress", () => {
+  it("injects the built-in default into runtime only", () => {
     const seeded = applyDefaultSatSupplier(emptySnapshot(), "mainnet");
     expect(seeded.suppliers).toEqual([createDefaultSatSupplierConfig("mainnet")]);
     expect(seeded.ownerSettings).toEqual({
@@ -55,21 +55,21 @@ describe("SatSubscription default supplier", () => {
     expect(state.getOwnerSettings()).toEqual(seeded.ownerSettings);
   });
 
-  it("keeps user suppliers and only fills missing owner settings", () => {
+  it("keeps user suppliers and injects the built-in default", () => {
     const userSupplier = {
       supplierId: "custom",
       name: "Custom",
-      supplierPublicKeyHex: SAT_DEFAULT_SUPPLIER_PUBLIC_KEY_HEX,
+      supplierPublicKeyHex: `03${"22".repeat(32)}`,
       multiaddrs: ["/ip4/127.0.0.1/tcp/1/ws"],
-      enabled: false
+      enabled: true
     };
     const snapshot = emptySnapshot({ suppliers: [userSupplier] });
     const next = applyDefaultSatSupplier(snapshot, "testnet");
-    expect(next.suppliers).toEqual([userSupplier]);
+    expect(next.suppliers).toEqual([createDefaultSatSupplierConfig("testnet"), userSupplier]);
     expect(next.ownerSettings).toEqual({
       ownerPublicKeyHex: OWNER,
-      defaultPublishSupplierId: null,
-      receiveSupplierIds: []
+      defaultPublishSupplierId: SAT_DEFAULT_SUPPLIER_ID,
+      receiveSupplierIds: [SAT_DEFAULT_SUPPLIER_ID]
     });
 
     const withSettings = emptySnapshot({
@@ -80,7 +80,11 @@ describe("SatSubscription default supplier", () => {
         receiveSupplierIds: ["custom"]
       }
     });
-    expect(applyDefaultSatSupplier(withSettings, "testnet")).toEqual(withSettings);
+    expect(applyDefaultSatSupplier(withSettings, "testnet")).toEqual({
+      ...withSettings,
+      suppliers: [createDefaultSatSupplierConfig("testnet"), userSupplier],
+      ownerSettings: { ...withSettings.ownerSettings!, receiveSupplierIds: [SAT_DEFAULT_SUPPLIER_ID, "custom"] }
+    });
   });
 
   it("does not seed before an owner is bound", () => {

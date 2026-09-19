@@ -1,7 +1,7 @@
 // SPI trusted service。
 //
 // SPI wire、request_id 与字段校验全部交给上游 satoshi-payment-interface。
-// 本文件只负责 Keymaster 的 owner 绑定、状态持久化、P2PKH 充值编排以及
+// 本文件只负责 Keymaster 的 owner 绑定、Worker 运行态、P2PKH 充值编排以及
 // Collect 的未知结果恢复；不保存私钥，也不把 SPI 内部对象暴露给 Connect。
 
 import { newCollectRequest, newInformationRequest, parseResponse } from "satoshi-payment-interface/wallet";

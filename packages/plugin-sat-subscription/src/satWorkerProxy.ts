@@ -1,6 +1,6 @@
 // 页面侧 SatSubscription / Channel facade。
 //
-// 页面不打开 Sat K-V、不创建网络连接、不接触私钥或 SSP wire。所有动作都
+// 页面不打开 Sat owner 文件、不创建网络连接、不接触私钥或 SSP wire。所有动作都
 // 通过 SharedWorker 的 typed RPC 完成；Channel runtime 是唯一业务消息入口。
 
 import type {
@@ -14,6 +14,7 @@ import type {
   SatIncomingPublish,
   SatIncomingPublishHandler,
   SatOwnerSupplierSettingsV1,
+  SatBillingPage,
   SatSubscriptionAdminService,
   SatSubscriptionSettingsSnapshot,
   SatSubscriptionSpiService,
@@ -334,7 +335,8 @@ export function createSatWorkerAdminService(coordinator: SatCoordinatorControl):
     upsertSupplier: (config: SatSupplierConfigV1) => callSat<void>(coordinator, { type: "admin.upsertSupplier", config }, "Sat supplier save"),
     deleteSupplier: (supplierId: string) => callSat<void>(coordinator, { type: "admin.deleteSupplier", supplierId }, "Sat supplier delete"),
     setOwnerSettings: (settings: SatOwnerSupplierSettingsV1) => callSat<void>(coordinator, { type: "admin.setOwnerSettings", settings }, "Sat owner settings"),
-    refreshSubscriptions: (input) => callSat(coordinator, { type: "admin.refreshSubscriptions", input }, "Sat subscription refresh")
+    refreshSubscriptions: (input) => callSat(coordinator, { type: "admin.refreshSubscriptions", input }, "Sat subscription refresh"),
+    getBilling: (input) => callSat<SatBillingPage>(coordinator, { type: "admin.getBilling", input }, "Sat billing query")
   };
 }
 

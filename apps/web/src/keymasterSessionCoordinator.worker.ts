@@ -4021,8 +4021,10 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
   const startAbortController = new AbortController();
   satRuntimeStartAbortController = startAbortController;
   const start = (async (): Promise<SatWorkerRuntimeState> => {
-    const store = createWorkerOwnerStore("sat-subscription");
-    const repository = createSatSubscriptionRepository(store);
+    // SatSubscription 只打开 `<owner>/sat-subscription/` 文件根；旧的
+    // `.keymaster/.../subscription-state` K-V 不再读取、迁移或删除。
+    const store = createWorkerOwnerFileStore("sat-subscription", "");
+    const repository = createSatSubscriptionRepository(store, ownerPublicKeyHex);
     let provider: ReturnType<typeof createSatSubscriptionProvider> | undefined;
     let handle: SatSubscriptionHandle | undefined;
     try {
@@ -4182,8 +4184,9 @@ async function releaseSatRuntime(
 
   const cleanup = previousRelease.then(async () => {
     // 必须在 runtime.handle.close / provider.shutdown 前清理物理订阅。
-    // 每一步都有上限：远端 Supplier 永不返回时，清理转为 owner K-V 中的
-    // 待退订证据，不能拖延锁屏或阻止后续 owner 建立会话。
+    // 每一步都有上限：远端 Supplier 永不返回时，清理只保留在当前 Worker
+    // 运行态，不能拖延锁屏或阻止后续 owner 建立会话；下次由 SS server
+    // 订阅查询重新取得远端事实。
     const startedRuntime = runtime ?? await awaitSatCleanup(runtimeStarting ?? Promise.resolve(undefined), "stale runtime start");
     const physicalCleanup = options.physicalCleanup !== false;
     // Mux 已在 release 入口取消了旧的物理动作；先推进 Provider 世代，
@@ -5701,8 +5704,8 @@ async function enterUnlockedState(
 
   publishSessionState(cause);
   // 解锁后立即建立 owner-scoped Sat runtime 和 owner inbox 的系统 caller。
-  // 连接/供应商暂不可用时只记录诊断；owner 的订阅意图仍留在 Sat K-V/Mux，
-  // 后续重连或设置变更会继续对账。
+  // 连接/供应商暂不可用时只记录诊断；owner 的本地设置仍在
+  // sat-subscription/setting.json，远端订阅事实由后续 SS server 查询取得。
   void ensureSatRuntime()
     .then((runtime) => ensureChannelSubscriptionMux(runtime))
     .catch((error) => console.warn("[channel] owner runtime startup deferred", error instanceof Error ? error.message : String(error)));
@@ -7299,6 +7302,9 @@ async function executeSatRequestUnsafe(
       break;
     case "admin.refreshSubscriptions":
       value = await runtime.handle.refreshSubscriptions(operation.input);
+      break;
+    case "admin.getBilling":
+      value = await runtime.admin.getBilling(operation.input);
       break;
     case "service.publish": value = await runtime.service.publish(operation.input); break;
     case "spi.getInformation": value = await runtime.spi.getInformation(operation.input); break;

@@ -85,8 +85,7 @@ function makeSnapshot(): SatSubscriptionSettingsSnapshot {
       observedChannels: [],
       lastChargedAmount: null,
       lastErrorCode: null
-    }],
-    feeAudit: []
+    }]
   };
 }
 
@@ -99,6 +98,7 @@ function makeServices(): void {
     deleteSupplier: vi.fn(async () => undefined),
     setOwnerSettings: vi.fn(async (_settings: SatOwnerSupplierSettingsV1) => undefined),
     refreshSubscriptions: vi.fn(async () => ({ channels: [], chargedAmount: "0" })),
+    getBilling: vi.fn(async () => ({ supplierId: "supplier-a", currency: "BSV", network: "mainnet", records: [], nextCursor: "" })),
     subscribeEvents: vi.fn(() => () => undefined)
   } as unknown as SatSubscriptionAdminService;
   state.spi = {

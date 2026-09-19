@@ -9,6 +9,7 @@ import type {
   SatSubscriptionAdminService,
   SatSubscriptionSettingsSnapshot,
   SatActionResult,
+  SatBillingPage,
   SatErrorCode,
   SatSupplierConfigV1,
   SatIncomingPublishHandler
@@ -22,9 +23,11 @@ import {
   newSubscribe,
   newUnsubscribe,
   newSubscriptionsRequest,
+  newBillingRequest,
   parseActionResult,
   parsePublish,
   parseSubscriptionsResponse,
+  parseBillingResponse,
   newRequestId
 } from "sat-subscription-protocol/client";
 import { parseRequestEnvelope } from "sat-subscription-protocol/wire";
@@ -39,6 +42,7 @@ import {
   normalizeSupplierConfig
 } from "./satValidation.js";
 import type { SatSubscriptionStateStore } from "./satState.js";
+import { isBuiltInDefaultSupplierConfig, SAT_DEFAULT_SUPPLIER_ID } from "./defaults.js";
 
 /** 连接边界的错误；sentBoundary 用来禁止不安全自动重试。 */
 export class SatTransportError extends Error {
@@ -262,20 +266,20 @@ export class SatSubscriptionHandle {
   private readonly stateStore: SatSubscriptionStateStore;
   /** Supplier catalog 代际；配置变更会使所有旧请求/连接失效。 */
   private generation: number;
-  /** 当前 Coordinator 逻辑频道并集；不包含 owner，物理状态仍按 Supplier/频道持久化。 */
+  /** 当前 Coordinator 逻辑频道并集；不包含 owner，只存在于当前 Worker。 */
   private readonly physicalDesiredChannels = new Set<string>();
   /** 正在清理的逻辑频道；失败时保留，下一次 reconcile 继续对账。 */
   private readonly physicalUnsubscribeChannels = new Set<string>();
   /** Worker 重启前遗留的远端订阅证据；不能恢复成当前逻辑 desired。 */
   private readonly historicalCleanupChannels = new Set<string>();
-  /** 当前连接代际内的远端订阅查询结果；旧 K-V observed 不能直接当真值。 */
+  /** 当前连接代际内的远端订阅查询结果；重启后必须重新向 SS server 查询。 */
   private readonly supplierRefreshStatus = new Map<string, { generation: number; ok: boolean }>();
   /**
    * 所有会改变物理订阅真值的动作共用一条队列。
    *
    * 不能只串行 Mux：设置页的 Supplier 变更和显式 service 调用也可能
    * 与 Mux 同时进入 Provider；若各自读取同一个 observed 状态，会产生两
-   * 笔 Subscribe。这里把“查远端/收费动作/落库”作为一个原子顺序。
+   * 笔 Subscribe。这里把“查远端/收费动作/运行态更新”作为一个原子顺序。
    */
   private mutationTail: Promise<void> = Promise.resolve();
   private readonly now: () => number;
@@ -498,8 +502,8 @@ export class SatSubscriptionHandle {
     await this.connectSupplier(supplier, generation);
     if (this.connections.get(supplier.supplierId)) {
       this.reconnectAttempts.delete(supplier.supplierId);
-      // 重连后的第一步必须刷新远端真值，再按当前 Mux union 对账；不能
-      // 依据旧 K-V observed 直接补发收费 Subscribe/Unsubscribe。
+      // 重连后的第一步必须刷新远端真值，再按当前 Mux union 对账；不能依据
+      // 上一次 Worker 的 observed 直接补发收费 Subscribe/Unsubscribe。
       void this.reconcileAfterReconnect(supplier.supplierId, generation);
       this.updateRuntimeHealth();
       return;
@@ -648,7 +652,9 @@ export class SatSubscriptionHandle {
       || record?.observed === "unknown_result"
       || record?.observed === "subscribing"
       || record?.observed === "unsubscribing";
-    if (!record || !needsRefresh) {
+    // 硬切换后 setting.json 不再携带订阅记录；没有本地 record 也必须先
+    // 查询 SS server，只有本轮查询成功确认“频道不存在”后才允许收费动作。
+    if (!needsRefresh) {
       return undefined;
     }
 
@@ -884,7 +890,7 @@ export class SatSubscriptionHandle {
 
   /**
    * 按 owner 的 receiveSupplierIds × 逻辑频道并集逐个对账。
-   * 每个 Supplier/频道独立落库和处理；某个 Supplier 失败不会回滚已经成功
+   * 每个 Supplier/频道独立更新和处理；某个 Supplier 失败不会回滚已经成功
    * 的其它 Supplier，也不会让下一次重试再次收费成功项。
    */
   private async reconcilePhysicalSubscriptions(requireReceiver = false, signal?: AbortSignal): Promise<void> {
@@ -1034,8 +1040,8 @@ export class SatSubscriptionHandle {
   }
 
   /**
-   * 锁屏前把当前 owner 的全部物理清理意图先写入 owner K-V。
-   * 网络动作随后可以超时/断开；下次解锁会按该证据先查询远端再继续退订。
+   * 锁屏前在当前 Worker 建立全部物理清理意图。
+   * 网络动作随后可以超时/断开；下次解锁会先查询 SS server 再继续退订。
    */
   async preparePhysicalCleanup(): Promise<void> {
     this.assertOpen();
@@ -1045,8 +1051,8 @@ export class SatSubscriptionHandle {
     this.generation += 1;
     this.supplierRefreshStatus.clear();
     // 这是锁屏安全边界的一部分，不能排在可能永不返回的 SSP mutation
-    // 后面。先同步建立本地清理意图，再异步持久化；网络清理失败时下次
-    // 解锁仍能依据 owner-scoped K-V 继续对账。
+    // 后面。先同步建立当前运行态清理意图；网络清理失败时下次解锁
+    // 仍能依据 SS server 查询继续对账。
     const records = this.stateStore.listSubscriptions();
     const channels = new Set(records.map((item) => item.channel));
     for (const channel of channels) {
@@ -1068,7 +1074,7 @@ export class SatSubscriptionHandle {
    * 查询远端订阅也必须和 Subscribe/Unsubscribe 共用同一条队列。
    *
    * 否则设置页的“刷新远端订阅”可能在 Mux 已读取旧 observed、但还没
-   * 落库的窗口内并发执行，导致两条操作都认为远端缺少频道并重复收费。
+   * 更新运行态的窗口内并发执行，导致两条操作都认为远端缺少频道并重复收费。
    */
   async refreshSubscriptions(input: { supplierId: string }, signal?: AbortSignal): Promise<{ channels: string[]; chargedAmount: string }> {
     this.assertOpen();
@@ -1127,6 +1133,71 @@ export class SatSubscriptionHandle {
       if (!feeRecorded) await this.recordFee({ action: "subscriptions", supplierId: input.supplierId, channel: "", requestIdHex: bytesToHex(requestId), chargedAmount: "", result: code === "unknown_result" ? "unknown_result" : "error", errorCode: code });
       if (error instanceof SatSubscriptionError) throw error;
       throw new SatSubscriptionError(code, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** 直接向 SS server 查询账单；结果只返回调用方，不写入本地状态。 */
+  async getBilling(input: { supplierId: string; fromMs: bigint; toMs: bigint; limit: number; cursor: string }, signal?: AbortSignal): Promise<SatBillingPage> {
+    this.assertOpen();
+    if (typeof input.fromMs !== "bigint" || typeof input.toMs !== "bigint" || input.fromMs < 0n || input.toMs < input.fromMs) {
+      throw new SatSubscriptionError("validation", "Billing time range is invalid");
+    }
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+      throw new SatSubscriptionError("validation", "Billing limit must be between 1 and 100");
+    }
+    if (typeof input.cursor !== "string" || input.cursor.length > 2_048 || /[\u0000-\u001f\u007f]/.test(input.cursor)) {
+      throw new SatSubscriptionError("validation", "Billing cursor is invalid");
+    }
+    throwIfSatOperationAborted(signal, "not-sent");
+    const requestId = validateRequestId(newRequestId());
+    const requestGeneration = this.generation;
+    let requestConnection: SatSupplierConnection | undefined;
+    let response: Uint8Array;
+    try {
+      requestConnection = this.connectionFor(input.supplierId);
+      response = await requestConnection.requestSsp(
+        newBillingRequest(requestId, input.fromMs, input.toMs, input.limit, input.cursor),
+        signal,
+      );
+      this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
+    } catch (error) {
+      const code = stableErrorCode(error);
+      if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
+        && requestConnection?.state !== "online") {
+        this.stopSupplier(input.supplierId, false);
+        this.scheduleReconnect(input.supplierId, requestGeneration);
+      }
+      throw new SatSubscriptionError(code, error instanceof Error ? error.message : String(error));
+    }
+    try {
+      const result = parseBillingResponse(response);
+      if (!equalBytes(result.requestId, requestId)) throw new SatSubscriptionError("protocol", "SSP BillingResponse request_id mismatch");
+      if (!result.success) {
+        throw new SatSubscriptionError(actionErrorCode(result.errorCode), `SSP BillingResponse failed: ${result.errorCode}`);
+      }
+      const records = result.records.map((record) => {
+        validateAmount(record.chargedAmount);
+        assertCanonicalAmount(record.chargedAmount);
+        return {
+          supplierId: input.supplierId,
+          chargeId: record.chargeId,
+          occurredAtMs: record.occurredAtMs,
+          action: record.action,
+          channel: record.channel,
+          sourceRequestIdHex: bytesToHex(record.sourceRequestId),
+          chargedAmount: record.chargedAmount,
+        };
+      });
+      return {
+        supplierId: input.supplierId,
+        currency: result.currency,
+        network: result.network,
+        records,
+        nextCursor: result.nextCursor,
+      };
+    } catch (error) {
+      if (error instanceof SatSubscriptionError) throw error;
+      throw new SatSubscriptionError("protocol", error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -1220,16 +1291,17 @@ export class SatSubscriptionHandle {
       supplierGeneration: this.stateStore.supplierGeneration(),
       suppliers: snapshot.suppliers.map((item) => ({ ...item, multiaddrs: [...item.multiaddrs] })),
       ownerSettings: snapshot.ownerSettings ? { ...snapshot.ownerSettings, receiveSupplierIds: [...snapshot.ownerSettings.receiveSupplierIds] } : null,
-      supplierViews: views,
-      feeAudit: snapshot.feeAudit.map((item) => ({ ...item }))
+      supplierViews: views
     };
   }
 
   async upsertSupplier(config: SatSupplierConfigV1): Promise<void> {
     this.assertOpen();
+    if (config.supplierId === SAT_DEFAULT_SUPPLIER_ID) throw new SatSubscriptionError("config", "The built-in default Supplier cannot be edited");
     return this.enqueueMutation(async () => {
       this.assertOpen();
       const normalized = normalizeSupplierConfig(config);
+      if (isBuiltInDefaultSupplierConfig(normalized)) throw new SatSubscriptionError("config", "The built-in default Supplier cannot be overridden");
       const previous = this.stateStore.getSupplier(normalized.supplierId);
       const identityChanged = previous?.enabled
         && normalized.enabled
@@ -1272,6 +1344,7 @@ export class SatSubscriptionHandle {
 
   async deleteSupplier(supplierId: string): Promise<void> {
     this.assertOpen();
+    if (supplierId === SAT_DEFAULT_SUPPLIER_ID) throw new SatSubscriptionError("config", "The built-in default Supplier cannot be deleted");
     return this.enqueueMutation(async () => {
       this.assertOpen();
       const previous = this.stateStore.getSupplier(supplierId);
@@ -1387,7 +1460,8 @@ export class SatSubscriptionProvider {
       upsertSupplier: (config) => handle.upsertSupplier(config),
       deleteSupplier: (supplierId) => handle.deleteSupplier(supplierId),
       setOwnerSettings: (settings) => handle.setOwnerSettings(settings),
-      refreshSubscriptions: (value) => handle.refreshSubscriptions(value)
+      refreshSubscriptions: (value) => handle.refreshSubscriptions(value),
+      getBilling: (value) => handle.getBilling(value)
     };
     return handle;
   }

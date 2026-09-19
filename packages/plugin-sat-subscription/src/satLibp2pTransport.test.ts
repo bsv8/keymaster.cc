@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { newActionResult, newPublish, newRequestId, newSubscribe } from "sat-subscription-protocol/client";
+import { newActionResult, newBillingRequest, newBillingResponse, newPublish, newRequestId, newSubscribe } from "sat-subscription-protocol/client";
 import { encodeUvarintFrame } from "bitcoin-libp2p/stream";
 import { createSatLibp2pTransport, SatLibp2pConnection } from "./satLibp2pTransport.js";
 
@@ -74,6 +74,35 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("SatSubscription libp2p adapter", () => {
+  it("routes BillingResponse to the matching SSP request", async () => {
+    const stream = new FakeStream();
+    const connection = {
+      newStream: vi.fn(async () => stream),
+      close: vi.fn(async () => undefined)
+    } as unknown as ConstructorParameters<typeof SatLibp2pConnection>[0]["connection"];
+    const adapter = new SatLibp2pConnection({
+      connection,
+      supplierPublicKeyHex: "03" + "22".repeat(32),
+      maxWireBytes: 1 << 20,
+      requestTimeoutMs: 2_000
+    });
+    const requestId = newRequestId();
+    const pending = adapter.requestSsp(newBillingRequest(requestId, 0n, 1_000n, 20, ""));
+    await waitFor(() => stream.sent.length === 1);
+    const response = newBillingResponse({
+      requestId,
+      success: true,
+      currency: "BSV",
+      network: "mainnet",
+      records: [],
+      nextCursor: "",
+      errorCode: ""
+    });
+    stream.push(encodeUvarintFrame(response));
+    await expect(pending).resolves.toEqual(response);
+    adapter.close();
+  });
+
   it("uses SDK uvarint framing for concurrent responses and inbound Publish", async () => {
     const stream = new FakeStream();
     const connection = {

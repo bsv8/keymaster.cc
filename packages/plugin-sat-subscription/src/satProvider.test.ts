@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   newActionResult,
+  newBillingResponse,
   newPublish,
   newRequestId,
   newSubscriptionsResponse,
@@ -106,6 +107,62 @@ describe("SatSubscriptionProvider", () => {
     await provider.shutdown();
   });
 
+  it("queries billing from the SS server without adding a local fee audit", async () => {
+    const store = makeStore();
+    const request = vi.fn(async (wire: Uint8Array) => {
+      const envelope = parseRequestEnvelope(wire);
+      expect(envelope.message.kind).toBe(Kind.BillingRequest);
+      return newBillingResponse({
+        requestId: envelope.requestId,
+        success: true,
+        currency: "BSV",
+        network: "mainnet",
+        records: [{
+          chargeId: "charge-1",
+          occurredAtMs: 123n,
+          action: "publish",
+          channel: "topic",
+          sourceRequestId: new Uint8Array(32).fill(7),
+          chargedAmount: "1.25",
+        }],
+        nextCursor: "next",
+        errorCode: "",
+      });
+    });
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest }) => connection(
+          supplier.supplierId,
+          supplier.supplierPublicKeyHex,
+          request,
+          (handler) => { void onSspRequest; void handler; }
+        )
+      }
+    });
+    await provider.bind({ ownerPublicKeyHex: OWNER });
+    const admin = provider.adminService();
+    if (!admin) throw new Error("expected Sat admin service");
+    await expect(admin.getBilling({ supplierId: "primary", fromMs: 0n, toMs: 1_000n, limit: 20, cursor: "" })).resolves.toEqual({
+      supplierId: "primary",
+      currency: "BSV",
+      network: "mainnet",
+      records: [{
+        supplierId: "primary",
+        chargeId: "charge-1",
+        occurredAtMs: 123n,
+        action: "publish",
+        channel: "topic",
+        sourceRequestIdHex: "07".repeat(32),
+        chargedAmount: "1.25",
+      }],
+      nextCursor: "next",
+    });
+    expect(store.listFeeAudit()).toEqual([]);
+    expect(request).toHaveBeenCalledTimes(1);
+    await provider.shutdown();
+  });
+
   it("maps the single physical Channel subscription to every configured receive Supplier", async () => {
     const store = makeStore(["primary", "backup"]);
     const requests = new Map<string, ReturnType<typeof vi.fn>>();
@@ -113,12 +170,13 @@ describe("SatSubscriptionProvider", () => {
       stateForOwner: async () => store,
       transport: {
         connect: async ({ supplier, onSspRequest, supplierGeneration }) => {
-          const request = vi.fn(async (wire: Uint8Array) => newActionResult({
-            requestId: parseRequestEnvelope(wire).requestId,
-            success: true,
-            chargedAmount: "0",
-            errorCode: ""
-          }));
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: [] });
+            }
+            return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "0", errorCode: "" });
+          });
           requests.set(supplier.supplierId, request);
           return connection(supplier.supplierId, supplier.supplierPublicKeyHex, request, (handler) => { void onSspRequest; void handler; }, supplierGeneration);
         }
@@ -129,8 +187,8 @@ describe("SatSubscriptionProvider", () => {
     if (!service) throw new Error("expected Sat service");
     await handle.subscribePhysical(`bsv8.inbox.${OWNER}`);
     await handle.unsubscribePhysical(`bsv8.inbox.${OWNER}`);
-    expect(requests.get("primary")).toHaveBeenCalledTimes(2);
-    expect(requests.get("backup")).toHaveBeenCalledTimes(2);
+    expect(requests.get("primary")).toHaveBeenCalledTimes(3);
+    expect(requests.get("backup")).toHaveBeenCalledTimes(3);
     await provider.shutdown();
   });
 
@@ -175,7 +233,8 @@ describe("SatSubscriptionProvider", () => {
 
     expect(subscribeCalls.get("primary")).toBe(1);
     expect(subscribeCalls.get("backup")).toBe(2);
-    expect(refreshCalls.get("backup")).toBe(1);
+    expect(refreshCalls.get("backup")).toBe(2);
+    expect(refreshCalls.get("primary")).toBe(1);
     const chargedSubscriptions = store.listFeeAudit().filter((item) => item.action === "subscribe" && item.chargedAmount === "1");
     expect(chargedSubscriptions.map((item) => item.supplierId).sort()).toEqual(["backup", "primary"]);
     await provider.shutdown();
@@ -197,7 +256,11 @@ describe("SatSubscriptionProvider", () => {
             }
             if (envelope.message.kind === Kind.SubscriptionsRequest) {
               refreshCalls += 1;
-              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: ["topic"] });
+              return newSubscriptionsResponse({
+                requestId: envelope.requestId,
+                chargedAmount: "0",
+                channels: refreshCalls === 1 ? [] : ["topic"]
+              });
             }
             return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "1", errorCode: "" });
           });
@@ -213,7 +276,7 @@ describe("SatSubscriptionProvider", () => {
     await expect(handle.subscribePhysical("topic")).resolves.toBeUndefined();
 
     expect(subscribeCalls).toBe(1);
-    expect(refreshCalls).toBe(1);
+    expect(refreshCalls).toBe(2);
     expect(store.listFeeAudit().filter((item) => item.action === "subscribe")).toHaveLength(1);
     expect(store.listSubscriptions("primary")[0]).toMatchObject({ desired: "subscribed", observed: "subscribed" });
     await provider.shutdown();
@@ -291,8 +354,8 @@ describe("SatSubscriptionProvider", () => {
             if (envelope.message.kind === Kind.SubscriptionsRequest) {
               refreshCount += 1;
               // 重连后的第一次 refresh 故意失败，验证“在线但未收敛”
-              // 会单独重试。
-              if (refreshCount === 1) throw new SatTransportError("refresh temporarily unavailable", { sentBoundary: "unknown" });
+              // 会单独重试；第 1 次是首次物理动作前的安全查询。
+              if (refreshCount === 2) throw new SatTransportError("refresh temporarily unavailable", { sentBoundary: "unknown" });
               return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: [] });
             }
             if (envelope.message.kind === Kind.Subscribe) subscribeCount += 1;
@@ -321,7 +384,7 @@ describe("SatSubscriptionProvider", () => {
 
     const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
     await handle.subscribePhysical("topic");
-    expect(refreshCount).toBe(0);
+    expect(refreshCount).toBe(1);
     expect(subscribeCount).toBe(1);
     notifyState?.("degraded");
 
@@ -366,6 +429,7 @@ describe("SatSubscriptionProvider", () => {
 
     await handle.subscribePhysical("new-app-topic");
     expect(requests).toEqual([
+      { kind: Kind.SubscriptionsRequest },
       { kind: Kind.Subscribe, channel: "new-app-topic" },
       { kind: Kind.SubscriptionsRequest },
       { kind: Kind.Unsubscribe, channel: "old-app-topic" }
@@ -402,8 +466,8 @@ describe("SatSubscriptionProvider", () => {
     await admin.setOwnerSettings({ ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: [] });
     await admin.setOwnerSettings({ ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: ["primary"] });
 
-    expect(requests.map((item) => item.kind)).toEqual([Kind.Subscribe, Kind.Unsubscribe, Kind.Subscribe]);
-    expect(store.listFeeAudit().filter((item) => item.action === "subscribe" || item.action === "unsubscribe")).toHaveLength(3);
+    expect(requests.map((item) => item.kind)).toEqual([Kind.SubscriptionsRequest, Kind.Unsubscribe, Kind.Subscribe]);
+    expect(store.listFeeAudit().filter((item) => item.action === "subscribe" || item.action === "unsubscribe")).toHaveLength(2);
     await provider.shutdown();
   });
 
@@ -441,12 +505,12 @@ describe("SatSubscriptionProvider", () => {
     });
 
     expect(requests).toEqual([
-      { supplierId: "primary", kind: Kind.Subscribe },
-      { supplierId: "backup", kind: Kind.Subscribe },
+      { supplierId: "primary", kind: Kind.SubscriptionsRequest },
+      { supplierId: "backup", kind: Kind.SubscriptionsRequest },
       { supplierId: "primary", kind: Kind.Unsubscribe },
       { supplierId: "backup", kind: Kind.SubscriptionsRequest }
     ]);
-    expect(store.listFeeAudit().filter((item) => item.action === "subscribe" || item.action === "unsubscribe")).toHaveLength(3);
+    expect(store.listFeeAudit().filter((item) => item.action === "subscribe" || item.action === "unsubscribe")).toHaveLength(1);
     await provider.shutdown();
   });
 

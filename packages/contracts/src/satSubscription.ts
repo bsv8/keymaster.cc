@@ -173,18 +173,43 @@ export interface SatSubscriptionSettingsSnapshot {
   ownerSettings: SatOwnerSupplierSettingsV1 | null;
   /** 供应商连接与订阅摘要。 */
   supplierViews: SatSupplierRuntimeView[];
-  /**
-   * 最近有界扣费审计。
-   *
-   * 金额仍是非负精确字符串；失败/未扣费的动作记录空串（设置页显示为"未知"），
-   * `subscriptions` 动作的 `channel` 也是空串。
-   */
-  feeAudit: Array<{ supplierId: string; action: string; channel: string; chargedAmount: string; result: string; errorCode?: SatErrorCode; createdAtMs: number }>;
+}
+
+/** SS server 返回的一条实际账单记录；账单不是本地设置或 Worker 快照。 */
+export interface SatBillingRecord {
+  /** 本地查询所用的 Supplier 编号。 */
+  supplierId: string;
+  /** SS server 账单记录编号。 */
+  chargeId: string;
+  /** 实际扣费时间，Unix 毫秒；使用 bigint 保持精确。 */
+  occurredAtMs: bigint;
+  /** 产生扣费的 SSP 动作。 */
+  action: string;
+  /** 产生扣费的频道；订阅动作可能是 `*`。 */
+  channel: string;
+  /** 产生扣费的 SSP request id，小写 hex。 */
+  sourceRequestIdHex: string;
+  /** 精确十进制扣费金额。 */
+  chargedAmount: string;
+}
+
+/** SS server 账单分页结果。 */
+export interface SatBillingPage {
+  /** 查询使用的 Supplier 编号。 */
+  supplierId: string;
+  /** 账单货币。 */
+  currency: string;
+  /** 账单所属网络。 */
+  network: string;
+  /** 本页账单记录。 */
+  records: SatBillingRecord[];
+  /** 下一页不透明游标；空字符串表示没有下一页。 */
+  nextCursor: string;
 }
 
 /** SatSubscription 设置页需要的额外受信任管理操作。 */
 export interface SatSubscriptionAdminService {
-  /** 读取当前 owner 的供应商/订阅/扣费摘要。 */
+  /** 读取当前 owner 的本地供应商设置与运行摘要。 */
   getSettingsSnapshot(): Promise<SatSubscriptionSettingsSnapshot>;
   /** 新增或更新供应商配置。 */
   upsertSupplier(config: SatSupplierConfigV1): Promise<void>;
@@ -194,6 +219,8 @@ export interface SatSubscriptionAdminService {
   setOwnerSettings(settings: SatOwnerSupplierSettingsV1): Promise<void>;
   /** 只读查询指定 Supplier 的远端订阅集合；不接受单频道收费变更。 */
   refreshSubscriptions(input: { supplierId: string }): Promise<{ channels: string[]; chargedAmount: string }>;
+  /** 直接查询 SS server 账单；不把结果写入 setting.json。 */
+  getBilling(input: { supplierId: string; fromMs: bigint; toMs: bigint; limit: number; cursor: string }): Promise<SatBillingPage>;
 }
 
 /** SPI Information 中单个 currency 的余额。 */
@@ -343,6 +370,7 @@ export type CoordinatorSatOperation =
   | { type: "admin.setOwnerSettings"; settings: SatOwnerSupplierSettingsV1 }
   | { type: "service.publish"; input: Parameters<SatSubscriptionService["publish"]>[0] }
   | { type: "admin.refreshSubscriptions"; input: Parameters<SatSubscriptionAdminService["refreshSubscriptions"]>[0] }
+  | { type: "admin.getBilling"; input: Parameters<SatSubscriptionAdminService["getBilling"]>[0] }
   | { type: "spi.getInformation"; input: Parameters<SatSubscriptionSpiService["getInformation"]>[0] }
   | { type: "spi.prepareTopUp"; input: Parameters<SatSubscriptionSpiService["prepareTopUp"]>[0] }
   | { type: "spi.submitTopUp"; preview: SatTopUpPreview }

@@ -77,8 +77,10 @@ const resources: I18nPluginResources = {
       "sat.settings.addresses": "libp2p addresses",
       "sat.settings.save": "Save supplier",
       "sat.settings.saved": "Supplier configuration saved.",
-      "sat.settings.audit": "Recent SSP charges",
-      "sat.settings.unknown": "unknown",
+      "sat.settings.billing": "Server billing",
+      "sat.settings.billing.description": "Billing is queried directly from the SS server and is not written to setting.json.",
+      "sat.settings.billing.refresh": "Query server billing",
+      "sat.settings.billing.refreshed": "Server billing refreshed.",
       "sat.settings.spi.refresh": "Refresh SPI balance",
       "sat.settings.spi.topupAmount": "Top-up satoshis",
       "sat.settings.spi.collectAmount": "Collect satoshis",
@@ -122,8 +124,10 @@ const resources: I18nPluginResources = {
       "sat.settings.addresses": "libp2p 地址",
       "sat.settings.save": "保存供应商",
       "sat.settings.saved": "供应商配置已保存。",
-      "sat.settings.audit": "最近 SSP 扣费",
-      "sat.settings.unknown": "未知",
+      "sat.settings.billing": "服务器账单",
+      "sat.settings.billing.description": "账单直接查询 SS server，不写入 setting.json。",
+      "sat.settings.billing.refresh": "查询服务器账单",
+      "sat.settings.billing.refreshed": "服务器账单已刷新。",
       "sat.settings.spi.refresh": "刷新 SPI 余额",
       "sat.settings.spi.topupAmount": "充值 satoshis",
       "sat.settings.spi.collectAmount": "回收 satoshis",
@@ -167,14 +171,14 @@ const satSubscriptionPluginDefinition = {
     id: "sat-subscription.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
-    storage: CENTRAL_STORAGE_DECLARATIONS.satSubscriptionState,
+    storage: CENTRAL_STORAGE_DECLARATIONS.satSubscriptionFiles,
   }],
   setup(ctx: PluginContext) {
     const coordinator = ctx.coordinator as SatCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Sat Coordinator control is unavailable");
     ctx.provide(SAT_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
-    // Window 只注册网络 lane；K-V、状态、Channel crypto 和 provider handle
+    // Window 只注册网络 lane；文件、状态、Channel crypto 和 provider handle
     // 全部由 Coordinator SharedWorker 创建，避免多 Tab 重复连接/扣费。
     const offLane = laneRegistry.register(new SatWindowP2pLane());
     const admin = createSatWorkerAdminService(coordinator);
@@ -191,8 +195,7 @@ const satSubscriptionPluginDefinition = {
       supplierGeneration: 1,
       suppliers: [],
       ownerSettings: null,
-      supplierViews: [],
-      feeAudit: []
+      supplierViews: []
     });
     resources.register<SatSubscriptionSettingsSnapshot, readonly string[]>({
       id: "sat-subscription.settings",

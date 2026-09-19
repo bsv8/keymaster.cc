@@ -101,7 +101,8 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     unitId: "sat-subscription.coordinator-worker",
     taskIds: [],
     serviceIds: ["sat-subscription.service", "channel.subscription-mux"],
-    storagePurposes: ["subscription-state"],
+    // `<owner>/sat-subscription/` 文件根；设置文件固定为 setting.json。
+    storagePurposes: [""],
     finalIoAuditEntries: [],
   },
   {

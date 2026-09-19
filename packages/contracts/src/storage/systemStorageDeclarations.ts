@@ -125,12 +125,16 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  satSubscriptionState: Object.freeze({
+  /**
+   * SatSubscription owner 文件根（空 purpose = `sat-subscription/`）。
+   * 只允许其中的 `setting.json` 保存本地供应商设置；订阅/账单由 SS server 提供。
+   */
+  satSubscriptionFiles: Object.freeze({
     moduleId: "sat-subscription",
-    purposeId: "subscription-state",
+    purposeId: "",
     scope: "owner",
     authority: "built-in-module",
-    model: "kv",
+    model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   tokenBsv21State: Object.freeze({
@@ -229,7 +233,7 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
     CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
     CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory,
   ]),
-  "sat-subscription": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.satSubscriptionState]),
+  "sat-subscription": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.satSubscriptionFiles]),
   "token-bsv21": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, CENTRAL_STORAGE_DECLARATIONS.tokenBsv21MintHistory]),
   "token-stas": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenStasState]),
   webrtc: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory]),

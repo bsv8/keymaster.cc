@@ -532,7 +532,7 @@ describe("Coordinator runtime contract parsers", () => {
     }).operationResult).toEqual({ endpoint: "https://example.test", limits: [1, 2] });
   });
 
-  it("accepts SatSubscription audit entries with no charged amount or channel", () => {
+  it("parses SatSubscription runtime views without a local billing list", () => {
     const response = (request: CoordinatorRpcRequest, operationResult: unknown) => parseCoordinatorResponseFor(request, {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
@@ -563,23 +563,47 @@ describe("Coordinator runtime contract parsers", () => {
         lastChargedAmount: "",
         lastErrorCode: "connect",
       }],
-      feeAudit: [
-        { supplierId: "bsv8", action: "subscribe", channel: `bsv8.inbox.${owner}`, chargedAmount: "", result: "error", errorCode: "connect", createdAtMs: 1 },
-        // `subscriptions` 动作没有单一频道，也没有扣费。
-        { supplierId: "bsv8", action: "subscriptions", channel: "", chargedAmount: "", result: "error", createdAtMs: 2 },
-        { supplierId: "bsv8", action: "publish", channel: "bsvprice.test", chargedAmount: "0.01", result: "ok", createdAtMs: 3 },
-      ],
     };
 
     const parsed = response(rpcRequest("sat.operation", { operation: { type: "admin.getSettings" } }), snapshot);
-    expect(parsed.operationResult).toMatchObject({
-      supplierViews: [{ lastChargedAmount: "" }],
-      feeAudit: [
-        { action: "subscribe", channel: `bsv8.inbox.${owner}`, chargedAmount: "" },
-        { action: "subscriptions", channel: "", chargedAmount: "" },
-        { action: "publish", chargedAmount: "0.01" },
-      ],
-    });
+    expect(parsed.operationResult).toMatchObject({ supplierViews: [{ lastChargedAmount: "" }] });
+  });
+
+  it("parses the SS billing page through the request-aware Sat result boundary", () => {
+    const request = parse(COORDINATOR_RPC_CAPABILITY.request, {
+      kind: "sat.operation",
+      expectedSessionEpoch: "epoch-1",
+      operation: {
+        type: "admin.getBilling",
+        input: { supplierId: "bsv8", fromMs: 0n, toMs: 1_000n, limit: 20, cursor: "" },
+      },
+    }) as CoordinatorRpcRequest;
+    const page = {
+      supplierId: "bsv8",
+      currency: "BSV",
+      network: "mainnet",
+      records: [{
+        supplierId: "bsv8",
+        chargeId: "charge-1",
+        occurredAtMs: 123n,
+        action: "subscribe",
+        channel: "bsv8.inbox.owner",
+        sourceRequestIdHex: "aa".repeat(32),
+        chargedAmount: "0.001",
+      }],
+      nextCursor: "",
+    };
+
+    expect(parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: page,
+    }).operationResult).toEqual(page);
+    expect(() => parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: { ...page, records: [{ ...page.records[0], sourceRequestIdHex: "bad" }] },
+    })).toThrow(/sourceRequestIdHex/);
   });
 
   it("parses the bucket block write control and bounds it to one 256 KiB block", () => {

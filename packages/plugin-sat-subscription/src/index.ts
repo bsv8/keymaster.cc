@@ -25,6 +25,7 @@ export {
   SAT_DEFAULT_SUPPLIER_MULTIADDRS,
   SAT_DEFAULT_SUPPLIER_NAME,
   SAT_DEFAULT_SUPPLIER_PUBLIC_KEY_HEX,
+  isBuiltInDefaultSupplierConfig,
   type SatDefaultNetwork
 } from "./defaults.js";
 export {
