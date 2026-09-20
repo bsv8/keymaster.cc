@@ -113,6 +113,15 @@ export type BroadcastResult =
     }
   | { readonly status: "uncertain"; readonly operationId: string };
 
+/** App 侧回款的链上原始交易摘要；只包含公开 txid、输入 outpoint 和目标地址输出合计。 */
+export interface TestnetTransactionOutputs {
+  readonly txid: string;
+  /** 每个输入的 `${prevTxid}:${prevVout}`，用于证明它确实消费了被资助的输出。 */
+  readonly inputOutpointKeys: readonly string[];
+  /** 匹配目标地址锁脚本的输出金额合计，单位 satoshis。 */
+  readonly outputSatoshis: number;
+}
+
 export interface TestnetChainAdapter {
   inspectNetwork(): Promise<TestnetChainIdentity>;
   inspectAddress(address: string): Promise<TestnetAddressObservation>;
@@ -120,13 +129,28 @@ export interface TestnetChainAdapter {
   fundFromSeed(input: { readonly seedPrivateKeyHex: string; readonly targetAddress: string; readonly satoshis: number; readonly operationId: string }): Promise<BroadcastResult>;
   reconcile(operationId: string): Promise<{ readonly status: "broadcast" | "not-found" | "uncertain"; readonly txid?: string }>;
   returnFunds(input: { readonly walletPrivateKeyHex: string; readonly targetAddress: string; readonly operationId: string }): Promise<BroadcastResult>;
+  /**
+   * 读取 testnet 原始交易并汇总目标地址的输出。页面自己广播的回款没有
+   * Resource 私钥可签名，只能按 canonical txid 和原始交易字节对账；
+   * 这里不接受供应商 JSON 里的金额推断。
+   */
+  inspectTransactionOutputs(txid: string, targetAddress: string): Promise<TestnetTransactionOutputs>;
 }
 
-/** 不把私钥放在普通对象字段中时，测试结果仍可保留的公开一次性钱包投影。 */
-export interface OneTimeWallet {
+/**
+ * 只需要公开收款地址的资金目标。
+ *
+ * 页面自己生成并持有私钥的 Key 不会把私钥交给 Node；Resource 只按
+ * address + run/scenario 身份登记账本，回归和收尾只使用链上公开事实。
+ */
+export interface FundingTarget {
   readonly runId: string;
   readonly scenarioId: string;
   readonly address: string;
+}
+
+/** 不把私钥放在普通对象字段中时，测试结果仍可保留的公开一次性钱包投影。 */
+export interface OneTimeWallet extends FundingTarget {
   readonly publicKeyHex: string;
   readonly privateKey: SecretString;
   clear(): void;
@@ -251,17 +275,30 @@ export class TestnetFundingResource {
     return { runId: safeRunId, scenarioId: safeScenarioId, address: deriveTestnetP2pkhAddress(publicKeyHex), publicKeyHex, privateKey, clear: () => privateKey.clear() };
   }
 
-  async fund(wallet: OneTimeWallet, amount: number, budget: FundingBudget): Promise<FundingLedgerRecord> {
-    assertSafeIdentifier(wallet.runId, "run_id");
-    assertSafeIdentifier(wallet.scenarioId, "scenario_id");
+  /**
+   * 用页面公开的 testnet 地址建立资金目标。
+   *
+   * App 生成的 Key 私钥只存在于页面 Vault，Node 不能也不应读取；地址
+   * 合法性由链适配器在广播前再次校验。
+   */
+  createFundingTarget(runId: string, scenarioId: string, address: string): FundingTarget {
+    assertSafeIdentifier(runId, "run_id");
+    assertSafeIdentifier(scenarioId, "scenario_id");
+    if (!/^[mn][1-9A-HJ-NP-Za-km-z]{25,34}$/u.test(address)) throw new Error("testnet funding target address is invalid");
+    return { runId, scenarioId, address };
+  }
+
+  async fund(target: FundingTarget, amount: number, budget: FundingBudget): Promise<FundingLedgerRecord> {
+    assertSafeIdentifier(target.runId, "run_id");
+    assertSafeIdentifier(target.scenarioId, "scenario_id");
     if (!Number.isSafeInteger(budget.maxFundingSatoshis) || budget.maxFundingSatoshis <= 0 || !Number.isSafeInteger(budget.maxLossSatoshis) || budget.maxLossSatoshis < 0 || !Number.isSafeInteger(budget.feeReserveSatoshis) || budget.feeReserveSatoshis < 0) throw new Error("testnet funding budget is invalid");
     if (!Number.isSafeInteger(amount) || amount <= 0 || amount > budget.maxFundingSatoshis) throw new Error("testnet funding amount exceeds the declared budget");
-    const operationId = `${wallet.runId}:${wallet.scenarioId}:fund`;
-    const current: FundingLedgerRecord = { runId: wallet.runId, scenarioId: wallet.scenarioId, walletAddress: wallet.address, fundedSatoshis: amount, businessTxids: [], businessSatoshis: 0, maxLossSatoshis: budget.maxLossSatoshis, status: "prepared", updatedAt: new Date().toISOString() };
+    const operationId = `${target.runId}:${target.scenarioId}:fund`;
+    const current: FundingLedgerRecord = { runId: target.runId, scenarioId: target.scenarioId, walletAddress: target.address, fundedSatoshis: amount, businessTxids: [], businessSatoshis: 0, maxLossSatoshis: budget.maxLossSatoshis, status: "prepared", updatedAt: new Date().toISOString() };
     await this.#ledger.append(current);
     let result: BroadcastResult;
     try {
-      result = await this.#chain.fundFromSeed({ seedPrivateKeyHex: this.#seed.read(), targetAddress: wallet.address, satoshis: amount, operationId });
+      result = await this.#chain.fundFromSeed({ seedPrivateKeyHex: this.#seed.read(), targetAddress: target.address, satoshis: amount, operationId });
     } catch {
       const uncertain = { ...current, status: "uncertain" as const, updatedAt: new Date().toISOString() };
       await this.#ledger.append(uncertain);
@@ -289,20 +326,49 @@ export class TestnetFundingResource {
    * 归集前仍要把 canonical txid 和业务金额登记到同一份公开账本，避免把
    * 用户有意转出的金额误报成资源损失，也避免“页面成功但账本缺一笔”。
    */
-  async recordBusinessTransaction(wallet: OneTimeWallet, txid: string, amountSatoshis: number): Promise<FundingLedgerRecord> {
-    assertSafeIdentifier(wallet.runId, "run_id");
-    assertSafeIdentifier(wallet.scenarioId, "scenario_id");
+  async recordBusinessTransaction(target: FundingTarget, txid: string, amountSatoshis: number): Promise<FundingLedgerRecord> {
+    assertSafeIdentifier(target.runId, "run_id");
+    assertSafeIdentifier(target.scenarioId, "scenario_id");
     const normalizedTxid = assertTxid(txid);
     if (!Number.isSafeInteger(amountSatoshis) || amountSatoshis <= 0) throw new Error("testnet business amount is invalid");
     const records = await this.#ledger.read();
-    const current = records.find((record) => record.runId === wallet.runId && record.scenarioId === wallet.scenarioId);
-    if (!current || current.walletAddress !== wallet.address || current.status !== "funded") throw new Error("business transaction requires a reconciled funded ledger record");
+    const current = records.find((record) => record.runId === target.runId && record.scenarioId === target.scenarioId);
+    if (!current || current.walletAddress !== target.address || current.status !== "funded") throw new Error("business transaction requires a reconciled funded ledger record");
     if (current.businessTxids.includes(normalizedTxid)) return current;
     const businessSatoshis = (current.businessSatoshis ?? 0) + amountSatoshis;
     if (businessSatoshis > current.fundedSatoshis) throw new Error("business transactions exceed the one-time wallet budget");
     const next = { ...current, businessTxids: [...current.businessTxids, normalizedTxid], businessSatoshis, updatedAt: new Date().toISOString() };
     await this.#ledger.append(next);
     return next;
+  }
+
+  /**
+   * 页面（App Key）自己把收到的金额转回目标地址后，按链上原始交易核对
+   * 并闭合账本。
+   *
+   * 这里不接受页面文案或供应商 JSON 的金额，只接受 canonical txid；输入
+   * 必须真的消费了本次资助的输出，目标地址输出金额必须落在预算内。失败
+   * 时账本进入 uncertain，阻止后续盲目重试。
+   */
+  async recordAppReturn(target: FundingTarget, input: { readonly returnTxid: string; readonly targetAddress: string }): Promise<FundingLedgerRecord> {
+    assertSafeIdentifier(target.runId, "run_id");
+    assertSafeIdentifier(target.scenarioId, "scenario_id");
+    const returnTxid = assertTxid(input.returnTxid);
+    const records = await this.#ledger.read();
+    const current = records.find((record) => record.runId === target.runId && record.scenarioId === target.scenarioId);
+    if (!current || current.walletAddress !== target.address || current.status !== "funded" || !current.fundingTxid) throw new Error("app return requires a reconciled funded ledger record");
+    const observed = await this.#chain.inspectTransactionOutputs(returnTxid, input.targetAddress);
+    if (observed.txid !== returnTxid) throw new Error("app return transaction id does not match the canonical raw transaction");
+    if (!observed.inputOutpointKeys.some((key) => key.startsWith(`${current.fundingTxid}:`))) throw new Error("app return does not spend the funded transaction output");
+    const businessSatoshis = current.businessSatoshis ?? 0;
+    const lossSatoshis = current.fundedSatoshis - businessSatoshis - observed.outputSatoshis;
+    if (observed.outputSatoshis <= 0 || lossSatoshis < 0 || lossSatoshis > current.maxLossSatoshis) {
+      await this.#ledger.append({ ...current, returnTxid, returnedSatoshis: observed.outputSatoshis, lossSatoshis: Math.max(0, lossSatoshis), status: "uncertain", updatedAt: new Date().toISOString() });
+      throw new Error("app return does not match the declared funding budget; manual reconciliation is required");
+    }
+    const returned = { ...current, returnTxid, returnedSatoshis: observed.outputSatoshis, returnFeeSatoshis: lossSatoshis, lossSatoshis, status: "returned" as const, updatedAt: new Date().toISOString() };
+    await this.#ledger.append(returned);
+    return returned;
   }
 
   async returnRemaining(wallet: OneTimeWallet, targetAddress: string): Promise<FundingLedgerRecord> {

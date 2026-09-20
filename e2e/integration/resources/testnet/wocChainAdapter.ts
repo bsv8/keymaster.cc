@@ -10,12 +10,14 @@ import {
   rawTxHexByteLength,
   signP2pkhTx,
 } from "../../../../packages/plugin-p2pkh/src/p2pkhSigner.js";
+import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "../../../../packages/plugin-p2pkh/src/p2pkhTransactionParser.js";
 import { allocateUtxos } from "../../../../packages/plugin-p2pkh/src/utxoAllocator.js";
 import type {
   BroadcastResult,
   TestnetAddressObservation,
   TestnetChainAdapter,
   TestnetChainIdentity,
+  TestnetTransactionOutputs,
 } from "./fundingResource.js";
 import { deriveTestnetP2pkhAddress } from "./fundingResource.js";
 
@@ -64,6 +66,14 @@ function assertOperationId(value: string): string {
 function assertTxid(value: unknown, label: string): string {
   if (typeof value !== "string" || !TXID_RE.test(value)) throw new Error(`testnet ${label} is not a valid txid`);
   return value.toLowerCase();
+}
+
+/** WOC `/tx/hash/{txid}` 对内存池交易也返回 200；只有确认数/块高才算进块。 */
+function isConfirmedTransactionDetail(detail: unknown): boolean {
+  if (typeof detail !== "object" || detail === null) return false;
+  const record = detail as { readonly confirmations?: unknown; readonly blockheight?: unknown };
+  return (typeof record.confirmations === "number" && record.confirmations > 0)
+    || (typeof record.blockheight === "number" && record.blockheight > 0);
 }
 
 function assertSatoshis(value: unknown, label: string, allowZero = false, allowNegative = false): number {
@@ -249,8 +259,11 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
   async observeTransaction(txid: string): Promise<ObservedTransaction> {
     const normalized = assertTxid(txid, "transaction");
     try {
-      await this.#getJson("test", `/tx/hash/${encodeURIComponent(normalized)}`);
-      return "confirmed";
+      const detail = await this.#getJson("test", `/tx/hash/${encodeURIComponent(normalized)}`);
+      // WOC 对已进内存池的交易同样返回 200（confirmations/blockheight 为空）；
+      // 只有明确带确认数或块高的响应才算 confirmed，否则会把未确认当成
+      // confirmed，confirmed-sync 永远看不到这笔交易。
+      if (isConfirmedTransactionDetail(detail)) return "confirmed";
     } catch (error) {
       if (!this.#isNotFound(error)) throw error;
     }
@@ -261,6 +274,28 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
       if (this.#isNotFound(error)) return "not-found";
       throw error;
     }
+  }
+
+  /**
+   * 按原始交易字节核对页面回款，而不是相信供应商 JSON 里的金额字段。
+   *
+   * 页面自己签名的回款没有 Resource 私钥；这是 App 侧转账唯一的链上
+   * 对账材料：canonical txid、输入 outpoint 和匹配目标地址的输出合计。
+   */
+  async inspectTransactionOutputs(txid: string, targetAddress: string): Promise<TestnetTransactionOutputs> {
+    const normalized = assertTxid(txid, "transaction");
+    const address = assertTestnetP2pkhAddress(targetAddress);
+    const rawTxHex = await this.#getText("test", `/tx/${encodeURIComponent(normalized)}/hex`);
+    const parsed = parseP2pkhTransaction(rawTxHex, normalized);
+    const scriptHex = p2pkhAddressToScriptHex(address, "test");
+    const outputSatoshis = parsed.outputs
+      .filter((output) => output.scriptHex === scriptHex)
+      .reduce((sum, output) => sum + output.value, 0);
+    return {
+      txid: parsed.canonicalTxid,
+      inputOutpointKeys: parsed.inputs.map((input) => input.outpointKey),
+      outputSatoshis,
+    };
   }
 
   async waitForTransaction(txid: string, options: { readonly timeoutMs?: number; readonly pollMs?: number } = {}): Promise<Exclude<ObservedTransaction, "not-found">> {
@@ -472,10 +507,36 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
   }
 
   async #getJson(network: "test" | "main", endpoint: string): Promise<unknown> {
-    const response = await this.#request(network, endpoint, { method: "GET" });
+    const response = await this.#requestReadWithBackoff(network, endpoint, { method: "GET" });
     const text = await response.text();
     if (!response.ok) throw new Error(`testnet API HTTP ${response.status}`);
     try { return JSON.parse(text) as unknown; } catch { throw new Error("testnet API returned invalid JSON"); }
+  }
+
+  /** 读取纯文本响应（WOC 的 /tx/{txid}/hex 返回原始交易 hex）。 */
+  async #getText(network: "test" | "main", endpoint: string): Promise<string> {
+    const response = await this.#requestReadWithBackoff(network, endpoint, { method: "GET" });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`testnet API HTTP ${response.status}`);
+    return text.trim();
+  }
+
+  /**
+   * 只读请求遇到 429 时按指数退避重试。
+   *
+   * 浏览器里的 keymaster 同步和 Node 侧确认轮询共用同一个 WOC 配额；长轮询
+   * 期间偶发 429 是外部事实，不能让它把一次合法等待判成失败。广播（POST）
+   * 仍然只发一次，绝不用重试掩盖“结果未知”。
+   */
+  async #requestReadWithBackoff(network: "test" | "main", endpoint: string, init: RequestInit): Promise<Response> {
+    let delayMs = 1_000;
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await this.#request(network, endpoint, init);
+      if (response.status !== 429 || attempt >= 5) return response;
+      await response.arrayBuffer().catch(() => undefined);
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 30_000);
+    }
   }
 
   async #postJson(network: "test" | "main", endpoint: string, body: unknown): Promise<Response> {

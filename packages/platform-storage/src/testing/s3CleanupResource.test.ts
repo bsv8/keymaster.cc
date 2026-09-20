@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { S3CleanupApi } from "./s3CleanupAdapter.js";
 import { S3CleanupResource } from "./s3CleanupResource.js";
 
-/** 单元测试专用的内存 S3 API；真实桶写入只在 Playwright real-resource 层发生。 */
+/** 单元测试专用的内存 S3 API；真实桶写入只在 Playwright 真实资源执行档（s3 等）发生。 */
 class MemoryS3Api implements S3CleanupApi {
   readonly objects = new Map<string, { body: string; etag: string }>([
     ["run-resource-safety/business/one", { body: "one", etag: "business-v1" }],

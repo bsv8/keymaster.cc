@@ -18,7 +18,7 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
 }
 
 /**
- * 整轮 real-resource 的唯一 setup：权限预检、S3 lease/开场清理，
+ * 整轮 resources 执行档的唯一 setup：权限预检、S3 lease/开场清理，
  * 以及 testnet 链网络/余额/旧账检查。SatSubscription 页面 Journey 自己
  * 通过真实 Chromium 建立连接；这里不把 Node WebSocket 探针当作页面业务
  * 证据，也不因为没有直接探测而把资源判定为失败。

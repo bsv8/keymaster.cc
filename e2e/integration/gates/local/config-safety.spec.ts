@@ -48,7 +48,7 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
 /**
  * 业务结果：真实资源测试的配置错误必须在读取资源前被拒绝，不能让错误路径、
  * 凭据或工作树中的文件进入后续 E2E。这里验证的是配置文件安全边界，不模拟
- * S3、testnet 或 SatSubscription 的服务行为；真实服务行为由 real-resource 层验证。
+ * S3、testnet 或 SatSubscription 的服务行为；真实服务行为由 resources/s3/satsubscription 执行档验证。
  */
 test(`${GATE_ID}：仓库外配置和秘密容器通过安全校验`, async () => {
   await withConfigDirectory(async (directory) => {

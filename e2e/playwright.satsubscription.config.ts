@@ -32,6 +32,6 @@ export default defineConfig({
   },
   projects: [{
     name: "satsubscription",
-    testMatch: /journeys\/satsubscription\/[^/]+\.spec\.ts$/u,
+    testMatch: /journeys\/satsubscription\/(?:real-channel-message|ss-server-settings|ss-server-settings-bsv8)\.spec\.ts$/u,
   }],
 });

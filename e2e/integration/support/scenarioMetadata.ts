@@ -31,7 +31,7 @@ export const LOCAL_CONTACT_MESSAGE_SCENARIO = {
 /** 真实 SatSubscription 本地供应商 Journey：正式服务完成 Channel 私信收发。 */
 export const REAL_SATSUB_MESSAGE_SCENARIO = {
   id: "J-REAL-SATSUB-MESSAGE",
-  level: "real-resource",
+  level: "satsubscription",
   requirementIds: ["KM-MESSAGE-001", "KM-SATSUB-001"],
   startingState: "Node 从仓库外 SATS_SUBSCRIPTION_DIR 构建正式 cmd/satsubscription 并启动一次性 PostgreSQL；三个用户各用一个独立浏览器进程和确定性白名单 Hex Key。",
   successCriteria: [
@@ -47,7 +47,7 @@ export const REAL_SATSUB_MESSAGE_SCENARIO = {
 /** 真实 SS server 设置页 Journey：单免费用户验证 SPI/订阅/账单真实翻页。不测内置 bsv8 缺省供应商。 */
 export const REAL_SATSUB_SERVER_SETTINGS_SCENARIO = {
   id: "J-REAL-SATSUB-SERVER-SETTINGS",
-  level: "real-resource",
+  level: "satsubscription",
   requirementIds: ["KM-SATSUB-001", "KM-SETTINGS-001"],
   startingState: "Node 从仓库外 SATS_SUBSCRIPTION_DIR 构建正式 cmd/satsubscription 并启动一次性 PostgreSQL；单用户用确定性免费白名单 Hex Key 初始化本地桶并把本地 SS 供应商设为默认发布方；3 条正扣费账单由一次性库的正式 operations fixture 预置（查询走真实 SSP）。",
   successCriteria: [
@@ -94,7 +94,7 @@ export const LOCAL_SETTINGS_SCENARIO = {
 /** 真实 S3 首次初始化 Journey；物理桶由 s3.json 指定，页面创建逻辑桶。 */
 export const REAL_S3_INITIALIZATION_SCENARIO = {
   id: "J-REAL-S3-INIT",
-  level: "real-resource",
+  level: "s3",
   requirementIds: ["KM-INIT-002"],
   startingState: "s3.json 指定的真实物理桶已取得本轮 lease 并完成开场清理，浏览器是全新 Chromium context。",
   successCriteria: [
@@ -110,7 +110,7 @@ export const REAL_S3_INITIALIZATION_SCENARIO = {
 /** 真实 S3 + Local 双桶双 Key 交叉切换 Journey；以首页「我的信息」公钥为准。 */
 export const REAL_S3_BUCKET_KEY_SWITCH_SCENARIO = {
   id: "J-REAL-S3-BUCKET-KEY-SWITCH",
-  level: "real-resource",
+  level: "s3",
   requirementIds: ["KM-STORAGE-001"],
   startingState: "s3.json 指定的真实物理桶已取得本轮 lease 并完成开场清理；浏览器从全新 Local 桶开始建立身份。",
   successCriteria: [
@@ -138,10 +138,10 @@ export const LIFECYCLE_BOUNDARY_GATE = {
   resourceProfile: "none",
 } as const satisfies IntegrationScenarioMetadata;
 
-/** 真实 testnet 资产 Journey；资源未准备时由 real-resource setup fail closed。 */
+/** 真实 testnet 资产 Journey；资源未准备时由 resources setup fail closed。 */
 export const REAL_TESTNET_ASSET_SCENARIO = {
   id: "J-REAL-TESTNET-ASSET",
-  level: "real-resource",
+  level: "p2pkh",
   requirementIds: ["KM-ASSET-001"],
   startingState: "真实 testnet 资金库已完成网络、余额、预算和旧账检查，Journey 获得独立一次性钱包。",
   successCriteria: [
@@ -152,10 +152,25 @@ export const REAL_TESTNET_ASSET_SCENARIO = {
   resourceProfile: "testnet",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 testnet 收币与全额回款 Journey：页面检测到账后用“全部”转回 seed。 */
+export const REAL_TESTNET_ROUNDTRIP_SCENARIO = {
+  id: "J-REAL-TESTNET-ROUNDTRIP",
+  level: "p2pkh",
+  requirementIds: ["KM-ASSET-001"],
+  startingState: "真实 testnet 资金库已完成网络、余额、预算和旧账检查；浏览器是全新 Chromium context，Local 桶和第一把 Key 由页面正式初始化流程生成。",
+  successCriteria: [
+    "Node 只按页面公开的 testnet 地址从 seed 打入 10 sat 并等待 confirmed，页面 Key 私钥不离开浏览器 Vault。",
+    "Keymaster confirmed-sync 在转账 Offer 上把余额检测为 10 sats，而不是 Node 侧重新查询余额。",
+    "用户填写 seed 地址并以“全部”转出：预览无找零、矿工费从余额扣除，页面返回 local-confirmed 和 canonical txid。",
+    "转出后页面余额回到 0；Node 按原始交易核对回款消费了资助输出、seed 实收金额与页面预览一致，账本闭合为 returned。",
+  ],
+  resourceProfile: "testnet",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 真实资源层的 SatSubscription 配置投影 Journey；不把投影冒充成页面连接或收费业务。 */
 export const REAL_SATSUBSCRIPTION_HEALTH_SCENARIO = {
   id: "J-REAL-SATSUB-HEALTH",
-  level: "real-resource",
+  level: "satsubscription",
   requirementIds: ["KM-SATSUB-001"],
   startingState: "resource-setup 已写入脱敏配置投影；真实连接结果由 Chromium 页面 Journey 产生。",
   successCriteria: [
@@ -169,7 +184,7 @@ export const REAL_SATSUBSCRIPTION_HEALTH_SCENARIO = {
 /** 真实 SatSubscription 页面 Journey；页面结果独立于资源状态投影。 */
 export const REAL_SATSUBSCRIPTION_PAGE_SCENARIO = {
   id: "J-REAL-SATSUB-PAGE",
-  level: "real-resource",
+  level: "satsubscription",
   requirementIds: ["KM-SATSUB-001"],
   startingState: "全新 Chromium context，用户通过真实 Local 页面建立 active Key；Node 只读取仓库外 Sat 配置。",
   successCriteria: [
@@ -183,7 +198,7 @@ export const REAL_SATSUBSCRIPTION_PAGE_SCENARIO = {
 /** 真实 bsv8 缺省网关 Journey：直连内置缺省配置，只做只读查询，不测本地 SS。 */
 export const REAL_SATSUB_DEFAULT_SETTINGS_SCENARIO = {
   id: "J-REAL-SATSUB-DEFAULT-SETTINGS",
-  level: "real-resource",
+  level: "satsubscription",
   requirementIds: ["KM-SATSUB-001"],
   startingState: "全新 Chromium context，用户通过真实 Local 页面建立全新 active Key；不启动本地 SS，直连构建对应的缺省网关。",
   successCriteria: [
@@ -239,7 +254,7 @@ export const CONFIG_SAFETY_GATE = {
 /** 真实 S3 Resource 安全 Gate：验证真实 lease、prefix 清理范围和收尾边界。 */
 export const RESOURCE_SAFETY_GATE = {
   id: "G-RESOURCE-SAFETY",
-  level: "real-resource",
+  level: "s3",
   requirementIds: ["KM-RESOURCE-001"],
   startingState: "真实 S3 setup 已读取仓库外 s3.json、取得 lease 并完成非前缀开场清理。",
   successCriteria: [
@@ -337,7 +352,7 @@ export const PLUGIN_LIFECYCLE_PRODUCTION_GATE = {
 /** 真实 msfile-nas 页面 Journey：正式 UI 从真实 Go NAS 获取并下载文件。 */
 export const REAL_MSFILE_NAS_SCENARIO = {
   id: "J-REAL-MSFILE-NAS",
-  level: "local-integration",
+  level: "msfile",
   requirementIds: ["KM-MSFILE-001"],
   startingState: "Node 从仓库外 MSFile-Proxy-Protocol 构建正式 cmd/msfile-nas，用一次性 NAS 目录、确定性供应商身份和 WebRTC Direct listener 发布夹具文件；浏览器是全新 Chromium context。",
   successCriteria: [
@@ -354,7 +369,7 @@ export const REAL_MSFILE_NAS_SCENARIO = {
 /** 真实 BSV8 官方 msfiles 服务 Journey：四个官方示例按正确方式打开。 */
 export const REAL_MSFILE_OFFICIAL_SCENARIO = {
   id: "J-REAL-MSFILE-OFFICIAL",
-  level: "local-integration",
+  level: "msfile",
   requirementIds: ["KM-MSFILE-001"],
   startingState: "全新 Chromium context 已完成 Local 初始化；MSFile 系统内置 BSV8 官方供应商（公钥 039da3…26，WSS /dns4/msfiles.bsv8.com/tcp/443/tls/ws）。",
   successCriteria: [
@@ -369,7 +384,7 @@ export const REAL_MSFILE_OFFICIAL_SCENARIO = {
 /** MSFile Window executor Gate：保留 Noise、签名、接管和传输边界技术证据。 */
 export const MSFILE_EXECUTOR_GATE = {
   id: "G-MSFILE-EXECUTOR",
-  level: "local-integration",
+  level: "msfile",
   requirementIds: ["KM-MSFILE-001", "KM-LIFECYCLE-001"],
   startingState: "临时 Go MSFile supplier、真实 Chromium 和隔离 Window executor 已准备。",
   successCriteria: [
@@ -383,7 +398,7 @@ export const MSFILE_EXECUTOR_GATE = {
 /** MSFile 原生 Range Gate：保留 Service Worker、Range、媒体和撤权边界。 */
 export const MSFILE_NATIVE_RANGE_GATE = {
   id: "G-MSFILE-NATIVE-RANGE",
-  level: "local-integration",
+  level: "msfile",
   requirementIds: ["KM-MSFILE-001", "KM-TECH-001", "KM-LIFECYCLE-001"],
   startingState: "临时 Go supplier 与真实生产媒体 Service Worker 已准备，浏览器通过原生媒体元素读取。",
   successCriteria: [
@@ -397,7 +412,7 @@ export const MSFILE_NATIVE_RANGE_GATE = {
 /** MSFile supplier runtime Gate：保留传输、TLS、Connect、并发和接管证据。 */
 export const MSFILE_PRODUCTION_RUNTIME_GATE = {
   id: "G-MSFILE-PRODUCTION-RUNTIME",
-  level: "local-integration",
+  level: "msfile",
   requirementIds: ["KM-MSFILE-001", "KM-APPS-001", "KM-LIFECYCLE-001"],
   startingState: "临时 Go supplier 发布 WebRTC/WSS 地址、证书 pin 和测试文件，生产 hook 已启动。",
   successCriteria: [

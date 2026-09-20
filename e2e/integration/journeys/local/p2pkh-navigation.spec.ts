@@ -10,7 +10,7 @@ export const JOURNEY_METADATA = LOCAL_P2PKH_NAVIGATION_SCENARIO;
  *
  * 这是默认 E2E 中的真实浏览器 smoke，不注入 provider 响应、IndexedDB 数据或
  * 本地广播服务器。新建钱包没有可消费余额，因此本场景只验证真实生产壳、真实
- * provider 读取链路和页面路由；testnet 充值、转账、确认和归集由 real-resource
+ * provider 读取链路和页面路由；testnet 充值、转账、确认和归集由 p2pkh
  * Journey 负责。
  */
 test(JOURNEY_ID + "：P2PKH 钱包通过真实 provider 展示链上和本地交易入口", async ({ page }) => {

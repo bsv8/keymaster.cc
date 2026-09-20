@@ -1,9 +1,12 @@
 import type { Page } from "@playwright/test";
 
-/** 集成测试证据层级；低层级结果不能自动提升高层级结论。 */
+/** 集成测试证据层级；按主要测试对象分类，低层级结果不能自动提升高层级结论。 */
 export type IntegrationLevel =
   | "local-integration"
-  | "real-resource"
+  | "p2pkh"
+  | "satsubscription"
+  | "s3"
+  | "msfile"
   | "deployment-acceptance";
 
 /** 场景使用的资源类型；`none` 表示不读取仓库外资源。 */

@@ -8,7 +8,10 @@
 | 层级 | 中文含义 | 能证明什么 |
 | --- | --- | --- |
 | `local-integration` | 本地浏览器集成 | 生产构建在 Chromium 中的确定性业务与失败路径 |
-| `real-resource` | 真实资源集成 | 本次连接的 S3、testnet、SatSubscription 或 P2P 资源 |
+| `p2pkh` | 链上资产与转账 | 真实 testnet 余额、转账、确认与资金归集 |
+| `satsubscription` | SatSubscription | 真实服务/页面/健康投影的订阅、账单与连接行为 |
+| `s3` | S3 桶存储 | 真实 S3 桶初始化、Key 切换与资源安全 |
+| `msfile` | MSFile 与 P2P | 真实 msfile 供应商的文件读取与 Range 行为 |
 | `deployment-acceptance` | 目标部署验收 | 指定不可变 Build ID 的公开部署行为 |
 
 较低层级不能替代较高层级；未执行、阻断、清理失败和结果未知都不能写成通过。
@@ -36,8 +39,8 @@ Gate     不适合写成用户旅程的技术边界
 pnpm test:e2e                    # 本地核心 + 非安全 HTTP 边界
 pnpm test:e2e:integration        # 本地生产构建的完整 Chromium 集成测试
 pnpm test:e2e:msfile             # 临时 Go Supplier 的 MSFile Gate
-pnpm test:e2e:real-s3            # 真实 S3
-pnpm test:e2e:real-resource      # 真实资源集合
+pnpm test:e2e:s3                 # 真实 S3
+pnpm test:e2e:resources          # 资源准备 + 真实资源集合
 pnpm test:e2e:deployment         # 指定部署验收
 pnpm check:integration-coverage  # 检查矩阵、插件、场景和生成视图一致
 ```

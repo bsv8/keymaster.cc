@@ -154,7 +154,7 @@ test(JOURNEY_ID + "：真实 testnet 余额、转账和归集", async ({ page, c
       cleanupError = error;
     }
     try {
-      // real-resource 项目显式关闭 trace/video/screenshot；只上传脱敏的
+      // resources 执行档显式关闭 trace/video/screenshot；只上传脱敏的
       // console/Worker 错误，并把一次性私钥作为已知秘密参与替换。
       const knownSecrets = [password, wallet?.privateKey.read() ?? ""];
       await attachBrowserErrors(testInfo, browserErrors, knownSecrets);

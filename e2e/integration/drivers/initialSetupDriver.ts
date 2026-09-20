@@ -230,7 +230,7 @@ export async function connectExistingS3User(
  *
  * 只接受 Resource 刚生成的一次性 testnet Key；长期 seed 不得传入这个
  * Driver。浏览器需要看到私钥文本是因为正式产品支持导入，但测试结束
- * 后由调用方清除一次性 Key，且 real-resource 项目不保留 trace/video。
+ * 后由调用方清除一次性 Key，且真实资源执行档不保留 trace/video。
  */
 export async function initializeLocalUserWithImportedHexKey(
   page: Page,
