@@ -120,6 +120,7 @@ Gate(3 项)：
 | --- | --- | --- | --- |
 | J-REAL-SATSUB-MESSAGE | `journeys/satsubscription/real-channel-message.spec.ts` | 三个独立浏览器进程各自建立白名单身份并连接正式供应商；验证真实 Channel 私信收发、刷新后本地历史、账本 0 扣费、第三方不可见，以及桶内 sent/received raw + timeindex 证据与 raw 缺失展示 | KM-MESSAGE-001、KM-SATSUB-001 |
 | J-REAL-SATSUB-SERVER-SETTINGS | `journeys/satsubscription/ss-server-settings.spec.ts` | 单免费白名单用户连接本地 SS 供应商并设为默认发布方；红绿灯 online、刷新 SPI 余额、刷新远端订阅正常；一次性库预置 3 条正式正扣费账单后以每页 2 条做真实 SSP 查询，第 1 页→第 2 页→第 1 页往返且记录不重复；不测内置 bsv8 缺省供应商 | KM-SATSUB-001、KM-SETTINGS-001 |
+| J-REAL-SATSUB-DEFAULT-SETTINGS | `journeys/satsubscription/ss-server-settings-bsv8.spec.ts` | 直连内置 bsv8 缺省网关（非本地 SS）：红绿灯 online、刷新 SPI 余额、刷新远端订阅、查询空账单（翻页禁用）均正常；只读，不启用接收/发布/充值 | KM-SATSUB-001 |
 
 ## 5. real-resource
 
@@ -134,7 +135,6 @@ Gate(3 项)：
 | J-REAL-TESTNET-ASSET | `journeys/real-resource/real-testnet-asset.spec.ts` | 真实 testnet 余额、转账、txid 对账和资金归集；保护 outpoint/结果未知不按普通可重试处理 | KM-ASSET-001 |
 | J-REAL-SATSUB-HEALTH | `journeys/real-resource/real-satsubscription-health.spec.ts` | 只读取脱敏配置投影；Node 探针不冒充页面健康和充值/账本结果 | KM-SATSUB-001 |
 | J-REAL-SATSUB-PAGE | `journeys/real-resource/real-satsubscription-page.spec.ts` | 真实页面把 multiaddr 映射为 supplier 配置；先验证错误公钥 disconnected/degraded，再验证正确公钥 online | KM-SATSUB-001 |
-| J-REAL-SATSUB-DEFAULT-SETTINGS | `journeys/real-resource/real-satsubscription-default.spec.ts` | 直连内置 bsv8 缺省网关（非本地 SS）：红绿灯 online、刷新 SPI 余额、刷新远端订阅、查询空账单（翻页禁用）均正常；只读，不启用接收/发布/充值 | KM-SATSUB-001 |
 | 资源收尾 | `resources/resource-teardown.spec.ts` | 依赖失败也执行；清理指定桶并释放 lease，清理不确定时保留 lease 交给下一轮恢复 | KM-RESOURCE-001 |
 
 ---
