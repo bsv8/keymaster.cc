@@ -180,6 +180,21 @@ export const REAL_SATSUBSCRIPTION_PAGE_SCENARIO = {
   resourceProfile: "satsubscription",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 bsv8 缺省网关 Journey：直连内置缺省配置，只做只读查询，不测本地 SS。 */
+export const REAL_SATSUB_DEFAULT_SETTINGS_SCENARIO = {
+  id: "J-REAL-SATSUB-DEFAULT-SETTINGS",
+  level: "real-resource",
+  requirementIds: ["KM-SATSUB-001"],
+  startingState: "全新 Chromium context，用户通过真实 Local 页面建立全新 active Key；不启动本地 SS，直连构建对应的缺省网关。",
+  successCriteria: [
+    "bsv8 缺省卡片显示内置默认说明且无删除按钮，红绿灯变绿（online）。",
+    "刷新 SPI 余额后行内出现 BSV 账户且无报错，刷新远端订阅后状态栏提示已刷新且无报错。",
+    "查询服务器账单第 1 页成功；全新 Key 账单为空且上一页/下一页禁用，全程无报错。",
+    "只做只读查询，不启用接收、不发布、不充值。",
+  ],
+  resourceProfile: "satsubscription",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 部署验收 Journey 的矩阵入口；本地 preview 不得替代不可变 Build ID。 */
 export const DEPLOYMENT_APPS_SCENARIO = {
   id: "J-DEPLOYMENT-APPS",

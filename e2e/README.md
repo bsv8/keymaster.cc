@@ -134,6 +134,7 @@ Gate(3 项)：
 | J-REAL-TESTNET-ASSET | `journeys/real-resource/real-testnet-asset.spec.ts` | 真实 testnet 余额、转账、txid 对账和资金归集；保护 outpoint/结果未知不按普通可重试处理 | KM-ASSET-001 |
 | J-REAL-SATSUB-HEALTH | `journeys/real-resource/real-satsubscription-health.spec.ts` | 只读取脱敏配置投影；Node 探针不冒充页面健康和充值/账本结果 | KM-SATSUB-001 |
 | J-REAL-SATSUB-PAGE | `journeys/real-resource/real-satsubscription-page.spec.ts` | 真实页面把 multiaddr 映射为 supplier 配置；先验证错误公钥 disconnected/degraded，再验证正确公钥 online | KM-SATSUB-001 |
+| J-REAL-SATSUB-DEFAULT-SETTINGS | `journeys/real-resource/real-satsubscription-default.spec.ts` | 直连内置 bsv8 缺省网关（非本地 SS）：红绿灯 online、刷新 SPI 余额、刷新远端订阅、查询空账单（翻页禁用）均正常；只读，不启用接收/发布/充值 | KM-SATSUB-001 |
 | 资源收尾 | `resources/resource-teardown.spec.ts` | 依赖失败也执行；清理指定桶并释放 lease，清理不确定时保留 lease 交给下一轮恢复 | KM-RESOURCE-001 |
 
 ---

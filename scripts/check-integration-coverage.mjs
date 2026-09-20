@@ -172,7 +172,7 @@ const EXECUTION_PROFILES = [
   { name: "satsubscription", pattern: /^journeys\/satsubscription\/[^/]+\.spec\.ts$/u },
   { name: "deployment", pattern: /^(?:journeys\/deployment|gates\/deployment)\/[^/]+\.spec\.ts$/u },
   { name: "real-s3", pattern: /^(?:journeys\/real-resource\/real-s3-(?:initialization|bucket-key-switching)|gates\/real-resource\/resource-safety)\.spec\.ts$/u },
-  { name: "real-resource", pattern: /^(?:journeys\/real-resource\/(?:real-testnet-asset|real-satsubscription-health|real-satsubscription-page)|resources\/(?:resource-setup|resource-teardown|real-resource-availability))\.spec\.ts$/u },
+  { name: "real-resource", pattern: /^(?:journeys\/real-resource\/(?:real-testnet-asset|real-satsubscription-health|real-satsubscription-page|real-satsubscription-default)|resources\/(?:resource-setup|resource-teardown|real-resource-availability))\.spec\.ts$/u },
   { name: "real-s3", pattern: /^resources\/s3-resource-(?:setup|teardown)\.spec\.ts$/u },
 ];
 
