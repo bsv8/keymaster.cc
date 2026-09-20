@@ -58,7 +58,7 @@ const forwarded = process.argv.slice(2);
 const args = [
   "playwright",
   "test",
-  "--config=playwright.satsubscription.config.ts",
+  "--config=e2e/playwright.satsubscription.config.ts",
   "--project=satsubscription",
   ...forwarded,
 ];

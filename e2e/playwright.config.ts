@@ -3,12 +3,12 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   // 默认入口只运行不依赖仓库外资源的 local-core 执行档；所有 spec 都在
   // integration 规划下，避免根目录测试被误放进生产 preview。
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   timeout: 30_000,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results",
+  outputDir: "../test-results",
   use: {
     baseURL: "http://127.0.0.1:4173",
     trace: "on-first-retry",

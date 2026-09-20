@@ -1,12 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   timeout: 60_000,
   forbidOnly: true,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/integration-real-s3",
+  outputDir: "../test-results/integration-real-s3",
   use: {
     baseURL: "http://127.0.0.1:4173",
     // S3 表单会短暂接触访问密钥；真实测试不保留页面产物。

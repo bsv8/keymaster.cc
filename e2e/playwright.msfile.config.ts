@@ -8,12 +8,12 @@ import { defineConfig, devices } from "@playwright/test";
  * 配置真实 NAS 并完成文件获取；它们不应被普通 local-core PR 扫描到。
  */
 export default defineConfig({
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   timeout: 360_000,
   forbidOnly: true,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/integration-msfile",
+  outputDir: "../test-results/integration-msfile",
   workers: 1,
   use: {
     baseURL: "http://127.0.0.1:4173",

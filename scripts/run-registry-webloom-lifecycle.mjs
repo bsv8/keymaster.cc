@@ -146,7 +146,7 @@ try {
   run("pnpm", ["typecheck:e2e"]);
   // registry 配置中的 webServer 还会执行 @keymaster/web 生产构建，随后
   // 用真实 Chromium 跑 plugin + Coordinator 两组生命周期用例。
-  run("pnpm", ["exec", "playwright", "test", "--config=playwright.lifecycle.registry.config.ts", "--project=lifecycle-registry"]);
+  run("pnpm", ["exec", "playwright", "test", "--config=e2e/playwright.lifecycle.registry.config.ts", "--project=lifecycle-registry"]);
   console.log(`正式 registry WebLoom ${expectedVersion} 生命周期验收通过`);
   }
 } finally {

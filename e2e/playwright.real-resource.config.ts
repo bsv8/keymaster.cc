@@ -1,12 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   timeout: 60_000,
   forbidOnly: true,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/integration-real-resource",
+  outputDir: "../test-results/integration-real-resource",
   use: {
     baseURL: "http://127.0.0.1:4173",
     // 真实资源 Journey 会在初始化阶段短暂接触一次性私钥；禁止把页面、

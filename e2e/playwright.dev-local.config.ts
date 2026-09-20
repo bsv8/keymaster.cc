@@ -9,12 +9,12 @@ import { defineConfig, devices } from "@playwright/test";
  *   - 该档只跑本地 Journey，且必须从当前工作树启动全新的 dev server。
  */
 export default defineConfig({
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   timeout: 180_000,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/dev-local",
+  outputDir: "../test-results/dev-local",
   use: {
     baseURL: "http://127.0.0.1:4174",
     trace: "retain-on-failure",

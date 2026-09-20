@@ -4,13 +4,13 @@ import { defineConfig, devices } from "@playwright/test";
 // 正式 registry 0.5.0 验收使用 playwright.lifecycle.registry.config.ts，
 // 并由 registry-only 临时副本入口执行。
 export default defineConfig({
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   testMatch: /gates\/lifecycle\/(?:coordinator-runtime-lifecycle|plugin-lifecycle-production)\.spec\.ts$/u,
   timeout: 30_000,
   forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/coordinator-runtime-lifecycle",
+  outputDir: "../test-results/coordinator-runtime-lifecycle",
   use: {
     baseURL: "http://127.0.0.1:4174",
     trace: "on-first-retry",

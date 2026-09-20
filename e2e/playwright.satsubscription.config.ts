@@ -8,12 +8,12 @@ import { defineConfig } from "@playwright/test";
  * 需要 SATS_SUBSCRIPTION_DIR、Go 和 PostgreSQL 才能运行。
  */
 export default defineConfig({
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   timeout: 360_000,
   forbidOnly: true,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/satsubscription",
+  outputDir: "../test-results/satsubscription",
   // 每个场景独占临时 PostgreSQL 与供应商端口；串行避免资源竞争。
   workers: 1,
   use: {

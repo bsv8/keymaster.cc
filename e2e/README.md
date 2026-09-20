@@ -28,16 +28,16 @@ support/ 场景元数据、脱敏、诊断等横切能力
 
 | 执行档(Group) | 配置/入口 | 命令 | 目录范围 | 中文说明 |
 | --- | --- | --- | --- | --- |
-| local-core | `playwright.config.ts` | `pnpm test:e2e:local-core` | `journeys/local`、`gates/local` | 日常入口，30s 超时；`pnpm test:e2e` = local-core + dev-http |
-| local-integration | `playwright.integration.config.ts` | `pnpm test:e2e:integration` | 同上 | 完整本地集成，60s 超时；另有初始化/多标签单场景 smoke 命令 |
-| dev-http | `playwright.dev-http.config.ts` | `pnpm test:e2e:dev-http` | `gates/dev-http` | 非安全 HTTP + 非 loopback 域名，真实 Vite dev server，不复用旧进程 |
-| lifecycle-local | `playwright.lifecycle.config.ts` | `pnpm test:e2e:lifecycle:local` | `gates/lifecycle` | 本地 WebLoom 0.5.0 tarball 的临时副本验收 |
-| lifecycle-registry | `playwright.lifecycle.registry.config.ts` | `pnpm test:e2e:lifecycle:registry` | `gates/lifecycle` | npm registry 0.5.0 的临时副本验收，`workers: 1` 串行 |
-| msfile | `playwright.msfile.config.ts` | `pnpm test:e2e:msfile` | `gates/msfile`、`journeys/msfile` | 需临时 Go supplier，360s 超时，`workers: 1` |
-| satsubscription | `playwright.satsubscription.config.ts` | `pnpm test:e2e:satsubscription` | `journeys/satsubscription` | 从仓库外 SatSubscription 构建正式服务 + 一次性 PostgreSQL；需 `SATS_SUBSCRIPTION_DIR`、Go、PostgreSQL，360s 超时，`workers: 1` |
-| real-resource | `playwright.real-resource.config.ts` | `pnpm test:e2e:real-resource` | `resources/*`、`journeys/real-resource/*` | 受保护真实资源；setup → 场景 → teardown 投影，`trace/screenshot/video` 全关 |
-| real-s3 | `playwright.real-s3.config.ts` | `pnpm test:e2e:real-s3` | `resources/s3-*`、`gates/real-resource/resource-safety`、`real-s3-initialization` | 只读取仓库外 `s3.json`，不碰 testnet/Sat 秘密 |
-| deployment | `playwright.deployment.config.ts` | `pnpm test:e2e:deployment` | `journeys/deployment`、`gates/deployment` | 目标部署验收，必须提供不可变 Build ID；单项可用脚本入口(见下表) |
+| local-core | `e2e/playwright.config.ts` | `pnpm test:e2e:local-core` | `journeys/local`、`gates/local` | 日常入口，30s 超时；`pnpm test:e2e` = local-core + dev-http |
+| local-integration | `e2e/playwright.integration.config.ts` | `pnpm test:e2e:integration` | 同上 | 完整本地集成，60s 超时；另有初始化/多标签单场景 smoke 命令 |
+| dev-http | `e2e/playwright.dev-http.config.ts` | `pnpm test:e2e:dev-http` | `gates/dev-http` | 非安全 HTTP + 非 loopback 域名，真实 Vite dev server，不复用旧进程 |
+| lifecycle-local | `e2e/playwright.lifecycle.config.ts` | `pnpm test:e2e:lifecycle:local` | `gates/lifecycle` | 本地 WebLoom 0.5.0 tarball 的临时副本验收 |
+| lifecycle-registry | `e2e/playwright.lifecycle.registry.config.ts` | `pnpm test:e2e:lifecycle:registry` | `gates/lifecycle` | npm registry 0.5.0 的临时副本验收，`workers: 1` 串行 |
+| msfile | `e2e/playwright.msfile.config.ts` | `pnpm test:e2e:msfile` | `gates/msfile`、`journeys/msfile` | 需临时 Go supplier，360s 超时，`workers: 1` |
+| satsubscription | `e2e/playwright.satsubscription.config.ts` | `pnpm test:e2e:satsubscription` | `journeys/satsubscription` | 从仓库外 SatSubscription 构建正式服务 + 一次性 PostgreSQL；需 `SATS_SUBSCRIPTION_DIR`、Go、PostgreSQL，360s 超时，`workers: 1` |
+| real-resource | `e2e/playwright.real-resource.config.ts` | `pnpm test:e2e:real-resource` | `resources/*`、`journeys/real-resource/*` | 受保护真实资源；setup → 场景 → teardown 投影，`trace/screenshot/video` 全关 |
+| real-s3 | `e2e/playwright.real-s3.config.ts` | `pnpm test:e2e:real-s3` | `resources/s3-*`、`gates/real-resource/resource-safety`、`real-s3-initialization` | 只读取仓库外 `s3.json`，不碰 testnet/Sat 秘密 |
+| deployment | `e2e/playwright.deployment.config.ts` | `pnpm test:e2e:deployment` | `journeys/deployment`、`gates/deployment` | 目标部署验收，必须提供不可变 Build ID；单项可用脚本入口(见下表) |
 
 执行档之外还有两个辅助脚本：`pnpm smoke:msfile-media-sw`(线上媒体 SW 响应头契约)和
 `pnpm verify:msfile-read-concurrency-pressure`(读取并发压力与内存上界)。
@@ -154,7 +154,7 @@ Gate(3 项)：
 ## 7. deployment
 
 必须有非本机真实部署地址和不可变 Build ID(`commit40位-sourceDigest16位`)。前两项由
-`playwright.deployment.config.ts` 统一运行；带故障注入 runner 的 Gate 建议用脚本入口，
+`e2e/playwright.deployment.config.ts` 统一运行；带故障注入 runner 的 Gate 建议用脚本入口，
 脚本会先校验目标环境再启动 Playwright，缺参数直接失败而不是 skip：
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 | 脚本入口 |

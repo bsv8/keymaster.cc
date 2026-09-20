@@ -4,7 +4,7 @@ import { defineConfig, devices } from "@playwright/test";
 // 新增 Coordinator peer lifecycle 链。入口脚本在无 workspace/file 逃逸的
 // 临时副本中用 frozen lockfile 安装后才加载此配置。
 export default defineConfig({
-  testDir: "./e2e/integration",
+  testDir: "./integration",
   testMatch: /gates\/lifecycle\/(?:plugin-lifecycle-production|coordinator-runtime-lifecycle)\.spec\.ts$/u,
   // 两条验收链共享同源 OPFS、Coordinator Worker 和生命周期全局状态；
   // 文件内 serial 不会阻止 Playwright 跨文件并发，必须在同一 registry
@@ -14,7 +14,7 @@ export default defineConfig({
   forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "test-results/lifecycle-registry",
+  outputDir: "../test-results/lifecycle-registry",
   use: {
     baseURL: "http://127.0.0.1:4175",
     trace: "on-first-retry",

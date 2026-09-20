@@ -105,7 +105,7 @@ try {
   run("pnpm", ["typecheck:e2e"]);
   // lifecycle 配置的 webServer 随后会执行 @keymaster/web 的生产 Vite
   // build；构建完成后才启动 preview 和真实 Chromium。
-  run("pnpm", ["exec", "playwright", "test", "--config=playwright.lifecycle.config.ts", "--project=lifecycle-local"]);
+  run("pnpm", ["exec", "playwright", "test", "--config=e2e/playwright.lifecycle.config.ts", "--project=lifecycle-local"]);
   console.log(`严格本地 WebLoom ${tarballVersion} 生命周期验收通过`);
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
