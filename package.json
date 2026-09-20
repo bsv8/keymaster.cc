@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@11.5.1",
   "config": {
-    "webloomFrameworkReleaseVersion": "0.4.3"
+    "webloomFrameworkReleaseVersion": "0.5.0"
   },
   "workspaces": [
     "apps/*",
@@ -19,7 +19,7 @@
     "verify:msfile-read-concurrency-pressure": "node scripts/msfile-read-concurrency-pressure.mjs",
     "verify:final-io-audit": "node scripts/check-coordinator-final-io-audit.mjs",
     "verify:lifecycle-deployment": "node scripts/check-plugin-lifecycle-deployment.mjs",
-    "test:lifecycle-runtime-lock-gate": "node scripts/check-plugin-lifecycle-runtime-lock-self-test.mjs",
+    "test:lifecycle-handover-gate": "node scripts/check-plugin-lifecycle-handover-self-test.mjs",
     "prepare:lifecycle-evidence": "node scripts/prepare-plugin-lifecycle-evidence.mjs",
     "verify:lifecycle-production-gates": "node scripts/check-plugin-lifecycle-production-gates.mjs",
     "verify:lifecycle-release": "pnpm verify:final-io-audit && pnpm verify:lifecycle-deployment && pnpm test:e2e:external && pnpm test:e2e:irreversible-io && pnpm test:e2e:recovery && pnpm verify:lifecycle-production-gates",
@@ -85,7 +85,7 @@
     "typescript": "^5.5.4",
     "vite": "^5.4.2",
     "vitest": "3.2.4",
-    "webloom-framework": "0.4.3"
+    "webloom-framework": "0.5.0"
   },
   "dependencies": {
     "@bsv/sdk": "^1.10.4",

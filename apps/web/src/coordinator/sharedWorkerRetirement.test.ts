@@ -26,7 +26,7 @@ function fixture(ready: Promise<void>) {
 }
 
 describe("Coordinator SharedWorker 退场", () => {
-  it("最后一个页面关闭后排空 Runtime、释放锁并退出 Worker", async () => {
+  it("最后一个页面关闭后排空 Runtime、释放资源并退出 Worker", async () => {
     vi.useFakeTimers();
     const test = fixture(Promise.resolve());
     installSharedWorkerRetirement(test.app, test.scope, { idleGraceMs: 250 });
@@ -56,7 +56,7 @@ describe("Coordinator SharedWorker 退场", () => {
 
   it("启动失败后退出 failed Worker，避免重试复用坏实例", async () => {
     vi.useFakeTimers();
-    const test = fixture(Promise.reject(new Error("runtime lock conflict")));
+    const test = fixture(Promise.reject(new Error("runtime startup failed")));
     installSharedWorkerRetirement(test.app, test.scope, { failureGraceMs: 25 });
     await Promise.resolve();
     await vi.advanceTimersByTimeAsync(25);

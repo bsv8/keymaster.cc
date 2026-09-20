@@ -131,7 +131,6 @@ const evidence = {
     handoverFile: "",
     targetBuildId: buildIdentity.buildId,
     strategy: "cold-switch",
-    runtimeLockMigrationMode: "initial-cold-switch",
     oldWorkerExitConfirmed: false,
     trafficDrainConfirmed: false,
     noParallelAuthority: false,

@@ -76,7 +76,6 @@ import {
   type PluginIntentSnapshot,
   type PluginIntentSubmissionResult,
 } from "webloom-framework";
-import * as WebLoomFramework from "webloom-framework";
 import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?sharedworker&url";
 
 /**
@@ -85,26 +84,8 @@ import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?shared
  * 不能因为 URL 相同而互相污染首次初始化状态。
  */
 
-/**
- * 旧 registry 包可能没有浏览器运行锁。不能把未知 runtimeLock 字段传给它
- * 再假设已经安全；生产页面先检查当前 WebLoom 包的能力标记，旧包直接拒绝连接。
- * 单测使用显式的 WebLoom testing 入口，不需要依赖 registry 包版本。
- */
-function hasWebLoomRuntimeLock(): boolean {
-  return typeof Reflect.get(WebLoomFramework as object, "WEBLOOM_RUNTIME_LOCK_PREFIX") === "string";
-}
-
 function isTestBuild(): boolean {
   return (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE === "test";
-}
-
-function runtimeLockUserMessage(snapshot: unknown): string | undefined {
-  const code = snapshot && typeof snapshot === "object"
-    ? (snapshot as { errorCode?: unknown }).errorCode
-    : undefined;
-  if (code === "runtime_lock_conflict") return "检测到另一个 Keymaster Runtime 正在运行。请刷新或关闭所有 Keymaster 页面后重新打开。";
-  if (code === "runtime_lock_unavailable") return "当前浏览器不支持 Keymaster 运行锁，无法安全启动 Coordinator。请使用支持 Web Locks 的浏览器。";
-  return undefined;
 }
 
 /** 为同一浏览器分配稳定的 SharedWorker 名称片段；身份来自 keymaster.session。 */
@@ -284,8 +265,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
    * 设计缘由：刷新后是否回锁定页不能依赖浏览器回收 SharedWorker——只要
    * Worker 里有挂起定时器/连接（例如 Sat 重连），它就不会被回收，新页面
    * 会继承已解锁会话。同一 Worker profile 的每个页面持有一把 shared
-   * Web Lock；新页面首次连接成功后查询该锁持有者，只有自己是唯一页面时
-   * 才把共享会话显式锁回锁定页。
+   * Web Lock；锁名按同源 profile 计算，不跟随 Worker URL，因此旧/新
+   * 构建并存时页面 presence 仍能被同一份锁观察到。新页面首次连接成功
+   * 后查询该锁持有者，只有自己是唯一页面时才把共享会话显式锁回锁定页。
    */
   private pagePresence: { name: string; acquired: Promise<boolean>; release: () => void } | null = null;
   /** 初始锁定判定只在本文档首次连接时执行一次；重连不重复判定。 */
@@ -397,10 +379,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.pendingSessionBinding = null;
 
     try {
-      if (!hasWebLoomRuntimeLock() && !isTestBuild()) {
-        this.connectionState = "fatal";
-        throw new Error("当前加载的 WebLoom 版本不支持浏览器运行锁，无法安全启动 Coordinator。请刷新页面并更新到包含 Web Locks 的版本；旧包不能无锁运行。");
-      }
       // WebLoom 是唯一的物理连接与 call/stream transport。领域 client 只
       // 保留重连策略和产品状态缓存，不再读取或监听 Runtime 裸端口。
       const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
@@ -408,14 +386,18 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         this.workerUrl ?? coordinatorWorkerUrl,
         typeof globalThis.location?.href === "string" ? globalThis.location.href : import.meta.url,
       );
-      const workerProfileId = !this.workerName && !this.workerUrl
+      const workerProfileId = !this.workerName
         ? await ensureCoordinatorWorkerProfileId()
         : undefined;
       const workerName = this.workerName ?? (!this.workerUrl
         ? `${isDevelopment ? "keymaster-coordinator-dev" : "keymaster-coordinator"}:${workerProfileId ?? "default"}`
         : undefined);
-      // 页面在场锁要在连接会话之前取得，且同一 profile 跨刷新/tab 稳定。
-      await this.beginPagePresence(workerName ?? workerUrl.toString());
+      // 页面在场锁要在连接会话之前取得，且同一 profile 跨刷新/tab 稳定；
+      // 不使用 workerUrl 作为锁名，避免旧/新构建各自误判为唯一页面。
+      const pagePresenceNamespace = workerProfileId
+        ? `profile:${workerProfileId}`
+        : `origin:${globalThis.location?.origin ?? "unknown"}`;
+      await this.beginPagePresence(pagePresenceNamespace);
       let runtimePublishedReady = false;
       const runtime = connectSharedWorker({
         id: "keymaster-coordinator",
@@ -433,9 +415,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         if (this.runtimeHandle !== runtime) return;
         if (snapshot.state === "ready") runtimePublishedReady = true;
         if (snapshot.state === "failed" || snapshot.state === "disconnected") {
-          const lockMessage = runtimeLockUserMessage(snapshot);
-          const message = lockMessage
-            ?? `Coordinator Runtime ${snapshot.state}${snapshot.error ? `: ${snapshot.error}` : ""}`;
+          const message = `Coordinator Runtime ${snapshot.state}${snapshot.error ? `: ${snapshot.error}` : ""}`;
           this.observedConnectionFailure = snapshot.state === "disconnected" && !runtimePublishedReady
             ? new Error("Coordinator SharedWorker failed before publishing a ready Runtime snapshot; inspect the Worker console")
             : new Error(message);
@@ -503,11 +483,17 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     let settle: (value: boolean) => void = () => undefined;
     const acquired = new Promise<boolean>((resolve) => { settle = resolve; });
     const timer = globalThis.setTimeout(() => settle(false), 1_000);
-    void locks.request(name, { mode: "shared" }, async () => {
-      globalThis.clearTimeout(timer);
-      settle(true);
-      await new Promise<void>((release) => { releaseHolder = release; });
-    }).catch(() => settle(false));
+    try {
+      void locks.request(name, { mode: "shared" }, async () => {
+        globalThis.clearTimeout(timer);
+        settle(true);
+        await new Promise<void>((release) => { releaseHolder = release; });
+      }).catch(() => settle(false));
+    } catch {
+      // 某些浏览器/测试替身会同步拒绝 optional page-presence lock；它
+      // 只用于“唯一页面”提示，失败时必须保持原有非阻断启动行为。
+      settle(false);
+    }
     this.pagePresence = {
       name,
       acquired,
@@ -2008,9 +1994,24 @@ export function createCoordinatorClient(options?: CoordinatorClientOptions): Key
 
 let singletonClient: KeymasterSessionCoordinatorClient | null = null;
 
+/**
+ * 仅隔离生命周期 E2E 使用：给同一构建生成两个不同的 Worker URL，
+ * 模拟旧/新发布并存。普通构建不会从页面 query 改写 Coordinator URL。
+ */
+function lifecycleE2eWorkerUrl(): string | undefined {
+  const env = (import.meta as ImportMeta & { env?: { VITE_MSFILE_E2E?: string } }).env;
+  if (env?.VITE_MSFILE_E2E !== "1" || typeof window === "undefined") return undefined;
+  const variant = new URLSearchParams(window.location.search).get("coordinatorWorkerVariant");
+  if (!variant || !/^[a-z0-9_-]{1,32}$/iu.test(variant)) return undefined;
+  const url = new URL(coordinatorWorkerUrl, window.location.href);
+  url.searchParams.set("keymaster-worker-variant", variant);
+  return url.toString();
+}
+
 export function getCoordinatorClient(): KeymasterSessionCoordinatorClient {
   if (!singletonClient) {
-    singletonClient = createCoordinatorClient();
+    const workerUrl = lifecycleE2eWorkerUrl();
+    singletonClient = createCoordinatorClient(workerUrl ? { workerUrl } : undefined);
   }
   return singletonClient;
 }

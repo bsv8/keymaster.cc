@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// 正式发布边界使用 npm registry 的 WebLoom 0.4.3；同时覆盖原有插件链和
+// 正式发布边界使用 npm registry 的 WebLoom 0.5.0；同时覆盖原有插件链和
 // 新增 Coordinator peer lifecycle 链。入口脚本在无 workspace/file 逃逸的
 // 临时副本中用 frozen lockfile 安装后才加载此配置。
 export default defineConfig({

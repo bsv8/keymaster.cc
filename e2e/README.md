@@ -31,8 +31,8 @@ support/ 场景元数据、脱敏、诊断等横切能力
 | local-core | `playwright.config.ts` | `pnpm test:e2e:local-core` | `journeys/local`、`gates/local` | 日常入口，30s 超时；`pnpm test:e2e` = local-core + dev-http |
 | local-integration | `playwright.integration.config.ts` | `pnpm test:e2e:integration` | 同上 | 完整本地集成，60s 超时；另有初始化/多标签单场景 smoke 命令 |
 | dev-http | `playwright.dev-http.config.ts` | `pnpm test:e2e:dev-http` | `gates/dev-http` | 非安全 HTTP + 非 loopback 域名，真实 Vite dev server，不复用旧进程 |
-| lifecycle-local | `playwright.lifecycle.config.ts` | `pnpm test:e2e:lifecycle:local` | `gates/lifecycle` | 本地 WebLoom 0.4.3 tarball 的临时副本验收 |
-| lifecycle-registry | `playwright.lifecycle.registry.config.ts` | `pnpm test:e2e:lifecycle:registry` | `gates/lifecycle` | npm registry 0.4.3 的临时副本验收，`workers: 1` 串行 |
+| lifecycle-local | `playwright.lifecycle.config.ts` | `pnpm test:e2e:lifecycle:local` | `gates/lifecycle` | 本地 WebLoom 0.5.0 tarball 的临时副本验收 |
+| lifecycle-registry | `playwright.lifecycle.registry.config.ts` | `pnpm test:e2e:lifecycle:registry` | `gates/lifecycle` | npm registry 0.5.0 的临时副本验收，`workers: 1` 串行 |
 | msfile | `playwright.msfile.config.ts` | `pnpm test:e2e:msfile` | `gates/msfile`、`journeys/msfile` | 需临时 Go supplier，360s 超时，`workers: 1` |
 | satsubscription | `playwright.satsubscription.config.ts` | `pnpm test:e2e:satsubscription` | `journeys/satsubscription` | 从仓库外 SatSubscription 构建正式服务 + 一次性 PostgreSQL；需 `SATS_SUBSCRIPTION_DIR`、Go、PostgreSQL，360s 超时，`workers: 1` |
 | real-resource | `playwright.real-resource.config.ts` | `pnpm test:e2e:real-resource` | `resources/*`、`journeys/real-resource/*` | 受保护真实资源；setup → 场景 → teardown 投影，`trace/screenshot/video` 全关 |

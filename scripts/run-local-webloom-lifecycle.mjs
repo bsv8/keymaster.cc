@@ -1,5 +1,5 @@
-// 在临时副本中用本地 WebLoom 0.4.3 tarball 跑严格 Chromium 生命周期验收。
-// 这是源码/tarball 证据；正式 registry 0.4.3 证据由独立的
+// 在临时副本中用本地 WebLoom 0.5.0 tarball 跑严格 Chromium 生命周期验收。
+// 这是源码/tarball 证据；正式 registry 0.5.0 证据由独立的
 // run-registry-webloom-lifecycle.mjs 入口负责，二者不混用结果。
 
 import { cp, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -14,8 +14,8 @@ if (!/^webloom-framework-\d+\.\d+\.\d+\.tgz$/u.test(tarballName)) {
   throw new Error("WEBLOOM_LOCAL_TARBALL 必须指向 webloom-framework-x.y.z.tgz");
 }
 const tarballVersion = tarballName.slice("webloom-framework-".length, -".tgz".length);
-if (tarballVersion !== "0.4.3") {
-  throw new Error(`严格本地生命周期验收要求包含 RuntimeLock 的 WebLoom 0.4.3，当前为 ${tarballVersion}`);
+if (tarballVersion !== "0.5.0") {
+  throw new Error(`严格本地生命周期验收要求使用 WebLoom 0.5.0，当前为 ${tarballVersion}`);
 }
 const tarballStat = await stat(tarball).catch(() => undefined);
 if (!tarballStat?.isFile()) throw new Error(`本地 WebLoom tarball 不存在：${tarball}`);
@@ -79,7 +79,7 @@ try {
 
   // 集成 tsconfig 位于仓库根目录，且其中的 gate 直接 import 这两个包；
   // 临时根 manifest 显式声明它们，避免 typecheck:e2e 依赖开发机遗留的
-  // 根 node_modules 链接。WebLoom 仍明确从上面的 0.4.3 tarball 安装。
+  // 根 node_modules 链接。WebLoom 仍明确从上面的 0.5.0 tarball 安装。
   const temporaryRootManifestPath = join(temporaryRoot, "package.json");
   const temporaryRootManifest = JSON.parse(await readFile(temporaryRootManifestPath, "utf8"));
   temporaryRootManifest.devDependencies = {
@@ -96,10 +96,10 @@ try {
   const installedManifestPath = join(temporaryRoot, "apps/web/node_modules/webloom-framework/package.json");
   const installedManifest = JSON.parse(await readFile(installedManifestPath, "utf8"));
   if (installedManifest.version !== tarballVersion) {
-    throw new Error(`临时副本实际安装的 WebLoom 版本不是 0.4.3：${String(installedManifest.version)}`);
+    throw new Error(`临时副本实际安装的 WebLoom 版本不是 0.5.0：${String(installedManifest.version)}`);
   }
 
-  // 这些检查在临时副本中执行，确认 TypeScript 解析到已安装的 0.4.3
+  // 这些检查在临时副本中执行，确认 TypeScript 解析到已安装的 0.5.0
   // tarball，而不是依赖当前工作区的 node_modules 或 workspace symlink。
   run("pnpm", ["typecheck"]);
   run("pnpm", ["typecheck:e2e"]);

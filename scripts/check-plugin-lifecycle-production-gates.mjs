@@ -7,12 +7,6 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { isBuildId } from "./plugin-lifecycle-build-id.mjs";
-import {
-  RUNTIME_LOCK_MIGRATION_MODES,
-  validateRuntimeLockCapabilityData,
-  validateRuntimeLockEvidenceData,
-  validateRuntimeLockMigrationRecord,
-} from "./plugin-lifecycle-runtime-lock-gate.mjs";
 
 const evidencePath = process.env.KEYMASTER_LIFECYCLE_EVIDENCE_FILE;
 const PRODUCT_CATALOG_SOURCE = resolve("packages/contracts/src/pluginProducts.ts");
@@ -152,52 +146,6 @@ async function readLocalJsonReference(reference, label, baseDir, errors) {
   } catch (error) {
     errors.push(`${label} 无法读取或解析：${referencePath}`);
     return undefined;
-  }
-}
-
-/** 交接文件中的运行锁迁移记录必须经过同一份首次冷切换/后续升级规则。 */
-async function validateRuntimeLockMigrationEvidence(migration, expectedBuildId, baseDir, errors) {
-  errors.push(...validateRuntimeLockMigrationRecord(migration, {
-    expectedTargetBuildId: expectedBuildId,
-    label: "deployment.runtimeLockMigration",
-  }));
-  if (!isRecord(migration)) return;
-
-  const semanticField = migration.mode === "initial-cold-switch"
-    ? "legacyExitEvidenceRef"
-    : "conflictEvidenceRef";
-  const semanticReference = migration[semanticField];
-  if (nonEmptyString(semanticReference) && !isPlaceholder(semanticReference) && !isHttpReference(semanticReference)) {
-    const data = await readLocalJsonReference(
-      semanticReference,
-      `deployment.runtimeLockMigration.${semanticField}`,
-      baseDir,
-      errors,
-    );
-    if (data) {
-      errors.push(...validateRuntimeLockEvidenceData(data, {
-        mode: migration.mode,
-        expectedTargetBuildId: expectedBuildId,
-        label: `deployment.runtimeLockMigration.${semanticField}`,
-      }));
-    }
-  }
-
-  const capabilityReference = migration.targetCapabilityEvidenceRef;
-  if (nonEmptyString(capabilityReference) && !isPlaceholder(capabilityReference) && !isHttpReference(capabilityReference)) {
-    const data = await readLocalJsonReference(
-      capabilityReference,
-      "deployment.runtimeLockMigration.targetCapabilityEvidenceRef",
-      baseDir,
-      errors,
-    );
-    if (data) {
-      errors.push(...validateRuntimeLockCapabilityData(data, {
-        expectedTargetWebLoomVersion: migration.targetWebLoomVersion,
-        expectedTargetBuildId: expectedBuildId,
-        label: "deployment.runtimeLockMigration.targetCapabilityEvidence",
-      }));
-    }
   }
 }
 
@@ -369,8 +317,8 @@ if (!evidencePath) {
       for (const field of ["oldWorkerExitConfirmed", "trafficDrainConfirmed", "noParallelAuthority", "rollbackWindowConfirmed"]) {
         if (handover[field] !== true) errors.push(`deploymentHandover.${field} 必须为 true`);
       }
-      if (!RUNTIME_LOCK_MIGRATION_MODES.includes(handover.runtimeLockMigrationMode)) {
-        errors.push("deploymentHandover.runtimeLockMigrationMode 必须明确是首次冷切换或 lock-aware-upgrade");
+      if (Object.hasOwn(handover, "runtimeLockMigrationMode")) {
+        errors.push("deploymentHandover.runtimeLockMigrationMode 已随 WebLoom 0.5.0 移除；请提交真实的 Keymaster authority Web Lock、交接、排空和回退证据");
       }
     }
 
@@ -402,9 +350,8 @@ if (!evidencePath) {
           && Date.parse(handover.verifiedAt) < Date.parse(deployment.observedAt)) {
           errors.push("deploymentHandover.verifiedAt 必须晚于部署交接 observedAt");
         }
-        await validateRuntimeLockMigrationEvidence(deployment.runtimeLockMigration, expectedBuildId, evidenceBaseDir, errors);
-        if (handover.runtimeLockMigrationMode !== deployment.runtimeLockMigration?.mode) {
-          errors.push("deploymentHandover.runtimeLockMigrationMode 必须与交接文件 runtimeLockMigration.mode 一致");
+        if (Object.hasOwn(deployment, "runtimeLockMigration")) {
+          errors.push("交接文件 runtimeLockMigration 已随 WebLoom 0.5.0 移除；请删除旧框架运行锁迁移字段，并以 Keymaster authority Web Lock 作为运行时唯一性证据");
         }
       }
     }

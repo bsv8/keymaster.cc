@@ -1,4 +1,4 @@
-// 正式 registry 0.4.3 生命周期验收：在临时副本中使用 frozen lockfile
+// 正式 registry 0.5.0 生命周期验收：在临时副本中使用 frozen lockfile
 // 安装 npm registry 包，再跑插件链和 Coordinator peer lifecycle 链。
 // 该入口不读取当前工作区 node_modules，也不接受 workspace/file WebLoom。
 
@@ -9,12 +9,13 @@ import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
 const registry = "https://registry.npmjs.org/";
-const expectedVersion = "0.4.3";
-const expectedIntegrity = "sha512-0GDqtZyFNJburCNfAgtZOgot+ykuCxqRtgltNXlRObAErwH++oLxFlGm8NFhJEmGqAIBMOwPvCHN8bf8U4Kmog==";
+const expectedVersion = "0.5.0";
+const expectedIntegrity = "sha512-DPcTEmpmOdLxBjugd7pHWHTdtH38hw8DAk3ULQ0Ofs4rrN7pLFy48Q8RNT7qQojnAsJVDix4y+f0YlLZfesmQg==";
 const manifestGateSelfTest = process.argv.includes("--manifest-gate-self-test");
 const temporaryRoot = await mkdtemp(join(tmpdir(), "keymaster-webloom-registry-lifecycle-"));
 const excludedDirectoryNames = new Set([
   ".git",
+  ".kilo",
   "dist",
   "node_modules",
   "playwright-report",
@@ -101,6 +102,7 @@ try {
       return !parts.includes("node_modules")
         && !parts.includes("dist")
         && !parts.includes(".git")
+        && !parts.includes(".kilo")
         && !parts.includes("test-results")
         && !parts.includes("playwright-report");
     },
@@ -136,8 +138,8 @@ try {
   }
   await assertNoLocalWebLoom(installed);
   const installedRuntimeEntry = await readFile(join(installed, "dist/index.js"), "utf8");
-  if (!installedRuntimeEntry.includes("WEBLOOM_RUNTIME_LOCK_PREFIX")) {
-    throw new Error("当前 registry WebLoom 0.4.3 不包含浏览器运行锁能力标记；不能把本次包当作锁安全发布。请核对 registry 包产物和 integrity，再重试生命周期验收。");
+  if (!installedRuntimeEntry.includes("createRuntimeTrafficBudget")) {
+    throw new Error("当前 registry WebLoom 0.5.0 缺少流式字节配额能力标记；请核对 registry 包产物和 integrity，再重试生命周期验收。");
   }
 
   run("pnpm", ["typecheck"]);

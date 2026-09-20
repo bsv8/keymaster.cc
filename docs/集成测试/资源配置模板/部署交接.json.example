@@ -26,17 +26,5 @@
     "reauthRequired": true,
     "windowUntil": "<回退窗口截止时间>",
     "evidenceRef": "<回退演练记录>"
-  },
-  "runtimeLockMigration": {
-    "mode": "initial-cold-switch",
-    "previousWebLoomVersion": "0.4.2",
-    "targetWebLoomVersion": "0.4.3",
-    "previousRuntimeLockAware": false,
-    "targetRuntimeLockAware": true,
-    "targetBuildId": "<待发布构建编号>",
-    "legacyPagesExited": false,
-    "legacyWorkersExited": false,
-    "legacyExitEvidenceRef": "<旧页面和 Worker 退出记录>",
-    "targetCapabilityEvidenceRef": "<目标版本运行锁能力记录>"
   }
 }

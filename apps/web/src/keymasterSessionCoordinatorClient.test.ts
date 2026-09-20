@@ -135,12 +135,12 @@ function createTestMessagePort(
   initialImplementation?: TestPostMessage,
   options: { autoReady?: boolean } = {},
 ) {
-  const calls = new Map<string, { mode: "unary" | "stream"; serviceInstanceId: string; nextSequence: number; request?: Record<string, unknown> }>();
+  const calls = new Map<string, { mode: "unary" | "stream"; serviceInstanceId: string; nextSequence: number; initialByteCredit?: number; request?: Record<string, unknown> }>();
   const runtimeMessageListeners = new Set<(event: MessageEvent) => void>();
   let runtimeMessageErrorListener: ((event: MessageEvent) => void) | null = null;
   let manuallyDisabled = false;
   let implementation: (message: any, transfer?: readonly Transferable[]) => unknown = initialImplementation ?? (() => undefined);
-  // WebLoom 0.4.3 的每条跨 realm 消息都必须带 endpoint binding；这个
+  // WebLoom 0.5.0 的每条跨 realm 消息都必须带 endpoint binding；这个
   // fake port 只模拟 Worker wire，不再依赖旧版缺少 binding 的宽松解码。
   const remoteBinding = {
     runtimeInstanceId: "test-coordinator-worker",
@@ -154,7 +154,13 @@ function createTestMessagePort(
     if (value.type === "webloom.runtime.v1.call") {
       const mode = capabilityKind(value);
       const request = value.request && typeof value.request === "object" ? value.request as Record<string, unknown> : {};
-      calls.set(value.callId as string, { mode, serviceInstanceId: value.serviceInstanceId as string, nextSequence: 1, request });
+      calls.set(value.callId as string, {
+        mode,
+        serviceInstanceId: value.serviceInstanceId as string,
+        nextSequence: 1,
+        ...(typeof value.initialByteCredit === "number" ? { initialByteCredit: value.initialByteCredit } : {}),
+        request,
+      });
       const requestKind = request.kind;
       const kind = mode === "stream"
         ? "subscribe"
@@ -180,7 +186,7 @@ function createTestMessagePort(
       const call = calls.get(value.requestId);
       if (!call) return;
       if (call.mode === "stream") {
-        emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", binding: remoteBinding, callId: value.requestId, serviceInstanceId: call.serviceInstanceId, streamReady: true } } as MessageEvent);
+        emit({ data: { type: "webloom.runtime.v1.result", protocolVersion: "webloom.runtime.v1", binding: remoteBinding, callId: value.requestId, serviceInstanceId: call.serviceInstanceId, streamReady: true, acceptedInitialByteCredit: call.initialByteCredit ?? 1 } } as MessageEvent);
         const baselines = value.operationResult && typeof value.operationResult === "object" && Array.isArray((value.operationResult as { baselines?: unknown[] }).baselines)
           ? (value.operationResult as { baselines: unknown[] }).baselines
           : [];

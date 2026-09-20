@@ -92,7 +92,7 @@ export type { BootstrapErrorContext, BootstrapErrorStage, BootstrapFatalPhase } 
 export const BOOTSTRAP_PLUGIN_TIMEOUT_MS = 15_000;
 
 /** Worker 发布切换或缓存重新验证时的一次性恢复等待。 */
-// 需覆盖旧 Worker 的空闲宽限、Runtime 排空和浏览器 Web Lock 释放。
+// 需覆盖旧 Worker 的空闲宽限、Runtime 排空和资源释放。
 // 失败的新 Worker 会在 25ms 后主动退出，旧 Worker 在无页面后 250ms
 // 开始退场；500ms 仍保持一次有界恢复，不会长期掩盖真实的多页面冲突。
 export const COORDINATOR_STARTUP_RETRY_DELAY_MS = 500;
@@ -546,7 +546,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // 页面销毁不是一次可重用的业务断线；撤权同步完成后必须立即通知
     // Coordinator。若等 Host 的异步 teardown（配置/远端连接）结束，
     // 浏览器可能先销毁文档而不再执行 Promise；连接必须尽快撤销，避免
-    // 页面继续使用旧代理。运行锁本身由浏览器在 Worker 终止时自动释放。
+    // 页面继续使用旧代理。Worker 资源由 SharedWorker Host 的 dispose 收口。
     // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
     // 仍在后台尽力执行，不能反过来阻塞新 Worker 的接管判定。
     coordinatorClient.shutdown();

@@ -105,12 +105,12 @@ function assertCleanBrowserDiagnostics(label: string, diagnostics: BrowserDiagno
   expect(diagnostics.pageErrors, `${label} page errors`).toEqual([]);
 }
 
-async function grantPersistentStorage(page: Page): Promise<void> {
+async function grantPersistentStorage(page: Page, query = "?lifecycleE2E=1"): Promise<void> {
   const browser = page.context().browser();
   if (!browser) throw new Error("Coordinator lifecycle E2E requires Chromium");
   // 先加载隔离 E2E 页面并在同一文档完成授权；先加载 permission 页面
   // 再立即导航会让上一页的异步身份切换在 unload 后命中已撤权 transport。
-  await page.goto("/?lifecycleE2E=1", { waitUntil: "domcontentloaded" });
+  await page.goto(`/${query}`, { waitUntil: "domcontentloaded" });
   const pageCdp = await page.context().newCDPSession(page);
   const target = await pageCdp.send("Target.getTargetInfo");
   await pageCdp.detach();
@@ -155,7 +155,7 @@ test.describe(GATE_ID + "：Coordinator WebLoom peer 生命周期真实业务链
       const survivor = await page.evaluate(async () => window.__lifecycleProductionE2E!.ownerStorageRoundTrip());
 
       expect(closed.oldServiceInstanceId).toBeTruthy();
-      // 这是严格的 0.4.3 验收：缺少任一生命周期/owner 投影能力都必须
+      // 这是严格的 0.5.0 验收：缺少任一生命周期/owner 投影能力都必须
       // 失败，不能把旧 registry 版本的降级路径报告成新契约通过。
       expect(closed.closeDrainSupported).toBe(true);
       expect(closed.closeDrainCompleted).toBe(true);
@@ -201,5 +201,41 @@ test.describe(GATE_ID + "：Coordinator WebLoom peer 生命周期真实业务链
     expect(result.connectedAfterLateResult).toBe(false);
     expect(result.connectionStateAfterLateResult).toBe("recoverable");
     assertCleanBrowserDiagnostics("single", diagnostics);
+  });
+
+  test("不同 Worker URL 并存时只有一个 Keymaster authority，冲突构建 fail closed", async ({ page, context }) => {
+    test.setTimeout(120_000);
+    const newBuildPage = await context.newPage();
+    const oldBuildDiagnostics = collectBrowserDiagnostics(page);
+    try {
+      // query 只在显式 lifecycle E2E 构建中改写 Worker URL；两个 URL
+      // 仍加载同一产物，但 SharedWorker 物理实例不同，模拟旧/新构建并存。
+      await grantPersistentStorage(page, "?lifecycleE2E=1&coordinatorWorkerVariant=old");
+      await lifecyclePage(page, "old-build");
+      const oldBootstrap = await page.evaluate(async () => window.__lifecycleProductionE2E!.bootstrap());
+      expect(oldBootstrap.buildId).toBeTruthy();
+
+      // Worker 侧持有的是 Keymaster 自己的 origin 级 authority lock，
+      // 不是 WebLoom Runtime lock。Window query 只用于确认真实浏览器锁
+      // 已由 SharedWorker 持有，然后再启动不同 URL 的新实例。
+      const heldAuthorityLocks = await page.evaluate(async () => {
+        const snapshot = await navigator.locks.query();
+        return (snapshot.held ?? []).filter((lock) => lock.name === "keymaster.coordinator.authority:v1").length;
+      });
+      expect(heldAuthorityLocks).toBe(1);
+
+      await newBuildPage.goto("/?lifecycleE2E=1&coordinatorWorkerVariant=new", { waitUntil: "domcontentloaded" });
+      await expect(newBuildPage.locator("[data-fatal-crash]")).toBeVisible({ timeout: 30_000 });
+      const newBuildFailure = await newBuildPage.locator("[data-fatal-crash]").textContent();
+      expect(newBuildFailure).toMatch(/启动\/运行失败|authority|Web Lock/iu);
+
+      // 新 Worker 没有 authority，旧 Worker 仍可继续完成一次真实 owner
+      // storage final-I/O；不会出现两个本地 authority 并行对外执行。
+      const oldRoundTrip = await page.evaluate(async () => window.__lifecycleProductionE2E!.ownerStorageRoundTrip());
+      expect(oldRoundTrip.value).toEqual({ source: "browser-shared-worker-message-port", ok: true });
+      assertCleanBrowserDiagnostics("old-build", oldBuildDiagnostics);
+    } finally {
+      await newBuildPage.close().catch(() => undefined);
+    }
   });
 });

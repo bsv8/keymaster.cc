@@ -139,6 +139,7 @@ import {
 } from "webloom-framework/advanced";
 import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import { createFinalIoAudit, type FinalIoAuditOperation } from "./coordinator/finalIoAudit.js";
+import { acquireCoordinatorAuthorityLock, type CoordinatorAuthorityLock } from "./coordinator/coordinatorAuthorityLock.js";
 import {
   assertCoordinatorWorkerUnitCatalog,
   COORDINATOR_WORKER_UNIT_CATALOG,
@@ -826,8 +827,8 @@ let coordinatorAuthorityInstanceId = makeCoordinatorAuthorityInstanceId();
 // 正式构建由 scripts/build-plugin-lifecycle.mjs 注入不可变 buildId。
 // 本地开发/单测没有构建注入时才回退到模块 URL；该回退不能用于发布证据。
 const COORDINATOR_BUILD_ID = import.meta.env.VITE_KEYMASTER_BUILD_ID ?? import.meta.url;
-// 运行控制锁属于 WebLoom/browser LockManager；这里仅保留协议字段，供
-// 本次 Worker 的内存 gate 和旧页面/旧授权迟到检查使用。
+// 跨 Worker 的发布/回退由 Keymaster authority Web Lock 与部署交接协议控制；
+// 这里仅保留协议字段，供本次 Worker 的内存 gate 和旧页面/旧授权迟到检查使用。
 const COORDINATOR_UPGRADE_PROTOCOL_VERSION = COORDINATOR_SERVICE_PROTOCOL_VERSION;
 
 interface CoordinatorAuthorityRecord {
@@ -860,6 +861,8 @@ interface CoordinatorFinalIoLease {
 
 let coordinatorHandoverGeneration = 0;
 let coordinatorAuthorityRecord: CoordinatorAuthorityRecord | undefined;
+/** 当前物理 Worker 持有的 Keymaster origin 级跨 Worker authority。 */
+let coordinatorAuthorityLock: CoordinatorAuthorityLock | undefined;
 /** 兼容旧快照字段；新版不从业务 K-V 恢复旧 Worker 的临时租约。 */
 let coordinatorAuthorityRecovery: CoordinatorAuthorityRecovery | undefined;
 /** 兼容旧诊断字段；新版仅保留当前运行时内的固定入口名。 */
@@ -868,8 +871,9 @@ let coordinatorAuthorityClaimTail: Promise<void> = Promise.resolve();
 /**
  * 同一 Coordinator 内的并发只读请求共用一个内存 read lease。
  *
- * WebLoom 浏览器锁负责不同物理 Worker 的唯一性；这里仅在当前 Worker
- * 内聚合 read 引用，避免每个无副作用的 Stat 都重复做内存 admission。
+ * Keymaster authority Web Lock 负责不同物理 Worker 的唯一性；这里仅在
+ * 当前 Worker 内聚合 read 引用，避免每个无副作用的 Stat 都重复做内存
+ * admission。
  */
 interface CoordinatorSharedReadLease {
   ioLease: CoordinatorFinalIoLease;
@@ -1526,6 +1530,9 @@ async function renameRuntimeBucket(label: string, peerId?: string): Promise<Stor
 
 /** Storage-first：先验证抽象桶，再打开 keys/ 与平台状态区。 */
 async function bootstrapPlatformStorage(profilePassword?: string, peerId?: string): Promise<void> {
+  // 冷启动/恢复的第一步也可能打开 Provider；必须先取得跨物理 Worker
+  // authority，不能因为当前还没有 Root 就绕过 authority lock。
+  await ensureCoordinatorAuthorityClaim();
   if (platformRootStore) return;
   const binding = storageBootstrapState?.selectedBucket;
   if (!binding) throw storageUnavailableError("Storage bootstrap selection is unavailable");
@@ -2735,21 +2742,25 @@ function isStorageConflict(error: unknown): boolean {
 }
 
 async function readCoordinatorAuthorityRecord(): Promise<CoordinatorAuthorityRecord | undefined> {
-  // Coordinator 的运行权威只存在当前 Worker 内存；浏览器级唯一性由
-  // WebLoom 的 navigator.locks 保证，不能从 Local/S3 业务 K-V 恢复临时锁。
+  // authority record 的诊断字段只存在当前 Worker 内存；真正的跨 Worker
+  // 唯一性由 Keymaster 自己持有的 origin 级 authority Web Lock 保证，不能
+  // 从 Local/S3 业务 K-V 恢复一把已经失去上下文的临时锁。
   return coordinatorAuthorityRecord;
 }
 
 /**
  * 声明当前 Worker 的内存运行权威。
  *
- * 跨 Tab 的唯一性由 WebLoom 浏览器锁负责；这里的随机身份只用于旧页面、
- * 旧授权和迟到结果检查，不依赖 Vault 状态，也不写 Local/S3 authority。
+ * 跨物理 Worker 的唯一性由 Keymaster authority Web Lock 负责；这里的随机
+ * 身份只用于旧页面、旧授权和迟到结果检查，不依赖 Vault 状态，也不写
+ * Local/S3 authority。锁冲突或 API 缺失必须在建立本地 record 前失败。
  */
 async function claimCoordinatorAuthority(): Promise<void> {
-  // 运行权威已经移到 WebLoom 浏览器锁。这里仍保留一个本次 Worker 的
-  // 随机身份和内存世代，供旧页面/旧授权拒绝以及本地 gate 做迟到检查；
-  // 不再读写 coordinator-upgrade/authority，也不把活动 I/O 写入业务桶。
+  if (!coordinatorAuthorityLock) {
+    coordinatorAuthorityLock = await acquireCoordinatorAuthorityLock();
+  }
+  // authority lock 会保持到当前 Worker 退场；这里的随机身份和内存世代
+  // 供旧页面/旧授权拒绝以及本地 gate 做迟到检查，不把活动 I/O 写入业务桶。
   coordinatorHandoverGeneration += 1;
   coordinatorAuthorityRecord = {
     version: 1,
@@ -2800,7 +2811,8 @@ async function assertCoordinatorAuthorityCurrent(): Promise<void> {
   await ensureCoordinatorAuthorityClaim();
   const current = await readCoordinatorAuthorityRecord();
   if (
-    !current
+    !coordinatorAuthorityLock
+    || !current
     || current.authorityInstanceId !== coordinatorAuthorityInstanceId
     || current.handoverGeneration !== coordinatorHandoverGeneration
     || current.buildId !== COORDINATOR_BUILD_ID
@@ -2827,8 +2839,9 @@ async function acquireCoordinatorFinalIoLeaseExclusive(
   auditOperation?: FinalIoAuditOperation,
 ): Promise<CoordinatorFinalIoLease> {
   // I/O 租约只表示当前 Worker 内存中的排空计数；WebLoom 已经在浏览器
-  // 级别保证只有一个 Coordinator Runtime，因此这里不能再对 Local/S3
-  // authority 做版本化 put。
+  // 级别负责 typed transport，但不负责跨构建互斥。Keymaster authority
+  // Web Lock 已在 Worker claim 阶段取得并持续持有；这里再确认它存在，
+  // 才允许进入最终 I/O。
   await assertCoordinatorAuthorityCurrent();
   const record = coordinatorAuthorityRecord;
   if (!record) throw coordinatorUpgradeError("upgrade.authority_unavailable", "Coordinator runtime authority is unavailable");
@@ -2982,8 +2995,8 @@ async function withCoordinatorFinalIoLease<T>(
   } = {},
 ): Promise<T> {
   await ensureCoordinatorUpgradeSession();
-  // 共享 read lease 只表示当前 Worker 已通过本地 authority 检查；高频
-  // 只读请求无需重复登记内存计数。WebLoom 浏览器锁已隔离其它物理 Worker。
+  // 共享 read lease 只表示当前 Worker 已持有 Keymaster 的 origin 级
+  // authority lock 并通过本地检查；高频只读请求无需重复登记内存计数。
   if (operation !== "read" || !hasCurrentCoordinatorSharedReadLease()) {
     await assertCoordinatorAuthorityCurrent();
   }
@@ -2998,8 +3011,9 @@ async function withCoordinatorFinalIoLease<T>(
   let operationError: unknown;
   try {
     lease.assertActive();
-    // 本地 UpgradeGate 和内存 I/O lease 只负责当前 Worker 的 admission/
-    // drain；不同物理 Worker 的唯一性由浏览器 Web Lock 保证。
+    // 本地 UpgradeGate 和内存 I/O lease 负责当前 Worker 的 admission/drain；
+    // 跨 Worker 的唯一性由 Keymaster authority lock 保证。没有这把锁时
+    // assertCoordinatorAuthorityCurrent 已经 fail closed，不能降级继续跑。
     if (options.durableLease !== false) {
       ioLease = await acquireCoordinatorFinalIoLease(operation, options.auditOperation);
     }
@@ -4821,7 +4835,7 @@ interface CoordinatorPeerState {
   drainPromise?: Promise<void>;
 }
 
-/** WebLoom 0.4.3 endpoint 字段的领域侧窄投影；不把框架对象泄漏进持久化。 */
+/** WebLoom 0.5.0 endpoint 字段的领域侧窄投影；不把框架对象泄漏进持久化。 */
 type CoordinatorPeerEndpointInfo = {
   readonly endpointState?: "active" | "closing" | "closed";
   readonly binding?: { readonly runtimeInstanceId: string; readonly connectionId: string };
@@ -4927,10 +4941,11 @@ function selectCoordinatorStorageIoOwner(): void {
   storageIoOwner = selected?.sessionBinding === undefined || selected.openCommitOrder === undefined
     ? undefined
     : {
-      ...selected.sessionBinding,
-      peerId: selected.peer.peerId,
-      commitOrder: ++coordinatorStorageIoHandoffRevision,
-    };
+        ...selected.sessionBinding,
+        peerId: selected.peer.peerId,
+        commitOrder: ++coordinatorStorageIoHandoffRevision,
+      };
+  notifyCoordinatorStorageIoHandoff(storageIoOwner);
 }
 
 function abortCoordinatorPeerInflight(peerId: string): void {
@@ -5155,6 +5170,23 @@ const coordinatorWorkerUnitRegistry = createCoordinatorWorkerUnitRegistry(undefi
 
 let coordinatorRuntimeApp: ReturnType<typeof startSharedWorkerApp> | undefined;
 let coordinatorRuntimeUnitSnapshotRevision = 0;
+type CoordinatorPeerHandoffNotifier = (peerId: string, handoffRevision?: number) => boolean;
+let testCoordinatorPeerHandoffNotifier: CoordinatorPeerHandoffNotifier | undefined;
+
+/**
+ * 领域 owner/session 交接完成后通知 WebLoom 当前物理 peer。
+ *
+ * WebLoom 只转发 handoff 事件，不解释 owner，也不参与 Keymaster 的
+ * lease/epoch/CAS 决策。单测没有真实 SharedWorker Host 时跳过该通知。
+ */
+function notifyCoordinatorStorageIoHandoff(owner: CoordinatorStorageIoOwner | undefined): void {
+  if (!owner) return;
+  if (testCoordinatorPeerHandoffNotifier) {
+    testCoordinatorPeerHandoffNotifier(owner.peerId, owner.commitOrder);
+    return;
+  }
+  coordinatorRuntimeApp?.notifyPeerHandoff(owner.peerId, owner.commitOrder);
+}
 
 function coordinatorRuntimeUnitVisible(unit: (typeof COORDINATOR_WORKER_UNIT_CATALOG)[number]): boolean {
   if (!isCoordinatorProductEnabled(unit.productId)) return false;
@@ -6783,12 +6815,6 @@ async function executeStorageControlAtFinalBoundary(
     try { discardCurrentPlatformStorageBinding(); }
     catch (error) { console.warn("[coordinator] deferred catalog binding discard failed", error instanceof Error ? error.message : String(error)); }
   };
-  // 没有 Root 时，activate/select/import 是建立第一个 Root 的冷启动操作；
-  // 此阶段还没有可用的 Coordinator authority，直接走 bootstrap 分支。
-  if (!platformRootStore) {
-    try { return await executeStorageControl(request, signal, peerId); }
-    finally { flushDeferredCatalogBindingDiscard(); }
-  }
   try {
     return await withCoordinatorFinalIoLease(
       storageControlIoKind(request.control),
@@ -6805,8 +6831,8 @@ async function executeStorageControlAtFinalBoundary(
         allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config" || request.control.type === "initial-setup",
         allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "connect-existing-remote" || request.control.type === "initial-setup-cleanup",
         // status/summary/connection 等控制读取只观察本地状态；probe 也
-        // 不提交配置或远端不可逆结果。它们仍经过本地运行世代/epoch
-        // 栅栏，不写入跨 Worker 的临时租约。
+        // 不提交配置或远端不可逆结果。它们仍经过 authority lock、本地
+        // 运行世代和 epoch 栅栏；冷启动没有 Root 也不能绕过跨 Worker 锁。
         durableLease: storageControlIoKind(request.control) === "write",
       },
     );
@@ -10939,7 +10965,8 @@ async function handleCrypto(
         // 签名只在 Worker 内计算；结果必须经过下方 epoch 检查以及
         // withCoordinatorFinalIoLease 的后置运行世代检查才会发布。
         // 页面刷新若终止 Worker，浏览器锁会自动释放；纯本地签名不需要
-        // 额外的持久运行锁。
+        // 额外的业务持久化租约；Worker 生命周期 authority lock 仍然必须
+        // 在进入 withCoordinatorFinalIoLease 前已取得。
         durableLease: false,
       },
     );
@@ -11834,9 +11861,10 @@ async function handleCoordinatorCryptoRpc(
     () => executeCryptoOperation(request, coordinatorState.activePrivateKeyBytes!),
     {
       auditOperation: "service.crypto.sign",
-      // 纯本地签名没有外部 I/O 或持久化副作用；返回前仍受 authority、
+      // 纯本地签名没有外部 I/O 或持久化副作用；返回前仍受 authority lock、
       // UpgradeGate、AbortSignal 和 session epoch 的多重后置栅栏保护。
-      // 纯本地签名不需要额外的内存 I/O 计数；浏览器锁负责 Worker 唯一性。
+      // 纯本地签名不需要额外的内存 I/O 计数；authority lock 负责 Worker
+      // 唯一性。
       durableLease: false,
     },
   );
@@ -12053,12 +12081,13 @@ async function openCoordinatorSession(
       // SharedWorker；若继续保留旧 peer，后续 hydrate 会请求一个永不响应的
       // realm。这里切换的是“未来请求”的目标；既有请求已捕获旧 peer，并由
       // 各自 Scope/AbortSignal 收口。所有页面共享同源 localStorage，写入仍由
-      // Web Lock 与 Provider CAS 串行，不会绕过存储并发边界。
+      // Provider 的事务/CAS 边界串行，不会绕过存储并发边界。
       storageIoOwner = {
         ...attempt.binding,
         peerId: attempt.peerId,
         commitOrder: ++coordinatorStorageIoHandoffRevision,
       };
+      notifyCoordinatorStorageIoHandoff(storageIoOwner);
       return {
         sessionEpoch: coordinatorState.sessionEpoch,
         ack: { status: "ok" },
@@ -12244,10 +12273,9 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
 // a no-op when native WebCrypto exists and never enables a fallback unless the
 // realm explicitly reports an insecure context.
 if ((globalThis as unknown as { onconnect?: unknown }).onconnect !== undefined) {
-// WebLoom 0.4.3 的 startSharedWorkerApp 默认会在这里的最外层申请运行锁；
-// 不把 runtimeLock 字段传给消费者，避免已发布的旧包静默忽略未知选项。
-// 锁名只由这个稳定 Runtime id 生成，不包含 buildId、Worker URL 或临时
-// session；Keymaster gate 只负责当前 Worker 内排空。
+// WebLoom 0.5.0 在这里创建 SharedWorker Host；它不负责跨 Worker 运行时
+// 互斥。Keymaster 在初始化和最终 I/O 前使用自己的 origin 级 authority
+// Web Lock；peer/session/lease/epoch/generation 继续负责页面会话与迟到结果。
 coordinatorRuntimeApp = startSharedWorkerApp({
   id: "keymaster-coordinator",
   plugins: [coordinatorTransportPlugin, ...coordinatorRuntimePlugins],
@@ -12308,6 +12336,22 @@ async function initializeCoordinator(skipStorageBootstrap = false, propagateFail
 }
 
 async function initializeCoordinatorInternal(skipStorageBootstrap = false, propagateFailure = false, peerId?: string): Promise<void> {
+  // 必须先取得 Keymaster 自己的跨 Worker authority，再触碰任何 Provider
+  // 或恢复对象；否则不同 Worker URL 可能同时初始化同一个物理桶。
+  try {
+    await ensureCoordinatorAuthorityClaim();
+  } catch (error) {
+    coordinatorState.vaultStatus = "fatal";
+    publishSessionState("bootstrap");
+    const code = error && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+    // authority 冲突/能力缺失不是 Storage onboarding 的可恢复状态；
+    // 必须让 session.open 失败，不能只返回一个没有 capability 的 fatal
+    // snapshot，让新页面看起来已经连上了一个不可用 Worker。
+    if (propagateFailure || code === "upgrade.authority_conflict" || code === "upgrade.authority_unavailable") throw error;
+    return;
+  }
   if (skipStorageBootstrap && !platformRootStore) {
     throw storageUnavailableError("Storage root is unavailable during recovery");
   }
@@ -12334,9 +12378,6 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
     }
   }
   try {
-    // 先取得共享持久化权威，再允许启动恢复读取 metadata、消费 Journal
-    // 或修改 Vault 选择。claim 与 locked/unlocked 状态完全解耦。
-    await ensureCoordinatorAuthorityClaim();
     // Storage ready 后，Vault/Keyspace 才允许读取 keys/。
     await withCoordinatorFinalIoLease(
       "write",
@@ -12459,6 +12500,11 @@ export function __testGetSnapshot(): CoordinatorBootstrapSnapshot {
   return buildSnapshot();
 }
 
+/** 测试专用：观测领域 owner handoff 对 WebLoom peer 的通知参数。 */
+export function __testSetCoordinatorPeerHandoffNotifier(notifier: CoordinatorPeerHandoffNotifier | undefined): void {
+  testCoordinatorPeerHandoffNotifier = notifier;
+}
+
 /** 测试专用：模拟另一个 Worker 让当前内存权威失效；不写业务 K-V。 */
 export async function __testFenceCoordinatorAuthority(): Promise<void> {
   await ensureCoordinatorAuthorityClaim();
@@ -12477,7 +12523,7 @@ export async function __testHoldCoordinatorFinalIoLease(): Promise<() => Promise
   return lease.release;
 }
 
-/** 测试专用：确认运行锁/临时 I/O 计数没有在业务 K-V 创建版本。 */
+/** 测试专用：确认临时 I/O 计数没有在业务 K-V 创建版本。 */
 export async function __testGetCoordinatorUpgradePartition(): Promise<{ revision: number; entryCount: number }> {
   // Coordinator upgrade/lease state is V1 memory-only. The old coordinator
   // K-V partition intentionally has no backing head, commits, or values.
@@ -12504,6 +12550,11 @@ export function __testResetState(): void {
   pluginIntentControllerOff?.();
   pluginIntentControllerOff = undefined;
   pluginIntentController = undefined;
+  const previousAuthorityLock = coordinatorAuthorityLock;
+  coordinatorAuthorityLock = undefined;
+  void previousAuthorityLock?.release().catch((error) => {
+    console.warn("[coordinator] test authority lock release failed", error instanceof Error ? error.message : String(error));
+  });
   coordinatorAuthorityInstanceId = makeCoordinatorAuthorityInstanceId();
   coordinatorAuthorityRecord = undefined;
   coordinatorAuthorityRecovery = undefined;
@@ -12569,6 +12620,7 @@ export function __testResetState(): void {
   storageIoOwner = undefined;
   coordinatorSessionCommitOrder = 0;
   coordinatorStorageIoHandoffRevision = 0;
+  testCoordinatorPeerHandoffNotifier = undefined;
   coordinatorOpeningSession = undefined;
   coordinatorSessionOpenTail = Promise.resolve();
   revokedCoordinatorPeerIds.clear();

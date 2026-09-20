@@ -11,7 +11,7 @@ import {
   COORDINATOR_SERVICE_CONTRACT_VERSION,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
-  systemStorageDeclarationFor,
+  systemStorageDeclarationForPurpose,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
 } from "@keymaster/contracts";
 import type { VaultCoordinatorControl } from "@keymaster/contracts";
@@ -194,7 +194,7 @@ export interface LifecycleProductionE2EHooks {
     oldProxyErrorCode: string;
     connectedAfterDisconnect: boolean;
     connectionState: string;
-    /** 当前提交态 WebLoom 是否暴露了 0.4.3 的 bounded drain API。 */
+    /** 当前提交态 WebLoom 是否暴露了 0.5.0 的 bounded drain API。 */
     closeDrainSupported: boolean;
     closeDrainCompleted: boolean;
     closeDrainTimedOut: boolean;
@@ -269,7 +269,10 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     // session.open 的真实响应携带当前 owner peer 投影；重读一次让
     // survivor 在其它 tab 完成 handoff 后也观察到最新 revision。
     await client.refreshStorageBootstrap();
-    const declaration = systemStorageDeclarationFor("p2pkh");
+    // P2PKH 同时有 owner K-V 状态和 owner 文件根；不能用会拒绝
+    // 多声明模块的单一声明解析器。这里要打开的是 round-trip 使用的
+    // owner K-V 状态，因此必须显式选择 purpose=state。
+    const declaration = systemStorageDeclarationForPurpose("p2pkh", "state");
     if (!declaration) throw new Error("Lifecycle E2E p2pkh storage declaration is missing");
     const authority = createStorageBindingAuthority(client, {
     });
@@ -394,10 +397,10 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
       && ownerPeer.binding.connectionId === runtimeBinding.connectionId);
     // 真实 Runtime close handshake：等待两端 execution slots 的 bounded
     // drain 完成后再断开页面，给 Worker 一个确定的 owner-handoff barrier。
-    // 提交态和本地验收都消费 WebLoom 0.4.3；仍保留运行时能力探测，
+    // 提交态和本地验收都消费 WebLoom 0.5.0；仍保留运行时能力探测，
     // 让缺 API 时由严格 spec 明确失败，而不是伪造 drain 结果。
     // 先取消 Coordinator topic stream，结束 Worker 端 async iterator；再由
-    // client 观察 WebLoom 0.4.3 的 bounded close ack。缺少 drain API 或真实
+    // client 观察 WebLoom 0.5.0 的 bounded close ack。缺少 drain API 或真实
     // ack 超时都会由严格 E2E 断言失败，不能把 fallback 当成成功。
     const closeDrainSupported = typeof runtime.drain === "function"
       && typeof client.drainRuntime === "function";

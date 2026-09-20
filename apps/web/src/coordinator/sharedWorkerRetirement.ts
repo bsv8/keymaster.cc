@@ -2,8 +2,8 @@
  * SharedWorker 退场策略。
  *
  * 浏览器不会保证最后一个 MessagePort 关闭后立刻销毁 SharedWorker。若旧构建
- * 继续存活，它仍会持有 WebLoom 运行锁，使刷新或发布切换后的新 Worker 启动
- * 失败。这里在没有活动页面后主动排空 Runtime，并最终关闭 Worker 全局作用域。
+ * 继续存活，它仍可能持有旧的内存资源、网络连接或任务；刷新/发布切换时必须
+ * 先主动排空 Runtime，再关闭 Worker 全局作用域。
  */
 export interface RetirableSharedWorkerApp {
   /** Runtime 首次启动结果。 */
@@ -12,7 +12,7 @@ export interface RetirableSharedWorkerApp {
   activePeers(): readonly unknown[];
   /** 页面连接、关闭等生命周期事件。 */
   subscribePeerLifecycle(listener: (event: { event: string }) => void): () => void;
-  /** 排空插件、调用和端口，并释放浏览器运行锁。 */
+  /** 排空插件、调用和端口，释放当前 Worker 持有的资源。 */
   dispose(reason?: string): Promise<unknown>;
 }
 

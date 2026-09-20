@@ -74,6 +74,7 @@ import {
   __testAttachPort,
   __testInstallCoordinatorBridgePeer,
   __testHandleCoordinatorSessionRpc,
+  __testSetCoordinatorPeerHandoffNotifier,
   __testAwaitCoordinatorPeerDrain,
   __testRequestCoordinatorLocalStorageBridge,
   __testCloseCoordinatorBridgePeer,
@@ -685,6 +686,11 @@ describe("Session Coordinator worker", () => {
     await __testDeleteVault();
     const first = makeCoordinatorTestPeer("session-owner-first-peer");
     const second = makeCoordinatorTestPeer("session-owner-second-peer");
+    const handoffs: Array<{ peerId: string; handoffRevision?: number }> = [];
+    __testSetCoordinatorPeerHandoffNotifier((peerId, handoffRevision) => {
+      handoffs.push({ peerId, handoffRevision });
+      return true;
+    });
     installCoordinatorSessionInitializationBridge();
     await __testCreateVault("session-test-password");
 
@@ -697,10 +703,19 @@ describe("Session Coordinator worker", () => {
       );
       expect(first.exposureCount).toBe(1);
       expect(second.exposureCount).toBe(1);
+      expect(handoffs).toEqual([
+        { peerId: first.peer.peerId, handoffRevision: 1 },
+        { peerId: second.peer.peerId, handoffRevision: 2 },
+      ]);
 
       // second 是最新提交的 owner；close 仍经真实 session.close handler。
       await __testHandleCoordinatorSessionRpc(second.peer, sessionClose(secondBinding));
       await __testAwaitCoordinatorPeerDrain(second.peer.peerId);
+      expect(handoffs).toEqual([
+        { peerId: first.peer.peerId, handoffRevision: 1 },
+        { peerId: second.peer.peerId, handoffRevision: 2 },
+        { peerId: first.peer.peerId, handoffRevision: 3 },
+      ]);
 
       __testSetLocalStorageBridgeOverride(undefined);
       await expect(__testRequestCoordinatorLocalStorageBridge({ type: "device-record-list" })).resolves.toMatchObject({
@@ -1563,7 +1578,7 @@ describe("Session Coordinator worker", () => {
   it("does not persist a temporary final-I/O lease across Worker restart", async () => {
     __testResetState();
     const release = await __testHoldCoordinatorFinalIoLease();
-    // 运行锁由浏览器 WebLoom 管理，Worker 重启不会读取旧桶内租约，
+    // 临时 I/O lease 只属于当前 Worker 内存，Worker 重启不会读取旧桶内租约，
     // 因此旧 I/O 不会把新 Worker 卡在 recovery-required。
     await __testRestartWorker();
     expect(__testGetSnapshot().authorityRecovery).toBeUndefined();
