@@ -93,7 +93,25 @@ export interface SatLibp2pTransportOptions {
   requestTimeoutMs?: number;
   /** 浏览器传输层资源硬上限。 */
   resourceLimits?: Partial<SatTransportResourceLimits>;
+  /**
+   * 空闲保活间隔毫秒；默认 30_000。空闲（无任何 SSP/SPI 收发）达到该
+   * 间隔时打一次标准 libp2p Ping（`/ipfs/ping/1.0.0`），产生双向流量
+   * 防止 Cloudflare / nginx 杀掉空闲 WSS 长连接；不动 SSP 协议。
+   * 小于等于 0 表示关闭保活。
+   */
+  keepaliveIntervalMs?: number;
+  /** 单次 Ping 超时毫秒；默认 10_000。 */
+  keepaliveTimeoutMs?: number;
 }
+
+/** 标准 libp2p Ping 协议；服务端只需启用 ping service，无需 SSP 改动。 */
+export const SAT_PING_PROTOCOL = "/ipfs/ping/1.0.0";
+const PING_PAYLOAD_BYTES = 32;
+/** 默认空闲保活间隔：小于 Cloudflare 100s 与常见 nginx 60s 空闲超时。 */
+export const DEFAULT_KEEPALIVE_INTERVAL_MS = 30_000;
+export const DEFAULT_KEEPALIVE_TIMEOUT_MS = 10_000;
+/** 连续失败几次后判定传输已死并走 degraded 重连；单次抖动不杀连接。 */
+const KEEPALIVE_MAX_CONSECUTIVE_FAILURES = 2;
 
 export interface SatLibp2pConnectInput {
   /** 供应商固定的压缩公钥 hex；不会信任远端 payload 自报身份。 */
@@ -139,6 +157,8 @@ function normalizeOptions(options: SatLibp2pTransportOptions): {
   maxWireBytes: number;
   requestTimeoutMs: number;
   resourceLimits: SatTransportResourceLimits;
+  keepaliveIntervalMs: number;
+  keepaliveTimeoutMs: number;
 } {
   const maxWireBytes = options.maxWireBytes ?? MAX_WIRE_BYTES;
   if (!Number.isSafeInteger(maxWireBytes) || maxWireBytes < 1 || maxWireBytes > MAX_WIRE_BYTES || maxWireBytes > DEFAULT_MAX_INBOUND_FRAME_BYTES) {
@@ -146,13 +166,17 @@ function normalizeOptions(options: SatLibp2pTransportOptions): {
   }
   const requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
   if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) throw new RangeError("requestTimeoutMs 必须是正数");
+  const keepaliveIntervalMs = options.keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
+  if (!Number.isFinite(keepaliveIntervalMs)) throw new RangeError("keepaliveIntervalMs 必须是有限数（<=0 关闭保活）");
+  const keepaliveTimeoutMs = options.keepaliveTimeoutMs ?? DEFAULT_KEEPALIVE_TIMEOUT_MS;
+  if (!Number.isFinite(keepaliveTimeoutMs) || keepaliveTimeoutMs <= 0) throw new RangeError("keepaliveTimeoutMs 必须是正数");
   const resourceLimits = {
     ...DEFAULT_SAT_TRANSPORT_RESOURCE_LIMITS,
     ...(options.resourceLimits ?? {})
   };
   for (const [name, value] of Object.entries(resourceLimits)) validatePositiveLimit(value as number, name);
   if (resourceLimits.maxWriterQueuedBytes < maxWireBytes) throw new RangeError("maxWriterQueuedBytes 不能小于 maxWireBytes");
-  return { host: options.host, maxWireBytes, requestTimeoutMs, resourceLimits };
+  return { host: options.host, maxWireBytes, requestTimeoutMs, resourceLimits, keepaliveIntervalMs, keepaliveTimeoutMs };
 }
 
 function operationSignal(timeoutMs: number, parent?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
@@ -194,7 +218,16 @@ export class SatLibp2pConnection {
   private readonly maxWireBytes: number;
   private readonly requestTimeoutMs: number;
   private readonly limits: SatTransportResourceLimits;
+  private readonly keepaliveIntervalMs: number;
+  private readonly keepaliveTimeoutMs: number;
   private readonly connection: Connection;
+  /** 最近一次业务收发时间；保活只在真正空闲时打 Ping，避免多余流量。 */
+  private lastActivityAt = Date.now();
+  private keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
+  private keepaliveRunning = false;
+  /** 远端不支持 Ping 协议时永久关闭本连接保活（旧网关兼容，不算失败）。 */
+  private keepaliveUnsupported = false;
+  private keepaliveFailures = 0;
   private readonly pending = new Map<string, PendingResponse>();
   private readonly incomingHandlers = new Set<(wire: Uint8Array) => Promise<Uint8Array>>();
   /** adapter connect 返回前已经到达的 Publish；避免注册 handler 的窗口丢消息。 */
@@ -218,6 +251,8 @@ export class SatLibp2pConnection {
     maxWireBytes: number;
     requestTimeoutMs: number;
     resourceLimits?: Partial<SatTransportResourceLimits>;
+    keepaliveIntervalMs?: number;
+    keepaliveTimeoutMs?: number;
   }) {
     this.connection = input.connection;
     this.supplierPublicKeyHex = input.supplierPublicKeyHex;
@@ -225,12 +260,16 @@ export class SatLibp2pConnection {
     this.maxWireBytes = input.maxWireBytes;
     this.requestTimeoutMs = input.requestTimeoutMs;
     this.limits = { ...DEFAULT_SAT_TRANSPORT_RESOURCE_LIMITS, ...(input.resourceLimits ?? {}) };
+    this.keepaliveIntervalMs = input.keepaliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
+    this.keepaliveTimeoutMs = input.keepaliveTimeoutMs ?? DEFAULT_KEEPALIVE_TIMEOUT_MS;
   }
 
   /** 预先打开 SSP 长 Stream，确保入站 Publish 在 provider 注册后可接收。 */
   async start(signal?: AbortSignal): Promise<void> {
     await this.ensureSspStream(signal);
     this.setConnectionState("online");
+    this.noteActivity();
+    this.scheduleKeepalive();
   }
 
   /** 监听 SSP 长流/连接状态；Provider 用它触发无配置变化的重连。 */
@@ -305,7 +344,9 @@ export class SatLibp2pConnection {
       stream = await this.connection.newStream(SPI_PROTOCOL, { signal: operation.signal }) as Stream;
       const responsePromise = readStreamToEnd(stream, { maxBytes: this.maxWireBytes, timeoutMs: this.requestTimeoutMs, signal: operation.signal });
       await this.sendUnframed(stream, request, operation.signal, () => { sendStarted = true; });
-      return await responsePromise;
+      const response = await responsePromise;
+      this.noteActivity();
+      return response;
     } catch (error) {
       try { stream?.abort(error instanceof Error ? error : new Error("SPI stream failed")); } catch { /* stream 已经关闭 */ }
       throw transportFailure(error, sendStarted ? "unknown" : "not-sent");
@@ -333,6 +374,7 @@ export class SatLibp2pConnection {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopKeepalive();
     this.setConnectionState("closed");
     const failure = new SatTransportError("SSP connection closed", { sentBoundary: "unknown" });
     for (const [requestId, pending] of this.pending) {
@@ -387,6 +429,7 @@ export class SatLibp2pConnection {
       if (this.closed || this.sspStream !== stream) throw new SatTransportError("SSP stream is not active", { sentBoundary: "not-sent" });
       // 真正的 wire 写入只能通过 bitcoin-libp2p 0.3.0 SDK。
       if (!writeUvarintFrame(stream, payload)) await this.waitDrain(stream);
+      this.noteActivity();
     }).finally(() => {
       this.writerQueuedFrames = Math.max(0, this.writerQueuedFrames - 1);
       this.writerQueuedBytes = Math.max(0, this.writerQueuedBytes - frameBytes);
@@ -465,6 +508,7 @@ export class SatLibp2pConnection {
     } catch (error) {
       throw new SatTransportError("SSP frame is neither a response nor Publish", { sentBoundary: "unknown", cause: error });
     }
+    this.noteActivity();
     const handler = this.incomingHandlers.values().next().value as ((wire: Uint8Array) => Promise<Uint8Array>) | undefined;
     if (!handler) {
       if (this.queuedIncoming.length >= this.limits.maxPendingIncomingPerLane) throw new SatTransportError("SSP inbound Publish queue is full", { sentBoundary: "unknown" });
@@ -494,6 +538,7 @@ export class SatLibp2pConnection {
     this.pending.delete(key);
     pending.cleanup();
     clearTimeout(pending.timer);
+    this.noteActivity();
     pending.resolve(wire.slice());
   }
 
@@ -523,6 +568,162 @@ export class SatLibp2pConnection {
       try { listener(next); } catch { /* 单个状态监听器不能打断连接清理。 */ }
     }
   }
+
+  /** 业务收发打点；保活只在真正空闲时才发 Ping。 */
+  private noteActivity(): void {
+    this.lastActivityAt = Date.now();
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepaliveTimer !== undefined) clearTimeout(this.keepaliveTimer);
+    this.keepaliveTimer = undefined;
+  }
+
+  private scheduleKeepalive(): void {
+    this.stopKeepalive();
+    if (this.closed || this.keepaliveUnsupported || !(this.keepaliveIntervalMs > 0)) return;
+    this.keepaliveTimer = setTimeout(() => {
+      this.keepaliveTimer = undefined;
+      void this.runKeepalive();
+    }, this.keepaliveIntervalMs);
+  }
+
+  private async runKeepalive(): Promise<void> {
+    if (this.closed || this.keepaliveUnsupported || this.keepaliveRunning) {
+      this.scheduleKeepalive();
+      return;
+    }
+    // 非 online（degraded 重连中）不打扰，provider 会重建连接；近期有
+    // 业务流量时链路本身就是活的，跳过本次。
+    if (this.connectionState !== "online" || Date.now() - this.lastActivityAt < this.keepaliveIntervalMs) {
+      this.scheduleKeepalive();
+      return;
+    }
+    this.keepaliveRunning = true;
+    try {
+      await this.pingOnce();
+      this.keepaliveFailures = 0;
+      this.noteActivity();
+    } catch (error) {
+      if (isUnsupportedPingProtocol(error)) {
+        // 旧网关没有 Ping 服务：永久关闭本连接保活，回到原有行为。
+        this.keepaliveUnsupported = true;
+        this.stopKeepalive();
+        return;
+      }
+      this.keepaliveFailures += 1;
+      if (this.keepaliveFailures >= KEEPALIVE_MAX_CONSECUTIVE_FAILURES && !this.closed) {
+        this.resetSspStream(transportFailure(error, "unknown"));
+      }
+    } finally {
+      this.keepaliveRunning = false;
+      this.scheduleKeepalive();
+    }
+  }
+
+  /**
+   * 标准 libp2p Ping：发 32 随机字节，收 32 回显并比对。
+   * 发收本身就是双向流量，正好重置中间代理的空闲计时。
+   */
+  private async pingOnce(): Promise<void> {
+    this.assertOpen();
+    const operation = operationSignal(this.keepaliveTimeoutMs);
+    let stream: Stream | undefined;
+    try {
+      stream = await this.connection.newStream(SAT_PING_PROTOCOL, { signal: operation.signal }) as Stream;
+      const payload = new Uint8Array(PING_PAYLOAD_BYTES);
+      crypto.getRandomValues(payload);
+      if (!stream.send(payload)) {
+        await new Promise<void>((resolve, reject) => {
+          const onDrain = (): void => { cleanup(); resolve(); };
+          const onClose = (event: Event): void => { cleanup(); reject((event as Event & { error?: unknown }).error ?? new Error("ping stream closed while draining")); };
+          const cleanup = (): void => {
+            stream?.removeEventListener("drain", onDrain);
+            stream?.removeEventListener("close", onClose);
+          };
+          stream?.addEventListener("drain", onDrain, { once: true });
+          stream?.addEventListener("close", onClose, { once: true });
+        });
+      }
+      const echo = await readExactBytes(stream, PING_PAYLOAD_BYTES, operation.signal, this.keepaliveTimeoutMs);
+      if (!equalBytes(echo, payload)) throw new SatTransportError("Ping echo mismatch", { sentBoundary: "unknown" });
+    } finally {
+      operation.dispose();
+      try { await stream?.close(); } catch { /* best effort */ }
+    }
+  }
+}
+
+/** 远端没有 Ping 协议 handler（旧网关）：开流即被拒，不能算传输故障。 */
+function isUnsupportedPingProtocol(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code;
+  if (code === "ERR_UNSUPPORTED_PROTOCOL") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /unsupported protocol|no handler|protocol not supported/i.test(message);
+}
+
+/** 从 message 事件精确读满 n 字节；Ping 回显用，不等远端关流。 */
+function readExactBytes(stream: Stream, count: number, signal: AbortSignal, timeoutMs: number): Promise<Uint8Array> {
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let settled = false;
+    const timer = setTimeout(() => fail("Ping read timed out"), timeoutMs);
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      stream.removeEventListener("message", onMessage);
+      stream.removeEventListener("close", onClose);
+    };
+    const succeed = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const output = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        output.set(chunk, offset);
+        offset += chunk.length;
+      }
+      resolve(output.subarray(0, count));
+    };
+    const fail = (message: string, cause?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new SatTransportError(message, { sentBoundary: "unknown", cause }));
+    };
+    const onMessage = (event: Event): void => {
+      if (settled) return;
+      const data = (event as MessageEvent).data as Uint8Array | ArrayLike<number> | undefined;
+      let chunk: Uint8Array;
+      try {
+        if (data instanceof Uint8Array) chunk = data;
+        else if (data != null && Number.isSafeInteger(data.length)) chunk = Uint8Array.from(data);
+        else throw new Error("unsupported ping chunk shape");
+      } catch (error) {
+        fail("Ping stream emitted an invalid chunk", error);
+        return;
+      }
+      chunks.push(chunk);
+      total += chunk.byteLength;
+      if (total >= count) succeed();
+    };
+    const onClose = (event: Event): void => {
+      const error = (event as Event & { error?: unknown }).error;
+      if (error != null) fail("Ping stream closed with an error", error);
+      else if (total < count) fail("Ping stream closed before echo arrived");
+      // 已收满时 close 属于正常结束，忽略。
+    };
+    const onAbort = (): void => fail("Ping was aborted", signal.reason);
+    if (signal.aborted) {
+      fail("Ping was aborted", signal.reason);
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    stream.addEventListener("message", onMessage);
+    stream.addEventListener("close", onClose);
+  });
 }
 
 /** 在调用方拥有的 Host 上建立一个固定 pinned Supplier 连接。 */
@@ -571,7 +772,9 @@ export function createSatLibp2pTransport(options: SatLibp2pTransportOptions): Sa
             supplierPublicKeyHex: bytesToHex(authenticated.publicKey),
             maxWireBytes: normalized.maxWireBytes,
             requestTimeoutMs: normalized.requestTimeoutMs,
-            resourceLimits: normalized.resourceLimits
+            resourceLimits: normalized.resourceLimits,
+            keepaliveIntervalMs: normalized.keepaliveIntervalMs,
+            keepaliveTimeoutMs: normalized.keepaliveTimeoutMs
           });
           await result.start(input.signal);
           return result;

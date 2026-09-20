@@ -65,6 +65,26 @@ class FakeStream {
   }
 }
 
+/** Ping 流：收到即按原样回显，模拟服务端 ping service。 */
+class EchoPingStream extends FakeStream {
+  override send(bytes: Uint8Array): boolean {
+    super.send(bytes);
+    queueMicrotask(() => this.push(bytes.slice()));
+    return true;
+  }
+}
+
+/** Ping 流：回显被篡改，模拟传输损坏。 */
+class CorruptEchoPingStream extends FakeStream {
+  override send(bytes: Uint8Array): boolean {
+    super.send(bytes);
+    const corrupt = bytes.slice();
+    corrupt[0] = (corrupt[0]! + 1) % 256;
+    queueMicrotask(() => this.push(corrupt));
+    return true;
+  }
+}
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let index = 0; index < 100; index += 1) {
     if (predicate()) return;
@@ -252,6 +272,110 @@ describe("SatSubscription libp2p adapter", () => {
       requestTimeoutMs: 2_000
     });
     await expect(sendAdapter.requestSpi(new Uint8Array([1]))).rejects.toMatchObject({ sentBoundary: "unknown" });
+  });
+
+  it("pings on idle to keep the path alive and stays online on echo", async () => {
+    vi.useFakeTimers();
+    try {
+      const sspStream = new FakeStream();
+      const pingStreams: EchoPingStream[] = [];
+      const connection = {
+        newStream: vi.fn(async (protocol: string) => {
+          if (protocol !== "/ipfs/ping/1.0.0") return sspStream;
+          const stream = new EchoPingStream();
+          pingStreams.push(stream);
+          return stream;
+        }),
+        close: vi.fn(async () => undefined)
+      } as unknown as ConstructorParameters<typeof SatLibp2pConnection>[0]["connection"];
+      const adapter = new SatLibp2pConnection({
+        connection,
+        supplierPublicKeyHex: "03" + "22".repeat(32),
+        maxWireBytes: 1 << 20,
+        requestTimeoutMs: 2_000,
+        keepaliveIntervalMs: 1_000,
+        keepaliveTimeoutMs: 500
+      });
+      const states: string[] = [];
+      adapter.onStateChange((state) => { states.push(state); });
+      await adapter.start();
+      await vi.advanceTimersByTimeAsync(1_100);
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(pingStreams.length).toBeGreaterThanOrEqual(2);
+      expect(pingStreams[0]!.sent[0]!.byteLength).toBe(32);
+      // 回显正确：一次降级都不应发生（初始即 online，无状态事件）。
+      expect(states).toEqual([]);
+      adapter.close();
+      const streamsAfterClose = pingStreams.length;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(pingStreams.length).toBe(streamsAfterClose);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disables keepalive when the remote has no Ping protocol (old gateway)", async () => {
+    vi.useFakeTimers();
+    try {
+      const sspStream = new FakeStream();
+      const connection = {
+        newStream: vi.fn(async (protocol: string) => {
+          if (protocol === "/ipfs/ping/1.0.0") throw Object.assign(new Error("protocol not supported"), { code: "ERR_UNSUPPORTED_PROTOCOL" });
+          return sspStream;
+        }),
+        close: vi.fn(async () => undefined)
+      } as unknown as ConstructorParameters<typeof SatLibp2pConnection>[0]["connection"];
+      const adapter = new SatLibp2pConnection({
+        connection,
+        supplierPublicKeyHex: "03" + "22".repeat(32),
+        maxWireBytes: 1 << 20,
+        requestTimeoutMs: 2_000,
+        keepaliveIntervalMs: 1_000,
+        keepaliveTimeoutMs: 500
+      });
+      const states: string[] = [];
+      adapter.onStateChange((state) => { states.push(state); });
+      await adapter.start();
+      await vi.advanceTimersByTimeAsync(5_000);
+      const pingAttempts = (connection.newStream as ReturnType<typeof vi.fn>).mock.calls.filter((call) => call[0] === "/ipfs/ping/1.0.0");
+      // 只试一次就永久关闭保活，不打扰旧网关，不算传输故障。
+      expect(pingAttempts).toHaveLength(1);
+      expect(states).toEqual([]);
+      adapter.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("degrades after consecutive ping failures so the provider reconnects", async () => {
+    vi.useFakeTimers();
+    try {
+      const sspStream = new FakeStream();
+      // 生产每次 Ping 都是新流；mock 同样每次返回新流。
+      const connection = {
+        newStream: vi.fn(async (protocol: string) => (protocol === "/ipfs/ping/1.0.0" ? new CorruptEchoPingStream() : sspStream)),
+        close: vi.fn(async () => undefined)
+      } as unknown as ConstructorParameters<typeof SatLibp2pConnection>[0]["connection"];
+      const adapter = new SatLibp2pConnection({
+        connection,
+        supplierPublicKeyHex: "03" + "22".repeat(32),
+        maxWireBytes: 1 << 20,
+        requestTimeoutMs: 2_000,
+        keepaliveIntervalMs: 1_000,
+        keepaliveTimeoutMs: 500
+      });
+      const states: string[] = [];
+      adapter.onStateChange((state) => { states.push(state); });
+      await adapter.start();
+      // 第一次失败只计数，第二次连续失败才 degraded（单次抖动不杀连接）。
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(states).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(states).toEqual(["degraded"]);
+      adapter.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails closed on the first connected address when identity pin authentication fails", async () => {
