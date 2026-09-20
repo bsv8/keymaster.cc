@@ -1,3 +1,51 @@
+.background-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.background-settings__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.background-settings__section-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.background-settings__hint {
+  margin: 0;
+  color: var(--text-muted, var(--text));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.background-settings__tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.background-settings__task {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.background-settings__task-label {
+  color: var(--text);
+  font-size: 13px;
+}
+
 .background-settings__field {
   display: flex;
   flex-direction: column;

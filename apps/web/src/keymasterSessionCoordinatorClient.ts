@@ -276,7 +276,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     vaultStatus: "booting",
     keyspaceGeneration: 0,
     taskSnapshots: [],
-    scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+    scheduleSettings: { taskIntervals: {} },
   };
 
   private eventListeners = new Map<string, Set<EventListener<CoordinatorTopicEvent>>>();

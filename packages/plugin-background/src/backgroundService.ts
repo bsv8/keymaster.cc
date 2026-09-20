@@ -24,7 +24,13 @@ import type {
   BackgroundTaskState,
   BackgroundCommandResult
 } from "@keymaster/contracts";
-import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import {
+  BACKGROUND_MANAGED_SYNC_TASK_IDS,
+  BACKGROUND_REGISTRY_CAPABILITY,
+  BACKGROUND_SERVICE_CAPABILITY,
+  BACKGROUND_SYNC_DEFAULT_INTERVAL_MS,
+  BACKGROUND_SYNC_INTERVAL_OPTIONS_MS
+} from "@keymaster/contracts";
 
 interface TaskRuntime {
   def: BackgroundTaskDefinition;
@@ -42,25 +48,28 @@ interface TaskRuntime {
   lastScheduledAt?: number;
 }
 
-/** 默认设置。 */
+/** 默认设置：所有任务使用平台缺省间隔（5 分钟）。 */
 const DEFAULT_SYNC_SETTINGS: BackgroundSyncSettings = {
-  assetHoldingsIntervalMs: 900_000
+  taskIntervals: {}
 };
 
-/** 预设间隔值集合。 */
-const VALID_INTERVALS = new Set([300_000, 900_000, 1_800_000, 3_600_000]);
-
 /**
- * 归一化 assetHoldingsIntervalMs。
+ * 归一化同步管理设置：只保留已登记任务与合法选项；非法值直接丢弃。
  */
-function normalizeAssetHoldingsInterval(
-  value: unknown,
-  minIntervalMs: number
-): number {
-  if (typeof value === "number" && Number.isFinite(value) && VALID_INTERVALS.has(value)) {
-    return Math.max(value, minIntervalMs);
+function normalizeBackgroundSyncSettings(settings: BackgroundSyncSettings | undefined): BackgroundSyncSettings {
+  const taskIntervals: Record<string, number> = {};
+  const options = BACKGROUND_SYNC_INTERVAL_OPTIONS_MS as readonly number[];
+  for (const taskId of BACKGROUND_MANAGED_SYNC_TASK_IDS) {
+    const raw = settings?.taskIntervals?.[taskId];
+    if (typeof raw === "number" && options.includes(raw)) taskIntervals[taskId] = raw;
   }
-  return Math.max(DEFAULT_SYNC_SETTINGS.assetHoldingsIntervalMs, minIntervalMs);
+  return { taskIntervals };
+}
+
+/** managed 任务的当前间隔；未配置时使用平台缺省。 */
+function managedIntervalFor(settings: BackgroundSyncSettings, taskId: string): number {
+  const configured = settings.taskIntervals[taskId];
+  return typeof configured === "number" ? configured : BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
 }
 
 /** 普通事件冷却时间：2 分钟。 */
@@ -183,19 +192,26 @@ export function createBackgroundService(_options: CreateBackgroundServiceOptions
 
   /**
    * 计算任务的下一次运行时间。
+   * managed 任务读取同步管理设置；间隔 0 表示关闭自动同步。
    */
   function scheduleNext(t: TaskRuntime) {
     let interval: number | undefined;
 
-    if (t.def.schedule?.group === "asset-holdings") {
+    if ((BACKGROUND_MANAGED_SYNC_TASK_IDS as readonly string[]).includes(t.def.id)) {
       const settings = loadScheduleSettings();
-      interval = settings.assetHoldingsIntervalMs;
+      interval = managedIntervalFor(settings, t.def.id);
     } else {
       interval = t.def.intervalMs;
     }
 
     if (interval == null) {
       t.nextRunAt = undefined;
+      return;
+    }
+
+    if (interval <= 0) {
+      t.nextRunAt = undefined;
+      t.lastScheduledAt = undefined;
       return;
     }
 
@@ -206,11 +222,11 @@ export function createBackgroundService(_options: CreateBackgroundServiceOptions
   }
 
   /**
-   * 重新计算所有 asset-holdings 组任务的下一次运行时间。
+   * 重新计算所有 managed 任务的下一次运行时间。
    */
-  function recalculateAssetHoldingsSchedule(): void {
+  function recalculateManagedSchedule(): void {
     for (const t of tasks.values()) {
-      if (t.def.schedule?.group === "asset-holdings") {
+      if ((BACKGROUND_MANAGED_SYNC_TASK_IDS as readonly string[]).includes(t.def.id)) {
         scheduleNext(t);
       }
     }
@@ -324,12 +340,21 @@ export function createBackgroundService(_options: CreateBackgroundServiceOptions
     }
   }
 
+  /** managed 任务是否被「同步管理」关闭（间隔 0）。 */
+  function isManagedTaskOff(t: TaskRuntime): boolean {
+    if (!(BACKGROUND_MANAGED_SYNC_TASK_IDS as readonly string[]).includes(t.def.id)) return false;
+    return managedIntervalFor(loadScheduleSettings(), t.def.id) <= 0;
+  }
+
   /**
    * 触发任务运行（内部领域事件 API）。
    */
   function trigger(id: string, reason = "interval"): void {
     const t = tasks.get(id);
     if (!t) return;
+
+    // 关闭的任务不响应自动触发；托盘「立即同步一次」仍然有效。
+    if (isManagedTaskOff(t) && reason !== "manual") return;
 
     // 冷却检查
     if (reason !== "manual" && reason !== "first-sync") {
@@ -405,23 +430,9 @@ export function createBackgroundService(_options: CreateBackgroundServiceOptions
   }
 
   async function updateScheduleSettings(settings: BackgroundSyncSettings): Promise<BackgroundCommandResult> {
-    const minInterval = getMinIntervalMs();
-    const normalized: BackgroundSyncSettings = {
-      assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(settings.assetHoldingsIntervalMs, minInterval)
-    };
-    saveScheduleSettings(normalized);
-    recalculateAssetHoldingsSchedule();
+    saveScheduleSettings(normalizeBackgroundSyncSettings(settings));
+    recalculateManagedSchedule();
     return { status: "accepted" };
-  }
-
-  function getMinIntervalMs(): number {
-    let min = 0;
-    for (const t of tasks.values()) {
-      if (t.def.schedule?.group === "asset-holdings" && t.def.schedule.minIntervalMs) {
-        min = Math.max(min, t.def.schedule.minIntervalMs);
-      }
-    }
-    return min;
   }
 
   /**

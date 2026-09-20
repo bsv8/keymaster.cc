@@ -132,7 +132,12 @@ import {
   __testSignChannelPrivateMessage,
   __testUnlock,
   __testUpdateScheduleSettings,
+  __testSetSmartSyncDebounceMs,
+  __testNotifyWocQueueChange,
+  __testSmartSyncState,
+  __testTriggerImmediateSync,
   __testReloadCoordinatorMeta,
+  __testSeedCoordinatorSettingsSnapshot,
   __testCoordinatorSnapshotMetrics,
   __testGetWorkerSession,
   __testSeedCoordinatorKeyValueGarbage,
@@ -1068,7 +1073,7 @@ describe("Session Coordinator worker", () => {
     expect(afterSelection).toEqual(beforeLifecycle);
     expect(__testGetWorkerSession()).toMatchObject({ activeKey: second.publicKeyHex.toLowerCase() });
 
-    await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 61_000 });
+    await __testUpdateScheduleSettings({ taskIntervals: { "p2pkh.transactions-sync": 60_000 } });
     const afterSettings = __testCoordinatorSnapshotMetrics();
     expect(afterSettings.settings).toEqual({ revision: afterSelection.settings.revision + 1, writes: afterSelection.settings.writes + 1 });
     expect(afterSettings.pluginIntent).toEqual(afterSelection.pluginIntent);
@@ -1402,7 +1407,7 @@ describe("Session Coordinator worker", () => {
 
   it("Root 重装从空 snapshot 恢复默认 settings 和新的 plugin-intent controller", async () => {
     __testResetState();
-    await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 60_000 });
+    await __testUpdateScheduleSettings({ taskIntervals: { "p2pkh.transactions-sync": 60_000 } });
     const messages: unknown[] = [];
     __testAttachPort("root-reload-intent-port", (message) => messages.push(message));
     const before = __testGetSnapshot();
@@ -1419,7 +1424,7 @@ describe("Session Coordinator worker", () => {
       },
     });
     expect(__testGetSnapshot()).toMatchObject({
-      scheduleSettings: { assetHoldingsIntervalMs: 60_000 },
+      scheduleSettings: { taskIntervals: { "p2pkh.transactions-sync": 60_000 } },
       pluginIntent: { desiredEnabled: { p2pkh: false } },
     });
 
@@ -1431,7 +1436,7 @@ describe("Session Coordinator worker", () => {
       await __testInstallCatalogLocalBinding(current);
       await __testReloadCoordinatorMeta();
       expect(__testGetSnapshot()).toMatchObject({
-        scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+        scheduleSettings: { taskIntervals: {} },
         pluginIntent: { revision: 0, desiredEnabled: {}, desiredRevision: {} },
       });
     } finally {
@@ -1750,28 +1755,44 @@ describe("Session Coordinator worker", () => {
     expect(JSON.stringify(snapshot)).not.toMatch(/password|privateKey|token/i);
   });
 
-  it("persists schedule settings and restores locked state after Worker restart", async () => {
+  it("persists sync management settings and restores locked state after Worker restart", async () => {
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    const ack = await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 60_000 });
+    const ack = await __testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": 60_000, "contacts.presence-probe": 0 } });
     expect(ack.ack.status).toBe("accepted");
-    expect(__testGetSnapshot().scheduleSettings.assetHoldingsIntervalMs).toBe(60_000);
+    expect(__testGetSnapshot().scheduleSettings.taskIntervals).toEqual({ "token-bsv21.sync": 60_000, "contacts.presence-probe": 0 });
     await __testRestartWorker();
     expect(__testGetSnapshot().vaultStatus).not.toBe("unlocked");
-    expect(__testGetSnapshot().scheduleSettings.assetHoldingsIntervalMs).toBe(60_000);
+    expect(__testGetSnapshot().scheduleSettings.taskIntervals).toEqual({ "token-bsv21.sync": 60_000, "contacts.presence-probe": 0 });
   });
 
-  it("does not publish an in-memory schedule change when persistence fails", async () => {
+  it("does not publish an in-memory sync settings change when persistence fails", async () => {
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
     const before = __testGetSnapshot().scheduleSettings;
     __testFailNextCoordinatorSnapshotPersist();
 
-    await expect(__testUpdateScheduleSettings({ assetHoldingsIntervalMs: 180_000 })).rejects.toThrow(/injected coordinator snapshot persist failure/);
+    await expect(__testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": 300_000 } })).rejects.toThrow(/injected coordinator snapshot persist failure/);
     expect(__testGetSnapshot().scheduleSettings).toEqual(before);
 
     await __testRestartWorker();
     expect(__testGetSnapshot().scheduleSettings).toEqual(before);
+  });
+
+  it("兼容旧版 assetHoldingsIntervalMs 快照：回落同步管理缺省而不是启动失败", async () => {
+    __testResetState();
+    __testSeedCoordinatorSettingsSnapshot({ scheduleSettings: { assetHoldingsIntervalMs: 900_000 } });
+    await __testReloadCoordinatorMeta();
+    expect(__testGetSnapshot().scheduleSettings.taskIntervals).toEqual({});
+  });
+
+  it("rejects unknown task ids and illegal intervals", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    const unknown = await __testUpdateScheduleSettings({ taskIntervals: { "unknown.task": 60_000 } });
+    expect(unknown.ack.status).toBe("validation-error");
+    const illegal = await __testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": 12_345 } });
+    expect(illegal.ack.status).toBe("validation-error");
   });
 
   it("marks tasks as blocked when vault is locked", async () => {
@@ -1838,13 +1859,203 @@ describe("Session Coordinator worker", () => {
     expect(task?.blockedReason).toBeUndefined();
   });
 
-  it("uses persisted interval for nextRunAt", async () => {
+  it("managed 任务的 nextRunAt 来自同步管理设置，关闭后没有 nextRunAt", async () => {
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 120_000 });
-    // 验证设置已持久化
-    const snapshot = __testGetSnapshot();
-    expect(snapshot.scheduleSettings.assetHoldingsIntervalMs).toBe(120_000);
+    __testRegisterTask({
+      id: "token-bsv21.sync",
+      pluginId: "token-bsv21",
+      publicKeyHex: "a".repeat(64),
+      syncPolicy: "managed",
+      intervalMs: 300_000,
+      run: async () => undefined,
+    });
+
+    const before = Date.now();
+    await __testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": 60_000 } });
+    const scheduled = __testGetSnapshot().taskSnapshots.find((task) => task.id === "token-bsv21.sync");
+    expect(scheduled?.nextRunAt).toBeTruthy();
+    expect(new Date(scheduled!.nextRunAt!).getTime()).toBeGreaterThanOrEqual(before + 50_000);
+
+    await __testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": 0 } });
+    const disabled = __testGetSnapshot().taskSnapshots.find((task) => task.id === "token-bsv21.sync");
+    expect(disabled?.nextRunAt).toBeUndefined();
+  });
+
+  it("关闭的 managed 任务不响应自动触发，但手动「立即同步一次」仍然有效", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    let runs = 0;
+    __testRegisterTask({
+      id: "token-stas.sync",
+      pluginId: "token-stas",
+      publicKeyHex: "a".repeat(64),
+      syncPolicy: "managed",
+      intervalMs: 0,
+      run: async () => { runs += 1; },
+    });
+
+    __testTriggerImmediateSync("unlock");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runs).toBe(0);
+
+    const manual = await __testBackgroundRunNow("token-stas.sync");
+    expect(manual.ack.status).toBe("accepted");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runs).toBe(1);
+  });
+
+  it("WoC 空闲满 2 秒后触发 smart 任务；WoC 变忙会重新计时", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetSmartSyncDebounceMs(5);
+    let runs = 0;
+    __testRegisterTask({
+      id: "p2pkh.utxo-snapshot",
+      pluginId: "p2pkh",
+      publicKeyHex: "a".repeat(64),
+      syncPolicy: "smart",
+      run: async () => { runs += 1; },
+    });
+
+    // 队列忙：不启动计时。
+    __testNotifyWocQueueChange({ queued: 1, inFlight: 0, coordinated: true });
+    expect(__testSmartSyncState().pending).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runs).toBe(0);
+
+    // 队列空闲：开始 2 秒计时（测试里缩短为 5ms）。
+    __testNotifyWocQueueChange({ queued: 0, inFlight: 0, coordinated: true });
+    expect(__testSmartSyncState().pending).toBe(true);
+    // 计时被打断：重新计时，不会触发。
+    __testNotifyWocQueueChange({ queued: 0, inFlight: 1, coordinated: true });
+    expect(__testSmartSyncState().pending).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runs).toBe(0);
+
+    __testNotifyWocQueueChange({ queued: 0, inFlight: 0, coordinated: true });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // 触发后任务会持续循环（完成后再次计时），这里只断言至少跑过一轮。
+    expect(runs).toBeGreaterThanOrEqual(1);
+  });
+
+  it("smart 任务完成后，若 WoC 空闲则重新开始计时", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetSmartSyncDebounceMs(60);
+    let runs = 0;
+    __testRegisterTask({
+      id: "p2pkh.utxo-snapshot",
+      pluginId: "p2pkh",
+      publicKeyHex: "a".repeat(64),
+      syncPolicy: "smart",
+      run: async () => { runs += 1; },
+    });
+
+    __testNotifyWocQueueChange({ queued: 0, inFlight: 0, coordinated: true });
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    expect(runs).toBe(1);
+    // 任务完成后队列仍空闲：计时重新开始，持续利用空闲时间刷新余额。
+    expect(__testSmartSyncState().pending).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    expect(runs).toBe(2);
+  });
+
+  it("锁定时 WoC 空闲事件不会挂起智能调度计时，解锁后恢复", () => {
+    __testResetState();
+    __testSetSmartSyncDebounceMs(5);
+    __testSetVaultStatus("locked");
+
+    __testNotifyWocQueueChange({ queued: 0, inFlight: 0, coordinated: true });
+    expect(__testSmartSyncState().pending).toBe(false);
+
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testNotifyWocQueueChange({ queued: 0, inFlight: 0, coordinated: true });
+    expect(__testSmartSyncState().pending).toBe(true);
+  });
+
+  it("锁定时 smart 任务完成不会重新挂起智能调度计时", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetSmartSyncDebounceMs(5);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let runs = 0;
+    __testRegisterTask({
+      id: "p2pkh.utxo-snapshot",
+      pluginId: "p2pkh",
+      publicKeyHex: "a".repeat(64),
+      syncPolicy: "smart",
+      run: async () => { runs += 1; await gate; },
+    });
+
+    void __testRunTask("p2pkh.utxo-snapshot");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(runs).toBe(1);
+
+    // 锁定：无 active key。任务在锁定期完成时不得重新挂起计时器。
+    __testSetVaultStatus("locked");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(__testSmartSyncState().pending).toBe(false);
+    expect(runs).toBe(1);
+
+    // 即使再等一个计时周期，也不会在锁定状态下触发同步。
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(runs).toBe(1);
+  });
+
+  it("真实 lock 流程下 smart 任务完成不会重新挂起智能调度计时", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const key = await __testCreateVault("pw", { label: "smart-lock-owner" });
+    __testSetSmartSyncDebounceMs(5);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let runs = 0;
+    __testRegisterTask({
+      id: "p2pkh.utxo-snapshot",
+      pluginId: "p2pkh",
+      publicKeyHex: key.publicKeyHex!,
+      syncPolicy: "smart",
+      run: async () => { runs += 1; await gate; },
+    });
+
+    void __testRunTask("p2pkh.utxo-snapshot");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(runs).toBe(1);
+
+    // 真实 lock：performGlobalLock 会 abort 任务、清 active key 并取消计时。
+    const lockPromise = __testLock();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    await lockPromise;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testSmartSyncState().pending).toBe(false);
+    expect(runs).toBe(1);
+    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === "p2pkh.utxo-snapshot")?.state).toBe("blocked");
+  });
+
+  it("解锁 / 初始化立即同步：smart 任务与未关闭的 managed 任务各跑一次", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    // 立即同步只跑一轮；把智能调度计时拉长，避免后台循环影响断言。
+    __testSetSmartSyncDebounceMs(10_000);
+    const runs = new Map<string, number>();
+    const register = (id: string, pluginId: string, syncPolicy: "smart" | "managed", intervalMs?: number) => {
+      __testRegisterTask({ id, pluginId, publicKeyHex: "a".repeat(64), syncPolicy, intervalMs, run: async () => { runs.set(id, (runs.get(id) ?? 0) + 1); } });
+    };
+    register("p2pkh.utxo-snapshot", "p2pkh", "smart");
+    register("p2pkh.transactions-sync", "p2pkh", "managed", 60_000);
+    register("contacts.presence-probe", "contacts", "managed", 0);
+
+    __testTriggerImmediateSync("unlock");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(runs.get("p2pkh.utxo-snapshot")).toBe(1);
+    expect(runs.get("p2pkh.transactions-sync")).toBe(1);
+    expect(runs.get("contacts.presence-probe")).toBeUndefined();
   });
 
   it("aborts P2PKH submissions when the broadcast provider is missing (not-dispatched)", async () => {

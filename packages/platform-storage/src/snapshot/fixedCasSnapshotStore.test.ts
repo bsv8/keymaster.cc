@@ -82,7 +82,7 @@ describe("fixed CAS snapshot store", () => {
     const settings = openCoordinatorObject(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings);
     const pluginIntent = openCoordinatorObject(CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent);
 
-    await settings.write({ scheduleSettings: { assetHoldingsIntervalMs: 60_000 } });
+    await settings.write({ scheduleSettings: { taskIntervals: { "token-bsv21.sync": 60_000 } } });
     expect(state.puts.map((put) => put.path)).toEqual([".keymaster/system/coordinator/settings/current"]);
     await Promise.all([settings.read(), pluginIntent.read()]);
     expect(state.puts).toHaveLength(1);

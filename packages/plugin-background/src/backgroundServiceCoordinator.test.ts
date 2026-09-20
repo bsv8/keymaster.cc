@@ -9,7 +9,7 @@ function createClient(overrides: Partial<{
   const topicHandlers = new Set<(event: unknown) => void>();
   return {
     getIsConnected: () => true,
-    getState: () => ({ taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } }),
+    getState: () => ({ taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
     subscribeTopic: (_topic: string, handler: (event: unknown) => void) => { topicHandlers.add(handler); return () => topicHandlers.delete(handler); },
     publishBackgroundSnapshot: (event: unknown) => { for (const handler of topicHandlers) handler(event); },
     backgroundRunNow: async () => ({ status: "accepted" }),

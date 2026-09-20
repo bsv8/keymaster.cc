@@ -8,6 +8,7 @@ import {
   defineCapability,
   type ValueParser,
 } from "webloom-framework";
+import { BACKGROUND_SYNC_INTERVAL_OPTIONS_MS } from "./background.js";
 import type {
   CoordinatorClientRequest,
   CoordinatorCommandAck,
@@ -1499,9 +1500,21 @@ function parsePluginIntentCommand(value: unknown): PluginIntentCommand {
   };
 }
 
+/** 同步管理允许的间隔取值；解析时 fail closed，避免任意周期写入快照。 */
+const BACKGROUND_SYNC_INTERVAL_OPTION_SET: ReadonlySet<number> = new Set(BACKGROUND_SYNC_INTERVAL_OPTIONS_MS);
+
 function parseBackgroundSettings(value: unknown): CoordinatorBackgroundSyncSettings {
   const settings = expectRecord(value, "background settings");
-  return { assetHoldingsIntervalMs: boundedNumber(settings.assetHoldingsIntervalMs, "background settings.assetHoldingsIntervalMs", 1) };
+  const intervals = expectRecord(settings.taskIntervals, "background settings.taskIntervals");
+  const taskIntervals: Record<string, number> = {};
+  for (const [taskId, interval] of Object.entries(intervals)) {
+    if (taskId.length === 0 || taskId.length > 128) throw new TypeError("Coordinator background settings task id is invalid");
+    if (typeof interval !== "number" || !BACKGROUND_SYNC_INTERVAL_OPTION_SET.has(interval)) {
+      throw new TypeError(`Coordinator background settings interval for ${taskId} is invalid`);
+    }
+    taskIntervals[taskId] = interval;
+  }
+  return { taskIntervals };
 }
 
 function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {

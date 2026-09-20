@@ -71,7 +71,7 @@ class Hub {
             vaultStatus: "locked",
             keyspaceGeneration: 0,
             taskSnapshots: [],
-            scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+            scheduleSettings: { taskIntervals: {} },
             ...(request.kind === "session.open" ? {
               sessionBinding: { peerGeneration: 1, sessionEpoch: "shared-epoch", leaseId: request.leaseId },
             } : {}),
@@ -559,7 +559,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         receivedLength = cloned.data.input.content.bytes.byteLength;
       }
       const operationResult = message.kind === "hello"
-        ? { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }
+        ? { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }
         : {};
       queueMicrotask(() => port.onmessage?.({ data: { requestId: message.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
@@ -578,7 +578,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
   it("uses the module URL constructor and a session-scoped Worker name", async () => {
     const port = createTestMessagePort();
-    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
+    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent)); });
     const worker = { port } as unknown as SharedWorker;
     const Constructor = vi.fn(() => worker);
     const original = globalThis.SharedWorker;
@@ -598,7 +598,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
     const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string };
-      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent));
     });
     const Constructor = vi.fn(() => ({ port }) as unknown as SharedWorker);
     const original = globalThis.SharedWorker;
@@ -816,7 +816,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
               }
             }]
           }
-        : { authorityInstanceId: "authority:test", sessionEpoch: "boot-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } };
+        : { authorityInstanceId: "authority:test", sessionEpoch: "boot-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } };
       queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "baseline-epoch", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
     const original = globalThis.SharedWorker;
@@ -841,7 +841,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
           vaultStatus: "locked",
           keyspaceGeneration: 0,
           taskSnapshots: [],
-          scheduleSettings: { assetHoldingsIntervalMs: 1 },
+          scheduleSettings: { taskIntervals: {} },
           pluginIntent: { revision: 1, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 1 } },
         };
       } else if (request.kind === "subscribe") {
@@ -1041,7 +1041,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
   it("clears an unlocked snapshot on transport timeout before reconnect", async () => {
     const port = createTestMessagePort();
-    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, authorityRecovery: { status: "recovery-required", reason: "active-final-io-leases", authorityBuildId: "old-worker", activeIoLeaseCount: 1, activeIoOperations: { read: 0, write: 1 }, handoverGeneration: 1 }, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
+    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, authorityRecovery: { status: "recovery-required", reason: "active-final-io-leases", authorityBuildId: "old-worker", activeIoLeaseCount: 1, activeIoOperations: { read: 0, write: 1 }, handoverGeneration: 1 }, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent)); });
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -1064,7 +1064,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string; kind: string };
       if (request.kind === "hello" || request.kind === "subscribe") {
-        queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
+        queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent));
       }
     });
     const original = globalThis.SharedWorker;
@@ -1172,7 +1172,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
                 activePublicKeyHex: "a".repeat(64),
                 keyspaceGeneration: 1,
                 taskSnapshots: [],
-                scheduleSettings: { assetHoldingsIntervalMs: 1 },
+                scheduleSettings: { taskIntervals: {} },
               },
             },
           } as MessageEvent));

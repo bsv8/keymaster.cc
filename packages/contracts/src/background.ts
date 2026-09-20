@@ -7,13 +7,34 @@ import { defineCapability } from "webloom-framework";
 import type { I18nText } from "./i18n.js";
 
 /**
+ * 可在「智能调度 → 同步管理」中单独配置同步间隔的后台任务。
+ * 设计缘由（2026-09-20）：
+ *   - 这些任务按各自配置的间隔自动运行，用户可以设 30 秒 / 1 分钟 /
+ *     5 分钟，也可以关闭（0）。
+ *   - UTXO 余额快照不在这个列表里：它是 smart 任务，由 WoC 空闲 2 秒
+ *     的智能调度驱动，永远保持最新。
+ */
+export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
+  "p2pkh.transactions-sync",
+  "token-bsv21.sync",
+  "token-stas.sync",
+  "collectible-1satordinals.sync",
+  "contacts.presence-probe"
+] as const;
+
+/** 用户可选的同步间隔（毫秒）；0 = 关闭该任务的自动同步（手动仍可触发）。 */
+export const BACKGROUND_SYNC_INTERVAL_OPTIONS_MS = [30_000, 60_000, 300_000, 0] as const;
+
+/** 任务缺省同步间隔：5 分钟。 */
+export const BACKGROUND_SYNC_DEFAULT_INTERVAL_MS = 300_000;
+
+/**
  * 后台同步设置。
- * 设计缘由：统一管理资产同步频率，避免各业务插件自行创建 interval。
- * 设置属于后台任务平台，而不是某个业务插件。
+ * 设计缘由：同步管理只描述「任务 id -> 间隔毫秒」；平台不保存业务字段。
+ * 0 表示关闭自动同步；未列出的任务使用平台缺省值。
  */
 export interface BackgroundSyncSettings {
-  /** 资产持仓同步周期毫秒。默认 900_000（15 分钟）。 */
-  assetHoldingsIntervalMs: number;
+  taskIntervals: Record<string, number>;
 }
 
 /**
@@ -226,14 +247,14 @@ export interface BackgroundService {
   cancelByKey(publicKeyHex: string): Promise<void | BackgroundCommandResult>;
 
   /**
-   * 获取后台同步设置。
-   * 设计缘由：设置属于后台任务平台，影响所有资产 provider。
+   * 读取同步管理设置（任务 id -> 间隔毫秒）。
+   * 设计缘由：同步管理属于后台任务平台，影响所有资产 provider。
    */
   getScheduleSettings(): BackgroundSyncSettings;
   /**
-   * 更新后台同步设置。
-   * 设计缘由：保存后重新计算 asset-holdings 组任务的 nextRunAt，
-   * 新周期从保存时刻开始计时，不立即触发网络同步。
+   * 更新同步管理设置。
+   * 设计缘由：保存后重算 managed 任务的定时器；0 表示关闭自动同步。
+   * 持久化成功前不得让新值生效。
    */
   updateScheduleSettings(settings: BackgroundSyncSettings): Promise<BackgroundCommandResult>;
 }
@@ -243,12 +264,24 @@ export interface BackgroundService {
  * 设计缘由：统一业务插件使用的 reason 字符串，避免拼写不一致；
  * backgroundService 内部对 "manual" / "first-sync" 做冷却白名单，
  * 业务插件应使用这些常量而非硬编码字符串。
+ *
+ * 智能调度（2026-09-20）：资产余额同步不再由固定周期驱动，改由
+ * WoC 空闲事件驱动：
+ *   - UNLOCK：Vault 解锁 / Key 初始化完成后立即同步一次；
+ *   - INIT：后台任务在已解锁状态下完成注册后立即同步一次；
+ *   - IDLE_SYNC：WoC 队列空闲满 2 秒后同步一轮（持续利用空闲时间）。
  */
 export const BACKGROUND_TRIGGER_REASON = {
   /** 手动触发（用户点击）。跳过冷却。 */
   MANUAL: "manual",
   /** 首次同步（无 snapshot 时）。跳过冷却。 */
   FIRST_SYNC: "first-sync",
+  /** 解锁 / 初始化后立即同步。 */
+  UNLOCK: "unlock",
+  /** 任务注册完成后立即同步。 */
+  INIT: "init",
+  /** WoC 空闲 2 秒后由智能调度触发。 */
+  IDLE_SYNC: "idle-sync",
 } as const;
 
 /** capability keys。 */

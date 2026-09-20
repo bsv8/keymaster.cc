@@ -17,7 +17,7 @@ describe("createKeyspaceServiceCoordinator", () => {
         selectedPublicKeyHex: "02".padEnd(66, "a"),
         keyspaceGeneration: 7,
         taskSnapshots: [],
-        scheduleSettings: { assetHoldingsIntervalMs: 900_000 }
+        scheduleSettings: { taskIntervals: {} }
       }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => ({ status: "accepted" as const }),
@@ -34,7 +34,7 @@ describe("createKeyspaceServiceCoordinator", () => {
   it("keeps selected while locked and active is empty", () => {
     const key = "02".padEnd(66, "a");
     const listeners: Array<(event: SessionStateEvent) => void> = [];
-    const client = { getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async <O extends CoordinatorVaultOperation>(_operation: O): Promise<VaultOperationResponse<O>> => ({ status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>) };
+    const client = { getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async <O extends CoordinatorVaultOperation>(_operation: O): Promise<VaultOperationResponse<O>> => ({ status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>) };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
     expect(keyspace.active()).toEqual({ activePublicKeyHex: undefined, generation: 1 });
     expect(keyspace.selected()).toBe(key);
@@ -51,7 +51,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     bus.subscribe("key.deleting", () => events.push("key.deleting"));
     bus.subscribe("key.deleted", () => events.push("key.deleted"));
     const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
       vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
@@ -76,7 +76,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     const key = "02".padEnd(66, "a");
     const operations: unknown[] = [];
     const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
       vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
@@ -97,7 +97,7 @@ describe("createKeyspaceServiceCoordinator", () => {
       releaseDelete = resolve;
     });
     const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
       vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
@@ -132,7 +132,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     const operations: unknown[] = [];
     const bus = createMessageBus();
     const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => ({ status: "blocked" as const, reason: { key: "background.blocked", fallback: "busy" } }),
       vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => { operations.push(operation); return { status: "ok", value: operation.type === "listKeys" ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : true, sessionEpoch: "e" } as VaultOperationResponse<O>; }

@@ -52,14 +52,21 @@ const backgroundResources: I18nPluginResources = {
       "background.tray.state.queued": "Queued",
       "background.tray.state.blocked": "Waiting for condition",
       "background.tray.state.idle": "Waiting to sync",
-      "background.settings.title": "Background sync settings",
-      "background.settings.description": "Background sync is always maintained by the system. You can adjust the sync interval or click \"Sync once now\" in the tray to manually trigger a sync.",
-      "background.settings.assetHoldingsInterval": "Asset balance sync interval",
-      "background.settings.save": "Save",
+      "background.settings.title": "Smart scheduling",
+      "background.settings.description": "Smart scheduling refreshes the BSV balance snapshot immediately after unlock and then every time the WoC queue stays idle for 2 seconds, so idle time is always used without competing with your actions. The sync management below controls the other background tasks.",
+      "background.settings.syncManagement": "Sync management",
+      "background.settings.syncManagementDesc": "Each task can have its own sync interval. \"Off\" disables automatic sync for that task; the tray's \"Sync once now\" still works.",
+      "background.settings.smartTitle": "BSV balance snapshot (smart)",
+      "background.settings.smartDesc": "The balance comes from the in-memory UTXO snapshot: refreshed right after unlock and every time the WoC queue is idle for 2 seconds. This interval is not configurable.",
+      "background.settings.task.p2pkh.transactions-sync": "P2PKH on-chain history",
+      "background.settings.task.token-bsv21.sync": "BSV-21 token holdings",
+      "background.settings.task.token-stas.sync": "STAS token holdings",
+      "background.settings.task.collectible-1satordinals.sync": "1Sat collectibles",
+      "background.settings.task.contacts.presence-probe": "Contacts presence probe",
+      "background.settings.option.30s": "30 seconds",
+      "background.settings.option.1min": "1 minute",
       "background.settings.option.5min": "5 minutes",
-      "background.settings.option.15min": "15 minutes (default)",
-      "background.settings.option.30min": "30 minutes",
-      "background.settings.option.60min": "1 hour",
+      "background.settings.option.off": "Off",
       "background.settings.saveFailed": "Save failed. Please try again later.",
       "background.tray.requestFailed": "Request failed. Please try again later.",
       "background.tray.cancelFailed": "Cancel failed. Please try again later.",
@@ -86,14 +93,21 @@ const backgroundResources: I18nPluginResources = {
       "background.tray.state.queued": "排队中",
       "background.tray.state.blocked": "等待条件",
       "background.tray.state.idle": "等待同步",
-      "background.settings.title": "后台同步设置",
-      "background.settings.description": "后台同步始终由系统维持。您可以调整同步频率，或在托盘中点击「立即同步一次」手动触发一轮同步。",
-      "background.settings.assetHoldingsInterval": "资产余额同步频率",
-      "background.settings.save": "保存",
+      "background.settings.title": "智能调度",
+      "background.settings.description": "智能调度在解锁后立即刷新一次 BSV 余额快照，之后只要 WoC 队列空闲满 2 秒就自动刷新：所有闲暇时间都用来获取余额，用户操作时自动让路。下面的「同步管理」控制其余后台任务。",
+      "background.settings.syncManagement": "同步管理",
+      "background.settings.syncManagementDesc": "每个任务可以单独设置同步间隔；选择「关闭」后该任务不再自动同步，托盘的「立即同步一次」仍然可用。",
+      "background.settings.smartTitle": "BSV 余额快照（智能）",
+      "background.settings.smartDesc": "余额来自内存 UTXO 快照：解锁后立即刷新，之后每次 WoC 队列空闲满 2 秒自动刷新，间隔不可配置。",
+      "background.settings.task.p2pkh.transactions-sync": "P2PKH 链上交易历史",
+      "background.settings.task.token-bsv21.sync": "BSV-21 代币持仓",
+      "background.settings.task.token-stas.sync": "STAS 代币持仓",
+      "background.settings.task.collectible-1satordinals.sync": "1Sat 收藏品",
+      "background.settings.task.contacts.presence-probe": "联系人在线探测",
+      "background.settings.option.30s": "30 秒",
+      "background.settings.option.1min": "1 分钟",
       "background.settings.option.5min": "5 分钟",
-      "background.settings.option.15min": "15 分钟（缺省）",
-      "background.settings.option.30min": "30 分钟",
-      "background.settings.option.60min": "1 小时",
+      "background.settings.option.off": "关闭",
       "background.settings.saveFailed": "保存失败，请稍后重试。",
       "background.tray.requestFailed": "请求失败，请稍后重试。",
       "background.tray.cancelFailed": "取消失败，请稍后重试。",
@@ -153,7 +167,7 @@ const backgroundPluginDefinition = {
     // 注册资源定义（硬切换 003）
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
 
-    // background.scheduleSettings：后台同步设置
+    // background.scheduleSettings：同步管理设置（任务 id -> 间隔毫秒）
     resources.register<BackgroundSyncSettings, readonly string[]>({
       id: "background.scheduleSettings",
       scope: "global",
@@ -162,7 +176,7 @@ const backgroundPluginDefinition = {
       subscribe: (_args, _ctx, invalidate) => service.onTaskSnapshotsChanged(invalidate),
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
-        return prev.assetHoldingsIntervalMs === next.assetHoldingsIntervalMs;
+        return JSON.stringify(prev.taskIntervals ?? {}) === JSON.stringify(next.taskIntervals ?? {});
       },
       invalidation: "immediate"
     });
@@ -211,8 +225,8 @@ const backgroundPluginDefinition = {
         label: { key: "background.settings.title", fallback: "Background sync" },
         order: 20
       },
-      label: { key: "background.settings.assetHoldingsInterval", fallback: "Asset balance sync interval" },
-      description: { key: "background.settings.description", fallback: "Adjust the asset balance sync interval." },
+      label: { key: "background.settings.syncManagement", fallback: "Sync management" },
+      description: { key: "background.settings.description", fallback: "Smart scheduling and per-task sync intervals." },
       component: BackgroundSettingsPage,
       order: 10,
       replacesSettingsRouteId: "background.settings",

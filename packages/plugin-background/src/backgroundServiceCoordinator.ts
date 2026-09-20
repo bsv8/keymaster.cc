@@ -69,7 +69,7 @@ export function createBackgroundServiceCoordinator(
 
   // 只读 cache
   let taskSnapshotsCache: BackgroundTaskSnapshot[] = [];
-  let cachedSettings: BackgroundSyncSettings = { assetHoldingsIntervalMs: 900_000 };
+  let cachedSettings: BackgroundSyncSettings = { taskIntervals: {} };
 
   // 状态变化监听器
   const taskSnapshotsChangedHandlers = new Set<(snapshots: BackgroundTaskSnapshot[]) => void>();

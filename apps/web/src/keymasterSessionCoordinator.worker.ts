@@ -90,7 +90,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, BACKGROUND_TRIGGER_REASON } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -152,7 +152,7 @@ import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordi
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { BorrowedOwnerFileStore, DeviceRecordV1, DeviceLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupKeyResult, InitialSetupResult, KeyHoldDocumentV1, KeymasterSessionKeyDerivationV1, KeymasterSessionV1, KeyspaceService, KeyValueStore, OwnerFileStore, PlatformRootStore, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore, DeviceRecordV1, DeviceLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupKeyResult, InitialSetupResult, KeyHoldDocumentV1, KeymasterSessionKeyDerivationV1, KeymasterSessionV1, KeyspaceService, KeyValueStore, OwnerFileStore, PlatformRootStore, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService, WocQueueSnapshot } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -769,11 +769,26 @@ function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSetting
   if (Object.keys(record).length !== 1 || !Object.prototype.hasOwnProperty.call(record, "scheduleSettings")) {
     throw new StorageRuntimeError("storage_provider_error", "Coordinator settings snapshot value is invalid");
   }
-  const schedule = snapshotRecord(record.scheduleSettings, "Coordinator schedule settings");
-  if (Object.keys(schedule).length !== 1 || typeof schedule.assetHoldingsIntervalMs !== "number"
-    || !Number.isSafeInteger(schedule.assetHoldingsIntervalMs) || schedule.assetHoldingsIntervalMs < 1_000
-    || schedule.assetHoldingsIntervalMs > 7 * 24 * 60 * 60 * 1000) throw new StorageRuntimeError("storage_provider_error", "Coordinator schedule settings are invalid");
-  return { scheduleSettings: { assetHoldingsIntervalMs: schedule.assetHoldingsIntervalMs } };
+  const settings = snapshotRecord(record.scheduleSettings, "Coordinator schedule settings");
+  // 兼容 2026-09-20 之前的旧形状（只有 assetHoldingsIntervalMs）：旧周期
+  // 选项已废弃，直接回落到同步管理缺省，而不是让整个 Worker 启动失败。
+  if (Object.prototype.hasOwnProperty.call(settings, "assetHoldingsIntervalMs")
+    && !Object.prototype.hasOwnProperty.call(settings, "taskIntervals")) {
+    return { scheduleSettings: { taskIntervals: {} } };
+  }
+  if (Object.keys(settings).length !== 1 || !Object.prototype.hasOwnProperty.call(settings, "taskIntervals")) {
+    throw new StorageRuntimeError("storage_provider_error", "Coordinator schedule settings are invalid");
+  }
+  const intervals = snapshotRecord(settings.taskIntervals, "Coordinator schedule taskIntervals");
+  const taskIntervals: Record<string, number> = {};
+  for (const [taskId, interval] of Object.entries(intervals)) {
+    if (typeof taskId !== "string" || taskId.length === 0 || taskId.length > 128
+      || typeof interval !== "number" || !BACKGROUND_SYNC_INTERVAL_OPTIONS_MS.includes(interval as never)) {
+      throw new StorageRuntimeError("storage_provider_error", "Coordinator schedule settings are invalid");
+    }
+    taskIntervals[taskId] = interval;
+  }
+  return { scheduleSettings: { taskIntervals } };
 }
 
 function validatePluginIntentSnapshot(value: unknown): PluginIntentSnapshot {
@@ -796,11 +811,11 @@ interface CoordinatorRuntimeSettings {
   p2pkhSettings: { includeTestnet: boolean };
   pluginIntent: PluginIntentSnapshot;
 }
-/** 桶级 Coordinator snapshot 只持久化调度设置；P2PKH 偏好归 owner 的 setting.json。 */
+/** 桶级 Coordinator snapshot 只持久化同步管理设置；P2PKH 偏好归 owner 的 setting.json。 */
 type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings">;
 function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
   return {
-    scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+    scheduleSettings: { taskIntervals: {} },
     p2pkhProviderConfigs: {},
     p2pkhSettings: { includeTestnet: false },
     pluginIntent: emptyPluginIntentSnapshot(),
@@ -2335,7 +2350,8 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
     delete mutable[key];
   }
   Object.assign(coordinatorMeta, structuredClone(next));
-  coordinatorMeta.scheduleSettings ??= { assetHoldingsIntervalMs: 900_000 };
+  coordinatorMeta.scheduleSettings ??= { taskIntervals: {} };
+  coordinatorMeta.scheduleSettings.taskIntervals ??= {};
   coordinatorMeta.p2pkhSettings ??= { includeTestnet: false };
   coordinatorMeta.p2pkhProviderConfigs ??= {};
   coordinatorMeta.pluginIntent ??= emptyPluginIntentSnapshot();
@@ -4620,6 +4636,7 @@ async function resumeAfterStorageReady(peerId?: string): Promise<boolean> {
       runtime.state = "idle";
       runtime.blockedReason = undefined;
       scheduleRuntime(runtime);
+      if (runtime.syncPolicy === "smart") armSmartSyncIfIdle();
     }
   }
   publishSessionState("bootstrap");
@@ -4684,6 +4701,13 @@ interface TaskRuntime {
   timer?: ReturnType<typeof setTimeout>;
   keyScope?: { publicKeyHex: string; label?: string } | (() => { publicKeyHex: string; label?: string } | undefined);
   intervalMs?: number;
+  /**
+   * 同步策略（2026-09-20 智能调度）：
+   *   - "managed"：间隔由同步管理设置决定（30 秒 / 1 分钟 / 5 分钟 / 关闭）。
+   *   - "smart"：由 WoC 空闲 2 秒的智能调度驱动，没有固定周期。
+   *   - "fixed"/缺省：平台固定周期或测试任务，不读取同步管理设置。
+   */
+  syncPolicy?: "managed" | "smart" | "fixed";
   run?: (context: { signal: AbortSignal; reason: string; reportProgress(progress: unknown): void; assertSessionFresh(): void }) => Promise<void>;
   startedEpoch?: SessionEpoch;
   startedGeneration?: number;
@@ -5144,7 +5168,7 @@ const coordinatorState: CoordinatorState = {
   vaultStatus: "booting",
   keyspaceGeneration: 0,
   taskRuntimes: new Map(),
-  scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+  scheduleSettings: { taskIntervals: {} },
   lastActivityAt: Date.now(),
 };
 
@@ -5477,7 +5501,7 @@ function coordinatorTaskBlockedReason(runtime: TaskRuntime, snapshot = currentPl
   }
   // P2PKH 链上数据（历史 + UTXO 快照）只有 WoC 一个来源；WOC 被停用时，
   // 相关任务必须在入口处阻断，而不是先启动一次再等 provider-unavailable。
-  if (runtime.id === "p2pkh.transactions-sync" || runtime.id === "token-bsv21.sync" || runtime.id === "token-stas.sync" || runtime.id === "collectible-1satordinals.sync") {
+  if (runtime.id === "p2pkh.transactions-sync" || runtime.id === "p2pkh.utxo-snapshot" || runtime.id === "token-bsv21.sync" || runtime.id === "token-stas.sync" || runtime.id === "collectible-1satordinals.sync") {
     if (!dependencies.includes("woc")) dependencies.push("woc");
   }
   const disabled = dependencies.find((pluginId) => !isCoordinatorProductEnabled(pluginId, snapshot));
@@ -5556,6 +5580,115 @@ function reconcileCoordinatorWorkerUnitIntent(snapshot: PluginIntentSnapshot): b
 }
 
 
+// ============================================================
+// 智能调度（2026-09-20）
+// ============================================================
+//
+// 设计缘由：
+//   - 资产余额（UTXO 快照）不再等固定周期：只要 WoC 队列空闲满 2 秒，
+//     就刷新一次余额快照，把「所有闲暇时间」用来获取余额。
+//   - 任何 WoC 请求开始都会打断计时；请求结束后重新从 0 计时 2 秒，
+//     因此用户操作期间不会与后台同步抢队列。
+//   - 其余同步任务由「同步管理」按各自间隔调度；间隔为 0 表示关闭。
+//   - 解锁 / 初始化完成后立即同步一次。
+
+/** 智能调度：WoC 队列空闲满 2 秒后刷新余额快照。 */
+const WOC_IDLE_SYNC_DEBOUNCE_MS = 2_000;
+
+let smartSyncIdleTimer: ReturnType<typeof setTimeout> | undefined;
+let smartSyncDebounceMs = WOC_IDLE_SYNC_DEBOUNCE_MS;
+
+/** managed 任务的当前间隔；未配置时使用平台缺省（5 分钟）。 */
+function managedIntervalFor(taskId: string): number {
+  const configured = coordinatorState.scheduleSettings.taskIntervals[taskId];
+  return typeof configured === "number" ? configured : BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+}
+
+/** 归一化同步管理设置：只保留已登记任务与合法选项，非法值直接丢弃。 */
+function normalizeBackgroundSyncSettings(settings: CoordinatorBackgroundSyncSettings | undefined): CoordinatorBackgroundSyncSettings {
+  const taskIntervals: Record<string, number> = {};
+  const options = BACKGROUND_SYNC_INTERVAL_OPTIONS_MS as readonly number[];
+  for (const taskId of BACKGROUND_MANAGED_SYNC_TASK_IDS) {
+    const raw = settings?.taskIntervals?.[taskId];
+    if (typeof raw === "number" && options.includes(raw)) taskIntervals[taskId] = raw;
+  }
+  return { taskIntervals };
+}
+
+function cancelSmartSyncIdleTimer(): void {
+  if (smartSyncIdleTimer !== undefined) {
+    clearTimeout(smartSyncIdleTimer);
+    smartSyncIdleTimer = undefined;
+  }
+}
+
+function isWocQueueIdle(snapshot: WocQueueSnapshot): boolean {
+  return snapshot.queued === 0 && snapshot.inFlight === 0;
+}
+
+/** 智能调度只在可运行会话里计时：锁定 / 无 active key 时不挂计时器。 */
+function canArmSmartSync(): boolean {
+  return coordinatorState.vaultStatus === "unlocked" && Boolean(coordinatorState.activePublicKeyHex);
+}
+
+/**
+ * 启动 2 秒计时。
+ * 设计缘由：计时是「任务完成后」计时——WoC 队列变忙会取消计时，变空
+ * 后再重新计时；429 backoff 期间自动把计时推迟到 backoff 解除。
+ */
+function armSmartSyncIdleTimer(snapshot: WocQueueSnapshot = p2pkhWocService?.getQueueSnapshot() ?? { queued: 0, inFlight: 0, coordinated: false }): void {
+  if (smartSyncIdleTimer !== undefined) return;
+  const now = Date.now();
+  const backoffDelay = snapshot.backoffUntil && snapshot.backoffUntil > now ? snapshot.backoffUntil - now : 0;
+  smartSyncIdleTimer = setTimeout(() => {
+    smartSyncIdleTimer = undefined;
+    // 计时期间发生锁定 / 切 owner 时不得触发同步。
+    if (!canArmSmartSync()) return;
+    triggerSmartSync(BACKGROUND_TRIGGER_REASON.IDLE_SYNC);
+  }, Math.max(smartSyncDebounceMs, backoffDelay));
+}
+
+/** WoC 队列事件：忙则取消计时；空闲且会话可运行时从这一刻开始重新计时 2 秒。 */
+function onWocQueueChanged(snapshot: WocQueueSnapshot): void {
+  if (!isWocQueueIdle(snapshot)) {
+    cancelSmartSyncIdleTimer();
+    return;
+  }
+  if (canArmSmartSync()) armSmartSyncIdleTimer(snapshot);
+}
+
+/** 若会话可运行且 WoC 当前空闲（或测试环境没有 WoC 服务），重新开始 2 秒计时。 */
+function armSmartSyncIfIdle(): void {
+  if (!canArmSmartSync()) return;
+  const snapshot = p2pkhWocService?.getQueueSnapshot();
+  if (!snapshot || isWocQueueIdle(snapshot)) armSmartSyncIdleTimer(snapshot);
+}
+
+/** 触发所有 smart 任务（余额快照）；正在运行的任务由 executeTask 自身去重。 */
+function triggerSmartSync(reason: string): void {
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    if (runtime.syncPolicy !== "smart") continue;
+    void executeTask(runtime.id, reason).catch(() => undefined);
+  }
+}
+
+/**
+ * 解锁 / 初始化后立即同步一次。
+ * smart 任务立即刷新余额；managed 任务只有未关闭（间隔 > 0）时才跑。
+ */
+function triggerImmediateSync(reason: string): void {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    if (runtime.syncPolicy === "smart") {
+      void executeTask(runtime.id, reason).catch(() => undefined);
+      continue;
+    }
+    if (runtime.syncPolicy === "managed" && (runtime.intervalMs ?? 0) > 0) {
+      void executeTask(runtime.id, reason).catch(() => undefined);
+    }
+  }
+}
+
 /** 让定时器本身也服从产品意图，避免 disable 后留下隐藏的 Worker 入口。 */
 function scheduleRuntime(runtime: TaskRuntime): void {
   const intentBlockedReason = coordinatorTaskBlockedReason(runtime);
@@ -5569,7 +5702,20 @@ function scheduleRuntime(runtime: TaskRuntime): void {
     }
     return;
   }
-  if (!runtime.intervalMs) return;
+  // smart 任务没有固定周期：由 WoC 空闲 2 秒的智能调度驱动。
+  if (runtime.syncPolicy === "smart") {
+    if (runtime.timer) clearTimeout(runtime.timer);
+    runtime.timer = undefined;
+    runtime.nextRunAt = undefined;
+    return;
+  }
+  // 间隔为 0 / 缺省表示关闭自动同步：清除定时器与 nextRunAt，手动仍可触发。
+  if (!runtime.intervalMs) {
+    if (runtime.timer) clearTimeout(runtime.timer);
+    runtime.timer = undefined;
+    runtime.nextRunAt = undefined;
+    return;
+  }
   if (runtime.timer) clearTimeout(runtime.timer);
   runtime.nextRunAt = new Date(Date.now() + runtime.intervalMs).toISOString();
   runtime.timer = setTimeout(() => { runtime.timer = undefined; void executeTask(runtime.id, "interval"); }, runtime.intervalMs);
@@ -5610,6 +5756,8 @@ function reconcileCoordinatorTaskIntent(snapshot: PluginIntentSnapshot): void {
       runtime.blockedReason = undefined;
       runtime.error = undefined;
       if (coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) scheduleRuntime(runtime);
+      // 智能任务没有固定周期：从产品恢复这一刻重新开始 2 秒计时。
+      if (runtime.syncPolicy === "smart") armSmartSyncIfIdle();
       changed = true;
     }
   }
@@ -5704,6 +5852,10 @@ async function enterUnlockedState(
       scheduleRuntime(runtime);
     }
   }
+
+  // 解锁 / 初始化完成后第一时间同步一次：余额快照立即刷新，未关闭的
+  // managed 任务也立即跑一轮，随后回到各自的同步管理间隔。
+  triggerImmediateSync(BACKGROUND_TRIGGER_REASON.UNLOCK);
 
   publishSessionState(cause);
   // 解锁后立即建立 owner-scoped Sat runtime 和 owner inbox 的系统 caller。
@@ -6220,7 +6372,8 @@ async function registerCoordinatorTasks(): Promise<void> {
     // BackgroundTaskDefinition 的历史 pluginId 仍带 package 前缀；Worker
     // 状态必须使用用户可操作的产品 id，才能和 PluginIntent 对齐。
     pluginId: "contacts",
-    intervalMs: contactsPresenceTask.schedule?.defaultIntervalMs ?? 5 * 60 * 1000,
+    syncPolicy: "managed",
+    intervalMs: managedIntervalFor(contactsPresenceTask.id),
     keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined,
     unitId: contactsPresenceTask.unitId,
     run: async ({ signal, reason, assertSessionFresh }) => {
@@ -6233,6 +6386,8 @@ async function registerCoordinatorTasks(): Promise<void> {
   }));
   const woc = createWocService({ messageBus });
   p2pkhWocService = woc;
+  // 智能调度订阅 WoC 队列：队列变空 2 秒后刷新余额快照；变忙则重新计时。
+  woc.onQueueChange(onWocQueueChanged);
   const persistedWocConfig = coordinatorMeta.p2pkhProviderConfigs?.woc;
   if (persistedWocConfig) {
     const next: Partial<import("@keymaster/contracts").WocConfig> = {};
@@ -6245,24 +6400,24 @@ async function registerCoordinatorTasks(): Promise<void> {
   registerWocP2pkhProviders({ registry: p2pkhRegistry, woc });
   p2pkhUtxoSnapshots = createP2pkhUtxoSnapshotStore({ woc });
   const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerOwnerFileStore("p2pkh", ""), woc, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
-  // The ordinary BSV pipeline has exactly one task: history metadata + UTXO snapshot.
-  const assetHoldingsIntervalMs = coordinatorState.scheduleSettings.assetHoldingsIntervalMs;
-  coordinatorState.taskRuntimes.set("p2pkh.transactions-sync", createCoordinatorTaskRuntime({ id: "p2pkh.transactions-sync", pluginId: "p2pkh", unitId: p2pkh.unitId, intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
+  // P2PKH 拆成两个任务：
+  //   - p2pkh.transactions-sync：链上历史元数据，按同步管理间隔运行；
+  //   - p2pkh.utxo-snapshot：BSV 余额来源（内存 UTXO 快照），由智能调度
+  //     在 WoC 空闲 2 秒后刷新，永远保持最新。
+  coordinatorState.taskRuntimes.set("p2pkh.transactions-sync", createCoordinatorTaskRuntime({ id: "p2pkh.transactions-sync", pluginId: "p2pkh", unitId: p2pkh.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor("p2pkh.transactions-sync"), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
     await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex);
-    let historyError: unknown;
-    try {
-      const result = await p2pkh.transactionsSync(signal);
-      assertSessionFresh();
-      if (result.cancelled) return;
-    } catch (error) {
-      historyError = error;
-    }
-    // UTXO 快照刷新与历史同步互不依赖：历史失败也必须尝试刷新快照；
-    // 刷新失败只保留旧快照，不改变历史结果。
-    await refreshP2pkhUtxoSnapshots(signal).catch(() => undefined);
+    const result = await p2pkh.transactionsSync(signal);
     assertSessionFresh();
-    emitDataChanged("p2pkh", ["resource", "utxo", "history"]);
-    if (historyError) throw historyError;
+    if (result.cancelled) return;
+    // 历史同步与 UTXO 快照互不依赖：快照刷新由 smart 任务独立负责。
+    emitDataChanged("p2pkh", ["resource", "history", "submission"]);
+  } }));
+  coordinatorState.taskRuntimes.set("p2pkh.utxo-snapshot", createCoordinatorTaskRuntime({ id: "p2pkh.utxo-snapshot", pluginId: "p2pkh", unitId: p2pkh.unitId, syncPolicy: "smart", keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
+    await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex);
+    // 单个资源失败只保留旧快照；失败不写 0，也不影响其它资源。
+    await refreshP2pkhUtxoSnapshots(signal);
+    assertSessionFresh();
+    emitDataChanged("p2pkh", ["utxo"]);
   } }));
   const p2pkhProvider = {
     listResources: async (assetId: "bsv" | "bsvtest") => {
@@ -6307,15 +6462,17 @@ async function registerCoordinatorTasks(): Promise<void> {
   const bsv21Task = createBsv21CoordinatorTask({ keyspace, stateStore: createWorkerOwnerStore("token-bsv21"), p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const stasTask = createStasCoordinatorTask({ keyspace, stateStore: createWorkerOwnerStore("token-stas"), p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const oneSatTask = createOrdinalsCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
-  coordinatorState.taskRuntimes.set(bsv21Task.id, createCoordinatorTaskRuntime({ id: bsv21Task.id, pluginId: "token-bsv21", unitId: bsv21Task.unitId, intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
-  coordinatorState.taskRuntimes.set(stasTask.id, createCoordinatorTaskRuntime({ id: stasTask.id, pluginId: "token-stas", unitId: stasTask.unitId, intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
-  coordinatorState.taskRuntimes.set(oneSatTask.id, createCoordinatorTaskRuntime({ id: oneSatTask.id, pluginId: "collectible-1satordinals", unitId: oneSatTask.unitId, intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
+  coordinatorState.taskRuntimes.set(bsv21Task.id, createCoordinatorTaskRuntime({ id: bsv21Task.id, pluginId: "token-bsv21", unitId: bsv21Task.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(bsv21Task.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
+  coordinatorState.taskRuntimes.set(stasTask.id, createCoordinatorTaskRuntime({ id: stasTask.id, pluginId: "token-stas", unitId: stasTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(stasTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
+  coordinatorState.taskRuntimes.set(oneSatTask.id, createCoordinatorTaskRuntime({ id: oneSatTask.id, pluginId: "collectible-1satordinals", unitId: oneSatTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(oneSatTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
   bindCoordinatorTaskUnitsToOwner();
   // Provider 初始注册必须再经过产品意图投影；否则 Worker 重启时若持久
   // 快照已禁用 WOC，短窗口内仍会把旧 Provider 暴露给任务。
   reconcileCoordinatorProviderIntent(currentPluginIntentSnapshot());
   for (const runtime of coordinatorState.taskRuntimes.values()) scheduleRuntime(runtime);
   publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
+  // 任务在「已解锁」状态下补齐注册（首次接入存储等）时，第一时间同步一次。
+  triggerImmediateSync(BACKGROUND_TRIGGER_REASON.INIT);
 }
 
 // ============================================================
@@ -10737,6 +10894,8 @@ async function performGlobalLock(reason: string): Promise<void> {
   const heldKeyLock = activeKeyLock.current;
   activeKeyLock.current = undefined;
   if (heldKeyLock) await heldKeyLock.release().catch(() => undefined);
+  // 锁定时智能调度计时也必须停止；解锁后会立即同步一次并重新开始计时。
+  cancelSmartSyncIdleTimer();
   // 第一阶段必须完全脱离网络：先递增 epoch、撤销 capability、覆盖密钥
   // 并广播 locked。Supplier 永不返回时，锁屏请求也不能被远端拖住。
   closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
@@ -11158,18 +11317,29 @@ async function handleBackgroundSettingsUpdate(
   ) {
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
   }
-  const interval = request.settings.assetHoldingsIntervalMs;
-  if (!Number.isFinite(interval) || interval < 1_000 || interval > 7 * 24 * 60 * 60 * 1000) {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid schedule interval" } };
+  const rawIntervals = request.settings?.taskIntervals;
+  if (!rawIntervals || typeof rawIntervals !== "object" || Array.isArray(rawIntervals)) {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid sync settings" } };
   }
-  const nextSettings = { ...request.settings };
+  const options = BACKGROUND_SYNC_INTERVAL_OPTIONS_MS as readonly number[];
+  for (const [taskId, interval] of Object.entries(rawIntervals)) {
+    if (!(BACKGROUND_MANAGED_SYNC_TASK_IDS as readonly string[]).includes(taskId)
+      || typeof interval !== "number" || !options.includes(interval)) {
+      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Invalid sync interval for ${taskId}` } };
+    }
+  }
+  const nextSettings = normalizeBackgroundSyncSettings(request.settings);
   const nextSnapshot: CoordinatorSettingsSnapshot = { scheduleSettings: nextSettings };
   // 持久化成功才发布新的内存状态；保存失败不能制造“设置已生效”
   // 的假象，也不能让后续调度使用未落盘的值。
   await persistCoordinatorSettings(nextSnapshot);
   coordinatorMeta.scheduleSettings = nextSettings;
   coordinatorState.scheduleSettings = nextSettings;
-  for (const runtime of coordinatorState.taskRuntimes.values()) { runtime.intervalMs = nextSettings.assetHoldingsIntervalMs; scheduleRuntime(runtime); }
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    if (runtime.syncPolicy !== "managed") continue;
+    runtime.intervalMs = nextSettings.taskIntervals[runtime.id] ?? BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+    scheduleRuntime(runtime);
+  }
 
   publishTopicEvent("background.snapshot", {
     type: "background.snapshot.changed",
@@ -11267,16 +11437,20 @@ async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal): Promise<void> {
 }
 
 async function cancelP2pkhSyncForProviderChange(): Promise<void> {
-  const runtime = coordinatorState.taskRuntimes.get("p2pkh.transactions-sync");
-  runtime?.controller?.abort();
-  if (runtime?.timer) clearTimeout(runtime.timer);
-  runtime && (runtime.timer = undefined);
-  if (runtime?.completion) await runtime.completion.catch(() => undefined);
-  if (runtime && coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) {
-    // Execute immediately; executeTask's finally block installs the next
-    // interval after this run. Scheduling here as well would leave a second
-    // timer alive and allow overlapping sync runs.
-    void executeTask(runtime.id, "provider-change");
+  // P2PKH 现在拆成 history + UTXO 两个任务；Provider 变化时两个都要取消，
+  // 避免旧任务继续使用已经撤权的 Provider 写结果。
+  for (const taskId of ["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"]) {
+    const runtime = coordinatorState.taskRuntimes.get(taskId);
+    runtime?.controller?.abort();
+    if (runtime?.timer) clearTimeout(runtime.timer);
+    runtime && (runtime.timer = undefined);
+    if (runtime?.completion) await runtime.completion.catch(() => undefined);
+    if (runtime && coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) {
+      // Execute immediately; executeTask's finally block installs the next
+      // interval after this run. Scheduling here as well would leave a second
+      // timer alive and allow overlapping sync runs.
+      void executeTask(runtime.id, "provider-change");
+    }
   }
 }
 
@@ -11471,6 +11645,11 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
     });
     return;
   }
+  // 「同步管理」关闭（间隔 0）表示不自动同步：定时器 / 领域事件 / 解锁
+  // 首次同步都不再拉起任务；托盘的手动「立即同步一次」仍然有效。
+  if (runtime.syncPolicy === "managed" && (runtime.intervalMs ?? 0) <= 0 && reason !== BACKGROUND_TRIGGER_REASON.MANUAL) {
+    return;
+  }
   if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
     runtime.state = "blocked";
     runtime.blockedReason = "Vault is locked";
@@ -11580,6 +11759,20 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
     } else if (!controller.signal.aborted && runtime.state !== "blocked") {
       // 仅当任务所属 session 仍有效且未 abort 时才恢复 idle/排程
       scheduleRuntime(runtime);
+    }
+
+    // 智能调度：smart 任务完成后，若 WoC 队列已空闲，从「任务完成」
+    // 这一刻重新计时 2 秒；任务运行期间的队列事件已把计时取消。
+    // 门禁：锁定 / 无 active key / 任务所属 session 已失效时不得重新计时，
+    // 否则锁定时被 abort 的任务会在 finally 里把计时器重新挂起来。
+    if (runtime.syncPolicy === "smart"
+      && runtime.state !== "blocked"
+      && coordinatorState.vaultStatus === "unlocked"
+      && coordinatorState.activePublicKeyHex
+      && runtime.startedEpoch === coordinatorState.sessionEpoch
+      && runtime.startedGeneration === coordinatorState.keyspaceGeneration
+      && runtime.startedPublicKeyHex === coordinatorState.activePublicKeyHex) {
+      armSmartSyncIfIdle();
     }
 
     publishTopicEvent("background.snapshot", {
@@ -12489,6 +12682,8 @@ export function __testResetState(): void {
   testKeyLifecycleOwnerBarrier = undefined;
   testLocalStorageBridgeOverride = undefined;
   invalidateWorkerSessionCache();
+  cancelSmartSyncIdleTimer();
+  smartSyncDebounceMs = WOC_IDLE_SYNC_DEBOUNCE_MS;
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     runtime.controller?.abort();
     if (runtime.timer) clearTimeout(runtime.timer);
@@ -13534,6 +13729,9 @@ export function __testRegisterTask(input: {
   unitId?: string;
   publicKeyHex: string;
   keyScope?: { publicKeyHex: string } | (() => { publicKeyHex: string } | undefined);
+  /** 同步策略；省略时为 fixed（不读取同步管理设置、不参与智能调度）。 */
+  syncPolicy?: "managed" | "smart" | "fixed";
+  intervalMs?: number;
   run(context: { signal: AbortSignal; assertSessionFresh(): void }): Promise<void>;
 }): void {
   const pluginId = input.pluginId ?? getCoordinatorWorkerUnitForTask(input.id)?.productId ?? "test";
@@ -13542,6 +13740,8 @@ export function __testRegisterTask(input: {
     pluginId,
     unitId: input.unitId,
     allowUncataloguedForTest: true,
+    syncPolicy: input.syncPolicy,
+    intervalMs: input.intervalMs,
     keyScope: input.keyScope ?? { publicKeyHex: input.publicKeyHex },
     run: input.run
   }));
@@ -13568,9 +13768,37 @@ export async function __testUpdateScheduleSettings(settings: CoordinatorBackgrou
   return handleBackgroundSettingsUpdate(`test-${Date.now()}`, { kind: "background.settings.update", settings, expectedSessionEpoch: coordinatorState.sessionEpoch });
 }
 
+/** 测试专用：调整智能调度 2 秒计时，避免测试等待真实时长。 */
+export function __testSetSmartSyncDebounceMs(ms: number): void {
+  smartSyncDebounceMs = Math.max(0, Math.floor(ms));
+}
+
+/** 测试专用：模拟 WoC 队列事件，驱动智能调度计时。 */
+export function __testNotifyWocQueueChange(snapshot: WocQueueSnapshot): void {
+  onWocQueueChanged(snapshot);
+}
+
+/** 测试专用：读取智能调度计时状态。 */
+export function __testSmartSyncState(): { pending: boolean; debounceMs: number } {
+  return { pending: smartSyncIdleTimer !== undefined, debounceMs: smartSyncDebounceMs };
+}
+
+/** 测试专用：模拟解锁 / 初始化后的立即同步。 */
+export function __testTriggerImmediateSync(reason = "unlock"): void {
+  triggerImmediateSync(reason);
+}
+
 /** 测试专用：按生产冷启动顺序从当前 Root 的三个固定对象重载公开 metadata。 */
 export async function __testReloadCoordinatorMeta(): Promise<void> {
   await loadCoordinatorMeta();
+}
+
+/** 测试专用：写入指定 Coordinator settings 快照值（模拟旧桶遗留数据）。 */
+export function __testSeedCoordinatorSettingsSnapshot(value: unknown): void {
+  ensureTestPlatformStorage();
+  const declaration = CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings;
+  const key = `snapshot:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`;
+  testCoordinatorSnapshots?.set(key, { revision: 1, value: structuredClone(value), writes: 1 });
 }
 
 export function __testCoordinatorSnapshotMetrics(): Record<"settings" | "pluginIntent", { revision: number; writes: number }> {

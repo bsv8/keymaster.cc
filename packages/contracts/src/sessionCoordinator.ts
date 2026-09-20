@@ -14,7 +14,7 @@ import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
 import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller, ChannelSubscriptionStatus } from "./channel.js";
 import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
-import type { BackgroundTaskProgress } from "./background.js";
+import type { BackgroundSyncSettings, BackgroundTaskProgress } from "./background.js";
 import type { VaultSealedSecret } from "./vault.js";
 import { defineCapability } from "webloom-framework";
 import type { CoordinatorVaultOperationResultFor } from "./sessionCoordinatorRuntime.js";
@@ -386,10 +386,11 @@ export type CoordinatorChannelOperation =
   | { type: "subscription-set"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; channels: string[] }
   | { type: "release"; ownerPublicKeyHex: string; caller: ChannelOperationCaller };
 
-/** 后台同步设置。 */
-export interface CoordinatorBackgroundSyncSettings {
-  assetHoldingsIntervalMs: number;
-}
+/**
+ * 后台同步设置（同步管理）：任务 id -> 间隔毫秒；0 = 关闭。
+ * 定义与校验常量见 background.ts；Coordinator 只负责持久化与广播。
+ */
+export type CoordinatorBackgroundSyncSettings = BackgroundSyncSettings;
 
 export type CoordinatorVaultOperation =
   | { type: "createVault"; password: string }
@@ -569,6 +570,7 @@ export interface BackgroundSnapshotEvent {
   sessionEpoch: SessionEpoch;
   backgroundSnapshotRevision: number;
   snapshots: CoordinatorTaskSnapshot[];
+  /** 同步管理设置；快照事件携带它以便页面无需额外 RPC 即可读取。 */
   scheduleSettings?: CoordinatorBackgroundSyncSettings;
 }
 
@@ -629,6 +631,7 @@ export interface CoordinatorBootstrapSnapshot {
   /** 当前 Worker 单元快照修订；缺失单元不是 blocked，而是 unknown。 */
   coordinatorWorkerUnitSnapshotRevision?: number;
   taskSnapshots: CoordinatorTaskSnapshot[];
+  /** 同步管理设置（任务 id -> 间隔毫秒；0 = 关闭）。 */
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   /** P2PKH 网络范围配置，保存在 Coordinator 平台 K-V。 */
   p2pkhSettings?: { includeTestnet: boolean };
@@ -716,6 +719,7 @@ export interface SessionCoordinatorClient {
   backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorCommandResult>;
   backgroundCancel(taskId: string): Promise<CoordinatorCommandResult>;
   backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  /** 更新同步管理设置（任务 id -> 间隔毫秒；0 = 关闭）。 */
   backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult>;
   storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
   /** 页面新增首桶后，刷新只含公开桶身份的 Local Storage bridge 启动快照。 */

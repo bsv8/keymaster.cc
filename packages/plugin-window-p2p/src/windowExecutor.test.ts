@@ -24,7 +24,7 @@ function makeFixture(input: { attach?: (context: WindowP2pExecutorLaneContext) =
     sessionEpoch: "epoch-a",
     keyspaceGeneration: 1,
     taskSnapshots: [],
-    scheduleSettings: {} as CoordinatorBootstrapSnapshot["scheduleSettings"]
+    scheduleSettings: { taskIntervals: {} }
   };
   const acquire = vi.fn(async (_owner: string, _port: MessagePort) => ({
     status: "ok" as const,
