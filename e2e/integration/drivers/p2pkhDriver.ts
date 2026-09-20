@@ -123,6 +123,20 @@ export async function waitForTestnetConfirmedSync(page: Page, timeoutMs = 180_00
  * Offer 余额来自 P2PKH service 对 confirmed-sync 归属投影的现算结果；
  * 这里断言的是页面真值，不是 Node 侧重新查询的链上余额。
  */
+/**
+ * 读取转账 Offer 上由 keymaster 余额计算出的 BSV Testnet 金额（单位 sats）。
+ *
+ * 只解析正式 Widget 的余额元素；不可解析时抛错而不是猜一个数字。
+ */
+export async function readTestnetOfferBalance(page: Page): Promise<number> {
+  const balance = page.getByRole("button", { name: /BSV Testnet/ }).first().locator(".transfer-picker__balance").first();
+  await expect(balance).toBeVisible({ timeout: 45_000 });
+  const text = (await balance.textContent())?.trim() ?? "";
+  const match = text.match(/^([0-9][0-9,]*)\s*sats$/u);
+  if (!match?.[1]) throw new Error(`BSV Testnet Offer 余额不可解析：${text}`);
+  return Number(match[1].replaceAll(",", ""));
+}
+
 export async function expectTestnetOfferBalance(page: Page, satoshis: number, timeoutMs = 120_000): Promise<void> {
   const offer = page.getByRole("button", { name: /BSV Testnet/ }).first();
   await expect(offer).toBeVisible({ timeout: 45_000 });

@@ -133,6 +133,7 @@ Gate(3 项)：
 | 资源可用性 | `resources/resource-availability.spec.ts` | 断言同一 `run_id` 的资源状态存在且 lease 已取得，不读取长期秘密 | KM-RESOURCE-001 |
 | J-REAL-TESTNET-ASSET | `journeys/p2pkh/real-testnet-asset.spec.ts` | 真实 testnet 余额、转账、txid 对账和资金归集；保护 outpoint/结果未知不按普通可重试处理 | KM-ASSET-001 |
 | J-REAL-TESTNET-ROUNDTRIP | `journeys/p2pkh/real-testnet-roundtrip.spec.ts` | 页面初始化桶和 Key 后 seed 打入 10 sat；keymaster confirmed-sync 检测到账，用户以「全部」转回 seed，按原始交易闭合账本 | KM-ASSET-001 |
+| J-REAL-TESTNET-ARRIVAL-PROBE | `journeys/p2pkh/real-testnet-arrival-probe.spec.ts` | 页面导入固定 key01 后 seed 打入 10 sat；记录广播/确认/开启 testnet 时间点，观察 Offer 余额出现耗时，自然窗口未出现时再强制同步一次；故意不回款以保留追踪余额 | KM-ASSET-001 |
 | 资源收尾 | `resources/resource-teardown.spec.ts` | 依赖失败也执行；清理指定桶并释放 lease，清理不确定时保留 lease 交给下一轮恢复 | KM-RESOURCE-001 |
 
 ---

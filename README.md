@@ -7,7 +7,7 @@ Connect 会话提供身份、签名、加密、资产、消息、文件及应用
 
 - 多桶存储：浏览器 Local 桶或兼容 S3 的远程桶。
 - 多 Key：私钥密文只存在桶内 Hold 快照，页面和业务插件拿不到私钥。
-- P2PKH：主网/测试网余额、链上交易、本地交易、转账和供应商切换。
+- P2PKH：主网/测试网余额、链上历史、本地交易、转账和 UTXO 快照刷新。
 - Channel：消息、联系人在线状态、WebRTC 信令和外部 App 频道。
 - MSFile：多供应商文件查询、读取、下载及原生 Range 媒体播放。
 - Connect：外部 App 的会话、身份、签名、加密、转账、频道和隔离存储。
@@ -20,7 +20,7 @@ Connect 会话提供身份、签名、加密、资产、消息、文件及应用
        ↓ 受限服务代理
 Coordinator SharedWorker：桶、Key 会话、任务和跨页面唯一运行态
        ↓
-Local / S3、WOC / JungleBus、MSFile / SatSubscription 等外部服务
+Local / S3、WOC、MSFile / SatSubscription 等外部服务
 ```
 
 所有敏感操作都绑定当前桶、Owner、会话和运行世代。锁定、切 Key、切桶或插件停用

@@ -38,12 +38,10 @@ import type {
   AssetDataInvalidationEvent,
   SessionStateEvent,
   VaultSealedSecret,
-  P2pkhProviderRegistrySnapshot,
   P2pkhProviderConfig,
-  P2pkhProviderSettings,
-  P2pkhNetworkProviderSelection,
   P2pkhProviderRegistry,
   P2pkhTransactionBroadcastProvider,
+  P2pkhUtxoSnapshotResult,
   WindowP2pExecutorLease,
   WindowP2pNoiseSignRequest,
   WindowP2pPeerRecordSignRequest,
@@ -148,8 +146,7 @@ import {
 } from "./coordinator/workerUnitCatalog.js";
 import { createCoordinatorWorkerUnitRegistry } from "./coordinator/workerUnitRuntime.js";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
-import { createJungleBusClient, registerJungleBusP2pkhProvider } from "@keymaster/plugin-junglebus/coordinator";
-import { createP2pkhProviderRegistry, createP2pkhService, type P2pkhService } from "@keymaster/plugin-p2pkh/coordinator";
+import { createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
 import { createP2pkhCoordinatorTasks, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
@@ -795,7 +792,6 @@ function validatePluginIntentSnapshot(value: unknown): PluginIntentSnapshot {
 interface CoordinatorRuntimeSettings {
   selectedPublicKeyHex?: string;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
-  p2pkhProviders: P2pkhProviderSettings;
   p2pkhProviderConfigs: Record<string, Record<string, unknown>>;
   p2pkhSettings: { includeTestnet: boolean };
   pluginIntent: PluginIntentSnapshot;
@@ -805,7 +801,6 @@ type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSet
 function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
   return {
     scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
-    p2pkhProviders: defaultP2pkhProviders(),
     p2pkhProviderConfigs: {},
     p2pkhSettings: { includeTestnet: false },
     pluginIntent: emptyPluginIntentSnapshot(),
@@ -888,13 +883,9 @@ let coordinatorUpgradeSession: UpgradeSession | undefined;
 let pluginIntentController: PluginIntentController | undefined;
 let pluginIntentControllerOff: (() => void) | undefined;
 let keyDeletionTail: Promise<void> = Promise.resolve();
-function defaultP2pkhProviders(): P2pkhProviderSettings {
-  return { main: { syncProviderId: "woc", broadcastProviderId: "woc" }, test: { syncProviderId: "woc", broadcastProviderId: "woc" }, generation: 0 };
-}
 let p2pkhRegistry: P2pkhProviderRegistry | undefined;
 let p2pkhWocService: WocService | undefined;
-let p2pkhJungleBusClient: ReturnType<typeof createJungleBusClient> | undefined;
-let p2pkhProviderRevision = 0;
+let p2pkhUtxoSnapshots: P2pkhUtxoSnapshotStore | undefined;
 let testP2pkhBroadcastProvider: P2pkhTransactionBroadcastProvider | undefined;
 let testPersistCoordinatorSnapshotFailure = false;
 let testFailColdStartInstall = false;
@@ -2068,6 +2059,7 @@ async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: s
     // 只有刷新走冷启动才会看到就绪状态。
     storageController = undefined;
     await ensureStorageRuntime(peerId);
+    await ensureCoordinatorTasksRegistered();
     coordinatorState.keyspaceGeneration += 1;
     coordinatorState.sessionEpoch = generateEpoch();
     coordinatorState.vaultStatus = "uninitialized";
@@ -2251,6 +2243,7 @@ async function executeExistingRemoteStorageConnect(
     // 连接成功后同样装配 Storage 运行态,页面无需刷新即可继续。
     storageController = undefined;
     await ensureStorageRuntime(peerId);
+    await ensureCoordinatorTasksRegistered();
     coordinatorState.keyspaceGeneration += 1;
     coordinatorState.sessionEpoch = generateEpoch();
     coordinatorState.vaultStatus = "uninitialized";
@@ -2343,7 +2336,6 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
   }
   Object.assign(coordinatorMeta, structuredClone(next));
   coordinatorMeta.scheduleSettings ??= { assetHoldingsIntervalMs: 900_000 };
-  coordinatorMeta.p2pkhProviders ??= defaultP2pkhProviders();
   coordinatorMeta.p2pkhSettings ??= { includeTestnet: false };
   coordinatorMeta.p2pkhProviderConfigs ??= {};
   coordinatorMeta.pluginIntent ??= emptyPluginIntentSnapshot();
@@ -4622,7 +4614,7 @@ async function resumeAfterStorageReady(peerId?: string): Promise<boolean> {
     return true;
   }
   await ensureStorageRuntime(peerId);
-  if (coordinatorState.taskRuntimes.size === 0) await registerCoordinatorTasks();
+  await ensureCoordinatorTasksRegistered();
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     if (runtime.state === "blocked" && runtime.blockedReason === "Storage unavailable") {
       runtime.state = "idle";
@@ -5361,12 +5353,11 @@ function bindCoordinatorTaskUnitsToOwner(snapshot = currentPluginIntentSnapshot(
   }
   // 这些服务由 registerCoordinatorTasks() 实际创建；它们没有独立周期
   // task，但仍必须和当前 owner 绑定，不能只依赖产品 manifest。
-  for (const unitId of ["woc.coordinator-worker", "junglebus.coordinator-worker"] as const) {
-    const serviceUnit = unitId === "woc.coordinator-worker" ? p2pkhWocService : p2pkhJungleBusClient;
+  for (const unitId of ["woc.coordinator-worker"] as const) {
+    const serviceUnit = p2pkhWocService;
     if (!serviceUnit) continue;
-    const productId = unitId === "woc.coordinator-worker" ? "woc" : "junglebus";
-    if (!isCoordinatorProductEnabled(productId, snapshot)
-      || (productId === "junglebus" && coordinatorMeta.p2pkhProviderConfigs?.junglebus?.enabled === false)) continue;
+    const productId = "woc";
+    if (!isCoordinatorProductEnabled(productId, snapshot)) continue;
     let unitSnapshot = activated.get(unitId);
     if (!unitSnapshot) {
       unitSnapshot = activateOwnerSessionUnit(unitId, identity);
@@ -5389,6 +5380,20 @@ function activateCoordinatorRootWorkerUnits(): void {
   if (vaultUnit.state === "starting") {
     coordinatorWorkerUnitRegistry.ready(vaultUnit.unitId, vaultUnit.instanceId);
   }
+}
+
+/**
+ * 在 Storage 已经可用的前提下补齐后台任务注册。
+ *
+ * 冷启动由 initializeCoordinatorInternal 注册；但“首次选择后端”时
+ * bootstrapPlatformStorage 会以未选择状态提前返回，之后才由 initial-setup
+ * 或接入已有桶的事务安装 Storage。如果这里不补一次，Worker 会一直没有
+ * 后台任务（例如 p2pkh.transactions-sync），页面余额也就永远不会更新。
+ */
+async function ensureCoordinatorTasksRegistered(): Promise<void> {
+  if (coordinatorState.taskRuntimes.size > 0) return;
+  await registerCoordinatorTasks();
+  activateCoordinatorRootWorkerUnits();
 }
 
 /** 最终租约入口的内存审计窗口；不保存业务数据，也不作为重试依据。 */
@@ -5470,18 +5475,10 @@ function coordinatorTaskBlockedReason(runtime: TaskRuntime, snapshot = currentPl
   if (dependencies.length === 0) {
     dependencies.push("background", runtime.pluginId);
   }
-  // P2PKH 同步的实际网络 Provider 是产品依赖的一部分。仅禁用 p2pkh
-  // 自身还不够：WOC/JungleBus 被停用时，任务也必须在入口处阻断，而不是
-  // 先启动一次再等到 registry 报 provider-unavailable。
+  // P2PKH 链上数据（历史 + UTXO 快照）只有 WoC 一个来源；WOC 被停用时，
+  // 相关任务必须在入口处阻断，而不是先启动一次再等 provider-unavailable。
   if (runtime.id === "p2pkh.transactions-sync" || runtime.id === "token-bsv21.sync" || runtime.id === "token-stas.sync" || runtime.id === "collectible-1satordinals.sync") {
-    const selected = coordinatorMeta.p2pkhProviders;
-    const providerIds = [
-      selected?.main.syncProviderId,
-      ...(coordinatorMeta.p2pkhSettings?.includeTestnet ? [selected?.test.syncProviderId] : []),
-    ];
-    for (const providerId of providerIds) {
-      if ((providerId === "woc" || providerId === "junglebus") && !dependencies.includes(providerId)) dependencies.push(providerId);
-    }
+    if (!dependencies.includes("woc")) dependencies.push("woc");
   }
   const disabled = dependencies.find((pluginId) => !isCoordinatorProductEnabled(pluginId, snapshot));
   return disabled ? `Plugin disabled: ${disabled}` : undefined;
@@ -5493,9 +5490,7 @@ function isPluginIntentBlockedReason(reason: string | undefined): boolean {
 
 /** Provider 重建后允许重新排程的可恢复阻塞；不是未知写入结果。 */
 function isProviderAvailabilityBlockedReason(reason: string | undefined): boolean {
-  return typeof reason === "string"
-    && (reason.startsWith("Selected confirmed provider is unavailable:")
-      || reason.startsWith("No confirmed sync provider selected for "));
+  return typeof reason === "string" && reason.startsWith("Broadcast provider is unavailable for ");
 }
 
 function coordinatorProductBlockedResponse(requestId: string, pluginId: string): CoordinatorResponse {
@@ -5514,43 +5509,19 @@ function reconcileCoordinatorProviderIntent(snapshot: PluginIntentSnapshot): boo
   if (!p2pkhRegistry) return false;
   let changed = false;
   const wocEnabled = isCoordinatorProductEnabled("woc", snapshot);
-  const hasWocConfirmed = Boolean(p2pkhRegistry.getConfirmedProvider("woc", "main"));
   const hasWocBroadcast = Boolean(p2pkhRegistry.getBroadcastProvider("woc", "main"));
   if (!wocEnabled) {
-    if (hasWocConfirmed) {
-      p2pkhRegistry.unregisterConfirmedProvider?.("woc");
-      changed = true;
-    }
     if (hasWocBroadcast) {
       p2pkhRegistry.unregisterBroadcastProvider?.("woc");
       changed = true;
     }
-  } else if (p2pkhWocService && (!hasWocConfirmed || !hasWocBroadcast)) {
-    // WOC 同时提供 confirmed 和 broadcast；若某一侧缺失，先移除另一侧
-    // 再由同一个工厂完整注册，避免 registry duplicate provider。
-    if (hasWocConfirmed) p2pkhRegistry.unregisterConfirmedProvider?.("woc");
-    if (hasWocBroadcast) p2pkhRegistry.unregisterBroadcastProvider?.("woc");
+  } else if (p2pkhWocService && !hasWocBroadcast) {
     registerWocP2pkhProviders({ registry: p2pkhRegistry, woc: p2pkhWocService });
     changed = true;
   }
-
-  const jungleBusEnabled = isCoordinatorProductEnabled("junglebus", snapshot)
-    && coordinatorMeta.p2pkhProviderConfigs?.junglebus?.enabled !== false;
-  const hasJungleBus = Boolean(p2pkhRegistry.getConfirmedProvider("junglebus", "main"));
-  if (!jungleBusEnabled) {
-    if (hasJungleBus) {
-      p2pkhRegistry.unregisterConfirmedProvider?.("junglebus");
-      changed = true;
-    }
-  } else if (!hasJungleBus && p2pkhJungleBusClient) {
-    registerJungleBusP2pkhProvider({ registry: p2pkhRegistry, client: p2pkhJungleBusClient });
-    changed = true;
-  }
   if (changed) {
-    // Provider 被撤权后，清理旧的 in-progress checkpoint；恢复时由同一
-    // task 再按当前 provider generation 建立新的 checkpoint。
+    // Provider 被撤权后，取消当前同步 run；恢复时由同一 task 重新开始。
     void cancelP2pkhSyncForProviderChange().catch(() => undefined);
-    publishTopicEvent("p2pkh.providers", { type: "p2pkh.providers.changed", snapshot: getP2pkhProviderSnapshot() });
   }
   return changed;
 }
@@ -5610,7 +5581,7 @@ function scheduleRuntime(runtime: TaskRuntime): void {
  * AbortSignal / finally 完成。
  */
 function reconcileCoordinatorTaskIntent(snapshot: PluginIntentSnapshot): void {
-  // 先投影 Provider，再重算任务状态。启用 WOC/JungleBus 时，旧的
+  // 先投影 Provider，再重算任务状态。启用 WOC 时，旧的
   // provider-unavailable 阻塞必须能在同一轮恢复；禁用时则由下面的产品
   // 依赖检查先挡住任务入口。
   let changed = reconcileCoordinatorProviderIntent(snapshot);
@@ -6130,20 +6101,33 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
       createActiveKeyCrypto: (requestedOwner: string) => createWorkerActiveKeyCrypto(requestedOwner),
     } as unknown as VaultService;
     const internalCoordinator = {
-      p2pkhProvidersGet: async (): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>> => {
+      p2pkhUtxosGet: async (input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>> => {
         if (!isCoordinatorProductEnabled("p2pkh")) {
           return {
             status: "blocked",
             reason: { key: "plugin.blocked.disabled", fallback: "Plugin disabled: p2pkh" },
           };
         }
-        return {
-          status: "ok",
-          value: getP2pkhProviderSnapshot(),
-          sessionEpoch: coordinatorState.sessionEpoch,
-        };
+        const resource = await p2pkhResourceForOwner(input.ownerPublicKeyHex, input.network);
+        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
+        return { status: "ok", value: p2pkhUtxoSnapshots.get(resource), sessionEpoch: coordinatorState.sessionEpoch };
       },
-      p2pkhBroadcast: async (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>> => {
+      p2pkhUtxosRefresh: async (input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>> => {
+        if (!isCoordinatorProductEnabled("p2pkh")) {
+          return {
+            status: "blocked",
+            reason: { key: "plugin.blocked.disabled", fallback: "Plugin disabled: p2pkh" },
+          };
+        }
+        const resource = await p2pkhResourceForOwner(input.ownerPublicKeyHex, input.network);
+        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
+        try {
+          return { status: "ok", value: await p2pkhUtxoSnapshots.refresh(resource), sessionEpoch: coordinatorState.sessionEpoch };
+        } catch (error) {
+          return { status: "error", message: error instanceof Error ? error.message : String(error) };
+        }
+      },
+      p2pkhBroadcast: async (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }): Promise<CoordinatorValueResult<unknown>> => {
         if (!isCoordinatorProductEnabled("p2pkh")) {
           return {
             status: "blocked",
@@ -6259,24 +6243,27 @@ async function registerCoordinatorTasks(): Promise<void> {
   const emitDataChanged = (providerId: string, kinds: AssetDataInvalidationEvent["kinds"]) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds });
   p2pkhRegistry = createP2pkhProviderRegistry();
   registerWocP2pkhProviders({ registry: p2pkhRegistry, woc });
-  const jungleBusConfig = coordinatorMeta.p2pkhProviderConfigs?.junglebus ?? {};
-  const jungleBus = createJungleBusClient({
-    ...(typeof jungleBusConfig.endpoint === "string" ? { baseUrl: jungleBusConfig.endpoint } : {}),
-    ...(typeof jungleBusConfig.mainEndpoint === "string" ? { mainBaseUrl: jungleBusConfig.mainEndpoint } : {}),
-    ...(typeof jungleBusConfig.testEndpoint === "string" ? { testBaseUrl: jungleBusConfig.testEndpoint } : {}),
-    ...(typeof jungleBusConfig.timeoutMs === "number" ? { timeoutMs: jungleBusConfig.timeoutMs } : {}),
-    ...(typeof jungleBusConfig.maxRetries === "number" ? { maxRetries: jungleBusConfig.maxRetries } : {}),
-    ...(typeof jungleBusConfig.requestsPerSecond === "number" ? { requestsPerSecond: jungleBusConfig.requestsPerSecond } : {})
-  });
-  p2pkhJungleBusClient = jungleBus;
-  if (jungleBusConfig.enabled !== false) {
-    registerJungleBusP2pkhProvider({ registry: p2pkhRegistry, client: jungleBus });
-  }
-  const providerSettings = () => coordinatorMeta.p2pkhProviders ?? (coordinatorMeta.p2pkhProviders = defaultP2pkhProviders());
-  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerOwnerFileStore("p2pkh", ""), registry: p2pkhRegistry, getSelection: (network) => { const selection = providerSettings()[network]; return { syncProviderId: selection.syncProviderId, generation: providerSettings().generation }; }, isGenerationCurrent: (_network, generation) => generation === providerSettings().generation, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
-  // The ordinary BSV confirmed pipeline has exactly one task.
+  p2pkhUtxoSnapshots = createP2pkhUtxoSnapshotStore({ woc });
+  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerOwnerFileStore("p2pkh", ""), woc, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
+  // The ordinary BSV pipeline has exactly one task: history metadata + UTXO snapshot.
   const assetHoldingsIntervalMs = coordinatorState.scheduleSettings.assetHoldingsIntervalMs;
-  coordinatorState.taskRuntimes.set("p2pkh.transactions-sync", createCoordinatorTaskRuntime({ id: "p2pkh.transactions-sync", pluginId: "p2pkh", unitId: p2pkh.unitId, intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex); const result = await p2pkh.transactionsSync(signal); assertSessionFresh(); if (!result.cancelled) emitDataChanged("p2pkh", ["resource", "utxo", "history"]); } }));
+  coordinatorState.taskRuntimes.set("p2pkh.transactions-sync", createCoordinatorTaskRuntime({ id: "p2pkh.transactions-sync", pluginId: "p2pkh", unitId: p2pkh.unitId, intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
+    await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex);
+    let historyError: unknown;
+    try {
+      const result = await p2pkh.transactionsSync(signal);
+      assertSessionFresh();
+      if (result.cancelled) return;
+    } catch (error) {
+      historyError = error;
+    }
+    // UTXO 快照刷新与历史同步互不依赖：历史失败也必须尝试刷新快照；
+    // 刷新失败只保留旧快照，不改变历史结果。
+    await refreshP2pkhUtxoSnapshots(signal).catch(() => undefined);
+    assertSessionFresh();
+    emitDataChanged("p2pkh", ["resource", "utxo", "history"]);
+    if (historyError) throw historyError;
+  } }));
   const p2pkhProvider = {
     listResources: async (assetId: "bsv" | "bsvtest") => {
       if (!coordinatorState.activePublicKeyHex) return [];
@@ -6288,11 +6275,31 @@ async function registerCoordinatorTasks(): Promise<void> {
       if (!ownerPublicKeyHex) return [];
       if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
       const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
-      const utxos = await repository.listUtxos();
-      return utxos.filter((utxo) => {
-        if (filter?.assetId && filter.assetId !== (utxo.network === "main" ? "bsv" : "bsvtest")) return false;
-        return true;
-      });
+      const rows: Array<{ id: string; resourceId: string; publicKeyHex: string; network: "main" | "test"; address: string; txid: string; vout: number; value: number; height: number; script: string; status: "confirmed" | "unconfirmed"; isSpentInMempoolTx: boolean; syncedAt: string }> = [];
+      for (const resource of await repository.listResourcesByKey()) {
+        if (filter?.assetId && resource.network !== (filter.assetId === "bsv" ? "main" : "test")) continue;
+        const snapshot = p2pkhUtxoSnapshots?.get(resource);
+        if (!snapshot?.available) continue;
+        for (const item of snapshot.items) {
+          if (item.isSpentInMempoolTx) continue;
+          rows.push({
+            id: `utxo:${resource.resourceId}:${item.txid}:${item.vout}`,
+            resourceId: resource.resourceId,
+            publicKeyHex: resource.publicKeyHex,
+            network: resource.network,
+            address: resource.address,
+            txid: item.txid,
+            vout: item.vout,
+            value: item.value,
+            height: item.height,
+            script: p2pkhAddressToScriptHex(resource.address, resource.network),
+            status: item.status,
+            isSpentInMempoolTx: item.isSpentInMempoolTx,
+            syncedAt: snapshot.syncedAt ?? new Date().toISOString()
+          });
+        }
+      }
+      return rows;
     },
     getGlobalSettings: () => ({ includeTestnet: coordinatorMeta.p2pkhSettings?.includeTestnet === true })
   };
@@ -6305,7 +6312,7 @@ async function registerCoordinatorTasks(): Promise<void> {
   coordinatorState.taskRuntimes.set(oneSatTask.id, createCoordinatorTaskRuntime({ id: oneSatTask.id, pluginId: "collectible-1satordinals", unitId: oneSatTask.unitId, intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
   bindCoordinatorTaskUnitsToOwner();
   // Provider 初始注册必须再经过产品意图投影；否则 Worker 重启时若持久
-  // 快照已禁用 WOC/JungleBus，短窗口内仍会把旧 Provider 暴露给任务。
+  // 快照已禁用 WOC，短窗口内仍会把旧 Provider 暴露给任务。
   reconcileCoordinatorProviderIntent(currentPluginIntentSnapshot());
   for (const runtime of coordinatorState.taskRuntimes.values()) scheduleRuntime(runtime);
   publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
@@ -6334,24 +6341,20 @@ function generateCoordinatorServiceId(prefix: string): string {
   return `${prefix}:${Date.now().toString(36)}:${randomIdentifierSuffix()}`;
 }
 
-function isP2pkhBroadcastRequest(request: CoordinatorClientRequest): request is Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }> {
-  return request.kind === "p2pkh.broadcast" || request.kind === "p2pkh.rebroadcast-ancestors";
+function isP2pkhBroadcastRequest(request: CoordinatorClientRequest): request is Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" }> {
+  return request.kind === "p2pkh.broadcast";
 }
 
 /** Remove a submission only when the Coordinator can prove no provider call was made. */
 async function abortNotDispatchedP2pkhSubmission(
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }>,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" }>,
   reason: string
 ): Promise<void> {
-  // A rebroadcast may be the first request after an earlier Worker died
-  // after crossing the network boundary. An empty attempt list is therefore
-  // not evidence that this submission is safe to release.
-  if (request.kind !== "p2pkh.broadcast") return;
   try {
     const keyspace = createWorkerKeyspace();
     if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
     const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
-    await repository.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason, requestKind: "initial" });
+    await repository.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason });
     publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
   } catch {
     // Cleanup is best-effort here. The response is still explicitly marked
@@ -6382,9 +6385,6 @@ async function buildTopicBaselines(
       };
       void summary;
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
-    }
-    if (topic === "p2pkh.providers") {
-      return [{ topic, baselineRevision: p2pkhProviderRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: { topic, type: "p2pkh.providers.changed" as const, providerRevision: p2pkhProviderRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: getP2pkhProviderSnapshot() } }];
     }
     if (topic === "msfile.state") {
       const baselineRevision = msfileRevision;
@@ -9972,18 +9972,17 @@ async function executeProcessRequest(
         return await handleBackgroundCancelByKey(requestId, request);
       case "background.settings.update":
         return await handleBackgroundSettingsUpdate(requestId, request);
-      case "p2pkh.providers.get":
-        return await handleP2pkhProvidersGet(requestId);
       case "p2pkh.settings.update":
         return await handleP2pkhSettingsUpdate(requestId, request);
-      case "p2pkh.providers.update":
-        return await handleP2pkhProvidersUpdate(requestId, request);
       case "p2pkh.provider-config.get":
         return await handleP2pkhProviderConfigGet(requestId, request);
       case "p2pkh.provider-config.update":
         return await handleP2pkhProviderConfigUpdate(requestId, request);
+      case "p2pkh.utxos.get":
+        return await handleP2pkhUtxosGet(requestId, request);
+      case "p2pkh.utxos.refresh":
+        return await handleP2pkhUtxosRefresh(requestId, request);
       case "p2pkh.broadcast":
-      case "p2pkh.rebroadcast-ancestors":
         return await handleP2pkhBroadcast(requestId, request);
       case "sat.operation":
         return await executeSatRequest(request);
@@ -11213,13 +11212,8 @@ async function loadP2pkhSettingForOwner(ownerPublicKeyHex: string | undefined): 
   if (p2pkhSettingOwner === owner) return;
   try {
     const setting = await p2pkhSettingRepository().readSetting();
-    const generation = coordinatorMeta.p2pkhProviders?.generation ?? 0;
-    coordinatorMeta.p2pkhProviders = {
-      main: { syncProviderId: setting.providers.main.syncProviderId, broadcastProviderId: setting.providers.main.broadcastProviderId },
-      test: { syncProviderId: setting.providers.test.syncProviderId, broadcastProviderId: setting.providers.test.broadcastProviderId },
-      generation,
-    };
     coordinatorMeta.p2pkhSettings = { includeTestnet: setting.includeTestnet };
+    // 旧 providerConfigs 中的 junglebus 等配置已由解析器丢弃。
     coordinatorMeta.p2pkhProviderConfigs = structuredClone(setting.providerConfigs);
     p2pkhSettingOwner = owner;
   } catch (error) {
@@ -11228,17 +11222,16 @@ async function loadP2pkhSettingForOwner(ownerPublicKeyHex: string | undefined): 
   }
 }
 
-/** 锁屏 / 切 owner：运行时不保留上一个 owner 的偏好。 */
+/** 锁屏 / 切 owner：运行时不保留上一个 owner 的偏好与内存快照。 */
 function resetP2pkhSettingsRuntime(): void {
   p2pkhSettingOwner = undefined;
-  coordinatorMeta.p2pkhProviders = defaultP2pkhProviders();
   coordinatorMeta.p2pkhProviderConfigs = {};
   coordinatorMeta.p2pkhSettings = { includeTestnet: false };
+  p2pkhUtxoSnapshots?.clearAll();
 }
 
 /** 读-改-写 setting.json；failure 时调用方不得更新内存镜像。 */
 async function writeP2pkhSettingFile(patch: {
-  providers?: P2pkhProviderSettings;
   includeTestnet?: boolean;
   providerConfigs?: Record<string, Record<string, unknown>>;
 }): Promise<void> {
@@ -11248,30 +11241,29 @@ async function writeP2pkhSettingFile(patch: {
   }
   const repository = p2pkhSettingRepository();
   const current = await repository.readSetting();
-  const providers = patch.providers ?? p2pkhProviderSettings();
   await repository.writeSetting({
     includeTestnet: patch.includeTestnet ?? current.includeTestnet,
     feeRateSatoshisPerKb: current.feeRateSatoshisPerKb,
-    providers: {
-      main: { syncProviderId: providers.main.syncProviderId, broadcastProviderId: providers.main.broadcastProviderId },
-      test: { syncProviderId: providers.test.syncProviderId, broadcastProviderId: providers.test.broadcastProviderId },
-    },
     providerConfigs: patch.providerConfigs ?? current.providerConfigs,
   });
 }
 
-function p2pkhProviderSettings(): P2pkhProviderSettings {
-  return coordinatorMeta.p2pkhProviders ?? (coordinatorMeta.p2pkhProviders = defaultP2pkhProviders());
-}
-
-function p2pkhSelection(network: "main" | "test"): P2pkhNetworkProviderSelection {
-  return p2pkhProviderSettings()[network];
-}
-
-function validateP2pkhSelection(network: "main" | "test", selection: P2pkhNetworkProviderSelection): string | undefined {
-  if (selection.syncProviderId && !p2pkhRegistry?.getConfirmedProvider(selection.syncProviderId, network)) return `Confirmed provider is unavailable for ${network}: ${selection.syncProviderId}`;
-  if (selection.broadcastProviderId && !p2pkhRegistry?.getBroadcastProvider(selection.broadcastProviderId, network)) return `Broadcast provider is unavailable for ${network}: ${selection.broadcastProviderId}`;
-  return undefined;
+/**
+ * 刷新当前 owner 全部启用网络的内存 UTXO 快照。
+ * 单个资源失败只保留其旧快照，不影响其它资源；错误向上抛给调用方决定。
+ */
+async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal): Promise<void> {
+  const owner = coordinatorState.activePublicKeyHex;
+  if (!owner || !p2pkhUtxoSnapshots) return;
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== owner.toLowerCase()) return;
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const includeTestnet = coordinatorMeta.p2pkhSettings?.includeTestnet === true;
+  for (const resource of await repository.listResourcesByKey()) {
+    if (resource.network === "test" && !includeTestnet) continue;
+    if (signal?.aborted) return;
+    await p2pkhUtxoSnapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);
+  }
 }
 
 async function cancelP2pkhSyncForProviderChange(): Promise<void> {
@@ -11280,27 +11272,12 @@ async function cancelP2pkhSyncForProviderChange(): Promise<void> {
   if (runtime?.timer) clearTimeout(runtime.timer);
   runtime && (runtime.timer = undefined);
   if (runtime?.completion) await runtime.completion.catch(() => undefined);
-  const publicKeyHex = coordinatorState.activePublicKeyHex;
-  if (!publicKeyHex) return;
-  const keyspace = createWorkerKeyspace();
-  try {
-    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
-    for (const resource of await repository.listResourcesByKey()) await repository.clearInProgressSyncState(resource.resourceId);
-  } catch {
-    // The generation fence still prevents late commits. A transient cleanup
-    // failure is surfaced by the next sync attempt instead of losing claims.
-  }
   if (runtime && coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) {
     // Execute immediately; executeTask's finally block installs the next
     // interval after this run. Scheduling here as well would leave a second
     // timer alive and allow overlapping sync runs.
     void executeTask(runtime.id, "provider-change");
   }
-}
-
-async function handleP2pkhProvidersGet(requestId: string): Promise<CoordinatorResponse> {
-  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: getP2pkhProviderSnapshot() };
 }
 
 async function handleP2pkhSettingsUpdate(
@@ -11319,39 +11296,20 @@ async function handleP2pkhSettingsUpdate(
   return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
 }
 
-async function handleP2pkhProvidersUpdate(
-  requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.providers.update" }>
-): Promise<CoordinatorResponse> {
-  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
-  const current = p2pkhProviderSettings();
-  if (request.expectedGeneration !== current.generation) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH provider settings generation changed" } };
-  const validation = validateP2pkhSelection(request.network, request.selection);
-  if (validation) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: validation } };
-  const next: P2pkhProviderSettings = { ...current, main: { ...current.main }, test: { ...current.test }, [request.network]: { ...request.selection }, generation: current.generation + 1 };
-  await writeP2pkhSettingFile({ providers: next });
-  coordinatorMeta.p2pkhProviders = next;
-  await cancelP2pkhSyncForProviderChange();
-  publishTopicEvent("p2pkh.providers", { type: "p2pkh.providers.changed", snapshot: getP2pkhProviderSnapshot() });
-  publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", snapshots: getTaskSnapshots() });
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" }, operationResult: getP2pkhProviderSnapshot() };
-}
-
 async function handleP2pkhProviderConfigGet(
   requestId: string,
   request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.get" }>
 ): Promise<CoordinatorResponse> {
-  const productId = request.providerId === "woc" || request.providerId === "junglebus" ? request.providerId : "p2pkh";
-  if (!isCoordinatorProductEnabled(productId)) return coordinatorProductBlockedResponse(requestId, productId);
-  const persisted = coordinatorMeta.p2pkhProviderConfigs?.[request.providerId];
+  // 只剩 WoC 一个 Provider；未知 provider id 直接拒绝。
+  if (request.providerId !== "woc") {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Unknown P2PKH provider: ${request.providerId}` } };
+  }
+  if (!isCoordinatorProductEnabled("woc")) return coordinatorProductBlockedResponse(requestId, "woc");
+  const persisted = coordinatorMeta.p2pkhProviderConfigs?.woc;
   if (persisted) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...persisted } };
-  if (request.providerId === "woc" && p2pkhWocService) {
+  if (p2pkhWocService) {
     const config = p2pkhWocService.getConfig();
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { endpoint: config.baseUrl, requestsPerSecond: config.requestsPerSecond } };
-  }
-  if (request.providerId === "junglebus" && p2pkhJungleBusClient?.getConfig) {
-    const config = p2pkhJungleBusClient.getConfig();
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { endpoint: config.baseUrl, mainEndpoint: config.mainBaseUrl, testEndpoint: config.testBaseUrl, timeoutMs: config.timeoutMs, maxRetries: config.maxRetries, requestsPerSecond: config.requestsPerSecond } };
   }
   return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: {} };
 }
@@ -11360,79 +11318,81 @@ async function handleP2pkhProviderConfigUpdate(
   requestId: string,
   request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.update" }>
 ): Promise<CoordinatorResponse> {
-  const productId = request.providerId === "woc" || request.providerId === "junglebus" ? request.providerId : "p2pkh";
-  if (!isCoordinatorProductEnabled(productId)) return coordinatorProductBlockedResponse(requestId, productId);
-  const knownDisabledConfirmedProvider = request.providerId === "junglebus" && Boolean(p2pkhJungleBusClient);
-  if (!knownDisabledConfirmedProvider
-    && !p2pkhRegistry?.listConfirmedProviders().some((provider) => provider.id === request.providerId)
-    && !p2pkhRegistry?.listBroadcastProviders().some((provider) => provider.id === request.providerId)) {
+  if (request.providerId !== "woc") {
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Unknown P2PKH provider: ${request.providerId}` } };
   }
+  if (!isCoordinatorProductEnabled("woc")) return coordinatorProductBlockedResponse(requestId, "woc");
   const previousConfigs = coordinatorMeta.p2pkhProviderConfigs;
-  const previousConfig = previousConfigs?.[request.providerId];
-  const enabled = request.providerId === "junglebus" ? request.config.enabled !== false : true;
+  const previousConfig = previousConfigs?.woc;
   const nextConfig = { ...(previousConfig ?? {}), ...request.config };
-  const settings = p2pkhProviderSettings();
-  const disabling = request.providerId === "junglebus" && !enabled;
-  const nextSelection: P2pkhProviderSettings = {
-    ...settings,
-    // Keep the user's explicit provider id when the optional plugin is
-    // disabled. The registry absence is intentional and makes the sync task
-    // enter blocked; clearing to null would silently turn an explicit choice
-    // into an unconfigured/fallback-looking state.
-    main: { ...settings.main },
-    test: { ...settings.test },
-    generation: settings.generation + 1
-  };
-  const nextProviderConfigs = { ...(previousConfigs ?? {}), [request.providerId]: nextConfig };
-  const wasJungleBusRegistered = Boolean(p2pkhRegistry?.getConfirmedProvider("junglebus", "main"));
-  const previousJungleBusClientConfig = p2pkhJungleBusClient?.getConfig?.();
+  const nextProviderConfigs = { ...(previousConfigs ?? {}), woc: nextConfig };
   const previousWocConfig = p2pkhWocService?.getConfig?.();
   try {
-    // Persist the candidate before changing the in-memory selection or
-    // registry. A failed write must leave the running session untouched.
-    await writeP2pkhSettingFile({ providerConfigs: nextProviderConfigs, providers: nextSelection });
-    if (request.providerId === "junglebus" && enabled && p2pkhJungleBusClient && !wasJungleBusRegistered) {
-      registerJungleBusP2pkhProvider({ registry: p2pkhRegistry!, client: p2pkhJungleBusClient });
-    }
-    if (request.providerId === "junglebus" && disabling && wasJungleBusRegistered) {
-      p2pkhRegistry?.unregisterConfirmedProvider?.("junglebus");
-    }
-    if (request.providerId === "woc" && p2pkhWocService) {
+    // Persist the candidate before changing the running service. A failed
+    // write must leave the running session untouched.
+    await writeP2pkhSettingFile({ providerConfigs: nextProviderConfigs });
+    if (p2pkhWocService) {
       const update: Partial<import("@keymaster/contracts").WocConfig> = {};
       if (typeof request.config.endpoint === "string" && request.config.endpoint.trim()) update.baseUrl = request.config.endpoint.trim();
       if (typeof request.config.requestsPerSecond === "number") update.requestsPerSecond = request.config.requestsPerSecond;
       if (Object.keys(update).length) p2pkhWocService.updateConfig(update);
-    } else if (request.providerId === "junglebus" && p2pkhJungleBusClient?.updateConfig) {
-      p2pkhJungleBusClient.updateConfig({
-        ...(typeof request.config.endpoint === "string" ? { baseUrl: request.config.endpoint } : {}),
-        ...(typeof request.config.mainEndpoint === "string" ? { mainBaseUrl: request.config.mainEndpoint } : {}),
-        ...(typeof request.config.testEndpoint === "string" ? { testBaseUrl: request.config.testEndpoint } : {}),
-        ...(typeof request.config.timeoutMs === "number" ? { timeoutMs: request.config.timeoutMs } : {}),
-        ...(typeof request.config.maxRetries === "number" ? { maxRetries: request.config.maxRetries } : {}),
-        ...(typeof request.config.requestsPerSecond === "number" ? { requestsPerSecond: request.config.requestsPerSecond } : {})
-      });
     }
   } catch (error) {
-    if (request.providerId === "junglebus" && p2pkhJungleBusClient) {
-      const isRegistered = Boolean(p2pkhRegistry?.getConfirmedProvider("junglebus", "main"));
-      if (wasJungleBusRegistered && !isRegistered) registerJungleBusP2pkhProvider({ registry: p2pkhRegistry!, client: p2pkhJungleBusClient });
-      if (!wasJungleBusRegistered && isRegistered) p2pkhRegistry?.unregisterConfirmedProvider?.("junglebus");
-      if (previousJungleBusClientConfig) p2pkhJungleBusClient.updateConfig?.(previousJungleBusClientConfig);
-    }
-    if (request.providerId === "woc" && previousWocConfig) p2pkhWocService?.updateConfig?.(previousWocConfig);
+    if (previousWocConfig) p2pkhWocService?.updateConfig?.(previousWocConfig);
     throw error;
   }
   coordinatorMeta.p2pkhProviderConfigs = nextProviderConfigs;
-  coordinatorMeta.p2pkhProviders = nextSelection;
   await cancelP2pkhSyncForProviderChange();
-  publishTopicEvent("p2pkh.providers", { type: "p2pkh.providers.changed", snapshot: getP2pkhProviderSnapshot() });
   return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
+}
+
+/** 读取 owner + network 对应的 P2PKH resource（不存在返回 undefined）。 */
+async function p2pkhResourceForOwner(ownerPublicKeyHex: string, network: "main" | "test") {
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  return repository.getResource(`p2pkh:${network}`);
+}
+
+/** 读取内存 UTXO 快照；没有 resource 或没有快照时 available=false。 */
+async function handleP2pkhUtxosGet(
+  requestId: string,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.utxos.get" }>
+): Promise<CoordinatorResponse> {
+  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
+  const resource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
+  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, items: [] } satisfies P2pkhUtxoSnapshotResult };
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: p2pkhUtxoSnapshots.get(resource) };
+}
+
+/**
+ * 刷新内存 UTXO 快照。
+ *
+ * 刷新失败时旧快照原样保留（绝不清空/置零），RPC 以 error 返回失败，
+ * 让调用方（转账 prepare/submit）明确拒绝继续，而不是使用过期快照。
+ */
+async function handleP2pkhUtxosRefresh(
+  requestId: string,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.utxos.refresh" }>
+): Promise<CoordinatorResponse> {
+  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
+  const resource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
+  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, items: [] } satisfies P2pkhUtxoSnapshotResult };
+  try {
+    const result = await p2pkhUtxoSnapshots.refresh(resource);
+    // 主动刷新成功后通知页面重读余额/币列表。
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo"] });
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+  } catch (error) {
+    // 旧快照保留；把失败原因返回给调用方。
+    const message = error instanceof Error ? error.message : String(error);
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `P2PKH UTXO snapshot refresh failed: ${message}` } };
+  }
 }
 
 async function handleP2pkhBroadcast(
   requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }>
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" }>
 ): Promise<CoordinatorResponse> {
   if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
   // 广播可能已经被远端接受但尚未回写本地提交记录；必须把 Provider
@@ -11449,16 +11409,9 @@ async function handleP2pkhBroadcast(
 
 async function handleP2pkhBroadcastUnsafe(
   requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }>
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" }>
 ): Promise<CoordinatorResponse> {
-  const isRebroadcast = request.kind === "p2pkh.rebroadcast-ancestors";
-  const settings = p2pkhProviderSettings();
-  if (request.expectedProviderGeneration !== settings.generation) {
-    await abortNotDispatchedP2pkhSubmission(request, "stale-provider-generation");
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "stale-provider-generation" } };
-  }
-  const providerId = p2pkhSelection(request.network).broadcastProviderId;
-  const provider = testP2pkhBroadcastProvider ?? (providerId ? p2pkhRegistry?.getBroadcastProvider(providerId, request.network) : undefined);
+  const provider = testP2pkhBroadcastProvider ?? p2pkhRegistry?.getBroadcastProvider("woc", request.network);
   if (!provider) {
     await abortNotDispatchedP2pkhSubmission(request, "broadcast-provider-unavailable");
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "broadcast-provider-unavailable" } };
@@ -11467,78 +11420,31 @@ async function handleP2pkhBroadcastUnsafe(
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
-  const localRows = (await repository.listLocalTransactions()).filter((row) => row.network === request.network);
-  const local = localRows.find((row) => row.id === request.submissionId);
+  const local = (await repository.listLocalTransactions()).find((row) => row.id === request.submissionId && row.network === request.network);
   if (!local) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Local P2PKH submission not found" } };
-  if (!isRebroadcast && (local.localState !== "submitting" || local.chainResolution !== "unresolved")) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
-  const rowsByTxid = new Map<string, typeof localRows>();
-  for (const row of localRows) {
-    const group = rowsByTxid.get(row.txid) ?? [];
-    group.push(row);
-    rowsByTxid.set(row.txid, group);
+  if (local.localState !== "submitting" || local.chainResolution !== "unresolved") {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
   }
-  const compareCanonicalRows = (left: (typeof localRows)[number], right: (typeof localRows)[number]): number => left.rawTxHex.localeCompare(right.rawTxHex) || left.id.localeCompare(right.id);
-  const canonicalRowForTxid = (txid: string): (typeof localRows)[number] | undefined => [...(rowsByTxid.get(txid) ?? [])].sort(compareCanonicalRows)[0];
-  const orderedTxids: string[] = [];
-  const visited = new Set<string>();
-  const visit = (txid: string) => {
-    if (visited.has(txid)) return;
-    visited.add(txid);
-    const group = rowsByTxid.get(txid) ?? [];
-    const parentTxids = [...new Set(group.flatMap((row) => row.parentTxids))].sort();
-    for (const parentTxid of parentTxids) {
-      if (rowsByTxid.has(parentTxid)) visit(parentTxid);
-    }
-    orderedTxids.push(txid);
-  };
-  visit(local.txid);
-  const dispatch = async (row: (typeof localRows)[number]) => {
-    const previousLocalState = row.localState;
-    const startedAt = new Date().toISOString();
-    try {
-      const result = await provider.broadcast({ network: request.network, canonicalTxid: row.txid, rawTxHex: row.rawTxHex });
-      if (result.canonicalTxid !== row.txid) throw new Error("Broadcast provider returned a different transaction id");
-      const finishedAt = new Date().toISOString();
-      await repository.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt: { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
-      return { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: row.txid } as const;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const finishedAt = new Date().toISOString();
-      const attempt = { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
-      if (previousLocalState === "local-confirmed") {
-        // A failed rebroadcast cannot invalidate an earlier accepted or
-        // already-known result. Preserve outputs/claims and append the audit.
-        await repository.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt });
-      } else {
-        await repository.finishLocalSubmission({ submissionId: row.id, localState: "isolated", reason: message, attempt });
-      }
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim"] });
-      return { status: previousLocalState === "local-confirmed" ? "rebroadcast-failed" : "isolated", txid: row.txid, reason: message } as const;
-    }
-  };
-  if (isRebroadcast) {
-    for (const txid of orderedTxids) {
-      const group = rowsByTxid.get(txid) ?? [];
-      // A duplicate audit sibling is part of the same logical transaction.
-      // Conflict wins over chain confirmation so an unsafe fork can never be
-      // hidden by platform K-V repository return order; chain confirmation then wins over a
-      // merely local lifecycle and skips the provider call.
-      if (group.some((row) => row.chainResolution === "conflicted")) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid, reason: "conflicted-ancestor" } };
-      if (group.some((row) => row.chainResolution === "chain-confirmed")) continue;
-      // Ancestor groups may use a deterministic representative, but the
-      // requested logical transaction must preserve the submission audit
-      // boundary: its attempt belongs to the exact submissionId supplied by
-      // the caller, even when another sibling sorts first.
-      const ancestor = txid === local.txid ? local : canonicalRowForTxid(txid);
-      if (!ancestor) continue;
-      const result = await dispatch(ancestor);
-      if (result.status === "isolated" || result.status === "rebroadcast-failed") return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...result, providerId: provider.descriptor.id } };
-    }
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "local-confirmed", providerId: provider.descriptor.id, txid: local.txid } };
+
+  const startedAt = new Date().toISOString();
+  try {
+    const result = await provider.broadcast({ network: request.network, canonicalTxid: local.txid, rawTxHex: local.rawTxHex });
+    if (result.canonicalTxid !== local.txid) throw new Error("Broadcast provider returned a different transaction id");
+    const finishedAt = new Date().toISOString();
+    await repository.finishLocalSubmission({ submissionId: local.id, localState: "local-confirmed", attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
+    // 广播后立即触发一次后台刷新；刷新失败不能释放输入 claim（claim
+    // 只在历史/快照确认后才由同步路径清理）。
+    void refreshP2pkhUtxoSnapshots().catch(() => undefined);
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: local.txid, providerId: provider.descriptor.id } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const finishedAt = new Date().toISOString();
+    const attempt = { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
+    await repository.finishLocalSubmission({ submissionId: local.id, localState: "isolated", reason: message, attempt });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim"] });
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid: local.txid, reason: message, providerId: provider.descriptor.id } };
   }
-  const result = await dispatch(local);
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...result, providerId: provider.descriptor.id } };
 }
 
 // ============================================================
@@ -11728,24 +11634,10 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     p2pkhSettings: coordinatorMeta.p2pkhSettings,
     storageBucketGeneration: platformRootStore?.bucket.bucketGeneration,
     ...(platformRootStore ? { storageBucketId: platformRootStore.bucket.bucketId } : {}),
-    p2pkhProviders: getP2pkhProviderSnapshot(),
     ...(storageIoOwnerPeer ? { storageIoOwnerPeer } : {}),
     // Worker 重启后 controller 可能尚未惰性创建，但持久化快照已经是
     // 当前产品意图真值；首个页面不能拿 revision=0 覆盖它。
     pluginIntent: pluginIntentController?.snapshot() ?? coordinatorMeta.pluginIntent,
-  };
-}
-
-function getP2pkhProviderSnapshot(): P2pkhProviderRegistrySnapshot {
-  const settings = coordinatorMeta.p2pkhProviders ?? (coordinatorMeta.p2pkhProviders = defaultP2pkhProviders());
-  return {
-    syncProviders: p2pkhRegistry?.listConfirmedProviders() ?? [],
-    broadcastProviders: p2pkhRegistry?.listBroadcastProviders() ?? [],
-    selection: {
-      main: { ...settings.main },
-      test: { ...settings.test },
-      generation: settings.generation,
-    },
   };
 }
 
@@ -11777,7 +11669,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -12400,8 +12292,7 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
       { allowLocalLock: true, auditOperation: "coordinator.bootstrap.recover" },
     );
     await ensureStorageRuntime(peerId);
-    await registerCoordinatorTasks();
-    activateCoordinatorRootWorkerUnits();
+    await ensureCoordinatorTasksRegistered();
     // 启动时如果 vault 是 locked 状态，将所有任务标记为 blocked
     if (coordinatorState.vaultStatus === "locked") {
       for (const runtime of coordinatorState.taskRuntimes.values()) {
@@ -12680,6 +12571,11 @@ export function __testResetState(): void {
   coordinatorContactsPresenceOff = undefined;
   coordinatorContactsService?.dispose?.();
   coordinatorContactsService = undefined;
+  // 后台任务注册会重建 P2PKH 供应商注册表；重置时一并丢弃旧句柄，
+  // 否则后续 ensureTestP2pkhProviders 会因为“注册表还在”而跳过重建，
+  // 让 taskRuntimes 保持为空。
+  p2pkhRegistry = undefined;
+  p2pkhWocService = undefined;
   contactsPresenceRevision = 0;
   lastContactsPresenceState = undefined;
   contactsPresencePublishTail = Promise.resolve();
@@ -12700,6 +12596,7 @@ export function __testResetState(): void {
   storageController = testStorageRuntimeOverride;
   coordinatorRequestTail = Promise.resolve();
   testP2pkhBroadcastProvider = undefined;
+  p2pkhUtxoSnapshots?.clearAll();
 }
 
 export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePublicKeyHex?: string): void {
@@ -12924,26 +12821,12 @@ export async function __testP2pkhProviderConfigGet(providerId: string): Promise<
     : {};
 }
 
-export async function __testP2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection): Promise<CoordinatorResponse> {
-  await ensureTestP2pkhProviders();
-  const current = p2pkhProviderSettings();
-  return handleP2pkhProvidersUpdate(`test-p2pkh-selection-${Date.now()}`, {
-    kind: "p2pkh.providers.update",
-    clientId: "test",
-    requestId: `test-p2pkh-selection-${Date.now()}`,
-    network,
-    selection,
-    expectedGeneration: current.generation,
-    expectedSessionEpoch: coordinatorState.sessionEpoch
-  });
-}
-
-export async function __testSeedP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submission: unknown; claims?: unknown[]; localOutpoints?: unknown[] }): Promise<void> {
+export async function __testSeedP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submission: unknown; claims?: unknown[] }): Promise<void> {
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
-  await repository.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never, localOutpoints: (input.localOutpoints ?? []) as never });
+  await repository.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never });
 }
 
 export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submissionId: string; localState: "local-confirmed" | "isolated" }): Promise<void> {
@@ -12954,14 +12837,14 @@ export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHe
   await repository.finishLocalSubmission({ submissionId: input.submissionId, localState: input.localState });
 }
 
-export async function __testSetP2pkhChainResolution(input: { ownerPublicKeyHex: string; submissionId: string; chainResolution: "unresolved" | "chain-confirmed" | "conflicted"; conflictSourceTxids?: string[] }): Promise<void> {
+export async function __testSetP2pkhChainResolution(input: { ownerPublicKeyHex: string; submissionId: string; chainResolution: "unresolved" | "chain-confirmed" }): Promise<void> {
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
   const row = (await repository.listLocalTransactions()).find((candidate) => candidate.id === input.submissionId);
   if (!row) throw new Error(`P2PKH submission not found: ${input.submissionId}`);
-  const next = { ...row, chainResolution: input.chainResolution, ...(input.chainResolution === "conflicted" ? { conflictSourceTxids: input.conflictSourceTxids ?? ["test-conflict"] } : { conflictSourceTxids: undefined }), ...(input.chainResolution === "chain-confirmed" ? { confirmedFactId: `${row.resourceId}:${row.txid}` } : { confirmedFactId: undefined }) };
+  const next = { ...row, chainResolution: input.chainResolution, ...(input.chainResolution === "chain-confirmed" ? { confirmedHistoryId: `${row.resourceId}:${row.txid}` } : { confirmedHistoryId: undefined }) };
   await repository.replaceLocalTransaction(next);
 }
 
@@ -12973,14 +12856,6 @@ export async function __testListP2pkhLocalTransactions(ownerPublicKeyHex: string
   return repository.listLocalTransactions();
 }
 
-export async function __testListP2pkhLocalOutpoints(ownerPublicKeyHex: string): Promise<unknown[]> {
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-  await satRuntimeRelease.catch(() => undefined);
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
-  return repository.listLocalOutpoints();
-}
-
 export async function __testListP2pkhLocalInputClaims(ownerPublicKeyHex: string): Promise<unknown[]> {
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
@@ -12989,19 +12864,15 @@ export async function __testListP2pkhLocalInputClaims(ownerPublicKeyHex: string)
   return repository.listLocalInputClaims();
 }
 
-export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch?: SessionEpoch; rebroadcast?: boolean }): Promise<CoordinatorResponse> {
+export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedSessionEpoch?: SessionEpoch }): Promise<CoordinatorResponse> {
   await ensureTestP2pkhProviders();
-  if (input.submissionId.startsWith("unknown-rebroadcast")) {
-  }
-  const kind = input.rebroadcast ? "p2pkh.rebroadcast-ancestors" : "p2pkh.broadcast";
   return handleP2pkhBroadcast(`test-p2pkh-broadcast-${Date.now()}`, {
-    kind,
+    kind: "p2pkh.broadcast",
     clientId: "test",
     requestId: `test-p2pkh-broadcast-${Date.now()}`,
     ownerPublicKeyHex: input.ownerPublicKeyHex,
     network: input.network,
     submissionId: input.submissionId,
-    expectedProviderGeneration: input.expectedProviderGeneration,
     expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch
   });
 }

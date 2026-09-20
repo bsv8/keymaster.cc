@@ -629,73 +629,59 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         )
     });
   }
-  function getAddressConfirmedUtxos(network: BsvNetwork, address: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocUtxoResponse[]> {
+  /**
+   * 单请求返回地址全部未花费输出（confirmed + unconfirmed）。
+   *
+   * 实测 WoC `/unspent/all` 每项字段：tx_hash / tx_pos / value / height /
+   * status / isSpentInMempoolTx。这里只做类型归一化，不猜测 status：
+   * 非 confirmed/unconfirmed 的值直接判为 provider 不一致，让上层整次
+   * 快照刷新失败并保留旧快照。
+   */
+  function getAddressUnspentAll(network: BsvNetwork, address: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocUtxoResponse[]> {
     return enqueue({
       priority: priorityOf(opts.priority ?? "background"),
       signal: opts.signal,
-      label: WOC_MSG.UTXOS_CONFIRMED,
+      label: WOC_MSG.UTXOS_ALL,
       fn: async (signal) => {
-        let raw: { result: Array<{ tx_hash: string; tx_pos: number; value: number; height: number; script?: string }> };
-        try {
-          raw = await fetchJson<{
-            result: Array<{ tx_hash: string; tx_pos: number; value: number; height: number; script?: string }>;
-          }>(
-            network,
-            `/address/${encodeURIComponent(address)}/confirmed/unspent`,
-            { method: "GET" },
-            signal,
-            opts.timeoutMs
-          );
-        } catch (err) {
-          if (isWocNotFoundError(err)) return [];
-          throw err;
+        // 404 不是“余额为 0”：`unspent/all` 的空结果必须由 HTTP 200 +
+        // result:[] + error:"" 表示（实测有效地址返回 200/[]，非法地址返回
+        // 400）。所有非 2xx 或顶层 error 一律失败，让上层保留旧快照。
+        const raw = await fetchJson<{ result?: unknown; error?: unknown }>(
+          network,
+          `/address/${encodeURIComponent(address)}/unspent/all`,
+          { method: "GET" },
+          signal,
+          opts.timeoutMs
+        );
+        // WoC 正常响应的 error 为 ""；非空 error 不能被当成空余额。
+        if (raw.error !== undefined && raw.error !== null && raw.error !== "") {
+          throw new Error(`WOC unspent/all returned an error: ${String(raw.error)}`);
         }
-        return raw.result.map((u) => ({
-          txid: u.tx_hash,
-          vout: u.tx_pos,
-          value: u.value,
-          height: u.height,
-          script: u.script,
-          isSpentInMempoolTx: false,
-          observation: "confirmed" as const,
-          canonicalTxid: u.tx_hash,
-          network
-        }));
-      }
-    });
-  }
-  function getAddressUnconfirmedUtxos(network: BsvNetwork, address: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocUtxoResponse[]> {
-    return enqueue({
-      priority: priorityOf(opts.priority ?? "background"),
-      signal: opts.signal,
-      label: WOC_MSG.UTXOS_UNCONFIRMED,
-      fn: async (signal) => {
-        let raw: { result: Array<{ tx_hash: string; tx_pos: number; value: number; height: number; script?: string; isSpentInMempoolTx?: boolean }> };
-        try {
-          raw = await fetchJson<{
-            result: Array<{ tx_hash: string; tx_pos: number; value: number; height: number; script?: string; isSpentInMempoolTx?: boolean }>;
-          }>(
-            network,
-            `/address/${encodeURIComponent(address)}/unconfirmed/unspent`,
-            { method: "GET" },
-            signal,
-            opts.timeoutMs
-          );
-        } catch (err) {
-          if (isWocNotFoundError(err)) return [];
-          throw err;
-        }
-        return raw.result.map((u) => ({
-          txid: u.tx_hash,
-          vout: u.tx_pos,
-          value: u.value,
-          height: 0,
-          script: u.script,
-          isSpentInMempoolTx: u.isSpentInMempoolTx ?? false,
-          observation: "unconfirmed" as const,
-          canonicalTxid: u.tx_hash,
-          network
-        }));
+        if (!Array.isArray(raw.result)) throw new Error("WOC unspent/all returned an invalid result");
+        return (raw.result as Array<{ tx_hash: string; tx_pos: number; value: number; height?: number; status?: string; script?: string; isSpentInMempoolTx?: boolean }>).map((u) => {
+          const txid = normalizeTxidHex(u.tx_hash);
+          if (!Number.isSafeInteger(u.tx_pos) || u.tx_pos < 0) throw new Error("WOC unspent/all returned an invalid tx_pos");
+          if (!Number.isSafeInteger(u.value) || u.value < 0) throw new Error("WOC unspent/all returned an invalid value");
+          if (u.status !== "confirmed" && u.status !== "unconfirmed") throw new Error("WOC unspent/all returned an unknown status");
+          // isSpentInMempoolTx 是必填布尔：缺失/非法一律整次失败，不能按 false 放行。
+          if (typeof u.isSpentInMempoolTx !== "boolean") throw new Error("WOC unspent/all returned an invalid isSpentInMempoolTx");
+          if (u.script !== undefined && typeof u.script !== "string") throw new Error("WOC unspent/all returned an invalid script");
+          // 已确认输出必须有正的高度；未确认输出高度归零。
+          const height = u.status === "confirmed"
+            ? (Number.isSafeInteger(u.height) && (u.height as number) > 0 ? (u.height as number) : (() => { throw new Error("WOC unspent/all returned an invalid confirmed height"); })())
+            : 0;
+          return {
+            txid,
+            vout: u.tx_pos,
+            value: u.value,
+            height,
+            status: u.status,
+            script: u.script,
+            isSpentInMempoolTx: u.isSpentInMempoolTx,
+            canonicalTxid: txid,
+            network
+          } satisfies WocUtxoResponse;
+        });
       }
     });
   }
@@ -1156,13 +1142,9 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocBalancePayload;
         return getAddressUnconfirmedBalance(p.network, p.address, opts);
       }
-      case WOC_MSG.UTXOS_CONFIRMED: {
+      case WOC_MSG.UTXOS_ALL: {
         const p = payload as WocUtxosPayload;
-        return getAddressConfirmedUtxos(p.network, p.address, opts);
-      }
-      case WOC_MSG.UTXOS_UNCONFIRMED: {
-        const p = payload as WocUtxosPayload;
-        return getAddressUnconfirmedUtxos(p.network, p.address, opts);
+        return getAddressUnspentAll(p.network, p.address, opts);
       }
       case WOC_MSG.HISTORY_CONFIRMED: {
         const p = payload as WocHistoryPayload;
@@ -1231,8 +1213,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     for (const type of [
       WOC_MSG.BALANCE_CONFIRMED,
       WOC_MSG.BALANCE_UNCONFIRMED,
-      WOC_MSG.UTXOS_CONFIRMED,
-      WOC_MSG.UTXOS_UNCONFIRMED,
+      WOC_MSG.UTXOS_ALL,
       WOC_MSG.HISTORY_CONFIRMED,
       WOC_MSG.HISTORY_UNCONFIRMED,
       WOC_MSG.TX_OBSERVATION,

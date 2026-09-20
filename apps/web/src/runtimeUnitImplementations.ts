@@ -33,7 +33,6 @@ import { msfilePlugin, msfileSetup } from "@keymaster/plugin-msfile";
 import { satSubscriptionPlugin, satSubscriptionSetup } from "@keymaster/plugin-sat-subscription";
 import { windowP2pPlugin, windowP2pSetup } from "@keymaster/plugin-window-p2p";
 import { p2pkhPlugin, p2pkhSetup } from "@keymaster/plugin-p2pkh";
-import { jungleBusPlugin, jungleBusSetup } from "@keymaster/plugin-junglebus";
 import { pokerPlugin, pokerSetup } from "@keymaster/plugin-poker";
 import { protocolPlugin, protocolSetup } from "@keymaster/plugin-protocol";
 import {
@@ -64,7 +63,6 @@ const WEB_WINDOW_SETUP_BY_PLUGIN_ID: ReadonlyMap<string, PluginSetup> = new Map(
   [satSubscriptionPlugin.id, satSubscriptionSetup],
   [windowP2pPlugin.id, windowP2pSetup],
   [p2pkhPlugin.id, p2pkhSetup],
-  [jungleBusPlugin.id, jungleBusSetup],
   [pokerPlugin.id, pokerSetup],
   [protocolPlugin.id, protocolSetup],
   [storagePlatformPlugin.id, storagePlatformSetup],

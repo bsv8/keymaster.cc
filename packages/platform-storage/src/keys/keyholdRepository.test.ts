@@ -79,7 +79,9 @@ function privateKey(value: number): Uint8Array {
   return bytes;
 }
 
-describe("KeyHold repository", () => {
+// KDF 迭代（600k）在批量并发运行时可能超过默认 5s；这里给整个套件 15s
+// 上限，避免把“慢”误报为“失败”。
+describe("KeyHold repository", { timeout: 15_000 }, () => {
   it("按公钥文件名创建、列出、读取、解锁和导出单 Key", async () => {
     const provider = new MemoryBucketProvider();
     const repository = createKeyHoldRepository(provider);

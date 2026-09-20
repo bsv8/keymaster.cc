@@ -10,6 +10,7 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
   config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
+  config?.testnet.trackingKeyPrivateKeyHex.clear();
 }
 
 /** 依赖测试失败也执行；清理不确定时保留 lease，让下一轮 setup 收口。 */

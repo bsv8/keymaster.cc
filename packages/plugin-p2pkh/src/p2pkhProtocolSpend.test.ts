@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import type { KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
+import { calculateP2pkhBalanceBreakdown } from "./p2pkhService.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, resourceIdFor } from "./storage/p2pkhStateRepository.js";
 import { createMemoryOwnerFileStore } from "./storage/testSupport/memoryOwnerFileStore.js";
 import { calcTxidFromRawTxHex, deriveP2pkhAddress } from "./p2pkhSigner.js";
@@ -25,6 +26,7 @@ function makeClaimStore() {
     network: "main" | "test";
     txid: string;
     vout: number;
+    value?: number;
     state: ClaimState;
     observation?: "unconfirmed" | "confirmed";
   }>();
@@ -36,7 +38,7 @@ function makeClaimStore() {
       resourceId: string;
       publicKeyHex: string;
       network: "main" | "test";
-      inputs: Array<{ txid: string; vout: number }>;
+      inputs: Array<{ txid: string; vout: number; value?: number }>;
     }) {
       const claimIds: string[] = [];
       for (const u of input.inputs) {
@@ -53,6 +55,7 @@ function makeClaimStore() {
           network: input.network,
           txid: u.txid,
           vout: u.vout,
+          ...(u.value === undefined ? {} : { value: u.value }),
           state: "claimed"
         });
         claimIds.push(id);
@@ -229,6 +232,54 @@ describe("createP2pkhProtocolSpendService", () => {
     expect(claimStore.list()[0]?.resourceId).toBe(resourceIdFor("main"));
     expect(preview.inputClaimIds).toHaveLength(1);
     expect(preview.inputClaimIds?.[0]).toContain(resourceIdFor("main"));
+  });
+
+  it("records the verified input value on protocol claims so balance deducts it immediately", async () => {
+    const { stateRepository } = await openIntegrationRepository();
+    const txid = "12".repeat(32);
+    const inputValue = 10_000;
+    const service = createP2pkhProtocolSpendService({
+      vault: {
+        status: () => "unlocked",
+        createActiveKeyCrypto: async () => ({
+          signDigest: async () => ({
+            publicKeyHex: INTEGRATION_OWNER.publicKeyHex,
+            format: "der" as const,
+            signature: new Uint8Array(64).buffer
+          })
+        })
+      } as never,
+      woc: { broadcast: vi.fn(async () => ({ accepted: true as const, canonicalTxid: txid, providerReturnedTxidRaw: txid, providerReturnedTxidNormalized: txid, txidIntegrity: "exact" as const })) } as never,
+      claimStore: {
+        tryClaimInputs: async (input) => stateRepository.tryClaimInputs(input),
+        releaseLocalInputClaims: async (input) => stateRepository.releaseLocalInputClaims(input.claimIds)
+      },
+      getKeyForOwner: async () => ({ publicKeyHex: INTEGRATION_OWNER.publicKeyHex })
+    });
+
+    await service.prepare({
+      ownerPublicKeyHex: INTEGRATION_OWNER.publicKeyHex,
+      network: "main",
+      inputs: [{ txid, vout: 0, value: inputValue, address: INTEGRATION_OWNER.address }],
+      outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
+      feeRateSatoshisPerKb: 1,
+      changeAddress: INTEGRATION_OWNER.address
+    });
+
+    const claims = await stateRepository.listLocalInputClaimsByResource(resourceIdFor("main"));
+    const protocolClaim = claims.find((row) => row.txid === txid);
+    expect(protocolClaim?.value).toBe(inputValue);
+    // 协议 prepare 后余额必须立即扣除 claim 金额（spendable 归零）。
+    const breakdown = calculateP2pkhBalanceBreakdown({
+      snapshot: {
+        available: true,
+        syncedAt: "t",
+        items: [{ txid, vout: 0, value: inputValue, height: 1, status: "confirmed", isSpentInMempoolTx: false }]
+      },
+      claims
+    });
+    expect(breakdown.pendingInputClaims).toBe(inputValue);
+    expect(breakdown.spendable).toBe(0);
   });
 
   it("rejects protocol spend when transfer has already claimed the same outpoint, and vice versa", async () => {

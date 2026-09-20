@@ -21,7 +21,6 @@
     "@keymaster/plugin-importer-hex": "*",
     "@keymaster/plugin-importer-json-file": "*",
     "@keymaster/plugin-importer-wif": "*",
-    "@keymaster/plugin-junglebus": "*",
     "@keymaster/plugin-key-import": "*",
     "@keymaster/plugin-message": "*",
     "@keymaster/plugin-msfile": "*",

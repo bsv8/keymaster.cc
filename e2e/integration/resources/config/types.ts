@@ -52,6 +52,14 @@ export interface E2ESatSubscriptionConfig extends E2ESatSubscriptionPageConfig {
 export interface E2ETestnetSeed {
   /** 只允许 testnet 资金管理器显式 read() 一次性使用。 */
   readonly privateKeyHex: SecretString;
+  /**
+   * 固定的可追踪测试 Key（仓库外 key01.hex）。
+   *
+   * 它由页面正式导入入口成为 active Key，seed 打款和页面回款都落在同一
+   * 地址上，便于跨轮追踪和失败回收；私钥仍只在 Node Resource 与页面 Vault
+   * 内短期存在，不进入报告。
+   */
+  readonly trackingKeyPrivateKeyHex: SecretString;
 }
 
 /** loader 的完整结果；不含原始 JSON，不提供 toJSON 展开路径。 */

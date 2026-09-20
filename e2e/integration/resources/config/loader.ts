@@ -139,11 +139,11 @@ function parseSatSubscription(value: Record<string, unknown>): E2ESatSubscriptio
   };
 }
 
-function parseSeed(text: string): SecretString {
+function parseSeed(text: string, filename: string): SecretString {
   const normalized = text.trim();
-  if (!/^[0-9a-f]{64}$/iu.test(normalized)) reject("seed-format-invalid", "seed-key.hex 必须是 64 位十六进制私钥");
+  if (!/^[0-9a-f]{64}$/iu.test(normalized)) reject("seed-format-invalid", `${filename} 必须是 64 位十六进制私钥`);
   const scalar = BigInt(`0x${normalized}`);
-  if (scalar <= 0n || scalar >= SECP256K1_ORDER) reject("seed-scalar-invalid", "seed-key.hex 不是合法 secp256k1 私钥标量");
+  if (scalar <= 0n || scalar >= SECP256K1_ORDER) reject("seed-scalar-invalid", `${filename} 不是合法 secp256k1 私钥标量`);
   return new SecretString(normalized.toLowerCase());
 }
 
@@ -157,7 +157,11 @@ export async function loadE2EConfig(options: { readonly workspaceRoot?: string; 
   const directory = await checkDirectory(options.configDir ?? process.env.KEYMASTER_E2E_CONFIG_DIR ?? DEFAULT_CONFIG_DIR, options.workspaceRoot ?? process.cwd());
   const s3 = parseS3(parseObject(await readPrivateFile(directory, "s3.json"), "s3.json"));
   const satsubscription = parseSatSubscription(parseObject(await readPrivateFile(directory, "satsubscription.json"), "satsubscription.json"));
-  const testnet = { privateKeyHex: parseSeed(await readPrivateFile(directory, "seed-key.hex")) };
+  const testnet = {
+    privateKeyHex: parseSeed(await readPrivateFile(directory, "seed-key.hex"), "seed-key.hex"),
+    // 固定导入 Key：收币与回款都落在同一地址，方便跨轮追踪和失败回收。
+    trackingKeyPrivateKeyHex: parseSeed(await readPrivateFile(directory, "key01.hex"), "key01.hex"),
+  };
   return { directory, s3, satsubscription, testnet };
 }
 

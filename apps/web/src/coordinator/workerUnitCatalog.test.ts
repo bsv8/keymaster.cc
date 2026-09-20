@@ -9,7 +9,7 @@ import {
 describe("Coordinator Worker unit catalog", () => {
   it("keeps migrated product, unit, task and final-I/O identities aligned", () => {
     expect(validateCoordinatorWorkerUnitCatalog()).toEqual([]);
-    expect(COORDINATOR_WORKER_UNIT_CATALOG).toHaveLength(12);
+    expect(COORDINATOR_WORKER_UNIT_CATALOG).toHaveLength(11);
     expect(COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === "storage.coordinator-worker")).toMatchObject({
       productId: "storage",
       scopeKind: "storage",

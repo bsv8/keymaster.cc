@@ -32,6 +32,7 @@ async function withConfigDirectory(run: (directory: string) => Promise<void>): P
       testnetApiBaseUrl: "",
     }));
     await writeRestrictedFile(path.join(directory, "seed-key.hex"), `01${"0".repeat(62)}\n`);
+    await writeRestrictedFile(path.join(directory, "key01.hex"), `02${"0".repeat(62)}\n`);
     await run(directory);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -43,6 +44,7 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
   config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
+  config?.testnet.trackingKeyPrivateKeyHex.clear();
 }
 
 /**
@@ -58,9 +60,17 @@ test(`${GATE_ID}：仓库外配置和秘密容器通过安全校验`, async () =
       expect(config.s3.endpoint).toBe("https://s3.example.test");
       expect(String(config.s3.secretAccessKey)).toBe("[REDACTED_SECRET]");
       expect(String(config.testnet.privateKeyHex)).toBe("[REDACTED_SECRET]");
+      expect(String(config.testnet.trackingKeyPrivateKeyHex)).toBe("[REDACTED_SECRET]");
     } finally {
       clearSecrets(config);
     }
+  });
+});
+
+test(`${GATE_ID}：缺少可追踪测试 Key 时在读取资源前 fail-closed`, async () => {
+  await withConfigDirectory(async (directory) => {
+    await rm(path.join(directory, "key01.hex"));
+    await expect(loadE2EConfig({ workspaceRoot: process.cwd(), configDir: directory })).rejects.toMatchObject({ code: "config-file-missing" });
   });
 });
 

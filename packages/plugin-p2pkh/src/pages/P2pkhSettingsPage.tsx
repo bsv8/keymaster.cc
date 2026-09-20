@@ -1,16 +1,14 @@
 // packages/plugin-p2pkh/src/pages/P2pkhSettingsPage.tsx
-// P2PKH 设置（硬切换 001）：
-//   - 设置项从 `allowUnconfirmed` 改为 `includeTestnet`。
-//   - 缺省 `false`：P2PKH 默认不包含 testnet 货币（资产、转账、widget、页面按钮、确认同步）。
-//   - 存储位置由 Coordinator 平台 K-V 统一承载。
-//   - 保存时调用 `service.applyGlobalSettings`：由 service 负责刷新进程内
-//     缓存、通知订阅者、并在 false → true 时补齐 testnet 资源。
+// P2PKH 设置：
+//   - includeTestnet：是否把 testnet 资产纳入运行范围；
+//   - BSV 矿工费率三档。
+//   - 已删除“确认同步供应商选择”：P2PKH 历史与 UTXO 只有 WoC 一个数据源。
 
 import { useEffect, useState } from "react";
 import { Select, TextInput } from "@keymaster/ui";
 import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
-import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
+import { P2PKH_COORDINATOR_CONTROL_CAPABILITY } from "@keymaster/contracts";
 import { resolveP2pkhFeeRateSatoshisPerKb, type P2pkhFeeRateTier, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 
@@ -36,7 +34,6 @@ export function P2pkhSettingsPage() {
     Object.entries(resolveP2pkhFeeRateSatoshisPerKb(DEFAULT_SETTINGS)).map(([tier, rate]) => [tier, String(rate)])
   ) as Record<P2pkhFeeRateTier, string>);
   const [error, setError] = useState<string | null>(null);
-  const [providers, setProviders] = useState<P2pkhProviderRegistrySnapshot | null>(null);
 
   useEffect(() => {
     setSettings(resourceSettings);
@@ -44,30 +41,6 @@ export function P2pkhSettingsPage() {
       Object.entries(resolveP2pkhFeeRateSatoshisPerKb(resourceSettings)).map(([tier, rate]) => [tier, String(rate)])
     ) as Record<P2pkhFeeRateTier, string>);
   }, [resourceSettings]);
-
-  useEffect(() => {
-    if (!coordinator) return;
-    let alive = true;
-    void coordinator.p2pkhProvidersGet().then((result) => {
-      if (alive && result.status === "ok") setProviders(result.value);
-    });
-    const off = coordinator.subscribeTopic("p2pkh.providers", (event: { type?: string; snapshot?: P2pkhProviderRegistrySnapshot }) => {
-      if (alive && event.type === "p2pkh.providers.changed" && event.snapshot) setProviders(event.snapshot);
-    });
-    return () => { alive = false; off(); };
-  }, [coordinator]);
-
-  async function updateProvider(network: "main" | "test", field: "syncProviderId" | "broadcastProviderId", value: string) {
-    if (!providers || !coordinator) return;
-    const selection = { ...providers.selection[network], [field]: value || null };
-    const result = await coordinator.p2pkhProvidersUpdate(network, selection, providers.selection.generation);
-    if (result.status !== "accepted" && result.status !== "ok") {
-      setError("message" in result ? result.message : t("p2pkh.settings.provider.retry", { defaultValue: "Provider settings changed; reload and try again." }));
-      return;
-    }
-    const next = await coordinator.p2pkhProvidersGet();
-    if (next.status === "ok") setProviders(next.value);
-  }
 
   async function applySettings(next: P2pkhGlobalSettings) {
     if (!service) return;
@@ -147,22 +120,6 @@ export function P2pkhSettingsPage() {
             hint={t("p2pkh.unit.satsPerKb", { defaultValue: "sats/kB" })}
           />
         ))}
-      </section>
-      <section className="p2pkh-settings__providers" aria-labelledby="p2pkh-providers-title">
-        <h3 id="p2pkh-providers-title">{t("p2pkh.settings.providers", { defaultValue: "Confirmed sync and broadcast providers" })}</h3>
-        <p>{t("p2pkh.settings.providersHint", { defaultValue: "Provider choices are persisted by the Coordinator. Changing one revokes the current sync generation." })}</p>
-        {providers ? (["main", "test"] as const).map((network) => {
-          const selectedSync = providers.selection[network].syncProviderId;
-          const selectedBroadcast = providers.selection[network].broadcastProviderId;
-          const syncProviders = providers.syncProviders.filter((provider) => provider.supportedNetworks.includes(network));
-          const broadcastProviders = providers.broadcastProviders.filter((provider) => provider.supportedNetworks.includes(network));
-          const syncUnavailable = Boolean(selectedSync && !syncProviders.some((provider) => provider.id === selectedSync));
-          const broadcastUnavailable = Boolean(selectedBroadcast && !broadcastProviders.some((provider) => provider.id === selectedBroadcast));
-          const syncOptions = [{ label: { key: "p2pkh.settings.provider.none", fallback: "Not configured" }, value: "" }, ...(syncUnavailable ? [{ label: { key: "p2pkh.settings.provider.unavailable", fallback: `Unavailable (selected: ${selectedSync})` }, value: selectedSync! }] : []), ...syncProviders.map((provider) => ({ label: { key: provider.id, fallback: provider.label }, value: provider.id }))];
-          const broadcastOptions = [{ label: { key: "p2pkh.settings.provider.none", fallback: "Not configured" }, value: "" }, ...(broadcastUnavailable ? [{ label: { key: "p2pkh.settings.provider.unavailable", fallback: `Unavailable (selected: ${selectedBroadcast})` }, value: selectedBroadcast! }] : []), ...broadcastProviders.map((provider) => ({ label: { key: provider.id, fallback: provider.label }, value: provider.id }))];
-          return <div key={network} className="p2pkh-settings__provider-network"><h4>{t(`p2pkh.network.${network}`, { defaultValue: network })}</h4><Select label={t("p2pkh.settings.provider.confirmed", { defaultValue: "Confirmed provider" })} value={selectedSync ?? ""} options={syncOptions} onChange={(event) => void updateProvider(network, "syncProviderId", event.currentTarget.value)} /><Select label={t("p2pkh.settings.provider.broadcast", { defaultValue: "Broadcast provider" })} value={selectedBroadcast ?? ""} options={broadcastOptions} onChange={(event) => void updateProvider(network, "broadcastProviderId", event.currentTarget.value)} />{syncUnavailable ? <p role="alert">{t("p2pkh.settings.provider.blocked", { defaultValue: "Confirmed sync is blocked: selected provider is unavailable ({{provider}}).", provider: selectedSync })}</p> : null}{broadcastUnavailable ? <p role="alert">{t("p2pkh.settings.provider.broadcastBlocked", { defaultValue: "Broadcast is blocked: selected provider is unavailable ({{provider}}).", provider: selectedBroadcast })}</p> : null}</div>;
-        }) : <p>{t("p2pkh.settings.providersLoading", { defaultValue: "Loading providers…" })}</p>}
-        <p>{t("p2pkh.settings.providerConfigHint", { defaultValue: "Provider endpoint and rate-limit settings are managed in each provider's own settings page." })}</p>
       </section>
       {error ? <p className="p2pkh-settings__error">{error}</p> : null}
     </div>

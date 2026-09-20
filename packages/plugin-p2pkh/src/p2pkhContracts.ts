@@ -12,7 +12,7 @@
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import { defineCapability } from "webloom-framework";
-import type { BsvNetwork, KeyIdentity, P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
+import type { BsvNetwork, KeyIdentity } from "@keymaster/contracts";
 
 /** P2PKH 资产 id。设计缘由：bsv 和 bsvtest 是同一类资产的不同网络，不是不同 provider。 */
 export type P2pkhAssetId = "bsv" | "bsvtest";
@@ -69,48 +69,37 @@ export interface P2pkhKeyResource {
   generation: number;
 }
 
-export interface P2pkhTransactionFact {
+/**
+ * 链上历史记录（历史同步的唯一产物）。
+ *
+ * 设计缘由（2026-09-20 解耦）：
+ *   - 历史同步只保存 WoC history 返回的 txid / height / fee 等元数据；
+ *   - 不再下载 raw tx、不再派生 owned outpoint、UTXO、余额或花费关系；
+ *   - raw transaction 只在打开详情页时按 txid 懒加载并临时解析。
+ */
+export interface P2pkhHistoryRecord {
   id: string;
   resourceId: string;
   publicKeyHex: string;
   network: BsvNetwork;
   address: string;
   txid: string;
-  rawTxHex: string;
-  blockHeight?: number;
-  blockHash?: string;
-  blockTime?: number;
-  inputOutpointKeys: string[];
-  inputs: Array<{ txid: string; vout: number; outpointKey: string }>;
-  ownedOutpointKeys: string[];
-  ownedOutputs: Array<{ vout: number; value: number; scriptHex: string }>;
-  firstConfirmedAt: string;
-  lastConfirmedAt: string;
+  /** 确认高度；未确认记录为 0。 */
+  height: number;
+  /** WoC history 返回的手续费（聪）；缺失时省略。 */
+  fee?: number;
+  /** 本地首次写入该记录的时间。 */
+  firstSeenAt: string;
 }
 
-export type P2pkhOwnedOutpointChainState = "available" | "spent";
-
-export interface P2pkhOwnedOutpointProjection {
-  id: string;
-  resourceId: string;
-  publicKeyHex: string;
-  network: BsvNetwork;
-  address: string;
-  txid: string;
-  vout: number;
-  outpointKey: string;
-  value: number;
-  scriptHex: string;
-  chainState: P2pkhOwnedOutpointChainState;
-  spentByTxid?: string;
-  createdBlockHeight?: number;
-  spentBlockHeight?: number;
-  updatedAt: string;
-}
-
+/**
+ * 本地交易的链上收敛状态。
+ *
+ * 只按“相同 txid”收敛：历史里看到同一 txid 才标 chain-confirmed。
+ * 不再根据输入关系派生 conflicted、后代失效或本地交易 DAG。
+ */
+export type P2pkhLocalChainResolution = "unresolved" | "chain-confirmed";
 export type P2pkhLocalLifecycleState = "prepared" | "submitting" | "local-confirmed" | "isolated";
-export type P2pkhLocalChainResolution = "unresolved" | "chain-confirmed" | "conflicted";
-export type P2pkhLocalOutpointState = "unavailable" | "available" | "claimed" | "isolated" | "invalidated";
 
 export interface P2pkhBroadcastAttempt {
   id: string;
@@ -135,27 +124,13 @@ export interface P2pkhLocalTransaction {
   chainResolution: P2pkhLocalChainResolution;
   inputOutpointKeys: string[];
   ownOutputs: Array<{ vout: number; value: number; scriptHex: string }>;
-  parentTxids: string[];
   createdAt: string;
   updatedAt: string;
   isolationReason?: string;
-  confirmedFactId?: string;
+  /** 命中历史记录后写入的 P2pkhHistoryRecord.id。 */
+  confirmedHistoryId?: string;
   resolvedAt?: string;
-  conflictSourceTxids?: string[];
   attempts: P2pkhBroadcastAttempt[];
-}
-
-export interface P2pkhLocalOutpoint {
-  id: string;
-  resourceId: string;
-  txid: string;
-  vout: number;
-  value: number;
-  scriptHex: string;
-  submissionId: string;
-  state: P2pkhLocalOutpointState;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export type P2pkhLocalInputClaimV10State = "active" | "isolated" | "released" | "confirmed";
@@ -178,14 +153,6 @@ export interface P2pkhLocalInputClaimV10 {
 export interface P2pkhTransactionSyncState {
   id: string;
   resourceId: string;
-  completeHeadTxid?: string;
-  inProgressProviderId?: string;
-  inProgressProviderGeneration?: number;
-  inProgressCursor?: string;
-  runHeadTxid?: string;
-  /** Transaction ids observed by the current resumable run for reorg audit. */
-  runObservedTxids?: string[];
-  runId?: string;
   pagesSynced: number;
   transactionsSynced: number;
   lastAttemptAt?: string;
@@ -193,22 +160,32 @@ export interface P2pkhTransactionSyncState {
   lastError?: string;
 }
 
+/**
+ * 余额明细（只由 UTXO 快照 + 本地占用现算）。
+ *
+ * 中文说明：
+ *   - confirmed：WoC 快照中已确认且未被内存池花费的输出合计；
+ *   - unconfirmed：快照中未确认且未被内存池花费的输出合计；
+ *   - spendable：confirmed + unconfirmed 再扣除本地 input claims 与协议保护
+ *     outpoint 后的可花费合计（余额 = spendable）；
+ *   - pendingInputClaims：本地 active/isolated input claim 占用的金额。
+ */
 export interface P2pkhBalanceBreakdown {
-  blockConfirmed: number;
-  localSpendable: number;
-  localConfirmedChange: number;
+  confirmed: number;
+  unconfirmed: number;
+  spendable: number;
   pendingInputClaims: number;
-  isolated: number;
 }
 
 /**
  * P2PKH 余额（硬切换 009 / 001）。
- * 设计缘由：余额不再是表、不是持久化实体，只是 service 基于当前 UTXO 快照
- * 的实时计算结果。WOC 当前返回的未花费 UTXO 集合是余额与可选输入的唯一链上
- * 真值；`confirmed / unconfirmed / spendable` 不再作为余额字段。
+ * 设计缘由：余额不再是表、不是持久化实体，只是基于 Coordinator Worker
+ * 内存 UTXO 快照的实时计算结果。快照不可用时是“未知/不可用”，不是 0。
  */
 export interface P2pkhBalance {
   total: number;
+  /** 冷启动尚未取得任何可信快照；此时 total 无意义。 */
+  available?: boolean;
   breakdown?: P2pkhBalanceBreakdown;
 }
 
@@ -421,8 +398,6 @@ export interface P2pkhTransferPreview {
 export type P2pkhTransferResultStatus =
   | "local-confirmed"
   | "isolated"
-  | "conflicted"
-  | "chain-confirmed"
   | "not-dispatched";
 
 export interface P2pkhTransferResult {
@@ -432,6 +407,20 @@ export interface P2pkhTransferResult {
   error?: string;
   submissionId: string;
   localInputClaimIds: string[];
+}
+
+/**
+ * 交易详情（详情页懒加载解析结果，只用于展示）。
+ *
+ * 中文说明：inputs/outputs 来自打开详情时按 txid 临时获取的 raw transaction；
+ * 不落盘、不参与余额/选币/历史同步。
+ */
+export interface P2pkhTransactionDetail {
+  txid: string;
+  network: BsvNetwork;
+  inputs: Array<{ txid: string; vout: number; outpointKey: string }>;
+  outputs: Array<{ vout: number; value: number; scriptHex: string }>;
+  sizeBytes: number;
 }
 
 /** P2PKH 服务契约：plugin-p2pkh 内部使用，对应 capability "p2pkh.service"。 */
@@ -484,21 +473,27 @@ export interface P2pkhService {
   isAssetEnabled(assetId: P2pkhAssetId): boolean;
   /** 不排除 protected outpoint 的原始 UTXO 读口，仅供协议级内部使用。 */
   listUtxosRaw?(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
+  /**
+   * UTXO 快照状态读口：`available=false` 表示尚未取得可信快照（余额未知）。
+   * 返回的 utxos 已排除 `isSpentInMempoolTx=true` 的输出。
+   */
+  getUtxosStatus?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; syncedAt?: string; utxos: P2pkhUtxo[] }>;  /** 主动刷新 Coordinator Worker 内存中的 UTXO 快照；失败时保留旧快照。 */
+  refreshUtxos?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; syncedAt?: string }>;
   listLocalInputClaims(resourceId?: string, limit?: number): Promise<P2pkhLocalInputClaim[]>;
 
-  /** v10 fact/projection views. Optional keeps the public capability compatible with token consumers. */
-  listTransactionFacts?(filter?: P2pkhUtxoFilter): Promise<P2pkhTransactionFact[]>;
-  listOwnedOutpoints?(filter?: P2pkhUtxoFilter): Promise<P2pkhOwnedOutpointProjection[]>;
-  listTransactionFactsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhTransactionFact>>;
-  listOwnedOutpointsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhOwnedOutpointProjection>>;
-  listOwnedOutpointValues?(resourceId: string, outpointKeys: string[]): Promise<Record<string, number>>;
+  /** 链上历史（只有 txid/height/fee 元数据，不做任何派生）。 */
+  listHistory?(filter?: P2pkhUtxoFilter): Promise<P2pkhHistoryRecord[]>;
+  listHistoryPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhHistoryRecord>>;
   listLocalTransactions?(filter?: P2pkhUtxoFilter): Promise<P2pkhLocalTransaction[]>;
-  listLocalOutpoints?(filter?: P2pkhUtxoFilter): Promise<P2pkhLocalOutpoint[]>;
   listLocalTransactionsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalTransaction>>;
-  listLocalOutpointsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalOutpoint>>;
   listLocalInputClaimsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalInputClaim>>;
   getBalanceBreakdown?(network?: BsvNetwork): Promise<P2pkhBalanceBreakdown>;
-  getProviderSnapshot?(): P2pkhProviderRegistrySnapshot | undefined;
+  /**
+   * 详情页懒加载：按 txid 从 WoC 取 raw transaction 并临时解析。
+   *
+   * 解析结果只用于展示，不写任何派生状态、不进入选币或余额。
+   */
+  getTransactionDetail?(input: { resourceId: string; network: BsvNetwork; txid: string }): Promise<P2pkhTransactionDetail | undefined>;
 
   allocateUtxos(request: UtxoAllocationRequest): Promise<UtxoAllocation>;
 

@@ -51,9 +51,10 @@ export function P2pkhBalanceWidget() {
   );
 
   const stale = status === "failed" || status === "rate-limited";
+  // 快照不可用（冷启动/刷新失败）时显示“未知”，绝不显示 0。
   const showAmount = (b: P2pkhBalance | null, network: "main" | "test") =>
-    b ? formatSatsWithPrice(b.total, price, { locale, network }) : "—";
-  const breakdown = (b: P2pkhBalance | null) => b?.breakdown ? <dl className="home-widget__breakdown"><dt>Block confirmed</dt><dd>{formatSats(b.breakdown.blockConfirmed)}</dd><dt>Isolated</dt><dd>{formatSats(b.breakdown.isolated)}</dd></dl> : null;
+    b && b.available !== false ? formatSatsWithPrice(b.total, price, { locale, network }) : "—";
+  const breakdown = (b: P2pkhBalance | null) => b?.breakdown ? <dl className="home-widget__breakdown"><dt>Confirmed</dt><dd>{formatSats(b.breakdown.confirmed)}</dd><dt>Pending claims</dt><dd>{formatSats(b.breakdown.pendingInputClaims)}</dd></dl> : null;
   const statusText = computeStatusText(readiness, status, t);
 
   return (

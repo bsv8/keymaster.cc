@@ -1,7 +1,6 @@
 import type {
   P2pkhLocalTransaction,
-  P2pkhOwnedOutpointProjection,
-  P2pkhTransactionFact
+  P2pkhHistoryRecord
 } from "../p2pkhContracts.js";
 import { parseP2pkhTransaction, type ParsedP2pkhTransaction } from "../p2pkhTransactionParser.js";
 
@@ -16,11 +15,11 @@ export interface LocalTransactionRecord {
   rawTxHex: string;
   inputOutpointKeys: string[];
   outputs: Array<{ vout: number; value: number; scriptHex: string }>;
-  fact?: P2pkhTransactionFact;
+  history?: P2pkhHistoryRecord;
   local?: P2pkhLocalTransaction;
 }
 
-/** Parse only bytes already persisted in the local fact/overlay. */
+/** Parse only bytes already persisted in the local record. */
 export function parseStoredTransaction(rawTxHex: string | undefined, txid: string): ParsedP2pkhTransaction | undefined {
   if (!rawTxHex) return undefined;
   try {
@@ -32,35 +31,6 @@ export function parseStoredTransaction(rawTxHex: string | undefined, txid: strin
 
 export function sumOutputs(outputs: Array<{ value: number }>): number {
   return outputs.reduce((sum, output) => sum + output.value, 0);
-}
-
-export function inputAmount(
-  resourceId: string,
-  inputOutpointKeys: string[],
-  inputValuesByResource: Record<string, Record<string, number>>
-): { value?: number; complete: boolean } {
-  const values = inputValuesByResource[resourceId] ?? {};
-  if (inputOutpointKeys.some((key) => values[key] === undefined)) return { complete: false };
-  return { value: inputOutpointKeys.reduce((sum, key) => sum + values[key]!, 0), complete: true };
-}
-
-/**
- * Return the balance represented by the local projection at the end of a
- * block. The local fact does not contain an intra-block transaction index,
- * so this must not be presented as the balance immediately after a specific
- * transaction.
- */
-export function balanceAtBlock(
-  network: P2pkhNetwork,
-  blockHeight: number | undefined,
-  owned: P2pkhOwnedOutpointProjection[],
-  complete: boolean
-): number | undefined {
-  if (blockHeight === undefined || !complete) return undefined;
-  return owned
-    .filter((row) => row.network === network && row.createdBlockHeight !== undefined && row.createdBlockHeight <= blockHeight)
-    .filter((row) => row.spentBlockHeight === undefined || row.spentBlockHeight > blockHeight)
-    .reduce((sum, row) => sum + row.value, 0);
 }
 
 export function listPath(network: P2pkhNetwork, page = 1, view: P2pkhWalletView = "transactions"): string {

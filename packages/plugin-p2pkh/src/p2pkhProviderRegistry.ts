@@ -1,6 +1,5 @@
 import type {
   BsvNetwork,
-  P2pkhConfirmedDataProvider,
   P2pkhProviderDescriptor,
   P2pkhProviderRegistry,
   P2pkhTransactionBroadcastProvider,
@@ -19,9 +18,13 @@ function assertDescriptor(descriptor: P2pkhProviderDescriptor): void {
   }
 }
 
-/** Coordinator-owned in-memory registry. A duplicate id is always fatal. */
+/**
+ * Coordinator-owned in-memory registry；只剩广播 Provider。
+ *
+ * 确认同步供应商选择层已删除：P2PKH 历史与 UTXO 只有 WoC 一个来源，
+ * 直接调用 WocService，不再经过 registry。
+ */
 export function createP2pkhProviderRegistry(): P2pkhProviderRegistry {
-  const confirmed = new Map<string, P2pkhConfirmedDataProvider>();
   const broadcast = new Map<string, P2pkhTransactionBroadcastProvider>();
 
   function register<T extends { descriptor: P2pkhProviderDescriptor }>(
@@ -40,19 +43,10 @@ export function createP2pkhProviderRegistry(): P2pkhProviderRegistry {
     network === undefined || descriptor.supportedNetworks.includes(network);
 
   return {
-    registerConfirmedProvider(provider) { register(confirmed, provider, "confirmed"); },
-    unregisterConfirmedProvider(providerId) { confirmed.delete(providerId); },
     registerBroadcastProvider(provider) { register(broadcast, provider, "broadcast"); },
     unregisterBroadcastProvider(providerId) { broadcast.delete(providerId); },
-    listConfirmedProviders(network) {
-      return [...confirmed.values()].filter((p) => supports(p.descriptor, network)).map((p) => cloneDescriptor(p.descriptor));
-    },
     listBroadcastProviders(network) {
       return [...broadcast.values()].filter((p) => supports(p.descriptor, network)).map((p) => cloneDescriptor(p.descriptor));
-    },
-    getConfirmedProvider(id, network) {
-      const provider = confirmed.get(id);
-      return provider && supports(provider.descriptor, network) ? provider : undefined;
     },
     getBroadcastProvider(id, network) {
       const provider = broadcast.get(id);

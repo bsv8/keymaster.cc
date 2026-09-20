@@ -70,15 +70,26 @@ export interface WocBalanceResponse {
   unconfirmed: number;
 }
 
-/** UTXO 响应。 */
+/**
+ * UTXO 响应（`unspent/all` 单请求归一化结果）。
+ *
+ * 字段语义（中文说明）：
+ *   - txid：交易 ID（canonical，小写 hex）；
+ *   - vout：输出序号；
+ *   - value：聪数量；
+ *   - height：区块高度；未确认时为 0；
+ *   - status：confirmed（已确认）或 unconfirmed（未确认）；
+ *   - isSpentInMempoolTx：是否已被内存池交易花费；true 的输出不可花费；
+ *   - script：锁定脚本（Provider 提供时）。
+ */
 export interface WocUtxoResponse {
   txid: string;
   vout: number;
   value: number;
   height: number;
+  status: WocObservation;
+  isSpentInMempoolTx: boolean;
   script?: string;
-  isSpentInMempoolTx?: boolean;
-  observation?: WocObservation;
   canonicalTxid?: string;
   network?: BsvNetwork;
 }
@@ -164,13 +175,15 @@ export interface WocService {
     options?: WocRequestOptions
   ): Promise<WocBalanceResponse>;
 
-  getAddressConfirmedUtxos(
-    network: BsvNetwork,
-    address: string,
-    options?: WocRequestOptions
-  ): Promise<WocUtxoResponse[]>;
-
-  getAddressUnconfirmedUtxos(
+  /**
+   * 单次请求返回地址的全部未花费输出（confirmed + unconfirmed + mempool 标记）。
+   *
+   * 设计缘由：P2PKH 的 UTXO 真值只有这一个来源；不再分别请求
+   * `confirmed/unspent` 与 `unconfirmed/unspent` 再在业务层合并。
+   * Provider 返回的 `status` 与 `isSpentInMempoolTx` 必须保留，不能在这里
+   * 猜测或丢掉。
+   */
+  getAddressUnspentAll(
     network: BsvNetwork,
     address: string,
     options?: WocRequestOptions
@@ -187,18 +200,6 @@ export interface WocService {
     addresses: string[],
     options?: WocRequestOptions
   ): Promise<WocBalanceResponse[]>;
-
-  getAddressesConfirmedUtxos(
-    network: BsvNetwork,
-    addresses: string[],
-    options?: WocRequestOptions
-  ): Promise<WocUtxoResponse[]>;
-
-  getAddressesUnconfirmedUtxos(
-    network: BsvNetwork,
-    addresses: string[],
-    options?: WocRequestOptions
-  ): Promise<WocUtxoResponse[]>;
 
   listAddressConfirmedHistory(
     network: BsvNetwork,

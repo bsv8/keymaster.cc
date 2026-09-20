@@ -225,8 +225,8 @@ function P2pkhTransferWidgetInner({
             </p>
           ) : null}
           {result.error ? <p className="p2pkh-transfer-widget__error">{result.error}</p> : null}
-          {result.status === "local-confirmed" ? <p>{t("p2pkh.transfer.result.localConfirmed", { defaultValue: "广播供应商明确接受，找零已在本地可花费余额中生效；等待确认事实最终裁决。" })}</p> : null}
-          {result.status === "isolated" || result.status === "conflicted" ? <p>{t("p2pkh.transfer.result.isolated", { defaultValue: "交易分支已隔离，输入占用不会自动释放；可在交易详情中重广播祖先链。" })}</p> : null}
+          {result.status === "local-confirmed" ? <p>{t("p2pkh.transfer.result.localConfirmed", { defaultValue: "广播供应商明确接受；找零要等 WoC 返回该输出后才会进入可花费余额。" })}</p> : null}
+          {result.status === "isolated" ? <p>{t("p2pkh.transfer.result.isolated", { defaultValue: "交易已隔离，输入占用不会自动释放；可在交易详情查看本地记录与广播尝试。" })}</p> : null}
           {result.status === "not-dispatched" ? <p>{t("p2pkh.transfer.result.notDispatched", { defaultValue: "交易未离开客户端，提交与输入占用已安全撤销。" })}</p> : null}
           <div className="p2pkh-transfer-widget__actions">
             <Button onClick={dismissResult} variant="primary">

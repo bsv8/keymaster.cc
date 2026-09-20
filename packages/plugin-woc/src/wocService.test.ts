@@ -65,6 +65,9 @@ function installFetchMock(opts?: { delayMs?: number; on?: (url: string) => Respo
     if (url.includes("/confirmed/unspent")) {
       return new Response(JSON.stringify({ result: [] }), { status: 200 });
     }
+    if (url.includes("/unspent/all")) {
+      return new Response(JSON.stringify({ result: [] }), { status: 200 });
+    }
     if (url.includes("/confirmed/history")) {
       return new Response(JSON.stringify({ result: [], nextPageToken: undefined }), { status: 200 });
     }
@@ -569,30 +572,186 @@ describe("WocService priority", () => {
 });
 
 describe("WocService 404 empty result (硬切换 008)", () => {
-  // 设计缘由：WOC 对同一地址 balance endpoint 可以返回 200 + 0，但
-  // confirmed/unspent 与 confirmed/history 可能返回 404。对钱包来说，
-  // 这不是同步失败，而是空 UTXO / 空历史。endpoint 层把 404 翻译成
-  // 空结果；其它 endpoint 的 404 仍按错误处理。
+  // 设计缘由：WOC 对同一地址 balance endpoint 可以返回 200 + 0；历史接口
+  // 的 404 可以视为空历史。`unspent/all` 的 404 不是“余额为 0”：空结果
+  // 必须由 HTTP 200 + result:[] 表示（实测有效地址 200/[]，非法地址 400），
+  // 因此 404 一律失败，让上层保留旧快照。
 
-  it("confirmed/unspent 404 returns []", async () => {
+  it("unspent/all 404 rejects instead of returning an empty list", async () => {
     const s = createWocService({ messageBus: createMessageBus() });
     s.updateConfig({ baseUrl: "https://mock.test" });
     (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
       return new Response("Not Found", { status: 404, statusText: "Not Found" });
     }) as unknown as typeof fetch;
-    const result = await s.getAddressConfirmedUtxos("main", "addr-no-utxos");
+    await expect(s.getAddressUnspentAll("main", "addr-no-utxos")).rejects.toThrow();
+    s.dispose();
+  });
+
+  it("unspent/all maps status/isSpentInMempoolTx/height and lowercases txid", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    const confirmedTxid = "AA".repeat(32);
+    const unconfirmedTxid = "bb".repeat(32);
+    const zeroHeightTxid = "cc".repeat(32);
+    let seenUrl = "";
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async (url: string) => {
+      seenUrl = url;
+      return new Response(
+        JSON.stringify({
+          result: [
+            {
+              tx_hash: confirmedTxid,
+              tx_pos: 0,
+              value: 1000,
+              height: 800000,
+              status: "confirmed",
+              isSpentInMempoolTx: false,
+              script: "76a91488ac"
+            },
+            {
+              tx_hash: unconfirmedTxid,
+              tx_pos: 1,
+              value: 500,
+              height: 12345,
+              status: "unconfirmed",
+              isSpentInMempoolTx: true
+            },
+            {
+              tx_hash: zeroHeightTxid,
+              tx_pos: 2,
+              value: 42,
+              height: 0,
+              status: "unconfirmed",
+              isSpentInMempoolTx: false
+            }
+          ]
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    const result = await s.getAddressUnspentAll("main", "addr-1");
+    expect(seenUrl).toContain("/unspent/all");
+    expect(result).toEqual([
+      {
+        txid: confirmedTxid.toLowerCase(),
+        vout: 0,
+        value: 1000,
+        height: 800000,
+        status: "confirmed",
+        script: "76a91488ac",
+        isSpentInMempoolTx: false,
+        canonicalTxid: confirmedTxid.toLowerCase(),
+        network: "main"
+      },
+      {
+        txid: unconfirmedTxid,
+        vout: 1,
+        value: 500,
+        height: 0,
+        status: "unconfirmed",
+        script: undefined,
+        isSpentInMempoolTx: true,
+        canonicalTxid: unconfirmedTxid,
+        network: "main"
+      },
+      {
+        txid: zeroHeightTxid,
+        vout: 2,
+        value: 42,
+        height: 0,
+        status: "unconfirmed",
+        script: undefined,
+        isSpentInMempoolTx: false,
+        canonicalTxid: zeroHeightTxid,
+        network: "main"
+      }
+    ]);
+    s.dispose();
+  });
+
+  it("unspent/all empty result with error:'' returns []", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
+      return new Response(JSON.stringify({ error: "", result: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await s.getAddressUnspentAll("main", "addr-empty");
     expect(result).toEqual([]);
     s.dispose();
   });
 
-  it("unconfirmed/unspent 404 returns []", async () => {
+  it("unspent/all rejects when the top-level error is non-empty even with result:[]", async () => {
     const s = createWocService({ messageBus: createMessageBus() });
     s.updateConfig({ baseUrl: "https://mock.test" });
     (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
-      return new Response("Not Found", { status: 404, statusText: "Not Found" });
+      return new Response(JSON.stringify({ error: "provider failure", result: [] }), { status: 200 });
     }) as unknown as typeof fetch;
-    const result = await s.getAddressUnconfirmedUtxos("main", "addr-no-utxos");
-    expect(result).toEqual([]);
+    await expect(s.getAddressUnspentAll("main", "addr")).rejects.toThrow(/provider failure/);
+    s.dispose();
+  });
+
+  it("unspent/all rejects when result is missing or not an array", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
+      return new Response(JSON.stringify({ error: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await expect(s.getAddressUnspentAll("main", "addr")).rejects.toThrow(/invalid result/);
+    s.dispose();
+  });
+
+  it("unspent/all rejects on unknown status", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          result: [{ tx_hash: "dd".repeat(32), tx_pos: 0, value: 1, height: 1, status: "pending", isSpentInMempoolTx: false }]
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    await expect(s.getAddressUnspentAll("main", "addr")).rejects.toThrow(/unknown status/);
+    s.dispose();
+  });
+
+  it("unspent/all rejects when isSpentInMempoolTx is missing or non-boolean", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          result: [{ tx_hash: "ee".repeat(32), tx_pos: 0, value: 1, height: 1, status: "confirmed" }]
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    await expect(s.getAddressUnspentAll("main", "addr")).rejects.toThrow(/isSpentInMempoolTx/);
+    s.dispose();
+  });
+
+  it("unspent/all rejects a confirmed row without a positive height", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          result: [{ tx_hash: "ff".repeat(32), tx_pos: 0, value: 1, height: 0, status: "confirmed", isSpentInMempoolTx: false }]
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    await expect(s.getAddressUnspentAll("main", "addr")).rejects.toThrow(/confirmed height/);
+    s.dispose();
+  });
+
+  it("unspent/all aborted request rejects", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    const ctl = new AbortController();
+    const p = s.getAddressUnspentAll("main", "addr1", { signal: ctl.signal, priority: "background" });
+    ctl.abort();
+    await expect(p).rejects.toBeDefined();
     s.dispose();
   });
 
@@ -618,13 +777,13 @@ describe("WocService 404 empty result (硬切换 008)", () => {
     s.dispose();
   });
 
-  it("500 still rejects for confirmed/unspent", async () => {
+  it("500 still rejects for unspent/all", async () => {
     const s = createWocService({ messageBus: createMessageBus() });
     s.updateConfig({ baseUrl: "https://mock.test" });
     (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
       return new Response("server error", { status: 500, statusText: "Server Error" });
     }) as unknown as typeof fetch;
-    await expect(s.getAddressConfirmedUtxos("main", "addr")).rejects.toThrow(/WOC 500/);
+    await expect(s.getAddressUnspentAll("main", "addr")).rejects.toThrow(/WOC 500/);
     s.dispose();
   });
 
@@ -638,13 +797,13 @@ describe("WocService 404 empty result (硬切换 008)", () => {
     s.dispose();
   });
 
-  it("429 still applies backoff and rejects for confirmed/unspent", async () => {
+  it("429 still applies backoff and rejects for unspent/all", async () => {
     const s = createWocService({ messageBus: createMessageBus() });
     s.updateConfig({ baseUrl: "https://mock.test" });
     (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
       return new Response("rate", { status: 429, headers: { "retry-after": "1" } });
     }) as unknown as typeof fetch;
-    await expect(s.getAddressConfirmedUtxos("main", "addr")).rejects.toThrow();
+    await expect(s.getAddressUnspentAll("main", "addr")).rejects.toThrow();
     // 关键：backoffUntil 必须被设置；不能让 429 静默退化为空结果。
     expect(s.getQueueSnapshot().backoffUntil).toBeGreaterThan(Date.now());
     s.dispose();
@@ -661,17 +820,17 @@ describe("WocService 404 empty result (硬切换 008)", () => {
     s.dispose();
   });
 
-  it("404 empty-result does NOT pollute snapshot.lastError", async () => {
-    // 关键：endpoint 翻译 404 为空结果后，pump 走 entry.resolve 分支，
-    // snapshot.lastError 不会被设为 "WOC 404 Not Found"。WOC tray UI 据此
-    // 不会显示假的错误状态。
+  it("history 404 empty-result does NOT pollute snapshot.lastError", async () => {
+    // 关键：历史 endpoint 仍把 404 翻译成空结果，pump 走 entry.resolve
+    // 分支，snapshot.lastError 不会被设为 "WOC 404 Not Found"。WOC tray UI
+    // 据此不会显示假的错误状态。
     const s = createWocService({ messageBus: createMessageBus() });
     s.updateConfig({ baseUrl: "https://mock.test" });
     (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () => {
       return new Response("Not Found", { status: 404, statusText: "Not Found" });
     }) as unknown as typeof fetch;
-    const result = await s.getAddressConfirmedUtxos("main", "addr");
-    expect(result).toEqual([]);
+    const result = await s.listAddressConfirmedHistory("main", "addr", { limit: 1 });
+    expect(result).toEqual({ items: [], nextPageToken: undefined });
     // 关键断言：lastError 不应包含 "404"——endpoint 已翻译成空结果。
     expect(s.getQueueSnapshot().lastError ?? "").not.toContain("404");
     s.dispose();

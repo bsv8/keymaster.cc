@@ -26,6 +26,7 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
   config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
+  config?.testnet.trackingKeyPrivateKeyHex.clear();
 }
 
 /**

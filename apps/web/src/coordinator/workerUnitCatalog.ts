@@ -1,6 +1,6 @@
 // Coordinator Worker 领域运行单元目录。
 //
-// 这里登记的是已经真正由 SharedWorker 装配的领域单元，不是 25 个页面
+// 这里登记的是已经真正由 SharedWorker 装配的领域单元，不是 24 个页面
 // 产品的伪迁移清单。产品 id 表示用户启停对象，unitId 表示稳定的 Worker
 // 运行单元，taskId 和最终 I/O 审计入口则把实际执行边界连接起来。
 
@@ -149,13 +149,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     unitId: "woc.coordinator-worker",
     taskIds: [],
     serviceIds: ["woc.service", "woc.bsv21", "woc.stas", "woc.1satordinals"],
-    storagePurposes: [],
-    finalIoAuditEntries: [],
-  },
-  {
-    unitId: "junglebus.coordinator-worker",
-    taskIds: [],
-    serviceIds: ["junglebus.confirmed-provider"],
     storagePurposes: [],
     finalIoAuditEntries: [],
   },

@@ -16,7 +16,9 @@ import type { P2pkhProtocolSubmission } from "./p2pkhContracts.js";
 import { calcTxidFromRawTxHex, rawTxHexByteLength, signP2pkhTx, type UnsignedTx } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
 
-type P2pkhInputOutpoint = Pick<ProtocolSpendInput, "txid" | "vout">;
+// value 必须随 claim 一起写入：余额计算按 claim.value 扣除 pendingInputClaims，
+// 否则协议已排除的 UTXO 仍会留在 spendable 里造成高估。
+type P2pkhInputOutpoint = Pick<ProtocolSpendInput, "txid" | "vout" | "value">;
 
 export interface P2pkhProtocolSpendClaimStore {
   tryClaimInputs(input: {
@@ -291,7 +293,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
               resourceId: resourceIdFor(input.network),
               publicKeyHex: resolvedOwner.publicKeyHex,
               network: input.network,
-              inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+              inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
               expectedCanonicalTxid: calcTxidFromRawTxHex(rawTxHex)
             })).claimIds;
             if (deps.submissionStore) {

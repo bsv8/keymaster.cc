@@ -276,6 +276,23 @@ export class TestnetFundingResource {
   }
 
   /**
+   * 用仓库外固定测试私钥建立可追踪钱包。
+   *
+   * 页面通过正式导入入口把它作为 active Key，因此 seed 打款地址在跨轮之间
+   * 稳定可查；失败时 Node 仍持有同一私钥，可以走 `returnRemaining` 把资金
+   * 归集回 seed，而不是像页面生成 Key 那样只能留下 10 sat 无法取回。
+   */
+  createImportedWallet(runId: string, scenarioId: string, privateKeyHex: string): OneTimeWallet {
+    const safeRunId = assertSafeIdentifier(runId, "run_id");
+    const safeScenarioId = assertSafeIdentifier(scenarioId, "scenario_id");
+    const normalized = privateKeyHex.trim().toLowerCase();
+    assertScalar(normalized);
+    const publicKeyHex = Buffer.from(secp256k1.getPublicKey(Buffer.from(normalized, "hex"), true)).toString("hex");
+    const privateKey = this.#makeSecret(normalized);
+    return { runId: safeRunId, scenarioId: safeScenarioId, address: deriveTestnetP2pkhAddress(publicKeyHex), publicKeyHex, privateKey, clear: () => privateKey.clear() };
+  }
+
+  /**
    * 用页面公开的 testnet 地址建立资金目标。
    *
    * App 生成的 Key 私钥只存在于页面 Vault，Node 不能也不应读取；地址

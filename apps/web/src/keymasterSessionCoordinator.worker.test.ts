@@ -99,7 +99,6 @@ import {
   __testRunTask,
   __testSetVaultStatus,
   __testFailNextCoordinatorSnapshotPersist,
-  __testFailNextP2pkhSettingWrite,
   __testFailAfterCatalogBindingPublish,
   __testFailNextOwnerStorageDeletion,
   __testFailAfterOwnerStorageActivation,
@@ -121,14 +120,8 @@ import {
   __testInstallCatalogLocalBinding,
   __testReleaseCatalogLocalBinding,
   __testSwitchCatalogBucket,
-  __testP2pkhProviderConfigGet,
-  __testP2pkhProviderConfigUpdate,
-  __testP2pkhProvidersUpdate,
   __testSeedP2pkhLocalSubmission,
-  __testFinishP2pkhLocalSubmission,
-  __testSetP2pkhChainResolution,
   __testListP2pkhLocalTransactions,
-  __testListP2pkhLocalOutpoints,
   __testListP2pkhLocalInputClaims,
   __testP2pkhBroadcast,
   __testSetP2pkhBroadcastProvider,
@@ -861,6 +854,9 @@ describe("Session Coordinator worker", () => {
       expect(fixture.state.session().activeBucketId).not.toBe(current.bucketId);
       expect(__testGetActivePublicKeyHex()).toBe(result.firstKey.publicKeyHex);
       expect(__testGetSnapshot()).toMatchObject({ vaultStatus: "unlocked", storageBucketId: result.bucket.bucketId });
+      // 回归：onboarding 安装 Storage 后必须补齐后台任务注册；否则
+      // p2pkh.transactions-sync 永远不会运行，页面余额不会更新。
+      expect(__testGetSnapshot().taskSnapshots.some((task) => task.id === "p2pkh.transactions-sync")).toBe(true);
     } finally {
       await __testReleaseCatalogLocalBinding();
       __testResetState();
@@ -1505,51 +1501,6 @@ describe("Session Coordinator worker", () => {
     expect(runs).toBe(1);
   });
 
-  it("projects WOC product intent to provider registry and token task gates", async () => {
-    __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
-    await __testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" });
-    // 只验证投影，不触发真实网络同步；锁定会让 provider change 的补偿
-    // 调度保持在门禁状态，避免测试把外部供应商当成 fixture。
-    __testSetVaultStatus("locked");
-
-    const messages: unknown[] = [];
-    __testAttachPort("plugin-intent-provider-port", (message) => messages.push(message));
-    const submit = async (desiredEnabled: boolean, commandId: string): Promise<void> => {
-      const snapshot = __testGetSnapshot();
-      await __testDispatchStorageMessage("plugin-intent-provider-port", {
-        kind: "plugin.intent.submit",
-        clientId: "plugin-intent-provider-port",
-        requestId: commandId,
-        command: {
-          commandId,
-          authorityInstanceId: snapshot.authorityInstanceId,
-          expectedRevision: snapshot.pluginIntent?.revision ?? 0,
-          pluginId: "woc",
-          desiredEnabled,
-        },
-      });
-      expect([...messages].reverse().find((message) => (message as { requestId?: string }).requestId === commandId)).toMatchObject({
-        operationResult: { status: "accepted" },
-      });
-    };
-
-    await submit(false, "plugin-intent-provider:disable");
-    const disabled = __testGetSnapshot();
-    expect(disabled.p2pkhProviders?.syncProviders.some((provider) => provider.id === "woc")).toBe(false);
-    expect(disabled.p2pkhProviders?.broadcastProviders.some((provider) => provider.id === "woc")).toBe(false);
-    const blockedTokenTasks = disabled.taskSnapshots.filter((task) => ["token-bsv21.sync", "token-stas.sync", "collectible-1satordinals.sync"].includes(task.id));
-    expect(blockedTokenTasks).toHaveLength(3);
-    for (const task of blockedTokenTasks) {
-      expect(task).toMatchObject({ state: "blocked", blockedReason: { fallback: "Plugin disabled: woc" } });
-    }
-
-    await submit(true, "plugin-intent-provider:enable");
-    const enabled = __testGetSnapshot();
-    expect(enabled.p2pkhProviders?.syncProviders.some((provider) => provider.id === "woc")).toBe(true);
-    expect(enabled.p2pkhProviders?.broadcastProviders.some((provider) => provider.id === "woc")).toBe(true);
-  });
-
   it("refuses disabling a Coordinator product marked always-on", async () => {
     __testResetState();
     const messages: unknown[] = [];
@@ -1896,108 +1847,102 @@ describe("Session Coordinator worker", () => {
     expect(snapshot.scheduleSettings.assetHoldingsIntervalMs).toBe(120_000);
   });
 
-  it("merges provider config updates without clearing the selected provider", async () => {
-    __testResetState();
-    await __testRestartWorker();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
-    const before = __testGetSnapshot();
-    await __testP2pkhProviderConfigUpdate("junglebus", {
-      enabled: true,
-      mainEndpoint: "https://main.example/v1",
-      testEndpoint: "https://test.example/v1",
-      timeoutMs: 1_111,
-      maxRetries: 4,
-      requestsPerSecond: 7
-    });
-    await __testP2pkhProviderConfigUpdate("junglebus", { endpoint: "https://alias.example/v1" });
-    const config = await __testP2pkhProviderConfigGet("junglebus");
-    expect(config).toMatchObject({ enabled: true, endpoint: "https://alias.example/v1", mainEndpoint: "https://main.example/v1", testEndpoint: "https://test.example/v1", timeoutMs: 1_111, maxRetries: 4, requestsPerSecond: 7 });
-    const after = __testGetSnapshot();
-    expect(after.p2pkhProviders?.selection.main.syncProviderId).toBe(before.p2pkhProviders?.selection.main.syncProviderId);
-    expect(after.p2pkhProviders?.selection.test.syncProviderId).toBe(before.p2pkhProviders?.selection.test.syncProviderId);
-  });
-
-  it("keeps provider selection unchanged when its metadata persistence fails", async () => {
-    __testResetState();
-    await __testRestartWorker();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
-    const before = __testGetSnapshot();
-    const beforeConfig = await __testP2pkhProviderConfigGet("woc");
-    __testFailNextP2pkhSettingWrite();
-    await expect(__testP2pkhProviderConfigUpdate("woc", { endpoint: "https://should-not-apply.example/v1" })).rejects.toThrow(/setting/iu);
-    const after = __testGetSnapshot();
-    expect(after.p2pkhProviders?.selection).toEqual(before.p2pkhProviders?.selection);
-    expect(await __testP2pkhProviderConfigGet("woc")).toEqual(beforeConfig);
-  });
-
-  it("keeps provider selection unchanged when a selection persistence fails", async () => {
-    __testResetState();
-    await __testRestartWorker();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
-    const before = __testGetSnapshot();
-    const generation = before.p2pkhProviders?.selection.generation ?? 0;
-    __testFailNextP2pkhSettingWrite();
-    await expect(__testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" })).rejects.toThrow(/setting/iu);
-    expect(__testGetSnapshot().p2pkhProviders?.selection).toEqual(before.p2pkhProviders?.selection);
-    expect(__testGetSnapshot().p2pkhProviders?.selection.generation).toBe(generation);
-  });
-
-  it("aborts stale-generation P2PKH submissions before any provider call", async () => {
+  it("aborts P2PKH submissions when the broadcast provider is missing (not-dispatched)", async () => {
     __testResetState();
     const owner = "c".repeat(64);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `stale-${Date.now()}`;
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "ab".repeat(32), rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["cd".repeat(32) + ":0"], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] },
+      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "ab".repeat(32), rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["cd".repeat(32) + ":0"], ownOutputs: [], createdAt: "now", updatedAt: "now", attempts: [] },
       claims: [{ id: `${submissionId}:claim`, submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "cd".repeat(32), vout: 0, value: 1, state: "active", createdAt: "now", updatedAt: "now" }]
     });
-    const currentGeneration = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId, expectedProviderGeneration: currentGeneration + 1 });
-    expect(response.operationResult).toMatchObject({ status: "not-dispatched", reason: "stale-provider-generation" });
-    expect((await __testListP2pkhLocalTransactions(owner)).some((row) => (row as { id?: string }).id === submissionId)).toBe(false);
+    // 禁用 woc 会从 registry 撤掉唯一的广播供应商，广播前无可用 provider。
+    __testSetP2pkhBroadcastProvider(undefined);
+    const portId = "p2pkh-missing-provider-port";
+    const messages: unknown[] = [];
+    __testAttachPort(portId, (message) => messages.push(message));
+    const submitIntent = async (desiredEnabled: boolean, commandId: string): Promise<void> => {
+      const snapshot = __testGetSnapshot();
+      await __testDispatchStorageMessage(portId, {
+        kind: "plugin.intent.submit",
+        clientId: portId,
+        requestId: commandId,
+        command: {
+          commandId,
+          authorityInstanceId: snapshot.authorityInstanceId,
+          expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+          pluginId: "woc",
+          desiredEnabled,
+        },
+      });
+      expect([...messages].reverse().find((message) => (message as { requestId?: string }).requestId === commandId)).toMatchObject({
+        operationResult: { status: "accepted" },
+      });
+    };
+    await submitIntent(false, "p2pkh-missing-provider:disable");
+    try {
+      const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId });
+      expect(response.operationResult).toMatchObject({ status: "not-dispatched", reason: "broadcast-provider-unavailable" });
+      expect((await __testListP2pkhLocalTransactions(owner)).some((row) => (row as { id?: string }).id === submissionId)).toBe(false);
+    } finally {
+      await submitIntent(true, "p2pkh-missing-provider:enable");
+      __testSetP2pkhBroadcastProvider(undefined);
+    }
   });
 
-  it("retains an unknown submission when a rebroadcast is not dispatched", async () => {
-    __testResetState();
-    const owner = "d".repeat(64);
-    __testSetVaultStatus("unlocked", owner);
-    const submissionId = `unknown-rebroadcast-${Date.now()}`;
-    await __testSeedP2pkhLocalSubmission({
-      ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "de".repeat(32), rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["ef".repeat(32) + ":0"], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] },
-      claims: [{ id: `${submissionId}:claim`, submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "ef".repeat(32), vout: 0, value: 1, state: "active", createdAt: "now", updatedAt: "now" }]
-    });
-    const currentGeneration = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId, expectedProviderGeneration: currentGeneration + 1, rebroadcast: true });
-    expect(response.operationResult).toMatchObject({ status: "not-dispatched", reason: "stale-provider-generation" });
-    expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === submissionId)).toMatchObject({ localState: "submitting", chainResolution: "unresolved", attempts: [] });
-  });
-
-  it("preserves local-confirmed state when a rebroadcast provider fails", async () => {
+  it("isolates a submitting P2PKH submission when the broadcast provider fails", async () => {
     __testResetState();
     const owner = "e".repeat(64);
     __testSetVaultStatus("unlocked", owner);
-    const submissionId = `failed-rebroadcast-${Date.now()}`;
+    const submissionId = `failed-broadcast-${Date.now()}`;
     const txid = "fa".repeat(32);
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] },
-      localOutpoints: [{ id: `p2pkh:main:${txid}:0`, resourceId: "p2pkh:main", txid, vout: 0, value: 1, scriptHex: "", submissionId, state: "unavailable", createdAt: "now", updatedAt: "now" }]
+      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], createdAt: "now", updatedAt: "now", attempts: [] },
     });
-    await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submissionId, localState: "local-confirmed" });
     __testSetP2pkhBroadcastProvider({
       descriptor: { id: "test-failing-provider", label: "Test failing provider", supportedNetworks: ["main", "test"] },
       broadcast: async () => { throw new Error("provider unavailable"); }
     });
-    const generation = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId, expectedProviderGeneration: generation, rebroadcast: true });
-    expect(response.operationResult).toMatchObject({ status: "rebroadcast-failed", txid, reason: "provider unavailable" });
-    expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === submissionId)).toMatchObject({ localState: "local-confirmed", chainResolution: "unresolved", attempts: [{ status: "isolated" }] });
-    __testSetP2pkhBroadcastProvider(undefined);
+    try {
+      const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId });
+      expect(response.operationResult).toMatchObject({ status: "isolated", txid, reason: "provider unavailable" });
+      expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === submissionId)).toMatchObject({ localState: "isolated", chainResolution: "unresolved", attempts: [{ status: "isolated" }] });
+    } finally {
+      __testSetP2pkhBroadcastProvider(undefined);
+    }
   });
 
-  it("broadcasts a double-axis submission without relying on legacy state", async () => {
+  it("keeps input claims after a failed broadcast (claims survive)", async () => {
+    __testResetState();
+    const owner = "d".repeat(64);
+    __testSetVaultStatus("unlocked", owner);
+    const submissionId = `failed-claims-${Date.now()}`;
+    const txid = "de".repeat(32);
+    const inputTxid = "ef".repeat(32);
+    await __testSeedP2pkhLocalSubmission({
+      ownerPublicKeyHex: owner,
+      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [`${inputTxid}:0`], ownOutputs: [], createdAt: "now", updatedAt: "now", attempts: [] },
+      claims: [{ id: `${submissionId}:claim`, submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: inputTxid, vout: 0, value: 1, state: "active", createdAt: "now", updatedAt: "now" }]
+    });
+    __testSetP2pkhBroadcastProvider({
+      descriptor: { id: "test-claims-failing-provider", label: "Test claims failing provider", supportedNetworks: ["main", "test"] },
+      broadcast: async () => { throw new Error("provider unavailable"); }
+    });
+    try {
+      const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId });
+      expect(response.operationResult).toMatchObject({ status: "isolated", txid });
+      // 失败只隔离本地提交，输入 claim 仍然保留（不再被删除），等待后续对账。
+      const claims = await __testListP2pkhLocalInputClaims(owner);
+      expect(claims.filter((row) => (row as { submissionId?: string }).submissionId === submissionId)).toHaveLength(1);
+      expect(claims.find((row) => (row as { submissionId?: string }).submissionId === submissionId)).toMatchObject({ state: "isolated" });
+    } finally {
+      __testSetP2pkhBroadcastProvider(undefined);
+    }
+  });
+
+  it("confirms a submitting P2PKH submission when the broadcast provider accepts", async () => {
     __testResetState();
     const owner = "f".repeat(64);
     __testSetVaultStatus("unlocked", owner);
@@ -2006,159 +1951,33 @@ describe("Session Coordinator worker", () => {
     const providerBroadcast = vi.fn(async () => ({ canonicalTxid: txid, status: "accepted" as const, providerReference: "provider-ref" }));
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["fc".repeat(32) + ":0"], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] },
+      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["fc".repeat(32) + ":0"], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], createdAt: "now", updatedAt: "now", attempts: [] },
       claims: [{ id: `${submissionId}:claim`, submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "fc".repeat(32), vout: 0, value: 1, state: "active", createdAt: "now", updatedAt: "now" }],
-      localOutpoints: [{ id: `p2pkh:main:${txid}:0`, resourceId: "p2pkh:main", txid, vout: 0, value: 1, scriptHex: "", submissionId, state: "unavailable", createdAt: "now", updatedAt: "now" }]
     });
     __testSetP2pkhBroadcastProvider({
       descriptor: { id: "test-double-axis-provider", label: "Double-axis test provider", supportedNetworks: ["main", "test"] },
       broadcast: providerBroadcast
     });
-    const generation = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId, expectedProviderGeneration: generation });
-    expect(response.operationResult).toMatchObject({ status: "local-confirmed", txid });
-    expect(providerBroadcast).toHaveBeenCalledWith({ network: "main", canonicalTxid: txid, rawTxHex: "00" });
-    expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === submissionId)).toMatchObject({ localState: "local-confirmed", chainResolution: "unresolved", attempts: [{ status: "accepted" }] });
-    expect((await __testListP2pkhLocalOutpoints(owner)).find((row) => (row as { submissionId?: string }).submissionId === submissionId)).toMatchObject({ state: "available" });
-    expect((await __testListP2pkhLocalInputClaims(owner)).find((row) => (row as { submissionId?: string }).submissionId === submissionId)).toMatchObject({ state: "active" });
-    __testSetP2pkhBroadcastProvider(undefined);
-  });
-
-  it("skips a chain-confirmed ancestor and broadcasts the unresolved child once", async () => {
-    __testResetState();
-    const owner = "1".repeat(64);
-    __testSetVaultStatus("unlocked", owner);
-    const parentTxid = "10".repeat(32);
-    const childTxid = "11".repeat(32);
-    await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id: "confirmed-parent", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: parentTxid, rawTxHex: "parent", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
-    await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submissionId: "confirmed-parent", localState: "local-confirmed" });
-    await __testSetP2pkhChainResolution({ ownerPublicKeyHex: owner, submissionId: "confirmed-parent", chainResolution: "chain-confirmed" });
-    await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id: "unresolved-child", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: childTxid, rawTxHex: "child", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [parentTxid], createdAt: "now", updatedAt: "now", attempts: [] } });
-    await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submissionId: "unresolved-child", localState: "local-confirmed" });
-    const providerBroadcast = vi.fn(async (request: { canonicalTxid: string }) => ({ canonicalTxid: request.canonicalTxid, status: "accepted" as const }));
-    __testSetP2pkhBroadcastProvider({ descriptor: { id: "test-ancestor-skip", label: "Ancestor skip", supportedNetworks: ["main", "test"] }, broadcast: providerBroadcast });
-    const generation = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId: "unresolved-child", expectedProviderGeneration: generation, rebroadcast: true });
-    expect(response.operationResult).toMatchObject({ status: "local-confirmed", txid: childTxid });
-    expect(providerBroadcast).toHaveBeenCalledTimes(1);
-    expect(providerBroadcast).toHaveBeenCalledWith({ network: "main", canonicalTxid: childTxid, rawTxHex: "child" });
-    expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === "confirmed-parent")).toMatchObject({ chainResolution: "chain-confirmed", attempts: [] });
-    expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === "unresolved-child")).toMatchObject({ localState: "local-confirmed", chainResolution: "unresolved", attempts: [{ status: "accepted" }] });
-    __testSetP2pkhBroadcastProvider(undefined);
-  });
-
-  it("blocks a conflicted ancestor before invoking the provider", async () => {
-    __testResetState();
-    const owner = "2".repeat(64);
-    __testSetVaultStatus("unlocked", owner);
-    const parentTxid = "20".repeat(32);
-    const childTxid = "21".repeat(32);
-    await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id: "conflicted-parent", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: parentTxid, rawTxHex: "parent", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
-    await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submissionId: "conflicted-parent", localState: "local-confirmed" });
-    await __testSetP2pkhChainResolution({ ownerPublicKeyHex: owner, submissionId: "conflicted-parent", chainResolution: "conflicted", conflictSourceTxids: ["ff".repeat(32)] });
-    await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id: "blocked-child", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: childTxid, rawTxHex: "child", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [parentTxid], createdAt: "now", updatedAt: "now", attempts: [] } });
-    await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submissionId: "blocked-child", localState: "local-confirmed" });
-    const providerBroadcast = vi.fn(async (request: { canonicalTxid: string }) => ({ canonicalTxid: request.canonicalTxid, status: "accepted" as const }));
-    __testSetP2pkhBroadcastProvider({ descriptor: { id: "test-ancestor-block", label: "Ancestor block", supportedNetworks: ["main", "test"] }, broadcast: providerBroadcast });
-    const generation = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId: "blocked-child", expectedProviderGeneration: generation, rebroadcast: true });
-    expect(response.operationResult).toMatchObject({ status: "isolated", txid: parentTxid, reason: "conflicted-ancestor" });
-    expect(providerBroadcast).not.toHaveBeenCalled();
-    expect((await __testListP2pkhLocalTransactions(owner)).every((row) => (row as { attempts?: unknown[] }).attempts?.length === 0)).toBe(true);
-    __testSetP2pkhBroadcastProvider(undefined);
-  });
-
-  it("裁决重复 txid sibling 不受返回顺序影响且只阻断一次逻辑交易", async () => {
-    for (const [owner, insertionOrder] of [["3".repeat(64), ["normal", "conflict"]], ["4".repeat(64), ["conflict", "normal"]]] as const) {
-      __testResetState();
-      __testSetVaultStatus("unlocked", owner);
-      const txid = "30".repeat(32);
-      const childTxid = "31".repeat(32);
-      const seed = async (kind: "normal" | "conflict") => {
-        const id = kind === "normal" ? "a-sibling" : "z-sibling";
-        await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: kind, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
-        await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submissionId: id, localState: "local-confirmed" });
-        if (kind === "conflict") await __testSetP2pkhChainResolution({ ownerPublicKeyHex: owner, submissionId: id, chainResolution: "conflicted", conflictSourceTxids: ["ee".repeat(32)] });
-      };
-      for (const kind of insertionOrder) await seed(kind);
-      await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id: "sibling-child", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: childTxid, rawTxHex: "child", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [txid], createdAt: "now", updatedAt: "now", attempts: [] } });
-      await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submissionId: "sibling-child", localState: "local-confirmed" });
-      const providerBroadcast = vi.fn(async (request: { canonicalTxid: string }) => ({ canonicalTxid: request.canonicalTxid, status: "accepted" as const }));
-      __testSetP2pkhBroadcastProvider({ descriptor: { id: "test-sibling-order", label: "Sibling order", supportedNetworks: ["main", "test"] }, broadcast: providerBroadcast });
-      const generation = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-      const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId: "sibling-child", expectedProviderGeneration: generation, rebroadcast: true });
-      expect(response.operationResult).toMatchObject({ status: "isolated", txid, reason: "conflicted-ancestor" });
-      expect(providerBroadcast).not.toHaveBeenCalled();
+    try {
+      const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId });
+      expect(response.operationResult).toMatchObject({ status: "local-confirmed", txid });
+      expect(providerBroadcast).toHaveBeenCalledWith({ network: "main", canonicalTxid: txid, rawTxHex: "00" });
+      expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === submissionId)).toMatchObject({ localState: "local-confirmed", chainResolution: "unresolved", attempts: [{ status: "accepted" }] });
+      expect((await __testListP2pkhLocalInputClaims(owner)).find((row) => (row as { submissionId?: string }).submissionId === submissionId)).toMatchObject({ state: "active" });
+    } finally {
       __testSetP2pkhBroadcastProvider(undefined);
     }
-    __testResetState();
-    const normalOwner = "5".repeat(64);
-    __testSetVaultStatus("unlocked", normalOwner);
-    const normalTxid = "50".repeat(32);
-    const normalChildTxid = "51".repeat(32);
-    for (const [id, rawTxHex] of [["first-sibling", "z-raw"], ["second-sibling", "a-raw"]] as const) {
-      await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: normalOwner, submission: { id, resourceId: "p2pkh:main", publicKeyHex: normalOwner, network: "main", txid: normalTxid, rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
-      await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: normalOwner, submissionId: id, localState: "local-confirmed" });
-    }
-    await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: normalOwner, submission: { id: "unresolved-child", resourceId: "p2pkh:main", publicKeyHex: normalOwner, network: "main", txid: normalChildTxid, rawTxHex: "child", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [normalTxid], createdAt: "now", updatedAt: "now", attempts: [] } });
-    await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: normalOwner, submissionId: "unresolved-child", localState: "local-confirmed" });
-    const normalProvider = vi.fn(async (request: { canonicalTxid: string }) => ({ canonicalTxid: request.canonicalTxid, status: "accepted" as const }));
-    __testSetP2pkhBroadcastProvider({ descriptor: { id: "test-sibling-single", label: "Sibling single", supportedNetworks: ["main", "test"] }, broadcast: normalProvider });
-    const normalGeneration = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    await __testP2pkhBroadcast({ ownerPublicKeyHex: normalOwner, network: "main", submissionId: "unresolved-child", expectedProviderGeneration: normalGeneration, rebroadcast: true });
-    expect(normalProvider).toHaveBeenCalledTimes(2);
-    expect(normalProvider).toHaveBeenNthCalledWith(1, { network: "main", canonicalTxid: normalTxid, rawTxHex: "a-raw" });
-    expect(normalProvider).toHaveBeenNthCalledWith(2, { network: "main", canonicalTxid: normalChildTxid, rawTxHex: "child" });
-    __testSetP2pkhBroadcastProvider(undefined);
-
-    __testResetState();
-    const targetOwner = "6".repeat(64);
-    __testSetVaultStatus("unlocked", targetOwner);
-    const targetTxid = "60".repeat(32);
-    for (const [id, rawTxHex] of [["canonical-sibling", "a-raw"], ["requested-sibling", "z-raw"]] as const) {
-      await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: targetOwner, submission: { id, resourceId: "p2pkh:main", publicKeyHex: targetOwner, network: "main", txid: targetTxid, rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
-      await __testFinishP2pkhLocalSubmission({ ownerPublicKeyHex: targetOwner, submissionId: id, localState: "local-confirmed" });
-    }
-    const targetProvider = vi.fn(async (request: { canonicalTxid: string }) => ({ canonicalTxid: request.canonicalTxid, status: "accepted" as const }));
-    __testSetP2pkhBroadcastProvider({ descriptor: { id: "test-target-boundary", label: "Target boundary", supportedNetworks: ["main", "test"] }, broadcast: targetProvider });
-    const targetGeneration = __testGetSnapshot().p2pkhProviders?.selection.generation ?? 0;
-    await __testP2pkhBroadcast({ ownerPublicKeyHex: targetOwner, network: "main", submissionId: "requested-sibling", expectedProviderGeneration: targetGeneration, rebroadcast: true });
-    expect(targetProvider).toHaveBeenCalledTimes(1);
-    expect(targetProvider).toHaveBeenCalledWith({ network: "main", canonicalTxid: targetTxid, rawTxHex: "z-raw" });
-    expect((await __testListP2pkhLocalTransactions(targetOwner)).find((row) => (row as { id?: string }).id === "requested-sibling")).toMatchObject({ localState: "local-confirmed", attempts: [{ status: "accepted" }] });
-    expect((await __testListP2pkhLocalTransactions(targetOwner)).find((row) => (row as { id?: string }).id === "canonical-sibling")).toMatchObject({ localState: "local-confirmed", attempts: [] });
-    __testSetP2pkhBroadcastProvider(undefined);
   });
 
-  it("keeps an explicitly selected provider id while the optional provider is disabled", async () => {
-    __testResetState();
-    await __testRestartWorker();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
-    await __testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" });
-    await __testP2pkhProviderConfigUpdate("junglebus", { enabled: false });
-    const disabled = __testGetSnapshot().p2pkhProviders;
-    expect(disabled?.selection.main.syncProviderId).toBe("junglebus");
-    expect(disabled?.syncProviders.some((provider) => provider.id === "junglebus")).toBe(false);
-    await __testP2pkhProviderConfigUpdate("junglebus", { enabled: true });
-    const enabled = __testGetSnapshot().p2pkhProviders;
-    expect(enabled?.selection.main.syncProviderId).toBe("junglebus");
-    expect(enabled?.syncProviders.some((provider) => provider.id === "junglebus")).toBe(true);
-  });
 
-  it("blocks the transaction sync task when its selected provider is unavailable", async () => {
-    __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
-    __testRegisterTask({
-      id: "p2pkh.transactions-sync",
-      publicKeyHex: "a".repeat(64),
-      run: async () => { throw Object.assign(new Error("JungleBus is unavailable"), { code: "provider-unavailable" }); }
-    });
-    await __testRunTask("p2pkh.transactions-sync");
-    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === "p2pkh.transactions-sync")).toMatchObject({
-      state: "blocked",
-      blockedReason: { fallback: "JungleBus is unavailable" }
-    });
-  });
+
+
+
+
+
+
+
+
 });
 
 describe("S3 桶本机 ID", () => {

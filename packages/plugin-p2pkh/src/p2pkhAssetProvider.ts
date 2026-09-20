@@ -121,21 +121,19 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
   async function listNetworkHistory(assetId: P2pkhAssetId) {
     if (isNotReady()) return [];
     const network = assetIdToNetwork(assetId);
-    const [facts, locals] = await Promise.all([
-      deps.service.listTransactionFacts?.({ assetId }) ?? Promise.resolve([]),
+    const [history, locals] = await Promise.all([
+      deps.service.listHistory?.({ assetId }) ?? Promise.resolve([]),
       deps.service.listLocalTransactions?.({ assetId }) ?? Promise.resolve([])
     ]);
-    const factTxids = new Set(facts.map((fact) => fact.txid));
+    const historyTxids = new Set(history.map((row) => row.txid));
     return [
-      ...facts.map((fact) => ({ id: fact.id, txid: fact.txid, status: "confirmed" as const, source: "chain" as const, syncedAt: fact.lastConfirmedAt })),
+      ...history.map((row) => ({ id: row.id, txid: row.txid, status: "confirmed" as const, source: "chain" as const, syncedAt: row.firstSeenAt })),
       ...locals
-        .filter((local) => local.network === network && !factTxids.has(local.txid))
+        .filter((local) => local.network === network && !historyTxids.has(local.txid))
         .map((local) => ({
           id: local.id,
           txid: local.txid,
-          // Conflicted records are terminal and cannot be replayed; they must
-          // not be presented as still awaiting confirmation.
-          status: local.chainResolution === "chain-confirmed" ? "confirmed" as const : local.chainResolution === "conflicted" ? "failed" as const : "pending" as const,
+          status: local.chainResolution === "chain-confirmed" ? "confirmed" as const : "pending" as const,
           source: "local-submission" as const,
           syncedAt: local.updatedAt
         }))
@@ -223,7 +221,7 @@ function statusTitle(status: string, source: string): { key: string; fallback: s
   if (status === "pending") return source === "local-submission"
     ? { key: "p2pkh.activity.localSubmission", fallback: "本地提交" }
     : { key: "p2pkh.activity.unconfirmed", fallback: "未确认交易" };
-  if (status === "failed") return { key: "p2pkh.activity.failed", fallback: "已冲突交易" };
+  if (status === "failed") return { key: "p2pkh.activity.failed", fallback: "失败/已隔离交易" };
   if (status === "dropped") return { key: "p2pkh.activity.dropped", fallback: "已丢弃" };
   return { key: "p2pkh.activity.info", fallback: "链上事件" };
 }

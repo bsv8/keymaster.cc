@@ -34,8 +34,7 @@ export const WOC_ACTOR_ACCEPT_CONCURRENCY = 32;
 export const WOC_MSG = {
   BALANCE_CONFIRMED: "woc.balance.confirmed",
   BALANCE_UNCONFIRMED: "woc.balance.unconfirmed",
-  UTXOS_CONFIRMED: "woc.utxos.confirmed",
-  UTXOS_UNCONFIRMED: "woc.utxos.unconfirmed",
+  UTXOS_ALL: "woc.utxos.all",
   HISTORY_CONFIRMED: "woc.history.confirmed",
   HISTORY_UNCONFIRMED: "woc.history.unconfirmed",
   TX_OBSERVATION: "woc.tx.observation",

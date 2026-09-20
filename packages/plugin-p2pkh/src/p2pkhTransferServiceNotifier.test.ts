@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
-import { makeResourceId, type P2pkhKeyResource, type P2pkhLocalInputClaim, type P2pkhLocalOutpoint, type P2pkhLocalTransaction, type P2pkhUtxo } from "./p2pkhContracts.js";
+import { makeResourceId, type P2pkhKeyResource, type P2pkhLocalInputClaim, type P2pkhLocalTransaction, type P2pkhUtxo } from "./p2pkhContracts.js";
 import type { AssetDataNotifier } from "@keymaster/contracts";
 
 const PRIVATE_KEY = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -16,13 +16,30 @@ function makeVault() { return { status: () => "unlocked", createActiveKeyCrypto:
 function makeRepository() {
   const resource: P2pkhKeyResource = { resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, label: "active", address: OWNER.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
   const utxo: P2pkhUtxo = { id: "coin", resourceId: resource.resourceId, publicKeyHex: OWNER.publicKeyHex, network: "main", address: OWNER.address, txid: TXID, vout: 0, value: 3_000, height: 1, status: "confirmed", isSpentInMempoolTx: false, syncedAt: resource.createdAt };
-  const claims = new Map<string, P2pkhLocalInputClaim>(); const locals = new Map<string, P2pkhLocalTransaction>(); const outputs = new Map<string, P2pkhLocalOutpoint>();
-  return { resource, claims, locals, outputs, async getResource(id: string) { return id === resource.resourceId ? resource : undefined; }, async listUtxos() { return [utxo]; }, async listLocalInputClaimsByResource() { return [...claims.values()]; }, async listLocalTransactions() { return [...locals.values()]; }, async listLocalOutpoints() { return [...outputs.values()]; }, async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims: P2pkhLocalInputClaim[]; localOutpoints: P2pkhLocalOutpoint[] }) { locals.set(input.submission.id, input.submission); for (const claim of input.claims) claims.set(claim.id, claim); for (const output of input.localOutpoints) outputs.set(output.id, output); }, async finishLocalSubmission(input: { submissionId: string; localState: "local-confirmed" | "isolated" }) { const row = locals.get(input.submissionId)!; locals.set(row.id, { ...row, localState: input.localState }); for (const claim of claims.values()) if (claim.submissionId === input.submissionId) claims.set(claim.id, { ...claim, state: input.localState === "local-confirmed" ? "active" : "isolated" }); for (const output of outputs.values()) if (output.submissionId === input.submissionId) outputs.set(output.id, { ...output, state: input.localState === "local-confirmed" ? "available" : "isolated" }); }, async abortUnattemptedLocalSubmission() {} };
+  const claims = new Map<string, P2pkhLocalInputClaim>(); const locals = new Map<string, P2pkhLocalTransaction>();
+  return {
+    resource, utxo, claims, locals,
+    async getResource(id: string) { return id === resource.resourceId ? resource : undefined; },
+    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims: P2pkhLocalInputClaim[] }) { locals.set(input.submission.id, input.submission); for (const claim of input.claims) claims.set(claim.id, claim); },
+    async abortUnattemptedLocalSubmission(input: { submissionId: string }) { locals.delete(input.submissionId); for (const [id, claim] of [...claims]) if (claim.submissionId === input.submissionId) claims.delete(id); },
+  };
 }
 
 function createFixture(outcome: "accepted" | "isolated") {
   const stateRepository = makeRepository(); const emit = vi.fn();
-  const service = createP2pkhTransferService({ vault: makeVault(), messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never, assetDataNotifier: { emit, subscribe: vi.fn() } as unknown as AssetDataNotifier, getStore: async () => stateRepository as never, broadcastPreflight: async () => ({ generation: 1 }), broadcastWithCoordinator: async ({ submissionId }: { submissionId: string }) => { await stateRepository.finishLocalSubmission({ submissionId, localState: outcome === "isolated" ? "isolated" : "local-confirmed" }); return { status: "ok" as const, value: { status: outcome }, sessionEpoch: "test-epoch" }; }, getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }), getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" }) });
+  const service = createP2pkhTransferService({
+    vault: makeVault(),
+    messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
+    assetDataNotifier: { emit, subscribe: vi.fn() } as unknown as AssetDataNotifier,
+    getStore: async () => stateRepository as never,
+    loadSpendableUtxos: async () => [stateRepository.utxo],
+    broadcastWithCoordinator: async ({ submissionId }: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }) => {
+      if (outcome === "isolated") return { status: "ok" as const, value: { status: "isolated", reason: "provider-failed" }, sessionEpoch: "test-epoch" };
+      return { status: "ok" as const, value: { status: outcome }, sessionEpoch: "test-epoch" };
+    },
+    getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
+    getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
+  });
   return { service, stateRepository, emit };
 }
 
@@ -34,11 +51,11 @@ describe("p2pkh transfer data notifications", () => {
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ providerId: "p2pkh", publicKeyHex: OWNER.publicKeyHex }));
   });
 
-  it("emits after isolation and keeps the local failure visible", async () => {
+  it("emits after isolation and keeps the claim for reconciliation", async () => {
     const { service, stateRepository, emit } = createFixture("isolated");
     const preview = await service.prepare({ ownerPublicKeyHex: OWNER.publicKeyHex, assetId: "bsv", recipientAddress: RECIPIENT.address, amountSatoshis: 1_000, feeRateSatoshisPerKb: 1 });
     expect((await service.submit(preview)).status).toBe("isolated");
-    expect([...stateRepository.claims.values()][0]?.state).toBe("isolated");
+    expect([...stateRepository.claims.values()][0]?.state).toBe("active");
     expect(emit).toHaveBeenCalled();
   });
 });

@@ -28,7 +28,6 @@ import type {
   BackgroundSnapshotEvent,
   AssetDataChangedEvent,
   CoordinatorStorageStateEvent,
-  P2pkhProvidersEvent,
   CoordinatorMsFileStateEvent,
   CoordinatorWorkerUnitStateEvent,
   CoordinatorChannelStateEvent,
@@ -48,7 +47,7 @@ import type {
 import type { ChannelOperationCaller, ChannelPublishResult, ChannelSubscriptionSetResult, ChannelSubscriptionStatus, JSONValue } from "./channel.js";
 import type { I18nText, I18nValues } from "./i18n.js";
 import type { ContactPresenceMap } from "./contacts.js";
-import type { P2pkhBroadcastResult, P2pkhProviderRegistrySnapshot } from "./bsvP2pkhProviders.js";
+import type { P2pkhBroadcastResult, P2pkhUtxoSnapshotResult } from "./bsvP2pkhProviders.js";
 import type {
   CoordinatorSatEvent,
   CoordinatorSatStateEvent,
@@ -172,9 +171,9 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
   "window-p2p.executor.acquire", "window-p2p.executor.release", "window-p2p.executor.spike.transfer",
   "window-p2p.executor.identity.sign-noise", "window-p2p.executor.identity.sign-peer-record",
   "sat.operation", "channel.operation", "channel.cancel", "contacts.presence.snapshot",
-  "plugin.intent.snapshot", "plugin.intent.submit", "p2pkh.providers.get", "p2pkh.providers.update",
-  "p2pkh.settings.update", "p2pkh.provider-config.get", "p2pkh.provider-config.update",
-  "p2pkh.broadcast", "p2pkh.rebroadcast-ancestors",
+  "plugin.intent.snapshot", "plugin.intent.submit", "p2pkh.settings.update", "p2pkh.provider-config.get", "p2pkh.provider-config.update",
+  "p2pkh.utxos.get", "p2pkh.utxos.refresh",
+  "p2pkh.broadcast",
 ]);
 
 const STORAGE_CONTROL_TYPES = [
@@ -398,7 +397,6 @@ export type CoordinatorP2pkhBroadcastResult =
   | P2pkhBroadcastResult
   | { status: "not-dispatched"; reason: "stale-provider-generation" | "broadcast-provider-unavailable" | "coordinator-not-dispatched" | "stale-session-epoch" }
   | { status: "isolated"; txid: string; reason: string; providerId?: string }
-  | { status: "rebroadcast-failed"; txid: string; reason: string; providerId: string }
   | { status: "local-confirmed" | "already-known"; txid: string; providerId?: string };
 
 /**
@@ -429,9 +427,9 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "contacts.presence.snapshot" } ? ContactPresenceMap :
   R extends { kind: "plugin.intent.snapshot" } ? PluginIntentSnapshot :
   R extends { kind: "plugin.intent.submit" } ? PluginIntentSubmissionResult :
-  R extends { kind: "p2pkh.providers.get" | "p2pkh.providers.update" } ? P2pkhProviderRegistrySnapshot :
+  R extends { kind: "p2pkh.utxos.get" | "p2pkh.utxos.refresh" } ? P2pkhUtxoSnapshotResult :
   R extends { kind: "p2pkh.provider-config.get" } ? P2pkhProviderConfig :
-  R extends { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" } ? CoordinatorP2pkhBroadcastResult :
+  R extends { kind: "p2pkh.broadcast" } ? CoordinatorP2pkhBroadcastResult :
   undefined;
 
 /** A client command after removing transport-owned clientId/requestId. */
@@ -454,11 +452,6 @@ type CoordinatorRpcVoidSuccessResponse = CoordinatorRpcResponseBase & {
 type CoordinatorRpcValueSuccessResponse<R extends CoordinatorRpcRequest> = CoordinatorRpcResponseBase & {
   ack: { status: "ok" };
   operationResult: CoordinatorRpcResultForRequest<R>;
-  cryptoResult?: never;
-};
-type CoordinatorRpcAcceptedValueResponse<R extends CoordinatorRpcRequest> = CoordinatorRpcResponseBase & {
-  ack: { status: "accepted" };
-  operationResult?: CoordinatorRpcResultForRequest<R>;
   cryptoResult?: never;
 };
 type CoordinatorRpcCryptoSuccessResponse<O extends CoordinatorCryptoOperation> = CoordinatorRpcResponseBase & {
@@ -511,11 +504,9 @@ export type CoordinatorRpcResponseForRequest<R extends CoordinatorRpcRequest> =
     ? O extends CoordinatorCryptoOperation
       ? CoordinatorRpcCryptoSuccessResponse<O> | CoordinatorRpcNonOkResponse
       : never
-    : R extends { kind: "p2pkh.providers.update" }
-      ? CoordinatorRpcValueSuccessResponse<R> | CoordinatorRpcAcceptedValueResponse<R> | CoordinatorRpcNonOkResponse
-      : R extends CoordinatorRpcVoidRequest
-        ? CoordinatorRpcVoidSuccessResponse | CoordinatorRpcNonOkResponse
-        : CoordinatorRpcValueSuccessResponse<R> | CoordinatorRpcNonOkResponse;
+    : R extends CoordinatorRpcVoidRequest
+      ? CoordinatorRpcVoidSuccessResponse | CoordinatorRpcNonOkResponse
+      : CoordinatorRpcValueSuccessResponse<R> | CoordinatorRpcNonOkResponse;
 
 export type CoordinatorRpcResponseFor<K extends CoordinatorRpcRequestKind> = CoordinatorRpcResponseForRequest<CoordinatorRpcRequestFor<K>>;
 
@@ -1584,22 +1575,17 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
       return { kind, taskId: text(request.taskId, kind + ".taskId", 256), reason: text(request.reason, kind + ".reason", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.cancel-by-key": return { kind, publicKeyHex: text(request.publicKeyHex, kind + ".publicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.settings.update": return { kind, settings: parseBackgroundSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "p2pkh.providers.get": return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "p2pkh.providers.update": {
-      const network = request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })();
-      const selection = expectRecord(request.selection, kind + ".selection");
-      const syncProviderId = selection.syncProviderId === null ? null : text(selection.syncProviderId, kind + ".selection.syncProviderId", 256);
-      const broadcastProviderId = selection.broadcastProviderId === null ? null : text(selection.broadcastProviderId, kind + ".selection.broadcastProviderId", 256);
-      return { kind, network, selection: { syncProviderId, broadcastProviderId }, expectedGeneration: boundedNumber(request.expectedGeneration, kind + ".expectedGeneration"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    }
     case "p2pkh.settings.update": {
       const settings = expectRecord(request.settings, kind + ".settings");
       return { kind, settings: { includeTestnet: booleanValue(settings.includeTestnet, kind + ".settings.includeTestnet") }, expectedSessionEpoch: epoch("expectedSessionEpoch") };
     }
     case "p2pkh.provider-config.get": return { kind, providerId: text(request.providerId, kind + ".providerId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.provider-config.update": return { kind, providerId: text(request.providerId, kind + ".providerId", 256), config: parseJsonRecord(request.config, kind + ".config"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "p2pkh.broadcast": case "p2pkh.rebroadcast-ancestors":
-      return { kind, ownerPublicKeyHex: text(request.ownerPublicKeyHex, kind + ".ownerPublicKeyHex", 256), network: request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })(), submissionId: text(request.submissionId, kind + ".submissionId", 256), expectedProviderGeneration: boundedNumber(request.expectedProviderGeneration, kind + ".expectedProviderGeneration"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "p2pkh.utxos.get":
+    case "p2pkh.utxos.refresh":
+      return { kind, ownerPublicKeyHex: text(request.ownerPublicKeyHex, kind + ".ownerPublicKeyHex", 256), network: request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })(), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "p2pkh.broadcast":
+      return { kind, ownerPublicKeyHex: text(request.ownerPublicKeyHex, kind + ".ownerPublicKeyHex", 256), network: request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })(), submissionId: text(request.submissionId, kind + ".submissionId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     default:
       throw new TypeError("Coordinator RPC request kind " + kind + " is unsupported");
   }
@@ -1882,9 +1868,6 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
     })();
   const storageBucketGeneration = optionalBoundedNumber(snapshot.storageBucketGeneration, field + ".storageBucketGeneration");
   const storageBucketId = optionalText(snapshot.storageBucketId, field + ".storageBucketId", 256);
-  const p2pkhProviders = snapshot.p2pkhProviders === undefined
-    ? undefined
-    : parseP2pkhProviderSnapshot(snapshot.p2pkhProviders, field + ".p2pkhProviders");
   const pluginIntent = snapshot.pluginIntent === undefined
     ? undefined
     : parsePluginIntentSnapshot(snapshot.pluginIntent, field + ".pluginIntent");
@@ -1921,7 +1904,6 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
     ...(p2pkhSettings === undefined ? {} : { p2pkhSettings }),
     ...(storageBucketGeneration === undefined ? {} : { storageBucketGeneration }),
     ...(storageBucketId === undefined ? {} : { storageBucketId }),
-    ...(p2pkhProviders === undefined ? {} : { p2pkhProviders }),
     ...(pluginIntent === undefined ? {} : { pluginIntent }),
     ...(storageIoOwnerPeer === undefined ? {} : { storageIoOwnerPeer }),
   };
@@ -2579,7 +2561,6 @@ function parseP2pkhBroadcastResult(value: unknown, field: string): CoordinatorP2
   const txid = text(result.txid, field + ".txid", 128);
   const reason = text(result.reason, field + ".reason", 4_096);
   if (status === "isolated") return { status, txid, reason, ...(providerId === undefined ? {} : { providerId }) };
-  if (status === "rebroadcast-failed") return { status, txid, reason, providerId: text(providerId, field + ".providerId", 256) };
   if (status === "local-confirmed") return { status, txid, ...(providerId === undefined ? {} : { providerId }) };
   throw new TypeError(`Coordinator ${field}.status is invalid`);
 }
@@ -2937,11 +2918,10 @@ function parseCoordinatorResultForRequest(request: CoordinatorRpcRequest, value:
     case "contacts.presence.snapshot": return parsePresenceMap(value, field);
     case "plugin.intent.snapshot": return parsePluginIntentSnapshot(value, field);
     case "plugin.intent.submit": return parsePluginIntentSubmissionResult(value, field);
-    case "p2pkh.providers.get":
-    case "p2pkh.providers.update": return parseP2pkhProviderSnapshot(value, field);
+    case "p2pkh.utxos.get":
+    case "p2pkh.utxos.refresh": return parseP2pkhUtxoSnapshotResult(value, field);
     case "p2pkh.provider-config.get": return parseP2pkhProviderConfigResult(value, field);
-    case "p2pkh.broadcast":
-    case "p2pkh.rebroadcast-ancestors": return parseP2pkhBroadcastResult(value, field);
+    case "p2pkh.broadcast": return parseP2pkhBroadcastResult(value, field);
     default: return parseUndefinedResult(value, field);
   }
 }
@@ -3012,14 +2992,13 @@ export function parseCoordinatorResponseFor<R extends CoordinatorRpcRequest>(
   }
   if (hasCryptoResult) throw new TypeError(`Coordinator ${request.kind} response contains cryptoResult`);
 
-  const acceptedWithOptionalResult = request.kind === "p2pkh.providers.update" && response.ack.status === "accepted";
   if (response.ack.status === "ok") {
     if (isVoidCoordinatorRequest(request)) {
       if (hasOperationResult) throw new TypeError(`Coordinator ${request.kind} void response contains operationResult`);
     } else if (!hasOperationResult) {
       throw new TypeError(`Coordinator ${request.kind} response is missing operationResult`);
     }
-  } else if (!acceptedWithOptionalResult && hasOperationResult) {
+  } else if (hasOperationResult) {
     throw new TypeError(`Coordinator ${request.kind} failure contains operationResult`);
   }
 
@@ -3057,7 +3036,7 @@ function parseCoordinatorTopic(value: unknown, field: string): CoordinatorTopic 
   const topic = text(value, field, 128);
   switch (topic) {
     case "session.state": case "background.snapshot": case "asset.data-changed":
-    case "storage.state": case "p2pkh.providers": case "msfile.state":
+    case "storage.state": case "msfile.state":
     case "sat.events": case "channel.events": case "contacts.presence":
     case "plugin.intent": case "worker.units":
       return topic;
@@ -3256,48 +3235,33 @@ function parseStorageStateEvent(value: unknown): CoordinatorStorageStateEvent {
   };
 }
 
-function parseP2pkhProviderDescriptor(value: unknown, field: string): { id: string; label: string; supportedNetworks: ("main" | "test")[] } {
-  const descriptor = expectRecord(value, field);
-  if (!Array.isArray(descriptor.supportedNetworks) || descriptor.supportedNetworks.length > 2) throw new TypeError(`Coordinator ${field}.supportedNetworks is invalid`);
-  return {
-    id: text(descriptor.id, field + ".id", 256),
-    label: text(descriptor.label, field + ".label", 512),
-    supportedNetworks: descriptor.supportedNetworks.map((network, index) => enumValue(network, ["main", "test"] as const, `${field}.supportedNetworks[${index}]`)),
-  };
-}
-
-function parseP2pkhProviderSelection(value: unknown, field: string): { syncProviderId: string | null; broadcastProviderId: string | null } {
-  const selection = expectRecord(value, field);
-  return {
-    syncProviderId: selection.syncProviderId === null ? null : text(selection.syncProviderId, field + ".syncProviderId", 256),
-    broadcastProviderId: selection.broadcastProviderId === null ? null : text(selection.broadcastProviderId, field + ".broadcastProviderId", 256),
-  };
-}
-
-function parseP2pkhProviderSnapshot(value: unknown, field: string): P2pkhProviderRegistrySnapshot {
+function parseP2pkhUtxoSnapshotResult(value: unknown, field: string): P2pkhUtxoSnapshotResult {
   const snapshot = expectRecord(value, field);
-  if (!Array.isArray(snapshot.syncProviders) || snapshot.syncProviders.length > 256) throw new TypeError(`Coordinator ${field}.syncProviders is invalid`);
-  if (!Array.isArray(snapshot.broadcastProviders) || snapshot.broadcastProviders.length > 256) throw new TypeError(`Coordinator ${field}.broadcastProviders is invalid`);
-  const selection = expectRecord(snapshot.selection, field + ".selection");
+  if (typeof snapshot.available !== "boolean") throw new TypeError(`Coordinator ${field}.available is invalid`);
+  if (snapshot.items !== undefined && (!Array.isArray(snapshot.items) || snapshot.items.length > 100_000)) throw new TypeError(`Coordinator ${field}.items is invalid`);
+  if (snapshot.syncedAt !== undefined && typeof snapshot.syncedAt !== "string") throw new TypeError(`Coordinator ${field}.syncedAt is invalid`);
+  const items = (snapshot.items ?? []).map((item, index) => {
+    const recordValue = expectRecord(item, `${field}.items[${index}]`);
+    const txid = text(recordValue.txid, `${field}.items[${index}].txid`, 64);
+    if (!/^[0-9a-f]{64}$/u.test(txid)) throw new TypeError(`Coordinator ${field}.items[${index}].txid is invalid`);
+    const vout = boundedNumber(recordValue.vout, `${field}.items[${index}].vout`);
+    const valueSatoshis = boundedNumber(recordValue.value, `${field}.items[${index}].value`);
+    const height = boundedNumber(recordValue.height, `${field}.items[${index}].height`);
+    if (typeof recordValue.isSpentInMempoolTx !== "boolean") throw new TypeError(`Coordinator ${field}.items[${index}].isSpentInMempoolTx is invalid`);
+    return {
+      txid,
+      vout,
+      value: valueSatoshis,
+      height,
+      status: enumValue(recordValue.status, ["confirmed", "unconfirmed"] as const, `${field}.items[${index}].status`),
+      isSpentInMempoolTx: recordValue.isSpentInMempoolTx,
+      ...(recordValue.script === undefined ? {} : { script: text(recordValue.script, `${field}.items[${index}].script`, 100_000) }),
+    };
+  });
   return {
-    syncProviders: snapshot.syncProviders.map((provider, index) => parseP2pkhProviderDescriptor(provider, `${field}.syncProviders[${index}]`)),
-    broadcastProviders: snapshot.broadcastProviders.map((provider, index) => parseP2pkhProviderDescriptor(provider, `${field}.broadcastProviders[${index}]`)),
-    selection: {
-      main: parseP2pkhProviderSelection(selection.main, field + ".selection.main"),
-      test: parseP2pkhProviderSelection(selection.test, field + ".selection.test"),
-      generation: boundedNumber(selection.generation, field + ".selection.generation"),
-    },
-  };
-}
-
-function parseP2pkhProvidersEvent(value: unknown): P2pkhProvidersEvent {
-  const event = topicEnvelope(value, "p2pkh.providers", "p2pkh.providers.changed");
-  return {
-    topic: "p2pkh.providers",
-    type: "p2pkh.providers.changed",
-    sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),
-    providerRevision: boundedNumber(event.providerRevision, "event.providerRevision"),
-    snapshot: parseP2pkhProviderSnapshot(event.snapshot, "event.snapshot"),
+    available: snapshot.available,
+    ...(snapshot.syncedAt === undefined ? {} : { syncedAt: snapshot.syncedAt as string }),
+    items,
   };
 }
 
@@ -3555,7 +3519,6 @@ function parseTopicEvent(value: unknown): CoordinatorTopicEvent {
     case "background.snapshot": return parseBackgroundSnapshotEvent(value);
     case "asset.data-changed": return parseAssetDataChangedEvent(value);
     case "storage.state": return parseStorageStateEvent(value);
-    case "p2pkh.providers": return parseP2pkhProvidersEvent(value);
     case "msfile.state": return parseMsFileStateEvent(value);
     case "sat.events": return parseSatStateEvent(value);
     case "channel.events": return parseChannelStateEvent(value);

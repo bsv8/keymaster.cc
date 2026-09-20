@@ -150,9 +150,6 @@ importers:
       '@keymaster/plugin-importer-wif':
         specifier: '*'
         version: link:../../packages/plugin-importer-wif
-      '@keymaster/plugin-junglebus':
-        specifier: '*'
-        version: link:../../packages/plugin-junglebus
       '@keymaster/plugin-key-import':
         specifier: '*'
         version: link:../../packages/plugin-key-import
@@ -468,24 +465,6 @@ importers:
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
-
-  packages/plugin-junglebus:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      '@noble/hashes':
-        specifier: ^1.4.0
-        version: 1.8.0
-      webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
 
   packages/plugin-key-import:
     dependencies:

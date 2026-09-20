@@ -1,24 +1,14 @@
 import { defineCapability } from "webloom-framework";
 import type { BsvNetwork } from "./vault.js";
 
-/** The only normalized data a confirmed P2PKH provider may expose. */
-export interface P2pkhConfirmedDataProvider {
-  readonly descriptor: P2pkhProviderDescriptor;
-  listAddressConfirmedTransactions(input: {
-    network: BsvNetwork;
-    address: string;
-    cursor?: string;
-    limit: number;
-    signal: AbortSignal;
-  }): Promise<P2pkhConfirmedTransactionPage>;
-  getConfirmedTransaction(input: {
-    network: BsvNetwork;
-    txid: string;
-    signal: AbortSignal;
-  }): Promise<P2pkhConfirmedTransaction>;
-}
-
-/** A broadcast provider is intentionally independent from confirmed sync. */
+/**
+ * 广播 Provider：唯一保留下来的 Provider 抽象。
+ *
+ * 设计缘由（2026-09-20 简化）：
+ *   - P2PKH 的已确认历史与 UTXO 真值只有 WoC 一个来源，confirmed-provider
+ *     选择层已删除；同步直接调用 WocService。
+ *   - 广播边界保留，方便未来切换广播通道，也不扩大本次改造范围。
+ */
 export interface P2pkhTransactionBroadcastProvider {
   readonly descriptor: P2pkhProviderDescriptor;
   broadcast(input: {
@@ -35,25 +25,6 @@ export interface P2pkhProviderDescriptor {
   supportedNetworks: BsvNetwork[];
 }
 
-export interface P2pkhConfirmedTransactionPage {
-  items: Array<{
-    txid: string;
-    blockHeight?: number;
-    blockHash?: string;
-    blockTime?: number;
-  }>;
-  nextCursor?: string;
-  exhausted: boolean;
-}
-
-export interface P2pkhConfirmedTransaction {
-  txid: string;
-  rawTxHex: string;
-  blockHeight?: number;
-  blockHash?: string;
-  blockTime?: number;
-}
-
 export interface P2pkhBroadcastResult {
   status: "accepted" | "already-known";
   canonicalTxid: string;
@@ -62,24 +33,43 @@ export interface P2pkhBroadcastResult {
   providerMessage?: string;
 }
 
+/** Provider 注册表快照：只剩广播 Provider。 */
 export interface P2pkhProviderRegistrySnapshot {
-  syncProviders: P2pkhProviderDescriptor[];
   broadcastProviders: P2pkhProviderDescriptor[];
-  selection: P2pkhProviderSettings;
 }
 
-export interface P2pkhNetworkProviderSelection {
-  syncProviderId: string | null;
-  broadcastProviderId: string | null;
+/**
+ * UTXO 快照项（Coordinator Worker 内存快照的跨进程投影）。
+ *
+ * 中文说明：
+ *   - txid/vout：outpoint；
+ *   - value：聪；
+ *   - height：确认高度（未确认为 0）；
+ *   - status：confirmed / unconfirmed；
+ *   - isSpentInMempoolTx：是否已被内存池交易花费（true 不可选币）；
+ *   - script：锁定脚本（Provider 提供时）。
+ */
+export interface P2pkhUtxoSnapshotItem {
+  txid: string;
+  vout: number;
+  value: number;
+  height: number;
+  status: "confirmed" | "unconfirmed";
+  isSpentInMempoolTx: boolean;
+  script?: string;
 }
 
-export interface P2pkhProviderSettings {
-  main: P2pkhNetworkProviderSelection;
-  test: P2pkhNetworkProviderSelection;
-  generation: number;
+/**
+ * UTXO 快照读取结果。
+ *
+ * `available=false` 表示冷启动/刷新失败后尚无任何可信快照，余额是
+ * “未知/不可用”，绝不能当成 0。
+ */
+export interface P2pkhUtxoSnapshotResult {
+  available: boolean;
+  syncedAt?: string;
+  items: P2pkhUtxoSnapshotItem[];
 }
-
-export type P2pkhProviderCapability = "confirmed-sync" | "broadcast";
 
 export const P2PKH_PROVIDERS_CAPABILITY = defineCapability<P2pkhProviderRegistry>({
   kind: "local",
@@ -110,14 +100,9 @@ export class P2pkhProviderError extends Error {
 }
 
 export interface P2pkhProviderRegistry {
-  registerConfirmedProvider(provider: P2pkhConfirmedDataProvider): void;
-  /** Optional lifecycle hook used when an optional provider plugin is disabled. */
-  unregisterConfirmedProvider?(providerId: string): void;
   registerBroadcastProvider(provider: P2pkhTransactionBroadcastProvider): void;
   /** 关闭 Provider 产品时同步移除广播入口；缺省实现只兼容只读 Provider。 */
   unregisterBroadcastProvider?(providerId: string): void;
-  listConfirmedProviders(network?: BsvNetwork): P2pkhProviderDescriptor[];
   listBroadcastProviders(network?: BsvNetwork): P2pkhProviderDescriptor[];
-  getConfirmedProvider(id: string, network: BsvNetwork): P2pkhConfirmedDataProvider | undefined;
   getBroadcastProvider(id: string, network: BsvNetwork): P2pkhTransactionBroadcastProvider | undefined;
 }

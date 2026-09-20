@@ -1,14 +1,18 @@
-import type { BorrowedOwnerFileStore, KeyspaceService, P2pkhProviderRegistry } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore, KeyspaceService, WocService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import { createP2pkhTransactionSync } from "./p2pkhTransactionSync.js";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 
+/**
+ * Coordinator 的 P2PKH 历史同步任务。
+ *
+ * 只有一个数据源：WocService。任务只同步历史元数据；UTXO 快照刷新由
+ * Worker 在同一个 run 里显式调用（见 Worker 装配），失败互不影响。
+ */
 export function createP2pkhCoordinatorTasks(input: {
   keyspace: KeyspaceService;
   storage: BorrowedOwnerFileStore;
-  registry: P2pkhProviderRegistry;
-  getSelection: (network: "main" | "test") => { syncProviderId: string | null; generation: number };
-  isGenerationCurrent?: (network: "main" | "test", generation: number) => boolean;
+  woc: WocService;
   isNetworkEnabled?: (network: "main" | "test") => boolean;
   messageBus?: MessageBus;
 }) {
@@ -16,9 +20,7 @@ export function createP2pkhCoordinatorTasks(input: {
   const sync = createP2pkhTransactionSync({
     getStore,
     getResources: async () => (await getStore()).listResourcesByKey().then((resources) => resources.filter((resource) => input.isNetworkEnabled?.(resource.network) ?? true)),
-    registry: input.registry,
-    getSelection: input.getSelection,
-    isGenerationCurrent: input.isGenerationCurrent,
+    woc: input.woc,
     isNetworkEnabled: input.isNetworkEnabled
   });
   return {

@@ -41,9 +41,7 @@ import type {
 import type { StorageProviderConfigDraft } from "./storage/profile.js";
 import type { ExistingRemoteStorageConnectPlan, InitialSetupPlan, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
 import type {
-  P2pkhProviderSettings,
-  P2pkhProviderRegistrySnapshot,
-  P2pkhNetworkProviderSelection,
+  P2pkhUtxoSnapshotResult,
 } from "./bsvP2pkhProviders.js";
 
 /** Provider-specific settings cross the Coordinator wire as JSON only. */
@@ -341,17 +339,16 @@ export type CoordinatorClientRequest =
     | { kind: "background.cancel"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.cancel-by-key"; clientId: string; requestId: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.providers.get"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.providers.update"; clientId: string; requestId: string; network: "main" | "test"; selection: P2pkhNetworkProviderSelection; expectedGeneration: number; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { includeTestnet: boolean }; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.rebroadcast-ancestors"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.utxos.get"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.utxos.refresh"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "plugin.intent" | "worker.units";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "plugin.intent" | "worker.units";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -471,7 +468,6 @@ export type CoordinatorTopicEvent =
   | BackgroundSnapshotEvent
   | AssetDataChangedEvent
   | CoordinatorStorageStateEvent
-  | P2pkhProvidersEvent
   | CoordinatorMsFileStateEvent
   | CoordinatorSatStateEvent
   | CoordinatorChannelStateEvent
@@ -520,14 +516,6 @@ export interface CoordinatorContactsPresenceEvent {
   /** 快照所属的当前 owner；锁定或无 active key 时为 null。 */
   activePublicKeyHex: string | null;
   presence: ContactPresenceMap;
-}
-
-export interface P2pkhProvidersEvent {
-  topic: "p2pkh.providers";
-  type: "p2pkh.providers.changed";
-  sessionEpoch: SessionEpoch;
-  providerRevision: number;
-  snapshot: P2pkhProviderRegistrySnapshot;
 }
 
 export interface CoordinatorStorageStateEvent {
@@ -611,7 +599,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | PluginIntentStateEvent | CoordinatorWorkerUnitStateEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | PluginIntentStateEvent | CoordinatorWorkerUnitStateEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -648,7 +636,6 @@ export interface CoordinatorBootstrapSnapshot {
   storageBucketGeneration?: number;
   /** 当前抽象存储桶身份；与页面 Local I/O 租约绑定。 */
   storageBucketId?: string;
-  p2pkhProviders?: P2pkhProviderRegistrySnapshot;
   /** 插件产品启用意图；不代表运行单元已经启动。 */
   pluginIntent?: PluginIntentSnapshot;
   /**
@@ -757,13 +744,14 @@ export interface SessionCoordinatorClient {
   pluginIntentSnapshot(): Promise<CoordinatorValueResult<PluginIntentSnapshot>>;
   /** 提交绝对启停意图；accepted 只表示 Worker 已持久化。 */
   pluginIntentSubmit(command: PluginIntentCommand): Promise<PluginIntentSubmissionResult>;
-  p2pkhProvidersGet(): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>>;
-  p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult>;
   p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;
   p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
   p2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorCommandResult>;
-  p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
-  p2pkhRebroadcastAncestors(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
+  /** 读取 Coordinator Worker 内存中的 UTXO 快照；`available=false` 表示尚无可信快照。 */
+  p2pkhUtxosGet(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>>;
+  /** 主动刷新 UTXO 快照；失败时旧快照保留，返回旧快照或 unavailable。 */
+  p2pkhUtxosRefresh(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>>;
+  p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }): Promise<CoordinatorValueResult<unknown>>;
   /** 页面活动心跳；不包含任何业务 RPC 权限。 */
   sendActivity(): void;
   /** 记录可恢复的 transport/业务失败，不抛到全局 UI。 */
@@ -795,11 +783,12 @@ export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
   reportRecoverableCoordinatorFailure?: SessionCoordinatorClient["reportRecoverableCoordinatorFailure"];
 };
 
-/** P2PKH/WOC/JungleBus 插件共享的 P2PKH 配置与广播面。 */
+/** P2PKH / WOC 插件共享的 P2PKH 设置、UTXO 快照与广播面。 */
 export type P2pkhCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "p2pkhProvidersGet" | "p2pkhProvidersUpdate" | "p2pkhSettingsUpdate" |
+  "p2pkhSettingsUpdate" |
   "p2pkhProviderConfigGet" | "p2pkhProviderConfigUpdate" |
-  "p2pkhBroadcast" | "p2pkhRebroadcastAncestors"
+  "p2pkhUtxosGet" | "p2pkhUtxosRefresh" |
+  "p2pkhBroadcast"
 >;
 
 /** MSFile 插件 Coordinator 面。 */
@@ -844,7 +833,6 @@ export const VAULT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<VaultCoordi
 export const BACKGROUND_COORDINATOR_CONTROL_CAPABILITY = defineCapability<BackgroundCoordinatorControl>({ kind: "local", id: "background.coordinator-control", version: "1" });
 export const P2PKH_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "p2pkh.coordinator-control", version: "1" });
 export const WOC_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "woc.coordinator-control", version: "1" });
-export const JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "junglebus.coordinator-control", version: "1" });
 export const MSFILE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<MsFileCoordinatorControl>({ kind: "local", id: "msfile.coordinator-control", version: "1" });
 export const SAT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<SatCoordinatorControl>({ kind: "local", id: "sat.coordinator-control", version: "1" });
 export const WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY = defineCapability<WindowP2pCoordinatorControl>({ kind: "local", id: "window-p2p.coordinator-control", version: "1" });

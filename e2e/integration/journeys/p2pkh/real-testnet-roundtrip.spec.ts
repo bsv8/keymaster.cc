@@ -11,11 +11,12 @@ import {
   submitTestnetSendAll,
   waitForTestnetConfirmedSync,
 } from "../../drivers/p2pkhDriver.js";
-import { initializeLocalUser } from "../../drivers/initialSetupDriver.js";
+import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
 import { loadE2EConfig, publicConfigFingerprint } from "../../resources/config/loader.js";
-import { RecoveryLedger, TestnetFundingResource, deriveTestnetP2pkhAddress, type FundingLedgerRecord, type FundingTarget } from "../../resources/testnet/fundingResource.js";
+import { RecoveryLedger, TestnetFundingResource, type FundingLedgerRecord, type OneTimeWallet } from "../../resources/testnet/fundingResource.js";
 import { createWocTestnetChainAdapter } from "../../resources/testnet/wocChainAdapter.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
+import { attachRedactedText, redactedError } from "../../support/redaction.js";
 import { readResourceRunState } from "../../support/resourceState.js";
 import { REAL_TESTNET_ROUNDTRIP_SCENARIO } from "../../support/scenarioMetadata.js";
 import type { LoadedE2EConfig } from "../../resources/config/types.js";
@@ -39,29 +40,31 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
   config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
+  config?.testnet.trackingKeyPrivateKeyHex.clear();
 }
 
 /**
- * 业务目标：用户初始化桶和第一把 Key 后，seed 向该 Key 的 testnet 地址
- * 转入 10 sat；Keymaster 自己同步并检测到账，用户再把全部余额转回 seed。
+ * 业务目标：用户从仓库外 key01.hex 导入固定测试 Key 作为 active Key；seed 向
+ * 该地址转入 10 sat；Keymaster 自己同步并检测到账，用户再把全部余额转回 seed。
  *
  * 开始状态：resource-setup 已完成 s3.json 指定桶的 lease、SatSubscription 配置
- * 投影和 testnet seed 余额/网络/旧账门禁；本浏览器仍是全新 context。
- * Key 由页面正式初始化流程生成，私钥从不离开页面 Vault；Node 侧只按公开
- * 地址打款，并按 canonical raw transaction 核对回款，不用 Node 余额代替
- * 页面余额断言。
+ * 投影和 testnet seed 余额/网络/旧账门禁；本浏览器是全新 context，key01 地址
+ * 在上一轮必须已清空（有余额直接 fail，不把旧钱混进本轮）。
+ * 私钥由页面正式导入入口接收；Node 侧持有同一把测试私钥只为失败回收，断言
+ * 页面余额时仍只用 keymaster 自己的 confirmed-sync 结果。
  *
  * 成功标准：
+ * - 页面导入后的 active Key 公钥等于 key01 派生公钥；
  * - 转账 Offer 余额由 keymaster confirmed-sync 显示为 10 sats，而不是 Node 侧查询；
  * - 用户以“全部”转回 seed：预览无找零、矿工费从余额扣除、页面返回 local-confirmed；
  * - 转出后页面余额回到 0；
  * - Node 只核对原始交易：它确实消费了资助输出，seed 收到的金额与页面预览一致，
  *   账本闭合为 returned，损失等于页面显示的矿工费。
  *
- * 外部资源与收尾：seed 侧广播由 Node Resource 完成，页面 Key 私钥始终只在
- * 浏览器 Vault。任何失败最多留下 10 sat 在浏览器 profile 中，等于声明的
- * maxLoss；账本保持 funded 供人工核对，不做盲目重试。该项目不保留 trace、
- * screenshot 或 video，因为浏览器会在初始化阶段短暂接触 Key 密码。
+ * 外部资源与收尾：seed 侧广播由 Node Resource 完成。页面转账广播前失败时，Node
+ * 用同一把 key01 私钥把资金归集回 seed；页面已广播后绝不重复归集，避免双花。
+ * 该项目不保留 trace、screenshot 或 video，因为浏览器会在初始化阶段短暂接触
+ * Key 密码和私钥材料。
  *
  * 覆盖需求：KM-ASSET-001。
  */
@@ -70,10 +73,15 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
   const password = "real-testnet-roundtrip-e2e-password-123";
   const browserErrors = captureBrowserErrors(page, context);
   let config: LoadedE2EConfig | undefined;
-  let target: FundingTarget | undefined;
+  let funding: TestnetFundingResource | undefined;
+  let wallet: OneTimeWallet | undefined;
   let funded: FundingLedgerRecord | undefined;
+  let seedAddress = "";
+  let appReturnSubmitted = false;
+  let fundsReturned = false;
   let journeyError: unknown;
   let evidenceError: unknown;
+  let recoveryError: unknown;
 
   try {
     const state = await readResourceRunState();
@@ -82,6 +90,7 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
 
     config = await loadE2EConfig();
     expect(publicConfigFingerprint(config), "Journey 与 setup 使用的公开资源配置必须一致").toBe(state.configFingerprint);
+    seedAddress = state.testnet.seedAddress;
 
     const ledger = new RecoveryLedger(path.join(config.directory, "testnet-funding-ledger.json"));
     const chain = createWocTestnetChainAdapter({
@@ -89,21 +98,28 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
       ...(config.satsubscription.testnetApiAuthorization === undefined ? {} : { authorization: config.satsubscription.testnetApiAuthorization.read() }),
       operationJournalPath: path.join(config.directory, "testnet-operation-journal.json"),
     });
-    const funding = new TestnetFundingResource(config.testnet.privateKeyHex, chain, ledger);
+    funding = new TestnetFundingResource(config.testnet.privateKeyHex, chain, ledger);
+    wallet = funding.createImportedWallet(state.runId, JOURNEY_ID, config.testnet.trackingKeyPrivateKeyHex.read());
 
-    let keyAddress = "";
-    await test.step("用户初始化 Local 桶和第一把 Key，Node 只取得公开 testnet 地址", async () => {
-      const ready = await initializeLocalUser(page, {
+    await test.step("用户用 key01 导入第一把 Key，地址与 Node 可追踪身份一致且上一轮已清空", async () => {
+      const existing = await chain.inspectAddress(wallet!.address);
+      expect(existing.mainnetBalance, "可追踪测试 Key 不得在 mainnet 有余额").toBe(0);
+      expect(
+        existing.testnetBalance === 0 && existing.spendableUtxoCount === 0,
+        `可追踪 Key 地址 ${wallet!.address} 仍有 testnet 余额（balance=${existing.testnetBalance}，utxos=${existing.spendableUtxoCount}）；请先导入该 Key 把余额转回 seed 后再跑`,
+      ).toBe(true);
+
+      const ready = await initializeLocalUserWithImportedHexKey(page, {
         bucketLabel: "真实 testnet 回款测试桶",
         keyLabel: "真实 testnet 回款 Key",
         password,
+        privateKeyHex: wallet!.privateKey.read(),
       });
-      keyAddress = deriveTestnetP2pkhAddress(ready.publicKeyHex);
-      target = funding.createFundingTarget(state.runId, JOURNEY_ID, keyAddress);
+      expect(ready.publicKeyHex, "页面导入后的 active Key 必须等于可追踪测试 Key").toBe(wallet!.publicKeyHex);
     });
 
-    await test.step("Resource 从 seed 打 10 sat 到页面 Key 并等待 confirmed", async () => {
-      funded = await funding.fund(target!, FUNDING_SATOSHIS, {
+    await test.step("Resource 从 seed 打 10 sat 到可追踪地址并等待 confirmed", async () => {
+      funded = await funding!.fund(wallet!, FUNDING_SATOSHIS, {
         maxFundingSatoshis: FUNDING_SATOSHIS,
         maxLossSatoshis: MAX_LOSS_SATOSHIS,
         feeReserveSatoshis: ADAPTER_FEE_RESERVE_SATOSHIS,
@@ -130,7 +146,9 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
       await selectTestnetTransferOffer(page);
       await expectTransferFeeTierRate(page, "medium", FEE_RATE_SATOSHIS_PER_KB);
 
-      receipt = await submitTestnetSendAll(page, { recipientAddress: state.testnet.seedAddress });
+      // 页面即将广播：此后 Node 不再尝试归集，避免与页面交易双花。
+      appReturnSubmitted = true;
+      receipt = await submitTestnetSendAll(page, { recipientAddress: seedAddress });
       expect(receipt.amountSatoshis + receipt.feeSatoshis, "“全部”转出的收款输出与矿工费必须等于到账的 10 sat").toBe(FUNDING_SATOSHIS);
       expect(receipt.amountSatoshis, "收款输出必须为正整数").toBeLessThan(FUNDING_SATOSHIS);
     });
@@ -141,10 +159,11 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
 
       const observation = await chain.waitForTransaction(receipt!.txid, { timeoutMs: 180_000, pollMs: 10_000 });
       expect(observation, "页面 local-confirmed 后，链上至少应观察到 confirmed 或 unconfirmed").toMatch(/^(confirmed|unconfirmed)$/u);
-      const returned = await funding.recordAppReturn(target!, {
+      const returned = await funding!.recordAppReturn(wallet!, {
         returnTxid: receipt!.txid,
-        targetAddress: state.testnet.seedAddress,
+        targetAddress: seedAddress,
       });
+      fundsReturned = returned.status === "returned";
       expect(returned.status, "链上回款符合预算后账本必须闭合为 returned").toBe("returned");
       expect(returned.returnTxid).toBe(receipt!.txid);
       expect(returned.returnedSatoshis, "seed 实收金额必须等于页面预览的收款输出").toBe(receipt!.amountSatoshis);
@@ -153,17 +172,27 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
   } catch (error) {
     journeyError = error;
   } finally {
-    // 页面 Key 的私钥只存在于浏览器 Vault，Node 无法替它归集；失败时账本
-    // 保持 funded，按公开地址留下人工核对线索，不盲目重放。
+    // 页面转账广播前失败时，Node 仍持有同一把 key01 私钥，可以把打款归集回
+    // seed；页面已广播后只按链上事实对账，绝不重复归集。
+    if (funding && wallet && funded && !fundsReturned && !appReturnSubmitted) {
+      try {
+        await funding.returnRemaining(wallet, seedAddress);
+      } catch (error) {
+        recoveryError = error;
+      }
+    }
     try {
       const knownSecrets = [password];
       await attachBrowserErrors(testInfo, browserErrors, knownSecrets);
+      if (recoveryError) await attachRedactedText(testInfo, "roundtrip-recovery-error", JSON.stringify(redactedError(recoveryError)), { contentType: "application/json" });
     } catch (error) {
       evidenceError = error;
     }
+    wallet?.clear();
     clearSecrets(config);
   }
 
   if (journeyError) throw journeyError;
+  if (recoveryError) throw recoveryError;
   if (evidenceError) throw evidenceError;
 });

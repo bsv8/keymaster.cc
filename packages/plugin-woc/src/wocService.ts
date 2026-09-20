@@ -126,7 +126,7 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
       );
     },
 
-    async getAddressConfirmedUtxos(
+    async getAddressUnspentAll(
       network: BsvNetwork,
       address: string,
       opts?: WocRequestOptions
@@ -139,26 +139,7 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
         timeoutMs: opts?.timeoutMs
       };
       return messageBus.request<WocUtxosPayload, WocUtxoResponse[]>(
-        WOC_MSG.UTXOS_CONFIRMED,
-        payload,
-        dispatchOptions(opts)
-      );
-    },
-
-    async getAddressUnconfirmedUtxos(
-      network: BsvNetwork,
-      address: string,
-      opts?: WocRequestOptions
-    ): Promise<WocUtxoResponse[]> {
-      const payload: WocUtxosPayload = {
-        network,
-        address,
-        priority: opts?.priority ?? "background",
-        signal: opts?.signal,
-        timeoutMs: opts?.timeoutMs
-      };
-      return messageBus.request<WocUtxosPayload, WocUtxoResponse[]>(
-        WOC_MSG.UTXOS_UNCONFIRMED,
+        WOC_MSG.UTXOS_ALL,
         payload,
         dispatchOptions(opts)
       );
@@ -178,23 +159,6 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
     ): Promise<WocBalanceResponse[]> {
       return Promise.all(addresses.map((a) => this.getAddressUnconfirmedBalance(network, a, opts)));
     },
-    async getAddressesConfirmedUtxos(
-      network: BsvNetwork,
-      addresses: string[],
-      opts?: WocRequestOptions
-    ): Promise<WocUtxoResponse[]> {
-      const results = await Promise.allSettled(addresses.map((a) => this.getAddressConfirmedUtxos(network, a, opts)));
-      return results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
-    },
-    async getAddressesUnconfirmedUtxos(
-      network: BsvNetwork,
-      addresses: string[],
-      opts?: WocRequestOptions
-    ): Promise<WocUtxoResponse[]> {
-      const results = await Promise.allSettled(addresses.map((a) => this.getAddressUnconfirmedUtxos(network, a, opts)));
-      return results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
-    },
-
     async listAddressConfirmedHistory(
       network: BsvNetwork,
       address: string,

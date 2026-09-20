@@ -6,8 +6,8 @@
 
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
 import { BSV_PRICE_READER_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
@@ -26,7 +26,8 @@ function deferred<T>() {
 }
 
 function makeFakeService(overrides?: {
-  getAssetBalance?: () => Promise<P2pkhBalance>;
+  getAssetBalance?: (assetId: string) => Promise<P2pkhBalance>;
+  includeTestnet?: boolean;
 }) {
   const syncListeners = new Set<(s: string) => void>();
   const dataListeners = new Set<() => void>();
@@ -46,10 +47,10 @@ function makeFakeService(overrides?: {
       },
       getAssetBalance: vi.fn(async (assetId: string) => {
         callCount++;
-        if (overrides?.getAssetBalance) return overrides.getAssetBalance();
-        return { total: assetId === "bsv" ? 1000 : 200 };
+        if (overrides?.getAssetBalance) return overrides.getAssetBalance(assetId);
+        return { total: assetId === "bsv" ? 1000 : 200, available: true };
       }),
-      getGlobalSettings: () => ({ includeTestnet: false }),
+      getGlobalSettings: () => ({ includeTestnet: overrides?.includeTestnet ?? false }),
       onGlobalSettingsChange: (h: (s: { includeTestnet: boolean }) => void) => {
         settingsListeners.add(h);
         return () => settingsListeners.delete(h);
@@ -150,6 +151,7 @@ function registerP2pkhResources(host: ReturnType<typeof createPluginHost>, servi
 
 describe("P2pkhBalanceWidget", () => {
   afterEach(() => {
+    cleanup();
     vi.restoreAllMocks();
   });
 
@@ -285,5 +287,101 @@ describe("P2pkhBalanceWidget", () => {
     await waitFor(() => {
       expect(screen.getByText("100,000,000 sats / 45.12 USDT")).toBeTruthy();
     });
+  });
+
+  it("shows — when the balance is unavailable", async () => {
+    const fake = makeFakeService({ getAssetBalance: async () => ({ total: 0, available: false }) });
+    const keyspace = makeFakeKeyspace();
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
+    registerP2pkhResources(host, fake.service);
+
+    render(
+      <PluginHostProvider host={host}>
+        <P2pkhBalanceWidget />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("—")).toBeTruthy();
+    });
+    expect(screen.queryByText(/1,000/)).toBeNull();
+  });
+
+  it("shows known balance with confirmed + pending-claims breakdown", async () => {
+    const fake = makeFakeService({
+      getAssetBalance: async () => ({
+        total: 5000,
+        available: true,
+        breakdown: { confirmed: 1000, unconfirmed: 200, spendable: 800, pendingInputClaims: 400 },
+      }),
+    });
+    const keyspace = makeFakeKeyspace();
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
+    registerP2pkhResources(host, fake.service);
+
+    render(
+      <PluginHostProvider host={host}>
+        <P2pkhBalanceWidget />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/5,000/)).toBeTruthy();
+    });
+    expect(screen.getByText("Confirmed")).toBeTruthy();
+    expect(screen.getByText("1,000 sats")).toBeTruthy();
+    expect(screen.getByText("Pending claims")).toBeTruthy();
+    expect(screen.getByText("400 sats")).toBeTruthy();
+  });
+
+  it("hides the testnet row when testnet is disabled", async () => {
+    const fake = makeFakeService({ includeTestnet: false });
+    const keyspace = makeFakeKeyspace();
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
+    registerP2pkhResources(host, fake.service);
+
+    const { unmount } = render(
+      <PluginHostProvider host={host}>
+        <P2pkhBalanceWidget />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/1,000/)).toBeTruthy();
+    });
+    expect(screen.queryByText("BSV Testnet (test)")).toBeNull();
+    unmount();
+  });
+
+  it("shows the testnet row when testnet is enabled", async () => {
+    const fake = makeFakeService({
+      includeTestnet: true,
+      getAssetBalance: async (assetId: string) => ({
+        total: assetId === "bsv" ? 1000 : 200,
+        available: true,
+      }),
+    });
+    const keyspace = makeFakeKeyspace();
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    host.provide(P2PKH_CAPABILITY, fake.service);
+    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
+    registerP2pkhResources(host, fake.service);
+
+    render(
+      <PluginHostProvider host={host}>
+        <P2pkhBalanceWidget />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("BSV Testnet (test)")).toBeTruthy();
+    });
+    expect(screen.getByText(/200/)).toBeTruthy();
   });
 });

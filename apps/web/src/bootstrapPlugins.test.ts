@@ -347,8 +347,8 @@ describe("web startup capability contract", () => {
       crypto: async () => ({ ack: { ok: false } }), backgroundCancelByKey: async () => ({ ok: false }),
       p2pkhProviderConfigGet: async () => ({ status: "ok", value: {} }),
       p2pkhProviderConfigUpdate: async () => ({ status: "ok" }),
-      p2pkhProvidersGet: async () => ({ status: "ok", value: { main: {}, test: {}, generation: 0 } }),
-      p2pkhProvidersUpdate: async () => ({ status: "ok" }),
+      p2pkhUtxosGet: async () => ({ status: "ok", value: { available: false, items: [] } }),
+      p2pkhUtxosRefresh: async () => ({ status: "ok", value: { available: false, items: [] } }),
       p2pkhSettingsUpdate: async () => ({ status: "ok" })
     } as unknown as SessionCoordinatorClient;
     const host = trackHost(createPluginHost({

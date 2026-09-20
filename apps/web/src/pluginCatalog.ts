@@ -31,7 +31,6 @@ import { msfilePlugin } from "@keymaster/plugin-msfile";
 import { satSubscriptionPlugin } from "@keymaster/plugin-sat-subscription";
 import { windowP2pPlugin } from "@keymaster/plugin-window-p2p";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
-import { jungleBusPlugin } from "@keymaster/plugin-junglebus";
 import { pokerPlugin } from "@keymaster/plugin-poker";
 import { protocolPlugin } from "@keymaster/plugin-protocol";
 import { storagePlatformPlugin } from "@keymaster/platform-storage";
@@ -56,7 +55,6 @@ const WEB_PLUGIN_CATALOG_SOURCE: readonly PluginManifest[] = [
   backgroundPlugin,
   homePlugin,
   wocPlugin,
-  jungleBusPlugin,
   p2pkhPlugin,
   bsv21TokenPlugin,
   stasTokenPlugin,
@@ -72,7 +70,7 @@ const WEB_PLUGIN_CATALOG_SOURCE: readonly PluginManifest[] = [
 /**
  * 应用目录的运行单元契约校验器。
  *
- * 这 25 个产品目前都由页面装配，不能继续让 Host 把“没有 units”解释成
+ * 这 24 个产品目前都由页面装配，不能继续让 Host 把“没有 units”解释成
  * 隐式历史实例。这里把每个产品明确落成一个 Window 运行单元；未来某个
  * 产品拆出 Coordinator Worker 单元时，必须在其 manifest 和 contracts 静态
  * 目录中同时声明；没有显式 units 的产品直接拒绝进入 Web 装配。

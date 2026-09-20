@@ -215,7 +215,7 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
     "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort",
     "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer", "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord",
     "satOperation", "channelOperation", "contactsPresenceSnapshot",
-    "p2pkhProvidersGet", "p2pkhProvidersUpdate", "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhBroadcast", "p2pkhRebroadcastAncestors"
+    "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast"
   ]);
 }
 
@@ -251,11 +251,10 @@ export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, 
       "backgroundCancel", "backgroundCancelByKey", "backgroundSettingsUpdate", "reportRecoverableCoordinatorFailure"
     ]);
     case "p2pkh":
-    case "woc":
-    case "junglebus": return bindCoordinatorMethods<P2pkhCoordinatorControl>(client, [
+    case "woc": return bindCoordinatorMethods<P2pkhCoordinatorControl>(client, [
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
-      "p2pkhProvidersGet", "p2pkhProvidersUpdate", "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate",
-      "p2pkhBroadcast", "p2pkhRebroadcastAncestors"
+      "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate",
+      "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast"
     ]);
     case "msfile": return bindCoordinatorMethods<MsFileCoordinatorControl>(client, [
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
