@@ -76,6 +76,123 @@ export async function readSatSupplierRow(page: Page, supplierId: string): Promis
   return (await row.innerText()).replace(/\s+/gu, " ");
 }
 
+/** 返回指定供应商卡片；优先用 data-supplier-id，兼容旧 hasText 过滤。 */
+export function satSupplierRow(page: Page, supplierId: string): Locator {
+  const settings = satSettings(page);
+  const byId = settings.locator(`[data-supplier-id="${supplierId}"]`);
+  return byId.first();
+}
+
+/**
+ * 等待红绿灯显示指定连接状态。
+ * 绿灯=已连接 online，红灯=未连接 disconnected，黄灯=连接中/已降级，灰灯=已停用。
+ * 同时校验灯的 data-state 与中文无障碍说明，避免只看文字误判。
+ */
+export async function waitForSatSupplierConnectionLight(
+  page: Page,
+  supplierId: string,
+  state: "online" | "disconnected" | "degraded" | "connecting" | "disabled",
+): Promise<void> {
+  const light = page.getByTestId(`ss-connection-light-${supplierId}`);
+  await expect(light, `供应商 ${supplierId} 缺少连接红绿灯`).toBeVisible({ timeout: 45_000 });
+  await expect.poll(
+    async () => await light.getAttribute("data-state"),
+    { timeout: 45_000, intervals: [250, 500, 1_000], message: `红绿灯未变为 ${state}` },
+  ).toBe(state);
+  const label = (await light.getAttribute("aria-label")) ?? "";
+  const expectedChinese = state === "online" ? "已连接" : state === "disconnected" ? "未连接" : state === "connecting" ? "连接中" : state === "degraded" ? "已降级" : "已停用";
+  expect(label, `红绿灯无障碍说明必须含中文“${expectedChinese}”`).toContain(expectedChinese);
+}
+
+/** 读取红绿灯当前状态（data-state），用于断言与诊断。 */
+export async function readSatSupplierConnectionLight(page: Page, supplierId: string): Promise<string> {
+  const light = page.getByTestId(`ss-connection-light-${supplierId}`);
+  await expect(light).toBeVisible();
+  return (await light.getAttribute("data-state")) ?? "";
+}
+
+/**
+ * 点击“刷新 SPI 余额”并确认远端事实已回显。
+ * 成功标准：无 role=alert，状态栏提示 SPI 已刷新，且行内出现 BSV 账户余额。
+ */
+export async function refreshSpiBalanceFromPage(page: Page, supplierId: string): Promise<void> {
+  const row = satSupplierRow(page, supplierId);
+  await row.getByRole("button", { name: /刷新 SPI 余额|Refresh SPI balance/iu }).click();
+  await expect(satSettings(page).getByRole("status")).toContainText(/SPI.*刷新|SPI.*balance|余额/iu, { timeout: 30_000 });
+  await expect(satSettings(page).getByRole("alert")).toHaveCount(0);
+  await expect(row).toContainText(/BSV\/testnet|BSV\/mainnet/u, { timeout: 30_000 });
+}
+
+/**
+ * 点击“刷新远端订阅”并确认远端事实已回显。
+ * 成功标准：无 alert，状态栏含“已刷新远端订阅”，行内远端观察字段可见。
+ */
+export async function refreshRemoteSubscriptionsFromPage(page: Page, supplierId: string): Promise<void> {
+  const row = satSupplierRow(page, supplierId);
+  await row.getByRole("button", { name: /刷新远端订阅|Refresh remote subscriptions/iu }).click();
+  await expect(satSettings(page).getByRole("status")).toContainText(/已刷新远端订阅|Remote subscriptions refreshed/iu, { timeout: 30_000 });
+  await expect(satSettings(page).getByRole("alert")).toHaveCount(0);
+  await expect(row).toContainText(/远端观察|Remote observed/u, { timeout: 30_000 });
+}
+
+/**
+ * 查询服务器账单首页（可指定每页条数），并确认分页状态与记录渲染。
+ * 返回首页记录数，供调用方决定是否继续翻页。
+ */
+export async function queryServerBillingFirstPage(
+  page: Page,
+  supplierId: string,
+  limit?: number,
+): Promise<number> {
+  const row = satSupplierRow(page, supplierId);
+  if (limit !== undefined) {
+    const select = page.getByTestId(`ss-billing-limit-${supplierId}`);
+    await select.selectOption(String(limit));
+    // 切换每页条数会自动重新查询首页；等待状态栏与记录稳定。
+    await expect(page.getByTestId(`ss-billing-status-${supplierId}`)).toContainText(/第 1 页/u, { timeout: 30_000 });
+  } else {
+    await row.getByRole("button", { name: /查询服务器账单|Query server billing/iu }).click();
+    await expect(page.getByTestId(`ss-billing-status-${supplierId}`)).toContainText(/第 1 页|尚未查询/u, { timeout: 30_000 });
+    await expect(page.getByTestId(`ss-billing-status-${supplierId}`)).toContainText(/第 1 页/u, { timeout: 30_000 });
+  }
+  await expect(satSettings(page).getByRole("alert")).toHaveCount(0);
+  const records = page.getByTestId(new RegExp(`^ss-billing-record-${supplierId}-`));
+  // 账单可能为空（新用户无扣费）：允许 0 条，但面板与状态必须可见。
+  await expect(page.getByTestId(`ss-billing-panel-${supplierId}`)).toBeVisible();
+  return records.count();
+}
+
+/** 点击“下一页”并确认页码+1；无下一页时直接返回 false。 */
+export async function billingNextPage(page: Page, supplierId: string): Promise<boolean> {
+  const nextButton = satSupplierRow(page, supplierId).getByRole("button", { name: /^下一页$|^Next page$/u });
+  if (!(await nextButton.isEnabled())) return false;
+  const status = page.getByTestId(`ss-billing-status-${supplierId}`);
+  const before = await status.innerText();
+  await nextButton.click();
+  await expect.poll(async () => status.innerText(), { timeout: 30_000, message: "点击下一页后账单状态未变化" }).not.toBe(before);
+  await expect(satSettings(page).getByRole("alert")).toHaveCount(0);
+  return true;
+}
+
+/** 点击“上一页”并确认页码-1；已是首页时直接返回 false。 */
+export async function billingPrevPage(page: Page, supplierId: string): Promise<boolean> {
+  const prevButton = satSupplierRow(page, supplierId).getByRole("button", { name: /^上一页$|^Previous page$/u });
+  if (!(await prevButton.isEnabled())) return false;
+  const status = page.getByTestId(`ss-billing-status-${supplierId}`);
+  const before = await status.innerText();
+  await prevButton.click();
+  await expect.poll(async () => status.innerText(), { timeout: 30_000, message: "点击上一页后账单状态未变化" }).not.toBe(before);
+  await expect(satSettings(page).getByRole("alert")).toHaveCount(0);
+  return true;
+}
+
+/** 读取账单面板状态文本（第 X 页，本页 N 条，是否还有下一页）。 */
+export async function readBillingStatus(page: Page, supplierId: string): Promise<string> {
+  const status = page.getByTestId(`ss-billing-status-${supplierId}`);
+  await expect(status).toBeVisible();
+  return ((await status.innerText()) ?? "").replace(/\s+/gu, " ");
+}
+
 /**
  * 在真实设置页把某个供应商设为接收方和默认发布方。
  *

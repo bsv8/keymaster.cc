@@ -218,4 +218,94 @@ describe("SatSubscriptionSettings", () => {
     }));
     confirm.mockRestore();
   });
+
+  it("用红绿灯显示连接状态（绿灯=已连接，中文可读）", async () => {
+    makeServices();
+    render(<SatSubscriptionSettings />);
+
+    await waitFor(() => expect(screen.getByTestId("ss-connection-light-supplier-a")).toBeTruthy());
+    const light = screen.getByTestId("ss-connection-light-supplier-a");
+    expect(light.getAttribute("data-state")).toBe("online");
+    expect(light.getAttribute("aria-label")).toContain("已连接");
+    expect(screen.getByTestId("ss-connection-status-supplier-a").textContent).toContain("已连接");
+  });
+
+  it("账单翻页复用同一会话时间范围（cursor 绑定 fromMs/toMs/limit）", async () => {
+    makeServices();
+    const firstPage = {
+      supplierId: "supplier-a",
+      currency: "BSV",
+      network: "testnet",
+      records: [{
+        supplierId: "supplier-a",
+        chargeId: "charge-1",
+        occurredAtMs: 1_700_000_000_000n,
+        action: "ssp-publish",
+        channel: "bsv8.inbox.x",
+        sourceRequestIdHex: "aa",
+        chargedAmount: "0"
+      }],
+      nextCursor: "cursor-2"
+    };
+    const secondPage = {
+      supplierId: "supplier-a",
+      currency: "BSV",
+      network: "testnet",
+      records: [{
+        supplierId: "supplier-a",
+        chargeId: "charge-2",
+        occurredAtMs: 1_700_000_000_001n,
+        action: "ssp-subscribe",
+        channel: "bsv8.inbox.x",
+        sourceRequestIdHex: "bb",
+        chargedAmount: "0"
+      }],
+      nextCursor: ""
+    };
+    state.admin.getBilling = vi.fn(async (input: { cursor: string; limit: number; fromMs: bigint; toMs: bigint }) => {
+      if (input.cursor === "") return firstPage;
+      if (input.cursor === "cursor-2") return secondPage;
+      throw new Error(`unexpected cursor ${input.cursor}`);
+    }) as unknown as SatSubscriptionAdminService["getBilling"];
+    render(<SatSubscriptionSettings />);
+
+    await waitFor(() => expect(screen.getByTestId("ss-billing-panel-supplier-a")).toBeTruthy());
+    // 首页：默认每页 5 条，cursor=""，创建新会话。
+    fireEvent.click(screen.getByRole("button", { name: "查询服务器账单" }));
+    await waitFor(() => expect(screen.getByTestId("ss-billing-record-supplier-a-charge-1")).toBeTruthy());
+    expect(state.admin.getBilling).toHaveBeenCalledWith(expect.objectContaining({ supplierId: "supplier-a", cursor: "", limit: 5 }));
+    expect(screen.getByTestId("ss-billing-status-supplier-a").textContent).toContain("第 1 页");
+    type BillingCall = { cursor: string; limit: number; fromMs: bigint; toMs: bigint };
+    const billingCalls = () =>
+      (state.admin.getBilling as unknown as { mock: { calls: Array<[BillingCall]> } }).mock.calls.map((args) => args[0]);
+    const firstCall = billingCalls()[0]!;
+
+    // 下一页：透传 nextCursor，且必须复用同一 fromMs/toMs/limit（否则服务端拒收 cursor）。
+    const nextButton = screen.getByRole("button", { name: "下一页" });
+    expect(nextButton.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(nextButton);
+    await waitFor(() => expect(screen.getByTestId("ss-billing-record-supplier-a-charge-2")).toBeTruthy());
+    expect(state.admin.getBilling).toHaveBeenCalledWith(expect.objectContaining({ cursor: "cursor-2", limit: 5 }));
+    expect(screen.getByTestId("ss-billing-status-supplier-a").textContent).toContain("第 2 页");
+    const calls = billingCalls();
+    expect(calls[1]!.fromMs).toBe(firstCall.fromMs);
+    expect(calls[1]!.toMs).toBe(firstCall.toMs);
+    expect(calls[1]!.limit).toBe(firstCall.limit);
+
+    // 上一页：回到首页游标并重新查询，仍复用同一会话时间范围。
+    const prevButton = screen.getByRole("button", { name: "上一页" });
+    expect(prevButton.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(prevButton);
+    await waitFor(() => expect(screen.getByTestId("ss-billing-record-supplier-a-charge-1")).toBeTruthy());
+    const callsAfterPrev = billingCalls();
+    expect(callsAfterPrev[2]!.cursor).toBe("");
+    expect(callsAfterPrev[2]!.fromMs).toBe(firstCall.fromMs);
+    expect(callsAfterPrev[2]!.toMs).toBe(firstCall.toMs);
+    expect(callsAfterPrev[2]!.limit).toBe(5);
+
+    // 每页条数切换：创建新会话，首页重新查询（cursor="" + 新 limit）。
+    const limitSelect = screen.getByTestId("ss-billing-limit-supplier-a") as HTMLSelectElement;
+    fireEvent.change(limitSelect, { target: { value: "2" } });
+    await waitFor(() => expect(state.admin.getBilling).toHaveBeenCalledWith(expect.objectContaining({ cursor: "", limit: 2 })));
+  });
 });

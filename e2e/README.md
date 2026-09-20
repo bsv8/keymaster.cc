@@ -119,6 +119,7 @@ Gate(3 项)：
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
 | J-REAL-SATSUB-MESSAGE | `journeys/satsubscription/real-channel-message.spec.ts` | 三个独立浏览器进程各自建立白名单身份并连接正式供应商；验证真实 Channel 私信收发、刷新后本地历史、账本 0 扣费、第三方不可见，以及桶内 sent/received raw + timeindex 证据与 raw 缺失展示 | KM-MESSAGE-001、KM-SATSUB-001 |
+| J-REAL-SATSUB-SERVER-SETTINGS | `journeys/satsubscription/ss-server-settings.spec.ts` | 单免费白名单用户连接本地 SS 供应商并设为默认发布方；红绿灯 online、刷新 SPI 余额、刷新远端订阅正常；一次性库预置 3 条正式正扣费账单后以每页 2 条做真实 SSP 查询，第 1 页→第 2 页→第 1 页往返且记录不重复；不测内置 bsv8 缺省供应商 | KM-SATSUB-001、KM-SETTINGS-001 |
 
 ## 5. real-resource
 

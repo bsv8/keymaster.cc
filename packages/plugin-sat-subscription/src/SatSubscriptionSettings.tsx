@@ -52,6 +52,52 @@ function bsvNetworkLabel(network: string): string {
   return `BSV/${network}`;
 }
 
+/** 连接状态 → 红绿灯中文说明（字段中文解释，不要靠英文猜）。 */
+function connectionStateLabel(state: string, tr: (key: string, fallback: string) => string): string {
+  switch (state) {
+    case "online":
+      return tr("sat.settings.connectionState.online", "已连接（绿灯）");
+    case "degraded":
+      return tr("sat.settings.connectionState.degraded", "已降级（黄灯）");
+    case "connecting":
+      return tr("sat.settings.connectionState.connecting", "连接中（黄灯）");
+    case "disabled":
+      return tr("sat.settings.connectionState.disabled", "已停用（灰灯）");
+    case "disconnected":
+    default:
+      return tr("sat.settings.connectionState.disconnected", "未连接（红灯）");
+  }
+}
+
+/**
+ * 红绿灯无障碍说明必须恒含中文（AGENTS：字段要有中文说明），与当前
+ * 界面语言无关；e2e 只认 data-state + 该中文，避免英文环境误判。
+ */
+function connectionLightChinese(state: string): string {
+  switch (state) {
+    case "online": return "已连接";
+    case "degraded": return "已降级";
+    case "connecting": return "连接中";
+    case "disabled": return "已停用";
+    case "disconnected":
+    default: return "未连接";
+  }
+}
+
+/** 账单 bigint 毫秒 → 本地可读时间；解析失败时保留原文。 */
+function formatBillingTime(occurredAtMs: bigint): string {
+  const numeric = Number(occurredAtMs);
+  if (!Number.isSafeInteger(numeric) || numeric < 0) return String(occurredAtMs);
+  try {
+    return new Date(numeric).toLocaleString();
+  } catch {
+    return String(occurredAtMs);
+  }
+}
+
+const BILLING_PAGE_SIZE_OPTIONS = [2, 5, 10, 20] as const;
+const DEFAULT_BILLING_LIMIT = 5;
+
 export function SatSubscriptionSettings() {
   const { t } = useI18n();
   // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统设置
@@ -95,6 +141,12 @@ function SatSubscriptionSettingsInner({
   const [busy, setBusy] = useState(false);
   const [spiInfo, setSpiInfo] = useState<Record<string, SatSpiInformation>>({});
   const [billing, setBilling] = useState<Record<string, SatBillingPage>>({});
+  // 账单翻页会话：SS server 的 cursor 绑定 fromMs/toMs/limit（见 billing.go
+  // billingCursorFingerprint），同一会话的上一页/下一页必须复用完全相同的
+  // 时间范围与每页条数；只有“查询首页 / 切换每页条数”才创建新会话。
+  interface BillingSession { fromMs: bigint; toMs: bigint; limit: number }
+  const [billingSessions, setBillingSessions] = useState<Record<string, BillingSession>>({});
+  const [billingHistories, setBillingHistories] = useState<Record<string, string[]>>({});
   const [topUpAmount, setTopUpAmount] = useState("1000");
   const [collectAmount, setCollectAmount] = useState("1000");
   const [topUpPreview, setTopUpPreview] = useState<SatTopUpPreview | null>(null);
@@ -176,21 +228,60 @@ function SatSubscriptionSettingsInner({
     finally { setBusy(false); }
   };
 
-  const refreshBilling = async (supplierId: string) => {
+  const getBillingSession = (supplierId: string): BillingSession | undefined => billingSessions[supplierId];
+  const getBillingLimit = (supplierId: string): number => billingSessions[supplierId]?.limit ?? DEFAULT_BILLING_LIMIT;
+  const getBillingHistory = (supplierId: string): string[] => billingHistories[supplierId] ?? [""];
+
+  const queryBillingWithSession = async (supplierId: string, cursor: string, session: BillingSession, nextHistory: string[]) => {
     setBusy(true);
     setError(null);
     try {
       const page = await service.getBilling({
         supplierId,
-        fromMs: 0n,
-        toMs: BigInt(Date.now() + 1),
-        limit: 20,
-        cursor: ""
+        fromMs: session.fromMs,
+        toMs: session.toMs,
+        limit: session.limit,
+        cursor
       });
       setBilling((current) => ({ ...current, [supplierId]: page }));
-      setMessage(tr("sat.settings.billing.refreshed", `已从 SS server 查询 ${page.records.length} 条账单`));
+      setBillingSessions((current) => ({ ...current, [supplierId]: session }));
+      setBillingHistories((current) => ({ ...current, [supplierId]: nextHistory }));
+      const pageNo = nextHistory.length;
+      const more = page.nextCursor ? tr("sat.settings.billing.hasMore", "还有下一页") : tr("sat.settings.billing.noMore", "已是最后一页");
+      setMessage(tr("sat.settings.billing.refreshed", `已从 SS server 查询第 ${pageNo} 页 ${page.records.length} 条账单（每页 ${session.limit} 条，${more}）`));
     } catch (cause) { setError(satErrorMessage(cause)); }
     finally { setBusy(false); }
+  };
+
+  /** 首页查询：创建新会话（固定 fromMs/toMs/limit），cursor="" 并重置翻页历史。 */
+  const refreshBilling = async (supplierId: string, limitOverride?: number) => {
+    const requested = limitOverride ?? getBillingLimit(supplierId);
+    const safeLimit = Number.isSafeInteger(requested) && requested >= 1 && requested <= 100 ? requested : DEFAULT_BILLING_LIMIT;
+    const session: BillingSession = { fromMs: 0n, toMs: BigInt(Date.now() + 1), limit: safeLimit };
+    await queryBillingWithSession(supplierId, "", session, [""]);
+  };
+
+  /** 下一页：复用同一会话的时间范围与 limit，只换 cursor，历史追加。 */
+  const nextBillingPage = async (supplierId: string) => {
+    const page = billing[supplierId];
+    const session = getBillingSession(supplierId);
+    if (!page?.nextCursor || !session) return;
+    const history = getBillingHistory(supplierId);
+    await queryBillingWithSession(supplierId, page.nextCursor, session, [...history, page.nextCursor]);
+  };
+
+  /** 上一页：复用同一会话回到上一个游标并重新查询（不复用缓存，保证远端事实）。 */
+  const prevBillingPage = async (supplierId: string) => {
+    const session = getBillingSession(supplierId);
+    const history = getBillingHistory(supplierId);
+    if (!session || history.length <= 1) return;
+    const prevHistory = history.slice(0, -1);
+    const prevCursor = prevHistory[prevHistory.length - 1] ?? "";
+    await queryBillingWithSession(supplierId, prevCursor, session, prevHistory);
+  };
+
+  const changeBillingLimit = async (supplierId: string, limit: number) => {
+    await refreshBilling(supplierId, limit);
   };
 
   const refreshSpi = async (supplierId: string) => {
@@ -199,6 +290,7 @@ function SatSubscriptionSettingsInner({
     try {
       const value = await spi.getInformation({ supplierId });
       setSpiInfo((current) => ({ ...current, [supplierId]: value }));
+      setMessage(tr("sat.settings.spi.refreshed", `已刷新 SPI 余额（${value.currencies.length} 个账户）`));
     } catch (cause) { setError(satErrorMessage(cause)); }
     finally { setBusy(false); }
   };
@@ -275,22 +367,75 @@ function SatSubscriptionSettingsInner({
         const builtIn = supplier.supplierId === SAT_DEFAULT_SUPPLIER_ID;
         const receiving = snapshot.ownerSettings?.receiveSupplierIds.includes(supplier.supplierId) ?? false;
         const view = snapshot.supplierViews.find((item) => item.supplierId === supplier.supplierId);
+        const connectionState = view?.connectionState ?? "disconnected";
+        const billingPage = billing[supplier.supplierId];
+        const billingHistory = getBillingHistory(supplier.supplierId);
+        const billingLimit = getBillingLimit(supplier.supplierId);
+        const canPrevBilling = billingHistory.length > 1;
+        const canNextBilling = Boolean(billingPage?.nextCursor);
         return (
-          <div key={supplier.supplierId} className="sat-subscription-settings__supplier">
+          <div key={supplier.supplierId} className="sat-subscription-settings__supplier" data-supplier-id={supplier.supplierId}>
             <strong>{supplier.name}</strong> <code>{supplier.supplierId}</code>
             <div>{tr("sat.settings.identity", "认证公钥")}: <code>{supplier.supplierPublicKeyHex}</code></div>
-            <div>{tr("sat.settings.connection", "连接")}: {view?.connectionState ?? "disconnected"}；{supplier.enabled ? tr("sat.settings.enabled", "已启用") : tr("sat.settings.disabled", "已停用")}</div>
+            <div data-testid={`ss-connection-status-${supplier.supplierId}`} data-connection-status={connectionState}>
+              <span
+                data-testid={`ss-connection-light-${supplier.supplierId}`}
+                data-connection-light={connectionState}
+                data-state={connectionState}
+                role="img"
+                aria-label={`连接状态 Connection：${connectionState}（${connectionLightChinese(connectionState)}）`}
+                title={`连接状态 Connection：${connectionState}（${connectionLightChinese(connectionState)}）`}
+                className="sat-connection-light"
+              />
+              {" "}{tr("sat.settings.connection", "连接状态")}: {connectionState}（{connectionStateLabel(connectionState, tr)}）；{supplier.enabled ? tr("sat.settings.enabled", "已启用") : tr("sat.settings.disabled", "已停用")}
+            </div>
             <div>{tr("sat.settings.desired", "期望订阅")}: {view?.desiredChannels.length ? view.desiredChannels.join(", ") : tr("sat.settings.none", "无")}；{tr("sat.settings.observed", "远端观察")}: {view?.observedChannels.length ? view.observedChannels.join(", ") : tr("sat.settings.none", "无")}</div>
             <div>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => void refreshSpi(supplier.supplierId)}>{tr("sat.settings.spi.refresh", "刷新 SPI 余额")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshSubscriptions(supplier.supplierId)}>{tr("sat.settings.subscriptions.refresh", "刷新远端订阅")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshBilling(supplier.supplierId)}>{tr("sat.settings.billing.refresh", "查询服务器账单")}</Button>
-              {spiInfo[supplier.supplierId]?.currencies.map((currency) => <span key={`${currency.currency}-${currency.network}`} className="sat-subscription-settings__spi-account"> {currency.currency}/{currency.network}: <code>{currency.balance.toString(10)}</code>（充值地址 <code>{currency.paymentAddress}</code>）{currency.currency === "BSV" ? <> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void prepareTopUp(supplier.supplierId, currency)}>{tr("sat.settings.spi.prepare", "生成充值预览")}</Button> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void collect(supplier.supplierId, currency)}>{tr("sat.settings.spi.collect", "回收余额")}</Button></> : null}</span>)}
+              {spiInfo[supplier.supplierId]?.currencies.map((currency) => <span key={`${currency.currency}-${currency.network}`} className="sat-subscription-settings__spi-account" data-testid={`ss-spi-account-${supplier.supplierId}-${currency.currency}-${currency.network}`}> {currency.currency}/{currency.network}: <code>{currency.balance.toString(10)}</code>（充值地址 <code>{currency.paymentAddress}</code>）{currency.currency === "BSV" ? <> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void prepareTopUp(supplier.supplierId, currency)}>{tr("sat.settings.spi.prepare", "生成充值预览")}</Button> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void collect(supplier.supplierId, currency)}>{tr("sat.settings.spi.collect", "回收余额")}</Button></> : null}</span>)}
             </div>
             <div>
-              <input aria-label={tr("sat.settings.spi.topupAmount", "充值 satoshis")} value={topUpAmount} onChange={(event) => setTopUpAmount(event.target.value)} inputMode="numeric" />
-              <input aria-label={tr("sat.settings.spi.collectAmount", "回收 satoshis")} value={collectAmount} onChange={(event) => setCollectAmount(event.target.value)} inputMode="numeric" />
+              <input aria-label={tr("sat.settings.spi.topupAmount", "充值金额（satoshis，正整数）")} value={topUpAmount} onChange={(event) => setTopUpAmount(event.target.value)} inputMode="numeric" />
+              <input aria-label={tr("sat.settings.spi.collectAmount", "回收金额（satoshis，正整数）")} value={collectAmount} onChange={(event) => setCollectAmount(event.target.value)} inputMode="numeric" />
               <span>请先刷新 SPI 并在对应 BSV 账户行操作</span>
+            </div>
+            <div data-testid={`ss-billing-panel-${supplier.supplierId}`} data-billing-panel={supplier.supplierId}>
+              <div>
+                <span>{tr("sat.settings.billing.panel", "服务器账单（SS server 直查，不写入本地）")}</span>{" "}
+                <label>
+                  {tr("sat.settings.billing.pageSize", "每页条数（账单分页）")}:
+                  {" "}
+                  <select
+                    aria-label={tr("sat.settings.billing.pageSize", "每页条数（账单分页）")}
+                    data-testid={`ss-billing-limit-${supplier.supplierId}`}
+                    value={String(billingLimit)}
+                    disabled={busy}
+                    onChange={(event) => void changeBillingLimit(supplier.supplierId, Number(event.target.value))}
+                  >
+                    {BILLING_PAGE_SIZE_OPTIONS.map((option) => <option key={option} value={String(option)}>{option}</option>)}
+                  </select>
+                </label>{" "}
+                <span data-testid={`ss-billing-status-${supplier.supplierId}`}>
+                  {billingPage
+                    ? `第 ${billingHistory.length} 页 Page ${billingHistory.length}，本页 ${billingPage.records.length} 条（${billingPage.currency}/${billingPage.network}，${billingPage.nextCursor ? "还有下一页 Has next" : "已是最后一页 Last page"}）`
+                    : `尚未查询服务器账单 Not queried`}
+                </span>
+              </div>
+              {billingPage ? (
+                <ul data-testid={`ss-billing-records-${supplier.supplierId}`}>
+                  {billingPage.records.map((item) => (
+                    <li key={item.chargeId} data-testid={`ss-billing-record-${supplier.supplierId}-${item.chargeId}`} data-billing-record={item.chargeId}>
+                      供应商编号:{item.supplierId}｜动作:{item.action}｜频道:{item.channel}｜扣费金额:{item.chargedAmount} {billingPage.currency}｜账单编号:{item.chargeId}｜发生时间:{formatBillingTime(item.occurredAtMs)}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <div>
+                <Button size="sm" variant="secondary" disabled={busy || !canPrevBilling} onClick={() => void prevBillingPage(supplier.supplierId)}>{tr("sat.settings.billing.prev", "上一页")}</Button>{" "}
+                <Button size="sm" variant="secondary" disabled={busy || !canNextBilling} onClick={() => void nextBillingPage(supplier.supplierId)}>{tr("sat.settings.billing.next", "下一页")}</Button>
+              </div>
             </div>
             <div>{tr("sat.settings.actions", "操作")}: {builtIn ? <span>内置默认 Supplier（不能编辑、停用或删除）</span> : <><Button size="sm" variant="secondary" disabled={busy} onClick={() => editSupplier(supplier)}>{tr("sat.settings.edit", "编辑")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy} onClick={() => void toggleEnabled(supplier)}>{supplier.enabled ? tr("sat.settings.disable", "停用") : tr("sat.settings.enable", "启用")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void setDefault(supplier.supplierId)}>{tr("sat.settings.default", "设为默认发布")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void toggleReceive(supplier.supplierId)}>{receiving ? tr("sat.settings.receive.off", "关闭接收") : tr("sat.settings.receive.on", "启用接收（可能收费）")}</Button>{" "}<Button size="sm" variant="danger" disabled={busy} onClick={() => void deleteSupplier(supplier)}>{tr("sat.settings.delete", "删除")}</Button></>}</div>
           </div>
@@ -310,8 +455,8 @@ function SatSubscriptionSettingsInner({
         <Button disabled={busy} variant="secondary" onClick={() => setTopUpPreview(null)}>{tr("sat.settings.spi.cancel", "取消")}</Button>
       </div> : null}
       <h2>{tr("sat.settings.billing", "服务器账单")}</h2>
-      <p>{tr("sat.settings.billing.description", "账单直接来自 SS server，不写入本地 setting.json。")}</p>
-      <ul>{Object.values(billing).flatMap((page) => page.records.map((item) => ({ item, currency: page.currency }))).slice(-20).reverse().map(({ item, currency }) => <li key={item.chargeId}>{item.supplierId} / {item.action} / {item.chargedAmount} / {currency}</li>)}</ul>
+      <p>{tr("sat.settings.billing.description", "账单直接来自 SS server，不写入本地 setting.json。各供应商当前页见上方账单面板，这里是汇总（最新 20 条）。")}</p>
+      <ul data-testid="ss-billing-summary">{Object.values(billing).flatMap((page) => page.records.map((item) => ({ item, currency: page.currency }))).slice(-20).reverse().map(({ item, currency }) => <li key={item.chargeId}>供应商编号:{item.supplierId}｜动作:{item.action}｜频道:{item.channel}｜扣费金额:{item.chargedAmount} {currency}｜账单编号:{item.chargeId}</li>)}</ul>
     </section>
   );
 }

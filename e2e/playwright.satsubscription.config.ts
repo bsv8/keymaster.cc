@@ -24,8 +24,9 @@ export default defineConfig({
   },
   webServer: {
     // 不启用 reuse：必须用当前工作树重新构建生产 preview，避免旧服务器
-    // 让真实供应商验收跑在过期产物上。
-    command: "cd apps/web && npx vite build && npx vite preview --host 127.0.0.1 --port 4173",
+    // 让真实供应商验收跑在过期产物上。用 pnpm filter 从仓库根解析，
+    // 兼容 Playwright 以 config 目录为 cwd 启动 webServer 的行为。
+    command: "pnpm --filter @keymaster/web build && pnpm --filter @keymaster/web exec vite preview --host 127.0.0.1 --port 4173",
     url: "http://127.0.0.1:4173",
     reuseExistingServer: false,
   },

@@ -75,6 +75,25 @@ export interface SatSubscriptionLocalServer {
   readonly multiaddr: string;
   /** 运行期只读账本投影；用于证明真实订阅和 0 扣费。 */
   ledgerSummary(): Promise<SatSubscriptionLedgerSummary>;
+  /**
+   * 向一次性库写入受控正扣费账单 fixture（正式 operations 行）。
+   *
+   * 只用于账单翻页测试：付费协议路径要求 SPI 足额余额，e2e 不做真实
+   * 充值；fixture 行满足服务端全部约束（术语外键、16 字节 scope、
+   * 32 字节 request/digest、channel 对象、正扣费），查询仍走真实
+   * SSP BillingRequest/Response。调用前用户必须至少完成一次协议
+   * 操作（确保 principals 行已存在），否则 fail-closed。
+   */
+  seedBillingFixture(input: {
+    /** 被记账的已认证主体压缩公钥 hex（小写）。 */
+    readonly ownerPublicKeyHex: string;
+    /** 写入的正扣费记录数；1..20。 */
+    readonly count: number;
+    /** 每个记录的频道；缺省 billing-fixture-1..N。 */
+    readonly channels?: readonly string[];
+    /** 精确十进制子单位扣费；缺省 0.1 对应的子单位。 */
+    readonly chargedSubunits?: string;
+  }): Promise<readonly string[]>;
   /** 服务端日志尾部；只用于失败诊断，不含私钥或 DSN 秘密。 */
   serverLogTail(lines?: number): readonly string[];
   /** 关闭服务、临时 PostgreSQL 和临时目录；幂等。 */
@@ -401,6 +420,54 @@ export async function startSatSubscriptionLocalServer(
             channel: row[1] ?? ""
           }))
         };
+      },
+      async seedBillingFixture(input: {
+        readonly ownerPublicKeyHex: string;
+        readonly count: number;
+        readonly channels?: readonly string[];
+        readonly chargedSubunits?: string;
+      }): Promise<readonly string[]> {
+        const owner = input.ownerPublicKeyHex.trim().toLowerCase();
+        if (!/^(02|03)[0-9a-f]{64}$/u.test(owner)) throw new Error("seedBillingFixture 的 ownerPublicKeyHex 不是合法压缩公钥");
+        if (!Number.isSafeInteger(input.count) || input.count < 1 || input.count > 20) {
+          throw new Error("seedBillingFixture 的 count 必须在 1..20 之间");
+        }
+        const charged = input.chargedSubunits ?? "100000000000000000";
+        if (!/^[1-9][0-9]{0,39}$/u.test(charged)) throw new Error("seedBillingFixture 的 chargedSubunits 必须是正整数");
+        const channels = input.channels ?? Array.from({ length: input.count }, (_, index) => `billing-fixture-${index + 1}`);
+        if (channels.length !== input.count) throw new Error("seedBillingFixture 的 channels 数量必须等于 count");
+        for (const channel of channels) {
+          if (!/^[A-Za-z0-9._-]{1,100}$/u.test(channel)) throw new Error(`seedBillingFixture 的频道不合法：${channel}`);
+        }
+        const principalRows = await queryLedger(
+          `SELECT 1 FROM principals WHERE principal_type = 'principal:secp256k1-public-key' AND principal_key = decode('${owner}', 'hex') LIMIT 1`,
+        );
+        if (principalRows.length === 0) {
+          throw new Error("seedBillingFixture 前用户必须先完成一次协议操作（principals 行缺失）");
+        }
+        const { randomBytes, randomUUID } = await import("node:crypto");
+        const values = channels.map((channel, index) => {
+          const operationId = randomUUID();
+          const scopeHex = randomBytes(16).toString("hex");
+          const requestHex = randomBytes(32).toString("hex");
+          const digestHex = randomBytes(32).toString("hex");
+          // occurred_at 错开 30 秒，保证排序确定且落在 [0, now+1ms] 查询窗内。
+          const offsetSecs = 30 * (channels.length - index);
+          return `('${operationId}', now() - make_interval(secs => ${offsetSecs}), 'domain:ssp', 'operation:ssp-publish', 'principal:secp256k1-public-key', decode('${owner}', 'hex'), decode('${scopeHex}', 'hex'), decode('${requestHex}', 'hex'), decode('${digestHex}', 'hex'), 'object:ssp-channel', convert_to('${channel}', 'UTF8'), 'operation-status:succeeded', ${charged}, NULL)`;
+        });
+        const { stdout } = await execFileAsync(
+          join(postgresBinDir, "psql"),
+          ["-h", "127.0.0.1", "-p", String(databasePort), "-U", DATABASE_USER, "-d", DATABASE_NAME, "-At", "-v", "ON_ERROR_STOP=1", "-c",
+            `INSERT INTO operations (operation_id, occurred_at, domain_type, operation_type, actor_type, actor_key, scope_key, request_key, request_digest, object_type, object_key, status_type, charged_subunits, result_document) VALUES ${values.join(", ")} RETURNING operation_id::text`],
+          { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+        );
+        // INSERT ... RETURNING 会附带 "INSERT 0 N" 命令回显，只收 UUID 行。
+        const ids = stdout
+          .split(/\r?\n/u)
+          .map((line) => line.trim())
+          .filter((line) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(line));
+        if (ids.length !== input.count) throw new Error(`seedBillingFixture 只写入 ${ids.length}/${input.count} 条`);
+        return ids;
       },
       serverLogTail: (lines = 40) => serverLogs.slice(-lines),
       stop

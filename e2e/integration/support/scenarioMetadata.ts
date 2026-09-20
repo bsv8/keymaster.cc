@@ -44,6 +44,21 @@ export const REAL_SATSUB_MESSAGE_SCENARIO = {
   resourceProfile: "satsubscription",
 } as const satisfies IntegrationScenarioMetadata;
 
+/** 真实 SS server 设置页 Journey：单免费用户验证 SPI/订阅/账单真实翻页。不测内置 bsv8 缺省供应商。 */
+export const REAL_SATSUB_SERVER_SETTINGS_SCENARIO = {
+  id: "J-REAL-SATSUB-SERVER-SETTINGS",
+  level: "real-resource",
+  requirementIds: ["KM-SATSUB-001", "KM-SETTINGS-001"],
+  startingState: "Node 从仓库外 SATS_SUBSCRIPTION_DIR 构建正式 cmd/satsubscription 并启动一次性 PostgreSQL；单用户用确定性免费白名单 Hex Key 初始化本地桶并把本地 SS 供应商设为默认发布方；3 条正扣费账单由一次性库的正式 operations fixture 预置（查询走真实 SSP）。",
+  successCriteria: [
+    "初始化桶 Key 后进入设置页，本地 SS 供应商红绿灯变绿（online）且中文说明为已连接。",
+    "点击刷新 SPI 余额后行内出现 BSV/testnet 账户余额且无报错。",
+    "点击刷新远端订阅后状态栏提示已刷新且无报错。",
+    "以每页 2 条查询账单：第 1 页 2 条且有下一页，第 2 页 1 条且与第 1 页不重复，返回第 1 页记录一致，全程无报错。",
+  ],
+  resourceProfile: "satsubscription",
+} as const satisfies IntegrationScenarioMetadata;
+
 /**
  * 本地缺省 SatSubscription Journey：
  * 验证缺省供应商可见、刷新锁定边界与多 tab 共享解锁/全局锁定。

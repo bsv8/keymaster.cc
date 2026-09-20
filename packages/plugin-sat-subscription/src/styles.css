@@ -133,6 +133,49 @@
   overflow-wrap: anywhere;
 }
 
+/* SS 连接红绿灯：绿=已连接，红=未连接，黄=连接中/已降级，灰=已停用。 */
+.sat-connection-light {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+  background: #9aa0a6;
+  vertical-align: -1px;
+}
+
+.sat-connection-light[data-state="online"] {
+  background: #2fa36b;
+  border-color: #238356;
+}
+
+.sat-connection-light[data-state="disconnected"] {
+  background: #d64545;
+  border-color: #b03232;
+}
+
+.sat-connection-light[data-state="connecting"],
+.sat-connection-light[data-state="degraded"] {
+  background: #d9a21b;
+  border-color: #a67c12;
+}
+
+.sat-connection-light[data-state="disabled"] {
+  background: #9aa0a6;
+  border-color: #7a8087;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sat-connection-light[data-state="connecting"] {
+    animation: sat-connection-light-pulse 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes sat-connection-light-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
 .sat-subscription-settings input,
 .sat-subscription-settings textarea {
   max-width: 100%;
