@@ -41,6 +41,12 @@ export interface StartSatSubscriptionLocalServerInput {
   readonly goCommand?: string;
   /** PostgreSQL bin 目录；缺省用 pg_config --bindir 解析。 */
   readonly postgresBinDir?: string;
+  /**
+   * 是否同时启动独立收款扫描器（scanner run）。
+   * 真实充值（页面 SPI 充值）需要它把服务器固定地址的链上收款归属到客户余额；
+   * 不充值只查只读状态时保持缺省 false。
+   */
+  readonly enableScanner?: boolean;
 }
 
 /** 账本里的操作计数；只保留类型、次数和收费子单位。 */
@@ -157,7 +163,10 @@ function assertWhitelist(publicKeys: readonly string[]): readonly string[] {
   return normalized;
 }
 
-function buildServerConfig(whitelist: readonly string[]): Record<string, unknown> {
+function buildServerConfig(whitelist: readonly string[], enableScanner = false): Record<string, unknown> {
+  // scanner run 要求 api_key_env 为空（免 key 公共端点）或指向已设置的环境变量；
+  // 有 key 才传 env 名，否则传空串，避免无 key 时 scanner 启动直接报错。
+  const scannerApiKeyEnv = process.env.SAT_SUBSCRIPTION_E2E_WHATSONCHAIN_API_KEY ? "SAT_SUBSCRIPTION_E2E_WHATSONCHAIN_API_KEY" : "";
   return {
     listen_addrs: ["/ip4/127.0.0.1/tcp/0"],
     currency: "BSV",
@@ -191,10 +200,12 @@ function buildServerConfig(whitelist: readonly string[]): Record<string, unknown
       max_streams_per_connection: 16
     },
     scanner: {
-      enabled: false,
+      enabled: enableScanner,
       endpoint: "https://api.whatsonchain.com/v1/bsv",
-      api_key_env: "SAT_SUBSCRIPTION_E2E_WHATSONCHAIN_API_KEY",
-      history_start_height: 0,
+      api_key_env: scannerApiKeyEnv,
+      // 服务器固定收款地址是全新地址，无历史；从高度 1 开始按地址查历史即可，
+      // 不需要全链 genesis 重扫。validation 要求 enabled 时高度为正数。
+      history_start_height: enableScanner ? 1 : 0,
       history_from_genesis: false,
       interval: "3s",
       request_timeout: "15s",
@@ -250,6 +261,7 @@ export async function startSatSubscriptionLocalServer(
   const signerKeyHex = randomBytes(32).toString("hex");
 
   let serverChild: ChildProcess | undefined;
+  let scannerChild: ChildProcess | undefined;
   let postgresStarted = false;
   let databasePort = 0;
   let stopped = false;
@@ -273,6 +285,8 @@ export async function startSatSubscriptionLocalServer(
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    if (scannerChild) await stopChild(scannerChild);
+    scannerChild = undefined;
     if (serverChild) await stopChild(serverChild);
     serverChild = undefined;
     if (postgresStarted) {
@@ -307,7 +321,7 @@ export async function startSatSubscriptionLocalServer(
     postgresStarted = true;
     await execFileAsync(join(postgresBinDir, "createdb"), ["-h", "127.0.0.1", "-p", String(databasePort), "-U", DATABASE_USER, DATABASE_NAME], { timeout: 30_000 });
 
-    await fs.writeFile(configPath, `${JSON.stringify(buildServerConfig(whitelist), null, 2)}\n`, "utf8");
+    await fs.writeFile(configPath, `${JSON.stringify(buildServerConfig(whitelist, input.enableScanner === true), null, 2)}\n`, "utf8");
     await execFileAsync(binaryPath, ["db", "migrate", "--config", configPath], {
       env: childEnv(),
       timeout: 120_000,
@@ -380,6 +394,34 @@ export async function startSatSubscriptionLocalServer(
       throw new Error("SatSubscription 服务端 Peer ID 与同一私钥的 JS 派生结果不一致");
     }
     const multiaddr = wsAddress.includes("/p2p/") ? wsAddress : `${wsAddress}/p2p/${ready.peer_id}`;
+
+    // 真实充值需要独立 scanner 进程把服务器固定地址的链上收款归属到客户余额。
+    // scanner run 无 ready 信号：启动后观察 5 秒，未提前退出即视为运行中。
+    if (input.enableScanner === true) {
+      const child = spawn(binaryPath, ["scanner", "run", "--config", configPath], {
+        env: childEnv(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      scannerChild = child;
+      child.stdout?.on("data", (chunk: Buffer) => {
+        for (const line of chunk.toString().split(/\r?\n/u)) rememberServerLog(`[scanner] ${line}`);
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        for (const line of chunk.toString().split(/\r?\n/u)) rememberServerLog(`[scanner] ${line}`);
+      });
+      const earlyExit = await new Promise<string | null>((resolveExit) => {
+        const timer = setTimeout(() => resolveExit(null), 5_000);
+        child.once("exit", (code, signal) => {
+          clearTimeout(timer);
+          resolveExit(`code=${code} signal=${signal}`);
+        });
+        child.once("error", (error) => {
+          clearTimeout(timer);
+          resolveExit(String(error));
+        });
+      });
+      if (earlyExit !== null) throw new Error(`SatSubscription scanner 启动后 5 秒内退出（${earlyExit}）；见 serverLogTail`);
+    }
 
     const queryLedger = async (sql: string): Promise<string[][]> => {
       const { stdout } = await execFileAsync(

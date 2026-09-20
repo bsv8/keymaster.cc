@@ -186,6 +186,67 @@ export async function billingPrevPage(page: Page, supplierId: string): Promise<b
   return true;
 }
 
+/**
+ * 读取 SPI 行内余额（余额，单位 sats）与充值地址（充值地址）。
+ * 行内结构：`BSV/testnet: <余额>（充值地址 <地址>）`，两个 <code> 按顺序出现。
+ */
+export async function readSpiBalanceSatoshis(page: Page, supplierId: string): Promise<bigint> {
+  const account = page.getByTestId(`ss-spi-account-${supplierId}-BSV-testnet`);
+  await expect(account).toBeVisible({ timeout: 30_000 });
+  const text = (await account.innerText()).replace(/\s+/gu, " ");
+  const match = /BSV\/testnet:\s*([0-9]+)/u.exec(text);
+  if (!match?.[1]) throw new Error(`SPI 行未解析到余额：${text.slice(0, 120)}`);
+  return BigInt(match[1]);
+}
+
+export async function readSpiPaymentAddress(page: Page, supplierId: string): Promise<string> {
+  const account = page.getByTestId(`ss-spi-account-${supplierId}-BSV-testnet`);
+  await expect(account).toBeVisible({ timeout: 30_000 });
+  const codes = account.locator("code");
+  const count = await codes.count();
+  if (count < 2) throw new Error("SPI 行缺少充值地址");
+  return ((await codes.nth(1).textContent()) ?? "").trim();
+}
+
+/**
+ * 填写充值金额（充值金额，单位 sats，正整数）并生成充值预览。
+ * 调用方必须先 `page.on("dialog", accept)`，因为确认广播时会弹 window.confirm。
+ */
+export async function prepareTopUpFromPage(page: Page, supplierId: string, amountSatoshis: number): Promise<void> {
+  const settings = satSettings(page);
+  await settings.getByLabel(/充值金额（satoshis，正整数）|topupAmount/iu).fill(String(amountSatoshis));
+  const row = satSupplierRow(page, supplierId);
+  await row.getByRole("button", { name: /生成充值预览|prepare/iu }).click();
+  await expect(page.getByRole("dialog")).toBeVisible({ timeout: 60_000 });
+}
+
+/** 在预览弹窗点确认并广播，返回页面显示的充值 txid（链上交易编号）。 */
+export async function submitTopUpFromPage(page: Page): Promise<string> {
+  await page.getByRole("button", { name: /确认并广播|confirm/iu }).click();
+  const status = satSettings(page).getByRole("status");
+  await expect(status).toContainText(/充值结果/u, { timeout: 120_000 });
+  await expect(satSettings(page).getByRole("alert")).toHaveCount(0);
+  const text = (await status.textContent()) ?? "";
+  const match = /txid=([0-9a-f]{64})/iu.exec(text);
+  if (!match) throw new Error(`充值结果缺少 txid：${text.slice(0, 160)}`);
+  return match[1]!.toLowerCase();
+}
+
+/**
+ * 填写回收金额（回收金额，单位 sats）并回收到当前 owner 地址。
+ * 注意：服务端 Collect 只扣减账本进清算账，不会链上打款；链上找零靠归集回 seed。
+ */
+export async function collectFromPage(page: Page, supplierId: string, amountSatoshis: number): Promise<string> {
+  const settings = satSettings(page);
+  await settings.getByLabel(/回收金额（satoshis，正整数）|collectAmount/iu).fill(String(amountSatoshis));
+  const row = satSupplierRow(page, supplierId);
+  await row.getByRole("button", { name: /回收余额|Collect balance/iu }).click();
+  const status = satSettings(page).getByRole("status");
+  await expect(status).toContainText(/Collect 结果/u, { timeout: 60_000 });
+  await expect(satSettings(page).getByRole("alert")).toHaveCount(0);
+  return ((await status.textContent()) ?? "").replace(/\s+/gu, " ");
+}
+
 /** 读取账单面板状态文本（第 X 页，本页 N 条，是否还有下一页）。 */
 export async function readBillingStatus(page: Page, supplierId: string): Promise<string> {
   const status = page.getByTestId(`ss-billing-status-${supplierId}`);

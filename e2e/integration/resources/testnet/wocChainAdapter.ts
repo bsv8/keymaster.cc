@@ -66,9 +66,13 @@ function assertTxid(value: unknown, label: string): string {
   return value.toLowerCase();
 }
 
-function assertSatoshis(value: unknown, label: string, allowZero = false): number {
+function assertSatoshis(value: unknown, label: string, allowZero = false, allowNegative = false): number {
   const number = typeof value === "number" ? value : Number(value);
-  if (!Number.isSafeInteger(number) || (allowZero ? number < 0 : number <= 0)) throw new Error(`testnet ${label} is invalid`);
+  if (!Number.isSafeInteger(number)) throw new Error(`testnet ${label} is invalid`);
+  // 未确认余额是相对已确认的增量：内存池里已有花费（例如本轮之前广播、尚未进块
+  // 的充值）时会为负数，这是链上事实，必须接受；确认余额永远不能为负。
+  if (number < 0 && !allowNegative) throw new Error(`testnet ${label} is invalid`);
+  if (number === 0 && !allowZero) throw new Error(`testnet ${label} is invalid`);
   return number;
 }
 
@@ -382,7 +386,7 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
   async #balance(network: "test" | "main", address: string, kind: "confirmed" | "unconfirmed"): Promise<number> {
     const value = await this.#getJson(network, `/address/${encodeURIComponent(address)}/${kind}/balance`);
     if (!value || typeof value !== "object") throw new Error(`testnet ${network} ${kind} balance is invalid`);
-    return assertSatoshis((value as { confirmed?: unknown; unconfirmed?: unknown })[kind], `${network} ${kind} balance`, true);
+    return assertSatoshis((value as { confirmed?: unknown; unconfirmed?: unknown })[kind], `${network} ${kind} balance`, true, kind === "unconfirmed");
   }
 
   async #listUtxos(network: "test" | "main", address: string, kind: "confirmed" | "unconfirmed"): Promise<P2pkhUtxo[]> {
