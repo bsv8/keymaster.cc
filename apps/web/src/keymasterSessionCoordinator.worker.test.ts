@@ -32,6 +32,7 @@ import {
   __testBuildChannelSeenMessageKey,
 } from "./keymasterSessionCoordinator.worker.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
+import { calcTxidFromRawTxHex } from "@keymaster/plugin-p2pkh/coordinator";
 import { newMessageID, newSessionID } from "bsv8-channel-protocol";
 import { parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
 import { verifySignedPrivateMessage } from "bsv8-channel-protocol/inbox";
@@ -2151,6 +2152,52 @@ describe("Session Coordinator worker", () => {
     } finally {
       __testSetP2pkhBroadcastProvider(undefined);
     }
+  });
+
+  it("creates the write-ahead submission from the page broadcast payload", async () => {
+    __testResetState();
+    const owner = "a1".repeat(32);
+    __testSetVaultStatus("unlocked", owner);
+    const submissionId = `page-payload-${Date.now()}`;
+    // 页面本地提交只存在于页面内存；Worker 必须能从请求负载重建审计记录。
+    // 这里的原始交易是 1 输入 1 输出 P2PKH，txid 用生产工具计算。
+    const inputTxid = "ab".repeat(32);
+    const rawTxHex = `0100000001${inputTxid}0000000000ffffffff01e8030000000000001976a914${"11".repeat(20)}88ac00000000`;
+    const txid = calcTxidFromRawTxHex(rawTxHex);
+    const providerBroadcast = vi.fn(async () => ({ canonicalTxid: txid, status: "accepted" as const }));
+    __testSetP2pkhBroadcastProvider({
+      descriptor: { id: "test-page-payload-provider", label: "Page payload test provider", supportedNetworks: ["main", "test"] },
+      broadcast: providerBroadcast
+    });
+    try {
+      const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId, submission: { resourceId: "p2pkh:main", txid, rawTxHex } });
+      expect(response.operationResult).toMatchObject({ status: "local-confirmed", txid });
+      expect(providerBroadcast).toHaveBeenCalledWith({ network: "main", canonicalTxid: txid, rawTxHex });
+      expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === submissionId)).toMatchObject({
+        localState: "local-confirmed",
+        chainResolution: "unresolved",
+        inputOutpointKeys: [`${inputTxid}:0`],
+        rawTxHex,
+      });
+    } finally {
+      __testSetP2pkhBroadcastProvider(undefined);
+    }
+  });
+
+  it("rejects a page broadcast payload whose txid does not match the raw transaction", async () => {
+    __testResetState();
+    const owner = "a2".repeat(32);
+    __testSetVaultStatus("unlocked", owner);
+    const submissionId = `page-payload-mismatch-${Date.now()}`;
+    const rawTxHex = `0100000001${"ab".repeat(32)}0000000000ffffffff01e8030000000000001976a914${"11".repeat(20)}88ac00000000`;
+    const response = await __testP2pkhBroadcast({
+      ownerPublicKeyHex: owner,
+      network: "main",
+      submissionId,
+      submission: { resourceId: "p2pkh:main", txid: "cd".repeat(32), rawTxHex }
+    });
+    expect(response.ack).toMatchObject({ status: "validation-error" });
+    expect((await __testListP2pkhLocalTransactions(owner)).some((row) => (row as { id?: string }).id === submissionId)).toBe(false);
   });
 
   it("confirms a submitting P2PKH submission when the broadcast provider accepts", async () => {

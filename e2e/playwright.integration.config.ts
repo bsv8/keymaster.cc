@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("local-integration");
 
 export default defineConfig({
   testDir: "./integration",
@@ -6,7 +9,7 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/integration-local",
+  outputDir,
   use: {
     baseURL: "http://127.0.0.1:4173",
     trace: "on-first-retry",

@@ -1,4 +1,7 @@
 import { defineConfig } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("satsubscription");
 
 /**
  * 真实 SatSubscription 本地执行档。
@@ -13,7 +16,7 @@ export default defineConfig({
   forbidOnly: true,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/satsubscription",
+  outputDir,
   // 每个场景独占临时 PostgreSQL 与供应商端口；串行避免资源竞争。
   workers: 1,
   use: {

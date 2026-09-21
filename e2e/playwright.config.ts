@@ -1,4 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+// 本轮产物落在仓库内 e2e/runs/local-core/<run-id>/artifacts，不进 git。
+const { outputDir } = configureRunSuite("local-core");
 
 export default defineConfig({
   // 默认入口只运行不依赖仓库外资源的 local-core 执行档；所有 spec 都在
@@ -8,7 +12,7 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results",
+  outputDir,
   use: {
     baseURL: "http://127.0.0.1:4173",
     trace: "on-first-retry",

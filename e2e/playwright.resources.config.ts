@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("resources");
 
 export default defineConfig({
   testDir: "./integration",
@@ -9,7 +12,7 @@ export default defineConfig({
   // 已确认 UTXO 而互相冲突。真实资金场景必须串行，不能靠重试掩盖双花竞争。
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/integration-resources",
+  outputDir,
   use: {
     baseURL: "http://127.0.0.1:4173",
     // 真实资源 Journey 会在初始化阶段短暂接触一次性私钥；禁止把页面、

@@ -63,6 +63,7 @@
     "test:e2e:irreversible-io": "node scripts/run-irreversible-io-smoke.mjs",
     "test:e2e:recovery": "node scripts/run-coordinator-recovery-drill.mjs",
     "test:e2e:report": "playwright show-report",
+    "collect:testnet:key01": "pnpm typecheck:e2e && playwright test --config=e2e/playwright.maintenance.config.ts",
     "docs:connect:dev": "pnpm --filter @keymaster/connect-docs dev",
     "docs:connect:build": "pnpm --filter @keymaster/connect-docs build"
   },

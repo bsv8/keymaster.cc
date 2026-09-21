@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertSafeIdentifier } from "./ids.js";
+import { runDataPath } from "./runData.js";
 
 /** 跨 Playwright setup/teardown 项目传递的非敏感状态；不允许加入凭据或私钥。 */
 export interface ResourceRunState {
@@ -30,7 +31,7 @@ export interface ResourceRunState {
 }
 
 export function resourceStatePath(): string {
-  return path.resolve(process.env.KEYMASTER_E2E_RESOURCE_STATE_FILE ?? "test-results/integration-resource-state.json");
+  return path.resolve(process.env.KEYMASTER_E2E_RESOURCE_STATE_FILE ?? runDataPath("resources", "state", "resource-state.json"));
 }
 
 export async function writeResourceRunState(state: ResourceRunState): Promise<void> {

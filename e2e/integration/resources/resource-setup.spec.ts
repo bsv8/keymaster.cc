@@ -3,12 +3,11 @@ import { loadE2EConfig, publicConfigFingerprint } from "./config/loader.js";
 import type { LoadedE2EConfig } from "./config/types.js";
 import { S3CleanupResource } from "./s3/s3CleanupResource.js";
 import { projectSatSubscriptionConfig } from "./satsubscription/healthResource.js";
-import { RecoveryLedger, TestnetFundingResource } from "./testnet/fundingResource.js";
+import { TestnetFundingResource } from "./testnet/fundingResource.js";
 import { createWocTestnetChainAdapter } from "./testnet/wocChainAdapter.js";
 import { currentRunId } from "../support/ids.js";
 import { attachRedactedText, redactedError } from "../support/redaction.js";
 import { writeResourceRunState } from "../support/resourceState.js";
-import path from "node:path";
 
 function clearSecrets(config: LoadedE2EConfig | undefined): void {
   config?.s3.secretAccessKey.clear();
@@ -41,15 +40,13 @@ test("真实资源整轮准备：S3、testnet 服务和资金账本门禁", asyn
     await s3.cleanup(runId);
 
     const satProjection = projectSatSubscriptionConfig(config.satsubscription, runId);
-    const ledger = new RecoveryLedger(path.join(config.directory, "testnet-funding-ledger.json"));
     const chain = createWocTestnetChainAdapter({
       baseUrl: config.satsubscription.testnetApiBaseUrl,
       ...(config.satsubscription.testnetApiAuthorization === undefined ? {} : { authorization: config.satsubscription.testnetApiAuthorization.read() }),
-      operationJournalPath: path.join(config.directory, "testnet-operation-journal.json"),
     });
-    const funding = new TestnetFundingResource(config.testnet.privateKeyHex, chain, ledger);
+    const funding = new TestnetFundingResource(config.testnet.privateKeyHex, chain);
     const minimumReserve = Number(process.env.KEYMASTER_E2E_MIN_TESTNET_RESERVE_SATOSHIS ?? "100000");
-    const prepared = await funding.prepare(runId, minimumReserve);
+    const prepared = await funding.prepare(minimumReserve);
 
     // Resource 状态只保留公开结果；seed、授权令牌和链适配器都不跨项目传递。
     await writeResourceRunState({

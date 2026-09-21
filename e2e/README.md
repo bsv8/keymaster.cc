@@ -24,10 +24,28 @@ support/ 场景元数据、脱敏、诊断等横切能力
 场景编号由 `support/scenarioMetadata.ts` 统一定义，spec 里通过
 `export const JOURNEY_ID/GATE_ID = XXX.id` 引用。
 
+## 运行数据目录
+
+一次 Playwright 命令 = 一轮（setup → journeys → teardown，同一个 `run_id`），
+运行产生的非秘密数据按执行档和轮次隔离：
+
+```text
+e2e/runs/<执行档>/<run-id>/
+  state/     机器读取的恢复状态（resource-state 等）
+  logs/      维护脚本日志（如手工归集记录）
+  artifacts/ Playwright 失败现场与附件
+```
+
+- `e2e/runs/` 不进 git，可以按轮或按执行档整体删除；
+- 仓库外 `~/.config/keymaster-e2e/` 只保留秘密配置（s3.json、satsubscription.json、
+  seed-key.hex、key01.hex），两类数据不混用；
+- 跨轮资金账本已移除：固定 key01 + 每轮门禁 + 手工归集脚本承担恢复。
+
 ## 执行档总表
 
 | 执行档(Group) | 配置/入口 | 命令 | 目录范围 | 中文说明 |
 | --- | --- | --- | --- | --- |
+| maintenance | `e2e/playwright.maintenance.config.ts` | `pnpm collect:testnet:key01` | `e2e/maintenance` | 手工维护脚本：Node 侧归集 key01 遗留 testnet 余额，不启动浏览器 |
 | local-core | `e2e/playwright.config.ts` | `pnpm test:e2e:local-core` | `journeys/local`、`gates/local` | 日常入口，30s 超时；`pnpm test:e2e` = local-core + dev-http |
 | local-integration | `e2e/playwright.integration.config.ts` | `pnpm test:e2e:integration` | 同上 | 完整本地集成，60s 超时；另有初始化/多标签单场景 smoke 命令 |
 | dev-http | `e2e/playwright.dev-http.config.ts` | `pnpm test:e2e:dev-http` | `gates/dev-http` | 非安全 HTTP + 非 loopback 域名，真实 Vite dev server，不复用旧进程 |
@@ -129,12 +147,13 @@ Gate(3 项)：
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
-| 资源准备 | `resources/resource-setup.spec.ts` | 整轮唯一 setup：配置权限预检；S3 取得 lease 并全量开场清理；testnet 网络/余额/旧账门禁 | KM-RESOURCE-001 |
+| 资源准备 | `resources/resource-setup.spec.ts` | 整轮唯一 setup：配置权限预检；S3 取得 lease 并全量开场清理；testnet 网络/余额门禁 | KM-RESOURCE-001 |
 | 资源可用性 | `resources/resource-availability.spec.ts` | 断言同一 `run_id` 的资源状态存在且 lease 已取得，不读取长期秘密 | KM-RESOURCE-001 |
-| J-REAL-TESTNET-ASSET | `journeys/p2pkh/real-testnet-asset.spec.ts` | 真实 testnet 余额、转账、txid 对账和资金归集；保护 outpoint/结果未知不按普通可重试处理 | KM-ASSET-001 |
-| J-REAL-TESTNET-ROUNDTRIP | `journeys/p2pkh/real-testnet-roundtrip.spec.ts` | 页面初始化桶和 Key 后 seed 打入 10 sat；keymaster 的 WoC `unspent/all` 内存快照在转账 Offer 检测到账，用户以「全部」转回 seed，按原始交易闭合账本 | KM-ASSET-001 |
-| J-REAL-TESTNET-ARRIVAL-PROBE | `journeys/p2pkh/real-testnet-arrival-probe.spec.ts` | 页面导入固定 key01 后 seed 打入 10 sat；记录广播/确认/开启 testnet 时间点，观察 Offer 余额出现耗时，自然窗口未出现时再强制刷新一次；故意不回款以保留追踪余额 | KM-ASSET-001 |
+| J-REAL-TESTNET-ROUNDTRIP | `journeys/p2pkh/real-testnet-roundtrip.spec.ts` | 唯一的真实 testnet 资产 Journey：页面导入仓库外 key01 固定 Key，seed 打入 50 sat 并等链上可观察；keymaster 的 WoC `unspent/all` 快照在转账 Offer 显示余额并记录到账耗时，用户以「全部」转回 seed，按原始交易核对 | KM-ASSET-001 |
 | 资源收尾 | `resources/resource-teardown.spec.ts` | 依赖失败也执行；清理指定桶并释放 lease，清理不确定时保留 lease 交给下一轮恢复 | KM-RESOURCE-001 |
+
+testnet 资金恢复：固定 key01 钱包 + 每轮开始的可花费输出门禁；广播结果未知时不盲目重发。
+遗留余额用 `pnpm collect:testnet:key01` 手工归集（Node 侧全部转出，自动扣费，不驱动页面）。
 
 ---
 
@@ -189,6 +208,7 @@ pnpm test:e2e:satsubscription    # 真实 SatSubscription 源码 + 一次性 Pos
 pnpm test:e2e:s3                 # 真实 S3
 pnpm test:e2e:resources          # 资源准备 + 真实资源集合
 pnpm test:e2e:deployment         # 指定部署验收
+pnpm collect:testnet:key01       # 手工把 key01 遗留 testnet 余额归集回 seed
 pnpm check:integration-coverage  # 校验覆盖矩阵、插件、场景和生成视图一致
 pnpm test:e2e:report             # 打开最近一次 Playwright 报告
 ```

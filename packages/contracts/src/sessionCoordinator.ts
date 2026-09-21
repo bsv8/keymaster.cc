@@ -41,6 +41,7 @@ import type {
 import type { StorageProviderConfigDraft } from "./storage/profile.js";
 import type { ExistingRemoteStorageConnectPlan, InitialSetupPlan, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
 import type {
+  P2pkhBroadcastSubmission,
   P2pkhUtxoSnapshotResult,
 } from "./bsvP2pkhProviders.js";
 
@@ -344,7 +345,7 @@ export type CoordinatorClientRequest =
     | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.utxos.get"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.utxos.refresh"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission; expectedSessionEpoch: SessionEpoch }
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
@@ -755,7 +756,7 @@ export interface SessionCoordinatorClient {
   p2pkhUtxosGet(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>>;
   /** 主动刷新 UTXO 快照；失败时旧快照保留，返回旧快照或 unavailable。 */
   p2pkhUtxosRefresh(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>>;
-  p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }): Promise<CoordinatorValueResult<unknown>>;
+  p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }): Promise<CoordinatorValueResult<unknown>>;
   /** 页面活动心跳；不包含任何业务 RPC 权限。 */
   sendActivity(): void;
   /** 记录可恢复的 transport/业务失败，不抛到全局 UI。 */

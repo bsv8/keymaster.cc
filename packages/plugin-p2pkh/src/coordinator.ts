@@ -9,4 +9,5 @@ export type { P2pkhUtxoSnapshotResource, P2pkhUtxoSnapshotStore } from "./p2pkhU
 export { createP2pkhService } from "./p2pkhService.js";
 export type { P2pkhServiceDeps } from "./p2pkhService.js";
 export type { P2pkhService } from "./p2pkhContracts.js";
-export { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
+export { p2pkhAddressToScriptHex, parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
+export { calcTxidFromRawTxHex } from "./p2pkhSigner.js";

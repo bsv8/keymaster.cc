@@ -48,7 +48,7 @@ import type {
 import type { ChannelOperationCaller, ChannelPublishResult, ChannelSubscriptionSetResult, ChannelSubscriptionStatus, JSONValue } from "./channel.js";
 import type { I18nText, I18nValues } from "./i18n.js";
 import type { ContactPresenceMap } from "./contacts.js";
-import type { P2pkhBroadcastResult, P2pkhUtxoSnapshotResult } from "./bsvP2pkhProviders.js";
+import type { P2pkhBroadcastResult, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult } from "./bsvP2pkhProviders.js";
 import type {
   CoordinatorSatEvent,
   CoordinatorSatStateEvent,
@@ -1597,8 +1597,17 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "p2pkh.utxos.get":
     case "p2pkh.utxos.refresh":
       return { kind, ownerPublicKeyHex: text(request.ownerPublicKeyHex, kind + ".ownerPublicKeyHex", 256), network: request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })(), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "p2pkh.broadcast":
-      return { kind, ownerPublicKeyHex: text(request.ownerPublicKeyHex, kind + ".ownerPublicKeyHex", 256), network: request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })(), submissionId: text(request.submissionId, kind + ".submissionId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "p2pkh.broadcast": {
+      const submission = parseP2pkhBroadcastSubmission(request.submission, kind + ".submission");
+      return {
+        kind,
+        ownerPublicKeyHex: text(request.ownerPublicKeyHex, kind + ".ownerPublicKeyHex", 256),
+        network: request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })(),
+        submissionId: text(request.submissionId, kind + ".submissionId", 256),
+        ...(submission === undefined ? {} : { submission }),
+        expectedSessionEpoch: epoch("expectedSessionEpoch"),
+      };
+    }
     default:
       throw new TypeError("Coordinator RPC request kind " + kind + " is unsupported");
   }
@@ -2554,6 +2563,27 @@ function parseP2pkhProviderConfigResult(value: unknown, field: string): P2pkhPro
   return parseJsonRecord(value, field);
 }
 
+/**
+ * 解析页面提交的待广播交易快照。
+ *
+ * rawTxHex 允许到 256 KiB（P2PKH 转账通常 < 1 KiB，这里只做上界防御）；
+ * canonical txid 与原始交易的一致性由 Worker 用生产解析器复核，解析层
+ * 只校验形状，不把“字段合法”当成交易合法。
+ */
+function parseP2pkhBroadcastSubmission(value: unknown, field: string): P2pkhBroadcastSubmission | undefined {
+  if (value === undefined) return undefined;
+  const submission = expectRecord(value, field);
+  const txid = text(submission.txid, field + ".txid", 64);
+  if (!/^[0-9a-f]{64}$/u.test(txid.toLowerCase())) throw new TypeError(`Coordinator ${field}.txid is invalid`);
+  const rawTxHex = text(submission.rawTxHex, field + ".rawTxHex", 262_144);
+  if (rawTxHex.length % 2 !== 0 || !/^[0-9a-f]+$/iu.test(rawTxHex)) throw new TypeError(`Coordinator ${field}.rawTxHex is invalid`);
+  return {
+    resourceId: text(submission.resourceId, field + ".resourceId", 256),
+    txid: txid.toLowerCase(),
+    rawTxHex: rawTxHex.toLowerCase(),
+  };
+}
+
 function parseP2pkhBroadcastResult(value: unknown, field: string): CoordinatorP2pkhBroadcastResult {
   const result = expectRecord(value, field);
   const status = text(result.status, field + ".status", 64);
@@ -2572,8 +2602,9 @@ function parseP2pkhBroadcastResult(value: unknown, field: string): CoordinatorP2
     };
   }
   const txid = text(result.txid, field + ".txid", 128);
-  const reason = text(result.reason, field + ".reason", 4_096);
-  if (status === "isolated") return { status, txid, reason, ...(providerId === undefined ? {} : { providerId }) };
+  // reason 只属于 isolated；local-confirmed 成功响应没有 reason，不能先解析它，
+  // 否则合法成功会被误判成“reason is invalid”。
+  if (status === "isolated") return { status, txid, reason: text(result.reason, field + ".reason", 4_096), ...(providerId === undefined ? {} : { providerId }) };
   if (status === "local-confirmed") return { status, txid, ...(providerId === undefined ? {} : { providerId }) };
   throw new TypeError(`Coordinator ${field}.status is invalid`);
 }

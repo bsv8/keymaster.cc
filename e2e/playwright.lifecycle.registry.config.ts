@@ -1,8 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
 
 // 正式发布边界使用 npm registry 的 WebLoom 0.5.0；同时覆盖原有插件链和
 // 新增 Coordinator peer lifecycle 链。入口脚本在无 workspace/file 逃逸的
 // 临时副本中用 frozen lockfile 安装后才加载此配置。
+// 注意：该配置在临时副本中运行，产物落在副本内的 e2e/runs，随副本一起销毁。
+const { outputDir } = configureRunSuite("lifecycle-registry");
 export default defineConfig({
   testDir: "./integration",
   testMatch: /gates\/lifecycle\/(?:plugin-lifecycle-production|coordinator-runtime-lifecycle)\.spec\.ts$/u,
@@ -14,7 +17,7 @@ export default defineConfig({
   forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/lifecycle-registry",
+  outputDir,
   use: {
     baseURL: "http://127.0.0.1:4175",
     trace: "on-first-retry",

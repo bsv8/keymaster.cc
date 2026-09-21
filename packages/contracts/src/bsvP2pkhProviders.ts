@@ -33,6 +33,24 @@ export interface P2pkhBroadcastResult {
   providerMessage?: string;
 }
 
+/**
+ * 页面侧 P2PKH 本地提交快照。
+ *
+ * 设计缘由：本地提交记录和输入占用目前是内存态，页面 service 与 SharedWorker
+ * 广播处理器是两个 JS realm，Worker 读不到页面内存。因此页面在请求广播时必须
+ * 把“待广播交易”（canonical txid + 原始交易 hex）交给 Worker；Worker 先把它
+ * 写入自己的审计存储（write-ahead），再调用广播 Provider，最后回写终态。
+ * 这样 Worker 始终是广播不可逆操作的唯一写者，也不会信任页面自报的成功状态。
+ */
+export interface P2pkhBroadcastSubmission {
+  /** 页面本地提交对应的资源 ID，例如 `p2pkh:test`。 */
+  readonly resourceId: string;
+  /** 与 rawTxHex 对应的 canonical txid（64 位小写十六进制）。 */
+  readonly txid: string;
+  /** 已签名的完整原始交易 hex；Worker 会用生产解析器复核 txid 后再广播。 */
+  readonly rawTxHex: string;
+}
+
 /** Provider 注册表快照：只剩广播 Provider。 */
 export interface P2pkhProviderRegistrySnapshot {
   broadcastProviders: P2pkhProviderDescriptor[];

@@ -49,10 +49,16 @@ pnpm check:integration-coverage  # 检查矩阵、插件、场景和生成视图
 
 配置模板在 `资源配置模板/`。复制到仓库外的
 `/home/david/.config/keymaster-e2e/` 后填写，并设置目录 `0700`、文件 `0600`。
+其中 `seed-key.hex` 是测试资金库，`key01.hex` 是页面导入的固定可追踪测试 Key，
+两者都必须存在（缺失时资源读取 fail closed）。
 
 - 凭据不能写入仓库、URL、日志或附件。
 - S3 测试先取得 lease（排他租约），按本轮 `run_id` 和 prefix 隔离并在 finally 清理。
-- testnet 使用一次性钱包，结束时归集余额；结果未知时保留脱敏恢复账本。
+- testnet 使用固定 key01 钱包：每轮开始断言其无可花费输出；页面广播前失败时
+  Node 按链上事实归集回 seed；遗留余额用 `pnpm collect:testnet:key01` 手工归集。
+  广播结果未知时不盲目重发，也不再维护跨轮恢复账本。
+- 运行数据（state/logs/artifacts）落在仓库内 `e2e/runs/<执行档>/<run-id>/`，
+  该目录不进 git、可整体删除；仓库外配置目录只放秘密。
 - 报告上传前扫描私钥、WIF、S3 Secret 和已知秘密；命中即阻断附件。
 - 配置缺失或权限不安全时 fail closed（安全拒绝），不把跳过当成通过。
 

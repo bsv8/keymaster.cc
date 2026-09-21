@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { signAsync } from "@noble/secp256k1";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import type { P2pkhUtxo, UtxoAllocation } from "../../../../packages/plugin-p2pkh/src/p2pkhContracts.js";
@@ -37,31 +35,7 @@ interface WocUtxoRow {
   readonly isSpentInMempoolTx?: unknown;
 }
 
-interface OperationJournalEntry {
-  readonly version: 1;
-  readonly operationId: string;
-  readonly txid: string;
-  readonly network: "test";
-  readonly sourceAddress: string;
-  readonly targetAddress: string;
-  readonly kind: "fund" | "return";
-  readonly satoshis: number;
-  /** 目标输出金额；用于 Resource 收尾账本核算。 */
-  readonly outputSatoshis: number;
-  /** 实际交易费；不能由页面显示值推断。 */
-  readonly feeSatoshis: number;
-  readonly createdAt: string;
-}
-
 type ObservedTransaction = "confirmed" | "unconfirmed" | "not-found";
-
-function assertOperationId(value: string): string {
-  const normalized = value.trim();
-  // operation_id 允许用冒号连接 run/scenario/动作，但仍必须能安全进入
-  // 账本、日志和恢复文件；不能把任意 URL 或配置原文带进资源层。
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(normalized)) throw new Error("testnet operationId is invalid");
-  return normalized;
-}
 
 function assertTxid(value: unknown, label: string): string {
   if (typeof value !== "string" || !TXID_RE.test(value)) throw new Error(`testnet ${label} is not a valid txid`);
@@ -162,16 +136,12 @@ function assertTestnetP2pkhAddress(value: string): string {
 export class WocTestnetChainAdapter implements TestnetChainAdapter {
   readonly #baseUrl: string;
   readonly #authorization?: string;
-  readonly #operationJournalPath?: string;
-  readonly #journal = new Map<string, OperationJournalEntry>();
-  #journalLoaded = false;
   #lastRequestAt = 0;
   #requestGate: Promise<void> = Promise.resolve();
 
-  constructor(options: { readonly baseUrl: string; readonly authorization?: string; readonly operationJournalPath?: string }) {
+  constructor(options: { readonly baseUrl: string; readonly authorization?: string }) {
     this.#baseUrl = assertHttpsBaseUrl(options.baseUrl);
     this.#authorization = options.authorization;
-    this.#operationJournalPath = options.operationJournalPath;
   }
 
   async inspectNetwork(): Promise<TestnetChainIdentity> {
@@ -200,36 +170,23 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
     };
   }
 
-  async fundFromSeed(input: { readonly seedPrivateKeyHex: string; readonly targetAddress: string; readonly satoshis: number; readonly operationId: string }): Promise<BroadcastResult> {
-    const operationId = assertOperationId(input.operationId);
+  async fundFromSeed(input: { readonly seedPrivateKeyHex: string; readonly targetAddress: string; readonly satoshis: number }): Promise<BroadcastResult> {
     const targetAddress = assertTestnetP2pkhAddress(input.targetAddress);
     const keyBytes = hexToBytes(input.seedPrivateKeyHex);
     try {
       const sourcePublicKeyHex = bytesToHex(secp256k1.getPublicKey(keyBytes, true));
       const sourceAddress = deriveTestnetP2pkhAddress(sourcePublicKeyHex);
-      const existing = await this.#existingOperation(operationId);
-      if (existing) return this.#reconcileKnown(existing);
       const utxos = await this.#spendableUtxos(sourceAddress);
       const allocation = this.#allocate(utxos, input.satoshis, TESTNET_FEE_RESERVE);
       const signed = await this.#signTransfer({ allocation, sourceAddress, targetAddress, privateKey: keyBytes, publicKeyHex: sourcePublicKeyHex });
       const txid = calcTxidFromRawTxHex(signed.rawTxHex);
-      await this.#remember({ version: 1, operationId, txid, network: "test", sourceAddress, targetAddress, kind: "fund", satoshis: input.satoshis, outputSatoshis: input.satoshis, feeSatoshis: signed.feeSatoshis, createdAt: new Date().toISOString() });
-      return await this.#broadcastOrUnknown(signed.rawTxHex, txid, operationId, { outputSatoshis: input.satoshis, feeSatoshis: signed.feeSatoshis });
+      return await this.#broadcastOrUnknown(signed.rawTxHex, txid, { outputSatoshis: input.satoshis, feeSatoshis: signed.feeSatoshis });
     } finally {
       keyBytes.fill(0);
     }
   }
 
-  async reconcile(operationId: string): Promise<{ readonly status: "broadcast" | "not-found" | "uncertain"; readonly txid?: string }> {
-    const entry = await this.#existingOperation(assertOperationId(operationId));
-    if (!entry) throw new Error("testnet operation is not present in the recovery journal");
-    const observed = await this.observeTransaction(entry.txid);
-    if (observed === "not-found") return { status: "not-found" };
-    return { status: "broadcast", txid: entry.txid };
-  }
-
-  async returnFunds(input: { readonly walletPrivateKeyHex: string; readonly targetAddress: string; readonly operationId: string; readonly feeRateSatoshisPerKb?: number }): Promise<BroadcastResult> {
-    const operationId = assertOperationId(input.operationId);
+  async returnFunds(input: { readonly walletPrivateKeyHex: string; readonly targetAddress: string; readonly feeRateSatoshisPerKb?: number }): Promise<BroadcastResult> {
     const targetAddress = assertTestnetP2pkhAddress(input.targetAddress);
     const feeRateSatoshisPerKb = input.feeRateSatoshisPerKb ?? DEFAULT_FEE_RATE_SATOSHIS_PER_KB;
     if (!Number.isSafeInteger(feeRateSatoshisPerKb) || feeRateSatoshisPerKb <= 0) throw new Error("testnet return fee rate is invalid");
@@ -237,8 +194,6 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
     try {
       const sourcePublicKeyHex = bytesToHex(secp256k1.getPublicKey(keyBytes, true));
       const sourceAddress = deriveTestnetP2pkhAddress(sourcePublicKeyHex);
-      const existing = await this.#existingOperation(operationId);
-      if (existing) return this.#reconcileKnown(existing);
       const utxos = await this.#spendableUtxos(sourceAddress);
       const total = utxos.reduce((sum, item) => sum + item.value, 0);
       // 归集预留按“1 输入 1 输出、无找零”的实际大小估算（10 + 148*n + 34 字节），
@@ -257,8 +212,7 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
       };
       const signed = await this.#signTransfer({ allocation, sourceAddress, targetAddress, privateKey: keyBytes, publicKeyHex: sourcePublicKeyHex, feeRateSatoshisPerKb });
       const txid = calcTxidFromRawTxHex(signed.rawTxHex);
-      await this.#remember({ version: 1, operationId, txid, network: "test", sourceAddress, targetAddress, kind: "return", satoshis: allocation.requestedSatoshis, outputSatoshis: allocation.requestedSatoshis, feeSatoshis: signed.feeSatoshis, createdAt: new Date().toISOString() });
-      return await this.#broadcastOrUnknown(signed.rawTxHex, txid, operationId, { outputSatoshis: allocation.requestedSatoshis, feeSatoshis: signed.feeSatoshis });
+      return await this.#broadcastOrUnknown(signed.rawTxHex, txid, { outputSatoshis: allocation.requestedSatoshis, feeSatoshis: signed.feeSatoshis });
     } finally {
       keyBytes.fill(0);
     }
@@ -270,7 +224,7 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
       const detail = await this.#getJson("test", `/tx/hash/${encodeURIComponent(normalized)}`);
       // WOC 对已进内存池的交易同样返回 200（confirmations/blockheight 为空）；
       // 只有明确带确认数或块高的响应才算 confirmed，否则会把未确认当成
-      // confirmed，confirmed-sync 永远看不到这笔交易。
+      // confirmed，依赖出块的调用方会一直等不到结果。
       if (isConfirmedTransactionDetail(detail)) return "confirmed";
     } catch (error) {
       if (!this.#isNotFound(error)) throw error;
@@ -318,36 +272,32 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
   }
 
   /**
-   * 生产 P2PKH confirmed-sync 只会把已进块交易写入 owned projection，
-   * 所以一次性钱包在交给浏览器前必须等充值交易成为 confirmed；仅看到
-   * mempool propagation 不能证明页面已有可选的 testnet UTXO。
+   * 等待原始交易可读，再汇总目标地址输出。
+   *
+   * WoC 的 `/tx/hash/{txid}` 与 `/tx/{txid}/hex` 索引进度不同：页面刚广播的
+   * 交易可能先在 hash/propagation 可见，hex 端点仍短暂 404。这里只对读取
+   * 做有界轮询，txid 和金额真值仍来自原始交易字节。
    */
-  async waitForConfirmedTransaction(txid: string, options: { readonly timeoutMs?: number; readonly pollMs?: number } = {}): Promise<void> {
-    const normalized = assertTxid(txid, "transaction");
-    const deadline = Date.now() + (options.timeoutMs ?? 600_000);
-    let last: ObservedTransaction = "not-found";
-    while (Date.now() < deadline) {
-      last = await this.observeTransaction(normalized);
-      if (last === "confirmed") return;
-      await new Promise<void>((resolve) => setTimeout(resolve, options.pollMs ?? 2_000));
-    }
-    throw new Error(`testnet transaction was not confirmed before timeout (${last})`);
-  }
-
-  async waitForSpendable(address: string, options: { readonly timeoutMs?: number; readonly pollMs?: number } = {}): Promise<number> {
-    const normalized = assertTestnetP2pkhAddress(address);
+  async waitForTransactionOutputs(
+    txid: string,
+    targetAddress: string,
+    options: { readonly timeoutMs?: number; readonly pollMs?: number } = {},
+  ): Promise<TestnetTransactionOutputs> {
     const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+    let lastError: unknown;
     while (Date.now() < deadline) {
-      const utxos = await this.#spendableUtxos(normalized);
-      const total = utxos.reduce((sum, item) => sum + item.value, 0);
-      if (total > 0) return total;
-      await new Promise<void>((resolve) => setTimeout(resolve, options.pollMs ?? 1_000));
+      try {
+        return await this.inspectTransactionOutputs(txid, targetAddress);
+      } catch (error) {
+        lastError = error;
+        await new Promise<void>((resolve) => setTimeout(resolve, options.pollMs ?? 5_000));
+      }
     }
-    throw new Error("testnet wallet did not become spendable before timeout");
+    throw lastError instanceof Error ? lastError : new Error("testnet transaction outputs were not readable before timeout");
   }
 
   /**
-   * 等待一次性钱包的上一笔充值输出确实被消费，并出现可归集的找零。
+   * 等待固定 key01 钱包的上一笔充值输出确实被消费，并出现可归集的找零。
    * 只等待“地址仍有余额”不够：在 mempool 状态尚未同步的短窗口内，
    * 旧充值 UTXO 可能仍被误认为可花费，归集就会和用户刚发出的交易竞争。
    */
@@ -368,10 +318,10 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
     throw new Error("testnet wallet change did not become safely spendable");
   }
 
-  async #broadcastOrUnknown(rawTxHex: string, txid: string, operationId: string, accounting: { readonly outputSatoshis: number; readonly feeSatoshis: number }): Promise<BroadcastResult> {
+  async #broadcastOrUnknown(rawTxHex: string, txid: string, accounting: { readonly outputSatoshis: number; readonly feeSatoshis: number }): Promise<BroadcastResult> {
     try {
-      // journal 已在本方法之前写入；这里对同一笔 canonical 交易做受限重试，
-      // 429/5xx 只是节点尚未接受，不改变 txid，也不构成双花风险。
+      // 对同一笔 canonical 交易做受限重试：429/5xx 只是节点尚未接受，
+      // 不改变 txid，也不构成双花风险。
       const response = await this.#broadcastWithBackoff("test", { txhex: rawTxHex });
       if (!response.ok) throw new Error(`testnet broadcast HTTP ${response.status}`);
       // WOC normally returns the txid as a JSON string. The local canonical
@@ -386,9 +336,8 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
       }
       return { status: "broadcast", txid, ...accounting };
     } catch {
-      // The operation journal was written before the request. The caller must
-      // reconcile this txid; no retry is performed here.
-      return { status: "uncertain", operationId };
+      // 广播结果未知：调用方必须先观察链上再决定是否重试，这里绝不盲目重发。
+      return { status: "uncertain" };
     }
   }
 
@@ -474,57 +423,13 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
     return encodeBase58(new Uint8Array([...payload, ...checksum]));
   }
 
-  async #existingOperation(operationId: string): Promise<OperationJournalEntry | undefined> {
-    await this.#loadJournal();
-    return this.#journal.get(operationId);
-  }
-
-  async #reconcileKnown(entry: OperationJournalEntry): Promise<BroadcastResult> {
-    const observed = await this.observeTransaction(entry.txid);
-    if (observed === "not-found" || entry.outputSatoshis === undefined || entry.feeSatoshis === undefined) {
-      return { status: "uncertain", operationId: entry.operationId };
-    }
-    return { status: "broadcast", txid: entry.txid, outputSatoshis: entry.outputSatoshis, feeSatoshis: entry.feeSatoshis };
-  }
-
-  async #loadJournal(): Promise<void> {
-    if (this.#journalLoaded) return;
-    this.#journalLoaded = true;
-    if (!this.#operationJournalPath) return;
-    try {
-      const value: unknown = JSON.parse(await readFile(this.#operationJournalPath, "utf8"));
-      if (!Array.isArray(value)) throw new Error("journal is not an array");
-      for (const item of value) {
-        if (item && typeof item === "object" && typeof (item as { operationId?: unknown }).operationId === "string") this.#journal.set((item as OperationJournalEntry).operationId, item as OperationJournalEntry);
-      }
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") return;
-      throw new Error("testnet operation journal is unreadable");
-    }
-  }
-
-  async #remember(entry: OperationJournalEntry): Promise<void> {
-    await this.#loadJournal();
-    const existing = this.#journal.get(entry.operationId);
-    if (existing && existing.txid !== entry.txid) throw new Error("testnet operation id was reused for a different transaction");
-    if (existing) return;
-    this.#journal.set(entry.operationId, entry);
-    if (!this.#operationJournalPath) return;
-    const file = this.#operationJournalPath;
-    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-    const temporary = `${file}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify([...this.#journal.values()], null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, file);
-  }
-
   /**
    * 广播遇到 429 / 5xx 时按指数退避重试。
    *
-   * 与只读请求不同：广播在写 journal（canonical txid 已落盘）之后才发，
-   * 重试的是“尚未被节点接受”的同一笔原始交易；txid 不变、不会双花。
-   * 只有反复 429/5xx 或连接失败仍无法确认结果时才返回 uncertain，交给
-   * `reconcile(operationId)` 对账，绝不在没有 journal 的情况下盲目重试。
-   * 4xx（除 429）是节点对交易本身的拒绝，不重试。
+   * 重试的是“尚未被节点接受”的同一笔 canonical 原始交易；txid 不变、
+   * 不会双花。只有反复 429/5xx 或连接失败仍无法确认结果时才返回
+   * uncertain，由调用方先观察链上，绝不盲目重发。4xx（除 429）是节点对
+   * 交易本身的拒绝，不重试。
    */
   async #broadcastWithBackoff(network: "test" | "main", body: unknown): Promise<Response> {
     let delayMs = 2_000;
@@ -631,7 +536,7 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
   }
 }
 
-export function createWocTestnetChainAdapter(options: { readonly baseUrl: string; readonly authorization?: string; readonly operationJournalPath?: string }): WocTestnetChainAdapter {
+export function createWocTestnetChainAdapter(options: { readonly baseUrl: string; readonly authorization?: string }): WocTestnetChainAdapter {
   return new WocTestnetChainAdapter(options);
 }
 

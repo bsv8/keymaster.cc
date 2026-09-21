@@ -8,7 +8,7 @@
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { AssetDataNotifier, CoordinatorValueResult, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
+import type { AssetDataNotifier, CoordinatorValueResult, P2pkhBroadcastSubmission, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
@@ -55,8 +55,13 @@ export interface P2pkhTransferServiceDeps {
    *   3. 扣除本地 active/isolated input claims 与协议保护 outpoints。
    */
   loadSpendableUtxos: (input: { ownerPublicKeyHex: string; resource: P2pkhKeyResource }) => Promise<P2pkhUtxo[]>;
-  /** Production ordinary transfers use the Coordinator-selected broadcaster. */
-  broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }) => Promise<CoordinatorValueResult<unknown>>;
+  /**
+   * Production ordinary transfers use the Coordinator-selected broadcaster.
+   *
+   * `submission` 必带给页面外的 Worker：页面本地提交是内存态，Worker 读不到，
+   * 广播前必须由 Worker 自己先做 write-ahead 审计记录。
+   */
+  broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
   /** Ordinary funding must never consume protocol-protected outpoints. */
   protectedOutpoints?: ProtectedOutpointRegistry;
   /**
@@ -243,7 +248,14 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           // A rejected RPC can mean that the request crossed the Worker
           // boundary but its response was lost. Treat it as possibly sent;
           // never write a terminal state from the page.
-          result = await deps.broadcastWithCoordinator({ ownerPublicKeyHex: owner.publicKeyHex, network, submissionId });
+          result = await deps.broadcastWithCoordinator({
+            ownerPublicKeyHex: owner.publicKeyHex,
+            network,
+            submissionId,
+            // 页面本地提交是内存态，Worker 读不到；把待广播交易交给 Worker，
+            // 由它先做 write-ahead 审计记录再广播。
+            submission: { resourceId: resource.resourceId, txid: preview.txid, rawTxHex: preview.rawTxHex },
+          });
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           return { status: "isolated", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds };

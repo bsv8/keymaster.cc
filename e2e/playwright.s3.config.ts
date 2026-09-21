@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("s3");
 
 export default defineConfig({
   testDir: "./integration",
@@ -6,7 +9,7 @@ export default defineConfig({
   forbidOnly: true,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/integration-s3",
+  outputDir,
   use: {
     baseURL: "http://127.0.0.1:4173",
     // S3 表单会短暂接触访问密钥；真实测试不保留页面产物。

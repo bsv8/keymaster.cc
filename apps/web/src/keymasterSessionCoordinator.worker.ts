@@ -147,7 +147,7 @@ import {
 import { createCoordinatorWorkerUnitRegistry } from "./coordinator/workerUnitRuntime.js";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
 import { createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotResource, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
-import { createP2pkhCoordinatorTasks, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository } from "@keymaster/plugin-p2pkh/coordinator";
+import { createP2pkhCoordinatorTasks, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
@@ -11608,7 +11608,16 @@ async function handleP2pkhBroadcast(
   return withCoordinatorFinalIoLease(
     "write",
     undefined,
-    () => handleP2pkhBroadcastUnsafe(requestId, request),
+    async () => {
+      try {
+        return await handleP2pkhBroadcastUnsafe(requestId, request);
+      } catch (error) {
+        // 不可逆操作的处理异常必须变成显式错误响应，而不是让框架层吞掉原因后
+        // 只报 "Remote capability operation failed"；调用方会以 isolated 收口。
+        const message = error instanceof Error ? error.message : String(error);
+        return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `P2PKH broadcast failed: ${message}` } };
+      }
+    },
     { auditOperation: "p2pkh.broadcast" },
   );
 }
@@ -11626,8 +11635,46 @@ async function handleP2pkhBroadcastUnsafe(
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
-  const local = (await repository.listLocalTransactions()).find((row) => row.id === request.submissionId && row.network === request.network);
-  if (!local) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Local P2PKH submission not found" } };
+  let local = (await repository.listLocalTransactions()).find((row) => row.id === request.submissionId && row.network === request.network);
+  if (!local) {
+    // 页面 service 与 Worker 是两个 JS realm，页面内存中的本地提交这里读不到。
+    // 页面必须在广播请求里带上待广播的 canonical 交易；Worker 先用生产解析器
+    // 复核 txid 与原始交易一致，再写自己的审计存储（write-ahead），最后广播。
+    if (!request.submission) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Local P2PKH submission not found" } };
+    let parsed;
+    try {
+      parsed = parseP2pkhTransaction(request.submission.rawTxHex, request.submission.txid);
+    } catch {
+      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast payload txid does not match the raw transaction" } };
+    }
+    if (parsed.canonicalTxid !== request.submission.txid) {
+      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast payload txid does not match the raw transaction" } };
+    }
+    const now = new Date().toISOString();
+    local = {
+      id: request.submissionId,
+      resourceId: request.submission.resourceId,
+      publicKeyHex: request.ownerPublicKeyHex,
+      network: request.network,
+      txid: request.submission.txid,
+      rawTxHex: request.submission.rawTxHex,
+      localState: "submitting",
+      chainResolution: "unresolved",
+      inputOutpointKeys: parsed.inputs.map((input) => input.outpointKey),
+      ownOutputs: [],
+      createdAt: now,
+      updatedAt: now,
+      attempts: [],
+    };
+    try {
+      await repository.prepareLocalSubmission({ submission: local, claims: [] });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `P2PKH broadcast payload write-ahead failed: ${message}` } };
+    }
+  } else if (request.submission && local.txid.toLowerCase() !== request.submission.txid) {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast payload does not match the stored submission" } };
+  }
   if (local.localState !== "submitting" || local.chainResolution !== "unresolved") {
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
   }
@@ -11644,7 +11691,10 @@ async function handleP2pkhBroadcastUnsafe(
     publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: local.txid, providerId: provider.descriptor.id } };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    // reason 必须是非空、有上界的字符串：它要跨 RPC parser 和 UI，空 message
+    // 的 Error 会让响应校验失败，把“已隔离”伪装成框架层 handler 异常。
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const message = (rawMessage.trim() || (error instanceof Error ? error.name || "broadcast-isolated" : "broadcast-isolated")).slice(0, 2_048);
     const finishedAt = new Date().toISOString();
     const attempt = { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "isolated", reason: message, attempt });
@@ -13091,7 +13141,7 @@ export async function __testListP2pkhLocalInputClaims(ownerPublicKeyHex: string)
   return repository.listLocalInputClaims();
 }
 
-export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedSessionEpoch?: SessionEpoch }): Promise<CoordinatorResponse> {
+export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: import("@keymaster/contracts").P2pkhBroadcastSubmission; expectedSessionEpoch?: SessionEpoch }): Promise<CoordinatorResponse> {
   await ensureTestP2pkhProviders();
   return handleP2pkhBroadcast(`test-p2pkh-broadcast-${Date.now()}`, {
     kind: "p2pkh.broadcast",
@@ -13100,6 +13150,7 @@ export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; n
     ownerPublicKeyHex: input.ownerPublicKeyHex,
     network: input.network,
     submissionId: input.submissionId,
+    ...(input.submission === undefined ? {} : { submission: input.submission }),
     expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch
   });
 }

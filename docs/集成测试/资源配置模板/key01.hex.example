@@ -1,0 +1,3 @@
+# 固定的可追踪 testnet 测试 Key：只填 64 位十六进制 secp256k1 标量，不要提交真实值。
+# 复制到仓库外的 /home/david/.config/keymaster-e2e/key01.hex 后再填写。
+# 该私钥会由页面正式导入入口成为 active Key，地址必须跨轮稳定，便于失败后手工归集。

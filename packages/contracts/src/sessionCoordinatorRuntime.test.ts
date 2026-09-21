@@ -80,6 +80,31 @@ describe("Coordinator runtime contract parsers", () => {
     }
   });
 
+  it("parses p2pkh.broadcast success without requiring an isolated reason", () => {
+    const request = rpcRequest("p2pkh.broadcast", { ownerPublicKeyHex: "a".repeat(64), network: "main", submissionId: "sub-1", expectedSessionEpoch: "epoch-1" });
+    const txid = "ab".repeat(32);
+    // local-confirmed 成功响应没有 reason；解析器不能先取 reason 再判断状态。
+    const confirmed = parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: { status: "local-confirmed", txid, providerId: "woc" },
+    });
+    expect(confirmed.operationResult).toEqual({ status: "local-confirmed", txid, providerId: "woc" });
+
+    const isolated = parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: { status: "isolated", txid, reason: "provider failed", providerId: "woc" },
+    });
+    expect(isolated.operationResult).toMatchObject({ status: "isolated", txid, reason: "provider failed" });
+
+    expect(() => parseCoordinatorResponseFor(request, {
+      sessionEpoch: "epoch-1",
+      ack: { status: "ok" },
+      operationResult: { status: "not-dispatched", reason: "made-up" },
+    })).toThrow(/reason/);
+  });
+
   it("rejects unknown RPC kinds and transport identity before dispatch", () => {
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, { kind: "made-up" })).toThrow();
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, { kind: "session.close", requestId: "forged" })).toThrow();

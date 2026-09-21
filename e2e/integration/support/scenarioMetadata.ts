@@ -138,45 +138,23 @@ export const LIFECYCLE_BOUNDARY_GATE = {
   resourceProfile: "none",
 } as const satisfies IntegrationScenarioMetadata;
 
-/** 真实 testnet 资产 Journey；资源未准备时由 resources setup fail closed。 */
-export const REAL_TESTNET_ASSET_SCENARIO = {
-  id: "J-REAL-TESTNET-ASSET",
-  level: "p2pkh",
-  requirementIds: ["KM-ASSET-001"],
-  startingState: "真实 testnet 资金库已完成网络、余额、预算和旧账检查，Journey 获得独立一次性钱包。",
-  successCriteria: [
-    "钱包余额和网络标签来自正式链上 provider，而不是页面 mock。",
-    "转账前后本地 submission、广播结果和链上观察可以按 txid 对账。",
-    "保护 outpoint、余额不足和广播结果未知均不会被错误地当作普通可重试失败。",
-  ],
-  resourceProfile: "testnet",
-} as const satisfies IntegrationScenarioMetadata;
-
-/** 真实 testnet 收币与全额回款 Journey：页面检测到账后用“全部”转回 seed。 */
+/**
+ * 真实 testnet 收币、到账观察与全额回款 Journey。
+ *
+ * 原来的随机一次性钱包 Journey 与独立到账探针已合并到这里：随机钱包的私钥
+ * 跑完即丢、无法跨轮回收，探针的计时也只在这里作为附件记录。资源未准备时由
+ * resources setup fail closed。
+ */
 export const REAL_TESTNET_ROUNDTRIP_SCENARIO = {
   id: "J-REAL-TESTNET-ROUNDTRIP",
   level: "p2pkh",
   requirementIds: ["KM-ASSET-001"],
-  startingState: "真实 testnet 资金库已完成网络、余额、预算和旧账检查；浏览器是全新 Chromium context；页面从仓库外 key01.hex 正式导入固定测试 Key，该地址在上一轮必须已无可花费输出。",
+  startingState: "真实 testnet 资金库已完成网络、余额和预算检查；浏览器是全新 Chromium context；页面从仓库外 key01.hex 正式导入固定测试 Key，该地址在上一轮必须已无可花费输出。",
   successCriteria: [
-    "页面导入后的 active Key 公钥等于 key01 派生公钥，Node 只按这个可追踪 testnet 地址从 seed 打入 10 sat 并等待链上（mempool 即可）可观察。",
-    "Keymaster 的 WoC `unspent/all` 快照在转账 Offer 上把余额检测为 10 sats，而不是 Node 侧重新查询余额。",
+    "页面导入后的 active Key 公钥等于 key01 派生公钥，Node 只按这个可追踪 testnet 地址从 seed 打入 50 sat 并等待链上（mempool 即可）可观察。",
+    "Keymaster 的 WoC `unspent/all` 快照在转账 Offer 上把余额检测为 50 sats，而不是 Node 侧重新查询余额；广播/链上可观察/页面可见三个时间点写入脱敏附件。",
     "用户填写 seed 地址并以“全部”转出：预览无找零、矿工费从余额扣除，页面返回 local-confirmed 和 canonical txid。",
-    "转出后页面余额回到 0；Node 按原始交易核对回款消费了资助输出、seed 实收金额与页面预览一致，账本闭合为 returned；页面广播前失败时用同一把 key01 按同一低费率归集回 seed。",
-  ],
-  resourceProfile: "testnet",
-} as const satisfies IntegrationScenarioMetadata;
-
-/** 真实 testnet 到账观察探针：只回答“页面何时能看到已确认到账”，不做回款。 */
-export const REAL_TESTNET_ARRIVAL_PROBE_SCENARIO = {
-  id: "J-REAL-TESTNET-ARRIVAL-PROBE",
-  level: "p2pkh",
-  requirementIds: ["KM-ASSET-001"],
-  startingState: "真实 testnet 资金库已完成网络、余额和旧账检查；浏览器是全新 Chromium context；页面从仓库外 key01.hex 导入固定测试 Key，该地址在运行前必须已无可花费输出。",
-  successCriteria: [
-    "Node 从 seed 向 key01 地址打入 10 sat 并等待 confirmed，记录广播/确认/开启 testnet 的时间点。",
-    "开启 testnet 后的 UTXO 快照刷新在转账 Offer 上把余额观察为 10 sats，并记录从确认到观察到的耗时。",
-    "若首次观察窗口未出现，用一次设置变更强制刷新后再次观察，并报告两次窗口的结果。",
+    "转出后页面余额回到 0；Node 按原始交易核对回款消费了资助输出、seed 实收金额与页面预览一致且损失不超过声明上限；页面广播前失败时用同一把 key01 按同一低费率归集回 seed。",
   ],
   resourceProfile: "testnet",
 } as const satisfies IntegrationScenarioMetadata;

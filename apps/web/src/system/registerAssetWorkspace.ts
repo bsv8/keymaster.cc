@@ -425,6 +425,7 @@ function registerTransferWorkspace(host: PluginHost): void {
   const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
   const routes = get(host, ROUTE_REGISTRY_CAPABILITY);
   const business = get(host, BUSINESS_REGISTRY_CAPABILITY);
+  const notifier = get<AssetDataNotifier>(host, ASSET_DATA_NOTIFIER_CAPABILITY);
 
   registerWorkspaceResource<ActiveKeyState, readonly string[]>(resources, {
     id: "transfer.active-key",
@@ -475,7 +476,11 @@ function registerTransferWorkspace(host: PluginHost): void {
     },
     subscribe: (_args, _context, invalidate) => {
       const offs = registry.list().map((provider) => provider.onChange(invalidate));
-      return () => { for (const off of offs) off(); };
+      // Provider 自身的 onChange 只在同步状态/广播事件时触发；UTXO 快照刷新
+      // 只通过 asset.data-changed 到达页面。Offer 余额同样必须跟着余额刷新，
+      // 否则转账后余额会长时间停留在旧值。
+      const offNotifier = notifier.subscribe(() => invalidate());
+      return () => { for (const off of offs) off(); offNotifier(); };
     },
     invalidation: "immediate"
   });

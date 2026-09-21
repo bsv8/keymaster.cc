@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import path from "node:path";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { bytesToHex, publicKeyFromPrivateKey } from "bitcoin-libp2p/identity";
 import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
@@ -24,8 +23,8 @@ import {
   startSatSubscriptionLocalServer,
   type SatSubscriptionLocalServer,
 } from "../../resources/satsubscription/localServerResource.js";
-import { RecoveryLedger, TestnetFundingResource, type FundingLedgerRecord, type OneTimeWallet } from "../../resources/testnet/fundingResource.js";
-import { createWocTestnetChainAdapter } from "../../resources/testnet/wocChainAdapter.js";
+import { TestnetFundingResource, type OneTimeWallet } from "../../resources/testnet/fundingResource.js";
+import { createWocTestnetChainAdapter, type WocTestnetChainAdapter } from "../../resources/testnet/wocChainAdapter.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
 import { currentRunId } from "../../support/ids.js";
@@ -105,26 +104,28 @@ function randomWhitelistPublicKeyHex(exclude: string): string {
 }
 
 /**
- * 业务目标：seed（testnet）→ 一次性 Key（极少金额）→ 页面充值进本地 SS
- * → 只查 SPI 余额 → 页面回收清零 → 一次性 Key 找零归集回 seed。全程 testnet。
+ * 业务目标：seed（testnet）→ 固定 key01 钱包（极少金额）→ 页面充值进本地 SS
+ * → 只查 SPI 余额 → 页面回收清零 → key01 找零归集回 seed。全程 testnet。
  *
- * 开始状态：seed 有足额 testnet 余额；本地 SS 用一次性 PostgreSQL + 随机服务身份
- * 启动，且同时启动独立 scanner run（否则链上充值无人入账，余额永远为 0）。
+ * 开始状态：seed 有足额 testnet 余额；key01 地址必须已无可花费输出；本地 SS 用
+ * 一次性 PostgreSQL + 随机服务身份启动，且同时启动独立 scanner run（否则链上
+ * 充值无人入账，余额永远为 0）。
  *
  * 关键语义（不要按“赎回链上币”理解）：
  * - 页面“回收余额”（Collect）只扣减服务端账本进清算账，不会链上打款；
- *   链上能回 seed 的只有一次性 Key 的找零（充值本金已留在 SS 固定地址）。
- * - 因此收尾账本把充值 txid 按业务金额登记，归集损失只核算三笔手续费。
+ *   链上能回 seed 的只有 key01 的找零（充值本金已留在 SS 固定地址）。
+ * - 不再维护跨轮账本：固定 key01 + 每轮开始的可花费输出门禁 + 手工归集脚本
+ *   就是恢复保障，损失在本 Journey 内按链上事实核算。
  *
  * 成功标准：
- * - seed→Key 充值确认后页面能用一次性 Key 初始化并看到 testnet UTXO；
+ * - seed→key01 充值确认后页面能导入同一把 Key 并看到 testnet UTXO；
  * - 本地 SS 红绿灯 online，SPI 行出现 BSV/testnet 账户；
  * - 充值前余额为 0，充值 TOPUP 后轮询到余额 == TOPUP；
  * - 回收 COLLECT（=TOPUP）后余额回到 0；
- * - 找零归集回 seed，状态 returned 且有 returnTxid。
+ * - 找零归集回 seed，损失不超过声明上限。
  *
- * 外部资源与收尾：一次性钱包 + 一次性 PG；结束时关浏览器/服务/临时目录，
- * 找零归 seed，未知广播结果保留恢复账本并禁止盲目重试。
+ * 外部资源与收尾：固定 key01 + 一次性 PG；结束时关浏览器/服务/临时目录，
+ * 找零归 seed，结果未知时先观察链上再决定是否重试。
  *
  * 覆盖需求：KM-SATSUB-001、KM-SETTINGS-001。
  */
@@ -132,8 +133,11 @@ test(JOURNEY_ID + "：SS server 设置页 testnet 小额充值只查余额与回
   test.setTimeout(900_000);
   const runId = currentRunId();
   let config: LoadedE2EConfig | undefined;
+  let funding: TestnetFundingResource | undefined;
+  let chain: WocTestnetChainAdapter | undefined;
   let wallet: OneTimeWallet | undefined;
-  let funded: FundingLedgerRecord | undefined;
+  let seedAddress = "";
+  let fundingTxid = "";
   let fundsReturned = false;
   let oneTimePrivateKeyHex = "";
   let server: SatSubscriptionLocalServer | undefined;
@@ -144,28 +148,35 @@ test(JOURNEY_ID + "：SS server 设置页 testnet 小额充值只查余额与回
 
   try {
     config = await loadE2EConfig();
-    const ledger = new RecoveryLedger(path.join(config.directory, "testnet-funding-ledger.json"));
-    const chain = createWocTestnetChainAdapter({
+    const activeChain = createWocTestnetChainAdapter({
       baseUrl: config.satsubscription.testnetApiBaseUrl,
       ...(config.satsubscription.testnetApiAuthorization === undefined ? {} : { authorization: config.satsubscription.testnetApiAuthorization.read() }),
-      operationJournalPath: path.join(config.directory, "testnet-operation-journal.json"),
     });
-    const funding = new TestnetFundingResource(config.testnet.privateKeyHex, chain, ledger);
-    wallet = funding.createOneTimeWallet(runId, JOURNEY_ID);
+    const activeFunding = new TestnetFundingResource(config.testnet.privateKeyHex, activeChain);
+    chain = activeChain;
+    funding = activeFunding;
+    wallet = activeFunding.createImportedWallet(runId, JOURNEY_ID, config.testnet.trackingKeyPrivateKeyHex.read());
     oneTimePrivateKeyHex = wallet.privateKey.read();
-    const seedAddress = (await withWocRetry(() => funding.prepare(runId, FUNDING_SATOSHIS), "prepare")).seedAddress;
+    seedAddress = (await withWocRetry(() => activeFunding.prepare(FUNDING_SATOSHIS), "prepare")).seedAddress;
 
-    await test.step("seed 打极少金额到一次性 Key 并等 confirmed", async () => {
-      funded = await withWocRetry(() => funding.fund(wallet!, FUNDING_SATOSHIS, {
+    await test.step("seed 打极少金额到固定 Key 并等链上可观察", async () => {
+      // 固定地址不能混入旧钱：有可花费输出就必须先归集。
+      const existing = await withWocRetry(() => activeChain.inspectAddress(wallet!.address), "precheck");
+      expect(
+        existing.spendableUtxoCount === 0,
+        `key01 地址 ${wallet!.address} 仍有可花费 testnet 输出（utxos=${existing.spendableUtxoCount}）；请先跑 pnpm collect:testnet:key01`,
+      ).toBe(true);
+      const funded = await withWocRetry(() => activeFunding.fund(wallet!, FUNDING_SATOSHIS, {
         maxFundingSatoshis: FUNDING_SATOSHIS,
         maxLossSatoshis: MAX_LOSS_SATOSHIS,
         feeReserveSatoshis: FEE_RESERVE_SATOSHIS,
       }), "fund");
-      expect(funded.fundingTxid, "充值记录必须有 canonical funding txid").toMatch(/^[0-9a-f]{64}$/iu);
-      await withWocRetry(() => chain.waitForConfirmedTransaction(funded!.fundingTxid!, { timeoutMs: 600_000, pollMs: 2_000 }), "wait-confirmed", 3, 5_000);
+      fundingTxid = funded.txid;
+      expect(fundingTxid, "充值回执必须有 canonical funding txid").toMatch(/^[0-9a-f]{64}$/iu);
+      await withWocRetry(() => activeChain.waitForTransaction(fundingTxid, { timeoutMs: 180_000, pollMs: 10_000 }), "wait-observed", 3, 5_000);
     });
 
-    await test.step("一次性 Key 初始化并开启 testnet，启动本地 SS（含 scanner）后保存供应商", async () => {
+    await test.step("固定 Key 初始化并开启 testnet，启动本地 SS（含 scanner）后保存供应商", async () => {
       const browser = await chromium.launch();
       const context = await browser.newContext({ baseURL: "http://127.0.0.1:4173" });
       const page = await context.newPage();
@@ -230,9 +241,8 @@ test(JOURNEY_ID + "：SS server 设置页 testnet 小额充值只查余额与回
       await prepareTopUpFromPage(page, SUPPLIER_ID, TOPUP_SATOSHIS);
       const topupTxid = await submitTopUpFromPage(page);
       expect(topupTxid).toMatch(/^[0-9a-f]{64}$/iu);
-      // 充值本金是用户有意转出：记业务账，否则归集会把本金误报成损失。
-      funded = await funding.recordBusinessTransaction(wallet!, topupTxid, TOPUP_SATOSHIS);
-      await withWocRetry(() => chain.waitForTransaction(topupTxid, { timeoutMs: 180_000, pollMs: 2_000 }), "wait-topup", 3, 5_000);
+      // 充值本金是用户有意转出：损失核算先扣掉 TOPUP，只统计链上手续费。
+      await withWocRetry(() => activeChain.waitForTransaction(topupTxid, { timeoutMs: 180_000, pollMs: 2_000 }), "wait-topup", 3, 5_000);
     });
 
     await test.step("只查 SPI 余额：轮询到余额等于充值金额", async () => {
@@ -252,33 +262,31 @@ test(JOURNEY_ID + "：SS server 设置页 testnet 小额充值只查余额与回
       await expect(page.locator(".sat-subscription-settings").getByRole("alert")).toHaveCount(0);
     });
 
-    await test.step("从初始化 Key 归集找零回 seed", async () => {
-      expect(funded?.fundingTxid).toBeTruthy();
-      const remaining = await withWocRetry(() => chain.waitForSpendableChange(wallet!.address, funded!.fundingTxid!, { timeoutMs: 180_000, pollMs: 2_000 }), "wait-change", 3, 5_000);
-      expect(remaining, "归集前一次性钱包必须仍有可花费找零").toBeGreaterThan(0);
-      const returned = await withWocRetry(() => funding.returnRemaining(wallet!, seedAddress), "return");
-      if (returned.status === "returned") fundsReturned = true;
-      funded = returned;
-      expect(returned.status).toBe("returned");
-      expect(returned.returnTxid).toMatch(/^[0-9a-f]{64}$/iu);
-      await withWocRetry(() => chain.waitForTransaction(returned.returnTxid!, { timeoutMs: 180_000, pollMs: 2_000 }), "wait-return", 3, 5_000);
+    await test.step("从固定 Key 归集找零回 seed", async () => {
+      expect(fundingTxid).toBeTruthy();
+      const remaining = await withWocRetry(() => activeChain.waitForSpendableChange(wallet!.address, fundingTxid, { timeoutMs: 180_000, pollMs: 2_000 }), "wait-change", 3, 5_000);
+      expect(remaining, "归集前固定 Key 钱包必须仍有可花费找零").toBeGreaterThan(0);
+      const returned = await withWocRetry(() => activeFunding.returnRemaining(wallet!, seedAddress), "return");
+      fundsReturned = true;
+      expect(returned.txid).toMatch(/^[0-9a-f]{64}$/iu);
+      await withWocRetry(() => activeChain.waitForTransaction(returned.txid, { timeoutMs: 180_000, pollMs: 2_000 }), "wait-return", 3, 5_000);
+      // 损失 = 充值 − 业务充值 − 回款，只应包含链上手续费。
+      const loss = FUNDING_SATOSHIS - TOPUP_SATOSHIS - returned.outputSatoshis;
+      expect(loss, "归集损失不得超过声明的最大损失").toBeGreaterThanOrEqual(0);
+      expect(loss, "归集损失不得超过声明的最大损失").toBeLessThanOrEqual(MAX_LOSS_SATOSHIS);
     });
   } catch (error) {
     journeyError = error;
   } finally {
     try {
-      if (wallet && funded?.status === "funded" && !fundsReturned && config) {
-        const cleanupWallet = wallet;
-        const cleanupLedger = new RecoveryLedger(path.join(config.directory, "testnet-funding-ledger.json"));
-        const cleanupChain = createWocTestnetChainAdapter({
-          baseUrl: config.satsubscription.testnetApiBaseUrl,
-          ...(config.satsubscription.testnetApiAuthorization === undefined ? {} : { authorization: config.satsubscription.testnetApiAuthorization.read() }),
-          operationJournalPath: path.join(config.directory, "testnet-operation-journal.json"),
-        });
-        const cleanupFunding = new TestnetFundingResource(config.testnet.privateKeyHex, cleanupChain, cleanupLedger);
-        const seedAddress = (await withWocRetry(() => cleanupFunding.prepare(runId, 0), "cleanup-prepare")).seedAddress;
-        const returned = await withWocRetry(() => cleanupFunding.returnRemaining(cleanupWallet, seedAddress), "cleanup-return");
-        if (returned.returnTxid) await cleanupChain.waitForTransaction(returned.returnTxid, { timeoutMs: 180_000, pollMs: 2_000 });
+      // 不看内存里的 fundingTxid：广播结果未知时它可能没留下；只要 key01
+      // 地址真的有可花费输出，就必须归集回 seed。
+      if (wallet && funding && chain && !fundsReturned) {
+        const observation = await chain.inspectAddress(wallet.address);
+        if (observation.spendableUtxoCount > 0) {
+          const returned = await withWocRetry(() => funding!.returnRemaining(wallet!, seedAddress), "cleanup-return");
+          await chain.waitForTransaction(returned.txid, { timeoutMs: 180_000, pollMs: 2_000 });
+        }
       }
     } catch (error) {
       cleanupError = error;

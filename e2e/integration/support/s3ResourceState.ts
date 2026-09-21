@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertSafeIdentifier } from "./ids.js";
+import { runDataPath } from "./runData.js";
 
 /** 只由真实 S3 setup/teardown/Journey 共享的非敏感状态。 */
 export interface S3ResourceRunState {
@@ -12,7 +13,7 @@ export interface S3ResourceRunState {
 }
 
 export function s3ResourceStatePath(): string {
-  return path.resolve(process.env.KEYMASTER_E2E_S3_RESOURCE_STATE_FILE ?? "test-results/real-s3-resource-state.json");
+  return path.resolve(process.env.KEYMASTER_E2E_S3_RESOURCE_STATE_FILE ?? runDataPath("s3", "state", "real-s3-resource-state.json"));
 }
 
 export async function writeS3ResourceRunState(state: S3ResourceRunState): Promise<void> {

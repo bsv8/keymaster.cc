@@ -134,9 +134,48 @@ export async function waitForTestnetUtxoSnapshot(page: Page, minOutputs = 1, tim
 }
 
 /**
+ * 在 Testnet 钱包页点「刷新 UTXO」，并等待快照输出数等于期望值。
+ *
+ * 用途：页面广播后，Funding UTXO 已被花费，但自动快照可能比 WoC 内存池
+ * 更新早一步，余额会短暂停留在旧值。这里用正式页面的刷新按钮强制一轮
+ * `unspent/all`，再断言页面自己的快照真值。
+ */
+export async function refreshTestnetUtxoSnapshot(page: Page, expectedOutputs: number, timeoutMs = 120_000): Promise<void> {
+  await page.getByRole("button", { name: /^On-chain transactions$|^链上交易$/u }).click();
+  await page.getByRole("button", { name: /^Testnet$|^测试网$/u }).click();
+  const refresh = page.getByRole("button", { name: /刷新 UTXO|Refresh UTXOs?/u });
+  await expect(refresh).toBeVisible({ timeout: 30_000 });
+  const readOutputs = async (): Promise<number> => {
+    try {
+      const snapshotLine = page.getByText(/UTXO 快照：|UTXO snapshot:/u);
+      if (await snapshotLine.count() === 0) return -1;
+      const text = (await snapshotLine.first().textContent()) ?? "";
+      const match = text.match(/（([0-9,]+)\s*个输出）|\(([0-9,]+)\s*outputs?\)/u);
+      const raw = match?.[1] ?? match?.[2];
+      return raw ? Number(raw.replaceAll(",", "")) : -1;
+    } catch {
+      // 页面重渲染/资源暂不可读时继续轮询，不把瞬时失败当成结论。
+      return -1;
+    }
+  };
+  let lastClick = 0;
+  await expect.poll(async () => {
+    const now = Date.now();
+    if (now - lastClick > 10_000) {
+      lastClick = now;
+      await refresh.click().catch(() => undefined);
+    }
+    return await readOutputs();
+  }, {
+    timeout: timeoutMs,
+    message: `keymaster 快照在手工刷新后必须显示 ${expectedOutputs} 个输出`,
+  }).toBe(expectedOutputs);
+}
+
+/**
  * 等待转账 Offer 上由 keymaster 余额计算出的 BSV Testnet 金额。
  *
- * Offer 余额来自 P2PKH service 对 confirmed-sync 归属投影的现算结果；
+ * Offer 余额来自 P2PKH service 对 WoC `unspent/all` 内存快照的现算结果；
  * 这里断言的是页面真值，不是 Node 侧重新查询的链上余额。
  */
 /**
@@ -162,7 +201,7 @@ export async function expectTestnetOfferBalance(page: Page, satoshis: number, ti
   await expect(balance).toBeVisible();
   await expect.poll(async () => (await balance.textContent())?.trim() ?? "", {
     timeout: timeoutMs,
-    message: `BSV Testnet Offer 余额必须由 keymaster confirmed-sync 刷新为 ${satoshis} sats`,
+    message: `BSV Testnet Offer 余额必须由 keymaster UTXO 快照刷新为 ${satoshis} sats`,
   }).toBe(`${satoshis} sats`);
 }
 
@@ -243,8 +282,10 @@ async function prepareAndBroadcast(page: Page, recipientAddress: string, amount:
   await page.getByRole("button", { name: /Broadcast transaction|确认并广播交易/u }).click();
   const resultHeading = page.getByRole("heading", { name: /Broadcast result|广播结果/ });
   await expect(resultHeading).toBeVisible({ timeout: 45_000 });
-  await expect(page.getByText("local-confirmed", { exact: true })).toBeVisible();
   const resultCard = page.locator("section").filter({ has: resultHeading }).first();
+  // 结果卡片用“状态：<status>”渲染状态；断言的是业务终态文本，
+  // 不要求它是独立元素（isolated 会在这里给出可读的失败现场）。
+  await expect(resultCard).toContainText(/local-confirmed/u);
   const txid = (await resultCard.locator("code").first().textContent())?.trim() ?? "";
   // 组件的结果卡片只有一个 txid code；如果 DOM 结构调整，下面的业务
   // 断言仍会把“广播完成但没有可对账身份”判为失败。

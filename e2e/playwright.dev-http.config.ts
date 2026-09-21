@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("dev-http");
 
 export default defineConfig({
   testDir: "./integration",
@@ -10,7 +13,7 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/dev-http",
+  outputDir,
   use: {
     // 故意使用非 loopback 主机名：Chromium 可能把 loopback HTTP 当作可信来源，
     // 无法复现用户报告的非安全上下文路径。

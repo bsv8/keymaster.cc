@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("lifecycle-local");
 
 // 本配置只负责本地 tarball 的严格 0.5.0 Coordinator 生命周期验收。
 // 正式 registry 0.5.0 验收使用 playwright.lifecycle.registry.config.ts，
@@ -10,7 +13,7 @@ export default defineConfig({
   forbidOnly: true,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/coordinator-runtime-lifecycle",
+  outputDir,
   use: {
     baseURL: "http://127.0.0.1:4174",
     trace: "on-first-retry",

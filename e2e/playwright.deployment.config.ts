@@ -1,4 +1,7 @@
 import { defineConfig } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("deployment");
 
 export default defineConfig({
   testDir: "./integration",
@@ -6,7 +9,7 @@ export default defineConfig({
   forbidOnly: true,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/integration-deployment",
+  outputDir,
   use: {
     baseURL: process.env.KEYMASTER_E2E_DEPLOYMENT_BASE_URL ?? "http://127.0.0.1:4173",
     trace: "retain-on-failure",

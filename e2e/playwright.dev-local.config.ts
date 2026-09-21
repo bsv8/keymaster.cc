@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("dev-local");
 
 /**
  * 开发服务器（`npm run dev`）上的本地 Journey 执行档。
@@ -14,7 +17,7 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/dev-local",
+  outputDir,
   use: {
     baseURL: "http://127.0.0.1:4174",
     trace: "retain-on-failure",

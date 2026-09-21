@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { configureRunSuite } from "./integration/support/runData.js";
+
+const { outputDir } = configureRunSuite("msfile");
 
 /**
  * MSFile 本地执行档。
@@ -13,7 +16,7 @@ export default defineConfig({
   forbidOnly: true,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",
-  outputDir: "../test-results/integration-msfile",
+  outputDir,
   workers: 1,
   use: {
     baseURL: "http://127.0.0.1:4173",
