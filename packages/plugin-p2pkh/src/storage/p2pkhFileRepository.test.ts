@@ -9,21 +9,21 @@ describe("P2PKH 文件仓储", () => {
 
     await expect(repository.readSetting()).resolves.toEqual({
       includeTestnet: false,
-      feeRateSatoshisPerKb: { low: 500, medium: 1000, high: 2000 },
+      feeRateSatoshisPerKb: { low: 60, medium: 120, high: 180 },
       providerConfigs: {},
     });
 
     await repository.writeSetting({
       includeTestnet: true,
-      feeRateSatoshisPerKb: { low: 500, medium: 1500, high: 2000 },
+      feeRateSatoshisPerKb: { low: 60, medium: 150, high: 180 },
       providerConfigs: { woc: { endpoint: "https://woc-proxy.example.invalid/v1/bsv" } },
     });
     const written = JSON.parse(new TextDecoder().decode(store.__files.get("setting.json")!)) as Record<string, unknown>;
     // 默认值不落盘：low/high 与默认相同被省略。
-    expect(written.feeRateSatoshisPerKb).toEqual({ medium: 1500 });
+    expect(written.feeRateSatoshisPerKb).toEqual({ medium: 150 });
     await expect(repository.readSetting()).resolves.toMatchObject({
       includeTestnet: true,
-      feeRateSatoshisPerKb: { low: 500, medium: 1500, high: 2000 },
+      feeRateSatoshisPerKb: { low: 60, medium: 150, high: 180 },
     });
   });
 
@@ -42,7 +42,7 @@ describe("P2PKH 文件仓储", () => {
     const repository = createP2pkhFileRepository(store as never);
     await expect(repository.readSetting()).resolves.toEqual({
       includeTestnet: true,
-      feeRateSatoshisPerKb: { low: 500, medium: 1000, high: 2000 },
+      feeRateSatoshisPerKb: { low: 60, medium: 120, high: 180 },
       providerConfigs: { woc: { requestsPerSecond: 3 } },
     });
   });

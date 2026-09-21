@@ -198,9 +198,9 @@ export type P2pkhFeeRateTier = "low" | "medium" | "high";
 
 /** BSV 交易费率按 sats/kB 计。中档是产品默认值；三档均可在系统设置调整。 */
 export const P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB: Record<P2pkhFeeRateTier, number> = {
-  low: 500,
-  medium: 1000,
-  high: 2000
+  low: 60,
+  medium: 120,
+  high: 180
 };
 
 export interface P2pkhGlobalSettings {

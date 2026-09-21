@@ -53,7 +53,7 @@ export interface P2pkhResolvedSetting {
 
 export const P2PKH_SETTING_DEFAULTS = Object.freeze({
   includeTestnet: false,
-  feeRateSatoshisPerKb: Object.freeze({ low: 500, medium: 1000, high: 2000 } as Record<P2pkhFeeRateTier, number>),
+  feeRateSatoshisPerKb: Object.freeze({ low: 60, medium: 120, high: 180 } as Record<P2pkhFeeRateTier, number>),
 });
 
 /** 历史记录条目（与 P2pkhHistoryRecord 的持久化字段一致）。 */
