@@ -1,7 +1,7 @@
-import { TOKEN_REGISTRY_CAPABILITY, type TokenRegistry, type TransferOffer, type TransferOfferStatus, type TransferProvider } from "@keymaster/contracts";
+import { TOKEN_REGISTRY_CAPABILITY, type BsvNetwork, type TokenRegistry, type TransferOffer, type TransferOfferStatus, type TransferProvider, type TransferWidgetProps } from "@keymaster/contracts";
 import { useCapability, useOptionalCapability } from "webloom-framework/react";
 import { useI18n } from "@keymaster/runtime";
-import { Button, EmptyState, Select, TextInput } from "@keymaster/ui";
+import { Button, EmptyState, PageHeader, Select, TextInput } from "@keymaster/ui";
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { sha256 } from "@noble/hashes/sha256";
 import { useEffect, useMemo, useState } from "react";
@@ -55,6 +55,46 @@ export function createBsv21TransferProvider(input: { tokenRegistry: TokenRegistr
   };
 }
 
+/**
+ * BSV-21 独立转账页的网络选择状态。
+ *
+ * `/transfer` 只负责普通 BSV；BSV-21 仍必须有自己的可达入口，避免收敛
+ * 普通 BSV 范围时把代币转账能力从界面上删除。
+ */
+export function Bsv21TransferPage() {
+  const { t } = useI18n();
+  const [network, setNetwork] = useState<BsvNetwork>("main");
+  const offer: TransferOffer = {
+    id: `bsv21.${network}`,
+    providerId: "bsv21",
+    assetProviderId: "bsv21",
+    assetId: `bsv21.${network}`,
+    label: { key: "bsv21.provider.name", fallback: "BSV-21" },
+    status: "ready",
+    network,
+    recipientTargetSection: network === "main" ? "mainnet" : "testnet"
+  };
+
+  return (
+    <div className="bsv21-transfer-page">
+      <PageHeader
+        title={t("bsv21.transfer.page.title", { defaultValue: "转移 BSV-21" })}
+        description={t("bsv21.transfer.page.desc", { defaultValue: "在独立入口转移 BSV-21 代币；普通 BSV 请使用普通转账页。" })}
+      />
+      <Select
+        label={t("bsv21.transfer.page.network", { defaultValue: "网络" })}
+        options={[
+          { label: t("bsv21.transfer.page.mainnet", { defaultValue: "主网" }), value: "main" },
+          { label: t("bsv21.transfer.page.testnet", { defaultValue: "testnet" }), value: "test" }
+        ]}
+        value={network}
+        onChange={(event) => setNetwork(event.currentTarget.value as BsvNetwork)}
+      />
+      <Bsv21TransferWidget offer={offer} onCompleted={() => undefined} />
+    </div>
+  );
+}
+
 export function protocolSpendReference(result: { canonicalTxid?: string; txid: string }): string {
   return result.canonicalTxid ?? result.txid;
 }
@@ -66,7 +106,7 @@ interface FormState {
   feeRate: string;
 }
 
-function Bsv21TransferWidget(props: import("@keymaster/contracts").TransferWidgetProps) {
+function Bsv21TransferWidget(props: TransferWidgetProps) {
   const { t } = useI18n();
   // owner 作用域 capability 会在锁定时撤销；路由/弹窗组件在锁定瞬间仍可能
   // 完成一次渲染，必须按"暂不可用"降级而不是抛错。
@@ -86,7 +126,7 @@ function Bsv21TransferWidgetInner({
   onCompleted,
   recipientPublicKeyHex,
   service
-}: import("@keymaster/contracts").TransferWidgetProps & { service: Bsv21TransferService }) {
+  }: TransferWidgetProps & { service: Bsv21TransferService }) {
   const { t } = useI18n();
   const registry = useCapability(TOKEN_REGISTRY_CAPABILITY);
   const [tokens, setTokens] = useState<Array<{ tokenId: string; label: string; balance: string }>>([]);

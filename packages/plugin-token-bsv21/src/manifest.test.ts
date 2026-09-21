@@ -190,7 +190,7 @@ async function setupManifest() {
   const { bsv21TokenSetup } = await import("./manifest.js");
   const dispose = bsv21TokenSetup(ctx as never) as unknown as (() => void) | undefined;
 
-  return { dispose, triggerFn, messageBusListeners, dataNotifierListeners, ctx };
+  return { dispose, triggerFn, messageBusListeners, dataNotifierListeners, registerRoute, registerFeature, ctx };
 }
 
 // ── 用例 ──────────────────────────────────────────────────────────
@@ -199,6 +199,20 @@ describe("bsv21TokenPlugin.setup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDbListResult = [];
+  });
+
+  it("为 BSV-21 转账保留独立可达路由与业务入口", async () => {
+    const { registerRoute, registerFeature } = await setupManifest();
+
+    expect(registerRoute).toHaveBeenCalledWith(expect.objectContaining({
+      id: "bsv21.transfer",
+      path: "/assets/bsv21/transfer",
+      component: expect.any(Function)
+    }));
+    expect(registerFeature).toHaveBeenCalledWith("token-bsv21-transfer", "assets", expect.objectContaining({
+      id: "assets.bsv21.transfer",
+      entry: expect.objectContaining({ path: "/assets/bsv21/transfer", routeId: "bsv21.transfer" })
+    }));
   });
 
   it("vault.unlocked 不直接触发 token-bsv21.sync", async () => {

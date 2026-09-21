@@ -155,6 +155,30 @@ function base58Decode(value: string): Uint8Array {
   return result;
 }
 
+/**
+ * 解析 Base58Check P2PKH 地址。
+ *
+ * 中文说明：只有主网 version 00 和 testnet version 6f 被识别为 P2PKH；
+ * 其他地址族、长度错误、非法 Base58 字符或校验和错误都返回 undefined。
+ * 地址反查只使用这里返回的 hash160，不把地址写入联系人数据。
+ */
+export function parseP2pkhAddress(address: string): { network: "main" | "test"; hash160Hex: string } | undefined {
+  try {
+    const decoded = base58Decode(address.trim());
+    if (decoded.length !== 25) return undefined;
+    const version = decoded[0];
+    const network = version === 0x00 ? "main" : version === 0x6f ? "test" : undefined;
+    if (!network) return undefined;
+    const payload = decoded.slice(0, 21);
+    const checksum = decoded.slice(21);
+    const actual = dsha256(payload).slice(0, 4);
+    if (bytesToHex(actual) !== bytesToHex(checksum)) return undefined;
+    return { network, hash160Hex: bytesToHex(decoded.slice(1, 21)) };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Convert a Base58Check P2PKH address to its exact locking script. */
 export function p2pkhAddressToScriptHex(address: string, network?: "main" | "test"): string {
   const decoded = base58Decode(address);

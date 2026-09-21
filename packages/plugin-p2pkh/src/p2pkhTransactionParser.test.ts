@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sha256 } from "@noble/hashes/sha256";
-import { p2pkhAddressToScriptHex, ownedP2pkhOutputs, parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
+import { parseP2pkhAddress, p2pkhAddressToScriptHex, ownedP2pkhOutputs, parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
 
 function hex(bytes: Uint8Array): string { return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""); }
 function bytes(raw: string): Uint8Array { return Uint8Array.from(raw.match(/../g)!.map((part) => Number.parseInt(part, 16))); }
@@ -19,6 +19,13 @@ function makeTransaction(address: string, inputCount = 1, outputCount = 1): stri
 }
 
 describe("P2PKH raw transaction parser", () => {
+  it("parses P2PKH address network and hash160, while rejecting bad checksums", () => {
+    const address = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
+    expect(parseP2pkhAddress(address)).toEqual({ network: "main", hash160Hex: "7680adec8eabcabac676be9e83854ade0bd22cdb" });
+    expect(parseP2pkhAddress(`${address.slice(0, -1)}U`)).toBeUndefined();
+    expect(parseP2pkhAddress("bc1future-address-family")).toBeUndefined();
+  });
+
   it("derives the canonical txid and only recognizes exact owned P2PKH scripts", () => {
     const address = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
     const rawTxHex = makeTransaction(address);

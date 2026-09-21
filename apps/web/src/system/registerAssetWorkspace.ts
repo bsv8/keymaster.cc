@@ -3,8 +3,6 @@ import type {
   AssetRegistry,
   BusinessFeatureRegistry,
   BusinessDomain,
-  CollectibleRegistry,
-  CollectibleTransferRegistry,
   ActiveKeyState,
   HomeRegistry,
   I18nPluginResources,
@@ -40,7 +38,6 @@ import { CollectiblesPage, CollectibleDetailPage } from "./collectibles.js";
 import { TransferPage } from "./transfer.js";
 import { createTransferFeatureCapability, TRANSFER_FEATURE_CAPABILITY } from "./transfer/transferFeature.js";
 import { CollectibleTransferPage } from "./collectibleTransfer.js";
-import type { CollectibleSummary } from "@keymaster/contracts";
 
 const assetsResources: I18nPluginResources = {
   namespace: "assets",
@@ -199,25 +196,41 @@ const transferResources: I18nPluginResources = {
       "transfer.action.toContact": "Transfer",
       "transfer.observation.confirmed": "WOC confirmed",
       "transfer.observation.unconfirmed": "WOC observed (unconfirmed)",
-      "transfer.page.desc.default": "Confirm the recipient first, then choose an asset type and verify the receiving details before submitting.",
-      "transfer.page.assets": "Assets",
+      "transfer.page.desc.default": "Choose a recipient address, enter the amount and fee rate, then verify the read-only transfer details before submitting.",
       "transfer.page.recipient.title": "Recipient",
-      "transfer.page.recipient.hint": "Choose a contact, or enter a recipient address after selecting an asset.",
+      "transfer.page.recipient.hint": "Search a contact or paste a compressed public key or P2PKH address.",
+      "transfer.page.recipient.contacts": "From contacts",
+      "transfer.page.recipient.manual": "Manual input",
       "transfer.page.recipient.publicKey": "Recipient public key",
       "transfer.page.recipient.change": "Change recipient",
       "transfer.page.recipient.placeholder": "Select a contact",
-      "transfer.page.recipient.manualAddress": "You can skip the contact and enter and verify a recipient address after selecting an asset.",
-      "transfer.page.assetType.title": "Asset type",
-      "transfer.page.assetType.targetHint": "Only assets that support this recipient public key are shown.",
-      "transfer.page.assetType.manualHint": "Choose an asset, then enter the recipient address and amount.",
-      "transfer.section.collectibles": "Collectibles",
+      "transfer.page.recipient.inputPlaceholder": "Paste public key, address, or search a contact",
+      "transfer.page.recipient.address": "Recipient address",
+      "transfer.page.recipient.copy": "Copy address",
+      "transfer.page.recipient.copied": "Copied",
+      "transfer.page.recipient.network": "Network",
+      "transfer.page.recipient.mainnet": "Mainnet",
+      "transfer.page.recipient.testnet": "Testnet",
+      "transfer.page.recipient.source.contact": "Contact public-key derivation",
+      "transfer.page.recipient.source.resolved": "Address matched contact",
+      "transfer.page.recipient.source.manualPublicKey": "Manual public key",
+      "transfer.page.recipient.source.manualAddress": "Manual address",
+      "transfer.page.recipient.unknownAddress": "Unknown address",
+      "transfer.page.recipient.noCodec": "The P2PKH address capability is unavailable; address lookup is disabled.",
+      "transfer.page.recipient.searchHint": "Other text is searched in local contacts.",
+      "transfer.page.recipient.searchEmpty": "No matching local contact.",
+      "transfer.page.recipient.invalidPublicKey": "Public key must be a compressed 33-byte hex key.",
+      "transfer.page.recipient.invalidAddress": "This is not a valid P2PKH address. Use the corresponding asset transfer entry.",
+      "transfer.page.recipient.testnetDisabled": "Testnet is not enabled. Enable testnet in settings first.",
+      "transfer.page.recipient.conflict": "The public key and address do not match; transfer is blocked.",
+      "transfer.page.recipient.networkChanged": "Address updated; verify again before submitting.",
       "transfer.page.empty.noKey.title": "No key yet",
       "transfer.page.empty.noKey.desc": "Import or create a key before starting a transfer.",
       "transfer.page.empty.noProvider.title": "No provider",
-      "transfer.page.empty.picker": "No transfer assets are currently available.",
-      "transfer.page.invalidRecipient": "Invalid contact transfer target",
-      "transfer.page.noRecipientProvider": "No asset can transfer to this contact public key",
-      "transfer.page.clearRecipient": "Clear target and browse all assets"
+      "transfer.page.empty.picker": "No ordinary BSV (P2PKH) transfer is currently available.",
+      "transfer.page.invalidRecipient": "The recipient parameters are invalid.",
+      "transfer.page.noRecipientProvider": "No ordinary BSV transfer is available for this network.",
+      "transfer.page.clearRecipient": "Clear recipient"
     },
     "zh-CN": {
       "transfer.route.title": "转账",
@@ -227,25 +240,41 @@ const transferResources: I18nPluginResources = {
       "transfer.action.toContact": "转账",
       "transfer.observation.confirmed": "WOC 已确认",
       "transfer.observation.unconfirmed": "WOC 已观察（未确认）",
-      "transfer.page.desc.default": "先确认收款人，再选择资产类型，并在提交前核对收款信息。",
-      "transfer.page.assets": "资产",
-      "transfer.page.recipient.title": "收款人",
-      "transfer.page.recipient.hint": "可以选择联系人，也可在选择资产后直接填写收款地址。",
+      "transfer.page.desc.default": "选择收款地址，填写金额与矿工费率，再核对只读转账信息后提交。",
+      "transfer.page.recipient.title": "收款方",
+      "transfer.page.recipient.hint": "搜索联系人，或粘贴压缩公钥、P2PKH 地址。",
+      "transfer.page.recipient.contacts": "从通讯录选择",
+      "transfer.page.recipient.manual": "手工输入",
       "transfer.page.recipient.publicKey": "收款人公钥",
-      "transfer.page.recipient.change": "更换收款人",
+      "transfer.page.recipient.change": "更换收款方",
       "transfer.page.recipient.placeholder": "选择联系人",
-      "transfer.page.recipient.manualAddress": "也可跳过联系人，选择资产后直接填写并核对收款地址。",
-      "transfer.page.assetType.title": "资产类型",
-      "transfer.page.assetType.targetHint": "仅显示支持该收款人公钥的资产。",
-      "transfer.page.assetType.manualHint": "选择资产后，继续填写收款地址和金额。",
-      "transfer.section.collectibles": "藏品",
+      "transfer.page.recipient.inputPlaceholder": "粘贴公钥、地址，或搜索联系人",
+      "transfer.page.recipient.address": "收款地址",
+      "transfer.page.recipient.copy": "复制地址",
+      "transfer.page.recipient.copied": "已复制",
+      "transfer.page.recipient.network": "网络",
+      "transfer.page.recipient.mainnet": "主网",
+      "transfer.page.recipient.testnet": "testnet",
+      "transfer.page.recipient.source.contact": "联系人公钥派生",
+      "transfer.page.recipient.source.resolved": "地址命中联系人",
+      "transfer.page.recipient.source.manualPublicKey": "手工公钥",
+      "transfer.page.recipient.source.manualAddress": "手工地址",
+      "transfer.page.recipient.unknownAddress": "陌生地址",
+      "transfer.page.recipient.noCodec": "P2PKH 地址能力不可用，地址反查已关闭。",
+      "transfer.page.recipient.searchHint": "其他文本会在本地通讯录中搜索。",
+      "transfer.page.recipient.searchEmpty": "没有匹配的本地联系人。",
+      "transfer.page.recipient.invalidPublicKey": "公钥必须是压缩格式的 33 字节 hex 公钥。",
+      "transfer.page.recipient.invalidAddress": "这不是有效的 P2PKH 地址，请从对应资产入口转账。",
+      "transfer.page.recipient.testnetDisabled": "未启用 testnet，请在设置中开启。",
+      "transfer.page.recipient.conflict": "公钥与地址不一致，已阻断转账。",
+      "transfer.page.recipient.networkChanged": "地址已更新，请重新核对。",
       "transfer.page.empty.noKey.title": "还没有 key",
       "transfer.page.empty.noKey.desc": "导入或创建一个 key 后再开始转账。",
       "transfer.page.empty.noProvider.title": "没有 provider",
-      "transfer.page.empty.picker": "当前没有可用的转账资产。",
-      "transfer.page.invalidRecipient": "联系人转账目标无效",
-      "transfer.page.noRecipientProvider": "当前没有可向该联系人公钥转账的资产",
-      "transfer.page.clearRecipient": "清除目标，浏览全部资产"
+      "transfer.page.empty.picker": "当前没有可用的普通 BSV（P2PKH）转账。",
+      "transfer.page.invalidRecipient": "收款方参数无效。",
+      "transfer.page.noRecipientProvider": "当前网络没有可用的普通 BSV 转账。",
+      "transfer.page.clearRecipient": "清除收款方"
     }
   }
 };
@@ -419,8 +448,6 @@ function registerTransferWorkspace(host: PluginHost): void {
   host.i18n.registerResources("transfer", transferResources);
   host.provide(TRANSFER_FEATURE_CAPABILITY, createTransferFeatureCapability());
   const registry = get(host, TRANSFER_REGISTRY_CAPABILITY);
-  const collectibles = get(host, COLLECTIBLE_REGISTRY_CAPABILITY);
-  const collectibleTransfers = get(host, COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY);
   const keyspace = get(host, KEYSPACE_SERVICE_CAPABILITY);
   const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
   const routes = get(host, ROUTE_REGISTRY_CAPABILITY);
@@ -434,32 +461,6 @@ function registerTransferWorkspace(host: PluginHost): void {
     load: async () => keyspace.active(),
     subscribe: (_args, _context, invalidate) => keyspace.onActiveKeyChanged(invalidate),
     equals: (a, b) => a?.activePublicKeyHex === b?.activePublicKeyHex,
-    invalidation: "immediate"
-  });
-
-  registerWorkspaceResource<Array<{ providerId: string; items: CollectibleSummary[]; error?: string }>, readonly string[]>(resources, {
-    id: "transfer.recipient-collectibles",
-    scope: "active-key",
-    key: (_args, context) => ["transfer.recipient-collectibles", context.activePublicKeyHex ?? "none"],
-    load: async (_args, context) => {
-      if (!context.activePublicKeyHex) return [];
-      return Promise.all(collectibles.list().map(async (provider) => {
-        try {
-          const items = await provider.listCollectibles();
-          return {
-            providerId: provider.id,
-            items: items.filter((item) => collectibleTransfers.listSupporting({ providerId: provider.id, collectibleId: item.collectibleId }).length > 0)
-          };
-        } catch (error) {
-          return { providerId: provider.id, items: [], error: error instanceof Error ? error.message : String(error) };
-        }
-      }));
-    },
-    subscribe: (_args, _context, invalidate) => {
-      const offs = collectibles.list().map((provider) => provider.onChange(invalidate));
-      const offKey = keyspace.onActiveKeyChanged(invalidate);
-      return () => { for (const off of offs) off(); offKey(); };
-    },
     invalidation: "immediate"
   });
 

@@ -58,6 +58,9 @@ export interface TransferOffer {
 export interface TransferWidgetProps {
   offer: TransferOffer;
   onCompleted(result: TransferCompletion): void;
+  /** 收款地址：平台核对后的最终支付真值。 */
+  readonly recipientAddress?: string;
+  /** 收款人公钥：仅用于派生、联系人反查和核对展示。 */
   readonly recipientPublicKeyHex?: string;
 }
 

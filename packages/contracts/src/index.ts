@@ -12,6 +12,7 @@ export * from "./vault.js";
 export * from "./keyspace.js";
 export * from "./keyImport.js";
 export * from "./transfer.js";
+export * from "./p2pkhAddress.js";
 export * from "./navigation.js";
 export * from "./business.js";
 export * from "./settings.js";

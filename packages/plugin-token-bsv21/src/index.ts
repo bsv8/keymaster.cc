@@ -9,4 +9,4 @@ export { buildBsv21P2pkhScript, encodeBsv21Payload } from "./bsv21Script.js";
 export { createBsv21MintService } from "./bsv21MintService.js";
 export { createBsv21TransferService } from "./bsv21TransferService.js";
 export { Bsv21MintPage } from "./Bsv21MintPage.js";
-export { createBsv21TransferProvider } from "./bsv21TransferProvider.js";
+export { Bsv21TransferPage, createBsv21TransferProvider } from "./bsv21TransferProvider.js";

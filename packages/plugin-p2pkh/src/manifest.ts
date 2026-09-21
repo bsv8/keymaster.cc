@@ -45,6 +45,7 @@ import {
   VAULT_SERVICE_CAPABILITY,
   WOC_CAPABILITY,
   P2PKH_COORDINATOR_CONTROL_CAPABILITY,
+  P2PKH_ADDRESS_CODEC_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhLocalInputClaim, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
@@ -52,6 +53,7 @@ import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResour
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
 import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
+import { p2pkhAddressCodec } from "./p2pkhAddressCodec.js";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
@@ -281,9 +283,9 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.result.confirmClose": "Confirm and close",
       "p2pkh.transfer.result.again": "Start over",
       "p2pkh.transfer.noActiveKeyWarning": "No active key available. Repair the failed / uninitialized keys in Key management first.",
-      "p2pkh.transfer.form.recipient": "Recipient address",
-      "p2pkh.transfer.form.recipientDerived": "Derived recipient address (verify)",
-      "p2pkh.transfer.form.recipientTarget": "This address was derived from the recipient public key. Verify it before continuing.",
+      "p2pkh.transfer.form.recipient": "Recipient address (read-only)",
+      "p2pkh.transfer.form.recipientDerived": "Derived recipient address (read-only)",
+      "p2pkh.transfer.form.recipientTarget": "This address was verified by the platform and is locked. Return to step 1 to change it.",
       "p2pkh.transfer.form.contactSelect": "Pick from contacts",
       "p2pkh.transfer.form.contactPlaceholder": "Unselected",
       "p2pkh.transfer.form.amount": "Amount (sats)",
@@ -294,8 +296,8 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.feeTier.low": "Low",
       "p2pkh.transfer.form.feeTier.medium": "Medium",
       "p2pkh.transfer.form.feeTier.high": "High",
-      "p2pkh.transfer.step.addressAmount": "Verify addresses and enter amount",
-      "p2pkh.transfer.step.addressAmountHint": "The change address belongs to the current key and cannot be edited. Carefully verify the recipient address.",
+      "p2pkh.transfer.step.addressAmount": "Amount and miner fee rate",
+      "p2pkh.transfer.step.addressAmountHint": "The platform verified and locked the recipient address. Only amount and miner fee rate can be entered here.",
       "p2pkh.transfer.preview.stepHint": "Verify the recipient, received amount, change, and miner fee before broadcasting.",
       "p2pkh.transfer.result.stepHint": "The final transaction has been submitted to the broadcast service.",
       "p2pkh.transfer.form.prepare": "Generate final transaction",
@@ -542,9 +544,9 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.result.confirmClose": "确认并关闭",
       "p2pkh.transfer.result.again": "再来一次",
       "p2pkh.transfer.noActiveKeyWarning": "当前没有可用的 active key。请先到 Key 管理处理失败 / 未初始化的 key 后再转账。",
-      "p2pkh.transfer.form.recipient": "接收方地址",
-      "p2pkh.transfer.form.recipientDerived": "派生的接收方地址（请核对）",
-      "p2pkh.transfer.form.recipientTarget": "此地址由收款人公钥派生。确认地址无误后再继续。",
+      "p2pkh.transfer.form.recipient": "收款地址（只读）",
+      "p2pkh.transfer.form.recipientDerived": "派生的收款地址（只读）",
+      "p2pkh.transfer.form.recipientTarget": "此地址已由平台核对并锁定。如需更换，请返回第 1 步。",
       "p2pkh.transfer.form.contactSelect": "从联系人选择",
       "p2pkh.transfer.form.contactPlaceholder": "未选择",
       "p2pkh.transfer.form.amount": "金额 (sats)",
@@ -555,8 +557,8 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.feeTier.low": "低",
       "p2pkh.transfer.form.feeTier.medium": "中",
       "p2pkh.transfer.form.feeTier.high": "高",
-      "p2pkh.transfer.step.addressAmount": "核对地址与填写金额",
-      "p2pkh.transfer.step.addressAmountHint": "找零地址由当前 key 决定，不能修改；请重点核对收款地址。",
+      "p2pkh.transfer.step.addressAmount": "金额与矿工费率",
+      "p2pkh.transfer.step.addressAmountHint": "收款地址已由平台核对并锁定；这里只能输入金额和矿工费率。",
       "p2pkh.transfer.preview.stepHint": "请核对收款地址、到账金额、找零与矿工费，再广播。",
       "p2pkh.transfer.result.stepHint": "最终交易已提交到广播服务。",
       "p2pkh.transfer.form.prepare": "生成最终交易",
@@ -608,7 +610,7 @@ const p2pkhPluginDefinition = {
       id: "p2pkh.window",
       runtime: "window-main",
       scopeKind: "owner-session",
-      provides: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
+      provides: [P2PKH_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
       dependencies: defineRuntimeUnitDependencies([
         { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
@@ -658,6 +660,7 @@ const p2pkhPluginDefinition = {
       assetDataNotifier
     });
     ctx.provide(P2PKH_CAPABILITY, service);
+    ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
       vault,
       woc,

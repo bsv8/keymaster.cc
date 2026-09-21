@@ -62,7 +62,7 @@ import { createBsv21SyncTask } from "./bsv21Sync.js";
 import { createBsv21SpendProtectionProvider } from "./bsv21SpendProtection.js";
 import { createBsv21MintService, BSV21_MINT_SERVICE_CAPABILITY } from "./bsv21MintService.js";
 import { createBsv21TransferService, BSV21_TRANSFER_SERVICE_CAPABILITY } from "./bsv21TransferService.js";
-import { createBsv21TransferProvider } from "./bsv21TransferProvider.js";
+import { Bsv21TransferPage, createBsv21TransferProvider } from "./bsv21TransferProvider.js";
 import { Bsv21MintPage } from "./Bsv21MintPage.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
@@ -73,6 +73,13 @@ const bsv21Resources: I18nPluginResources = {
       "bsv21.provider.name": "BSV-21",
       "bsv21.route.mint": "Create BSV-21",
       "bsv21.menu.mint": "Create BSV-21",
+      "bsv21.route.transfer": "Transfer BSV-21",
+      "bsv21.menu.transfer": "Transfer BSV-21",
+      "bsv21.transfer.page.title": "Transfer BSV-21",
+      "bsv21.transfer.page.desc": "Transfer BSV-21 tokens from the dedicated page; use the regular transfer page for BSV.",
+      "bsv21.transfer.page.network": "Network",
+      "bsv21.transfer.page.mainnet": "Mainnet",
+      "bsv21.transfer.page.testnet": "Testnet",
       "bsv21.mint.title": "Create BSV-21 token",
       "bsv21.mint.locked.title": "Wallet is locked",
       "bsv21.mint.locked.description": "Unlock to mint tokens again.",
@@ -119,6 +126,13 @@ const bsv21Resources: I18nPluginResources = {
       "bsv21.provider.name": "BSV-21",
       "bsv21.route.mint": "创建 BSV-21",
       "bsv21.menu.mint": "创建 BSV-21",
+      "bsv21.route.transfer": "转移 BSV-21",
+      "bsv21.menu.transfer": "转移 BSV-21",
+      "bsv21.transfer.page.title": "转移 BSV-21",
+      "bsv21.transfer.page.desc": "在独立页面转移 BSV-21 代币；普通 BSV 请使用普通转账页。",
+      "bsv21.transfer.page.network": "网络",
+      "bsv21.transfer.page.mainnet": "主网",
+      "bsv21.transfer.page.testnet": "测试网",
       "bsv21.mint.title": "创建 BSV-21 代币",
       "bsv21.mint.locked.title": "钱包已锁定",
       "bsv21.mint.locked.description": "解锁后可继续铸造代币。",
@@ -256,6 +270,13 @@ const bsv21TokenPluginDefinition = {
       component: Bsv21MintPage
     });
 
+    routes.register({
+      id: "bsv21.transfer",
+      path: "/assets/bsv21/transfer",
+      label: { key: "bsv21.route.transfer", fallback: "Transfer BSV-21" },
+      component: Bsv21TransferPage
+    });
+
     business.registerFeature("token-bsv21", "assets", {
       id: "assets.bsv21",
       label: { key: "bsv21.menu.mint", fallback: "Create BSV-21" },
@@ -264,6 +285,18 @@ const bsv21TokenPluginDefinition = {
       entry: {
         path: "/assets/bsv21/create",
         routeId: "bsv21.mint",
+        visibleWhen: ({ unlocked }) => unlocked
+      }
+    });
+
+    business.registerFeature("token-bsv21-transfer", "assets", {
+      id: "assets.bsv21.transfer",
+      label: { key: "bsv21.menu.transfer", fallback: "Transfer BSV-21" },
+      order: 26,
+      icon: "Send",
+      entry: {
+        path: "/assets/bsv21/transfer",
+        routeId: "bsv21.transfer",
         visibleWhen: ({ unlocked }) => unlocked
       }
     });
