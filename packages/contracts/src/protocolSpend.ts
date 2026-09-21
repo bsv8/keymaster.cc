@@ -8,6 +8,7 @@ import { defineCapability } from "webloom-framework";
 //     等插件复用。
 
 import type { BsvNetwork } from "./vault.js";
+import type { P2pkhUtxoBinding } from "./bsvP2pkhProviders.js";
 
 export const P2PKH_PROTOCOL_SPEND_CAPABILITY = defineCapability<ProtocolSpendService>({
   kind: "local",
@@ -43,6 +44,10 @@ export interface ProtocolSpendPreview {
   protectedClaimIds?: string[];
   inputClaimIds?: string[];
   submissionId?: string;
+  /** 花费钱包 P2PKH UTXO 时捕获的快照绑定；纯代币输入可省略。 */
+  utxoBinding?: P2pkhUtxoBinding;
+  /** 兼容协议层的序号投影；无钱包 P2PKH 输入时省略。 */
+  utxoSeq?: number;
 }
 
 export interface ProtocolSpendResult {

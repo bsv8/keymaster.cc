@@ -136,6 +136,11 @@ export interface AssetDataInvalidationEvent {
   revision: number;
   /** 变更的数据类别。 */
   kinds: Array<"resource" | "utxo" | "history" | "holding" | "claim" | "submission" | "settings" | "protocol-snapshot" | "balance">;
+  /**
+   * P2PKH 快照序号表。中文：main=主网，test=测试网；没有可信快照的网络省略。
+   * v1 不携带快照状态，消费方只用它判断是否出现了新版本。
+   */
+  utxoSeqs?: { main?: number; test?: number };
 }
 
 /**

@@ -9,9 +9,11 @@ import type {
   ProtocolSpendResult,
   ProtocolSpendService,
   ProtectedOutpointRegistry,
-  WocService,
+  CentralBroadcastService,
+  P2pkhUtxoBinding,
   VaultService
 } from "@keymaster/contracts";
+import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import type { P2pkhProtocolSubmission } from "./p2pkhContracts.js";
 import { calcTxidFromRawTxHex, rawTxHexByteLength, signP2pkhTx, type UnsignedTx } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
@@ -40,7 +42,10 @@ export interface P2pkhProtocolSpendSubmissionStore {
 
 export interface P2pkhProtocolSpendDeps {
   vault: VaultService;
-  woc: WocService;
+  /** 生产广播入口；协议 spend 不直接依赖 WOC 或其它 Provider。 */
+  centralBroadcastService?: CentralBroadcastService;
+  /** 从当前快照取得协议输入对应的序号绑定。 */
+  getUtxoBinding?: (input: { ownerPublicKeyHex: string; network: BsvNetwork }) => Promise<P2pkhUtxoBinding | undefined>;
   getKeyForOwner: (ownerPublicKeyHex: string) => Promise<{ publicKeyHex: string }>;
   claimStore: P2pkhProtocolSpendClaimStore;
   submissionStore?: P2pkhProtocolSpendSubmissionStore;
@@ -165,16 +170,6 @@ function assertUnprotectedInputs(
       throw new Error(`Protocol spend blocked by protected outpoint: ${utxo.txid}:${utxo.vout}`);
     }
   }
-}
-
-function isDefinitivelyRejectedError(msg: string): boolean {
-  if (!msg) return false;
-  const lower = msg.toLowerCase();
-  if (lower.includes("timeout") || lower.includes("aborted") || lower.includes("network")) {
-    return false;
-  }
-  if (/\b4\d\d\b/.test(lower) && !/\b429\b/.test(lower)) return true;
-  return lower.includes("rejected") || lower.includes("invalid transaction") || lower.includes("bad-txns");
 }
 
 function buildProtocolSubmissionRecord(input: {
@@ -309,6 +304,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
                 status: "prepared"
               }));
             }
+            const utxoBinding = await deps.getUtxoBinding?.({ ownerPublicKeyHex: resolvedOwner.publicKeyHex, network: input.network });
             return {
               ownerPublicKeyHex: resolvedOwner.publicKeyHex,
               requestingPluginId: input.requestingPluginId,
@@ -323,7 +319,8 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
               rawTxHex,
               protectedClaimIds,
               inputClaimIds,
-              submissionId
+              submissionId,
+              ...(utxoBinding === undefined ? {} : { utxoBinding, utxoSeq: utxoBinding.seq })
             };
           }
           feeSatoshis = nextFee;
@@ -345,7 +342,85 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
 
     async submit(preview): Promise<ProtocolSpendResult> {
       try {
-        const broadcastRes = await deps.woc.broadcast(preview.network, preview.rawTxHex, { timeoutMs: 30_000 });
+        let canonicalTxid = preview.txid;
+        let providerReturnedTxidRaw: string | undefined;
+        let providerReturnedTxidNormalized: string | undefined;
+        let txidIntegrity: "exact" | "reversed" | "mismatch" | "missing" | undefined;
+        let isolated = false;
+        if (deps.centralBroadcastService) {
+          const result = await deps.centralBroadcastService.submitOnce({
+            ownerPublicKeyHex: preview.ownerPublicKeyHex,
+            network: preview.network,
+            submissionId: preview.submissionId ?? crypto.randomUUID(),
+            resourceId: resourceIdFor(preview.network),
+            txid: preview.txid,
+            rawTxHex: preview.rawTxHex,
+            ...(preview.utxoBinding === undefined ? {} : { utxoBinding: preview.utxoBinding }),
+          });
+          if (result.status === "isolated") {
+            isolated = true;
+            canonicalTxid = result.canonicalTxid ?? preview.txid;
+            providerReturnedTxidRaw = result.providerReturnedTxidRaw;
+            providerReturnedTxidNormalized = result.providerReturnedTxidNormalized;
+            txidIntegrity = result.txidIntegrity;
+          } else if (result.status === "not-dispatched") {
+            // 中文：Worker 已明确证明未派发时，协议输入占用和保护 claim
+            // 必须在这里立即释放；不能把它当成 unknown 留到后台观察。
+            const existing = deps.submissionStore && preview.submissionId
+              ? await deps.submissionStore.getProtocolSubmission({ publicKeyHex: preview.ownerPublicKeyHex, id: preview.submissionId })
+              : undefined;
+            const protectedClaimIds = preview.protectedClaimIds && preview.protectedClaimIds.length > 0
+              ? preview.protectedClaimIds
+              : existing?.protectedClaimIds ?? [];
+            const inputClaimIds = preview.inputClaimIds && preview.inputClaimIds.length > 0
+              ? preview.inputClaimIds
+              : existing?.localInputClaimIds ?? [];
+            if (protectedClaimIds.length > 0 && deps.protectedOutpoints) {
+              await deps.protectedOutpoints.releaseClaims(protectedClaimIds);
+            }
+            if (inputClaimIds.length > 0) {
+              await deps.claimStore.releaseLocalInputClaims({ publicKeyHex: preview.ownerPublicKeyHex, claimIds: inputClaimIds });
+            }
+            if (deps.submissionStore && preview.submissionId) {
+              await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
+                submissionId: preview.submissionId,
+                resourceId: resourceIdFor(preview.network),
+                publicKeyHex: preview.ownerPublicKeyHex,
+                network: preview.network,
+                canonicalTxid: preview.txid,
+                inputs: preview.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+                protectedClaimIds,
+                localInputClaimIds: inputClaimIds,
+                status: "rejected",
+                droppedReason: result.reason,
+                createdAt: existing?.createdAt,
+              }));
+            }
+            return {
+              status: "rejected",
+              txid: preview.txid,
+              rawTxHex: preview.rawTxHex,
+              inputClaimIds,
+              submissionId: preview.submissionId,
+              error: result.reason,
+            };
+          } else {
+            canonicalTxid = result.canonicalTxid ?? ("txid" in result ? result.txid : preview.txid);
+            providerReturnedTxidRaw = "providerReturnedTxidRaw" in result
+              ? result.providerReturnedTxidRaw
+              : canonicalTxid;
+            providerReturnedTxidNormalized = "providerReturnedTxidNormalized" in result
+              ? result.providerReturnedTxidNormalized
+              : canonicalTxid.toLowerCase();
+            if ("txidIntegrity" in result && result.txidIntegrity !== undefined) {
+              txidIntegrity = result.txidIntegrity;
+            } else {
+              txidIntegrity = providerReturnedTxidNormalized === preview.txid.toLowerCase() ? "exact" : "mismatch";
+            }
+          }
+        } else {
+          throw new Error("Central broadcast service is unavailable");
+        }
         if (deps.submissionStore && preview.submissionId) {
           const existing = await deps.submissionStore.getProtocolSubmission({
             publicKeyHex: preview.ownerPublicKeyHex,
@@ -356,42 +431,48 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             resourceId: resourceIdFor(preview.network),
             publicKeyHex: preview.ownerPublicKeyHex,
             network: preview.network,
-            canonicalTxid: broadcastRes.canonicalTxid,
+            canonicalTxid,
             inputs: preview.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
             protectedClaimIds: preview.protectedClaimIds ?? existing?.protectedClaimIds ?? [],
             localInputClaimIds: preview.inputClaimIds ?? existing?.localInputClaimIds ?? [],
-            status: broadcastRes.txidIntegrity === "mismatch" ? "provider-inconsistent" : "broadcast-pending-woc",
+            status: txidIntegrity === "mismatch" ? "provider-inconsistent" : isolated ? "unknown" : "broadcast-pending-woc",
             observation: existing?.observation,
             createdAt: existing?.createdAt
           }));
         }
         return {
-          status: broadcastRes.txidIntegrity === "mismatch" ? "provider-inconsistent" : "broadcast-pending-woc",
+          status: txidIntegrity === "mismatch" ? "provider-inconsistent" : isolated ? "unknown" : "broadcast-pending-woc",
           txid: preview.txid,
           rawTxHex: preview.rawTxHex,
           inputClaimIds: preview.inputClaimIds,
           submissionId: preview.submissionId,
-          canonicalTxid: broadcastRes.canonicalTxid,
-          providerReturnedTxidRaw: broadcastRes.providerReturnedTxidRaw,
-          providerReturnedTxidNormalized: broadcastRes.providerReturnedTxidNormalized,
-          txidIntegrity: broadcastRes.txidIntegrity
+          canonicalTxid,
+          providerReturnedTxidRaw,
+          providerReturnedTxidNormalized,
+          txidIntegrity
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (preview.protectedClaimIds && preview.protectedClaimIds.length > 0 && deps.protectedOutpoints && isDefinitivelyRejectedError(msg)) {
-          await deps.protectedOutpoints.releaseClaims(preview.protectedClaimIds);
+        const definitivelyRejected = isDefinitelyNotDispatchedBroadcastError(err);
+        const existing = deps.submissionStore && preview.submissionId
+          ? await deps.submissionStore.getProtocolSubmission({ publicKeyHex: preview.ownerPublicKeyHex, id: preview.submissionId })
+          : undefined;
+        const protectedClaimIds = preview.protectedClaimIds && preview.protectedClaimIds.length > 0
+          ? preview.protectedClaimIds
+          : existing?.protectedClaimIds ?? [];
+        const inputClaimIds = preview.inputClaimIds && preview.inputClaimIds.length > 0
+          ? preview.inputClaimIds
+          : existing?.localInputClaimIds ?? [];
+        if (protectedClaimIds.length > 0 && deps.protectedOutpoints && definitivelyRejected) {
+          await deps.protectedOutpoints.releaseClaims(protectedClaimIds);
         }
-        if (preview.inputClaimIds && preview.inputClaimIds.length > 0 && isDefinitivelyRejectedError(msg)) {
+        if (inputClaimIds.length > 0 && definitivelyRejected) {
           await deps.claimStore.releaseLocalInputClaims({
             publicKeyHex: preview.ownerPublicKeyHex,
-            claimIds: preview.inputClaimIds
+            claimIds: inputClaimIds
           });
         }
         if (deps.submissionStore && preview.submissionId) {
-          const existing = await deps.submissionStore.getProtocolSubmission({
-            publicKeyHex: preview.ownerPublicKeyHex,
-            id: preview.submissionId
-          });
           await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
             submissionId: preview.submissionId,
             resourceId: resourceIdFor(preview.network),
@@ -399,20 +480,20 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             network: preview.network,
             canonicalTxid: preview.txid,
             inputs: preview.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
-            protectedClaimIds: preview.protectedClaimIds ?? existing?.protectedClaimIds ?? [],
-            localInputClaimIds: preview.inputClaimIds ?? existing?.localInputClaimIds ?? [],
-            status: isDefinitivelyRejectedError(msg) ? "rejected" : "unknown",
-            droppedReason: isDefinitivelyRejectedError(msg) ? msg : undefined,
+            protectedClaimIds,
+            localInputClaimIds: inputClaimIds,
+            status: definitivelyRejected ? "rejected" : "unknown",
+            droppedReason: definitivelyRejected ? msg : undefined,
             observation: existing?.observation,
             createdAt: existing?.createdAt
           }));
         }
-        if (isDefinitivelyRejectedError(msg)) {
+        if (definitivelyRejected) {
           return {
             status: "rejected",
             txid: preview.txid,
             rawTxHex: preview.rawTxHex,
-            inputClaimIds: preview.inputClaimIds,
+            inputClaimIds,
             submissionId: preview.submissionId,
             error: msg
           };

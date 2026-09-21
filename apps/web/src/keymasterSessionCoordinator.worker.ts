@@ -35,6 +35,7 @@ import type {
   CoordinatorSubscribeTopicsResult,
   CoordinatorTopicBaseline,
   CoordinatorValueResult,
+  P2pkhBroadcastSubmission,
   AssetDataInvalidationEvent,
   SessionStateEvent,
   VaultSealedSecret,
@@ -90,7 +91,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, BACKGROUND_TRIGGER_REASON } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -146,13 +147,13 @@ import {
 } from "./coordinator/workerUnitCatalog.js";
 import { createCoordinatorWorkerUnitRegistry } from "./coordinator/workerUnitRuntime.js";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
-import { createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotResource, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
+import { createCentralBroadcastService, createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotResource, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
 import { createP2pkhCoordinatorTasks, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { BorrowedOwnerFileStore, DeviceRecordV1, DeviceLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupKeyResult, InitialSetupResult, KeyHoldDocumentV1, KeymasterSessionKeyDerivationV1, KeymasterSessionV1, KeyspaceService, KeyValueStore, OwnerFileStore, PlatformRootStore, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService, WocQueueSnapshot } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore, DeviceRecordV1, DeviceLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupKeyResult, InitialSetupResult, KeyHoldDocumentV1, KeymasterSessionKeyDerivationV1, KeymasterSessionV1, KeyspaceService, KeyValueStore, OwnerFileStore, PlatformRootStore, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService, WocServiceHandle, WocQueueSnapshot } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -164,6 +165,8 @@ import type {
   CoordinatorMsFileStateEvent,
   MsFileConnectAppContext,
   MsFileErrorCode,
+  AssetDataChangedEvent,
+  WocUtxoResponse,
 } from "@keymaster/contracts";
 import { createStorageRuntimeController, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, encryptDeviceConfig, decryptDeviceConfig, createKeyLock, createKeyHoldRepository, createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument, generateSessionId, createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode } from "@keymaster/platform-storage/coordinator";
 import type { BucketObjectStoreCapabilityState, KeyHoldFile, KeyHoldRepository, KeyLock, LocalStorageBridgeRequest, LocalStorageBridgeResponse, UnlockedKeyHold } from "@keymaster/platform-storage/coordinator";
@@ -899,9 +902,13 @@ let pluginIntentController: PluginIntentController | undefined;
 let pluginIntentControllerOff: (() => void) | undefined;
 let keyDeletionTail: Promise<void> = Promise.resolve();
 let p2pkhRegistry: P2pkhProviderRegistry | undefined;
-let p2pkhWocService: WocService | undefined;
+let p2pkhWocService: WocServiceHandle | undefined;
 let p2pkhUtxoSnapshots: P2pkhUtxoSnapshotStore | undefined;
 let testP2pkhBroadcastProvider: P2pkhTransactionBroadcastProvider | undefined;
+/** 测试专用：替换快照 store 的 `unspent/all` 数据源，避免测试出网。 */
+let testP2pkhUnspentAllProvider: ((network: "main" | "test", address: string) => Promise<WocUtxoResponse[]>) | undefined;
+/** 测试专用：缩短 Worker 内中心广播服务的重试预算。 */
+let testSatBroadcastRetryOverrides: { maxAttempts?: number; deadlineMs?: number; initialBackoffMs?: number; maxBackoffMs?: number } | undefined;
 let testPersistCoordinatorSnapshotFailure = false;
 let testFailColdStartInstall = false;
 let testFailAfterBucketPasswordCatalogUpdate = false;
@@ -6253,6 +6260,9 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
       createActiveKeyCrypto: (requestedOwner: string) => createWorkerActiveKeyCrypto(requestedOwner),
     } as unknown as VaultService;
     const internalCoordinator = {
+      // createP2pkhService 构造时读取 p2pkhSettings；Worker 内部 facade
+      // 只需要投影设置，不暴露其它 bootstrap 字段。
+      getBootstrapSnapshot: () => ({ p2pkhSettings: coordinatorMeta.p2pkhSettings }),
       p2pkhUtxosGet: async (input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>> => {
         if (!isCoordinatorProductEnabled("p2pkh")) {
           return {
@@ -6261,7 +6271,7 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
           };
         }
         const resource = await p2pkhResourceForOwner(input.ownerPublicKeyHex, input.network);
-        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
+        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, state: "unavailable" as const, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
         return { status: "ok", value: p2pkhUtxoSnapshots.get(resource), sessionEpoch: coordinatorState.sessionEpoch };
       },
       p2pkhUtxosRefresh: async (input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>> => {
@@ -6272,14 +6282,14 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
           };
         }
         const resource = await p2pkhResourceForOwner(input.ownerPublicKeyHex, input.network);
-        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
+        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, state: "unavailable" as const, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
         try {
           return { status: "ok", value: await p2pkhUtxoSnapshots.refresh(resource), sessionEpoch: coordinatorState.sessionEpoch };
         } catch (error) {
           return { status: "error", message: error instanceof Error ? error.message : String(error) };
         }
       },
-      p2pkhBroadcast: async (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }): Promise<CoordinatorValueResult<unknown>> => {
+      p2pkhBroadcast: async (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }): Promise<CoordinatorValueResult<unknown>> => {
         if (!isCoordinatorProductEnabled("p2pkh")) {
           return {
             status: "blocked",
@@ -6287,7 +6297,9 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
           };
         }
         if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== ownerSessionEpoch || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
-          return { status: "stale-epoch" };
+          // 与页面 client 同语义：会话/owner 失效是终态，中心服务会映射成 cancelled，
+          // 不能被当成可重试的传输失败空转到预算耗尽。
+          return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: coordinatorState.sessionEpoch };
         }
         const request = {
           kind: "p2pkh.broadcast" as const,
@@ -6297,14 +6309,44 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
           expectedSessionEpoch: coordinatorState.sessionEpoch,
         };
         const response = await handleP2pkhBroadcast(request.requestId, request);
+        if (response.ack.status === "stale-epoch") {
+          return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: response.sessionEpoch };
+        }
         if (response.ack.status !== "ok") return response.ack;
         if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
-          return { status: "stale-epoch" };
+          return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: coordinatorState.sessionEpoch };
         }
         return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
       },
     } as unknown as import("@keymaster/contracts").SessionCoordinatorClient;
-    const service = createP2pkhService({ vault, coordinator: internalCoordinator, messageBus, keyspace, storage: createWorkerOwnerFileStore("p2pkh", "") });
+    // Worker 内的中心广播服务：与页面共用同一套重试/唤醒语义，但依赖
+    // 全部在 SharedWorker 进程内解析（不新增 capability，也不跨 realm）。
+    // 中文：SatSubscription 的自动充值由此获得"等新序号→重新组合→再提交"。
+    const centralBroadcastService = createCentralBroadcastService({
+      coordinator: { p2pkhBroadcast: (input) => internalCoordinator.p2pkhBroadcast(input) },
+      subscribeTopic: (listener) => subscribeWorkerUtxoSeq((event) => {
+        if (event.ownerPublicKeyHex.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) return;
+        listener({ utxoSeqs: event.network === "main" ? { main: event.seq } : { test: event.seq } } as AssetDataChangedEvent);
+      }),
+      getSnapshot: async (network) => {
+        const result = await internalCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex, network });
+        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
+      },
+      refreshSnapshot: async (network) => {
+        const result = await internalCoordinator.p2pkhUtxosRefresh({ ownerPublicKeyHex, network });
+        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
+      },
+      ...(testSatBroadcastRetryOverrides ?? {}),
+    });
+    const service = createP2pkhService({
+      vault,
+      coordinator: internalCoordinator,
+      centralBroadcastService,
+      broadcastWithCoordinator: (input) => internalCoordinator.p2pkhBroadcast(input),
+      messageBus,
+      keyspace,
+      storage: createWorkerOwnerFileStore("p2pkh", ""),
+    });
     try {
       // 充值首次进入时确保 owner 的 main P2PKH resource 已存在；该调用只
       // 在 Worker 中读取私钥并派生地址，不会把私钥/crypto capability发给页面。
@@ -6340,6 +6382,22 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
       satP2pkhServiceStartingOwnerPublicKeyHex = undefined;
     }
   }
+}
+
+/**
+ * 快照 store 的 WoC 数据源包装。
+ *
+ * 生产路径原样委托给真实 WoC；测试可用 `__testSetP2pkhUnspentAllProvider`
+ * 替换 `unspent/all`，让 Worker 侧的消费/重试链路不出网。
+ */
+function createP2pkhSnapshotWocSource(woc: WocServiceHandle): WocService {
+  return {
+    getAddressUnspentAll: (network: "main" | "test", address: string, options?: import("@keymaster/contracts").WocRequestOptions) =>
+      testP2pkhUnspentAllProvider
+        ? testP2pkhUnspentAllProvider(network, address)
+        : woc.getAddressUnspentAll(network, address, options),
+    getTransactionObservation: (network: "main" | "test", txid: string, options?: import("@keymaster/contracts").WocRequestOptions) => woc.getTransactionObservation(network, txid, options),
+  } as unknown as WocService;
 }
 
 async function registerCoordinatorTasks(): Promise<void> {
@@ -6395,10 +6453,10 @@ async function registerCoordinatorTasks(): Promise<void> {
     if (typeof persistedWocConfig.requestsPerSecond === "number") next.requestsPerSecond = persistedWocConfig.requestsPerSecond;
     if (Object.keys(next).length) woc.updateConfig(next);
   }
-  const emitDataChanged = (providerId: string, kinds: AssetDataInvalidationEvent["kinds"]) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds });
+  const emitDataChanged = (providerId: string, kinds: AssetDataInvalidationEvent["kinds"], utxoSeqs?: { main?: number; test?: number }) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds, ...(utxoSeqs === undefined ? {} : { utxoSeqs }) });
   p2pkhRegistry = createP2pkhProviderRegistry();
   registerWocP2pkhProviders({ registry: p2pkhRegistry, woc });
-  p2pkhUtxoSnapshots = createP2pkhUtxoSnapshotStore({ woc });
+  p2pkhUtxoSnapshots = createP2pkhUtxoSnapshotStore({ woc: createP2pkhSnapshotWocSource(woc) });
   const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerOwnerFileStore("p2pkh", ""), woc, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
   // P2PKH 拆成两个任务：
   //   - p2pkh.transactions-sync：链上历史元数据，按同步管理间隔运行；
@@ -6415,9 +6473,9 @@ async function registerCoordinatorTasks(): Promise<void> {
   coordinatorState.taskRuntimes.set("p2pkh.utxo-snapshot", createCoordinatorTaskRuntime({ id: "p2pkh.utxo-snapshot", pluginId: "p2pkh", unitId: p2pkh.unitId, syncPolicy: "smart", keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
     await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex);
     // 单个资源失败只保留旧快照；失败不写 0，也不影响其它资源。
-    await refreshP2pkhUtxoSnapshots(signal);
+    const utxoSeqs = await refreshP2pkhUtxoSnapshots(signal);
     assertSessionFresh();
-    emitDataChanged("p2pkh", ["utxo", "balance"]);
+    emitDataChanged("p2pkh", ["utxo", "balance"], utxoSeqs);
   } }));
   const p2pkhProvider = {
     listResources: async (assetId: "bsv" | "bsvtest") => {
@@ -11454,18 +11512,25 @@ async function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTest
  * 刷新当前 owner 全部启用网络的内存 UTXO 快照。
  * 单个资源失败只保留其旧快照，不影响其它资源；错误向上抛给调用方决定。
  */
-async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal): Promise<void> {
+async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal): Promise<{ main?: number; test?: number }> {
   const owner = coordinatorState.activePublicKeyHex;
-  if (!owner || !p2pkhUtxoSnapshots) return;
+  if (!owner || !p2pkhUtxoSnapshots) return {};
   const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== owner.toLowerCase()) return;
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== owner.toLowerCase()) return {};
   const includeTestnet = coordinatorMeta.p2pkhSettings?.includeTestnet === true;
   const resources = await ensureWorkerP2pkhResources(owner, includeTestnet);
+  const utxoSeqs: { main?: number; test?: number } = {};
   for (const resource of resources) {
     if (resource.network === "test" && !includeTestnet) continue;
-    if (signal?.aborted) return;
-    await p2pkhUtxoSnapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);
+    if (signal?.aborted) return utxoSeqs;
+    // consumed 快照不能仅凭“下一次 unspent 内容暂时没变”解封。
+    // 先做一次交易级只读观察：只有消费交易超过阈值且 confirmed /
+    // unconfirmed 都不存在时，才复用原序号恢复 fresh。
+    await p2pkhUtxoSnapshots.reconcileConsumed(resource).catch(() => false);
+    const result = await p2pkhUtxoSnapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);
+    if (result?.seq !== undefined) utxoSeqs[resource.network] = result.seq;
   }
+  return utxoSeqs;
 }
 
 async function cancelP2pkhSyncForProviderChange(): Promise<void> {
@@ -11572,7 +11637,7 @@ async function handleP2pkhUtxosGet(
 ): Promise<CoordinatorResponse> {
   if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
   const resource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
-  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, items: [] } satisfies P2pkhUtxoSnapshotResult };
+  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, state: "unavailable", items: [] } satisfies P2pkhUtxoSnapshotResult };
   return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: p2pkhUtxoSnapshots.get(resource) };
 }
 
@@ -11588,11 +11653,18 @@ async function handleP2pkhUtxosRefresh(
 ): Promise<CoordinatorResponse> {
   if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
   const resource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
-  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, items: [] } satisfies P2pkhUtxoSnapshotResult };
+  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, state: "unavailable", items: [] } satisfies P2pkhUtxoSnapshotResult };
   try {
+    await p2pkhUtxoSnapshots.reconcileConsumed(resource);
     const result = await p2pkhUtxoSnapshots.refresh(resource);
     // 主动刷新成功后通知页面重读余额/币列表。
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "balance"] });
+    publishTopicEvent("asset.data-changed", {
+      type: "asset.data-changed",
+      providerId: "p2pkh",
+      publicKeyHex: request.ownerPublicKeyHex,
+      kinds: ["utxo", "balance"],
+      ...(result.seq === undefined ? {} : { utxoSeqs: { [request.network]: result.seq } }),
+    });
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   } catch (error) {
     // 旧快照保留；把失败原因返回给调用方。
@@ -11640,6 +11712,9 @@ async function handleP2pkhBroadcastUnsafe(
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  let consumed = false;
+  let snapshotResource: P2pkhUtxoSnapshotResource | undefined;
+  const consumedBinding = request.submission?.utxoBinding;
   let local = (await repository.listLocalTransactions()).find((row) => row.id === request.submissionId && row.network === request.network);
   if (!local) {
     // 页面 service 与 Worker 是两个 JS realm，页面内存中的本地提交这里读不到。
@@ -11684,17 +11759,103 @@ async function handleP2pkhBroadcastUnsafe(
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
   }
 
+  // 中文：无论 Worker 是否已有本地 write-ahead 记录，都必须从本次原始
+  // 交易解析输入 outpoint；不能信任页面或旧记录中的 inputOutpointKeys。
+  const rawTxHexForValidation = request.submission?.rawTxHex ?? local.rawTxHex;
+  const txidForValidation = request.submission?.txid ?? local.txid;
+  let parsedInputOutpointKeys: string[];
+  try {
+    const parsed = parseP2pkhTransaction(rawTxHexForValidation, txidForValidation);
+    if (parsed.canonicalTxid !== local.txid.toLowerCase()) throw new Error("txid mismatch");
+    parsedInputOutpointKeys = parsed.inputs.map((input) => input.outpointKey);
+  } catch {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast raw transaction is invalid" } };
+  }
+
+  // 唯一的 Worker 门禁：在同一无 await 的同步块内完成绑定核对、输入归属
+  // 校验和消费。纯代币输入没有命中钱包快照时保持 untouched，不要求序号。
+  snapshotResource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
+  const consumeResult = snapshotResource && p2pkhUtxoSnapshots
+    ? p2pkhUtxoSnapshots.consume(snapshotResource, {
+        binding: consumedBinding,
+        inputOutpointKeys: parsedInputOutpointKeys,
+        txid: local.txid,
+      })
+    // 没有该 owner/network 资源时无法证明输入属于钱包快照，按纯协议输入
+    // 路径继续；正常 P2PKH 资源由 ensureWorkerP2pkhResources 预先材料化。
+    : { status: "untouched" as const };
+  if (consumeResult.status === "rejected") {
+    await abortNotDispatchedP2pkhSubmission(request, consumeResult.reason);
+    return {
+      requestId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      ack: { status: "ok" },
+      operationResult: {
+        status: "not-dispatched",
+        reason: consumeResult.reason,
+        ...(consumeResult.currentSeq === undefined ? {} : { currentSeq: consumeResult.currentSeq }),
+      },
+    };
+  }
+  consumed = consumeResult.status === "consumed";
+
   const startedAt = new Date().toISOString();
   try {
     const result = await provider.broadcast({ network: request.network, canonicalTxid: local.txid, rawTxHex: local.rawTxHex });
-    if (result.canonicalTxid !== local.txid) throw new Error("Broadcast provider returned a different transaction id");
+    if (result.canonicalTxid !== local.txid) {
+      // 中文：Provider 已返回，但 txid 与本地原始交易不一致。它不是“未派发”，
+      // 不能回滚消费；同时把回执完整透传，让协议层进入 provider-inconsistent。
+      const message = "Broadcast provider returned a different transaction id";
+      const finishedAt = new Date().toISOString();
+      await repository.finishLocalSubmission({
+        submissionId: local.id,
+        localState: "isolated",
+        reason: message,
+        attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated", providerMessage: message },
+      });
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim", "balance"] });
+      return {
+        requestId,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        ack: { status: "ok" },
+        operationResult: {
+          status: "isolated",
+          txid: local.txid,
+          reason: message,
+          canonicalTxid: local.txid,
+          providerReturnedTxidRaw: result.canonicalTxid,
+          providerReturnedTxidNormalized: result.canonicalTxid.toLowerCase(),
+          txidIntegrity: "mismatch",
+          providerId: provider.descriptor.id,
+        },
+      };
+    }
     const finishedAt = new Date().toISOString();
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "local-confirmed", attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
     // 广播后立即触发一次后台刷新；刷新失败不能释放输入 claim（claim
     // 只在历史/快照确认后才由同步路径清理）。
-    void refreshP2pkhUtxoSnapshots().catch(() => undefined);
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim", "balance"] });
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: local.txid, providerId: provider.descriptor.id } };
+    void refreshP2pkhUtxoSnapshots().then((utxoSeqs) => {
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim", "balance"], ...(Object.keys(utxoSeqs).length === 0 ? {} : { utxoSeqs }) });
+    }).catch(() => {
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim", "balance"] });
+    });
+    return {
+      requestId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      ack: { status: "ok" },
+      operationResult: {
+        status: result.status === "already-known" ? "already-known" : "local-confirmed",
+        txid: local.txid,
+        canonicalTxid: result.canonicalTxid,
+        providerReturnedTxidRaw: result.providerReturnedTxidRaw ?? result.canonicalTxid,
+        providerReturnedTxidNormalized: result.providerReturnedTxidNormalized ?? result.canonicalTxid.toLowerCase(),
+        txidIntegrity: result.txidIntegrity ?? "exact",
+        providerId: provider.descriptor.id,
+        ...(result.providerReference === undefined ? {} : { providerReference: result.providerReference }),
+        ...(result.providerCode === undefined ? {} : { providerCode: result.providerCode }),
+        ...(result.providerMessage === undefined ? {} : { providerMessage: result.providerMessage }),
+      }
+    };
   } catch (error) {
     // reason 必须是非空、有上界的字符串：它要跨 RPC parser 和 UI，空 message
     // 的 Error 会让响应校验失败，把“已隔离”伪装成框架层 handler 异常。
@@ -11702,6 +11863,13 @@ async function handleP2pkhBroadcastUnsafe(
     const message = (rawMessage.trim() || (error instanceof Error ? error.name || "broadcast-isolated" : "broadcast-isolated")).slice(0, 2_048);
     const finishedAt = new Date().toISOString();
     const attempt = { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
+    // 只有结构化标记（code=definitive-not-dispatched）或节点明确拒绝交易本体
+    // 的错误才允许回滚消费；HTTP 4xx / 超时 / 网络错误可能是"已存在"，保持 isolated。
+    if (isDefinitelyNotDispatchedBroadcastError(error)) {
+      if (consumed && snapshotResource && consumedBinding) p2pkhUtxoSnapshots?.rollbackConsume(snapshotResource, consumedBinding);
+      await abortNotDispatchedP2pkhSubmission(request, message);
+      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "coordinator-not-dispatched" } };
+    }
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "isolated", reason: message, attempt });
     publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim", "balance"] });
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid: local.txid, reason: message, providerId: provider.descriptor.id } };
@@ -11945,6 +12113,39 @@ function getTaskSnapshots(): CoordinatorTaskSnapshot[] {
   return snapshots;
 }
 
+/**
+ * Worker 内的 UTXO 序号通知。
+ *
+ * 中文：topic stream 只发给页面 peer；Worker 内部的重试方（SatSubscription
+ * 的中心广播服务）需要一个同进程的唤醒源，避免等退避到点再出网探测。
+ * 只传序号，不传快照内容，语义与页面的 `asset.data-changed.utxoSeqs` 一致。
+ */
+interface WorkerUtxoSeqEvent {
+  /** 序号归属 owner（压缩公钥 hex，小写）。 */
+  ownerPublicKeyHex: string;
+  /** 网络：main=主网，test=测试网。 */
+  network: "main" | "test";
+  /** 最新快照序号。 */
+  seq: number;
+}
+
+const workerUtxoSeqListeners = new Set<(event: WorkerUtxoSeqEvent) => void>();
+
+function subscribeWorkerUtxoSeq(listener: (event: WorkerUtxoSeqEvent) => void): () => void {
+  workerUtxoSeqListeners.add(listener);
+  return () => workerUtxoSeqListeners.delete(listener);
+}
+
+function publishWorkerUtxoSeq(event: WorkerUtxoSeqEvent): void {
+  for (const listener of [...workerUtxoSeqListeners]) {
+    try {
+      listener(event);
+    } catch {
+      // 观察者失败不能影响快照提交。
+    }
+  }
+}
+
 function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopicEvent {
   const normalized = {
     ...event,
@@ -11959,6 +12160,18 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
         }
       : {})
   } as CoordinatorTopicEvent;
+  // Worker 内唤醒源：带 utxoSeqs 的快照事件同时通知同进程的重试方。
+  if (topic === "asset.data-changed") {
+    const assetEvent = normalized as CoordinatorTopicEvent & Pick<AssetDataChangedEvent, "publicKeyHex" | "utxoSeqs">;
+    if (typeof assetEvent.publicKeyHex === "string" && assetEvent.utxoSeqs) {
+      for (const network of ["main", "test"] as const) {
+        const seq = assetEvent.utxoSeqs[network];
+        if (typeof seq === "number") {
+          publishWorkerUtxoSeq({ ownerPublicKeyHex: assetEvent.publicKeyHex, network, seq });
+        }
+      }
+    }
+  }
   // WebLoom owns the physical stream credit; each Coordinator peer only gets
   // a bounded domain queue. A slow peer therefore terminates its own stream
   // with stream_overflow instead of backpressuring unrelated pages or dropping
@@ -12894,6 +13107,22 @@ export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePubli
 
 export function __testSetP2pkhBroadcastProvider(provider: P2pkhTransactionBroadcastProvider | undefined): void {
   testP2pkhBroadcastProvider = provider;
+}
+
+/** 测试专用：替换快照 store 的 `unspent/all` 数据源。传 undefined 恢复真实 WoC。 */
+export function __testSetP2pkhUnspentAllProvider(provider: ((network: "main" | "test", address: string) => Promise<WocUtxoResponse[]>) | undefined): void {
+  testP2pkhUnspentAllProvider = provider;
+}
+
+/** 测试专用：缩短 Worker 内中心广播服务的重试预算。传 undefined 恢复生产默认值。 */
+export function __testSetSatBroadcastRetryOverrides(input: { maxAttempts?: number; deadlineMs?: number; initialBackoffMs?: number; maxBackoffMs?: number } | undefined): void {
+  testSatBroadcastRetryOverrides = input;
+}
+
+/** 测试专用：取得 Worker 内 SatSubscription 使用的 P2PKH service。 */
+export async function __testEnsureSatP2pkhService(): Promise<P2pkhService> {
+  await ensureTestP2pkhProviders();
+  return ensureSatP2pkhService();
 }
 
 export function __testFailNextCoordinatorSnapshotPersist(): void {

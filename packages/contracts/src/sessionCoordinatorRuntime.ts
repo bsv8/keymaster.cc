@@ -396,9 +396,42 @@ export type CoordinatorChannelOperationResult = CoordinatorChannelOperationResul
 
 export type CoordinatorP2pkhBroadcastResult =
   | P2pkhBroadcastResult
-  | { status: "not-dispatched"; reason: "stale-provider-generation" | "broadcast-provider-unavailable" | "coordinator-not-dispatched" | "stale-session-epoch" }
-  | { status: "isolated"; txid: string; reason: string; providerId?: string }
-  | { status: "local-confirmed" | "already-known"; txid: string; providerId?: string };
+  | {
+      status: "not-dispatched";
+      reason:
+        | "stale-provider-generation"
+        | "broadcast-provider-unavailable"
+        | "coordinator-not-dispatched"
+        | "stale-session-epoch"
+        | "snapshot-stale"
+        | "snapshot-consumed"
+        | "snapshot-binding-required"
+        | "snapshot-input-invalid";
+      /** 当前快照序号；仅快照门禁拒绝时携带。 */
+      currentSeq?: number;
+    }
+  | {
+      status: "isolated";
+      txid: string;
+      reason: string;
+      canonicalTxid?: string;
+      providerReturnedTxidRaw?: string;
+      providerReturnedTxidNormalized?: string;
+      txidIntegrity?: "exact" | "reversed" | "mismatch" | "missing";
+      providerId?: string;
+    }
+  | {
+      status: "local-confirmed" | "already-known";
+      txid: string;
+      canonicalTxid?: string;
+      providerReturnedTxidRaw?: string;
+      providerReturnedTxidNormalized?: string;
+      txidIntegrity?: "exact" | "reversed" | "mismatch" | "missing";
+      providerId?: string;
+      providerReference?: string;
+      providerCode?: string;
+      providerMessage?: string;
+    };
 
 /**
  * Request/result association for the complete request, including nested
@@ -2577,10 +2610,16 @@ function parseP2pkhBroadcastSubmission(value: unknown, field: string): P2pkhBroa
   if (!/^[0-9a-f]{64}$/u.test(txid.toLowerCase())) throw new TypeError(`Coordinator ${field}.txid is invalid`);
   const rawTxHex = text(submission.rawTxHex, field + ".rawTxHex", 262_144);
   if (rawTxHex.length % 2 !== 0 || !/^[0-9a-f]+$/iu.test(rawTxHex)) throw new TypeError(`Coordinator ${field}.rawTxHex is invalid`);
+  const binding = submission.utxoBinding === undefined ? undefined : expectRecord(submission.utxoBinding, field + ".utxoBinding");
+  const utxoBinding = binding === undefined ? undefined : {
+    resourceId: text(binding.resourceId, field + ".utxoBinding.resourceId", 256),
+    seq: boundedNumber(binding.seq, field + ".utxoBinding.seq", 1),
+  };
   return {
     resourceId: text(submission.resourceId, field + ".resourceId", 256),
     txid: txid.toLowerCase(),
     rawTxHex: rawTxHex.toLowerCase(),
+    ...(utxoBinding === undefined ? {} : { utxoBinding }),
   };
 }
 
@@ -2589,12 +2628,20 @@ function parseP2pkhBroadcastResult(value: unknown, field: string): CoordinatorP2
   const status = text(result.status, field + ".status", 64);
   const providerId = optionalText(result.providerId, field + ".providerId", 256);
   if (status === "not-dispatched") {
-    return { status, reason: enumValue(result.reason, ["stale-provider-generation", "broadcast-provider-unavailable", "coordinator-not-dispatched", "stale-session-epoch"] as const, field + ".reason") };
+    const currentSeq = optionalBoundedNumber(result.currentSeq, field + ".currentSeq", 1);
+    return {
+      status,
+      reason: enumValue(result.reason, ["stale-provider-generation", "broadcast-provider-unavailable", "coordinator-not-dispatched", "stale-session-epoch", "snapshot-stale", "snapshot-consumed", "snapshot-binding-required", "snapshot-input-invalid"] as const, field + ".reason"),
+      ...(currentSeq === undefined ? {} : { currentSeq }),
+    };
   }
   if (status === "accepted" || status === "already-known") {
     return {
       status,
       canonicalTxid: text(result.canonicalTxid, field + ".canonicalTxid", 128),
+      ...(result.providerReturnedTxidRaw === undefined ? {} : { providerReturnedTxidRaw: text(result.providerReturnedTxidRaw, field + ".providerReturnedTxidRaw", 128) }),
+      ...(result.providerReturnedTxidNormalized === undefined ? {} : { providerReturnedTxidNormalized: text(result.providerReturnedTxidNormalized, field + ".providerReturnedTxidNormalized", 128) }),
+      ...(result.txidIntegrity === undefined ? {} : { txidIntegrity: enumValue(result.txidIntegrity, ["exact", "reversed", "mismatch", "missing"] as const, field + ".txidIntegrity") }),
       ...(providerId === undefined ? {} : { providerId }),
       ...(result.providerReference === undefined ? {} : { providerReference: text(result.providerReference, field + ".providerReference", 512) }),
       ...(result.providerCode === undefined ? {} : { providerCode: text(result.providerCode, field + ".providerCode", 256) }),
@@ -2604,8 +2651,28 @@ function parseP2pkhBroadcastResult(value: unknown, field: string): CoordinatorP2
   const txid = text(result.txid, field + ".txid", 128);
   // reason 只属于 isolated；local-confirmed 成功响应没有 reason，不能先解析它，
   // 否则合法成功会被误判成“reason is invalid”。
-  if (status === "isolated") return { status, txid, reason: text(result.reason, field + ".reason", 4_096), ...(providerId === undefined ? {} : { providerId }) };
-  if (status === "local-confirmed") return { status, txid, ...(providerId === undefined ? {} : { providerId }) };
+  if (status === "isolated") return {
+    status,
+    txid,
+    reason: text(result.reason, field + ".reason", 4_096),
+    ...(result.canonicalTxid === undefined ? {} : { canonicalTxid: text(result.canonicalTxid, field + ".canonicalTxid", 128) }),
+    ...(result.providerReturnedTxidRaw === undefined ? {} : { providerReturnedTxidRaw: text(result.providerReturnedTxidRaw, field + ".providerReturnedTxidRaw", 128) }),
+    ...(result.providerReturnedTxidNormalized === undefined ? {} : { providerReturnedTxidNormalized: text(result.providerReturnedTxidNormalized, field + ".providerReturnedTxidNormalized", 128) }),
+    ...(result.txidIntegrity === undefined ? {} : { txidIntegrity: enumValue(result.txidIntegrity, ["exact", "reversed", "mismatch", "missing"] as const, field + ".txidIntegrity") }),
+    ...(providerId === undefined ? {} : { providerId }),
+  };
+  if (status === "local-confirmed") return {
+    status,
+    txid,
+    ...(result.canonicalTxid === undefined ? {} : { canonicalTxid: text(result.canonicalTxid, field + ".canonicalTxid", 128) }),
+    ...(result.providerReturnedTxidRaw === undefined ? {} : { providerReturnedTxidRaw: text(result.providerReturnedTxidRaw, field + ".providerReturnedTxidRaw", 128) }),
+    ...(result.providerReturnedTxidNormalized === undefined ? {} : { providerReturnedTxidNormalized: text(result.providerReturnedTxidNormalized, field + ".providerReturnedTxidNormalized", 128) }),
+    ...(result.txidIntegrity === undefined ? {} : { txidIntegrity: enumValue(result.txidIntegrity, ["exact", "reversed", "mismatch", "missing"] as const, field + ".txidIntegrity") }),
+    ...(providerId === undefined ? {} : { providerId }),
+    ...(result.providerReference === undefined ? {} : { providerReference: text(result.providerReference, field + ".providerReference", 512) }),
+    ...(result.providerCode === undefined ? {} : { providerCode: text(result.providerCode, field + ".providerCode", 256) }),
+    ...(result.providerMessage === undefined ? {} : { providerMessage: text(result.providerMessage, field + ".providerMessage", 4_096) }),
+  };
   throw new TypeError(`Coordinator ${field}.status is invalid`);
 }
 
@@ -3204,6 +3271,11 @@ function parseAssetKinds(value: unknown, field: string): AssetDataChangedEvent["
 
 function parseAssetDataChangedEvent(value: unknown): AssetDataChangedEvent {
   const event = topicEnvelope(value, "asset.data-changed", "asset.data-changed");
+  const rawSeqs = event.utxoSeqs === undefined ? undefined : expectRecord(event.utxoSeqs, "event.utxoSeqs");
+  const utxoSeqs = rawSeqs === undefined ? undefined : {
+    ...(rawSeqs.main === undefined ? {} : { main: boundedNumber(rawSeqs.main, "event.utxoSeqs.main", 1) }),
+    ...(rawSeqs.test === undefined ? {} : { test: boundedNumber(rawSeqs.test, "event.utxoSeqs.test", 1) }),
+  };
   return {
     topic: "asset.data-changed",
     type: "asset.data-changed",
@@ -3212,6 +3284,7 @@ function parseAssetDataChangedEvent(value: unknown): AssetDataChangedEvent {
     publicKeyHex: text(event.publicKeyHex, "event.publicKeyHex", 256),
     assetDataRevision: boundedNumber(event.assetDataRevision, "event.assetDataRevision"),
     kinds: parseAssetKinds(event.kinds, "event.kinds"),
+    ...(utxoSeqs === undefined ? {} : { utxoSeqs }),
   };
 }
 
@@ -3291,6 +3364,10 @@ function parseP2pkhUtxoSnapshotResult(value: unknown, field: string): P2pkhUtxoS
   if (typeof snapshot.available !== "boolean") throw new TypeError(`Coordinator ${field}.available is invalid`);
   if (snapshot.items !== undefined && (!Array.isArray(snapshot.items) || snapshot.items.length > 100_000)) throw new TypeError(`Coordinator ${field}.items is invalid`);
   if (snapshot.syncedAt !== undefined && typeof snapshot.syncedAt !== "string") throw new TypeError(`Coordinator ${field}.syncedAt is invalid`);
+  const seq = optionalBoundedNumber(snapshot.seq, field + ".seq", 1);
+  const state = snapshot.state === undefined
+    ? (snapshot.available ? "fresh" : "unavailable")
+    : enumValue(snapshot.state, ["fresh", "consumed", "unavailable"] as const, field + ".state");
   const items = (snapshot.items ?? []).map((item, index) => {
     const recordValue = expectRecord(item, `${field}.items[${index}]`);
     const txid = text(recordValue.txid, `${field}.items[${index}].txid`, 64);
@@ -3311,6 +3388,8 @@ function parseP2pkhUtxoSnapshotResult(value: unknown, field: string): P2pkhUtxoS
   });
   return {
     available: snapshot.available,
+    ...(seq === undefined ? {} : { seq }),
+    state,
     ...(snapshot.syncedAt === undefined ? {} : { syncedAt: snapshot.syncedAt as string }),
     items,
   };

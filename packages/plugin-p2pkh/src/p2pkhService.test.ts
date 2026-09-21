@@ -24,7 +24,7 @@ const vault = {
 const messageBus = { publish: () => undefined, subscribe: () => () => undefined } as never;
 
 function snapshot(items: P2pkhUtxoSnapshotResult["items"] = []): P2pkhUtxoSnapshotResult {
-  return { available: true, syncedAt: "2026-09-20T00:00:00.000Z", items };
+  return { available: true, state: "fresh", seq: 1, syncedAt: "2026-09-20T00:00:00.000Z", items };
 }
 
 function coordinatorWithSnapshot(items: P2pkhUtxoSnapshotResult["items"], includeTestnet = false) {

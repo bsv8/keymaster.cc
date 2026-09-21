@@ -143,7 +143,12 @@ const wocPluginDefinition = {
     }
     const service = createWocService({ messageBus, initialConfig: bootstrap });
     await service.ready();
-    ctx.provide(WOC_CAPABILITY, service);
+    // WOC capability 只向页面插件暴露只读方法。完整句柄仍由 Worker
+    // 自己保留并用于注册物理广播 Provider，页面即使拿到运行时对象也
+    // 不存在 `broadcast` 出口。
+    const { broadcast: _workerBroadcast, ...readOnlyService } = service;
+    void _workerBroadcast;
+    ctx.provide(WOC_CAPABILITY, readOnlyService);
 
     // BSV-21 / STAS / 1Sat Ordinals 的 WOC capability。
     // 全部共享同一个 actor（service 内的 createWocService 持有 actor 并

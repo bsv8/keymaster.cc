@@ -11,7 +11,7 @@
 //   - 锁定钱包 / 切换 owner / 销毁会话时由调用方清除对应快照。
 
 import type { WocService, WocUtxoResponse } from "@keymaster/contracts";
-import type { P2pkhUtxoSnapshotItem, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
+import type { P2pkhUtxoBinding, P2pkhUtxoSnapshotItem, P2pkhUtxoSnapshotResult, P2pkhUtxoSnapshotState } from "@keymaster/contracts";
 
 const TXID_PATTERN = /^[0-9a-f]{64}$/u;
 
@@ -32,14 +32,51 @@ export interface P2pkhUtxoSnapshotResource {
 interface StoredSnapshot {
   items: P2pkhUtxoSnapshotItem[];
   syncedAt: string;
+  seq: number;
+  state: Exclude<P2pkhUtxoSnapshotState, "unavailable">;
+  /** 已消费快照对应的交易；只在 Worker 内存中保存，用于丢弃交易解封。 */
+  consumedByTxid?: string;
+  /** 消费发生时间；用于限制自动解封的最短等待窗口。 */
+  consumedAt?: string;
 }
+
+/** Worker 广播门禁消费结果。此操作必须在同一 JS tick 内完成。 */
+export type P2pkhUtxoSnapshotConsumeResult =
+  | { status: "untouched" }
+  | { status: "consumed"; seq: number; touchedOutpointKeys: string[] }
+  | {
+      status: "rejected";
+      reason: "snapshot-stale" | "snapshot-consumed" | "snapshot-binding-required" | "snapshot-input-invalid";
+      currentSeq?: number;
+    };
 
 export interface P2pkhUtxoSnapshotStore {
   refresh(resource: P2pkhUtxoSnapshotResource, options?: { signal?: AbortSignal }): Promise<P2pkhUtxoSnapshotResult>;
   get(resource: P2pkhUtxoSnapshotResource): P2pkhUtxoSnapshotResult;
+  /**
+   * 在 Worker 同步块内核对绑定、输入归属并消费快照。
+   * 中文：返回 consumed 后，该序号在下一次内容变化刷新前不可再次提交。
+   */
+  consume(resource: P2pkhUtxoSnapshotResource, input: {
+    binding?: P2pkhUtxoBinding;
+    inputOutpointKeys: readonly string[];
+    /** 实际广播交易 ID；用于消费结果未知时的只读链上观察。 */
+    txid?: string;
+  }): P2pkhUtxoSnapshotConsumeResult;
+  /** 写前审计或参数校验失败时回滚本次尚未派发的消费。 */
+  rollbackConsume(resource: P2pkhUtxoSnapshotResource, binding: P2pkhUtxoBinding): boolean;
+  /**
+   * 检查已消费快照对应的交易是否已被 WoC 丢弃。
+   * 中文：只有超过等待阈值且 observation 未返回时，才复用旧序号解封；
+   * confirmed / unconfirmed / 观察失败都保持 consumed。
+   */
+  reconcileConsumed(resource: P2pkhUtxoSnapshotResource, options?: { thresholdMs?: number }): Promise<boolean>;
   clearOwner(publicKeyHex: string): void;
   clearAll(): void;
 }
+
+/** 消费交易等待链上观察的最短时间；防止短暂传播延迟误解封。 */
+export const P2PKH_CONSUMED_RECONCILE_THRESHOLD_MS = 10 * 60 * 1_000;
 
 /**
  * 严格校验并归一化一次 `unspent/all` 响应。
@@ -90,6 +127,8 @@ export function validateP2pkhUnspentAll(rows: readonly WocUtxoResponse[]): P2pkh
 export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () => string }): P2pkhUtxoSnapshotStore {
   const now = () => deps.now?.() ?? new Date().toISOString();
   const snapshots = new Map<string, StoredSnapshot>();
+  /** Worker 会话内全局单调序号；不落盘，重启后重新从 1 发号。 */
+  let nextSeq = 0;
   /** 同一资源的并发刷新复用同一个在途请求，避免重复消耗 WoC 限流额度。 */
   const inFlight = new Map<string, Promise<P2pkhUtxoSnapshotResult>>();
   /**
@@ -100,6 +139,8 @@ export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () =
    * 请求尚未返回，也能在清除时把纪元推进到足以使该请求失效。
    */
   const epochs = new Map<string, number>();
+  /** 消费/清除版本；用于使广播前已经发起的刷新不能覆盖消费状态。 */
+  const mutations = new Map<string, number>();
   const knownKeys = new Set<string>();
 
   function snapshotKey(resource: P2pkhUtxoSnapshotResource): string {
@@ -112,8 +153,13 @@ export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () =
     return epochs.get(key) ?? 0;
   }
 
+  function mutationFor(key: string): number {
+    return mutations.get(key) ?? 0;
+  }
+
   function invalidate(key: string): void {
     epochs.set(key, epochFor(key) + 1);
+    mutations.set(key, mutationFor(key) + 1);
     snapshots.delete(key);
     inFlight.delete(key);
   }
@@ -125,6 +171,7 @@ export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () =
       const pending = inFlight.get(key);
       if (pending && !options?.signal) return pending;
       const epoch = epochFor(key);
+      const mutation = mutationFor(key);
       const task = (async (): Promise<P2pkhUtxoSnapshotResult> => {
         const rows = await deps.woc.getAddressUnspentAll(resource.network, resource.address, {
           priority: "background",
@@ -135,10 +182,19 @@ export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () =
         if (epochFor(key) !== epoch) {
           throw new Error("P2PKH UTXO snapshot refresh was invalidated by an owner/session change");
         }
-        const stored: StoredSnapshot = { items, syncedAt: now() };
+        // 消费可能发生在网络请求期间；迟到响应只能返回当前状态，不能解封
+        // 已消费的旧序号，也不能覆盖同一 tick 的其它 Worker 门禁结果。
+        if (mutationFor(key) !== mutation) {
+          return toResult(snapshots.get(key));
+        }
+        const previous = snapshots.get(key);
+        const sameContent = previous !== undefined && equalSnapshotItems(previous.items, items);
+        const stored: StoredSnapshot = sameContent
+          ? { ...previous, items, syncedAt: now() }
+          : { items, syncedAt: now(), seq: ++nextSeq, state: "fresh" };
         // 原子替换：只有完整校验通过且代际未变才写入。
         snapshots.set(key, stored);
-        return { available: true, syncedAt: stored.syncedAt, items };
+        return toResult(stored);
       })();
       inFlight.set(key, task);
       try {
@@ -148,9 +204,83 @@ export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () =
       }
     },
     get(resource): P2pkhUtxoSnapshotResult {
-      const stored = snapshots.get(snapshotKey(resource));
-      if (!stored) return { available: false, items: [] };
-      return { available: true, syncedAt: stored.syncedAt, items: stored.items };
+      return toResult(snapshots.get(snapshotKey(resource)));
+    },
+    consume(resource, input): P2pkhUtxoSnapshotConsumeResult {
+      const key = snapshotKey(resource);
+      const stored = snapshots.get(key);
+      if (!stored) return { status: "untouched" };
+      const inputKeys = [...new Set(input.inputOutpointKeys)];
+      const itemKeys = new Set(stored.items.map((item) => `${item.txid}:${item.vout}`));
+      const touchedOutpointKeys = inputKeys.filter((outpointKey) => itemKeys.has(outpointKey));
+      // 中文：带 binding 就表示交易声称使用了当前钱包快照。若一个输入都
+      // 不在快照中，不能把它当成纯协议交易放行，否则过期/伪造 binding
+      // 会绕过序号门禁；无 binding 的纯协议输入才允许 untouched。
+      if (touchedOutpointKeys.length === 0) {
+        return input.binding
+          ? { status: "rejected", reason: "snapshot-input-invalid", currentSeq: stored.seq }
+          : { status: "untouched" };
+      }
+      if (!input.binding || input.binding.resourceId !== resource.resourceId) {
+        return { status: "rejected", reason: "snapshot-binding-required", currentSeq: stored.seq };
+      }
+      if (stored.state === "consumed") {
+        return { status: "rejected", reason: "snapshot-consumed", currentSeq: stored.seq };
+      }
+      if (input.binding.seq !== stored.seq) {
+        return { status: "rejected", reason: "snapshot-stale", currentSeq: stored.seq };
+      }
+      if (touchedOutpointKeys.some((outpointKey) => stored.items.some((item) => `${item.txid}:${item.vout}` === outpointKey && item.isSpentInMempoolTx))) {
+        return { status: "rejected", reason: "snapshot-input-invalid", currentSeq: stored.seq };
+      }
+      snapshots.set(key, {
+        ...stored,
+        state: "consumed",
+        ...(input.txid === undefined ? {} : { consumedByTxid: input.txid }),
+        consumedAt: now(),
+      });
+      mutations.set(key, mutationFor(key) + 1);
+      return { status: "consumed", seq: stored.seq, touchedOutpointKeys };
+    },
+    rollbackConsume(resource, binding): boolean {
+      const key = snapshotKey(resource);
+      const stored = snapshots.get(key);
+      if (!stored || stored.state !== "consumed" || stored.seq !== binding.seq) return false;
+      snapshots.set(key, { ...stored, state: "fresh", consumedByTxid: undefined, consumedAt: undefined });
+      mutations.set(key, mutationFor(key) + 1);
+      return true;
+    },
+    async reconcileConsumed(resource, options): Promise<boolean> {
+      const key = snapshotKey(resource);
+      const stored = snapshots.get(key);
+      if (stored?.state !== "consumed" || !stored.consumedByTxid || !stored.consumedAt) return false;
+      const epoch = epochFor(key);
+      const mutation = mutationFor(key);
+      const thresholdMs = options?.thresholdMs ?? P2PKH_CONSUMED_RECONCILE_THRESHOLD_MS;
+      const consumedAtMs = Date.parse(stored.consumedAt);
+      const nowMs = Date.parse(now());
+      if (!Number.isFinite(consumedAtMs) || !Number.isFinite(nowMs) || nowMs - consumedAtMs < thresholdMs) return false;
+
+      let observation: Awaited<ReturnType<WocService["getTransactionObservation"]>>;
+      try {
+        observation = await deps.woc.getTransactionObservation(resource.network, stored.consumedByTxid, { priority: "background" });
+      } catch {
+        // 观察失败不能改变 consumed；下一次同步仍会继续检查。
+        return false;
+      }
+      if (observation.observation !== undefined) return false;
+
+      // observation 跨越 await，必须再次确认期间没有刷新、消费、清除或
+      // 回滚，避免旧观察结果解封新一代快照。
+      const current = snapshots.get(key);
+      if (!current || current.state !== "consumed"
+        || current.seq !== stored.seq
+        || current.consumedByTxid !== stored.consumedByTxid
+        || epochFor(key) !== epoch
+        || mutationFor(key) !== mutation) return false;
+      snapshots.set(key, { ...current, state: "fresh", consumedByTxid: undefined, consumedAt: undefined });
+      mutations.set(key, mutationFor(key) + 1);
+      return true;
     },
     clearOwner(publicKeyHex: string): void {
       const prefix = `${publicKeyHex.toLowerCase()}:`;
@@ -161,4 +291,23 @@ export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () =
       snapshots.clear();
     },
   };
+
+  function toResult(stored: StoredSnapshot | undefined): P2pkhUtxoSnapshotResult {
+    if (!stored) return { available: false, state: "unavailable", items: [] };
+    if (stored.state === "consumed") {
+      return { available: false, seq: stored.seq, state: "consumed", syncedAt: stored.syncedAt, items: [] };
+    }
+    return { available: true, seq: stored.seq, state: "fresh", syncedAt: stored.syncedAt, items: stored.items };
+  }
+}
+
+function equalSnapshotItems(left: readonly P2pkhUtxoSnapshotItem[], right: readonly P2pkhUtxoSnapshotItem[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!;
+    const b = right[index]!;
+    if (a.txid !== b.txid || a.vout !== b.vout || a.value !== b.value || a.height !== b.height
+      || a.status !== b.status || a.isSpentInMempoolTx !== b.isSpentInMempoolTx || a.script !== b.script) return false;
+  }
+  return true;
 }

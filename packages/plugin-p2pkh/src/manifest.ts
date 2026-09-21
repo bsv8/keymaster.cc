@@ -11,6 +11,7 @@
 import type {
   AssetDataNotifier,
   BalanceBroadcaster,
+  CentralBroadcastService,
   GlobalBalanceSnapshot,
   AssetRegistry,
   BusinessFeatureRegistry,
@@ -28,10 +29,12 @@ import type {
   SystemSettingsRegistry,
   VaultService,
   WocService,
-  P2pkhCoordinatorControl
+  P2pkhCoordinatorControl,
+  P2pkhBroadcastAssemblyControl
 } from "@keymaster/contracts";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
+  CENTRAL_BROADCAST_CAPABILITY,
   BALANCE_BROADCAST_CAPABILITY,
   ASSET_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
@@ -58,6 +61,7 @@ import { createP2pkhService } from "./p2pkhService.js";
 import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 import { p2pkhAddressCodec } from "./p2pkhAddressCodec.js";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
+import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
@@ -607,7 +611,7 @@ export const p2pkhResources: I18nPluginResources = {
 const p2pkhPluginDefinition = {
   id: "p2pkh",
   name: "P2PKH",
-  description: "BSV P2PKH 资产实现：由 Coordinator 统一调度确认交易同步，保留旧协议 spend 的 WOC broadcaster。",
+  description: "BSV P2PKH 资产实现：由 Coordinator 统一调度快照、门禁与中心广播。",
   kind: "business",
   startup: "optional",
   bootstrapStage: "owner-apps-ready",
@@ -619,12 +623,12 @@ const p2pkhPluginDefinition = {
       id: "p2pkh.window",
       runtime: "window-main",
       scopeKind: "owner-session",
-      provides: [P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
+      provides: [P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
       dependencies: defineRuntimeUnitDependencies([
         { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
         { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
-        { capability: WOC_CAPABILITY, reason: "旧协议 spend 使用 WOC broadcaster" },
+        { capability: WOC_CAPABILITY, reason: "读取历史与详情；广播只能走中心服务" },
         { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "排除协议受保护 outpoint" },
         { capability: ASSET_REGISTRY_CAPABILITY, reason: "注册 P2PKH AssetProvider" },
         { capability: TRANSFER_REGISTRY_CAPABILITY, reason: "注册 P2PKH TransferProvider" },
@@ -650,21 +654,39 @@ const p2pkhPluginDefinition = {
     const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
     const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
     const woc = ctx.capability(WOC_CAPABILITY);
-    const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
+    const coordinator = ctx.coordinator as (P2pkhCoordinatorControl & P2pkhBroadcastAssemblyControl) | undefined;
     if (!coordinator) throw new Error("P2PKH Coordinator control is unavailable");
-    ctx.provide(P2PKH_COORDINATOR_CONTROL_CAPABILITY, coordinator);
+    // p2pkhBroadcast 只留在装配层的局部闭包中；P2PKH 公共 Coordinator
+    // capability 不再把 Worker 广播 RPC 传给插件/三方。
+    const { p2pkhBroadcast: assemblyBroadcast, ...publicCoordinatorFields } = coordinator;
+    const publicCoordinator = Object.freeze(publicCoordinatorFields);
+    ctx.provide(P2PKH_COORDINATOR_CONTROL_CAPABILITY, publicCoordinator);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
     const assetDataNotifier = ctx.optionalCapability(ASSET_DATA_NOTIFIER_CAPABILITY);
     const storage = ctx.filesFor("");
+    const centralBroadcastService: CentralBroadcastService = createCentralBroadcastService({
+      coordinator: { p2pkhBroadcast: assemblyBroadcast },
+      subscribeTopic: (listener) => publicCoordinator.subscribeTopic("asset.data-changed", listener),
+      getSnapshot: async (network) => {
+        const result = await publicCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex: keyspace.active().activePublicKeyHex ?? "", network });
+        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
+      },
+      refreshSnapshot: async (network) => {
+        const result = await publicCoordinator.p2pkhUtxosRefresh({ ownerPublicKeyHex: keyspace.active().activePublicKeyHex ?? "", network });
+        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
+      },
+    });
+    ctx.provide(CENTRAL_BROADCAST_CAPABILITY, centralBroadcastService);
 
     const service = createP2pkhService({
       vault,
-      coordinator,
+      coordinator: publicCoordinator,
       messageBus,
       keyspace,
       storage,
       woc,
+      centralBroadcastService,
       protectedOutpoints,
       assetDataNotifier
     });
@@ -673,7 +695,12 @@ const p2pkhPluginDefinition = {
     ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
       vault,
-      woc,
+      centralBroadcastService,
+      getUtxoBinding: async ({ ownerPublicKeyHex, network }) => {
+        const result = await publicCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex, network });
+        if (result.status !== "ok" || !result.value.available || result.value.state !== "fresh" || result.value.seq === undefined) return undefined;
+        return { resourceId: `p2pkh:${network}`, seq: result.value.seq };
+      },
       claimStore: {
         async tryClaimInputs(input) {
           if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");

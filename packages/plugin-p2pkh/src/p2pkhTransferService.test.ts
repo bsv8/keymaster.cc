@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import type { CentralBroadcastService } from "@keymaster/contracts";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
+import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
 import { makeResourceId, type P2pkhKeyResource, type P2pkhLocalInputClaim, type P2pkhLocalTransaction, type P2pkhUtxo } from "./p2pkhContracts.js";
 
@@ -57,7 +59,7 @@ function makeResource(): P2pkhKeyResource {
   return { resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, label: "active", address: OWNER.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
 }
 
-function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-dispatched" = "accepted", broadcastError?: Error, options?: { utxos?: P2pkhUtxo[] }) {
+function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-dispatched" = "accepted", broadcastError?: Error, options?: { utxos?: P2pkhUtxo[]; centralBroadcastService?: CentralBroadcastService }) {
   const resource = makeResource();
   const stateRepository = makeRepository(resource);
   const utxos = options?.utxos ?? [makeUtxo()];
@@ -75,6 +77,7 @@ function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-d
     messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
     getStore: async () => stateRepository as never,
     loadSpendableUtxos: loadSpendableUtxos as never,
+    centralBroadcastService: options?.centralBroadcastService,
     broadcastWithCoordinator: broadcast as never,
     getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" }),
     getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" })
@@ -107,6 +110,31 @@ describe("ordinary P2PKH Coordinator transfer", () => {
     expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({ ownerPublicKeyHex: OWNER.publicKeyHex, network: "main" }));
     expect([...stateRepository.locals.values()][0]?.localState).toBe("submitting");
     expect([...stateRepository.claims.values()][0]?.state).toBe("active");
+  });
+
+  it("does not rebuild sendAll after a retryable failure (requires reconfirmation)", async () => {
+    const central = createCentralBroadcastService({
+      coordinator: {
+        p2pkhBroadcast: vi.fn(async () => ({
+          status: "ok" as const,
+          value: { status: "not-dispatched", reason: "coordinator-not-dispatched" },
+          sessionEpoch: "test-epoch"
+        }))
+      } as never,
+      maxAttempts: 3,
+      initialBackoffMs: 0,
+      maxBackoffMs: 0,
+      sleep: async () => undefined
+    });
+    const { service, stateRepository, broadcast } = makeService("accepted", undefined, { centralBroadcastService: central });
+    const preview = await service.prepare({ ownerPublicKeyHex: OWNER.publicKeyHex, assetId: "bsv", recipientAddress: RECIPIENT.address, amountSatoshis: 0, sendAll: true, feeRateSatoshisPerKb: 1 });
+    const result = await service.submit(preview);
+    expect(result.status).toBe("not-dispatched");
+    expect(result.reason).toBe("requires-reconfirm");
+    // 第一次尝试未派发后 claims 已回滚；第二轮不得重建（金额会变）也不得广播。
+    expect(stateRepository.locals.size).toBe(0);
+    expect(stateRepository.claims.size).toBe(0);
+    expect(broadcast).not.toHaveBeenCalled();
   });
 
   it("isolates provider failure and keeps the input claim for reconciliation", async () => {

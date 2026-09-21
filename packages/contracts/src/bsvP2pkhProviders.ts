@@ -28,6 +28,12 @@ export interface P2pkhProviderDescriptor {
 export interface P2pkhBroadcastResult {
   status: "accepted" | "already-known";
   canonicalTxid: string;
+  /** Provider 原始返回的 txid；跨 Worker 后仍保留，便于协议层审计。 */
+  providerReturnedTxidRaw?: string;
+  /** 归一化后的 Provider txid。 */
+  providerReturnedTxidNormalized?: string;
+  /** Provider txid 与本地 canonical txid 的一致性。 */
+  txidIntegrity?: "exact" | "reversed" | "mismatch" | "missing";
   providerReference?: string;
   providerCode?: string;
   providerMessage?: string;
@@ -49,6 +55,16 @@ export interface P2pkhBroadcastSubmission {
   readonly txid: string;
   /** 已签名的完整原始交易 hex；Worker 会用生产解析器复核 txid 后再广播。 */
   readonly rawTxHex: string;
+  /** 组合交易时捕获的快照序号绑定；花费钱包 P2PKH UTXO 时必须提供。 */
+  readonly utxoBinding?: P2pkhUtxoBinding;
+}
+
+/** 组合交易时捕获的 UTXO 快照版本绑定。 */
+export interface P2pkhUtxoBinding {
+  /** 资源 ID，例如 p2pkh:main / p2pkh:test。 */
+  readonly resourceId: string;
+  /** 组合时看到的快照序号；提交时必须与 Worker 当前序号一致。 */
+  readonly seq: number;
 }
 
 /** Provider 注册表快照：只剩广播 Provider。 */
@@ -77,6 +93,12 @@ export interface P2pkhUtxoSnapshotItem {
   script?: string;
 }
 
+/** 快照状态；只记录整组快照，不记录单张 UTXO 的分配状态。 */
+export type P2pkhUtxoSnapshotState =
+  | "fresh"       // 可用于新的组合与提交
+  | "consumed"    // 已被一次提交消费，等待同步；不可读、不可提交
+  | "unavailable"; // 尚无可信快照
+
 /**
  * UTXO 快照读取结果。
  *
@@ -84,8 +106,15 @@ export interface P2pkhUtxoSnapshotItem {
  * “未知/不可用”，绝不能当成 0。
  */
 export interface P2pkhUtxoSnapshotResult {
+  /** 是否有可信且可用于组合的快照。consumed / unavailable 时为 false。 */
   available: boolean;
+  /** 快照序号；内容不变时沿用，内容变化时严格递增。 */
+  seq?: number;
+  /** 快照状态。 */
+  state: P2pkhUtxoSnapshotState;
+  /** 最近一次成功同步时间（ISO 8601）。 */
   syncedAt?: string;
+  /** UTXO 列表；consumed / unavailable 时必须为空数组。 */
   items: P2pkhUtxoSnapshotItem[];
 }
 

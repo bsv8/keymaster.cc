@@ -1,14 +1,16 @@
 // packages/plugin-p2pkh/src/p2pkhTransferService.ts
 // P2PKH 转移业务服务：
 //   - prepareTransfer 生成最终已签名交易快照。
-//   - submitTransfer 只广播 preview.rawTxHex，不再重签、不再重算 fee。
+//   - submitTransfer 先提交该快照；命中序号门禁且确定未派发时，中心服务
+//     才会等待新快照并完整重选输入、重签名、重新提交。
 //   - 预览阶段不写本地提交 / 本地输入占用；只有进入应用内广播流程后才写。
 // 设计缘由：preview 必须是最终承诺对象，否则用户看到的内容和实际广播的交易
 // 可能不是同一笔，后续无法安全复制 rawTxHex 进行外部广播。
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { AssetDataNotifier, CoordinatorValueResult, P2pkhBroadcastSubmission, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
+import type { AssetDataNotifier, CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
+import { CentralBroadcastRetryableError } from "./centralBroadcastService.js";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
@@ -54,7 +56,17 @@ export interface P2pkhTransferServiceDeps {
    *   2. 从快照扣除 `isSpentInMempoolTx=true`；
    *   3. 扣除本地 active/isolated input claims 与协议保护 outpoints。
    */
-  loadSpendableUtxos: (input: { ownerPublicKeyHex: string; resource: P2pkhKeyResource }) => Promise<P2pkhUtxo[]>;
+  loadSpendableUtxos: (input: {
+    ownerPublicKeyHex: string;
+    resource: P2pkhKeyResource;
+    /** submit/retry 阶段允许把 consumed 视为“等待新序号”，而不是余额为 0。 */
+    purpose?: "prepare" | "submit" | "retry";
+    signal?: AbortSignal;
+  }) => Promise<P2pkhUtxo[] | { utxos: P2pkhUtxo[]; utxoBinding?: P2pkhUtxoBinding }>;
+  /** 取得刚刚用于选币的快照绑定；生产实现必须返回序号。 */
+  getUtxoBinding?: (input: { ownerPublicKeyHex: string; resource: P2pkhKeyResource }) => Promise<P2pkhUtxoBinding | undefined>;
+  /** 页面侧唯一中心广播入口；生产 manifest 注入，旧测试可用下方兼容函数。 */
+  centralBroadcastService?: CentralBroadcastService;
   /**
    * Production ordinary transfers use the Coordinator-selected broadcaster.
    *
@@ -78,13 +90,17 @@ export interface P2pkhTransferServiceDeps {
 }
 
 export interface P2pkhTransferService {
-  prepare(input: P2pkhTransferInput): Promise<P2pkhTransferPreview>;
-  submit(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;
+  prepare(input: P2pkhTransferInput, context?: { retry?: boolean; signal?: AbortSignal }): Promise<P2pkhTransferPreview>;
+  submit(preview: P2pkhTransferPreview, options?: { signal?: AbortSignal }): Promise<P2pkhTransferResult>;
+}
+
+function normalizeLoadedUtxos(value: P2pkhUtxo[] | { utxos: P2pkhUtxo[]; utxoBinding?: P2pkhUtxoBinding }): { utxos: P2pkhUtxo[]; utxoBinding?: P2pkhUtxoBinding } {
+  return Array.isArray(value) ? { utxos: value } : value;
 }
 
 export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pkhTransferService {
   return {
-    async prepare(input) {
+    async prepare(input, context) {
       const validated = validateTransferInput(input);
       const network = assetIdToNetwork(validated.assetId);
       const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
@@ -101,7 +117,10 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       }
       validateAddressForNetwork(validated.recipientAddress, network);
 
-      const candidates = await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource });
+      const loaded = normalizeLoadedUtxos(await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource, purpose: context?.retry ? "retry" : "prepare", signal: context?.signal }));
+      const candidates = loaded.utxos;
+      // 中文：绑定必须来自同一次刷新，避免“UTXO 集合”和“序号”来自两次 RPC。
+      const utxoBinding = loaded.utxoBinding ?? await deps.getUtxoBinding?.({ ownerPublicKeyHex: owner.publicKeyHex, resource });
       if (candidates.length === 0) {
         throw buildAllocationError({
           available: 0,
@@ -161,7 +180,10 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           // 用 keyB 广播"的错位。
           return {
             ...solution.preview,
-            ownerPublicKeyHex: owner.publicKeyHex
+            ownerPublicKeyHex: owner.publicKeyHex,
+            previewId: crypto.randomUUID(),
+            ...(utxoBinding === undefined ? {} : { utxoBinding }),
+            sendAll: validated.sendAll,
           };
         }
         bestError = solution.error;
@@ -184,7 +206,13 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           signRawTx
         });
         if (feeFromAmount.ok) {
-          return { ...feeFromAmount.preview, ownerPublicKeyHex: owner.publicKeyHex };
+          return {
+            ...feeFromAmount.preview,
+            ownerPublicKeyHex: owner.publicKeyHex,
+            previewId: crypto.randomUUID(),
+            ...(utxoBinding === undefined ? {} : { utxoBinding }),
+            sendAll: validated.sendAll,
+          };
         }
         bestError = feeFromAmount.error;
       }
@@ -200,7 +228,8 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       );
     },
 
-    async submit(preview) {
+    async submit(preview, options) {
+      if (options?.signal?.aborted) return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: "broadcast retry cancelled", submissionId: "", localInputClaimIds: [], attempts: 0, reason: "cancelled" };
       const owner = await resolveOwnerKeyIdentity(deps, preview.ownerPublicKeyHex);
       const stateRepository = await deps.getStore(owner.publicKeyHex);
       const network = preview.network;
@@ -218,77 +247,112 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       if (preview.amountSatoshis <= 0) {
         throw new Error("Preview amount is invalid");
       }
-
-      // 提交前再次刷新 `unspent/all`，并确认 preview 中的全部输入仍然存在
-      // 且数值未变；刷新失败或输入消失即拒绝广播。
-      const candidates = await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource });
-      const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
-      const { address: expectedChangeAddress } = await activeCrypto.deriveP2pkhAddress({ publicKeyHex: owner.publicKeyHex, network });
-      validateFinalTransferPreview(preview, { candidates, expectedChangeAddress });
-
-      if (!deps.broadcastWithCoordinator) {
+      if (!deps.centralBroadcastService && !deps.broadcastWithCoordinator) {
         throw new Error("Coordinator broadcast is required for ordinary P2PKH transfers");
       }
 
-      const submissionId = crypto.randomUUID();
-      const now = new Date().toISOString();
-      // 原子地写 local transaction + 所有 input claim。冲突时整事务 abort，
-      // submission / claims 都不写——这是并发防重的事务层保险。两个并发
-      // submit 撞到同一对 (txid, vout) 时，第二个会抛「already claimed」，
-      // 外层不进 broadcast。
-      // 不再写本地输出 overlay：广播产生的找零只有 WoC 返回后才可花费。
-      const localInputClaimIds = preview.allocation.selected.map((input) => localInputClaimIdFor(resource.resourceId, input.txid, input.vout));
-      const localSubmission: P2pkhLocalTransaction = { id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: preview.txid, rawTxHex: preview.rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: preview.allocation.selected.map((input) => `${input.txid}:${input.vout}`), ownOutputs: preview.outputs.flatMap((output, vout) => output.address === preview.changeAddress ? [{ vout, value: output.value, scriptHex: p2pkhAddressToScriptHex(output.address, network) }] : []), createdAt: now, updatedAt: now, attempts: [] };
-      const claims: P2pkhLocalInputClaim[] = preview.allocation.selected.map((input) => ({ id: localInputClaimIdFor(resource.resourceId, input.txid, input.vout), submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: input.txid, vout: input.vout, outpointKey: `${input.txid}:${input.vout}`, value: input.value, state: "active", createdAt: now, updatedAt: now }));
-      await stateRepository.prepareLocalSubmission({ submission: localSubmission, claims });
-
-      {
-        let result: CoordinatorValueResult<unknown>;
+      // 提交前再次刷新 `unspent/all`，并确认 preview 中的全部输入仍然存在
+      // 且数值未变；刷新失败或输入消失即拒绝广播。
+      const submitPrepared = async (currentPreview: P2pkhTransferPreview, submitOnce?: (input: {
+        ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; resourceId: string; txid: string; rawTxHex: string; utxoBinding?: P2pkhUtxoBinding;
+      }) => Promise<CoordinatorP2pkhBroadcastResult>): Promise<{ submissionId: string; result: CoordinatorP2pkhBroadcastResult; localInputClaimIds: string[]; preview: P2pkhTransferPreview }> => {
+        const loaded = normalizeLoadedUtxos(await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource, purpose: currentPreview === preview ? "submit" : "retry", signal: options?.signal }));
+        const candidates = loaded.utxos;
+        const currentBinding = loaded.utxoBinding ?? await deps.getUtxoBinding?.({ ownerPublicKeyHex: owner.publicKeyHex, resource });
+        const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
+        const { address: expectedChangeAddress } = await activeCrypto.deriveP2pkhAddress({ publicKeyHex: owner.publicKeyHex, network });
+        if (currentPreview.utxoBinding && (!currentBinding || currentBinding.seq !== currentPreview.utxoBinding.seq || currentBinding.resourceId !== currentPreview.utxoBinding.resourceId)) {
+          return { submissionId: "", result: { status: "not-dispatched", reason: "snapshot-stale", currentSeq: currentBinding?.seq }, localInputClaimIds: [], preview: currentPreview };
+        }
+        validateFinalTransferPreview(currentPreview, { candidates, expectedChangeAddress });
+        const submissionId = crypto.randomUUID();
+        const now = new Date().toISOString();
+        const localInputClaimIds = currentPreview.allocation.selected.map((input) => localInputClaimIdFor(resource.resourceId, input.txid, input.vout));
+        const localSubmission: P2pkhLocalTransaction = { id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: currentPreview.txid, rawTxHex: currentPreview.rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: currentPreview.allocation.selected.map((input) => `${input.txid}:${input.vout}`), ownOutputs: currentPreview.outputs.flatMap((output, vout) => output.address === currentPreview.changeAddress ? [{ vout, value: output.value, scriptHex: p2pkhAddressToScriptHex(output.address, network) }] : []), createdAt: now, updatedAt: now, attempts: [] };
+        const claims: P2pkhLocalInputClaim[] = currentPreview.allocation.selected.map((input) => ({ id: localInputClaimIdFor(resource.resourceId, input.txid, input.vout), submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: input.txid, vout: input.vout, outpointKey: `${input.txid}:${input.vout}`, value: input.value, state: "active", createdAt: now, updatedAt: now }));
+        await stateRepository.prepareLocalSubmission({ submission: localSubmission, claims });
         try {
-          // A rejected RPC can mean that the request crossed the Worker
-          // boundary but its response was lost. Treat it as possibly sent;
-          // never write a terminal state from the page.
-          result = await deps.broadcastWithCoordinator({
-            ownerPublicKeyHex: owner.publicKeyHex,
-            network,
-            submissionId,
-            // 页面本地提交是内存态，Worker 读不到；把待广播交易交给 Worker，
-            // 由它先做 write-ahead 审计记录再广播。
-            submission: { resourceId: resource.resourceId, txid: preview.txid, rawTxHex: preview.rawTxHex },
-          });
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          return { status: "isolated", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds };
-        }
-        if (result.status === "ok") {
-          const value = result.value as { status?: string; txid?: string } | undefined;
-          if (value?.status === "not-dispatched") {
-            await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason: String((value as { reason?: unknown }).reason ?? "not-dispatched") });
-            deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim", "balance"] });
-            return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: String((value as { reason?: unknown }).reason ?? "not-dispatched"), submissionId, localInputClaimIds: [] };
+          let result: CoordinatorP2pkhBroadcastResult;
+          if (submitOnce) {
+            result = await submitOnce({ ownerPublicKeyHex: owner.publicKeyHex, network, submissionId, resourceId: resource.resourceId, txid: currentPreview.txid, rawTxHex: currentPreview.rawTxHex, ...(currentPreview.utxoBinding === undefined ? {} : { utxoBinding: currentPreview.utxoBinding }) });
+          } else if (deps.broadcastWithCoordinator) {
+            const response = await deps.broadcastWithCoordinator({ ownerPublicKeyHex: owner.publicKeyHex, network, submissionId, submission: { resourceId: resource.resourceId, txid: currentPreview.txid, rawTxHex: currentPreview.rawTxHex, ...(currentPreview.utxoBinding === undefined ? {} : { utxoBinding: currentPreview.utxoBinding }) } });
+            if (response.status === "ok") result = response.value as CoordinatorP2pkhBroadcastResult;
+            else if (response.status === "transport-error" && response.dispatchStatus !== "not-dispatched") result = { status: "isolated", txid: currentPreview.txid, reason: response.message };
+            else result = { status: "not-dispatched", reason: "coordinator-not-dispatched" };
+          } else {
+            throw new Error("Coordinator broadcast is required for ordinary P2PKH transfers");
           }
-          const isolated = value?.status === "isolated";
-          const isolationReason = isolated ? ((value as { reason?: unknown } | undefined)?.reason as string | undefined ?? "broadcast-isolated") : undefined;
-          // The Coordinator is the sole writer of the broadcast terminal state.
-          // The page may receive a response after sync has already promoted the
-          // row to chain-confirmed, so it must never replay this transition.
+          if (result.status === "not-dispatched") {
+            await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason: result.reason });
+            return { submissionId, result, localInputClaimIds: [], preview: currentPreview };
+          }
           deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim", "balance"] });
-          return { status: isolated ? "isolated" : value?.status === "already-known" ? "local-confirmed" : "local-confirmed", txid: preview.txid, rawTxHex: preview.rawTxHex, submissionId, localInputClaimIds };
+          return { submissionId, result, localInputClaimIds, preview: currentPreview };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { submissionId, result: { status: "isolated", txid: currentPreview.txid, reason: message }, localInputClaimIds, preview: currentPreview };
         }
-        const reason = "message" in result ? result.message : "Coordinator broadcast transport failed";
-        if (result.status === "transport-error" && result.dispatchStatus === "not-dispatched") {
-          await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason });
-          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim", "balance"] });
-          return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds: [] };
-        }
-        // A transport failure is ambiguous: the Worker may have broadcast and
-        // committed a final state even though the response was lost. Leave the
-        // row for the Coordinator/sync reconciliation instead of writing from
-        // the page and potentially downgrading chain-confirmed state.
-        return { status: "isolated", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds };
+      };
+
+      if (!deps.centralBroadcastService) {
+        const firstAttempt = await submitPrepared(preview);
+        return mapTransferResult(firstAttempt.result, firstAttempt.preview, firstAttempt.submissionId, firstAttempt.localInputClaimIds, 1);
       }
+
+      // 首次尝试也必须由中心服务计数和分类。否则首次命中 consumed
+      // 时，中心会在没有新序号的情况下直接开始第二次 rebuild。
+      let first = true;
+      let latestPreview = preview;
+      let latestSubmissionId = "";
+      let latestLocalInputClaimIds: string[] = [];
+      const outcome = await deps.centralBroadcastService.submitWithRetry({
+        network,
+        boundSeq: preview.utxoBinding?.seq,
+        signal: options?.signal,
+        attempt: async ({ submitOnce }) => {
+          // 中文：sendAll 的金额随余额浮动，任何可重试失败后都不得自动重建，
+          // 必须让用户重新确认；首次尝试仍提交用户已确认的 preview。
+          if (!first && preview.sendAll) {
+            throw new Error("sendAll requires reconfirmation after a retryable failure");
+          }
+          const currentPreview = first ? preview : await this.prepare({
+            assetId: preview.assetId,
+            ownerPublicKeyHex: owner.publicKeyHex,
+            recipientAddress: preview.recipientAddress,
+            amountSatoshis: preview.amountSatoshis,
+            feeRateSatoshisPerKb: preview.feeRateSatoshisPerKb,
+            sendAll: preview.sendAll,
+          }, { retry: true, signal: options?.signal });
+          first = false;
+          latestPreview = currentPreview;
+          const attempt = await submitPrepared(currentPreview, submitOnce);
+          latestSubmissionId = attempt.submissionId;
+          latestLocalInputClaimIds = attempt.localInputClaimIds;
+          if (currentPreview.sendAll && attempt.result.status === "not-dispatched" && (attempt.result.reason === "snapshot-stale" || attempt.result.reason === "snapshot-consumed")) {
+            throw new Error("sendAll requires reconfirmation after the UTXO snapshot changed");
+          }
+          return { submissionId: attempt.submissionId, result: attempt.result };
+        },
+      });
+      return {
+        status: outcome.status === "local-confirmed" ? "local-confirmed" : outcome.status === "isolated" ? "isolated" : "not-dispatched",
+        txid: outcome.txid ?? latestPreview.txid,
+        rawTxHex: latestPreview.rawTxHex,
+        error: outcome.error,
+        submissionId: latestSubmissionId,
+        localInputClaimIds: latestLocalInputClaimIds,
+        attempts: outcome.attempts,
+        ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+      };
     }
   };
+}
+
+function mapTransferResult(result: CoordinatorP2pkhBroadcastResult, preview: P2pkhTransferPreview, submissionId: string, localInputClaimIds: string[], attempts: number): P2pkhTransferResult {
+  if (result.status === "isolated") return { status: "isolated", txid: result.txid, rawTxHex: preview.rawTxHex, error: result.reason, submissionId, localInputClaimIds, attempts, reason: "isolated" };
+  if (result.status === "not-dispatched") return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: result.reason, submissionId, localInputClaimIds, attempts, reason: result.reason === "snapshot-binding-required" || result.reason === "snapshot-input-invalid" ? "snapshot-binding" : undefined };
+  return { status: "local-confirmed", txid: preview.txid, rawTxHex: preview.rawTxHex, submissionId, localInputClaimIds, attempts };
 }
 
 function validateFinalTransferPreview(
@@ -474,7 +538,8 @@ async function solveForSelectedInputs(params: {
           estimatedFeeSatoshis: feeSatoshis,
           serializedSizeBytes,
           txid: calcTxidFromRawTxHex(rawTxHex),
-          rawTxHex
+          rawTxHex,
+          previewId: ""
         }
       };
     }
@@ -541,7 +606,8 @@ async function solveForSelectedInputs(params: {
       estimatedFeeSatoshis,
       serializedSizeBytes,
       txid: calcTxidFromRawTxHex(stableRawTxHex),
-      rawTxHex: stableRawTxHex
+      rawTxHex: stableRawTxHex,
+      previewId: ""
     }
   };
 }

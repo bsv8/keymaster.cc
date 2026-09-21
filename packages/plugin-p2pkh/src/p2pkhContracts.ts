@@ -12,7 +12,7 @@
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import { defineCapability } from "webloom-framework";
-import type { BalanceBroadcaster, BsvNetwork, KeyIdentity, P2pkhBalance, P2pkhBalanceBreakdown } from "@keymaster/contracts";
+import type { BalanceBroadcaster, BsvNetwork, KeyIdentity, P2pkhBalance, P2pkhBalanceBreakdown, P2pkhUtxoBinding, CentralBroadcastFailureReason } from "@keymaster/contracts";
 
 // 余额广播契约属于全局 contracts；这里重导出旧路径，兼容插件内部和外部现有 import。
 export type { P2pkhBalance, P2pkhBalanceBreakdown } from "@keymaster/contracts";
@@ -366,6 +366,12 @@ export interface P2pkhTransferPreview {
   serializedSizeBytes: number;
   txid: string;
   rawTxHex: string;
+  /** 本次准备的内存标识；重试时用于区分每一轮提交。 */
+  previewId: string;
+  /** 组合阶段捕获的 UTXO 快照序号；纯兼容夹具可省略。 */
+  utxoBinding?: P2pkhUtxoBinding;
+  /** 是否为“全部发送”；重试时必须重新确认金额。 */
+  sendAll?: boolean;
 }
 
 /** 转移结果。 */
@@ -381,6 +387,10 @@ export interface P2pkhTransferResult {
   error?: string;
   submissionId: string;
   localInputClaimIds: string[];
+  /** 已尝试次数（含第一次）。 */
+  attempts: number;
+  /** 自动重试的终止原因。 */
+  reason?: CentralBroadcastFailureReason;
 }
 
 /**
@@ -453,8 +463,8 @@ export interface P2pkhService {
    * UTXO 快照状态读口：`available=false` 表示尚未取得可信快照（余额未知）。
    * 返回的 utxos 已排除 `isSpentInMempoolTx=true` 的输出。
    */
-  getUtxosStatus?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; syncedAt?: string; utxos: P2pkhUtxo[] }>;  /** 主动刷新 Coordinator Worker 内存中的 UTXO 快照；失败时保留旧快照。 */
-  refreshUtxos?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; syncedAt?: string }>;
+  getUtxosStatus?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; state: "fresh" | "consumed" | "unavailable"; seq?: number; syncedAt?: string; utxos: P2pkhUtxo[] }>;  /** 主动刷新 Coordinator Worker 内存中的 UTXO 快照；失败时保留旧快照。 */
+  refreshUtxos?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; state: "fresh" | "consumed" | "unavailable"; seq?: number; syncedAt?: string }>;
   listLocalInputClaims(resourceId?: string, limit?: number): Promise<P2pkhLocalInputClaim[]>;
 
   /** 链上历史（只有 txid/height/fee 元数据，不做任何派生）。 */

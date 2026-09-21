@@ -156,6 +156,7 @@ export interface WocBroadcastResult {
  * 多标签页协调由 plugin-woc 内部负责。多标签页协调仅在 Web Locks 可用时
  * 是强保证；不可用时降级为单 tab 限流（snapshot.coordinated=false 提示）。
  */
+/** WOC 只读服务；插件可见能力不包含广播出口。 */
 export interface WocService {
   getConfig(): WocConfig;
   updateConfig(input: Partial<WocConfig>): WocConfig;
@@ -235,6 +236,10 @@ export interface WocService {
     options?: WocRequestOptions
   ): Promise<string>;
 
+}
+
+/** Worker/装配层内部的 WOC 广播扩展，不通过 WOC_CAPABILITY 暴露给插件。 */
+export interface WocWorkerBroadcastService {
   /** 广播：内部强制 broadcast 优先级，调用方不能降级。 */
   broadcast(
     network: BsvNetwork,
@@ -242,6 +247,9 @@ export interface WocService {
     options?: Omit<WocRequestOptions, "priority">
   ): Promise<WocBroadcastResult>;
 }
+
+/** createWocService 返回的完整内部句柄；仅 Worker/装配层使用扩展方法。 */
+export type WocServiceHandle = WocService & WocWorkerBroadcastService;
 
 /** WOC capability key。 */
 export const WOC_CAPABILITY = defineCapability<WocService>({

@@ -215,6 +215,31 @@ describe("Coordinator runtime contract parsers", () => {
     })).toThrow();
   });
 
+  it("parses asset.data-changed utxoSeqs and rejects invalid seq values", () => {
+    const base = {
+      topic: "asset.data-changed",
+      type: "asset.data-changed",
+      sessionEpoch: "epoch-1",
+      providerId: "p2pkh",
+      publicKeyHex: "02" + "11".repeat(32),
+      assetDataRevision: 3,
+      kinds: ["utxo", "balance"],
+      utxoSeqs: { main: 5, test: 7 },
+    };
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, base)).toEqual(base);
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, utxoSeqs: undefined })).toEqual({
+      topic: "asset.data-changed",
+      type: "asset.data-changed",
+      sessionEpoch: "epoch-1",
+      providerId: "p2pkh",
+      publicKeyHex: "02" + "11".repeat(32),
+      assetDataRevision: 3,
+      kinds: ["utxo", "balance"],
+    });
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, utxoSeqs: { main: 0 } })).toThrow();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, utxoSeqs: { main: "5" } })).toThrow();
+  });
+
   it("parses channel baselines and typed Sat incoming events", () => {
     expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
       topic: "channel.events",

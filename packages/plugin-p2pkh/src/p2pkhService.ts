@@ -15,6 +15,8 @@
 import type {
   AssetDataNotifier,
   BalanceBroadcaster,
+  CentralBroadcastService,
+  CoordinatorValueResult,
   GlobalBalanceSnapshot,
   ProtectedOutpointRegistry,
   KeyspaceService,
@@ -22,6 +24,8 @@ import type {
   VaultService,
   WocService,
   P2pkhCoordinatorControl,
+  P2pkhBroadcastSubmission,
+  P2pkhUtxoBinding,
   P2pkhUtxoSnapshotResult,
 } from "@keymaster/contracts";
 import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot } from "@keymaster/contracts";
@@ -48,6 +52,7 @@ import {
 } from "./p2pkhContracts.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, type P2pkhStateRepositoryBundle, type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
+import { CentralBroadcastRetryableError } from "./centralBroadcastService.js";
 import { allocateUtxos, P2pkhAllocationError } from "./utxoAllocator.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 import { canonicalizeP2pkhUtxos } from "./p2pkhCanonical.js";
@@ -180,6 +185,10 @@ export interface P2pkhServiceDeps {
   storage: BorrowedOwnerFileStore;
   /** 详情页懒加载 raw transaction 的唯一来源。 */
   woc?: WocService;
+  /** 页面侧唯一中心广播服务；普通转账和协议 spend 共用。 */
+  centralBroadcastService?: CentralBroadcastService;
+  /** SharedWorker 内部兼容面，仅供 sat top-up 装配；页面 manifest 不注入。 */
+  broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
   protectedOutpoints?: ProtectedOutpointRegistry;
   assetDataNotifier?: AssetDataNotifier;
 }
@@ -300,6 +309,13 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     return result.value;
   }
 
+  /** 返回组合交易需要的资源 + 快照序号绑定；consumed/unavailable 不可组合。 */
+  async function getUtxoBinding(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<P2pkhUtxoBinding | undefined> {
+    const snapshot = await requireUtxoSnapshot(input, "get");
+    if (!snapshot.available || snapshot.state !== "fresh" || snapshot.seq === undefined) return undefined;
+    return { resourceId: makeResourceId(input.network), seq: snapshot.seq };
+  }
+
   /** 从快照得到该 owner/network 的可花费 UTXO（排除 mempool 花费 / claims / protected）。 */
   async function listSpendableUtxosFromSnapshot(input: {
     resource: P2pkhKeyResource;
@@ -346,22 +362,49 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     return canonicalizeP2pkhUtxos(filterUtxos(visible, filter));
   }
 
+  // 中文：每次 submit 都有独立取消信号；切 owner、锁仓或销毁 service
+  // 时全部终止等待新快照，避免旧 owner 的重试继续运行。
+  const transferRetryControllers = new Set<AbortController>();
+  function abortTransferRetries(): void {
+    for (const controller of transferRetryControllers) controller.abort();
+    transferRetryControllers.clear();
+  }
+
   const transfer = createP2pkhTransferService({
     vault: deps.vault,
     protectedOutpoints: deps.protectedOutpoints,
-    broadcastWithCoordinator: deps.coordinator ? async (input) => {
-      return deps.coordinator!.p2pkhBroadcast(input);
-    } : undefined,
+    centralBroadcastService: deps.centralBroadcastService,
+    broadcastWithCoordinator: deps.broadcastWithCoordinator,
     messageBus: deps.messageBus,
     assetDataNotifier: deps.assetDataNotifier,
     getStore: (publicKeyHex) => ensureRepositoryForOwner(publicKeyHex),
-    loadSpendableUtxos: async ({ ownerPublicKeyHex, resource }) => {
+    loadSpendableUtxos: async ({ ownerPublicKeyHex, resource, purpose }) => {
       // 准备/提交前刷新一次 `unspent/all`；刷新失败即拒绝继续，
       // 不允许用可能已过期的快照签署交易。
-      const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex, network: resource.network }, "refresh");
-      if (!snapshot.available) throw new Error("P2PKH UTXO snapshot is unavailable");
-      return listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex });
+      let snapshot: P2pkhUtxoSnapshotResult;
+      try {
+        snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex, network: resource.network }, "refresh");
+      } catch (error) {
+        if (purpose === "submit" || purpose === "retry") throw new CentralBroadcastRetryableError("snapshot-refresh");
+        throw error;
+      }
+      if (!snapshot.available) {
+        // submit 看到 consumed 代表“上一次已占用该序号，等待新快照”，
+        // 不能把这段保护窗口误报成余额为 0。transfer service 会结合
+        // 当前 binding 把它转换为 snapshot-stale，并交给中心服务等待。
+        if ((purpose === "submit" || purpose === "retry") && snapshot.state === "consumed") {
+          throw new CentralBroadcastRetryableError("snapshot-wait", snapshot.seq);
+        }
+        throw new Error("P2PKH UTXO snapshot is unavailable");
+      }
+      const utxos = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex });
+      return {
+        utxos,
+        // 中文：与本次 refresh 的 UTXO 集合共用同一个序号，避免跨 RPC 错配。
+        ...(snapshot.seq === undefined ? {} : { utxoBinding: { resourceId: resource.resourceId, seq: snapshot.seq } }),
+      };
     },
+    getUtxoBinding: async ({ ownerPublicKeyHex, resource }) => getUtxoBinding({ ownerPublicKeyHex, network: resource.network }),
     getActiveKey: () => {
       const state = getActiveKeyState();
       if (!state.activePublicKeyHex) {
@@ -471,7 +514,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: active, network }, "get");
     } catch {
       // 快照不可用（冷启动/刷新失败）：余额未知，绝不当 0。
-      snapshot = { available: false, items: [] };
+      snapshot = { available: false, state: "unavailable", items: [] };
     }
     return { breakdown: calculateP2pkhBalanceBreakdown({ snapshot, claims, protectedOutpoints: protectedOutpointKeys(network) }), available: snapshot.available };
   }
@@ -578,6 +621,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     return off;
   }
   trackKeyspaceSubscribe(() => {
+    abortTransferRetries();
     const nextOwner = getActiveKeyState().activePublicKeyHex?.trim().toLowerCase() ?? "";
     if (balanceSnapshot.publicKeyHex !== nextOwner) {
       activeIdentity = undefined;
@@ -597,6 +641,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   });
 
   trackSubscribe<{ publicKeyHex: string }>("key.deleting", () => {
+    abortTransferRetries();
     clearBalanceSnapshot();
     try {
       disposeP2pkhStateRepository();
@@ -605,6 +650,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     }
   });
   trackSubscribe<{ publicKeyHex: string }>("key.deleted", async () => {
+    abortTransferRetries();
     clearBalanceSnapshot();
     try {
       disposeP2pkhStateRepository();
@@ -654,6 +700,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   });
 
   function onVaultLocked() {
+    abortTransferRetries();
     setStatus("idle");
     disposeP2pkhStateRepository();
     activeIdentity = undefined;
@@ -822,13 +869,13 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
 
     async getUtxosStatus(filter) {
       const ownerHex = filter?.ownerPublicKeyHex ?? getActiveKeyState().activePublicKeyHex;
-      if (!ownerHex) return { available: false, utxos: [] };
+      if (!ownerHex) return { available: false, state: "unavailable", utxos: [] };
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : "main";
       const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network }, "get");
       const resource = await (await ensureRepositoryForOwner(ownerHex)).getResource(makeResourceId(network));
-      if (!resource) return { available: snapshot.available, syncedAt: snapshot.syncedAt, utxos: [] };
+      if (!resource) return { available: snapshot.available, state: snapshot.state, seq: snapshot.seq, syncedAt: snapshot.syncedAt, utxos: [] };
       const utxos = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex: ownerHex });
-      return { available: snapshot.available, syncedAt: snapshot.syncedAt, utxos: filterUtxos(utxos, filter) };
+      return { available: snapshot.available, state: snapshot.state, seq: snapshot.seq, syncedAt: snapshot.syncedAt, utxos: filterUtxos(utxos, filter) };
     },
 
     async refreshUtxos(filter) {
@@ -836,7 +883,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       if (!ownerHex) throw new Error("Active key is required");
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : "main";
       const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network }, "refresh");
-      return { available: snapshot.available, syncedAt: snapshot.syncedAt };
+      return { available: snapshot.available, state: snapshot.state, seq: snapshot.seq, syncedAt: snapshot.syncedAt };
     },
 
     isAssetEnabled(assetId) {
@@ -953,7 +1000,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       if (!settings.includeTestnet && preview.assetId === "bsvtest") {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
-      return transfer.submit(preview);
+      const controller = new AbortController();
+      transferRetryControllers.add(controller);
+      return transfer.submit(preview, { signal: controller.signal }).finally(() => {
+        transferRetryControllers.delete(controller);
+      });
     },
 
     getGlobalSettings() {
@@ -988,6 +1039,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       }
     },
     async onKeyRemoved() {
+      abortTransferRetries();
       clearBalanceSnapshot();
       try {
         disposeP2pkhStateRepository();
@@ -1006,6 +1058,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       return loadTransactionDetail(input);
     },
     dispose() {
+      abortTransferRetries();
       for (const off of messageBusUnsubs) {
         try {
           off();

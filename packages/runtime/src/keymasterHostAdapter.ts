@@ -293,6 +293,16 @@ function createAssetDataNotifier(): AssetDataNotifier {
         ...previous,
         kinds: [...new Set([...previous.kinds, ...event.kinds])],
         revision: Math.max(previous.revision, event.revision),
+        ...(previous.utxoSeqs || event.utxoSeqs ? {
+          utxoSeqs: {
+            ...(previous.utxoSeqs?.main !== undefined || event.utxoSeqs?.main !== undefined
+              ? { main: Math.max(previous.utxoSeqs?.main ?? 0, event.utxoSeqs?.main ?? 0) }
+              : {}),
+            ...(previous.utxoSeqs?.test !== undefined || event.utxoSeqs?.test !== undefined
+              ? { test: Math.max(previous.utxoSeqs?.test ?? 0, event.utxoSeqs?.test ?? 0) }
+              : {}),
+          },
+        } : {}),
       } : event);
       if (!scheduled) {
         scheduled = true;

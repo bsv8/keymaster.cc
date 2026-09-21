@@ -37,6 +37,11 @@ import { newMessageID, newSessionID } from "bsv8-channel-protocol";
 import { parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
 import { verifySignedPrivateMessage } from "bsv8-channel-protocol/inbox";
 import { PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
+
+// Worker 现在始终解析已有本地记录的 rawTxHex；测试也使用真实可解析交易。
+function makeTestP2pkhRawTx(inputTxid: string): string {
+  return `0100000001${inputTxid}0000000000ffffffff01e8030000000000001976a914${"11".repeat(20)}88ac00000000`;
+}
 import {
   __testBackgroundRunNow,
   __testCancelByKey,
@@ -126,6 +131,9 @@ import {
   __testListP2pkhLocalInputClaims,
   __testP2pkhBroadcast,
   __testSetP2pkhBroadcastProvider,
+  __testSetP2pkhUnspentAllProvider,
+  __testSetSatBroadcastRetryOverrides,
+  __testEnsureSatP2pkhService,
   __testSetActive,
   __testSealLocalSecret,
   __testEncodeChannelPrivateBody,
@@ -2109,10 +2117,11 @@ describe("Session Coordinator worker", () => {
     const owner = "e".repeat(64);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `failed-broadcast-${Date.now()}`;
-    const txid = "fa".repeat(32);
+    const rawTxHex = makeTestP2pkhRawTx("ab".repeat(32));
+    const txid = calcTxidFromRawTxHex(rawTxHex);
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], createdAt: "now", updatedAt: "now", attempts: [] },
+      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], createdAt: "now", updatedAt: "now", attempts: [] },
     });
     __testSetP2pkhBroadcastProvider({
       descriptor: { id: "test-failing-provider", label: "Test failing provider", supportedNetworks: ["main", "test"] },
@@ -2132,11 +2141,12 @@ describe("Session Coordinator worker", () => {
     const owner = "d".repeat(64);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `failed-claims-${Date.now()}`;
-    const txid = "de".repeat(32);
     const inputTxid = "ef".repeat(32);
+    const rawTxHex = makeTestP2pkhRawTx(inputTxid);
+    const txid = calcTxidFromRawTxHex(rawTxHex);
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [`${inputTxid}:0`], ownOutputs: [], createdAt: "now", updatedAt: "now", attempts: [] },
+      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [`${inputTxid}:0`], ownOutputs: [], createdAt: "now", updatedAt: "now", attempts: [] },
       claims: [{ id: `${submissionId}:claim`, submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: inputTxid, vout: 0, value: 1, state: "active", createdAt: "now", updatedAt: "now" }]
     });
     __testSetP2pkhBroadcastProvider({
@@ -2152,6 +2162,61 @@ describe("Session Coordinator worker", () => {
       expect(claims.find((row) => (row as { submissionId?: string }).submissionId === submissionId)).toMatchObject({ state: "isolated" });
     } finally {
       __testSetP2pkhBroadcastProvider(undefined);
+    }
+  });
+
+  it("retries a SatSubscription top-up after another submission consumes the same snapshot seq", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const firstCoin = { txid: "aa".repeat(32), vout: 0, value: 100_000, height: 100, status: "confirmed" as const, isSpentInMempoolTx: false };
+    const changeCoin = { txid: "bb".repeat(32), vout: 0, value: 99_000, height: 101, status: "confirmed" as const, isSpentInMempoolTx: false };
+    // 快照数据源必须在解锁/装配触发后台刷新之前替换，否则在途的真实 WoC
+    // 请求会被复用并返回空快照。
+    __testSetP2pkhUnspentAllProvider(async () => [firstCoin]);
+    const created = await __testCreateVault("pw", { label: "sat-retry-owner" });
+    const owner = created.publicKeyHex!;
+    await __testSetActive(owner);
+    const service = await __testEnsureSatP2pkhService();
+    const resource = (await service.listResources("bsv")).find((row) => row.publicKeyHex === owner);
+    if (!resource) throw new Error("P2PKH resource was not created");
+    const broadcast = vi.fn(async (input: { network: "main" | "test"; canonicalTxid: string; rawTxHex: string; signal?: AbortSignal }) => ({
+      canonicalTxid: input.canonicalTxid,
+      status: "accepted" as const,
+    }));
+    __testSetP2pkhBroadcastProvider({
+      descriptor: { id: "test-sat-retry-provider", label: "Sat retry test provider", supportedNetworks: ["main", "test"] },
+      broadcast,
+    });
+    __testSetSatBroadcastRetryOverrides({ maxAttempts: 3, deadlineMs: 10_000, initialBackoffMs: 1, maxBackoffMs: 1 });
+    try {
+      const input = {
+        assetId: "bsv" as const,
+        ownerPublicKeyHex: owner,
+        recipientAddress: resource.address,
+        amountSatoshis: 1_000,
+        feeRateSatoshisPerKb: 60,
+      };
+      const previewA = await service.prepareTransfer(input);
+      const previewB = await service.prepareTransfer(input);
+      expect(previewA.utxoBinding?.seq).toBeDefined();
+      expect(previewB.utxoBinding?.seq).toBe(previewA.utxoBinding?.seq);
+
+      const resultA = await service.submitTransfer(previewA);
+      expect(resultA).toMatchObject({ status: "local-confirmed", attempts: 1 });
+      expect(broadcast).toHaveBeenCalledTimes(1);
+
+      // 模拟 A 的广播已反映到 WoC：B 的旧序号过期，必须重新组合后成功。
+      __testSetP2pkhUnspentAllProvider(async () => [changeCoin]);
+      const resultB = await service.submitTransfer(previewB);
+      expect(resultB).toMatchObject({ status: "local-confirmed", attempts: 2 });
+      expect(resultB.txid).not.toBe(resultA.txid);
+      expect(broadcast).toHaveBeenCalledTimes(2);
+    } finally {
+      __testSetP2pkhBroadcastProvider(undefined);
+      __testSetP2pkhUnspentAllProvider(undefined);
+      __testSetSatBroadcastRetryOverrides(undefined);
+      await __testLock().catch(() => undefined);
+      await __testDeleteVault().catch(() => undefined);
     }
   });
 
@@ -2206,11 +2271,12 @@ describe("Session Coordinator worker", () => {
     const owner = "f".repeat(64);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `double-axis-${Date.now()}`;
-    const txid = "fb".repeat(32);
+    const rawTxHex = makeTestP2pkhRawTx("fc".repeat(32));
+    const txid = calcTxidFromRawTxHex(rawTxHex);
     const providerBroadcast = vi.fn(async () => ({ canonicalTxid: txid, status: "accepted" as const, providerReference: "provider-ref" }));
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["fc".repeat(32) + ":0"], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], createdAt: "now", updatedAt: "now", attempts: [] },
+      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid, rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["fc".repeat(32) + ":0"], ownOutputs: [{ vout: 0, value: 1, scriptHex: "" }], createdAt: "now", updatedAt: "now", attempts: [] },
       claims: [{ id: `${submissionId}:claim`, submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "fc".repeat(32), vout: 0, value: 1, state: "active", createdAt: "now", updatedAt: "now" }],
     });
     __testSetP2pkhBroadcastProvider({
@@ -2220,7 +2286,7 @@ describe("Session Coordinator worker", () => {
     try {
       const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId });
       expect(response.operationResult).toMatchObject({ status: "local-confirmed", txid });
-      expect(providerBroadcast).toHaveBeenCalledWith({ network: "main", canonicalTxid: txid, rawTxHex: "00" });
+      expect(providerBroadcast).toHaveBeenCalledWith({ network: "main", canonicalTxid: txid, rawTxHex });
       expect((await __testListP2pkhLocalTransactions(owner)).find((row) => (row as { id?: string }).id === submissionId)).toMatchObject({ localState: "local-confirmed", chainResolution: "unresolved", attempts: [{ status: "accepted" }] });
       expect((await __testListP2pkhLocalInputClaims(owner)).find((row) => (row as { submissionId?: string }).submissionId === submissionId)).toMatchObject({ state: "active" });
     } finally {

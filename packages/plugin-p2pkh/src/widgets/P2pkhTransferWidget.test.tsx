@@ -102,7 +102,8 @@ function preview(): P2pkhTransferPreview {
     estimatedFeeSatoshis: 100,
     serializedSizeBytes: 200,
     txid: "aa".repeat(32),
-    rawTxHex: "00"
+    rawTxHex: "00",
+    previewId: "test-preview"
   };
 }
 

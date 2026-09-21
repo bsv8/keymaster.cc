@@ -597,6 +597,8 @@ export interface AssetDataChangedEvent {
   publicKeyHex: string;
   assetDataRevision: number;
   kinds: AssetDataInvalidationEvent["kinds"];
+  /** P2PKH 各网络最新快照序号；没有可信快照的网络省略。 */
+  utxoSeqs?: { main?: number; test?: number };
 }
 
 /** subscribe 的原子 baseline。session.state 的 revision 全局严格递增。 */
@@ -794,9 +796,14 @@ export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
 export type P2pkhCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "p2pkhSettingsUpdate" |
   "p2pkhProviderConfigGet" | "p2pkhProviderConfigUpdate" |
-  "p2pkhUtxosGet" | "p2pkhUtxosRefresh" |
-  "p2pkhBroadcast"
+  "p2pkhUtxosGet" | "p2pkhUtxosRefresh"
 >;
+
+/**
+ * 装配层给中心广播服务的私有 Worker 出口。
+ * 中文：此类型不注册 capability，不应被普通插件直接取得。
+ */
+export type P2pkhBroadcastAssemblyControl = Pick<SessionCoordinatorClient, "p2pkhBroadcast">;
 
 /** MSFile 插件 Coordinator 面。 */
 export type MsFileCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,

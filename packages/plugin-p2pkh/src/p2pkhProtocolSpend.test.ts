@@ -88,9 +88,30 @@ function makeClaimStore() {
   };
 }
 
+type TestBroadcast = (network: "main" | "test", rawTxHex: string) => Promise<{
+  canonicalTxid: string;
+}>;
+
+function makeCentralBroadcast(
+  broadcast: TestBroadcast = async (_network, rawTxHex) => ({
+    canonicalTxid: calcTxidFromRawTxHex(rawTxHex),
+  }),
+  submitOnceResult?: unknown,
+) {
+  return {
+    submitOnce: submitOnceResult !== undefined
+      ? async () => submitOnceResult
+      : async (input: { network: "main" | "test"; rawTxHex: string }) => ({
+          status: "local-confirmed" as const,
+          txid: (await broadcast(input.network, input.rawTxHex)).canonicalTxid,
+        }),
+  } as never;
+}
+
 function makeService(options?: {
   claimStore?: ReturnType<typeof makeClaimStore>;
-  broadcast?: (network: "main" | "test", rawTxHex: string) => Promise<unknown>;
+  broadcast?: TestBroadcast;
+  submitOnceResult?: unknown;
   protectedOutpoints?: ProtectedOutpointRegistry;
 }) {
   const privHex = options?.claimStore ? "00000000000000000000000000000000000000000000000000000000000000a1" : "00000000000000000000000000000000000000000000000000000000000000aa";
@@ -115,15 +136,7 @@ function makeService(options?: {
         }
       })
     } as never,
-    woc: {
-      broadcast: options?.broadcast ?? vi.fn(async (_network: "main" | "test", rawTxHex: string) => ({
-        accepted: true as const,
-        canonicalTxid: calcTxidFromRawTxHex(rawTxHex),
-        providerReturnedTxidRaw: calcTxidFromRawTxHex(rawTxHex),
-        providerReturnedTxidNormalized: calcTxidFromRawTxHex(rawTxHex),
-        txidIntegrity: "exact" as const
-      }))
-    } as never,
+    centralBroadcastService: makeCentralBroadcast(options?.broadcast, options?.submitOnceResult),
     claimStore,
     protectedOutpoints: options?.protectedOutpoints,
     getKeyForOwner: async (ownerPublicKeyHex: string) => {
@@ -249,7 +262,7 @@ describe("createP2pkhProtocolSpendService", () => {
           })
         })
       } as never,
-      woc: { broadcast: vi.fn(async () => ({ accepted: true as const, canonicalTxid: txid, providerReturnedTxidRaw: txid, providerReturnedTxidNormalized: txid, txidIntegrity: "exact" as const })) } as never,
+      centralBroadcastService: makeCentralBroadcast(async () => ({ canonicalTxid: txid })),
       claimStore: {
         tryClaimInputs: async (input) => stateRepository.tryClaimInputs(input),
         releaseLocalInputClaims: async (input) => stateRepository.releaseLocalInputClaims(input.claimIds)
@@ -273,6 +286,7 @@ describe("createP2pkhProtocolSpendService", () => {
     const breakdown = calculateP2pkhBalanceBreakdown({
       snapshot: {
         available: true,
+        state: "fresh",
         syncedAt: "t",
         items: [{ txid, vout: 0, value: inputValue, height: 1, status: "confirmed", isSpentInMempoolTx: false }]
       },
@@ -300,7 +314,7 @@ describe("createP2pkhProtocolSpendService", () => {
           })
         })
       } as never,
-      woc: { broadcast: vi.fn(async () => ({ accepted: true as const, canonicalTxid: txid, providerReturnedTxidRaw: txid, providerReturnedTxidNormalized: txid, txidIntegrity: "exact" as const })) } as never,
+      centralBroadcastService: makeCentralBroadcast(async () => ({ canonicalTxid: txid })),
       claimStore: {
         tryClaimInputs: async (input) => stateRepository.tryClaimInputs(input),
         releaseLocalInputClaims: async (input) => stateRepository.releaseLocalInputClaims(input.claimIds)
@@ -328,7 +342,7 @@ describe("createP2pkhProtocolSpendService", () => {
           })
         })
       } as never,
-      woc: { broadcast: vi.fn(async () => ({ accepted: true as const, canonicalTxid: txid, providerReturnedTxidRaw: txid, providerReturnedTxidNormalized: txid, txidIntegrity: "exact" as const })) } as never,
+      centralBroadcastService: makeCentralBroadcast(async () => ({ canonicalTxid: txid })),
       claimStore: {
         tryClaimInputs: async (input) => stateRepository.tryClaimInputs(input),
         releaseLocalInputClaims: async (input) => stateRepository.releaseLocalInputClaims(input.claimIds)
@@ -395,6 +409,44 @@ describe("createP2pkhProtocolSpendService", () => {
       changeAddress: owner.address
     });
     expect(retry.inputClaimIds).toHaveLength(1);
+  });
+
+  it("releases claims when the worker gate returns not-dispatched", async () => {
+    const releaseClaims = vi.fn(async () => {});
+    const protectedTxid = "55".repeat(32);
+    const protectedOutpoints = {
+      register: vi.fn(),
+      unregister: vi.fn(),
+      list: vi.fn(() => [{ txid: protectedTxid, vout: 0, network: "main" as const, ownerPluginId: "token-bsv21" }]),
+      isProtected: vi.fn((input: { txid: string; vout: number; network: string }) => input.txid === protectedTxid && input.vout === 0 && input.network === "main"),
+      onChange: vi.fn(() => () => {}),
+      claimProtectedInputs: vi.fn(async () => ({ claimIds: ["protected-claim-1"] })),
+      releaseClaims,
+      unregisterByOwner: vi.fn(),
+      _ids: vi.fn(() => ["token-bsv21"]),
+    } as unknown as ProtectedOutpointRegistry;
+    const { service, owner, claimStore } = makeService({
+      submitOnceResult: { status: "not-dispatched", reason: "snapshot-stale", currentSeq: 9 },
+      protectedOutpoints,
+    });
+
+    const preview = await service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      requestingPluginId: "token-bsv21",
+      network: "main",
+      inputs: [{ txid: protectedTxid, vout: 0, value: 10_000, address: owner.address }],
+      outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
+      feeRateSatoshisPerKb: 1,
+      changeAddress: owner.address
+    });
+    expect(preview.protectedClaimIds).toEqual(["protected-claim-1"]);
+
+    const result = await service.submit(preview);
+    // 中文：门禁拒绝属于"确定未派发"，必须立刻释放占用并按 rejected 收口。
+    expect(result.status).toBe("rejected");
+    expect(result.error).toBe("snapshot-stale");
+    expect(releaseClaims).toHaveBeenCalledWith(["protected-claim-1"]);
+    expect(claimStore.list()).toHaveLength(0);
   });
 
   it("keeps claims after unknown broadcast and blocks re-preview", async () => {

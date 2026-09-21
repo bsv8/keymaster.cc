@@ -215,7 +215,7 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
     "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort",
     "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer", "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord",
     "satOperation", "channelOperation", "contactsPresenceSnapshot",
-    "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast"
+    "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhUtxosGet", "p2pkhUtxosRefresh"
   ]);
 }
 
@@ -250,11 +250,14 @@ export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, 
       "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "subscribeTopic", "backgroundRunNow", "backgroundTrigger",
       "backgroundCancel", "backgroundCancelByKey", "backgroundSettingsUpdate", "reportRecoverableCoordinatorFailure"
     ]);
-    case "p2pkh":
-    case "woc": return bindCoordinatorMethods<P2pkhCoordinatorControl>(client, [
+    case "p2pkh": return bindCoordinatorMethods<P2pkhCoordinatorControl & Pick<SessionCoordinatorClient, "p2pkhBroadcast">>(client, [
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
       "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate",
       "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast"
+    ]);
+    case "woc": return bindCoordinatorMethods<import("@keymaster/contracts").P2pkhCoordinatorControl>(client, [
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",
+      "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhUtxosGet", "p2pkhUtxosRefresh"
     ]);
     case "msfile": return bindCoordinatorMethods<MsFileCoordinatorControl>(client, [
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic", "sendActivity",

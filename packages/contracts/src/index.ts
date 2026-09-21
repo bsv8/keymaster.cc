@@ -49,6 +49,7 @@ export * from "./sessionCoordinator.js";
 export * from "./sessionCoordinatorRuntime.js";
 export * from "./windowP2pExecutor.js";
 export * from "./bsvP2pkhProviders.js";
+export * from "./broadcast.js";
 export * from "./resource.js";
 export * from "./webrtc.js";
 export * from "./channel.js";

@@ -16,7 +16,7 @@ function claim(id: string, txid: string, value: number, state: P2pkhLocalInputCl
 
 describe("calculateP2pkhBalanceBreakdown (snapshot-based)", () => {
   it("returns all zeros when the snapshot is unavailable", () => {
-    const snapshot: P2pkhUtxoSnapshotResult = { available: false, items: [] };
+    const snapshot: P2pkhUtxoSnapshotResult = { available: false, state: "unavailable", items: [] };
     expect(calculateP2pkhBalanceBreakdown({ snapshot, claims: [claim("c1", "aa".repeat(32), 1000)] })).toEqual({
       confirmed: 0,
       unconfirmed: 0,
@@ -31,6 +31,7 @@ describe("calculateP2pkhBalanceBreakdown (snapshot-based)", () => {
     const spentTxid = "cc".repeat(32);
     const snapshot: P2pkhUtxoSnapshotResult = {
       available: true,
+      state: "fresh",
       syncedAt: "now",
       items: [
         snapshotItem(confirmedTxid, 1000, "confirmed"),
@@ -51,6 +52,7 @@ describe("calculateP2pkhBalanceBreakdown (snapshot-based)", () => {
     const txidB = "ee".repeat(32);
     const snapshot: P2pkhUtxoSnapshotResult = {
       available: true,
+      state: "fresh",
       items: [snapshotItem(txidA, 1000), snapshotItem(txidB, 500)],
     };
     const claims = [
@@ -70,6 +72,7 @@ describe("calculateP2pkhBalanceBreakdown (snapshot-based)", () => {
     const freeTxid = "f2".repeat(32);
     const snapshot: P2pkhUtxoSnapshotResult = {
       available: true,
+      state: "fresh",
       items: [snapshotItem(protectedTxid, 1000), snapshotItem(freeTxid, 500)],
     };
     const result = calculateP2pkhBalanceBreakdown({
@@ -82,7 +85,7 @@ describe("calculateP2pkhBalanceBreakdown (snapshot-based)", () => {
 
   it("floors spendable at zero when claims and protected values exceed the snapshot", () => {
     const txid = "f3".repeat(32);
-    const snapshot: P2pkhUtxoSnapshotResult = { available: true, items: [snapshotItem(txid, 300)] };
+    const snapshot: P2pkhUtxoSnapshotResult = { available: true, state: "fresh", items: [snapshotItem(txid, 300)] };
     const result = calculateP2pkhBalanceBreakdown({
       snapshot,
       claims: [claim("c1", txid, 500)],
