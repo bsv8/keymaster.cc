@@ -17,7 +17,7 @@
 // 由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
 // service 内部 storage 监听回灌。
 
-import type { KeyspaceService, TransferOffer, TransferOfferStatus, TransferProvider } from "@keymaster/contracts";
+import { BALANCE_NETWORK_KEYS, type KeyspaceService, type TransferOffer, type TransferOfferStatus, type TransferProvider } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type { P2pkhAssetId, P2pkhService, P2pkhSyncStatus } from "./p2pkhContracts.js";
 import { P2PKH_ASSETS } from "./p2pkhContracts.js";
@@ -88,7 +88,12 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
 
   async function toOffer(assetId: P2pkhAssetId): Promise<TransferOffer> {
     const def = P2PKH_ASSETS[assetId];
-    const balance = await deps.service.getAssetBalance(assetId);
+    const snapshot = deps.service.balanceBroadcaster.getSnapshot();
+    const owner = deps.keyspace.active().activePublicKeyHex?.trim().toLowerCase();
+    const balance = snapshot.publicKeyHex === owner
+      ? snapshot.balances[BALANCE_NETWORK_KEYS[def.network]]
+      : undefined;
+    const safeBalance = balance ?? { total: 0, available: false };
       return {
         id: `p2pkh:${assetId}`,
         providerId: "p2pkh",
@@ -101,9 +106,11 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
           fallback: `BSV P2PKH (${def.network})`
         },
         balance: {
-          amount: balance.total,
+          amount: safeBalance.total,
           unit: def.unit,
-          display: `${balance.total} ${def.unit}`
+          // amount 在未知时只是占位 0；available=false 禁止平台显示成真实 0。
+          available: safeBalance.available,
+          ...(safeBalance.available === false ? {} : { display: `${safeBalance.total} ${def.unit}` })
       },
       status: mapStatus(deps.service.syncStatus()),
       order: assetId === "bsv" ? 10 : 11

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { sha256 } from "@noble/hashes/sha256";
 import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { KEYSPACE_SERVICE_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type KeyspaceService, type P2pkhCoordinatorControl, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type GlobalBalanceSnapshot, type KeyspaceService, type P2pkhCoordinatorControl, type SessionCoordinatorClient } from "@keymaster/contracts";
 import { P2PKH_CAPABILITY, type P2pkhBalanceBreakdown, type P2pkhGlobalSettings, type P2pkhHistoryRecord, type P2pkhLocalTransaction, type P2pkhService } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";
 import { P2pkhWalletPage, type WalletSnapshot } from "./P2pkhWalletPage.js";
@@ -69,10 +69,29 @@ function makeLocal(id: string, overrides: Partial<P2pkhLocalTransaction> = {}): 
   };
 }
 
-function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] = [historyRecord], serviceOverrides: Partial<P2pkhService> = {}, walletOverrides: Partial<WalletSnapshot> = {}, coordinatorOverrides: Partial<SessionCoordinatorClient> = {}) {
+function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] = [historyRecord], serviceOverrides: Partial<P2pkhService> = {}, walletOverrides: Partial<WalletSnapshot> = {}, coordinatorOverrides: Partial<SessionCoordinatorClient> = {}, balanceOverrides: Partial<GlobalBalanceSnapshot> = {}) {
   const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
   const registry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
   const testResource = { resourceId: "p2pkh:test", publicKeyHex: owner, label: "test", address: "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn", network: "test" as const, createdAt: "now", generation: 0 };
+  const defaultBalances: GlobalBalanceSnapshot["balances"] = {
+    mainnet: { total: 1000, available: true, breakdown },
+    ...(includeTestnet ? { testnet: { total: 2000, available: true } } : {}),
+  };
+  const balanceSnapshot: GlobalBalanceSnapshot = {
+    publicKeyHex: owner,
+    includeTestnet,
+    balances: balanceOverrides.balances ?? defaultBalances,
+    revision: 1,
+    ...balanceOverrides,
+  };
+  registry.register({
+    id: "p2pkh.balance",
+    scope: "active-key",
+    key: (_args: unknown, context: { activePublicKeyHex?: string }) => ["p2pkh.balance", context.activePublicKeyHex ?? "none"],
+    load: async () => balanceSnapshot,
+    subscribe: () => () => undefined,
+    invalidation: "immediate",
+  });
   registry.register({ id: "p2pkh.settings", scope: "global", key: () => ["p2pkh.settings"], load: async () => ({ includeTestnet } satisfies P2pkhGlobalSettings), subscribe: () => () => undefined, invalidation: "immediate" });
   registry.register({
     id: "p2pkh.wallet",
@@ -88,10 +107,6 @@ function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] =
       protectedOutpoints: [],
       sync: [],
       syncStatus: "idle" as const,
-      balances: {
-        main: { total: 1000, available: true, breakdown },
-        test: { total: 2000, available: true },
-      },
       historyCursors: {},
       localCursors: {},
       claimCursors: {},
@@ -229,8 +244,8 @@ describe("P2pkhWalletPage", () => {
   });
 
   it("shows unknown balance when unavailable and known balance with breakdown", async () => {
-    const knownHost = registerWallet(false, [historyRecord], {}, {
-      balances: { main: { total: 5000, available: true, breakdown } },
+    const knownHost = registerWallet(false, [historyRecord], {}, {}, {}, {
+      balances: { mainnet: { total: 5000, available: true, breakdown } },
     });
     render(<PluginHostProvider host={knownHost}><P2pkhWalletPage network="main" /></PluginHostProvider>);
     await waitFor(() => expect(screen.getByText(/5,000/)).toBeTruthy());
@@ -238,8 +253,8 @@ describe("P2pkhWalletPage", () => {
     expect(screen.getByText("400 sats")).toBeTruthy();
     cleanup();
 
-    const unknownHost = registerWallet(false, [historyRecord], {}, {
-      balances: { main: { total: 0, available: false } },
+    const unknownHost = registerWallet(false, [historyRecord], {}, {}, {}, {
+      balances: { mainnet: { total: 0, available: false } },
     });
     render(<PluginHostProvider host={unknownHost}><P2pkhWalletPage network="main" /></PluginHostProvider>);
     await waitFor(() => expect(screen.getByText(/Unknown \(UTXO snapshot not available yet\)|未知（尚未取得 UTXO 快照）/u)).toBeTruthy());

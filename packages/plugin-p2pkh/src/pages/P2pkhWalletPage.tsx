@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPrice, type DataTableColumn } from "@keymaster/ui";
 import { useOptionalCapability } from "webloom-framework/react";
 import { router, useBsvPrice, useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
-import { P2PKH_COORDINATOR_CONTROL_CAPABILITY } from "@keymaster/contracts";
+import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhUtxo } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { detailPath, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
@@ -22,7 +22,6 @@ export type WalletSnapshot = {
   syncStatus: P2pkhSyncStatus;
   lastSyncedAt?: string;
   syncError?: string;
-  balances: Record<string, { total: number; available?: boolean; breakdown?: P2pkhBalanceBreakdown }>;
   historyCursors: Record<string, string | undefined>;
   localCursors: Record<string, string | undefined>;
   claimCursors: Record<string, string | undefined>;
@@ -45,8 +44,10 @@ function amountLabel(value: number | undefined): string {
 
 const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
   resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [],
-  sync: [], syncStatus: "idle", balances: {}, historyCursors: {}, localCursors: {}, claimCursors: {}
+  sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {}, claimCursors: {}
 };
+
+const EMPTY_BALANCE_SNAPSHOT = emptyGlobalBalanceSnapshot();
 
 export function P2pkhWalletPage(props: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
   const { t } = useI18n();
@@ -98,6 +99,13 @@ function P2pkhWalletPageInner({
       : { ...EMPTY_WALLET_SNAPSHOT, error: snapshot.error?.message },
     EMPTY_WALLET_SNAPSHOT
   );
+  const balanceSnapshot = useOptionalResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
+    host.resourceStore,
+    "p2pkh.balance",
+    [],
+    (snapshot) => snapshot.data ?? EMPTY_BALANCE_SNAPSHOT,
+    EMPTY_BALANCE_SNAPSHOT
+  );
   const [loadedHistory, setLoadedHistory] = useState<P2pkhHistoryRecord[]>(wallet.history);
   const [loadedLocals, setLoadedLocals] = useState<P2pkhLocalTransaction[]>(wallet.locals);
   const [historyCursors, setHistoryCursors] = useState<Record<string, string | undefined>>(wallet.historyCursors);
@@ -125,8 +133,9 @@ function P2pkhWalletPageInner({
     router.push(listPath(network, next, view));
   };
   const networkEnabled = network === "main" || settings.includeTestnet;
-  const balance = networkEnabled ? wallet.balances[network] : undefined;
-  const balanceKnown = Boolean(balance?.available);
+  // 钱包余额唯一读取来源是全局广播；钱包资源不再携带第二份余额真值。
+  const balance = networkEnabled ? balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]] : undefined;
+  const balanceKnown = Boolean(balance && balance.available !== false);
   const sync = wallet.sync.find((row) => row.resourceId === `p2pkh:${network}`);
   const selectedResources = useMemo(() => networkEnabled ? wallet.resources.filter((resource) => resource.network === network) : [], [wallet.resources, network, networkEnabled]);
 
@@ -258,7 +267,7 @@ function P2pkhWalletPageInner({
         <article>
           <h2>{networkTitle}</h2>
           <strong>{balanceKnown ? formatSatsWithPrice(balance!.total, price, { locale, network }) : t("p2pkh.balance.unknown", { defaultValue: "未知（尚未取得 UTXO 快照）" })}</strong>
-          <BalanceBreakdown breakdown={balance?.breakdown} />
+          <BalanceBreakdown breakdown={balanceKnown ? balance?.breakdown : undefined} />
           <Button variant="ghost" disabled={refreshing || selectedResources.length === 0} onClick={() => void refreshUtxos()}>{refreshing ? t("p2pkh.action.inProgress", { defaultValue: "处理中…" }) : t("p2pkh.action.refreshUtxos", { defaultValue: "刷新 UTXO" })}</Button>
         </article>
       </section> : <EmptyState title={t("p2pkh.wallet.networkDisabled", { defaultValue: "Testnet is disabled" })} description={t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "Enable testnet in P2PKH settings before viewing testnet data." })} />}

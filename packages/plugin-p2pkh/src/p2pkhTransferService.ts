@@ -264,7 +264,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           const value = result.value as { status?: string; txid?: string } | undefined;
           if (value?.status === "not-dispatched") {
             await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason: String((value as { reason?: unknown }).reason ?? "not-dispatched") });
-            deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
+            deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim", "balance"] });
             return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: String((value as { reason?: unknown }).reason ?? "not-dispatched"), submissionId, localInputClaimIds: [] };
           }
           const isolated = value?.status === "isolated";
@@ -272,13 +272,13 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           // The Coordinator is the sole writer of the broadcast terminal state.
           // The page may receive a response after sync has already promoted the
           // row to chain-confirmed, so it must never replay this transition.
-          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
+          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim", "balance"] });
           return { status: isolated ? "isolated" : value?.status === "already-known" ? "local-confirmed" : "local-confirmed", txid: preview.txid, rawTxHex: preview.rawTxHex, submissionId, localInputClaimIds };
         }
         const reason = "message" in result ? result.message : "Coordinator broadcast transport failed";
         if (result.status === "transport-error" && result.dispatchStatus === "not-dispatched") {
           await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason });
-          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
+          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim", "balance"] });
           return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds: [] };
         }
         // A transport failure is ambiguous: the Worker may have broadcast and

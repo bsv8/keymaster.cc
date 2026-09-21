@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { TransferOffer } from "@keymaster/contracts";
+import type { GlobalBalanceSnapshot, TransferOffer } from "@keymaster/contracts";
 import type { P2pkhTransferPreview } from "../p2pkhContracts.js";
 import { P2pkhTransferWidget } from "./P2pkhTransferWidget.js";
 
@@ -15,6 +15,13 @@ const mocks = vi.hoisted(() => ({
     prepareTransfer: vi.fn(),
     submitTransfer: vi.fn()
   },
+  serviceAvailable: true,
+  balanceSnapshot: {
+    publicKeyHex: "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    includeTestnet: false,
+    balances: { mainnet: { total: 1234, available: true } },
+    revision: 1,
+  } as GlobalBalanceSnapshot,
   context: {
     activePublicKeyHex: "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     identity: {
@@ -28,12 +35,18 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({ t: (_key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? _key }),
+  useI18n: () => ({
+    t: (_key: string, values?: { defaultValue?: string; [key: string]: unknown }) => {
+      const template = values?.defaultValue ?? _key;
+      return template.replace(/\{\{(\w+)\}\}/g, (_match: string, key: string) => String(values?.[key] ?? ""));
+    }
+  }),
   useLocale: () => "en-US",
   usePluginHost: () => ({ resourceStore: {} }),
   useOptionalResourceSelector: (_store: unknown, resourceId: string, _args: readonly string[], _selector: unknown, fallback: unknown) => {
     if (resourceId === "p2pkh.transfer-context") return mocks.context;
     if (resourceId === "p2pkh.settings") return { includeTestnet: false };
+    if (resourceId === "p2pkh.balance") return mocks.balanceSnapshot;
     return fallback;
   }
 }));
@@ -41,11 +54,12 @@ vi.mock("@keymaster/runtime", () => ({
 vi.mock("webloom-framework/react", () => ({
   useOptionalCapability: (capability: string | { id: string }) => {
     const id = typeof capability === "string" ? capability : capability.id;
-    return id === "p2pkh.service" ? mocks.service : undefined;
+    return id === "p2pkh.service" && mocks.serviceAvailable ? mocks.service : undefined;
   },
   useOptionalResourceSelector: (_store: unknown, resourceId: string, _args: readonly string[], _selector: unknown, fallback: unknown) => {
     if (resourceId === "p2pkh.transfer-context") return mocks.context;
     if (resourceId === "p2pkh.settings") return { includeTestnet: false };
+    if (resourceId === "p2pkh.balance") return mocks.balanceSnapshot;
     return fallback;
   }
 }));
@@ -59,6 +73,13 @@ const OFFER: TransferOffer = {
   status: "ready",
   network: "main",
   recipientTargetSection: "mainnet"
+};
+const TEST_OFFER: TransferOffer = {
+  ...OFFER,
+  id: "p2pkh:bsvtest",
+  assetId: "bsvtest",
+  network: "test",
+  recipientTargetSection: "testnet"
 };
 
 function preview(): P2pkhTransferPreview {
@@ -89,6 +110,13 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    mocks.serviceAvailable = true;
+    mocks.balanceSnapshot = {
+      publicKeyHex: mocks.context.activePublicKeyHex,
+      includeTestnet: false,
+      balances: { mainnet: { total: 1234, available: true } },
+      revision: 1,
+    };
   });
 
   it("T13：接收 recipientAddress，地址不是可编辑输入", () => {
@@ -115,5 +143,60 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
     await waitFor(() => expect(screen.getByText("只读核对")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /高 ·/u }));
     expect(screen.queryByText("只读核对")).toBeNull();
+  });
+
+  it("T12：金额输入旁显示当前主网广播余额", () => {
+    render(<P2pkhTransferWidget offer={OFFER} recipientAddress={RECIPIENT_ADDRESS} recipientPublicKeyHex={RECIPIENT_PUBLIC_KEY} onCompleted={vi.fn()} />);
+    expect(screen.getByText("可用余额：1,234 sats（主网）")).toBeTruthy();
+  });
+
+  it("T13：收款网络切到 testnet 后参考值只读取 testnet 键", () => {
+    mocks.balanceSnapshot = {
+      publicKeyHex: mocks.context.activePublicKeyHex,
+      includeTestnet: true,
+      balances: {
+        mainnet: { total: 1234, available: true },
+        testnet: { total: 5678, available: true },
+      },
+      revision: 2,
+    };
+    render(<P2pkhTransferWidget offer={TEST_OFFER} recipientAddress={RECIPIENT_ADDRESS} recipientPublicKeyHex={RECIPIENT_PUBLIC_KEY} onCompleted={vi.fn()} />);
+    expect(screen.getByText("可用余额：5,678 sats（测试网）")).toBeTruthy();
+    expect(screen.queryByText("可用余额：1,234 sats（主网）")).toBeNull();
+  });
+
+  it("T14：余额未知或 testnet 未启用时不显示 0 余额", () => {
+    mocks.balanceSnapshot = {
+      publicKeyHex: mocks.context.activePublicKeyHex,
+      includeTestnet: false,
+      balances: { mainnet: { total: 0, available: false } },
+      revision: 3,
+    };
+    render(<P2pkhTransferWidget offer={OFFER} recipientAddress={RECIPIENT_ADDRESS} recipientPublicKeyHex={RECIPIENT_PUBLIC_KEY} onCompleted={vi.fn()} />);
+    expect(screen.getByText("可用余额未知（主网）")).toBeTruthy();
+    expect(screen.queryByText("可用余额：0 sats（主网）")).toBeNull();
+  });
+
+  it("T15：余额刷新只更新参考文案，不覆盖用户已输入金额", () => {
+    const view = render(<P2pkhTransferWidget offer={OFFER} recipientAddress={RECIPIENT_ADDRESS} recipientPublicKeyHex={RECIPIENT_PUBLIC_KEY} onCompleted={vi.fn()} />);
+    const amount = screen.getByRole("textbox", { name: /金额/u }) as HTMLInputElement;
+    fireEvent.change(amount, { target: { value: "777" } });
+
+    mocks.balanceSnapshot = {
+      publicKeyHex: mocks.context.activePublicKeyHex,
+      includeTestnet: false,
+      balances: { mainnet: { total: 4321, available: true } },
+      revision: 4,
+    };
+    view.rerender(<P2pkhTransferWidget offer={OFFER} recipientAddress={RECIPIENT_ADDRESS} recipientPublicKeyHex={RECIPIENT_PUBLIC_KEY} onCompleted={vi.fn()} />);
+
+    expect((screen.getByRole("textbox", { name: /金额/u }) as HTMLInputElement).value).toBe("777");
+    expect(screen.getByText("可用余额：4,321 sats（主网）")).toBeTruthy();
+  });
+
+  it("T10：余额消费能力缺失时降级为锁定提示，不崩溃", () => {
+    mocks.serviceAvailable = false;
+    render(<P2pkhTransferWidget offer={OFFER} recipientAddress={RECIPIENT_ADDRESS} recipientPublicKeyHex={RECIPIENT_PUBLIC_KEY} onCompleted={vi.fn()} />);
+    expect(screen.getByText("钱包已锁定；解锁后可继续转账。")).toBeTruthy();
   });
 });

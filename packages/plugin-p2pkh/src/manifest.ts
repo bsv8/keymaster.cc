@@ -10,6 +10,8 @@
 
 import type {
   AssetDataNotifier,
+  BalanceBroadcaster,
+  GlobalBalanceSnapshot,
   AssetRegistry,
   BusinessFeatureRegistry,
   BreadcrumbProvider,
@@ -30,6 +32,7 @@ import type {
 } from "@keymaster/contracts";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
+  BALANCE_BROADCAST_CAPABILITY,
   ASSET_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
@@ -48,7 +51,7 @@ import {
   P2PKH_ADDRESS_CODEC_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
-import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhLocalInputClaim, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
+import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhLocalInputClaim, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
 
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
@@ -62,7 +65,9 @@ import { P2pkhSettingsPage } from "./pages/P2pkhSettingsPage.js";
 import { registerP2pkhNavigation } from "./pages/P2pkhNavigation.js";
 import { P2pkhTransactionDetailRoute } from "./pages/P2pkhTransactionDetailPage.js";
 import { transactionSourceListPath } from "./pages/p2pkhTransactionView.js";
+import { P2pkhBalanceWidget } from "./widgets/P2pkhBalanceWidget.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
+import { emptyGlobalBalanceSnapshot } from "@keymaster/contracts";
 
 export { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 
@@ -293,6 +298,8 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.amountPlaceholder": "Enter sats or choose All",
       "p2pkh.transfer.form.sendAll": "All",
       "p2pkh.transfer.form.sendAllHint": "The final received amount automatically subtracts the actual miner fee.",
+      "p2pkh.transfer.form.availableBalance": "Available balance: {{balance}} sats ({{network}})",
+      "p2pkh.transfer.form.availableBalanceUnknown": "Available balance: Unknown ({{network}})",
       "p2pkh.transfer.form.feeTier.low": "Low",
       "p2pkh.transfer.form.feeTier.medium": "Medium",
       "p2pkh.transfer.form.feeTier.high": "High",
@@ -554,6 +561,8 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.amountPlaceholder": "输入 sats，或选择全部",
       "p2pkh.transfer.form.sendAll": "全部",
       "p2pkh.transfer.form.sendAllHint": "最终到账额会自动扣除实际矿工费。",
+      "p2pkh.transfer.form.availableBalance": "可用余额：{{balance}} sats（{{network}}）",
+      "p2pkh.transfer.form.availableBalanceUnknown": "可用余额未知（{{network}}）",
       "p2pkh.transfer.form.feeTier.low": "低",
       "p2pkh.transfer.form.feeTier.medium": "中",
       "p2pkh.transfer.form.feeTier.high": "高",
@@ -610,7 +619,7 @@ const p2pkhPluginDefinition = {
       id: "p2pkh.window",
       runtime: "window-main",
       scopeKind: "owner-session",
-      provides: [P2PKH_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
+      provides: [P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
       dependencies: defineRuntimeUnitDependencies([
         { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
@@ -660,6 +669,7 @@ const p2pkhPluginDefinition = {
       assetDataNotifier
     });
     ctx.provide(P2PKH_CAPABILITY, service);
+    ctx.provide(BALANCE_BROADCAST_CAPABILITY, service.balanceBroadcaster);
     ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
       vault,
@@ -701,32 +711,23 @@ const p2pkhPluginDefinition = {
     // 注册资源定义（硬切换 003）
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
 
-    // p2pkh.balance：P2PKH 余额数据（bsv + bsvtest）
-    resources.register<{ bsv: P2pkhBalance | null; bsvtest: P2pkhBalance | null }, readonly string[]>({
+    // p2pkh.balance：所有余额消费方共用的 GlobalBalanceSnapshot。
+    const broadcaster: BalanceBroadcaster = service.balanceBroadcaster;
+    resources.register<GlobalBalanceSnapshot, readonly string[]>({
       id: "p2pkh.balance",
       scope: "active-key",
       key: (_args, context) => ["p2pkh.balance", context.activePublicKeyHex ?? "none"],
-      load: async (_args, context, _signal) => {
-        if (!context.activePublicKeyHex) {
-          return { bsv: null, bsvtest: null };
-        }
-        const include = service.getGlobalSettings().includeTestnet;
-        const calls: Promise<P2pkhBalance>[] = [service.getAssetBalance("bsv")];
-        if (include) calls.push(service.getAssetBalance("bsvtest"));
-        const results = await Promise.all(calls);
-        const bsv = results[0] ?? null;
-        const bsvtest = include ? (results[1] ?? null) : null;
-        return { bsv, bsvtest };
+      load: async (_args, context) => {
+        if (!context.activePublicKeyHex) return emptyGlobalBalanceSnapshot();
+        const snapshot = broadcaster.getSnapshot();
+        return snapshot.publicKeyHex === context.activePublicKeyHex.trim().toLowerCase()
+          ? snapshot
+          : emptyGlobalBalanceSnapshot();
       },
-      subscribe: (_args, _ctx, invalidate) => {
-        const offData = service.onDataChanged(invalidate);
-        const offSettings = service.onGlobalSettingsChange(invalidate);
-        return () => { offData(); offSettings(); };
-      },
-      equals: (prev, next) => {
-        if (!prev || !next) return prev === next;
-        return JSON.stringify(prev) === JSON.stringify(next);
-      },
+      subscribe: (_args, _ctx, invalidate) => broadcaster.subscribe(() => invalidate()),
+      equals: (prev, next) => !prev || !next
+        ? prev === next
+        : prev.revision === next.revision && prev.publicKeyHex === next.publicKeyHex,
       invalidation: "microtask"
     });
 
@@ -790,16 +791,13 @@ const p2pkhPluginDefinition = {
       /** 最近一次完整同步成功时间（来自 Coordinator 任务快照，跨进程可见）。 */
       lastSyncedAt?: string;
       syncError?: string;
-      balances: Record<string, P2pkhBalance>;
       historyCursors: Record<string, string | undefined>;
       localCursors: Record<string, string | undefined>;
       claimCursors: Record<string, string | undefined>;
     };
-    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, historyCursors: {}, localCursors: {}, claimCursors: {} });
+    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [], sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {}, claimCursors: {} });
     const loadWalletResource = async (context: { activePublicKeyHex?: string }): Promise<P2pkhWalletResource> => {
       if (!context.activePublicKeyHex) return emptyWallet();
-      const includeTestnet = service.getGlobalSettings().includeTestnet;
-      const networks = includeTestnet ? ["main", "test"] as const : ["main"] as const;
       const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
       const resourcesForKey = await service.listResources();
       const resourceIds = resourcesForKey.map((resource) => resource.resourceId);
@@ -809,12 +807,11 @@ const p2pkhPluginDefinition = {
         const values = await Promise.all(resourceIds.map(async (resourceId) => [resourceId, await reader(resourceId)] as const));
         return { items: values.flatMap(([, page]) => page.items), cursors: Object.fromEntries(values.map(([resourceId, page]) => [resourceId, page.nextCursor])) };
       };
-      const [historyPage, localsPage, claimsPage, sync, balances, utxoStatuses] = await Promise.all([
+      const [historyPage, localsPage, claimsPage, sync, utxoStatuses] = await Promise.all([
         service.listHistoryPage ? readPagePerResource((resourceId) => service.listHistoryPage!({ resourceId, limit: walletLimits.history })) : Promise.resolve({ items: [] as P2pkhHistoryRecord[], cursors: {} }),
         service.listLocalTransactionsPage ? readPagePerResource((resourceId) => service.listLocalTransactionsPage!({ resourceId, limit: walletLimits.locals })) : Promise.resolve({ items: [] as P2pkhLocalTransaction[], cursors: {} }),
         service.listLocalInputClaimsPage ? readPagePerResource((resourceId) => service.listLocalInputClaimsPage!({ resourceId, limit: walletLimits.claims })) : Promise.resolve({ items: [] as P2pkhLocalInputClaim[], cursors: {} }),
         stateRepository.listTransactionSyncStates(),
-        Promise.all(networks.map(async (network) => [network, await service.getAssetBalance(network === "main" ? "bsv" : "bsvtest")] as const)),
         // 每个资源单独取内存快照状态；合并时只要有一个启用网络没有可信快照，
         // 整体标记为不可用（余额未知），绝不显示 0。
         Promise.all(resourcesForKey.map(async (resource) => service.getUtxosStatus
@@ -843,7 +840,6 @@ const p2pkhPluginDefinition = {
         syncStatus,
         ...(task?.lastCompletedAt === undefined ? {} : { lastSyncedAt: task.lastCompletedAt }),
         ...(syncError === undefined ? {} : { syncError }),
-        balances: Object.fromEntries(balances),
         historyCursors: historyPage.cursors,
         localCursors: localsPage.cursors,
         claimCursors: claimsPage.cursors,
@@ -974,6 +970,16 @@ const p2pkhPluginDefinition = {
     const transferProvider = createP2pkhTransferProvider({ service, messageBus, keyspace });
     transferReg.register(transferProvider);
 
+    const home = ctx.capability(HOME_REGISTRY_CAPABILITY);
+    home.register({
+      id: "p2pkh.balance",
+      title: { key: "p2pkh.balanceWidget.title", fallback: "P2PKH balance" },
+      component: P2pkhBalanceWidget,
+      order: 10,
+      slot: "aside",
+      refreshHint: "realtime",
+    });
+
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const crumbProvider: BreadcrumbProvider = {
       id: "p2pkh.crumbs",
@@ -1032,6 +1038,11 @@ const p2pkhPluginDefinition = {
       }
       try {
         transferProvider.dispose();
+      } catch {
+        // swallow
+      }
+      try {
+        home.unregister("p2pkh.balance");
       } catch {
         // swallow
       }

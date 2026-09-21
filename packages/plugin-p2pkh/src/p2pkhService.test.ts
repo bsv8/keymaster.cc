@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { KeyspaceService, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
+import type { AssetDataInvalidationEvent, AssetDataNotifier, KeyspaceService, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
 import { createMemoryOwnerFileStore } from "./storage/testSupport/memoryOwnerFileStore.js";
 import { createP2pkhService } from "./p2pkhService.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
@@ -27,14 +27,43 @@ function snapshot(items: P2pkhUtxoSnapshotResult["items"] = []): P2pkhUtxoSnapsh
   return { available: true, syncedAt: "2026-09-20T00:00:00.000Z", items };
 }
 
-function coordinatorWithSnapshot(items: P2pkhUtxoSnapshotResult["items"]) {
-  const result = snapshot(items);
+function coordinatorWithSnapshot(items: P2pkhUtxoSnapshotResult["items"], includeTestnet = false) {
+  let result = snapshot(items);
+  const topicListeners = new Map<string, Set<(event: unknown) => void>>();
   return {
-    getBootstrapSnapshot: () => ({}),
+    getBootstrapSnapshot: () => ({ p2pkhSettings: { includeTestnet } }),
     p2pkhUtxosGet: vi.fn(async () => ({ status: "ok" as const, value: result })),
     p2pkhUtxosRefresh: vi.fn(async () => ({ status: "ok" as const, value: result })),
     p2pkhBroadcast: vi.fn(async () => ({ status: "ok" as const, value: { status: "accepted" } })),
     p2pkhSettingsUpdate: vi.fn(async () => ({ status: "ok" as const })),
+    setSnapshot(next: P2pkhUtxoSnapshotResult) {
+      result = next;
+    },
+    subscribeTopic(topic: string, handler: (event: unknown) => void) {
+      const listeners = topicListeners.get(topic) ?? new Set<(event: unknown) => void>();
+      listeners.add(handler);
+      topicListeners.set(topic, listeners);
+      return () => listeners.delete(handler);
+    },
+    emitTopic(topic: string, event: unknown) {
+      for (const listener of [...(topicListeners.get(topic) ?? [])]) listener(event);
+    },
+  };
+}
+
+function createTestNotifier(): AssetDataNotifier & { emit: ReturnType<typeof vi.fn> } {
+  const listeners = new Set<(event: AssetDataInvalidationEvent) => void>();
+  const emit = vi.fn((event: AssetDataInvalidationEvent) => {
+    queueMicrotask(() => {
+      for (const listener of [...listeners]) listener(event);
+    });
+  });
+  return {
+    emit,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
   };
 }
 
@@ -121,6 +150,118 @@ describe("P2PKH service (snapshot + history)", () => {
     expect((await service.listLocalTransactions?.({}))?.map((row) => row.id)).toContain("sub-page");
     expect((await service.listLocalTransactionsPage?.({ resourceId: resource.resourceId }))?.items.map((row) => row.id)).toContain("sub-page");
     expect((await service.listLocalInputClaimsPage?.({ resourceId: resource.resourceId }))?.items).toHaveLength(1);
+    service.dispose?.();
+  });
+
+  it("T01/T02/T03/T11：余额 map 按设置成形，未知不等于 0", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const pending = new Promise<{ status: "ok"; value: P2pkhUtxoSnapshotResult }>((resolve) => {
+      queueMicrotask(() => resolve({ status: "ok", value: snapshot([{ txid: "01".repeat(32), vout: 0, value: 1200, height: 10, status: "confirmed", isSpentInMempoolTx: false }]) }));
+    });
+    const coordinator = coordinatorWithSnapshot([]);
+    coordinator.p2pkhUtxosGet.mockImplementation(async () => pending);
+    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never });
+
+    const cold = service.balanceBroadcaster.getSnapshot();
+    expect(Object.keys(cold.balances)).toEqual(["mainnet"]);
+    expect(cold.balances.mainnet?.available).toBe(false);
+
+    await service.getResourceBalance(resource.resourceId);
+    const ready = service.balanceBroadcaster.getSnapshot();
+    expect(Object.keys(ready.balances)).toEqual(["mainnet"]);
+    expect(ready.balances.mainnet).toMatchObject({ total: 1200, available: true });
+    service.dispose?.();
+
+    const testnetService = createP2pkhService({
+      vault,
+      keyspace: keyspace(),
+      messageBus,
+      storage: createMemoryOwnerFileStore() as never,
+      coordinator: coordinatorWithSnapshot([{ txid: "02".repeat(32), vout: 0, value: 300, height: 0, status: "unconfirmed", isSpentInMempoolTx: false }], true) as never,
+    });
+    await testnetService.getResourceBalance(resource.resourceId);
+    const bothNetworks = testnetService.balanceBroadcaster.getSnapshot();
+    expect(Object.keys(bothNetworks.balances).sort()).toEqual(["mainnet", "testnet"]);
+    expect(bothNetworks.balances.testnet).toMatchObject({ total: 300, available: true });
+    testnetService.dispose?.();
+  });
+
+  it("T04：切换全局 testnet 设置时立即增删 testnet map 键", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const coordinator = coordinatorWithSnapshot([{ txid: "03".repeat(32), vout: 0, value: 700, height: 10, status: "confirmed", isSpentInMempoolTx: false }]);
+    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never });
+
+    await service.getResourceBalance(resource.resourceId);
+    expect(Object.keys(service.balanceBroadcaster.getSnapshot().balances)).toEqual(["mainnet"]);
+
+    coordinator.emitTopic("background.snapshot", {
+      type: "background.snapshot.changed",
+      p2pkhSettings: { includeTestnet: true },
+    });
+    await service.getResourceBalance("p2pkh:test");
+    expect(Object.keys(service.balanceBroadcaster.getSnapshot().balances).sort()).toEqual(["mainnet", "testnet"]);
+
+    coordinator.emitTopic("background.snapshot", {
+      type: "background.snapshot.changed",
+      p2pkhSettings: { includeTestnet: false },
+    });
+    await service.getResourceBalance(resource.resourceId);
+    expect(Object.keys(service.balanceBroadcaster.getSnapshot().balances)).toEqual(["mainnet"]);
+    service.dispose?.();
+  });
+
+  it("T05/T06：广播提交后重算并通知消费方，重算只读 Coordinator 快照", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const coordinator = coordinatorWithSnapshot([{ txid: "04".repeat(32), vout: 0, value: 1000, height: 10, status: "confirmed", isSpentInMempoolTx: false }]);
+    const notifier = createTestNotifier();
+    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never, assetDataNotifier: notifier });
+    const onDataChanged = vi.fn();
+    service.onDataChanged(onDataChanged);
+
+    await service.getResourceBalance(resource.resourceId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const before = service.balanceBroadcaster.getSnapshot();
+    coordinator.setSnapshot(snapshot([{ txid: "05".repeat(32), vout: 0, value: 400, height: 11, status: "confirmed", isSpentInMempoolTx: false }]));
+    notifier.emit({ providerId: "p2pkh", publicKeyHex: OWNER, revision: 99, kinds: ["utxo", "balance"] });
+
+    await vi.waitFor(() => expect(service.balanceBroadcaster.getSnapshot().balances.mainnet?.total).toBe(400));
+    const after = service.balanceBroadcaster.getSnapshot();
+    expect(after.revision).toBeGreaterThan(before.revision);
+    expect(onDataChanged).toHaveBeenCalled();
+    expect(notifier.emit).toHaveBeenCalledWith(expect.objectContaining({ providerId: "p2pkh", publicKeyHex: OWNER, kinds: ["balance"] }));
+    expect(coordinator.p2pkhUtxosRefresh).not.toHaveBeenCalled();
+    service.dispose?.();
+  });
+
+  it("T07/T08：owner 不一致、锁屏和旧 owner 失效事件都不能暴露旧快照", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const notifier = createTestNotifier();
+    const coordinator = coordinatorWithSnapshot([{ txid: "06".repeat(32), vout: 0, value: 900, height: 12, status: "confirmed", isSpentInMempoolTx: false }]);
+    let activeOwner = OWNER;
+    let vaultStatus: "unlocked" | "locked" = "unlocked";
+    const service = createP2pkhService({
+      vault: Object.assign({}, vault as unknown as object, { status: () => vaultStatus }) as never,
+      keyspace: { ...keyspace(), active: () => ({ activePublicKeyHex: activeOwner }) } as never,
+      messageBus,
+      storage: storage as never,
+      coordinator: coordinator as never,
+      assetDataNotifier: notifier,
+    });
+
+    await service.getResourceBalance(resource.resourceId);
+    const ready = service.balanceBroadcaster.getSnapshot();
+    await service.getResourceBalance(resource.resourceId);
+    expect(service.balanceBroadcaster.getSnapshot().revision).toBe(ready.revision);
+
+    notifier.emit({ providerId: "p2pkh", publicKeyHex: "03" + "22".repeat(32), revision: 100, kinds: ["balance"] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(service.balanceBroadcaster.getSnapshot().revision).toBe(ready.revision);
+
+    activeOwner = "03" + "22".repeat(32);
+    expect(service.balanceBroadcaster.getSnapshot()).toMatchObject({ publicKeyHex: "", balances: {} });
+    activeOwner = OWNER;
+    vaultStatus = "locked";
+    expect(service.balanceBroadcaster.getSnapshot()).toMatchObject({ publicKeyHex: "", balances: {} });
     service.dispose?.();
   });
 });

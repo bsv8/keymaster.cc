@@ -10,10 +10,10 @@
 import { formatSats, formatSatsWithPrice } from "@keymaster/ui";
 import { countRender, useResourceSelector } from "webloom-framework/react";
 import { useBsvPrice, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
-import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus } from "../p2pkhContracts.js";
+import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot } from "@keymaster/contracts";
+import type { P2pkhBalance, P2pkhSyncStatus } from "../p2pkhContracts.js";
 
-const DEFAULT_BALANCES: { bsv: P2pkhBalance | null; bsvtest: P2pkhBalance | null } = { bsv: null, bsvtest: null };
-const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
+const DEFAULT_BALANCES = emptyGlobalBalanceSnapshot();
 
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 
@@ -32,8 +32,8 @@ export function P2pkhBalanceWidget() {
     store, "p2pkh.sync-status", [], (snapshot) => snapshot.data ?? "idle"
   );
 
-  // 使用 Resource Store 读取余额数据
-  const balances = useResourceSelector<typeof DEFAULT_BALANCES, typeof DEFAULT_BALANCES>(
+  // 使用 Resource Store 读取统一的全局余额快照。
+  const balances = useResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
     store,
     "p2pkh.balance",
     [],
@@ -41,20 +41,11 @@ export function P2pkhBalanceWidget() {
     (a, b) => JSON.stringify(a) === JSON.stringify(b)
   );
 
-  // 使用 Resource Store 读取设置
-  const settings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    store,
-    "p2pkh.settings",
-    [],
-    (snapshot) => snapshot.data ?? DEFAULT_SETTINGS,
-    (a, b) => a.includeTestnet === b.includeTestnet
-  );
-
   const stale = status === "failed" || status === "rate-limited";
   // 快照不可用（冷启动/刷新失败）时显示“未知”，绝不显示 0。
-  const showAmount = (b: P2pkhBalance | null, network: "main" | "test") =>
+  const showAmount = (b: P2pkhBalance | undefined, network: "main" | "test") =>
     b && b.available !== false ? formatSatsWithPrice(b.total, price, { locale, network }) : "—";
-  const breakdown = (b: P2pkhBalance | null) => b?.breakdown ? <dl className="home-widget__breakdown"><dt>Confirmed</dt><dd>{formatSats(b.breakdown.confirmed)}</dd><dt>Pending claims</dt><dd>{formatSats(b.breakdown.pendingInputClaims)}</dd></dl> : null;
+  const breakdown = (b: P2pkhBalance | undefined) => b?.available !== false && b?.breakdown ? <dl className="home-widget__breakdown"><dt>Confirmed</dt><dd>{formatSats(b.breakdown.confirmed)}</dd><dt>Pending claims</dt><dd>{formatSats(b.breakdown.pendingInputClaims)}</dd></dl> : null;
   const statusText = computeStatusText(readiness, status, t);
 
   return (
@@ -65,16 +56,16 @@ export function P2pkhBalanceWidget() {
       <section className="home-widget__row">
         <div>
           <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvMain", { defaultValue: "BSV (main)" })}</p>
-          <p className="home-widget__amount">{showAmount(balances.bsv, "main")}</p>
-          {breakdown(balances.bsv)}
+          <p className="home-widget__amount">{showAmount(balances.balances[BALANCE_NETWORK_KEYS.main], "main")}</p>
+          {breakdown(balances.balances[BALANCE_NETWORK_KEYS.main])}
         </div>
       </section>
-      {settings.includeTestnet ? (
+      {balances.includeTestnet ? (
         <section className="home-widget__row">
           <div>
             <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
-            <p className="home-widget__amount">{showAmount(balances.bsvtest, "test")}</p>
-            {breakdown(balances.bsvtest)}
+            <p className="home-widget__amount">{showAmount(balances.balances[BALANCE_NETWORK_KEYS.test], "test")}</p>
+            {breakdown(balances.balances[BALANCE_NETWORK_KEYS.test])}
           </div>
         </section>
       ) : null}

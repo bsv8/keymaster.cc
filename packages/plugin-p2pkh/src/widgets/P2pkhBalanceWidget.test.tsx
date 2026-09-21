@@ -94,22 +94,27 @@ function registerP2pkhResources(host: ReturnType<typeof createPluginHost>, servi
     scope: "active-key",
     key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
       ["p2pkh.balance", context.activePublicKeyHex ?? "none"],
-    load: async () => {
+    load: async (_args: readonly string[], context: { activePublicKeyHex?: string }) => {
       const include = service.getGlobalSettings().includeTestnet;
       const calls = [service.getAssetBalance("bsv")];
       if (include) calls.push(service.getAssetBalance("bsvtest"));
       const results = await Promise.all(calls);
-      return { bsv: results[0] ?? null, bsvtest: include ? (results[1] ?? null) : null };
+      return {
+        publicKeyHex: context.activePublicKeyHex ?? ACTIVE_PK,
+        includeTestnet: include,
+        balances: {
+          ...(results[0] ? { mainnet: results[0] } : {}),
+          ...(include && results[1] ? { testnet: results[1] } : {}),
+        },
+        revision: 1,
+      };
     },
     subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => {
       const offData = service.onDataChanged(invalidate);
       const offSettings = service.onGlobalSettingsChange(invalidate);
       return () => { offData(); offSettings(); };
     },
-    equals: (prev: any, next: any) => {
-      if (!prev || !next) return prev === next;
-      return prev.bsv?.total === next.bsv?.total && prev.bsvtest?.total === next.bsvtest?.total;
-    },
+    equals: (prev: any, next: any) => JSON.stringify(prev) === JSON.stringify(next),
     invalidation: "microtask"
   });
 

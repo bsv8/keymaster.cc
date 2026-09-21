@@ -6410,14 +6410,14 @@ async function registerCoordinatorTasks(): Promise<void> {
     assertSessionFresh();
     if (result.cancelled) return;
     // 历史同步与 UTXO 快照互不依赖：快照刷新由 smart 任务独立负责。
-    emitDataChanged("p2pkh", ["resource", "history", "submission"]);
+    emitDataChanged("p2pkh", ["resource", "history", "submission", "balance"]);
   } }));
   coordinatorState.taskRuntimes.set("p2pkh.utxo-snapshot", createCoordinatorTaskRuntime({ id: "p2pkh.utxo-snapshot", pluginId: "p2pkh", unitId: p2pkh.unitId, syncPolicy: "smart", keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
     await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex);
     // 单个资源失败只保留旧快照；失败不写 0，也不影响其它资源。
     await refreshP2pkhUtxoSnapshots(signal);
     assertSessionFresh();
-    emitDataChanged("p2pkh", ["utxo"]);
+    emitDataChanged("p2pkh", ["utxo", "balance"]);
   } }));
   const p2pkhProvider = {
     listResources: async (assetId: "bsv" | "bsvtest") => {
@@ -6512,7 +6512,7 @@ async function abortNotDispatchedP2pkhSubmission(
     if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
     const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
     await repository.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason });
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim", "balance"] });
   } catch {
     // Cleanup is best-effort here. The response is still explicitly marked
     // not-dispatched, while a later reconciliation can safely inspect the row.
@@ -6640,7 +6640,7 @@ async function buildTopicBaselines(
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
       ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null, keyspaceGeneration: coordinatorState.keyspaceGeneration }
-        : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings };
+        : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings, p2pkhSettings: coordinatorMeta.p2pkhSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
 
@@ -11498,7 +11498,12 @@ async function handleP2pkhSettingsUpdate(
   await writeP2pkhSettingFile({ includeTestnet: request.settings.includeTestnet });
   coordinatorMeta.p2pkhSettings = { includeTestnet: request.settings.includeTestnet };
   await cancelP2pkhSyncForProviderChange();
-  publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", snapshots: getTaskSnapshots() });
+  publishTopicEvent("background.snapshot", {
+    type: "background.snapshot.changed",
+    snapshots: getTaskSnapshots(),
+    // 设置写入成功后随同快照广播，窗口无需再发起 RPC 才能收敛 testnet 开关。
+    p2pkhSettings: coordinatorMeta.p2pkhSettings,
+  });
   return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
 }
 
@@ -11587,7 +11592,7 @@ async function handleP2pkhUtxosRefresh(
   try {
     const result = await p2pkhUtxoSnapshots.refresh(resource);
     // 主动刷新成功后通知页面重读余额/币列表。
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo"] });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "balance"] });
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   } catch (error) {
     // 旧快照保留；把失败原因返回给调用方。
@@ -11688,7 +11693,7 @@ async function handleP2pkhBroadcastUnsafe(
     // 广播后立即触发一次后台刷新；刷新失败不能释放输入 claim（claim
     // 只在历史/快照确认后才由同步路径清理）。
     void refreshP2pkhUtxoSnapshots().catch(() => undefined);
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim", "balance"] });
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: local.txid, providerId: provider.descriptor.id } };
   } catch (error) {
     // reason 必须是非空、有上界的字符串：它要跨 RPC parser 和 UI，空 message
@@ -11698,7 +11703,7 @@ async function handleP2pkhBroadcastUnsafe(
     const finishedAt = new Date().toISOString();
     const attempt = { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "isolated", reason: message, attempt });
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim"] });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim", "balance"] });
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid: local.txid, reason: message, providerId: provider.descriptor.id } };
   }
 }
@@ -11946,7 +11951,13 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
     topic,
     ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
-    ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
+    ...(topic === "background.snapshot"
+      ? {
+          scheduleSettings: coordinatorState.scheduleSettings,
+          // 所有 background 快照都带当前设置，保证新订阅者和跨 tab 更新使用同一份值。
+          p2pkhSettings: coordinatorMeta.p2pkhSettings,
+        }
+      : {})
   } as CoordinatorTopicEvent;
   // WebLoom owns the physical stream credit; each Coordinator peer only gets
   // a bounded domain queue. A slow peer therefore terminates its own stream

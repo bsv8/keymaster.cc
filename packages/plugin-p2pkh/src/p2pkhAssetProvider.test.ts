@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import type { KeyspaceService } from "@keymaster/contracts";
+import { describe, expect, it, vi } from "vitest";
+import type { BalanceBroadcaster, GlobalBalanceSnapshot, KeyspaceService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type { P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhService } from "./p2pkhContracts.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
@@ -7,14 +7,27 @@ import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 const owner = "02" + "11".repeat(32);
 
 function createDeps(history: P2pkhHistoryRecord[], locals: P2pkhLocalTransaction[]) {
+  let balanceSnapshot: GlobalBalanceSnapshot = {
+    publicKeyHex: owner,
+    includeTestnet: false,
+    balances: { mainnet: { total: 1000, available: true } },
+    revision: 1,
+  };
+  const dataListeners = new Set<() => void>();
   const service = {
     getGlobalSettings: () => ({ includeTestnet: false }),
-    getAssetBalance: async () => ({ total: 1000, available: true }),
+    balanceBroadcaster: {
+      getSnapshot: () => balanceSnapshot,
+      subscribe: () => () => undefined,
+    } satisfies BalanceBroadcaster,
     syncStatus: () => "idle" as const,
     listHistory: async () => history,
     listLocalTransactions: async () => locals,
     onSyncStatusChange: () => () => undefined,
-    onDataChanged: () => () => undefined,
+    onDataChanged: (handler: () => void) => {
+      dataListeners.add(handler);
+      return () => dataListeners.delete(handler);
+    },
     onGlobalSettingsChange: () => () => undefined,
   } as unknown as P2pkhService;
   const messageBus = { subscribe: () => () => undefined } as unknown as MessageBus;
@@ -24,7 +37,17 @@ function createDeps(history: P2pkhHistoryRecord[], locals: P2pkhLocalTransaction
     onActiveKeyChanged: () => () => undefined,
     onInitializationChange: () => () => undefined,
   } as unknown as KeyspaceService;
-  return { service, messageBus, keyspace };
+  return {
+    service,
+    messageBus,
+    keyspace,
+    emitDataChanged() {
+      for (const listener of [...dataListeners]) listener();
+    },
+    setBalance(total: number) {
+      balanceSnapshot = { ...balanceSnapshot, balances: { mainnet: { total, available: true } }, revision: balanceSnapshot.revision + 1 };
+    },
+  };
 }
 
 function local(id: string, txid: string, chainResolution: P2pkhLocalTransaction["chainResolution"]): P2pkhLocalTransaction {
@@ -60,5 +83,20 @@ describe("p2pkhAssetProvider", () => {
     const activities = await provider.listActivity("bsv");
     expect(activities).toHaveLength(1);
     expect(activities[0]).toMatchObject({ txid, status: "confirmed" });
+  });
+
+  it("T05：资产摘要在余额广播提交后的 data-changed 失效后读取新快照", async () => {
+    const deps = createDeps([], []);
+    const provider = createP2pkhAssetProvider(deps);
+    const changed = vi.fn();
+    provider.onChange(changed);
+
+    expect((await provider.listAssets())[0]?.balance?.amount).toBe(1000);
+    deps.setBalance(400);
+    deps.emitDataChanged();
+
+    expect(changed).toHaveBeenCalled();
+    expect((await provider.listAssets())[0]?.balance?.amount).toBe(400);
+    provider.dispose?.();
   });
 });

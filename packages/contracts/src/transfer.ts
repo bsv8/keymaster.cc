@@ -17,9 +17,14 @@ export type TransferRecipientTargetSection = "mainnet" | "testnet" | "other-asse
 
 /** 转账余额（按 provider 语义；coin 类型通常是 satoshis）。 */
 export interface TransferOfferBalance {
+  /** 主要展示金额；available=false 时 amount 只是占位值。 */
   amount: number;
+  /** 金额单位，例如 sats、BSV。 */
   unit: string;
+  /** provider 预格式化的展示文本。 */
   display?: string;
+  /** 余额是否可信；false 表示未知，不能展示为 0。 */
+  available?: boolean;
 }
 
 /**

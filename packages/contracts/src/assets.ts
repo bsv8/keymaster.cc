@@ -22,6 +22,8 @@ export interface AssetBalance {
   unit: string;
   /** 备用展示文本，例如 "0.1234 BSV"。 */
   display?: string;
+  /** 余额是否可信；false 表示未知，消费方不得把 amount=0 渲染为真实余额。 */
+  available?: boolean;
 }
 
 /** 资产列表使用的最小摘要。 */
@@ -133,7 +135,7 @@ export interface AssetDataInvalidationEvent {
   /** 变更版本号；用于微任务合并重读。 */
   revision: number;
   /** 变更的数据类别。 */
-  kinds: Array<"resource" | "utxo" | "history" | "holding" | "claim" | "submission" | "settings" | "protocol-snapshot">;
+  kinds: Array<"resource" | "utxo" | "history" | "holding" | "claim" | "submission" | "settings" | "protocol-snapshot" | "balance">;
 }
 
 /**

@@ -765,6 +765,34 @@ describe("KeymasterSessionCoordinatorClient", () => {
     }
   });
 
+  it("T08：资产数据失效事件只接受递增 revision，旧事件不覆盖余额广播", async () => {
+    const hub = new Hub();
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "asset-revision-gate" });
+      await client.connect();
+      const events: unknown[] = [];
+      client.subscribeTopic("asset.data-changed", (event) => events.push(event));
+      const base = {
+        topic: "asset.data-changed" as const,
+        type: "asset.data-changed" as const,
+        sessionEpoch: client.getSessionEpoch(),
+        providerId: "p2pkh",
+        publicKeyHex: "02" + "11".repeat(32),
+        kinds: ["balance"] as const,
+      };
+      const newer = { ...base, assetDataRevision: 2 };
+      await hub.broadcast(newer);
+      await hub.broadcast(newer);
+      await hub.broadcast({ ...base, assetDataRevision: 1, publicKeyHex: "03" + "22".repeat(32) });
+
+      expect(events).toEqual([newer]);
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
   it("routes background.snapshot only to the background topic listener", async () => {
     const hub = new Hub();
     const Constructor = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
@@ -783,11 +811,13 @@ describe("KeymasterSessionCoordinatorClient", () => {
         type: "background.snapshot.changed",
         backgroundSnapshotRevision: 1,
         sessionEpoch: "shared-epoch",
-        snapshots: []
+        snapshots: [],
+        p2pkhSettings: { includeTestnet: true }
       });
 
       expect(backgroundEvents).toHaveLength(1);
       expect(vaultEvents).toHaveLength(0);
+      expect(client.getBootstrapSnapshot().p2pkhSettings).toEqual({ includeTestnet: true });
     } finally {
       globalThis.SharedWorker = original;
     }

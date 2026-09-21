@@ -118,6 +118,8 @@ export interface ApplicationSettingsRegistry {
  */
 export interface HomeRegistry {
   register(widget: HomeWidget): void;
+  /** 注销已注册 widget；插件卸载时释放自己的首页挂载。 */
+  unregister(id: string): void;
   list(): HomeWidget[];
 }
 

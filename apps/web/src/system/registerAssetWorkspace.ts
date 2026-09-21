@@ -76,7 +76,8 @@ const assetsResources: I18nPluginResources = {
       "assets.status.stale": "Stale",
       "assets.status.failed": "Failed",
       "assets.status.unsupported": "Unsupported",
-      "assets.status.unavailable": "Wallet is locked or asset services are temporarily unavailable; unlock to restore."
+      "assets.status.unavailable": "Wallet is locked or asset services are temporarily unavailable; unlock to restore.",
+      "assets.balance.unknown": "Unknown"
     },
     "zh-CN": {
       "assets.domain.label": "钱包",
@@ -112,7 +113,8 @@ const assetsResources: I18nPluginResources = {
       "assets.status.stale": "已过期",
       "assets.status.failed": "失败",
       "assets.status.unsupported": "不支持",
-      "assets.status.unavailable": "钱包已锁定或资产服务暂不可用；解锁后会自动恢复。"
+      "assets.status.unavailable": "钱包已锁定或资产服务暂不可用；解锁后会自动恢复。",
+      "assets.balance.unknown": "未知"
     }
   }
 };

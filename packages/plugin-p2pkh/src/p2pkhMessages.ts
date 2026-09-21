@@ -12,6 +12,8 @@ export const P2PKH_MSG = {
   REHYDRATE_ERROR: "p2pkh.rehydrate.error",
   /** 转账广播完成。 */
   TRANSFER_BROADCAST: "p2pkh.transfer.broadcast",
+  /** 全局余额快照发生内容变化。payload 是 GlobalBalanceSnapshot。 */
+  BALANCE_CHANGED: "p2pkh.balance.changed",
   /**
    * 全局产品设置变更（硬切换 001）。
    * 设计缘由：跨标签页或非 settings 页面需要知道 includeTestnet 切换，

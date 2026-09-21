@@ -18,6 +18,8 @@ export * from "./business.js";
 export * from "./settings.js";
 export * from "./home.js";
 export * from "./assets.js";
+export * from "./balanceTypes.js";
+export * from "./balance.js";
 export * from "./contacts.js";
 export * from "./runtimeCapabilities.js";
 export * from "./registries.js";

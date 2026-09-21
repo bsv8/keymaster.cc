@@ -20,7 +20,7 @@
 //     由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
 //     service 内部 storage 监听回灌。
 
-import type { AssetActivity, AssetProvider, AssetSummary, AssetStatus, KeyspaceService } from "@keymaster/contracts";
+import { BALANCE_NETWORK_KEYS, type AssetActivity, type AssetProvider, type AssetSummary, type AssetStatus, type KeyspaceService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
@@ -99,7 +99,12 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
 
   async function toSummary(assetId: P2pkhAssetId): Promise<AssetSummary> {
     const def = P2PKH_ASSETS[assetId];
-    const balance = await deps.service.getAssetBalance(assetId);
+    const snapshot = deps.service.balanceBroadcaster.getSnapshot();
+    const owner = deps.keyspace.active().activePublicKeyHex?.trim().toLowerCase();
+    const balance = snapshot.publicKeyHex === owner
+      ? snapshot.balances[BALANCE_NETWORK_KEYS[def.network]]
+      : undefined;
+    const safeBalance = balance ?? { total: 0, available: false };
     return {
       assetId,
       providerId: "p2pkh",
@@ -108,9 +113,11 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
       label: { key: `p2pkh.asset.${assetId}`, fallback: def.label },
       network: def.network,
       balance: {
-        amount: balance.total,
+        amount: safeBalance.total,
         unit: def.unit,
-        display: `${balance.total} ${def.unit}`
+        // amount 在未知时只是占位 0；available 是 UI 判断“未知而非 0”的真值。
+        available: safeBalance.available,
+        ...(safeBalance.available === false ? {} : { display: `${safeBalance.total} ${def.unit}` })
       },
       status: mapStatus(deps.service.syncStatus()),
       detailRoute: { id: def.network === "main" ? "p2pkh.mainnet.transactions" : "p2pkh.testnet.transactions", path: `/p2pkh/${def.network === "main" ? "mainnet" : "testnet"}/transactions?page=1` },

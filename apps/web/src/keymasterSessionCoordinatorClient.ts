@@ -1720,7 +1720,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       }
     } else if (event.type === "background.snapshot.changed") {
       // Background is a separate domain and must not advance Session identity.
-      this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, taskSnapshots: [...event.snapshots] };
+      this.bootstrapSnapshotCache = {
+        ...this.bootstrapSnapshotCache,
+        taskSnapshots: [...event.snapshots],
+        ...(event.p2pkhSettings ? { p2pkhSettings: { ...event.p2pkhSettings } } : {}),
+      };
     } else if (event.topic === "storage.state") {
       this.bootstrapSnapshotCache = {
         ...this.bootstrapSnapshotCache,

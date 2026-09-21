@@ -12,7 +12,10 @@
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import { defineCapability } from "webloom-framework";
-import type { BsvNetwork, KeyIdentity } from "@keymaster/contracts";
+import type { BalanceBroadcaster, BsvNetwork, KeyIdentity, P2pkhBalance, P2pkhBalanceBreakdown } from "@keymaster/contracts";
+
+// 余额广播契约属于全局 contracts；这里重导出旧路径，兼容插件内部和外部现有 import。
+export type { P2pkhBalance, P2pkhBalanceBreakdown } from "@keymaster/contracts";
 
 /** P2PKH 资产 id。设计缘由：bsv 和 bsvtest 是同一类资产的不同网络，不是不同 provider。 */
 export type P2pkhAssetId = "bsv" | "bsvtest";
@@ -158,35 +161,6 @@ export interface P2pkhTransactionSyncState {
   lastAttemptAt?: string;
   lastSuccessAt?: string;
   lastError?: string;
-}
-
-/**
- * 余额明细（只由 UTXO 快照 + 本地占用现算）。
- *
- * 中文说明：
- *   - confirmed：WoC 快照中已确认且未被内存池花费的输出合计；
- *   - unconfirmed：快照中未确认且未被内存池花费的输出合计；
- *   - spendable：confirmed + unconfirmed 再扣除本地 input claims 与协议保护
- *     outpoint 后的可花费合计（余额 = spendable）；
- *   - pendingInputClaims：本地 active/isolated input claim 占用的金额。
- */
-export interface P2pkhBalanceBreakdown {
-  confirmed: number;
-  unconfirmed: number;
-  spendable: number;
-  pendingInputClaims: number;
-}
-
-/**
- * P2PKH 余额（硬切换 009 / 001）。
- * 设计缘由：余额不再是表、不是持久化实体，只是基于 Coordinator Worker
- * 内存 UTXO 快照的实时计算结果。快照不可用时是“未知/不可用”，不是 0。
- */
-export interface P2pkhBalance {
-  total: number;
-  /** 冷启动尚未取得任何可信快照；此时 total 无意义。 */
-  available?: boolean;
-  breakdown?: P2pkhBalanceBreakdown;
 }
 
 /**
@@ -425,6 +399,8 @@ export interface P2pkhTransactionDetail {
 
 /** P2PKH 服务契约：plugin-p2pkh 内部使用，对应 capability "p2pkh.service"。 */
 export interface P2pkhService {
+  /** 全局余额只读广播；所有余额展示/offer 都从此快照取值。 */
+  readonly balanceBroadcaster: BalanceBroadcaster;
   syncStatus(): P2pkhSyncStatus;
   onSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
 

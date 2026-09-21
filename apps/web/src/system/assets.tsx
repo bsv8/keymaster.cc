@@ -196,7 +196,7 @@ export function AssetsPage() {
                           <div className="asset-workspace-row__meta">
                                 <span className={`asset-workspace-pill is-${asset.status}`}>{statusLabel(asset.status, t)}</span>
                                 <span className={`asset-workspace-pill is-${group.network}`}>{networkLabel(group.network, t)}</span>
-                                {asset.balance ? <strong>{balanceText(asset, price, locale, group.network)}</strong> : null}
+                                {asset.balance ? <strong>{balanceText(asset, price, locale, group.network, t)}</strong> : null}
                               </div>
                         </div>
                           </li>
@@ -276,10 +276,14 @@ function balanceText(
   asset: AssetSummary,
   price: { amount: string; unit: string } | null,
   locale: string,
-  network: Network
+  network: Network,
+  t: (key: string, values?: { defaultValue?: string }) => string
 ): string {
   const balance = asset.balance;
   if (!balance) return "";
+  if (balance.available === false) {
+    return t("assets.balance.unknown", { defaultValue: "Unknown" });
+  }
   if (asset.kind === "coin" && balance.unit === "sats" && typeof balance.amount === "number") {
     return formatSatsWithPrice(balance.amount, price, { locale, network });
   }

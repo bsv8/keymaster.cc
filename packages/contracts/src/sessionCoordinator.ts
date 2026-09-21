@@ -573,6 +573,8 @@ export interface BackgroundSnapshotEvent {
   snapshots: CoordinatorTaskSnapshot[];
   /** 同步管理设置；快照事件携带它以便页面无需额外 RPC 即可读取。 */
   scheduleSettings?: CoordinatorBackgroundSyncSettings;
+  /** P2PKH 网络范围设置；余额/资产页面据此决定是否显示 testnet。 */
+  p2pkhSettings?: { includeTestnet: boolean };
 }
 
 /** Coordinator Worker 实际运行单元快照；这是 Window 汇总后台状态的唯一入口。 */

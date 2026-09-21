@@ -3180,6 +3180,12 @@ function parseBackgroundSnapshotEvent(value: unknown): BackgroundSnapshotEvent {
   const event = topicEnvelope(value, "background.snapshot", "background.snapshot.changed");
   if (!Array.isArray(event.snapshots) || event.snapshots.length > 4_096) throw new TypeError("Coordinator background snapshots are invalid");
   const scheduleSettings = event.scheduleSettings === undefined ? undefined : parseBackgroundSettings(event.scheduleSettings);
+  const p2pkhSettings = event.p2pkhSettings === undefined
+    ? undefined
+    : (() => {
+      const settings = expectRecord(event.p2pkhSettings, "event.p2pkhSettings");
+      return { includeTestnet: booleanValue(settings.includeTestnet, "event.p2pkhSettings.includeTestnet") };
+    })();
   return {
     topic: "background.snapshot",
     type: "background.snapshot.changed",
@@ -3187,12 +3193,13 @@ function parseBackgroundSnapshotEvent(value: unknown): BackgroundSnapshotEvent {
     backgroundSnapshotRevision: boundedNumber(event.backgroundSnapshotRevision, "event.backgroundSnapshotRevision"),
     snapshots: event.snapshots.map((snapshot, index) => parseTaskSnapshot(snapshot, `event.snapshots[${index}]`)),
     ...(scheduleSettings === undefined ? {} : { scheduleSettings }),
+    ...(p2pkhSettings === undefined ? {} : { p2pkhSettings }),
   };
 }
 
 function parseAssetKinds(value: unknown, field: string): AssetDataChangedEvent["kinds"] {
   if (!Array.isArray(value) || value.length > 16) throw new TypeError(`Coordinator ${field} is invalid`);
-  return value.map((kind, index) => enumValue(kind, ["resource", "utxo", "history", "holding", "claim", "submission", "settings", "protocol-snapshot"] as const, `${field}[${index}]`));
+  return value.map((kind, index) => enumValue(kind, ["resource", "utxo", "history", "holding", "claim", "submission", "settings", "protocol-snapshot", "balance"] as const, `${field}[${index}]`));
 }
 
 function parseAssetDataChangedEvent(value: unknown): AssetDataChangedEvent {

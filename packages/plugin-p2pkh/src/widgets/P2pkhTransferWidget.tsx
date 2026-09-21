@@ -14,7 +14,7 @@ import { useEffect, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
-import type { KeyIdentity, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
+import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot, type KeyIdentity, type TransferCompletion, type TransferOffer, type TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhFeeRateTier, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY, assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
 
@@ -71,6 +71,17 @@ function P2pkhTransferWidgetInner({
     (snapshot) => snapshot.data ?? { includeTestnet: false },
     { includeTestnet: false }
   );
+  const balanceSnapshot = useOptionalResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
+    host.resourceStore,
+    "p2pkh.balance",
+    [],
+    (snapshot) => snapshot.data ?? emptyGlobalBalanceSnapshot(),
+    emptyGlobalBalanceSnapshot()
+  );
+  const networkBalance = balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]];
+  const networkLabel = t(network === "main" ? "p2pkh.network.main" : "p2pkh.network.test", {
+    defaultValue: network === "main" ? "主网" : "测试网"
+  });
   const feeRates = resolveP2pkhFeeRateSatoshisPerKb(globalSettings);
   const feeRateKey = `${feeRates.low}:${feeRates.medium}:${feeRates.high}`;
   const [form, setForm] = useState<FormState>({
@@ -269,6 +280,11 @@ function P2pkhTransferWidgetInner({
                 {t("p2pkh.transfer.form.sendAll", { defaultValue: "全部" })}
               </Button>
             </div>
+            <p className="p2pkh-transfer-widget__balance-reference" aria-live="polite">
+              {networkBalance && networkBalance.available !== false
+                ? t("p2pkh.transfer.form.availableBalance", { defaultValue: "可用余额：{{balance}} sats（{{network}}）", balance: formatNumber(networkBalance.total), network: networkLabel })
+                : t("p2pkh.transfer.form.availableBalanceUnknown", { defaultValue: "可用余额未知（{{network}}）", network: networkLabel })}
+            </p>
             {/^(all|全部)$/i.test(form.amount.trim()) ? <p className="p2pkh-transfer-widget__amount-hint">{t("p2pkh.transfer.form.sendAllHint", { defaultValue: "最终到账额会自动扣除实际矿工费。" })}</p> : null}
             <div className="p2pkh-transfer-widget__fee-tier" role="group" aria-label={t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}>
               <span>{t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}</span>

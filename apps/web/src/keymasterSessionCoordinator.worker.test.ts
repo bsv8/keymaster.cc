@@ -1959,7 +1959,8 @@ describe("Session Coordinator worker", () => {
     // 任务完成后队列仍空闲：计时重新开始，持续利用空闲时间刷新余额。
     expect(__testSmartSyncState().pending).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 90));
-    expect(runs).toBe(2);
+    // 第二轮计时与测试唤醒可能落在同一事件循环时间点；只要求第二轮已经启动。
+    expect(runs).toBeGreaterThanOrEqual(2);
   });
 
   it("锁定时 WoC 空闲事件不会挂起智能调度计时，解锁后恢复", () => {

@@ -9,7 +9,7 @@ import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 function emptyWallet(): WalletSnapshot {
   return {
-    resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {},
+    resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [], sync: [], syncStatus: "idle",
     historyCursors: {}, localCursors: {}, claimCursors: {}
   };
 }
