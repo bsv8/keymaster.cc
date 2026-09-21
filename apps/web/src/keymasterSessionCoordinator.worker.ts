@@ -146,7 +146,7 @@ import {
 } from "./coordinator/workerUnitCatalog.js";
 import { createCoordinatorWorkerUnitRegistry } from "./coordinator/workerUnitRuntime.js";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
-import { createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
+import { createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotResource, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
 import { createP2pkhCoordinatorTasks, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
@@ -11419,6 +11419,38 @@ async function writeP2pkhSettingFile(patch: {
 }
 
 /**
+ * 为当前 owner 在 Worker 侧材料化启用的 P2PKH 资源。
+ *
+ * 资源表是每个 JS realm 各自的内存态（见 p2pkhStateRepository）：页面窗口
+ * 创建的资源对 Worker 不可见，Worker 的余额快照任务必须按同一套确定性规则
+ * （owner 公钥 + 网络 → P2PKH 地址）自己补齐资源，否则快照刷新找不到任何
+ * 地址，余额永远停在“未知”。
+ */
+async function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const existing = await repository.listResourcesByKey();
+  const networks: Array<"main" | "test"> = includeTestnet ? ["main", "test"] : ["main"];
+  const createdAt = new Date().toISOString();
+  for (const network of networks) {
+    const resourceId = `p2pkh:${network}`;
+    if (existing.some((resource) => resource.resourceId === resourceId)) continue;
+    const address = deriveP2pkhAddress(ownerPublicKeyHex, network);
+    const resource = {
+      resourceId,
+      publicKeyHex: ownerPublicKeyHex,
+      label: "",
+      address,
+      network,
+      createdAt,
+      generation: 0,
+    };
+    await repository.putAddress(resource);
+    existing.push(resource);
+  }
+  return existing;
+}
+
+/**
  * 刷新当前 owner 全部启用网络的内存 UTXO 快照。
  * 单个资源失败只保留其旧快照，不影响其它资源；错误向上抛给调用方决定。
  */
@@ -11427,9 +11459,9 @@ async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal): Promise<void> {
   if (!owner || !p2pkhUtxoSnapshots) return;
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== owner.toLowerCase()) return;
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
   const includeTestnet = coordinatorMeta.p2pkhSettings?.includeTestnet === true;
-  for (const resource of await repository.listResourcesByKey()) {
+  const resources = await ensureWorkerP2pkhResources(owner, includeTestnet);
+  for (const resource of resources) {
     if (resource.network === "test" && !includeTestnet) continue;
     if (signal?.aborted) return;
     await p2pkhUtxoSnapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);

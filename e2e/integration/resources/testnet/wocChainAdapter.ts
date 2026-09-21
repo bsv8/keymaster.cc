@@ -228,9 +228,11 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
     return { status: "broadcast", txid: entry.txid };
   }
 
-  async returnFunds(input: { readonly walletPrivateKeyHex: string; readonly targetAddress: string; readonly operationId: string }): Promise<BroadcastResult> {
+  async returnFunds(input: { readonly walletPrivateKeyHex: string; readonly targetAddress: string; readonly operationId: string; readonly feeRateSatoshisPerKb?: number }): Promise<BroadcastResult> {
     const operationId = assertOperationId(input.operationId);
     const targetAddress = assertTestnetP2pkhAddress(input.targetAddress);
+    const feeRateSatoshisPerKb = input.feeRateSatoshisPerKb ?? DEFAULT_FEE_RATE_SATOSHIS_PER_KB;
+    if (!Number.isSafeInteger(feeRateSatoshisPerKb) || feeRateSatoshisPerKb <= 0) throw new Error("testnet return fee rate is invalid");
     const keyBytes = hexToBytes(input.walletPrivateKeyHex);
     try {
       const sourcePublicKeyHex = bytesToHex(secp256k1.getPublicKey(keyBytes, true));
@@ -239,15 +241,21 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
       if (existing) return this.#reconcileKnown(existing);
       const utxos = await this.#spendableUtxos(sourceAddress);
       const total = utxos.reduce((sum, item) => sum + item.value, 0);
-      if (total <= TESTNET_FEE_RESERVE) throw new Error("testnet wallet has no safe balance to return");
+      // 归集预留按“1 输入 1 输出、无找零”的实际大小估算（10 + 148*n + 34 字节），
+      // 而不是固定 1000 sat：小额钱包（roundtrip 的 10 sat 资助）也必须能按
+      // 用户实际使用的低费率归集。最终费率由 #signTransfer 按签名后的真实
+      // 大小复核，预留不足会直接抛错而不是广播低于费率的交易。
+      const estimatedSize = 10 + utxos.length * 148 + 34;
+      const feeReserve = Math.max(1, Math.ceil(estimatedSize * feeRateSatoshisPerKb / 1_000));
+      if (total <= feeReserve) throw new Error("testnet wallet has no safe balance to return");
       const allocation: UtxoAllocation = {
-        requestedSatoshis: total - TESTNET_FEE_RESERVE,
-        feeReserveSatoshis: TESTNET_FEE_RESERVE,
+        requestedSatoshis: total - feeReserve,
+        feeReserveSatoshis: feeReserve,
         selected: utxos,
         totalInputSatoshis: total,
         changeSatoshis: 0,
       };
-      const signed = await this.#signTransfer({ allocation, sourceAddress, targetAddress, privateKey: keyBytes, publicKeyHex: sourcePublicKeyHex });
+      const signed = await this.#signTransfer({ allocation, sourceAddress, targetAddress, privateKey: keyBytes, publicKeyHex: sourcePublicKeyHex, feeRateSatoshisPerKb });
       const txid = calcTxidFromRawTxHex(signed.rawTxHex);
       await this.#remember({ version: 1, operationId, txid, network: "test", sourceAddress, targetAddress, kind: "return", satoshis: allocation.requestedSatoshis, outputSatoshis: allocation.requestedSatoshis, feeSatoshis: signed.feeSatoshis, createdAt: new Date().toISOString() });
       return await this.#broadcastOrUnknown(signed.rawTxHex, txid, operationId, { outputSatoshis: allocation.requestedSatoshis, feeSatoshis: signed.feeSatoshis });
@@ -362,7 +370,9 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
 
   async #broadcastOrUnknown(rawTxHex: string, txid: string, operationId: string, accounting: { readonly outputSatoshis: number; readonly feeSatoshis: number }): Promise<BroadcastResult> {
     try {
-      const response = await this.#postJson("test", "/tx/raw", { txhex: rawTxHex });
+      // journal 已在本方法之前写入；这里对同一笔 canonical 交易做受限重试，
+      // 429/5xx 只是节点尚未接受，不改变 txid，也不构成双花风险。
+      const response = await this.#broadcastWithBackoff("test", { txhex: rawTxHex });
       if (!response.ok) throw new Error(`testnet broadcast HTTP ${response.status}`);
       // WOC normally returns the txid as a JSON string. The local canonical
       // txid remains authoritative; a mismatching provider receipt is an
@@ -382,14 +392,15 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
     }
   }
 
-  async #signTransfer(input: { readonly allocation: UtxoAllocation; readonly sourceAddress: string; readonly targetAddress: string; readonly privateKey: Uint8Array; readonly publicKeyHex: string }): Promise<{ readonly rawTxHex: string; readonly feeSatoshis: number }> {
+  async #signTransfer(input: { readonly allocation: UtxoAllocation; readonly sourceAddress: string; readonly targetAddress: string; readonly privateKey: Uint8Array; readonly publicKeyHex: string; readonly feeRateSatoshisPerKb?: number }): Promise<{ readonly rawTxHex: string; readonly feeSatoshis: number }> {
+    const feeRateSatoshisPerKb = input.feeRateSatoshisPerKb ?? DEFAULT_FEE_RATE_SATOSHIS_PER_KB;
     const unsigned = buildP2pkhTx({ allocation: input.allocation, recipientAddress: input.targetAddress, changeAddress: input.sourceAddress });
     const raw = await signP2pkhTx(unsigned, input.allocation.selected, async (digest) => {
       const signature = await signAsync(digest, input.privateKey, { lowS: true });
       return encodeDerSignature(signature.r, signature.s);
     }, input.publicKeyHex);
     const size = rawTxHexByteLength(raw);
-    const minimumFee = Math.max(1, Math.ceil(size * DEFAULT_FEE_RATE_SATOSHIS_PER_KB / 1_000));
+    const minimumFee = Math.max(1, Math.ceil(size * feeRateSatoshisPerKb / 1_000));
     const actualFee = input.allocation.totalInputSatoshis - unsigned.outputs.reduce((sum, output) => sum + output.value, 0);
     if (actualFee < minimumFee) throw new Error("testnet transaction fee is below the current minimum");
     return { rawTxHex: raw, feeSatoshis: actualFee };
@@ -506,6 +517,37 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
     await rename(temporary, file);
   }
 
+  /**
+   * 广播遇到 429 / 5xx 时按指数退避重试。
+   *
+   * 与只读请求不同：广播在写 journal（canonical txid 已落盘）之后才发，
+   * 重试的是“尚未被节点接受”的同一笔原始交易；txid 不变、不会双花。
+   * 只有反复 429/5xx 或连接失败仍无法确认结果时才返回 uncertain，交给
+   * `reconcile(operationId)` 对账，绝不在没有 journal 的情况下盲目重试。
+   * 4xx（除 429）是节点对交易本身的拒绝，不重试。
+   */
+  async #broadcastWithBackoff(network: "test" | "main", body: unknown): Promise<Response> {
+    let delayMs = 2_000;
+    for (let attempt = 0; ; attempt += 1) {
+      let response: Response;
+      try {
+        response = await this.#postJson(network, "/tx/raw", body);
+      } catch (error) {
+        if (attempt >= 4) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 2, 30_000);
+        continue;
+      }
+      const retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+      if (!retryable || attempt >= 4) return response;
+      const retryAfterSeconds = Number((response.headers.get("retry-after") ?? "").trim());
+      const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1_000 : 0;
+      await response.arrayBuffer().catch(() => undefined);
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.max(delayMs, retryAfterMs)));
+      delayMs = Math.min(delayMs * 2, 30_000);
+    }
+  }
+
   async #getJson(network: "test" | "main", endpoint: string): Promise<unknown> {
     const response = await this.#requestReadWithBackoff(network, endpoint, { method: "GET" });
     const text = await response.text();
@@ -522,17 +564,27 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
   }
 
   /**
-   * 只读请求遇到 429 时按指数退避重试。
+   * 只读请求遇到 429 或 5xx 时按指数退避重试。
    *
    * 浏览器里的 keymaster 同步和 Node 侧确认轮询共用同一个 WOC 配额；长轮询
-   * 期间偶发 429 是外部事实，不能让它把一次合法等待判成失败。广播（POST）
+   * 期间偶发 429/500 是外部事实，不能让它把一次合法等待判成失败。广播（POST）
    * 仍然只发一次，绝不用重试掩盖“结果未知”。
    */
   async #requestReadWithBackoff(network: "test" | "main", endpoint: string, init: RequestInit): Promise<Response> {
     let delayMs = 1_000;
     for (let attempt = 0; ; attempt += 1) {
-      const response = await this.#request(network, endpoint, init);
-      if (response.status !== 429 || attempt >= 5) return response;
+      let response: Response;
+      try {
+        response = await this.#request(network, endpoint, init);
+      } catch (error) {
+        // 网络中断/超时同样是外部事实：只读请求可以安全重试。
+        if (attempt >= 5) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 2, 30_000);
+        continue;
+      }
+      const retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+      if (!retryable || attempt >= 5) return response;
       await response.arrayBuffer().catch(() => undefined);
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
       delayMs = Math.min(delayMs * 2, 30_000);

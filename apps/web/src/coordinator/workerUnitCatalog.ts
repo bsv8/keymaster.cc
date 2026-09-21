@@ -115,11 +115,14 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   },
   {
     unitId: "p2pkh.coordinator-worker",
-    taskIds: ["p2pkh.transactions-sync"],
+    taskIds: ["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"],
     requiredProductIds: ["background", "p2pkh"],
     serviceIds: ["p2pkh.provider-registry", "p2pkh.asset-service"],
     storagePurposes: [""],
-    finalIoAuditEntries: [{ taskId: "p2pkh.transactions-sync", operation: "p2pkh.sync" }],
+    finalIoAuditEntries: [
+      { taskId: "p2pkh.transactions-sync", operation: "p2pkh.sync" },
+      { taskId: "p2pkh.utxo-snapshot", operation: "p2pkh.utxo-snapshot" },
+    ],
   },
   {
     unitId: "token-bsv21.coordinator-worker",

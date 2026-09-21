@@ -38,6 +38,7 @@ export type FinalIoAuditOperation =
   | "window-p2p.spike-transfer"
   | "contacts.presence-probe"
   | "p2pkh.sync"
+  | "p2pkh.utxo-snapshot"
   | "token-bsv21.sync"
   | "token-stas.sync"
   | "collectible-1satordinals.sync"

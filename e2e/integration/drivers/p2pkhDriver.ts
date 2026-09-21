@@ -100,21 +100,37 @@ export async function setP2pkhFeeRate(page: Page, tier: P2pkhFeeTier, satsPerKb:
 }
 
 /**
- * 在 testnet 钱包页等待 keymaster 完成一次覆盖 testnet 资源的 confirmed-sync。
+ * 等设置变更触发的 provider-change 同步先跑完，再进入 Testnet 钱包页。
  *
- * “最近完整同步”只在 worker 真的把该网络资源同步成功后才会有时间；
- * 这是比 Offer 余额更早、更直接的同步完成证据，也能把“同步没跑”与
- * “同步跑了但没看到钱”区分开。
+ * 已知竞态：设置变更（开启 testnet / 改费率）会触发同步；如果在这轮同步
+ * 结束前切到 Testnet 钱包页，Coordinator SharedWorker 会在数秒后被回收，
+ * 页面回到锁屏。设置页不展示任务状态，因此这里用固定等待窗口让同步完成。
  */
-export async function waitForTestnetConfirmedSync(page: Page, timeoutMs = 180_000): Promise<void> {
+export async function waitForP2pkhSyncIdle(page: Page, settleMs = 12_000): Promise<void> {
+  await page.waitForTimeout(settleMs);
+}
+
+export async function waitForTestnetUtxoSnapshot(page: Page, minOutputs = 1, timeoutMs = 180_000): Promise<void> {
   await page.getByRole("button", { name: /^On-chain transactions$|^链上交易$/u }).click();
   await page.getByRole("button", { name: /^Testnet$|^测试网$/u }).click();
-  const syncLine = page.getByText(/Last complete sync|最近完整同步/u).first();
-  await expect(syncLine).toBeVisible();
-  await expect.poll(async () => (await syncLine.textContent()) ?? "", {
+  // 只匹配真正的快照行（“UTXO 快照：<time>（N 个输出）”/“UTXO snapshot: ... (N outputs)”）。
+  // “未知（尚未取得 UTXO 快照）”也含 “UTXO 快照”字样，不能当作快照可用。
+  const snapshotLine = page.getByText(/UTXO 快照：|UTXO snapshot:/u);
+  await expect.poll(async () => {
+    try {
+      if (await snapshotLine.count() === 0) return 0;
+      const text = (await snapshotLine.first().textContent()) ?? "";
+      const match = text.match(/（([0-9,]+)\s*个输出）|\(([0-9,]+)\s*outputs?\)/u);
+      const raw = match?.[1] ?? match?.[2];
+      return raw ? Number(raw.replaceAll(",", "")) : 0;
+    } catch {
+      // 页面重渲染/资源暂不可读时继续轮询，不把瞬时失败当成结论。
+      return 0;
+    }
+  }, {
     timeout: timeoutMs,
-    message: "keymaster 必须在开启 testnet 后完成一次覆盖 testnet 的 confirmed-sync",
-  }).toMatch(/\d/u);
+    message: `keymaster 必须在开启 testnet 后刷新出至少 ${minOutputs} 个可花费输出的 UTXO 快照`,
+  }).toBeGreaterThanOrEqual(minOutputs);
 }
 
 /**
@@ -224,7 +240,7 @@ async function prepareAndBroadcast(page: Page, recipientAddress: string, amount:
   const serializedSizeBytes = readSats(await preview.locator("p").filter({ hasText: /序列化大小|Serialized size/u }).first().textContent());
   const changeText = await preview.locator("p").filter({ hasText: /找零输出|Change output/u }).first().textContent() ?? "";
 
-  await page.getByRole("button", { name: /Confirm and broadcast transaction|确认并广播交易/ }).click();
+  await page.getByRole("button", { name: /Broadcast transaction|确认并广播交易/u }).click();
   const resultHeading = page.getByRole("heading", { name: /Broadcast result|广播结果/ });
   await expect(resultHeading).toBeVisible({ timeout: 45_000 });
   await expect(page.getByText("local-confirmed", { exact: true })).toBeVisible();

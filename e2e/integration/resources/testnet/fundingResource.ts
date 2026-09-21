@@ -128,7 +128,13 @@ export interface TestnetChainAdapter {
   /** 适配器内部必须用正式交易构造器和 testnet 广播端点。 */
   fundFromSeed(input: { readonly seedPrivateKeyHex: string; readonly targetAddress: string; readonly satoshis: number; readonly operationId: string }): Promise<BroadcastResult>;
   reconcile(operationId: string): Promise<{ readonly status: "broadcast" | "not-found" | "uncertain"; readonly txid?: string }>;
-  returnFunds(input: { readonly walletPrivateKeyHex: string; readonly targetAddress: string; readonly operationId: string }): Promise<BroadcastResult>;
+  /**
+   * 归集一次性钱包余额。
+   *
+   * `feeRateSatoshisPerKb` 让小额钱包（例如 roundtrip 的 10 sat 资助）也能按
+   * 用户实际使用的低费率归集；缺省保持适配器的高费率预算语义。
+   */
+  returnFunds(input: { readonly walletPrivateKeyHex: string; readonly targetAddress: string; readonly operationId: string; readonly feeRateSatoshisPerKb?: number }): Promise<BroadcastResult>;
   /**
    * 读取 testnet 原始交易并汇总目标地址的输出。页面自己广播的回款没有
    * Resource 私钥可签名，只能按 canonical txid 和原始交易字节对账；
@@ -229,6 +235,18 @@ export class RecoveryLedger {
   async uncertain(): Promise<FundingLedgerRecord[]> {
     return (await this.read()).filter((record) => record.status === "uncertain");
   }
+
+  /**
+   * 把链上从未出现的 uncertain 记录重新标记为 `prepared`，允许重试。
+   *
+   * 只用于“operation journal 里有 canonical txid、但该 txid 从未上链”的情况：
+   * 广播结果未知且资金没有离开 seed 时，blocking 整轮 setup 没有意义。调用
+   * 方必须先通过 adapter.reconcile 确认 not-found；在这里只负责写回。
+   */
+  async markUncertainAsRetryable(record: FundingLedgerRecord): Promise<void> {
+    if (record.status !== "uncertain") throw new Error("testnet retry recovery requires an uncertain record");
+    await this.append({ ...record, status: "prepared", updatedAt: new Date().toISOString() });
+  }
 }
 
 /**
@@ -257,8 +275,25 @@ export class TestnetFundingResource {
     const observation = await this.#chain.inspectAddress(seedAddress);
     if (observation.mainnetBalance !== 0) throw new Error("derived funding identity has unexpected mainnet balance; manual review required");
     if (observation.testnetBalance < minimumReserveSatoshis) throw new Error("testnet funding reserve is below this run budget");
+    // 旧账门禁：uncertain 记录只有在“journal 有 txid 且链上从未出现”时才允许
+    // 自动恢复为可重试；txid 已上链说明资金确实动过，仍需人工按 txid 对账。
     const existing = await this.#ledger.uncertain();
-    if (existing.length > 0) throw new Error("testnet recovery ledger contains unresolved uncertain operations");
+    for (const record of existing) {
+      const operationId = `${record.runId}:${record.scenarioId}:fund`;
+      let onChain = true;
+      try {
+        onChain = (await this.#chain.reconcile(operationId)).status !== "not-found";
+      } catch {
+        // journal 里没有这笔操作（例如账本与 journal 跨轮不一致）：资金没有
+        // 离开 seed，该记录可以安全重试。
+        onChain = false;
+      }
+      if (!onChain) {
+        await this.#ledger.markUncertainAsRetryable(record);
+        continue;
+      }
+      throw new Error("testnet recovery ledger contains unresolved uncertain operations");
+    }
     return { seedAddress, testnetBalance: observation.testnetBalance, spendableUtxoCount: observation.spendableUtxoCount, tipHeight: identity.tipHeight };
   }
 
@@ -310,7 +345,11 @@ export class TestnetFundingResource {
     assertSafeIdentifier(target.scenarioId, "scenario_id");
     if (!Number.isSafeInteger(budget.maxFundingSatoshis) || budget.maxFundingSatoshis <= 0 || !Number.isSafeInteger(budget.maxLossSatoshis) || budget.maxLossSatoshis < 0 || !Number.isSafeInteger(budget.feeReserveSatoshis) || budget.feeReserveSatoshis < 0) throw new Error("testnet funding budget is invalid");
     if (!Number.isSafeInteger(amount) || amount <= 0 || amount > budget.maxFundingSatoshis) throw new Error("testnet funding amount exceeds the declared budget");
-    const operationId = `${target.runId}:${target.scenarioId}:fund`;
+    // 每次尝试都使用唯一的 operationId：复用同一个 id 会让适配器把上一轮
+    // 已经花掉的 journal 交易当成“本轮的充值”，返回一个已无效的 txid，
+    // 测试随后只能对着永远不会到账的余额空等。唯一 id 仍可追溯，且新广播
+    // 会重新选币，绝不会把旧交易当成新结果。
+    const operationId = `${target.runId}:${target.scenarioId}:fund:${Date.now().toString(36)}`;
     const current: FundingLedgerRecord = { runId: target.runId, scenarioId: target.scenarioId, walletAddress: target.address, fundedSatoshis: amount, businessTxids: [], businessSatoshis: 0, maxLossSatoshis: budget.maxLossSatoshis, status: "prepared", updatedAt: new Date().toISOString() };
     await this.#ledger.append(current);
     let result: BroadcastResult;
@@ -388,9 +427,10 @@ export class TestnetFundingResource {
     return returned;
   }
 
-  async returnRemaining(wallet: OneTimeWallet, targetAddress: string): Promise<FundingLedgerRecord> {
+  async returnRemaining(wallet: OneTimeWallet, targetAddress: string, options: { readonly feeRateSatoshisPerKb?: number } = {}): Promise<FundingLedgerRecord> {
     assertSafeIdentifier(wallet.runId, "run_id");
     assertSafeIdentifier(wallet.scenarioId, "scenario_id");
+    if (options.feeRateSatoshisPerKb !== undefined && (!Number.isSafeInteger(options.feeRateSatoshisPerKb) || options.feeRateSatoshisPerKb <= 0)) throw new Error("testnet return fee rate is invalid");
     const records = await this.#ledger.read();
     const current = records.find((record) => record.runId === wallet.runId && record.scenarioId === wallet.scenarioId);
     if (!current || current.walletAddress !== wallet.address || current.status !== "funded") throw new Error("testnet return requires a reconciled funded ledger record");
@@ -398,7 +438,12 @@ export class TestnetFundingResource {
     await this.#ledger.append({ ...current, status: "returning", updatedAt: new Date().toISOString() });
     let result: BroadcastResult;
     try {
-      result = await this.#chain.returnFunds({ walletPrivateKeyHex: wallet.privateKey.read(), targetAddress, operationId });
+      result = await this.#chain.returnFunds({
+        walletPrivateKeyHex: wallet.privateKey.read(),
+        targetAddress,
+        operationId,
+        ...(options.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: options.feeRateSatoshisPerKb }),
+      });
     } catch {
       await this.#ledger.append({ ...current, status: "uncertain", updatedAt: new Date().toISOString() });
       throw new Error("testnet return result is uncertain; manual reconciliation is required");

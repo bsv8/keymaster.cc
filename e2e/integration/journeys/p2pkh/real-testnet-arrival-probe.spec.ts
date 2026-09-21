@@ -98,9 +98,11 @@ test(JOURNEY_ID + "：seed 打 10 sat 到 key01，页面何时观察到余额", 
     await test.step("页面用 key01 导入 Key，确认地址在打款前为 0 余额", async () => {
       const existing = await chain.inspectAddress(wallet!.address);
       expect(existing.mainnetBalance, "可追踪测试 Key 不得在 mainnet 有余额").toBe(0);
+      // 只按“是否还有可花费输出”判空：上一轮支出可能仍在 mempool，
+      // confirmed + unconfirmed 的求和会短暂为负，不能作为判空依据。
       expect(
-        existing.testnetBalance === 0 && existing.spendableUtxoCount === 0,
-        `可追踪 Key 地址 ${wallet!.address} 仍有 testnet 余额（balance=${existing.testnetBalance}，utxos=${existing.spendableUtxoCount}）；请先清空该地址后再跑探针`,
+        existing.spendableUtxoCount === 0,
+        `可追踪 Key 地址 ${wallet!.address} 仍有可花费 testnet 输出（utxos=${existing.spendableUtxoCount}，balance=${existing.testnetBalance}）；请先清空该地址后再跑探针`,
       ).toBe(true);
 
       const ready = await initializeLocalUserWithImportedHexKey(page, {

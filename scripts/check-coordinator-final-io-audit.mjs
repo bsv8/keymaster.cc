@@ -108,6 +108,7 @@ checkFinalIoLeaseCalls();
 const productionTaskAuditEntries = [
   ["contacts.presence-probe", "contacts.presence-probe"],
   ["p2pkh.transactions-sync", "p2pkh.sync"],
+  ["p2pkh.utxo-snapshot", "p2pkh.utxo-snapshot"],
   ["token-bsv21.sync", "token-bsv21.sync"],
   ["token-stas.sync", "token-stas.sync"],
   ["collectible-1satordinals.sync", "collectible-1satordinals.sync"],

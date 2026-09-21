@@ -19,9 +19,13 @@ describe("Coordinator Worker unit catalog", () => {
     expect(getCoordinatorWorkerUnitForTask("p2pkh.transactions-sync")).toMatchObject({
       productId: "p2pkh",
       unitId: "p2pkh.coordinator-worker",
-      finalIoAuditEntries: [{ taskId: "p2pkh.transactions-sync", operation: "p2pkh.sync" }],
+      finalIoAuditEntries: [
+        { taskId: "p2pkh.transactions-sync", operation: "p2pkh.sync" },
+        { taskId: "p2pkh.utxo-snapshot", operation: "p2pkh.utxo-snapshot" },
+      ],
     });
     expect(getCoordinatorWorkerAuditOperationForTask("p2pkh.transactions-sync")).toBe("p2pkh.sync");
+    expect(getCoordinatorWorkerAuditOperationForTask("p2pkh.utxo-snapshot")).toBe("p2pkh.utxo-snapshot");
   });
 
   it("rejects duplicate product, unit and task identities", () => {

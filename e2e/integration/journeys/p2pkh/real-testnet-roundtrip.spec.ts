@@ -9,7 +9,8 @@ import {
   selectTestnetTransferOffer,
   setP2pkhFeeRate,
   submitTestnetSendAll,
-  waitForTestnetConfirmedSync,
+  waitForP2pkhSyncIdle,
+  waitForTestnetUtxoSnapshot,
 } from "../../drivers/p2pkhDriver.js";
 import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
 import { loadE2EConfig, publicConfigFingerprint } from "../../resources/config/loader.js";
@@ -51,15 +52,19 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
  * 投影和 testnet seed 余额/网络/旧账门禁；本浏览器是全新 context，key01 地址
  * 在上一轮必须已清空（有余额直接 fail，不把旧钱混进本轮）。
  * 私钥由页面正式导入入口接收；Node 侧持有同一把测试私钥只为失败回收，断言
- * 页面余额时仍只用 keymaster 自己的 confirmed-sync 结果。
+ * 页面余额时仍只用 keymaster 自己的 UTXO 快照结果。
  *
  * 成功标准：
  * - 页面导入后的 active Key 公钥等于 key01 派生公钥；
- * - 转账 Offer 余额由 keymaster confirmed-sync 显示为 10 sats，而不是 Node 侧查询；
+ * - 转账 Offer 余额由 keymaster 自己的 WoC `unspent/all` 快照显示为 10 sats，
+ *   而不是 Node 侧查询；
  * - 用户以“全部”转回 seed：预览无找零、矿工费从余额扣除、页面返回 local-confirmed；
  * - 转出后页面余额回到 0；
  * - Node 只核对原始交易：它确实消费了资助输出，seed 收到的金额与页面预览一致，
  *   账本闭合为 returned，损失等于页面显示的矿工费。
+ *
+ * Node 侧只等到充值在 mempool 可观察：余额管线已经是 provider 快照，不再
+ * 依赖出块；等待真实确认会把每次运行拖到十几分钟，且不增加覆盖。
  *
  * 外部资源与收尾：seed 侧广播由 Node Resource 完成。页面转账广播前失败时，Node
  * 用同一把 key01 私钥把资金归集回 seed；页面已广播后绝不重复归集，避免双花。
@@ -104,9 +109,12 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
     await test.step("用户用 key01 导入第一把 Key，地址与 Node 可追踪身份一致且上一轮已清空", async () => {
       const existing = await chain.inspectAddress(wallet!.address);
       expect(existing.mainnetBalance, "可追踪测试 Key 不得在 mainnet 有余额").toBe(0);
+      // 只按“是否还有可花费输出”判空：testnet 确认慢，上一轮的支出可能仍在
+      // mempool，此时 confirmed + unconfirmed 的求和会短暂为负，不能作为判空
+      // 依据；只要没有可花费输出，就不会把旧钱混进本轮。
       expect(
-        existing.testnetBalance === 0 && existing.spendableUtxoCount === 0,
-        `可追踪 Key 地址 ${wallet!.address} 仍有 testnet 余额（balance=${existing.testnetBalance}，utxos=${existing.spendableUtxoCount}）；请先导入该 Key 把余额转回 seed 后再跑`,
+        existing.spendableUtxoCount === 0,
+        `可追踪 Key 地址 ${wallet!.address} 仍有可花费 testnet 输出（utxos=${existing.spendableUtxoCount}，balance=${existing.testnetBalance}）；请先导入该 Key 把余额转回 seed 后再跑`,
       ).toBe(true);
 
       const ready = await initializeLocalUserWithImportedHexKey(page, {
@@ -118,26 +126,32 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
       expect(ready.publicKeyHex, "页面导入后的 active Key 必须等于可追踪测试 Key").toBe(wallet!.publicKeyHex);
     });
 
-    await test.step("Resource 从 seed 打 10 sat 到可追踪地址并等待 confirmed", async () => {
-      funded = await funding!.fund(wallet!, FUNDING_SATOSHIS, {
-        maxFundingSatoshis: FUNDING_SATOSHIS,
-        maxLossSatoshis: MAX_LOSS_SATOSHIS,
-        feeReserveSatoshis: ADAPTER_FEE_RESERVE_SATOSHIS,
-      });
-      expect(funded.fundingTxid, "充值记录必须有 canonical funding txid").toMatch(/^[0-9a-f]{64}$/iu);
-      // keymaster confirmed-sync 只摄入已进块交易；这里必须等真实确认，
-      // 不能用“WOC 能查到交易”代替确认。testnet 出块不稳，用较慢轮询减少
-      // 与页面同步共用 WOC 配额时的 429。
-      await chain.waitForConfirmedTransaction(funded.fundingTxid!, { timeoutMs: 900_000, pollMs: 15_000 });
+  await test.step("Resource 从 seed 打 10 sat 到可追踪地址并等待链上可观察", async () => {
+    funded = await funding!.fund(wallet!, FUNDING_SATOSHIS, {
+      maxFundingSatoshis: FUNDING_SATOSHIS,
+      maxLossSatoshis: MAX_LOSS_SATOSHIS,
+      feeReserveSatoshis: ADAPTER_FEE_RESERVE_SATOSHIS,
     });
+    expect(funded.fundingTxid, "充值记录必须有 canonical funding txid").toMatch(/^[0-9a-f]{64}$/iu);
+    // 余额真值是 Coordinator 的 WoC `unspent/all` 快照，它同时返回未确认
+    // 输出；这里只要求链上（mempool 即可）可观察，就能让随后的
+    // provider-change 快照刷新看到这笔钱，不再为等出块浪费十几分钟。
+    const observation = await chain.waitForTransaction(funded.fundingTxid!, { timeoutMs: 180_000, pollMs: 10_000 });
+    expect(observation, "充值交易必须先在链上（mempool 或 confirmed）可观察，才能触发页面同步").toMatch(/^(confirmed|unconfirmed)$/u);
+  });
 
-    await test.step("用户开启 testnet 并调低费率，keymaster 完成一次 testnet confirmed-sync", async () => {
-      await enableTestnetAssets(page);
-      await setP2pkhFeeRate(page, "medium", FEE_RATE_SATOSHIS_PER_KB);
-      // 设置变更会触发 provider-change 即时同步；钱包页的“最近完整同步”
-      // 证明 keymaster 真的跑完了一次覆盖 testnet 资源的确认同步。
-      await waitForTestnetConfirmedSync(page);
-    });
+  await test.step("用户开启 testnet 并调低费率，keymaster 自动刷新出 testnet UTXO 快照", async () => {
+    await enableTestnetAssets(page);
+    await setP2pkhFeeRate(page, "medium", FEE_RATE_SATOSHIS_PER_KB);
+    // 设置变更会触发 provider-change 即时任务（历史同步 + UTXO 快照刷新）。
+    // 已知竞态：若在这轮同步结束前就切到 Testnet 钱包页，Coordinator
+    // SharedWorker 会在数秒后被回收，页面回到锁屏。这里先在设置页等到
+    // 同步任务回到空闲，再进入钱包页观察快照。
+    await waitForP2pkhSyncIdle(page);
+    // 页面上的“UTXO 快照：<time>（N 个输出）”证明 keymaster 真的对 testnet
+    // 资源跑完了一次 `unspent/all` 刷新，钱已经进入可花费集合。
+    await waitForTestnetUtxoSnapshot(page);
+  });
 
     let receipt: Awaited<ReturnType<typeof submitTestnetSendAll>> | undefined;
     await test.step("Keymaster 检测到账后，用户把全部余额转回 seed 地址", async () => {
@@ -173,10 +187,11 @@ test(JOURNEY_ID + "：真实 testnet 收币与全额回款", async ({ page, cont
     journeyError = error;
   } finally {
     // 页面转账广播前失败时，Node 仍持有同一把 key01 私钥，可以把打款归集回
-    // seed；页面已广播后只按链上事实对账，绝不重复归集。
+    // seed；归集使用与本 Journey 相同的 1 sats/kB 费率，10 sat 余额也能归集，
+    // 不会留在固定地址阻塞下一轮。页面已广播后只按链上事实对账，绝不重复归集。
     if (funding && wallet && funded && !fundsReturned && !appReturnSubmitted) {
       try {
-        await funding.returnRemaining(wallet, seedAddress);
+        await funding.returnRemaining(wallet, seedAddress, { feeRateSatoshisPerKb: FEE_RATE_SATOSHIS_PER_KB });
       } catch (error) {
         recoveryError = error;
       }
