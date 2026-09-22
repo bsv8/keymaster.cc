@@ -17,7 +17,6 @@ import type {
   BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
-  BsvNetwork,
   I18nPluginResources,
   KeyspaceService,
   KeyIdentity,
@@ -54,7 +53,7 @@ import {
   P2PKH_ADDRESS_CODEC_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
-import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhLocalInputClaim, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
+import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
 
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
@@ -202,7 +201,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.attempts": "Broadcast attempts",
       "p2pkh.wallet.none": "None",
       "p2pkh.balance.localSpendable": "Local spendable",
-      "p2pkh.balance.pendingClaims": "Pending input claims",
       "p2pkh.balance.confirmed": "Confirmed (spendable)",
       "p2pkh.balance.unconfirmed": "Unconfirmed (spendable)",
       "p2pkh.balance.unknown": "Unknown (UTXO snapshot not available yet)",
@@ -286,9 +284,9 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.result.title": "Broadcast result",
       "p2pkh.transfer.result.status": "Status: ",
       "p2pkh.transfer.result.txid": "txid: ",
-      "p2pkh.transfer.result.rejected": "Broadcast was rejected by the network. No local input claim was written.",
-      "p2pkh.transfer.result.unknown": "Broadcast result is unknown. The inputs have been claimed locally.",
-      "p2pkh.transfer.result.broadcast": "The final preview transaction was broadcast and claimed locally.",
+      "p2pkh.transfer.result.rejected": "Broadcast was rejected by the network. No local audit row was kept.",
+      "p2pkh.transfer.result.unknown": "Broadcast result is unknown. Check the local audit row before retrying.",
+      "p2pkh.transfer.result.broadcast": "The final preview transaction was broadcast and recorded locally.",
       "p2pkh.transfer.result.confirmClose": "Confirm and close",
       "p2pkh.transfer.result.again": "Start over",
       "p2pkh.transfer.noActiveKeyWarning": "No active key available. Repair the failed / uninitialized keys in Key management first.",
@@ -465,7 +463,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.attempts": "广播尝试",
       "p2pkh.wallet.none": "无",
       "p2pkh.balance.localSpendable": "本地可花",
-      "p2pkh.balance.pendingClaims": "待确认输入占用",
       "p2pkh.balance.confirmed": "已确认（可花费）",
       "p2pkh.balance.unconfirmed": "未确认（可花费）",
       "p2pkh.balance.unknown": "未知（尚未取得 UTXO 快照）",
@@ -549,9 +546,9 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.result.title": "广播结果",
       "p2pkh.transfer.result.status": "状态：",
       "p2pkh.transfer.result.txid": "txid：",
-      "p2pkh.transfer.result.rejected": "广播被网络拒绝，未写入本地输入占用。",
-      "p2pkh.transfer.result.unknown": "广播结果未知，已为本次输入写入本地输入占用。",
-      "p2pkh.transfer.result.broadcast": "已广播最终预览交易，并写入本地输入占用。",
+      "p2pkh.transfer.result.rejected": "广播被网络拒绝，未保留本地审计记录。",
+      "p2pkh.transfer.result.unknown": "广播结果未知，请先查看本地审计记录再重试。",
+      "p2pkh.transfer.result.broadcast": "已广播最终预览交易，并写入本地审计记录。",
       "p2pkh.transfer.result.confirmClose": "确认并关闭",
       "p2pkh.transfer.result.again": "再来一次",
       "p2pkh.transfer.noActiveKeyWarning": "当前没有可用的 active key。请先到 Key 管理处理失败 / 未初始化的 key 后再转账。",
@@ -629,7 +626,7 @@ const p2pkhPluginDefinition = {
         { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
         { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
         { capability: WOC_CAPABILITY, reason: "读取历史与详情；广播只能走中心服务" },
-        { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "排除协议受保护 outpoint" },
+        { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "协议资产自己的受保护输入机制；普通 P2PKH 不读取" },
         { capability: ASSET_REGISTRY_CAPABILITY, reason: "注册 P2PKH AssetProvider" },
         { capability: TRANSFER_REGISTRY_CAPABILITY, reason: "注册 P2PKH TransferProvider" },
         { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 P2PKH 页面" },
@@ -687,7 +684,6 @@ const p2pkhPluginDefinition = {
       storage,
       woc,
       centralBroadcastService,
-      protectedOutpoints,
       assetDataNotifier
     });
     ctx.provide(P2PKH_CAPABILITY, service);
@@ -808,11 +804,9 @@ const p2pkhPluginDefinition = {
       resources: P2pkhKeyResource[];
       history: P2pkhHistoryRecord[];
       locals: P2pkhLocalTransaction[];
-      claims: P2pkhLocalInputClaim[];
       utxos: P2pkhUtxo[];
       utxosAvailable: boolean;
       utxosSyncedAt?: string;
-      protectedOutpoints: Array<{ txid: string; vout: number; network: BsvNetwork }>;
       sync: P2pkhTransactionSyncState[];
       syncStatus: P2pkhSyncStatus;
       /** 最近一次完整同步成功时间（来自 Coordinator 任务快照，跨进程可见）。 */
@@ -820,24 +814,22 @@ const p2pkhPluginDefinition = {
       syncError?: string;
       historyCursors: Record<string, string | undefined>;
       localCursors: Record<string, string | undefined>;
-      claimCursors: Record<string, string | undefined>;
     };
-    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [], sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {}, claimCursors: {} });
+    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], utxos: [], utxosAvailable: false, sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {} });
     const loadWalletResource = async (context: { activePublicKeyHex?: string }): Promise<P2pkhWalletResource> => {
       if (!context.activePublicKeyHex) return emptyWallet();
       const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
       const resourcesForKey = await service.listResources();
       const resourceIds = resourcesForKey.map((resource) => resource.resourceId);
       // 钱包首屏只取有界一页；cursor 是不透明 last-key，翻页不用重读全部历史。
-      const walletLimits = { history: 200, locals: 500, claims: 500 };
+      const walletLimits = { history: 200, locals: 500 };
       const readPagePerResource = async <T>(reader: (resourceId: string) => Promise<{ items: T[]; nextCursor?: string }>): Promise<{ items: T[]; cursors: Record<string, string | undefined> }> => {
         const values = await Promise.all(resourceIds.map(async (resourceId) => [resourceId, await reader(resourceId)] as const));
         return { items: values.flatMap(([, page]) => page.items), cursors: Object.fromEntries(values.map(([resourceId, page]) => [resourceId, page.nextCursor])) };
       };
-      const [historyPage, localsPage, claimsPage, sync, utxoStatuses] = await Promise.all([
+      const [historyPage, localsPage, sync, utxoStatuses] = await Promise.all([
         service.listHistoryPage ? readPagePerResource((resourceId) => service.listHistoryPage!({ resourceId, limit: walletLimits.history })) : Promise.resolve({ items: [] as P2pkhHistoryRecord[], cursors: {} }),
         service.listLocalTransactionsPage ? readPagePerResource((resourceId) => service.listLocalTransactionsPage!({ resourceId, limit: walletLimits.locals })) : Promise.resolve({ items: [] as P2pkhLocalTransaction[], cursors: {} }),
-        service.listLocalInputClaimsPage ? readPagePerResource((resourceId) => service.listLocalInputClaimsPage!({ resourceId, limit: walletLimits.claims })) : Promise.resolve({ items: [] as P2pkhLocalInputClaim[], cursors: {} }),
         stateRepository.listTransactionSyncStates(),
         // 每个资源单独取内存快照状态；合并时只要有一个启用网络没有可信快照，
         // 整体标记为不可用（余额未知），绝不显示 0。
@@ -858,18 +850,15 @@ const p2pkhPluginDefinition = {
         resources: resourcesForKey,
         history: historyPage.items,
         locals: localsPage.items,
-        claims: claimsPage.items,
         utxos: utxoStatus.utxos,
         utxosAvailable: utxoStatus.available,
         ...(utxoStatus.syncedAt === undefined ? {} : { utxosSyncedAt: utxoStatus.syncedAt }),
-        protectedOutpoints: protectedOutpoints.list({ publicKeyHex: context.activePublicKeyHex }),
         sync,
         syncStatus,
         ...(task?.lastCompletedAt === undefined ? {} : { lastSyncedAt: task.lastCompletedAt }),
         ...(syncError === undefined ? {} : { syncError }),
         historyCursors: historyPage.cursors,
         localCursors: localsPage.cursors,
-        claimCursors: claimsPage.cursors,
       };
     };
     resources.register<P2pkhWalletResource, readonly string[]>({
@@ -888,35 +877,12 @@ const p2pkhPluginDefinition = {
       subscribe: (_args, _ctx, invalidate) => { const off = service.onDataChanged(invalidate); return () => off(); },
       invalidation: "microtask"
     });
-    resources.register<{ utxos: P2pkhUtxo[]; claims: P2pkhLocalInputClaim[]; available: boolean; syncedAt?: string }, readonly string[]>({
+    resources.register<{ utxos: P2pkhUtxo[]; available: boolean; syncedAt?: string }, readonly string[]>({
       id: "p2pkh.coins",
       scope: "active-key",
       key: (_args, context) => ["p2pkh.coins", context.activePublicKeyHex ?? "none"],
-      load: async (_args, context) => { const wallet = await loadWalletResource(context); return { utxos: wallet.utxos, claims: wallet.claims, available: wallet.utxosAvailable, ...(wallet.utxosSyncedAt === undefined ? {} : { syncedAt: wallet.utxosSyncedAt }) }; },
+      load: async (_args, context) => { const wallet = await loadWalletResource(context); return { utxos: wallet.utxos, available: wallet.utxosAvailable, ...(wallet.utxosSyncedAt === undefined ? {} : { syncedAt: wallet.utxosSyncedAt }) }; },
       subscribe: (_args, _ctx, invalidate) => { const off = service.onDataChanged(invalidate); return () => off(); },
-      invalidation: "microtask"
-    });
-
-    resources.register<{ outpoints: Array<{ txid: string; vout: number; network: BsvNetwork; ownerPluginId: string; reason?: string; kind?: string; publicKeyHex?: string }> }, readonly string[]>({
-      id: "p2pkh.protected-outpoints",
-      scope: "active-key",
-      key: (args, context) => ["p2pkh.protected-outpoints", context.activePublicKeyHex ?? "none", args[0] ?? "all"],
-      load: async (args, context) => {
-        if (!context.activePublicKeyHex) {
-          return { outpoints: [] };
-        }
-        const network = args[0] === "bsv" || args[0] === "bsvtest" ? (args[0] === "bsv" ? "main" : "test") : undefined;
-        const outpoints = protectedOutpoints.list({
-          publicKeyHex: context.activePublicKeyHex,
-          ...(network ? { network } : {})
-        });
-        return { outpoints };
-      },
-      subscribe: (_args, _ctx, invalidate) => {
-        const off = protectedOutpoints.onChange(invalidate);
-        const offKey = keyspace.onActiveKeyChanged(invalidate);
-        return () => { off(); offKey(); };
-      },
       invalidation: "microtask"
     });
     resources.register<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, readonly string[]>({

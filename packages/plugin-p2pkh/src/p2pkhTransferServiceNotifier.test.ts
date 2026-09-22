@@ -20,7 +20,7 @@ function makeRepository() {
   return {
     resource, utxo, claims, locals,
     async getResource(id: string) { return id === resource.resourceId ? resource : undefined; },
-    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims: P2pkhLocalInputClaim[] }) { locals.set(input.submission.id, input.submission); for (const claim of input.claims) claims.set(claim.id, claim); },
+    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims?: P2pkhLocalInputClaim[] }) { locals.set(input.submission.id, input.submission); for (const claim of input.claims ?? []) claims.set(claim.id, claim); },
     async abortUnattemptedLocalSubmission(input: { submissionId: string }) { locals.delete(input.submissionId); for (const [id, claim] of [...claims]) if (claim.submissionId === input.submissionId) claims.delete(id); },
   };
 }
@@ -51,11 +51,11 @@ describe("p2pkh transfer data notifications", () => {
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ providerId: "p2pkh", publicKeyHex: OWNER.publicKeyHex }));
   });
 
-  it("emits after isolation and keeps the claim for reconciliation", async () => {
+  it("emits after isolation without creating a local input claim", async () => {
     const { service, stateRepository, emit } = createFixture("isolated");
     const preview = await service.prepare({ ownerPublicKeyHex: OWNER.publicKeyHex, assetId: "bsv", recipientAddress: RECIPIENT.address, amountSatoshis: 1_000, feeRateSatoshisPerKb: 1 });
     expect((await service.submit(preview)).status).toBe("isolated");
-    expect([...stateRepository.claims.values()][0]?.state).toBe("active");
+    expect(stateRepository.claims.size).toBe(0);
     expect(emit).toHaveBeenCalled();
   });
 });

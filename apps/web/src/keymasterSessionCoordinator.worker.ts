@@ -6570,7 +6570,7 @@ async function abortNotDispatchedP2pkhSubmission(
     if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
     const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
     await repository.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason });
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim", "balance"] });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "balance"] });
   } catch {
     // Cleanup is best-effort here. The response is still explicitly marked
     // not-dispatched, while a later reconciliation can safely inspect the row.
@@ -11813,7 +11813,7 @@ async function handleP2pkhBroadcastUnsafe(
         reason: message,
         attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated", providerMessage: message },
       });
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim", "balance"] });
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
       return {
         requestId,
         sessionEpoch: coordinatorState.sessionEpoch,
@@ -11832,12 +11832,12 @@ async function handleP2pkhBroadcastUnsafe(
     }
     const finishedAt = new Date().toISOString();
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "local-confirmed", attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
-    // 广播后立即触发一次后台刷新；刷新失败不能释放输入 claim（claim
-    // 只在历史/快照确认后才由同步路径清理）。
+    // 广播后立即触发一次后台刷新；普通 P2PKH 不维护本地输入占用，
+    // 下一组可花 UTXO 由 WoC 快照内容变化和新 seq 决定。
     void refreshP2pkhUtxoSnapshots().then((utxoSeqs) => {
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim", "balance"], ...(Object.keys(utxoSeqs).length === 0 ? {} : { utxoSeqs }) });
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "balance"], ...(Object.keys(utxoSeqs).length === 0 ? {} : { utxoSeqs }) });
     }).catch(() => {
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim", "balance"] });
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
     });
     return {
       requestId,
@@ -11871,7 +11871,7 @@ async function handleP2pkhBroadcastUnsafe(
       return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "coordinator-not-dispatched" } };
     }
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "isolated", reason: message, attempt });
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim", "balance"] });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid: local.txid, reason: message, providerId: provider.descriptor.id } };
   }
 }

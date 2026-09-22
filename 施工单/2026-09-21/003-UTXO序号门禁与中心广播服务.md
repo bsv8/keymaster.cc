@@ -13,7 +13,8 @@
 
 1. **快速连打会撞同一组 UTXO**：A、B 两个程序在很短时间内各自 `prepare`，拿到的是
    同一份 UTXO 快照；A 先广播成功，B 仍按旧快照组合，广播时输入已被花掉 → 第二笔失败。
-   现有防线只有本地 input claim（同一进程内、提交时才写），挡不住两次 prepare 之间的空窗。
+   prepare 阶段没有统一的整组快照门禁，提交时只校验交易输入，无法阻止两笔旧 preview
+   在同一组 UTXO 上竞争。
 2. **广播出口分散，可被绕过**：目前有三条路能广播：
    - 普通转账 → Worker `p2pkh.broadcast`（半中心，但入口暴露给插件）；
    - 协议花费（BSV-21 / STAS / 1Sat 等代币的 gas）→ `p2pkhProtocolSpend` 直接调用
@@ -65,15 +66,16 @@
 - [ ] 广播前发出的在途刷新，返回后不得覆盖/解封消费状态（消费使在途刷新作废）。
 - [ ] 广播结果未知（`isolated`）时不得自动重试、不得用超时 TTL 解封。
 - [ ] 广播被判定为"确定未派发"（provider 不存在、payload 非法、会话失效、门禁拒绝）→ 不消费，序号保持可用。
-- [ ] 本地 input claim 保留为第二道防线（持久化），覆盖"新快照内容已变但被花输入仍未消失"的窗口。
+- [x] 普通 P2PKH 不再使用本地 input claim 或 protected outpoint；整组快照 `seq` 是唯一并发门禁。
+      协议资产自己的 claim/protected 记录只在协议资产路径内使用。
 
 ### 3.3 重试红线与预算
 
 - [ ] 只有**确定未派发**的失败允许自动重试；`isolated`（可能已广播）必须立即停止。
 - [ ] 重试预算（已定）：最多 5 次（含第一次）、总时长不超过 2 分钟；退避
       `1s → 2s → 4s（上限 5s）+ 抖动`，收到新序号事件可提前唤醒。
-- [ ] 每次重试都是完整重来：重新刷新、新序号、重新选币、重新签名、新 `submissionId`、新 claims。
-- [ ] 重试前必须确认上一次尝试的本地 submission/claims 已释放，否则不得进入下一轮。
+- [ ] 每次重试都是完整重来：重新刷新、新序号、重新选币、重新签名、新 `submissionId`。
+- [ ] 重试前必须确认上一次尝试的本地 submission 审计记录已按结果正确收口，否则不得进入下一轮。
 - [ ] 终态停止条件：余额不够 / 无可用 UTXO / 地址金额非法 / 钱包锁定 / owner 变更 /
       用户取消 / 超出重试预算。
 - [ ] `sendAll`（全部）不自动重试：金额会随余额变化，必须让用户重新确认（`requires-reconfirm`）。
@@ -341,7 +343,7 @@ CONSUMED ──交易同步判定链上没有这笔（超时后）──▶ FRES
 apps（页面 / 代币插件 / 三方）
   └─ 只调业务 API：transfer.prepare/submit、protocolSpend.prepare/submit（签名不变）
 业务服务（p2pkhTransferService / p2pkhProtocolSpendService）
-  └─ 向中心广播服务提供"一次完整尝试"（内含重新选币、签名、写 claims）
+  └─ 向中心广播服务提供"一次完整尝试"（内含重新选币、签名、写本地审计记录）
 中心广播服务（唯一广播能力，能力 id tx.broadcast）
   ├─ 页面实例（plugin-p2pkh window unit）：订阅 asset.data-changed.utxoSeqs 唤醒
   └─ Worker 实例（SatSubscription）：订阅 Worker 本地序号通知唤醒
@@ -373,12 +375,14 @@ loop:
 
 - **首次尝试提交用户已确认的 preview 本身，不重新组合**（preview 是最终承诺对象）；只有可重试失败后的
   下一轮才按原始输入重新读快照、重新选币、重新签名。
-- 每次尝试由业务闭包负责：写 claims / 本地 submission；被判定未派发时由闭包自己回滚（释放 claims、
-  abort submission），中心服务只做调度与判定。
+- `prepare` 阶段只做一次快照刷新：若状态为 `consumed` 或刷新暂不可用，立即返回带“正在同步、可重试”语义的错误，
+  不在 prepare 内启动 120 秒 / 2 秒间隔轮询。只有 `submit` 已经进入中心广播重试后，才等待 `fresh` 新序号再重建交易。
+- 每次尝试由业务闭包负责：写本地 submission 审计记录；被判定未派发时由闭包自己删除未尝试记录，
+  中心服务只做调度与判定。
 - 收到事件但序号未变大 → 忽略，继续等；事件缺失时按退避主动 `p2pkhUtxosRefresh` 探测。
-- 已消费资源的 `refresh` 返回 `state=consumed`，中心服务将其视为"继续等待"，不是错误。
-- 业务重建时快照仍不可用（consumed / 刷新失败）→ 抛类型化可重试错误，中心服务**不消耗尝试次数**，
-  等 fresh 快照后继续。
+- 已消费资源的 `refresh` 返回 `state=consumed`，中心服务只在 `submit` 重试流程中将其视为“继续等待”，不是余额不足。
+- `submit` 重建时快照仍不可用（consumed / 刷新失败）→ 抛类型化可重试错误，中心服务**不消耗尝试次数**，
+  等 fresh 快照后继续；独立调用 `prepare` 不等待，直接把同步中状态交给页面。
 
 ### 6.3 结果分类
 
@@ -468,9 +472,9 @@ loop:
 | T09 | 提交 `binding.seq` 小于当前 | 拒绝 `snapshot-stale`，带 `currentSeq`，不广播 |
 | T10 | 花了钱包 P2PKH 但未带 binding | 拒绝 `snapshot-binding-required` |
 | T11 | 纯代币 UTXO 交易不带序号 | 放行（不触发 P2PKH 门禁） |
-| T12 | 广播前失败（provider 缺失 / payload 非法） | 不消费，序号仍 fresh，claims 已回滚 |
-| T13 | A/B 连打，余额足够 | 都在预算内成功；A/B 的 attempts 均为 1（B 无需重试）或 B 重试后成功 |
-| T14 | A/B 连打，余额只够一笔 | A 成功；B 重试后 `insufficient` 终态并停止 |
+| T12 | 广播前失败（provider 缺失 / payload 非法） | 不消费，序号仍 fresh，未尝试的本地审计行已删除 |
+| T13 | A/B 连打，余额足够 | 首笔消费整组快照；后续笔必须等新 seq，再重新选币并成功 |
+| T14 | A/B 连打，余额只够一笔 | 首笔成功；后续笔等新 seq 后以 `insufficient` 终态停止 |
 | T15 | 某次尝试返回 isolated | 立即停止，provider 只被调用一次，reason=`isolated` |
 | T16 | 重试预算 | 最多 5 次 / 2 分钟；超时原因 `snapshot-timeout`，不是 `insufficient` |
 | T17 | `sendAll` 遇 stale | 不自动重试，`requires-reconfirm` |
@@ -506,13 +510,13 @@ pnpm build
   并发消费、绑定校验、输入失效、回滚消费、丢弃解封、观察失败不解封）。
 - `centralBroadcastService.test.ts`：T13～T17（新序号才重试、isolated 立即停止、预算耗尽、
   同序号解封重试、可重试错误不消耗次数、取消等待）。
-- `p2pkhTransferService.test.ts`：sendAll 可重试失败后不再重建（`requires-reconfirm`）+ 旧路径兼容。
+- `p2pkhTransferService.test.ts`：sendAll 可重试失败后不再重建（`requires-reconfirm`），并验证普通转账不写 input claim。
 - `p2pkhProtocolSpend.test.ts`：T24（门禁拒绝立即释放 protected/本地 claims 并按 rejected 收口）。
 - `broadcast.test.ts`（新增）：HTTP 4xx / 超时 / 网络一律按“结果未知”，只有结构化标记或
   节点明确拒绝交易本体才允许回滚。
 - `sessionCoordinatorRuntime.test.ts`：T18（`asset.data-changed.utxoSeqs` 解析与非法值拒绝）。
 - `keymasterSessionCoordinator.worker.test.ts`：T26（Worker 内 SatSubscription 连打自动重试）
-  以及既有门禁用例（provider 缺失 not-dispatched、provider 失败 isolated、claims 保留、payload 校验）。
+  以及既有门禁用例（provider 缺失 not-dispatched、provider 失败 isolated、payload 校验）。
 - 仍缺自动化：T20 广播出口 grep 门禁（靠 `lint:boundaries` + 人工 grep）、T21 代币 gas 的
   Worker 级集成用例（机制由快照 store 单测 + T26 门禁消费覆盖）、T22 的 API 兼容属类型层、
   T23 锁仓中断 Worker 重试的时序；`keymasterHostAdapter` 的 `utxoSeqs` 合并无单测。

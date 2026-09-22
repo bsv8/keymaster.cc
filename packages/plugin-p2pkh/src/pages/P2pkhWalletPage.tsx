@@ -3,7 +3,7 @@ import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPr
 import { useOptionalCapability } from "webloom-framework/react";
 import { router, useBsvPrice, useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot } from "@keymaster/contracts";
-import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhUtxo } from "../p2pkhContracts.js";
+import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhUtxo } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { detailPath, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
 
@@ -13,18 +13,15 @@ export type WalletSnapshot = {
   resources: P2pkhKeyResource[];
   history: P2pkhHistoryRecord[];
   locals: P2pkhLocalTransaction[];
-  claims: P2pkhLocalInputClaim[];
   utxos: P2pkhUtxo[];
   utxosAvailable: boolean;
   utxosSyncedAt?: string;
-  protectedOutpoints: Array<{ txid: string; vout: number; network: "main" | "test" }>;
   sync: P2pkhTransactionSyncState[];
   syncStatus: P2pkhSyncStatus;
   lastSyncedAt?: string;
   syncError?: string;
   historyCursors: Record<string, string | undefined>;
   localCursors: Record<string, string | undefined>;
-  claimCursors: Record<string, string | undefined>;
 };
 
 export interface P2pkhTransactionListRow {
@@ -43,8 +40,8 @@ function amountLabel(value: number | undefined): string {
 }
 
 const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
-  resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [],
-  sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {}, claimCursors: {}
+  resources: [], history: [], locals: [], utxos: [], utxosAvailable: false,
+  sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {}
 };
 
 const EMPTY_BALANCE_SNAPSHOT = emptyGlobalBalanceSnapshot();
@@ -93,7 +90,6 @@ function P2pkhWalletPageInner({
           ...snapshot.data,
           historyCursors: snapshot.data.historyCursors ?? {},
           localCursors: snapshot.data.localCursors ?? {},
-          claimCursors: snapshot.data.claimCursors ?? {},
           error: snapshot.error?.message
         }
       : { ...EMPTY_WALLET_SNAPSHOT, error: snapshot.error?.message },
@@ -133,8 +129,9 @@ function P2pkhWalletPageInner({
     router.push(listPath(network, next, view));
   };
   const networkEnabled = network === "main" || settings.includeTestnet;
-  // 钱包余额唯一读取来源是全局广播；钱包资源不再携带第二份余额真值。
-  const balance = networkEnabled ? balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]] : undefined;
+  // 钱包余额唯一读取来源是全局广播；页面不再维护第二份余额状态。
+  const resourceBalance = networkEnabled ? balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]] : undefined;
+  const balance = resourceBalance;
   const balanceKnown = Boolean(balance && balance.available !== false);
   const sync = wallet.sync.find((row) => row.resourceId === `p2pkh:${network}`);
   const selectedResources = useMemo(() => networkEnabled ? wallet.resources.filter((resource) => resource.network === network) : [], [wallet.resources, network, networkEnabled]);
@@ -181,7 +178,9 @@ function P2pkhWalletPageInner({
     setRefreshing(true);
     setActionError(null);
     try {
-      await service.refreshUtxos?.({ ownerPublicKeyHex: selectedResources[0]?.publicKeyHex });
+      // service 的无 network 兼容入口默认刷新 mainnet；钱包页必须把当前
+      // 路由网络明确传下去，否则 testnet 页的按钮只会刷新另一张快照。
+      await service.refreshUtxos?.({ ownerPublicKeyHex: selectedResources[0]?.publicKeyHex, resourceId: `p2pkh:${network}` });
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -304,6 +303,5 @@ function BalanceBreakdown({ breakdown }: { breakdown?: P2pkhBalanceBreakdown }) 
     <dt>{t("p2pkh.balance.confirmed", { defaultValue: "已确认" })}</dt><dd>{formatSats(breakdown.confirmed)}</dd>
     <dt>{t("p2pkh.balance.unconfirmed", { defaultValue: "未确认" })}</dt><dd>{formatSats(breakdown.unconfirmed)}</dd>
     <dt>{t("p2pkh.balance.localSpendable", { defaultValue: "可花费" })}</dt><dd>{formatSats(breakdown.spendable)}</dd>
-    <dt>{t("p2pkh.balance.pendingClaims", { defaultValue: "待确认输入占用" })}</dt><dd>{formatSats(breakdown.pendingInputClaims)}</dd>
   </dl>;
 }

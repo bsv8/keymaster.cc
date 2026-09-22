@@ -3,7 +3,7 @@
 // 真值边界：
 //   - 链上历史元数据（txid/height/fee）= `p2pkh/<net>/history.json`；
 //   - UTXO = 只存在于 Coordinator Worker 内存快照（本仓储不保存、不派生）；
-//   - 资源表、本地提交、输入占用、协议提交、同步状态 = 仅内存；
+//   - 资源表、本地提交、协议提交、历史/协议兼容 claim、同步状态 = 仅内存；
 //   - 不再有 raw tx 文件、高度文件、owned outpoint 投影或交易 DAG。
 
 import type { BorrowedOwnerFileStore, BsvNetwork } from "@keymaster/contracts";
@@ -21,7 +21,7 @@ import type { P2pkhHistoryEntryV1 } from "./p2pkhFileFormats.js";
 
 const openHandles = new Set<P2pkhStateRepositoryBundle>();
 /**
- * 同一 owner 文件句柄必须共享同一份内存本地态（资源表/本地提交/占用/游标）；
+ * 同一 owner 文件句柄必须共享同一份内存本地态（资源表/本地提交/协议兼容 claim/游标）；
  * 否则 service 与 Coordinator task 各自 open 会得到互不可见的空状态。
  */
 const bundlesByFiles = new WeakMap<object, P2pkhStateRepositoryBundle>();
@@ -252,15 +252,18 @@ export function createP2pkhStateRepository(handle: P2pkhStateRepositoryBundle) {
     },
 
     /**
-     * 原子写入本地提交 + 输入占用。冲突时整个操作失败（并发防重的事务层保险）。
-     * 不再写本地输出 overlay：广播产生的找零只有 WoC 返回后才可花费。
+     * 写入本地提交审计记录。
+     *
+     * 普通 P2PKH 转账不再传入 claims；并发唯一由 Coordinator 的 UTXO 快照
+     * seq 门禁负责。`claims` 仅作为旧数据/协议兼容入口保留，不能作为普通
+     * P2PKH 选币或余额计算的依据。
      */
-    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims: P2pkhLocalInputClaim[] }): Promise<void> {
+    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims?: readonly P2pkhLocalInputClaim[] }): Promise<void> {
       const now = new Date().toISOString();
       // 原子性：先完整预检全部输入，全部通过后才统一写入 claim 和 submission。
       // 第二个输入冲突时不能留下第一个已写入的 claim。
       const prepared: Array<{ id: string; claim: P2pkhLocalInputClaim }> = [];
-      for (const claim of input.claims) {
+      for (const claim of input.claims ?? []) {
         const id = claim.id || claimId(claim.resourceId, claim.txid, claim.vout);
         const existing = localClaims.get(id);
         if (existing && existing.submissionId !== claim.submissionId && !["released", "confirmed"].includes(existing.state)) {

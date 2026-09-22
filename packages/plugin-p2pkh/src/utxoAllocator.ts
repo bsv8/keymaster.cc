@@ -1,7 +1,7 @@
 // packages/plugin-p2pkh/src/utxoAllocator.ts
 // UTXO 选择（硬切换 001）：
-//   - 输入集合 = 当前 WOC 未花费 UTXO - 本地输入占用；service 已
-//     在传入前完成输入占用过滤。
+//   - 输入集合 = 当前 WoC P2PKH 快照中未被内存池花费的 UTXO；service 已
+//     在传入前完成 isSpentInMempoolTx 过滤，整组并发由快照 seq 门禁负责。
 //   - 不再区分 confirmed / unconfirmed：所有未 claimed 的候选都可参与。
 //   - 失败原因收敛为 no-utxos / insufficient / policy-denied。
 // 设计缘由：让 transfer 页面只看到错误，不自己重新计算。

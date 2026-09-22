@@ -282,18 +282,16 @@ describe("createP2pkhProtocolSpendService", () => {
     const claims = await stateRepository.listLocalInputClaimsByResource(resourceIdFor("main"));
     const protocolClaim = claims.find((row) => row.txid === txid);
     expect(protocolClaim?.value).toBe(inputValue);
-    // 协议 prepare 后余额必须立即扣除 claim 金额（spendable 归零）。
+    // 协议 claim 只服务于协议资产自身；普通 P2PKH 余额仍完全以 WoC 快照为准。
     const breakdown = calculateP2pkhBalanceBreakdown({
       snapshot: {
         available: true,
         state: "fresh",
         syncedAt: "t",
         items: [{ txid, vout: 0, value: inputValue, height: 1, status: "confirmed", isSpentInMempoolTx: false }]
-      },
-      claims
+      }
     });
-    expect(breakdown.pendingInputClaims).toBe(inputValue);
-    expect(breakdown.spendable).toBe(0);
+    expect(breakdown.spendable).toBe(inputValue);
   });
 
   it("rejects protocol spend when transfer has already claimed the same outpoint, and vice versa", async () => {

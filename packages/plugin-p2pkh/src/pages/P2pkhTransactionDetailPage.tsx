@@ -9,8 +9,8 @@ import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 function emptyWallet(): WalletSnapshot {
   return {
-    resources: [], history: [], locals: [], claims: [], utxos: [], utxosAvailable: false, protectedOutpoints: [], sync: [], syncStatus: "idle",
-    historyCursors: {}, localCursors: {}, claimCursors: {}
+    resources: [], history: [], locals: [], utxos: [], utxosAvailable: false, sync: [], syncStatus: "idle",
+    historyCursors: {}, localCursors: {}
   };
 }
 
@@ -68,7 +68,6 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
           ...snapshot.data,
           historyCursors: snapshot.data.historyCursors ?? {},
           localCursors: snapshot.data.localCursors ?? {},
-          claimCursors: snapshot.data.claimCursors ?? {},
           error: snapshot.error?.message,
           loaded: true
         }

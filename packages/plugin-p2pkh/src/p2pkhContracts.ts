@@ -1,7 +1,7 @@
 // packages/plugin-p2pkh/src/p2pkhContracts.ts
 // P2PKH 专属类型与 P2pkhService 契约。
 // 设计缘由：硬切换后这些类型默认只在 plugin-p2pkh 内部使用，不进入全局 contracts。
-// 包含 confirmed facts/projections、本地提交和本地输入占用。
+// 包含 confirmed facts/projections、本地提交和协议资产兼容 claim。
 //
 // 硬切换 002 收尾（key 域彻底收尾）：
 //   - P2PKH 资源 / UTXO / history / submission / claim / transfer input /
@@ -282,9 +282,7 @@ export interface UtxoAllocationError {
 export type P2pkhSyncStatus = "idle" | "syncing" | "ok" | "failed" | "rate-limited" | "blocked";
 
 /** Pending transfer。 */
-/** 本地输入占用。
- *
- */
+/** 历史/协议兼容的本地输入 claim；普通 P2PKH 转账不创建、不读取。 */
 export type P2pkhLocalInputClaimState = P2pkhLocalInputClaimV10State;
 
 export interface P2pkhLocalInputClaim {
@@ -457,7 +455,7 @@ export interface P2pkhService {
    * `bsv` 恒为 true；`bsvtest` 取决于 includeTestnet 开关。
    */
   isAssetEnabled(assetId: P2pkhAssetId): boolean;
-  /** 不排除 protected outpoint 的原始 UTXO 读口，仅供协议级内部使用。 */
+  /** 与 listUtxos 相同的兼容读口；普通 P2PKH 不使用 protected outpoint 过滤。 */
   listUtxosRaw?(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
   /**
    * UTXO 快照状态读口：`available=false` 表示尚未取得可信快照（余额未知）。
@@ -465,14 +463,11 @@ export interface P2pkhService {
    */
   getUtxosStatus?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; state: "fresh" | "consumed" | "unavailable"; seq?: number; syncedAt?: string; utxos: P2pkhUtxo[] }>;  /** 主动刷新 Coordinator Worker 内存中的 UTXO 快照；失败时保留旧快照。 */
   refreshUtxos?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; state: "fresh" | "consumed" | "unavailable"; seq?: number; syncedAt?: string }>;
-  listLocalInputClaims(resourceId?: string, limit?: number): Promise<P2pkhLocalInputClaim[]>;
-
   /** 链上历史（只有 txid/height/fee 元数据，不做任何派生）。 */
   listHistory?(filter?: P2pkhUtxoFilter): Promise<P2pkhHistoryRecord[]>;
   listHistoryPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhHistoryRecord>>;
   listLocalTransactions?(filter?: P2pkhUtxoFilter): Promise<P2pkhLocalTransaction[]>;
   listLocalTransactionsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalTransaction>>;
-  listLocalInputClaimsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalInputClaim>>;
   getBalanceBreakdown?(network?: BsvNetwork): Promise<P2pkhBalanceBreakdown>;
   /**
    * 详情页懒加载：按 txid 从 WoC 取 raw transaction 并临时解析。

@@ -30,6 +30,8 @@ UTXO：WoC `unspent/all`（每个 owner + network + address 一次请求）
   保留旧快照，绝不把余额写成 0。
 - 成功返回空 `result` 才表示余额为 0；冷启动尚未取得快照时余额是“未知/不可用”。
 - `isSpentInMempoolTx=true` 的输出不进入可花费部分，也不参与选币。
+- 按当前 WoC 业务边界，`unspent/all` 返回普通 P2PKH 输出；1Sat Ordinals、BSV-21
+  等定制资产由各自的资产插件管理，不在普通 P2PKH 选币集合中。
 - 未知 `status`、非法 txid/vout/value、同一 outpoint 内容冲突使整次快照失败。
 - 锁定钱包、切换 Owner、销毁会话时清除对应内存快照。
 - 每个快照返回 `seq`（序号）和 `state`（状态）：`fresh=可用`、`consumed=已消费等待同步`、
@@ -70,18 +72,23 @@ P2PKH 的链上数据分成两个独立任务，互不阻塞：
 
 - 准备交易前刷新一次 `unspent/all`；提交前再次刷新，并确认 preview 中的全部输入
   仍然存在且数值未变。
-- 可花集合固定为：`WoC unspent/all − isSpentInMempoolTx − 本地 input claims − 协议保护 outpoints`。
-- 同一进程内保留原子 input claim，防止两个并发提交选择同一个 UTXO。
+- 普通 P2PKH 可花集合固定为：`WoC unspent/all − isSpentInMempoolTx=true`。
+  普通 P2PKH 不读取本地 input claim，也不读取协议资产的 protected outpoint。
+- `utxoBinding` 保存本次选币快照的 `resourceId`（资源 ID）和 `seq`（快照序号）；
+  `seq` 是整组 UTXO 的唯一并发门禁，不是单个 outpoint 的锁。
 - 本地广播产生的找零不再主动加入可花集合；只有 WoC 返回该找零后才能再次消费。
-- 广播后立即触发一次后台刷新；刷新失败不释放输入 claim。
+- 广播后立即触发一次后台刷新；刷新失败只保留旧快照，不伪造余额，也不写入本地输入占用。
 - 重启后没有本地 UTXO 缓存，必须重新请求 WoC 后才能转账。
-- Worker 广播前在同一个同步门禁块中完成：核对快照状态、序号、输入归属和 mempool 标记，
-  然后消费快照；同一序号的并发提交只能有一个通过。
+- Worker 广播前在同一个同步门禁块中完成：核对快照状态、`seq`、输入归属和 mempool 标记，
+  然后消费整组快照；同一序号的并发提交只能有一个通过，即使两笔选择了不同 UTXO。
 - 如果交易带 `utxoBinding` 但没有任何输入命中当前钱包快照，门禁返回
   `snapshot-input-invalid`；只有不带绑定的纯协议输入才允许走 `untouched`。
   这样既阻止过期绑定绕过门禁，也保留代币输入 + 钱包 gas 输入的混合交易。
 - 门禁确定未派发时，中心服务最多自动重试 5 次、总时长 2 分钟；后续每轮都重新刷新、选币、
-  签名、写 claims 和生成 `submissionId`。结果未知 `isolated` 时立即停止，提示“上一笔交易状态未确认”。
+  签名并生成新的 `submissionId`。结果未知 `isolated` 时立即停止，提示“上一笔交易状态未确认”。
+- `prepareTransfer` 每次只主动刷新一次快照；如果快照处于 `consumed` 或尚不可用，立即返回“正在同步、可稍后重试”，
+  不在准备阶段自行轮询 120 秒或每 2 秒重复刷新。只有已经进入 `submitTransfer` 的中心重试流程，
+  才会等待 `fresh` 新序号后重新选币、签名和提交。
 - `sendAll` 遇快照变化不自动重试，必须让用户重新确认金额。
 - 普通转账第一次提交仍使用用户已确认的 preview；只有门禁拒绝后的下一轮才重新选币、签名。
 - SatSubscription 在 SharedWorker 内复用同一个中心广播服务模块（Worker 实例），同样获得
@@ -152,7 +159,7 @@ P2PKH 设置 `includeTestnet=false`（默认）时：
 ## 本地交易
 
 广播明确返回 accepted 或 already-known 后进入 `local-confirmed`（本地确认）。超时、拒绝或
-网络异常进入 `isolated`（隔离），不能自动释放输入。历史记录只通过“相同 txid”把本地提交
+网络异常进入 `isolated`（隔离），本地只保留审计记录，不形成输入占用。历史记录只通过“相同 txid”把本地提交
 标记为 `chain-confirmed`，不再根据输入关系派生 `conflicted`、后代失效或本地交易 DAG。
 
 快照刷新成功会通过 `asset.data-changed.utxoSeqs` 通知各网络的新序号（`main=主网`、`test=测试网`），
@@ -172,8 +179,9 @@ P2PKH 设置 `includeTestnet=false`（默认）时：
 
 ## 安全边界
 
-- 选币同时考虑快照可花输出、输入 claim 和受保护 outpoint。
-- 广播结果未知时不自动重试，也不使用单纯的超时 TTL 解锁输入；只能等待 WoC 观察、内容变化
+- 选币只考虑当前快照中未被 `isSpentInMempoolTx=true` 标记的 P2PKH 输出。
+- 普通 P2PKH 不使用 input claim 或 protected outpoint；协议资产的保护由协议资产自身负责。
+- 广播结果未知时不自动重发原交易，也不使用单纯的超时 TTL 解锁 seq；只能等待 WoC 观察、内容变化
   刷新，或超过 10 分钟后确认该交易已被丢弃。
 - `WocService` 对插件只提供余额、历史、UTXO 和交易观察等只读接口；广播统一经过中心广播服务。
 - 所有写入绑定 Owner、网络和会话 epoch。
@@ -184,5 +192,6 @@ P2PKH 设置 `includeTestnet=false`（默认）时：
 普通 P2PKH 页面转账使用页面侧中心广播服务；Worker 内的 SatSubscription 复用**同模块的中心
 广播实例**（不新增 capability、不跨 realm），同样自动重试，并订阅 Worker 本地序号通知唤醒。
 `broadcastWithCoordinator` 仅保留为 Worker 内部兼容/测试回退路径。协议资产（BSV-21 / STAS /
-1Sat）的 gas 花费已纳入同一快照序号门禁与中心出口，其自动重试属于后续版本范围。所有路径在
-结果未知时都保留本地占用，不使用超时直接解封。
+1Sat）的 gas 花费已纳入同一快照序号门禁与中心出口，其自动重试属于后续版本范围。普通 P2PKH
+结果未知时保留本地审计行；协议资产的 claim/protected 记录仍只服务协议资产，不作为普通 P2PKH 的
+余额或选币过滤条件。

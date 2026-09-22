@@ -2,7 +2,7 @@
 // UTXO 分配逻辑单测（硬切换 001）：
 //   - 不允许金额为 0/负数。
 //   - allocator 不再区分 confirmed / unconfirmed；所有未 reserved 候选都可参与。
-//   - 本地输入占用排除由 service 层在传入前完成；allocator 只看候选集合。
+//   - 内存池已花费输出与并发 seq 门禁由 service/Worker 处理；allocator 只看候选集合。
 
 import { describe, expect, it } from "vitest";
 import { allocateUtxos } from "./utxoAllocator.js";

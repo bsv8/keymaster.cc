@@ -2,16 +2,17 @@ import { expect, test } from "@playwright/test";
 import {
   dismissTestnetTransferResult,
   enableTestnetAssets,
-  expectTestnetOfferBalance,
+  expectAmountBalanceReference,
+  expectTestnetWalletBalance,
   expectTransferFeeTierRate,
   openTransferPage,
   refreshTestnetUtxoSnapshot,
-  selectTestnetTransferOffer,
   setP2pkhFeeRate,
   submitTestnetSendAll,
   waitForP2pkhSyncIdle,
   waitForTestnetUtxoSnapshot,
 } from "../../drivers/p2pkhDriver.js";
+import { enterManualRecipient, selectRecipientTab } from "../../drivers/transferRecipientDriver.js";
 import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
 import { loadE2EConfig, publicConfigFingerprint } from "../../resources/config/loader.js";
 import { TestnetFundingResource, type OneTimeWallet } from "../../resources/testnet/fundingResource.js";
@@ -163,20 +164,24 @@ test(JOURNEY_ID + "：真实 testnet 收币、到账观察与全额回款", asyn
       // 页面上的“UTXO 快照：<time>（N 个输出）”证明 keymaster 真的对 testnet
       // 资源跑完了一次 `unspent/all` 刷新，钱已经进入可花费集合。
       await waitForTestnetUtxoSnapshot(page);
+      await expectTestnetWalletBalance(page, FUNDING_SATOSHIS);
     });
 
     let receipt: Awaited<ReturnType<typeof submitTestnetSendAll>> | undefined;
     await test.step("Keymaster 检测到账后，用户把全部余额转回 seed 地址", async () => {
       await openTransferPage(page);
-      await expectTestnetOfferBalance(page, FUNDING_SATOSHIS);
+      await selectRecipientTab(page, "manual");
+      await enterManualRecipient(page, seedAddress);
+      await expectAmountBalanceReference(page, { network: "test", satoshis: FUNDING_SATOSHIS });
+      await expectTransferFeeTierRate(page, "medium", FEE_RATE_SATOSHIS_PER_KB);
       timing.pageObservedAt = new Date().toISOString();
       timing.pageObservedMs = Date.now() - Date.parse(String(timing.broadcastAt));
-      await selectTestnetTransferOffer(page);
-      await expectTransferFeeTierRate(page, "medium", FEE_RATE_SATOSHIS_PER_KB);
 
       // 页面即将广播：此后 Node 不再尝试归集，避免与页面交易双花。
-      appReturnSubmitted = true;
-      receipt = await submitTestnetSendAll(page, { recipientAddress: seedAddress });
+      receipt = await submitTestnetSendAll(page, {
+        recipientAddress: seedAddress,
+        onBroadcastAttempt: () => { appReturnSubmitted = true; },
+      });
       expect(receipt.amountSatoshis + receipt.feeSatoshis, "“全部”转出的收款输出与矿工费必须等于到账的 50 sat").toBe(FUNDING_SATOSHIS);
       expect(receipt.amountSatoshis, "收款输出必须为正整数").toBeLessThan(FUNDING_SATOSHIS);
     });
@@ -186,8 +191,7 @@ test(JOURNEY_ID + "：真实 testnet 收币、到账观察与全额回款", asyn
       // 自动快照可能比 WoC 内存池更新早一步；用页面自己的「刷新 UTXO」
       // 推一轮，再断言 keymaster 快照不再包含资助输出。
       await refreshTestnetUtxoSnapshot(page, 0);
-      await openTransferPage(page);
-      await expectTestnetOfferBalance(page, 0, 60_000);
+      await expectTestnetWalletBalance(page, 0, 60_000);
 
       const observation = await activeChain.waitForTransaction(receipt!.txid, { timeoutMs: 180_000, pollMs: 10_000 });
       expect(observation, "页面 local-confirmed 后，链上至少应观察到 confirmed 或 unconfirmed").toMatch(/^(confirmed|unconfirmed)$/u);

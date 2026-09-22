@@ -13,7 +13,7 @@ const CHANGE_ADDRESS = "1dice8EMZmqKvrGE4Qc9bUFf9PX3xaYDp";
 const mocks = vi.hoisted(() => ({
   service: {
     prepareTransfer: vi.fn(),
-    submitTransfer: vi.fn()
+    submitTransfer: vi.fn(),
   },
   serviceAvailable: true,
   balanceSnapshot: {
@@ -178,7 +178,7 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
     expect(screen.queryByText("可用余额：0 sats（主网）")).toBeNull();
   });
 
-  it("T15：余额刷新只更新参考文案，不覆盖用户已输入金额", () => {
+  it("T15：余额快照变化只更新参考文案，不覆盖用户已输入金额", () => {
     const view = render(<P2pkhTransferWidget offer={OFFER} recipientAddress={RECIPIENT_ADDRESS} recipientPublicKeyHex={RECIPIENT_PUBLIC_KEY} onCompleted={vi.fn()} />);
     const amount = screen.getByRole("textbox", { name: /金额/u }) as HTMLInputElement;
     fireEvent.change(amount, { target: { value: "777" } });

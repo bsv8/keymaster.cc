@@ -29,14 +29,24 @@ function base58(bytes: Uint8Array): string {
   return result || "1";
 }
 
-/** 从公钥推导 testnet P2PKH 地址；只接收公开公钥，不接收私钥。 */
-export function deriveTestnetP2pkhAddress(publicKeyHex: string): string {
-  if (!/^0[23][0-9a-f]{64}$/iu.test(publicKeyHex)) throw new Error("testnet public key is invalid");
+/** 从公钥推导 P2PKH 地址；只接收公开公钥，不接收私钥。 */
+function deriveP2pkhAddress(publicKeyHex: string, versionByte: number): string {
+  if (!/^0[23][0-9a-f]{64}$/iu.test(publicKeyHex)) throw new Error("P2PKH public key is invalid");
   const publicKey = Buffer.from(publicKeyHex, "hex");
   const hash160 = ripemd160(sha256(publicKey));
-  const payload = Buffer.concat([Buffer.from([0x6f]), hash160]);
+  const payload = Buffer.concat([Buffer.from([versionByte]), hash160]);
   const checksum = sha256(sha256(payload)).subarray(0, 4);
   return base58(Buffer.concat([payload, checksum]));
+}
+
+/** 从公钥推导 testnet P2PKH 地址；只接收公开公钥，不接收私钥。 */
+export function deriveTestnetP2pkhAddress(publicKeyHex: string): string {
+  return deriveP2pkhAddress(publicKeyHex, 0x6f);
+}
+
+/** 从公钥推导 mainnet P2PKH 地址；只用于 Node 侧 e2e 期望值计算。 */
+export function deriveMainnetP2pkhAddress(publicKeyHex: string): string {
+  return deriveP2pkhAddress(publicKeyHex, 0x00);
 }
 
 /** 从私钥只在 Node Resource 内派生公开 testnet 地址；调用者不得把私钥放入状态文件。 */
@@ -153,7 +163,14 @@ export class TestnetFundingResource {
     this.#chain = chain;
   }
 
-  async prepare(minimumReserveSatoshis: number): Promise<{ readonly seedAddress: string; readonly testnetBalance: number; readonly spendableUtxoCount: number; readonly tipHeight: number }> {
+  async prepare(minimumReserveSatoshis: number): Promise<{
+    readonly seedAddress: string;
+    /** seed 压缩公钥的公开投影；不向调用者返回 seed 私钥。 */
+    readonly seedPublicKeyHex: string;
+    readonly testnetBalance: number;
+    readonly spendableUtxoCount: number;
+    readonly tipHeight: number;
+  }> {
     if (!Number.isSafeInteger(minimumReserveSatoshis) || minimumReserveSatoshis < 0) throw new Error("testnet minimum reserve is invalid");
     const privateKeyHex = this.#seed.read();
     assertScalar(privateKeyHex);
@@ -164,7 +181,7 @@ export class TestnetFundingResource {
     const observation = await this.#chain.inspectAddress(seedAddress);
     if (observation.mainnetBalance !== 0) throw new Error("derived funding identity has unexpected mainnet balance; manual review required");
     if (observation.testnetBalance < minimumReserveSatoshis) throw new Error("testnet funding reserve is below this run budget");
-    return { seedAddress, testnetBalance: observation.testnetBalance, spendableUtxoCount: observation.spendableUtxoCount, tipHeight: identity.tipHeight };
+    return { seedAddress, seedPublicKeyHex: publicKeyHex, testnetBalance: observation.testnetBalance, spendableUtxoCount: observation.spendableUtxoCount, tipHeight: identity.tipHeight };
   }
 
   /**

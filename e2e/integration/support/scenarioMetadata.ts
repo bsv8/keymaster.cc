@@ -159,6 +159,25 @@ export const REAL_TESTNET_ROUNDTRIP_SCENARIO = {
   resourceProfile: "testnet",
 } as const satisfies IntegrationScenarioMetadata;
 
+/**
+ * 真实 testnet 通讯录收款方 + 多笔转账 Journey；覆盖 001/002/003 的页面与链上衔接。
+ * 字段说明：联系人身份使用 publicKeyHex，余额使用 sats，广播状态使用页面结果卡。
+ */
+export const REAL_TESTNET_CONTACT_TRANSFER_SCENARIO = {
+  id: "J-REAL-TESTNET-CONTACT-TRANSFER",
+  level: "p2pkh",
+  requirementIds: ["KM-ASSET-001", "KM-CONTACT-001", "KM-BALANCE-001", "KM-BROADCAST-001"],
+  startingState: "真实 testnet 资源已完成预算与网络门禁；全新 Chromium context 导入固定 key01，key01 地址无可花费输出；seed 的压缩公钥作为公开联系人投影提供给页面。",
+  successCriteria: [
+    "R1–R10 覆盖通讯录、公钥、命中联系人地址、陌生地址、网络锁定、关闭 testnet、冲突和非法 P2PKH 地址；Widget 收款地址全程只读。",
+    "B1–B5 证明金额旁余额参考来自页面余额广播，跨 tab 刷新不覆盖金额输入，testnet 开关和资产总览同步。",
+    "T1–T5 在真实 testnet 完成 4 笔固定金额和 1 笔全部发送；每笔结果是 local-confirmed，Node 按 fundingTxid/前一笔找零输入与目标输出对账。",
+    "T2 不等待上一笔页面同步即继续，由中心服务按 UTXO 序号门禁重建；T4.5 超额金额不进入广播，T5 sendAll 遇 requires-reconfirm 最多重新确认一次。",
+    "任意页面广播进入后不再自动归集；isolated 立即停止并保留现场；正常完成后 key01 归零且总手续费不超过 10 sats。",
+  ],
+  resourceProfile: "testnet",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 真实资源层的 SatSubscription 配置投影 Journey；不把投影冒充成页面连接或收费业务。 */
 export const REAL_SATSUBSCRIPTION_HEALTH_SCENARIO = {
   id: "J-REAL-SATSUB-HEALTH",

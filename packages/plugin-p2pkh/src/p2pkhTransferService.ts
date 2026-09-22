@@ -3,19 +3,18 @@
 //   - prepareTransfer 生成最终已签名交易快照。
 //   - submitTransfer 先提交该快照；命中序号门禁且确定未派发时，中心服务
 //     才会等待新快照并完整重选输入、重签名、重新提交。
-//   - 预览阶段不写本地提交 / 本地输入占用；只有进入应用内广播流程后才写。
+//   - 预览阶段不写本地提交；只有进入应用内广播流程后才写审计记录。
 // 设计缘由：preview 必须是最终承诺对象，否则用户看到的内容和实际广播的交易
 // 可能不是同一笔，后续无法安全复制 rawTxHex 进行外部广播。
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { AssetDataNotifier, CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
+import type { AssetDataNotifier, CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, VaultService } from "@keymaster/contracts";
 import { CentralBroadcastRetryableError } from "./centralBroadcastService.js";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
   P2pkhKeyResource,
-  P2pkhLocalInputClaim,
   P2pkhLocalTransaction,
   P2pkhTransferInput,
   P2pkhTransferPreview,
@@ -25,7 +24,7 @@ import type {
 } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
-import { localInputClaimIdFor, type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
+import { type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import {
   buildP2pkhTx,
   calcTxidFromRawTxHex,
@@ -44,7 +43,7 @@ export interface P2pkhTransferServiceDeps {
   /**
    * 硬切换 002 收尾 + 多 owner 支持：按 `publicKeyHex` 返回该 owner
    * 的 P2PKH namespace K-V。transfer 内部所有读 K-V 的入口（prepare
-   * 选币 / submit 取 resource / claim / submission 写入）都传
+   * 选币 / submit 取 resource / submission 写入）都传
    * `input.ownerPublicKeyHex` 或 `preview.ownerPublicKeyHex`——
    * 严格按调用方指定的 owner 走 namespace，不再从 active key 推导。
    */
@@ -54,7 +53,7 @@ export interface P2pkhTransferServiceDeps {
    *   1. 刷新一次 WoC `unspent/all` 内存快照（失败则整次加载失败，
    *      不允许用已知过期的快照签署交易）；
    *   2. 从快照扣除 `isSpentInMempoolTx=true`；
-   *   3. 扣除本地 active/isolated input claims 与协议保护 outpoints。
+   *   3. 只排除 isSpentInMempoolTx=true 的输出；并发由 UTXO 快照 seq 统一门禁。
    */
   loadSpendableUtxos: (input: {
     ownerPublicKeyHex: string;
@@ -74,8 +73,6 @@ export interface P2pkhTransferServiceDeps {
    * 广播前必须由 Worker 自己先做 write-ahead 审计记录。
    */
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
-  /** Ordinary funding must never consume protocol-protected outpoints. */
-  protectedOutpoints?: ProtectedOutpointRegistry;
   /**
    * 当前 active key。p2pkhService.rebindActiveKey 内部用 requireReadyKey
    * 收窄；这里直接拿到的就是 ReadyKeyIdentity（publicKeyHex 必填）。
@@ -267,10 +264,11 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         validateFinalTransferPreview(currentPreview, { candidates, expectedChangeAddress });
         const submissionId = crypto.randomUUID();
         const now = new Date().toISOString();
-        const localInputClaimIds = currentPreview.allocation.selected.map((input) => localInputClaimIdFor(resource.resourceId, input.txid, input.vout));
+        const localInputClaimIds: string[] = [];
         const localSubmission: P2pkhLocalTransaction = { id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: currentPreview.txid, rawTxHex: currentPreview.rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: currentPreview.allocation.selected.map((input) => `${input.txid}:${input.vout}`), ownOutputs: currentPreview.outputs.flatMap((output, vout) => output.address === currentPreview.changeAddress ? [{ vout, value: output.value, scriptHex: p2pkhAddressToScriptHex(output.address, network) }] : []), createdAt: now, updatedAt: now, attempts: [] };
-        const claims: P2pkhLocalInputClaim[] = currentPreview.allocation.selected.map((input) => ({ id: localInputClaimIdFor(resource.resourceId, input.txid, input.vout), submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: input.txid, vout: input.vout, outpointKey: `${input.txid}:${input.vout}`, value: input.value, state: "active", createdAt: now, updatedAt: now }));
-        await stateRepository.prepareLocalSubmission({ submission: localSubmission, claims });
+        // 本地交易只保留审计记录，不再把输入写入 LocalInputClaim。
+        // 同一组 UTXO 的并发控制由 Coordinator Worker 的 seq 门禁负责。
+        await stateRepository.prepareLocalSubmission({ submission: localSubmission });
         try {
           let result: CoordinatorP2pkhBroadcastResult;
           if (submitOnce) {
@@ -287,7 +285,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason: result.reason });
             return { submissionId, result, localInputClaimIds: [], preview: currentPreview };
           }
-          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim", "balance"] });
+          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "balance"] });
           return { submissionId, result, localInputClaimIds, preview: currentPreview };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

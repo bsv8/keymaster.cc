@@ -18,8 +18,8 @@ import type { P2pkhProtocolSubmission } from "./p2pkhContracts.js";
 import { calcTxidFromRawTxHex, rawTxHexByteLength, signP2pkhTx, type UnsignedTx } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
 
-// value 必须随 claim 一起写入：余额计算按 claim.value 扣除 pendingInputClaims，
-// 否则协议已排除的 UTXO 仍会留在 spendable 里造成高估。
+// value 必须随协议 claim 一起写入，供协议资产自身的审计与恢复使用；
+// 普通 P2PKH 余额不读取这些 claim，避免把协议资产保护混入 P2PKH 选币。
 type P2pkhInputOutpoint = Pick<ProtocolSpendInput, "txid" | "vout" | "value">;
 
 export interface P2pkhProtocolSpendClaimStore {

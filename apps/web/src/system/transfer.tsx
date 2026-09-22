@@ -33,6 +33,8 @@ interface TransferNetworkSettings {
 interface RecipientCandidate {
   /** 输入形态：公钥或地址。 */
   kind: "public-key" | "address";
+  /** 公钥候选的输入来源；手工粘贴即使命中联系人，也仍保留手工来源。 */
+  publicKeySource?: "contact" | "manual";
   /** 可选的收款人公钥；地址未命中联系人时没有该字段。 */
   publicKeyHex?: string;
   /** 地址所属网络。 */
@@ -115,9 +117,11 @@ function makePublicCandidate(
   publicKeyHex: string,
   network: BsvNetwork,
   contacts: Contact[],
-  codec: P2pkhAddressCodec | undefined
+  codec: P2pkhAddressCodec | undefined,
+  publicKeySource?: "contact" | "manual"
 ): RecipientCandidate {
   const contact = contactByPublicKey(contacts, publicKeyHex);
+  const resolvedSource = publicKeySource ?? (contact ? "contact" : "manual");
   let address: string | undefined;
   if (codec) {
     try {
@@ -128,15 +132,16 @@ function makePublicCandidate(
   }
   return {
     kind: "public-key",
+    publicKeySource: resolvedSource,
     publicKeyHex,
     network,
     address,
     contactName: contact?.name,
     recipient: address
       ? {
-          identity: {
+        identity: {
             publicKeyHex,
-            source: contact ? "contact" : "manual"
+            source: resolvedSource
           },
           network,
           address,
@@ -299,7 +304,7 @@ export function TransferPage() {
     if (!value) return { searching: false };
     const publicKeyHex = normalizePublicKey(value);
     if (publicKeyHex) {
-      return { candidate: makePublicCandidate(publicKeyHex, includeTestnet ? publicNetwork : "main", contacts, codec), searching: false };
+      return { candidate: makePublicCandidate(publicKeyHex, includeTestnet ? publicNetwork : "main", contacts, codec, "manual"), searching: false };
     }
     if (codec) {
       const parsedAddress = codec.parseAddress(value);
@@ -375,7 +380,7 @@ export function TransferPage() {
         ? t("transfer.page.recipient.source.resolved", { defaultValue: "地址命中联系人" })
         : t("transfer.page.recipient.source.manualAddress", { defaultValue: "手工地址" });
     }
-    return candidateValue.contactName
+    return candidateValue.publicKeySource === "contact"
       ? t("transfer.page.recipient.source.contact", { defaultValue: "联系人公钥派生" })
       : t("transfer.page.recipient.source.manualPublicKey", { defaultValue: "手工公钥" });
   }

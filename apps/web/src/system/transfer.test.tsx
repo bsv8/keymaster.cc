@@ -280,4 +280,13 @@ describe("TransferPage 收款方与 P2PKH 范围", () => {
     expect(screen.getByTestId("recipient-source").textContent).toBe("手工公钥");
     expect(screen.getByTestId("provider-step").textContent).toContain(OTHER_MAIN_ADDRESS);
   });
+
+  it("手工输入已存在于通讯录的公钥仍标记为手工公钥", () => {
+    mocks.contacts.push({ publicKeyHex: OWNER, name: "Alice", tags: [], createdAt: "", updatedAt: "" });
+    render(<TransferPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "手工输入" }));
+    fireEvent.change(screen.getByPlaceholderText("粘贴公钥、地址，或搜索联系人"), { target: { value: OWNER } });
+
+    expect(screen.getByTestId("recipient-source").textContent).toBe("手工公钥");
+  });
 });

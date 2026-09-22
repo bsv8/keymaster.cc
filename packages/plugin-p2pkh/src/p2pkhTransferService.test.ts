@@ -38,13 +38,13 @@ function makeRepository(resource: P2pkhKeyResource) {
   return {
     claims, locals,
     async getResource(id: string) { return id === resource.resourceId ? resource : undefined; },
-    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims: P2pkhLocalInputClaim[] }) {
-      for (const claim of input.claims) {
+    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims?: P2pkhLocalInputClaim[] }) {
+      for (const claim of input.claims ?? []) {
         const existing = claims.get(claim.id);
         if (existing && existing.submissionId !== claim.submissionId && !["released", "confirmed"].includes(existing.state)) throw new Error("P2PKH input already claimed");
       }
       locals.set(input.submission.id, { ...input.submission, localState: "submitting", chainResolution: "unresolved" });
-      for (const claim of input.claims) claims.set(claim.id, { ...claim, state: "active" });
+      for (const claim of input.claims ?? []) claims.set(claim.id, { ...claim, state: "active" });
     },
     async abortUnattemptedLocalSubmission(input: { submissionId: string }) {
       const row = locals.get(input.submissionId);
@@ -104,12 +104,12 @@ describe("ordinary P2PKH Coordinator transfer", () => {
     const preview = await prepare(service);
     const result = await service.submit(preview);
     expect(result.status).toBe("local-confirmed");
-    expect(result.localInputClaimIds).toHaveLength(1);
+    expect(result.localInputClaimIds).toEqual([]);
     // 提交前再次刷新快照并校验输入仍然可花。
     expect(loadSpendableUtxos).toHaveBeenCalledTimes(2);
     expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({ ownerPublicKeyHex: OWNER.publicKeyHex, network: "main" }));
     expect([...stateRepository.locals.values()][0]?.localState).toBe("submitting");
-    expect([...stateRepository.claims.values()][0]?.state).toBe("active");
+    expect(stateRepository.claims.size).toBe(0);
   });
 
   it("does not rebuild sendAll after a retryable failure (requires reconfirmation)", async () => {
@@ -131,18 +131,18 @@ describe("ordinary P2PKH Coordinator transfer", () => {
     const result = await service.submit(preview);
     expect(result.status).toBe("not-dispatched");
     expect(result.reason).toBe("requires-reconfirm");
-    // 第一次尝试未派发后 claims 已回滚；第二轮不得重建（金额会变）也不得广播。
+    // 第一次尝试未派发后本地审计已回滚；第二轮不得重建（金额会变）也不得广播。
     expect(stateRepository.locals.size).toBe(0);
     expect(stateRepository.claims.size).toBe(0);
     expect(broadcast).not.toHaveBeenCalled();
   });
 
-  it("isolates provider failure and keeps the input claim for reconciliation", async () => {
+  it("isolates provider failure without creating a local input claim", async () => {
     const { service, stateRepository } = makeService("isolated");
     const result = await service.submit(await prepare(service));
     expect(result.status).toBe("isolated");
     expect([...stateRepository.locals.values()][0]?.localState).toBe("submitting");
-    expect([...stateRepository.claims.values()][0]?.state).toBe("active");
+    expect(stateRepository.claims.size).toBe(0);
   });
 
   it("does not write a terminal state when the Coordinator RPC response is lost", async () => {
@@ -152,7 +152,7 @@ describe("ordinary P2PKH Coordinator transfer", () => {
     expect(result.error).toBe("Coordinator port closed");
     expect([...stateRepository.locals.values()][0]?.localState).toBe("submitting");
     expect([...stateRepository.locals.values()][0]?.isolationReason).toBeUndefined();
-    expect([...stateRepository.claims.values()][0]?.state).toBe("active");
+    expect(stateRepository.claims.size).toBe(0);
   });
 
   it("revokes a submission when the Coordinator explicitly reports no dispatch", async () => {
@@ -170,7 +170,7 @@ describe("ordinary P2PKH Coordinator transfer", () => {
     await expect(prepare(service)).rejects.toThrow(/no-utxos|insufficient|Available inputs/i);
   });
 
-  it("revalidates the preview inputs against the refreshed snapshot before writing claims", async () => {
+  it("revalidates the preview inputs against the refreshed snapshot before writing the audit row", async () => {
     const { service, stateRepository, broadcast } = makeService();
     const preview = await prepare(service);
     const tampered = {

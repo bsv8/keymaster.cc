@@ -11,9 +11,11 @@ import { expect, type Page } from "@playwright/test";
 export async function navigateToBusinessPage(
   page: Page,
   input: { readonly label: RegExp; readonly path: RegExp },
+  options: { readonly timeoutMs?: number } = {},
 ): Promise<void> {
   const navigation = page.getByRole("navigation", { name: /Primary navigation|主导航/ });
-  await expect(navigation).toBeVisible();
-  await navigation.getByRole("button", { name: input.label }).click();
-  await expect(page).toHaveURL(input.path);
+  const timeout = options.timeoutMs ?? 30_000;
+  await expect(navigation).toBeVisible({ timeout });
+  await navigation.getByRole("button", { name: input.label }).click({ timeout });
+  await expect(page).toHaveURL(input.path, { timeout });
 }

@@ -9,7 +9,7 @@
 //     本地不再保存或派生任何 UTXO。
 //   - 历史 = WoC history 元数据（txid/height/fee）；raw tx 只在详情页
 //     懒加载并临时解析。
-//   - 转账 prepare/submit 前各刷新一次快照，并保留原子 input claim。
+//   - 转账 prepare/submit 前各刷新一次快照；并发门禁只使用快照 seq。
 //   - key.deleting / vault.locked 时释放 owner K-V 句柄。
 
 import type {
@@ -18,7 +18,6 @@ import type {
   CentralBroadcastService,
   CoordinatorValueResult,
   GlobalBalanceSnapshot,
-  ProtectedOutpointRegistry,
   KeyspaceService,
   BorrowedOwnerFileStore,
   VaultService,
@@ -35,7 +34,6 @@ import type {
   P2pkhBalanceBreakdown,
   P2pkhGlobalSettings,
   P2pkhKeyResource,
-  P2pkhLocalInputClaim,
   P2pkhService as IP2pkhService,
   P2pkhSyncStatus,
   P2pkhTransactionDetail,
@@ -65,7 +63,6 @@ const EMPTY_BALANCE_BREAKDOWN: P2pkhBalanceBreakdown = {
   confirmed: 0,
   unconfirmed: 0,
   spendable: 0,
-  pendingInputClaims: 0,
 };
 
 function unknownP2pkhBalance(): P2pkhBalance {
@@ -139,40 +136,24 @@ function snapshotItemToUtxo(input: {
 }
 
 /**
- * 余额明细：只由 UTXO 快照 + 本地 input claims 现算。
+ * 余额明细：只由 UTXO 快照现算。
  *
  * 快照不可用时返回 `available: false`，调用方必须显示“未知/不可用”，
  * 不得把 total 当 0。
  */
 export function calculateP2pkhBalanceBreakdown(input: {
   snapshot: P2pkhUtxoSnapshotResult;
-  claims: P2pkhLocalInputClaim[];
-  protectedOutpoints?: ReadonlySet<string>;
 }): P2pkhBalanceBreakdown {
   if (!input.snapshot.available) {
-    return { confirmed: 0, unconfirmed: 0, spendable: 0, pendingInputClaims: 0 };
+    return { confirmed: 0, unconfirmed: 0, spendable: 0 };
   }
   const spendableItems = input.snapshot.items.filter((item) => !item.isSpentInMempoolTx);
   const confirmed = spendableItems.filter((item) => item.status === "confirmed").reduce((sum, item) => sum + item.value, 0);
   const unconfirmed = spendableItems.filter((item) => item.status === "unconfirmed").reduce((sum, item) => sum + item.value, 0);
-  const seenClaims = new Set<string>();
-  let pendingInputClaims = 0;
-  for (const claim of input.claims) {
-    if (claim.state !== "active" && claim.state !== "isolated") continue;
-    const key = `${claim.txid}:${claim.vout}`;
-    if (seenClaims.has(key)) continue;
-    seenClaims.add(key);
-    pendingInputClaims += claim.value ?? 0;
-  }
-  const protectedOutpoints = input.protectedOutpoints ?? new Set<string>();
-  const protectedValue = spendableItems
-    .filter((item) => protectedOutpoints.has(`${item.txid}:${item.vout}`))
-    .reduce((sum, item) => sum + item.value, 0);
   return {
     confirmed,
     unconfirmed,
-    spendable: Math.max(0, confirmed + unconfirmed - pendingInputClaims - protectedValue),
-    pendingInputClaims,
+    spendable: confirmed + unconfirmed,
   };
 }
 
@@ -189,7 +170,6 @@ export interface P2pkhServiceDeps {
   centralBroadcastService?: CentralBroadcastService;
   /** SharedWorker 内部兼容面，仅供 sat top-up 装配；页面 manifest 不注入。 */
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
-  protectedOutpoints?: ProtectedOutpointRegistry;
   assetDataNotifier?: AssetDataNotifier;
 }
 
@@ -316,27 +296,20 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     return { resourceId: makeResourceId(input.network), seq: snapshot.seq };
   }
 
-  /** 从快照得到该 owner/network 的可花费 UTXO（排除 mempool 花费 / claims / protected）。 */
+  /** 从快照得到该 owner/network 的可花费 UTXO（只排除内存池已花费输出）。 */
   async function listSpendableUtxosFromSnapshot(input: {
     resource: P2pkhKeyResource;
     snapshot: P2pkhUtxoSnapshotResult;
     ownerPublicKeyHex: string;
   }): Promise<P2pkhUtxo[]> {
-    const stateRepository = await ensureRepositoryForOwner(input.ownerPublicKeyHex);
-    const reservations = await stateRepository.listLocalInputClaimsByResource(input.resource.resourceId);
-    const reserved = new Set(
-      reservations.filter((row) => row.state === "active" || row.state === "isolated").map((row) => `${row.txid}:${row.vout}`)
-    );
     const candidates = input.snapshot.items
       .filter((item) => !item.isSpentInMempoolTx)
-      .map((item) => snapshotItemToUtxo({ item, resource: input.resource }))
-      .filter((utxo) => !reserved.has(`${utxo.txid}:${utxo.vout}`))
-      .filter((utxo) => !deps.protectedOutpoints?.isProtected({ txid: utxo.txid, vout: utxo.vout, network: utxo.network, publicKeyHex: input.ownerPublicKeyHex }));
+      .map((item) => snapshotItemToUtxo({ item, resource: input.resource }));
     return canonicalizeP2pkhUtxos(candidates);
   }
 
   /** 聚合读路径：按 filter 解析 owner/network，再从快照取可花费集合。 */
-  async function collectUtxos(filter: P2pkhUtxoFilter | undefined, excludeProtected: boolean): Promise<P2pkhUtxo[]> {
+  async function collectUtxos(filter: P2pkhUtxoFilter | undefined): Promise<P2pkhUtxo[]> {
     const ownerHex = filter?.ownerPublicKeyHex ?? getActiveKeyState().activePublicKeyHex;
     if (!ownerHex) return [];
     const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
@@ -349,13 +322,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       const utxos = snapshot.items
         .filter((item) => !item.isSpentInMempoolTx)
         .map((item) => snapshotItemToUtxo({ item, resource }));
-      const stateRepository = await ensureRepositoryForOwner(ownerHex);
-      const reservations = await stateRepository.listLocalInputClaimsByResource(resource.resourceId);
-      const reserved = new Set(reservations.filter((row) => row.state === "active" || row.state === "isolated").map((row) => `${row.txid}:${row.vout}`));
-      rows.push(...utxos.filter((utxo) =>
-        !reserved.has(`${utxo.txid}:${utxo.vout}`)
-        && (!excludeProtected || !deps.protectedOutpoints?.isProtected({ txid: utxo.txid, vout: utxo.vout, network: utxo.network, publicKeyHex: ownerHex }))
-      ));
+      rows.push(...utxos);
     }
     const settings = getCurrentSettings();
     const visible = settings.includeTestnet ? rows : rows.filter((u) => u.network === "main");
@@ -372,7 +339,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
 
   const transfer = createP2pkhTransferService({
     vault: deps.vault,
-    protectedOutpoints: deps.protectedOutpoints,
     centralBroadcastService: deps.centralBroadcastService,
     broadcastWithCoordinator: deps.broadcastWithCoordinator,
     messageBus: deps.messageBus,
@@ -381,19 +347,22 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     loadSpendableUtxos: async ({ ownerPublicKeyHex, resource, purpose }) => {
       // 准备/提交前刷新一次 `unspent/all`；刷新失败即拒绝继续，
       // 不允许用可能已过期的快照签署交易。
+      const transferPurpose = purpose ?? "prepare";
       let snapshot: P2pkhUtxoSnapshotResult;
       try {
+        // prepare/submit/retry 都只做一次 Coordinator 快照读取；consumed 不在
+        // service 内轮询等待，避免页面业务层自行制造 WoC 刷新循环。
         snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex, network: resource.network }, "refresh");
       } catch (error) {
-        if (purpose === "submit" || purpose === "retry") throw new CentralBroadcastRetryableError("snapshot-refresh");
+        if (transferPurpose === "submit" || transferPurpose === "retry") throw new CentralBroadcastRetryableError("snapshot-refresh");
         throw error;
       }
       if (!snapshot.available) {
-        // submit 看到 consumed 代表“上一次已占用该序号，等待新快照”，
-        // 不能把这段保护窗口误报成余额为 0。transfer service 会结合
-        // 当前 binding 把它转换为 snapshot-stale，并交给中心服务等待。
-        if ((purpose === "submit" || purpose === "retry") && snapshot.state === "consumed") {
-          throw new CentralBroadcastRetryableError("snapshot-wait", snapshot.seq);
+        // submit/retry 看到 consumed 交给中心广播服务等待新序号；prepare
+        // 直接返回可重试的同步中错误，不把 consumed 误报成余额不足。
+        if (snapshot.state === "consumed") {
+          if (transferPurpose === "submit" || transferPurpose === "retry") throw new CentralBroadcastRetryableError("snapshot-wait", snapshot.seq);
+          throw new Error("P2PKH UTXO snapshot is synchronizing; please wait for a fresh sequence and try again");
         }
         throw new Error("P2PKH UTXO snapshot is unavailable");
       }
@@ -492,23 +461,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     return ensureRepositoryForOwner(state.activePublicKeyHex);
   }
 
-  function protectedOutpointKeys(network?: "main" | "test"): ReadonlySet<string> {
-    const rows = deps.protectedOutpoints?.list({ ...(network ? { network } : {}), publicKeyHex: getActiveKeyState().activePublicKeyHex ?? undefined }) ?? [];
-    return new Set(rows.map((row) => `${row.txid}:${row.vout}`));
-  }
-
   async function calculateBalanceBreakdown(network: "main" | "test"): Promise<{ breakdown: P2pkhBalanceBreakdown; available: boolean }> {
     const active = getActiveKeyState().activePublicKeyHex;
-    if (!active) return { breakdown: { confirmed: 0, unconfirmed: 0, spendable: 0, pendingInputClaims: 0 }, available: false };
-    const resourceId = makeResourceId(network);
-    let claims: P2pkhLocalInputClaim[] = [];
-    try {
-      const stateRepository = await ensureRepository();
-      claims = await stateRepository.listLocalInputClaimsByResource(resourceId);
-    } catch {
-      // owner storage 尚未就绪时，余额必须保持未知，不能把缺失的 claims 当作可信 0。
-      return { breakdown: { ...EMPTY_BALANCE_BREAKDOWN }, available: false };
-    }
+    if (!active) return { breakdown: { confirmed: 0, unconfirmed: 0, spendable: 0 }, available: false };
     let snapshot: P2pkhUtxoSnapshotResult;
     try {
       snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: active, network }, "get");
@@ -516,7 +471,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       // 快照不可用（冷启动/刷新失败）：余额未知，绝不当 0。
       snapshot = { available: false, state: "unavailable", items: [] };
     }
-    return { breakdown: calculateP2pkhBalanceBreakdown({ snapshot, claims, protectedOutpoints: protectedOutpointKeys(network) }), available: snapshot.available };
+    return { breakdown: calculateP2pkhBalanceBreakdown({ snapshot }), available: snapshot.available };
   }
 
   /**
@@ -595,7 +550,12 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     const includeTestnet = getCurrentSettings().includeTestnet;
     const hasMainnet = Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, "mainnet");
     const hasTestnet = Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, "testnet");
-    if (balanceSnapshot.publicKeyHex !== active || balanceSnapshot.includeTestnet !== includeTestnet || !hasMainnet || hasTestnet !== includeTestnet) {
+    // “未知”只是占位，不是一个已完成的缓存命中。真实 WoC 刷新可能先
+    // 完成 UTXO 快照、再到达余额消费方；若这里只检查 map 形状，余额资源
+    // 会永久停留在 available=false，直到下一次无关事件再次触发刷新。
+    const requiredNetworks = includeTestnet ? ["mainnet", "testnet"] as const : ["mainnet"] as const;
+    const hasUnavailableBalance = requiredNetworks.some((network) => balanceSnapshot.balances[network]?.available !== true);
+    if (balanceSnapshot.publicKeyHex !== active || balanceSnapshot.includeTestnet !== includeTestnet || !hasMainnet || hasTestnet !== includeTestnet || hasUnavailableBalance) {
       await refreshBalanceSnapshot();
     }
     if (balanceRefreshInFlight) await balanceRefreshInFlight;
@@ -807,15 +767,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     );
   }
 
-  if (deps.protectedOutpoints) {
-    messageBusUnsubs.push(deps.protectedOutpoints.onChange(() => {
-      void refreshBalanceSnapshot();
-      for (const l of dataChangedListeners) {
-        try { l(); } catch { /* 静默 */ }
-      }
-    }));
-  }
-
   // 初次装配也发布一份当前 owner 的只读投影；无 active key 时保持空快照。
   void refreshBalanceSnapshot();
 
@@ -860,11 +811,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     },
 
     async listUtxos(filter) {
-      return collectUtxos(filter, true);
+      return collectUtxos(filter);
     },
 
     async listUtxosRaw(filter) {
-      return collectUtxos(filter, false);
+      return collectUtxos(filter);
     },
 
     async getUtxosStatus(filter) {
@@ -922,14 +873,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
       return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
     },
-    async listLocalInputClaimsPage(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex;
-      const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
-      const page = await stateRepository.listLocalInputClaimsPage({ resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
-      const items = getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.network === "main");
-      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
-      return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
-    },
     async getBalanceBreakdown(network) {
       const target = network ?? "main";
       await ensureBalanceSnapshotReady();
@@ -937,17 +880,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         ? { ...balanceSnapshot.balances[BALANCE_NETWORK_KEYS[target]]!.breakdown! }
         : { ...EMPTY_BALANCE_BREAKDOWN };
     },
-    async listLocalInputClaims(resourceId?: string, limit?: number) {
-      const stateRepository = await ensureRepository();
-      const all = resourceId && typeof stateRepository.listLocalInputClaimsByResource === "function"
-        ? await stateRepository.listLocalInputClaimsByResource(resourceId, limit)
-        : await stateRepository.listLocalInputClaims(limit);
-      const settings = getCurrentSettings();
-      return settings.includeTestnet
-        ? all.filter((r) => !resourceId || r.resourceId === resourceId)
-        : all.filter((r) => r.network === "main" && (!resourceId || r.resourceId === resourceId));
-    },
-
     async allocateUtxos(request) {
       if (!request.assetId || !(request.assetId in P2PKH_ASSETS)) {
         throw new Error("P2PKH provider requires an assetId");

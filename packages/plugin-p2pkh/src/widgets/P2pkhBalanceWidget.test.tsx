@@ -314,12 +314,12 @@ describe("P2pkhBalanceWidget", () => {
     expect(screen.queryByText(/1,000/)).toBeNull();
   });
 
-  it("shows known balance with confirmed + pending-claims breakdown", async () => {
+  it("shows known balance with confirmed + spendable breakdown", async () => {
     const fake = makeFakeService({
       getAssetBalance: async () => ({
         total: 5000,
         available: true,
-        breakdown: { confirmed: 1000, unconfirmed: 200, spendable: 800, pendingInputClaims: 400 },
+        breakdown: { confirmed: 1000, unconfirmed: 200, spendable: 1200 },
       }),
     });
     const keyspace = makeFakeKeyspace();
@@ -339,8 +339,8 @@ describe("P2pkhBalanceWidget", () => {
     });
     expect(screen.getByText("Confirmed")).toBeTruthy();
     expect(screen.getByText("1,000 sats")).toBeTruthy();
-    expect(screen.getByText("Pending claims")).toBeTruthy();
-    expect(screen.getByText("400 sats")).toBeTruthy();
+    expect(screen.getByText("Spendable")).toBeTruthy();
+    expect(screen.getByText("1,200 sats")).toBeTruthy();
   });
 
   it("hides the testnet row when testnet is disabled", async () => {

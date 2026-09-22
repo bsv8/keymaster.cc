@@ -8,10 +8,8 @@ export interface P2pkhBalanceBreakdown {
   confirmed: number;
   /** 未确认但尚未被内存池花费的输出总额。 */
   unconfirmed: number;
-  /** 扣除本地输入占用和协议保护后的可花费金额。 */
+  /** 当前 UTXO 快照中可花费的金额；只排除内存池已花费输出。 */
   spendable: number;
-  /** 本地 active/isolated input claim 占用的输入金额。 */
-  pendingInputClaims: number;
 }
 
 /** P2PKH 余额；快照不可用时 available=false，不能把 total 当作 0 展示。 */

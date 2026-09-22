@@ -10,7 +10,7 @@ import { P2pkhWalletPage, type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 const owner = "02" + "11".repeat(32);
 const txid = "aa".repeat(32);
-const breakdown: P2pkhBalanceBreakdown = { confirmed: 1000, unconfirmed: 200, spendable: 800, pendingInputClaims: 400 };
+const breakdown: P2pkhBalanceBreakdown = { confirmed: 1000, unconfirmed: 200, spendable: 1200 };
 const historyRecord: P2pkhHistoryRecord = {
   id: `p2pkh:main:${txid}`,
   resourceId: "p2pkh:main",
@@ -101,15 +101,12 @@ function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] =
       resources: [testResource, { resourceId: "p2pkh:main", publicKeyHex: owner, label: "main", address: "1abc", network: "main" as const, createdAt: "now", generation: 0 }],
       history,
       locals: [],
-      claims: [],
       utxos: [],
       utxosAvailable: false,
-      protectedOutpoints: [],
       sync: [],
       syncStatus: "idle" as const,
       historyCursors: {},
       localCursors: {},
-      claimCursors: {},
       ...walletOverrides,
     }),
     subscribe: () => () => undefined,
@@ -250,7 +247,7 @@ describe("P2pkhWalletPage", () => {
     render(<PluginHostProvider host={knownHost}><P2pkhWalletPage network="main" /></PluginHostProvider>);
     await waitFor(() => expect(screen.getByText(/5,000/)).toBeTruthy());
     expect(screen.getByText("1,000 sats")).toBeTruthy();
-    expect(screen.getByText("400 sats")).toBeTruthy();
+    expect(screen.getByText("1,200 sats")).toBeTruthy();
     cleanup();
 
     const unknownHost = registerWallet(false, [historyRecord], {}, {}, {}, {

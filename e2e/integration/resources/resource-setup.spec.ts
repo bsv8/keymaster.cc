@@ -17,6 +17,9 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
   config?.testnet.trackingKeyPrivateKeyHex.clear();
 }
 
+/** 真实资源 Journey 最长 30 分钟；租约还要覆盖 setup、收尾和网络抖动。 */
+const RESOURCE_RUN_LEASE_TTL_MS = 60 * 60_000;
+
 /**
  * 整轮 resources 执行档的唯一 setup：权限预检、S3 lease/开场清理，
  * 以及 testnet 链网络/余额/旧账检查。SatSubscription 页面 Journey 自己
@@ -33,7 +36,7 @@ test("真实资源整轮准备：S3、testnet 服务和资金账本门禁", asyn
   try {
     config = await loadE2EConfig();
     s3 = new S3CleanupResource(config.s3);
-    await s3.acquireLease(runId);
+    await s3.acquireLease(runId, Date.now(), RESOURCE_RUN_LEASE_TTL_MS);
     leaseAcquired = true;
     // setup 是非前缀测试：按约定清理指定桶中的全部业务对象；后续 Journey
     // 如果是前缀测试，则显式传入自己的 run_id/scenario_id 前缀。
@@ -63,6 +66,7 @@ test("真实资源整轮准备：S3、testnet 服务和资金账本门禁", asyn
       testnet: {
         network: "testnet",
         seedAddress: prepared.seedAddress,
+        seedPublicKeyHex: prepared.seedPublicKeyHex,
         testnetBalance: prepared.testnetBalance,
         spendableUtxoCount: prepared.spendableUtxoCount,
         tipHeight: prepared.tipHeight,

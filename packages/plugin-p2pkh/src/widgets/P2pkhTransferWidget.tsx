@@ -79,15 +79,18 @@ function P2pkhTransferWidgetInner({
     emptyGlobalBalanceSnapshot()
   );
   const networkBalance = balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]];
+  const displayedNetworkBalance = networkBalance;
   const networkLabel = t(network === "main" ? "p2pkh.network.main" : "p2pkh.network.test", {
     defaultValue: network === "main" ? "主网" : "测试网"
   });
   const feeRates = resolveP2pkhFeeRateSatoshisPerKb(globalSettings);
   const feeRateKey = `${feeRates.low}:${feeRates.medium}:${feeRates.high}`;
-  const [form, setForm] = useState<FormState>({
-    recipient: recipientAddress ?? "",
-    amount: "0",
-    feeTier: "medium"
+  const [form, setForm] = useState<FormState>(() => {
+    return {
+      recipient: recipientAddress ?? "",
+      amount: "0",
+      feeTier: "medium"
+    };
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -239,8 +242,8 @@ function P2pkhTransferWidgetInner({
           ) : null}
           {result.error ? <p className="p2pkh-transfer-widget__error">{result.error}</p> : null}
           {result.status === "local-confirmed" ? <p>{t("p2pkh.transfer.result.localConfirmed", { defaultValue: "广播供应商明确接受；找零要等 WoC 返回该输出后才会进入可花费余额。" })}</p> : null}
-          {result.status === "isolated" ? <p>{t("p2pkh.transfer.result.isolated", { defaultValue: "交易已隔离，输入占用不会自动释放；可在交易详情查看本地记录与广播尝试。" })}</p> : null}
-          {result.status === "not-dispatched" ? <p>{t("p2pkh.transfer.result.notDispatched", { defaultValue: "交易未离开客户端，提交与输入占用已安全撤销。" })}</p> : null}
+          {result.status === "isolated" ? <p>{t("p2pkh.transfer.result.isolated", { defaultValue: "交易已隔离；可在交易详情查看本地审计记录与广播尝试。" })}</p> : null}
+          {result.status === "not-dispatched" ? <p>{t("p2pkh.transfer.result.notDispatched", { defaultValue: "交易未离开客户端，本地审计记录已安全撤销。" })}</p> : null}
           <div className="p2pkh-transfer-widget__actions">
             <Button onClick={dismissResult} variant="primary">
               {t("p2pkh.transfer.result.confirmClose", { defaultValue: "确认并关闭" })}
@@ -281,8 +284,8 @@ function P2pkhTransferWidgetInner({
               </Button>
             </div>
             <p className="p2pkh-transfer-widget__balance-reference" aria-live="polite">
-              {networkBalance && networkBalance.available !== false
-                ? t("p2pkh.transfer.form.availableBalance", { defaultValue: "可用余额：{{balance}} sats（{{network}}）", balance: formatNumber(networkBalance.total), network: networkLabel })
+              {displayedNetworkBalance && displayedNetworkBalance.available !== false
+                ? t("p2pkh.transfer.form.availableBalance", { defaultValue: "可用余额：{{balance}} sats（{{network}}）", balance: formatNumber(displayedNetworkBalance.total), network: networkLabel })
                 : t("p2pkh.transfer.form.availableBalanceUnknown", { defaultValue: "可用余额未知（{{network}}）", network: networkLabel })}
             </p>
             {/^(all|全部)$/i.test(form.amount.trim()) ? <p className="p2pkh-transfer-widget__amount-hint">{t("p2pkh.transfer.form.sendAllHint", { defaultValue: "最终到账额会自动扣除实际矿工费。" })}</p> : null}

@@ -1,14 +1,11 @@
 import { expect, type Page } from "@playwright/test";
 import { navigateToBusinessPage } from "./navigationDriver.js";
 
-/**
- * 在正式系统设置工作区打开 P2PKH 的 testnet 开关。
- *
- * 这里不直接改 Coordinator K-V，也不访问页面内部 service；真实用户只能
- * 通过 registry 提供的设置控件打开 testnet。选择器只留在 Driver，Journey
- * 只表达“用户允许查看并使用 testnet 资产”。
- */
-export async function enableTestnetAssets(page: Page): Promise<void> {
+/** P2PKH 页面支持的网络字段；main=主网，test=testnet 测试网。 */
+export type P2pkhNetwork = "main" | "test";
+
+/** 在系统设置页切换 testnet 纳入范围；设置值由正式页面保存。 */
+export async function setTestnetAssets(page: Page, enabled: boolean): Promise<void> {
   await navigateToBusinessPage(page, {
     label: /^System$|^系统$/u,
     path: /\/settings\/system$/u,
@@ -17,71 +14,71 @@ export async function enableTestnetAssets(page: Page): Promise<void> {
   await expect(p2pkhSettings).toBeVisible();
   const includeTestnet = p2pkhSettings.getByRole("combobox").first();
   await expect(includeTestnet).toBeVisible();
-  await includeTestnet.selectOption("yes");
+  await includeTestnet.selectOption(enabled ? "yes" : "no");
   await expect.poll(() => includeTestnet.inputValue(), {
     timeout: 20_000,
-    message: "用户打开 testnet 后，P2PKH 设置必须立即保存并回显",
-  }).toBe("yes");
+    message: `P2PKH testnet 开关必须保存为 ${enabled ? "开启" : "关闭"} 并回显`,
+  }).toBe(enabled ? "yes" : "no");
 }
 
-/** 用户从正式业务菜单进入转账页，不选择资产；供需要先核对余额的 Journey 使用。 */
+/** 用户允许在业务页面使用 testnet。 */
+export async function enableTestnetAssets(page: Page): Promise<void> {
+  await setTestnetAssets(page, true);
+}
+
+/** 用户关闭 testnet；用于验证跨 tab 设置传播和边界。 */
+export async function disableTestnetAssets(page: Page): Promise<void> {
+  await setTestnetAssets(page, false);
+}
+
+/** 进入普通转账页；页面第一步必须是收款方。 */
 export async function openTransferPage(page: Page): Promise<void> {
   await navigateToBusinessPage(page, {
     label: /^Transfer$|^转账$/u,
-    path: /\/transfer$/u,
+    path: /\/transfer(?:\?.*)?$/u,
   });
-  await expect(page.getByRole("heading", { name: /Asset type|资产类型/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Recipient|收款方/u })).toBeVisible();
+  await expect(page.getByTestId("p2pkh-transfer-widget")).toHaveCount(0);
 }
 
-/** 选择 BSV Testnet Offer 并等待转账表单出现。 */
-export async function selectTestnetTransferOffer(page: Page): Promise<void> {
-  await expect(page.getByRole("button", { name: /BSV Testnet/ }).first()).toBeVisible({ timeout: 45_000 });
-  await page.getByRole("button", { name: /BSV Testnet/ }).first().click();
-  await expect(page.getByRole("heading", { name: /Verify addresses and enter amount|核对地址与填写金额/ })).toBeVisible();
+/** 进入 testnet 钱包页；只通过正式菜单和页面按钮导航。 */
+export async function openTestnetWalletPage(page: Page): Promise<void> {
+  await navigateToBusinessPage(page, {
+    label: /^On-chain transactions$|^链上交易$/u,
+    path: /\/p2pkh\/mainnet\/transactions(?:\?.*)?$/u,
+  });
+  const testnetButton = page.getByRole("button", { name: /^Testnet$|^测试网$/u });
+  await expect(testnetButton).toBeVisible();
+  await testnetButton.click();
+  await expect(page).toHaveURL(/\/p2pkh\/testnet\/transactions(?:\?.*)?$/u);
 }
 
-/** 用户从正式业务菜单进入转账页，并等待 testnet 资产 Offer 出现。 */
-export async function openTestnetTransfer(page: Page): Promise<void> {
-  await openTransferPage(page);
-  await selectTestnetTransferOffer(page);
-}
-
-/** 关闭广播结果卡片，回到资产选择，用于继续观察余额。 */
+/** 关闭成功结果卡，回到“收款方”空态。 */
 export async function dismissTestnetTransferResult(page: Page): Promise<void> {
   await page.getByRole("button", { name: /确认并关闭|Confirm and close/u }).click();
-  await expect(page.getByRole("heading", { name: /Asset type|资产类型/ })).toBeVisible();
+  await expect(page).toHaveURL(/\/transfer$/u);
+  await expect(page.getByRole("heading", { name: /Recipient|收款方/u })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /通讯录|联系人|Contacts/iu }).first()).toBeVisible();
 }
 
-export interface TestnetTransferInput {
-  /** 接收方的 testnet P2PKH 地址；Journey 在资源层之外生成公开目标。 */
-  readonly recipientAddress: string;
-  /** 金额，单位 satoshis；必须与资金预算分开声明。 */
-  readonly amountSatoshis: number;
-}
-
-/** P2PKH 矿工费率档位；与设置页的三个 sats/kB 输入一一对应。 */
+/** P2PKH 矿工费率字段；单位是 sats/kB。 */
 export type P2pkhFeeTier = "low" | "medium" | "high";
 
-/** 设置页费率输入的可访问名称。 */
+/** 设置页费率输入的中文/英文可访问名称。 */
 const FEE_TIER_SETTINGS_LABELS: Record<P2pkhFeeTier, RegExp> = {
   low: /低|Low/u,
   medium: /中（默认）|Medium \(default\)/u,
   high: /高|High/u,
 };
 
-/** 转账 Widget 费率按钮的可见文案（与设置页标签不同）。 */
+/** 转账 Widget 费率按钮的可见文案。 */
 const FEE_TIER_WIDGET_LABELS: Record<P2pkhFeeTier, RegExp> = {
   low: /^低|^Low/u,
   medium: /^中|^Medium/u,
   high: /^高|^High/u,
 };
 
-/**
- * 在正式系统设置中修改一个矿工费率档位。
- *
- * 10 sat 级别的余额要完成“全部”转出，必须让预览使用最小的合法费率；
- * 这里只通过页面控件修改，不写 Coordinator K-V 或 service 内部状态。
- */
+/** 通过正式设置页修改矿工费率。 */
 export async function setP2pkhFeeRate(page: Page, tier: P2pkhFeeTier, satsPerKb: number): Promise<void> {
   await navigateToBusinessPage(page, {
     label: /^System$|^系统$/u,
@@ -99,22 +96,14 @@ export async function setP2pkhFeeRate(page: Page, tier: P2pkhFeeTier, satsPerKb:
   }).toBe(String(satsPerKb));
 }
 
-/**
- * 等设置变更触发的 provider-change 同步先跑完，再进入 Testnet 钱包页。
- *
- * 已知竞态：设置变更（开启 testnet / 改费率）会触发同步；如果在这轮同步
- * 结束前切到 Testnet 钱包页，Coordinator SharedWorker 会在数秒后被回收，
- * 页面回到锁屏。设置页不展示任务状态，因此这里用固定等待窗口让同步完成。
- */
+/** 设置变更触发的同步有已知竞态；此等待仅用于让 owner 同步完成。 */
 export async function waitForP2pkhSyncIdle(page: Page, settleMs = 12_000): Promise<void> {
   await page.waitForTimeout(settleMs);
 }
 
+/** 等待 testnet 钱包页自己的 UTXO 快照输出数。 */
 export async function waitForTestnetUtxoSnapshot(page: Page, minOutputs = 1, timeoutMs = 180_000): Promise<void> {
-  await page.getByRole("button", { name: /^On-chain transactions$|^链上交易$/u }).click();
-  await page.getByRole("button", { name: /^Testnet$|^测试网$/u }).click();
-  // 只匹配真正的快照行（“UTXO 快照：<time>（N 个输出）”/“UTXO snapshot: ... (N outputs)”）。
-  // “未知（尚未取得 UTXO 快照）”也含 “UTXO 快照”字样，不能当作快照可用。
+  await openTestnetWalletPage(page);
   const snapshotLine = page.getByText(/UTXO 快照：|UTXO snapshot:/u);
   await expect.poll(async () => {
     try {
@@ -124,25 +113,17 @@ export async function waitForTestnetUtxoSnapshot(page: Page, minOutputs = 1, tim
       const raw = match?.[1] ?? match?.[2];
       return raw ? Number(raw.replaceAll(",", "")) : 0;
     } catch {
-      // 页面重渲染/资源暂不可读时继续轮询，不把瞬时失败当成结论。
       return 0;
     }
   }, {
     timeout: timeoutMs,
-    message: `keymaster 必须在开启 testnet 后刷新出至少 ${minOutputs} 个可花费输出的 UTXO 快照`,
+    message: `keymaster 必须刷新出至少 ${minOutputs} 个可花费 testnet UTXO 输出`,
   }).toBeGreaterThanOrEqual(minOutputs);
 }
 
-/**
- * 在 Testnet 钱包页点「刷新 UTXO」，并等待快照输出数等于期望值。
- *
- * 用途：页面广播后，Funding UTXO 已被花费，但自动快照可能比 WoC 内存池
- * 更新早一步，余额会短暂停留在旧值。这里用正式页面的刷新按钮强制一轮
- * `unspent/all`，再断言页面自己的快照真值。
- */
+/** 在钱包页点击“刷新 UTXO”，并等待页面快照输出数精确变化。 */
 export async function refreshTestnetUtxoSnapshot(page: Page, expectedOutputs: number, timeoutMs = 120_000): Promise<void> {
-  await page.getByRole("button", { name: /^On-chain transactions$|^链上交易$/u }).click();
-  await page.getByRole("button", { name: /^Testnet$|^测试网$/u }).click();
+  if (!/\/p2pkh\/testnet\/transactions(?:\?.*)?$/u.test(page.url())) await openTestnetWalletPage(page);
   const refresh = page.getByRole("button", { name: /刷新 UTXO|Refresh UTXOs?/u });
   await expect(refresh).toBeVisible({ timeout: 30_000 });
   const readOutputs = async (): Promise<number> => {
@@ -154,7 +135,6 @@ export async function refreshTestnetUtxoSnapshot(page: Page, expectedOutputs: nu
       const raw = match?.[1] ?? match?.[2];
       return raw ? Number(raw.replaceAll(",", "")) : -1;
     } catch {
-      // 页面重渲染/资源暂不可读时继续轮询，不把瞬时失败当成结论。
       return -1;
     }
   };
@@ -165,52 +145,90 @@ export async function refreshTestnetUtxoSnapshot(page: Page, expectedOutputs: nu
       lastClick = now;
       await refresh.click().catch(() => undefined);
     }
-    return await readOutputs();
+    return readOutputs();
   }, {
     timeout: timeoutMs,
-    message: `keymaster 快照在手工刷新后必须显示 ${expectedOutputs} 个输出`,
+    message: `keymaster 快照必须刷新为 ${expectedOutputs} 个 testnet 输出`,
   }).toBe(expectedOutputs);
 }
 
-/**
- * 等待转账 Offer 上由 keymaster 余额计算出的 BSV Testnet 金额。
- *
- * Offer 余额来自 P2PKH service 对 WoC `unspent/all` 内存快照的现算结果；
- * 这里断言的是页面真值，不是 Node 侧重新查询的链上余额。
- */
-/**
- * 读取转账 Offer 上由 keymaster 余额计算出的 BSV Testnet 金额（单位 sats）。
- *
- * 只解析正式 Widget 的余额元素；不可解析时抛错而不是猜一个数字。
- */
-export async function readTestnetOfferBalance(page: Page): Promise<number> {
-  const balance = page.getByRole("button", { name: /BSV Testnet/ }).first().locator(".transfer-picker__balance").first();
-  await expect(balance).toBeVisible({ timeout: 45_000 });
+/** 读取钱包页显示的 testnet sats 余额；未知状态直接失败。 */
+export async function readTestnetWalletBalance(page: Page): Promise<number> {
+  const balance = page.locator(".p2pkh-wallet__balances strong").first();
+  await expect(balance).toBeVisible({ timeout: 30_000 });
   const text = (await balance.textContent())?.trim() ?? "";
-  const match = text.match(/^([0-9][0-9,]*)\s*sats$/u);
-  if (!match?.[1]) throw new Error(`BSV Testnet Offer 余额不可解析：${text}`);
-  return Number(match[1].replaceAll(",", ""));
+  if (/未知|unknown/i.test(text)) throw new Error(`testnet 钱包余额仍未知：${text}`);
+  return readSats(text, "testnet 钱包余额");
 }
 
-export async function expectTestnetOfferBalance(page: Page, satoshis: number, timeoutMs = 120_000): Promise<void> {
-  const offer = page.getByRole("button", { name: /BSV Testnet/ }).first();
-  await expect(offer).toBeVisible({ timeout: 45_000 });
-  // 余额元素必须精确等于目标值；用整个按钮文本做子串匹配会让 "10 sats"
-  // 在断言 0 sats 时误通过。
-  const balance = offer.locator(".transfer-picker__balance").first();
-  await expect(balance).toBeVisible();
-  await expect.poll(async () => (await balance.textContent())?.trim() ?? "", {
+/** 断言 testnet 钱包页余额；余额真值来自页面全局广播而不是 Node 查询。 */
+export async function expectTestnetWalletBalance(page: Page, satoshis: number, timeoutMs = 120_000): Promise<void> {
+  if (!/\/p2pkh\/testnet\/transactions(?:\?.*)?$/u.test(page.url())) await openTestnetWalletPage(page);
+  const balance = page.locator(".p2pkh-wallet__balances strong").first();
+  const refresh = page.getByRole("button", { name: /刷新 UTXO|Refresh UTXOs?/u });
+  await expect(balance).toBeVisible({ timeout: 30_000 });
+  let lastRefreshAt = 0;
+  await expect.poll(async () => {
+    try {
+      const value = await readTestnetWalletBalance(page);
+      if (value === satoshis) return value;
+    } catch {
+      // unknown 只表示余额投影还没完成；下面的按钮是只读 WoC 快照刷新，
+      // 不会构造交易或触发广播。
+    }
+    const now = Date.now();
+    if (now - lastRefreshAt >= 10_000) {
+      lastRefreshAt = now;
+      await refresh.click().catch(() => undefined);
+    }
+    return -1;
+  }, {
     timeout: timeoutMs,
-    message: `BSV Testnet Offer 余额必须由 keymaster UTXO 快照刷新为 ${satoshis} sats`,
-  }).toBe(`${satoshis} sats`);
+    message: `testnet 钱包页面余额必须为 ${satoshis} sats`,
+  }).toBe(satoshis);
 }
 
-/**
- * 断言转账 Widget 的费率档位显示指定费率。
- *
- * 设置页写入 P2PKH service 缓存的费率不会立即反映到已挂载的 Widget；
- * 这个轮询证明“设置真的进入了新建交易预览的取值路径”，而不是只改了输入框。
- */
+/** 断言转账金额旁余额参考；unknown 只能显示“未知”，不能伪装成 0。 */
+export async function expectAmountBalanceReference(
+  page: Page,
+  input: { readonly network: P2pkhNetwork; readonly satoshis?: number; readonly unknown?: boolean },
+  timeoutMs = 20_000,
+): Promise<void> {
+  const reference = page.locator(".p2pkh-transfer-widget__balance-reference").first();
+  await expect(reference).toBeVisible();
+  const networkText = input.network === "test" ? /测试网|testnet/iu : /主网|mainnet/iu;
+  if (input.unknown) {
+    await expect.poll(() => reference.textContent() ?? "", { timeout: timeoutMs }).toMatch(/可用余额未知|available balance unknown/u);
+    await expect(reference).not.toContainText(/(?:^|\D)0(?:\D|$)/u);
+    await expect(reference).toContainText(networkText);
+    return;
+  }
+  if (input.satoshis === undefined) throw new Error("已知余额参考必须提供 satoshis");
+  await expect.poll(() => reference.textContent() ?? "", { timeout: timeoutMs }).toContain(`${input.satoshis} sats`);
+  await expect(reference).not.toContainText(/可用余额未知|available balance unknown/u);
+  await expect(reference).toContainText(networkText);
+}
+
+/** 读取金额输入框；字段含义是转出 sats，不是网络余额。 */
+export async function readAmountValue(page: Page): Promise<string> {
+  const amount = page.getByLabel(/金额 \(sats\)|Amount \(sats\)/u).first();
+  await expect(amount).toBeVisible();
+  return amount.inputValue();
+}
+
+/** 断言金额输入值不会被跨 tab 的余额刷新覆盖。 */
+export async function expectAmountValue(page: Page, value: string): Promise<void> {
+  await expect(page.getByLabel(/金额 \(sats\)|Amount \(sats\)/u).first()).toHaveValue(value);
+}
+
+/** 写入金额输入；输入变化会按产品语义清除旧预览。 */
+export async function setAmountValue(page: Page, value: string): Promise<void> {
+  const amount = page.getByLabel(/金额 \(sats\)|Amount \(sats\)/u).first();
+  await expect(amount).toBeVisible();
+  await amount.fill(value);
+}
+
+/** 断言设置变更后当前 Widget 的费率按钮显示真实费率。 */
 export async function expectTransferFeeTierRate(page: Page, tier: P2pkhFeeTier, satsPerKb: number): Promise<void> {
   const group = page.locator(".p2pkh-transfer-widget__fee-tier");
   await expect(group).toBeVisible({ timeout: 20_000 });
@@ -221,82 +239,107 @@ export async function expectTransferFeeTierRate(page: Page, tier: P2pkhFeeTier, 
   }).toContain(`${satsPerKb} sats/kB`);
 }
 
-/**
- * 完成一次用户可见的 testnet P2PKH 转账，并只返回页面显示的 canonical txid。
- * rawTxHex 不写入测试结果；它只在正式 Widget 的预览阶段供用户核对。
- */
-export async function submitTestnetTransfer(page: Page, input: TestnetTransferInput): Promise<string> {
-  const receipt = await prepareAndBroadcast(page, input.recipientAddress, String(input.amountSatoshis));
-  expect(receipt.amountSatoshis, "固定金额转账的收款输出必须等于声明金额").toBe(input.amountSatoshis);
-  return receipt.txid;
-}
-
-export interface TestnetSendAllInput {
-  /** 接收方的 testnet P2PKH 地址；通常是 Resource 的 seed 地址。 */
-  readonly recipientAddress: string;
-}
-
-/** “全部”转出后的页面回执；金额和矿工费来自正式 Widget 的最终预览。 */
-export interface TestnetSendAllReceipt {
+export interface TransferReceipt {
   readonly txid: string;
-  /** 预览中的收款输出金额（= 可用输入 - 实际矿工费）。 */
+  /** 预览中收款输出金额；单位 sats。 */
   readonly amountSatoshis: number;
+  /** 预览中最终矿工费；单位 sats。 */
   readonly feeSatoshis: number;
+  /** 序列化交易字节数；只用于页面预览与链上诊断，不进入附件。 */
   readonly serializedSizeBytes: number;
-  /** 预览是否明确显示没有找零输出。 */
+  /** 是否没有找零输出。 */
   readonly noChange: boolean;
+  /** 找零输出金额；没有找零时为 0。 */
+  readonly changeSatoshis: number;
+}
+
+/** 从当前只读预览读取金额、矿工费、大小和找零，不读取 rawTxHex。 */
+async function readPreview(page: Page): Promise<Omit<TransferReceipt, "txid">> {
+  const preview = page.locator("section.p2pkh-transfer-widget__preview").first();
+  await expect(preview.getByRole("heading", { name: /只读核对|Final transaction preview|最终交易预览/u })).toBeVisible({ timeout: 45_000 });
+  const amountSatoshis = readSats(await preview.locator(".p2pkh-transfer-widget__recipient-output strong").first().textContent(), "收款输出");
+  const feeSatoshis = readSats(await preview.locator("p").filter({ hasText: /最终矿工费|Final fee/u }).first().textContent(), "最终矿工费");
+  const serializedSizeBytes = readSats(await preview.locator("p").filter({ hasText: /序列化大小|Serialized size/u }).first().textContent(), "序列化大小");
+  const change = await preview.locator("p").filter({ hasText: /找零输出|Change output/u }).first().textContent() ?? "";
+  const noChange = /无|none/i.test(change);
+  return {
+    amountSatoshis,
+    feeSatoshis,
+    serializedSizeBytes,
+    noChange,
+    changeSatoshis: noChange ? 0 : readSats(change, "找零输出"),
+  };
+}
+
+/** 等待广播结果卡；isolated 是结果未知，必须立即让 Journey 失败。 */
+async function waitForBroadcastResult(page: Page): Promise<{ readonly card: ReturnType<Page["locator"]>; readonly text: string }> {
+  const card = page.locator("section.p2pkh-transfer-widget__result").first();
+  await expect(card.getByRole("heading", { name: /本地确认结果|Broadcast result|广播结果/u })).toBeVisible({ timeout: 120_000 });
+  const text = (await card.textContent()) ?? "";
+  if (/\bisolated\b|广播结果未知|交易已隔离/u.test(text)) throw new Error(`页面广播结果未知（isolated），必须停止：${text}`);
+  return { card, text };
 }
 
 /**
- * 使用正式 Widget 的“全部”完成 testnet 转出，并返回预览中对账所需的
- * 数值和 canonical txid。
- *
- * 这里只解构页面已展示的预览数字；rawTxHex 和链上金额核对的真值由
- * Journey 的链适配器按原始交易另行验证。
+ * 提交当前预览并等待结果。sendAll 遇到 requires-reconfirm 时只允许点一次
+ * “再来一次”并重新生成预览；固定金额不自动重放。
  */
-export async function submitTestnetSendAll(page: Page, input: TestnetSendAllInput): Promise<TestnetSendAllReceipt> {
-  const receipt = await prepareAndBroadcast(page, input.recipientAddress, "全部");
-  expect(receipt.noChange, "“全部”转出必须没有找零输出").toBe(true);
-  expect(receipt.amountSatoshis, "“全部”转出的收款输出必须为正").toBeGreaterThan(0);
-  expect(receipt.feeSatoshis, "“全部”转出必须按费率扣除矿工费").toBeGreaterThan(0);
-  return receipt;
-}
-
-async function prepareAndBroadcast(page: Page, recipientAddress: string, amount: string): Promise<TestnetSendAllReceipt> {
-  const recipient = page.getByLabel(/Recipient address|接收方地址/);
-  await expect(recipient).toBeVisible();
-  await recipient.fill(recipientAddress);
-  await page.getByLabel(/Amount \(sats\)|金额 \(sats\)/).fill(amount);
-
-  await page.getByRole("button", { name: /Generate final transaction|生成最终交易/ }).click();
+export async function submitAndAwaitResult(page: Page, options: {
+  readonly allowReconfirm?: boolean;
+  /** 进入页面广播动作前调用；用于禁止未知结果后的 Node 侧竞争归集。 */
+  readonly onBroadcastAttempt?: () => void;
+} = {}): Promise<TransferReceipt> {
   const preview = page.locator("section.p2pkh-transfer-widget__preview").first();
-  await expect(preview.getByRole("heading", { name: /Final transaction preview|最终交易预览/ })).toBeVisible({ timeout: 45_000 });
-  await expect(page.getByText(recipientAddress, { exact: true }).last()).toBeVisible();
-
-  // 预览数字必须在广播前读取：点击广播后 Widget 会用结果卡片替换整个预览区。
-  const amountSatoshis = readSats(await preview.locator(".p2pkh-transfer-widget__recipient-output strong").first().textContent());
-  const feeSatoshis = readSats(await preview.locator("p").filter({ hasText: /最终矿工费|Final fee/u }).first().textContent());
-  const serializedSizeBytes = readSats(await preview.locator("p").filter({ hasText: /序列化大小|Serialized size/u }).first().textContent());
-  const changeText = await preview.locator("p").filter({ hasText: /找零输出|Change output/u }).first().textContent() ?? "";
-
-  await page.getByRole("button", { name: /Broadcast transaction|确认并广播交易/u }).click();
-  const resultHeading = page.getByRole("heading", { name: /Broadcast result|广播结果/ });
-  await expect(resultHeading).toBeVisible({ timeout: 45_000 });
-  const resultCard = page.locator("section").filter({ has: resultHeading }).first();
-  // 结果卡片用“状态：<status>”渲染状态；断言的是业务终态文本，
-  // 不要求它是独立元素（isolated 会在这里给出可读的失败现场）。
-  await expect(resultCard).toContainText(/local-confirmed/u);
-  const txid = (await resultCard.locator("code").first().textContent())?.trim() ?? "";
-  // 组件的结果卡片只有一个 txid code；如果 DOM 结构调整，下面的业务
-  // 断言仍会把“广播完成但没有可对账身份”判为失败。
+  if (await preview.count() === 0) {
+    // 固定金额 Journey 可以先填写金额再调用本 helper；这里补齐用户真实的
+    // “生成最终交易”动作，保证读取和提交的始终是同一份只读预览。
+    await page.getByRole("button", { name: /生成最终交易|Generate final transaction/u }).click();
+  }
+  let previewValues = await readPreview(page);
+  options.onBroadcastAttempt?.();
+  await page.getByRole("button", { name: /确认并广播交易|Broadcast transaction/u }).click();
+  let result = await waitForBroadcastResult(page);
+  const requiresReconfirm = /requires-reconfirm|余额已变化，请重新确认全部发送金额/u.test(result.text);
+  if (requiresReconfirm) {
+    if (!options.allowReconfirm) throw new Error("页面要求重新确认金额，但当前转账不允许自动重确认");
+    await result.card.getByRole("button", { name: /再来一次|Again/u }).click();
+    await expect(page.locator("section.p2pkh-transfer-widget__preview")).toHaveCount(0);
+    await page.getByRole("button", { name: /生成最终交易|Generate final transaction/u }).click();
+    previewValues = await readPreview(page);
+    options.onBroadcastAttempt?.();
+    await page.getByRole("button", { name: /确认并广播交易|Broadcast transaction/u }).click();
+    result = await waitForBroadcastResult(page);
+    if (/requires-reconfirm|余额已变化，请重新确认全部发送金额/u.test(result.text)) {
+      throw new Error("sendAll 第二次仍要求重新确认；按约定停止，不循环重试");
+    }
+  }
+  if (!/local-confirmed/u.test(result.text)) throw new Error(`页面广播未达到 local-confirmed：${result.text}`);
+  const txid = (await result.card.locator("code").first().textContent())?.trim() ?? "";
   expect(txid, "广播结果必须展示可对账的 canonical txid").toMatch(/^[0-9a-f]{64}$/iu);
-  return { txid: txid.toLowerCase(), amountSatoshis, feeSatoshis, serializedSizeBytes, noChange: !/sats/u.test(changeText) };
+  return { txid: txid.toLowerCase(), ...previewValues };
 }
 
-/** 从页面文案里提取整数金额；预览字段可能带千位分隔符。 */
-function readSats(text: string | null): number {
-  const match = (text ?? "").match(/([0-9][0-9,]*)/u);
-  if (!match?.[1]) throw new Error("transfer preview number is not readable");
+/** 兼容旧 Journey 的“全部”动作；收款地址必须已经由收款方页面锁定。 */
+export async function submitTestnetSendAll(
+  page: Page,
+  input: {
+    readonly recipientAddress: string;
+    /** 进入广播动作前调用，避免准备阶段失败时误禁用安全归集。 */
+    readonly onBroadcastAttempt?: () => void;
+  },
+): Promise<TransferReceipt> {
+  const readonlyRecipient = page.getByTestId("p2pkh-recipient-address").locator("code");
+  await expect(readonlyRecipient).toHaveText(input.recipientAddress);
+  await page.getByRole("button", { name: /^全部$|^All$/u }).click();
+  return submitAndAwaitResult(page, { allowReconfirm: true, onBroadcastAttempt: input.onBroadcastAttempt });
+}
+
+/** 从页面字段文本提取整数 sats；字段标签已经在调用处限定。 */
+function readSats(text: string | null, label: string): number {
+  // 找零字段还包含找零地址；优先读取紧邻单位的数字，不能误读地址中的
+  // Base58 数字。钱包余额和预览金额也统一走这个解析规则。
+  const match = (text ?? "").match(/([0-9][0-9,]*)\s*(?:sats|bytes|聪)/iu)
+    ?? (text ?? "").match(/([0-9][0-9,]*)/u);
+  if (!match?.[1]) throw new Error(`${label}不可解析：${text ?? ""}`);
   return Number(match[1].replaceAll(",", ""));
 }
-

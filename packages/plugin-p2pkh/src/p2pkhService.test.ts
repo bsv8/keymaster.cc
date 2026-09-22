@@ -87,7 +87,7 @@ describe("P2PKH service (snapshot + history)", () => {
     service.dispose?.();
   });
 
-  it("computes the balance breakdown from the coordinator snapshot minus active claims", async () => {
+  it("computes the balance breakdown from the coordinator snapshot only", async () => {
     const storage = createMemoryOwnerFileStore();
     const txA = "bb".repeat(32);
     const txB = "cc".repeat(32);
@@ -108,9 +108,9 @@ describe("P2PKH service (snapshot + history)", () => {
     });
     const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never });
     const breakdown = await service.getBalanceBreakdown?.("main");
-    expect(breakdown).toMatchObject({ confirmed: 1000, unconfirmed: 500, spendable: 500, pendingInputClaims: 1000 });
+    expect(breakdown).toMatchObject({ confirmed: 1000, unconfirmed: 500, spendable: 1500 });
     const balance = await service.getResourceBalance(resource.resourceId);
-    expect(balance.total).toBe(500);
+    expect(balance.total).toBe(1500);
     expect(balance.available).toBe(true);
     service.dispose?.();
   });
@@ -133,7 +133,7 @@ describe("P2PKH service (snapshot + history)", () => {
     service.dispose?.();
   });
 
-  it("exposes local transactions and input-claim pages", async () => {
+  it("exposes local transaction pages without a local input-claim API", async () => {
     const storage = createMemoryOwnerFileStore();
     const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage as never));
     await repository.putAddress(resource);
@@ -149,7 +149,6 @@ describe("P2PKH service (snapshot + history)", () => {
     const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinatorWithSnapshot([]) as never });
     expect((await service.listLocalTransactions?.({}))?.map((row) => row.id)).toContain("sub-page");
     expect((await service.listLocalTransactionsPage?.({ resourceId: resource.resourceId }))?.items.map((row) => row.id)).toContain("sub-page");
-    expect((await service.listLocalInputClaimsPage?.({ resourceId: resource.resourceId }))?.items).toHaveLength(1);
     service.dispose?.();
   });
 

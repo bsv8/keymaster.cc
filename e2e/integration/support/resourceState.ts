@@ -23,6 +23,8 @@ export interface ResourceRunState {
   readonly testnet: {
     readonly network: "testnet";
     readonly seedAddress: string;
+    /** seed 压缩公钥的公开投影；仅供页面通讯录场景使用，不包含私钥。 */
+    readonly seedPublicKeyHex: string;
     readonly testnetBalance: number;
     readonly spendableUtxoCount: number;
     readonly tipHeight: number;
@@ -68,6 +70,8 @@ export async function readResourceRunState(): Promise<ResourceRunState | null> {
       || state.testnet.network !== "testnet"
       || typeof state.testnet.seedAddress !== "string"
       || !/^[mn][1-9A-HJ-NP-Za-km-z]{25,34}$/u.test(state.testnet.seedAddress)
+      || typeof state.testnet.seedPublicKeyHex !== "string"
+      || !/^0[23][0-9a-f]{64}$/iu.test(state.testnet.seedPublicKeyHex)
       || !Number.isSafeInteger(state.testnet.testnetBalance)
       || state.testnet.testnetBalance < 0
       || !Number.isSafeInteger(state.testnet.spendableUtxoCount)
