@@ -18,6 +18,8 @@ import type {
   MsFileReadBlockInput,
   MsFileReadResult,
   MsFileReadSeedInput,
+  MsFileSellerRuntimeStatus,
+  MsFileSellerSettings,
   MsFileServiceStatus,
   MsFileSettingsSnapshot,
   MsFileStatInput,
@@ -26,7 +28,7 @@ import type {
   MsFileSupplierProbeResult,
   MsFileCoordinatorControl,
 } from "@keymaster/contracts";
-import { MSFILE_READ_CONCURRENCY_RECOMMENDED, normalizeMsFileReadConcurrencySettings } from "@keymaster/contracts";
+import { MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT, normalizeMsFileReadConcurrencySettings } from "@keymaster/contracts";
 import type { MsFileService } from "@keymaster/contracts";
 import { MsFileServiceError } from "./msfileErrors.js";
 
@@ -40,6 +42,8 @@ type StateEvent = {
   globalSeedReadConcurrency: number;
   globalBlockReadConcurrency: number;
   globalStatConcurrency: number;
+  sellerSettings: MsFileSellerSettings;
+  sellerRuntimeStatus: MsFileSellerRuntimeStatus;
   pendingApprovals: MsFilePendingApprovalView[];
 };
 
@@ -57,7 +61,7 @@ interface CachedStatResult {
 function cloneStatResult(value: MsFileStatResult): MsFileStatResult {
   return {
     seedHashHex: value.seedHashHex,
-    suppliers: value.suppliers.map((entry) => ({ ...entry })),
+    sources: value.sources.map((entry) => ({ ...entry })),
   };
 }
 
@@ -76,6 +80,8 @@ function isSameStateEvent(a: StateEvent, b: StateEvent): boolean {
     && a.globalSeedReadConcurrency === b.globalSeedReadConcurrency
     && a.globalBlockReadConcurrency === b.globalBlockReadConcurrency
     && a.globalStatConcurrency === b.globalStatConcurrency
+    && JSON.stringify(a.sellerSettings) === JSON.stringify(b.sellerSettings)
+    && a.sellerRuntimeStatus === b.sellerRuntimeStatus
     && JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings)
     && JSON.stringify(a.pendingApprovals) === JSON.stringify(b.pendingApprovals);
 }
@@ -101,6 +107,8 @@ export class MsFileServiceProxy implements MsFileService {
     supplierGeneration: 0,
     globalSettings: null,
     ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
+    sellerSettings: { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
+    sellerRuntimeStatus: "disabled",
     pendingApprovals: [],
   };
   private readonly listeners = new Set<() => void>();
@@ -118,7 +126,14 @@ export class MsFileServiceProxy implements MsFileService {
       // 兼容旧 Worker 的 baseline：四项并发设置必须以完整快照进入页面。
       const concurrency = normalizeMsFileReadConcurrencySettings(event)
         ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
-      const next: StateEvent = { ...event, ...concurrency };
+      const next: StateEvent = {
+        ...event,
+        ...concurrency,
+        // 旧 Worker baseline 没有卖方字段时采用关闭态，避免设置回读与
+        // baseline 在 undefined/default 之间反复切换并触发通知循环。
+        sellerSettings: event.sellerSettings ?? { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
+        sellerRuntimeStatus: event.sellerRuntimeStatus ?? "disabled",
+      };
       const changed = !isSameStateEvent(this.current, next);
       this.current = next;
       // 变更驱动：内容相同的重复事件不得让资源订阅者失效回读。
@@ -166,6 +181,8 @@ export class MsFileServiceProxy implements MsFileService {
       globalSeedReadConcurrency: snapshot.globalSeedReadConcurrency,
       globalBlockReadConcurrency: snapshot.globalBlockReadConcurrency,
       globalStatConcurrency: snapshot.globalStatConcurrency,
+      sellerSettings: snapshot.sellerSettings,
+      sellerRuntimeStatus: snapshot.sellerRuntimeStatus,
     };
     const changed = !isSameStateEvent(this.current, next);
     this.current = next;
@@ -229,6 +246,10 @@ export class MsFileServiceProxy implements MsFileService {
 
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
     return this.control({ type: "settings.global.update", input }).then(() => undefined);
+  }
+
+  updateSellerSettings(input: MsFileSellerSettings): Promise<void> {
+    return this.control({ type: "settings.seller.update", input }).then(() => undefined);
   }
 
   updateMediaBlockReadConcurrency(value: number): Promise<void> {
@@ -298,7 +319,7 @@ export class MsFileServiceProxy implements MsFileService {
     if (cached) this.statCache.delete(input.seedHashHex);
     return this.dataFor<MsFileStatResult>(null, () => ({ type: "stat", seedHashHex: input.seedHashHex }), [], input.signal)
       .then((result) => {
-        if (!result.suppliers.some((entry) => entry.status === "network-error")
+        if (!result.sources.some((entry) => entry.status === "network-error")
           && this.current.sessionEpoch === sessionEpoch
           && this.current.supplierGeneration === supplierGeneration) {
           this.statCache.set(input.seedHashHex, {
@@ -320,7 +341,7 @@ export class MsFileServiceProxy implements MsFileService {
   readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult> {
     return this.dataFor<MsFileReadResult>(
       null,
-      () => ({ type: "read-seed", supplierPublicKeyHex: input.supplierPublicKeyHex, seedHashHex: input.seedHashHex }),
+      () => ({ type: "read-seed", sourceId: input.sourceId, seedHashHex: input.seedHashHex }),
       [],
       input.signal
     );
@@ -329,7 +350,7 @@ export class MsFileServiceProxy implements MsFileService {
   readBlock(input: MsFileReadBlockInput): Promise<MsFileReadResult> {
     return this.dataFor<MsFileReadResult>(
       null,
-      () => ({ type: "read-block", supplierPublicKeyHex: input.supplierPublicKeyHex, blockHashHex: input.blockHashHex }),
+      () => ({ type: "read-block", sourceId: input.sourceId, seedHashHex: input.seedHashHex, blockHashHex: input.blockHashHex }),
       [],
       input.signal
     );
@@ -340,21 +361,21 @@ export class MsFileServiceProxy implements MsFileService {
       this.dataFor<MsFileStatResult>(ctx, (grantId) => ({ type: "stat", grantId, seedHashHex: input.seedHashHex }), [], input.signal),
     readSeed: (
       ctx: MsFileConnectAppContext,
-      input: { supplierPublicKeyHex: string; seedHashHex: string; signal?: AbortSignal }
+      input: { sourceId: string; seedHashHex: string; signal?: AbortSignal }
     ): Promise<MsFileReadResult> =>
       this.dataFor<MsFileReadResult>(
         ctx,
-        (grantId) => ({ type: "read-seed", grantId, supplierPublicKeyHex: input.supplierPublicKeyHex, seedHashHex: input.seedHashHex }),
+        (grantId) => ({ type: "read-seed", grantId, sourceId: input.sourceId, seedHashHex: input.seedHashHex }),
         [],
         input.signal
       ),
     readBlock: (
       ctx: MsFileConnectAppContext,
-      input: { supplierPublicKeyHex: string; blockHashHex: string; signal?: AbortSignal }
+      input: { sourceId: string; seedHashHex: string; blockHashHex: string; signal?: AbortSignal }
     ): Promise<MsFileReadResult> =>
       this.dataFor<MsFileReadResult>(
         ctx,
-        (grantId) => ({ type: "read-block", grantId, supplierPublicKeyHex: input.supplierPublicKeyHex, blockHashHex: input.blockHashHex }),
+        (grantId) => ({ type: "read-block", grantId, sourceId: input.sourceId, seedHashHex: input.seedHashHex, blockHashHex: input.blockHashHex }),
         [],
         input.signal
       ),

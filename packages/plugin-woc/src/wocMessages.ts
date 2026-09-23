@@ -38,6 +38,8 @@ export const WOC_MSG = {
   HISTORY_CONFIRMED: "woc.history.confirmed",
   HISTORY_UNCONFIRMED: "woc.history.unconfirmed",
   TX_OBSERVATION: "woc.tx.observation",
+  CHAIN_HEIGHT: "woc.chain.height",
+  TX_SPENT_OUTPUT: "woc.tx.spentOutput",
   TX_RAW: "woc.tx.raw",
   TX_BROADCAST: "woc.tx.broadcast",
   // token / collectible 协议查询：与上面 coin 类 endpoint 共享 actor 的
@@ -89,6 +91,16 @@ export interface WocTransactionObservationPayload extends WocActorPayload {
 
 export interface WocRawTransactionPayload extends WocActorPayload {
   txid: string;
+}
+
+/** 当前最佳链高度；无额外参数。 */
+export type WocChainHeightPayload = WocActorPayload;
+
+export interface WocSpentOutputPayload extends WocActorPayload {
+  /** 被花费交易 txid。 */
+  txid: string;
+  /** 被花费输出索引。 */
+  vout: number;
 }
 
 /** BSV-21：列地址持有的 token。 */

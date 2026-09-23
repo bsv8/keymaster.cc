@@ -9,7 +9,9 @@ import type {
   MsFilePendingApprovalView,
   MsFileReadConcurrencySettings,
   MsFileSatoshiAmount,
+  MsFileSellerRuntimeStatus,
   MsFileService,
+  MsFileSellerSettings,
   MsFileSettingsSnapshot,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
@@ -22,6 +24,8 @@ import {
   MSFILE_MAX_SEED_BYTES,
   MSFILE_READ_CONCURRENCY_HARD_LIMITS,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_SELLER_SETTINGS_DEFAULT,
+  normalizeMsFileSellerSettings,
   normalizeMsFileReadConcurrencySettings,
   normalizeMsFileSatoshiAmount,
 } from "@keymaster/contracts";
@@ -40,6 +44,17 @@ export interface MsFileStatusResourceSnapshot {
 type AmountDraft = { text: string; unlimited: boolean };
 type ConcurrencyField = keyof MsFileReadConcurrencySettings;
 type ConcurrencyDraft = Record<ConcurrencyField, string>;
+
+/** 卖方运行状态的中文说明；状态值本身是稳定契约，不翻译持久化字段。 */
+const SELLER_RUNTIME_STATUS_LABELS: Record<MsFileSellerRuntimeStatus, string> = {
+  "disabled": "已关闭",
+  "waiting-unlock": "等待解锁",
+  "indexing": "正在建立本地索引",
+  "configuration-error": "配置不完整",
+  "ready": "可以接单",
+  "selling": "正在销售",
+  "degraded": "依赖暂不可用",
+};
 
 function concurrencyDraft(settings: MsFileReadConcurrencySettings): ConcurrencyDraft {
   return {
@@ -109,6 +124,11 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
   const [keyDraft, setKeyDraft] = useState("");
   const [addressesDraft, setAddressesDraft] = useState("");
   const [enabledDraft, setEnabledDraft] = useState(true);
+  const [sellerDraft, setSellerDraft] = useState<MsFileSellerSettings>({
+    ...MSFILE_SELLER_SETTINGS_DEFAULT,
+    supportedArbiterPublicKeys: [],
+  });
+  const [sellerArbitersDraft, setSellerArbitersDraft] = useState("");
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probeResult, setProbeResult] = useState<{ key: string; ok: boolean; detail: string } | null>(null);
@@ -143,6 +163,32 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       globalStatConcurrency: snapshot.globalStatConcurrency,
     }));
   }, [snapshot?.mediaBlockReadConcurrency, snapshot?.globalSeedReadConcurrency, snapshot?.globalBlockReadConcurrency, snapshot?.globalStatConcurrency]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    setSellerDraft({ ...snapshot.sellerSettings, supportedArbiterPublicKeys: [...snapshot.sellerSettings.supportedArbiterPublicKeys] });
+    setSellerArbitersDraft(snapshot.sellerSettings.supportedArbiterPublicKeys.join("\n"));
+  }, [snapshot?.sellerSettings]);
+
+  async function saveSellerSettings() {
+    setError(null);
+    setStatusMessage(null);
+    const candidate = normalizeMsFileSellerSettings({
+      ...sellerDraft,
+      supportedArbiterPublicKeys: sellerArbitersDraft.split("\n").map((value) => value.trim().toLowerCase()).filter(Boolean),
+    });
+    if (!candidate) {
+      setError("卖方设置不合法：请检查价格、报价期限、仲裁方公钥和并发上限。");
+      return;
+    }
+    try {
+      await service.updateSellerSettings(candidate);
+      await reload();
+      setStatusMessage("卖方设置已保存。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
 
   // 审查修复（chunk 体积）：multiaddr/libp2p 依赖只在预览 PeerId 时动态加载，
   // 不进入应用主 chunk。
@@ -464,6 +510,47 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         <Button variant="secondary" onClick={() => void restoreRecommendedConcurrency()}>
           {t("msfile.settings.readConcurrency.reset", { defaultValue: "恢复建议值" })}
         </Button>
+      </div>
+
+      <h3>BitFS 卖方模式</h3>
+      <p className="msfile-settings__hint">
+        开启后，当前 Key 可出售本地完整文件。卖方运行期间会暂停 Vault 自动锁，但不会自动解锁；手动锁定仍会立即停止接单并清除内存索引。
+      </p>
+      <p className="msfile-settings__hint">
+        当前运行状态：{SELLER_RUNTIME_STATUS_LABELS[snapshot?.sellerRuntimeStatus ?? "disabled"]}（
+        {snapshot?.sellerRuntimeStatus ?? "disabled"}）。「依赖暂不可用」表示 BitFS 卖方协议或 Window
+        传输尚未就绪，此时不会对外报价。
+      </p>
+      <div className="msfile-settings__form">
+        <label className="msfile-settings__checkbox">
+          <input
+            type="checkbox"
+            checked={sellerDraft.sellerEnabled}
+            onChange={(event) => setSellerDraft((current) => ({ ...current, sellerEnabled: event.target.checked }))}
+          />
+          <span>允许当前 Key 作为 BitFS 卖方</span>
+        </label>
+        <label>
+          <span>单个 Seed 售价（聪）</span>
+          <input value={sellerDraft.seedPriceSatoshis} onChange={(event) => setSellerDraft((current) => ({ ...current, seedPriceSatoshis: event.target.value }))} />
+        </label>
+        <label>
+          <span>完整 256 KiB Block 售价（聪）</span>
+          <input value={sellerDraft.fullBlockPriceSatoshis} onChange={(event) => setSellerDraft((current) => ({ ...current, fullBlockPriceSatoshis: event.target.value }))} />
+        </label>
+        <label>
+          <span>报价有效时间（秒，30–86400）</span>
+          <input type="number" min={30} max={86400} value={sellerDraft.quoteLifetimeSeconds} onChange={(event) => setSellerDraft((current) => ({ ...current, quoteLifetimeSeconds: Number(event.target.value) }))} />
+        </label>
+        <label>
+          <span>接受的仲裁方压缩公钥（每行一个）</span>
+          <textarea rows={4} value={sellerArbitersDraft} onChange={(event) => setSellerArbitersDraft(event.target.value)} />
+        </label>
+        <label>
+          <span>同时销售会话上限（1–16）</span>
+          <input type="number" min={1} max={16} value={sellerDraft.maxConcurrentSales} onChange={(event) => setSellerDraft((current) => ({ ...current, maxConcurrentSales: Number(event.target.value) }))} />
+        </label>
+        <Button onClick={() => void saveSellerSettings()}>保存卖方设置</Button>
       </div>
 
       <h3>{t("msfile.settings.suppliers", { defaultValue: "Suppliers" })}</h3>

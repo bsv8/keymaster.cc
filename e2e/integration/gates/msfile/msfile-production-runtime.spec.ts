@@ -51,7 +51,7 @@ interface ProductionHooks {
   configure(supplier: { name: string; supplierPublicKeyHex: string; addresses: string[]; enabled: boolean }): Promise<void>;
   status(): string;
   probe(supplierPublicKeyHex: string): Promise<{ connected: boolean; addresses: Array<{ address: string; ok: boolean; errorCode?: string }> }>;
-  stat(seedHashHex: string): Promise<{ seedHashHex: string; suppliers: Array<Record<string, unknown>> }>;
+  stat(seedHashHex: string): Promise<{ seedHashHex: string; sources: Array<Record<string, unknown>> }>;
   readSeed(supplierPublicKeyHex: string, seedHashHex: string): Promise<ReadSummary>;
   readBlock(supplierPublicKeyHex: string, blockHashHex: string): Promise<ReadSummary>;
   readSeeds(supplierPublicKeyHex: string, seedHashHexes: string[]): Promise<ReadSummary[]>;
@@ -501,7 +501,7 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
       const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
       return api.stat(hash);
     }, seedHash);
-    expect(stat.suppliers).toContainEqual(expect.objectContaining({ supplierPublicKeyHex: fixture.supplierPublicKeyHex, status: "available", fileSizeBytes: String(FILE_BYTES) }));
+    expect(stat.sources).toContainEqual(expect.objectContaining({ supplierPublicKeyHex: fixture.supplierPublicKeyHex, status: "available", fileSizeBytes: String(FILE_BYTES) }));
     const seed = await readSummary(controlPage, "seed", fixture, seedHash);
     expect(seed).toEqual({ contentHashHex: seedHash, byteLength: fixture.seedLengths.get(seedHash), sha256Hex: seedHash });
     const blockHash = fixture.blockHashes[0]!;
@@ -522,7 +522,7 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
     expect(burst.blocks).toHaveLength(8);
     expect(burst.seeds.every((entry) => entry.sha256Hex === entry.contentHashHex)).toBe(true);
     expect(burst.blocks.every((entry) => entry.sha256Hex === entry.contentHashHex)).toBe(true);
-    expect(burst.statDuringRead.suppliers[0]).toMatchObject({ status: "available" });
+    expect(burst.statDuringRead.sources[0]).toMatchObject({ status: "available" });
     console.log(JSON.stringify({ event: "msfile_b01_webrtc", peerId: fixture.peerId, seedReads: 4, blockReads: 8, durationMs: Math.round(burst.durationMs) }));
   });
 
@@ -542,7 +542,7 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
       const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
       return api.stat(hash);
     }, seedHash);
-    expect(stat.suppliers[0]).toMatchObject({ status: "available" });
+    expect(stat.sources[0]).toMatchObject({ status: "available" });
     expect(await readSummary(controlPage, "seed", fixture, seedHash)).toMatchObject({ contentHashHex: seedHash, sha256Hex: seedHash });
     expect(await readSummary(controlPage, "block", fixture, fixture.blockHashes[1]!)).toMatchObject({ contentHashHex: fixture.blockHashes[1], sha256Hex: fixture.blockHashes[1] });
     console.log(JSON.stringify({
@@ -646,7 +646,7 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
       while (completed < total) {
         const count = Math.min(4, total - completed);
         const results = await Promise.all(Array.from({ length: count }, (_, index) => api.stat(seedHashes[(completed + index) % seedHashes.length]!)));
-        if (results.some((result) => result.suppliers[0]?.status !== "available")) throw new Error("10k Stat returned a non-available supplier");
+        if (results.some((result) => result.sources[0]?.status !== "available")) throw new Error("10k Stat returned a non-available supplier");
         completed += count;
       }
       return {
@@ -808,8 +808,8 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
     };
 
     const seedHash = fixture.seedHashes[2]!;
-    const stat = await invoke("stat", seedHash) as { suppliers: Array<Record<string, unknown>> };
-    expect(stat.suppliers[0]).toMatchObject({ supplierPublicKeyHex: fixture.supplierPublicKeyHex, status: "available" });
+    const stat = await invoke("stat", seedHash) as { sources: Array<Record<string, unknown>> };
+    expect(stat.sources[0]).toMatchObject({ supplierPublicKeyHex: fixture.supplierPublicKeyHex, status: "available" });
     expect(await invoke("seed", seedHash)).toMatchObject({ contentHashHex: seedHash, sha256Hex: seedHash });
     const blockHash = fixture.blockHashes[2]!;
     expect(await invoke("block", blockHash)).toMatchObject({ contentHashHex: blockHash, sha256Hex: blockHash, byteLength: BLOCK_BYTES });

@@ -77,6 +77,15 @@ function snapshot(overrides: Partial<MsFileSettingsSnapshot> = {}): MsFileSettin
       }
     ],
     supplierGeneration: 3,
+    sellerSettings: {
+      sellerEnabled: false,
+      seedPriceSatoshis: "0",
+      fullBlockPriceSatoshis: "0",
+      quoteLifetimeSeconds: 300,
+      maxConcurrentSales: 1,
+      supportedArbiterPublicKeys: [],
+    },
+    sellerRuntimeStatus: "disabled",
     ...overrides
   };
 }
@@ -162,12 +171,23 @@ describe("MsFileSettings", () => {
     expect(vi.mocked(service.updateGlobalPriceSettings).mock.calls[0]?.[0]).toMatchObject({ seedMaxPriceSatoshis: "0" });
   });
 
+  it("renders the seller runtime status with a Chinese explanation", async () => {
+    const service = makeService({
+      getSettingsSnapshot: vi.fn(async () => snapshot({ sellerRuntimeStatus: "degraded" })),
+    });
+    state.service = service;
+    render(<MsFileSettings />);
+    await waitFor(() => expect(screen.getByText(/当前运行状态：依赖暂不可用/)).toBeTruthy());
+    expect(screen.getByText(/此时不会对外报价/)).toBeTruthy();
+  });
+
   it("exposes read concurrency settings without the removed media prefetch policy", async () => {
     const service = makeService();
     state.service = service;
     render(<MsFileSettings />);
     await waitFor(() => expect(screen.getByDisplayValue("5000")).toBeTruthy());
-    expect(screen.getAllByRole("spinbutton")).toHaveLength(4);
+    // 四项读取并发 + 卖方报价有效期/最大并发销售数。
+    expect(screen.getAllByRole("spinbutton")).toHaveLength(6);
     expect(screen.getByText("全局 Stat 查询并发数")).toBeTruthy();
     expect(screen.getByText("Keymaster 同时处理的 Stat 查询任务数量。每个查询仍会询问所有已启用的 Supplier。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保存播放策略/ })).toBeNull();

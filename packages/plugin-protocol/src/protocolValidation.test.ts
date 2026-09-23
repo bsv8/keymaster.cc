@@ -117,6 +117,7 @@ describe("connect.launch signed proof boundary", () => {
 
 describe("msfile protocol validation", () => {
   const SUPPLIER = "035f3d296df6e017c017270bfc0293dc7d197ff9e04a25c096260420644d86d21a";
+  const SOURCE = `remote-proxy:${SUPPLIER}`;
   const HASH = "ab".repeat(32);
 
   it("accepts the three canonical shapes", () => {
@@ -126,12 +127,12 @@ describe("msfile protocol validation", () => {
     }).params).toMatchObject({ connectSessionId: "session" });
     expect(parseRequestMessage({
       v: PROTOCOL_VERSION, type: "request", id: "s2", method: "msfile.seed.read",
-      params: { connectSessionId: "session", supplierPublicKeyHex: SUPPLIER, seedHashHex: HASH }
-    }).params).toMatchObject({ supplierPublicKeyHex: SUPPLIER });
+      params: { connectSessionId: "session", sourceId: SOURCE, seedHashHex: HASH }
+    }).params).toMatchObject({ sourceId: SOURCE });
     expect(parseRequestMessage({
       v: PROTOCOL_VERSION, type: "request", id: "s3", method: "msfile.block.read",
-      params: { connectSessionId: "session", supplierPublicKeyHex: SUPPLIER, blockHashHex: HASH }
-    }).params).toMatchObject({ supplierPublicKeyHex: SUPPLIER });
+      params: { connectSessionId: "session", sourceId: SOURCE, seedHashHex: HASH, blockHashHex: HASH }
+    }).params).toMatchObject({ sourceId: SOURCE, seedHashHex: HASH });
   });
 
   // SDK 传入 maxPriceSatoshis / fileId / blockIndex 等额外字段必须全部拒绝。
@@ -150,22 +151,22 @@ describe("msfile protocol validation", () => {
       v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.seed.read",
       params: {
         connectSessionId: "session",
-        supplierPublicKeyHex: SUPPLIER,
+        sourceId: SOURCE,
         seedHashHex: HASH,
         [field]: field === "blockIndex" ? 1 : field.includes("Satoshis") ? "10" : {}
       }
     })).toThrowError(/forbidden|invalid_request/i);
   });
 
-  it("rejects non-canonical hashes and malformed supplier keys", () => {
+  it("rejects non-canonical hashes and malformed source routes", () => {
     expect(() => parseRequestMessage({
       v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.stat",
       params: { connectSessionId: "s", seedHashHex: "AB".repeat(32) }
     })).toThrowError(/64 lower-case hex/iu);
     expect(() => parseRequestMessage({
       v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.block.read",
-      params: { connectSessionId: "s", supplierPublicKeyHex: "04" + "11".repeat(32), blockHashHex: HASH }
-    })).toThrowError(/compressed secp256k1/iu);
+      params: { connectSessionId: "s", sourceId: "remote-proxy:04" + "11".repeat(32), seedHashHex: HASH, blockHashHex: HASH }
+    })).toThrowError(/source route/iu);
   });
 
   it("requires connectSessionId like every other business method family", () => {

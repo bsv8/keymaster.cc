@@ -16,13 +16,16 @@ import type {
   MsFileAppPriceOverride,
   MsFileGlobalPriceSettings,
   MsFileReadConcurrencySettings,
+  MsFileSellerSettings,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
 import {
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_SELLER_SETTINGS_DEFAULT,
   isValidMsFileSupplierPublicKeyHex,
   msFileAppPolicyKeyString,
   normalizeMsFileReadConcurrencySettings,
+  normalizeMsFileSellerSettings,
   normalizeMsFileSatoshiAmount,
 } from "@keymaster/contracts";
 
@@ -45,6 +48,8 @@ export interface MsFileRepository {
   putGlobalSettings(settings: MsFileGlobalPriceSettings, updatedAt: number): Promise<void>;
   putReadConcurrencySettings(settings: MsFileReadConcurrencySettings, updatedAt: number): Promise<void>;
   putMediaBlockReadConcurrency(settings: { mediaBlockReadConcurrency: number } | number, updatedAt: number): Promise<void>;
+  /** 保存独立 schema v2 的卖方设置。 */
+  putSellerSettings(settings: MsFileSellerSettings, updatedAt: number): Promise<void>;
   listSuppliers(): Promise<MsFileSupplierConfig[]>;
   getSupplier(supplierPublicKeyHex: string): Promise<MsFileSupplierConfig | null>;
   upsertSupplier(config: MsFileSupplierConfig): Promise<void>;
@@ -80,6 +85,8 @@ export interface MsFileGlobalSettingsSnapshot {
   globalBlockReadConcurrency?: number;
   globalStatConcurrency?: number;
   updatedAt: number | null;
+  /** 当前 Key 的卖方配置。 */
+  sellerSettings: MsFileSellerSettings;
 }
 
 /**
@@ -100,6 +107,8 @@ interface StoredSettingSnapshot {
   priceLimits: MsFileGlobalPriceSettings | null;
   readConcurrency: MsFileReadConcurrencySettings;
   suppliers: MsFileSupplierConfig[];
+  /** schema v2 卖方配置；v1 文件读取时补安全缺省值。 */
+  sellerSettings: MsFileSellerSettings;
 }
 
 interface StoredAppEntry {
@@ -177,8 +186,8 @@ function parseSupplier(value: unknown, index: number): MsFileSupplierConfig {
 function parseSettingFile(bytes: Uint8Array): StoredSettingSnapshot {
   const label = "MSFile setting.json";
   const record = decodeJsonObject(bytes, MAX_SETTING_FILE_BYTES, label);
-  assertKnownKeys(record, ["format", "version", "priceLimits", "readConcurrency", "suppliers"], label);
-  if (record.format !== MSFILES_SETTING_FORMAT || record.version !== 1) fail(`${label} format/version is invalid`);
+  assertKnownKeys(record, ["format", "version", "priceLimits", "readConcurrency", "suppliers", "seller"], label);
+  if (record.format !== MSFILES_SETTING_FORMAT || (record.version !== 1 && record.version !== 2)) fail(`${label} format/version is invalid`);
 
   let priceLimits: MsFileGlobalPriceSettings | null = null;
   if (record.priceLimits !== undefined) {
@@ -220,13 +229,28 @@ function parseSettingFile(bytes: Uint8Array): StoredSettingSnapshot {
       return parsed;
     });
   }
-  return { priceLimits, readConcurrency, suppliers };
+  let sellerSettings: MsFileSellerSettings = { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] };
+  if (record.version === 2 && record.seller !== undefined) {
+    const seller = expectRecord(record.seller, `${label} seller`);
+    assertKnownKeys(seller, [
+      "sellerEnabled",
+      "seedPriceSatoshis",
+      "fullBlockPriceSatoshis",
+      "quoteLifetimeSeconds",
+      "supportedArbiterPublicKeys",
+      "maxConcurrentSales",
+    ], `${label} seller`);
+    const normalized = normalizeMsFileSellerSettings(seller);
+    if (!normalized) fail(`${label} seller is invalid`);
+    sellerSettings = normalized;
+  }
+  return { priceLimits, readConcurrency, suppliers, sellerSettings };
 }
 
 function serializeSettingFile(snapshot: StoredSettingSnapshot): Uint8Array {
   const record: Record<string, unknown> = {
     format: MSFILES_SETTING_FORMAT,
-    version: 1,
+    version: 2,
     ...(snapshot.priceLimits === null ? {} : {
       priceLimits: {
         seedMaxPriceSatoshis: snapshot.priceLimits.seedMaxPriceSatoshis,
@@ -234,6 +258,10 @@ function serializeSettingFile(snapshot: StoredSettingSnapshot): Uint8Array {
       },
     }),
     readConcurrency: { ...snapshot.readConcurrency },
+    seller: {
+      ...snapshot.sellerSettings,
+      supportedArbiterPublicKeys: [...snapshot.sellerSettings.supportedArbiterPublicKeys],
+    },
     ...(snapshot.suppliers.length === 0 ? {} : {
       suppliers: snapshot.suppliers.map((supplier) => ({
         name: supplier.name,
@@ -333,6 +361,7 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
         priceLimits: null,
         readConcurrency: { ...MSFILE_READ_CONCURRENCY_RECOMMENDED },
         suppliers: [],
+        sellerSettings: { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
       };
     }
     return parseSettingFile(file.bytes);
@@ -385,6 +414,7 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
         settings: snapshot.priceLimits,
         ...snapshot.readConcurrency,
         updatedAt: null,
+        sellerSettings: { ...snapshot.sellerSettings, supportedArbiterPublicKeys: [...snapshot.sellerSettings.supportedArbiterPublicKeys] },
       };
     },
     async putGlobalSettings(settings, updatedAt) {
@@ -416,6 +446,18 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
       if (!normalized) throw new Error("invalid MSFile read concurrency settings");
       snapshot.readConcurrency = normalized;
       await writeSetting(snapshot);
+    },
+    async putSellerSettings(settings, updatedAt) {
+      assertOpen();
+      void updatedAt;
+      const normalized = normalizeMsFileSellerSettings(settings);
+      if (!normalized) throw new Error("invalid MSFile seller settings");
+      await mutateSetting((snapshot) => {
+        snapshot.sellerSettings = {
+          ...normalized,
+          supportedArbiterPublicKeys: [...normalized.supportedArbiterPublicKeys],
+        };
+      });
     },
     async listSuppliers() {
       assertOpen();

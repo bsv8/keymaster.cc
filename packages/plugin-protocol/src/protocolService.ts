@@ -4090,7 +4090,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const params = rec.params as import("@keymaster/contracts").MsFileSeedReadParams;
     const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
     return service.connect.readSeed(context, {
-      supplierPublicKeyHex: params.supplierPublicKeyHex,
+      sourceId: params.sourceId,
       seedHashHex: params.seedHashHex,
       signal: rec.abortController?.signal
     });
@@ -4100,7 +4100,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     const params = rec.params as import("@keymaster/contracts").MsFileBlockReadParams;
     const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
     return service.connect.readBlock(context, {
-      supplierPublicKeyHex: params.supplierPublicKeyHex,
+      sourceId: params.sourceId,
+      seedHashHex: params.seedHashHex,
       blockHashHex: params.blockHashHex,
       signal: rec.abortController?.signal
     });

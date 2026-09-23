@@ -70,3 +70,26 @@ Coordinator SharedWorker 执行。
 Chromium 与本机正式 Go Supplier 的身份、读取、Range、取消和压力测试已有自动化证据。
 Firefox、Safari、公共 CA/公网网络、目标 NAS 和真实部署 smoke 仍需对应环境验证；以
 [覆盖矩阵](./集成测试/覆盖矩阵.md)为准。
+
+## BitFS 本地来源与卖方模式（部分实现）
+
+Keymaster 正在增加不经过 MSFile 网络的 local msfile，并允许用户显式开启 BitFS 卖方模式。
+冻结需求与实施门禁见
+[BitFS 本地 MSFile 与卖方模式需求](./proposals/msfile/BitFS本地代理与卖方模式需求.md) 与
+[施工单](./proposals/msfile/BitFS本地代理与卖方模式施工单.md)。当前已经具备的行为：
+
+- 统一 MSFile API 增加 `sourceId`/`sourceKind` 来源路由；`local-bitfs` 直接读取当前 Key 的
+  `/msfile/storage`，不编码 `/msfile/1.0.0`，也不伪造供应商公钥；
+- 本地 Stat 在返回 `available` 前校验元数据、Seed Hash、长度、块数与全部 Block 存在性；
+  读取失败会立即撤销可用性并映射为稳定错误码；
+- 设置页可保存当前 Key 的卖方开关、价格、报价期限、仲裁方与并发上限；开启且已解锁时暂停
+  Vault 自动锁（手动锁仍然立即生效）；
+- Coordinator 在卖方开启时建立唯一 Seed 内存索引，并消费 ChannelProtocol 已验证的
+  `bsv8.hash.request.v1`：命中完整 Seed 且 locator 通过 WSS/WS/WebRTC Direct 白名单后才建立
+  卖方会话；未命中保持静默；
+- 卖方会话通过 Window P2P lane 拨号并协商 `/bitfs/wire/1.0.0`，帧收发有长度上限、严格解析和
+  世代撤销；报价与出站报文遵循 persist-before-send。
+
+尚未完成：BitFS 买方购买与报价发现、卖方开池/交付/收款协议端口、链上广播对账，以及
+WebSocket/WSS 与 WebRTC Direct 的真实浏览器互操作证据。协议端口未就绪时卖方运行状态为
+`degraded`，不会对外报价。

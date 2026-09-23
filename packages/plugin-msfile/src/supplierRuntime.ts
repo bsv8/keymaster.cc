@@ -3,16 +3,9 @@
 // 这里仅保留供应商连接/Stat/Read 业务；公共 Host、lease、TypedSigner 和
 // lane registry 由 plugin-window-p2p 统一拥有。
 
-import { webRTCDirect } from "@libp2p/webrtc";
-import { webSockets } from "@libp2p/websockets";
-import { multiaddr } from "@multiformats/multiaddr";
-import { authenticateConnection } from "bitcoin-libp2p/libp2p";
 import { hexToBytes, peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
-import {
-  dialAuthenticatedWebRTCDirect,
-  parseWebRTCDirectEndpoint,
-  WebRTCDirectError,
-} from "bitcoin-libp2p/webrtc-direct";
+import { WebRTCDirectError } from "bitcoin-libp2p/webrtc-direct";
+import { dialAuthenticatedAddress, type AuthenticatedDialConnection, type AuthenticatedDialHost } from "./authenticatedDial.js";
 import type {
   MsFileSupplierConfig,
   MsFileSupplierProbeResult,
@@ -39,9 +32,8 @@ type StreamLike = {
   close(): Promise<void>;
   [Symbol.asyncIterator](): AsyncIterator<StreamChunk>;
 };
-type Connection = Parameters<typeof authenticateConnection>[0];
-type Host = {
-  dial(address: ReturnType<typeof multiaddr>, options?: { signal?: AbortSignal }): Promise<Connection>;
+type Connection = AuthenticatedDialConnection;
+type Host = AuthenticatedDialHost & {
   stop(): void | Promise<void>;
 };
 
@@ -397,42 +389,18 @@ export class MsFileSupplierRuntime {
     throw new Error(`MSFile supplier dial failed: ${errors.join(" | ")}`);
   }
 
-  /**
-   * Direct 与 WSS 共用一个 host，但拨号能力必须按地址类型分流：
-   * WebRTC Direct 由 0.3.0 SDK 完成 endpoint 校验、身份 pin、超时和取消；
-   * WSS 继续使用业务层已有的 host.dial + authenticateConnection。
-   */
-  private async dialSupplierAddress(
+  /** 拨号与身份 pin 共用 `authenticatedDial` 的唯一策略。 */
+  private dialSupplierAddress(
     supplier: MsFileSupplierConfig,
     address: string,
     signal?: AbortSignal,
   ): Promise<Connection> {
-    const publicKey = hexToBytes(supplier.supplierPublicKeyHex);
-    const parsed = multiaddr(address);
-    const isDirect = parsed.getComponents().some((component) => component.name === "webrtc-direct");
-    if (isDirect) {
-      const endpoint = parseWebRTCDirectEndpoint(parsed, { publicKey });
-      const result = await dialAuthenticatedWebRTCDirect(this.host, endpoint, {
-        publicKey,
-        signal,
-        timeoutMs: 15_000,
-      });
-      return result.connection;
-    }
-
-    const connection = await this.host.dial(parsed, { signal });
-    try {
-      authenticateConnection(connection, {
-        peerId: peerIdFromPublicKeyBytes(publicKey),
-        publicKey,
-      });
-      return connection;
-    } catch (error) {
-      // host.dial 已经建立了连接；身份 pin 失败时不能交给外层用
-      // `connection` 变量清理，因为这里会在返回前直接抛出。
-      await connection.close().catch(() => undefined);
-      throw error;
-    }
+    return dialAuthenticatedAddress({
+      host: this.host,
+      address,
+      publicKeyHex: supplier.supplierPublicKeyHex,
+      ...(signal === undefined ? {} : { signal }),
+    });
   }
 
   private async installConnection(supplier: MsFileSupplierConfig, generation: number, connection: Connection): Promise<SupplierConnection> {

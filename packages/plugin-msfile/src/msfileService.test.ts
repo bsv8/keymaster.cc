@@ -19,6 +19,8 @@ import { validatePersistedSupplier } from "./supplierConfig.js";
 const PUBLISHER_A = OWNER_PUBKEY;
 export const OWNER_PEER_ID = "16Uiu2HAm7jWZvRQWjW8LpPRXqyGJqpb4rqLkX7FUu53zoQG9oUuF";
 const OTHER_KEY = "02b6de0e542ca933c790eb27e7d759abf2947233552fd0f942c4cd391186286e72";
+/** 测试中的远程来源统一使用公开 API 的稳定路由标识。 */
+const remoteSourceId = (supplierPublicKeyHex: string): string => `remote-proxy:${supplierPublicKeyHex}`;
 
 function createMsFileService(deps: Omit<MsFileServiceImplDeps, "repository"> & { repository?: MsFileServiceImplDeps["repository"] }): MsFileServiceImpl {
   const repository = deps.repository ?? openMsFileRepository(createInMemoryMsFileRepositoryStores(OWNER_PUBKEY));
@@ -176,7 +178,7 @@ describe("trusted reads", () => {
   it("fail closed before global settings exist", async () => {
     const service = await freshService();
     await service.upsertSupplier({ name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true });
-    await expect(service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: "ab".repeat(32) }))
+    await expect(service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32) }))
       .rejects.toMatchObject({ code: "msfile_not_configured" });
   });
 
@@ -194,7 +196,7 @@ describe("trusted reads", () => {
     const outcome = { type: "ok" as const, content: seedBytes };
     transport.script.push(async () => outcome);
 
-    const result = await service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: await hashOf(seedBytes) });
+    const result = await service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: await hashOf(seedBytes) });
     expect(result.contentHashHex).toBe(await hashOf(seedBytes));
     expect(result.content.$type).toBe("binary");
     expect(transport.reads[0]).toMatchObject({ kind: "seed", maxPriceSatoshis: 100n });
@@ -206,7 +208,7 @@ describe("trusted reads", () => {
     await configureGlobal(service);
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
     await expect(
-      service.readBlock({ supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: "11".repeat(32) })
+      service.readBlock({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: "11".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_price_limit_exceeded" });
     expect(transport.reads).toHaveLength(1);
   });
@@ -217,19 +219,19 @@ describe("trusted reads", () => {
     await configureGlobal(service);
     transport.script.push(async () => ({ type: "supplier-error", errorCode: "content_not_found" }));
     await expect(
-      service.readBlock({ supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: "11".repeat(32) })
+      service.readBlock({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: "11".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_content_not_found" });
     transport.script.push(async () => ({ type: "supplier-error", errorCode: "rate_limited" }));
     await expect(
-      service.readBlock({ supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: "11".repeat(32) })
+      service.readBlock({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: "11".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_rate_limited" });
     transport.script.push(async () => ({ type: "supplier-error", errorCode: "acquisition_failed" }));
     await expect(
-      service.readBlock({ supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: "11".repeat(32) })
+      service.readBlock({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: "11".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_supplier_error" });
     transport.script.push(async () => ({ type: "supplier-error", errorCode: "totally_unknown_code" }));
     await expect(
-      service.readBlock({ supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: "11".repeat(32) })
+      service.readBlock({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: "11".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_transport_error" });
   });
 
@@ -253,7 +255,7 @@ describe("trusted reads", () => {
     await service.stat({ seedHashHex: wrongHash });
     transport.script.push(async () => ({ type: "ok", content: wrongLength }));
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: wrongHash })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: wrongHash })
     ).rejects.toMatchObject({ code: "msfile_integrity_error" });
 
     // 精确长度（32 字节）且 hash 匹配：放行。
@@ -262,25 +264,25 @@ describe("trusted reads", () => {
     await service.stat({ seedHashHex: rightHash });
     transport.script.push(async () => ({ type: "ok", content: right }));
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: rightHash })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: rightHash })
     ).resolves.toMatchObject({ contentHashHex: rightHash });
 
     // 供应商配置世代变化后缓存失效：未知尺寸回退到基础校验。
     await service.upsertSupplier({ name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true });
     transport.script.push(async () => ({ type: "ok", content: wrongLength }));
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: wrongHash })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: wrongHash })
     ).resolves.toMatchObject({ contentHashHex: wrongHash });
   });
 
   it("reject unknown / disabled suppliers before touching the wire", async () => {
     const service = await freshService();
     await configureGlobal(service);
-    await expect(service.readSeed({ supplierPublicKeyHex: "02" + "22".repeat(32), seedHashHex: "ab".repeat(32) }))
+    await expect(service.readSeed({ sourceId: remoteSourceId("02" + "22".repeat(32)), seedHashHex: "ab".repeat(32) }))
       .rejects.toMatchObject({ code: "msfile_supplier_not_found" });
     await service.upsertSupplier({ name: "off", supplierPublicKeyHex: "02" + "33".repeat(32).replace(/^/, ""), addresses: [SUPPLIER_ADDRESS.replace(SUPPLIER_PEER_ID, "16Uiu2HAm7jWZvRQWjW8LpPRXqyGJqpb4rqLkX7FUu53zoQG9oUuF")], enabled: false }).catch(() => undefined);
     const disabledKey = "02b6de0e542ca933c790eb27e7d759abf2947233552fd0f942c4cd391186286e72";
-    await expect(service.readSeed({ supplierPublicKeyHex: disabledKey, seedHashHex: "ab".repeat(32) }))
+    await expect(service.readSeed({ sourceId: remoteSourceId(disabledKey), seedHashHex: "ab".repeat(32) }))
       .rejects.toMatchObject({ code: "msfile_supplier_not_found" });
   });
 
@@ -290,7 +292,7 @@ describe("trusted reads", () => {
     await configureGlobal(service);
     transport.script.push(async () => ({ type: "ok", content: new Uint8Array(31) }));
     await expect(
-      service.readBlock({ supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: "11".repeat(32) })
+      service.readBlock({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: "11".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_integrity_error" });
   });
 
@@ -323,8 +325,8 @@ describe("trusted reads", () => {
       enabled: false, // 不参与 Stat 并发
     });
     const result = await service.stat({ seedHashHex: "ab".repeat(32) });
-    expect(result.suppliers).toHaveLength(1);
-    expect(result.suppliers[0]).toMatchObject({ status: "quoted", supplierPublicKeyHex: SUPPLIER_PUBKEY });
+    expect(result.sources).toHaveLength(1);
+    expect(result.sources[0]).toMatchObject({ status: "quoted", supplierPublicKeyHex: SUPPLIER_PUBKEY });
     // 启用第二个供应商后网络错误单独呈现。
     await service.upsertSupplier({
       name: "b",
@@ -333,7 +335,7 @@ describe("trusted reads", () => {
       enabled: true,
     });
     const result2 = await service.stat({ seedHashHex: "ab".repeat(32) });
-    expect(result2.suppliers.find((entry) => entry.supplierPublicKeyHex === other)).toMatchObject({ status: "network-error" });
+    expect(result2.sources.find((entry) => entry.sourceKind === "remote-proxy" && entry.supplierPublicKeyHex === other)).toMatchObject({ status: "network-error" });
     void transport.available;
   });
 });
@@ -346,7 +348,7 @@ describe("connect gateway authorization", () => {
     const service = await freshService(transport);
     await configureGlobal(service);
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
-    const pending = service.connect.readSeed(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: "ab".repeat(32) });
+    const pending = service.connect.readSeed(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32) });
     void pending.catch(() => undefined);
     await waitForApprovals(service);
     const authorizations = await service.listAppAuthorizations();
@@ -366,12 +368,12 @@ describe("connect gateway authorization", () => {
 
     const bytes = new Uint8Array(64);
     transport.script.push(async () => ({ type: "ok", content: bytes }));
-    await service.connect.readBlock(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: await hashOf(bytes) });
+    await service.connect.readBlock(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: await hashOf(bytes) });
     expect(transport.reads[0]).toMatchObject({ kind: "block", maxPriceSatoshis: 0n });
     // Seed 未设置 override → 继承全局 100。
     const seedBytes = new Uint8Array(32);
     transport.script.push(async () => ({ type: "ok", content: seedBytes }));
-    await service.connect.readSeed(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: await hashOf(seedBytes) });
+    await service.connect.readSeed(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: await hashOf(seedBytes) });
     expect(transport.reads[1]).toMatchObject({ kind: "seed", maxPriceSatoshis: 100n });
   });
 
@@ -385,7 +387,7 @@ describe("connect gateway authorization", () => {
     // 第一次：超额 → 用户选择“仅本次 200”。
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
     transport.script.push(async () => ({ type: "ok", content: seedBytes }));
-    const pendingOnce = service.connect.readSeed(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: seedHash });
+    const pendingOnce = service.connect.readSeed(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: seedHash });
     await waitForApprovals(service);
     const approvals = service.listPendingApprovals();
 
@@ -398,7 +400,7 @@ describe("connect gateway authorization", () => {
     // 第二次：再次超额 → “始终 300”，只写 seed 字段。
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
     transport.script.push(async () => ({ type: "ok", content: seedBytes }));
-    const pendingAlways = service.connect.readSeed(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: seedHash });
+    const pendingAlways = service.connect.readSeed(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: seedHash });
     await waitForApprovals(service);
     const approval = service.listPendingApprovals()[0]!;
     await service.resolveApproval(approval.approvalId, { action: "allow", scope: "always", newMaxPriceSatoshis: "300" });
@@ -409,7 +411,7 @@ describe("connect gateway authorization", () => {
 
     // 第三次：以持久化的 300 直接成功，无需确认。
     transport.script.push(async () => ({ type: "ok", content: seedBytes }));
-    await service.connect.readSeed(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: seedHash });
+    await service.connect.readSeed(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: seedHash });
     // 第二次调用的首个 wire Read 仍从继承全局 10 开始（once 未落库），确认后按 300 重发。
     expect(transport.reads.map((read) => read.maxPriceSatoshis)).toEqual([10n, 200n, 10n, 300n, 300n]);
   });
@@ -420,7 +422,7 @@ describe("connect gateway authorization", () => {
     await configureGlobal(service, "10", "10");
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
-    const pending = service.connect.readBlock(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: "11".repeat(32) });
+    const pending = service.connect.readBlock(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: "11".repeat(32) });
     await waitForApprovals(service);
     const approval = service.listPendingApprovals()[0];
     await service.resolveApproval(approval!.approvalId, { action: "allow", scope: "once", newMaxPriceSatoshis: "20" });
@@ -434,7 +436,7 @@ describe("connect gateway authorization", () => {
     const service = await freshService(transport);
     await configureGlobal(service);
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
-    const pending = service.connect.readSeed(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: "ab".repeat(32) });
+    const pending = service.connect.readSeed(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32) });
     await waitForApprovals(service);
     await service.resolveApproval(service.listPendingApprovals()[0]!.approvalId, { action: "reject" });
     await expect(pending).rejects.toMatchObject({ code: "user_rejected" });
@@ -452,7 +454,7 @@ describe("connect gateway authorization", () => {
     const otherApp = appContext(OWNER_PUBKEY, PUBLISHER_A, "editor");
     const bytes = new Uint8Array(32);
     transport.script.push(async () => ({ type: "ok", content: bytes }));
-    await service.connect.readSeed(otherApp, { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: await hashOf(bytes) });
+    await service.connect.readSeed(otherApp, { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: await hashOf(bytes) });
     expect(transport.reads[0]).toMatchObject({ maxPriceSatoshis: 100n });
   });
 
@@ -461,7 +463,7 @@ describe("connect gateway authorization", () => {
     const service = await freshService(transport);
     await configureGlobal(service);
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
-    const pending = service.connect.readSeed(ctxA(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: "ab".repeat(32) });
+    const pending = service.connect.readSeed(ctxA(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32) });
     await waitForApprovals(service);
     await service.abortSession(ctxA().connectSessionId);
     await expect(pending).rejects.toMatchObject({ code: "user_rejected" });
@@ -489,6 +491,7 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
     globalSeedReadConcurrency?: number;
     globalBlockReadConcurrency?: number;
     globalStatConcurrency?: number;
+    sellerSettings: import("@keymaster/contracts").MsFileSellerSettings;
     updatedAt: number | null;
   };
 } {
@@ -500,8 +503,13 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
       globalSeedReadConcurrency?: number;
       globalBlockReadConcurrency?: number;
       globalStatConcurrency?: number;
+      sellerSettings: import("@keymaster/contracts").MsFileSellerSettings;
       updatedAt: number | null;
-    } = { settings: null, updatedAt: null };
+    } = {
+      settings: null,
+      sellerSettings: { sellerEnabled: false, seedPriceSatoshis: "0", fullBlockPriceSatoshis: "0", quoteLifetimeSeconds: 300, maxConcurrentSales: 1, supportedArbiterPublicKeys: [] },
+      updatedAt: null,
+    };
     return {
       rows,
       settingsRow,
@@ -513,6 +521,10 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
       },
       async putMediaBlockReadConcurrency(settings) {
         settingsRow.mediaBlockReadConcurrency = typeof settings === "number" ? settings : settings.mediaBlockReadConcurrency;
+        settingsRow.updatedAt = Date.now();
+      },
+      async putSellerSettings(settings) {
+        settingsRow.sellerSettings = { ...settings, supportedArbiterPublicKeys: [...settings.supportedArbiterPublicKeys] };
         settingsRow.updatedAt = Date.now();
       },
       async listSuppliers() {
@@ -560,7 +572,7 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
 
     // 窗口内的 read / probe 都不能到达 transport。
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: "ab".repeat(32) })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_unavailable" });
     expect(transport.reads).toHaveLength(0);
     await expect(service.probeSupplier(SUPPLIER_PUBKEY)).rejects.toMatchObject({ code: "msfile_unavailable" });
@@ -572,7 +584,7 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
     const hash = Array.from(await sha256(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
     transport.script.push(async () => ({ type: "ok", content: bytes }));
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: hash })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: hash })
     ).resolves.toMatchObject({ contentHashHex: hash });
     expect(transport.reads).toHaveLength(1);
   });
@@ -595,7 +607,7 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
 
     // failed barrier：read 持续禁用。
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: "ab".repeat(32) })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32) })
     ).rejects.toMatchObject({ code: "msfile_unavailable" });
 
     // 重新保存成功后解除。
@@ -605,7 +617,7 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
     const hash = Array.from(await sha256(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
     transport.script.push(async () => ({ type: "ok", content: bytes }));
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: hash })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: hash })
     ).resolves.toBeTruthy();
   });
 
@@ -619,8 +631,8 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
 
     // 不等待任何初始化：立即 stat 必须看到预置供应商（而非误报“无供应商”）。
     const result = await service.stat({ seedHashHex: "ab".repeat(32) });
-    expect(result.suppliers).toHaveLength(1);
-    expect(result.suppliers[0]).toMatchObject({ status: "absent", supplierPublicKeyHex: SUPPLIER_PUBKEY });
+    expect(result.sources).toHaveLength(1);
+    expect(result.sources[0]).toMatchObject({ status: "absent", supplierPublicKeyHex: SUPPLIER_PUBKEY });
   });
 
   it("always exposes the builtin supplier, overriding a persisted duplicate", async () => {
@@ -647,7 +659,7 @@ function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDb
 
     // stat/probe 都来自同一快照：内置供应商参与广播且可测试连接。
     const stat = await service.stat({ seedHashHex: "ab".repeat(32) });
-    expect(stat.suppliers).toContainEqual(expect.objectContaining({ supplierPublicKeyHex: official.supplierPublicKeyHex, status: "absent" }));
+    expect(stat.sources).toContainEqual(expect.objectContaining({ supplierPublicKeyHex: official.supplierPublicKeyHex, status: "absent" }));
     await expect(service.probeSupplier(official.supplierPublicKeyHex)).resolves.toMatchObject({ connected: true });
   });
 
@@ -740,7 +752,7 @@ describe("supplier fence token（第五轮审查修复）", () => {
     transport.script.push(async () => ({ type: "ok", content: bytes }));
 
     // read 先启动并悬挂在地址校验上（首次 loader 调用）。
-    const pendingRead = service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: hash });
+    const pendingRead = service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: hash });
     void pendingRead.catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(validatorCalls).toBeGreaterThanOrEqual(1);
@@ -811,7 +823,7 @@ describe("supplier fence token（第五轮审查修复）", () => {
 
     // 无 mutation 的后续 stat 正常拨号（活性对照）。
     const result = await service.stat({ seedHashHex: "ab".repeat(32) });
-    expect(result.suppliers).toHaveLength(1);
+    expect(result.sources).toHaveLength(1);
     expect(dialCount).toBe(1);
   });
 
@@ -847,7 +859,7 @@ describe("supplier fence token（第五轮审查修复）", () => {
     // 三个数据面操作同时悬挂在地址校验上。
     const bytes = new Uint8Array(32);
     const hash = Array.from(await sha256(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
-    const pendingRead = service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: hash });
+    const pendingRead = service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: hash });
     void pendingRead.catch(() => undefined);
     const pendingStat = service.stat({ seedHashHex: hash });
     void pendingStat.catch(() => undefined);
@@ -916,7 +928,7 @@ describe("supplier invalidation races（审查修复）", () => {
       return { type: "ok" as const, content: bytes };
     });
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: hash })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: hash })
     ).rejects.toMatchObject({ code: "msfile_unavailable" });
   });
 
@@ -970,7 +982,7 @@ describe("supplier invalidation races（审查修复）", () => {
     const oddHash = Array.from(await sha256(odd), (b) => b.toString(16).padStart(2, "0")).join("");
     transport.script.push(async () => ({ type: "ok", content: odd }));
     await expect(
-      service.readSeed({ supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: oddHash })
+      service.readSeed({ sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: oddHash })
     ).resolves.toMatchObject({ contentHashHex: oddHash });
   });
 
@@ -982,7 +994,7 @@ describe("supplier invalidation races（审查修复）", () => {
     const hash = Array.from(await sha256(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
     transport.script.push(async () => ({ type: "ok" as const, content: bytes }));
-    const pending = service.connect.readSeed(gwCtx(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: hash });
+    const pending = service.connect.readSeed(gwCtx(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: hash });
     void pending.catch(() => undefined);
     await waitForApprovals(service);
     const approvalId = service.listPendingApprovals()[0]!.approvalId;
@@ -1006,7 +1018,7 @@ describe("supplier invalidation races（审查修复）", () => {
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
     transport.script.push(async () => ({ type: "ok", content: bytes }));
     const blockHash = Array.from(await sha256(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
-    const blockPending = service.connect.readBlock(gwCtx(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, blockHashHex: blockHash });
+    const blockPending = service.connect.readBlock(gwCtx(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: "ab".repeat(32), blockHashHex: blockHash });
     await waitForApprovals(service);
     await service.resolveApproval(service.listPendingApprovals()[0]!.approvalId, { action: "allow", scope: "always", newMaxPriceSatoshis: "40" });
     await blockPending;
@@ -1016,7 +1028,7 @@ describe("supplier invalidation races（审查修复）", () => {
     const seedHash = Array.from(await sha256(seedBytes), (b) => b.toString(16).padStart(2, "0")).join("");
     transport.script.push(async () => ({ type: "price-limit-exceeded" }));
     transport.script.push(async () => ({ type: "ok", content: seedBytes }));
-    const seedPending = service.connect.readSeed(gwCtx(), { supplierPublicKeyHex: SUPPLIER_PUBKEY, seedHashHex: seedHash });
+    const seedPending = service.connect.readSeed(gwCtx(), { sourceId: remoteSourceId(SUPPLIER_PUBKEY), seedHashHex: seedHash });
     await waitForApprovals(service);
     await service.resolveApproval(service.listPendingApprovals()[0]!.approvalId, { action: "allow", scope: "always", newMaxPriceSatoshis: "70" });
     await seedPending;

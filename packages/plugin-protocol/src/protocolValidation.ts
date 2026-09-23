@@ -60,7 +60,8 @@ import {
   STORAGE_DEFAULT_LIST_LIMIT,
   STORAGE_MAX_LIST_LIMIT,
   STORAGE_MAX_PARTS,
-  STORAGE_MAX_PAYLOAD_BYTES
+  STORAGE_MAX_PAYLOAD_BYTES,
+  isValidMsFileSourceId,
 } from "@keymaster/contracts";
 import { AppIdentityValidationError, verifyAppIdentityProof } from "./appIdentity.js";
 
@@ -641,12 +642,10 @@ function msfileHash(value: unknown, field: string): string {
   return hash;
 }
 
-function msfileSupplierKey(obj: Record<string, unknown>, name: string): string {
-  const key = expectString(obj.supplierPublicKeyHex, `${name}.supplierPublicKeyHex`);
-  if (!/^(02|03)[0-9a-f]{64}$/.test(key)) {
-    throw new ProtocolValidationError("invalid_request", "supplierPublicKeyHex must be a compressed secp256k1 public key");
-  }
-  return key;
+function msfileSourceId(obj: Record<string, unknown>, name: string): string {
+  const sourceId = expectString(obj.sourceId, `${name}.sourceId`);
+  if (!isValidMsFileSourceId(sourceId)) throw new ProtocolValidationError("invalid_request", "sourceId must be a valid MSFile source route");
+  return sourceId;
 }
 
 function validateMsFileStatParams(raw: unknown): MsFileStatParams {
@@ -658,7 +657,7 @@ function validateMsFileSeedReadParams(raw: unknown): MsFileSeedReadParams {
   const obj = msfileObject(raw, "msfile.seed.read params");
   return {
     connectSessionId: storageSession(obj, "msfile.seed.read"),
-    supplierPublicKeyHex: msfileSupplierKey(obj, "msfile.seed.read"),
+    sourceId: msfileSourceId(obj, "msfile.seed.read"),
     seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex")
   };
 }
@@ -667,7 +666,8 @@ function validateMsFileBlockReadParams(raw: unknown): MsFileBlockReadParams {
   const obj = msfileObject(raw, "msfile.block.read params");
   return {
     connectSessionId: storageSession(obj, "msfile.block.read"),
-    supplierPublicKeyHex: msfileSupplierKey(obj, "msfile.block.read"),
+    sourceId: msfileSourceId(obj, "msfile.block.read"),
+    seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex"),
     blockHashHex: msfileHash(obj.blockHashHex, "blockHashHex")
   };
 }

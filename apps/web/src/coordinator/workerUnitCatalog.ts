@@ -93,8 +93,9 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     unitId: "msfile.coordinator-worker",
     taskIds: [],
     serviceIds: ["msfile.service"],
-    // `<owner>/msfiles/` 文件根；App 覆盖额度按 publisher 惰性打开，不在此列举。
-    storagePurposes: [""],
+    // `<owner>/msfiles/` 文件根；`bitfs-journal` 保存不可逆协议证据；
+    // App 覆盖额度按 publisher 惰性打开，不在此列举。
+    storagePurposes: ["", "bitfs-journal"],
     finalIoAuditEntries: [],
   },
   {

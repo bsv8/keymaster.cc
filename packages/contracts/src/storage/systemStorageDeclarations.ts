@@ -206,6 +206,18 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
+   * BitFS 不可逆协议证据：checkpoint、exact outbox 与结果未知交易。
+   * 独立 purpose 防止与内容、MSFile 设置或 App 用量混写。
+   */
+  bitfsJournalFiles: Object.freeze({
+    moduleId: "msfiles",
+    purposeId: "bitfs-journal",
+    scope: "owner",
+    authority: "built-in-module",
+    model: "files",
+    schemaVersion: 1,
+  } satisfies PluginStorageDeclaration),
+  /**
    * 三方 App 设置（KeymasterFormats《app.publickeyhex/settings.json》）：
    * `<owner>/app.<publisher 公钥>/settings.json`。绑定必须携带 publisher，
    * 因此不通过 filesFor(purposeId) 暴露给普通插件 setup。
@@ -239,6 +251,7 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   webrtc: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory]),
   msfile: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,
+    CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,
     CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles,
   ]),
 });

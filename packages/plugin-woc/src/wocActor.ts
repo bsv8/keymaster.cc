@@ -26,6 +26,7 @@ import type {
   WocQueueSnapshot,
   WocRequestPriority,
   WocTransactionObservation,
+  WocSpentOutput,
   WocUnconfirmedHistory,
   WocUtxoResponse,
   WocBsv21TokenDetail
@@ -44,6 +45,8 @@ import {
   type WocBsv21TokenBalancePayload,
   type WocBroadcastPayload,
   type WocHistoryPayload,
+  type WocChainHeightPayload,
+  type WocSpentOutputPayload,
   type WocTransactionObservationPayload,
   type WocRawTransactionPayload,
   type Woc1SatContentPayload,
@@ -807,6 +810,43 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     });
   }
 
+  function getChainHeight(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<number> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.CHAIN_HEIGHT,
+      fn: async (signal) => {
+        const raw = await fetchJson<unknown>(network, "/chain/info", { method: "GET" }, signal, opts.timeoutMs);
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("WOC chain info response is invalid");
+        const value = (raw as Record<string, unknown>).blocks ?? (raw as Record<string, unknown>).height;
+        if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error("WOC chain info response has no valid height");
+        return value as number;
+      }
+    });
+  }
+
+  function getSpentOutput(network: BsvNetwork, txid: string, vout: number, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocSpentOutput | null> {
+    const normalized = normalizeTxidHex(txid);
+    if (!Number.isSafeInteger(vout) || vout < 0 || vout > 0xffffffff) return Promise.reject(new TypeError("WOC spent output vout is invalid"));
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.TX_SPENT_OUTPUT,
+      fn: async (signal) => {
+        let raw: unknown;
+        try {
+          raw = await fetchJson<unknown>(network, `/tx/${encodeURIComponent(normalized)}/${vout}/spent`, { method: "GET" }, signal, opts.timeoutMs);
+        } catch (error) {
+          if (isWocNotFoundError(error)) return null;
+          throw error;
+        }
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("WOC spent output response is invalid");
+        const value = raw as Record<string, unknown>;
+        const spenderTxid = normalizeTxidHex(String(value.txid ?? ""));
+        const vin = value.vin;
+        if (!Number.isSafeInteger(vin) || (vin as number) < 0) throw new Error("WOC spent output response has invalid vin");
+        if (value.status !== "confirmed" && value.status !== "unconfirmed") throw new Error("WOC spent output response has invalid status");
+        return { txid: spenderTxid, vin: vin as number, status: value.status };
+      }
+    });
+  }
+
   function broadcast(network: BsvNetwork, rawTxHex: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<WocBroadcastResult> {
     return enqueue({
       priority: WOC_PRIORITY.broadcast,
@@ -1158,6 +1198,14 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocTransactionObservationPayload;
         return getTransactionObservation(p.network, p.canonicalTxid, opts);
       }
+      case WOC_MSG.CHAIN_HEIGHT: {
+        const p = payload as WocChainHeightPayload;
+        return getChainHeight(p.network, opts);
+      }
+      case WOC_MSG.TX_SPENT_OUTPUT: {
+        const p = payload as WocSpentOutputPayload;
+        return getSpentOutput(p.network, p.txid, p.vout, opts);
+      }
       case WOC_MSG.TX_RAW: {
         const p = payload as WocRawTransactionPayload;
         return getRawTransaction(p.network, p.txid, opts);
@@ -1217,6 +1265,8 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.HISTORY_CONFIRMED,
       WOC_MSG.HISTORY_UNCONFIRMED,
       WOC_MSG.TX_OBSERVATION,
+      WOC_MSG.CHAIN_HEIGHT,
+      WOC_MSG.TX_SPENT_OUTPUT,
       WOC_MSG.TX_RAW,
       WOC_MSG.TX_BROADCAST,
       WOC_MSG.BSV21_LIST_TOKENS,

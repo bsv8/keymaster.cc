@@ -68,7 +68,7 @@ function sourceInput() {
   return {
     taskToken: "task-token",
     seedHashHex: "aa".repeat(32),
-    supplierPublicKeyHex: `02${"11".repeat(32)}`,
+    sourceId: `remote-proxy:02${"11".repeat(32)}`,
     fileSizeBytes: 1n,
     declaredMediaType: "audio/mpeg",
     mediaBlockReadConcurrency: 2,

@@ -114,6 +114,7 @@ import {
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_SELLER_SETTINGS_DEFAULT,
   normalizeMsFileReadConcurrencySettings,
   SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
@@ -194,8 +195,28 @@ function randomIdentifierSuffix(): string {
 
 // MSFile runtime 真值在 Coordinator SharedWorker；transport 由 Window executor 注入。
 import {
+  BitfsSeedIndex,
+  BitfsSellerRuntime,
+  BitfsSellerProtocol,
+  BitfsSellerSessionManager,
+  BitfsTransactionBroadcaster,
+  createBitfsJournal,
+  createBitfsSessionJournal,
+  createBitfsTransactionJournal,
+  createBitfsVaultSigner,
+  createBitfsWocChainPort,
+  createMsFileLocalContentSource,
   createMsFileService,
+  createUnavailableBitfsSellerContentResolver,
   openMsFileRepository,
+  reconcileBitfsTransactions,
+  reconcileBitfsSessionTransactions,
+  storeMsFileSeed,
+  type BitfsSellerMatch,
+  type BitfsSellerProtocolPort,
+  type BitfsSellerStreamTransport,
+  type BitfsTransactionJournal,
+  type BitfsStreamEvent,
   type MsFileServiceImpl,
   type MsFileServiceEventState,
 } from "@keymaster/plugin-msfile/coordinator";
@@ -3510,6 +3531,264 @@ type MsFileRuntimeStores = {
 /** MSFile 的 owner 文件句柄与 App publisher 枚举；句柄由 worker 缓存与失效。 */
 let msfileRuntimeStores: MsFileRuntimeStores | undefined;
 let lastMsFileState: CoordinatorMsFileStateEvent | undefined;
+/** 当前 owner 的 BitFS 卖方派生索引；锁定、切 Key 或关闭卖方时立即丢弃。 */
+let msfileSellerIndex: BitfsSeedIndex | undefined;
+/** 索引重建取消句柄，防止旧 owner 的迟到结果重新发布。 */
+let msfileSellerIndexController: AbortController | undefined;
+/** 当前 owner 唯一的卖方匹配运行单元。 */
+let msfileSellerRuntime: BitfsSellerRuntime | undefined;
+/** 当前 owner 唯一的卖方协议端口；未就绪时不得对外报价。 */
+let msfileSellerProtocolPort: BitfsSellerProtocolPort | undefined;
+/** 当前 owner 唯一的卖方会话管理器；多 Tab 只共享这一份。 */
+let msfileSellerSessionManager: BitfsSellerSessionManager | undefined;
+/** 当前 owner 的 BitFS 交易 outbox；与普通 P2PKH 业务记录隔离。 */
+let msfileBitfsTransactionJournal: BitfsTransactionJournal | undefined;
+/** 只通过 Worker 内 WoC 句柄广播/对账的 BitFS 交易器。 */
+let msfileBitfsBroadcaster: BitfsTransactionBroadcaster | undefined;
+/** 卖方会话 generation；锁定、切 Key、关闭卖方或重建 runtime 时推进。 */
+let msfileSellerSessionEpoch = 0;
+/** 测试注入的卖方 bridge；生产为 undefined，使用 Window lane + 未就绪端口。 */
+let testMsfileSellerBridge: { transport: BitfsSellerStreamTransport; protocol: BitfsSellerProtocolPort } | undefined;
+
+function sellerKeepsVaultUnlocked(): boolean {
+  return coordinatorState.vaultStatus === "unlocked"
+    && msfileRuntime?.describeState().sellerSettings.sellerEnabled === true;
+}
+
+function stopMsfileSellerRuntime(): void {
+  msfileSellerSessionEpoch += 1;
+  msfileSellerIndexController?.abort();
+  msfileSellerIndexController = undefined;
+  msfileSellerRuntime?.clear();
+  msfileSellerRuntime = undefined;
+  const manager = msfileSellerSessionManager;
+  msfileSellerSessionManager = undefined;
+  msfileSellerProtocolPort = undefined;
+  msfileBitfsTransactionJournal = undefined;
+  msfileBitfsBroadcaster = undefined;
+  manager?.clear();
+  msfileSellerIndex?.clear();
+  msfileSellerIndex = undefined;
+}
+
+/**
+ * Worker → Window lane 的 BitFS stream 端口。
+ *
+ * 中文说明：帧字节由协议端口负责先落盘再交给这里；本适配器只做受限
+ * lane operation 转发，Window 侧仍会再次严格解析并做身份 pin。
+ */
+function createMsfileSellerStreamTransport(): BitfsSellerStreamTransport {
+  return {
+    async open(input) {
+      await requestWindowP2pExecutorOperation({
+        type: "lane",
+        laneId: "msfile",
+        operation: {
+          type: "bitfs-seller-open",
+          sessionId: input.sessionId,
+          addresses: input.addresses,
+          publicKeyHex: input.publicKeyHex,
+          expectedPeerId: input.expectedPeerId,
+          firstFrame: input.firstFrame,
+        },
+      }, input.signal);
+    },
+    async send(sessionId, frame) {
+      await requestWindowP2pExecutorOperation({
+        type: "lane",
+        laneId: "msfile",
+        operation: { type: "bitfs-seller-send", sessionId, frame },
+      });
+    },
+    async close(sessionId, reason) {
+      await requestWindowP2pExecutorOperation({
+        type: "lane",
+        laneId: "msfile",
+        operation: { type: "bitfs-seller-close", sessionId, reason },
+      }).catch(() => undefined);
+    },
+  };
+}
+
+/** 当前是否存在可用的 BitFS 卖方 stream 通道。 */
+function msfileSellerTransportAvailable(): boolean {
+  if (testMsfileSellerBridge) return true;
+  return windowP2pExecutorLease?.transportReady === true
+    && windowP2pExecutorLease.sessionEpoch === coordinatorState.sessionEpoch;
+}
+
+async function configureMsfileSellerRuntime(
+  service: MsFileServiceImpl,
+  ownerPublicKeyHex: string,
+  settings: import("@keymaster/contracts").MsFileSellerSettings,
+): Promise<import("@keymaster/contracts").MsFileSellerRuntimeStatus> {
+  stopMsfileSellerRuntime();
+  if (!settings.sellerEnabled) {
+    // 关闭后从当前时刻重新计算自动锁定，而不是沿用暂停前的旧 deadline。
+    resetAutoLockTimer();
+    return "disabled";
+  }
+  // 卖方需要持续接单；启用期间只暂停自动锁，手动锁定仍走全局释放路径。
+  if (autoLockTimer) clearTimeout(autoLockTimer);
+  autoLockTimer = undefined;
+  coordinatorState.autoLockDeadline = undefined;
+  if (settings.supportedArbiterPublicKeys.length === 0) return "configuration-error";
+  service.setSellerRuntimeStatus("indexing");
+  const controller = new AbortController();
+  msfileSellerIndexController = controller;
+  const index = new BitfsSeedIndex();
+  msfileSellerIndex = index;
+  try {
+    const contentStore = createWorkerOwnerFileStore("msfile", "");
+    await index.build(contentStore, controller.signal);
+    if (controller.signal.aborted || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) {
+      return "waiting-unlock";
+    }
+    const cryptoPort = await createWorkerActiveKeyCrypto(ownerPublicKeyHex);
+    const signer = createBitfsVaultSigner(cryptoPort);
+    const journalStore = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+    const journal = createBitfsJournal(journalStore);
+    const transactionJournal = createBitfsTransactionJournal(journalStore);
+    const woc = p2pkhWocService;
+    // WoC 未装配时仍允许派生索引和 fail-closed 协议端口启动；
+    // 任何真实交易广播/高度查询都会明确失败，不会伪造链上事实。
+    const chain = woc ? createBitfsWocChainPort(woc, "main") : {
+      async broadcast(): Promise<never> { throw new Error("BitFS Worker 内 WoC 服务未就绪"); },
+      async lookupTransaction(): Promise<"unknown"> { return "unknown"; },
+    };
+    const broadcaster = new BitfsTransactionBroadcaster({
+      journal: transactionJournal,
+      chain,
+      nowMs: () => Date.now(),
+    });
+    const sessions = createBitfsSessionJournal(journalStore);
+    // 恢复阶段只查询已持久化的 txid，不自动重播不可逆交易。
+    const outcomes = await reconcileBitfsTransactions({ journal: transactionJournal, broadcaster, signal: controller.signal });
+    await reconcileBitfsSessionTransactions({ sessions, outcomes, nowMs: Date.now() });
+    if (controller.signal.aborted) return "waiting-unlock";
+    msfileBitfsTransactionJournal = transactionJournal;
+    msfileBitfsBroadcaster = broadcaster;
+    msfileSellerRuntime = new BitfsSellerRuntime({
+      signer,
+      index,
+      journal,
+      settings: () => service.describeState().sellerSettings,
+      nowMs: () => Date.now(),
+      allowLoopbackWs: import.meta.env?.DEV === true,
+    });
+    const protocolPort = testMsfileSellerBridge?.protocol ?? new BitfsSellerProtocol({
+      signer,
+      sessions,
+      // go-bitfs 补齐“exact Kind 5 → 已验证 Hash 视图”前保持 fail closed，
+      // 不在 Keymaster 内复制 CBOR 字段位置或授权验证公式。
+      content: createUnavailableBitfsSellerContentResolver(),
+      broadcaster,
+      ownerPublicKeyHex,
+      generation: () => msfileSellerSessionEpoch,
+      nowMs: () => Date.now(),
+      blockHeight: () => {
+        if (!woc) throw new Error("BitFS Worker 内 WoC 服务未就绪");
+        return woc.getChainHeight("main", { priority: "interactive" });
+      },
+    });
+    const transport = testMsfileSellerBridge?.transport ?? createMsfileSellerStreamTransport();
+    const manager: BitfsSellerSessionManager = new BitfsSellerSessionManager({
+      transport,
+      protocol: protocolPort,
+      nowMs: () => Date.now(),
+      // 报价期限是最短会话空闲时间；给对端留出付款与交付窗口。
+      idleTimeoutMs: () => Math.max(30_000, settings.quoteLifetimeSeconds * 1_000),
+      maxSessions: () => service.describeState().sellerSettings.maxConcurrentSales,
+      onActiveSessionsChanged: (activeCount) => {
+        if (msfileSellerSessionManager !== manager) return;
+        if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) return;
+        service.setSellerRuntimeStatus(activeCount > 0
+          ? "selling"
+          : (protocolPort.ready && msfileSellerTransportAvailable() ? "ready" : "degraded"));
+      },
+      isCurrent: () => msfileSellerSessionManager === manager
+        && !controller.signal.aborted
+        && coordinatorState.activePublicKeyHex === ownerPublicKeyHex
+        && msfileRuntime === service,
+    });
+    msfileSellerProtocolPort = protocolPort;
+    msfileSellerSessionManager = manager;
+    // 协议端口未就绪时只能保持 degraded：不报价、不暴露库存。
+    return protocolPort.ready ? "ready" : "degraded";
+  } catch (error) {
+    if (controller.signal.aborted) return "waiting-unlock";
+    console.warn("[msfile] seller runtime configuration failed", error instanceof Error ? error.message : String(error));
+    stopMsfileSellerRuntime();
+    return "configuration-error";
+  }
+}
+
+/**
+ * 消费一条已验证 Hash 请求：命中完整 Seed 且 locator 兼容时建立销售会话。
+ *
+ * 中文说明：只处理 ChannelProtocol 已验签的 VerifiedHashRequest；未命中保持
+ * 静默。报价只在协议端口就绪时产生，且报价字节由 journal 先落盘。
+ */
+async function handleMsfileSellerHashRequest(
+  request: import("bsv8-channel-protocol/hash-request").VerifiedHashRequest,
+): Promise<void> {
+  const runtime = msfileSellerRuntime;
+  const manager = msfileSellerSessionManager;
+  const protocolPort = msfileSellerProtocolPort;
+  const service = msfileRuntime;
+  if (!runtime || !manager || !protocolPort || !service) return;
+  if (!protocolPort.ready) return;
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
+  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
+  const epoch = msfileSellerSessionEpoch;
+  if (manager.activeCount() >= service.describeState().sellerSettings.maxConcurrentSales) return;
+  let match: BitfsSellerMatch | null;
+  try {
+    match = await runtime.match(request);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return;
+    console.warn("[msfile] seller hash request match failed", error instanceof Error ? error.message : String(error));
+    return;
+  }
+  if (!match) return;
+  // match 期间可能发生锁定、切 Key、关闭卖方或 runtime 重建；迟到结果不得建会话。
+  if (epoch !== msfileSellerSessionEpoch
+    || msfileSellerRuntime !== runtime
+    || msfileSellerSessionManager !== manager
+    || coordinatorState.vaultStatus !== "unlocked"
+    || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) return;
+  try {
+    const publicKeyHex = request.from_public_key;
+    await manager.start({
+      sessionId: crypto.randomUUID(),
+      addresses: match.addresses,
+      publicKeyHex,
+      // 只从已验证公钥派生 PeerId；不使用请求者自报的 locator PeerId。
+      expectedPeerId: peerIdFromPublicKeyBytes(cryptoHexToBytes(publicKeyHex)).toString(),
+      quoteBytes: match.quoteBytes,
+      seedHashHex: match.seedHashHex,
+    });
+  } catch (error) {
+    console.warn("[msfile] seller session start failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** Window lane 的 BitFS 事件只允许路由到当前唯一卖方会话管理器。 */
+function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecutorLeaseState): void {
+  if (!rawEvent || typeof rawEvent !== "object") return;
+  const event = rawEvent as Partial<BitfsStreamEvent>;
+  const manager = msfileSellerSessionManager;
+  if (!manager) return;
+  if (typeof event.sessionId !== "string" || event.sessionId.length === 0) return;
+  // 旧 lease/旧 owner 的迟到事件不得进入新会话。
+  if (event.ownerSessionEpoch !== lease.sessionEpoch) return;
+  if (event.type === "bitfs-seller-session-closed") {
+    void manager.close(event.sessionId, typeof event.reason === "string" ? event.reason : "stream_error").catch(() => undefined);
+    return;
+  }
+  if (event.type !== "bitfs-seller-frame" || !(event.frame instanceof Uint8Array)) return;
+  void manager.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(() => undefined);
+}
 
 /* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
 const SAT_WINDOW_LANE_ID = "sat-subscription";
@@ -3745,6 +4024,8 @@ function emitMsFileState(): void {
     globalSeedReadConcurrency: state?.globalSeedReadConcurrency ?? msfileReadConcurrencySettings.globalSeedReadConcurrency,
     globalBlockReadConcurrency: state?.globalBlockReadConcurrency ?? msfileReadConcurrencySettings.globalBlockReadConcurrency,
     globalStatConcurrency: state?.globalStatConcurrency ?? msfileReadConcurrencySettings.globalStatConcurrency,
+    sellerSettings: state?.sellerSettings ?? { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
+    sellerRuntimeStatus: state?.sellerRuntimeStatus ?? (coordinatorState.vaultStatus === "unlocked" ? "disabled" : "waiting-unlock"),
     pendingApprovals: state?.pendingApprovals ?? []
   };
   const nextConcurrency = normalizeMsFileReadConcurrencySettings(event) ?? msfileReadConcurrencySettings;
@@ -3946,6 +4227,8 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       service = createMsFileService({
         repository: repository,
         transport: windowP2pExecutorTransport,
+        localSource: createMsFileLocalContentSource(createWorkerOwnerFileStore("msfile", "")),
+        onSellerSettingsChanged: (settings) => configureMsfileSellerRuntime(service!, ownerPublicKeyHex, settings),
         notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
       });
       // 服务构造会异步读取 owner 文件；必须等首轮读取完成后再发布实例。
@@ -3963,6 +4246,8 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       }
       msfileRuntimeStores = stores;
       msfileRuntime = service;
+      const sellerStatus = await configureMsfileSellerRuntime(service, ownerPublicKeyHex, service.describeState().sellerSettings);
+      service.setSellerRuntimeStatus(sellerStatus);
       testMsfileRuntimeRecoveryAllowed = false;
       coordinatorWorkerUnitRegistry.ready(workerUnit.unitId, workerUnit.instanceId);
       emitMsFileState();
@@ -4252,6 +4537,7 @@ async function releaseSatRuntime(
 
 function releaseMsfileRuntime(_reason: string): void {
   msfileRuntimeStartToken += 1;
+  stopMsfileSellerRuntime();
   for (const pending of msfileRequests.values()) pending.controller.abort();
   msfileRequests.clear();
   for (const pending of windowP2pExecutorIdentityRequests.values()) pending.controller.abort();
@@ -6609,6 +6895,8 @@ async function buildTopicBaselines(
         status: (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "unavailable") as import("@keymaster/contracts").MsFileServiceStatus,
         supplierGeneration: 0, globalSettings: null,
         ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
+        sellerSettings: { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
+        sellerRuntimeStatus: coordinatorState.vaultStatus === "unlocked" ? "disabled" as const : "waiting-unlock" as const,
         pendingApprovals: []
       };
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
@@ -8306,6 +8594,9 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
             : { kind: locator.kind })
         } as unknown as import("@keymaster/contracts").JSONValue
       });
+      // BitFS 卖方匹配：命中完整 Seed 且 locator 兼容时才建立销售会话；
+      // 未命中或端口未就绪时保持静默，不泄露库存。
+      void handleMsfileSellerHashRequest(hashRequest);
       return;
     }
     const publicMessage = parsePublicMessage(event.channel, event.contentJson);
@@ -8935,6 +9226,10 @@ function handleWindowP2pExecutorPortMessage(event: MessageEvent): void {
     if (!lease.transportReady) {
       clearWindowP2pExecutorLeaseLocked();
     } else {
+      // 新 Host 就绪后卖方 stream 通道恢复；若卖方仍启用则回到 ready/selling。
+      if (msfileSellerProtocolPort?.ready && coordinatorState.vaultStatus === "unlocked" && msfileRuntime) {
+        msfileRuntime.setSellerRuntimeStatus((msfileSellerSessionManager?.activeCount() ?? 0) > 0 ? "selling" : "ready");
+      }
       void syncWindowP2pExecutorConfig().catch(() => {
         if (windowP2pExecutorLease?.leaseId === lease.leaseId) clearWindowP2pExecutorLeaseLocked();
       });
@@ -8993,6 +9288,13 @@ function handleWindowP2pExecutorPortMessage(event: MessageEvent): void {
         && (stateEvent.state === "online" || stateEvent.state === "degraded" || stateEvent.state === "closed")) {
         registration.handler(stateEvent.state);
       }
+      return;
+    }
+    if (eventValue && typeof eventValue === "object"
+      && ((eventValue as { type?: unknown }).type === "bitfs-seller-frame"
+        || (eventValue as { type?: unknown }).type === "bitfs-seller-session-closed")) {
+      // BitFS 卖方会话事件：只允许路由到当前唯一会话管理器；无 bridge 额度。
+      handleBitfsSellerStreamEvent(eventValue, lease);
       return;
     }
     if (!eventValue || typeof eventValue !== "object" || (eventValue as { type?: unknown }).type !== "ssp.request") {
@@ -9477,6 +9779,15 @@ function clearWindowP2pExecutorLeaseLocked(): void {
   if (workerUnit) stopCoordinatorWorkerUnit(workerUnit.unitId, workerUnit.instanceId);
   satConnectionStateHandlers.clear();
   windowP2pExecutorLease = undefined;
+  // 唯一 Window Host 消失后所有 BitFS 销售连接已不可用：立即清空会话并
+  // 回到 degraded，不能停留在 selling。
+  const sellerManager = msfileSellerSessionManager;
+  if (sellerManager) {
+    sellerManager.clear();
+    if (coordinatorState.vaultStatus === "unlocked" && msfileRuntime && msfileSellerProtocolPort?.ready) {
+      msfileRuntime.setSellerRuntimeStatus("degraded");
+    }
+  }
 }
 
 function acquireWindowP2pExecutorLease(input: {
@@ -9643,6 +9954,7 @@ function enqueueWindowP2pExecutorIdentitySign(
 
 const MSFILE_MUTATION_CONTROLS = new Set<CoordinatorMsFileControl["type"]>([
   "settings.global.update",
+  "settings.seller.update",
   "settings.readConcurrency.update",
   "settings.readConcurrency.reset",
   "settings.mediaBlockReadConcurrency.update",
@@ -9723,6 +10035,7 @@ async function executeMsfileControlNow(
     case "settings.mediaBlockReadConcurrency.get": value = await service.getMediaBlockReadConcurrency(); break;
     case "settings.mediaBlockReadConcurrency.update": await service.updateMediaBlockReadConcurrency(control.mediaBlockReadConcurrency); value = null; break;
     case "settings.global.update": await service.updateGlobalPriceSettings(control.input); value = null; break;
+    case "settings.seller.update": await service.updateSellerSettings(control.input); value = null; break;
     case "supplier.upsert":
       if (control.expectedGeneration !== null && control.expectedGeneration !== supplierGenerationNow()) {
         return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "MSFile supplier generation changed" } };
@@ -9846,8 +10159,8 @@ async function executeMsfileDataUnsafe(
     // 受信任内部插件路径：只使用全局额度；gateway 不参与。
     switch (data.type) {
       case "stat": value = await service.stat({ seedHashHex: data.seedHashHex, signal }); break;
-      case "read-seed": value = await service.readSeed({ supplierPublicKeyHex: data.supplierPublicKeyHex, seedHashHex: data.seedHashHex, signal }); break;
-      case "read-block": value = await service.readBlock({ supplierPublicKeyHex: data.supplierPublicKeyHex, blockHashHex: data.blockHashHex, signal }); break;
+      case "read-seed": value = await service.readSeed({ sourceId: data.sourceId, seedHashHex: data.seedHashHex, signal }); break;
+      case "read-block": value = await service.readBlock({ sourceId: data.sourceId, seedHashHex: data.seedHashHex, blockHashHex: data.blockHashHex, signal }); break;
     }
   } else {
     const { context } = await resolveMsfileGrant(data.grantId, actualClientId, requestEpoch);
@@ -9857,8 +10170,8 @@ async function executeMsfileDataUnsafe(
     }
     switch (data.type) {
       case "stat": value = await service.connect.stat(context, { seedHashHex: data.seedHashHex, signal }); break;
-      case "read-seed": value = await service.connect.readSeed(context, { supplierPublicKeyHex: data.supplierPublicKeyHex, seedHashHex: data.seedHashHex, signal }); break;
-      case "read-block": value = await service.connect.readBlock(context, { supplierPublicKeyHex: data.supplierPublicKeyHex, blockHashHex: data.blockHashHex, signal }); break;
+      case "read-seed": value = await service.connect.readSeed(context, { sourceId: data.sourceId, seedHashHex: data.seedHashHex, signal }); break;
+      case "read-block": value = await service.connect.readBlock(context, { sourceId: data.sourceId, seedHashHex: data.seedHashHex, blockHashHex: data.blockHashHex, signal }); break;
     }
   }
   if (controller.signal.aborted || requestEpoch !== coordinatorState.sessionEpoch) {
@@ -12196,6 +12509,11 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
 function resetAutoLockTimer(): void {
   const AUTO_LOCK_TIMEOUT_MS = 15 * 60 * 1000;
   if (autoLockTimer) clearTimeout(autoLockTimer);
+  if (sellerKeepsVaultUnlocked()) {
+    autoLockTimer = undefined;
+    coordinatorState.autoLockDeadline = undefined;
+    return;
+  }
   coordinatorState.autoLockDeadline = Date.now() + AUTO_LOCK_TIMEOUT_MS;
 
   autoLockTimer = setTimeout(() => {
@@ -12888,6 +13206,74 @@ export function __testSignChannelPrivateMessage(input: {
 
 export function __testGetSnapshot(): CoordinatorBootstrapSnapshot {
   return buildSnapshot();
+}
+
+/** 测试专用：观察卖方是否暂停自动锁，以及派生索引是否已释放。 */
+export function __testGetMsfileSellerLifecycle(): {
+  /** 自动锁截止时间；卖方启用时必须为空。 */
+  autoLockDeadline?: number;
+  /** 当前是否存在卖方索引。 */
+  indexActive: boolean;
+  /** 当前是否存在卖方匹配运行单元。 */
+  runtimeActive: boolean;
+} {
+  return {
+    ...(coordinatorState.autoLockDeadline === undefined ? {} : { autoLockDeadline: coordinatorState.autoLockDeadline }),
+    indexActive: msfileSellerIndex !== undefined,
+    runtimeActive: msfileSellerRuntime !== undefined,
+  };
+}
+
+/** 测试专用：替换卖方协议端口与 stream transport；传 undefined 恢复生产实现。 */
+export function __testSetMsfileSellerBridge(
+  bridge: { transport: BitfsSellerStreamTransport; protocol: BitfsSellerProtocolPort } | undefined,
+): void {
+  testMsfileSellerBridge = bridge;
+}
+
+/** 测试专用：直接投递一条已验证 Hash 请求，验证 Worker 的卖方匹配接线。 */
+export async function __testDispatchMsfileSellerHashRequest(
+  request: import("bsv8-channel-protocol/hash-request").VerifiedHashRequest,
+): Promise<void> {
+  await handleMsfileSellerHashRequest(request);
+}
+
+/** 测试专用：观察当前唯一卖方会话数。 */
+export function __testMsfileSellerSessionCount(): number {
+  return msfileSellerSessionManager?.activeCount() ?? 0;
+}
+
+/** 测试专用：向当前 owner 的 `msfiles/` 根写入一个完整 Seed。 */
+export async function __testMsfileStoreSeed(input: {
+  /** 文件名。 */
+  name: string;
+  /** 媒体类型。 */
+  mediaType: string;
+  /** 文件字节。 */
+  bytes: Uint8Array;
+}): Promise<{ seedHashHex: string }> {
+  const bytes = input.bytes.slice();
+  const result = await storeMsFileSeed({
+    store: createWorkerOwnerFileStore("msfile", ""),
+    source: {
+      name: input.name,
+      mediaType: input.mediaType,
+      size: BigInt(bytes.byteLength),
+      async *stream() { yield bytes; },
+      async read(offset, length) { return bytes.slice(Number(offset), Number(offset) + length); },
+    },
+  });
+  return { seedHashHex: result.entry.seedHashHex };
+}
+
+/** 测试专用：直接写入当前 owner `msfiles/` 根下的相对路径。 */
+export async function __testMsfileOwnerStorageWrite(path: string, bytes: Uint8Array): Promise<void> {
+  await createWorkerOwnerFileStore("msfile", "").put(path, bytes);
+}
+
+/** 测试专用：删除当前 owner `msfiles/` 根下的相对路径。 */
+export async function __testMsfileOwnerStorageDelete(path: string): Promise<void> {
+  await createWorkerOwnerFileStore("msfile", "").delete(path);
 }
 
 /** 测试专用：观测领域 owner handoff 对 WebLoom peer 的通知参数。 */

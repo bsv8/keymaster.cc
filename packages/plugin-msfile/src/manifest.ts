@@ -467,6 +467,7 @@ const msfilePluginDefinition = {
     // 通过 filesFor(purposeId) 预绑定，因此不出现在这里）。
     storages: [
       CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,
+      CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,
     ],
   }],
   i18n: resources,

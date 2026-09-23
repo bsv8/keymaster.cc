@@ -23,6 +23,7 @@ import type {
   MsFileReadBlockInput,
   MsFileReadResult,
   MsFileReadSeedInput,
+  MsFileSellerSettings,
   MsFileServiceStatus,
   MsFileSettingsSnapshot,
   MsFileStatInput,
@@ -31,16 +32,22 @@ import type {
   MsFileSupplierProbeResult,
 } from "@keymaster/contracts";
 import {
+  MSFILE_LOCAL_SOURCE_ID,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_SELLER_SETTINGS_DEFAULT,
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
   isValidMsFileHashHex,
+  isValidMsFileSourceId,
   isValidMsFileSupplierPublicKeyHex,
+  msFileRemoteSourceId,
   msFileSatoshiAmountToBigInt,
   msFileAppPolicyKeyString,
   normalizeMsFileReadConcurrencySettings,
+  normalizeMsFileSellerSettings,
   type MsFileService,
 } from "@keymaster/contracts";
+import type { MsFileLocalContentSource } from "./bitfs/localContentSource.js";
 import { sanitizeAppOverride, type MsFileRepository } from "./storage/msfileRepository.js";
 import { MsFileServiceError } from "./msfileErrors.js";
 import { validateBlockContent, validateSeedContent } from "./contentValidation.js";
@@ -62,6 +69,10 @@ export interface MsFileServiceImplDeps {
   validatorLoader?: () => Promise<Pick<typeof import("./supplierConfig.js"), "validatePersistedSupplier">>;
   /** 测试接缝：覆盖平台内置供应商；缺省使用 MSFILE_BUILTIN_SUPPLIERS。 */
   builtinSuppliers?: readonly MsFileSupplierConfig[];
+  /** 当前 Owner 的 local 内容来源；缺失时只保留 remote proxy 行为。 */
+  localSource?: MsFileLocalContentSource;
+  /** Coordinator 在设置提交后启动/停止唯一卖方运行单元。 */
+  onSellerSettingsChanged?(settings: MsFileSellerSettings): Promise<import("@keymaster/contracts").MsFileSellerRuntimeStatus>;
 }
 
 export interface MsFileServiceEventState {
@@ -76,6 +87,10 @@ export interface MsFileServiceEventState {
   globalBlockReadConcurrency: number;
   /** 整个 Keymaster 的 Stat 并发数。 */
   globalStatConcurrency: number;
+  /** 当前 Key 的卖方设置。 */
+  sellerSettings: MsFileSellerSettings;
+  /** 当前卖方运行状态。 */
+  sellerRuntimeStatus: import("@keymaster/contracts").MsFileSellerRuntimeStatus;
   pendingApprovals: MsFilePendingApprovalView[];
 }
 
@@ -88,6 +103,8 @@ export function isSameMsFileServiceEventState(a: MsFileServiceEventState, b: MsF
     && a.globalBlockReadConcurrency === b.globalBlockReadConcurrency
     && a.globalStatConcurrency === b.globalStatConcurrency
     && JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings)
+    && JSON.stringify(a.sellerSettings) === JSON.stringify(b.sellerSettings)
+    && a.sellerRuntimeStatus === b.sellerRuntimeStatus
     && JSON.stringify(a.pendingApprovals) === JSON.stringify(b.pendingApprovals);
 }
 
@@ -121,12 +138,14 @@ interface CachedStatResult {
 function cloneStatResult(value: MsFileStatResult): MsFileStatResult {
   return {
     seedHashHex: value.seedHashHex,
-    suppliers: value.suppliers.map((entry) => ({ ...entry })),
+    sources: value.sources.map((entry) => ({ ...entry })),
   };
 }
 
 export class MsFileServiceImpl implements MsFileService {  private readonly repository: Promise<MsFileRepository>;
   private readonly transport: MsFileTransport;
+  private readonly localSource: MsFileLocalContentSource | undefined;
+  private readonly onSellerSettingsChanged: MsFileServiceImplDeps["onSellerSettingsChanged"];
   private readonly now: () => number;
   private readonly randomId: () => string;
   private readonly notifyStateChange: ((state: MsFileServiceEventState) => void) | undefined;
@@ -150,6 +169,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   private readonly statFileSizeBySupplierSeed = new Map<string, string>();
   /** 最近 Stat 元数据的短 TTL 缓存；不缓存 network-error。 */
   private readonly statCache = new Map<string, CachedStatResult>();
+  /** 同一 Worker owner-session 内的 local 读取合并表。 */
+  private readonly localReadFlights = new Map<string, Promise<MsFileReadResult>>();
   private supplierGeneration = 0;
   /**
    * 原子供应商快照（审查修复）：{ generation, suppliers } 整体替换，
@@ -167,6 +188,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
   };
   private cachedSuppliers: MsFileSupplierConfig[] = [];
+  private cachedSellerSettings: MsFileSellerSettings = cloneSellerSettings(MSFILE_SELLER_SETTINGS_DEFAULT);
+  private sellerStatus: import("@keymaster/contracts").MsFileSellerRuntimeStatus = "disabled";
   /**
    * 最近一次广播的快照（审查修复）：emit() 只有内容真的变化才广播。
    * 读取路径（getSettingsSnapshot）也会调用 emit 做“读时发现变化才同步”，
@@ -178,6 +201,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   constructor(deps: MsFileServiceImplDeps) {
     this.repository = Promise.resolve(deps.repository);
     this.transport = deps.transport ?? createUnavailableMsFileTransport();
+    this.localSource = deps.localSource;
+    this.onSellerSettingsChanged = deps.onSellerSettingsChanged;
     this.now = deps.now ?? DEFAULT_NOW;
     this.randomId = deps.randomId ?? DEFAULT_RANDOM_ID;
     this.notifyStateChange = deps.notifyStateChange;
@@ -226,8 +251,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   /* ============== 状态与订阅 ============== */
 
   status(): MsFileServiceStatus {
-    if (this.disposed || !this.transport.available || this.initializationError) return "unavailable";
-    if (!this.cachedSettings.settings && this.cachedSuppliers.length === 0) return "unconfigured";
+    if (this.disposed || this.initializationError) return "unavailable";
+    if (!this.localSource && !this.transport.available) return "unavailable";
+    if (!this.localSource && !this.cachedSettings.settings && this.cachedSuppliers.length === 0) return "unconfigured";
     return "ready";
   }
 
@@ -243,6 +269,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.supplierFence += 1;
     this.disposed = true;
     this.statCache.clear();
+    this.localReadFlights.clear();
     this.statFileSizeBySupplierSeed.clear();
     this.supplierBarriers.clear();
     for (const [, entry] of [...this.approvals]) {
@@ -263,6 +290,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       globalSeedReadConcurrency: this.cachedSettings.globalSeedReadConcurrency,
       globalBlockReadConcurrency: this.cachedSettings.globalBlockReadConcurrency,
       globalStatConcurrency: this.cachedSettings.globalStatConcurrency,
+      sellerSettings: cloneSellerSettings(this.cachedSellerSettings),
+      sellerRuntimeStatus: this.sellerStatus,
       pendingApprovals: this.pendingApprovalViews(),
     };
   }
@@ -289,6 +318,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       this.cachedSettings = settingsRow
         ? canonicalSettingsRow(settingsRow)
         : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
+      this.cachedSellerSettings = cloneSellerSettings(settingsRow?.sellerSettings ?? MSFILE_SELLER_SETTINGS_DEFAULT);
+      this.sellerStatus = sellerRuntimeStatus(this.cachedSellerSettings, Boolean(this.localSource));
       this.supplierSnapshot = { generation: generationAtStart, suppliers };
       this.cachedSuppliers = suppliers;
       this.emit();
@@ -309,6 +340,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.cachedSettings = row
       ? canonicalSettingsRow(row)
       : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
+    this.cachedSellerSettings = cloneSellerSettings(row?.sellerSettings ?? MSFILE_SELLER_SETTINGS_DEFAULT);
     // 配置读取也是状态同步：新建的 Coordinator runtime 可能没有经历
     // 首次 refresh 的 topic 发布，读取到的权威快照必须立即广播给页面
     // 代理，否则页面会长期停留在旧的 unconfigured baseline。
@@ -320,6 +352,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       ...readConcurrencyFromRow(row),
       suppliers,
       supplierGeneration: this.supplierGeneration,
+      sellerSettings: cloneSellerSettings(this.cachedSellerSettings),
+      sellerRuntimeStatus: this.sellerStatus,
     };
   }
 
@@ -374,6 +408,27 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       globalStatConcurrency: this.cachedSettings.globalStatConcurrency,
       updatedAt,
     };
+    this.emit();
+  }
+
+  async updateSellerSettings(input: MsFileSellerSettings): Promise<void> {
+    await this.ensureReady();
+    const settings = normalizeMsFileSellerSettings(input);
+    if (!settings) throw new Error("MSFile 卖方设置不合法");
+    await (await this.repository).putSellerSettings(settings, this.now());
+    this.cachedSellerSettings = cloneSellerSettings(settings);
+    this.sellerStatus = this.onSellerSettingsChanged
+      ? await this.onSellerSettingsChanged(cloneSellerSettings(settings))
+      : sellerRuntimeStatus(settings, Boolean(this.localSource));
+    // 卖方开关与索引状态由 Coordinator 单实例消费；设置变化先清 local Stat
+    // 缓存，避免上传/删除与运行态切换后的旧可用性继续存在。
+    this.statCache.clear();
+    this.emit();
+  }
+
+  /** Coordinator 索引、transport 或销售会话变化时更新唯一运行状态。 */
+  setSellerRuntimeStatus(status: import("@keymaster/contracts").MsFileSellerRuntimeStatus): void {
+    this.sellerStatus = status;
     this.emit();
   }
 
@@ -670,7 +725,6 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     if (this.supplierFence !== fenceAtStart || this.supplierGeneration !== generationAtStart) {
       throw new MsFileServiceError("msfile_unavailable", "MSFile supplier configuration changed during stat setup");
     }
-    if (enabled.length === 0) return { seedHashHex: input.seedHashHex, suppliers: [] };
     if (input.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
     const cached = this.statCache.get(input.seedHashHex);
     const now = this.now();
@@ -685,20 +739,42 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     if (cached) this.statCache.delete(input.seedHashHex);
     // Stat 对所有启用供应商并发；单个供应商失败不影响其他结果，
     // 网络错误不得折叠成 absent。
-    const entries = await Promise.all(
+    const [localEntry, remoteEntries] = await Promise.all([
+      this.localSource?.stat(input.seedHashHex, input.signal).catch((error) => {
+        if (input.signal?.aborted) throw error;
+        return null;
+      }) ?? Promise.resolve(null),
+      Promise.all(
       enabled.map(async (supplier): Promise<MsFileStatEntryUnion> => {
         try {
           if (this.disposed || this.supplierFence !== fenceAtStart || this.supplierGeneration !== generationAtStart) {
             throw new MsFileServiceError("msfile_unavailable");
           }
-          return await this.transport.stat({ supplier, seedHashHex: input.seedHashHex, supplierGeneration: generationAtStart, signal: input.signal });
+          const entry = await this.transport.stat({ supplier, seedHashHex: input.seedHashHex, supplierGeneration: generationAtStart, signal: input.signal });
+          return {
+            ...entry,
+            sourceId: msFileRemoteSourceId(supplier.supplierPublicKeyHex),
+            sourceKind: "remote-proxy",
+          };
         } catch (error) {
           if (input.signal?.aborted) throw error;
           // 单个供应商失败不影响其他供应商结果；网络错误不得折叠成 absent。
-          return { supplierPublicKeyHex: supplier.supplierPublicKeyHex, status: "network-error" };
+          return {
+            sourceId: msFileRemoteSourceId(supplier.supplierPublicKeyHex),
+            sourceKind: "remote-proxy",
+            supplierPublicKeyHex: supplier.supplierPublicKeyHex,
+            status: "network-error",
+          };
         }
       })
-    );
+      ),
+    ]);
+    const entries: MsFileStatEntryUnion[] = [
+      ...(this.localSource
+        ? [localEntry ?? { sourceId: MSFILE_LOCAL_SOURCE_ID, sourceKind: "local-bitfs" as const, status: "absent" as const }]
+        : []),
+      ...remoteEntries,
+    ];
     // 返回前复核世代；尺寸缓存只在通过最终检查后提交，
     // 迟到响应不得在缓存清理之后重新写入旧值。
     if (this.supplierFence !== fenceAtStart || this.supplierGeneration !== generationAtStart) {
@@ -706,10 +782,12 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     }
     for (const entry of entries) {
       if ((entry.status === "available" || entry.status === "quoted")) {
-        this.statFileSizeBySupplierSeed.set(`${entry.supplierPublicKeyHex}|${input.seedHashHex}`, entry.fileSizeBytes);
+        if (entry.sourceKind === "remote-proxy" && entry.supplierPublicKeyHex) {
+          this.statFileSizeBySupplierSeed.set(`${entry.supplierPublicKeyHex}|${input.seedHashHex}`, entry.fileSizeBytes);
+        }
       }
     }
-    const result: MsFileStatResult = { seedHashHex: input.seedHashHex, suppliers: entries };
+    const result: MsFileStatResult = { seedHashHex: input.seedHashHex, sources: entries };
     // 只缓存无 network-error 的完整结果。网络错误必须尽快重新探测，
     // 否则瞬时断线会被错误地展示为稳定状态。
     if (!entries.some((entry) => entry.status === "network-error")) {
@@ -729,11 +807,53 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   }
 
   async readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult> {
-    return this.trustedRead(input.supplierPublicKeyHex, "seed", input.seedHashHex, input.signal);
+    return this.readFromSource(input.sourceId, "seed", input.seedHashHex, input.seedHashHex, input.signal);
   }
 
   async readBlock(input: MsFileReadBlockInput): Promise<MsFileReadResult> {
-    return this.trustedRead(input.supplierPublicKeyHex, "block", input.blockHashHex, input.signal);
+    return this.readFromSource(input.sourceId, "block", input.seedHashHex, input.blockHashHex, input.signal);
+  }
+
+  private async readFromSource(
+    sourceId: string,
+    kind: MsFileContentKind,
+    seedHashHex: string,
+    contentHashHex: string,
+    signal?: AbortSignal,
+  ): Promise<MsFileReadResult> {
+    assertHash(seedHashHex, "seedHashHex");
+    assertHash(contentHashHex, kind === "seed" ? "seedHashHex" : "blockHashHex");
+    if (!isValidMsFileSourceId(sourceId)) throw new MsFileServiceError("msfile_supplier_not_found", "MSFile 来源标识不合法");
+    if (sourceId !== MSFILE_LOCAL_SOURCE_ID) {
+      return this.trustedRead(remoteSupplierKeyFromSourceId(sourceId), kind, contentHashHex, signal);
+    }
+    await this.ensureReady();
+    if (!this.localSource) throw new MsFileServiceError("msfile_unavailable", "local MSFile 来源不可用");
+    if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+    const flightKey = `${kind}|${seedHashHex}|${contentHashHex}`;
+    let flight = this.localReadFlights.get(flightKey);
+    if (!flight) {
+      flight = (async (): Promise<MsFileReadResult> => {
+        try {
+          const content = kind === "seed"
+            ? await this.localSource!.readSeed(seedHashHex)
+            : await this.localSource!.readBlock(seedHashHex, contentHashHex);
+          return { contentHashHex, content: { $type: "binary", bytes: toArrayBuffer(content) } };
+        } catch (error) {
+          // local 完整性失败必须立即撤销此前缓存的 available；来源自身会
+          // 记住该 Seed 的失败状态，下一次 Stat 返回 absent。
+          this.statCache.delete(seedHashHex);
+          throw mapLocalContentError(error);
+        }
+      })();
+      this.localReadFlights.set(flightKey, flight);
+      void flight.finally(() => {
+        if (this.localReadFlights.get(flightKey) === flight) this.localReadFlights.delete(flightKey);
+      }).catch(() => undefined);
+    }
+    const result = await flight;
+    if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+    return { contentHashHex: result.contentHashHex, content: { ...result.content, bytes: result.content.bytes.slice(0) } };
   }
 
   private async trustedRead(
@@ -760,10 +880,14 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   readonly connect = {
     stat: (ctx: MsFileConnectAppContext, input: { seedHashHex: string; signal?: AbortSignal }): Promise<MsFileStatResult> =>
       this.connectCall(ctx, async () => this.stat(input)),
-    readSeed: (ctx: MsFileConnectAppContext, input: { supplierPublicKeyHex: string; seedHashHex: string; signal?: AbortSignal }): Promise<MsFileReadResult> =>
-      this.connectCall(ctx, () => this.connectRead(ctx, "seed", input.supplierPublicKeyHex, input.seedHashHex, input.signal)),
-    readBlock: (ctx: MsFileConnectAppContext, input: { supplierPublicKeyHex: string; blockHashHex: string; signal?: AbortSignal }): Promise<MsFileReadResult> =>
-      this.connectCall(ctx, () => this.connectRead(ctx, "block", input.supplierPublicKeyHex, input.blockHashHex, input.signal)),
+    readSeed: (ctx: MsFileConnectAppContext, input: { sourceId: string; seedHashHex: string; signal?: AbortSignal }): Promise<MsFileReadResult> =>
+      this.connectCall(ctx, () => input.sourceId === MSFILE_LOCAL_SOURCE_ID
+        ? this.readFromSource(input.sourceId, "seed", input.seedHashHex, input.seedHashHex, input.signal)
+        : this.connectRead(ctx, "seed", input.sourceId, input.seedHashHex, input.seedHashHex, input.signal)),
+    readBlock: (ctx: MsFileConnectAppContext, input: { sourceId: string; seedHashHex: string; blockHashHex: string; signal?: AbortSignal }): Promise<MsFileReadResult> =>
+      this.connectCall(ctx, () => input.sourceId === MSFILE_LOCAL_SOURCE_ID
+        ? this.readFromSource(input.sourceId, "block", input.seedHashHex, input.blockHashHex, input.signal)
+        : this.connectRead(ctx, "block", input.sourceId, input.seedHashHex, input.blockHashHex, input.signal)),
   };
 
   private async connectCall<T>(ctx: MsFileConnectAppContext, run: () => Promise<T>): Promise<T> {
@@ -785,12 +909,14 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   private async connectRead(
     ctx: MsFileConnectAppContext,
     kind: MsFileContentKind,
-    supplierPublicKeyHex: string,
+    sourceId: string,
+    seedHashHex: string,
     hashHex: string,
     signal?: AbortSignal
   ): Promise<MsFileReadResult> {
     assertHash(hashHex, kind === "seed" ? "seedHashHex" : "blockHashHex");
-    assertSupplierKey(supplierPublicKeyHex);
+    assertHash(seedHashHex, "seedHashHex");
+    const supplierPublicKeyHex = remoteSupplierKeyFromSourceId(sourceId);
     // 同上：gateway 路径的 barrier 前置。
     this.assertNotInvalidating(supplierPublicKeyHex);
     const repository = await this.repository;
@@ -997,7 +1123,7 @@ type MsFileGlobalSettingsSnapshotLike = {
   globalStatConcurrency: number;
   updatedAt?: number | null;
 };
-type MsFileStatEntryUnion = import("@keymaster/contracts").MsFileSupplierStat;
+type MsFileStatEntryUnion = import("@keymaster/contracts").MsFileSourceStat;
 
 function readConcurrencyFromRow(row: {
   mediaBlockReadConcurrency?: number;
@@ -1022,6 +1148,19 @@ function canonicalSettingsRow(row: import("./storage/msfileRepository.js").MsFil
   };
 }
 
+function cloneSellerSettings(settings: Readonly<MsFileSellerSettings>): MsFileSellerSettings {
+  return { ...settings, supportedArbiterPublicKeys: [...settings.supportedArbiterPublicKeys] };
+}
+
+function sellerRuntimeStatus(
+  settings: Readonly<MsFileSellerSettings>,
+  localSourceAvailable: boolean,
+): import("@keymaster/contracts").MsFileSellerRuntimeStatus {
+  if (!settings.sellerEnabled) return "disabled";
+  if (!localSourceAvailable || settings.supportedArbiterPublicKeys.length === 0) return "configuration-error";
+  return "ready";
+}
+
 function assertAmount(value: unknown, field: string): void {
   if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value) || BigInt(value) > 0xffffffffffffffffn) {
     throw new Error(`${field} must be a canonical decimal amount in 0..2^64-1`);
@@ -1039,6 +1178,29 @@ function assertHash(value: unknown, field: string): void {
 
 function assertSupplierKey(value: unknown): void {
   if (!isValidMsFileSupplierPublicKeyHex(value)) throw new MsFileServiceError("msfile_supplier_not_found", "supplier public key is invalid");
+}
+
+/** 从受校验的 remote sourceId 恢复供应商身份；local 必须走独立分支。 */
+function remoteSupplierKeyFromSourceId(sourceId: string): string {
+  if (!isValidMsFileSourceId(sourceId) || sourceId === MSFILE_LOCAL_SOURCE_ID) {
+    throw new MsFileServiceError("msfile_supplier_not_found", "MSFile 远程来源标识不合法");
+  }
+  const supplierPublicKeyHex = sourceId.slice("remote-proxy:".length);
+  assertSupplierKey(supplierPublicKeyHex);
+  return supplierPublicKeyHex;
+}
+
+/** local 存储错误只映射为稳定 MSFile 错误，不向页面泄露内部路径。 */
+function mapLocalContentError(error: unknown): MsFileServiceError {
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (code === "missing-seed" || code === "missing-meta" || code === "missing-block") {
+    return new MsFileServiceError("msfile_content_not_found");
+  }
+  if (code === "cancelled") return new MsFileServiceError("msfile_media_cancelled");
+  if (code === "integrity" || code === "invalid-meta") return new MsFileServiceError("msfile_integrity_error");
+  return new MsFileServiceError("msfile_unavailable", "local MSFile 读取失败");
 }
 
 function assertAppKeyShape(ctx: MsFileConnectAppContext): void {

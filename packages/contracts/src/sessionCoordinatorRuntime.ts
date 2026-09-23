@@ -66,13 +66,17 @@ import type {
   MsFileApprovalDecision,
   MsFileConnectAppContext,
   MsFileGlobalPriceSettings,
+  MsFileSellerSettings,
   MsFileSupplierConfig,
 } from "./msfile.js";
 import {
   MSFILE_MAX_BLOCK_BYTES,
+  MSFILE_LOCAL_SOURCE_ID,
   isValidMsFileHashHex,
+  isValidMsFileSourceId,
   isValidMsFileSupplierPublicKeyHex,
   normalizeMsFileSatoshiAmount,
+  normalizeMsFileSellerSettings,
 } from "./msfile.js";
 import type {
   CoordinatorOwnerStorageData,
@@ -294,7 +298,7 @@ export type CoordinatorStorageDataResultFor<D extends CoordinatorStorageData> =
 export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl> =
   C extends { type: "settings.get" } ? MsFileSettingsSnapshot :
   C extends { type: "settings.readConcurrency.get" } ? MsFileReadConcurrencySettings :
-  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
+  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
   C extends { type: "settings.mediaBlockReadConcurrency.get" } ? number :
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult :
   C extends { type: "app-authorizations.list" } ? MsFileAppAuthorizationView[] :
@@ -1193,6 +1197,12 @@ function parseMsFileGlobalPriceSettings(value: unknown): MsFileGlobalPriceSettin
   };
 }
 
+function parseMsFileSellerSettings(value: unknown, field = "MSFile seller settings"): MsFileSellerSettings {
+  const normalized = normalizeMsFileSellerSettings(expectRecord(value, field));
+  if (!normalized) throw new TypeError(`Coordinator ${field} is invalid`);
+  return normalized;
+}
+
 function parseMsFileSupplier(value: unknown): MsFileSupplierConfig {
   const supplier = expectRecord(value, "MSFile supplier");
   const supplierPublicKeyHex = text(supplier.supplierPublicKeyHex, "MSFile supplier.supplierPublicKeyHex", 66);
@@ -1283,6 +1293,7 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   }
   if (type === "settings.readConcurrency.update") return { type, input: parseMsFileReadConcurrency(control.input) };
   if (type === "settings.global.update") return { type, input: parseMsFileGlobalPriceSettings(control.input) };
+  if (type === "settings.seller.update") return { type, input: parseMsFileSellerSettings(control.input) };
   if (type === "settings.mediaBlockReadConcurrency.update") {
     return { type, mediaBlockReadConcurrency: boundedNumber(control.mediaBlockReadConcurrency, "MSFile control.mediaBlockReadConcurrency", 1, 16) };
   }
@@ -1343,14 +1354,14 @@ function parseMsFileData(value: unknown): CoordinatorMsFileData {
   };
   if (type === "stat") return { type, seedHashHex: hash(data.seedHashHex, "MSFile data.stat.seedHashHex"), ...(grantId === undefined ? {} : { grantId }) };
   if (type === "read-seed") {
-    const supplierPublicKeyHex = text(data.supplierPublicKeyHex, "MSFile data.read-seed.supplierPublicKeyHex", 66);
-    if (!isValidMsFileSupplierPublicKeyHex(supplierPublicKeyHex)) throw new TypeError("Coordinator MSFile supplier public key is invalid");
-    return { type, supplierPublicKeyHex, seedHashHex: hash(data.seedHashHex, "MSFile data.read-seed.seedHashHex"), ...(grantId === undefined ? {} : { grantId }) };
+    const sourceId = text(data.sourceId, "MSFile data.read-seed.sourceId", 96);
+    if (!isValidMsFileSourceId(sourceId)) throw new TypeError("Coordinator MSFile source ID is invalid");
+    return { type, sourceId, seedHashHex: hash(data.seedHashHex, "MSFile data.read-seed.seedHashHex"), ...(grantId === undefined ? {} : { grantId }) };
   }
   if (type === "read-block") {
-    const supplierPublicKeyHex = text(data.supplierPublicKeyHex, "MSFile data.read-block.supplierPublicKeyHex", 66);
-    if (!isValidMsFileSupplierPublicKeyHex(supplierPublicKeyHex)) throw new TypeError("Coordinator MSFile supplier public key is invalid");
-    return { type, supplierPublicKeyHex, blockHashHex: hash(data.blockHashHex, "MSFile data.read-block.blockHashHex"), ...(grantId === undefined ? {} : { grantId }) };
+    const sourceId = text(data.sourceId, "MSFile data.read-block.sourceId", 96);
+    if (!isValidMsFileSourceId(sourceId)) throw new TypeError("Coordinator MSFile source ID is invalid");
+    return { type, sourceId, seedHashHex: hash(data.seedHashHex, "MSFile data.read-block.seedHashHex"), blockHashHex: hash(data.blockHashHex, "MSFile data.read-block.blockHashHex"), ...(grantId === undefined ? {} : { grantId }) };
   }
   throw new TypeError("Coordinator MSFile data " + type + " is unsupported");
 }
@@ -2297,36 +2308,46 @@ function parseStoragePlatformGrant(value: unknown, field: string): StoragePlatfo
   };
 }
 
-function parseMsFileStatEntry(value: unknown, field: string): MsFileStatResult["suppliers"][number] {
-  const supplier = expectRecord(value, field);
-  const supplierPublicKeyHex = text(supplier.supplierPublicKeyHex, field + ".supplierPublicKeyHex", 66);
-  if (!isValidMsFileSupplierPublicKeyHex(supplierPublicKeyHex)) throw new TypeError(`Coordinator ${field}.supplierPublicKeyHex is invalid`);
-  const status = enumValue(supplier.status, ["available", "absent", "discovering", "quoted", "network-error"] as const, field + ".status");
-  if (status === "absent" || status === "network-error") return { supplierPublicKeyHex, status };
-  if (status === "discovering") return { supplierPublicKeyHex, status, retryAfterMs: boundedNumber(supplier.retryAfterMs, field + ".retryAfterMs") };
-  const recommendedFilename = text(supplier.recommendedFilename, field + ".recommendedFilename", 512);
-  const fileSizeBytes = parseMsFileSatoshiAmount(supplier.fileSizeBytes, field + ".fileSizeBytes");
-  const mediaType = text(supplier.mediaType, field + ".mediaType", 256);
-  if (status === "available") return { supplierPublicKeyHex, status, recommendedFilename, fileSizeBytes, mediaType };
+function parseMsFileStatEntry(value: unknown, field: string): MsFileStatResult["sources"][number] {
+  const source = expectRecord(value, field);
+  const sourceId = text(source.sourceId, field + ".sourceId", 96);
+  if (!isValidMsFileSourceId(sourceId)) throw new TypeError(`Coordinator ${field}.sourceId is invalid`);
+  const sourceKind = enumValue(source.sourceKind, ["local-bitfs", "remote-proxy"] as const, field + ".sourceKind");
+  if ((sourceKind === "local-bitfs") !== (sourceId === MSFILE_LOCAL_SOURCE_ID)) throw new TypeError(`Coordinator ${field} source identity is inconsistent`);
+  const supplierPublicKeyHex = sourceKind === "remote-proxy"
+    ? text(source.supplierPublicKeyHex, field + ".supplierPublicKeyHex", 66)
+    : undefined;
+  if (supplierPublicKeyHex !== undefined && !isValidMsFileSupplierPublicKeyHex(supplierPublicKeyHex)) throw new TypeError(`Coordinator ${field}.supplierPublicKeyHex is invalid`);
+  if (sourceKind === "local-bitfs" && source.supplierPublicKeyHex !== undefined) throw new TypeError(`Coordinator ${field} local source cannot contain supplierPublicKeyHex`);
+  const base = sourceKind === "remote-proxy"
+    ? { sourceId, sourceKind, supplierPublicKeyHex: supplierPublicKeyHex! }
+    : { sourceId: MSFILE_LOCAL_SOURCE_ID, sourceKind };
+  const status = enumValue(source.status, ["available", "absent", "discovering", "quoted", "network-error"] as const, field + ".status");
+  if (status === "absent" || status === "network-error") return { ...base, status } as MsFileStatResult["sources"][number];
+  if (status === "discovering") return { ...base, status, retryAfterMs: boundedNumber(source.retryAfterMs, field + ".retryAfterMs") } as MsFileStatResult["sources"][number];
+  const recommendedFilename = text(source.recommendedFilename, field + ".recommendedFilename", 512);
+  const fileSizeBytes = parseMsFileSatoshiAmount(source.fileSizeBytes, field + ".fileSizeBytes");
+  const mediaType = text(source.mediaType, field + ".mediaType", 256);
+  if (status === "available") return { ...base, status, recommendedFilename, fileSizeBytes, mediaType } as MsFileStatResult["sources"][number];
   return {
-    supplierPublicKeyHex,
+    ...base,
     status,
     recommendedFilename,
     fileSizeBytes,
     mediaType,
-    minSeedPriceSatoshis: parseMsFileSatoshiAmount(supplier.minSeedPriceSatoshis, field + ".minSeedPriceSatoshis"),
-    maxSeedPriceSatoshis: parseMsFileSatoshiAmount(supplier.maxSeedPriceSatoshis, field + ".maxSeedPriceSatoshis"),
-    minFullBlockPriceSatoshis: parseMsFileSatoshiAmount(supplier.minFullBlockPriceSatoshis, field + ".minFullBlockPriceSatoshis"),
-    maxFullBlockPriceSatoshis: parseMsFileSatoshiAmount(supplier.maxFullBlockPriceSatoshis, field + ".maxFullBlockPriceSatoshis"),
-  };
+    minSeedPriceSatoshis: parseMsFileSatoshiAmount(source.minSeedPriceSatoshis, field + ".minSeedPriceSatoshis"),
+    maxSeedPriceSatoshis: parseMsFileSatoshiAmount(source.maxSeedPriceSatoshis, field + ".maxSeedPriceSatoshis"),
+    minFullBlockPriceSatoshis: parseMsFileSatoshiAmount(source.minFullBlockPriceSatoshis, field + ".minFullBlockPriceSatoshis"),
+    maxFullBlockPriceSatoshis: parseMsFileSatoshiAmount(source.maxFullBlockPriceSatoshis, field + ".maxFullBlockPriceSatoshis"),
+  } as MsFileStatResult["sources"][number];
 }
 
 function parseMsFileStatResult(value: unknown, field: string): MsFileStatResult {
   const result = expectRecord(value, field);
-  if (!Array.isArray(result.suppliers) || result.suppliers.length > 256) throw new TypeError(`Coordinator ${field}.suppliers is invalid`);
+  if (!Array.isArray(result.sources) || result.sources.length > 256) throw new TypeError(`Coordinator ${field}.sources is invalid`);
   return {
     seedHashHex: text(result.seedHashHex, field + ".seedHashHex", 64),
-    suppliers: result.suppliers.map((item, index) => parseMsFileStatEntry(item, `${field}.suppliers[${index}]`)),
+    sources: result.sources.map((item, index) => parseMsFileStatEntry(item, `${field}.sources[${index}]`)),
   };
 }
 
@@ -2363,6 +2384,8 @@ function parseMsFileSettingsSnapshot(value: unknown, field: string): MsFileSetti
     ...parseMsFileReadConcurrency(result),
     suppliers: result.suppliers.map((item, index) => parseMsFileSupplier(item)),
     supplierGeneration: boundedNumber(result.supplierGeneration, field + ".supplierGeneration"),
+    sellerSettings: parseMsFileSellerSettings(result.sellerSettings, field + ".sellerSettings"),
+    sellerRuntimeStatus: enumValue(result.sellerRuntimeStatus, ["disabled", "waiting-unlock", "indexing", "configuration-error", "ready", "selling", "degraded"] as const, field + ".sellerRuntimeStatus"),
   };
 }
 
@@ -2405,7 +2428,7 @@ function parseMsFileControlResult(value: unknown, field: string): CoordinatorMsF
 function parseMsFileDataResult(value: unknown, field: string): CoordinatorMsFileDataResult {
   if (value === undefined) return undefined;
   const result = expectRecord(value, field);
-  if ("suppliers" in result) return parseMsFileStatResult(result, field);
+  if ("sources" in result) return parseMsFileStatResult(result, field);
   if ("contentHashHex" in result) return parseMsFileReadResult(result, field);
   throw new TypeError(`Coordinator ${field} is unsupported`);
 }
@@ -3424,6 +3447,8 @@ function parseMsFileStateEvent(value: unknown): CoordinatorMsFileStateEvent {
     supplierGeneration: boundedNumber(event.supplierGeneration, "event.supplierGeneration"),
     globalSettings,
     ...concurrency,
+    sellerSettings: parseMsFileSellerSettings(event.sellerSettings, "event.sellerSettings"),
+    sellerRuntimeStatus: enumValue(event.sellerRuntimeStatus, ["disabled", "waiting-unlock", "indexing", "configuration-error", "ready", "selling", "degraded"] as const, "event.sellerRuntimeStatus"),
     pendingApprovals: event.pendingApprovals.map((approval, index) => parseMsFilePendingApproval(approval, `event.pendingApprovals[${index}]`)),
   };
 }

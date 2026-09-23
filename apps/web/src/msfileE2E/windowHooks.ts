@@ -244,8 +244,8 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
     status: () => getService().status(),
     probe: (supplierPublicKeyHex) => getService().probeSupplier(supplierPublicKeyHex),
     stat: (seedHashHex) => getService().stat({ seedHashHex }),
-    readSeed: async (supplierPublicKeyHex, seedHashHex) => summarizeRead(await getService().readSeed({ supplierPublicKeyHex, seedHashHex })),
-    readBlock: async (supplierPublicKeyHex, blockHashHex) => summarizeRead(await getService().readBlock({ supplierPublicKeyHex, blockHashHex })),
+    readSeed: async (supplierPublicKeyHex, seedHashHex) => summarizeRead(await getService().readSeed({ sourceId: `remote-proxy:${supplierPublicKeyHex}`, seedHashHex })),
+    readBlock: async (supplierPublicKeyHex, blockHashHex) => summarizeRead(await getService().readBlock({ sourceId: `remote-proxy:${supplierPublicKeyHex}`, seedHashHex: "ab".repeat(32), blockHashHex })),
     setReadDelay(milliseconds) {
       if (!Number.isSafeInteger(milliseconds) || milliseconds < 0 || milliseconds > 30_000) {
         throw new Error("MSFile E2E read delay must be an integer in 0..30000");
@@ -273,8 +273,8 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
         controllerScriptUrl: navigator.serviceWorker.controller?.scriptURL ?? "",
       };
     },
-    readSeeds: async (supplierPublicKeyHex, seedHashHexes) => Promise.all(seedHashHexes.map(async (seedHashHex) => summarizeRead(await getService().readSeed({ supplierPublicKeyHex, seedHashHex })))),
-    readBlocks: async (supplierPublicKeyHex, blockHashHexes) => Promise.all(blockHashHexes.map(async (blockHashHex) => summarizeRead(await getService().readBlock({ supplierPublicKeyHex, blockHashHex })))),
+    readSeeds: async (supplierPublicKeyHex, seedHashHexes) => Promise.all(seedHashHexes.map(async (seedHashHex) => summarizeRead(await getService().readSeed({ sourceId: `remote-proxy:${supplierPublicKeyHex}`, seedHashHex })))),
+    readBlocks: async (supplierPublicKeyHex, blockHashHexes) => Promise.all(blockHashHexes.map(async (blockHashHex) => summarizeRead(await getService().readBlock({ sourceId: `remote-proxy:${supplierPublicKeyHex}`, seedHashHex: "ab".repeat(32), blockHashHex })))),
     async seedConnectSession(input) {
       const { ownerPublicKeyHex } = await ensureUnlocked(coordinator, client);
       const appIdentity = verifyAppIdentityProof(input.proof);

@@ -147,6 +147,14 @@ export interface MsFileSeedVerifyResult {
   complete: boolean;
 }
 
+/** local MSFile Stat 成功后的已验证内容摘要。 */
+export interface MsFileLocalSeedDescriptor {
+  /** 严格解析并与 Seed 对账后的元数据。 */
+  meta: MsFileSeedMeta;
+  /** 通过 Seed Hash 与文件大小验证的原始 Seed 字节。 */
+  seedBytes: Uint8Array;
+}
+
 function fail(code: MsFileSeedStoreErrorCode, message: string): never {
   throw new MsFileSeedStoreError(code, message);
 }
@@ -498,6 +506,72 @@ export async function storeMsFileSeed(input: {
 }
 
 /**
+ * 提交经 BitFS 买方验货后的 Seed/Block。
+ *
+ * 写入顺序固定为 Block → Seed → meta；meta 是 available 的最后提交点。
+ * 函数仍使用 masterseed 重验 Seed Hash、文件大小、块长度和每块 Hash，
+ * 不信任网络层“已验证”声明。
+ */
+export async function commitPurchasedMsFileContent(input: {
+  /** 当前 Owner 的 `msfiles/` 根。 */
+  store: OwnerFileStore;
+  /** 报价与购买会话绑定的 Seed Hash。 */
+  seedHashHex: string;
+  /** exact Seed 原文。 */
+  seedBytes: Uint8Array;
+  /** 按 Seed 摘要顺序的全部 Block。 */
+  blocks: readonly Uint8Array[];
+  /** 报价中绑定的原文件字节数。 */
+  fileSizeBytes: string;
+  /** 用户可见文件名。 */
+  fileName: string;
+  /** 用户可见 MIME 类型。 */
+  mediaType: string;
+  /** 取消本次提交。 */
+  signal?: AbortSignal;
+  /** 显式时钟，仅用于 meta.storedAt。 */
+  now?(): number;
+}): Promise<MsFileSeedUploadResult> {
+  const { store, signal } = input;
+  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  if (!(input.seedBytes instanceof Uint8Array) || input.seedBytes.byteLength === 0) fail("invalid-source", "purchased seed is empty");
+  if (!/^(0|[1-9][0-9]*)$/u.test(input.fileSizeBytes)) fail("invalid-source", "purchased file size is invalid");
+  const sourceSize = BigInt(input.fileSizeBytes);
+  const now = input.now ?? Date.now;
+  try {
+    const info = await verifySeedForSourceSize([input.seedBytes], Digest.fromHex(seedHashHex), sourceSize, signal);
+    const totalBlocks = Number(info.blockCount);
+    if (input.blocks.length !== totalBlocks) throw new MsFileSeedStoreError("integrity", "purchased block count does not match seed");
+    const randomAccess = createSeedRandomAccess(input.seedBytes);
+    await runPool(totalBlocks, MSFILE_SEED_BLOCK_WRITE_CONCURRENCY, signal, async (index, blockSignal) => {
+      const bytes = input.blocks[index];
+      if (!(bytes instanceof Uint8Array)) throw new MsFileSeedStoreError("integrity", "purchased block is not bytes");
+      const blockIndex = BigInt(index);
+      const digest = await readBlockHash(randomAccess, info.seedSize, blockIndex, blockSignal);
+      const expectedSize = Number(expectedBlockSize(sourceSize, blockIndex));
+      if (bytes.byteLength !== expectedSize) throw new MsFileSeedStoreError("integrity", "purchased block length does not match seed");
+      verifyBlock(bytes, digest, blockSignal);
+      await putFile(store, blockPath(seedHashHex, digest.toHex()), bytes, blockSignal);
+    });
+    // meta 尚未存在，因此中断留下的块/Seed 不会被列表或 Stat 当成 available。
+    await putFile(store, seedPath(seedHashHex), input.seedBytes, signal);
+    const meta: MsFileSeedMeta = {
+      seedHashHex,
+      fileName: sanitizeMsFileSeedFileName(input.fileName, seedHashHex),
+      mediaType: normalizeMsFileSeedMediaType(input.mediaType),
+      fileSizeBytes: sourceSize.toString(),
+      blockCount: totalBlocks,
+      seedSizeBytes: info.seedSize.toString(),
+      storedAt: new Date(now()).toISOString(),
+    };
+    await putFile(store, metaPath(seedHashHex), serializeMsFileSeedMeta(meta), signal);
+    return { entry: { seedHashHex, seedPresent: true, meta }, meta };
+  } catch (cause) {
+    throw toStoreError(cause, "storage");
+  }
+}
+
+/**
  * 列出全部条目：只读 `meta/` 前缀，一个 meta 文件对应一个条目。
  *
  * 列表阶段不做任何缺失检查：不列 `seeds/`、不读种子、不读块。seeds/ 与
@@ -543,6 +617,100 @@ export async function listMsFileSeeds(input: {
   } catch (cause) {
     throw toStoreError(cause, "storage");
   }
+}
+
+/**
+ * 校验 local 内容是否可报告 available。
+ *
+ * 与页面的轻量 `verifyMsFileSeed` 不同，本入口会验证 Seed Hash、Seed 长度、
+ * 文件大小关系以及全部 Block 的存在性；Block 字节 Hash 仍在每次读取时验证。
+ */
+export async function inspectLocalMsFileSeed(input: {
+  /** 当前 Owner 的 `msfiles/` 文件根。 */
+  store: OwnerFileStore;
+  /** 要检查的 Seed Hash。 */
+  seedHashHex: string;
+  /** 取消当前索引或读取操作。 */
+  signal?: AbortSignal;
+}): Promise<MsFileLocalSeedDescriptor | null> {
+  const { store, signal } = input;
+  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  try {
+    const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
+    if (!metaBytes) return null;
+    const meta = parseMsFileSeedMeta(metaBytes, seedHashHex);
+    const seedBytes = await getFile(store, seedPath(seedHashHex), signal);
+    if (!seedBytes) return null;
+    const info = await verifySeedForSourceSize(
+      [seedBytes],
+      Digest.fromHex(seedHashHex),
+      BigInt(meta.fileSizeBytes),
+      signal,
+    );
+    if (Number(info.blockCount) !== meta.blockCount || info.seedSize.toString() !== meta.seedSizeBytes) return null;
+    const randomAccess = createSeedRandomAccess(seedBytes);
+    const files = await listPrefix(store, `storage/${seedHashHex}/`, signal);
+    const present = new Set(files.map((file) => file.path));
+    for (let index = 0; index < meta.blockCount; index += 1) {
+      const digest = await readBlockHash(randomAccess, info.seedSize, BigInt(index), signal);
+      if (!present.has(blockPath(seedHashHex, digest.toHex()))) return null;
+    }
+    return { meta, seedBytes };
+  } catch (cause) {
+    if (isMsFileSeedStoreError(cause) && cause.code === "cancelled") throw cause;
+    return null;
+  }
+}
+
+/** 从 local MSFile 读取并验证一个 Seed，不加载 Block 内容。 */
+export async function readLocalMsFileSeed(input: {
+  /** 当前 Owner 的 `msfiles/` 文件根。 */
+  store: OwnerFileStore;
+  /** 要读取的 Seed Hash。 */
+  seedHashHex: string;
+  /** 取消读取。 */
+  signal?: AbortSignal;
+}): Promise<MsFileLocalSeedDescriptor> {
+  const descriptor = await inspectLocalMsFileSeed(input);
+  if (!descriptor) throw new MsFileSeedStoreError("missing-seed", "local Seed 不存在或内容不完整");
+  return descriptor;
+}
+
+/**
+ * 按 `Seed Hash + Block Hash` 精确读取 local Block，并验证归属、长度和 Hash。
+ */
+export async function readLocalMsFileBlock(input: {
+  /** 当前 Owner 的 `msfiles/` 文件根。 */
+  store: OwnerFileStore;
+  /** Block 所属 Seed Hash。 */
+  seedHashHex: string;
+  /** 要读取的 Block Hash。 */
+  blockHashHex: string;
+  /** 取消读取。 */
+  signal?: AbortSignal;
+}): Promise<Uint8Array> {
+  const { store, signal } = input;
+  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  const blockHashHex = assertSeedHashHex(input.blockHashHex);
+  const descriptor = await readLocalMsFileSeed({ store, seedHashHex, ...(signal === undefined ? {} : { signal }) });
+  const sourceSize = BigInt(descriptor.meta.fileSizeBytes);
+  const seedSize = BigInt(descriptor.seedBytes.byteLength);
+  const randomAccess = createSeedRandomAccess(descriptor.seedBytes);
+  let matchedIndex = -1;
+  for (let index = 0; index < descriptor.meta.blockCount; index += 1) {
+    const digest = await readBlockHash(randomAccess, seedSize, BigInt(index), signal);
+    if (digest.toHex() === blockHashHex) {
+      matchedIndex = index;
+      break;
+    }
+  }
+  if (matchedIndex < 0) throw new MsFileSeedStoreError("missing-block", "Block 不属于指定 Seed");
+  const bytes = await getFile(store, blockPath(seedHashHex, blockHashHex), signal);
+  if (!bytes) throw new MsFileSeedStoreError("missing-block", "local Block 不存在");
+  const expectedSize = Number(expectedBlockSize(sourceSize, BigInt(matchedIndex)));
+  if (bytes.byteLength !== expectedSize) throw new MsFileSeedStoreError("integrity", "local Block 长度不正确");
+  verifyBlock(bytes, Digest.fromHex(blockHashHex), signal);
+  return bytes;
 }
 
 /**

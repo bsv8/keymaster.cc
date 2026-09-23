@@ -45,10 +45,16 @@ describe("central storage declarations", () => {
   });
 
   it("keeps MSFile settings on the owner file formats", () => {
-    expect(SYSTEM_STORAGE_DECLARATIONS.msfile).toHaveLength(2);
+    expect(SYSTEM_STORAGE_DECLARATIONS.msfile).toHaveLength(3);
     expect(CENTRAL_STORAGE_DECLARATIONS.msfilesFiles).toMatchObject({
       moduleId: "msfiles",
       purposeId: "",
+      scope: "owner",
+      model: "files",
+    });
+    expect(CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles).toMatchObject({
+      moduleId: "msfiles",
+      purposeId: "bitfs-journal",
       scope: "owner",
       model: "files",
     });

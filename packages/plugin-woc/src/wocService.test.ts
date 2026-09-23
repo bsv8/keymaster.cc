@@ -176,6 +176,32 @@ describe("WocService basics", () => {
     s.dispose();
   });
 
+  it("通过统一 actor 读取明确最佳链高度", async () => {
+    const fetch = installFetchMock({
+      on: (url) => url.endsWith("/chain/info")
+        ? new Response(JSON.stringify({ blocks: 900_123, headers: 900_123 }), { status: 200 })
+        : undefined,
+    });
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    await expect(s.getChainHeight("main", { priority: "interactive" })).resolves.toBe(900_123);
+    expect(fetch).toHaveBeenCalledWith("https://mock.test/main/chain/info", expect.anything());
+    s.dispose();
+  });
+
+  it("通过统一 actor 查询支付池 outpoint 的花费交易", async () => {
+    const txid = "11".repeat(32);
+    installFetchMock({
+      on: (url) => url.endsWith(`/tx/${txid}/0/spent`)
+        ? new Response(JSON.stringify({ txid: "22".repeat(32), vin: 1, status: "unconfirmed" }), { status: 200 })
+        : undefined,
+    });
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    await expect(s.getSpentOutput("main", txid, 0)).resolves.toEqual({ txid: "22".repeat(32), vin: 1, status: "unconfirmed" });
+    s.dispose();
+  });
+
   it("aborted request resolves with abort error", async () => {
     const s = createWocService({ messageBus: createMessageBus() });
     const ctl = new AbortController();

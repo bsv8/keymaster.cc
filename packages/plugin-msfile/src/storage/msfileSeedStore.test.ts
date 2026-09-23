@@ -10,6 +10,7 @@ import {
   MSFILE_SEED_META_FORMAT,
   MsFileSeedStoreError,
   deleteMsFileSeed,
+  commitPurchasedMsFileContent,
   listMsFileSeeds,
   normalizeMsFileSeedMediaType,
   parseMsFileSeedMeta,
@@ -98,6 +99,49 @@ describe("MSFile seed metadata", () => {
 });
 
 describe("MSFile bucket seed storage", () => {
+  it("BitFS 买入内容按 Block → Seed → meta 提交并重验完整性", async () => {
+    const sourceStore = createInMemoryOwnerFileStore();
+    await storeMsFileSeed({ store: sourceStore, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });
+    const seedBytes = sourceStore.objects.get(`seeds/${ABC_SEED_HASH}.ms`)!;
+    const blockBytes = sourceStore.objects.get(`storage/${ABC_SEED_HASH}/${ABC_BLOCK_HASH}`)!;
+    const destination = createInMemoryOwnerFileStore();
+    const writes: string[] = [];
+    const originalPut = destination.put.bind(destination);
+    destination.put = async (path, bytes, options) => { writes.push(path); return originalPut(path, bytes, options); };
+    await expect(commitPurchasedMsFileContent({
+      store: destination,
+      seedHashHex: ABC_SEED_HASH,
+      seedBytes,
+      blocks: [blockBytes],
+      fileSizeBytes: "3",
+      fileName: "abc.txt",
+      mediaType: "text/plain",
+      now: () => Date.parse("2026-09-23T00:00:00.000Z"),
+    })).resolves.toMatchObject({ meta: { seedHashHex: ABC_SEED_HASH, blockCount: 1 } });
+    expect(writes).toEqual([
+      `storage/${ABC_SEED_HASH}/${ABC_BLOCK_HASH}`,
+      `seeds/${ABC_SEED_HASH}.ms`,
+      `meta/${ABC_SEED_HASH}.json`,
+    ]);
+    await expect(readMsFileSeed({ store: destination, seedHashHex: ABC_SEED_HASH })).resolves.toMatchObject({ parts: [ABC_BYTES] });
+  });
+
+  it("BitFS 买入块损坏时不提交 meta", async () => {
+    const sourceStore = createInMemoryOwnerFileStore();
+    await storeMsFileSeed({ store: sourceStore, source: createMemorySource(ABC_BYTES) });
+    const destination = createInMemoryOwnerFileStore();
+    await expect(commitPurchasedMsFileContent({
+      store: destination,
+      seedHashHex: ABC_SEED_HASH,
+      seedBytes: sourceStore.objects.get(`seeds/${ABC_SEED_HASH}.ms`)! ,
+      blocks: [new TextEncoder().encode("abd")],
+      fileSizeBytes: "3",
+      fileName: "abc.txt",
+      mediaType: "text/plain",
+    })).rejects.toMatchObject({ code: "integrity" });
+    expect(destination.objects.has(`meta/${ABC_SEED_HASH}.json`)).toBe(false);
+  });
+
   it("stores abc with official vectors and the documented layout", async () => {
     const store = createInMemoryOwnerFileStore();
     const result = await storeMsFileSeed({ store, source: createMemorySource(ABC_BYTES, { name: "abc.txt", mediaType: "text/plain" }) });

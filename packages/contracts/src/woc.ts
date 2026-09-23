@@ -121,6 +121,16 @@ export interface WocTransactionObservation {
   observation?: WocObservation;
 }
 
+/** 指定 outpoint 的花费交易；null 表示节点明确返回尚未花费。 */
+export interface WocSpentOutput {
+  /** 花费交易 canonical txid。 */
+  txid: string;
+  /** 花费交易中引用该 outpoint 的输入索引。 */
+  vin: number;
+  /** 花费交易是否已确认。 */
+  status: "confirmed" | "unconfirmed";
+}
+
 /**
  * 广播结果。
  *
@@ -228,6 +238,20 @@ export interface WocService {
     canonicalTxid: string,
     options?: WocRequestOptions
   ): Promise<WocTransactionObservation>;
+
+  /** 读取节点当前最佳链高度；用于高度锁，不得由本地时钟估算。 */
+  getChainHeight(
+    network: BsvNetwork,
+    options?: WocRequestOptions
+  ): Promise<number>;
+
+  /** 查询指定 outpoint 的 confirmed/unconfirmed spender。 */
+  getSpentOutput(
+    network: BsvNetwork,
+    txid: string,
+    vout: number,
+    options?: WocRequestOptions
+  ): Promise<WocSpentOutput | null>;
 
   /** Confirmed raw transaction bytes for provider adapters. */
   getRawTransaction?(

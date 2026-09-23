@@ -54,6 +54,8 @@ import type {
   MsFileConnectAppContext,
   MsFileGlobalPriceSettings,
   MsFileReadConcurrencySettings,
+  MsFileSellerRuntimeStatus,
+  MsFileSellerSettings,
   MsFilePendingApprovalView,
   MsFileServiceStatus,
   MsFileSettingsSnapshot,
@@ -226,6 +228,8 @@ export type CoordinatorMsFileControl =
   | { type: "settings.mediaBlockReadConcurrency.get" }
   | { type: "settings.mediaBlockReadConcurrency.update"; mediaBlockReadConcurrency: number }
   | { type: "settings.global.update"; input: MsFileGlobalPriceSettings }
+  /** 保存当前 Key 的 BitFS 卖方设置。 */
+  | { type: "settings.seller.update"; input: MsFileSellerSettings }
   | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }
   | { type: "supplier.delete"; supplierPublicKeyHex: string; expectedGeneration: number | null }
   | { type: "supplier.probe"; supplierPublicKeyHex: string }
@@ -252,8 +256,8 @@ export type CoordinatorMsFileControl =
  */
 export type CoordinatorMsFileData =
   | { type: "stat"; grantId?: string; seedHashHex: string }
-  | { type: "read-seed"; grantId?: string; supplierPublicKeyHex: string; seedHashHex: string }
-  | { type: "read-block"; grantId?: string; supplierPublicKeyHex: string; blockHashHex: string };
+  | { type: "read-seed"; grantId?: string; sourceId: string; seedHashHex: string }
+  | { type: "read-block"; grantId?: string; sourceId: string; seedHashHex: string; blockHashHex: string };
 
 export type CoordinatorClientRequestWithMsfile =
   | { kind: "msfile.grant"; clientId: string; requestId: string; context: MsFileConnectAppContext; expectedSessionEpoch: SessionEpoch }
@@ -368,6 +372,10 @@ export interface CoordinatorMsFileStateEvent {
   globalBlockReadConcurrency: number;
   /** 整个 Keymaster 的 Stat 并发数。 */
   globalStatConcurrency: number;
+  /** 当前 Key 的卖方配置；用于多 Tab 展示同一用户意图。 */
+  sellerSettings: MsFileSellerSettings;
+  /** Coordinator 唯一卖方运行单元状态。 */
+  sellerRuntimeStatus: MsFileSellerRuntimeStatus;
   pendingApprovals: MsFilePendingApprovalView[];
 }
 

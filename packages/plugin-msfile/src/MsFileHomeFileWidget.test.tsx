@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { MsFileReadResult, MsFileService, MsFileSettingsSnapshot, MsFileStatResult, MsFileSupplierStat } from "@keymaster/contracts";
+import type { MsFileReadResult, MsFileService, MsFileSettingsSnapshot, MsFileSourceStat, MsFileStatResult } from "@keymaster/contracts";
 import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 
 const HASH = "aa".repeat(32);
@@ -70,6 +70,15 @@ function settingsSnapshot(): MsFileSettingsSnapshot {
       { name: "Beta", supplierPublicKeyHex: SUPPLIER_B, addresses: [], enabled: true },
     ],
     supplierGeneration: 1,
+    sellerSettings: {
+      sellerEnabled: false,
+      seedPriceSatoshis: "0",
+      fullBlockPriceSatoshis: "0",
+      quoteLifetimeSeconds: 300,
+      maxConcurrentSales: 1,
+      supportedArbiterPublicKeys: [],
+    },
+    sellerRuntimeStatus: "disabled",
   };
 }
 
@@ -150,7 +159,7 @@ describe("MsFileHomeFileWidget", () => {
     const service = makeService({
       stat: vi.fn(async (): Promise<MsFileStatResult> => ({
         seedHashHex: HASH,
-        suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "note.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
+        sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "note.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
       })),
       readSeed: vi.fn(async (input: { seedHashHex: string }) => response(input.seedHashHex, bytesFromHex(BLOCK_HASH))),
       readBlock: vi.fn(async (input: { blockHashHex: string }) => response(input.blockHashHex, new TextEncoder().encode("hello"))),
@@ -159,8 +168,8 @@ describe("MsFileHomeFileWidget", () => {
 
     submit();
     await waitFor(() => expect(screen.getByText("hello")).toBeTruthy());
-    expect(service.readSeed).toHaveBeenCalledWith(expect.objectContaining({ supplierPublicKeyHex: SUPPLIER_A, seedHashHex: HASH }));
-    expect(service.readBlock).toHaveBeenCalledWith(expect.objectContaining({ supplierPublicKeyHex: SUPPLIER_A, blockHashHex: BLOCK_HASH }));
+    expect(service.readSeed).toHaveBeenCalledWith(expect.objectContaining({ sourceId: `remote-proxy:${SUPPLIER_A}`, seedHashHex: HASH }));
+    expect(service.readBlock).toHaveBeenCalledWith(expect.objectContaining({ sourceId: `remote-proxy:${SUPPLIER_A}`, blockHashHex: BLOCK_HASH }));
     expect(service.readSeed).not.toHaveBeenCalledWith(expect.objectContaining({ maxPriceSatoshis: expect.anything() }));
     expect(service.readBlock).not.toHaveBeenCalledWith(expect.objectContaining({ maxPriceSatoshis: expect.anything() }));
   });
@@ -169,9 +178,9 @@ describe("MsFileHomeFileWidget", () => {
     const service = makeService({
       stat: vi.fn(async (): Promise<MsFileStatResult> => ({
         seedHashHex: HASH,
-        suppliers: [
-          { supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "a.bin", fileSizeBytes: "0", mediaType: "application/octet-stream" },
-          { supplierPublicKeyHex: SUPPLIER_B, status: "quoted", recommendedFilename: "b.bin", fileSizeBytes: "0", mediaType: "application/octet-stream", minSeedPriceSatoshis: "1", maxSeedPriceSatoshis: "2", minFullBlockPriceSatoshis: "3", maxFullBlockPriceSatoshis: "4" },
+        sources: [
+          { sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "a.bin", fileSizeBytes: "0", mediaType: "application/octet-stream" },
+          { sourceId: `remote-proxy:${SUPPLIER_B}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_B, status: "quoted", recommendedFilename: "b.bin", fileSizeBytes: "0", mediaType: "application/octet-stream", minSeedPriceSatoshis: "1", maxSeedPriceSatoshis: "2", minFullBlockPriceSatoshis: "3", maxFullBlockPriceSatoshis: "4" },
         ],
       })),
       readSeed: vi.fn(async (input: { seedHashHex: string }) => response(input.seedHashHex, new Uint8Array())),
@@ -184,14 +193,14 @@ describe("MsFileHomeFileWidget", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "选择此供应商" })[1]!);
     fireEvent.click(await screen.findByRole("button", { name: "下载" }));
-    await waitFor(() => expect(service.readSeed).toHaveBeenCalledWith(expect.objectContaining({ supplierPublicKeyHex: SUPPLIER_B })));
+    await waitFor(() => expect(service.readSeed).toHaveBeenCalledWith(expect.objectContaining({ sourceId: `remote-proxy:${SUPPLIER_B}` })));
   });
 
   it("blocks files over 256 MiB before Seed Read", async () => {
     const service = makeService({
       stat: vi.fn(async (): Promise<MsFileStatResult> => ({
         seedHashHex: HASH,
-        suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "large.bin", fileSizeBytes: String(256 * 1024 * 1024 + 1), mediaType: "application/octet-stream" }],
+        sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "large.bin", fileSizeBytes: String(256 * 1024 * 1024 + 1), mediaType: "application/octet-stream" }],
       })),
     });
     await renderReady(service);
@@ -209,8 +218,8 @@ describe("MsFileHomeFileWidget", () => {
     { status: "discovering" as const, expected: "发现中" },
     { status: "network-error" as const, expected: "暂时不可用" },
   ])("keeps the Stat status $status distinct", async ({ status, expected }) => {
-    const base = { supplierPublicKeyHex: SUPPLIER_A };
-    const entry: MsFileSupplierStat = status === "available"
+    const base = { sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy" as const, supplierPublicKeyHex: SUPPLIER_A };
+    const entry: MsFileSourceStat = status === "available"
       ? { ...base, status, recommendedFilename: "available.bin", fileSizeBytes: "0", mediaType: "application/octet-stream" }
       : status === "quoted"
         ? { ...base, status, recommendedFilename: "quoted.bin", fileSizeBytes: "0", mediaType: "application/octet-stream", minSeedPriceSatoshis: "1", maxSeedPriceSatoshis: "2", minFullBlockPriceSatoshis: "3", maxFullBlockPriceSatoshis: "4" }
@@ -218,7 +227,7 @@ describe("MsFileHomeFileWidget", () => {
           ? { ...base, status, retryAfterMs: 500 }
           : { ...base, status };
     const service = makeService({
-      stat: vi.fn(async (): Promise<MsFileStatResult> => ({ seedHashHex: HASH, suppliers: [entry] })),
+      stat: vi.fn(async (): Promise<MsFileStatResult> => ({ seedHashHex: HASH, sources: [entry] })),
     });
     await renderReady(service);
 
@@ -232,7 +241,7 @@ describe("MsFileHomeFileWidget", () => {
     const service = makeService({
       stat: vi.fn(async (): Promise<MsFileStatResult> => ({
         seedHashHex: HASH,
-        suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "locked.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
+        sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "locked.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
       })),
       readSeed: vi.fn((input: { signal?: AbortSignal }) => {
         readSignal = input.signal;
@@ -256,7 +265,7 @@ describe("MsFileHomeFileWidget", () => {
     const service = makeService({
       stat: vi.fn(async (): Promise<MsFileStatResult> => ({
         seedHashHex: HASH,
-        suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "switched.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
+        sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "switched.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
       })),
       readSeed: vi.fn((input: { signal?: AbortSignal }) => {
         readSignal = input.signal;
@@ -281,7 +290,7 @@ describe("MsFileHomeFileWidget", () => {
       getSettingsSnapshot: vi.fn(async () => ({ ...settingsSnapshot(), supplierGeneration: state.status.supplierGeneration })),
       stat: vi.fn(async (): Promise<MsFileStatResult> => ({
         seedHashHex: HASH,
-        suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "generation.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
+        sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "generation.txt", fileSizeBytes: "5", mediaType: "text/plain" }],
       })),
       readSeed: vi.fn((input: { signal?: AbortSignal }) => {
         readSignal = input.signal;
@@ -306,7 +315,7 @@ describe("MsFileHomeFileWidget", () => {
         .mockImplementationOnce(() => new Promise<MsFileStatResult>((resolve) => { resolveFirstStat = resolve; }))
         .mockImplementationOnce(async (input: { seedHashHex: string }): Promise<MsFileStatResult> => ({
           seedHashHex: input.seedHashHex,
-          suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "new-query.bin", fileSizeBytes: "0", mediaType: "application/octet-stream" }],
+          sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "new-query.bin", fileSizeBytes: "0", mediaType: "application/octet-stream" }],
         })),
     });
     await renderReady(service);
@@ -318,7 +327,7 @@ describe("MsFileHomeFileWidget", () => {
     await waitFor(() => expect(screen.getAllByText("new-query.bin", { exact: true }).length).toBeGreaterThan(0));
     resolveFirstStat({
       seedHashHex: HASH,
-      suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "absent" }],
+      sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "absent" }],
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.getAllByText("new-query.bin", { exact: true }).length).toBeGreaterThan(0);
@@ -329,7 +338,7 @@ describe("MsFileHomeFileWidget", () => {
     const service = makeService({
       stat: vi.fn(async (): Promise<MsFileStatResult> => ({
         seedHashHex: HASH,
-        suppliers: [{ supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "unsafe.bin", fileSizeBytes: "0", mediaType: "application/octet-stream" }],
+        sources: [{ sourceId: `remote-proxy:${SUPPLIER_A}`, sourceKind: "remote-proxy", supplierPublicKeyHex: SUPPLIER_A, status: "available", recommendedFilename: "unsafe.bin", fileSizeBytes: "0", mediaType: "application/octet-stream" }],
       })),
       readSeed: vi.fn(async (input: { seedHashHex: string }) => response(input.seedHashHex, new Uint8Array())),
     });

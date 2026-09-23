@@ -47,15 +47,33 @@ describe("global settings（msfiles/setting.json）", () => {
       globalSeedReadConcurrency: 4,
       globalBlockReadConcurrency: 8,
       globalStatConcurrency: 4,
+      sellerSettings: { sellerEnabled: false, seedPriceSatoshis: "0", fullBlockPriceSatoshis: "0", quoteLifetimeSeconds: 300, maxConcurrentSales: 1, supportedArbiterPublicKeys: [] },
       updatedAt: null,
     });
     const file = decodeSetting(stores);
     expect(file).toMatchObject({
       format: "keymaster.msfiles-setting",
-      version: 1,
+      version: 2,
       priceLimits: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" },
     });
     expect(file.suppliers).toBeUndefined();
+    db.close();
+  });
+
+  it("读取 v1 时卖方默认关闭，首次保存卖方设置后升级为 v2", async () => {
+    const { stores, open } = freshRepository();
+    writeRawSetting(stores, {
+      format: "keymaster.msfiles-setting",
+      version: 1,
+      priceLimits: { seedMaxPriceSatoshis: "5", blockMaxPriceSatoshis: "6" },
+    });
+    const db = await open();
+    await expect(db.getGlobalSettings()).resolves.toMatchObject({ sellerSettings: { sellerEnabled: false } });
+    await db.putSellerSettings({ sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 2, supportedArbiterPublicKeys: [SUPPLIER_PUBKEY] }, 20);
+    expect(decodeSetting(stores)).toMatchObject({
+      version: 2,
+      seller: { sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 2, supportedArbiterPublicKeys: [SUPPLIER_PUBKEY] },
+    });
     db.close();
   });
 

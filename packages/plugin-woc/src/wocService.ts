@@ -26,6 +26,7 @@ import type {
   WocService,
   WocWorkerBroadcastService,
   WocTransactionObservation,
+  WocSpentOutput,
   WocUnconfirmedHistory,
   WocUtxoResponse
 } from "@keymaster/contracts";
@@ -37,6 +38,8 @@ import {
   type WocBalancePayload,
   type WocBroadcastPayload,
   type WocHistoryPayload,
+  type WocChainHeightPayload,
+  type WocSpentOutputPayload,
   type WocTransactionObservationPayload,
   type WocRawTransactionPayload,
   type WocUtxosPayload
@@ -232,6 +235,26 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
         payload,
         dispatchOptions(opts)
       );
+    },
+
+    async getChainHeight(network: BsvNetwork, opts?: WocRequestOptions): Promise<number> {
+      const payload: WocChainHeightPayload = {
+        network,
+        priority: opts?.priority ?? "background",
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      };
+      return messageBus.request<WocChainHeightPayload, number>(WOC_MSG.CHAIN_HEIGHT, payload, dispatchOptions(opts));
+    },
+
+    async getSpentOutput(network: BsvNetwork, txid: string, vout: number, opts?: WocRequestOptions): Promise<WocSpentOutput | null> {
+      const payload: WocSpentOutputPayload = {
+        network, txid, vout,
+        priority: opts?.priority ?? "background",
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      };
+      return messageBus.request<WocSpentOutputPayload, WocSpentOutput | null>(WOC_MSG.TX_SPENT_OUTPUT, payload, dispatchOptions(opts));
     },
 
     async getRawTransaction(network: BsvNetwork, txid: string, opts?: WocRequestOptions): Promise<string> {

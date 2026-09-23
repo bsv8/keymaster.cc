@@ -23,3 +23,10 @@
 3. 字段首次出现时必须有中文含义；完整字段以 `packages/contracts/src/` 的中文注释为准。
 4. 测试证据只维护在 `docs/集成测试/覆盖矩阵.yaml`，Markdown 表由脚本生成。
 5. 计划中的行为必须明确标为“未完成”，不能和当前实现混写。
+
+## 未完成提案
+
+提案不是当前行为；完成后应把稳定结论合并回对应主题文档，并由 Git 历史保留施工过程。
+
+- [BitFS 本地 MSFile 与卖方模式需求](./proposals/msfile/BitFS本地代理与卖方模式需求.md)
+- [BitFS 本地 MSFile 与卖方模式施工单](./proposals/msfile/BitFS本地代理与卖方模式施工单.md)

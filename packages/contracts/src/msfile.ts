@@ -168,6 +168,24 @@ export function isValidMsFileSupplierPublicKeyHex(input: unknown): input is stri
   return typeof input === "string" && /^(02|03)[0-9a-f]{64}$/.test(input);
 }
 
+/** Keymaster 内置本地 BitFS 来源的稳定路由标识。 */
+export const MSFILE_LOCAL_SOURCE_ID = "local-bitfs";
+
+/** MSFile 来源类型；本地来源不经过 `/msfile/1.0.0`。 */
+export type MsFileSourceKind = "local-bitfs" | "remote-proxy";
+
+/** 根据远程供应商身份生成不会与本地来源冲突的稳定路由标识。 */
+export function msFileRemoteSourceId(supplierPublicKeyHex: string): string {
+  if (!isValidMsFileSupplierPublicKeyHex(supplierPublicKeyHex)) throw new TypeError("MSFile 远程来源公钥不合法");
+  return `remote-proxy:${supplierPublicKeyHex}`;
+}
+
+/** 校验 MSFile 来源路由标识；拒绝路径字符和无界文本。 */
+export function isValidMsFileSourceId(input: unknown): input is string {
+  return typeof input === "string"
+    && (input === MSFILE_LOCAL_SOURCE_ID || /^remote-proxy:(02|03)[0-9a-f]{64}$/u.test(input));
+}
+
 /** 稳定 App 策略键：owner + publisher + appId。不使用 origin 或 identityDigestHex。 */
 export interface MsFileAppIdentityKey {
   ownerPublicKeyHex: string;
@@ -236,34 +254,56 @@ export type MsFileSupplierStat =
   | MsFileStatQuotedEntry
   | MsFileStatNetworkErrorEntry;
 
+/** 远程 Proxy 结果补充来源路由信息后的公共视图。 */
+type MsFileRemoteSourceStat<T> = T extends MsFileSupplierStat
+  ? T & { /** 稳定来源路由标识。 */ sourceId: string; /** 固定为远程 Proxy。 */ sourceKind: "remote-proxy" }
+  : never;
+
+/** local 结果没有远程供应商公钥，不能用假公钥占位。 */
+type MsFileLocalSourceStat<T> = T extends MsFileSupplierStat
+  ? Omit<T, "supplierPublicKeyHex"> & { /** 固定本地路由标识。 */ sourceId: typeof MSFILE_LOCAL_SOURCE_ID; /** 固定为本地 BitFS。 */ sourceKind: "local-bitfs" }
+  : never;
+
+/** 统一 MSFile API 返回的 local/remote 来源状态。 */
+export type MsFileSourceStat = MsFileRemoteSourceStat<MsFileSupplierStat> | MsFileLocalSourceStat<MsFileSupplierStat>;
+
 export interface MsFileStatResult {
   seedHashHex: string;
-  suppliers: MsFileSupplierStat[];
+  /** 所有本地与远程来源；本地来源固定排在第一位。 */
+  sources: MsFileSourceStat[];
 }
 
 /* ============== Read ============== */
 
 export interface MsFileReadSeedInput {
-  supplierPublicKeyHex: string;
+  /** 要读取的来源路由标识。 */
+  sourceId: string;
   seedHashHex: string;
   signal?: AbortSignal;
 }
 
 export interface MsFileReadBlockInput {
-  supplierPublicKeyHex: string;
+  /** 要读取的来源路由标识。 */
+  sourceId: string;
+  /** Block 所属 Seed；用于本地精确寻址和关系校验。 */
+  seedHashHex: string;
   blockHashHex: string;
   signal?: AbortSignal;
 }
 
 export interface MsFileSeedReadParams {
   connectSessionId: string;
-  supplierPublicKeyHex: string;
+  /** 要读取的来源路由标识。 */
+  sourceId: string;
   seedHashHex: string;
 }
 
 export interface MsFileBlockReadParams {
   connectSessionId: string;
-  supplierPublicKeyHex: string;
+  /** 要读取的来源路由标识。 */
+  sourceId: string;
+  /** Block 所属 Seed；remote wire 不发送该字段。 */
+  seedHashHex: string;
   blockHashHex: string;
 }
 
@@ -288,6 +328,85 @@ export interface MsFileSupplierConfig {
    */
   builtin?: boolean;
 }
+
+/** 当前 Key 的 BitFS 卖方持久化设置。 */
+export interface MsFileSellerSettings {
+  /** 是否允许当前 Key 作为 BitFS 卖方。 */
+  sellerEnabled: boolean;
+  /** 单个 Seed 的售价（聪）。 */
+  seedPriceSatoshis: MsFileSatoshiAmount;
+  /** 一个完整 256 KiB Block 的售价（聪）。 */
+  fullBlockPriceSatoshis: MsFileSatoshiAmount;
+  /** 报价有效时间（秒）。 */
+  quoteLifetimeSeconds: number;
+  /** 卖方接受的仲裁方压缩公钥列表。 */
+  supportedArbiterPublicKeys: string[];
+  /** 当前 Key 同时处理的销售会话上限。 */
+  maxConcurrentSales: number;
+}
+
+/** 新安装与旧 schema 升级时采用的安全卖方缺省值。 */
+export const MSFILE_SELLER_SETTINGS_DEFAULT: Readonly<MsFileSellerSettings> = Object.freeze({
+  sellerEnabled: false,
+  seedPriceSatoshis: "0",
+  fullBlockPriceSatoshis: "0",
+  quoteLifetimeSeconds: 300,
+  supportedArbiterPublicKeys: [],
+  maxConcurrentSales: 1,
+});
+
+/** 卖方设置边界；设置页与 Coordinator DTO 校验共同使用。 */
+export const MSFILE_SELLER_LIMITS = Object.freeze({
+  /** 报价最短有效秒数。 */
+  quoteLifetimeSecondsMin: 30,
+  /** 报价最长有效秒数。 */
+  quoteLifetimeSecondsMax: 86_400,
+  /** 同时销售会话硬上限。 */
+  maxConcurrentSales: 16,
+  /** 可配置仲裁方数量硬上限。 */
+  supportedArbiters: 32,
+});
+
+/** 严格规范化卖方设置；任一字段不合法时返回 undefined。 */
+export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSettings | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  if (typeof value.sellerEnabled !== "boolean") return undefined;
+  const seedPriceSatoshis = normalizeMsFileSatoshiAmount(value.seedPriceSatoshis);
+  const fullBlockPriceSatoshis = normalizeMsFileSatoshiAmount(value.fullBlockPriceSatoshis);
+  if (seedPriceSatoshis === undefined || fullBlockPriceSatoshis === undefined) return undefined;
+  if (!Number.isSafeInteger(value.quoteLifetimeSeconds)
+    || (value.quoteLifetimeSeconds as number) < MSFILE_SELLER_LIMITS.quoteLifetimeSecondsMin
+    || (value.quoteLifetimeSeconds as number) > MSFILE_SELLER_LIMITS.quoteLifetimeSecondsMax) return undefined;
+  if (!Number.isSafeInteger(value.maxConcurrentSales)
+    || (value.maxConcurrentSales as number) < 1
+    || (value.maxConcurrentSales as number) > MSFILE_SELLER_LIMITS.maxConcurrentSales) return undefined;
+  if (!Array.isArray(value.supportedArbiterPublicKeys)
+    || value.supportedArbiterPublicKeys.length > MSFILE_SELLER_LIMITS.supportedArbiters) return undefined;
+  const supportedArbiterPublicKeys: string[] = [];
+  for (const item of value.supportedArbiterPublicKeys) {
+    if (!isValidMsFileSupplierPublicKeyHex(item) || supportedArbiterPublicKeys.includes(item)) return undefined;
+    supportedArbiterPublicKeys.push(item);
+  }
+  return {
+    sellerEnabled: value.sellerEnabled,
+    seedPriceSatoshis,
+    fullBlockPriceSatoshis,
+    quoteLifetimeSeconds: value.quoteLifetimeSeconds as number,
+    supportedArbiterPublicKeys,
+    maxConcurrentSales: value.maxConcurrentSales as number,
+  };
+}
+
+/** 卖方运行状态；用户开关与实际可接单状态分开表达。 */
+export type MsFileSellerRuntimeStatus =
+  | "disabled"
+  | "waiting-unlock"
+  | "indexing"
+  | "configuration-error"
+  | "ready"
+  | "selling"
+  | "degraded";
 
 export interface MsFileSupplierAddressProbeResult {
   address: string;
@@ -320,6 +439,10 @@ export interface MsFileSettingsSnapshot {
   suppliers: MsFileSupplierConfig[];
   /** 供应商配置世代；每次变更递增，使旧连接失效。 */
   supplierGeneration: number;
+  /** 当前 Key 的卖方配置；旧设置文件缺失时 sellerEnabled=false。 */
+  sellerSettings: MsFileSellerSettings;
+  /** Coordinator 中唯一卖方运行单元的当前状态。 */
+  sellerRuntimeStatus: MsFileSellerRuntimeStatus;
 }
 
 export interface MsFileAppPolicyRecord {
@@ -429,6 +552,8 @@ export interface MsFileService {
   /** 兼容旧调用方的单字段读取入口。 */
   getMediaBlockReadConcurrency(): Promise<number>;
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void>;
+  /** 原子保存当前 Key 的 BitFS 卖方设置。 */
+  updateSellerSettings(input: MsFileSellerSettings): Promise<void>;
   /** 兼容旧调用方的单字段保存入口；只影响之后新建的媒体 Session。 */
   updateMediaBlockReadConcurrency(value: number): Promise<void>;
   upsertSupplier(input: MsFileSupplierConfig): Promise<void>;

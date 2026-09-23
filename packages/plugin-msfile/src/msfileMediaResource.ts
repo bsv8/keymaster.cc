@@ -17,7 +17,8 @@ export interface MsFileMediaResourceInput {
   /** 每次首页获取任务的内存 token；不把媒体字节放进 Resource Store。 */
   taskToken: string;
   seedHashHex: string;
-  supplierPublicKeyHex: string;
+  /** MSFile 来源路由标识；可以是 local-bitfs 或 remote-proxy。 */
+  sourceId: string;
   fileSizeBytes: bigint;
   declaredMediaType: string;
   /** 创建媒体 Session 时固定的并发快照；设置刷新不会重建既有 Session。 */
@@ -64,7 +65,7 @@ function sessionFor(args: readonly string[]): MsFileMediaSession {
   const { input } = sourceEntry;
   const {
     seedHashHex,
-    supplierPublicKeyHex,
+    sourceId,
     fileSizeBytes,
     declaredMediaType,
     mediaBlockReadConcurrency,
@@ -75,12 +76,12 @@ function sessionFor(args: readonly string[]): MsFileMediaSession {
   const service = configuredService;
   const session = createMsFileNativeMediaSession({
     seedHashHex,
-    supplierPublicKeyHex,
+    supplierPublicKeyHex: sourceId,
     fileSizeBytes,
     declaredMediaType,
     reader: {
-      readSeed: async ({ signal }) => extractMsFileReadBytes(await service.readSeed({ supplierPublicKeyHex, seedHashHex, signal }), seedHashHex),
-      readBlock: async ({ blockHashHex, signal }) => extractMsFileReadBytes(await service.readBlock({ supplierPublicKeyHex, blockHashHex, signal }), blockHashHex),
+      readSeed: async ({ signal }) => extractMsFileReadBytes(await service.readSeed({ sourceId, seedHashHex, signal }), seedHashHex),
+      readBlock: async ({ blockHashHex, signal }) => extractMsFileReadBytes(await service.readBlock({ sourceId, seedHashHex, blockHashHex, signal }), blockHashHex),
     },
   }, {
     mediaBlockReadConcurrency,
@@ -95,7 +96,7 @@ function sessionFor(args: readonly string[]): MsFileMediaSession {
 export function msFileMediaResourceArgs(input: MsFileMediaResourceInput): readonly string[] {
   const previous = sourceInputs.get(input.taskToken);
   const sameSource = previous && previous.input.seedHashHex === input.seedHashHex &&
-    previous.input.supplierPublicKeyHex === input.supplierPublicKeyHex &&
+    previous.input.sourceId === input.sourceId &&
     previous.input.fileSizeBytes === input.fileSizeBytes &&
     previous.input.declaredMediaType === input.declaredMediaType;
   const version = sameSource ? previous.version : (previous?.version ?? 0) + 1;

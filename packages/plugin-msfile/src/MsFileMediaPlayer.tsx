@@ -103,7 +103,7 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   const mediaArgs = msFileMediaResourceArgs({
     taskToken,
     seedHashHex,
-    supplierPublicKeyHex,
+    sourceId: supplierPublicKeyHex,
     fileSizeBytes,
     declaredMediaType,
     mediaBlockReadConcurrency,

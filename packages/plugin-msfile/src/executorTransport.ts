@@ -33,7 +33,13 @@ export type MsFileP2pLaneOperation =
   | { type: "stat"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** Seed 的 64 位 hex 哈希。 */ seedHashHex: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "read"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 内容种类：seed 或 block。 */ kind: MsFileTransportReadInput["kind"]; /** 内容的 64 位 hex 哈希。 */ hashHex: string; /** 十进制聪上限。 */ maxPriceSatoshis: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "probe"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
-  | { type: "invalidate"; /** 要失效的供应商公钥；省略表示全部。 */ supplierPublicKeyHex?: string; /** 新的配置世代。 */ generation: number };
+  | { type: "invalidate"; /** 要失效的供应商公钥；省略表示全部。 */ supplierPublicKeyHex?: string; /** 新的配置世代。 */ generation: number }
+  /** BitFS 卖方会话：拨号、身份 pin 并发送已持久化的报价首帧。 */
+  | { type: "bitfs-seller-open"; /** 会话编号。 */ sessionId: string; /** 已验证的候选 multiaddr。 */ addresses: string[]; /** 请求者压缩公钥 hex。 */ publicKeyHex: string; /** 由同一公钥派生的 PeerId。 */ expectedPeerId: string; /** 已持久化的 exact Kind 1 字节。 */ firstFrame: Uint8Array }
+  /** BitFS 卖方会话：发送一条已持久化的 exact Artifact。 */
+  | { type: "bitfs-seller-send"; /** 会话编号。 */ sessionId: string; /** exact Artifact 字节。 */ frame: Uint8Array }
+  /** BitFS 卖方会话：关闭连接。 */
+  | { type: "bitfs-seller-close"; /** 会话编号。 */ sessionId: string; /** 稳定关闭原因。 */ reason?: string };
 
 /** Worker 与 Window executor 之间版本化同步的完整读取资源预算。 */
 export interface WindowP2pExecutorConcurrencyConfig extends MsFileReadConcurrencySettings, WindowP2pBaseConcurrencyConfig {

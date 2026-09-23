@@ -22,6 +22,54 @@ export {
   type MsFileServiceEventState,
 } from "./msfileService.js";
 export { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
+export { createMsFileLocalContentSource, type MsFileLocalContentSource } from "./bitfs/localContentSource.js";
+export { createBitfsVaultSigner, bitfsWorkflowFacts, mapBitfsErrorCode } from "./bitfs/sdk.js";
+export { createBitfsJournal, type BitfsJournal, type BitfsJournalRecord } from "./bitfs/journal.js";
+export {
+  createBitfsSessionJournal,
+  type BitfsSessionJournal,
+  type BitfsSessionRecord,
+  type BitfsBuyerPhase,
+  type BitfsSellerPhase,
+  type BitfsEvidenceName,
+} from "./bitfs/sessionJournal.js";
+export {
+  BitfsTransactionBroadcaster,
+  createBitfsTransactionJournal,
+  type BitfsBroadcastOutcome,
+  type BitfsChainPort,
+  type BitfsTransactionJournal,
+  type BitfsTransactionRecord,
+  type BitfsTransactionState,
+} from "./bitfs/broadcast.js";
+export { createBitfsWocChainPort, reconcileBitfsTransactions, reconcileBitfsSessionTransactions, readBitfsPoolSpendChain } from "./bitfs/wocChain.js";
+export { BitfsSeedIndex, BITFS_SEED_INDEX_PAGE_SIZE, BITFS_SEED_INDEX_VERIFY_CONCURRENCY, type BitfsSeedIndexEntry } from "./bitfs/seedIndex.js";
+export { BitfsSellerRuntime, type BitfsSellerMatch, type BitfsSellerRuntimeDeps } from "./bitfs/sellerRuntime.js";
+export {
+  BitfsSellerProtocol,
+  createUnavailableBitfsSellerContentResolver,
+  type BitfsSellerContentResolver,
+  type BitfsSellerContentResolution,
+  type BitfsSellerProtocolDeps,
+} from "./bitfs/sellerProtocol.js";
+export {
+  BitfsSellerSessionManager,
+  createUnavailableBitfsSellerProtocolPort,
+  type BitfsSellerProtocolPort,
+  type BitfsSellerProtocolResult,
+  type BitfsSellerSessionCloseReason,
+  type BitfsSellerSessionManagerDeps,
+  type BitfsSellerStreamTransport,
+} from "./bitfs/sellerSession.js";
+export type { BitfsStreamEvent } from "./bitfs/sellerStreamRuntime.js";
+// 内容存储只暴露 Worker-safe 的读写原语；买方写入和索引检查共用同一布局。
+export {
+  serializeMsFileSeedMeta,
+  storeMsFileSeed,
+  commitPurchasedMsFileContent,
+  type MsFileSeedMeta,
+  type MsFileSeedSource,
+} from "./storage/msfileSeedStore.js";
 export { createWindowP2pMsFileTransport, type MsFileP2pLaneOperation } from "./executorTransport.js";
 export type { WindowP2pExecutorBridge, WindowP2pExecutorOperation } from "@keymaster/plugin-window-p2p/executor-transport";
 // 注意：supplierConfig（multiaddr/libp2p 依赖）不在此静态导出，
@@ -58,6 +106,8 @@ export function buildMsFileStateEvent(
     globalSeedReadConcurrency: state.globalSeedReadConcurrency,
     globalBlockReadConcurrency: state.globalBlockReadConcurrency,
     globalStatConcurrency: state.globalStatConcurrency,
+    sellerSettings: state.sellerSettings,
+    sellerRuntimeStatus: state.sellerRuntimeStatus,
     pendingApprovals
   };
 }

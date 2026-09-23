@@ -33,7 +33,8 @@ import {
 } from "./keymasterSessionCoordinator.worker.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { calcTxidFromRawTxHex } from "@keymaster/plugin-p2pkh/coordinator";
-import { newMessageID, newSessionID } from "bsv8-channel-protocol";
+import { HASH_REQUEST_CHANNEL, messageIDFromBytes, newMessageID, newSessionID, parsePrivateKey, parsePublicKey, parseSHA256Hash } from "bsv8-channel-protocol";
+import { marshal, newMultiaddrLocator, parseAndVerify, sign } from "bsv8-channel-protocol/hash-request";
 import { parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
 import { verifySignedPrivateMessage } from "bsv8-channel-protocol/inbox";
 import { PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
@@ -90,6 +91,11 @@ import {
   __testGetCoordinatorUpgradePartition,
   __testSetStorageSessionResolver,
   __testGetSnapshot,
+  __testGetMsfileSellerLifecycle,
+  __testSetMsfileSellerBridge,
+  __testDispatchMsfileSellerHashRequest,
+  __testMsfileSellerSessionCount,
+  __testMsfileStoreSeed,
   __testGetVaultStatus,
   __testGetVaultAuthMetadata,
   __testOwnerStorageNamespaceExists,
@@ -2860,6 +2866,119 @@ describe("Session Coordinator MSFile RPC lane", () => {
     });
   });
 
+  it("卖方启用时暂停自动锁，关闭后从当前时刻重计，手动锁立即释放索引", async () => {
+    await unlockVault();
+    const arbiter = validPublisherKey(27);
+    const enabled = await __testDispatchMsfileControl({
+      type: "settings.seller.update",
+      input: { sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+    });
+    expect(enabled.ack.status).toBe("ok");
+    const active = __testGetMsfileSellerLifecycle();
+    expect(active.autoLockDeadline).toBeUndefined();
+    expect(active).toMatchObject({ indexActive: true, runtimeActive: true });
+
+    const beforeDisable = Date.now();
+    const disabled = await __testDispatchMsfileControl({
+      type: "settings.seller.update",
+      input: { sellerEnabled: false, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+    });
+    expect(disabled.ack.status).toBe("ok");
+    const resumed = __testGetMsfileSellerLifecycle();
+    expect(resumed.indexActive).toBe(false);
+    expect(resumed.runtimeActive).toBe(false);
+    expect(resumed.autoLockDeadline).toBeGreaterThanOrEqual(beforeDisable + 15 * 60 * 1_000);
+
+    await __testDispatchMsfileControl({
+      type: "settings.seller.update",
+      input: { sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+    });
+    await __testLock();
+    expect(__testGetMsfileSellerLifecycle()).toEqual({ indexActive: false, runtimeActive: false });
+  });
+
+  it("已验证 Hash 请求命中本地 Seed 时建立卖方会话，未命中与重复请求保持静默", async () => {
+    await unlockVault();
+    const opened: Array<{ sessionId: string; addresses: string[]; publicKeyHex: string; expectedPeerId: string; firstFrame: Uint8Array }> = [];
+    const transport = {
+      async open(input: { sessionId: string; addresses: string[]; publicKeyHex: string; expectedPeerId: string; firstFrame: Uint8Array }) {
+        opened.push({ ...input, firstFrame: input.firstFrame.slice() });
+      },
+      async send() {},
+      async close() {},
+    };
+    const onFrame = vi.fn(async () => ({ type: "none" }) as const);
+    __testSetMsfileSellerBridge({ transport, protocol: { ready: true, onFrame } });
+    try {
+      // 页面上传语义：真实 storeMsFileSeed 写入 seeds/storage/meta 三处。
+      const stored = await __testMsfileStoreSeed({
+        name: "abc.txt",
+        mediaType: "text/plain",
+        bytes: new TextEncoder().encode("abc"),
+      });
+      expect(stored.seedHashHex).toBe("4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358");
+      const arbiter = validPublisherKey(27);
+      await __testDispatchMsfileControl({
+        type: "settings.seller.update",
+        input: { sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+      });
+      const ready = await __testDispatchMsfileControl({ type: "settings.get" });
+      expect(ready.operationResult).toMatchObject({ sellerRuntimeStatus: "ready" });
+
+      const privateBytes = new Uint8Array(32);
+      privateBytes[31] = 2;
+      const privateKey = parsePrivateKey(privateBytes);
+      const requesterPublicKeyHex = bytesToHex(secp256k1.getPublicKey(privateBytes, true));
+      const peerId = peerIdFromPublicKeyBytes(hexToBytes(requesterPublicKeyHex)).toString();
+      const locatorAddress = `/dns4/buyer.example/tcp/443/tls/ws/p2p/${peerId}`;
+      const now = Date.now();
+      const request = parseAndVerify(HASH_REQUEST_CHANNEL, marshal(sign({
+        from_public_key: parsePublicKey(requesterPublicKeyHex),
+        message_id: messageIDFromBytes(new Uint8Array(32).fill(0x44)),
+        issued_at_ms: now - 100,
+        expires_at_ms: now + 10_000,
+        body: { hash: parseSHA256Hash(stored.seedHashHex), locators: [newMultiaddrLocator(locatorAddress)] },
+      }, privateKey)));
+
+      await __testDispatchMsfileSellerHashRequest(request);
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toMatchObject({
+        addresses: [locatorAddress],
+        publicKeyHex: requesterPublicKeyHex,
+        expectedPeerId: peerId,
+      });
+      expect(opened[0]!.firstFrame.byteLength).toBeGreaterThan(0);
+      expect(__testMsfileSellerSessionCount()).toBe(1);
+      const selling = await __testDispatchMsfileControl({ type: "settings.get" });
+      expect(selling.operationResult).toMatchObject({ sellerRuntimeStatus: "selling" });
+
+      // 同一 (from_public_key, message_id) 重复请求不得第二次报价。
+      await __testDispatchMsfileSellerHashRequest(request);
+      expect(opened).toHaveLength(1);
+
+      // 未命中库存保持静默。
+      const miss = parseAndVerify(HASH_REQUEST_CHANNEL, marshal(sign({
+        from_public_key: parsePublicKey(requesterPublicKeyHex),
+        message_id: messageIDFromBytes(new Uint8Array(32).fill(0x45)),
+        issued_at_ms: now - 100,
+        expires_at_ms: now + 10_000,
+        body: { hash: parseSHA256Hash("ab".repeat(32)), locators: [newMultiaddrLocator(locatorAddress)] },
+      }, privateKey)));
+      await __testDispatchMsfileSellerHashRequest(miss);
+      expect(opened).toHaveLength(1);
+
+      // 关闭卖方：会话清空、索引释放。
+      await __testDispatchMsfileControl({
+        type: "settings.seller.update",
+        input: { sellerEnabled: false, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+      });
+      expect(__testMsfileSellerSessionCount()).toBe(0);
+      expect(__testGetMsfileSellerLifecycle()).toMatchObject({ indexActive: false, runtimeActive: false });
+    } finally {
+      __testSetMsfileSellerBridge(undefined);
+    }
+  });
+
   it("waits on full global slots and rotates clients fairly", async () => {
     await unlockVault();
     const started: string[] = [];
@@ -3044,7 +3163,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     let releaseResolver!: (value: { sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
     const gated = new Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
     __testSetStorageSessionResolver(() => gated);
-    const pendingRead = __testDispatchMsfileData({ type: "read-seed", grantId, supplierPublicKeyHex: identity.publisherPublicKeyHex, seedHashHex: "ab".repeat(32) }, "port-a");
+    const pendingRead = __testDispatchMsfileData({ type: "read-seed", grantId, sourceId: `remote-proxy:${identity.publisherPublicKeyHex}`, seedHashHex: "ab".repeat(32) }, "port-a");
     await new Promise((resolve) => setTimeout(resolve, 20));
     await __testLock();
     await __testUnlock("vault-pw");
@@ -3105,21 +3224,22 @@ describe("Session Coordinator MSFile RPC lane", () => {
     // Window executor transport 未就绪，内置供应商如实报告 network-error。
     const trustedStat = await __testDispatchMsfileData({ type: "stat", seedHashHex: "ab".repeat(32) }, "port-a");
     expect(trustedStat.ack.status).toBe("ok");
-    const trustedSuppliers = (trustedStat.operationResult as { suppliers: Array<{ status: string }> }).suppliers;
-    expect(trustedSuppliers).toHaveLength(1);
-    expect(trustedSuppliers[0]).toMatchObject({ status: "network-error" });
+    const trustedSources = (trustedStat.operationResult as { sources: Array<{ status: string }> }).sources;
+    expect(trustedSources).toHaveLength(2);
+    expect(trustedSources[0]).toMatchObject({ sourceKind: "local-bitfs", status: "absent" });
+    expect(trustedSources[1]).toMatchObject({ sourceKind: "remote-proxy", status: "network-error" });
 
     // Read fail closed（三道闸）：全局设置未保存 → msfile_not_configured。
-    const unconfigured = await __testDispatchMsfileData({ type: "read-seed", supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-a");
+    const unconfigured = await __testDispatchMsfileData({ type: "read-seed", sourceId: "remote-proxy:02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-a");
     expect(unconfigured.ack).toMatchObject({ status: "error", code: "msfile_not_configured" });
 
     // 设置已保存但 Gate 0 前无 transport → 未配置供应商先失败。
     await __testDispatchMsfileControl({ type: "settings.global.update", input: { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" } });
-    const trustedRead = await __testDispatchMsfileData({ type: "read-seed", supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-a");
+    const trustedRead = await __testDispatchMsfileData({ type: "read-seed", sourceId: "remote-proxy:02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-a");
     expect(trustedRead.ack).toMatchObject({ status: "error", code: "msfile_supplier_not_found" });
 
     // 其他端口的 grant 不能使用。
-    const stolen = await __testDispatchMsfileData({ type: "read-seed", grantId, supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-b");
+    const stolen = await __testDispatchMsfileData({ type: "read-seed", grantId, sourceId: "remote-proxy:02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-b");
     expect(stolen.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
   });
 });

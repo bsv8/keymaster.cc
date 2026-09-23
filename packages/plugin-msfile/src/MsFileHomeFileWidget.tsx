@@ -15,7 +15,7 @@ import type {
   MsFileStatQuotedEntry,
   MsFileStatResult,
   MsFileSupplierConfig,
-  MsFileSupplierStat,
+  MsFileSourceStat,
 } from "@keymaster/contracts";
 import {
   isValidMsFileHashHex,
@@ -102,11 +102,11 @@ interface HomeProgress {
 }
 
 type CandidateStat =
-  | Extract<MsFileSupplierStat, { status: "available" }>
-  | Extract<MsFileSupplierStat, { status: "quoted" }>;
+  | Extract<MsFileSourceStat, { status: "available" }>
+  | Extract<MsFileSourceStat, { status: "quoted" }>;
 
 interface FileSelection {
-  supplierPublicKeyHex: string;
+  sourceId: string;
   supplierName: string;
   stat: CandidateStat;
   fileSizeBytes: bigint;
@@ -116,7 +116,7 @@ interface FileSelection {
 }
 
 interface SupplierStatView {
-  entry: MsFileSupplierStat;
+  entry: MsFileSourceStat;
   supplierName: string;
   selection?: FileSelection;
 }
@@ -196,7 +196,7 @@ function candidateOf(view: SupplierStatView): FileSelection | undefined {
   return view.selection;
 }
 
-function quoteFields(entry: MsFileStatQuotedEntry): readonly string[] {
+function quoteFields(entry: Pick<MsFileStatQuotedEntry, "minSeedPriceSatoshis" | "maxSeedPriceSatoshis" | "minFullBlockPriceSatoshis" | "maxFullBlockPriceSatoshis">): readonly string[] {
   return [
     entry.minSeedPriceSatoshis,
     entry.maxSeedPriceSatoshis,
@@ -214,16 +214,17 @@ function buildStatViews(
   settings: MsFileSettingsSnapshot | null,
   seedHashHex: string,
 ): SupplierStatView[] {
-  if (!result || result.seedHashHex !== seedHashHex || !Array.isArray(result.suppliers)) {
+  if (!result || result.seedHashHex !== seedHashHex || !Array.isArray(result.sources)) {
     throw new FileAssemblyError("invalid-block-response");
   }
   const supplierByKey = new Map((settings?.suppliers ?? []).map((supplier) => [supplier.supplierPublicKeyHex, supplier]));
-  return result.suppliers.map((entry) => {
-    if (!entry || typeof entry.supplierPublicKeyHex !== "string" || !isValidMsFileSupplierPublicKeyHex(entry.supplierPublicKeyHex)) {
+  return result.sources.map((entry) => {
+    if (!entry || typeof entry.sourceId !== "string") {
       throw new FileAssemblyError("invalid-block-response");
     }
-    const config = supplierByKey.get(entry.supplierPublicKeyHex);
-    const supplierName = safeSupplierName(config);
+    if (entry.sourceKind === "remote-proxy" && !isValidMsFileSupplierPublicKeyHex(entry.supplierPublicKeyHex)) throw new FileAssemblyError("invalid-block-response");
+    const config = entry.sourceKind === "remote-proxy" ? supplierByKey.get(entry.supplierPublicKeyHex) : undefined;
+    const supplierName = entry.sourceKind === "local-bitfs" ? "本地文件" : safeSupplierName(config);
     if (entry.status !== "available" && entry.status !== "quoted") {
       if (entry.status === "discovering" && (!Number.isFinite(entry.retryAfterMs) || entry.retryAfterMs < 0)) {
         throw new FileAssemblyError("invalid-block-response");
@@ -241,7 +242,7 @@ function buildStatViews(
       for (const amount of quoteFields(entry)) parseMsFileUint64(amount);
     }
     const selection: FileSelection = {
-      supplierPublicKeyHex: entry.supplierPublicKeyHex,
+      sourceId: entry.sourceId,
       supplierName,
       stat: entry,
       fileSizeBytes,
@@ -544,7 +545,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
           },
         }));
         const seedResponse = await service.readSeed({
-          supplierPublicKeyHex: selection.supplierPublicKeyHex,
+          sourceId: selection.sourceId,
           seedHashHex: task.hash,
           signal: task.controller.signal,
         });
@@ -566,7 +567,8 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
         const parts = await readMsFileBlocksWithWorkerPool(
           plan,
           (blockHashHex, signal) => service.readBlock({
-            supplierPublicKeyHex: selection.supplierPublicKeyHex,
+            sourceId: selection.sourceId,
+            seedHashHex: task.hash,
             blockHashHex,
             signal,
           }),
@@ -732,10 +734,10 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
     }
   }, [abandonTask, beginSelected, configurationState, failTask, isCurrent, makeError, seedHashDraft, service, settingsSnapshot, t]);
 
-  const selectSupplier = useCallback((supplierPublicKeyHex: string) => {
+  const selectSupplier = useCallback((sourceId: string) => {
     const task = taskRef.current;
     if (!task || !isCurrent(task)) return;
-    const selection = task.stats.find((view) => view.entry.supplierPublicKeyHex === supplierPublicKeyHex)?.selection;
+    const selection = task.stats.find((view) => view.entry.sourceId === sourceId)?.selection;
     if (!selection) return;
     void beginSelected(task, selection);
   }, [beginSelected, isCurrent]);
@@ -878,10 +880,10 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
           <h4 id="msfile-home-suppliers-title">{t("msfile.home.suppliers", { defaultValue: "供应商结果" })}</h4>
           <ul>
             {state.stats.map((view) => (
-              <li key={view.entry.supplierPublicKeyHex} className={view.selection ? "is-candidate" : ""}>
+              <li key={view.entry.sourceId} className={view.selection ? "is-candidate" : ""}>
                 <div className="msfile-home-file__supplier-head">
                   <strong>{view.supplierName}</strong>
-                  <code title={view.entry.supplierPublicKeyHex}>{shortHex(view.entry.supplierPublicKeyHex)}</code>
+                  <code title={view.entry.sourceId}>{view.entry.sourceKind === "local-bitfs" ? "local" : shortHex(view.entry.supplierPublicKeyHex)}</code>
                   <span className={`msfile-home-file__status msfile-home-file__status--${view.entry.status}`}>
                     {view.entry.status === "available" ? t("msfile.home.status.available", { defaultValue: "可获取" })
                       : view.entry.status === "quoted" ? t("msfile.home.status.quoted", { defaultValue: "有报价" })
@@ -903,7 +905,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
                       </p>
                     ) : null}
                     {candidateCount > 1 && state.phase === "supplier-selection" ? (
-                      <Button size="sm" onClick={() => selectSupplier(view.entry.supplierPublicKeyHex)}>
+                      <Button size="sm" onClick={() => selectSupplier(view.entry.sourceId)}>
                         {t("msfile.home.selectSupplier", { defaultValue: "选择此供应商" })}
                       </Button>
                     ) : null}
@@ -935,9 +937,9 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
           state.selected.fileSizeBytes <= MAX_BROWSER_MEDIA_FILE_SIZE &&
           state.phase !== "failed" && state.phase !== "cancelled" ? (
             <MsFileMediaPlayer
-              key={`${state.hash}:${state.selected.supplierPublicKeyHex}`}
+              key={`${state.hash}:${state.selected.sourceId}`}
               seedHashHex={state.hash}
-              supplierPublicKeyHex={state.selected.supplierPublicKeyHex}
+              supplierPublicKeyHex={state.selected.sourceId}
               fileSizeBytes={state.selected.fileSizeBytes}
               declaredMediaType={state.selected.mediaType}
               filename={state.selected.filename}

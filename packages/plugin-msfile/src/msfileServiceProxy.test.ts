@@ -16,6 +16,8 @@ function makeStateEvent(sessionEpoch: string, supplierGeneration: number) {
     globalSeedReadConcurrency: 1,
     globalBlockReadConcurrency: 1,
     globalStatConcurrency: 1,
+    sellerSettings: { sellerEnabled: false, seedPriceSatoshis: "0", fullBlockPriceSatoshis: "0", quoteLifetimeSeconds: 300, maxConcurrentSales: 1, supportedArbiterPublicKeys: [] },
+    sellerRuntimeStatus: "disabled" as const,
     pendingApprovals: [],
   };
 }
@@ -25,7 +27,9 @@ describe("MsFileServiceProxy Stat cache（页面侧元数据短缓存）", () =>
     let listener: ((event: unknown) => void) | undefined;
     const value: MsFileStatResult = {
       seedHashHex: "ab".repeat(32),
-      suppliers: [{
+      sources: [{
+        sourceId: `remote-proxy:${"02" + "11".repeat(32)}`,
+        sourceKind: "remote-proxy",
         supplierPublicKeyHex: "02" + "11".repeat(32),
         status: "available",
         fileSizeBytes: "1",
@@ -44,10 +48,10 @@ describe("MsFileServiceProxy Stat cache（页面侧元数据短缓存）", () =>
     const proxy = new MsFileServiceProxy(coordinator);
 
     const first = await proxy.stat({ seedHashHex: value.seedHashHex });
-    first.suppliers[0]!.status = "absent";
+    first.sources[0]!.status = "absent";
     const second = await proxy.stat({ seedHashHex: value.seedHashHex });
     expect(msfileData).toHaveBeenCalledTimes(1);
-    expect(second.suppliers[0]!.status).toBe("available");
+    expect(second.sources[0]!.status).toBe("available");
 
     listener!(makeStateEvent("epoch-1", 1));
     await proxy.stat({ seedHashHex: value.seedHashHex });
@@ -94,6 +98,8 @@ describe("MsFileServiceProxy Stat cache（页面侧元数据短缓存）", () =>
       globalStatConcurrency: 1,
       suppliers: [{ name: "builtin", supplierPublicKeyHex: "02" + "11".repeat(32), addresses: [], enabled: true }],
       supplierGeneration: 1,
+      sellerSettings: { sellerEnabled: false, seedPriceSatoshis: "0", fullBlockPriceSatoshis: "0", quoteLifetimeSeconds: 300, maxConcurrentSales: 1, supportedArbiterPublicKeys: [] },
+      sellerRuntimeStatus: "disabled" as const,
     };
     const msfileControl = vi.fn(async (control: { type: string }) => {
       if (control.type !== "settings.get") return { status: "ok" as const, value: null, sessionEpoch: "epoch-1" };
