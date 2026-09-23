@@ -148,7 +148,11 @@ function makeFakeWebrtcService(opts?: {
   };
 }
 
-function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMessageService | null): PluginHost {
+function makeFakeHost(
+  service: MessageService | null,
+  webrtcService?: WebrtcMessageService | null,
+  presenceMap?: Record<string, { publicKeyHex: string; state: "online" | "offline"; lastPongAtMs?: number }>
+): PluginHost {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY.id]: makeFakeI18n(),
     [KEYSPACE_SERVICE_CAPABILITY.id]: makeFakeKeyspace()
@@ -205,6 +209,25 @@ function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMess
     key: () => ["webrtc.session"],
     load: async () => webrtcService?.snapshot() ?? { phase: "idle", remotePublicKeyHex: null },
     subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => webrtcService?.subscribe(() => invalidate()) ?? (() => {}),
+    invalidation: "immediate"
+  });
+  // 通讯录在线快照：缺省对任意 peer 返回 online，保证旧用例的拨号按钮可用；
+  // 需要验证离线门禁的用例显式传入 offline map。
+  const defaultPresence = presenceMap ?? new Proxy({}, {
+    get: (target, prop) => {
+      if (typeof prop === "string" && /^[0-9a-f]{64,66}$/i.test(prop)) {
+        return { publicKeyHex: prop, state: "online" as const, lastPongAtMs: Date.now() };
+      }
+      return (target as Record<string, unknown>)[prop as string];
+    }
+  }) as Record<string, { publicKeyHex: string; state: "online" | "offline"; lastPongAtMs?: number }>;
+  resourceRegistry.register({
+    id: "contacts.presence",
+    scope: "active-key",
+    key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
+      ["contacts.presence", context.activePublicKeyHex ?? "none"],
+    load: async () => defaultPresence,
+    subscribe: () => () => {},
     invalidation: "immediate"
   });
 

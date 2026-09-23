@@ -32,6 +32,7 @@ export {
   type WebrtcRemoteNotice,
   type WebrtcRemoteNoticeKind,
   type WebrtcBlockReason,
+  type WebrtcPeerPresenceState,
   type WebrtcSubscriber,
   type WebrtcEnvironment,
   type RTCPeerConnectionLike,

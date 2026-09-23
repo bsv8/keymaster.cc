@@ -1,13 +1,19 @@
 // packages/plugin-webrtc/src/webrtcService.ts
-// WebRTC 业务 service（施工单 2026-07-04 002 硬切换）。
+// WebRTC 业务 service（施工单 2026-07-04 002 硬切换 + 通话恢复）。
 //
 // 设计缘由：
 //   - 单活会话：整个 plugin-webrtc 实例同时只允许一通会话占位；占位期间包括
-//     「拨号中 / 响铃中 / 已接通 / 挂断清理中」；
+//     「拨号中 / 响铃中 / 已接通 / 挂断清理中」；文件传输与音视频通话共享
+//     同一个单活槽，互斥；
 //   - 文件传输信令统一走 Channel 的固定 `bsv8.webrtc.signal.v1` 私信协议；
-//   - 音视频呼叫暂时关闭：ChannelProtocol 尚未提供正式的呼叫会合请求，不能
-//     用自定义摘要冒充文件 Hash，也不能接受没有前置关系的媒体 offer；
-//   - 收到旧版呼叫请求或媒体 offer 只丢弃，不创建来电、不申请设备权限；
+//   - 音视频通话使用相同的 Hash 会合模式恢复：主叫先经 `bsv8.message.v1`
+//     发送 `keymaster.webrtc.call.request`（rendezvous hash + mode），被叫
+//     用户确认后才发布真实 Hash 请求，主叫随后发送媒体 offer；
+//     拒绝 / 忙 / 挂断 / 回退经 `keymaster.webrtc.call.control`（APP 私信）
+//     交换，不占用 webrtc-signal 的四个分支；
+//   - 没有前置 call.request 的媒体 offer 直接丢弃，不创建来电、不申请设备权限；
+//   - 拨号前强在线门禁：`getPeerPresence` 非 `online` 一律 fail-closed；
+//     无 presence 提供者时为兼容旧测试放行，由 manifest 注入真实通讯录快照；
 //   - 不持久化任何媒体 / SDP / ICE 累积态；页面刷新 / disable / 挂断都立刻
 //     释放本地 tracks + RTCPeerConnection；
 //   - phase 状态机：idle / inviting / incoming / connecting / connected / ended；
@@ -71,7 +77,13 @@ export type WebrtcSessionPhase =
   | "ended";
 
 /** 拨号门禁失败原因。 */
-export type WebrtcBlockReason = ContractWebrtcBlockReason | "send_invite_failed" | "create_offer_failed" | "busy_local";
+export type WebrtcBlockReason =
+  | ContractWebrtcBlockReason
+  | "send_invite_failed"
+  | "create_offer_failed"
+  | "busy_local"
+  | "target_offline"
+  | "target_unknown";
 
 /** 入站远端提示（一次性，UI 消费后清）。 */
 export type WebrtcRemoteNoticeKind = "fallback_suggested" | "rejected" | "busy";
@@ -404,6 +416,12 @@ const WEBRTC_TRANSFER_CHUNK_BYTES = 16 * 1024;
 const MAX_WEBRTC_TRANSFER_CHUNKS = Math.ceil(MAX_WEBRTC_TRANSFER_BYTES / WEBRTC_TRANSFER_CHUNK_BYTES);
 /** 入站传输请求在本地待确认队列中的最长保留时间。 */
 const TRANSFER_REQUEST_TTL_MS = 2 * 60 * 1000;
+/**
+ * 接受入站传输后等待对端 Offer 的独立超时。发送端在 15 秒无传输后即超时
+ * 退出；若接受时发送端已不在，Offer 永远不会到来，不能让请求占槽到 TTL。
+ * 正常接受→Offer 只需数秒，30 秒与传输 idle 超时同量级。
+ */
+const TRANSFER_OFFER_WAIT_TIMEOUT_MS = 30 * 1000;
 /** 同一 WebRTC service 的待确认请求总数上限。 */
 const MAX_PENDING_TRANSFER_REQUESTS = 32;
 /** 单个发送者同时进入待确认队列的请求数上限。 */
@@ -427,6 +445,21 @@ const TRANSFER_BUFFER_LOW_WATER_MARK = 512 * 1024;
 const TRANSFER_BUFFER_WAIT_TIMEOUT_MS = 10 * 1000;
 const MAX_TRANSFER_METADATA_LENGTH = 256;
 const MAX_TRANSFER_MIME_LENGTH = 128;
+
+/** 音视频呼叫经 APP 私信交换的请求类型。 */
+const CALL_REQUEST_TYPE = "keymaster.webrtc.call.request";
+/** 音视频呼叫经 APP 私信交换的控制类型（reject/busy/hangup/fallback）。 */
+const CALL_CONTROL_TYPE = "keymaster.webrtc.call.control";
+/** 呼叫请求在本地的最长有效期；过期按拒绝处理，不建 PC。 */
+const CALL_REQUEST_TTL_MS = 2 * 60 * 1000;
+/** 呼叫请求过期检查的对端时钟偏移容差；超过 TTL+容差的远期时间视为非法。 */
+const CALL_REQUEST_CLOCK_SKEW_MS = 60 * 1000;
+/** 主叫发出 call.request 后等待被叫 Hash/answer 的最长_setup_时间。 */
+const CALL_SETUP_TIMEOUT_MS = 60 * 1000;
+/** 被叫发布 Hash 后等待主叫 offer 的最长等待时间。 */
+const CALL_OFFER_WAIT_TIMEOUT_MS = 60 * 1000;
+
+export type WebrtcPeerPresenceState = "online" | "offline" | "unknown";
 
 function createProtocolSessionId(env: WebrtcEnvironment): string {
   const supplied = env.generateSessionId?.();
@@ -466,6 +499,97 @@ function decodeDescription(sdp: string, type: "offer" | "answer"): RTCSessionDes
 function isDataChannelOffer(sdp: string): boolean {
   // 浏览器 data channel offer 有 m=application；fake 可用常见 SCTP 标志。
   return /(?:^|\r?\n)m=application(?:\s|$)/.test(sdp) || /(?:^|\r?\n)a=sctp(?:\s|$)/.test(sdp);
+}
+
+function isMediaOffer(sdp: string): boolean {
+  return /(?:^|\r?\n)m=(audio|video)(?:\s|$)/.test(sdp);
+}
+
+function generateCallRendezvousHash(sessionId: string, nowMs: number): string {
+  try {
+    const cryptoObj = (globalThis as { crypto?: { getRandomValues?: (array: Uint8Array) => Uint8Array } }).crypto;
+    if (cryptoObj?.getRandomValues) {
+      const bytes = new Uint8Array(32);
+      cryptoObj.getRandomValues(bytes);
+      return bytesToHex(bytes);
+    }
+  } catch {
+    // ignore，走 fallback。
+  }
+  let fallback = "";
+  const alphabet = "0123456789abcdef";
+  const seed = `${sessionId}-${nowMs}-${Math.random()}`;
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  let state = hash || 0x9e3779b9;
+  for (let i = 0; i < 64; i += 1) {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    fallback += alphabet[state % 16];
+  }
+  return fallback;
+}
+
+function isValidRendezvousHash(hash: unknown): hash is string {
+  return typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
+}
+
+function isJsonRecord(value: JSONValue): value is { [key: string]: JSONValue } {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+interface ParsedCallRequest {
+  sessionId: string;
+  hash: string;
+  mode: WebrtcMode;
+  expiresAtMs: number;
+}
+
+function parseCallRequest(content: JSONValue): ParsedCallRequest | null {
+  if (!isJsonRecord(content) || content.type !== CALL_REQUEST_TYPE) return null;
+  if (typeof content.session_id !== "string" || typeof content.hash !== "string") return null;
+  if (content.mode !== "audio" && content.mode !== "video") return null;
+  try {
+    parseSessionID(content.session_id);
+  } catch {
+    return null;
+  }
+  if (!isValidRendezvousHash(content.hash)) return null;
+  // expires_at_ms 必需：缺失或非法一律丢弃，避免离线积压的旧邀请延迟触发来电。
+  if (typeof content.expires_at_ms !== "number" || !Number.isSafeInteger(content.expires_at_ms) || content.expires_at_ms <= 0) {
+    return null;
+  }
+  return { sessionId: content.session_id, hash: content.hash, mode: content.mode, expiresAtMs: content.expires_at_ms };
+}
+
+type CallControlAction = "reject" | "busy" | "hangup" | "fallback_required";
+
+interface ParsedCallControl {
+  sessionId: string;
+  action: CallControlAction;
+  reason?: string;
+  suggestedMode?: WebrtcMode;
+}
+
+function parseCallControl(content: JSONValue): ParsedCallControl | null {
+  if (!isJsonRecord(content) || content.type !== CALL_CONTROL_TYPE) return null;
+  if (typeof content.session_id !== "string") return null;
+  try {
+    parseSessionID(content.session_id);
+  } catch {
+    return null;
+  }
+  const action = content.action;
+  if (action !== "reject" && action !== "busy" && action !== "hangup" && action !== "fallback_required") {
+    return null;
+  }
+  const out: ParsedCallControl = { sessionId: content.session_id, action };
+  if (typeof content.reason === "string" && content.reason.length <= 64) out.reason = content.reason;
+  if (content.suggested_mode === "audio" || content.suggested_mode === "video") {
+    out.suggestedMode = content.suggested_mode;
+  }
+  return out;
 }
 
 function toProtocolCandidate(candidate: RTCIceCandidateInit): {
@@ -511,6 +635,16 @@ export function createWebrtcService(input: {
   configStore: WebrtcConfigStore;
   /** 只允许已知联系人/业务准入的发送者进入用户确认队列；缺省为拒绝。 */
   isTransferSenderAllowed?: (publicKeyHex: string, signal?: AbortSignal) => boolean | Promise<boolean>;
+  /** 音视频来电的联系人准入；缺省复用文件传输准入。 */
+  isCallSenderAllowed?: (publicKeyHex: string, signal?: AbortSignal) => boolean | Promise<boolean>;
+  /**
+   * 对端在线状态查询（通讯录 Ping/Pong 投影）。
+   * 返回 `online` 才允许拨号/发文件；`offline`/`unknown` 一律 fail-closed。
+   * 未注入时为兼容旧单测放行，manifest 必须注入真实快照。
+   */
+  getPeerPresence?: (publicKeyHex: string) => WebrtcPeerPresenceState | Promise<WebrtcPeerPresenceState>;
+  /** 接受后等待 Offer 的超时覆盖（毫秒）；缺省 TRANSFER_OFFER_WAIT_TIMEOUT_MS，仅测试注入。 */
+  transferOfferWaitTimeoutMs?: number;
   env?: WebrtcEnvironment;
 }): WebrtcService {
   const channel = input.channel;
@@ -560,6 +694,59 @@ export function createWebrtcService(input: {
     return result.messageId;
   }
 
+  const isCallSenderAllowed = input.isCallSenderAllowed ?? input.isTransferSenderAllowed ?? (() => false);
+  const getPeerPresence = input.getPeerPresence;
+
+  /** 拨号前强在线门禁；无提供者时为兼容旧测试放行。 */
+  async function queryPeerPresence(targetPublicKeyHex: string): Promise<WebrtcPeerPresenceState> {
+    if (!getPeerPresence) return "online";
+    try {
+      return await getPeerPresence(targetPublicKeyHex.trim().toLowerCase());
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /** 出站呼叫请求经 APP 私信发送；Coordinator 仅做透传，不审查业务语义。 */
+  async function publishCallRequest(input: { recipientPublicKeyHex: string; sessionId: string; hash: string; mode: WebrtcMode }): Promise<void> {
+    await channel.publishPrivate({
+      recipientPublicKeyHex: input.recipientPublicKeyHex,
+      protocol: APP_MESSAGE_PROTOCOL,
+      content: {
+        type: CALL_REQUEST_TYPE,
+        session_id: input.sessionId,
+        hash: input.hash,
+        mode: input.mode,
+        expires_at_ms: env.now() + CALL_REQUEST_TTL_MS
+      }
+    });
+  }
+
+  /** 呼叫控制（reject/busy/hangup/fallback）经 APP 私信尽力投递。 */
+  async function publishCallControl(input: {
+    recipientPublicKeyHex: string;
+    sessionId: string;
+    action: CallControlAction;
+    reason?: string;
+    suggestedMode?: WebrtcMode;
+  }): Promise<void> {
+    try {
+      await channel.publishPrivate({
+        recipientPublicKeyHex: input.recipientPublicKeyHex,
+        protocol: APP_MESSAGE_PROTOCOL,
+        content: {
+          type: CALL_CONTROL_TYPE,
+          session_id: input.sessionId,
+          action: input.action,
+          ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.suggestedMode ? { suggested_mode: input.suggestedMode } : {})
+        }
+      });
+    } catch {
+      // 控制信令丢失时对端依靠超时收敛；不抛到 UI。
+    }
+  }
+
   interface ActiveSession {
     /** 对应本次 offer 的真实 Hash 请求编号；握手完成前为空。 */
     requestMessageId: string | null;
@@ -569,7 +756,11 @@ export function createWebrtcService(input: {
     mode: WebrtcMode;
     remotePublicKeyHex: string;
     ownerPublicKeyHex: string | null;
+    /** 创建时捕获的 owner generation，防止切换密钥后旧异步操作继续推进。 */
+    ownerGeneration: number;
     startedAtMs: number;
+    /** 音视频会合用的 rendezvous hash（64 hex）；文件传输不使用该字段。 */
+    rendezvousHash: string;
     localStream: MediaStreamLike | null;
     pc: RTCPeerConnectionLike | null;
     remoteStream: MediaStreamLike | null;
@@ -588,8 +779,34 @@ export function createWebrtcService(input: {
     negotiated: boolean;
     /** 防止来电通知和迟到 offer 同时触发两次媒体授权。 */
     acceptPromise?: Promise<void>;
+    /** 建连超时清理定时器。 */
+    setupTimer?: ReturnType<typeof setTimeout>;
   }
   let active: ActiveSession | null = null;
+  /**
+   * 拨号预留槽：在第一次异步操作前同步占位，防止在线查询/媒体授权期间的
+   * 第二次拨号通过单活检查并覆盖 `active`。预留期间快照呈 inviting，
+   * 真实会话建立（或失败）时释放。
+   */
+  interface DialReservation {
+    ownerPublicKeyHex: string;
+    ownerGeneration: number;
+    targetPublicKeyHex: string;
+    mode: WebrtcMode;
+    startedAtMs: number;
+  }
+  let dialReservation: DialReservation | null = null;
+  function isDialReservationCurrent(reservation: DialReservation): boolean {
+    return !disposed
+      && dialReservation === reservation
+      && ownerGeneration === reservation.ownerGeneration
+      && currentOwnerPublicKeyHex() === reservation.ownerPublicKeyHex;
+  }
+  function clearDialReservationIfCurrent(reservation: DialReservation): boolean {
+    if (dialReservation !== reservation) return false;
+    dialReservation = null;
+    return true;
+  }
   interface KnownHashRequest {
     publisherPublicKeyHex: string;
     hash: string;
@@ -653,6 +870,8 @@ export function createWebrtcService(input: {
     hashRequestMessageId?: string;
     /** Hash Publish 尚未返回时先暂存合法 offer，待真实 message_id 确认后处理。 */
     pendingOffer?: WebrtcInviteSignal;
+    /** 接受后等待 Offer 的独立超时句柄；Offer 处理/请求移除时清理。 */
+    offerWaitTimer?: ReturnType<typeof setTimeout>;
     expiresAtMs: number;
   }
   interface TransferAcceptanceToken {
@@ -750,7 +969,29 @@ export function createWebrtcService(input: {
     noticeRegistry.dismiss(`webrtc-transfer-${sessionId}`);
   }
 
+  function clearTransferOfferWaitTimeout(request: PendingTransferRequest): void {
+    if (request.offerWaitTimer !== undefined) {
+      clearTimeout(request.offerWaitTimer);
+      request.offerWaitTimer = undefined;
+    }
+  }
+
+  /**
+   * 为已接受的请求武装 Offer 等待超时：到期仍无 Offer 则释放请求与会话槽。
+   * 回调按对象身份移除，Offer 已处理 / owner 已切换 / 已 dispose 时 no-op。
+   */
+  function armTransferOfferWaitTimeout(sessionId: string, request: PendingTransferRequest): void {
+    clearTransferOfferWaitTimeout(request);
+    const timeoutMs = input.transferOfferWaitTimeoutMs ?? TRANSFER_OFFER_WAIT_TIMEOUT_MS;
+    request.offerWaitTimer = setTimeout(() => {
+      request.offerWaitTimer = undefined;
+      removePendingTransferRequestIfCurrent(sessionId, request);
+    }, timeoutMs);
+  }
+
   function removePendingTransferRequest(sessionId: string): void {
+    const request = pendingTransferRequests.get(sessionId);
+    if (request) clearTransferOfferWaitTimeout(request);
     if (!pendingTransferRequests.delete(sessionId)) return;
     dismissTransferNotice(sessionId);
     if (pendingTransferRequests.size === 0 && pendingTransferPruneTimer !== undefined) {
@@ -878,6 +1119,12 @@ export function createWebrtcService(input: {
     }
   }
 
+  function isCallCurrent(session: ActiveSession | null): session is ActiveSession {
+    return session !== null
+      && active === session
+      && isOwnerFenceCurrent(session.ownerPublicKeyHex, session.ownerGeneration);
+  }
+
   async function handleIncomingHashRequest(message: {
     channel: string;
     publisherPublicKeyHex: string;
@@ -898,6 +1145,17 @@ export function createWebrtcService(input: {
       activeTransfer.requestMessageId = message.messageId;
       activeTransfer.hashRequestPublished = true;
       await beginOutgoingTransferOffer(activeTransfer);
+    }
+
+    // 主叫等待被叫发布 rendezvous Hash：hash 一致即绑定 request_message_id 并建 offer。
+    if (active && isCallCurrent(active) && active.direction === "outgoing"
+      && active.requestMessageId === null
+      && active.remotePublicKeyHex === publisher
+      && active.rendezvousHash === (knownHashRequests.get(`${publisher}\u0000${message.messageId}`)?.hash ?? "")) {
+      active.requestMessageId = message.messageId;
+      active.hashRequestPublished = true;
+      emit();
+      await beginOutgoingCallOffer(active);
     }
   }
 
@@ -932,6 +1190,25 @@ export function createWebrtcService(input: {
       return new Error("transfer_owner_changed");
     }
     return new Error("transfer_stale");
+  }
+
+  /**
+   * 已接受、等待对端 Offer 的入站传输同样占用单活槽。
+   * `acceptIncomingTransfer` 成功后到 Offer 被处理（`activeTransfer` 建立）前，
+   * 若允许呼叫抢占，文件 Offer 会因已有通话被丢弃、发送方最终超时。
+   * 过期或非当前 owner 的请求不占槽（由 TTL 修剪负责回收）。
+   */
+  function hasAcceptedTransferAwaitingOffer(): boolean {
+    if (disposed) return false;
+    const now = env.now();
+    const currentOwner = currentOwnerPublicKeyHex();
+    for (const request of pendingTransferRequests.values()) {
+      if (!request.accepted) continue;
+      if (request.expiresAtMs <= now) continue;
+      if (request.ownerPublicKeyHex !== currentOwner || request.ownerGeneration !== ownerGeneration) continue;
+      return true;
+    }
+    return false;
   }
 
   async function recordCallEnd(session: ActiveSession, status: "completed" | "missed" | "rejected" | "failed"): Promise<void> {
@@ -1097,14 +1374,17 @@ export function createWebrtcService(input: {
       } else {
         phase = "connecting";
       }
+    } else if (dialReservation) {
+      // 拨号预留期间即呈 inviting，避免在线查询/媒体授权期间 UI 仍显示 idle。
+      phase = "inviting";
     } else if (endedDeadlineAt !== null) {
       phase = "ended";
     }
     return {
       phase,
-      remotePublicKeyHex: active?.remotePublicKeyHex ?? null,
-      direction: active?.direction ?? null,
-      mode: active?.mode ?? null,
+      remotePublicKeyHex: active?.remotePublicKeyHex ?? dialReservation?.targetPublicKeyHex ?? null,
+      direction: active?.direction ?? (dialReservation ? "outgoing" : null),
+      mode: active?.mode ?? dialReservation?.mode ?? null,
       hasLocalStream: !!active?.localStream,
       hasRemoteStream: !!active?.remoteStream,
       remoteNotice,
@@ -1125,6 +1405,16 @@ export function createWebrtcService(input: {
   }
 
   /**
+   * 只清除指定会话：异步延续在每次 `await` 后必须用它复核，迟到的旧会话
+   * 结果不得清除期间已建立的新会话。返回是否真正执行了清理。
+   */
+  function clearActiveIfCurrent(session: ActiveSession, opts: { showEndedPhase?: boolean } = {}): boolean {
+    if (active !== session) return false;
+    clearActive(opts);
+    return true;
+  }
+
+  /**
    * 统一清场入口。所有本地释放（关闭 pc、停 tracks、清 active）都走这里，
    * 失败回滚也走这里。统一 emit 以保证 UI 永远能看到终态。
    */
@@ -1133,6 +1423,10 @@ export function createWebrtcService(input: {
     active = null;
     dismissAllNotices();
     if (session) {
+      if (session.setupTimer !== undefined) {
+        clearTimeout(session.setupTimer);
+        session.setupTimer = undefined;
+      }
       try {
         session.localStream?.stop();
       } catch {
@@ -1160,11 +1454,16 @@ export function createWebrtcService(input: {
   }
 
   /**
-   * 主动挂断只改变本地会话和 RTCPeerConnection 状态。
-   * ChannelProtocol WebRTC V1 没有 hangup 分支，不能发送私造控制消息。
+   * 主动挂断：先经 APP 控制信令尽力通知对端，再本地清场。
+   * webrtc-signal V1 没有 hangup 分支，挂断控制走 `keymaster.webrtc.call.control`。
    */
   async function doHangup(reason: WebrtcHangupReason): Promise<void> {
     const session = active;
+    if (dialReservation !== null) {
+      // 预留槽同样是单活占用：挂断即取消等待中的拨号；拨号流程在下一次
+      // owner/预留复核时中止并停止已取得的媒体流。
+      dialReservation = null;
+    }
     if (!session) {
       // 没有活动会话时，如果 UI 点了 hangup → 至少不要让 UI 卡住；走清场。
       endedDeadlineAt = env.now() + ENDED_PHASE_TTL_MS;
@@ -1180,10 +1479,64 @@ export function createWebrtcService(input: {
       emit();
       return;
     }
-    await recordCallEnd(session, resolveCallEndStatus({ session, origin: "local", reason }));
-    // 先同步清场 + emit；V1 没有 hangup wire 分支，远端依靠 RTC 状态/超时收敛。
-    clearActive({ showEndedPhase: true });
-    void reason;
+    const remote = session.remotePublicKeyHex;
+    const sessionId = session.sessionId;
+    try {
+      await recordCallEnd(session, resolveCallEndStatus({ session, origin: "local", reason }));
+    } finally {
+      // 历史写入期间会话可能已被对端挂断/超时/切换身份结束：只清除仍是
+      // 当前的自己，不碰期间建立的新会话；控制信令同样只为自己发送。
+      if (!clearActiveIfCurrent(session, { showEndedPhase: true })) return;
+    }
+    // 先同步清场 + emit，UI 立刻看到 ended；控制信令异步尽力投递。
+    void publishCallControl({ recipientPublicKeyHex: remote, sessionId, action: "hangup", reason }).catch(() => undefined);
+  }
+
+  function clearCallSetupTimer(session: ActiveSession): void {
+    if (session.setupTimer !== undefined) {
+      clearTimeout(session.setupTimer);
+      session.setupTimer = undefined;
+    }
+  }
+
+  function armCallSetupTimeout(session: ActiveSession, timeoutMs: number): void {
+    clearCallSetupTimer(session);
+    session.setupTimer = setTimeout(() => {
+      if (active !== session || disposed) return;
+      if (session.negotiated || session.pcConnected) return;
+      const timedOut = active === session ? session : null;
+      if (!timedOut) return;
+      void recordCallEnd(session, session.direction === "incoming" ? "missed" : "failed").catch(() => undefined);
+      clearActive({ showEndedPhase: true });
+      lastError = "invalid_state";
+      emit();
+    }, timeoutMs);
+  }
+
+  async function checkCallSenderAllowed(senderPublicKeyHex: string): Promise<boolean> {
+    const controller = new AbortController();
+    transferAdmissionControllers.add(controller);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      const decision = Promise.resolve().then(() => isCallSenderAllowed(senderPublicKeyHex, controller.signal));
+      const timedOut = new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), TRANSFER_ADMISSION_TIMEOUT_MS);
+      });
+      const cancelled = new Promise<boolean>((resolve) => {
+        onAbort = () => resolve(false);
+        if (controller.signal.aborted) onAbort();
+        else controller.signal.addEventListener("abort", onAbort, { once: true });
+      });
+      return await Promise.race([decision, timedOut, cancelled]);
+    } catch {
+      return false;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (onAbort !== undefined) controller.signal.removeEventListener("abort", onAbort);
+      transferAdmissionControllers.delete(controller);
+      controller.abort();
+    }
   }
 
   /* ----- 入站信令处理 ----- */
@@ -1197,7 +1550,10 @@ export function createWebrtcService(input: {
     if (!currentOwner || currentOwner === remotePublicKeyHex) return;
     const capturedOwnerGeneration = ownerGeneration;
     prunePendingTransferRequests();
-    if (active || activeTransfer || pendingTransferRequests.has(transferRequest.sessionId)) return;
+    // 注意：待确认等候室是有界排队，不属于单活占用；已接受待 Offer 的请求
+    // 只在接受/拨号环节占位（见 hasAcceptedTransferAwaitingOffer），这里不拦截，
+    // 否则新请求连排队通知都建不出来。
+    if (active || activeTransfer || dialReservation || pendingTransferRequests.has(transferRequest.sessionId)) return;
     if (pendingTransferCountForSender(remotePublicKeyHex) >= MAX_PENDING_TRANSFER_REQUESTS_PER_SENDER) return;
     if (!consumeTransferRequestRate(remotePublicKeyHex)) return;
     const checkKey = `${remotePublicKeyHex}\u0000${transferRequest.sessionId}`;
@@ -1214,7 +1570,7 @@ export function createWebrtcService(input: {
       if (!ownerAfterCheck || ownerAfterCheck !== currentOwner
         || ownerGeneration !== capturedOwnerGeneration || disposed) return;
       prunePendingTransferRequests();
-      if (active || activeTransfer || pendingTransferRequests.size >= MAX_PENDING_TRANSFER_REQUESTS) return;
+      if (active || activeTransfer || dialReservation || pendingTransferRequests.size >= MAX_PENDING_TRANSFER_REQUESTS) return;
       if (pendingTransferCountForSender(remotePublicKeyHex) >= MAX_PENDING_TRANSFER_REQUESTS_PER_SENDER) return;
       const request: PendingTransferRequest = {
         requesterPublicKeyHex: remotePublicKeyHex,
@@ -1239,13 +1595,111 @@ export function createWebrtcService(input: {
     }
   }
 
+  async function handleIncomingCallRequest(request: ParsedCallRequest, remotePublicKeyHex: string): Promise<void> {
+    if (disposed) return;
+    // 过期检查优先：离线积压的旧邀请不得触发来电，也不回 busy。
+    const receivedAtMs = env.now();
+    if (request.expiresAtMs <= receivedAtMs) return;
+    if (request.expiresAtMs - receivedAtMs > CALL_REQUEST_TTL_MS + CALL_REQUEST_CLOCK_SKEW_MS) return;
+    const currentOwner = currentOwnerPublicKeyHex();
+    if (!currentOwner || currentOwner === remotePublicKeyHex) return;
+    if (active || activeTransfer || dialReservation || hasAcceptedTransferAwaitingOffer()) {
+      // 单活槽被占（含拨号预留与已接受待 Offer 的传输）：回 busy，不创建来电。
+      await publishCallControl({ recipientPublicKeyHex: remotePublicKeyHex, sessionId: request.sessionId, action: "busy", reason: "busy" });
+      return;
+    }
+    // 联系人准入：非联系人直接丢弃，不回包、不申请设备，避免泄露在线状态。
+    if (!await checkCallSenderAllowed(remotePublicKeyHex)) return;
+    // 准入查询是异步的：复核过期时间，过期请求不得建来电。
+    const checkedAtMs = env.now();
+    if (request.expiresAtMs <= checkedAtMs) return;
+    if (request.expiresAtMs - checkedAtMs > CALL_REQUEST_TTL_MS + CALL_REQUEST_CLOCK_SKEW_MS) return;
+    if (disposed || active || activeTransfer || dialReservation || hasAcceptedTransferAwaitingOffer()) return;
+    const ownerAfterCheck = currentOwnerPublicKeyHex();
+    if (!ownerAfterCheck || ownerAfterCheck !== currentOwner) return;
+    const session: ActiveSession = {
+      requestMessageId: null,
+      sessionId: request.sessionId,
+      direction: "incoming",
+      mode: request.mode,
+      remotePublicKeyHex,
+      ownerPublicKeyHex: ownerAfterCheck,
+      ownerGeneration,
+      startedAtMs: env.now(),
+      rendezvousHash: request.hash,
+      localStream: null,
+      pc: null,
+      remoteStream: null,
+      pendingOffer: null,
+      callRequestAccepted: false,
+      hashRequestPublished: false,
+      pcConnected: false,
+      negotiated: false
+    };
+    active = session;
+    armCallSetupTimeout(session, CALL_OFFER_WAIT_TIMEOUT_MS + CALL_SETUP_TIMEOUT_MS);
+    upsertIncomingNotice(session);
+    emit();
+  }
+
+  function handleIncomingCallControl(control: ParsedCallControl, remotePublicKeyHex: string): void {
+    if (disposed || !active) return;
+    const session = active;
+    if (session.sessionId !== control.sessionId) return;
+    if (session.remotePublicKeyHex !== remotePublicKeyHex) return;
+    if (!isCallCurrent(session)) return;
+    switch (control.action) {
+      case "reject": {
+        if (session.direction !== "outgoing") return;
+        clearActive({ showEndedPhase: true });
+        void recordCallEnd(session, "failed").catch(() => undefined);
+        remoteNotice = { kind: "rejected", message: `peer rejected: ${control.reason ?? "declined"}` };
+        emit();
+        return;
+      }
+      case "busy": {
+        if (session.direction !== "outgoing") return;
+        clearActive({ showEndedPhase: true });
+        void recordCallEnd(session, "failed").catch(() => undefined);
+        remoteNotice = { kind: "busy", message: "peer is busy" };
+        emit();
+        return;
+      }
+      case "fallback_required": {
+        if (session.direction !== "outgoing") return;
+        clearActive({ showEndedPhase: true });
+        void recordCallEnd(session, "failed").catch(() => undefined);
+        remoteNotice = {
+          kind: "fallback_suggested",
+          message: "peer has no video capability; you can fall back to audio chat",
+          suggestedMode: control.suggestedMode ?? "audio"
+        };
+        emit();
+        return;
+      }
+      case "hangup": {
+        clearActive({ showEndedPhase: true });
+        void recordCallEnd(session, resolveCallEndStatus({ session, origin: "remote" })).catch(() => undefined);
+        emit();
+        return;
+      }
+    }
+  }
+
   function handleIncoming(msg: ChannelPrivateMessageEvent): void {
     if (disposed) return;
     const remote = msg.publisherPublicKeyHex.trim().toLowerCase();
     if (msg.protocol === APP_MESSAGE_PROTOCOL) {
-      // 旧版呼叫请求没有对应的正式 ChannelProtocol 会合协议；不能把它
-      // 转换成 Hash 请求或来电状态，也不能因此触发设备权限申请。
-      if (isObject(msg.content) && msg.content.type === "keymaster.webrtc.call.request") return;
+      const callRequest = parseCallRequest(msg.content);
+      if (callRequest) {
+        void handleIncomingCallRequest(callRequest, remote).catch(() => undefined);
+        return;
+      }
+      const callControl = parseCallControl(msg.content);
+      if (callControl) {
+        handleIncomingCallControl(callControl, remote);
+        return;
+      }
       const transferRequest = parseTransferRequest(msg.content);
       if (transferRequest) {
         void handleIncomingTransferRequest(transferRequest, remote).catch(() => undefined);
@@ -1260,10 +1714,9 @@ export function createWebrtcService(input: {
       if (activeTransfer) return;
       if (isDataChannelOffer(sig.signal.sdp)) {
         void onRemoteTransferOffer(sig as WebrtcInviteSignal, remote).catch(() => undefined);
-      } else {
-        // 音视频呼叫协议未正式注册；尤其不能接受没有前置呼叫请求的
-        // 直接 offer。文件传输仍走独立的 data-channel + 文件 Hash 关系。
-        return;
+      } else if (isMediaOffer(sig.signal.sdp) || !isDataChannelOffer(sig.signal.sdp)) {
+        // 媒体 offer 必须有前置 call.request；无 active 来电一律丢弃。
+        void onRemoteCallOffer(sig as WebrtcInviteSignal, remote).catch(() => undefined);
       }
       return;
     }
@@ -1285,24 +1738,182 @@ export function createWebrtcService(input: {
       }
       if (sig.signal.type === "end-of-candidates") {
         void onRemoteTransferEndOfCandidates(sig as WebrtcEndOfCandidatesSignal).catch(() => undefined);
+        return;
+      }
+    }
+
+    const callLocal = active?.requestMessageId
+      ? { requestMessageId: active.requestMessageId, sessionId: active.sessionId }
+      : null;
+    if (callLocal
+      && active
+      && remote === active.remotePublicKeyHex
+      && isAcceptableRemoteSession(sig, callLocal)) {
+      if (sig.signal.type === "answer") {
+        void onRemoteCallAnswer(sig as WebrtcAnswerSignal).catch(() => undefined);
+        return;
+      }
+      if (sig.signal.type === "ice-candidate") {
+        void onRemoteCallIce(sig as WebrtcIceSignal).catch(() => undefined);
+        return;
+      }
+      if (sig.signal.type === "end-of-candidates") {
+        void onRemoteCallEndOfCandidates(sig as WebrtcEndOfCandidatesSignal).catch(() => undefined);
       }
     }
   }
 
   async function acceptIncoming(): Promise<void> {
-    // ChannelProtocol 目前只有文件 Hash 请求的会合关系；没有正式的
-    // 呼叫请求子协议，因此用户接受动作也必须 fail-closed，不能申请设备。
-    lastError = "call_protocol_unavailable";
-    emit();
-    throw new Error("call_protocol_unavailable");
+    const session = active;
+    if (!session || session.direction !== "incoming") throw new Error("invalid_state");
+    if (!isCallCurrent(session)) throw new Error("transfer_owner_changed");
+    if (session.callRequestAccepted) return;
+    if (session.acceptPromise) {
+      await session.acceptPromise;
+      return;
+    }
+    const promise = (async () => {
+      // 模式协商：video 先试，失败则回退建议；audio 失败直接拒绝。
+      // 设备授权只在用户明确接受后申请。
+      let stream: MediaStreamLike | null = null;
+      if (session.mode === "video") {
+        try {
+          stream = await env.getUserMedia({ audio: true, video: true });
+        } catch {
+          stream = null;
+        }
+        if (!stream) {
+          // 视频授权等待期间原会话可能已结束并被新来电替代：只为仍是
+          // 当前的会话继续，迟到的旧流程不得发控制、不得清理新会话。
+          if (active !== session || !isCallCurrent(session)) return;
+          try {
+            const audioOnly = await env.getUserMedia({ audio: true, video: false });
+            audioOnly.stop();
+            if (active !== session || !isCallCurrent(session)) return;
+            await publishCallControl({
+              recipientPublicKeyHex: session.remotePublicKeyHex,
+              sessionId: session.sessionId,
+              action: "fallback_required",
+              reason: "video_unavailable",
+              suggestedMode: "audio"
+            });
+          } catch {
+            if (active !== session || !isCallCurrent(session)) return;
+            await publishCallControl({
+              recipientPublicKeyHex: session.remotePublicKeyHex,
+              sessionId: session.sessionId,
+              action: "reject",
+              reason: "audio_unavailable"
+            });
+          }
+          if (active !== session || !isCallCurrent(session)) return;
+          await recordCallEnd(session, "rejected").catch(() => undefined);
+          clearActiveIfCurrent(session);
+          return;
+        }
+      } else {
+        try {
+          stream = await env.getUserMedia({ audio: true, video: false });
+        } catch (err) {
+          // 授权等待期间原会话可能已结束：只为仍是当前的会话发送控制与清理，
+          // 否则按身份失效退出，不污染新会话的错误态。
+          if (active !== session || !isCallCurrent(session)) {
+            throw new Error("transfer_owner_changed");
+          }
+          lastError = "device_unavailable";
+          emit();
+          await publishCallControl({
+            recipientPublicKeyHex: session.remotePublicKeyHex,
+            sessionId: session.sessionId,
+            action: "reject",
+            reason: "audio_unavailable"
+          });
+          if (active !== session || !isCallCurrent(session)) {
+            throw new Error("transfer_owner_changed");
+          }
+          await recordCallEnd(session, "rejected").catch(() => undefined);
+          clearActiveIfCurrent(session);
+          throw new Error(`device_unavailable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (!isCallCurrent(session)) {
+        try {
+          stream?.stop();
+        } catch {
+          // ignore
+        }
+        throw new Error("transfer_owner_changed");
+      }
+      session.localStream = stream;
+      session.callRequestAccepted = true;
+      // 只有用户确认后才发布真实 Hash 请求，建立会合关系。
+      // 发布失败必须回滚：停媒体流、清理会话、尽力通知主叫，避免麦克风常开且无法重试。
+      let hashRequestMessageId: string;
+      try {
+        hashRequestMessageId = await publishHashRequest(session.rendezvousHash);
+      } catch (error) {
+        try {
+          stream?.stop();
+        } catch {
+          // ignore
+        }
+        if (active !== session) {
+          // 等待期间原会话已结束（对端挂断/身份切换）且可能已有新会话：
+          // 只停孤流，不碰现会话、不改错误态、不发旧会话的控制消息。
+          throw error instanceof Error ? error : new Error(String(error));
+        }
+        const remote = session.remotePublicKeyHex;
+        const sessionId = session.sessionId;
+        await recordCallEnd(session, "failed").catch(() => undefined);
+        // 历史写入期间会话仍可能更替：复核后只清除自己的会话。
+        if (active !== session) {
+          throw error instanceof Error ? error : new Error(String(error));
+        }
+        clearActive();
+        lastError = "send_invite_failed";
+        emit();
+        void publishCallControl({
+          recipientPublicKeyHex: remote,
+          sessionId,
+          action: "reject",
+          reason: "invalid_state"
+        }).catch(() => undefined);
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      if (!isCallCurrent(session)) {
+        try {
+          stream?.stop();
+        } catch {
+          // ignore
+        }
+        throw new Error("transfer_owner_changed");
+      }
+      session.requestMessageId = hashRequestMessageId;
+      session.hashRequestPublished = true;
+      armCallSetupTimeout(session, CALL_OFFER_WAIT_TIMEOUT_MS);
+      emit();
+    })();
+    session.acceptPromise = promise;
+    try {
+      await promise;
+    } finally {
+      if (active === session) session.acceptPromise = undefined;
+    }
   }
 
   async function rejectIncoming(): Promise<void> {
     if (!active || active.direction !== "incoming") return;
     const session = active;
-    await recordCallEnd(session, "rejected");
-    // ChannelProtocol WebRTC V1 没有 reject 分支；拒接只在本地清理会话。
-    clearActive();
+    if (!isCallCurrent(session)) {
+      clearActiveIfCurrent(session);
+      return;
+    }
+    const remote = session.remotePublicKeyHex;
+    const sessionId = session.sessionId;
+    await recordCallEnd(session, "rejected").catch(() => undefined);
+    // 历史写入期间会话可能已结束：只清除/通知仍是当前的自己。
+    if (!clearActiveIfCurrent(session)) return;
+    await publishCallControl({ recipientPublicKeyHex: remote, sessionId, action: "reject", reason: "declined" });
   }
 
   async function acceptIncomingTransferForRequest(
@@ -1328,7 +1939,7 @@ export function createWebrtcService(input: {
       removePendingTransferRequestIfCurrent(sessionId, request);
       throw new Error("transfer_owner_changed");
     }
-    if (active || activeTransfer) throw new Error("busy_local");
+    if (active || activeTransfer || dialReservation || hasAcceptedTransferAwaitingOffer()) throw new Error("busy_local");
     if (request.accepted) return;
     if (transferAcceptanceInFlight !== null) throw new Error("busy_local");
 
@@ -1358,6 +1969,10 @@ export function createWebrtcService(input: {
       current.pendingOffer = undefined;
       if (pendingOffer) {
         await onRemoteTransferOffer(pendingOffer, current.requesterPublicKeyHex);
+      } else {
+        // 接受后 Offer 到达前请求持续占槽：若发送端已退出、无 Offer 到来，
+        // 独立超时释放请求与会话槽，不等到两分钟 TTL。
+        armTransferOfferWaitTimeout(sessionId, current);
       }
     } catch (error) {
       removePendingTransferRequestIfCurrent(sessionId, request);
@@ -1474,7 +2089,9 @@ export function createWebrtcService(input: {
   function finalizeTransferWithFailure(session: ActiveTransfer, err: Error): void {
     if (session.settled) return;
     session.settled = true;
-    if (activeTransfer?.sessionId === session.sessionId) {
+    // 只释放指定的会话对象：sessionId 唯一故等价于身份比较，显式按身份判断
+    // 可避免迟到的旧传输结果清除期间建立的新传输。
+    if (activeTransfer === session) {
       activeTransfer = null;
     }
     closeTransferResources(session);
@@ -1486,7 +2103,7 @@ export function createWebrtcService(input: {
   function finalizeTransferWithSuccess(session: ActiveTransfer, blob?: Blob): void {
     if (session.settled) return;
     session.settled = true;
-    if (activeTransfer?.sessionId === session.sessionId) {
+    if (activeTransfer === session) {
       activeTransfer = null;
     }
     const completedBlob = blob ?? session.blob;
@@ -1749,7 +2366,7 @@ export function createWebrtcService(input: {
       lastError = "service_not_ready";
       throw new Error("service_not_ready");
     }
-    if (active || isTransferActive()) {
+    if (active || isTransferActive() || dialReservation || hasAcceptedTransferAwaitingOffer()) {
       throw new Error("busy_local");
     }
     const ownerPublicKeyHex = currentOwnerPublicKeyHex();
@@ -1930,11 +2547,15 @@ export function createWebrtcService(input: {
       || activeTransfer.requestMessageId !== sig.request_message_id
       || activeTransfer.sessionId !== sig.session_id) return;
     if (!activeTransfer.pc) return;
+    // 捕获原会话：await 期间旧传输可能结束并建立新传输，失败只结算捕获的对象。
+    const session = activeTransfer;
+    const pc = session.pc;
+    if (!pc) return;
     const parsed = decodeDescription(sig.signal.sdp, "answer");
     try {
-      await activeTransfer.pc.setRemoteDescription(parsed);
+      await pc.setRemoteDescription(parsed);
     } catch (err) {
-      finalizeTransferWithFailure(activeTransfer, err instanceof Error ? err : new Error(String(err)));
+      finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
     }
   }
 
@@ -2131,7 +2752,8 @@ export function createWebrtcService(input: {
     candidate: RTCIceCandidateInit
   ): Promise<void> {
     const matchesTransfer = activeTransfer?.requestMessageId === requestMessageId && activeTransfer.sessionId === sessionId;
-    if (!matchesTransfer) return;
+    const matchesCall = active?.requestMessageId === requestMessageId && active.sessionId === sessionId;
+    if (!matchesTransfer && !matchesCall) return;
     const body = newIceSignal(requestMessageId, sessionId, toProtocolCandidate(candidate));
     try {
       await publishSignalBody(remotePublicKeyHex, body);
@@ -2146,7 +2768,8 @@ export function createWebrtcService(input: {
     remotePublicKeyHex: string
   ): Promise<void> {
     const matchesTransfer = activeTransfer?.requestMessageId === requestMessageId && activeTransfer.sessionId === sessionId;
-    if (!matchesTransfer) return;
+    const matchesCall = active?.requestMessageId === requestMessageId && active.sessionId === sessionId;
+    if (!matchesTransfer && !matchesCall) return;
     try {
       await publishSignalBody(
         remotePublicKeyHex,
@@ -2154,6 +2777,190 @@ export function createWebrtcService(input: {
       );
     } catch {
       // 候选结束通知丢失时，浏览器仍可依据已有候选继续连接。
+    }
+  }
+
+  function attachCallPeerEvents(session: ActiveSession, pc: RTCPeerConnectionLike): void {
+    pc.onIceCandidate((candidate) => {
+      const currentRequest = session.requestMessageId;
+      if (currentRequest && active === session) {
+        void sendIce(currentRequest, session.sessionId, session.remotePublicKeyHex, candidate).catch(() => undefined);
+      }
+    });
+    pc.onIceGatheringStateChange((state) => {
+      if (state === "complete" && session.requestMessageId && active === session) {
+        void sendEndOfCandidates(session.requestMessageId, session.sessionId, session.remotePublicKeyHex).catch(() => undefined);
+      }
+    });
+    pc.onConnectionStateChange((state) => {
+      const current = active;
+      if (!current || current !== session) return;
+      if (state === "connected") {
+        current.pcConnected = true;
+        clearCallSetupTimer(current);
+        emit();
+        return;
+      }
+      if (state === "failed" || state === "disconnected" || state === "closed") {
+        const failed = active === session ? session : null;
+        if (!failed) return;
+        void recordCallEnd(session, resolveCallEndStatus({ session, origin: "local", reason: "ice_disconnected" })).catch(() => undefined);
+        clearActive({ showEndedPhase: true });
+        lastError = "invalid_state";
+        emit();
+      }
+    });
+    pc.onTrack((stream) => {
+      const current = active;
+      if (current && current === session) {
+        current.remoteStream = stream;
+        current.pcConnected = true;
+        clearCallSetupTimer(current);
+        emit();
+      }
+    });
+  }
+
+  async function beginOutgoingCallOffer(session: ActiveSession): Promise<void> {
+    if (!isCallCurrent(session) || session.direction !== "outgoing" || !session.requestMessageId || session.pc) return;
+    const requestMessageId = session.requestMessageId;
+    if (!session.localStream) return;
+    const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
+    session.pc = pc;
+    try {
+      pc.replaceLocalStream(session.localStream);
+    } catch {
+      // ignore，SDP 失败会走统一失败路径。
+    }
+    attachCallPeerEvents(session, pc);
+    let offer: RTCSessionDescriptionInit;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } catch (err) {
+      if (isCallCurrent(session)) {
+        await recordCallEnd(session, "failed").catch(() => undefined);
+        if (active !== session) {
+          throw err instanceof Error ? err : new Error(String(err));
+        }
+        clearActive();
+        lastError = "create_offer_failed";
+        emit();
+      }
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    if (!isCallCurrent(session) || session.requestMessageId !== requestMessageId) {
+      return;
+    }
+    session.pendingOffer = offer;
+    try {
+      await publishSignalBody(
+        session.remotePublicKeyHex,
+        newOfferSignal(requestMessageId, session.sessionId, encodeDescription(offer))
+      );
+      if (!isCallCurrent(session)) return;
+      armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS);
+      emit();
+    } catch (err) {
+      if (isCallCurrent(session)) {
+        await recordCallEnd(session, "failed").catch(() => undefined);
+        if (active !== session) {
+          throw err instanceof Error ? err : new Error(String(err));
+        }
+        clearActive();
+        lastError = "send_invite_failed";
+        emit();
+      }
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
+  async function onRemoteCallOffer(sig: WebrtcInviteSignal, remote: string): Promise<void> {
+    if (disposed || !active) return;
+    const session = active;
+    if (!isCallCurrent(session) || session.direction !== "incoming") return;
+    if (session.remotePublicKeyHex !== remote || session.sessionId !== sig.session_id) return;
+    if (!session.callRequestAccepted || !session.hashRequestPublished) return;
+    if (session.requestMessageId !== sig.request_message_id) return;
+    if (session.rendezvousHash === "" || session.pc) return;
+    const parsedOffer = decodeDescription(sig.signal.sdp, "offer");
+    const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
+    session.pc = pc;
+    if (session.localStream) {
+      try {
+        pc.replaceLocalStream(session.localStream);
+      } catch {
+        // ignore
+      }
+    }
+    attachCallPeerEvents(session, pc);
+    session.pendingOffer = parsedOffer;
+    try {
+      await pc.setRemoteDescription(parsedOffer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      if (!isCallCurrent(session)) return;
+      await publishSignalBody(remote, newAnswerSignal(session.requestMessageId!, session.sessionId, encodeDescription(answer)));
+      if (!isCallCurrent(session)) return;
+      session.negotiated = true;
+      session.pendingOffer = null;
+      armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS);
+      emit();
+    } catch {
+      if (!isCallCurrent(session)) return;
+      await recordCallEnd(session, "failed").catch(() => undefined);
+      // 历史写入期间会话仍可能更替：只清除自己的会话。
+      if (active !== session) return;
+      clearActive();
+      lastError = "invalid_state";
+      emit();
+    }
+  }
+
+  async function onRemoteCallAnswer(sig: WebrtcAnswerSignal): Promise<void> {
+    if (!active || !isCallCurrent(active) || active.direction !== "outgoing") return;
+    if (active.requestMessageId !== sig.request_message_id || active.sessionId !== sig.session_id) return;
+    if (!active.pc) return;
+    // 捕获原会话：await 期间旧通话可能结束并建立新会话，后续只作用于捕获的对象。
+    const session = active;
+    const pc = session.pc;
+    if (!pc) return;
+    try {
+      await pc.setRemoteDescription(decodeDescription(sig.signal.sdp, "answer"));
+      if (!isCallCurrent(session)) return;
+      session.negotiated = true;
+      armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS);
+      emit();
+    } catch {
+      if (!isCallCurrent(session)) return;
+      await recordCallEnd(session, "failed").catch(() => undefined);
+      // 历史写入期间会话仍可能更替：只清除自己的会话。
+      if (active !== session) return;
+      clearActive();
+      lastError = "invalid_state";
+      emit();
+    }
+  }
+
+  async function onRemoteCallIce(sig: WebrtcIceSignal): Promise<void> {
+    if (!active || !isCallCurrent(active)) return;
+    if (active.requestMessageId !== sig.request_message_id || active.sessionId !== sig.session_id) return;
+    if (!active.pc) return;
+    try {
+      await active.pc.addIceCandidate(fromProtocolCandidate(sig.signal.candidate));
+    } catch {
+      // ignore
+    }
+  }
+
+  async function onRemoteCallEndOfCandidates(sig: WebrtcEndOfCandidatesSignal): Promise<void> {
+    if (!active || !isCallCurrent(active)) return;
+    if (active.requestMessageId !== sig.request_message_id || active.sessionId !== sig.session_id) return;
+    if (!active.pc) return;
+    try {
+      await active.pc.addIceCandidate({ candidate: "" });
+    } catch {
+      // ignore
     }
   }
 
@@ -2173,22 +2980,180 @@ export function createWebrtcService(input: {
     file: Blob | File
   ): Promise<void> {
     if (file.size > MAX_WEBRTC_TRANSFER_BYTES) {
+      lastError = "transfer_too_large" as WebrtcBlockReason;
+      emit();
       throw new Error("transfer_too_large");
     }
     if (!channel.isReady()) {
+      lastError = "service_not_ready";
+      emit();
       throw new Error("service_not_ready");
     }
-    if (active || isTransferActive()) {
+    if (active || isTransferActive() || dialReservation || hasAcceptedTransferAwaitingOffer()) {
+      lastError = "busy_local";
+      emit();
       throw new Error("busy_local");
     }
-    await startOutgoingTransfer({ targetPublicKeyHex: targetPublicKeyHex.trim().toLowerCase(), kind, file });
+    const normalized = targetPublicKeyHex.trim().toLowerCase();
+    if (!/^(02|03)[0-9a-f]{64}$/.test(normalized)) {
+      lastError = "invalid_target";
+      emit();
+      throw new Error("invalid_target");
+    }
+    const presence = await queryPeerPresence(normalized);
+    if (presence !== "online") {
+      lastError = presence === "offline" ? "target_offline" : "target_unknown";
+      emit();
+      throw new Error(lastError);
+    }
+    await startOutgoingTransfer({ targetPublicKeyHex: normalized, kind, file });
   }
 
   async function startCall(input: StartCallInput): Promise<void> {
-    void input;
-    lastError = "call_protocol_unavailable";
+    if (!channel.isReady()) {
+      lastError = "service_not_ready";
+      emit();
+      throw new Error("service_not_ready");
+    }
+    if (active || isTransferActive() || dialReservation || hasAcceptedTransferAwaitingOffer()) {
+      lastError = "busy_local";
+      emit();
+      throw new Error("busy_local");
+    }
+    const target = input.targetPublicKeyHex.trim().toLowerCase();
+    if (!/^(02|03)[0-9a-f]{64}$/.test(target)) {
+      lastError = "invalid_target";
+      emit();
+      throw new Error("invalid_target");
+    }
+    if (input.mode !== "audio" && input.mode !== "video") {
+      lastError = "invalid_target";
+      emit();
+      throw new Error("invalid_target");
+    }
+    // owner 与 generation 必须在第一次异步操作前同时捕获；之后每一步复核，
+    // 拨号异步期间切换身份时中止，避免留下携带旧 owner 的失效会话。
+    const capturedOwnerPublicKeyHex = currentOwnerPublicKeyHex();
+    if (!capturedOwnerPublicKeyHex) {
+      lastError = "service_not_ready";
+      emit();
+      throw new Error("service_not_ready");
+    }
+    const capturedOwnerGeneration = ownerGeneration;
+    // 原子预留单活槽：同步占位，之后的在线查询/媒体授权期间第二次拨号直接 busy。
+    const reservation: DialReservation = {
+      ownerPublicKeyHex: capturedOwnerPublicKeyHex,
+      ownerGeneration: capturedOwnerGeneration,
+      targetPublicKeyHex: target,
+      mode: input.mode,
+      startedAtMs: env.now()
+    };
+    dialReservation = reservation;
     emit();
-    throw new Error("call_protocol_unavailable");
+    try {
+      // 拨号前强在线门禁：通讯录 Ping/Pong 非 online 一律 fail-closed。
+      const presence = await queryPeerPresence(target);
+      if (!isDialReservationCurrent(reservation)) throw new Error("transfer_owner_changed");
+      if (presence !== "online") {
+        if (clearDialReservationIfCurrent(reservation)) {
+          lastError = presence === "offline" ? "target_offline" : "target_unknown";
+          emit();
+        }
+        throw new Error(presence === "offline" ? "target_offline" : "target_unknown");
+      }
+      let localStream: MediaStreamLike;
+      try {
+        localStream = input.mode === "audio"
+          ? await env.getUserMedia({ audio: true, video: false })
+          : await env.getUserMedia({ audio: true, video: true });
+      } catch (err) {
+        if (clearDialReservationIfCurrent(reservation)) {
+          lastError = "device_unavailable";
+          emit();
+        }
+        throw new Error(`device_unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (!isDialReservationCurrent(reservation)) {
+        try {
+          localStream.stop();
+        } catch {
+          // ignore
+        }
+        clearDialReservationIfCurrent(reservation);
+        emit();
+        throw new Error("transfer_owner_changed");
+      }
+      const sessionId = createProtocolSessionId(env);
+      const rendezvousHash = generateCallRendezvousHash(sessionId, env.now());
+      if (!isValidRendezvousHash(rendezvousHash)) {
+        try {
+          localStream.stop();
+        } catch {
+          // ignore
+        }
+        if (clearDialReservationIfCurrent(reservation)) {
+          lastError = "create_offer_failed";
+          emit();
+        }
+        throw new Error("create_offer_failed");
+      }
+      // 发送邀请前最终复核：预留仍有效且单活槽未被来电/传输占用
+      //（含已接受待 Offer 的入站传输）。
+      const slotTaken = active || isTransferActive() || hasAcceptedTransferAwaitingOffer();
+      if (!isDialReservationCurrent(reservation) || slotTaken) {
+        try {
+          localStream.stop();
+        } catch {
+          // ignore
+        }
+        const stillOurs = clearDialReservationIfCurrent(reservation);
+        if (stillOurs && !slotTaken) emit();
+        throw new Error(slotTaken ? "busy_local" : "transfer_owner_changed");
+      }
+      const session: ActiveSession = {
+        requestMessageId: null,
+        sessionId,
+        direction: "outgoing",
+        mode: input.mode,
+        remotePublicKeyHex: target,
+        ownerPublicKeyHex: capturedOwnerPublicKeyHex,
+        ownerGeneration: capturedOwnerGeneration,
+        startedAtMs: env.now(),
+        rendezvousHash,
+        localStream,
+        pc: null,
+        remoteStream: null,
+        pendingOffer: null,
+        callRequestAccepted: false,
+        hashRequestPublished: false,
+        pcConnected: false,
+        negotiated: false
+      };
+      active = session;
+      // 预留转交真实会话：先置 active 再释放预留，避免窗口期。
+      dialReservation = null;
+      armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS + CALL_OFFER_WAIT_TIMEOUT_MS);
+      emit();
+      try {
+        await publishCallRequest({ recipientPublicKeyHex: target, sessionId, hash: rendezvousHash, mode: input.mode });
+      } catch (err) {
+        if (active === session) {
+          try {
+            localStream.stop();
+          } catch {
+            // ignore
+          }
+          clearActive();
+          lastError = "send_invite_failed";
+          emit();
+        }
+        throw new Error(`send_invite_failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } catch (error) {
+      // 预留仍在自己名下时释放并回到 idle；active 已建立的路径由各自的分支出清。
+      if (clearDialReservationIfCurrent(reservation)) emit();
+      throw error instanceof Error ? error : new Error(String(error));
+    }
   }
 
   /* ----- STUN 自检 ----- */
@@ -2332,8 +3297,16 @@ export function createWebrtcService(input: {
         ownerGeneration += 1;
       }
       cancelTransferAdmissions();
+      if (dialReservation
+        && (dialReservation.ownerPublicKeyHex !== nextOwner || dialReservation.ownerGeneration !== ownerGeneration)) {
+        // 拨号异步期间切换身份：释放预留槽，等待中的在线查询/媒体授权在复核时中止并停流。
+        dialReservation = null;
+        emit();
+      }
       if (active && active.ownerPublicKeyHex !== nextOwner) {
+        const stale = active;
         clearActive({ showEndedPhase: true });
+        void recordCallEnd(stale, "failed").catch(() => undefined);
       }
       if (activeTransfer && activeTransfer.ownerPublicKeyHex !== nextOwner) {
         finalizeTransferWithFailure(activeTransfer, new Error("transfer_owner_changed"));
@@ -2350,9 +3323,19 @@ export function createWebrtcService(input: {
     if (disposed) return;
     disposed = true;
     ownerGeneration += 1;
+    dialReservation = null;
     cancelTransferAdmissions();
     // 单一清理路径：本地截断 UI、释放 tracks、关闭 pc、取消订阅。
-    // V1 没有 hangup wire 分支；远端会由 RTC connection state/超时收敛。
+    // 若有活动通话，先尽力经 APP 控制通知对端，再本地清场。
+    const staleCall = active;
+    if (staleCall) {
+      void publishCallControl({
+        recipientPublicKeyHex: staleCall.remotePublicKeyHex,
+        sessionId: staleCall.sessionId,
+        action: "hangup",
+        reason: "page_unload"
+      }).catch(() => undefined);
+    }
     clearActive({ showEndedPhase: true });
     if (activeTransfer) {
       finalizeTransferWithFailure(activeTransfer, new Error("service_disposed"));

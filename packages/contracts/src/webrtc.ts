@@ -24,12 +24,17 @@ export type WebrtcSessionPhase =
 export type WebrtcBlockReason =
   | "service_not_ready"
   | "invalid_target"
+  | "target_offline"
+  | "target_unknown"
   | "call_protocol_unavailable"
   | "device_unavailable"
   | "send_invite_failed"
   | "create_offer_failed"
   | "busy_local"
-  | "invalid_state";
+  | "invalid_state"
+  | "transfer_too_large"
+  | "transfer_timeout"
+  | "transfer_connection_failed";
 
 export interface WebrtcRemoteNotice {
   kind: "fallback_suggested" | "rejected" | "busy";
