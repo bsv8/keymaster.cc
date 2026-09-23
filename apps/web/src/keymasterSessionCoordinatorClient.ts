@@ -21,6 +21,7 @@ import type {
   CoordinatorCryptoOperation,
   CoordinatorCryptoResult,
   CoordinatorBackgroundSyncSettings,
+  AutoLockSettings,
   CoordinatorTaskSnapshot,
   CoordinatorVaultOperation,
   CoordinatorVaultOperationResultFor,
@@ -277,6 +278,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     keyspaceGeneration: 0,
     taskSnapshots: [],
     scheduleSettings: { taskIntervals: {} },
+    autoLockTimeoutMs: 5 * 60 * 1000,
   };
 
   private eventListeners = new Map<string, Set<EventListener<CoordinatorTopicEvent>>>();
@@ -1456,6 +1458,17 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand(request);
   }
 
+  async autolockSettingsUpdate(settings: AutoLockSettings): Promise<CoordinatorCommandResult> {
+    const request: CoordinatorClientRequest = {
+      kind: "autolock.settings.update",
+      clientId: this.clientId,
+      requestId: this.generateRequestId(),
+      settings,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
+    };
+    return this.requestCommand(request);
+  }
+
   sendActivity(): void {
     const runtime = this.runtimeHandle;
     if (!this.isConnected || !runtime) return;
@@ -1693,6 +1706,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
         keyspaceGeneration: event.keyspaceGeneration,
         authorityRecovery: event.authorityRecovery,
+        ...(event.autoLockTimeoutMs === undefined
+          ? {}
+          : { autoLockTimeoutMs: event.autoLockTimeoutMs }),
       };
       if (sessionChanged) {
         // 运行单元属于 session 世代；切换世代时先撤下旧快照，避免旧

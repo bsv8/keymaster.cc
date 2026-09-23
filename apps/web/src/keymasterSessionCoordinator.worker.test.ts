@@ -2887,7 +2887,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     const resumed = __testGetMsfileSellerLifecycle();
     expect(resumed.indexActive).toBe(false);
     expect(resumed.runtimeActive).toBe(false);
-    expect(resumed.autoLockDeadline).toBeGreaterThanOrEqual(beforeDisable + 15 * 60 * 1_000);
+    expect(resumed.autoLockDeadline).toBeGreaterThanOrEqual(beforeDisable + 5 * 60 * 1_000);
 
     await __testDispatchMsfileControl({
       type: "settings.seller.update",

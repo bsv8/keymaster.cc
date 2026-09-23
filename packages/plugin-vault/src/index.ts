@@ -3,6 +3,8 @@
 // apps/web 通过 import 这个文件来装配插件，不直接 import 内部模块。
 
 export { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "./manifest.js";
+export { AutoLockSettingsSection } from "./AutoLockSettingsSection.js";
+export { createAutoLockServiceCoordinator } from "./autoLockServiceCoordinator.js";
 export { VaultKeyExportModal } from "./VaultKeyExportModal.js";
 export { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
 export { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";

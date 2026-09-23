@@ -204,6 +204,7 @@ describe("Coordinator startup recovery", () => {
   it("uses frozen null-prototype coordinator facades for each trust boundary", () => {
     const rawClient = Object.create({
       vaultOperation: () => undefined,
+      autolockSettingsUpdate: () => undefined,
       storageBindOwner: () => undefined,
       storageDeleteOwner: () => undefined
     }) as SessionCoordinatorClient;
@@ -236,6 +237,7 @@ describe("Coordinator startup recovery", () => {
 
     const vaultClient = createVaultCoordinatorClient(rawClient);
     expect(vaultClient.vaultOperation).toBeTypeOf("function");
+    expect(vaultClient.autolockSettingsUpdate).toBeTypeOf("function");
     expect((vaultClient as unknown as Record<string, unknown>).storageDeleteOwner).toBeUndefined();
   });
 
@@ -345,6 +347,7 @@ describe("web startup capability contract", () => {
       unlock: async () => ({ ok: false }), lock: async () => ({ ok: false }),
       activateKey: async () => ({ ok: false }), vaultOperation: async () => ({ ok: false }),
       crypto: async () => ({ ack: { ok: false } }), backgroundCancelByKey: async () => ({ ok: false }),
+      autolockSettingsUpdate: async () => ({ status: "accepted" }),
       p2pkhProviderConfigGet: async () => ({ status: "ok", value: {} }),
       p2pkhProviderConfigUpdate: async () => ({ status: "ok" }),
       p2pkhUtxosGet: async () => ({ status: "ok", value: { available: false, items: [] } }),

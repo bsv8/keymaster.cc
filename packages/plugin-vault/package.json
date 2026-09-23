@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./coordinator": "./src/coordinator.ts",
-    "./session-crypto-worker": "./src/sessionCryptoWorker.ts"
+    "./session-crypto-worker": "./src/sessionCryptoWorker.ts",
+    "./styles.css": "./src/styles.css"
   },
   "types": "./src/index.ts",
   "dependencies": {
@@ -17,6 +18,7 @@
     "@noble/hashes": "^1.8.0",
     "@noble/secp256k1": "^2.2.0",
     "keyhold": "2.1.0",
+    "lucide-react": "^0.468.0",
     "webloom-framework": "0.5.0"
   }
 }

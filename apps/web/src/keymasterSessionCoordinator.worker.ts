@@ -91,7 +91,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -790,7 +790,12 @@ function snapshotRecord(value: unknown, name: string): Record<string, unknown> {
 
 function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSettingsSnapshot {
   const record = snapshotRecord(value, "Coordinator settings");
-  if (Object.keys(record).length !== 1 || !Object.prototype.hasOwnProperty.call(record, "scheduleSettings")) {
+  // 兼容旧快照：只有 scheduleSettings；新快照可携带 autoLockTimeoutMs。
+  // 旧快照缺字段时回落到缺省，而不是让 Worker 启动失败。
+  const keys = Object.keys(record);
+  const hasSchedule = Object.prototype.hasOwnProperty.call(record, "scheduleSettings");
+  const hasAutoLock = Object.prototype.hasOwnProperty.call(record, "autoLockTimeoutMs");
+  if (!hasSchedule || keys.some((k) => k !== "scheduleSettings" && k !== "autoLockTimeoutMs")) {
     throw new StorageRuntimeError("storage_provider_error", "Coordinator settings snapshot value is invalid");
   }
   const settings = snapshotRecord(record.scheduleSettings, "Coordinator schedule settings");
@@ -798,7 +803,10 @@ function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSetting
   // 选项已废弃，直接回落到同步管理缺省，而不是让整个 Worker 启动失败。
   if (Object.prototype.hasOwnProperty.call(settings, "assetHoldingsIntervalMs")
     && !Object.prototype.hasOwnProperty.call(settings, "taskIntervals")) {
-    return { scheduleSettings: { taskIntervals: {} } };
+    return {
+      scheduleSettings: { taskIntervals: {} },
+      autoLockTimeoutMs: parsePersistedAutoLockTimeoutMs(record.autoLockTimeoutMs),
+    };
   }
   if (Object.keys(settings).length !== 1 || !Object.prototype.hasOwnProperty.call(settings, "taskIntervals")) {
     throw new StorageRuntimeError("storage_provider_error", "Coordinator schedule settings are invalid");
@@ -812,7 +820,15 @@ function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSetting
     }
     taskIntervals[taskId] = interval;
   }
-  return { scheduleSettings: { taskIntervals } };
+  return { scheduleSettings: { taskIntervals }, autoLockTimeoutMs: parsePersistedAutoLockTimeoutMs(record.autoLockTimeoutMs) };
+}
+
+function parsePersistedAutoLockTimeoutMs(value: unknown): number {
+  if (value === undefined) return AUTO_LOCK_DEFAULT_TIMEOUT_MS;
+  if (!isValidAutoLockTimeoutMs(value)) {
+    throw new StorageRuntimeError("storage_provider_error", "Coordinator auto-lock settings are invalid");
+  }
+  return value as number;
 }
 
 function validatePluginIntentSnapshot(value: unknown): PluginIntentSnapshot {
@@ -831,15 +847,17 @@ function validatePluginIntentSnapshot(value: unknown): PluginIntentSnapshot {
 interface CoordinatorRuntimeSettings {
   selectedPublicKeyHex?: string;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
+  autoLockTimeoutMs: number;
   p2pkhProviderConfigs: Record<string, Record<string, unknown>>;
   p2pkhSettings: { includeTestnet: boolean };
   pluginIntent: PluginIntentSnapshot;
 }
-/** 桶级 Coordinator snapshot 只持久化同步管理设置；P2PKH 偏好归 owner 的 setting.json。 */
-type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings">;
+/** 桶级 Coordinator snapshot 持久化同步管理 + 自动锁；P2PKH 偏好归 owner 的 setting.json。 */
+type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings" | "autoLockTimeoutMs">;
 function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
   return {
     scheduleSettings: { taskIntervals: {} },
+    autoLockTimeoutMs: AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhProviderConfigs: {},
     p2pkhSettings: { includeTestnet: false },
     pluginIntent: emptyPluginIntentSnapshot(),
@@ -2380,6 +2398,9 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
   Object.assign(coordinatorMeta, structuredClone(next));
   coordinatorMeta.scheduleSettings ??= { taskIntervals: {} };
   coordinatorMeta.scheduleSettings.taskIntervals ??= {};
+  coordinatorMeta.autoLockTimeoutMs = normalizeAutoLockTimeoutMs(
+    (next as Partial<CoordinatorRuntimeSettings>).autoLockTimeoutMs
+  );
   coordinatorMeta.p2pkhSettings ??= { includeTestnet: false };
   coordinatorMeta.p2pkhProviderConfigs ??= {};
   coordinatorMeta.pluginIntent ??= emptyPluginIntentSnapshot();
@@ -2726,6 +2747,7 @@ async function loadCoordinatorMeta(): Promise<void> {
     pluginIntent: pluginIntent?.value ?? defaults.pluginIntent,
   });
   coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings;
+  coordinatorState.autoLockTimeoutMs = coordinatorMeta.autoLockTimeoutMs;
 }
 
 async function writeCoordinatorSnapshot<T>(
@@ -2756,6 +2778,7 @@ async function persistSelectedPublicKey(selectedPublicKeyHex = coordinatorMeta.s
 
 async function persistCoordinatorSettings(settings: CoordinatorSettingsSnapshot = {
   scheduleSettings: coordinatorMeta.scheduleSettings,
+  autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs,
 }): Promise<void> {
   await writeCoordinatorSnapshot(coordinatorSettingsSnapshot, structuredClone(settings), "coordinator.settings.persist");
 }
@@ -3242,6 +3265,7 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
     selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null,
     keyspaceGeneration: coordinatorState.keyspaceGeneration,
+    autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
   });
   publishCoordinatorContactsPresence();
@@ -3259,6 +3283,7 @@ interface CoordinatorState {
   keyspaceGeneration: number;
   taskRuntimes: Map<string, TaskRuntime>;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
+  autoLockTimeoutMs: number;
   autoLockDeadline?: number;
   lastActivityAt: number;
 }
@@ -5462,6 +5487,7 @@ const coordinatorState: CoordinatorState = {
   keyspaceGeneration: 0,
   taskRuntimes: new Map(),
   scheduleSettings: { taskIntervals: {} },
+  autoLockTimeoutMs: AUTO_LOCK_DEFAULT_TIMEOUT_MS,
   lastActivityAt: Date.now(),
 };
 
@@ -6985,7 +7011,7 @@ async function buildTopicBaselines(
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
-      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null, keyspaceGeneration: coordinatorState.keyspaceGeneration }
+      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null, keyspaceGeneration: coordinatorState.keyspaceGeneration, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }
         : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings, p2pkhSettings: coordinatorMeta.p2pkhSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
@@ -10500,6 +10526,8 @@ async function executeProcessRequest(
         return await handleBackgroundCancelByKey(requestId, request);
       case "background.settings.update":
         return await handleBackgroundSettingsUpdate(requestId, request);
+      case "autolock.settings.update":
+        return await handleAutolockSettingsUpdate(requestId, request);
       case "p2pkh.settings.update":
         return await handleP2pkhSettingsUpdate(requestId, request);
       case "p2pkh.provider-config.get":
@@ -11700,7 +11728,10 @@ async function handleBackgroundSettingsUpdate(
     }
   }
   const nextSettings = normalizeBackgroundSyncSettings(request.settings);
-  const nextSnapshot: CoordinatorSettingsSnapshot = { scheduleSettings: nextSettings };
+  const nextSnapshot: CoordinatorSettingsSnapshot = {
+    scheduleSettings: nextSettings,
+    autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
+  };
   // 持久化成功才发布新的内存状态；保存失败不能制造“设置已生效”
   // 的假象，也不能让后续调度使用未落盘的值。
   await persistCoordinatorSettings(nextSnapshot);
@@ -11717,6 +11748,48 @@ async function handleBackgroundSettingsUpdate(
     sessionEpoch: coordinatorState.sessionEpoch,
     snapshots: getTaskSnapshots(),
   });
+
+  return {
+    requestId,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    ack: { status: "accepted" },
+  };
+}
+
+async function handleAutolockSettingsUpdate(
+  requestId: string,
+  request: { kind: "autolock.settings.update"; settings: { timeoutMs: number }; expectedSessionEpoch: SessionEpoch }
+): Promise<CoordinatorResponse> {
+  if (
+    request.expectedSessionEpoch !== coordinatorState.sessionEpoch
+    && request.expectedSessionEpoch !== "boot"
+    && request.expectedSessionEpoch !== "locked"
+  ) {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+  }
+  const timeoutMs = request.settings?.timeoutMs;
+  if (!isValidAutoLockTimeoutMs(timeoutMs)) {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid auto-lock timeout" } };
+  }
+  const nextSnapshot: CoordinatorSettingsSnapshot = {
+    scheduleSettings: coordinatorMeta.scheduleSettings,
+    autoLockTimeoutMs: timeoutMs,
+  };
+  // 持久化成功才发布内存状态；保存失败不能制造“已生效”假象。
+  await persistCoordinatorSettings(nextSnapshot);
+  coordinatorMeta.autoLockTimeoutMs = timeoutMs;
+  coordinatorState.autoLockTimeoutMs = timeoutMs;
+  // 立即按新超时重算 deadline：解锁态下从当前时刻重新计时；
+  // 永不锁定则清除 timer；锁定态下只记设置，下次解锁生效。
+  if (coordinatorState.vaultStatus === "unlocked") {
+    resetAutoLockTimer();
+  } else {
+    if (autoLockTimer) clearTimeout(autoLockTimer);
+    autoLockTimer = undefined;
+    coordinatorState.autoLockDeadline = undefined;
+  }
+
+  publishSessionState("autolock-settings");
 
   return {
     requestId,
@@ -12392,6 +12465,7 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     coordinatorWorkerUnitSnapshotRevision: coordinatorRuntimeUnitRevision(),
     taskSnapshots: getTaskSnapshots(),
     scheduleSettings: coordinatorState.scheduleSettings,
+    autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhSettings: coordinatorMeta.p2pkhSettings,
     storageBucketGeneration: platformRootStore?.bucket.bucketGeneration,
     ...(platformRootStore ? { storageBucketId: platformRootStore.bucket.bucketId } : {}),
@@ -12507,14 +12581,24 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
 // ============================================================
 
 function resetAutoLockTimer(): void {
-  const AUTO_LOCK_TIMEOUT_MS = 15 * 60 * 1000;
   if (autoLockTimer) clearTimeout(autoLockTimer);
   if (sellerKeepsVaultUnlocked()) {
     autoLockTimer = undefined;
     coordinatorState.autoLockDeadline = undefined;
     return;
   }
-  coordinatorState.autoLockDeadline = Date.now() + AUTO_LOCK_TIMEOUT_MS;
+  const timeoutMs = normalizeAutoLockTimeoutMs(
+    coordinatorMeta.autoLockTimeoutMs ?? coordinatorState.autoLockTimeoutMs
+  );
+  coordinatorState.autoLockTimeoutMs = timeoutMs;
+  coordinatorMeta.autoLockTimeoutMs = timeoutMs;
+  // 永不锁定：不清 deadline，直接不设 timer。
+  if (timeoutMs === AUTO_LOCK_NEVER_TIMEOUT_MS) {
+    autoLockTimer = undefined;
+    coordinatorState.autoLockDeadline = undefined;
+    return;
+  }
+  coordinatorState.autoLockDeadline = Date.now() + timeoutMs;
 
   autoLockTimer = setTimeout(() => {
     autoLockTimer = undefined;
@@ -12525,7 +12609,7 @@ function resetAutoLockTimer(): void {
     ) {
       void performGlobalLock("auto-lock-timeout");
     }
-  }, AUTO_LOCK_TIMEOUT_MS);
+  }, timeoutMs);
 }
 
 // ============================================================
@@ -14475,6 +14559,14 @@ export async function __testBackgroundRunNow(taskId: string): Promise<Coordinato
 
 export async function __testUpdateScheduleSettings(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorResponse> {
   return handleBackgroundSettingsUpdate(`test-${Date.now()}`, { kind: "background.settings.update", settings, expectedSessionEpoch: coordinatorState.sessionEpoch });
+}
+
+export async function __testUpdateAutolockSettings(settings: { timeoutMs: number }): Promise<CoordinatorResponse> {
+  return handleAutolockSettingsUpdate(`test-${Date.now()}`, { kind: "autolock.settings.update", settings, expectedSessionEpoch: coordinatorState.sessionEpoch });
+}
+
+export function __testGetAutolockTimeoutMs(): number {
+  return coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS;
 }
 
 /** 测试专用：调整智能调度 2 秒计时，避免测试等待真实时长。 */

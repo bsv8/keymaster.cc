@@ -27,6 +27,8 @@ import type {
   ActiveKeyState,
   KeyIdentity,
   VaultService,
+  AutoLockService,
+  AutoLockSettings,
   CoordinatorValueResult,
   CoordinatorCommandResult,
   CoordinatorCryptoOperation,
@@ -36,6 +38,7 @@ import type {
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import {
+  AUTOLOCK_SERVICE_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   COMMAND_REGISTRY_CAPABILITY,
@@ -43,6 +46,7 @@ import {
   ROUTE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   SETTINGS_REGISTRY_CAPABILITY,
+  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
   VAULT_LOCAL_SECRET_CAPABILITY,
@@ -53,8 +57,10 @@ import {
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
 import { VaultUnlockPage } from "./VaultUnlockPage.js";
+import { AutoLockSettingsSection } from "./AutoLockSettingsSection.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
+import { createAutoLockServiceCoordinator } from "./autoLockServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
 import { createVaultLocalSecretService } from "./localSecretService.js";
 
@@ -212,7 +218,30 @@ const vaultResources: I18nPluginResources = {
       "vault.currentKey.protection.password": "Bucket password",
       "vault.currentKey.protection.passwordDescription": "Hold ciphertext protector · used for unlock and recovery",
       "vault.currentKey.backup.title": "Encrypted backup",
-      "vault.currentKey.backup.action": "Export current key backup"
+      "vault.currentKey.backup.action": "Export current key backup",
+      "vault.autolock.system.group": "Security",
+      "vault.autolock.system.title": "Auto-lock",
+      "vault.autolock.system.description": "Lock the wallet automatically after inactivity. Changes take effect immediately.",
+      "vault.autolock.current.never": "Current: never auto-lock (stay unlocked).",
+      "vault.autolock.current.timeout": "Current: auto-lock after {{minutes}} minutes of inactivity.",
+      "vault.autolock.current.timeoutHours": "Current: auto-lock after {{hours}} hours of inactivity.",
+      "vault.autolock.presets.label": "Quick durations",
+      "vault.autolock.preset.minutes": "{{minutes}} minutes",
+      "vault.autolock.preset.hours": "{{hours}} hours",
+      "vault.autolock.preset.never": "Never",
+      "vault.autolock.preset.custom": "Custom",
+      "vault.autolock.back.label": "Back to quick options",
+      "vault.autolock.custom.label": "Custom minutes (1-1440 minutes)",
+      "vault.autolock.custom.placeholder": "e.g. 10",
+      "vault.autolock.custom.unit": "minutes",
+      "vault.autolock.custom.apply": "Apply",
+      "vault.autolock.custom.applying": "Saving…",
+      "vault.autolock.custom.required": "Enter minutes (at least 1).",
+      "vault.autolock.custom.invalid": "Enter a valid number of minutes.",
+      "vault.autolock.custom.min": "At least 1 minute.",
+      "vault.autolock.custom.max": "Up to 24 hours (1440 minutes); longer means \"Never\".",
+      "vault.autolock.custom.tooLarge": "The number is too large. Try a smaller value.",
+      "vault.autolock.saveFailed": "Save failed. Please try again later."
     },
     "zh-CN": {
       "vault.route.unlock": "解锁钱包",
@@ -351,7 +380,30 @@ const vaultResources: I18nPluginResources = {
       "vault.currentKey.protection.password": "桶密码",
       "vault.currentKey.protection.passwordDescription": "Hold 密文保护器 · 用于解锁和恢复",
       "vault.currentKey.backup.title": "加密备份",
-      "vault.currentKey.backup.action": "导出当前私钥备份"
+      "vault.currentKey.backup.action": "导出当前私钥备份",
+      "vault.autolock.system.group": "安全",
+      "vault.autolock.system.title": "自动锁定",
+      "vault.autolock.system.description": "无操作一段时间后自动锁定钱包，修改立即生效。",
+      "vault.autolock.current.never": "当前：永不自动锁定（一直不锁）。",
+      "vault.autolock.current.timeout": "当前：无操作 {{minutes}} 分钟后自动锁定。",
+      "vault.autolock.current.timeoutHours": "当前：无操作 {{hours}} 小时后自动锁定。",
+      "vault.autolock.presets.label": "快捷时长",
+      "vault.autolock.preset.minutes": "{{minutes}} 分钟",
+      "vault.autolock.preset.hours": "{{hours}}小时",
+      "vault.autolock.preset.never": "永不",
+      "vault.autolock.preset.custom": "自定义",
+      "vault.autolock.back.label": "返回快捷选项",
+      "vault.autolock.custom.label": "自定义分钟数（1～1440 分钟）",
+      "vault.autolock.custom.placeholder": "例如：10",
+      "vault.autolock.custom.unit": "分钟",
+      "vault.autolock.custom.apply": "应用",
+      "vault.autolock.custom.applying": "保存中…",
+      "vault.autolock.custom.required": "请输入分钟数（至少 1 分钟）。",
+      "vault.autolock.custom.invalid": "请输入有效的分钟数。",
+      "vault.autolock.custom.min": "至少 1 分钟。",
+      "vault.autolock.custom.max": "最多 24 小时（1440 分钟），更长请选择「永不」。",
+      "vault.autolock.custom.tooLarge": "数值过大，请缩小后重试。",
+      "vault.autolock.saveFailed": "保存失败，请稍后重试。"
     }
   }
 };
@@ -370,12 +422,13 @@ const vaultPluginDefinition = {
     id: "vault.window",
     runtime: "window-main",
     scopeKind: "root",
-    provides: [VAULT_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY],
+    provides: [VAULT_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, AUTOLOCK_SERVICE_CAPABILITY],
     dependencies: [
       { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "vault lifecycle events" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault key resource" },
       { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault routes" },
       { capability: SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings" },
+      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault auto-lock system setting" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings navigation" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault breadcrumbs" },
       { capability: COMMAND_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault lock command" },
@@ -408,10 +461,26 @@ const vaultPluginDefinition = {
     ctx.provide(VAULT_CAPABILITY, service);
     ctx.provide(VAULT_LOCAL_SECRET_CAPABILITY, createVaultLocalSecretService(coordinatorClient));
 
+    // 自动锁 facade：真值在 Coordinator，页面经 session.state 收敛多 tab。
+    const autoLockService = createAutoLockServiceCoordinator({ coordinatorClient });
+    ctx.provide(AUTOLOCK_SERVICE_CAPABILITY, autoLockService);
+
     // 创建 keyspace：依赖 vault.service。
     if (!keyspaceHandle) throw new Error("Session Coordinator is unavailable");
     ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
+    resources.register<AutoLockSettings, readonly string[]>({
+      id: "vault.autoLockSettings",
+      scope: "global",
+      key: () => ["vault.autoLockSettings"],
+      load: async () => autoLockService.getSettings(),
+      subscribe: (_args, _ctx, invalidate) => autoLockService.onSettingsChanged(invalidate),
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        return prev.timeoutMs === next.timeoutMs;
+      },
+      invalidation: "immediate"
+    });
     resources.register<VaultKeyResourceState, readonly string[]>({
       id: "vault.key-state",
       // 作用域绑定 active key：解锁/切换 Key 会改变资源键,注册表必须重新
@@ -523,6 +592,27 @@ const vaultPluginDefinition = {
       }
     });
 
+    // 自动锁系统设置：挂入「设置 → 系统」，锁定态也可查看修改（桶级快照
+    // 在 locked 仍可读写；无桶时回落缺省）。
+    try {
+      const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
+      systemSettings.register({
+        id: "vault.system-settings.autolock",
+        group: {
+          id: "security",
+          label: { key: "vault.autolock.system.group", fallback: "Security" },
+          order: 15
+        },
+        label: { key: "vault.autolock.system.title", fallback: "Auto-lock" },
+        description: { key: "vault.autolock.system.description", fallback: "Lock the wallet automatically after inactivity." },
+        component: AutoLockSettingsSection,
+        order: 10,
+        visibleWhen: () => true
+      });
+    } catch {
+      // 旧 host 无 system-settings registry 时跳过，vault 核心功能不受影响。
+    }
+
     // 硬切换 001：vault 是 core 插件，理论上不会被 disable。
     // 但 host 仍会要求 setup 返回 teardown。vault 自身不持有后台资源，
     // 返回幂等空函数即可。service.lock() 等动作由 vault 命令触发，
@@ -530,6 +620,7 @@ const vaultPluginDefinition = {
     return () => {
       // 幂等：清空内存 vault 句柄引用。
       service.dispose?.();
+      autoLockService.dispose?.();
     };
   }
 } satisfies PluginManifest & { setup: PluginSetup };

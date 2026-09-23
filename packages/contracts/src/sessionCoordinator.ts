@@ -15,6 +15,7 @@ import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller, Cha
 import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundSyncSettings, BackgroundTaskProgress } from "./background.js";
+import type { AutoLockSettings } from "./autolock.js";
 import type { VaultSealedSecret } from "./vault.js";
 import { defineCapability } from "webloom-framework";
 import type { CoordinatorVaultOperationResultFor } from "./sessionCoordinatorRuntime.js";
@@ -344,6 +345,7 @@ export type CoordinatorClientRequest =
     | { kind: "background.cancel"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.cancel-by-key"; clientId: string; requestId: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
+    | { kind: "autolock.settings.update"; clientId: string; requestId: string; settings: AutoLockSettings; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { includeTestnet: boolean }; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
@@ -564,11 +566,14 @@ export interface SessionStateEvent {
     | "create-initial-key"
     | "import-initial-key"
     | "delete-active-key"
-    | "recover-empty-vault";
+    | "recover-empty-vault"
+    | "autolock-settings";
   vaultStatus: CoordinatorVaultStatus;
   activePublicKeyHex: string | null;
   selectedPublicKeyHex?: string | null;
   keyspaceGeneration: number;
+  /** 自动锁定超时毫秒；0 = 永不。页面无需额外 RPC 即可读取。 */
+  autoLockTimeoutMs?: number;
   /** Coordinator 启动接管被旧最终 I/O 租约阻塞时的脱敏诊断。 */
   authorityRecovery?: CoordinatorAuthorityRecovery;
 }
@@ -646,6 +651,8 @@ export interface CoordinatorBootstrapSnapshot {
   taskSnapshots: CoordinatorTaskSnapshot[];
   /** 同步管理设置（任务 id -> 间隔毫秒；0 = 关闭）。 */
   scheduleSettings: CoordinatorBackgroundSyncSettings;
+  /** 自动锁定超时毫秒；0 = 永不。缺省 5 分钟。 */
+  autoLockTimeoutMs?: number;
   /** P2PKH 网络范围配置，保存在 Coordinator 平台 K-V。 */
   p2pkhSettings?: { includeTestnet: boolean };
   /** 当前抽象存储桶世代；只用于绑定生命周期身份，不代替 owner/key 世代。 */
@@ -734,6 +741,8 @@ export interface SessionCoordinatorClient {
   backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
   /** 更新同步管理设置（任务 id -> 间隔毫秒；0 = 关闭）。 */
   backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult>;
+  /** 更新自动锁定设置（超时毫秒；0 = 永不）。 */
+  autolockSettingsUpdate(settings: AutoLockSettings): Promise<CoordinatorCommandResult>;
   storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
   /** 页面新增首桶后，刷新只含公开桶身份的 Local Storage bridge 启动快照。 */
   refreshStorageBootstrap?(): Promise<void>;
@@ -788,7 +797,12 @@ export type StorageCoordinatorControl = CoordinatorSessionControl & Pick<Session
 
 /** Vault 插件 Coordinator 面。 */
 export type VaultCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto" | "backgroundCancelByKey"
+  "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto" | "backgroundCancelByKey" | "autolockSettingsUpdate"
+>;
+
+/** 自动锁设置 Coordinator 面；vault 插件的窄面。 */
+export type AutolockCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "autolockSettingsUpdate"
 >;
 
 /** Background 插件 Coordinator 面；诊断回报在旧测试夹具中可缺省。 */

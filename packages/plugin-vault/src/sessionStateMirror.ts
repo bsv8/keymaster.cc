@@ -3,6 +3,10 @@ import type {
   SessionCoordinatorClient,
   SessionStateEvent,
 } from "@keymaster/contracts";
+import {
+  AUTO_LOCK_DEFAULT_TIMEOUT_MS,
+  normalizeAutoLockTimeoutMs,
+} from "@keymaster/contracts";
 
 export interface SessionStateSnapshot {
   sessionEpoch: string;
@@ -11,6 +15,7 @@ export interface SessionStateSnapshot {
   selectedPublicKeyHex?: string;
   keyspaceGeneration: number;
   sessionRevision: number;
+  autoLockTimeoutMs: number;
 }
 
 /**
@@ -35,6 +40,7 @@ export class SessionStateMirror {
         selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
         keyspaceGeneration: event.keyspaceGeneration,
         sessionRevision: event.sessionRevision,
+        autoLockTimeoutMs: normalizeAutoLockTimeoutMs(event.autoLockTimeoutMs),
       });
       for (const listener of this.listeners) listener(this.snapshot);
     });
@@ -58,6 +64,7 @@ export class SessionStateMirror {
       selectedPublicKeyHex: snapshot.selectedPublicKeyHex,
       keyspaceGeneration: snapshot.keyspaceGeneration,
       sessionRevision: 0,
+      autoLockTimeoutMs: normalizeAutoLockTimeoutMs(snapshot.autoLockTimeoutMs),
     });
   }
 }

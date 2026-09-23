@@ -232,7 +232,7 @@ export function createStorageCoordinatorClient(client: SessionCoordinatorClient)
 export function createVaultCoordinatorClient(client: SessionCoordinatorClient): VaultCoordinatorControl {
   const facade = bindCoordinatorMethods<VaultCoordinatorControl>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic",
-    "unlock", "lock", "activateKey", "vaultOperation", "crypto", "backgroundCancelByKey"
+    "unlock", "lock", "activateKey", "vaultOperation", "crypto", "backgroundCancelByKey", "autolockSettingsUpdate"
   ]);
   return facade;
 }

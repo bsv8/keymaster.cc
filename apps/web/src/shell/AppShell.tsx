@@ -73,7 +73,6 @@ export function areShellGuardStatesEqual(a: ShellGuardState, b: ShellGuardState)
   });
 }
 
-const AUTO_LOCK_IDLE_MS = 5 * 60 * 1000;
 const AUTO_LOCK_ACTIVITY_EVENTS: Array<keyof WindowEventMap> = [
   "pointerdown",
   "keydown",

@@ -9,6 +9,10 @@ import {
   type ValueParser,
 } from "webloom-framework";
 import { BACKGROUND_SYNC_INTERVAL_OPTIONS_MS } from "./background.js";
+import {
+  AUTO_LOCK_DEFAULT_TIMEOUT_MS,
+  isValidAutoLockTimeoutMs,
+} from "./autolock.js";
 import type {
   CoordinatorClientRequest,
   CoordinatorCommandAck,
@@ -169,7 +173,7 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
   "session.open", "session.close", "session.activity",
   "unlock", "lock", "activate-key", "vault.operation", "crypto",
   "background.run-now", "background.trigger", "background.cancel", "background.cancel-by-key",
-  "background.settings.update", "storage.grant", "storage.control", "storage.data",
+  "background.settings.update", "autolock.settings.update", "storage.grant", "storage.control", "storage.data",
   "storage.cancel", "storage.session.abort", "storage.owner.bind", "storage.platform.bind",
   "storage.owner.data", "storage.platform.data", "storage.owner.delete", "msfile.control",
   "msfile.grant", "msfile.data", "msfile.cancel", "msfile.session.abort",
@@ -511,6 +515,7 @@ type CoordinatorRpcVoidRequest =
       | "background.cancel"
       | "background.cancel-by-key"
       | "background.settings.update"
+      | "autolock.settings.update"
       | "storage.cancel"
       | "storage.session.abort"
       | "msfile.cancel"
@@ -1547,6 +1552,23 @@ function parsePluginIntentCommand(value: unknown): PluginIntentCommand {
 /** 同步管理允许的间隔取值；解析时 fail closed，避免任意周期写入快照。 */
 const BACKGROUND_SYNC_INTERVAL_OPTION_SET: ReadonlySet<number> = new Set(BACKGROUND_SYNC_INTERVAL_OPTIONS_MS);
 
+function parseAutoLockSettings(value: unknown): import("./autolock.js").AutoLockSettings {
+  const settings = expectRecord(value, "autolock settings");
+  const timeoutMs = settings.timeoutMs;
+  if (!isValidAutoLockTimeoutMs(timeoutMs)) {
+    throw new TypeError("Coordinator autolock settings timeout is invalid");
+  }
+  return { timeoutMs };
+}
+
+function parseAutoLockTimeoutMsField(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!isValidAutoLockTimeoutMs(value)) {
+    throw new TypeError(`Coordinator ${field} is invalid`);
+  }
+  return value as number;
+}
+
 function parseBackgroundSettings(value: unknown): CoordinatorBackgroundSyncSettings {
   const settings = expectRecord(value, "background settings");
   const intervals = expectRecord(settings.taskIntervals, "background settings.taskIntervals");
@@ -1632,6 +1654,7 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
       return { kind, taskId: text(request.taskId, kind + ".taskId", 256), reason: text(request.reason, kind + ".reason", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.cancel-by-key": return { kind, publicKeyHex: text(request.publicKeyHex, kind + ".publicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.settings.update": return { kind, settings: parseBackgroundSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "autolock.settings.update": return { kind, settings: parseAutoLockSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.settings.update": {
       const settings = expectRecord(request.settings, kind + ".settings");
       return { kind, settings: { includeTestnet: booleanValue(settings.includeTestnet, kind + ".settings.includeTestnet") }, expectedSessionEpoch: epoch("expectedSessionEpoch") };
@@ -1967,6 +1990,10 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
       return snapshot.taskSnapshots.map((task, index) => parseTaskSnapshot(task, `${field}.taskSnapshots[${index}]`));
     })(),
     scheduleSettings: parseBackgroundSettings(snapshot.scheduleSettings),
+    ...(() => {
+      const autoLockTimeoutMs = parseAutoLockTimeoutMsField(snapshot.autoLockTimeoutMs, field + ".autoLockTimeoutMs");
+      return autoLockTimeoutMs === undefined ? {} : { autoLockTimeoutMs };
+    })(),
     ...(p2pkhSettings === undefined ? {} : { p2pkhSettings }),
     ...(storageBucketGeneration === undefined ? {} : { storageBucketGeneration }),
     ...(storageBucketId === undefined ? {} : { storageBucketId }),
@@ -3084,6 +3111,7 @@ function isVoidCoordinatorRequest(request: CoordinatorRpcRequest): boolean {
     case "background.cancel":
     case "background.cancel-by-key":
     case "background.settings.update":
+    case "autolock.settings.update":
     case "storage.cancel":
     case "storage.session.abort":
     case "msfile.cancel":
@@ -3205,16 +3233,18 @@ function parseSessionStateEvent(value: unknown): SessionStateEvent {
   const event = topicEnvelope(value, "session.state", "session.state.changed");
   const authorityRecovery = event.authorityRecovery === undefined ? undefined : parseAuthorityRecovery(event.authorityRecovery, "event.authorityRecovery");
   const selectedPublicKeyHex = event.selectedPublicKeyHex === undefined ? undefined : nullableText(event.selectedPublicKeyHex, "event.selectedPublicKeyHex", 256);
+  const autoLockTimeoutMs = parseAutoLockTimeoutMsField(event.autoLockTimeoutMs, "event.autoLockTimeoutMs");
   return {
     topic: "session.state",
     type: "session.state.changed",
     sessionRevision: boundedNumber(event.sessionRevision, "event.sessionRevision"),
     sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),
-    cause: enumValue(event.cause, ["bootstrap", "unlock", "lock", "activate-key", "create-vault", "create-initial-key", "import-initial-key", "delete-active-key", "recover-empty-vault"] as const, "event.cause"),
+    cause: enumValue(event.cause, ["bootstrap", "unlock", "lock", "activate-key", "create-vault", "create-initial-key", "import-initial-key", "delete-active-key", "recover-empty-vault", "autolock-settings"] as const, "event.cause"),
     vaultStatus: enumValue(event.vaultStatus, ["booting", "uninitialized", "locked", "unlocked", "fatal"] as const, "event.vaultStatus"),
     activePublicKeyHex: nullableText(event.activePublicKeyHex, "event.activePublicKeyHex", 256),
     ...(selectedPublicKeyHex === undefined ? {} : { selectedPublicKeyHex }),
     keyspaceGeneration: boundedNumber(event.keyspaceGeneration, "event.keyspaceGeneration"),
+    ...(autoLockTimeoutMs === undefined ? {} : { autoLockTimeoutMs }),
     ...(authorityRecovery === undefined ? {} : { authorityRecovery }),
   };
 }
