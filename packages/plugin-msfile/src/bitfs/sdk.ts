@@ -3,6 +3,7 @@
 
 import type { ActiveKeyCrypto } from "@keymaster/contracts";
 import {
+  MultisigPoolEngine,
   WireError,
   type Signer,
   type SigningRequest,
@@ -42,6 +43,23 @@ export function createBitfsVaultSigner(cryptoPort: ActiveKeyCrypto): Signer {
       return new Uint8Array(result.signature).slice();
     },
   };
+}
+
+/** 从三方已验证公钥推导规范池脚本；只返回副本，不构造协议状态或持久化 SDK 对象。 */
+export function deriveBitfsPoolLockingScript(input: {
+  /** 当前买方的压缩公钥。 */
+  buyerPublicKeyHex: string;
+  /** 报价绑定的卖方压缩公钥。 */
+  sellerPublicKeyHex: string;
+  /** 报价允许且本次选中的仲裁方压缩公钥。 */
+  arbiterPublicKeyHex: string;
+}): Uint8Array {
+  const engine = new MultisigPoolEngine({
+    buyerPublicKey: hexToBytes(input.buyerPublicKeyHex),
+    sellerPublicKey: hexToBytes(input.sellerPublicKeyHex),
+    arbiterPublicKey: hexToBytes(input.arbiterPublicKeyHex),
+  });
+  return engine.lockingScript().slice();
 }
 
 /** 把 SDK 稳定错误码映射成 MSFile 稳定错误码。 */

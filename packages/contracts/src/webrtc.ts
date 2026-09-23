@@ -89,6 +89,8 @@ export interface WebrtcMessageService {
   startCall(input: { targetPublicKeyHex: string; mode: WebrtcMode }): Promise<void>;
   sendImage(input: { targetPublicKeyHex: string; file: Blob | File }): Promise<void>;
   sendFile(input: { targetPublicKeyHex: string; file: Blob | File }): Promise<void>;
+  /** 读取当前 WebRTC STUN 地址；仅用于复用相同的浏览器连通性配置。 */
+  getStunServers?(): readonly string[];
   acceptIncoming(): Promise<void>;
   rejectIncoming(): Promise<void>;
   hangup(): Promise<void>;

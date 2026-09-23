@@ -75,6 +75,19 @@ export interface ProtocolSpendResult {
 export interface ProtocolSpendService {
   prepare(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview>;
   submit(preview: ProtocolSpendPreview): Promise<ProtocolSpendResult>;
+  /** 释放尚未广播的预签名及其输入占用；未知或已派发交易不得调用。 */
+  releasePrepared?(preview: ProtocolSpendPreview): Promise<void>;
+  /** 按持久化提交编号释放已明确未派发的预签名；用于跨进程恢复。 */
+  releasePreparedSubmission?(input: {
+    /** 提交所属的当前 Key。 */
+    ownerPublicKeyHex: string;
+    /** 交易所属网络。 */
+    network: BsvNetwork;
+    /** 必须与持久化预签名记录一致的 canonical txid。 */
+    txid: string;
+    /** P2PKH 持久化的 protocol submission ID。 */
+    submissionId: string;
+  }): Promise<void>;
 }
 
 export interface ProtocolSpendPrepareInput {

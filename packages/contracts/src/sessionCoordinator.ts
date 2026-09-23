@@ -231,6 +231,12 @@ export type CoordinatorMsFileControl =
   | { type: "settings.global.update"; input: MsFileGlobalPriceSettings }
   /** 保存当前 Key 的 BitFS 卖方设置。 */
   | { type: "settings.seller.update"; input: MsFileSellerSettings }
+  /** 发布或复用指定 Seed 的 ChannelProtocol Hash 需求；不触发资金操作。 */
+  | { type: "bitfs.demand.publish"; seedHashHex: string }
+  /** 读取指定 Seed 当前需求编号及已验签报价。 */
+  | { type: "bitfs.demand.snapshot"; seedHashHex: string }
+  /** 停止本地接收该需求的新报价并关闭其待处理 WebRTC 连接。 */
+  | { type: "bitfs.demand.cancel"; seedHashHex: string }
   | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }
   | { type: "supplier.delete"; supplierPublicKeyHex: string; expectedGeneration: number | null }
   | { type: "supplier.probe"; supplierPublicKeyHex: string }

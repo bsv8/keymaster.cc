@@ -3,6 +3,7 @@
 
 import {
   completeSellerPayment,
+  inspectSellerDeliveryRequest,
   prepareSellerDelivery,
   prepareSellerPresign,
   verifySellerFunding,
@@ -16,6 +17,7 @@ import {
 import { BitfsTransactionBroadcaster } from "./broadcast.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 import type { BitfsSellerProtocolPort, BitfsSellerProtocolResult } from "./sellerSession.js";
+import type { MsFileLocalContentSource } from "./localContentSource.js";
 import { bitfsWorkflowFacts } from "./sdk.js";
 
 /** Kind 5 验证后的应用可读视图。证据验证必须来自 go-bitfs，不得自行解释 CBOR。 */
@@ -231,9 +233,53 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
   }
 }
 
-/** SDK 尚未提供 Kind 5 已验证 Hash 视图时的 fail-closed 端口。 */
+/** 上游事实源不可用时使用的 fail-closed 内容端口。 */
 export function createUnavailableBitfsSellerContentResolver(): BitfsSellerContentResolver {
-  return { ready: false, async resolve() { throw new Error("go-bitfs 尚未公开 Kind 5 已验证内容 Hash 视图"); } };
+  return { ready: false, async resolve() { throw new Error("BitFS 卖方缺少可用的链上事实或本地内容来源"); } };
+}
+
+/** 使用 go-bitfs 预检 Kind 5，再从当前 Owner 的 MSFile 内容库按授权顺序取内容。 */
+export function createBitfsLocalSellerContentResolver(input: {
+  /** 当前 Owner 的本地 MSFile 内容来源。 */
+  content: MsFileLocalContentSource;
+  /** 调用时读取可信 UTC 毫秒；SDK 事实由此显式生成。 */
+  nowMs(): number;
+  /** 从节点查询的明确区块高度；不可用时解析保持失败关闭。 */
+  blockHeight(): Promise<number>;
+}): BitfsSellerContentResolver {
+  return {
+    ready: true,
+    async resolve(request) {
+      const seedHashHex = assertSeedHash(request.seedHashHex);
+      const summary = await inspectSellerDeliveryRequest(
+        bitfsWorkflowFacts(input.nowMs(), await input.blockHeight()),
+        { quoteRaw: request.quoteRaw, pool: request.pool, requestRaw: request.requestRaw },
+      );
+      const hashes = summary.contentHashes.map(toHex);
+      const requestsSeed = hashes.includes(seedHashHex);
+      const blockHashes = hashes.filter((hash) => hash !== seedHashHex);
+      const seed = requestsSeed || blockHashes.length > 0
+        ? await input.content.readSeed(seedHashHex)
+        : undefined;
+      const blocks = blockHashes.length > 0
+        ? await input.content.readBlocks(seedHashHex, blockHashes)
+        : new Map<string, Uint8Array>();
+      const payloads = hashes.map((hash) => {
+        if (hash === seedHashHex) {
+          if (!seed) throw new Error("BitFS 授权请求 Seed，但本地没有可交付 Seed");
+          return seed.slice();
+        }
+        const payload = blocks.get(hash);
+        if (!payload) throw new Error(`BitFS 授权 Block 缺失：${hash}`);
+        return payload.slice();
+      });
+      return {
+        authorizationIdHex: toHex(summary.paymentAuthorizationID),
+        payloads,
+        ...(blockHashes.length === 0 || seed === undefined ? {} : { seed: seed.slice() }),
+      };
+    },
+  };
 }
 
 /** 在卖方签名前持久化 Kind 7；结果不明时恢复路径拒绝再次调用签名器。 */
@@ -309,5 +355,6 @@ export async function persistSellerKind7BeforeSigning(input: {
 }
 
 function assertHash(value: string): void { if (!/^[0-9a-f]{64}$/u.test(value)) throw new TypeError("PaymentAuthorizationID 不合法"); }
+function assertSeedHash(value: string): string { if (!/^[0-9a-f]{64}$/u.test(value)) throw new TypeError("BitFS Seed Hash 不合法"); return value; }
 function toHex(value: Uint8Array): string { return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join(""); }
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean { return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]); }

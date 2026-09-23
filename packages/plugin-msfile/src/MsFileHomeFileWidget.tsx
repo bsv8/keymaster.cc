@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   MsFileGlobalPriceSettings,
+  MsFileBitfsDemandSnapshot,
   MsFileReadResult,
   MsFileService,
   MsFileServiceStatus,
@@ -136,6 +137,10 @@ interface HomeState {
   preview?: PreviewState;
   notice?: string;
   error?: HomeError;
+  /** 当前 Seed 对应的已发布需求和经过验签的 BitFS 报价。 */
+  bitfsDemand?: MsFileBitfsDemandSnapshot;
+  /** 需求发布或报价刷新失败时的中文提示。 */
+  bitfsDemandError?: string;
 }
 
 interface FetchTask {
@@ -152,6 +157,10 @@ interface FetchTask {
   readPromise?: Promise<void>;
   previewUrl?: string;
   downloadUrl?: string;
+  /** 报价轮询定时器；取消查询、切 Key 或卸载时清除。 */
+  bitfsDemandPollTimer?: ReturnType<typeof setInterval>;
+  /** 防止上一次报价刷新尚未结束时重叠发起新 RPC。 */
+  bitfsDemandPollBusy?: boolean;
 }
 
 const INITIAL_STATE: HomeState = { phase: "idle", hash: "", stats: [] };
@@ -387,6 +396,8 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
 
   const releaseTask = useCallback((task: FetchTask) => {
     task.controller.abort();
+    if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
+    task.bitfsDemandPollTimer = undefined;
     if (task.previewUrl && task.previewUrl !== task.downloadUrl) revokeUrl(task.previewUrl);
     revokeUrl(task.downloadUrl);
     task.previewUrl = undefined;
@@ -666,6 +677,52 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
     await readFile(task, "preview");
   }, [isCurrent, readFile, t]);
 
+  const startBitfsDemand = useCallback((task: FetchTask) => {
+    if (!service.publishBitfsDemand) return;
+    const displayAndPoll = (snapshot: MsFileBitfsDemandSnapshot): void => {
+      if (!isCurrent(task)) return;
+      setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
+      const expiresAtMs = snapshot.expiresAtMs ?? Date.now() + 10 * 60 * 1_000;
+      if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
+      task.bitfsDemandPollTimer = setInterval(() => {
+        if (!isCurrent(task) || Date.now() >= expiresAtMs) {
+          if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
+          task.bitfsDemandPollTimer = undefined;
+          return;
+        }
+        if (task.bitfsDemandPollBusy || !service.getBitfsDemand) return;
+        task.bitfsDemandPollBusy = true;
+        void service.getBitfsDemand(task.hash)
+          .then((nextSnapshot) => {
+            if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemand: nextSnapshot, bitfsDemandError: undefined }));
+          })
+          .catch((cause) => {
+            if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemandError: makeError(cause).message }));
+          })
+          .finally(() => { task.bitfsDemandPollBusy = false; });
+      }, 3_000);
+    };
+    const publish = async (): Promise<void> => {
+      try {
+        const initial = await service.publishBitfsDemand!(task.hash);
+        displayAndPoll(initial);
+      } catch (cause) {
+        if (!isCurrent(task)) return;
+        // 网络 Publish 超时可能表示“结果未知”。读回 Worker 已在发送前保存的
+        // message_id；若它仍有效，继续收集回答而不生成第二条公开需求。
+        const prepared = await service.getBitfsDemand?.(task.hash).catch(() => undefined);
+        if (!isCurrent(task)) return;
+        if (prepared?.requestMessageId) {
+          displayAndPoll(prepared);
+          setState((previous) => ({ ...previous, bitfsDemandError: t("msfile.home.bitfs.publishUnknown", { defaultValue: "需求发布结果暂时未知；正在按原需求编号等待报价。" }) }));
+        } else {
+          setState((previous) => ({ ...previous, bitfsDemandError: makeError(cause).message }));
+        }
+      }
+    };
+    void publish();
+  }, [isCurrent, makeError, service, t]);
+
   const submitQuery = useCallback(async () => {
     // 无论新输入是否合法，先取消并释放旧文件，保证“新查询覆盖旧查询”。
     abandonTask();
@@ -685,8 +742,8 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
       setState({ phase: "failed", hash, stats: [], error: makeError({ code: "msfile_unavailable" }) });
       return;
     }
-    if (configurationState !== "ready") {
-      const code = configurationState === "unconfigured" ? "msfile_not_configured" : "msfile_unavailable";
+    if (configurationState === "unavailable") {
+      const code = "msfile_unavailable";
       setState({ phase: "failed", hash, stats: [], error: makeError({ code }) });
       return;
     }
@@ -706,9 +763,18 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
       if (!isCurrent(task)) return;
       const views = buildStatViews(result, settingsSnapshot, hash);
       task.stats = views;
+      const localAbsent = result.sources.some((entry) => entry.sourceKind === "local-bitfs" && entry.status === "absent");
+      if (localAbsent) startBitfsDemand(task);
       const candidates = views.map(candidateOf).filter((candidate): candidate is FileSelection => Boolean(candidate));
       if (candidates.length === 0) {
-        setState({ phase: "supplier-selection", hash, stats: views, notice: t("msfile.home.noCandidate", { defaultValue: "当前没有供应商可以提供这个文件。" }) });
+        setState({
+          phase: "supplier-selection",
+          hash,
+          stats: views,
+          notice: localAbsent
+            ? t("msfile.home.bitfs.waiting", { defaultValue: "本地没有该文件，已发布 BitFS 需求；正在等待卖家报价。" })
+            : t("msfile.home.noCandidate", { defaultValue: "当前没有供应商可以提供这个文件。" }),
+        });
         return;
       }
       if (candidates.length === 1) {
@@ -732,7 +798,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
         failTask(task, cause);
       }
     }
-  }, [abandonTask, beginSelected, configurationState, failTask, isCurrent, makeError, seedHashDraft, service, settingsSnapshot, t]);
+  }, [abandonTask, beginSelected, configurationState, failTask, isCurrent, makeError, seedHashDraft, service, settingsSnapshot, startBitfsDemand, t]);
 
   const selectSupplier = useCallback((sourceId: string) => {
     const task = taskRef.current;
@@ -804,9 +870,12 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
   const cancel = useCallback(() => {
     const task = taskRef.current;
     const hash = task?.hash ?? state.hash;
+    if (task && service.cancelBitfsDemand) {
+      void service.cancelBitfsDemand(task.hash).catch(() => undefined);
+    }
     abandonTask();
     setState({ phase: "cancelled", hash, stats: [] });
-  }, [abandonTask, state.hash]);
+  }, [abandonTask, service, state.hash]);
 
   const hasEnabledSupplier = settingsSnapshot?.suppliers.some((supplier) => supplier.enabled) ?? false;
   const busy = isBusyPhase(state.phase);
@@ -864,6 +933,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
           <p>{hasEnabledSupplier
             ? t("msfile.home.config.priceMissing", { defaultValue: "请先保存全局 Seed/Block 金额上限。" })
             : t("msfile.home.config.supplierMissing", { defaultValue: "请先启用至少一个供应商。" })}</p>
+          <p>{t("msfile.home.config.bitfsIndependent", { defaultValue: "BitFS 需求广播不依赖普通 MSFile 供应商；本地缺失时仍可收集 BitFS 报价。" })}</p>
           <AppLink to="/settings/system">{t("msfile.home.settings", { defaultValue: "打开 MSFile 设置" })}</AppLink>
         </div>
       ) : null}
@@ -874,6 +944,33 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
         </p>
       ) : null}
       {state.notice ? <p className="msfile-home-file__notice" role="status">{state.notice}</p> : null}
+
+      {state.bitfsDemand || state.bitfsDemandError ? (
+        <section className="msfile-home-file__bitfs-demand" aria-labelledby="msfile-home-bitfs-demand-title">
+          <h4 id="msfile-home-bitfs-demand-title">{t("msfile.home.bitfs.title", { defaultValue: "BitFS 需求与报价" })}</h4>
+          {state.bitfsDemand?.requestMessageId ? (
+            <p>
+              {t("msfile.home.bitfs.requestId", { defaultValue: "需求编号" })}: <code title={state.bitfsDemand.requestMessageId}>{shortHex(state.bitfsDemand.requestMessageId)}</code>
+              {state.bitfsDemand.expiresAtMs ? ` · ${t("msfile.home.bitfs.expires", { defaultValue: "有效至" })} ${new Date(state.bitfsDemand.expiresAtMs).toLocaleTimeString()}` : ""}
+            </p>
+          ) : null}
+          {state.bitfsDemandError ? <p className="msfile-home-file__supplier-detail" role="status">{state.bitfsDemandError}</p> : null}
+          {state.bitfsDemand && state.bitfsDemand.quotes.length === 0 ? (
+            <p className="msfile-home-file__supplier-detail" role="status">{t("msfile.home.bitfs.noQuotes", { defaultValue: "需求已发出，尚未收到有效报价；页面会继续刷新报价。" })}</p>
+          ) : null}
+          {state.bitfsDemand && state.bitfsDemand.quotes.length > 0 ? (
+            <ul>
+              {state.bitfsDemand.quotes.map((quote) => (
+                <li key={quote.sessionId}>
+                  <strong>{quote.recommendedFilename}</strong>
+                  <span> · {t("msfile.home.bitfs.seller", { defaultValue: "卖家" })} <code title={quote.sellerPublicKeyHex}>{shortHex(quote.sellerPublicKeyHex)}</code></span>
+                  <span> · Seed {quote.seedPriceSatoshis} sats · Block {quote.fullBlockPriceSatoshis} sats</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
 
       {state.stats.length > 0 ? (
         <section className="msfile-home-file__suppliers" aria-labelledby="msfile-home-suppliers-title">

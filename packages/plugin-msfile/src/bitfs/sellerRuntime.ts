@@ -12,7 +12,11 @@ import { deriveSupplierPeerId, normalizeSupplierAddress } from "../supplierConfi
 export interface BitfsSellerMatch {
   /** Channel 去重键。 */
   requestKey: string;
-  /** 已通过白名单与身份 pin 的规范 multiaddr。 */
+  /** ChannelProtocol 哈希请求的真实 message_id。 */
+  requestMessageId: string;
+  /** 本次销售连接使用的 locator 类型。 */
+  transport: "multiaddr" | "webrtc-sdp";
+  /** multiaddr 方式下通过白名单与身份 pin 的规范地址；SDP 方式为空。 */
   addresses: string[];
   /** 已持久化、可以交给 BitFS stream 的 exact Kind 1 bytes。 */
   quoteBytes: Uint8Array;
@@ -41,7 +45,7 @@ export class BitfsSellerRuntime {
 
   /**
    * 命中完整 Seed 且存在兼容 locator 时生成确定报价；未命中保持静默。
-   * `webrtc-sdp` 会被明确忽略，不会当作 WebRTC Direct。
+   * `webrtc-sdp` 单独走 ChannelProtocol SDP/ICE，不会伪装成 WebRTC Direct。
    */
   async match(request: VerifiedHashRequest, signal?: AbortSignal): Promise<BitfsSellerMatch | null> {
     if (!isVerifiedHashRequest(request)) throw new TypeError("卖方只接受 VerifiedHashRequest");
@@ -58,12 +62,16 @@ export class BitfsSellerRuntime {
     if (signal?.aborted) throw new DOMException("销售请求已取消", "AbortError");
     const expectedPeerId = deriveSupplierPeerId(request.from_public_key);
     const addresses: string[] = [];
+    let hasWebRtcSdpLocator = false;
     for (const locator of request.body.locators) {
-      if (locator.kind !== "multiaddr") continue; // webrtc-sdp 不是 WebRTC Direct。
+      if (locator.kind === "webrtc-sdp") {
+        hasWebRtcSdpLocator = true;
+        continue;
+      }
       const parsed = normalizeSupplierAddress(locator.address, expectedPeerId, { allowLoopbackWs: this.deps.allowLoopbackWs === true });
       if (parsed.ok && !addresses.includes(parsed.value.normalized)) addresses.push(parsed.value.normalized);
     }
-    if (addresses.length === 0) return null;
+    if (addresses.length === 0 && !hasWebRtcSdpLocator) return null;
     const quote = await createSellerQuote(bitfsWorkflowFacts(nowMs), this.deps.signer, {
       seedHash: hexToBytes(request.body.hash),
       buyerPublicKey: hexToBytes(request.from_public_key),
@@ -76,7 +84,14 @@ export class BitfsSellerRuntime {
     });
     const journalId = await requestJournalId(request);
     const quoteBytes = await this.deps.journal.prepareOutbound(journalId, "seller", quote.outbound, nowMs);
-    return { requestKey: key, addresses, quoteBytes, seedHashHex: request.body.hash };
+    return {
+      requestKey: key,
+      requestMessageId: request.message_id,
+      transport: hasWebRtcSdpLocator ? "webrtc-sdp" : "multiaddr",
+      addresses,
+      quoteBytes,
+      seedHashHex: request.body.hash,
+    };
   }
 
   clear(): void { this.seen.clear(); }

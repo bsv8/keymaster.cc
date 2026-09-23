@@ -206,6 +206,21 @@ function buildProtocolSubmissionRecord(input: {
 }
 
 export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): ProtocolSpendService {
+  const submissionTails = new Map<string, Promise<void>>();
+  async function serializeSubmissionOperation<T>(submissionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = submissionTails.get(submissionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => gate);
+    submissionTails.set(submissionId, queued);
+    await previous;
+    try { return await operation(); }
+    finally {
+      release();
+      if (submissionTails.get(submissionId) === queued) submissionTails.delete(submissionId);
+    }
+  }
+
   return {
     async prepare(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview> {
       let protectedClaimIds: string[] = [];
@@ -340,7 +355,107 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       }
     },
 
+    async releasePrepared(preview): Promise<void> {
+      const submissionId = preview.submissionId;
+      if (!submissionId || !deps.submissionStore) throw new Error("Prepared protocol spend has no durable submission record");
+      await serializeSubmissionOperation(submissionId, async () => {
+        const owner = await resolveOwnerKeyIdentity(deps, preview.ownerPublicKeyHex);
+        if (owner.publicKeyHex.toLowerCase() !== preview.ownerPublicKeyHex.toLowerCase()) {
+          throw new Error("Prepared protocol spend owner is not active");
+        }
+        if (calcTxidFromRawTxHex(preview.rawTxHex) !== preview.txid) throw new Error("Prepared protocol spend txid does not match its raw bytes");
+        const existing = await deps.submissionStore!.getProtocolSubmission({ publicKeyHex: preview.ownerPublicKeyHex, id: submissionId });
+        if (!existing
+          || (existing.status !== "prepared" && !(existing.status === "rejected" && existing.droppedReason === "prepared-spend-released"))
+          || existing.canonicalTxid !== preview.txid
+          || existing.network !== preview.network
+          || existing.resourceId !== resourceIdFor(preview.network)
+          || existing.inputs.length !== preview.inputs.length
+          || existing.inputs.some((input, index) => input.txid !== preview.inputs[index]?.txid || input.vout !== preview.inputs[index]?.vout)) {
+          throw new Error("Only a matching undispatched protocol spend can be released");
+        }
+        const protectedClaimIds = existing.protectedClaimIds;
+        const inputClaimIds = existing.localInputClaimIds;
+        if (existing.status === "prepared") {
+          // 先封住后续 submit，再解除输入 claim；写盘失败时资金仍保持占用。
+          await deps.submissionStore!.putProtocolSubmission(buildProtocolSubmissionRecord({
+            submissionId,
+            resourceId: resourceIdFor(preview.network),
+            publicKeyHex: preview.ownerPublicKeyHex,
+            network: preview.network,
+            canonicalTxid: preview.txid,
+            inputs: existing.inputs,
+            protectedClaimIds,
+            localInputClaimIds: inputClaimIds,
+            status: "rejected",
+            droppedReason: "prepared-spend-released",
+            createdAt: existing.createdAt,
+          }));
+        }
+        if (protectedClaimIds.length > 0 && deps.protectedOutpoints) {
+          await deps.protectedOutpoints.releaseClaims(protectedClaimIds);
+        }
+        if (inputClaimIds.length > 0) {
+          await deps.claimStore.releaseLocalInputClaims({ publicKeyHex: preview.ownerPublicKeyHex, claimIds: inputClaimIds });
+        }
+      });
+    },
+
+    async releasePreparedSubmission(input): Promise<void> {
+      const submissionId = input.submissionId;
+      if (!submissionId || !deps.submissionStore) throw new Error("Prepared protocol submission has no durable record");
+      await serializeSubmissionOperation(submissionId, async () => {
+        const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
+        if (owner.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) {
+          throw new Error("Prepared protocol submission owner is not active");
+        }
+        const existing = await deps.submissionStore!.getProtocolSubmission({ publicKeyHex: input.ownerPublicKeyHex, id: submissionId });
+        if (!existing
+          || (existing.status !== "prepared" && !(existing.status === "rejected" && existing.droppedReason === "prepared-spend-released"))
+          || existing.submissionId !== submissionId
+          || existing.canonicalTxid !== input.txid
+          || existing.network !== input.network
+          || existing.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()
+          || existing.resourceId !== resourceIdFor(input.network)) {
+          throw new Error("Only a matching definitely undispatched protocol submission can be released");
+        }
+        if (existing.status === "prepared") {
+          // 先持久化拒绝状态，之后即使释放过程被中断也不能再提交原交易。
+          await deps.submissionStore!.putProtocolSubmission(buildProtocolSubmissionRecord({
+            submissionId,
+            resourceId: resourceIdFor(input.network),
+            publicKeyHex: input.ownerPublicKeyHex,
+            network: input.network,
+            canonicalTxid: input.txid,
+            inputs: existing.inputs,
+            protectedClaimIds: existing.protectedClaimIds,
+            localInputClaimIds: existing.localInputClaimIds,
+            status: "rejected",
+            droppedReason: "prepared-spend-released",
+            createdAt: existing.createdAt,
+          }));
+        }
+        if (existing.protectedClaimIds.length > 0 && deps.protectedOutpoints) {
+          await deps.protectedOutpoints.releaseClaims(existing.protectedClaimIds);
+        }
+        if (existing.localInputClaimIds.length > 0) {
+          await deps.claimStore.releaseLocalInputClaims({ publicKeyHex: input.ownerPublicKeyHex, claimIds: existing.localInputClaimIds });
+        }
+      });
+    },
+
     async submit(preview): Promise<ProtocolSpendResult> {
+      const submissionIdForLock = preview.submissionId ?? preview.txid;
+      return serializeSubmissionOperation(submissionIdForLock, async () => {
+      if (preview.submissionId && deps.submissionStore) {
+        const existing = await deps.submissionStore.getProtocolSubmission({
+          publicKeyHex: preview.ownerPublicKeyHex,
+          id: preview.submissionId,
+        });
+        if (!existing || existing.canonicalTxid !== preview.txid || existing.status === "rejected") {
+          throw new Error("Protocol spend is missing, mismatched, or already released");
+        }
+      }
       try {
         let canonicalTxid = preview.txid;
         let providerReturnedTxidRaw: string | undefined;
@@ -507,6 +622,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           error: msg
         };
       }
+      });
     }
   };
 }

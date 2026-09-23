@@ -714,6 +714,63 @@ export async function readLocalMsFileBlock(input: {
 }
 
 /**
+ * 一次加载并验证 Seed 后，批量读取授权所需的 Block，避免每个 Block 都重读整份 Seed。
+ */
+export async function readLocalMsFileBlocks(input: {
+  /** 当前 Owner 的 `msfiles/` 文件根。 */
+  store: OwnerFileStore;
+  /** 所有 Block 共同所属的 Seed Hash。 */
+  seedHashHex: string;
+  /** 按调用方需要的顺序提交的 Block Hash 清单；返回 Map 按 Hash 查询。 */
+  blockHashHexes: readonly string[];
+  /** 取消批量读取。 */
+  signal?: AbortSignal;
+}): Promise<Map<string, Uint8Array>> {
+  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  if (input.blockHashHexes.length === 0) return new Map();
+  if (input.blockHashHexes.length > 64) fail("invalid-hash", "a local block batch cannot exceed 64 hashes");
+
+  const requested = new Set<string>();
+  for (const rawHash of input.blockHashHexes) {
+    const hash = assertSeedHashHex(rawHash);
+    if (requested.has(hash)) fail("invalid-hash", "a local block batch cannot contain duplicate hashes");
+    requested.add(hash);
+  }
+
+  const descriptor = await readLocalMsFileSeed({
+    store: input.store,
+    seedHashHex,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  });
+  const sourceSize = BigInt(descriptor.meta.fileSizeBytes);
+  const seedSize = BigInt(descriptor.seedBytes.byteLength);
+  const randomAccess = createSeedRandomAccess(descriptor.seedBytes);
+  const blockIndices = new Map<string, bigint>();
+
+  for (let index = 0; index < descriptor.meta.blockCount && blockIndices.size < requested.size; index += 1) {
+    const digest = await readBlockHash(randomAccess, seedSize, BigInt(index), input.signal);
+    const hash = digest.toHex();
+    if (requested.has(hash)) blockIndices.set(hash, BigInt(index));
+  }
+  if (blockIndices.size !== requested.size) fail("missing-block", "one or more requested Blocks do not belong to the Seed");
+
+  const hashes = [...requested];
+  const blocks = new Map<string, Uint8Array>();
+  await runPool(hashes.length, MSFILE_SEED_BLOCK_READ_CONCURRENCY, input.signal, async (index, signal) => {
+    const hash = hashes[index]!;
+    const blockIndex = blockIndices.get(hash);
+    if (blockIndex === undefined) fail("missing-block", "requested Block does not belong to the Seed");
+    const bytes = await getFile(input.store, blockPath(seedHashHex, hash), signal);
+    if (!bytes) fail("missing-block", `local Block ${hash} is missing`);
+    const expectedSize = Number(expectedBlockSize(sourceSize, blockIndex));
+    if (bytes.byteLength !== expectedSize) fail("integrity", `local Block ${hash} has an unexpected size`);
+    verifyBlock(bytes, Digest.fromHex(hash), signal);
+    blocks.set(hash, bytes.slice());
+  });
+  return blocks;
+}
+
+/**
  * 读取并完整校验一个条目：元数据 -> 种子（`verifySeedForSourceSize`）-> 逐块
  * `verifyBlock` 后组装。任何缺块、长度或摘要不符都会失败，不返回部分内容。
  */

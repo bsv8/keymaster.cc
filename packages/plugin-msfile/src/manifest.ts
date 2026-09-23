@@ -15,6 +15,8 @@ import {
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
   MSFILE_COORDINATOR_CONTROL_CAPABILITY,
+  P2PKH_PROTOCOL_SPEND_CAPABILITY,
+  WEBRTC_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   type MsFileCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
@@ -101,6 +103,7 @@ const resources: I18nPluginResources = {
       "msfile.home.config.unavailable": "MSFile is unavailable right now. Try again later.",
       "msfile.home.config.priceMissing": "Save the global Seed and Block price limits before fetching.",
       "msfile.home.config.supplierMissing": "Enable at least one supplier before fetching.",
+      "msfile.home.config.bitfsIndependent": "BitFS demand discovery does not require regular MSFile suppliers; BitFS quotes can still be collected when the file is absent locally.",
       "msfile.home.suppliers": "Supplier results",
       "msfile.home.status.available": "Available",
       "msfile.home.status.quoted": "Quoted",
@@ -111,6 +114,13 @@ const resources: I18nPluginResources = {
       "msfile.home.discoveringDetail": "The supplier is discovering this Seed. Try again later.",
       "msfile.home.discoveringRetry": "Retry status: available after {{ms}} ms.",
       "msfile.home.networkDetail": "The supplier is temporarily unavailable; this is not an absent result.",
+      "msfile.home.bitfs.title": "BitFS demand and quotes",
+      "msfile.home.bitfs.waiting": "The file is not local. A BitFS demand was published; waiting for seller quotes.",
+      "msfile.home.bitfs.requestId": "Demand ID",
+      "msfile.home.bitfs.expires": "Expires",
+      "msfile.home.bitfs.noQuotes": "The demand is published. No valid quotes have arrived yet; this page will keep refreshing.",
+      "msfile.home.bitfs.publishUnknown": "The publish result is unknown; waiting for quotes against the same demand ID.",
+      "msfile.home.bitfs.seller": "Seller",
       "msfile.home.chooseSupplier": "Choose a supplier. Seed and all Blocks will use the same supplier.",
       "msfile.home.selectSupplier": "Use this supplier",
       "msfile.home.fileName": "File name",
@@ -295,6 +305,7 @@ const resources: I18nPluginResources = {
       "msfile.home.config.unavailable": "MSFile 当前不可用，请稍后重试。",
       "msfile.home.config.priceMissing": "请先保存全局 Seed 和 Block 金额上限。",
       "msfile.home.config.supplierMissing": "请先启用至少一个供应商。",
+      "msfile.home.config.bitfsIndependent": "BitFS 需求广播不依赖普通 MSFile 供应商；本地缺失时仍可收集 BitFS 报价。",
       "msfile.home.suppliers": "供应商结果",
       "msfile.home.status.available": "可获取",
       "msfile.home.status.quoted": "有报价",
@@ -305,6 +316,13 @@ const resources: I18nPluginResources = {
       "msfile.home.discoveringDetail": "供应商正在发现该 Seed，可稍后重试。",
       "msfile.home.discoveringRetry": "可重试状态：约 {{ms}} ms 后重试。",
       "msfile.home.networkDetail": "供应商暂时不可用，这不是 absent 结果。",
+      "msfile.home.bitfs.title": "BitFS 需求与报价",
+      "msfile.home.bitfs.waiting": "本地没有该文件，已发布 BitFS 需求；正在等待卖家报价。",
+      "msfile.home.bitfs.requestId": "需求编号",
+      "msfile.home.bitfs.expires": "有效至",
+      "msfile.home.bitfs.noQuotes": "需求已发出，尚未收到有效报价；页面会继续刷新报价。",
+      "msfile.home.bitfs.publishUnknown": "需求发布结果暂时未知；正在按原需求编号等待报价。",
+      "msfile.home.bitfs.seller": "卖家",
       "msfile.home.chooseSupplier": "请选择一个供应商；Seed 与所有 Block 将固定使用同一供应商。",
       "msfile.home.selectSupplier": "选择此供应商",
       "msfile.home.fileName": "文件名",
@@ -451,6 +469,8 @@ const msfilePluginDefinition = {
     storages: [CENTRAL_STORAGE_DECLARATIONS.msfilesFiles],
     dependencies: defineRuntimeUnitDependencies([
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
+      { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, optional: true, reason: "BitFS 专款交易只通过 P2PKH 受控 signer 预签；P2PKH 未启用时买方准备保持不可用" },
+      { capability: WEBRTC_SERVICE_CAPABILITY, optional: true, reason: "BitFS SDP DataChannel 复用用户当前 WebRTC STUN 配置" },
       { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "MSFile settings live under Settings -> System" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册 MSFile 首页文件获取投影" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
@@ -478,7 +498,12 @@ const msfilePluginDefinition = {
     const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
     // MSFile 只注册自己的业务 lane；公共 Host 与 executor 由 Window P2P
     // 系统插件拥有，避免两个插件各自建立网络实例。
-    const offLane = laneRegistry.register(new MsFileP2pLane());
+    const protocolSpend = ctx.optionalCapability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
+    const webRtcService = ctx.optionalCapability(WEBRTC_SERVICE_CAPABILITY);
+    const offLane = laneRegistry.register(new MsFileP2pLane(
+      protocolSpend,
+      () => webRtcService?.getStunServers?.() ?? ["stun:stun.l.google.com:19302"],
+    ));
     const service = new MsFileServiceProxy(coordinator);
     ctx.provide(MSFILE_SERVICE_CAPABILITY, service);
     // 桶存储服务复用同一 owner 文件根；MasterSeed 算法来自官方 SDK。

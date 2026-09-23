@@ -7,6 +7,7 @@ import type {
   CoordinatorMsFileData,
   CoordinatorValueResult,
   MsFileApprovalDecision,
+  MsFileBitfsDemandSnapshot,
   MsFileAppAuthorizationView,
   MsFileAppIdentityKey,
   MsFileAppPriceOverrideUpdate,
@@ -292,6 +293,21 @@ export class MsFileServiceProxy implements MsFileService {
 
   resolveApproval(approvalId: string, decision: MsFileApprovalDecision): Promise<void> {
     return this.control({ type: "approval.resolve", approvalId, decision }).then(() => undefined);
+  }
+
+  /** 发布或复用本 Seed 的 ChannelProtocol 需求；此操作只广播需求，不动资金。 */
+  publishBitfsDemand(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
+    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.publish", seedHashHex });
+  }
+
+  /** 读取当前需求编号和已经验签的报价摘要。 */
+  getBitfsDemand(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
+    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.snapshot", seedHashHex });
+  }
+
+  /** 停止本地接收该需求后续报价。 */
+  cancelBitfsDemand(seedHashHex: string): Promise<void> {
+    return this.control({ type: "bitfs.demand.cancel", seedHashHex }).then(() => undefined);
   }
 
   abortSession(connectSessionId: string): Promise<void> {

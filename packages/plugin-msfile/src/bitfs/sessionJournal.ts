@@ -57,6 +57,10 @@ type BitfsFixedEvidenceName =
   | "kind10-retrieval-request"
   | "kind11-retrieval-response"
   | "funding-transaction"
+  /** 开池前固定金额、仲裁方与退款规则，恢复时禁止改绑。 */
+  | "opening-configuration"
+  /** ChannelProtocol 中需求的真实 message_id，用于恢复报价关联。 */
+  | "hash-request-message-id"
   | "latest-payment-transaction"
   | "close-transaction"
   | "refund-transaction"
@@ -85,7 +89,7 @@ export interface BitfsSessionRecord {
   counterpartyPublicKeyHex: string;
   /** 本次买卖绑定的 Seed Hash。 */
   seedHashHex: string;
-  /** 创建会话时的 Worker generation，用于拒绝迟到结果。 */
+  /** 创建会话时的 Worker generation 记录；本次异步请求另由 Coordinator 当前 generation 拦截迟到结果。 */
   generation: number;
   /** 买方或卖方阶段。 */
   phase: BitfsBuyerPhase | BitfsSellerPhase;
@@ -234,7 +238,7 @@ const evidenceNames = new Set<BitfsFixedEvidenceName>([
   "kind1-quote", "kind2-opening-request", "kind3-opening-response", "kind4-funding-delivery",
   "kind5-content-request", "kind6-content-delivery", "kind7-payment-update", "kind8-arbitration-request",
   "kind9-arbitration-response", "kind10-retrieval-request", "kind11-retrieval-response", "funding-transaction",
-  "latest-payment-transaction", "close-transaction", "refund-transaction", "arbitrated-payment-transaction",
+  "opening-configuration", "hash-request-message-id", "latest-payment-transaction", "close-transaction", "refund-transaction", "arbitrated-payment-transaction",
   "opening-evidence", "pool-evidence", "delivery-evidence",
 ]);
 

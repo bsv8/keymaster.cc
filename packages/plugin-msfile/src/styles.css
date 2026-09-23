@@ -196,6 +196,35 @@
   gap: 7px;
 }
 
+.msfile-home-file__bitfs-demand {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+}
+
+.msfile-home-file__bitfs-demand h4,
+.msfile-home-file__bitfs-demand p {
+  margin: 0;
+}
+
+.msfile-home-file__bitfs-demand ul {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.msfile-home-file__bitfs-demand li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .msfile-home-file__suppliers ul {
   display: flex;
   flex-direction: column;

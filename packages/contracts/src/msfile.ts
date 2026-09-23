@@ -345,6 +345,36 @@ export interface MsFileSellerSettings {
   maxConcurrentSales: number;
 }
 
+/** 经 BitFS 报价验签后，可安全展示给买方的摘要。 */
+export interface MsFileBitfsQuoteView {
+  /** Keymaster 内部买方会话编号。 */
+  sessionId: string;
+  /** 报价对应的 Seed Hash。 */
+  seedHashHex: string;
+  /** 已验签卖方压缩公钥。 */
+  sellerPublicKeyHex: string;
+  /** Seed 单价，单位聪。 */
+  seedPriceSatoshis: string;
+  /** 完整 Block 单价，单位聪。 */
+  fullBlockPriceSatoshis: string;
+  /** 报价有效截止时间，Unix 秒。 */
+  quoteExpiresAtUnixSeconds: string;
+  /** 卖方建议文件名。 */
+  recommendedFilename: string;
+}
+
+/** 当前 Seed 的 ChannelProtocol 需求与已验证报价视图。 */
+export interface MsFileBitfsDemandSnapshot {
+  /** 当前需求的 Seed Hash。 */
+  seedHashHex: string;
+  /** 已签名 Hash 请求的 message_id；未发布时为 null。 */
+  requestMessageId: string | null;
+  /** 需求过期时间，Unix 毫秒；未发布时为 null。 */
+  expiresAtMs: number | null;
+  /** 通过关联 WebRTC DataChannel 收到并验签的报价。 */
+  quotes: MsFileBitfsQuoteView[];
+}
+
 /** 新安装与旧 schema 升级时采用的安全卖方缺省值。 */
 export const MSFILE_SELLER_SETTINGS_DEFAULT: Readonly<MsFileSellerSettings> = Object.freeze({
   sellerEnabled: false,
@@ -572,6 +602,16 @@ export interface MsFileService {
   stat(input: MsFileStatInput): Promise<MsFileStatResult>;
   readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult>;
   readBlock(input: MsFileReadBlockInput): Promise<MsFileReadResult>;
+
+  /**
+   * 为本地缺失的 Seed 发布或复用 ChannelProtocol Hash 需求；不拆分资金。
+   * 缺少该可选能力的旧 service 只可执行现有 remote MSFile 读取。
+   */
+  publishBitfsDemand?(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot>;
+  /** 读取需求编号及其当前已验证报价；不包含原始 wire 或交易证据。 */
+  getBitfsDemand?(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot>;
+  /** 停止本地接收该需求的新报价；不会撤回已经发布的公开 Hash 请求。 */
+  cancelBitfsDemand?(seedHashHex: string): Promise<void>;
 
   readonly connect: MsFileConnectGateway;
 }

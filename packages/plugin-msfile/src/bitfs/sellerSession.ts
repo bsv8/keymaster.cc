@@ -12,12 +12,18 @@ import { MAX_WIRE_FRAME_BYTES, parse, type WireKind } from "go-bitfs";
 
 /** Window lane 提供的 BitFS stream 端口；只在 Window 侧持有 Host。 */
 export interface BitfsSellerStreamTransport {
-  /** 拨号、身份 pin、打开 `/bitfs/wire/1.0.0` 并发送首帧（报价）。 */
+  /** 按选定 locator 建立连接，并在通道打开后发送首帧（报价）。 */
   open(input: {
     /** 本次销售会话的稳定编号。 */
     sessionId: string;
-    /** 已通过白名单与 PeerId 校验的候选 multiaddr 列表。 */
+    /** 本次销售连接使用的 locator 类型。 */
+    transport: "multiaddr" | "webrtc-sdp";
+    /** ChannelProtocol Hash 请求的真实 message_id；SDP 模式必填。 */
+    requestMessageId: string;
+    /** 已通过白名单与 PeerId 校验的候选 multiaddr 列表；SDP 模式为空。 */
     addresses: string[];
+    /** ChannelProtocol WebRTC session_id；SDP 模式必填。 */
+    webrtcSessionId: string;
     /** 请求者已验证的 33 字节压缩公钥 hex。 */
     publicKeyHex: string;
     /** 请求者已验证公钥派生出的 PeerId。 */
@@ -132,8 +138,14 @@ export class BitfsSellerSessionManager {
   async start(input: {
     /** 会话编号。 */
     sessionId: string;
+    /** 本次销售连接使用的 locator 类型。 */
+    transport?: "multiaddr" | "webrtc-sdp";
+    /** ChannelProtocol Hash 请求的真实 message_id。 */
+    requestMessageId?: string;
     /** 已验证的候选 multiaddr。 */
     addresses: string[];
+    /** ChannelProtocol WebRTC session_id。 */
+    webrtcSessionId?: string;
     /** 请求者已验证的 33 字节压缩公钥 hex。 */
     publicKeyHex: string;
     /** 由同一公钥派生的 PeerId。 */
@@ -146,7 +158,9 @@ export class BitfsSellerSessionManager {
     if (!this.deps.isCurrent()) return false;
     if (this.sessions.has(input.sessionId)) return false;
     if (this.sessions.size >= this.deps.maxSessions()) return false;
-    if (input.addresses.length === 0) return false;
+    const transport = input.transport ?? "multiaddr";
+    if (transport === "webrtc-sdp" && (!input.requestMessageId || !input.webrtcSessionId)) return false;
+    if (transport === "multiaddr" && input.addresses.length === 0) return false;
     if (!(input.quoteBytes instanceof Uint8Array) || input.quoteBytes.byteLength === 0) return false;
     const entry: SellerSessionEntry = {
       sessionId: input.sessionId,
@@ -167,7 +181,10 @@ export class BitfsSellerSessionManager {
       });
       await this.deps.transport.open({
         sessionId: input.sessionId,
+        transport,
+        requestMessageId: input.requestMessageId ?? "",
         addresses: [...input.addresses],
+        webrtcSessionId: input.webrtcSessionId ?? "",
         publicKeyHex: input.publicKeyHex,
         expectedPeerId: input.expectedPeerId,
         firstFrame: input.quoteBytes.slice(),

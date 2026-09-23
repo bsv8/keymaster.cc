@@ -23,7 +23,30 @@ export {
 } from "./msfileService.js";
 export { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
 export { createMsFileLocalContentSource, type MsFileLocalContentSource } from "./bitfs/localContentSource.js";
-export { createBitfsVaultSigner, bitfsWorkflowFacts, mapBitfsErrorCode } from "./bitfs/sdk.js";
+export { createBitfsVaultSigner, deriveBitfsPoolLockingScript, bitfsWorkflowFacts, mapBitfsErrorCode } from "./bitfs/sdk.js";
+export {
+  createBitfsFundingLedger,
+  calculateBitfsTopUp,
+  prepareBitfsFundingSplit,
+  recoverBitfsFundingSplits,
+  prepareBitfsFunding,
+  BitfsFundingError,
+  type BitfsDedicatedUtxo,
+  type BitfsDedicatedUtxoState,
+  type BitfsFundingAccount,
+  type BitfsFundingErrorCode,
+  type BitfsFundingLedger,
+  type BitfsFundingPool,
+  type BitfsFundingPrepareDeps,
+  type BitfsFundingSplitPrepareDeps,
+  type BitfsFundingInputReservation,
+  type BitfsFundingTransaction,
+  type BitfsFundingTransactionPurpose,
+  type BitfsFundingTransactionState,
+  type BitfsFundingTransactionView,
+  type PreparedBitfsFunding,
+  type PreparedBitfsFundingSplit,
+} from "./bitfs/funding.js";
 export { createBitfsJournal, type BitfsJournal, type BitfsJournalRecord } from "./bitfs/journal.js";
 export {
   createBitfsSessionJournal,
@@ -33,6 +56,13 @@ export {
   type BitfsSellerPhase,
   type BitfsEvidenceName,
 } from "./bitfs/sessionJournal.js";
+export {
+  createBitfsBuyerTask,
+  type BitfsBuyerOpeningInput,
+  type BitfsBuyerQuoteView,
+  type BitfsBuyerTask,
+  type BitfsBuyerTaskDeps,
+} from "./bitfs/buyerTask.js";
 export {
   BitfsTransactionBroadcaster,
   createBitfsTransactionJournal,
@@ -47,6 +77,7 @@ export { BitfsSeedIndex, BITFS_SEED_INDEX_PAGE_SIZE, BITFS_SEED_INDEX_VERIFY_CON
 export { BitfsSellerRuntime, type BitfsSellerMatch, type BitfsSellerRuntimeDeps } from "./bitfs/sellerRuntime.js";
 export {
   BitfsSellerProtocol,
+  createBitfsLocalSellerContentResolver,
   createUnavailableBitfsSellerContentResolver,
   type BitfsSellerContentResolver,
   type BitfsSellerContentResolution,
@@ -62,6 +93,7 @@ export {
   type BitfsSellerStreamTransport,
 } from "./bitfs/sellerSession.js";
 export type { BitfsStreamEvent } from "./bitfs/sellerStreamRuntime.js";
+export type { BitfsWebRtcStreamEvent } from "./bitfs/webrtcStreamRuntime.js";
 // 内容存储只暴露 Worker-safe 的读写原语；买方写入和索引检查共用同一布局。
 export {
   serializeMsFileSeedMeta,

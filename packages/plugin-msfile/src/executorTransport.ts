@@ -8,6 +8,8 @@ import type {
   MsFileSupplierConfig,
   MsFileSupplierProbeResult,
   MsFileSupplierStat,
+  ProtocolSpendPreview,
+  ProtocolSpendPrepareInput,
 } from "@keymaster/contracts";
 import {
   MSFILE_MAX_BLOCK_BYTES,
@@ -35,11 +37,19 @@ export type MsFileP2pLaneOperation =
   | { type: "probe"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "invalidate"; /** 要失效的供应商公钥；省略表示全部。 */ supplierPublicKeyHex?: string; /** 新的配置世代。 */ generation: number }
   /** BitFS 卖方会话：拨号、身份 pin 并发送已持久化的报价首帧。 */
-  | { type: "bitfs-seller-open"; /** 会话编号。 */ sessionId: string; /** 已验证的候选 multiaddr。 */ addresses: string[]; /** 请求者压缩公钥 hex。 */ publicKeyHex: string; /** 由同一公钥派生的 PeerId。 */ expectedPeerId: string; /** 已持久化的 exact Kind 1 字节。 */ firstFrame: Uint8Array }
+  | { type: "bitfs-seller-open"; /** 会话编号。 */ sessionId: string; /** 传输方式；SDP 方式使用 ChannelProtocol 信令。 */ transport?: "multiaddr" | "webrtc-sdp"; /** 已验证的候选 multiaddr。 */ addresses: string[]; /** ChannelProtocol Hash 请求 message_id。 */ requestMessageId?: string; /** ChannelProtocol WebRTC session_id。 */ webrtcSessionId?: string; /** 请求者压缩公钥 hex。 */ publicKeyHex: string; /** 由同一公钥派生的 PeerId；SDP 方式不使用。 */ expectedPeerId: string; /** 已持久化的 exact Kind 1 字节。 */ firstFrame: Uint8Array }
+  | { type: "bitfs-webrtc-buyer-answer"; /** 买方本地会话编号。 */ sessionId: string; /** ChannelProtocol Hash 请求 message_id。 */ requestMessageId: string; /** ChannelProtocol WebRTC session_id。 */ webrtcSessionId: string; /** offer 发送者压缩公钥 hex。 */ publicKeyHex: string; /** ChannelProtocol 已验签 offer 的 SDP。 */ offerSdp: string }
+  | { type: "bitfs-webrtc-signal"; /** 已建立的本地 WebRTC 会话编号。 */ sessionId: string; /** ChannelProtocol Hash 请求 message_id。 */ requestMessageId: string; /** ChannelProtocol WebRTC session_id。 */ webrtcSessionId: string; /** 对端已验签压缩公钥 hex。 */ publicKeyHex: string; /** ChannelProtocol 已验证的 answer/ICE/end signal。 */ signal: Record<string, unknown> }
   /** BitFS 卖方会话：发送一条已持久化的 exact Artifact。 */
   | { type: "bitfs-seller-send"; /** 会话编号。 */ sessionId: string; /** exact Artifact 字节。 */ frame: Uint8Array }
   /** BitFS 卖方会话：关闭连接。 */
-  | { type: "bitfs-seller-close"; /** 会话编号。 */ sessionId: string; /** 稳定关闭原因。 */ reason?: string };
+  | { type: "bitfs-seller-close"; /** 会话编号。 */ sessionId: string; /** 稳定关闭原因。 */ reason?: string }
+  /** BitFS 专款交易：只通过 P2PKH 受控 signer 准备原文，不广播。 */
+  | { type: "bitfs-funding-prepare"; /** 已验证的 P2PKH 交易计划。 */ input: ProtocolSpendPrepareInput }
+  /** BitFS 专款交易：释放尚未广播的签名预览与输入占用。 */
+  | { type: "bitfs-funding-release"; /** 先前返回的受控签名预览。 */ preview: ProtocolSpendPreview }
+  /** BitFS 恢复交易：按 P2PKH 持久化提交编号释放明确未派发的输入 claim。 */
+  | { type: "bitfs-funding-release-submission"; /** 当前 Key。 */ ownerPublicKeyHex: string; /** 交易网络。 */ network: "main" | "test"; /** canonical txid。 */ txid: string; /** P2PKH 持久化提交编号。 */ submissionId: string };
 
 /** Worker 与 Window executor 之间版本化同步的完整读取资源预算。 */
 export interface WindowP2pExecutorConcurrencyConfig extends MsFileReadConcurrencySettings, WindowP2pBaseConcurrencyConfig {

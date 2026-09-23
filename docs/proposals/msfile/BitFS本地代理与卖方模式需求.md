@@ -1,6 +1,6 @@
 # BitFS 本地 MSFile 与卖方模式需求
 
-> 状态：未完成，本文是实施前的需求冻结稿，不描述当前已经具备的能力。
+> 状态：需求已对齐，实施未完成；第 7 节及第 10–11 节采用卖家主动连接买家的下载流程。
 >
 > 相关真值：MSFile 对外语义以 `MSFile-Proxy-Protocol` V1 为准；BitFS 交易与证据语义以
 > `go-bitfs` Wire Protocol v1 为准；文件内容布局沿用 Keymaster `/msfile/storage`。
@@ -35,7 +35,7 @@ Coordinator MSFile 调度器
 3. BitFS 买方购买、支付池、恢复、广播对账及购买结果入库。
 4. BitFS 卖方开关、Seed 内存索引、Channel Hash 请求匹配、报价、交付和收款。
 5. 卖方模式运行时禁止 Vault 自动锁；手动锁仍然有效。
-6. WebSocket/WSS 与 WebRTC Direct 的浏览器 transport 准入检查。
+6. ChannelProtocol 文件需求广播、WebRTC SDP/ICE 信令和 BitFS DataChannel transport；保留独立的 WebSocket/WSS transport 准入。
 
 ### 2.2 本期不包含
 
@@ -72,7 +72,7 @@ local 买方、local 卖方与 `/msfile/storage` 页面必须共用当前 Key �
 - BitFS 购买成功的内容按“Block → Seed → 元数据”顺序写入后，立即成为普通本地 MSFile 文件；
 - 页面下载、预览、校验和删除继续复用现有服务；
 - 不建立 BitFS cache、临时永久副本或第二套元数据真值；
-- 部分购买内容只有在 Seed、全部 Block 和元数据提交完成后才进入可见列表。
+- 部分购买内容只有在 Seed、全部 Block 和元数据提交完成后才进入**已存储文件列表**；购买任务及其进度、花费另行显示在同一页面。
 
 ## 5. 统一 MSFile 来源
 
@@ -110,7 +110,8 @@ local 报告 `available` 前至少确认：
 - `readBlock` 必须校验 Block Hash，并在掌握文件大小时校验末块精确长度；
 - 同一内容的并发 local 获取使用 single-flight，不能重复购买；
 - 本地已有且验证通过的内容直接返回，价格为零；
-- local 缺失时，只有调用方明确选择 local BitFS 来源才进入购买。
+- “通过 Seed 获取文件”界面发现 local 缺失时自动创建或复用本 Key、该 Seed 的需求任务；查询和发布需求不划拨资金。
+- `stat`、`readSeed`、`readBlock` 的只读调用不隐式开池或付款；其它调用方不得仅因 local 缺失就触发购买。
 
 ## 7. BitFS 买方
 
@@ -130,8 +131,30 @@ local 报告 `available` 前至少确认：
 网络超时重发已保存的 exact bytes，不能重新签名生成另一份报文。内容必须先验证并可靠写入，才允许
 推进相应付款。广播结果未知时按 txid/outpoint 对账，不盲目重签或推进状态。
 
-报价发现不是 go-bitfs SDK 的职责。本功能上线前必须冻结 Seed Hash 如何发现卖方、如何接收多个报价、
-如何验证与选择报价的应用协议；未完成时 local Stat 只能返回本地结果，不能假装具备公网发现能力。
+报价发现不是 go-bitfs SDK 的职责。本期应用协议使用 ChannelProtocol 的 `bsv8.hash.request.v1` 发布需求，
+并通过 `bsv8.webrtc.signal.v1` 接收关联 offer。Keymaster 负责把验签后的 BitFS Kind 1 展示为报价；
+报价选择、购买和资金流程未实现前不得把网络报价标成已下载，也不得开池或付款。
+
+### 7.1 需求、报价与开始下载
+
+1. 本地缺失即发布 `bsv8.hash.request.v1`，绑定 Seed Hash、买方身份、真实 `message_id`、过期时间和 `webrtc-sdp` 能力声明。该 locator 表示买方接受 SDP 信令，不是可拨地址。卖家引用该请求发送已签名 offer；买方通过私密 Inbox 回答并持续统计已验签报价。无符合条件的报价时任务保持“等待合适报价”，不预先拆分余额。
+2. MSFile 设置提供 `buyerAutoPurchaseEnabled`（自动购买开关，旧设置缺省关闭）、`maxFullBlockPriceSatoshis`（自动下载最高完整块价，聪）和 `sellerSelectionPriority`（卖家选择偏好：价格优先或最近速度优先）。**便宜与否只按单块报价判断**；不设单文件最高花费，也不因文件总价而拒绝合格块。自动购买开启时，只接受单块报价不高于设置上限的卖家；关闭时仍可收集报价并由用户按文件强制下载。
+3. `/msfile/storage` 的每个待下载文件提供“强制下载”及独立滑块。滑块设定该文件所有卖家的最高可接受块价，覆盖自动下载块价上限；即使选择网速优先，也不能购买超过该上限的块。多个不同报价时，滑块范围为当前有效报价的最低价至最高价，初始值为 `最低价 + (最高价 − 最低价) × 20%`，金额按整数聪取整；只有一个有效报价或所有报价相同，范围为报价至报价的 120%，初始值为报价的 120%。新报价可更新滑块范围，但不得自动提高用户已经选定的上限；需要用户再次拖动才允许更高价格。实际付款始终按已验证报价，不按滑块上限计费。
+4. 第一个合格报价出现或用户强制下载后，任务进入“开始下载”：此时才为**这一个文件**按 MSFile 的资金规则拆分余额。资金划拨是开始下载的第一步，与卖家数量无关；卖家后续涌入或离开不要求按人数重拆。
+
+### 7.2 资金与卖家调度
+
+1. MSFile 可从普通余额的多个 UTXO 聚合，并拆出若干回到当前 Key 地址的专用 UTXO；这些 UTXO 由余额服务的受保护 outpoint 机制隔离普通转账。MSFile 记录每笔资金的来源交易、归属文件、可用/占用/待回收状态，不派生新私钥或地址。拆分交易的广播结果未知时先按原 txid 对账，不得再次构造拆分交易。
+2. 首次拆分按该文件下一段预计购买所需金额规划；后续金额不足时才再次拆分，目标为下一段预计需求的 120%，留下 20% 余量。120% 是**划拨量规则**，不是售价加成或单文件价格上限。拆分数量由 MSFile 的 UTXO 管理规则决定，不按卖家数确定。专用 UTXO 未花部分仍属于用户资金。
+3. 所有单块报价不高于当前任务上限的卖家都有正式传输的机会；首次交付就是正式购买并按协议付款，没有免费试传或“试传”阶段。对未曾交付的卖家标记“速度未知”。限制同时连接、开池和传输数；新卖家排队进入，差的卖家退出后让出名额。
+4. 下载中按每个卖家**最近已验证块**的有效字节和耗时评估速度，不使用整个任务的全局平均。价格优先时先比较块价，价格接近再比较最近速度；网速优先时先比较最近速度，速度接近再比较块价。对样本不足、超时与断线有确定规则；只有表现持续明显更好才重分配**后续**块，避免频繁切换。已有请求、交付与付款保留原卖家归属，不能重复买同一块。
+5. 卖家表现合适且仍有内容要买时，可以继续建立后续费用池；不再采用的卖家停止接收新请求，关闭其费用池并回收未使用资金。多个卖家的池、付款和回收分别记账。
+
+### 7.3 进度、取消与资金回收
+
+`/msfile/storage` 同时展示进行中的购买任务和已完成文件。任务至少显示 Seed Hash、当前阶段、已验证块数/总块数、已验证字节数、报价范围、当前最高块价、卖家最近速度、受保护未花资金、各池占用、已付卖家金额、矿工费及待回收金额。总数尚未知时显示“未知”，不显示假百分比；完成入库后保留该 Seed 的购买花费记录。
+
+取消时立即停止新块请求，并尝试联系**该文件全部已开池卖家**关池和回收。未开池的专用 UTXO 可解除保护；已开池资金在链上确认回收前继续受保护。卖家联系不上或关池结果未知时，保留该池的证据、金额和到期时间，持续观察并在允许的超时点执行买方退款、按 txid 对账。买方不以“发起仲裁”作为取消回收路径；卖家对已交付内容的既有权利不能因取消而抹掉。界面逐池显示“关池中、待到期、退款中、已回收”，不得将点击取消显示为资金已全部返回。
 
 ## 8. BitFS 卖方设置
 
@@ -187,15 +210,15 @@ Map<seedHashHex, {
 2. 将 `body.hash` 按 Seed Hash 查询内存索引；
 3. 未命中或不是 `available` 时保持静默，避免暴露库存；
 4. 使用已验证的 `from_public_key` 作为 BitFS 报价绑定的买方公钥；
-5. 检查 locator 与当前浏览器可用 bitcoin-libp2p transport 的交集；
-6. 拨号并完成身份 pin 与 `/bitfs/wire/1.0.0` 协商后，才建立销售会话和发送报价。
+5. 只接受请求声明且本地支持的 locator；本期通过 `webrtc-sdp` 表示买方接受 SDP 信令连接；
+6. 卖方引用已验证请求的 `message_id` 发送 offer，双方完成私密 Inbox 信令和身份关系校验后建立 DataChannel，再发送报价。
 
 Channel 的 Hash 是通用文件 Hash，没有 BitFS 类型字段。Keymaster 只以“是否命中完整 Seed 索引”决定是否响应，
 不能响应普通 Block Hash 或任意文件 Hash。
 
 ## 11. 浏览器连接准入
 
-销售请求可用的条件是：`对方 locator ∩ 本浏览器可用 transport` 非空，不要求对方同时提供两种连接。
+销售请求可用的条件是：买方声明的 locator 与卖方支持的连接方式相符。使用 `webrtc-sdp` 时，买方通过 ChannelProtocol 私密 Inbox 接收卖方 offer 并回传 answer；买方不需要发布 libp2p 入站地址。发布需求只表示愿意建立该连接，不表示连接已经成功。
 
 ### 11.1 WebSocket
 
@@ -210,6 +233,14 @@ Channel 的 Hash 是通用文件 Hash，没有 BitFS 类型字段。Keymaster �
 - 校验 certhash、PeerId、公钥绑定和浏览器运行时能力；
 - 禁止把 ChannelProtocol 的 `{kind: "webrtc-sdp"}` 当成 WebRTC Direct；后者是 SDP 信令声明，
   不是 bitcoin-libp2p WebRTC Direct 地址。
+- 本期 BitFS 购买不使用该 locator；它是与 SDP 信令 WebRTC 分离的另一种传输方式。
+
+### 11.3 ChannelProtocol SDP WebRTC
+
+- 买方在 `bsv8.hash.request.v1` 中发布 Seed Hash 和 `webrtc-sdp` locator；该公开请求由 ChannelProtocol 验签、过期检查并按 `(from_public_key, message_id)` 去重。
+- 卖方只在该已验证 Hash 命中完整可用 Seed 时响应，并在 `bsv8.webrtc.signal.v1` offer 中带回同一 `request_message_id` 与新 `session_id`。
+- answer 和后续信令必须由 ChannelProtocol 检查对端身份及请求/会话关系；SDP 连接中的 DataChannel 标签固定为 `bitfs`，承载 go-bitfs exact Artifact 字节。
+- `webrtc-sdp` 是愿意接受 SDP WebRTC 信令的能力声明，不是地址，也不能改写成 WebRTC Direct multiaddr。候选连接失败时不影响本地 Seed 可用性。
 
 没有可用 locator 时不启动销售。拨号失败只产生本次连接失败，不得把 Seed 从本地索引删除。
 
@@ -249,3 +280,4 @@ Channel 的 Hash 是通用文件 Hash，没有 BitFS 类型字段。Keymaster �
 5. 买卖双方所有不可逆动作均具备 persist-before-send、幂等与恢复证据；
 6. 锁定、切 Key、切存储、多 Tab、迟到响应和广播未知结果通过集成测试；
 7. go-bitfs TypeScript 角色 API、依赖版本和许可证边界已经完成发布审查。
+8. 自动报价收集、单块价格门槛、逐卖家最近速度调度、单文件强制下载滑块与多池回收通过端到端验收；`/msfile/storage` 在完成前展示可恢复的任务、进度和真实资金状态。

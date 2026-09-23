@@ -9,6 +9,7 @@ import {
   inspectLocalMsFileSeed,
   isMsFileSeedStoreError,
   readLocalMsFileBlock,
+  readLocalMsFileBlocks,
   readLocalMsFileSeed,
 } from "../storage/msfileSeedStore.js";
 
@@ -20,10 +21,18 @@ export interface MsFileLocalContentSource {
   readSeed(seedHashHex: string, signal?: AbortSignal): Promise<Uint8Array>;
   /** 在指定 Seed 路径下读取并验证 Block。 */
   readBlock(seedHashHex: string, blockHashHex: string, signal?: AbortSignal): Promise<Uint8Array>;
+  /** 一次读取多个同属一个 Seed 的 Block，并复用同一次 Seed 校验。 */
+  readBlocks(seedHashHex: string, blockHashHexes: readonly string[], signal?: AbortSignal): Promise<Map<string, Uint8Array>>;
 }
 
 /** 使用当前 Owner 文件根创建 local 来源。 */
-export function createMsFileLocalContentSource(store: OwnerFileStore): MsFileLocalContentSource {
+export function createMsFileLocalContentSource(
+  store: OwnerFileStore,
+  options: {
+    /** 内容读取失败时使卖方派生索引中的 Seed 失效。 */
+    onReadFailure?(seedHashHex: string, error: unknown): void;
+  } = {},
+): MsFileLocalContentSource {
   if (!store || typeof store.get !== "function" || typeof store.list !== "function") {
     throw new TypeError("local MSFile 需要当前 Owner 的文件存储句柄");
   }
@@ -32,7 +41,10 @@ export function createMsFileLocalContentSource(store: OwnerFileStore): MsFileLoc
   const invalidSeeds = new Set<string>();
   const rememberFailure = (seedHashHex: string, error: unknown): never => {
     if (!(error instanceof DOMException && error.name === "AbortError")
-      && !(isMsFileSeedStoreError(error) && error.code === "cancelled")) invalidSeeds.add(seedHashHex);
+      && !(isMsFileSeedStoreError(error) && error.code === "cancelled")) {
+      invalidSeeds.add(seedHashHex);
+      options.onReadFailure?.(seedHashHex, error);
+    }
     throw error;
   };
   return {
@@ -74,6 +86,19 @@ export function createMsFileLocalContentSource(store: OwnerFileStore): MsFileLoc
           ...(signal === undefined ? {} : { signal }),
         });
         return bytes.slice();
+      } catch (error) {
+        return rememberFailure(seedHashHex, error);
+      }
+    },
+    async readBlocks(seedHashHex, blockHashHexes, signal) {
+      try {
+        const blocks = await readLocalMsFileBlocks({
+          store,
+          seedHashHex,
+          blockHashHexes,
+          ...(signal === undefined ? {} : { signal }),
+        });
+        return new Map([...blocks].map(([hash, bytes]) => [hash, bytes.slice()]));
       } catch (error) {
         return rememberFailure(seedHashHex, error);
       }
