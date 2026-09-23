@@ -52,6 +52,8 @@ function makeFakeService(
     startCall: vi.fn(async () => undefined),
     acceptIncoming: vi.fn(async () => undefined),
     rejectIncoming: vi.fn(async () => undefined),
+    acceptIncomingTransfer: vi.fn(async () => undefined),
+    rejectIncomingTransfer: vi.fn(async () => undefined),
     hangup: vi.fn(async () => undefined),
     listHistoryForPeer: vi.fn(async () => []),
     getTransferBlob: vi.fn(async () => null),

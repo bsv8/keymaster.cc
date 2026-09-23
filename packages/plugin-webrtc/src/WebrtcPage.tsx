@@ -58,12 +58,17 @@ interface WebrtcPageInnerProps {
 const ERROR_KEY: Record<WebrtcBlockReason, string> = {
   service_not_ready: "webrtc.page.workbench.block.service_not_ready",
   invalid_target: "webrtc.page.workbench.block.invalid_target",
+  target_offline: "webrtc.page.workbench.block.target_offline",
+  target_unknown: "webrtc.page.workbench.block.target_unknown",
   call_protocol_unavailable: "webrtc.page.workbench.block.call_protocol_unavailable",
   busy_local: "webrtc.page.workbench.block.busy_local",
   device_unavailable: "webrtc.page.workbench.block.device_unavailable",
   send_invite_failed: "webrtc.page.workbench.block.send_invite_failed",
   create_offer_failed: "webrtc.page.workbench.block.create_offer_failed",
-  invalid_state: "webrtc.page.workbench.block.invalid_state"
+  invalid_state: "webrtc.page.workbench.block.invalid_state",
+  transfer_too_large: "webrtc.page.workbench.block.transfer_too_large",
+  transfer_timeout: "webrtc.page.workbench.block.transfer_timeout",
+  transfer_connection_failed: "webrtc.page.workbench.block.transfer_connection_failed"
 };
 
 function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement {

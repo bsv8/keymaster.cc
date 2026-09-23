@@ -8,6 +8,7 @@
 //   - i18n namespace：`webrtc`。
 
 import type {
+  ContactsService,
   I18nPluginResources,
   PluginManifest,
   PluginSetup,
@@ -15,6 +16,7 @@ import type {
 import {
   BREADCRUMB_REGISTRY_CAPABILITY,
   CHANNEL_RUNTIME_CAPABILITY,
+  CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
   CONTACTS_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   NOTICE_REGISTRY_CAPABILITY,
@@ -46,7 +48,7 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.breadcrumb.settings": "WebRTC",
       "webrtc.page.workbench.title": "WebRTC",
       "webrtc.page.workbench.desc":
-        "File transfer over WebRTC data channels. Audio/video calls remain disabled until a formal call rendezvous protocol is published.",
+        "Audio/video calls and file transfer over ChannelProtocol (Hash rendezvous + webrtc-signal). Only online contacts can be dialed.",
       "webrtc.page.workbench.target.label": "Recipient publicKeyHex",
       "webrtc.page.workbench.target.placeholder":
         "02... (66 hex chars)",
@@ -56,6 +58,10 @@ const webrtcResources: I18nPluginResources = {
         "webrtc service not ready (vault locked or no active key)",
       "webrtc.page.workbench.block.invalid_target":
         "recipient publicKeyHex must be 66 hex chars",
+      "webrtc.page.workbench.block.target_offline":
+        "peer is offline (only online contacts can use WebRTC)",
+      "webrtc.page.workbench.block.target_unknown":
+        "peer presence unknown (wait for contact probe, only online contacts can use WebRTC)",
       "webrtc.page.workbench.block.call_protocol_unavailable":
         "audio/video calls are unavailable until the call rendezvous protocol is published",
       "webrtc.page.workbench.call_protocol_unavailable":
@@ -72,6 +78,10 @@ const webrtcResources: I18nPluginResources = {
         "invalid session state",
       "webrtc.page.workbench.block.transfer_too_large":
         "attachment is larger than 16 MiB",
+      "webrtc.page.workbench.block.transfer_timeout":
+        "transfer timed out",
+      "webrtc.page.workbench.block.transfer_connection_failed":
+        "transfer connection failed",
       "webrtc.page.workbench.block.transfer_protocol_unavailable":
         "attachment transfer protocol is unavailable",
       "webrtc.page.workbench.direction.outgoing": "outgoing",
@@ -121,7 +131,7 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.breadcrumb.settings": "WebRTC",
       "webrtc.page.workbench.title": "WebRTC",
       "webrtc.page.workbench.desc":
-        "通过 WebRTC 数据通道传输文件。正式呼叫会合协议发布前，音视频呼叫保持关闭。",
+        "基于 ChannelProtocol 的音视频通话与文件传输（Hash 会合 + webrtc-signal）。仅在线联系人可拨号。",
       "webrtc.page.workbench.target.label": "对方 publicKeyHex",
       "webrtc.page.workbench.target.placeholder": "02...（66 个 hex）",
       "webrtc.page.workbench.target.mode.audio": "音频聊天",
@@ -130,6 +140,10 @@ const webrtcResources: I18nPluginResources = {
         "webrtc service 未就绪（vault 未解锁或没有 active key）",
       "webrtc.page.workbench.block.invalid_target":
         "对方 publicKeyHex 必须为 66 个 hex 字符",
+      "webrtc.page.workbench.block.target_offline":
+        "对方离线（仅在线联系人可使用 WebRTC）",
+      "webrtc.page.workbench.block.target_unknown":
+        "对方在线状态未知（等待通讯录探测，仅在线联系人可使用 WebRTC）",
       "webrtc.page.workbench.block.call_protocol_unavailable":
         "正式呼叫会合协议发布前，暂不支持音视频呼叫",
       "webrtc.page.workbench.call_protocol_unavailable":
@@ -140,6 +154,8 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.workbench.block.create_offer_failed": "创建 offer 失败",
       "webrtc.page.workbench.block.invalid_state": "会话状态非法",
       "webrtc.page.workbench.block.transfer_too_large": "附件超过 16 MiB",
+      "webrtc.page.workbench.block.transfer_timeout": "传输超时",
+      "webrtc.page.workbench.block.transfer_connection_failed": "传输连接失败",
       "webrtc.page.workbench.block.transfer_protocol_unavailable": "附件传输协议不可用",
       "webrtc.page.workbench.direction.outgoing": "呼出",
       "webrtc.page.workbench.direction.incoming": "来电",
@@ -192,7 +208,7 @@ const webrtcPluginDefinition = {
   id: WEBRTC_PLUGIN_ID,
   name: "WebRTC",
   description:
-    "Keymaster WebRTC business plugin: file transfer over Channel private signalling; audio/video calls are disabled until a formal rendezvous protocol is published.",
+    "Keymaster WebRTC business plugin: audio/video calls and file transfer over ChannelProtocol (Hash rendezvous + webrtc-signal + APP control), gated by contacts presence.",
   kind: "business",
   startup: "optional",
   bootstrapStage: "owner-apps-ready",
@@ -208,7 +224,8 @@ const webrtcPluginDefinition = {
     dependencies: defineRuntimeUnitDependencies([
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel 私信" },
       { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "打开 key-scoped 历史库" },
-      { capability: CONTACTS_SERVICE_CAPABILITY, reason: "只允许当前 owner 通讯录中的发送者进入文件传输确认" },
+      { capability: CONTACTS_SERVICE_CAPABILITY, reason: "只允许当前 owner 通讯录中的发送者进入确认" },
+      { capability: CONTACTS_COORDINATOR_CONTROL_CAPABILITY, reason: "读取 Coordinator 通讯录在线快照做拨号门禁", optional: true },
       { capability: NOTICE_REGISTRY_CAPABILITY, reason: "投递全局紧急 notice" },
       { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册 WebRTC 系统设置" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 WebRTC session resources" },
@@ -218,7 +235,13 @@ const webrtcPluginDefinition = {
   i18n: webrtcResources,
   async setup(ctx) {
     const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
-    const contacts = ctx.capability(CONTACTS_SERVICE_CAPABILITY);
+    const contacts: ContactsService = ctx.capability(CONTACTS_SERVICE_CAPABILITY);
+    const optionalCapability = (ctx as unknown as {
+      optionalCapability?: (capability: unknown) => unknown;
+    }).optionalCapability;
+    const contactsControl = optionalCapability?.(CONTACTS_COORDINATOR_CONTROL_CAPABILITY) as
+      | { contactsPresenceSnapshot?: () => Promise<{ status: string; value?: Record<string, { state?: string }> }> }
+      | undefined;
     const noticeRegistry = ctx.capability(NOTICE_REGISTRY_CAPABILITY);
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
     const configStore = createFileWebrtcConfigStore(ctx.filesFor(""));
@@ -229,16 +252,43 @@ const webrtcPluginDefinition = {
       ownerPublicKeyHex: () => keyspace.active().activePublicKeyHex ?? null,
       storage: historyStorage
     });
+    const isContactAllowed = async (publicKeyHex: string, signal?: AbortSignal) => {
+      if (signal?.aborted) return false;
+      const contact = await contacts.findByPublicKeyHex(publicKeyHex);
+      return !signal?.aborted && Boolean(contact);
+    };
     const service = createWebrtcService({
       channel,
       keyspace,
       historyService,
       noticeRegistry,
       configStore,
-      isTransferSenderAllowed: async (publicKeyHex, signal) => {
-        if (signal?.aborted) return false;
-        const contact = await contacts.findByPublicKeyHex(publicKeyHex);
-        return !signal?.aborted && Boolean(contact);
+      isTransferSenderAllowed: isContactAllowed,
+      isCallSenderAllowed: isContactAllowed,
+      getPeerPresence: async (publicKeyHex) => {
+        const normalized = publicKeyHex.trim().toLowerCase();
+        // 非联系人直接 offline，不泄露探测细节。
+        const contact = await contacts.findByPublicKeyHex(normalized).catch(() => undefined);
+        if (!contact) return "offline";
+        // 优先 Coordinator 快照（Ping/Pong 真值）；缺失时回落到窗口 service 内存。
+        try {
+          const snapshot = await contactsControl?.contactsPresenceSnapshot?.();
+          const value = (snapshot as { status?: string; value?: Record<string, { state?: string }> } | undefined);
+          if (value?.status === "ok" && value.value) {
+            const presence = value.value[normalized];
+            if (presence?.state === "online") return "online";
+            if (presence?.state === "offline") return "offline";
+          }
+        } catch {
+          // ignore，回落到本地 service。
+        }
+        try {
+          const local = contacts.getPresence?.(normalized);
+          if (local?.state === "online") return "online";
+          return "offline";
+        } catch {
+          return "unknown";
+        }
       },
     });
     ctx.provide(WEBRTC_SERVICE_CAPABILITY, service);

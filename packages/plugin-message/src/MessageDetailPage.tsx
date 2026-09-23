@@ -4,16 +4,17 @@
 //   - 路由参数是对端 publicKeyHex；
 //   - 文本消息与 WebRTC 历史分开存储、合并展示；
 //   - 发送动作保留文本输入，并在正文区下方直接承载当前 peer 的通话面板；
-//   - 不在页面轮询对端在线状态；消息和 WebRTC 都直接执行，失败由协议结果反馈。
+//   - 文本消息经 bsv8.message.v1 可离线投递；WebRTC 通话/文件/图片拨号前强在线门禁，
+//     非 online 直接禁用按钮并提示，失败也由 service 的 target_offline/target_unknown 反馈。
 //
 // 硬切换 003：消息和联系人数据使用 Resource Store。
 // WebRTC 会话快照是实时状态，保留为本地订阅。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useOptionalCapability, useCapability, useResource, useResourceSelector } from "webloom-framework/react";
-import { useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
+import { useCurrentPath, useI18n, usePluginHost, useOptionalResourceSelector, router } from "@keymaster/runtime";
 import { EmptyState, TextArea } from "@keymaster/ui";
-import { KEYSPACE_SERVICE_CAPABILITY, MESSAGE_SERVICE_CAPABILITY, WEBRTC_SERVICE_CAPABILITY, type WebrtcHistoryItem, type WebrtcSessionSnapshot } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, MESSAGE_SERVICE_CAPABILITY, WEBRTC_SERVICE_CAPABILITY, type ContactPresenceMap, type WebrtcHistoryItem, type WebrtcSessionSnapshot } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";
 import type { MessageDetailData } from "./manifest.js";
 import { buildMessageTimeline, type MessageTimelineItem } from "./messageTimeline.js";
@@ -24,6 +25,8 @@ const DEFAULT_VISIBLE_MESSAGE_COUNT = 20;
 const MESSAGE_ERROR_KEYS: Record<string, string> = {
   service_not_ready: "message.page.detail.error.service_not_ready",
   invalid_target: "message.page.detail.error.invalid_target",
+  target_offline: "message.page.detail.error.target_offline",
+  target_unknown: "message.page.detail.error.target_unknown",
   device_unavailable: "message.page.detail.error.device_unavailable",
   send_invite_failed: "message.page.detail.error.send_invite_failed",
   create_offer_failed: "message.page.detail.error.create_offer_failed",
@@ -71,6 +74,19 @@ export function MessageDetailPage(): JSX.Element {
   const messages = detailData.messages;
   const contact = detailData.contact;
 
+  // 通讯录在线状态（Ping/Pong 投影；离线时禁用 WebRTC 拨号，文本消息仍可发送）。
+  // contacts 插件可能未装配时降级为 null（视为离线，门禁 fail-closed）。
+  const presenceByPublicKey = useOptionalResourceSelector<ContactPresenceMap, ContactPresenceMap>(
+    host.resourceStore, "contacts.presence", [],
+    (snapshot) => snapshot.data ?? {},
+    {}
+  );
+  const peerPresence = normalizedPeerPublicKeyHex
+    ? (presenceByPublicKey[normalizedPeerPublicKeyHex] ?? null)
+    : null;
+  const peerPresenceState = peerPresence?.state ?? "offline";
+  const isPeerOnline = peerPresenceState === "online";
+
   // WebRTC 相关状态（实时状态，保留为本地订阅）
   const historyResource = useResource<WebrtcHistoryItem[]>(host.resourceStore, "webrtc.peer-history", [normalizedPeerPublicKeyHex]);
   const history = historyResource.data ?? [];
@@ -89,6 +105,10 @@ export function MessageDetailPage(): JSX.Element {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const sendInFlightRef = useRef(false);
+  // 拨号本地锁：service 快照经资源订阅异步到达，连续点击可能在快照翻转前
+  // 两次进入 startCall；ref 做同步互斥，state 驱动按钮禁用。
+  const dialInFlightRef = useRef(false);
+  const [dialBusy, setDialBusy] = useState(false);
   const service = messageService;
 
   useEffect(() => {
@@ -213,7 +233,10 @@ export function MessageDetailPage(): JSX.Element {
 
   const title = contact?.name?.trim() ? contact.name : shortPublicKeyHex(peerPublicKeyHex);
   const actionsDisabled = !webrtc;
-  const dialButtonsDisabled = actionsDisabled || hasAnyActiveWebrtcSession;
+  // WebRTC 拨号前强在线门禁：离线/未知直接禁用，文本消息不受影响。
+  const offlineGated = !isPeerOnline;
+  const dialButtonsDisabled = actionsDisabled || hasAnyActiveWebrtcSession || offlineGated || dialBusy;
+  const attachmentButtonsDisabled = actionsDisabled || offlineGated;
 
   async function sendText() {
     if (sendInFlightRef.current) return;
@@ -241,14 +264,28 @@ export function MessageDetailPage(): JSX.Element {
 
   async function startCall(mode: "audio" | "video") {
     if (!webrtc) return;
+    // 同步互斥：快照翻转前连续点击只允许第一次进入拨号流程。
+    if (dialInFlightRef.current) return;
     if (hasAnyActiveWebrtcSession) {
       setSendError(i18n.t("message.page.detail.error.busy_local"));
       return;
     }
+    if (!isPeerOnline) {
+      setSendError(i18n.t(peerPresenceState === "offline"
+        ? "message.page.detail.error.target_offline"
+        : "message.page.detail.error.target_unknown"));
+      return;
+    }
+    dialInFlightRef.current = true;
+    setDialBusy(true);
+    setSendError(null);
     try {
       await webrtc.startCall({ targetPublicKeyHex: normalizedPeerPublicKeyHex, mode });
     } catch (err) {
       setSendError(formatMessageDetailError(i18n, err));
+    } finally {
+      dialInFlightRef.current = false;
+      setDialBusy(false);
     }
   }
 
@@ -311,6 +348,15 @@ export function MessageDetailPage(): JSX.Element {
           <h1 className="km-message-detail__title">{title}</h1>
           <span className="km-message-detail__key">
             {shortPublicKeyHex(peerPublicKeyHex)}
+          </span>
+          <span
+            className="km-message-detail__presence"
+            data-peer-presence={peerPresenceState}
+            title={peerPresence?.lastPongAtMs ? new Date(peerPresence.lastPongAtMs).toLocaleString() : undefined}
+          >
+            {i18n.t(`message.page.detail.${peerPresenceState === "online" ? "online" : peerPresenceState === "offline" ? "offline" : "unknown"}`, {
+              defaultValue: peerPresenceState
+            })}
           </span>
         </div>
       </header>
@@ -542,7 +588,10 @@ export function MessageDetailPage(): JSX.Element {
           <button
             className="km-message-detail__action"
             type="button"
-            disabled={actionsDisabled}
+            disabled={attachmentButtonsDisabled}
+            title={offlineGated ? i18n.t(peerPresenceState === "offline"
+              ? "message.page.detail.error.target_offline"
+              : "message.page.detail.error.target_unknown") : undefined}
             onClick={() => imageInputRef.current?.click()}
           >
             {i18n.t("message.page.detail.image")}
@@ -550,7 +599,10 @@ export function MessageDetailPage(): JSX.Element {
           <button
             className="km-message-detail__action"
             type="button"
-            disabled={actionsDisabled}
+            disabled={attachmentButtonsDisabled}
+            title={offlineGated ? i18n.t(peerPresenceState === "offline"
+              ? "message.page.detail.error.target_offline"
+              : "message.page.detail.error.target_unknown") : undefined}
             onClick={() => fileInputRef.current?.click()}
           >
             {i18n.t("message.page.detail.file")}

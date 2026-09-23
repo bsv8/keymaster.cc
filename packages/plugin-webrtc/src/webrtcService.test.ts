@@ -39,7 +39,7 @@ function makeMutableKeyspace(initialOwner = OWNER): { keyspace: KeyspaceService;
     setOwner(nextOwnerPublicKeyHex) {
       ownerPublicKeyHex = nextOwnerPublicKeyHex;
       for (const listener of listeners) {
-        listener({ activePublicKeyHex: nextOwnerPublicKeyHex } as ActiveKeyChangedState);
+        listener({ activePublicKeyHex: nextOwnerPublicKeyHex } as unknown as ActiveKeyChangedState);
       }
     }
   };
@@ -213,8 +213,8 @@ function makeChannel(ready = true, ownerPublicKeyHex = OWNER): ChannelRuntime & 
     messageId?: string
   ) => void;
 } {
-  let privateHandler: ((event: Parameters<NonNullable<ChannelRuntime["subscribePrivate"]>>[0]) => void) | undefined;
-  let publicHandler: ((event: Parameters<NonNullable<ChannelRuntime["subscribe"]>>[0]) => void) | undefined;
+  let privateHandler: Parameters<ChannelRuntime["subscribePrivate"]>[0] | undefined;
+  let publicHandler: Parameters<ChannelRuntime["subscribe"]>[0] | undefined;
   const published: Array<{ recipientPublicKeyHex: string; protocol: string; content: unknown }> = [];
   const hashRequests: Array<{ hash: string; locator: "webrtc-sdp" }> = [];
   const hashRequestMessages: Array<{ hash: string; locator: "webrtc-sdp"; messageId: string }> = [];
@@ -310,7 +310,7 @@ describe("createWebrtcService", () => {
     service.dispose();
   });
 
-  it("blocks audio/video calls until a formal call rendezvous protocol exists", async () => {
+  it("gates outgoing calls on contacts presence (offline fail-closed, no media)", async () => {
     const channel = makeChannel();
     const peers: TestPeer[] = [];
     const environment = makeEnvironment(peers);
@@ -318,14 +318,36 @@ describe("createWebrtcService", () => {
       channel,
       keyspace: makeKeyspace(),
       configStore: createMemoryWebrtcConfigStore(),
-      env: environment
+      env: environment,
+      getPeerPresence: () => "offline"
     });
 
-    await expect(service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })).rejects.toThrow("call_protocol_unavailable");
+    await expect(service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })).rejects.toThrow("target_offline");
     expect(environment.mediaCalls).toHaveLength(0);
     expect(channel.published).toHaveLength(0);
-    expect(service.snapshot().lastError).toBe("call_protocol_unavailable");
-    service.dispose();
+    expect(service.snapshot().lastError).toBe("target_offline");
+    await service.dispose();
+  });
+
+  it("sends call.request when peer is online and acquires media", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      getPeerPresence: () => "online"
+    });
+
+    await service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
+    expect(environment.mediaCalls).toHaveLength(1);
+    expect(channel.published).toHaveLength(1);
+    expect(channel.published[0]?.protocol).toBe("bsv8.message.v1");
+    expect(service.snapshot().phase).toBe("inviting");
+    expect(service.snapshot().remotePublicKeyHex?.toLowerCase()).toBe(TARGET.toLowerCase());
+    await service.dispose();
   });
 
   it("ignores a direct media offer without a matching call rendezvous request", async () => {
@@ -344,28 +366,624 @@ describe("createWebrtcService", () => {
     expect(service.snapshot().phase).toBe("idle");
     expect(environment.mediaCalls).toHaveLength(0);
     expect(peers).toHaveLength(0);
-    service.dispose();
+    await service.dispose();
   });
 
-  it("does not request media permission when a call request or offer is received", async () => {
+  it("does not request media permission until user accepts an incoming call request", async () => {
     const channel = makeChannel();
     const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async () => true
+    });
+    const sessionId = newSessionID();
+    // 缺 hash 的旧请求直接丢弃，不建来电、不申请设备。
+    channel.deliver({ type: "keymaster.webrtc.call.request", session_id: sessionId, mode: "audio" }, TARGET, "bsv8.message.v1");
+    await Promise.resolve();
+    expect(environment.mediaCalls).toHaveLength(0);
+    expect(service.snapshot().phase).toBe("idle");
+    await expect(service.acceptIncoming()).rejects.toThrow("invalid_state");
+    expect(environment.mediaCalls).toHaveLength(0);
+    // 完整请求建来电，但仍不申请设备，直到 accept。
+    const fullSessionId = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: fullSessionId,
+      hash: "d".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    expect(environment.mediaCalls).toHaveLength(0);
+    expect(peers).toHaveLength(0);
+    await service.dispose();
+  });
+
+  it("completes incoming call accept -> hash -> offer -> answer and hangup control", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async (publicKeyHex) => publicKeyHex.toLowerCase() === TARGET.toLowerCase()
+    });
+    const sessionId = newSessionID();
+    const rendezvousHash = "e".repeat(64);
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionId,
+      hash: rendezvousHash,
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    await service.acceptIncoming();
+    expect(environment.mediaCalls).toHaveLength(1);
+    expect(channel.hashRequests).toHaveLength(1);
+    expect(channel.hashRequests[0]?.hash).toBe(rendezvousHash);
+    const hashMessageId = channel.hashRequestMessages[0]?.messageId ?? newMessageID();
+    // 主叫 offer 引用真实 Hash 编号后自动应答。
+    channel.deliver(newOffer(hashMessageId as never, sessionId as never, "v=0\r\nm=audio 9 RTP/AVP 0"), TARGET, "bsv8.webrtc.signal.v1");
+    await vi.waitFor(() => expect(peers).toHaveLength(1));
+    await vi.waitFor(() => expect(channel.published.some((item) => {
+      try {
+        return parseBodyValue(item.content as never).signal.type === "answer";
+      } catch {
+        return false;
+      }
+    })).toBe(true));
+    expect(service.snapshot().phase).toBe("connecting");
+    // 对端挂断经 APP 控制到达，本地收敛到 ended 并记录。
+    channel.deliver({
+      type: "keymaster.webrtc.call.control",
+      session_id: sessionId,
+      action: "hangup",
+      reason: "hangup"
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("ended"));
+    await service.dispose();
+  });
+
+  it("rejects incoming call with control and clears without media PC", async () => {
+    const channel = makeChannel();
+    const environment = makeEnvironment([]);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async () => true
+    });
+    const sessionId = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionId,
+      hash: "f".repeat(64),
+      mode: "video",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    await service.rejectIncoming();
+    expect(service.snapshot().phase).toBe("idle");
+    expect(channel.published.some((item) => (item.content as { type?: string })?.type === "keymaster.webrtc.call.control")).toBe(true);
+    await service.dispose();
+  });
+
+  it("blocks file transfer when peer is offline", async () => {
+    const channel = makeChannel();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: makeEnvironment([]),
+      getPeerPresence: () => "offline"
+    });
+    const file = new Blob(["hello"], { type: "text/plain" });
+    await expect(service.sendFile({ targetPublicKeyHex: TARGET, file })).rejects.toThrow("target_offline");
+    expect(service.snapshot().lastError).toBe("target_offline");
+    await service.dispose();
+  });
+
+  it("reserves the single-call slot synchronously during concurrent dials", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    let releasePresence!: (state: "online") => void;
+    const presenceGate = new Promise<"online">((resolve) => {
+      releasePresence = resolve;
+    });
     const environment = makeEnvironment(peers);
     const service = createWebrtcService({
       channel,
       keyspace: makeKeyspace(),
       configStore: createMemoryWebrtcConfigStore(),
-      env: environment
+      env: environment,
+      getPeerPresence: () => presenceGate
     });
-    const requestMessageId = newMessageID();
-    const sessionId = newSessionID();
-    channel.deliver({ type: "keymaster.webrtc.call.request", session_id: sessionId, mode: "audio" }, TARGET, "bsv8.message.v1");
-    channel.deliver(newOffer(requestMessageId, sessionId, "v=0\r\nm=audio 9 RTP/AVP 0"));
+
+    const first = service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
+    // 预留槽同步生效：第二次拨号直接 busy，不会覆盖占位。
+    expect(service.snapshot().phase).toBe("inviting");
+    await expect(service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })).rejects.toThrow("busy_local");
+    releasePresence("online");
+    await first;
+    expect(environment.mediaCalls).toHaveLength(1);
+    expect(channel.published).toHaveLength(1);
+    expect(service.snapshot().phase).toBe("inviting");
+    await service.dispose();
+  });
+
+  it("aborts a dial when the owner changes during async setup", async () => {
+    const mutable = makeMutableKeyspace(OWNER);
+    const channel = makeChannel(true, OWNER);
+    const peers: TestPeer[] = [];
+    let releasePresence!: (state: "online") => void;
+    const presenceGate = new Promise<"online">((resolve) => {
+      releasePresence = resolve;
+    });
+    const environment = makeEnvironment(peers);
+    const service = createWebrtcService({
+      channel,
+      keyspace: mutable.keyspace,
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      getPeerPresence: () => presenceGate
+    });
+
+    const dial = service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
+    mutable.setOwner(OTHER);
+    releasePresence("online");
+    await expect(dial).rejects.toThrow("transfer_owner_changed");
     expect(environment.mediaCalls).toHaveLength(0);
+    expect(channel.published).toHaveLength(0);
     expect(service.snapshot().phase).toBe("idle");
-    await expect(service.acceptIncoming()).rejects.toThrow("call_protocol_unavailable");
+    await service.dispose();
+  });
+
+  it("rolls back media and the session when Hash publish fails on accept", async () => {
+    const channel = makeChannel();
+    vi.mocked(channel.publishHashRequest!).mockImplementation(async () => {
+      throw new Error("hash_publish_failed");
+    });
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async () => true
+    });
+    const sessionId = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionId,
+      hash: "b".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    await expect(service.acceptIncoming()).rejects.toThrow("hash_publish_failed");
+    // 会话已清理：无残留媒体流，可观察状态回到 idle，再次接受报无效状态。
+    expect(service.snapshot().phase).toBe("idle");
+    expect(service.snapshot().hasLocalStream).toBe(false);
+    expect(channel.published.some((item) =>
+      (item.content as { type?: string })?.type === "keymaster.webrtc.call.control"
+    )).toBe(true);
+    await expect(service.acceptIncoming()).rejects.toThrow("invalid_state");
+    await service.dispose();
+  });
+
+  it("drops expired or over-long call requests without creating incoming state", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async () => true
+    });
+    // 已过期：直接丢弃。
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: newSessionID(),
+      hash: "c".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() - 1_000
+    }, TARGET, "bsv8.message.v1");
+    // 远超 TTL+时钟容差：视为非法。
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: newSessionID(),
+      hash: "d".repeat(64),
+      mode: "video",
+      expires_at_ms: Date.now() + 10 * 60 * 1000
+    }, TARGET, "bsv8.message.v1");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(service.snapshot().phase).toBe("idle");
     expect(environment.mediaCalls).toHaveLength(0);
-    service.dispose();
+    expect(peers).toHaveLength(0);
+    expect(notices.records.size).toBe(0);
+    expect(channel.published).toHaveLength(0);
+    await service.dispose();
+  });
+
+  it("cancels a pending dial when hangup is invoked during setup", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    let releasePresence!: (state: "online") => void;
+    const presenceGate = new Promise<"online">((resolve) => {
+      releasePresence = resolve;
+    });
+    const environment = makeEnvironment(peers);
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      getPeerPresence: () => presenceGate
+    });
+
+    const dial = service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
+    expect(service.snapshot().phase).toBe("inviting");
+    // 预留期挂断：释放占位，等待中的拨号在复核时中止。
+    await service.hangup();
+    expect(service.snapshot().phase).not.toBe("inviting");
+    releasePresence("online");
+    await expect(dial).rejects.toThrow("transfer_owner_changed");
+    expect(environment.mediaCalls).toHaveLength(0);
+    expect(channel.published).toHaveLength(0);
+    await service.dispose();
+  });
+
+  it("does not clear a newer session when a stale accept Hash publish fails", async () => {
+    const channel = makeChannel();
+    let rejectPublish!: (error: Error) => void;
+    const publishGate = new Promise<{ messageId: string }>((_resolve, reject) => {
+      rejectPublish = reject;
+    });
+    vi.mocked(channel.publishHashRequest!).mockImplementation(() => publishGate);
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async () => true
+    });
+    const sessionA = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionA,
+      hash: "a".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    const acceptA = service.acceptIncoming();
+    await vi.waitFor(() => expect(environment.mediaCalls).toHaveLength(1));
+    // 等待期间原来电被对端挂断，随后新来电已建立。
+    channel.deliver({
+      type: "keymaster.webrtc.call.control",
+      session_id: sessionA,
+      action: "hangup",
+      reason: "hangup"
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("ended"));
+    const sessionB = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionB,
+      hash: "b".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    rejectPublish(new Error("stale_hash_failed"));
+    await expect(acceptA).rejects.toThrow("stale_hash_failed");
+    // 新会话必须存活：仍为来电、B 的通知仍在、错误态未被旧失败污染。
+    expect(service.snapshot().phase).toBe("incoming");
+    expect(service.snapshot().lastError).toBeNull();
+    expect(notices.records.has(`webrtc-incoming-${sessionB}`)).toBe(true);
+    await service.dispose();
+  });
+
+  it("does not clear a newer incoming call when stale audio permission fails", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    let releaseMedia!: () => void;
+    const mediaGate = new Promise<void>((resolve) => {
+      releaseMedia = resolve;
+    });
+    const baseEnv = makeEnvironment(peers);
+    const environment = {
+      ...baseEnv,
+      getUserMedia: async (constraints: MediaStreamConstraints) => {
+        baseEnv.mediaCalls.push(constraints);
+        await mediaGate;
+        throw new Error("no_device");
+      }
+    };
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async () => true
+    });
+    const sessionA = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionA,
+      hash: "a".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    const acceptA = service.acceptIncoming();
+    await vi.waitFor(() => expect(baseEnv.mediaCalls).toHaveLength(1));
+    // 授权等待期间 A 被对端挂断，随后新来电 B 建立。
+    channel.deliver({
+      type: "keymaster.webrtc.call.control",
+      session_id: sessionA,
+      action: "hangup",
+      reason: "hangup"
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("ended"));
+    const sessionB = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionB,
+      hash: "b".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    releaseMedia();
+    await expect(acceptA).rejects.toThrow("transfer_owner_changed");
+    // B 必须存活：仍为来电、B 的通知仍在、无旧会话的拒接控制、无错误污染。
+    expect(service.snapshot().phase).toBe("incoming");
+    expect(service.snapshot().lastError).toBeNull();
+    expect(notices.records.has(`webrtc-incoming-${sessionB}`)).toBe(true);
+    expect(channel.published).toHaveLength(0);
+    await service.dispose();
+  });
+
+  it("does not clear a newer incoming call when stale video permission fails", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    let releaseMedia!: () => void;
+    const mediaGate = new Promise<void>((resolve) => {
+      releaseMedia = resolve;
+    });
+    const baseEnv = makeEnvironment(peers);
+    const environment = {
+      ...baseEnv,
+      getUserMedia: async (constraints: MediaStreamConstraints) => {
+        baseEnv.mediaCalls.push(constraints);
+        await mediaGate;
+        throw new Error("no_device");
+      }
+    };
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isCallSenderAllowed: async () => true
+    });
+    const sessionA = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionA,
+      hash: "a".repeat(64),
+      mode: "video",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    const acceptA = service.acceptIncoming();
+    await vi.waitFor(() => expect(baseEnv.mediaCalls).toHaveLength(1));
+    channel.deliver({
+      type: "keymaster.webrtc.call.control",
+      session_id: sessionA,
+      action: "hangup",
+      reason: "hangup"
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("ended"));
+    const sessionB = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionB,
+      hash: "b".repeat(64),
+      mode: "video",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    releaseMedia();
+    // 视频授权失败且会话已更替：旧流程直接返回，不申请音频、不发回退控制。
+    await acceptA;
+    expect(baseEnv.mediaCalls).toHaveLength(1);
+    expect(service.snapshot().phase).toBe("incoming");
+    expect(service.snapshot().lastError).toBeNull();
+    expect(notices.records.has(`webrtc-incoming-${sessionB}`)).toBe(true);
+    expect(channel.published).toHaveLength(0);
+    await service.dispose();
+  });
+
+  it("treats an accepted transfer awaiting offer as occupying the single slot", async () => {
+    const channel = makeChannel();
+    let resolveHashRequest!: (value: { messageId: string }) => void;
+    const hashRequestGate = new Promise<{ messageId: string }>((resolve) => {
+      resolveHashRequest = resolve;
+    });
+    vi.mocked(channel.publishHashRequest!).mockImplementation(async (input) => {
+      channel.hashRequests.push(input);
+      return hashRequestGate;
+    });
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isTransferSenderAllowed: async () => true
+    });
+    const sessionId = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.transfer.request",
+      session_id: sessionId,
+      hash: "a".repeat(64),
+      kind: "file",
+      byte_length: 1
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true));
+    const acceptPromise = service.acceptIncomingTransfer(sessionId);
+    await vi.waitFor(() => expect(channel.hashRequests).toHaveLength(1));
+    // Hash 发布等待中：拨号必须 busy，不能抢占传输槽。
+    await expect(service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })).rejects.toThrow("busy_local");
+    const offerRequestId = newMessageID();
+    resolveHashRequest({ messageId: offerRequestId });
+    await acceptPromise;
+    // 已接受待 Offer：仍占槽，拨号继续 busy。
+    expect(service.snapshot().phase).toBe("idle");
+    expect(environment.mediaCalls).toHaveLength(0);
+    await expect(service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })).rejects.toThrow("busy_local");
+    // 匹配的 Offer 仍能正常处理并建连。
+    channel.deliver(
+      newOffer(offerRequestId as never, sessionId as never, "v=0\r\nm=application 9 DTLS/SCTP 5000"),
+      TARGET,
+      "bsv8.webrtc.signal.v1"
+    );
+    await vi.waitFor(() => expect(peers).toHaveLength(1));
+    await service.dispose();
+  });
+
+  it("does not clear or notify for a newer session when its own hangup loses a race", async () => {
+    const channel = makeChannel();
+    let releaseHistory!: () => void;
+    const historyGate = new Promise<void>((resolve) => {
+      releaseHistory = resolve;
+    });
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      historyService: {
+        listForPeer: async () => [],
+        appendCall: async () => {
+          await historyGate;
+        },
+        appendTransfer: async () => undefined,
+        getBlob: async () => null
+      },
+      isCallSenderAllowed: async () => true
+    });
+    const sessionA = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionA,
+      hash: "a".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    await service.acceptIncoming();
+    // 本地挂断卡在历史写入上；期间对端挂断结束 A，随后新来电 B 建立。
+    const hangupPromise = service.hangup();
+    channel.deliver({
+      type: "keymaster.webrtc.call.control",
+      session_id: sessionA,
+      action: "hangup",
+      reason: "hangup"
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("ended"));
+    const sessionB = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.call.request",
+      session_id: sessionB,
+      hash: "b".repeat(64),
+      mode: "audio",
+      expires_at_ms: Date.now() + 60_000
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(service.snapshot().phase).toBe("incoming"));
+    releaseHistory();
+    await hangupPromise;
+    // B 必须存活：仍为来电、B 的通知仍在、没有为旧 A 发出挂断控制。
+    expect(service.snapshot().phase).toBe("incoming");
+    expect(notices.records.has(`webrtc-incoming-${sessionB}`)).toBe(true);
+    expect(channel.published).toHaveLength(0);
+    await service.dispose();
+  });
+
+  it("releases an accepted transfer slot when no offer arrives before its own timeout", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: environment,
+      noticeRegistry: notices.registry,
+      isTransferSenderAllowed: async () => true,
+      transferOfferWaitTimeoutMs: 50
+    });
+    const sessionId = newSessionID();
+    channel.deliver({
+      type: "keymaster.webrtc.transfer.request",
+      session_id: sessionId,
+      hash: "e".repeat(64),
+      kind: "file",
+      byte_length: 1
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true));
+    await service.acceptIncomingTransfer(sessionId);
+    // 接受后 Offer 到达前占槽。
+    await expect(service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })).rejects.toThrow("busy_local");
+    // 发送端已退出、无 Offer：独立超时后释放请求与会话槽，不等两分钟 TTL。
+    // 注意：接受动作本身即关闭入站通知，这里按超时等待（4 倍余量），再确认释放。
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(false);
+    await service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
+    expect(service.snapshot().phase).toBe("inviting");
+    expect(channel.published.some((item) =>
+      (item.content as { type?: string })?.type === "keymaster.webrtc.call.request"
+    )).toBe(true);
+    await service.dispose();
   });
 
   it("requires contact admission and explicit confirmation before publishing Hash", async () => {
@@ -374,7 +992,7 @@ describe("createWebrtcService", () => {
     const hashRequestResult = new Promise<{ messageId: string }>((resolve) => {
       resolveHashRequest = resolve;
     });
-    vi.mocked(channel.publishHashRequest).mockImplementation(async (input) => {
+    vi.mocked(channel.publishHashRequest!).mockImplementation(async (input) => {
       channel.hashRequests.push(input);
       return hashRequestResult;
     });
@@ -435,7 +1053,7 @@ describe("createWebrtcService", () => {
         resolve: (value: { messageId: string }) => void;
         reject: (reason: Error) => void;
       }> = [];
-      vi.mocked(channel.publishHashRequest).mockImplementation(async (input) => {
+      vi.mocked(channel.publishHashRequest!).mockImplementation(async (input) => {
         channel.hashRequests.push(input);
         return new Promise<{ messageId: string }>((resolve, reject) => {
           hashResults.push({ resolve, reject });
@@ -468,7 +1086,7 @@ describe("createWebrtcService", () => {
       expect(staleReject).toBeDefined();
 
       // 直接执行旧通知的接受动作，确保闭包捕获的是旧 request，而不是只捕获 sessionId。
-      const oldAcceptance = staleAccept!.run();
+      const oldAcceptance = staleAccept!.run!();
       await vi.waitFor(() => expect(hashResults).toHaveLength(1));
 
       mutable.setOwner(OTHER);
@@ -482,7 +1100,7 @@ describe("createWebrtcService", () => {
       await vi.waitFor(() => expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true));
 
       // 旧 owner 的通知动作仍可能被 UI 异步执行，但只能作用于旧请求对象。
-      await staleReject!.run();
+      await staleReject!.run!();
       expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true);
 
       const newAcceptance = service.acceptIncomingTransfer(sessionId);
