@@ -10,13 +10,6 @@ function labelOf(value: string | I18nText): string {
   return typeof value === "string" ? value : value.fallback;
 }
 
-function countByStatus<T extends { status: string }>(items: readonly T[]): Record<string, number> {
-  return items.reduce<Record<string, number>>((acc, item) => {
-    acc[item.status] = (acc[item.status] ?? 0) + 1;
-    return acc;
-  }, {});
-}
-
 type Network = Extract<BsvNetwork, "main" | "test">;
 
 const NETWORK_ORDER: Network[] = ["main", "test"];
@@ -93,10 +86,7 @@ export function AssetsPage() {
     null
   );
   const includeTestnet = settings.includeTestnet;
-  const assetTotal = rows.assets.reduce((sum, provider) => sum + provider.assets.length, 0);
-  const tokenTotal = rows.tokens.reduce((sum, provider) => sum + provider.tokens.length, 0);
-  const readyTotal = rows.assets.reduce((sum, provider) => sum + (countByStatus(provider.assets).ready ?? 0), 0)
-    + rows.tokens.reduce((sum, provider) => sum + (countByStatus(provider.tokens).ready ?? 0), 0);
+  const providerTotal = (assets?.list().length ?? 0) + (tokens?.list().length ?? 0);
   const activeText = useMemo(() => {
     if (!activeIdentity) return t("assets.context.noKey", { defaultValue: "无 key" });
     return `${activeIdentity.label ?? t("assets.context.unnamed", { defaultValue: "未命名" })} (${activeIdentity.publicKeyHex.slice(0, 12)}…)`;
@@ -105,108 +95,90 @@ export function AssetsPage() {
   if (!assets || !tokens) {
     return (
       <div className="asset-workspace-page assets-page">
-        <EmptyState
-          title={t("assets.page.empty.providers.title", { defaultValue: "暂无资产 provider" })}
-          description={t("assets.status.unavailable", { defaultValue: "钱包已锁定或资产服务暂不可用；解锁后会自动恢复。" })}
-        />
+        <div className="assets-page__empty">
+          <EmptyState
+            title={t("assets.page.empty.providers.title", { defaultValue: "暂无资产 provider" })}
+            description={t("assets.status.unavailable", { defaultValue: "钱包已锁定或资产服务暂不可用；解锁后会自动恢复。" })}
+          />
+        </div>
       </div>
     );
   }
 
   return (
     <div className="asset-workspace-page assets-page">
-      <section className="asset-workspace-hero">
-        <div className="asset-workspace-hero__eyebrow">{t("assets.page.eyebrow", { defaultValue: "Asset workspace" })}</div>
-        <div className="asset-workspace-hero__body">
-          <div className="asset-workspace-hero__copy">
-            <PageHeader title={t("assets.page.title", { defaultValue: "资产" })} description={activeText} />
-            <p className="asset-workspace-hero__lede">
-              {includeTestnet
-                ? t("assets.page.lede.testnet", { defaultValue: "按 provider 聚合展示你当前 key 下的 coin、token 与同步状态。mainnet 和 testnet 会分开展示。" })
-                : t("assets.page.lede.mainnet", { defaultValue: "按 provider 聚合展示你当前 key 下的 coin、token 与同步状态。当前只显示 mainnet。" })}
-            </p>
-          </div>
-          <div className="asset-workspace-hero__actions">
-            <span className={`asset-workspace-scope is-${includeTestnet ? "dual" : "main"}`}>
-              {includeTestnet
-                ? t("assets.page.scope.dual", { defaultValue: "Mainnet + testnet" })
-                : t("assets.page.scope.main", { defaultValue: "Mainnet only" })}
-            </span>
-            <Button onClick={() => host.resourceStore.invalidate("assets.holdings", [])}>{t("assets.page.refresh", { defaultValue: "Refresh" })}</Button>
-          </div>
+      <header className="assets-page__header">
+        <div className="assets-page__intro">
+          <span className="assets-page__eyebrow">{t("assets.page.eyebrow", { defaultValue: "资产总览" })}</span>
+          <PageHeader title={t("assets.page.title", { defaultValue: "资产" })} description={activeText} />
+          <p className="assets-page__lede">
+            {includeTestnet
+              ? t("assets.page.lede.testnet", { defaultValue: "按 provider 聚合展示你当前 key 下的 coin、token 与同步状态。mainnet 和 testnet 会分开展示。" })
+              : t("assets.page.lede.mainnet", { defaultValue: "按 provider 聚合展示你当前 key 下的 coin、token 与同步状态。当前只显示 mainnet。" })}
+          </p>
         </div>
-        <div className="asset-workspace-stats" aria-label={t("assets.page.stats", { defaultValue: "Summary" })}>
-          <div className="asset-workspace-stat">
-            <span>{t("assets.page.stats.assets", { defaultValue: "Assets" })}</span>
-            <strong>{assetTotal}</strong>
-          </div>
-          <div className="asset-workspace-stat">
-            <span>{t("assets.page.stats.tokens", { defaultValue: "Tokens" })}</span>
-            <strong>{tokenTotal}</strong>
-          </div>
-          <div className="asset-workspace-stat">
-            <span>{t("assets.page.stats.ready", { defaultValue: "Ready" })}</span>
-            <strong>{readyTotal}</strong>
-          </div>
+        <span className={`assets-page__scope is-${includeTestnet ? "dual" : "main"}`}>
+          <span className="assets-page__scope-dot" aria-hidden="true" />
+          {includeTestnet
+            ? t("assets.page.scope.dual", { defaultValue: "主网 + 测试网" })
+            : t("assets.page.scope.main", { defaultValue: "仅主网" })}
+        </span>
+      </header>
+      {providerTotal === 0 ? (
+        <div className="assets-page__empty">
+          <EmptyState title={t("assets.page.empty.providers.title", { defaultValue: "暂无资产 provider" })} />
         </div>
-      </section>
-      {assets.list().length === 0 && tokens.list().length === 0 ? (
-        <EmptyState title={t("assets.page.empty.providers.title", { defaultValue: "暂无资产 provider" })} />
-      ) : null}
-      <div className="asset-workspace-grid">
+      ) : <div className="asset-workspace-grid">
         <section className="asset-workspace-panel">
           <div className="asset-workspace-panel__head">
             <div>
               <h3>{t("assets.route.list", { defaultValue: "Asset overview" })}</h3>
               <p>{t("assets.page.assets.desc", { defaultValue: "Coins and provider-specific assets." })}</p>
             </div>
-            <span>{assetTotal}</span>
           </div>
           <div className="asset-workspace-stack">
-            {rows.assets.map((provider) => (
+            {rows.assets.length === 0 ? <p className="asset-workspace-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p> : null}
+            {rows.assets.map((provider) => {
+              const groups = groupByNetwork(provider.assets, includeTestnet).filter((group) => group.items.length > 0);
+              return (
               <article key={provider.provider.id} className="asset-workspace-provider">
                 <div className="asset-workspace-provider__head">
                   <div>
                     <h4>{labelOf(provider.provider.name)}</h4>
-                    <p>{`${provider.assets.length} assets`}</p>
                   </div>
-                  <span>{provider.provider.id}</span>
+                  <span className="assets-page__provider-id">{provider.provider.id}</span>
                 </div>
                 {provider.error ? <p className="asset-workspace-provider__error">{provider.error}</p> : null}
-                {groupByNetwork(provider.assets, includeTestnet).map((group) => (
+                {!provider.error && groups.length === 0 ? <p className="asset-workspace-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p> : null}
+                {groups.map((group) => (
                   <section key={group.network} className={`asset-workspace-network is-${group.network}`}>
                     <div className="asset-workspace-network__head">
                       <h5>{networkLabel(group.network, t)}</h5>
-                      <span>{`${group.items.length}`}</span>
                     </div>
-                    {group.items.length === 0 ? (
-                      <p className="asset-workspace-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p>
-                    ) : (
-                      <ul className="asset-workspace-list">
-                        {group.items.map((asset) => (
-                          <li key={asset.assetId} className="asset-workspace-row">
-                        <div className={`asset-workspace-mark asset-workspace-mark--${asset.kind}`}>
-                          {asset.kind.slice(0, 1)}
-                        </div>
-                        <div className="asset-workspace-row__button" role="group" aria-label={labelOf(asset.label)}>
-                          <div className="asset-workspace-row__body">
-                            <strong>{labelOf(asset.label)}</strong>
-                            <span>{asset.assetId}</span>
+                    <ul className="asset-workspace-list">
+                      {group.items.map((asset) => (
+                        <li key={asset.assetId} className="asset-workspace-row">
+                          <div className={`asset-workspace-mark asset-workspace-mark--${asset.kind}`} aria-hidden="true">
+                            {asset.kind.slice(0, 1)}
                           </div>
-                          <div className="asset-workspace-row__meta">
-                                <span className={`asset-workspace-pill is-${asset.status}`}>{statusLabel(asset.status, t)}</span>
-                                <span className={`asset-workspace-pill is-${group.network}`}>{networkLabel(group.network, t)}</span>
-                                {asset.balance ? <strong>{balanceText(asset, price, locale, group.network, t)}</strong> : null}
-                              </div>
-                        </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                          <div className="asset-workspace-row__content" role="group" aria-label={labelOf(asset.label)}>
+                            <div className="asset-workspace-row__body">
+                              <strong>{labelOf(asset.label)}</strong>
+                              <span>{asset.assetId}</span>
+                            </div>
+                            <div className="asset-workspace-row__meta">
+                              <span className={`asset-workspace-pill is-${asset.status}`}>{statusLabel(asset.status, t)}</span>
+                              {asset.balance ? <strong>{balanceText(asset, price, locale, group.network, t)}</strong> : null}
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   </section>
                 ))}
               </article>
-            ))}
+              );
+            })}
           </div>
         </section>
         <section className="asset-workspace-panel">
@@ -215,58 +187,53 @@ export function AssetsPage() {
               <h3>{t("assets.page.tokens.title", { defaultValue: "Tokens" })}</h3>
               <p>{t("assets.page.tokens.desc", { defaultValue: "BSV-21 and other token providers." })}</p>
             </div>
-            <span>{tokenTotal}</span>
           </div>
           <div className="asset-workspace-stack">
-            {rows.tokens.map((provider) => (
+            {rows.tokens.length === 0 ? <p className="asset-workspace-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p> : null}
+            {rows.tokens.map((provider) => {
+              const groups = groupByNetwork(provider.tokens, includeTestnet).filter((group) => group.items.length > 0);
+              return (
               <article key={provider.provider.id} className="asset-workspace-provider">
                 <div className="asset-workspace-provider__head">
                   <div>
                     <h4>{labelOf(provider.provider.name)}</h4>
-                    <p>{`${provider.tokens.length} tokens`}</p>
                   </div>
-                  <span>{provider.provider.id}</span>
+                  <span className="assets-page__provider-id">{provider.provider.id}</span>
                 </div>
                 {provider.error ? <p className="asset-workspace-provider__error">{provider.error}</p> : null}
-                {groupByNetwork(provider.tokens, includeTestnet).map((group) => (
+                {!provider.error && groups.length === 0 ? <p className="asset-workspace-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p> : null}
+                {groups.map((group) => (
                   <section key={group.network} className={`asset-workspace-network is-${group.network}`}>
                     <div className="asset-workspace-network__head">
                       <h5>{networkLabel(group.network, t)}</h5>
-                      <span>{`${group.items.length}`}</span>
                     </div>
-                    {group.items.length === 0 ? (
-                      <p className="asset-workspace-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p>
-                    ) : (
-                      <ul className="asset-workspace-list">
-                        {group.items.map((token) => (
-                          <li key={token.tokenId} className="asset-workspace-row">
-                        <div className="asset-workspace-mark asset-workspace-mark--token">
-                          T
-                        </div>
-                        <div className="asset-workspace-row__button" role="group" aria-label={labelOf(token.label)}>
-                          <div className="asset-workspace-row__body">
-                            <strong>{labelOf(token.label)}</strong>
-                            <span>{token.tokenId}</span>
+                    <ul className="asset-workspace-list">
+                      {group.items.map((token) => (
+                        <li key={token.tokenId} className="asset-workspace-row">
+                          <div className="asset-workspace-mark asset-workspace-mark--token" aria-hidden="true">T</div>
+                          <div className="asset-workspace-row__content" role="group" aria-label={labelOf(token.label)}>
+                            <div className="asset-workspace-row__body">
+                              <strong>{labelOf(token.label)}</strong>
+                              <span>{token.tokenId}</span>
+                            </div>
+                            <div className="asset-workspace-row__meta">
+                              <span className={`asset-workspace-pill is-${token.status}`}>{statusLabel(token.status, t)}</span>
+                              {token.observation ? <span className={`asset-workspace-pill is-${token.observation}`}>{observationLabel(token.observation, t)}</span> : null}
+                              {token.balance ? <strong>{token.balance.display ?? `${token.balance.amount} ${token.balance.unit}`}</strong> : null}
+                              {token.canonicalTxid ? <span className="assets-page__txid">{token.canonicalTxid.slice(0, 12)}…</span> : null}
+                            </div>
                           </div>
-                          <div className="asset-workspace-row__meta">
-                                <span className={`asset-workspace-pill is-${token.status}`}>{statusLabel(token.status, t)}</span>
-                                <span className={`asset-workspace-pill is-${group.network}`}>{networkLabel(group.network, t)}</span>
-                                {token.observation ? <span className={`asset-workspace-pill is-${token.observation}`}>{observationLabel(token.observation, t)}</span> : null}
-                                {token.balance ? <strong>{token.balance.display ?? `${token.balance.amount} ${token.balance.unit}`}</strong> : null}
-                                {token.canonicalTxid ? <span>{token.canonicalTxid.slice(0, 12)}…</span> : null}
-                              </div>
-                        </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                        </li>
+                      ))}
+                    </ul>
                   </section>
                 ))}
               </article>
-            ))}
+              );
+            })}
           </div>
         </section>
-      </div>
+      </div>}
     </div>
   );
 }
