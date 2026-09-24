@@ -725,10 +725,10 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
           scriptHex: output.scriptHex.toLowerCase(),
         }));
       let account = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
-      let pool = account.pools.find((item) => item.poolId === session.sessionId);
-      if (!pool) throw new Error("BitFS 关池专款账本中找不到对应费用池");
-      if (pool.state === "closed") {
-        if (pool.recoveryTxid !== txid) throw new Error("BitFS 费用池已由另一笔交易关闭");
+      let ledgerPool = account.pools.find((item) => item.poolId === session.sessionId);
+      if (!ledgerPool) throw new Error("BitFS 关池专款账本中找不到对应费用池");
+      if (ledgerPool.state === "closed") {
+        if (ledgerPool.recoveryTxid !== txid) throw new Error("BitFS 费用池已由另一笔交易关闭");
         const record = await deps.transactions.getTransactionRecord(txid);
         const outcome: BitfsBroadcastOutcome = { status: "confirmed", txid, attempts: record?.attempts ?? 1 };
         const finalPhase = cancellationIntent ? "cancelled" : "completed";
@@ -737,10 +737,10 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
         }
         return { outcome, closed: true };
       }
-      if (pool.state !== "open" && pool.state !== "recovery-pending") {
+      if (ledgerPool.state !== "open" && ledgerPool.state !== "recovery-pending") {
         throw new Error("BitFS 费用池当前状态不能关池");
       }
-      if (pool.state === "open") {
+      if (ledgerPool.state === "open") {
         deps.assertCurrentContext();
         account = await deps.ledger.preparePoolRecovery({
           ownerPublicKeyHex: owner,
@@ -754,9 +754,9 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
           outputs: ownerOutputs,
           nowMs: deps.nowMs(),
         });
-        pool = account.pools.find((item) => item.poolId === session.sessionId);
+        ledgerPool = account.pools.find((item) => item.poolId === session.sessionId);
       }
-      if (!pool || pool.state !== "recovery-pending" || pool.recoveryTxid !== txid) {
+      if (!ledgerPool || ledgerPool.state !== "recovery-pending" || ledgerPool.recoveryTxid !== txid) {
         throw new Error("BitFS 费用池恢复计划与 Kind 13 交易不一致");
       }
       const ledgerPlan = account.transactions.find((item) => item.txid === txid && item.purpose === "close");
