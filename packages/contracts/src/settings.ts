@@ -43,7 +43,7 @@ export interface SystemSettingsItem {
   visibleWhen?: (ctx: { unlocked: boolean }) => boolean;
 }
 
-/** 由常驻系统模块注入到「设置 → 系统状态」的实时状态视图。 */
+/** 由常驻系统模块注入到「设置 → 广播网关」的实时状态视图。 */
 export interface SystemStatusModule {
   /** 全局唯一、带模块命名空间的 id。 */
   id: string;

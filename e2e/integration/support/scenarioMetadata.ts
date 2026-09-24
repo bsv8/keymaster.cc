@@ -51,7 +51,7 @@ export const REAL_SATSUB_SERVER_SETTINGS_SCENARIO = {
   requirementIds: ["KM-SATSUB-001", "KM-SETTINGS-001"],
   startingState: "Node 从仓库外 SATS_SUBSCRIPTION_DIR 构建正式 cmd/satsubscription 并启动一次性 PostgreSQL；单用户用确定性免费白名单 Hex Key 初始化本地桶并把本地 SS 供应商设为默认发布方；3 条正扣费账单由一次性库的正式 operations fixture 预置（查询走真实 SSP）。",
   successCriteria: [
-    "初始化桶 Key 后进入设置页，本地 SS 供应商红绿灯变绿（online）且中文说明为已连接。",
+    "初始化桶 Key 后进入广播网关页，本地 SS 供应商红绿灯变绿（online）且中文说明为已连接。",
     "点击刷新 SPI 余额后行内出现 BSV/testnet 账户余额且无报错。",
     "点击刷新远端订阅后状态栏提示已刷新且无报错。",
     "以每页 2 条查询账单：第 1 页 2 条且有下一页，第 2 页 1 条且与第 1 页不重复，返回第 1 页记录一致，全程无报错。",
@@ -69,7 +69,7 @@ export const LOCAL_SATSUBSCRIPTION_DEFAULT_SCENARIO = {
   requirementIds: ["KM-SETTINGS-001", "KM-LIFECYCLE-001"],
   startingState: "全新 Chromium context 完成 Local 初始化；缺省 SatSubscription 供应商由运行时写入。",
   successCriteria: [
-    "解锁后系统设置中的 SatSubscription 显示缺省 bsv8 供应商。",
+    "解锁后广播网关中的 SatSubscription 显示缺省 bsv8 供应商。",
     "单页面刷新必须回到锁定页，重新输入 Key 密码后才能进入。",
     "多个 tab 共享解锁：其它页面在场时刷新不回锁定页，且缺省供应商仍可读。",
     "任一 tab 手动锁定后，所有 tab 都必须回到锁定页。",
@@ -84,9 +84,11 @@ export const LOCAL_SETTINGS_SCENARIO = {
   requirementIds: ["KM-NAV-001", "KM-SETTINGS-001"],
   startingState: "全新 Chromium context 已完成 Local 初始化，Vault 已解锁且存在 active Key。",
   successCriteria: [
-    "系统、价格、插件和系统状态入口都由正式业务菜单打开。",
+    "系统、价格、插件和广播网关入口都由正式业务菜单打开。",
+    "BSV 链入口位于设置菜单下，并同时展示 P2PKH 与 WOC 配置。",
+    "本地文件入口位于设置菜单下，并展示 MSFile 配置。",
     "语言修改立即反映到页面并持久化到 localStorage，刷新后仍保持合法语言。",
-    "插件依赖状态和系统状态页可以读取，设置页失败时保留可诊断结果。",
+    "插件依赖状态和广播网关页可以读取，设置页失败时保留可诊断结果。",
   ],
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;

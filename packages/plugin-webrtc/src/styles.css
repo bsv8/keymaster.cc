@@ -9,9 +9,7 @@
 .km-webrtc-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 16px;
-  max-width: 960px;
+  gap: 14px;
 }
 
 .km-webrtc-page__title {
@@ -49,10 +47,41 @@
   width: 100%;
   padding: 8px 10px;
   font-family: monospace;
-  border: 1px solid var(--km-color-border, #d1d5db);
-  border-radius: 4px;
-  background: var(--km-color-surface, #fff);
-  color: var(--km-color-text, #111827);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.km-webrtc-page__section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.km-webrtc-page__section-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.km-webrtc-page__stun-list {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.km-webrtc-page__diagnostics {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.km-webrtc-page__diagnostic-results {
+  width: 100%;
 }
 
 .km-webrtc-page__button {
@@ -158,16 +187,23 @@
   display: flex;
   gap: 8px;
   align-items: center;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--km-color-border, #e5e7eb);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.km-webrtc-page__stun-row:last-child {
+  border-bottom: 0;
 }
 
 .km-webrtc-page__stun-row__url {
   font-family: monospace;
 }
 /* 仅 flex 行内的 url 占满剩余空间；table 里的 td 不应走该规则。 */
-.km-webrtc-page__stun-row > .km-webrtc-page__stun-row__url {
+.km-webrtc-page__stun-row > .km-webrtc-page__stun-row__url,
+.km-webrtc-page__stun-row > code {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .km-webrtc-page__stun-row__status {
@@ -185,6 +221,53 @@
 
 .km-webrtc-page__stun-row__status--error {
   color: var(--km-color-danger, #dc2626);
+}
+
+.webrtc-stun-editor__description {
+  margin: 0 0 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.webrtc-stun-editor__field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.webrtc-stun-editor__field > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.webrtc-stun-editor__result,
+.webrtc-stun-editor__error {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.webrtc-stun-editor__result--ok {
+  border: 1px solid color-mix(in srgb, #2fa36b 42%, var(--border));
+  background: color-mix(in srgb, #2fa36b 8%, var(--surface));
+  color: #238356;
+}
+
+.webrtc-stun-editor__result--timeout {
+  border: 1px solid color-mix(in srgb, #d6a417 42%, var(--border));
+  background: color-mix(in srgb, #d6a417 8%, var(--surface));
+  color: #a87409;
+}
+
+.webrtc-stun-editor__result--error,
+.webrtc-stun-editor__error {
+  border: 1px solid color-mix(in srgb, var(--danger) 44%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  color: var(--danger);
 }
 
 .km-webrtc-page__field-error {

@@ -1,21 +1,17 @@
 // packages/plugin-woc/src/manifest.ts
-// WOC 插件清单：注册 woc.service / 设置页 / 面包屑。
+// WOC 插件清单：注册 woc.service；设置区由 Web 装配层的 BSV 链页面承载。
 //
 // 设计缘由（硬切换 008 收尾）：
 //   - actor 必须挂到 runtime messageBus 才能与其它插件在同一总线上。
 //   - 因此本插件显式声明对 RUNTIME_MESSAGE_BUS capability 的依赖。
 //   - 业务插件仍只依赖 wocService，不再接触 messageBus。
 //
-// 硬切换 003：所有展示文案走 i18n；WOC 通过 system-settings.registry
-// 注入「设置 → 系统」，不再提供旧菜单入口。
+// 硬切换 003：所有展示文案走 i18n；WOC 设置不再注入「设置 → 系统」。
 
 import type {
-  BreadcrumbProvider,
-  BreadcrumbRegistry,
   I18nPluginResources,
   PluginManifest,
   PluginSetup,
-  SystemSettingsRegistry,
   Woc1SatOrdinalsService,
   WocBsv21Service,
   WocConfig,
@@ -31,8 +27,6 @@ import {
   WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
   WOC_STAS_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
-  BREADCRUMB_REGISTRY_CAPABILITY,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
@@ -40,7 +34,6 @@ import { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
 import { createWocBsv21Service } from "./wocBsv21Service.js";
 import { createWocService } from "./wocService.js";
 import { createWocStasService } from "./wocStasService.js";
-import { WocSettingsPage } from "./pages/WocSettingsPage.js";
 
 const wocResources: I18nPluginResources = {
   namespace: "woc",
@@ -115,8 +108,6 @@ const wocPluginDefinition = {
     ],
     dependencies: defineRuntimeUnitDependencies([
       { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "注册 WOC actor handlers（target=woc）" },
-      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 WOC 系统设置" },
-      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 WOC 面包屑" },
     ]),
   }, {
     id: "woc.coordinator-worker",
@@ -161,33 +152,6 @@ const wocPluginDefinition = {
     const oneSatService = createWoc1SatOrdinalsService({ messageBus });
     ctx.provide(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
 
-    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
-    systemSettings.register({
-      id: "woc.system-settings.connection",
-      group: {
-        id: "woc",
-        label: { key: "woc.crumb.woc", fallback: "WOC" },
-        order: 40
-      },
-      label: { key: "woc.page.title", fallback: "WOC settings" },
-      description: { key: "woc.page.desc", fallback: "WhatsOnChain API endpoint, rate limit, and queue status." },
-      component: WocSettingsPage,
-      order: 10,
-      replacesSettingsRouteId: "woc.settings",
-      visibleWhen: ({ unlocked }) => unlocked
-    });
-
-    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
-    const crumbProvider: BreadcrumbProvider = {
-      id: "woc.crumbs",
-      order: 250,
-      match: (path) => path === "/settings/woc",
-      resolve: () => [
-        { label: { key: "woc.crumb.settings", fallback: "Settings" } },
-        { label: { key: "woc.crumb.woc", fallback: "WOC" } }
-      ]
-    };
-    breadcrumbs.register(crumbProvider);
     return () => {
       // 硬切换 001：bridge 到 service.dispose()。
       // actor detach + 取消 messageBus handle 都在 dispose 内。

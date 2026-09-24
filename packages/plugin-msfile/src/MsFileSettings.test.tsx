@@ -24,7 +24,10 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({ t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key }),
+  useI18n: () => ({
+    t: (key: string, options?: { defaultValue?: string; [key: string]: unknown }) =>
+      (options?.defaultValue ?? key).replace(/\{\{(\w+)\}\}/gu, (match, name: string) => String(options?.[name] ?? match))
+  }),
   usePluginHost: () => ({ resourceStore: {} }),
   useRuntimeStatus: () => ({ vault: "unlocked" }),
   // 模拟可选资源选择器的引用稳定性：内容不变返回同一引用。
@@ -141,11 +144,15 @@ describe("MsFileSettings", () => {
         <MsFileSettings />
       </StrictMode>
     );
+    expect(screen.getByRole("heading", { name: "Local files" })).toBeTruthy();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(5);
+    expect(document.querySelectorAll(".msfile-settings label label")).toHaveLength(0);
     await waitFor(() => expect(screen.getByDisplayValue("5000")).toBeTruthy());
     const seedInput = screen.getByDisplayValue("5000") as HTMLInputElement;
     // 不限金额开关未开启时空输入不允许保存为 0。
     fireEvent.change(seedInput, { target: { value: "" } });
-    const saveButton = screen.getByRole("button", { name: /^Save$/ });
+    const saveButton = screen.getByRole("button", { name: /^Save price limits$/ });
     fireEvent.click(saveButton);
     await waitFor(() => expect(screen.getAllByText(/must be a positive amount/i).length).toBeGreaterThan(0));
     expect(service.updateGlobalPriceSettings).not.toHaveBeenCalled();
@@ -166,7 +173,7 @@ describe("MsFileSettings", () => {
     await waitFor(() => expect(screen.getByDisplayValue("5000")).toBeTruthy());
     const unlimitedToggles = screen.getAllByRole("checkbox");
     fireEvent.click(unlimitedToggles[0]!);
-    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save price limits$/ }));
     await waitFor(() => expect(service.updateGlobalPriceSettings).toHaveBeenCalled());
     expect(vi.mocked(service.updateGlobalPriceSettings).mock.calls[0]?.[0]).toMatchObject({ seedMaxPriceSatoshis: "0" });
   });
@@ -177,7 +184,7 @@ describe("MsFileSettings", () => {
     });
     state.service = service;
     render(<MsFileSettings />);
-    await waitFor(() => expect(screen.getByText(/当前运行状态：依赖暂不可用/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("依赖暂不可用")).toBeTruthy());
     expect(screen.getByText(/此时不会对外报价/)).toBeTruthy();
   });
 
@@ -218,6 +225,12 @@ describe("MsFileSettings", () => {
     state.service = service;
     render(<MsFileSettings />);
     await waitFor(() => expect(screen.getByText("nas")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: /^(Add|添加)$/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add supplier" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
 
     const testButton = screen.getByRole("button", { name: /test connection/i });
     fireEvent.click(testButton);

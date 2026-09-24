@@ -84,7 +84,7 @@ export interface SystemSettingsRegistry {
   _ids(): string[];
 }
 
-/** 常驻系统模块向「设置 → 系统状态」注入实时状态视图。 */
+/** 常驻系统模块向「设置 → 广播网关」注入实时状态视图。 */
 export interface SystemStatusRegistry {
   register(module: SystemStatusModule): void;
   unregister(id: string): void;

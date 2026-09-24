@@ -38,6 +38,7 @@ import { CollectiblesPage, CollectibleDetailPage } from "./collectibles.js";
 import { TransferPage } from "./transfer.js";
 import { createTransferFeatureCapability, TRANSFER_FEATURE_CAPABILITY } from "./transfer/transferFeature.js";
 import { CollectibleTransferPage } from "./collectibleTransfer.js";
+import { BsvChainSettingsPage } from "./bsvChain.js";
 
 const assetsResources: I18nPluginResources = {
   namespace: "assets",
@@ -115,6 +116,28 @@ const assetsResources: I18nPluginResources = {
       "assets.status.unsupported": "不支持",
       "assets.status.unavailable": "钱包已锁定或资产服务暂不可用；解锁后会自动恢复。",
       "assets.balance.unknown": "未知"
+    }
+  }
+};
+
+const bsvChainResources: I18nPluginResources = {
+  namespace: "bsvChain",
+  resources: {
+    en: {
+      "bsvChain.menu": "BSV Chain",
+      "bsvChain.crumb.settings": "Settings",
+      "bsvChain.page.title": "BSV Chain",
+      "bsvChain.page.description": "Configure P2PKH network scope, fee rates, and the WOC connection.",
+      "bsvChain.p2pkh": "P2PKH",
+      "bsvChain.woc": "WOC"
+    },
+    "zh-CN": {
+      "bsvChain.menu": "BSV 链",
+      "bsvChain.crumb.settings": "设置",
+      "bsvChain.page.title": "BSV 链",
+      "bsvChain.page.description": "配置 P2PKH 网络范围、矿工费率与 WOC 连接。",
+      "bsvChain.p2pkh": "P2PKH",
+      "bsvChain.woc": "WOC"
     }
   }
 };
@@ -319,6 +342,40 @@ function get<T>(host: PluginHost, capability: LocalCapability<T>): T {
   return host.capabilities.get(capability);
 }
 
+function registerBsvChainWorkspace(host: PluginHost): void {
+  host.i18n.registerResources("bsvChain", bsvChainResources);
+  const routes = get(host, ROUTE_REGISTRY_CAPABILITY);
+  const business = get(host, BUSINESS_REGISTRY_CAPABILITY);
+  const breadcrumbs = get(host, BREADCRUMB_REGISTRY_CAPABILITY);
+
+  routes.register({
+    id: "settings.bsv-chain",
+    path: "/settings/bsv-chain",
+    label: { key: "bsvChain.menu", fallback: "BSV Chain" },
+    component: BsvChainSettingsPage
+  });
+  business.registerFeature("bsv-chain-workspace", "settings", {
+    id: "settings.bsv-chain",
+    label: { key: "bsvChain.menu", fallback: "BSV Chain" },
+    order: 20,
+    icon: "Network",
+    entry: {
+      path: "/settings/bsv-chain",
+      routeId: "settings.bsv-chain",
+      visibleWhen: ({ unlocked }) => unlocked
+    }
+  });
+  breadcrumbs.register({
+    id: "settings.bsv-chain.crumbs",
+    order: 190,
+    match: (path) => path === "/settings/bsv-chain",
+    resolve: () => [
+      { label: { key: "bsvChain.crumb.settings", fallback: "Settings" } },
+      { label: { key: "bsvChain.page.title", fallback: "BSV Chain" } }
+    ]
+  });
+}
+
 /** 资产工作区不是独立产品插件，仍必须绑定到 owner-session 进行回收。 */
 function registerWorkspaceResource<T, TArgs extends readonly string[]>(
   registry: ResourceRegistry,
@@ -521,8 +578,10 @@ export async function registerAssetWorkspace(host: PluginHost): Promise<() => vo
   const beforeBusiness = host.business._ids();
   const beforeBusinessDomainIds = new Set(beforeBusiness.domains);
   const beforeBusinessFeatureIds = new Set(beforeBusiness.features);
+  const beforeBreadcrumbIds = new Set(host.breadcrumbs._ids());
   const hadTransferFeature = host.capabilities.has(TRANSFER_FEATURE_CAPABILITY);
 
+  registerBsvChainWorkspace(host);
   registerAssetsWorkspace(host);
   registerCollectiblesWorkspace(host);
   registerCollectibleTransferWorkspace(host);
@@ -545,6 +604,9 @@ export async function registerAssetWorkspace(host: PluginHost): Promise<() => vo
     for (const id of host.routes._ids().filter((item) => !beforeRouteIds.has(item))) {
       host.routes.unregister(id);
     }
+    for (const id of host.breadcrumbs._ids().filter((item) => !beforeBreadcrumbIds.has(item))) {
+      host.breadcrumbs.unregister(id);
+    }
     for (const id of host.home._ids().filter((item) => !beforeHomeIds.has(item))) {
       host.home.unregister(id);
     }
@@ -556,7 +618,7 @@ export async function registerAssetWorkspace(host: PluginHost): Promise<() => vo
       resources.unregister(id);
     }
     if (!hadTransferFeature) host.capabilities.revoke(TRANSFER_FEATURE_CAPABILITY);
-    for (const pluginId of ["assets", "collectibles", "collectibleTransfer", "transfer"]) {
+    for (const pluginId of ["bsvChain", "assets", "collectibles", "collectibleTransfer", "transfer"]) {
       host.i18n.unregisterResources(pluginId);
     }
   };

@@ -4,7 +4,7 @@
 // 不直接打开 DB、发送网络请求或接触私钥。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   SatOwnerSupplierSettingsV1,
   SatSubscriptionAdminService,
@@ -114,14 +114,38 @@ function makeServices(): void {
 afterEach(() => cleanup());
 
 describe("SatSubscriptionSettings", () => {
+  it("opens the add-supplier action as a modal and saves its fields", async () => {
+    makeServices();
+    render(<SatSubscriptionSettings />);
+
+    fireEvent.click(screen.getByRole("button", { name: "新增供应商" }));
+    const editor = screen.getByRole("dialog");
+    fireEvent.change(within(editor).getByLabelText("供应商编号"), { target: { value: "supplier-b" } });
+    fireEvent.change(within(editor).getByLabelText("名称"), { target: { value: "Supplier B" } });
+    fireEvent.change(within(editor).getByLabelText("供应商公钥"), { target: { value: SUPPLIER_KEY } });
+    fireEvent.change(within(editor).getByLabelText("libp2p 地址"), { target: { value: "/ip4/127.0.0.1/tcp/4002" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "保存供应商" }));
+
+    await waitFor(() => expect(state.admin.upsertSupplier).toHaveBeenCalledWith({
+      supplierId: "supplier-b",
+      name: "Supplier B",
+      supplierPublicKeyHex: SUPPLIER_KEY,
+      multiaddrs: ["/ip4/127.0.0.1/tcp/4002"],
+      enabled: true
+    }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("edits a supplier through the admin service and preserves its identity fields", async () => {
     makeServices();
     render(<SatSubscriptionSettings />);
 
     await waitFor(() => expect(screen.getByText("Supplier A")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "编辑" }));
-    fireEvent.change(screen.getByDisplayValue("Supplier A"), { target: { value: "Supplier A renamed" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存供应商" }));
+    const editor = screen.getByRole("dialog");
+    expect((within(editor).getByLabelText("供应商编号") as HTMLInputElement).disabled).toBe(true);
+    fireEvent.change(within(editor).getByDisplayValue("Supplier A"), { target: { value: "Supplier A renamed" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "保存修改" }));
 
     await waitFor(() => expect(state.admin.upsertSupplier).toHaveBeenCalledWith(expect.objectContaining({
       supplierId: "supplier-a",
@@ -129,6 +153,7 @@ describe("SatSubscriptionSettings", () => {
       supplierPublicKeyHex: SUPPLIER_KEY,
       enabled: true
     })));
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(state.invalidated).toBeGreaterThan(0);
   });
 

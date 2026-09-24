@@ -1,7 +1,18 @@
+.background-settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 960px;
+}
+
 .background-settings {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface);
 }
 
 .background-settings__section {
@@ -95,3 +106,7 @@
 
 .background-settings__interval:disabled { cursor: wait; opacity: 0.6; }
 .background-settings__error { margin: 10px 0 0; color: var(--danger); font-size: 13px; }
+
+@media (max-width: 640px) {
+  .background-settings { padding: 14px; }
+}

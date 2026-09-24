@@ -15,7 +15,7 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
 
 /**
  * 业务目标：
- * 用户完成初始化后，通过正式菜单查看系统、价格、插件和系统状态设置，
+ * 用户完成初始化后，通过正式菜单查看自动锁屏、智能调度、私钥导出、BSV 链、本地文件、价格、插件和广播网关，
  * 并切换一次界面语言。
  *
  * 用户价值：
@@ -30,7 +30,7 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
  * 成功标准：
  * - 正式设置入口都能从业务导航打开；
  * - 语言热切换同时更新 html lang 和持久化模式；
- * - 刷新后仍能进入设置工作区，并能读取插件状态和系统状态入口。
+ * - 刷新后仍能进入设置工作区，并能读取插件状态和广播网关入口。
  *
  * 业务风险：
  * 如果菜单和页面不是同一个 registry 真值，用户可能看到入口却无法配置；
@@ -41,7 +41,7 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
  *
  * 覆盖需求：KM-NAV-001、KM-SETTINGS-001。
  */
-test(JOURNEY_ID + "：从正式菜单查看设置并热切换界面语言", async ({ page, context }, testInfo) => {
+test(JOURNEY_ID + "：从正式菜单查看独立设置并热切换界面语言", async ({ page, context }, testInfo) => {
   test.setTimeout(60_000);
   const password = "settings-e2e-password-123";
   const browserErrors = captureBrowserErrors(page, context);
@@ -54,12 +54,42 @@ test(JOURNEY_ID + "：从正式菜单查看设置并热切换界面语言", asyn
       );
     });
 
-    await test.step("用户在系统设置中切换界面语言", async () => {
+    await test.step("安全、智能调度和私钥导出使用独立入口，设置菜单不再提供系统页", async () => {
       await openSettingsPage(page, {
-        label: /^System$|^系统$/,
-        path: /\/settings\/system$/u,
-        heading: /^System$|^系统$/,
+        label: /^Auto lock$|^自动锁屏$/u,
+        path: /\/settings\/auto-lock$/u,
+        heading: /^Auto lock$|^自动锁屏$/u,
       });
+      await expect(page.locator(".autolock-settings")).toBeVisible();
+      await expect(page.locator(".autolock-summary")).toBeVisible();
+      await expect(page.getByRole("button", { name: /^5 minutes$|^5 分钟$/u })).toHaveAttribute("aria-pressed", "true");
+      await page.getByRole("button", { name: /^Custom$|^自定义$/u }).click();
+      const autoLockEditor = page.getByRole("dialog");
+      await expect(autoLockEditor.getByPlaceholder(/e\.g\.|例如/u)).toBeVisible();
+      await autoLockEditor.getByRole("button", { name: /^Cancel$|^取消$/u }).click();
+      await openSettingsPage(page, {
+        label: /^Smart scheduling$|^智能调度$/u,
+        path: /\/settings\/smart-scheduling$/u,
+        heading: /^Smart scheduling$|^智能调度$/u,
+      });
+      await expect(page.locator(".background-settings")).toBeVisible();
+      await openSettingsPage(page, {
+        label: /^Export private key$|^导出私钥$/u,
+        path: /\/settings\/current-key$/u,
+        heading: /^Export private key$|^导出私钥$/u,
+      });
+      const exportCard = page.getByRole("region", { name: /^Encrypted private key backup$|^加密私钥备份$/u });
+      await expect(exportCard).toBeVisible();
+      await exportCard.getByRole("button", { name: /^Export private key$|^导出私钥$/u }).click();
+      const exportDialog = page.getByRole("dialog");
+      await expect(exportDialog).toContainText(/Export private key|导出私钥/u);
+      await exportDialog.getByRole("button", { name: /^Cancel$|^取消$/u }).click();
+      await expect(exportDialog).toHaveCount(0);
+      const navigation = page.getByRole("navigation", { name: /Primary navigation|主导航/ });
+      await expect(navigation.getByRole("button", { name: /^System$|^系统$/u })).toHaveCount(0);
+    });
+
+    await test.step("用户通过顶栏切换界面语言", async () => {
       const current = await page.locator("html").getAttribute("lang");
       const next = current === "zh-CN" ? "en" : "zh-CN";
       await changeLanguage(page, next);
@@ -70,12 +100,58 @@ test(JOURNEY_ID + "：从正式菜单查看设置并热切换界面语言", asyn
       await unlockWalletInPlace(page, password);
       await expect(page.getByRole("navigation", { name: /Primary navigation|主导航/ })).toBeVisible();
       await openSettingsPage(page, {
-        label: /^System$|^系统$/,
-        path: /\/settings\/system$/u,
-        heading: /^System$|^系统$/,
+        label: /^Smart scheduling$|^智能调度$/u,
+        path: /\/settings\/smart-scheduling$/u,
+        heading: /^Smart scheduling$|^智能调度$/u,
       });
       const restored = await page.locator("html").getAttribute("lang");
       await changeLanguage(page, restored === "zh-CN" ? "en" : "zh-CN");
+    });
+
+    await test.step("用户从设置菜单打开 BSV 链配置", async () => {
+      await openSettingsPage(page, {
+        label: /^BSV Chain$|^BSV 链$/u,
+        path: /\/settings\/bsv-chain$/u,
+        heading: /^BSV Chain$|^BSV 链$/u,
+      });
+      await expect(page.locator("#p2pkh")).toBeVisible();
+      await expect(page.locator("#woc")).toBeVisible();
+    });
+
+    await test.step("用户从设置菜单打开本地文件", async () => {
+      await openSettingsPage(page, {
+        label: /^Local files$|^本地文件$/u,
+        path: /\/settings\/local-files$/u,
+        heading: /^Local files$|^本地文件$/u,
+      });
+      await expect(page.getByRole("region", { name: /^Local files$|^本地文件$/u })).toBeVisible();
+    });
+
+    await test.step("用户在广播网关同一页面查看 SatSubscription 与 WebRTC", async () => {
+      await openSettingsPage(page, {
+        label: /^Broadcast gateway$|^广播网关$/,
+        path: /\/settings\/system-status$/u,
+        heading: /^Broadcast gateway$|^广播网关$/,
+      });
+      const gateway = page.locator(".system-status-page");
+      const satRegion = gateway.getByRole("region", { name: /^SatSubscription$/u });
+      await expect(satRegion).toBeVisible();
+      const webrtcRegion = gateway.getByRole("region", { name: /^WebRTC$/u });
+      await expect(webrtcRegion).toBeVisible();
+      await expect(page.locator(".sat-subscription-settings")).toBeVisible();
+      await expect(page.locator('[data-webrtc-settings="main"]')).toBeVisible();
+      await webrtcRegion.getByRole("button", { name: /^Add STUN server$|^新增 STUN 服务器$/u }).click();
+      const stunEditor = page.getByRole("dialog");
+      await expect(stunEditor.getByPlaceholder("stun:host:port")).toBeVisible();
+      await expect(stunEditor.getByRole("button", { name: /^Save STUN server$|^保存 STUN 服务器$/u })).toBeDisabled();
+      await stunEditor.getByRole("button", { name: /^Cancel$|^取消$/u }).click();
+      await expect(stunEditor).toHaveCount(0);
+      await satRegion.getByRole("button", { name: /^Add supplier$|^新增供应商$/u }).click();
+      const supplierEditor = page.getByRole("dialog");
+      await expect(supplierEditor.getByLabel(/Supplier id|供应商编号/u)).toBeVisible();
+      await supplierEditor.getByRole("button", { name: /^Cancel$|^取消$/u }).click();
+      await expect(supplierEditor).toHaveCount(0);
+      await expect(gateway.getByRole("tab")).toHaveCount(0);
     });
 
     await test.step("用户通过菜单查看价格和插件配置入口", async () => {
@@ -90,14 +166,6 @@ test(JOURNEY_ID + "：从正式菜单查看设置并热切换界面语言", asyn
         heading: /^Plugins$|^插件管理$/,
       });
       expect(await countManagedPlugins(page), "插件管理页必须由正式运行时提供可观察的插件状态").toBeGreaterThan(0);
-    });
-
-    await test.step("用户查看系统状态，而不是进入孤立配置页", async () => {
-      await openSettingsPage(page, {
-        label: /^System status$|^系统状态$/,
-        path: /\/settings\/system-status$/u,
-        heading: /^System status$|^系统状态$/,
-      });
     });
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password]);

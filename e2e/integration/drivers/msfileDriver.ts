@@ -13,9 +13,17 @@ export interface MsFileSupplierDraft {
   readonly addresses: readonly string[];
 }
 
-/** `/settings/system` 的 MSFile group；aria-label 是它的业务身份。 */
+/** `/settings/local-files` 的本地文件设置区；aria-label 是它的业务身份。 */
 function msfileSettings(page: Page): Locator {
-  return page.getByRole("region", { name: /^MSFile$/u });
+  return page.getByRole("region", { name: /^Local files$|^本地文件$/u });
+}
+
+export async function openMsFileSettingsPage(page: Page): Promise<void> {
+  await navigateToBusinessPage(page, {
+    label: /^Local files$|^本地文件$/u,
+    path: /\/settings\/local-files$/u,
+  });
+  await expect(page.getByRole("heading", { name: /^Local files$|^本地文件$/u })).toBeVisible();
 }
 
 /** 首页/路由共用的「通过 Seed 获取文件」模块。 */
@@ -43,7 +51,7 @@ export async function saveMsFilePriceLimits(
   input: { readonly seedMaxPriceSatoshis: string; readonly blockMaxPriceSatoshis: string },
 ): Promise<void> {
   const settings = msfileSettings(page);
-  await expect(settings.getByRole("heading", { name: /Price limits|价格限制/ })).toBeVisible();
+  await expect(settings.getByRole("heading", { name: /Spending controls|支付与限额/ })).toBeVisible();
   await settings.getByLabel(/Seed max price|Seed 单个最高金额/).first().fill(input.seedMaxPriceSatoshis);
   await settings.getByLabel(/Block max price|Block 单个最高金额/).first().fill(input.blockMaxPriceSatoshis);
   await settings.getByRole("button", { name: /Save price limits|保存价格限制/ }).click();
@@ -52,6 +60,7 @@ export async function saveMsFilePriceLimits(
 
 /** 保存一个真实供应商；地址由 Resource 提供，Driver 不推导 PeerId。 */
 export async function addMsFileSupplier(page: Page, supplier: MsFileSupplierDraft): Promise<void> {
+  await page.getByRole("button", { name: /^Add$|^添加$/u }).click();
   const settings = msfileSettings(page);
   await settings.getByLabel(/Display name|显示名称/).first().fill(supplier.name);
   await settings.getByLabel(/Supplier public key|供应商公钥/).first().fill(supplier.supplierPublicKeyHex);

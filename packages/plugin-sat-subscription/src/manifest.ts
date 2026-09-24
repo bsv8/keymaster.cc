@@ -14,7 +14,6 @@ import type {
   SatSubscriptionSpiService,
   SatSubscriptionSettingsSnapshot,
   SessionCoordinatorClient,
-  SystemSettingsRegistry,
   SystemStatusRegistry,
   WindowP2pExecutorLaneRegistry
 } from "@keymaster/contracts";
@@ -25,7 +24,6 @@ import {
   SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
   SAT_COORDINATOR_CONTROL_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   SYSTEM_STATUS_REGISTRY_CAPABILITY,
   type SatCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
@@ -38,7 +36,7 @@ import { SatWindowP2pLane } from "./satWindowLane.js";
 import { createSatWorkerAdminService, createSatWorkerChannelRuntime, createSatWorkerSpiService } from "./satWorkerProxy.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
-export const SAT_SUBSCRIPTION_ROUTE_PATH = "/settings/system";
+export const SAT_SUBSCRIPTION_ROUTE_PATH = "/settings/system-status";
 
 const resources: I18nPluginResources = {
   namespace: "common",
@@ -52,7 +50,7 @@ const resources: I18nPluginResources = {
       "sat.settings.connection": "Connection",
       "sat.settings.actions": "Actions",
       "sat.settings.edit": "Edit",
-      "sat.settings.editing": "Editing supplier",
+      "sat.settings.editing": "Edit supplier",
       "sat.settings.enable": "Enable",
       "sat.settings.disable": "Disable",
       "sat.settings.enabled": "Enabled",
@@ -70,7 +68,9 @@ const resources: I18nPluginResources = {
       "sat.settings.deleteConfirm": "Delete this supplier? Its balance will not be collected automatically.",
       "sat.settings.deleted": "Supplier deleted; its balance was not collected.",
       "sat.settings.empty": "No suppliers configured.",
-      "sat.settings.add": "Add or update supplier",
+      "sat.settings.add": "Add supplier",
+      "sat.settings.saveEdit": "Save changes",
+      "sat.settings.supplierEditor.description": "Enter the supplier identity and connection addresses. Saving an existing supplier updates its current configuration.",
       "sat.settings.id": "Supplier id",
       "sat.settings.name": "Display name",
       "sat.settings.key": "Supplier public key",
@@ -113,7 +113,7 @@ const resources: I18nPluginResources = {
       "sat.settings.connection": "连接状态",
       "sat.settings.actions": "操作",
       "sat.settings.edit": "编辑",
-      "sat.settings.editing": "正在编辑供应商",
+      "sat.settings.editing": "编辑供应商",
       "sat.settings.enable": "启用",
       "sat.settings.disable": "停用",
       "sat.settings.enabled": "已启用",
@@ -131,7 +131,9 @@ const resources: I18nPluginResources = {
       "sat.settings.deleteConfirm": "确认删除该供应商？删除不会自动回收供应商余额。",
       "sat.settings.deleted": "供应商已删除；余额不会自动回收。",
       "sat.settings.empty": "尚未配置供应商。",
-      "sat.settings.add": "新增或更新供应商",
+      "sat.settings.add": "新增供应商",
+      "sat.settings.saveEdit": "保存修改",
+      "sat.settings.supplierEditor.description": "填写供应商身份与连接地址；保存已有供应商时会更新原配置。",
       "sat.settings.id": "供应商编号",
       "sat.settings.name": "显示名称",
       "sat.settings.key": "供应商公钥",
@@ -191,9 +193,8 @@ const satSubscriptionPluginDefinition = {
     ],
     dependencies: defineRuntimeUnitDependencies([
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
-      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "设置页业务读取统一经过 Resource Store" },
-      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 系统设置" },
-      { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 运行诊断" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "广播网关业务读取统一经过 Resource Store" },
+      { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 广播网关" },
     ]),
   }, {
     id: "sat-subscription.coordinator-worker",
@@ -248,19 +249,8 @@ const satSubscriptionPluginDefinition = {
     const spi = createSatWorkerSpiService(coordinator);
     ctx.provide(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, spi);
 
-    const settings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
     const status = ctx.capability(SYSTEM_STATUS_REGISTRY_CAPABILITY);
-    const settingId = "sat-subscription.system-settings";
     const statusId = "sat-subscription.system-status";
-    settings.register({
-      id: settingId,
-      group: { id: "sat-subscription", label: { key: "sat.settings.title", fallback: "SatSubscription" }, order: 55 },
-      label: { key: "sat.settings.title", fallback: "SatSubscription" },
-      description: { key: "sat.settings.description", fallback: "SSP / Channel / SPI" },
-      component: SatSubscriptionSettings,
-      order: 10,
-      visibleWhen: ({ unlocked }) => unlocked
-    });
     status.register({
       id: statusId,
       path: SAT_SUBSCRIPTION_ROUTE_PATH,
@@ -272,7 +262,6 @@ const satSubscriptionPluginDefinition = {
 
     ctx.onDispose(async () => {
       offLane();
-      settings.unregister(settingId);
       status.unregister(statusId);
     });
   }

@@ -211,16 +211,14 @@
 
 /* ---------- System status modules ---------- */
 .system-status-page { max-width: 960px; }
-.system-status-page__tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
-.system-status-page__tab { min-height: 40px; padding: 8px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
-.system-status-page__tab.is-active { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
-.system-status-page__tab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.system-status-page__module { background: var(--surface); border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px); padding: 18px; }
+.system-status-page__modules { display: flex; flex-direction: column; gap: 20px; }
+.system-status-page__module { background: var(--surface); border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px); padding: 20px; }
 .system-status-page__module-header { margin: 0 0 18px; }
-.system-status-page__module-header h2 { margin: 0; font-size: 16px; }
+.system-status-page__module-header h2 { margin: 0; font-size: 17px; }
 .system-status-page__module-header p, .system-status-page__empty { margin: 6px 0 0; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
 @media (max-width: 640px) {
   .system-settings-page__group { padding: 14px; }
+  .system-status-page__module { padding: 14px; }
 }
 
 /* ---------- pm-state badges ---------- */

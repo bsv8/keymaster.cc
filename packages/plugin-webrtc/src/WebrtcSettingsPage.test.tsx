@@ -6,7 +6,7 @@
 // globalThis 注入。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, fireEvent, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { WebrtcSettingsPage } from "./WebrtcSettingsPage.js";
 import { createMemoryWebrtcConfigStore } from "./webrtcConfig.js";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
@@ -58,6 +58,7 @@ function makeFakeService(
     sendImage: vi.fn(async () => undefined),
     sendFile: vi.fn(async () => undefined),
     consumeRemoteNotice: () => undefined,
+    testStunServer: async (url: string): Promise<StunDiagnosticResult> => ({ url, status: "ok" }),
     runStunDiagnostics: async (): Promise<StunDiagnosticResult[]> => [],
     getStunServers: () => cfg.stunServers.slice(),
     applyStunServers: async (input) => {
@@ -113,10 +114,11 @@ describe("WebrtcSettingsPage", () => {
       stunServers: ["stun:stun.l.google.com:19302"]
     });
     render(<WebrtcSettingsPage />);
-    expect(screen.getByDisplayValue("stun:stun.l.google.com:19302")).toBeTruthy();
+    expect(screen.getByText("stun:stun.l.google.com:19302")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add STUN server" })).toBeTruthy();
   });
 
-  it("blur-save persists to service.applyStunServers", async () => {
+  it("keeps save disabled until the new STUN server test succeeds", async () => {
     activeTestService.service = makeFakeService(
       { stunServers: ["stun:stun.l.google.com:19302"] },
       {
@@ -126,29 +128,39 @@ describe("WebrtcSettingsPage", () => {
       }
     );
     render(<WebrtcSettingsPage />);
-    const input = screen.getAllByDisplayValue("stun:stun.l.google.com:19302")[0] as HTMLInputElement;
+    fireEvent.click(screen.getByRole("button", { name: "Add STUN server" }));
+    const editor = screen.getByRole("dialog");
+    const input = within(editor).getByLabelText("STUN server URL") as HTMLInputElement;
+    const save = within(editor).getByRole("button", { name: "Save STUN server" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
     fireEvent.change(input, { target: { value: "stun:new.example.com:3478" } });
-    fireEvent.blur(input);
-    await waitFor(() => {
-      expect(activeTestService.applied).not.toBeNull();
-    });
-    expect(activeTestService.applied).toEqual(["stun:new.example.com:3478"]);
+    expect(save.disabled).toBe(true);
+    fireEvent.click(within(editor).getByRole("button", { name: "Test STUN server" }));
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(activeTestService.applied).toEqual([
+      "stun:stun.l.google.com:19302",
+      "stun:new.example.com:3478"
+    ]));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("invalid URL on blur triggers rollback and does not apply", async () => {
+  it("keeps save disabled when the STUN test times out", async () => {
     activeTestService.service = makeFakeService(
       { stunServers: ["stun:stun.l.google.com:19302"] },
       {
-        applyStunServers: async (xs) => {
-          activeTestService.applied = [...xs];
-        }
+        testStunServer: async (url): Promise<StunDiagnosticResult> => ({ url, status: "timeout" })
       }
     );
     render(<WebrtcSettingsPage />);
-    const input = screen.getAllByDisplayValue("stun:stun.l.google.com:19302")[0] as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "turn:bad.example.com:3478" } });
-    fireEvent.blur(input);
-    await new Promise((r) => setTimeout(r, 50));
+    fireEvent.click(screen.getByRole("button", { name: "Add STUN server" }));
+    const editor = screen.getByRole("dialog");
+    fireEvent.change(within(editor).getByLabelText("STUN server URL"), {
+      target: { value: "stun:timeout.example.com:3478" }
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Test STUN server" }));
+    await waitFor(() => expect(within(editor).getByRole("status").textContent).toBe("timeout"));
+    expect((within(editor).getByRole("button", { name: "Save STUN server" }) as HTMLButtonElement).disabled).toBe(true);
     expect(activeTestService.applied).toBeNull();
   });
 
@@ -162,7 +174,7 @@ describe("WebrtcSettingsPage", () => {
       }
     );
     render(<WebrtcSettingsPage />);
-    const removeBtns = screen.getAllByLabelText("Remove");
+    const removeBtns = screen.getAllByRole("button", { name: "Remove" });
     fireEvent.click(removeBtns[0]!);
     await waitFor(() => {
       expect(activeTestService.applied).not.toBeNull();

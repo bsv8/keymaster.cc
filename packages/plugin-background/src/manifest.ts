@@ -10,7 +10,6 @@ import type {
   PluginManifest,
   PluginSetup,
   ResourceRegistry,
-  SystemSettingsRegistry,
   TopbarRegistry,
   BackgroundCoordinatorControl
 } from "@keymaster/contracts";
@@ -18,10 +17,12 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   BACKGROUND_COORDINATOR_CONTROL_CAPABILITY,
+  BREADCRUMB_REGISTRY_CAPABILITY,
+  BUSINESS_REGISTRY_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
+  SETTINGS_REGISTRY_CAPABILITY,
   TOPBAR_REGISTRY_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
@@ -53,6 +54,7 @@ const backgroundResources: I18nPluginResources = {
       "background.tray.state.blocked": "Waiting for condition",
       "background.tray.state.idle": "Waiting to sync",
       "background.settings.title": "Smart scheduling",
+      "background.settings.crumb.settings": "Settings",
       "background.settings.description": "Smart scheduling refreshes the BSV balance snapshot immediately after unlock and then every time the WoC queue stays idle for 2 seconds, so idle time is always used without competing with your actions. The sync management below controls the other background tasks.",
       "background.settings.syncManagement": "Sync management",
       "background.settings.syncManagementDesc": "Each task can have its own sync interval. \"Off\" disables automatic sync for that task; the tray's \"Sync once now\" still works.",
@@ -94,6 +96,7 @@ const backgroundResources: I18nPluginResources = {
       "background.tray.state.blocked": "等待条件",
       "background.tray.state.idle": "等待同步",
       "background.settings.title": "智能调度",
+      "background.settings.crumb.settings": "设置",
       "background.settings.description": "智能调度在解锁后立即刷新一次 BSV 余额快照，之后只要 WoC 队列空闲满 2 秒就自动刷新：所有闲暇时间都用来获取余额，用户操作时自动让路。下面的「同步管理」控制其余后台任务。",
       "background.settings.syncManagement": "同步管理",
       "background.settings.syncManagementDesc": "每个任务可以单独设置同步间隔；选择「关闭」后该任务不再自动同步，托盘的「立即同步一次」仍然可用。",
@@ -141,7 +144,9 @@ const backgroundPluginDefinition = {
     ],
     dependencies: defineRuntimeUnitDependencies([
       { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "需要向 Topbar 注册任务托盘" },
-      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册后台同步系统设置" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置入口" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置面包屑" },
+      { capability: SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置路由" },
     ]),
   }],
   i18n: backgroundResources,
@@ -217,20 +222,40 @@ const backgroundPluginDefinition = {
       order: 100
     });
 
-    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
-    systemSettings.register({
-      id: "background.system-settings.schedule",
-      group: {
-        id: "background-sync",
-        label: { key: "background.settings.title", fallback: "Background sync" },
-        order: 20
-      },
-      label: { key: "background.settings.syncManagement", fallback: "Sync management" },
+    const settings = ctx.capability(SETTINGS_REGISTRY_CAPABILITY);
+    settings.register({
+      id: "background.smart-scheduling",
+      path: "/settings/smart-scheduling",
+      label: { key: "background.settings.title", fallback: "Smart scheduling" },
       description: { key: "background.settings.description", fallback: "Smart scheduling and per-task sync intervals." },
       component: BackgroundSettingsPage,
       order: 10,
-      replacesSettingsRouteId: "background.settings",
+      icon: "Activity",
       visibleWhen: ({ unlocked }) => unlocked
+    });
+
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
+    business.registerFeature("background", "settings", {
+      id: "settings.smart-scheduling",
+      label: { key: "background.settings.title", fallback: "Smart scheduling" },
+      description: { key: "background.settings.description", fallback: "Smart scheduling and per-task sync intervals." },
+      order: 14,
+      icon: "Activity",
+      entry: {
+        path: "/settings/smart-scheduling",
+        component: BackgroundSettingsPage,
+        visibleWhen: ({ unlocked }) => unlocked
+      }
+    });
+    const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
+    breadcrumbs.register({
+      id: "background.settings.crumbs",
+      order: 14,
+      match: (path) => path === "/settings/smart-scheduling",
+      resolve: () => [
+        { label: { key: "background.settings.crumb.settings", fallback: "Settings" } },
+        { label: { key: "background.settings.title", fallback: "Smart scheduling" } }
+      ]
     });
 
     return () => {

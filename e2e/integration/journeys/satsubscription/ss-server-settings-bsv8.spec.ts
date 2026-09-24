@@ -80,11 +80,11 @@ test(JOURNEY_ID + "：bsv8 缺省网关设置页三功能", async ({ page, conte
       );
     });
 
-    await test.step("打开系统设置并确认 bsv8 缺省卡片", async () => {
+    await test.step("打开广播网关并确认 bsv8 缺省卡片", async () => {
       await openSettingsPage(page, {
-        label: /^System$|^系统$/u,
-        path: /\/settings\/system$/u,
-        heading: /^System$|^系统$/u,
+        label: /^Broadcast gateway$|^广播网关$/u,
+        path: /\/settings\/system-status$/u,
+        heading: /^Broadcast gateway$|^广播网关$/u,
       });
       const row = page.locator(`[data-supplier-id="${DEFAULT_SUPPLIER_ID}"]`);
       await expect(row).toBeVisible({ timeout: 30_000 });

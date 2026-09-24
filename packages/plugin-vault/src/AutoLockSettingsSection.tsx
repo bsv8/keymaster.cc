@@ -1,19 +1,6 @@
-// packages/plugin-vault/src/AutoLockSettingsSection.tsx
-// 自动锁定设置区：2 / 5 / 15 分钟 + 24 小时 + 永不 + 自定义（折叠式）。
-//
-// 设计缘由（UE 简单简洁）：
-//   - 默认只露出一行：当前状态 + 快捷选项（2 / 5 / 15 / 24小时 / 永不 /
-//     自定义）；自定义输入框默认隐藏，不把页面摊开。24 小时后面就是永不。
-//   - 点「自定义」后快捷选项收起，只留紧凑的一行：返回 icon + 分钟输入 +
-//     应用；返回 icon 一键回到快捷选项，返回即丢弃草稿。
-//   - 自定义输入点应用/回车才保存，输入过程中绝不禁用输入框、不打断 typing。自定义只能等于、不能超过 24 小时（1440 分钟）。
-//   - 当前生效值若为自定义分钟，自定义按钮高亮；点开后输入框预填该值。
-//   - 1 分钟起步的整数校验在本地先拦，错误就地提示；保存失败回滚到实际
-//     生效值，不让 UI 停在假值上。
-//   - 0 = 永不（一直不锁），与后台「0 = 关闭」一致；绝不表示立即锁定。
-
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft } from "lucide-react";
+import { Check, Clock3, Infinity as InfinityIcon, SlidersHorizontal, Timer } from "lucide-react";
+import { Button, Modal, PageHeader } from "@keymaster/ui";
 import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import {
@@ -32,7 +19,6 @@ function timeoutMsToMinutesText(timeoutMs: number): string {
   return String(Math.round(timeoutMs / 60000));
 }
 
-/** 已有值是否命中不上候选（预设/永不）：命中不上 → 自定义。 */
 function isCustomTimeout(timeoutMs: number): boolean {
   return (
     !(AUTO_LOCK_PRESET_OPTIONS_MS as readonly number[]).includes(timeoutMs) &&
@@ -40,7 +26,6 @@ function isCustomTimeout(timeoutMs: number): boolean {
   );
 }
 
-/** 自定义输入解析为超时毫秒；空/非法/超过 24 小时返回 undefined（不保存）。 */
 function parseCustomMinutesToMs(raw: string): number | undefined {
   const trimmed = raw.trim();
   if (trimmed === "") return undefined;
@@ -53,9 +38,8 @@ function parseCustomMinutesToMs(raw: string): number | undefined {
   return ms;
 }
 
-type I18nT = (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string;
+type I18nT = (key: string, values?: { defaultValue?: string; [key: string]: string | number | boolean | null | undefined }) => string;
 
-/** 自定义输入的即时校验文案；空值返回 null（输入过程中不打扰，失焦/回车另行处理）。 */
 function customInputError(raw: string, t: I18nT): string | null {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
@@ -76,6 +60,21 @@ function customInputError(raw: string, t: I18nT): string | null {
   return null;
 }
 
+export function AutoLockSettingsPage() {
+  const { t } = useI18n();
+  return (
+    <div className="autolock-settings-page">
+      <PageHeader
+        title={t("vault.autolock.page.title", { defaultValue: "自动锁屏" })}
+        description={t("vault.autolock.page.description", {
+          defaultValue: "无操作一段时间后自动锁屏，修改立即生效。"
+        })}
+      />
+      <AutoLockSettingsSection />
+    </div>
+  );
+}
+
 export function AutoLockSettingsSection() {
   const service = useOptionalCapability(AUTOLOCK_SERVICE_CAPABILITY);
   if (!service) {
@@ -88,7 +87,6 @@ function AvailableAutoLockSettingsSection({ service }: { service: AutoLockServic
   const host = usePluginHost();
   const { t } = useI18n();
   const store = host.resourceStore;
-
   const settings = useOptionalResourceSelector<AutoLockSettings, AutoLockSettings>(
     store,
     "vault.autoLockSettings",
@@ -99,55 +97,37 @@ function AvailableAutoLockSettingsSection({ service }: { service: AutoLockServic
 
   const effectiveTimeoutMs = settings.timeoutMs;
   const isNever = effectiveTimeoutMs === AUTO_LOCK_NEVER_TIMEOUT_MS;
-  const activePreset = (AUTO_LOCK_PRESET_OPTIONS_MS as readonly number[]).includes(effectiveTimeoutMs)
-    ? effectiveTimeoutMs
-    : undefined;
   const isCustomValue = isCustomTimeout(effectiveTimeoutMs);
-  // 整小时的值用小时展示（如 24 小时），其余用分钟。
   const effectiveMinutes = Math.round(effectiveTimeoutMs / 60000);
-  const wholeHours =
-    !isNever && effectiveMinutes >= 60 && effectiveMinutes % 60 === 0
-      ? effectiveMinutes / 60
-      : undefined;
-  const isWholeHours = wholeHours !== undefined;
+  const wholeHours = !isNever && effectiveMinutes >= 60 && effectiveMinutes % 60 === 0
+    ? effectiveMinutes / 60
+    : undefined;
 
   const [pending, setPending] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  // 折叠态：false = 快捷选项行；true = 自定义输入行（快捷选项收起）。
-  // 显示时先比对已有值：命中预设/永不 → 快捷行；命中不上 → 直接进自定义行。
-  // 懒初始化避免首屏闪一下快捷行；effect 只处理异步到达/跨 tab 收敛。
-  const [customOpen, setCustomOpen] = useState(() => isCustomTimeout(settings.timeoutMs));
-  // 自定义输入框的文本值；打开时预填当前值，保存中不被跨 tab 快照覆盖。
-  const [customMinutes, setCustomMinutes] = useState<string>(() =>
-    settings.timeoutMs === AUTO_LOCK_NEVER_TIMEOUT_MS
-      ? ""
-      : String(Math.round(settings.timeoutMs / 60000))
-  );
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customMinutes, setCustomMinutes] = useState("");
   const [customError, setCustomError] = useState<string | null>(null);
   const pendingRef = useRef(false);
-  const savedRef = useRef<number | null>(null);
   const customInputRef = useRef<HTMLInputElement>(null);
 
-  // 生效值为自定义分钟时自动展开自定义行（首屏 / 跨 tab 收敛），
-  // 其它情况不强行收起——用户正在输入时不丢草稿。
-  useEffect(() => {
-    if (savedRef.current !== null && savedRef.current === effectiveTimeoutMs) {
-      savedRef.current = null;
-    }
-    if (pendingRef.current) return;
-    if (isCustomValue) {
-      setCustomOpen(true);
-      setCustomMinutes(String(Math.round(effectiveTimeoutMs / 60000)));
-      setCustomError(null);
-    }
-  }, [effectiveTimeoutMs, isCustomValue]);
-
-  // 展开自定义行后自动聚焦输入框，方便直接 typing。
   useEffect(() => {
     if (customOpen) customInputRef.current?.focus();
   }, [customOpen]);
 
+  function durationLabel(timeoutMs: number): string {
+    if (timeoutMs === AUTO_LOCK_NEVER_TIMEOUT_MS) {
+      return t("vault.autolock.preset.never", { defaultValue: "永不" });
+    }
+    const minutes = Math.round(timeoutMs / 60000);
+    const hours = minutes >= 60 && minutes % 60 === 0 ? minutes / 60 : undefined;
+    return hours !== undefined
+      ? t("vault.autolock.preset.hours", { defaultValue: "{{hours}} 小时", hours })
+      : t("vault.autolock.preset.minutes", { defaultValue: "{{minutes}} 分钟", minutes });
+  }
+
   function openCustom() {
+    if (pending) return;
     setCustomMinutes(isNever ? "" : String(Math.round(effectiveTimeoutMs / 60000)));
     setCustomError(null);
     setSaveError(null);
@@ -155,16 +135,14 @@ function AvailableAutoLockSettingsSection({ service }: { service: AutoLockServic
   }
 
   function closeCustom() {
+    if (pending) return;
     setCustomOpen(false);
     setCustomError(null);
   }
 
-  async function applyTimeoutMs(nextTimeoutMs: number) {
-    if (pendingRef.current) return;
-    if (nextTimeoutMs === effectiveTimeoutMs) {
-      setCustomError(null);
-      return;
-    }
+  async function applyTimeoutMs(nextTimeoutMs: number): Promise<boolean> {
+    if (pendingRef.current) return false;
+    if (nextTimeoutMs === effectiveTimeoutMs) return true;
     const previousTimeoutMs = service.getSettings().timeoutMs;
     pendingRef.current = true;
     setPending(true);
@@ -177,36 +155,20 @@ function AvailableAutoLockSettingsSection({ service }: { service: AutoLockServic
           "message" in result ? result.message : t("vault.autolock.saveFailed", { defaultValue: "保存失败，请稍后重试。" })
         );
       }
-      savedRef.current = nextTimeoutMs;
-      // 自定义值若命中预设/永不，自动收回到快捷选项行，保持界面简洁。
-      if (
-        (AUTO_LOCK_PRESET_OPTIONS_MS as readonly number[]).includes(nextTimeoutMs) ||
-        nextTimeoutMs === AUTO_LOCK_NEVER_TIMEOUT_MS
-      ) {
-        setCustomOpen(false);
-      }
+      return true;
     } catch (error: unknown) {
       setSaveError(error instanceof Error ? error.message : String(error));
-      // 回滚自定义输入框到实际生效值，避免停留在未生效的假值上。
       setCustomMinutes(
         previousTimeoutMs === AUTO_LOCK_NEVER_TIMEOUT_MS ? "" : timeoutMsToMinutesText(previousTimeoutMs)
       );
+      return false;
     } finally {
       pendingRef.current = false;
       setPending(false);
     }
   }
 
-  function applyPreset(presetMs: number) {
-    void applyTimeoutMs(presetMs);
-  }
-
-  function applyNever() {
-    void applyTimeoutMs(AUTO_LOCK_NEVER_TIMEOUT_MS);
-  }
-
-  /** 提交自定义输入：点应用或回车才保存，输入过程中绝不打断。 */
-  function applyCustom() {
+  async function applyCustom() {
     if (pendingRef.current) return;
     const trimmed = customMinutes.trim();
     if (trimmed === "") {
@@ -222,140 +184,167 @@ function AvailableAutoLockSettingsSection({ service }: { service: AutoLockServic
       return;
     }
     setCustomMinutes(String(Math.round(timeoutMs / 60000)));
-    void applyTimeoutMs(timeoutMs);
+    if (await applyTimeoutMs(timeoutMs)) closeCustom();
   }
 
-  /** 失焦只做校验提示，不提交。 */
-  function handleCustomBlur() {
-    if (pendingRef.current) return;
-    if (customMinutes.trim() === "") {
-      setCustomError(t("vault.autolock.custom.required", { defaultValue: "请输入分钟数（至少 1 分钟）。" }));
-      return;
-    }
-    const err = customInputError(customMinutes, t);
-    if (err) setCustomError(err);
-  }
+  const currentDescription = isNever
+    ? t("vault.autolock.current.never", { defaultValue: "当前：永不自动锁定（一直不锁）。" })
+    : wholeHours !== undefined
+      ? t("vault.autolock.current.timeoutHours", {
+          defaultValue: "当前：无操作 {{hours}} 小时后自动锁定。",
+          hours: wholeHours,
+        })
+      : t("vault.autolock.current.timeout", {
+          defaultValue: "当前：无操作 {{minutes}} 分钟后自动锁定。",
+          minutes: effectiveMinutes,
+        });
 
   return (
     <div className="autolock-settings">
-      <p className="autolock-settings__current" role="status">
-        {isNever
-          ? t("vault.autolock.current.never", { defaultValue: "当前：永不自动锁定（一直不锁）。" })
-          : isWholeHours ? (
-            t("vault.autolock.current.timeoutHours", {
-              defaultValue: "当前：无操作 {{hours}} 小时后自动锁定。",
-              hours: wholeHours,
-            })
-          ) : (
-            t("vault.autolock.current.timeout", {
-              defaultValue: "当前：无操作 {{minutes}} 分钟后自动锁定。",
-              minutes: Math.round(effectiveTimeoutMs / 60000),
-            })
-          )}
-      </p>
+      <section className="autolock-summary" aria-labelledby="autolock-summary-title">
+        <div className="autolock-summary__icon" aria-hidden="true"><Timer size={22} /></div>
+        <div className="autolock-summary__content">
+          <span id="autolock-summary-title">{t("vault.autolock.summary.title", { defaultValue: "当前策略" })}</span>
+          <strong>{durationLabel(effectiveTimeoutMs)}</strong>
+          <p role="status">{currentDescription}</p>
+        </div>
+        <span className={`autolock-summary__badge ${isNever ? "is-off" : "is-on"}`}>
+          {isNever
+            ? t("vault.autolock.summary.disabled", { defaultValue: "已关闭" })
+            : t("vault.autolock.summary.enabled", { defaultValue: "已启用" })}
+        </span>
+      </section>
 
-      {customOpen ? (
-        <div className="autolock-settings__custom">
-          <div className="autolock-settings__custom-row">
-            <button
-              type="button"
-              className="autolock-settings__back"
-              disabled={pending}
-              onClick={closeCustom}
-              aria-label={t("vault.autolock.back.label", { defaultValue: "返回快捷选项" })}
-              title={t("vault.autolock.back.label", { defaultValue: "返回快捷选项" })}
-            >
-              <ChevronLeft size={16} aria-hidden="true" />
-            </button>
+      <section className="autolock-duration" aria-labelledby="autolock-duration-title">
+        <div className="autolock-duration__header">
+          <h2 id="autolock-duration-title">{t("vault.autolock.presets.title", { defaultValue: "无操作后锁定" })}</h2>
+          <p>{t("vault.autolock.presets.description", { defaultValue: "选择钱包保持解锁的时长，设置会立即生效。" })}</p>
+        </div>
+        <div
+          className="autolock-duration__options"
+          role="group"
+          aria-label={t("vault.autolock.presets.label", { defaultValue: "锁定时长" })}
+        >
+          {(AUTO_LOCK_PRESET_OPTIONS_MS as readonly number[]).map((presetMs) => {
+            const active = effectiveTimeoutMs === presetMs;
+            const label = durationLabel(presetMs);
+            return (
+              <Button
+                key={presetMs}
+                className={`autolock-option ${active ? "is-active" : ""}`}
+                variant={active ? "primary" : "secondary"}
+                aria-label={label}
+                aria-pressed={active}
+                disabled={pending}
+                onClick={() => void applyTimeoutMs(presetMs)}
+              >
+                <span className="autolock-option__content">
+                  <span className="autolock-option__value">
+                    {presetMs === 24 * 60 * 60 * 1000
+                      ? <Clock3 size={16} aria-hidden="true" />
+                      : <Timer size={16} aria-hidden="true" />}
+                    <strong>{label}</strong>
+                    {active ? <Check size={15} aria-hidden="true" /> : null}
+                  </span>
+                  <small>{t("vault.autolock.presets.optionHint", { defaultValue: "无操作后" })}</small>
+                </span>
+              </Button>
+            );
+          })}
+          <Button
+            className={`autolock-option ${isNever ? "is-active" : ""}`}
+            variant={isNever ? "primary" : "secondary"}
+            aria-label={t("vault.autolock.preset.never", { defaultValue: "永不" })}
+            aria-pressed={isNever}
+            disabled={pending}
+            onClick={() => void applyTimeoutMs(AUTO_LOCK_NEVER_TIMEOUT_MS)}
+          >
+            <span className="autolock-option__content">
+              <span className="autolock-option__value">
+                <InfinityIcon size={16} aria-hidden="true" />
+                <strong>{t("vault.autolock.preset.never", { defaultValue: "永不" })}</strong>
+                {isNever ? <Check size={15} aria-hidden="true" /> : null}
+              </span>
+              <small>{t("vault.autolock.presets.neverHint", { defaultValue: "一直保持解锁" })}</small>
+            </span>
+          </Button>
+          <Button
+            className={`autolock-option ${isCustomValue ? "is-active" : ""}`}
+            variant={isCustomValue ? "primary" : "secondary"}
+            aria-label={t("vault.autolock.preset.custom", { defaultValue: "自定义" })}
+            aria-pressed={isCustomValue}
+            disabled={pending}
+            onClick={openCustom}
+          >
+            <span className="autolock-option__content">
+              <span className="autolock-option__value">
+                <SlidersHorizontal size={16} aria-hidden="true" />
+                <strong>{isCustomValue ? durationLabel(effectiveTimeoutMs) : t("vault.autolock.preset.custom", { defaultValue: "自定义" })}</strong>
+                {isCustomValue ? <Check size={15} aria-hidden="true" /> : null}
+              </span>
+              <small>{t("vault.autolock.presets.customHint", { defaultValue: "输入精确时长" })}</small>
+            </span>
+          </Button>
+        </div>
+      </section>
+
+      {saveError && !customOpen ? <p className="autolock-settings__error" role="alert">{saveError}</p> : null}
+
+      <Modal
+        open={customOpen}
+        title={t("vault.autolock.custom.modalTitle", { defaultValue: "自定义自动锁屏" })}
+        onClose={closeCustom}
+        data-testid="autolock-custom-editor"
+        footer={
+          <>
+            <Button variant="ghost" disabled={pending} onClick={closeCustom}>
+              {t("common.action.cancel", { defaultValue: "取消" })}
+            </Button>
+            <Button loading={pending} onClick={() => void applyCustom()}>
+              {pending
+                ? t("vault.autolock.custom.applying", { defaultValue: "保存中…" })
+                : t("vault.autolock.custom.apply", { defaultValue: "应用" })}
+            </Button>
+          </>
+        }
+      >
+        <p className="autolock-custom-editor__description">
+          {t("vault.autolock.custom.modalDescription", {
+            defaultValue: "输入 1 到 1440 分钟之间的整数时长。"
+          })}
+        </p>
+        <label className="autolock-custom-editor__field">
+          <span>{t("vault.autolock.custom.label", { defaultValue: "自定义分钟数（1～1440 分钟）" })}</span>
+          <div className="autolock-custom-editor__input-row">
             <input
               ref={customInputRef}
               id="autolock-custom-minutes"
-              className="autolock-settings__custom-input"
               type="number"
               min={1}
               max={AUTO_LOCK_MAX_CUSTOM_MINUTES}
               step={1}
               inputMode="numeric"
-              aria-label={t("vault.autolock.custom.label", { defaultValue: "自定义分钟数（1～1440 分钟）" })}
               placeholder={t("vault.autolock.custom.placeholder", { defaultValue: "例如：10" })}
               value={customMinutes}
               disabled={pending}
-              onChange={(e) => {
-                setCustomMinutes(e.currentTarget.value);
+              onChange={(event) => {
+                setCustomMinutes(event.currentTarget.value);
                 setCustomError(null);
               }}
-              onBlur={handleCustomBlur}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  applyCustom();
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void applyCustom();
                 }
               }}
             />
-            <span className="autolock-settings__custom-unit">
-              {t("vault.autolock.custom.unit", { defaultValue: "分钟" })}
-            </span>
-            <button
-              type="button"
-              className="autolock-settings__custom-apply"
-              disabled={pending}
-              onClick={applyCustom}
-            >
-              {pending
-                ? t("vault.autolock.custom.applying", { defaultValue: "保存中…" })
-                : t("vault.autolock.custom.apply", { defaultValue: "应用" })}
-            </button>
+            <span>{t("vault.autolock.custom.unit", { defaultValue: "分钟" })}</span>
           </div>
-          {customError ? <p className="autolock-settings__error">{customError}</p> : null}
-        </div>
-      ) : (
-        <div
-          className="autolock-settings__presets"
-          role="group"
-          aria-label={t("vault.autolock.presets.label", { defaultValue: "快捷时长" })}
-        >
-          {(AUTO_LOCK_PRESET_OPTIONS_MS as readonly number[]).map((presetMs) => {
-            const presetMinutes = Math.round(presetMs / 60000);
-            const presetHours =
-              presetMinutes >= 60 && presetMinutes % 60 === 0 ? presetMinutes / 60 : undefined;
-            const active = activePreset === presetMs;
-            return (
-              <button
-                key={presetMs}
-                type="button"
-                className={`autolock-settings__preset ${active ? "is-active" : ""}`}
-                aria-pressed={active}
-                disabled={pending}
-                onClick={() => applyPreset(presetMs)}
-              >
-                {presetHours !== undefined
-                  ? t("vault.autolock.preset.hours", { defaultValue: "{{hours}}小时", hours: presetHours })
-                  : t("vault.autolock.preset.minutes", { defaultValue: "{{minutes}} 分钟", minutes: presetMinutes })}
-              </button>
-            );
-          })}
-          <button
-            type="button"
-            className={`autolock-settings__preset autolock-settings__preset--never ${isNever ? "is-active" : ""}`}
-            aria-pressed={isNever}
-            disabled={pending}
-            onClick={applyNever}
-          >
-            {t("vault.autolock.preset.never", { defaultValue: "永不" })}
-          </button>
-          <button
-            type="button"
-            className={`autolock-settings__preset autolock-settings__preset--custom ${isCustomValue ? "is-active" : ""}`}
-            aria-pressed={isCustomValue}
-            disabled={pending}
-            onClick={openCustom}
-          >
-            {t("vault.autolock.preset.custom", { defaultValue: "自定义" })}
-          </button>
-        </div>
-      )}
-
-      {saveError ? <p className="autolock-settings__error">{saveError}</p> : null}
+        </label>
+        {customError || saveError ? (
+          <p className="autolock-custom-editor__error" role="alert">{customError ?? saveError}</p>
+        ) : null}
+      </Modal>
     </div>
   );
 }

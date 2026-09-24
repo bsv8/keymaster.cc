@@ -46,7 +46,6 @@ import {
   ROUTE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   SETTINGS_REGISTRY_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
   VAULT_LOCAL_SECRET_CAPABILITY,
@@ -57,7 +56,7 @@ import {
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
 import { VaultUnlockPage } from "./VaultUnlockPage.js";
-import { AutoLockSettingsSection } from "./AutoLockSettingsSection.js";
+import { AutoLockSettingsPage } from "./AutoLockSettingsSection.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { createAutoLockServiceCoordinator } from "./autoLockServiceCoordinator.js";
@@ -85,10 +84,12 @@ const vaultResources: I18nPluginResources = {
       "vault.route.unlock": "Unlock wallet",
       "vault.route.create": "New wallet",
       "vault.route.settings": "Key management",
-      "vault.route.currentKey": "Current private key",
+      "vault.route.currentKey": "Export private key",
+      "vault.route.autoLock": "Auto lock",
       "vault.crumb.settings": "Settings",
       "vault.crumb.keys": "Key management",
-      "vault.crumb.currentKey": "Current private key",
+      "vault.crumb.currentKey": "Export private key",
+      "vault.crumb.autoLock": "Auto lock",
       "vault.command.lock": "Lock wallet",
       "vault.unlock.title": "Unlock wallet",
       "vault.unlock.description": "Enter this Key\u2019s own password to unlock it.",
@@ -178,10 +179,10 @@ const vaultResources: I18nPluginResources = {
       "vault.keyDelete.err.failed": "Delete failed",
       "vault.keyDelete.labelPrompt": "Type the target label to confirm:",
       "vault.keyDelete.bucketPasswordPrompt": "Enter the current bucket password to update the security snapshot:",
-      "vault.keyExport.title": "Export backup",
+      "vault.keyExport.title": "Export private key",
       "vault.keyExport.cancel": "Cancel",
-      "vault.keyExport.submit": "Download backup file",
-      "vault.keyExport.hint": "Exports an encrypted backup of the selected Catalog Hold key.",
+      "vault.keyExport.submit": "Export private key",
+      "vault.keyExport.hint": "Download an encrypted backup of the current private key. The file does not contain a plaintext key, but it and the required credentials must be kept secure.",
       "vault.keyExport.err.failed": "Export failed",
       "vault.keyImportBackup.title": "Import backup",
       "vault.keyImportBackup.submit": "Restore backup",
@@ -206,31 +207,36 @@ const vaultResources: I18nPluginResources = {
       "vault.changePassword.err.tooShort": "New password must be at least 8 characters",
       "vault.changePassword.err.mismatch": "The new passwords do not match",
       "vault.changePassword.err.failed": "Change password failed",
-      "vault.currentKey.title": "Current private key",
-      "vault.currentKey.description": "Manage protection methods and encrypted backups for the active private key.",
-      "vault.currentKey.empty.title": "No current private key",
-      "vault.currentKey.empty.description": "Create, import, or activate a key in Key management first.",
-      "vault.currentKey.empty.action": "Open Key management",
-      "vault.currentKey.identity.active": "Current active private key",
-      "vault.currentKey.protection.title": "Private key protection",
-      "vault.currentKey.protection.description": "The current bucket password protects the private-key ciphertext in Hold.",
-      "vault.currentKey.protection.available": "Available",
-      "vault.currentKey.protection.password": "Bucket password",
-      "vault.currentKey.protection.passwordDescription": "Hold ciphertext protector · used for unlock and recovery",
-      "vault.currentKey.backup.title": "Encrypted backup",
-      "vault.currentKey.backup.action": "Export current key backup",
-      "vault.autolock.system.group": "Security",
-      "vault.autolock.system.title": "Auto-lock",
-      "vault.autolock.system.description": "Lock the wallet automatically after inactivity. Changes take effect immediately.",
+      "vault.currentKey.title": "Export private key",
+      "vault.currentKey.description": "Download an encrypted backup of the active private key for migration or recovery. The private key is never shown in plaintext.",
+      "vault.currentKey.empty.title": "No private key to export",
+      "vault.currentKey.empty.description": "Create, import, or activate a private key first.",
+      "vault.currentKey.identity.label": "Current private key",
+      "vault.currentKey.export.title": "Encrypted private key backup",
+      "vault.currentKey.export.description": "The export contains the current private key in encrypted form and can be restored with the required credentials.",
+      "vault.currentKey.export.warning": "Keep the downloaded file and credentials secure. Anyone with both may be able to restore the private key.",
+      "vault.currentKey.export.action": "Export private key",
+      "vault.autolock.page.title": "Auto lock",
+      "vault.autolock.page.description": "Lock the wallet automatically after inactivity. Changes take effect immediately.",
+      "vault.autolock.summary.title": "Current policy",
+      "vault.autolock.summary.enabled": "Enabled",
+      "vault.autolock.summary.disabled": "Off",
       "vault.autolock.current.never": "Current: never auto-lock (stay unlocked).",
       "vault.autolock.current.timeout": "Current: auto-lock after {{minutes}} minutes of inactivity.",
       "vault.autolock.current.timeoutHours": "Current: auto-lock after {{hours}} hours of inactivity.",
-      "vault.autolock.presets.label": "Quick durations",
+      "vault.autolock.presets.label": "Lock duration",
+      "vault.autolock.presets.title": "Lock after inactivity",
+      "vault.autolock.presets.description": "Choose how long the wallet may stay unlocked. Changes take effect immediately.",
+      "vault.autolock.presets.optionHint": "After inactivity",
+      "vault.autolock.presets.neverHint": "Keep unlocked",
+      "vault.autolock.presets.customHint": "Enter a precise duration",
       "vault.autolock.preset.minutes": "{{minutes}} minutes",
       "vault.autolock.preset.hours": "{{hours}} hours",
       "vault.autolock.preset.never": "Never",
       "vault.autolock.preset.custom": "Custom",
       "vault.autolock.back.label": "Back to quick options",
+      "vault.autolock.custom.modalTitle": "Custom auto-lock duration",
+      "vault.autolock.custom.modalDescription": "Enter a whole number of minutes between 1 and 1440.",
       "vault.autolock.custom.label": "Custom minutes (1-1440 minutes)",
       "vault.autolock.custom.placeholder": "e.g. 10",
       "vault.autolock.custom.unit": "minutes",
@@ -247,10 +253,12 @@ const vaultResources: I18nPluginResources = {
       "vault.route.unlock": "解锁钱包",
       "vault.route.create": "创建钱包",
       "vault.route.settings": "Key 管理",
-      "vault.route.currentKey": "当前私钥",
+      "vault.route.currentKey": "导出私钥",
+      "vault.route.autoLock": "自动锁屏",
       "vault.crumb.settings": "设置",
       "vault.crumb.keys": "Key 管理",
-      "vault.crumb.currentKey": "当前私钥",
+      "vault.crumb.currentKey": "导出私钥",
+      "vault.crumb.autoLock": "自动锁屏",
       "vault.command.lock": "锁定钱包",
       "vault.unlock.title": "解锁钱包",
       "vault.unlock.description": "输入这把 Key 自己的密码来解锁。",
@@ -340,10 +348,10 @@ const vaultResources: I18nPluginResources = {
       "vault.keyDelete.err.failed": "删除失败",
       "vault.keyDelete.labelPrompt": "请输入目标标签以确认：",
       "vault.keyDelete.bucketPasswordPrompt": "请输入当前桶密码以更新安全快照：",
-      "vault.keyExport.title": "导出备份",
+      "vault.keyExport.title": "导出私钥",
       "vault.keyExport.cancel": "取消",
-      "vault.keyExport.submit": "下载备份文件",
-      "vault.keyExport.hint": "导出当前 Catalog Hold Key 的加密备份。",
+      "vault.keyExport.submit": "导出私钥",
+      "vault.keyExport.hint": "将下载当前私钥的加密备份。文件不包含明文私钥，但必须与对应凭据一起妥善保管。",
       "vault.keyExport.err.failed": "导出失败",
       "vault.keyImportBackup.title": "导入备份",
       "vault.keyImportBackup.submit": "恢复备份",
@@ -368,31 +376,36 @@ const vaultResources: I18nPluginResources = {
       "vault.changePassword.err.tooShort": "新密码至少 8 位",
       "vault.changePassword.err.mismatch": "两次新密码不一致",
       "vault.changePassword.err.failed": "修改密码失败",
-      "vault.currentKey.title": "当前私钥管理",
-      "vault.currentKey.description": "管理当前 active 私钥的保护方式与加密备份。",
-      "vault.currentKey.empty.title": "当前没有可管理的私钥",
-      "vault.currentKey.empty.description": "请先到 Key 管理中创建、导入或激活一把 Key。",
-      "vault.currentKey.empty.action": "前往 Key 管理",
-      "vault.currentKey.identity.active": "当前 active 私钥",
-      "vault.currentKey.protection.title": "私钥保护",
-      "vault.currentKey.protection.description": "当前桶密码保护 Hold 中的私钥密文。",
-      "vault.currentKey.protection.available": "可用",
-      "vault.currentKey.protection.password": "桶密码",
-      "vault.currentKey.protection.passwordDescription": "Hold 密文保护器 · 用于解锁和恢复",
-      "vault.currentKey.backup.title": "加密备份",
-      "vault.currentKey.backup.action": "导出当前私钥备份",
-      "vault.autolock.system.group": "安全",
-      "vault.autolock.system.title": "自动锁定",
-      "vault.autolock.system.description": "无操作一段时间后自动锁定钱包，修改立即生效。",
+      "vault.currentKey.title": "导出私钥",
+      "vault.currentKey.description": "下载当前私钥的加密备份，用于迁移或恢复。页面不会显示明文私钥。",
+      "vault.currentKey.empty.title": "当前没有可导出的私钥",
+      "vault.currentKey.empty.description": "请先创建、导入或激活一把私钥。",
+      "vault.currentKey.identity.label": "当前私钥",
+      "vault.currentKey.export.title": "加密私钥备份",
+      "vault.currentKey.export.description": "导出文件包含当前私钥的加密数据，可使用对应凭据恢复。",
+      "vault.currentKey.export.warning": "请妥善保管下载文件和对应凭据；两者同时泄露可能导致私钥被恢复。",
+      "vault.currentKey.export.action": "导出私钥",
+      "vault.autolock.page.title": "自动锁屏",
+      "vault.autolock.page.description": "无操作一段时间后自动锁屏，修改立即生效。",
+      "vault.autolock.summary.title": "当前策略",
+      "vault.autolock.summary.enabled": "已启用",
+      "vault.autolock.summary.disabled": "已关闭",
       "vault.autolock.current.never": "当前：永不自动锁定（一直不锁）。",
       "vault.autolock.current.timeout": "当前：无操作 {{minutes}} 分钟后自动锁定。",
       "vault.autolock.current.timeoutHours": "当前：无操作 {{hours}} 小时后自动锁定。",
-      "vault.autolock.presets.label": "快捷时长",
+      "vault.autolock.presets.label": "锁定时长",
+      "vault.autolock.presets.title": "无操作后锁定",
+      "vault.autolock.presets.description": "选择钱包保持解锁的时长，设置会立即生效。",
+      "vault.autolock.presets.optionHint": "无操作后",
+      "vault.autolock.presets.neverHint": "一直保持解锁",
+      "vault.autolock.presets.customHint": "输入精确时长",
       "vault.autolock.preset.minutes": "{{minutes}} 分钟",
-      "vault.autolock.preset.hours": "{{hours}}小时",
+      "vault.autolock.preset.hours": "{{hours}} 小时",
       "vault.autolock.preset.never": "永不",
       "vault.autolock.preset.custom": "自定义",
       "vault.autolock.back.label": "返回快捷选项",
+      "vault.autolock.custom.modalTitle": "自定义自动锁屏",
+      "vault.autolock.custom.modalDescription": "输入 1 到 1440 分钟之间的整数时长。",
       "vault.autolock.custom.label": "自定义分钟数（1～1440 分钟）",
       "vault.autolock.custom.placeholder": "例如：10",
       "vault.autolock.custom.unit": "分钟",
@@ -428,7 +441,6 @@ const vaultPluginDefinition = {
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault key resource" },
       { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault routes" },
       { capability: SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings" },
-      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault auto-lock system setting" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings navigation" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault breadcrumbs" },
       { capability: COMMAND_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault lock command" },
@@ -538,14 +550,24 @@ const vaultPluginDefinition = {
     settings.register({
       id: "vault.current-key",
       path: "/settings/current-key",
-      label: { key: "vault.route.currentKey", fallback: "Current private key" },
+      label: { key: "vault.route.currentKey", fallback: "Export private key" },
       description: {
         key: "vault.currentKey.description",
-        fallback: "Manage protection methods and encrypted backups for the active private key."
+        fallback: "Download an encrypted backup of the active private key."
       },
       component: CurrentKeySettingsPage,
       order: 0,
       icon: "ShieldCheck",
+      visibleWhen: ({ unlocked }) => unlocked
+    });
+    settings.register({
+      id: "vault.auto-lock",
+      path: "/settings/auto-lock",
+      label: { key: "vault.route.autoLock", fallback: "Auto lock" },
+      description: { key: "vault.autolock.page.description", fallback: "Lock the wallet automatically after inactivity." },
+      component: AutoLockSettingsPage,
+      order: 1,
+      icon: "LockKeyhole",
       visibleWhen: ({ unlocked }) => unlocked
     });
 
@@ -555,14 +577,22 @@ const vaultPluginDefinition = {
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("vault", "settings", {
       id: "settings.current-key",
-      label: { key: "vault.route.currentKey", fallback: "Current private key" },
+      label: { key: "vault.route.currentKey", fallback: "Export private key" },
       description: {
         key: "vault.currentKey.description",
-        fallback: "Manage protection methods and encrypted backups for the active private key."
+        fallback: "Download an encrypted backup of the active private key."
       },
       order: 12,
       icon: "ShieldCheck",
       entry: { path: "/settings/current-key", component: CurrentKeySettingsPage }
+    });
+    business.registerFeature("vault", "settings", {
+      id: "settings.auto-lock",
+      label: { key: "vault.route.autoLock", fallback: "Auto lock" },
+      description: { key: "vault.autolock.page.description", fallback: "Lock the wallet automatically after inactivity." },
+      order: 13,
+      icon: "LockKeyhole",
+      entry: { path: "/settings/auto-lock", component: AutoLockSettingsPage }
     });
 
     // 硬切换 003：面包屑第一段固定为不可点击的"设置"分类节点。
@@ -573,7 +603,16 @@ const vaultPluginDefinition = {
       match: (path) => path === "/settings/current-key",
       resolve: () => [
         { label: { key: "vault.crumb.settings", fallback: "Settings" } },
-        { label: { key: "vault.crumb.currentKey", fallback: "Current private key" } }
+        { label: { key: "vault.crumb.currentKey", fallback: "Export private key" } }
+      ]
+    });
+    breadcrumbs.register({
+      id: "breadcrumb.vault.auto-lock",
+      order: 1,
+      match: (path) => path === "/settings/auto-lock",
+      resolve: () => [
+        { label: { key: "vault.crumb.settings", fallback: "Settings" } },
+        { label: { key: "vault.crumb.autoLock", fallback: "Auto lock" } }
       ]
     });
 
@@ -591,27 +630,6 @@ const vaultPluginDefinition = {
         }
       }
     });
-
-    // 自动锁系统设置：挂入「设置 → 系统」，锁定态也可查看修改（桶级快照
-    // 在 locked 仍可读写；无桶时回落缺省）。
-    try {
-      const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
-      systemSettings.register({
-        id: "vault.system-settings.autolock",
-        group: {
-          id: "security",
-          label: { key: "vault.autolock.system.group", fallback: "Security" },
-          order: 15
-        },
-        label: { key: "vault.autolock.system.title", fallback: "Auto-lock" },
-        description: { key: "vault.autolock.system.description", fallback: "Lock the wallet automatically after inactivity." },
-        component: AutoLockSettingsSection,
-        order: 10,
-        visibleWhen: () => true
-      });
-    } catch {
-      // 旧 host 无 system-settings registry 时跳过，vault 核心功能不受影响。
-    }
 
     // 硬切换 001：vault 是 core 插件，理论上不会被 disable。
     // 但 host 仍会要求 setup 返回 teardown。vault 自身不持有后台资源，

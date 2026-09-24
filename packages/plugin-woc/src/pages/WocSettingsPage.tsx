@@ -13,7 +13,7 @@ import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } fro
 
 export function WocSettingsPage() {
   const { t } = useI18n();
-  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统设置
+  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在 BSV 链
   // 页面上，必须按"暂不可用"渲染而不是抛错。
   const service = useOptionalCapability(WOC_CAPABILITY);
   const coordinator = useOptionalCapability(WOC_COORDINATOR_CONTROL_CAPABILITY);

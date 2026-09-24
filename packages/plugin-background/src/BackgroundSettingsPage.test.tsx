@@ -102,6 +102,13 @@ afterEach(() => {
 });
 
 describe("BackgroundSettingsPage 同步管理", () => {
+  it("独立设置页显示智能调度标题", () => {
+    const fake = makeFakeService();
+    activeService.service = fake.service;
+    render(<BackgroundSettingsPage />);
+    expect(screen.getByRole("heading", { name: "智能调度" })).toBeTruthy();
+  });
+
   it("保存失败时回滚乐观更新，并显示错误", async () => {
     const fake = makeFakeService();
     activeService.service = fake.service;

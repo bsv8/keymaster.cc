@@ -1,5 +1,4 @@
 import { expect, type Page } from "@playwright/test";
-import { navigateToBusinessPage } from "./navigationDriver.js";
 
 /**
  * 通过 business.registry 打开设置工作区。
@@ -11,17 +10,21 @@ export async function openSettingsPage(
   page: Page,
   input: { readonly label: RegExp; readonly path: RegExp; readonly heading: RegExp },
 ): Promise<void> {
-  await navigateToBusinessPage(page, { label: input.label, path: input.path });
+  const navigation = page.getByRole("navigation", { name: /Primary navigation|主导航/ });
+  const settingsDomain = navigation
+    .getByRole("heading", { name: /^Settings$|^设置$/ })
+    .locator("..");
+  await expect(settingsDomain).toBeVisible();
+  await settingsDomain.getByRole("button", { name: input.label }).click();
+  await expect(page).toHaveURL(input.path);
   await expect(page.getByRole("heading", { name: input.heading }).first()).toBeVisible();
 }
 
-/** 用户在系统设置中切换语言，并确认热更新与持久化结果同时成立。 */
+/** 用户通过顶栏语言菜单切换语言，并确认界面语言立即更新。 */
 export async function changeLanguage(page: Page, language: "en" | "zh-CN"): Promise<void> {
-  // SystemSettingsPage 用 registry group id 作为业务 section id；这里按
-  // 语言设置组找 combobox，避免依赖当前翻译文本是否被浏览器纳入 label 名称。
-  const selector = page.locator("#language").getByRole("combobox");
-  await expect(selector).toBeVisible();
-  await selector.selectOption(language);
+  await page.getByRole("button", { name: /Switch language|切换语言/u }).click();
+  const optionName = language === "en" ? /^English$/u : /^(Simplified Chinese|简体中文)$/u;
+  await page.getByRole("menuitemradio", { name: optionName }).click();
   await expect.poll(() => page.locator("html").getAttribute("lang")).toBe(language);
   // 语言偏好不再写 localStorage：跨客户端偏好由远端设置负责,当前只验证热切换。
 }

@@ -4,11 +4,11 @@ import { navigateToBusinessPage } from "./navigationDriver.js";
 /** P2PKH 页面支持的网络字段；main=主网，test=testnet 测试网。 */
 export type P2pkhNetwork = "main" | "test";
 
-/** 在系统设置页切换 testnet 纳入范围；设置值由正式页面保存。 */
+/** 在 BSV 链页面切换 testnet 纳入范围；设置值由正式页面保存。 */
 export async function setTestnetAssets(page: Page, enabled: boolean): Promise<void> {
   await navigateToBusinessPage(page, {
-    label: /^System$|^系统$/u,
-    path: /\/settings\/system$/u,
+    label: /^BSV Chain$|^BSV 链$/u,
+    path: /\/settings\/bsv-chain$/u,
   });
   const p2pkhSettings = page.locator("#p2pkh");
   await expect(p2pkhSettings).toBeVisible();
@@ -78,11 +78,11 @@ const FEE_TIER_WIDGET_LABELS: Record<P2pkhFeeTier, RegExp> = {
   high: /^高|^High/u,
 };
 
-/** 通过正式设置页修改矿工费率。 */
+/** 通过正式 BSV 链页面修改矿工费率。 */
 export async function setP2pkhFeeRate(page: Page, tier: P2pkhFeeTier, satsPerKb: number): Promise<void> {
   await navigateToBusinessPage(page, {
-    label: /^System$|^系统$/u,
-    path: /\/settings\/system$/u,
+    label: /^BSV Chain$|^BSV 链$/u,
+    path: /\/settings\/bsv-chain$/u,
   });
   const p2pkhSettings = page.locator("#p2pkh");
   await expect(p2pkhSettings).toBeVisible();

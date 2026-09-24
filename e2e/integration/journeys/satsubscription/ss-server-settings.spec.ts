@@ -200,9 +200,9 @@ test(JOURNEY_ID + "：SS server 设置页 testnet 小额充值只查余额与回
         enableScanner: true,
       });
       await openSettingsPage(page, {
-        label: /^System$|^系统$/u,
-        path: /\/settings\/system$/u,
-        heading: /^System$|^系统$/u,
+        label: /^Broadcast gateway$|^广播网关$/u,
+        path: /\/settings\/system-status$/u,
+        heading: /^Broadcast gateway$|^广播网关$/u,
       });
       await saveSatSupplierFromPage(page, {
         supplierId: SUPPLIER_ID,

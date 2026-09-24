@@ -13,6 +13,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useOptionalCapability } from "webloom-framework/react";
+import { PageHeader } from "@keymaster/ui";
 import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import {
   BACKGROUND_MANAGED_SYNC_TASK_IDS,
@@ -38,6 +39,21 @@ function effectiveInterval(settings: BackgroundSyncSettings, taskId: string): nu
 }
 
 export function BackgroundSettingsPage() {
+  const { t } = useI18n();
+  return (
+    <div className="background-settings-page">
+      <PageHeader
+        title={t("background.settings.title", { defaultValue: "智能调度" })}
+        description={t("background.settings.description", {
+          defaultValue: "管理余额快照与后台任务的自动同步。"
+        })}
+      />
+      <BackgroundSettingsContent />
+    </div>
+  );
+}
+
+function BackgroundSettingsContent() {
   // owner-session 在锁定过渡中会先撤销 capability；路由树卸载前若有一帧
   // 仍命中本页，不能把这个正常的 unavailable 状态升级成 React fatal。
   const backgroundService = useOptionalCapability(BACKGROUND_SERVICE_CAPABILITY);

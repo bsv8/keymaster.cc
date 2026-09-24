@@ -1,4 +1,4 @@
-// SatSubscription 系统设置页。
+// SatSubscription 广播网关页。
 //
 // 本页只操作 trusted admin service；不读取私钥、Channel 明文或完整 Wire。
 // 连接/订阅失败保留服务端最后状态，不在页面偷偷重试收费动作。
@@ -18,7 +18,7 @@ import type {
 import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
-import { Button } from "@keymaster/ui";
+import { Button, Modal } from "@keymaster/ui";
 import { SAT_DEFAULT_SUPPLIER_ID } from "./defaults.js";
 
 function emptyDraft(): SatSupplierConfigV1 {
@@ -136,6 +136,8 @@ function SatSubscriptionSettingsInner({
     null
   );
   const [draft, setDraft] = useState<SatSupplierConfigV1>(emptyDraft);
+  const [supplierEditorOpen, setSupplierEditorOpen] = useState(false);
+  const [supplierEditorMode, setSupplierEditorMode] = useState<"create" | "edit">("create");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -155,12 +157,31 @@ function SatSubscriptionSettingsInner({
     host.resourceStore.invalidate("sat-subscription.settings", []);
   }, [host.resourceStore]);
 
+  const openSupplierEditor = () => {
+    if (busy) return;
+    setDraft(emptyDraft());
+    setSupplierEditorMode("create");
+    setMessage(null);
+    setError(null);
+    setSupplierEditorOpen(true);
+  };
+
+  const closeSupplierEditor = () => {
+    if (busy) return;
+    setSupplierEditorOpen(false);
+    setSupplierEditorMode("create");
+    setDraft(emptyDraft());
+    setError(null);
+  };
+
   const saveSupplier = async () => {
     setBusy(true);
     setMessage(null);
     setError(null);
     try {
       await service.upsertSupplier({ ...draft, multiaddrs: draft.multiaddrs.filter((value) => value.length > 0) });
+      setSupplierEditorOpen(false);
+      setSupplierEditorMode("create");
       setDraft(emptyDraft());
       setMessage(tr("sat.settings.saved", "供应商配置已保存"));
       await reload();
@@ -170,9 +191,12 @@ function SatSubscriptionSettingsInner({
   };
 
   const editSupplier = (supplier: SatSupplierConfigV1) => {
+    if (busy) return;
     setDraft({ ...supplier, multiaddrs: [...supplier.multiaddrs] });
-    setMessage(tr("sat.settings.editing", `正在编辑供应商 ${supplier.supplierId}`));
+    setSupplierEditorMode("edit");
+    setMessage(null);
     setError(null);
+    setSupplierEditorOpen(true);
   };
 
   const setDefault = async (supplierId: string) => {
@@ -357,12 +381,15 @@ function SatSubscriptionSettingsInner({
   };
 
   return (
-    <section className="settings-page sat-subscription-settings">
-      <h1>{tr("sat.settings.title", "SatSubscription")}</h1>
-      <p>{tr("sat.settings.description", "多供应商 SSP 订阅、Channel 物理传输和 SPI 账户管理。Subscribe 与自动 ACK 可能产生费用。")}</p>
+    <section className="sat-subscription-settings">
       {message ? <p role="status">{message}</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
-      <h2>{tr("sat.settings.suppliers", "供应商")}</h2>
+      {error && !supplierEditorOpen ? <p role="alert">{error}</p> : null}
+      <div className="sat-subscription-settings__section-header">
+        <h3 className="sat-subscription-settings__section-title">{tr("sat.settings.suppliers", "供应商")}</h3>
+        <Button size="sm" onClick={openSupplierEditor} disabled={busy}>
+          {tr("sat.settings.add", "新增供应商")}
+        </Button>
+      </div>
       {snapshot?.suppliers.length ? snapshot.suppliers.map((supplier) => {
         const builtIn = supplier.supplierId === SAT_DEFAULT_SUPPLIER_ID;
         const receiving = snapshot.ownerSettings?.receiveSupplierIds.includes(supplier.supplierId) ?? false;
@@ -441,20 +468,92 @@ function SatSubscriptionSettingsInner({
           </div>
         );
       }) : <p>{tr("sat.settings.empty", "尚未配置供应商。")}</p>}
-      <h3>{tr("sat.settings.add", "新增/更新供应商")}</h3>
-      <input aria-label={tr("sat.settings.id", "供应商编号")} placeholder={tr("sat.settings.id", "供应商编号")} value={draft.supplierId} onChange={(event) => setDraft({ ...draft, supplierId: event.target.value })} />
-      <input aria-label={tr("sat.settings.name", "名称")} placeholder={tr("sat.settings.name", "名称")} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
-      <input aria-label={tr("sat.settings.key", "供应商公钥")} placeholder={tr("sat.settings.key", "供应商公钥（66 位小写 hex）")} value={draft.supplierPublicKeyHex} onChange={(event) => setDraft({ ...draft, supplierPublicKeyHex: event.target.value })} />
-      <textarea aria-label={tr("sat.settings.addresses", "libp2p 地址")} placeholder={tr("sat.settings.addresses", "libp2p 地址，每行一个")} value={draft.multiaddrs.join("\n")} onChange={(event) => setDraft({ ...draft, multiaddrs: event.target.value.split("\n") })} />
-      <label><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} /> {tr("sat.settings.enabledField", "启用供应商")}</label>
-      <Button disabled={busy} onClick={() => void saveSupplier()}>{tr("sat.settings.save", "保存供应商")}</Button>
-      {topUpPreview ? <div role="dialog">
+      <Modal
+        open={supplierEditorOpen}
+        title={supplierEditorMode === "edit"
+          ? tr("sat.settings.editing", "编辑供应商")
+          : tr("sat.settings.add", "新增供应商")}
+        onClose={closeSupplierEditor}
+        data-testid="sat-supplier-editor"
+        footer={
+          <>
+            <Button variant="ghost" disabled={busy} onClick={closeSupplierEditor}>
+              {tr("common.action.cancel", "取消")}
+            </Button>
+            <Button
+              loading={busy}
+              onClick={() => void saveSupplier()}
+            >
+              {supplierEditorMode === "edit"
+                ? tr("sat.settings.saveEdit", "保存修改")
+                : tr("sat.settings.save", "保存供应商")}
+            </Button>
+          </>
+        }
+      >
+        <p className="sat-supplier-editor__description">
+          {tr("sat.settings.supplierEditor.description", "填写供应商身份与连接地址；保存已有供应商时会更新原配置。")}
+        </p>
+        <div className="sat-supplier-editor__fields">
+          <label className="sat-supplier-editor__field">
+            <span>{tr("sat.settings.id", "供应商编号")}</span>
+            <input
+              aria-label={tr("sat.settings.id", "供应商编号")}
+              placeholder={tr("sat.settings.id", "供应商编号")}
+              value={draft.supplierId}
+              disabled={busy || supplierEditorMode === "edit"}
+              onChange={(event) => setDraft({ ...draft, supplierId: event.target.value })}
+            />
+          </label>
+          <label className="sat-supplier-editor__field">
+            <span>{tr("sat.settings.name", "名称")}</span>
+            <input
+              aria-label={tr("sat.settings.name", "名称")}
+              placeholder={tr("sat.settings.name", "名称")}
+              value={draft.name}
+              disabled={busy}
+              onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+            />
+          </label>
+          <label className="sat-supplier-editor__field">
+            <span>{tr("sat.settings.key", "供应商公钥")}</span>
+            <input
+              aria-label={tr("sat.settings.key", "供应商公钥")}
+              placeholder={tr("sat.settings.key", "供应商公钥（66 位小写 hex）")}
+              value={draft.supplierPublicKeyHex}
+              disabled={busy}
+              onChange={(event) => setDraft({ ...draft, supplierPublicKeyHex: event.target.value })}
+            />
+          </label>
+          <label className="sat-supplier-editor__field">
+            <span>{tr("sat.settings.addresses", "libp2p 地址")}</span>
+            <textarea
+              aria-label={tr("sat.settings.addresses", "libp2p 地址")}
+              placeholder={tr("sat.settings.addresses", "libp2p 地址，每行一个")}
+              value={draft.multiaddrs.join("\n")}
+              disabled={busy}
+              onChange={(event) => setDraft({ ...draft, multiaddrs: event.target.value.split("\n") })}
+            />
+          </label>
+          <label className="sat-supplier-editor__checkbox">
+            <input
+              type="checkbox"
+              checked={draft.enabled}
+              disabled={busy}
+              onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
+            />
+            {tr("sat.settings.enabledField", "启用供应商")}
+          </label>
+        </div>
+        {error ? <p className="sat-supplier-editor__error" role="alert">{error}</p> : null}
+      </Modal>
+      {topUpPreview ? <div className="sat-subscription-settings__topup-dialog" role="dialog">
         <strong>{tr("sat.settings.spi.preview", "充值预览")}</strong>
         <div>网络: <strong>{bsvNetworkLabel(topUpPreview.network)}</strong>；Supplier: <code>{topUpPreview.supplierId}</code>；目标: <code>{topUpPreview.paymentAddress}</code>；金额: <code>{topUpPreview.amountSatoshis.toString(10)}</code> sats</div>
         <Button disabled={busy} onClick={() => void submitTopUp()}>{tr("sat.settings.spi.confirm", "确认并广播")}</Button>
         <Button disabled={busy} variant="secondary" onClick={() => setTopUpPreview(null)}>{tr("sat.settings.spi.cancel", "取消")}</Button>
       </div> : null}
-      <h2>{tr("sat.settings.billing", "服务器账单")}</h2>
+      <h3 className="sat-subscription-settings__section-title">{tr("sat.settings.billing", "服务器账单")}</h3>
       <p>{tr("sat.settings.billing.description", "账单直接来自 SS server，不写入本地 setting.json。各供应商当前页见上方账单面板，这里是汇总（最新 20 条）。")}</p>
       <ul data-testid="ss-billing-summary">{Object.values(billing).flatMap((page) => page.records.map((item) => ({ item, currency: page.currency }))).slice(-20).reverse().map(({ item, currency }) => <li key={item.chargeId}>供应商编号:{item.supplierId}｜动作:{item.action}｜频道:{item.channel}｜扣费金额:{item.chargedAmount} {currency}｜账单编号:{item.chargeId}</li>)}</ul>
     </section>

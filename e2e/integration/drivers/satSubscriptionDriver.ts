@@ -30,13 +30,16 @@ function satSettings(page: Page): Locator {
  */
 export async function saveSatSupplierFromPage(page: Page, input: SatSupplierFormInput): Promise<void> {
   const settings = satSettings(page);
-  await settings.getByLabel(/Supplier id|供应商编号/iu).fill(input.supplierId);
-  await settings.getByLabel(/^Display name$|^名称$|^显示名称$/iu).fill(input.name);
-  await settings.getByLabel(/Supplier public key|供应商公钥/iu).fill(input.supplierPublicKeyHex);
-  await settings.getByLabel(/libp2p addresses|Dialable addresses|libp2p 地址/iu).fill(input.multiaddrs.join("\n"));
-  const enabled = settings.getByRole("checkbox", { name: /Enable supplier|Enabled|启用供应商/iu });
+  await settings.getByRole("button", { name: /^Add supplier$|^新增供应商$/u }).click();
+  const editor = page.getByRole("dialog");
+  await editor.getByLabel(/Supplier id|供应商编号/iu).fill(input.supplierId);
+  await editor.getByLabel(/^Display name$|^名称$|^显示名称$/iu).fill(input.name);
+  await editor.getByLabel(/Supplier public key|供应商公钥/iu).fill(input.supplierPublicKeyHex);
+  await editor.getByLabel(/libp2p addresses|Dialable addresses|libp2p 地址/iu).fill(input.multiaddrs.join("\n"));
+  const enabled = editor.getByRole("checkbox", { name: /Enable supplier|Enabled|启用供应商/iu });
   if ((await enabled.isChecked()) !== input.enabled) await enabled.click();
-  await settings.getByRole("button", { name: /Save supplier|Add supplier|保存供应商/iu }).click();
+  await editor.getByRole("button", { name: /Save supplier|Add supplier|保存供应商/iu }).click();
+  await expect(editor).toHaveCount(0);
   await expect(settings.getByRole("status")).toContainText(/saved|保存/iu);
 }
 

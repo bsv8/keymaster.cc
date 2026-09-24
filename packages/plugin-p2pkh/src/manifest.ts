@@ -2,11 +2,11 @@
 // P2PKH 业务包（硬切换后）：
 //   - 注入 woc.service / background.registry / background.service。
 //   - 注册 P2PKH AssetProvider、TransferProvider（Offer/Widget）。
-//   - 注册页面：链上交易、本地交易、设置。
+//   - 注册页面：链上交易、本地交易；设置由 Web 装配层的 BSV 链页面承载。
 //   - 不再自己创建 interval；不再自己向 Topbar 写组件。
 //   - 监听 vault 事件自动同步。
 //
-// 硬切换 003：route / business navigation / home widget / settings / breadcrumb 全部走 I18nText。
+// 硬切换 003：route / business navigation / home widget / breadcrumb 全部走 I18nText。
 
 import type {
   AssetDataNotifier,
@@ -25,7 +25,6 @@ import type {
   ResourceRegistry,
   RouteRegistry,
   ProtectedOutpointRegistry,
-  SystemSettingsRegistry,
   VaultService,
   WocService,
   P2pkhCoordinatorControl,
@@ -45,7 +44,6 @@ import {
   ROUTE_REGISTRY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   TRANSFER_REGISTRY_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
   WOC_CAPABILITY,
@@ -64,7 +62,6 @@ import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
-import { P2pkhSettingsPage } from "./pages/P2pkhSettingsPage.js";
 import { registerP2pkhNavigation } from "./pages/P2pkhNavigation.js";
 import { P2pkhTransactionDetailRoute } from "./pages/P2pkhTransactionDetailPage.js";
 import { transactionSourceListPath } from "./pages/p2pkhTransactionView.js";
@@ -631,7 +628,6 @@ const p2pkhPluginDefinition = {
         { capability: TRANSFER_REGISTRY_CAPABILITY, reason: "注册 P2PKH TransferProvider" },
         { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 P2PKH 页面" },
         { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入资产业务导航" },
-        { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册 Testnet 系统设置" },
         { capability: HOME_REGISTRY_CAPABILITY, reason: "注册 P2PKH 首页 widget" },
         { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册 P2PKH 面包屑" },
         { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 P2PKH resources" },
@@ -927,12 +923,6 @@ const p2pkhPluginDefinition = {
       label: { key: "p2pkh.route.transaction", fallback: "P2PKH transaction" },
       component: P2pkhTransactionDetailRoute
     });
-    routes.register({
-      id: "p2pkh.settings",
-      path: "/p2pkh/settings",
-      label: { key: "p2pkh.route.settings", fallback: "P2PKH provider settings" },
-      component: P2pkhSettingsPage
-    });
 
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     const disposeNavigation = registerP2pkhNavigation({
@@ -942,22 +932,6 @@ const p2pkhPluginDefinition = {
       onIncludeTestnetChange: (handler) => service.onGlobalSettingsChange((settings) => handler(settings.includeTestnet))
     });
     ctx.onDispose(disposeNavigation);
-
-    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
-    systemSettings.register({
-      id: "p2pkh.system-settings.testnet",
-      group: {
-        id: "p2pkh",
-        label: { key: "p2pkh.settings.label", fallback: "P2PKH" },
-        order: 30
-      },
-      label: { key: "p2pkh.settings.label", fallback: "P2PKH" },
-      description: { key: "p2pkh.settings.description", fallback: "P2PKH product settings." },
-      component: P2pkhSettingsPage,
-      order: 10,
-      replacesSettingsRouteId: "p2pkh.settings",
-      visibleWhen: ({ unlocked }) => unlocked
-    });
 
     const transferReg = ctx.capability(TRANSFER_REGISTRY_CAPABILITY);
     const transferProvider = createP2pkhTransferProvider({ service, messageBus, keyspace });
@@ -977,14 +951,8 @@ const p2pkhPluginDefinition = {
     const crumbProvider: BreadcrumbProvider = {
       id: "p2pkh.crumbs",
       order: 200,
-      match: (path) => path.startsWith("/p2pkh") || path.startsWith("/settings/p2pkh"),
+      match: (path) => path.startsWith("/p2pkh"),
       resolve: (path) => {
-        if (path.startsWith("/settings/p2pkh")) {
-          return [
-            { label: { key: "p2pkh.crumb.settings", fallback: "Settings" } },
-            { label: { key: "p2pkh.crumb.p2pkh", fallback: "P2PKH" } }
-          ];
-        }
         if (path === "/p2pkh/mainnet/transactions" || path === "/p2pkh/testnet/transactions") {
           return [
             { label: { key: "p2pkh.crumb.wallet", fallback: "Wallets" }, path: "/" },
