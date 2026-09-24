@@ -17,3 +17,4 @@ minimumReleaseAgeExclude:
   - webloom-framework@0.5.0
   - keyhold@2.1.0
   - sat-subscription-protocol@0.3.0
+  - go-bitfs@0.3.2
