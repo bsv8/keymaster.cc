@@ -1,8 +1,9 @@
 // packages/plugin-settings/src/manifest.ts
 // 设置页（硬切换 003）：
-//   - 不再有 /settings 聚合页。
+//   - 不再有 /settings 聚合页，也不再有 /settings/apps 应用设置目录。
 //   - plugin-settings 通过 business.registry 提供「设置」业务域。
-//   - 系统设置、应用设置、插件设置和系统状态各自拥有明确的新导航入口。
+//   - 系统设置、插件设置和系统状态各自拥有明确的新导航入口；
+//     bsv-price / poker 等业务插件的设置页直接挂到「设置」域下。
 //   - 不再向 breadcrumb.registry 注册指向 /settings 的可点击父级。
 //
 // 设计缘由：
@@ -17,7 +18,6 @@ import type {
   PluginSetup,
 } from "@keymaster/contracts";
 import {
-  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   defineRuntimeUnitDependencies,
@@ -26,7 +26,6 @@ import { PluginManagerPage } from "./PluginManagerPage.js";
 import { LanguageSection } from "./LanguageSection.js";
 import { SystemSettingsPage } from "./SystemSettingsPage.js";
 import { SystemStatusPage } from "./SystemStatusPage.js";
-import { ApplicationSettingsPage } from "./ApplicationSettingsPage.js";
 
 /** 设置 i18n 资源。设计缘由：route / menu / 设置项 label 全部走 I18nText。 */
 const settingsResources: I18nPluginResources = {
@@ -43,13 +42,6 @@ const settingsResources: I18nPluginResources = {
       "settings.system.description": "Changes take effect immediately.",
       "settings.system.group.language": "Language",
       "settings.business.plugins": "Plugin settings",
-      "settings.applicationSettings.title": "Application settings",
-      "settings.applicationSettings.description": "Choose an application to configure.",
-      "settings.applicationSettings.directory": "Configured applications",
-      "settings.applicationSettings.count": "{{count}} apps",
-      "settings.applicationSettings.open": "Open {{name}} settings",
-      "settings.applicationSettings.empty.title": "No application settings",
-      "settings.applicationSettings.empty.description": "Enabled applications with settings will appear here.",
       "settings.systemStatus.title": "System status",
       "settings.systemStatus.description": "Live status for always-on system modules.",
       "settings.systemStatus.empty": "No system status modules are available.",
@@ -111,13 +103,6 @@ const settingsResources: I18nPluginResources = {
       "settings.system.description": "修改会立即生效。",
       "settings.system.group.language": "语言",
       "settings.business.plugins": "插件设置",
-      "settings.applicationSettings.title": "应用设置",
-      "settings.applicationSettings.description": "选择要配置的应用。",
-      "settings.applicationSettings.directory": "已配置的应用",
-      "settings.applicationSettings.count": "{{count}} 个应用",
-      "settings.applicationSettings.open": "打开 {{name}} 设置",
-      "settings.applicationSettings.empty.title": "暂无应用设置",
-      "settings.applicationSettings.empty.description": "已启用且提供设置的应用会显示在这里。",
       "settings.systemStatus.title": "系统状态",
       "settings.systemStatus.description": "查看常驻系统模块的实时状态。",
       "settings.systemStatus.empty": "当前没有可用的系统状态模块。",
@@ -187,7 +172,6 @@ const settingsPluginDefinition = {
     scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
       { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册系统语言设置" },
-      { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, reason: "展示应用设置目录" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为设置详情页提供面包屑" },
     ]),
     business: {
@@ -202,19 +186,9 @@ const settingsPluginDefinition = {
           icon: "Settings",
           entry: { path: "/settings/system", component: SystemSettingsPage }
         }, {
-          id: "settings.application-settings",
-          label: { key: "settings.applicationSettings.title", fallback: "Application settings" },
-          order: 20,
-          icon: "PanelsTopLeft",
-          entry: {
-            path: "/settings/apps",
-            component: ApplicationSettingsPage,
-            activeWhen: (path) => path.startsWith("/settings/apps/")
-          }
-        }, {
           id: "settings.plugins",
           label: { key: "settings.business.plugins", fallback: "Plugin settings" },
-          order: 30,
+          order: 40,
           icon: "Puzzle",
           entry: { path: "/settings/plugins", component: PluginManagerPage }
         }, {
@@ -246,17 +220,8 @@ const settingsPluginDefinition = {
     });
     // 面包屑：当前路径匹配时第一段固定为不可点击的"设置"分类节点。
     // 这样 plugin 的 settings breadcrumb 不再回指不存在的 /settings，
-    // 同时与 /settings/apps/poker 等其它设置详情页保持一致的第一段样式。
+    // 同时与 /settings/poker 等其它设置详情页保持一致的第一段样式。
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
-    breadcrumbs.register({
-      id: "settings.application-settings.crumbs",
-      order: 5,
-      match: (path) => path === "/settings/apps",
-      resolve: () => [
-        { label: { key: "settings.crumb.settings", fallback: "Settings" } },
-        { label: { key: "settings.applicationSettings.title", fallback: "Application settings" } }
-      ]
-    });
     breadcrumbs.register({
       id: "settings.plugins.crumbs",
       order: 5,

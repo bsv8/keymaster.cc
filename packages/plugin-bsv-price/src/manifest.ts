@@ -23,7 +23,6 @@ import {
   CHANNEL_RUNTIME_CAPABILITY,
   ROUTE_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
-  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   HOME_REGISTRY_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
@@ -146,6 +145,22 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.settings.channel.label": "Subscribed channel",
       "bsv-price.settings.status.label": "Status",
       "bsv-price.settings.snapshotAt.label": "Snapshot time",
+      "bsv-price.settings.data.label": "Received data",
+      "bsv-price.settings.data.desc":
+        "Everything this page received from the subscription: runtime state, snapshot and all quotes.",
+      "bsv-price.settings.coreState.label": "Channel runtime",
+      "bsv-price.settings.configured.label": "Configured",
+      "bsv-price.settings.configured.true": "Yes",
+      "bsv-price.settings.configured.false": "No",
+      "bsv-price.settings.active.key.label": "Active publisher key",
+      "bsv-price.settings.snapshot.protocol.label": "Snapshot protocol",
+      "bsv-price.settings.snapshot.sourceAt.label": "Source snapshot time",
+      "bsv-price.settings.lastError.label": "Last parse error",
+      "bsv-price.settings.quotes.label": "Received quotes",
+      "bsv-price.settings.quotes.empty": "(waiting for the active server's snapshot)",
+      "bsv-price.settings.quotes.table.market": "Market",
+      "bsv-price.settings.quotes.table.pair": "Trading pair",
+      "bsv-price.settings.quotes.table.price": "Price",
       "bsv-price.settings.restore": "Restore original settings",
       "bsv-price.settings.restored": "Original settings restored",
       "bsv-price.settings.serverAdded": "Server added",
@@ -273,6 +288,22 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.settings.channel.label": "当前订阅频道",
       "bsv-price.settings.status.label": "当前状态",
       "bsv-price.settings.snapshotAt.label": "快照时间",
+      "bsv-price.settings.data.label": "收到的数据",
+      "bsv-price.settings.data.desc":
+        "本次订阅拿到的全部数据：运行状态、快照与全部行情。",
+      "bsv-price.settings.coreState.label": "Channel 运行状态",
+      "bsv-price.settings.configured.label": "已配置",
+      "bsv-price.settings.configured.true": "是",
+      "bsv-price.settings.configured.false": "否",
+      "bsv-price.settings.active.key.label": "激活发布器公钥",
+      "bsv-price.settings.snapshot.protocol.label": "快照协议",
+      "bsv-price.settings.snapshot.sourceAt.label": "源快照时间",
+      "bsv-price.settings.lastError.label": "最近解析错误",
+      "bsv-price.settings.quotes.label": "收到的行情",
+      "bsv-price.settings.quotes.empty": "（等待激活服务器的快照）",
+      "bsv-price.settings.quotes.table.market": "交易所",
+      "bsv-price.settings.quotes.table.pair": "交易对",
+      "bsv-price.settings.quotes.table.price": "价格",
       "bsv-price.settings.restore": "恢复原始设置",
       "bsv-price.settings.restored": "已恢复原始设置",
       "bsv-price.settings.serverAdded": "已添加服务器",
@@ -352,10 +383,9 @@ const bsvPricePluginDefinition = {
         capability: CHANNEL_RUNTIME_CAPABILITY, sourceRuntime: "window-main",
         reason: "通过 Coordinator Channel runtime 订阅精确价格频道"
       },
-      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册行情页与应用设置详情页" },
-      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "为行情页与应用设置详情页提供面包屑" },
-      { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册应用设置目录入口" },
-      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将行情页挂入首页业务域" },
+      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册行情页与设置详情页" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "为行情页与设置详情页提供面包屑" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将行情页挂入首页业务域、设置页挂入设置域" },
       { capability: HOME_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将 BSV 价格显示在首页右侧栏" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 BSV Price 状态资源" },
     ]),
@@ -397,7 +427,6 @@ const bsvPricePluginDefinition = {
 
     const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
-    const applicationSettings = ctx.capability(APPLICATION_SETTINGS_REGISTRY_CAPABILITY);
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     const home = ctx.capability(HOME_REGISTRY_CAPABILITY);
 
@@ -424,6 +453,18 @@ const bsvPricePluginDefinition = {
       entry: { path: "/bsv-price", routeId: "bsv-price.page" }
     });
 
+    business.registerFeature(BSV_PRICE_PLUGIN_ID, "settings", {
+      id: "settings.bsv-price",
+      label: { key: "bsv-price.menu", fallback: "BSV Price" },
+      description: {
+        key: "bsv-price.settings.desc",
+        fallback: "Manage price publisher servers and the active quote. The price is display-only and never used for business decisions."
+      },
+      order: 20,
+      icon: "LineChart",
+      entry: { path: BSV_PRICE_SETTINGS_PATH, routeId: "bsv-price.settings" }
+    });
+
     home.register({
       id: "bsv-price.snapshot",
       title: { key: "bsv-price.home.title", fallback: "BSV Price" },
@@ -448,22 +489,8 @@ const bsvPricePluginDefinition = {
       match: (path: string) => path === BSV_PRICE_SETTINGS_PATH,
       resolve: () => [
         { label: { key: "settings.crumb.settings", fallback: "Settings" } },
-        { label: { key: "settings.applicationSettings.title", fallback: "Application settings" } },
         { label: { key: "bsv-price.settings.title", fallback: "BSV Price settings" } }
       ]
-    });
-
-    applicationSettings.register({
-      id: "bsv-price.settings",
-      path: BSV_PRICE_SETTINGS_PATH,
-      // 目录层展示应用名；进入详情页后才展示“BSV Price 设置”。
-      label: { key: "bsv-price.menu", fallback: "BSV Price" },
-      description: {
-        key: "bsv-price.settings.desc",
-        fallback: "Manage price publisher servers and the active quote. The price is display-only and never used for business decisions."
-      },
-      order: 130,
-      icon: "LineChart"
     });
 
     return () => {

@@ -22,7 +22,6 @@ export * from "./registries/importerRegistry.js";
 export * from "./registries/vaultSettingsRegistry.js";
 export * from "./registries/transferRegistry.js";
 export * from "./registries/assetRegistry.js";
-export * from "./registries/applicationSettingsRegistry.js";
 export * from "./registries/topbarRegistry.js";
 export * from "./registries/noticeRegistry.js";
 export * from "./navigate.js";

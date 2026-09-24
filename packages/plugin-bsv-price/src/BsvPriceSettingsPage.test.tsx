@@ -255,4 +255,69 @@ describe("BsvPriceSettingsPage", () => {
     expect(rows[1]?.textContent).toContain("alt");
     expect(rows[1]?.querySelector("[data-bsv-price-server-delete]")).not.toBeNull();
   });
+
+  it("shows every received field: server keys, runtime state, snapshot and all quotes", async () => {
+    const full: BsvPriceServiceSnapshot = makeSnapshot(
+      {
+        servers: [{ name: "bsv8", publisherPublicKeyHex: DEFAULT_KEY }],
+        active: { publisherPublicKeyHex: DEFAULT_KEY, market: "gate", pair: "bsvusdt" },
+        savedAtMs: 0
+      },
+      {
+        coreState: "ready",
+        status: "receiving",
+        configured: true,
+        snapshot: {
+          protocol: "bsv8.bsv-price.v1",
+          snapshotAtMs: 1_000,
+          markets: {
+            gate: { bsvusdt: "45.1200", bsvcny: "321.85" },
+            okx: { bsvusdt: "45.0900" }
+          }
+        },
+        lastError: "invalid_body",
+        subscriptionErrorCode: null,
+        subscriptionErrorMessage: null,
+        price: { amount: "45.12", unit: "USDT", updatedAtMs: 1_000 }
+      }
+    );
+    const subs = new Set<(price: PriceValue) => void>();
+    activeTestService.service = {
+      snapshot: () => full,
+      get: () => full.price,
+      subscribe: (handler) => {
+        subs.add(handler);
+        return () => {
+          subs.delete(handler);
+        };
+      },
+      getConfig: () => ({
+        servers: full.servers,
+        active: full.active,
+        savedAtMs: 0
+      }),
+      addServer: async () => { throw new Error("unused"); },
+      removeServer: async () => { throw new Error("unused"); },
+      setActiveOption: async () => { throw new Error("unused"); },
+      restoreOriginalSettings: async () => { throw new Error("unused"); },
+      dispose: () => undefined
+    };
+    render(<BsvPriceSettingsPage />);
+
+    // 服务器行带公钥 hex。
+    expect(document.querySelector("[data-bsv-price-server-pubkey]")?.textContent).toContain(DEFAULT_KEY);
+    // 运行状态与配置。
+    expect(document.querySelector("[data-bsv-price-settings-core-state]")?.textContent).toBe("ready");
+    expect(document.querySelector("[data-bsv-price-settings-configured]")?.textContent).toBe("是");
+    expect(document.querySelector("[data-bsv-price-settings-active-key]")?.textContent).toContain(DEFAULT_KEY);
+    // 快照协议与解析错误。
+    expect(document.querySelector("[data-bsv-price-settings-protocol]")?.textContent).toBe("bsv8.bsv-price.v1");
+    expect(document.querySelector("[data-bsv-price-settings-last-error]")?.textContent).toBe("invalid_body");
+    // 全部行情逐行展示，激活行高亮。
+    const table = document.querySelector("[data-bsv-price-settings-quotes]");
+    expect(table?.textContent).toContain("gate");
+    expect(table?.textContent).toContain("bsvcny");
+    expect(table?.textContent).toContain("45.1200");
+    expect(table?.querySelectorAll("[data-bsv-price-settings-quote-active='true']")).toHaveLength(1);
+  });
 });

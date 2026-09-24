@@ -15,7 +15,7 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
 
 /**
  * 业务目标：
- * 用户完成初始化后，通过正式菜单查看系统、应用、插件和系统状态设置，
+ * 用户完成初始化后，通过正式菜单查看系统、价格、插件和系统状态设置，
  * 并切换一次界面语言。
  *
  * 用户价值：
@@ -28,7 +28,7 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
  * - 不读取 S3、testnet 或任何长期秘密。
  *
  * 成功标准：
- * - 四个正式设置入口都能从业务导航打开；
+ * - 正式设置入口都能从业务导航打开；
  * - 语言热切换同时更新 html lang 和持久化模式；
  * - 刷新后仍能进入设置工作区，并能读取插件状态和系统状态入口。
  *
@@ -78,11 +78,11 @@ test(JOURNEY_ID + "：从正式菜单查看设置并热切换界面语言", asyn
       await changeLanguage(page, restored === "zh-CN" ? "en" : "zh-CN");
     });
 
-    await test.step("用户通过菜单查看应用和插件配置入口", async () => {
+    await test.step("用户通过菜单查看价格和插件配置入口", async () => {
       await openSettingsPage(page, {
-        label: /^Application settings$|^应用设置$/,
-        path: /\/settings\/apps$/u,
-        heading: /^Application settings$|^应用设置$/,
+        label: /^BSV Price$|^BSV 价格$/,
+        path: /\/settings\/bsv-price$/u,
+        heading: /^BSV Price settings$|^BSV Price 设置$/,
       });
       await openSettingsPage(page, {
         label: /^Plugin settings$|^Plugins$|^插件设置$|^插件$/,

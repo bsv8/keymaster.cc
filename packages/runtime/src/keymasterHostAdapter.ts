@@ -10,7 +10,6 @@ import type {
   AssetRegistry,
   AssetRegistry as KeymasterAssetRegistry,
   AssetDataNotifier as KeymasterAssetDataNotifier,
-  ApplicationSettingsRegistry,
   BreadcrumbRegistry,
   BusinessFeatureRegistry,
   ChannelRuntime,
@@ -50,7 +49,6 @@ import {
   SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   SYSTEM_STATUS_REGISTRY_CAPABILITY,
   VAULT_SETTINGS_REGISTRY_CAPABILITY,
-  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
   HOME_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   COMMAND_REGISTRY_CAPABILITY,
@@ -96,7 +94,6 @@ import { createSettingsRegistry } from "./registries/settingsRegistry.js";
 import { createSystemSettingsRegistry } from "./registries/systemSettingsRegistry.js";
 import { createSystemStatusRegistry } from "./registries/systemStatusRegistry.js";
 import { createVaultSettingsRegistry } from "./registries/vaultSettingsRegistry.js";
-import { createApplicationSettingsRegistry } from "./registries/applicationSettingsRegistry.js";
 import { createHomeRegistry } from "./registries/homeRegistry.js";
 import { createBusinessFeatureRegistry } from "./registries/businessFeatureRegistry.js";
 import { createCommandRegistry } from "./registries/commandRegistry.js";
@@ -606,7 +603,6 @@ function createKeymasterCapabilities(): {
   systemSettings: import("./registries/systemSettingsRegistry.js").SystemSettingsRegistry;
   systemStatus: import("./registries/systemStatusRegistry.js").SystemStatusRegistry;
   vaultSettings: import("./registries/vaultSettingsRegistry.js").VaultSettingsRegistry;
-  applicationSettings: import("./registries/applicationSettingsRegistry.js").ApplicationSettingsRegistry;
   home: import("./registries/homeRegistry.js").HomeRegistry;
   business: import("./registries/businessFeatureRegistry.js").BusinessFeatureRegistry;
   commands: import("./registries/commandRegistry.js").CommandRegistry;
@@ -628,7 +624,6 @@ function createKeymasterCapabilities(): {
   const systemSettings = createSystemSettingsRegistry();
   const systemStatus = createSystemStatusRegistry();
   const vaultSettings = createVaultSettingsRegistry();
-  const applicationSettings = createApplicationSettingsRegistry();
   const home = createHomeRegistry();
   const business = createBusinessFeatureRegistry();
   const commands = createCommandRegistry();
@@ -651,7 +646,6 @@ function createKeymasterCapabilities(): {
     "system-settings.registry": systemSettings,
     "system-status.registry": systemStatus,
     "vault-settings.registry": vaultSettings,
-    "application-settings.registry": applicationSettings,
     "home.registry": home,
     "business.registry": business,
     "command.registry": commands,
@@ -675,7 +669,6 @@ function createKeymasterCapabilities(): {
     systemSettings,
     systemStatus,
     vaultSettings,
-    applicationSettings,
     home,
     business,
     commands,
@@ -902,7 +895,6 @@ export function createKeymasterPluginHost(
     ["system-settings.registry", { name: "system-settings.registry" }],
     ["system-status.registry", { name: "system-status.registry" }],
     ["vault-settings.registry", { name: "vault-settings.registry" }],
-    ["application-settings.registry", { name: "application-settings.registry" }],
     ["home.registry", { name: "home.registry" }],
     ["command.registry", { name: "command.registry" }],
     ["importer.registry", { name: "importer.registry" }],
@@ -1253,7 +1245,6 @@ export function createKeymasterPluginHost(
     { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, value: domain.systemSettings },
     { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, value: domain.systemStatus },
     { capability: VAULT_SETTINGS_REGISTRY_CAPABILITY, value: domain.vaultSettings },
-    { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, value: domain.applicationSettings },
     { capability: HOME_REGISTRY_CAPABILITY, value: domain.home },
     { capability: BUSINESS_REGISTRY_CAPABILITY, value: domain.business },
     { capability: COMMAND_REGISTRY_CAPABILITY, value: domain.commands },
@@ -1583,7 +1574,6 @@ export function createKeymasterPluginHost(
     systemSettings: domain.systemSettings,
     systemStatus: domain.systemStatus,
     vaultSettings: domain.vaultSettings,
-    applicationSettings: domain.applicationSettings,
     home: domain.home,
     business: domain.business,
     commands: domain.commands,

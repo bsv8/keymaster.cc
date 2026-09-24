@@ -8,8 +8,8 @@ import {
 } from "bsv8-channel-protocol/bsv-price";
 
 export { BSV_PRICE_CHANNEL_PREFIX, BSV_PRICE_PROTOCOL };
-/** BSV Price 在「设置 → 应用设置」下的详情页路径。 */
-export const BSV_PRICE_SETTINGS_PATH = "/settings/apps/bsv-price";
+/** BSV Price 在「设置」下的详情页路径。 */
+export const BSV_PRICE_SETTINGS_PATH = "/settings/bsv-price";
 
 /**
  * plugin-bsv-price 配置 key 名（用于 manifest 装配）。
