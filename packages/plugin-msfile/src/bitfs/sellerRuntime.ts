@@ -5,6 +5,7 @@ import { isVerifiedHashRequest, dedupKey, type VerifiedHashRequest } from "bsv8-
 import type { MsFileSellerSettings } from "@keymaster/contracts";
 import { createSellerQuote, type Signer } from "go-bitfs";
 import type { BitfsJournal } from "./journal.js";
+import type { BitfsSessionJournal } from "./sessionJournal.js";
 import type { BitfsSeedIndex } from "./seedIndex.js";
 import { bitfsWorkflowFacts } from "./sdk.js";
 import { deriveSupplierPeerId, normalizeSupplierAddress } from "../supplierConfig.js";
@@ -22,6 +23,8 @@ export interface BitfsSellerMatch {
   quoteBytes: Uint8Array;
   /** 报价绑定的 Seed Hash。 */
   seedHashHex: string;
+  /** 重连时复用的原卖方资金会话；新销售时省略。 */
+  resumeSessionId?: string;
 }
 
 export interface BitfsSellerRuntimeDeps {
@@ -31,6 +34,8 @@ export interface BitfsSellerRuntimeDeps {
   index: BitfsSeedIndex;
   /** persist-before-send journal。 */
   journal: BitfsJournal;
+  /** 买卖会话证据日志；用于从已开池会话中恢复原报价与池身份。 */
+  sessions?: BitfsSessionJournal;
   /** 返回当前卖方设置。 */
   settings(): Readonly<MsFileSellerSettings>;
   /** 显式可信时钟；SDK 与运行单元都不自行拥有时钟。 */
@@ -72,6 +77,35 @@ export class BitfsSellerRuntime {
       if (parsed.ok && !addresses.includes(parsed.value.normalized)) addresses.push(parsed.value.normalized);
     }
     if (addresses.length === 0 && !hasWebRtcSdpLocator) return null;
+    // 已开池的卖方会话只能沿用原 Kind 1、Kind 2/3 和池证据。新报价会
+    // 改变买方验签上下文，不能拿来接管旧池；若同一买方有多笔未完成池，
+    // 身份不足以区分目标，保持静默以免把交易路由到错误的池。
+    const ownerPublicKeyHex = Array.from(this.deps.signer.publicKey(), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const resumable = (await this.deps.sessions?.list() ?? []).filter((record) =>
+      record.role === "seller"
+      && record.ownerPublicKeyHex === ownerPublicKeyHex
+      && record.counterpartyPublicKeyHex === request.from_public_key.toLowerCase()
+      && record.seedHashHex === request.body.hash
+      && record.evidence.includes("kind2-opening-request")
+      && record.phase !== "closed"
+      && record.phase !== "failed"
+      && record.phase !== "arbitration-prepared"
+      && record.phase !== "arbitration-payment-unknown");
+    if (resumable.length > 1) return null;
+    if (resumable.length === 1) {
+      const existing = resumable[0]!;
+      const quoteBytes = await this.deps.sessions?.getEvidence(existing.sessionId, "kind1-quote");
+      if (!quoteBytes) return null;
+      return {
+        requestKey: key,
+        requestMessageId: request.message_id,
+        transport: hasWebRtcSdpLocator ? "webrtc-sdp" : "multiaddr",
+        addresses,
+        quoteBytes,
+        seedHashHex: request.body.hash,
+        resumeSessionId: existing.sessionId,
+      };
+    }
     const quote = await createSellerQuote(bitfsWorkflowFacts(nowMs), this.deps.signer, {
       seedHash: hexToBytes(request.body.hash),
       buyerPublicKey: hexToBytes(request.from_public_key),

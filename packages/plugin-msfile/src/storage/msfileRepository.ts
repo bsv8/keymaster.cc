@@ -14,6 +14,7 @@ import type {
   BorrowedOwnerFileStore,
   MsFileAppIdentityKey,
   MsFileAppPriceOverride,
+  MsFileBitfsBuyerSettings,
   MsFileGlobalPriceSettings,
   MsFileReadConcurrencySettings,
   MsFileSellerSettings,
@@ -21,18 +22,22 @@ import type {
 } from "@keymaster/contracts";
 import {
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
   MSFILE_SELLER_SETTINGS_DEFAULT,
   isValidMsFileSupplierPublicKeyHex,
   msFileAppPolicyKeyString,
   normalizeMsFileReadConcurrencySettings,
+  normalizeMsFileBitfsBuyerSettings,
   normalizeMsFileSellerSettings,
   normalizeMsFileSatoshiAmount,
 } from "@keymaster/contracts";
 
 const SETTING_FILE = "setting.json";
+const BITFS_BUYER_SETTING_FILE = "bitfs-buyer-settings.json";
 const APP_SETTINGS_FILE = "settings.json";
 const MSFILES_SETTING_FORMAT = "keymaster.msfiles-setting";
 const APP_SETTINGS_FORMAT = "keymaster.app-settings";
+const BITFS_BUYER_SETTINGS_FORMAT = "keymaster.msfile-bitfs-buyer-settings";
 /** 单文件上限，与 KeymasterFormats 文档一致。 */
 const MAX_SETTING_FILE_BYTES = 32 * 1024;
 const MAX_APP_SETTINGS_FILE_BYTES = 16 * 1024;
@@ -50,6 +55,10 @@ export interface MsFileRepository {
   putMediaBlockReadConcurrency(settings: { mediaBlockReadConcurrency: number } | number, updatedAt: number): Promise<void>;
   /** 保存独立 schema v2 的卖方设置。 */
   putSellerSettings(settings: MsFileSellerSettings, updatedAt: number): Promise<void>;
+  /** 读取独立文件中的买方策略；旧版文件缺失时返回关闭自动购买的安全缺省值。 */
+  getBitfsBuyerSettings?(): Promise<MsFileBitfsBuyerSettings>;
+  /** 原子替换当前 Key 的 BitFS 买方策略。 */
+  putBitfsBuyerSettings?(settings: MsFileBitfsBuyerSettings, updatedAt: number): Promise<void>;
   listSuppliers(): Promise<MsFileSupplierConfig[]>;
   getSupplier(supplierPublicKeyHex: string): Promise<MsFileSupplierConfig | null>;
   upsertSupplier(config: MsFileSupplierConfig): Promise<void>;
@@ -245,6 +254,22 @@ function parseSettingFile(bytes: Uint8Array): StoredSettingSnapshot {
     sellerSettings = normalized;
   }
   return { priceLimits, readConcurrency, suppliers, sellerSettings };
+}
+
+function parseBitfsBuyerSettingsFile(bytes: Uint8Array): MsFileBitfsBuyerSettings {
+  const label = "MSFile bitfs-buyer-settings.json";
+  const record = decodeJsonObject(bytes, 64 * 1024, label);
+  assertKnownKeys(record, ["format", "version", "settings"], label);
+  if (record.format !== BITFS_BUYER_SETTINGS_FORMAT || record.version !== 1) fail(`${label} format/version is invalid`);
+  const normalized = normalizeMsFileBitfsBuyerSettings(record.settings);
+  if (!normalized) fail(`${label} settings are invalid`);
+  return normalized;
+}
+
+function serializeBitfsBuyerSettingsFile(settings: MsFileBitfsBuyerSettings): Uint8Array {
+  const normalized = normalizeMsFileBitfsBuyerSettings(settings);
+  if (!normalized) fail("MSFile BitFS buyer settings are invalid");
+  return encodeJsonObject({ format: BITFS_BUYER_SETTINGS_FORMAT, version: 1, settings: normalized });
 }
 
 function serializeSettingFile(snapshot: StoredSettingSnapshot): Uint8Array {
@@ -458,6 +483,16 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
           supportedArbiterPublicKeys: [...normalized.supportedArbiterPublicKeys],
         };
       });
+    },
+    async getBitfsBuyerSettings() {
+      assertOpen();
+      const file = await stores.settings.get(BITFS_BUYER_SETTING_FILE);
+      return file ? parseBitfsBuyerSettingsFile(file.bytes) : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+    },
+    async putBitfsBuyerSettings(settings, updatedAt) {
+      assertOpen();
+      void updatedAt;
+      await stores.settings.put(BITFS_BUYER_SETTING_FILE, serializeBitfsBuyerSettingsFile(settings));
     },
     async listSuppliers() {
       assertOpen();

@@ -204,6 +204,8 @@ export interface BitfsFundingLedger {
     poolId: string;
     purpose: "close" | "refund";
     txid: string;
+    /** 关池/退款交易实际花费的池状态 outpoint；必须从经 go-bitfs 验证的交易原文解析。 */
+    spendingOutpoint: string;
     outputs: Array<Pick<BitfsDedicatedUtxo, "txid" | "vout" | "valueSatoshis" | "scriptHex">>;
     nowMs: number;
   }): Promise<BitfsFundingAccount>;
@@ -530,11 +532,18 @@ export function createBitfsFundingLedger(store: OwnerFileStore): BitfsFundingLed
     preparePoolRecovery(input) {
       const poolId = assertPoolId(input.poolId);
       const txid = assertHash(input.txid);
+      const spendingOutpoint = assertOutpoint(input.spendingOutpoint);
       const outputs = validateExpectedOutputs(txid, input.outputs);
       return mutate({ ...input, change(current) {
         const pool = requirePool(current, poolId);
         if (pool.state === "recovery-pending") {
           if (pool.recoveryTxid !== txid) throw new BitfsFundingError("integrity", "同一池的待恢复交易哈希发生变化");
+          const transaction = requireTransaction(current, txid);
+          if (transaction.purpose !== input.purpose
+            || !sameStrings(transaction.inputOutpoints, [spendingOutpoint])
+            || !sameOutputs(transaction.expectedOutputs, outputs)) {
+            throw new BitfsFundingError("integrity", "同一待恢复交易的输入或找回输出发生变化");
+          }
           return current;
         }
         if (pool.state !== "open") throw new BitfsFundingError("invalid_transition", "BitFS 池尚未开立或已经关闭");
@@ -545,7 +554,7 @@ export function createBitfsFundingLedger(store: OwnerFileStore): BitfsFundingLed
             txid,
             purpose: input.purpose,
             state: "prepared",
-            inputOutpoints: [pool.openingOutpoint],
+            inputOutpoints: [spendingOutpoint],
             expectedOutputs: outputs,
             poolId,
           }],

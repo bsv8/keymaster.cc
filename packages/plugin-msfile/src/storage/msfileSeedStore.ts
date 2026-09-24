@@ -571,6 +571,36 @@ export async function commitPurchasedMsFileContent(input: {
   }
 }
 
+/** 校验已购 Seed 并返回其按文件顺序引用的 Block Hash。 */
+export async function inspectPurchasedMsFileSeed(input: {
+  /** 文件 Seed Hash。 */
+  seedHashHex: string;
+  /** exact Seed 原文。 */
+  seedBytes: Uint8Array;
+  /** 报价中绑定的原文件大小。 */
+  fileSizeBytes: string;
+}): Promise<{ blockHashesHex: string[]; seedSizeBytes: string }> {
+  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  if (!(input.seedBytes instanceof Uint8Array) || input.seedBytes.byteLength === 0) {
+    fail("invalid-source", "purchased seed is empty");
+  }
+  if (!/^(0|[1-9][0-9]*)$/u.test(input.fileSizeBytes)) fail("invalid-source", "purchased file size is invalid");
+  const sourceSize = BigInt(input.fileSizeBytes);
+  try {
+    const info = await verifySeedForSourceSize([input.seedBytes], Digest.fromHex(seedHashHex), sourceSize);
+    if (info.blockCount > BigInt(Number.MAX_SAFE_INTEGER)) fail("invalid-source", "purchased seed block count is too large");
+    const randomAccess = createSeedRandomAccess(input.seedBytes);
+    const blockHashesHex: string[] = [];
+    for (let index = 0; index < Number(info.blockCount); index += 1) {
+      const digest = await readBlockHash(randomAccess, info.seedSize, BigInt(index));
+      blockHashesHex.push(digest.toHex());
+    }
+    return { blockHashesHex, seedSizeBytes: info.seedSize.toString(10) };
+  } catch (cause) {
+    throw toStoreError(cause, "integrity");
+  }
+}
+
 /**
  * 列出全部条目：只读 `meta/` 前缀，一个 meta 文件对应一个条目。
  *

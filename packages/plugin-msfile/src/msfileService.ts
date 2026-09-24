@@ -17,6 +17,7 @@ import type {
   MsFileAppPriceOverrideUpdate,
   MsFileConnectAppContext,
   MsFileContentKind,
+  MsFileBitfsBuyerSettings,
   MsFileGlobalPriceSettings,
   MsFileReadConcurrencySettings,
   MsFilePendingApproval,
@@ -34,6 +35,7 @@ import type {
 import {
   MSFILE_LOCAL_SOURCE_ID,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
   MSFILE_SELLER_SETTINGS_DEFAULT,
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
@@ -45,6 +47,7 @@ import {
   msFileAppPolicyKeyString,
   normalizeMsFileReadConcurrencySettings,
   normalizeMsFileSellerSettings,
+  normalizeMsFileBitfsBuyerSettings,
   type MsFileService,
 } from "@keymaster/contracts";
 import type { MsFileLocalContentSource } from "./bitfs/localContentSource.js";
@@ -424,6 +427,24 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     // 缓存，避免上传/删除与运行态切换后的旧可用性继续存在。
     this.statCache.clear();
     this.emit();
+  }
+
+  /** 读取当前 Key 的 BitFS 自动购买策略；旧文件或旧 Repository 使用关闭态缺省值。 */
+  async getBitfsBuyerSettings(): Promise<MsFileBitfsBuyerSettings> {
+    await this.ensureReady();
+    const repository = await this.repository;
+    const settings = await repository.getBitfsBuyerSettings?.();
+    return settings ? { ...settings } : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+  }
+
+  /** 原子保存 BitFS 自动购买策略；既有购买会话继续使用开池时固定的证据。 */
+  async updateBitfsBuyerSettings(input: MsFileBitfsBuyerSettings): Promise<void> {
+    await this.ensureReady();
+    const settings = normalizeMsFileBitfsBuyerSettings(input);
+    if (!settings) throw new Error("MSFile BitFS 买方设置不合法");
+    const repository = await this.repository;
+    if (!repository.putBitfsBuyerSettings) throw new Error("当前 MSFile 存储不支持 BitFS 买方设置");
+    await repository.putBitfsBuyerSettings(settings, this.now());
   }
 
   /** Coordinator 索引、transport 或销售会话变化时更新唯一运行状态。 */

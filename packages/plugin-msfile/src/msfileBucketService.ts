@@ -5,7 +5,7 @@
 // OwnerFileStore 完成。MasterSeed 算法全部来自 `masterseed` 官方 SDK。
 
 import { defineCapability } from "webloom-framework";
-import type { MsFileCoordinatorControl, OwnerFileStore } from "@keymaster/contracts";
+import type { MsFileBitfsTaskSnapshot, MsFileCoordinatorControl, OwnerFileStore } from "@keymaster/contracts";
 import {
   MsFileSeedStoreError,
   deleteMsFileSeed,
@@ -32,6 +32,18 @@ export interface MsFileBucketOperationOptions {
 
 export interface MsFileBucketService {
   list(options?: { signal?: AbortSignal }): Promise<MsFileSeedEntry[]>;
+  /** 读取 Worker 持久化的买方任务摘要；报价、交易和签名原文不会返回页面。 */
+  listBitfsTasks?(): Promise<MsFileBitfsTaskSnapshot[]>;
+  /** 对仍有在线卖方会话的任务发起取消；Worker 负责写日志与关池。 */
+  cancelBitfsTask?(seedHashHex: string, sessionId: string): Promise<void>;
+  /** 为已断线的开池会话发布新需求；Worker 会把报价关联回原资金会话。 */
+  reconnectBitfsTask?(seedHashHex: string): Promise<void>;
+  /** 从任务页选择报价并开始购买；单块最高价按当前文件单独固定。 */
+  startBitfsTask?(seedHashHex: string, sessionId: string, maxFullBlockPriceSatoshis: string): Promise<void>;
+  /** 持久化当前 Seed 的强制下载单块上限；不改自动购买设置。 */
+  saveBitfsPriceLimit?(seedHashHex: string, maxFullBlockPriceSatoshis: string): Promise<void>;
+  /** 停止当前 Seed 继续接收报价；已开始购买的资金恢复责任保留。 */
+  cancelBitfsDemand?(seedHashHex: string): Promise<void>;
   upload(source: MsFileSeedSource, options?: MsFileBucketOperationOptions): Promise<MsFileSeedUploadResult>;
   read(seedHashHex: string, options?: MsFileBucketOperationOptions): Promise<MsFileSeedReadResult>;
   verify(seedHashHex: string, options?: MsFileBucketOperationOptions): Promise<MsFileSeedVerifyResult>;
@@ -129,6 +141,58 @@ export function createMsFileBucketService(deps: MsFileBucketServiceDeps): MsFile
   };
   return {
     list: (listOptions = {}) => listMsFileSeeds({ store, ...withSignal(listOptions.signal) }),
+    async listBitfsTasks() {
+      if (!canUseWorkerBlocks) return [];
+      const result = await coordinator.msfileControl({ type: "bitfs.purchase.tasks.list" });
+      if (result.status !== "ok") throw new MsFileSeedStoreError("storage", "无法读取 BitFS 购买任务摘要");
+      if (!Array.isArray(result.value)) throw new MsFileSeedStoreError("storage", "BitFS 购买任务摘要格式无效");
+      return result.value as MsFileBitfsTaskSnapshot[];
+    },
+    async cancelBitfsTask(seedHashHex, sessionId) {
+      if (!canUseWorkerBlocks) throw new MsFileSeedStoreError("storage", "当前 MSFile 连接不支持 BitFS 购买任务");
+      const result = await coordinator.msfileControl({ type: "bitfs.purchase.cancel", seedHashHex, sessionId });
+      if (result.status !== "ok") {
+        const message = "message" in result && typeof result.message === "string" ? result.message : "取消 BitFS 购买失败";
+        throw new MsFileSeedStoreError("storage", message);
+      }
+    },
+    async reconnectBitfsTask(seedHashHex) {
+      if (!canUseWorkerBlocks) throw new MsFileSeedStoreError("storage", "当前 MSFile 连接不支持 BitFS 买方任务");
+      const result = await coordinator.msfileControl({ type: "bitfs.demand.publish", seedHashHex });
+      if (result.status !== "ok") {
+        const message = "message" in result && typeof result.message === "string" ? result.message : "重新连接 BitFS 卖家失败";
+        throw new MsFileSeedStoreError("storage", message);
+      }
+    },
+    async startBitfsTask(seedHashHex, sessionId, maxFullBlockPriceSatoshis) {
+      if (!canUseWorkerBlocks) throw new MsFileSeedStoreError("storage", "当前 MSFile 连接不支持 BitFS 买方任务");
+      const result = await coordinator.msfileControl({
+        type: "bitfs.purchase.start",
+        seedHashHex,
+        sessionId,
+        maxFullBlockPriceSatoshis,
+      });
+      if (result.status !== "ok") {
+        const message = "message" in result && typeof result.message === "string" ? result.message : "启动 BitFS 购买失败";
+        throw new MsFileSeedStoreError("storage", message);
+      }
+    },
+    async saveBitfsPriceLimit(seedHashHex, maxFullBlockPriceSatoshis) {
+      if (!canUseWorkerBlocks) throw new MsFileSeedStoreError("storage", "当前 MSFile 连接不支持 BitFS 单文件价格上限");
+      const result = await coordinator.msfileControl({ type: "bitfs.buyerPriceLimit.update", seedHashHex, maxFullBlockPriceSatoshis });
+      if (result.status !== "ok") {
+        const message = "message" in result && typeof result.message === "string" ? result.message : "保存 BitFS 单文件最高价失败";
+        throw new MsFileSeedStoreError("storage", message);
+      }
+    },
+    async cancelBitfsDemand(seedHashHex) {
+      if (!canUseWorkerBlocks) throw new MsFileSeedStoreError("storage", "当前 MSFile 连接不支持 BitFS 需求控制");
+      const result = await coordinator.msfileControl({ type: "bitfs.demand.cancel", seedHashHex });
+      if (result.status !== "ok") {
+        const message = "message" in result && typeof result.message === "string" ? result.message : "停止 BitFS 报价收集失败";
+        throw new MsFileSeedStoreError("storage", message);
+      }
+    },
     upload: (source, uploadOptions = {}) => storeMsFileSeed({
       store,
       source,

@@ -72,6 +72,11 @@ import type {
   MsFileGlobalPriceSettings,
   MsFileSellerSettings,
   MsFileSupplierConfig,
+  MsFileBitfsDemandSnapshot,
+  MsFileBitfsPurchaseSnapshot,
+  MsFileBitfsTaskSnapshot,
+  MsFileBitfsQuoteView,
+  MsFileBitfsBuyerSettings,
 } from "./msfile.js";
 import {
   MSFILE_MAX_BLOCK_BYTES,
@@ -81,6 +86,7 @@ import {
   isValidMsFileSupplierPublicKeyHex,
   normalizeMsFileSatoshiAmount,
   normalizeMsFileSellerSettings,
+  normalizeMsFileBitfsBuyerSettings,
 } from "./msfile.js";
 import type {
   CoordinatorOwnerStorageData,
@@ -301,9 +307,13 @@ export type CoordinatorStorageDataResultFor<D extends CoordinatorStorageData> =
 /** 依据 msfile.control 内层 control discriminant 收窄 operationResult。 */
 export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl> =
   C extends { type: "settings.get" } ? MsFileSettingsSnapshot :
+  C extends { type: "settings.bitfsBuyer.get" } ? MsFileBitfsBuyerSettings :
   C extends { type: "settings.readConcurrency.get" } ? MsFileReadConcurrencySettings :
-  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
+  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "settings.bitfsBuyer.update" | "bitfs.buyerPriceLimit.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
   C extends { type: "settings.mediaBlockReadConcurrency.get" } ? number :
+  C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" | "bitfs.purchase.start" | "bitfs.purchase.cancel" } ? MsFileBitfsDemandSnapshot :
+  C extends { type: "bitfs.purchase.tasks.list" } ? MsFileBitfsTaskSnapshot[] :
+  C extends { type: "bitfs.demand.cancel" } ? null :
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult :
   C extends { type: "app-authorizations.list" } ? MsFileAppAuthorizationView[] :
   C extends { type: "approvals.pending" } ? CoordinatorMsFileStateEvent["pendingApprovals"] :
@@ -1208,6 +1218,13 @@ function parseMsFileSellerSettings(value: unknown, field = "MSFile seller settin
   return normalized;
 }
 
+/** Worker RPC 边界统一校验 BitFS 买方自动购买策略。 */
+function parseMsFileBitfsBuyerSettings(value: unknown, field = "MSFile BitFS buyer settings"): MsFileBitfsBuyerSettings {
+  const normalized = normalizeMsFileBitfsBuyerSettings(expectRecord(value, field));
+  if (!normalized) throw new TypeError(`${field} is invalid`);
+  return normalized;
+}
+
 function parseMsFileSupplier(value: unknown): MsFileSupplierConfig {
   const supplier = expectRecord(value, "MSFile supplier");
   const supplierPublicKeyHex = text(supplier.supplierPublicKeyHex, "MSFile supplier.supplierPublicKeyHex", 66);
@@ -1293,12 +1310,45 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   const control = expectRecord(value, "MSFile control");
   const type = text(control.type, "MSFile control.type", 96);
   if (type === "settings.get" || type === "settings.readConcurrency.get" || type === "settings.readConcurrency.reset"
-    || type === "settings.mediaBlockReadConcurrency.get" || type === "app-authorizations.list" || type === "approvals.pending") {
+    || type === "settings.bitfsBuyer.get"
+    || type === "settings.mediaBlockReadConcurrency.get" || type === "app-authorizations.list" || type === "approvals.pending"
+    || type === "bitfs.purchase.tasks.list") {
     return { type };
+  }
+  if (type === "bitfs.demand.publish" || type === "bitfs.demand.snapshot" || type === "bitfs.demand.cancel") {
+    const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
+    if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError(`Coordinator MSFile control ${type} Seed Hash is invalid`);
+    return { type, seedHashHex };
+  }
+  if (type === "bitfs.purchase.start") {
+    const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
+    if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError("Coordinator MSFile purchase Seed Hash is invalid");
+    const maxFullBlockPriceSatoshis = optionalText(control.maxFullBlockPriceSatoshis, `MSFile control.${type}.maxFullBlockPriceSatoshis`, 20);
+    return {
+      type,
+      seedHashHex,
+      sessionId: text(control.sessionId, `MSFile control.${type}.sessionId`, 128),
+      ...(maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis: parseMsFileSatoshiAmount(maxFullBlockPriceSatoshis, `MSFile control.${type}.maxFullBlockPriceSatoshis`) }),
+    };
+  }
+  if (type === "bitfs.purchase.cancel") {
+    const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
+    if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError("Coordinator MSFile purchase Seed Hash is invalid");
+    return { type, seedHashHex, sessionId: text(control.sessionId, `MSFile control.${type}.sessionId`, 128) };
+  }
+  if (type === "bitfs.buyerPriceLimit.update") {
+    const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
+    if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError(`Coordinator MSFile control ${type} Seed Hash is invalid`);
+    return {
+      type,
+      seedHashHex,
+      maxFullBlockPriceSatoshis: parseMsFileSatoshiAmount(control.maxFullBlockPriceSatoshis, `MSFile control.${type}.maxFullBlockPriceSatoshis`),
+    };
   }
   if (type === "settings.readConcurrency.update") return { type, input: parseMsFileReadConcurrency(control.input) };
   if (type === "settings.global.update") return { type, input: parseMsFileGlobalPriceSettings(control.input) };
   if (type === "settings.seller.update") return { type, input: parseMsFileSellerSettings(control.input) };
+  if (type === "settings.bitfsBuyer.update") return { type, input: parseMsFileBitfsBuyerSettings(control.input) };
   if (type === "settings.mediaBlockReadConcurrency.update") {
     return { type, mediaBlockReadConcurrency: boundedNumber(control.mediaBlockReadConcurrency, "MSFile control.mediaBlockReadConcurrency", 1, 16) };
   }
@@ -2869,8 +2919,17 @@ function parseStorageDataResultFor(data: CoordinatorStorageData, value: unknown,
 function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: unknown, field: string): unknown {
   switch (control.type) {
     case "settings.get": return parseMsFileSettingsSnapshot(value, field);
+    case "settings.bitfsBuyer.get": return parseMsFileBitfsBuyerSettings(value, field);
     case "settings.readConcurrency.get": return parseMsFileReadConcurrency(value);
     case "settings.mediaBlockReadConcurrency.get": return boundedNumber(value, field, 1, 16);
+    case "bitfs.demand.publish":
+    case "bitfs.demand.snapshot":
+    case "bitfs.purchase.start":
+    case "bitfs.purchase.cancel": return parseMsFileBitfsDemandSnapshot(value, field);
+    case "bitfs.purchase.tasks.list": {
+      if (!Array.isArray(value) || value.length > 1_000) throw new TypeError(`Coordinator ${field} must be a bounded array`);
+      return value.map((item, index) => parseMsFileBitfsTaskSnapshot(item, `${field}[${index}]`));
+    }
     case "bucket.get-block": {
       const bytes = arrayBufferValue(value, field);
       if (bytes.byteLength < 1 || bytes.byteLength > MSFILE_MAX_BLOCK_BYTES) throw new TypeError(`Coordinator ${field} is invalid`);
@@ -2889,6 +2948,10 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "settings.readConcurrency.reset":
     case "settings.mediaBlockReadConcurrency.update":
     case "settings.global.update":
+    case "settings.seller.update":
+    case "settings.bitfsBuyer.update":
+    case "bitfs.buyerPriceLimit.update":
+    case "bitfs.demand.cancel":
     case "supplier.upsert":
     case "supplier.delete":
     case "app-policy.update":
@@ -2898,6 +2961,158 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
       if (value !== null) throw new TypeError(`Coordinator ${field} must be null`);
       return null;
   }
+}
+
+function parseMsFileBitfsQuoteView(value: unknown, field: string): MsFileBitfsQuoteView {
+  const quote = expectRecord(value, field);
+  const sessionId = text(quote.sessionId, `${field}.sessionId`, 128);
+  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(sessionId)) throw new TypeError(`Coordinator ${field}.sessionId is invalid`);
+  const seedHashHex = text(quote.seedHashHex, `${field}.seedHashHex`, 64);
+  if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError(`Coordinator ${field}.seedHashHex is invalid`);
+  const sellerPublicKeyHex = text(quote.sellerPublicKeyHex, `${field}.sellerPublicKeyHex`, 66);
+  if (!isValidMsFileSupplierPublicKeyHex(sellerPublicKeyHex)) throw new TypeError(`Coordinator ${field}.sellerPublicKeyHex is invalid`);
+  if (!Array.isArray(quote.supportedArbiterPublicKeys) || quote.supportedArbiterPublicKeys.length > 64) {
+    throw new TypeError(`Coordinator ${field}.supportedArbiterPublicKeys is invalid`);
+  }
+  const supportedArbiterPublicKeys = quote.supportedArbiterPublicKeys.map((item, index) => {
+    const publicKeyHex = text(item, `${field}.supportedArbiterPublicKeys[${index}]`, 66);
+    if (!isValidMsFileSupplierPublicKeyHex(publicKeyHex)) throw new TypeError(`Coordinator ${field}.supportedArbiterPublicKeys[${index}] is invalid`);
+    return publicKeyHex;
+  });
+  const quoteExpiresAtUnixSeconds = text(quote.quoteExpiresAtUnixSeconds, `${field}.quoteExpiresAtUnixSeconds`, 20);
+  if (!/^[1-9][0-9]*$/u.test(quoteExpiresAtUnixSeconds)) throw new TypeError(`Coordinator ${field}.quoteExpiresAtUnixSeconds is invalid`);
+  const recentBytesPerSecond = quote.recentBytesPerSecond === undefined
+    ? undefined
+    : quote.recentBytesPerSecond === null
+      ? null
+      : parseMsFileSatoshiAmount(quote.recentBytesPerSecond, `${field}.recentBytesPerSecond`);
+  return {
+    sessionId,
+    seedHashHex,
+    fileSizeBytes: parseMsFileSatoshiAmount(quote.fileSizeBytes, `${field}.fileSizeBytes`),
+    sellerPublicKeyHex,
+    seedPriceSatoshis: parseMsFileSatoshiAmount(quote.seedPriceSatoshis, `${field}.seedPriceSatoshis`),
+    fullBlockPriceSatoshis: parseMsFileSatoshiAmount(quote.fullBlockPriceSatoshis, `${field}.fullBlockPriceSatoshis`),
+    quoteExpiresAtUnixSeconds,
+    recommendedFilename: text(quote.recommendedFilename, `${field}.recommendedFilename`, 512),
+    supportedArbiterPublicKeys,
+    ...(recentBytesPerSecond === undefined ? {} : { recentBytesPerSecond }),
+  };
+}
+
+function parseMsFileBitfsPurchaseSnapshot(value: unknown, field: string): MsFileBitfsPurchaseSnapshot {
+  const purchase = expectRecord(value, field);
+  const sessionId = text(purchase.sessionId, `${field}.sessionId`, 128);
+  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(sessionId)) throw new TypeError(`Coordinator ${field}.sessionId is invalid`);
+  const openingAmountSatoshis = purchase.openingAmountSatoshis === null
+    ? null
+    : parseMsFileSatoshiAmount(purchase.openingAmountSatoshis, `${field}.openingAmountSatoshis`);
+  const currentMaxFullBlockPriceSatoshis = purchase.currentMaxFullBlockPriceSatoshis === undefined
+    ? undefined
+    : purchase.currentMaxFullBlockPriceSatoshis === null
+      ? null
+      : parseMsFileSatoshiAmount(purchase.currentMaxFullBlockPriceSatoshis, `${field}.currentMaxFullBlockPriceSatoshis`);
+  const totalBlockCount = purchase.totalBlockCount === null
+    ? null
+    : boundedNumber(purchase.totalBlockCount, `${field}.totalBlockCount`, 0);
+  const verifiedBytes = purchase.verifiedBytes === undefined
+    ? undefined
+    : purchase.verifiedBytes === null
+      ? null
+      : parseMsFileSatoshiAmount(purchase.verifiedBytes, `${field}.verifiedBytes`);
+  const message = purchase.message === null ? null : text(purchase.message, `${field}.message`, 512);
+  return {
+    sessionId,
+    phase: enumValue(purchase.phase, [
+      "discovering", "opening", "cancelling-opening", "funding", "funding-unknown", "requesting-seed", "requesting-blocks",
+      "payment-unknown", "content-committing", "closing-pool", "close-unknown", "cancelling-pool", "cancel-unknown", "cancelled",
+      "refund-ready", "refund-unknown", "refunded",
+      "completed", "failed", "connection-closed",
+    ] as const, `${field}.phase`),
+    openingAmountSatoshis,
+    ...(currentMaxFullBlockPriceSatoshis === undefined ? {} : { currentMaxFullBlockPriceSatoshis }),
+    verifiedBlockCount: boundedNumber(purchase.verifiedBlockCount, `${field}.verifiedBlockCount`, 0),
+    ...(verifiedBytes === undefined ? {} : { verifiedBytes }),
+    totalBlockCount,
+    message,
+  };
+}
+
+function parseMsFileBitfsTaskSnapshot(value: unknown, field: string): MsFileBitfsTaskSnapshot {
+  const row = expectRecord(value, field);
+  const progress = parseMsFileBitfsPurchaseSnapshot(row, field);
+  const seedHashHex = text(row.seedHashHex, `${field}.seedHashHex`, 64);
+  const discoveryOnly = row.discoveryOnly === undefined ? false : bool(row.discoveryOnly, `${field}.discoveryOnly`);
+  const sellerPublicKeyHex = row.sellerPublicKeyHex === null
+    ? null
+    : text(row.sellerPublicKeyHex, `${field}.sellerPublicKeyHex`, 66);
+  if (!isValidMsFileHashHex(seedHashHex)
+    || (sellerPublicKeyHex !== null && !isValidMsFileSupplierPublicKeyHex(sellerPublicKeyHex))
+    || (!discoveryOnly && sellerPublicKeyHex === null)) {
+    throw new TypeError(`Coordinator ${field} identity is invalid`);
+  }
+  const recommendedFilename = row.recommendedFilename === null
+    ? null
+    : text(row.recommendedFilename, `${field}.recommendedFilename`, 512);
+  const fileSizeBytes = row.fileSizeBytes === null ? null : parseMsFileSatoshiAmount(row.fileSizeBytes, `${field}.fileSizeBytes`);
+  const verifiedBytes = row.verifiedBytes === null || row.verifiedBytes === undefined
+    ? null
+    : parseMsFileSatoshiAmount(row.verifiedBytes, `${field}.verifiedBytes`);
+  const fullBlockPriceSatoshis = row.fullBlockPriceSatoshis === null
+    ? null
+    : parseMsFileSatoshiAmount(row.fullBlockPriceSatoshis, `${field}.fullBlockPriceSatoshis`);
+  const availableQuotes = row.availableQuotes === undefined
+    ? []
+    : (() => {
+      if (!Array.isArray(row.availableQuotes) || row.availableQuotes.length > 256) throw new TypeError(`Coordinator ${field}.availableQuotes is invalid`);
+      return row.availableQuotes.map((item, index) => parseMsFileBitfsQuoteView(item, `${field}.availableQuotes[${index}]`));
+    })();
+  const canCancel = row.canCancel === undefined ? undefined : bool(row.canCancel, `${field}.canCancel`);
+  const canReconnect = row.canReconnect === undefined ? undefined : bool(row.canReconnect, `${field}.canReconnect`);
+  return {
+    ...progress,
+    seedHashHex,
+    sellerPublicKeyHex,
+    recommendedFilename,
+    fileSizeBytes,
+    verifiedBytes,
+    fullBlockPriceSatoshis,
+    paidSatoshis: parseMsFileSatoshiAmount(row.paidSatoshis, `${field}.paidSatoshis`),
+    minerFeeSatoshis: parseMsFileSatoshiAmount(row.minerFeeSatoshis, `${field}.minerFeeSatoshis`),
+    lockedSatoshis: parseMsFileSatoshiAmount(row.lockedSatoshis, `${field}.lockedSatoshis`),
+    pendingReturnSatoshis: parseMsFileSatoshiAmount(row.pendingReturnSatoshis, `${field}.pendingReturnSatoshis`),
+    ...(row.discoveryOnly === undefined ? {} : { discoveryOnly }),
+    availableQuotes,
+    ...(canCancel === undefined ? {} : { canCancel }),
+    ...(canReconnect === undefined ? {} : { canReconnect }),
+  };
+}
+
+function parseMsFileBitfsDemandSnapshot(value: unknown, field: string): MsFileBitfsDemandSnapshot {
+  const snapshot = expectRecord(value, field);
+  if (!Array.isArray(snapshot.quotes) || snapshot.quotes.length > 256) throw new TypeError(`Coordinator ${field}.quotes is invalid`);
+  const requestMessageId = snapshot.requestMessageId === null ? null : text(snapshot.requestMessageId, `${field}.requestMessageId`, 256);
+  const expiresAtMs = snapshot.expiresAtMs === null ? null : boundedNumber(snapshot.expiresAtMs, `${field}.expiresAtMs`, 0);
+  const purchase: MsFileBitfsPurchaseSnapshot | null | undefined = snapshot.purchase === undefined
+    ? undefined
+    : snapshot.purchase === null
+      ? null
+      : parseMsFileBitfsPurchaseSnapshot(snapshot.purchase, `${field}.purchase`);
+  const currentMaxFullBlockPriceSatoshis = snapshot.currentMaxFullBlockPriceSatoshis === undefined
+    ? undefined
+    : snapshot.currentMaxFullBlockPriceSatoshis === null
+      ? null
+      : parseMsFileSatoshiAmount(snapshot.currentMaxFullBlockPriceSatoshis, `${field}.currentMaxFullBlockPriceSatoshis`);
+  const seedHashHex = text(snapshot.seedHashHex, `${field}.seedHashHex`, 64);
+  if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError(`Coordinator ${field}.seedHashHex is invalid`);
+  return {
+    seedHashHex,
+    requestMessageId,
+    expiresAtMs,
+    quotes: snapshot.quotes.map((item, index) => parseMsFileBitfsQuoteView(item, `${field}.quotes[${index}]`)),
+    ...(purchase === undefined ? {} : { purchase }),
+    ...(currentMaxFullBlockPriceSatoshis === undefined ? {} : { currentMaxFullBlockPriceSatoshis }),
+  };
 }
 
 function parseSatPublishResult(value: unknown, field: string): CoordinatorSatPublishResult {

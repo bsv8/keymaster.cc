@@ -345,12 +345,83 @@ export interface MsFileSellerSettings {
   maxConcurrentSales: number;
 }
 
+/** 当前 Key 的 BitFS 买方自动购买策略；强制下载限额按单个文件单独设置。 */
+export interface MsFileBitfsBuyerSettings {
+  /** 是否在单块报价不高于自动购买上限时自动开始购买；旧配置缺失时关闭。 */
+  buyerAutoPurchaseEnabled: boolean;
+  /** 自动购买允许的单个完整 Block 最高价，单位聪；不限制整份文件总价。 */
+  maxFullBlockPriceSatoshis: MsFileSatoshiAmount;
+  /** 多个合格卖家时的优先规则；速度优先尚无有效样本时回退到价格优先。 */
+  sellerSelectionPriority: "price" | "recent-speed";
+  /** BitFS 买方同时处理的文件任务上限。 */
+  maxConcurrentDownloads: number;
+  /** 单个文件同时参与传输的卖家费用池数量；旧设置缺失时保持单卖家。 */
+  maxConcurrentSellerSessions: number;
+  /** 用户按 Seed 单独保存的强制下载完整 Block 最高价；与自动购买上限分开。 */
+  filePriceLimitsBySeedHash?: Record<string, MsFileSatoshiAmount>;
+}
+
+/** 自动购买安全缺省值；升级旧配置时必须保持关闭。 */
+export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSettings> = Object.freeze({
+  buyerAutoPurchaseEnabled: false,
+  maxFullBlockPriceSatoshis: "0",
+  sellerSelectionPriority: "price",
+  maxConcurrentDownloads: 1,
+  maxConcurrentSellerSessions: 3,
+  filePriceLimitsBySeedHash: Object.freeze({}),
+});
+
+/** BitFS 买方并发范围；任务数有界，避免报价洪峰同时占用资金和连接。 */
+export const MSFILE_BITFS_BUYER_LIMITS = Object.freeze({
+  maxConcurrentDownloads: 16,
+  maxConcurrentSellerSessions: 16,
+});
+
+/** 严格校验买方设置；非法输入整体拒绝保存。 */
+export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBuyerSettings | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const value = input as Record<string, unknown>;
+  const maxFullBlockPriceSatoshis = normalizeMsFileSatoshiAmount(value.maxFullBlockPriceSatoshis);
+  const filePriceLimitsBySeedHash: Record<string, MsFileSatoshiAmount> = {};
+  const savedFileLimits = value.filePriceLimitsBySeedHash;
+  if (savedFileLimits !== undefined) {
+    if (typeof savedFileLimits !== "object" || savedFileLimits === null || Array.isArray(savedFileLimits)) return undefined;
+    const entries = Object.entries(savedFileLimits as Record<string, unknown>);
+    if (entries.length > 256) return undefined;
+    for (const [seedHashHex, amount] of entries) {
+      const normalizedAmount = normalizeMsFileSatoshiAmount(amount);
+      if (!isValidMsFileHashHex(seedHashHex) || normalizedAmount === undefined) return undefined;
+      filePriceLimitsBySeedHash[seedHashHex] = normalizedAmount;
+    }
+  }
+  const maxConcurrentSellerSessions = value.maxConcurrentSellerSessions === undefined ? 1 : value.maxConcurrentSellerSessions;
+  if (typeof value.buyerAutoPurchaseEnabled !== "boolean"
+    || maxFullBlockPriceSatoshis === undefined
+    || (value.sellerSelectionPriority !== "price" && value.sellerSelectionPriority !== "recent-speed")
+    || !Number.isSafeInteger(value.maxConcurrentDownloads)
+    || (value.maxConcurrentDownloads as number) < 1
+    || (value.maxConcurrentDownloads as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentDownloads
+    || !Number.isSafeInteger(maxConcurrentSellerSessions)
+    || (maxConcurrentSellerSessions as number) < 1
+    || (maxConcurrentSellerSessions as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions) return undefined;
+  return {
+    buyerAutoPurchaseEnabled: value.buyerAutoPurchaseEnabled,
+    maxFullBlockPriceSatoshis,
+    sellerSelectionPriority: value.sellerSelectionPriority,
+    maxConcurrentDownloads: value.maxConcurrentDownloads as number,
+    maxConcurrentSellerSessions: maxConcurrentSellerSessions as number,
+    filePriceLimitsBySeedHash,
+  };
+}
+
 /** 经 BitFS 报价验签后，可安全展示给买方的摘要。 */
 export interface MsFileBitfsQuoteView {
   /** Keymaster 内部买方会话编号。 */
   sessionId: string;
   /** 报价对应的 Seed Hash。 */
   seedHashHex: string;
+  /** 报价签名绑定的原文件大小，单位字节。 */
+  fileSizeBytes: string;
   /** 已验签卖方压缩公钥。 */
   sellerPublicKeyHex: string;
   /** Seed 单价，单位聪。 */
@@ -361,6 +432,105 @@ export interface MsFileBitfsQuoteView {
   quoteExpiresAtUnixSeconds: string;
   /** 卖方建议文件名。 */
   recommendedFilename: string;
+  /** 报价允许的仲裁方压缩公钥；买方只可从此列表选择。 */
+  supportedArbiterPublicKeys: string[];
+  /** 最近一次已验收并完成付款的 Block 有效传输速度，单位字节/秒；没有样本时为 null。 */
+  recentBytesPerSecond?: MsFileSatoshiAmount | null;
+}
+
+/** 买方购买阶段；供界面显示，不暴露交易原文。 */
+export type MsFileBitfsPurchasePhase =
+  /** 正在收集并验签卖家报价；尚未动用买方资金。 */
+  | "discovering"
+  /** 正在准备并发送开池预签请求。 */
+  | "opening"
+  /** 已取消正在准备但尚未收到卖方开池预签的流程；资金占用正在释放。 */
+  | "cancelling-opening"
+  /** 正在广播或核对开池资金交易。 */
+  | "funding"
+  /** 开池交易结果暂时未知。 */
+  | "funding-unknown"
+  /** 正在请求或等待 Seed。 */
+  | "requesting-seed"
+  /** 正在请求或等待文件块。 */
+  | "requesting-blocks"
+  /** 付款已发送，正在核对池交易。 */
+  | "payment-unknown"
+  /** 已付款，正在写入本地文件。 */
+  | "content-committing"
+  /** 文件已写入，正在通过 Kind 12/13 协商关池。 */
+  | "closing-pool"
+  /** 完整关池交易已发送，正在核对并回收买方余款。 */
+  | "close-unknown"
+  /** 买方主动取消后，正在与卖方协商关闭费用池。 */
+  | "cancelling-pool"
+  /** 买方主动取消的关池结果尚未确定；费用池仍受保护。 */
+  | "cancel-unknown"
+  /** 取消已由链上确认，费用池余款已回收。 */
+  | "cancelled"
+  /** 退款锁已到期，正在广播买方预签退款。 */
+  | "refund-ready"
+  /** 退款交易结果尚未确定，资金仍受保护。 */
+  | "refund-unknown"
+  /** 退款交易已观察，余款已恢复为专款可用余额。 */
+  | "refunded"
+  /** 文件已验证并写入本地 MSFile。 */
+  | "completed"
+  /** 买方协议或数据校验失败。 */
+  | "failed"
+  /** 传输已断开；本地会话证据仍保留。 */
+  | "connection-closed";
+
+/** 当前 Seed 的买方购买进度摘要，不包含 wire 或交易原文。 */
+export interface MsFileBitfsPurchaseSnapshot {
+  /** 被选中的报价会话编号。 */
+  sessionId: string;
+  /** 买方持久化会话阶段。 */
+  phase: MsFileBitfsPurchasePhase;
+  /** 本次计划的开池金额；尚未准备时为 null。 */
+  openingAmountSatoshis: string | null;
+  /** 用户为本文件选择的完整 Block 最高价；未使用文件专属上限时为 null。 */
+  currentMaxFullBlockPriceSatoshis?: MsFileSatoshiAmount | null;
+  /** 已验证并暂存的不同 Block 数量。 */
+  verifiedBlockCount: number;
+  /** 已验证并暂存 Block 的总字节数；底层存储未能提供准确大小时为 null。 */
+  verifiedBytes?: MsFileSatoshiAmount | null;
+  /** 报价文件的 Block 总数。 */
+  totalBlockCount: number | null;
+  /** 购买过程中的中文提示；没有错误时为 null。 */
+  message: string | null;
+}
+
+/** `/msfile/storage` 显示的可恢复 BitFS 购买任务；不含 Artifact、签名或交易原文。 */
+export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
+  /** 购买绑定的 Seed Hash。 */
+  seedHashHex: string;
+  /** 当前购买报价卖家的压缩公钥；仅收集需求报价时还没有卖家，值为 null。 */
+  sellerPublicKeyHex: string | null;
+  /** 报价给出的建议文件名；旧会话缺少时为 null。 */
+  recommendedFilename: string | null;
+  /** 报价绑定的文件字节数；旧会话缺少时为 null。 */
+  fileSizeBytes: MsFileSatoshiAmount | null;
+  /** 完整 Block 单价；旧会话缺少时为 null。 */
+  fullBlockPriceSatoshis: MsFileSatoshiAmount | null;
+  /** 已支付给卖家的累计金额；尚无链上付款时为 0。 */
+  paidSatoshis: MsFileSatoshiAmount;
+  /** FundingTx 与当前费用池状态交易已知的矿工费合计。 */
+  minerFeeSatoshis: MsFileSatoshiAmount;
+  /** 仍处于费用池中或待回收的金额。 */
+  lockedSatoshis: MsFileSatoshiAmount;
+  /** 已准备但尚未观察回收的买方输出金额。 */
+  pendingReturnSatoshis: MsFileSatoshiAmount;
+  /** 任务页显示的已验收 Block 字节数；无法准确读取时为 null。 */
+  verifiedBytes: MsFileSatoshiAmount | null;
+  /** 是否仍处于需求/报价阶段，尚未选择卖家或准备资金。 */
+  discoveryOnly?: boolean;
+  /** 当前需求收到的已验签报价；可能为空，报价来自当前 Worker 会话。 */
+  availableQuotes?: MsFileBitfsQuoteView[];
+  /** 当前页面是否可以安全取消；已产生付款签名或卖家离线时为 false。 */
+  canCancel?: boolean;
+  /** 买卖通道断开且存在已开费用池时，可重新发布需求并续接原会话。 */
+  canReconnect?: boolean;
 }
 
 /** 当前 Seed 的 ChannelProtocol 需求与已验证报价视图。 */
@@ -373,6 +543,10 @@ export interface MsFileBitfsDemandSnapshot {
   expiresAtMs: number | null;
   /** 通过关联 WebRTC DataChannel 收到并验签的报价。 */
   quotes: MsFileBitfsQuoteView[];
+  /** 当前 Seed 最近一次买方购买会话；未开始时为 null。 */
+  purchase?: MsFileBitfsPurchaseSnapshot | null;
+  /** 用户为当前 Seed 保存的强制下载上限；不代替全局自动购买价上限。 */
+  currentMaxFullBlockPriceSatoshis?: MsFileSatoshiAmount | null;
 }
 
 /** 新安装与旧 schema 升级时采用的安全卖方缺省值。 */
@@ -584,6 +758,10 @@ export interface MsFileService {
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void>;
   /** 原子保存当前 Key 的 BitFS 卖方设置。 */
   updateSellerSettings(input: MsFileSellerSettings): Promise<void>;
+  /** 读取当前 Key 的 BitFS 自动购买策略；缺失方法的旧代理按自动购买关闭处理。 */
+  getBitfsBuyerSettings?(): Promise<MsFileBitfsBuyerSettings>;
+  /** 保存当前 Key 的 BitFS 自动购买策略；不改变已开始的购买任务。 */
+  updateBitfsBuyerSettings?(input: MsFileBitfsBuyerSettings): Promise<void>;
   /** 兼容旧调用方的单字段保存入口；只影响之后新建的媒体 Session。 */
   updateMediaBlockReadConcurrency(value: number): Promise<void>;
   upsertSupplier(input: MsFileSupplierConfig): Promise<void>;
@@ -610,6 +788,10 @@ export interface MsFileService {
   publishBitfsDemand?(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot>;
   /** 读取需求编号及其当前已验证报价；不包含原始 wire 或交易证据。 */
   getBitfsDemand?(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot>;
+  /** 选择已验签报价并通过其关联 DataChannel 执行买方购买流程。 */
+  startBitfsPurchase?(seedHashHex: string, sessionId: string, maxFullBlockPriceSatoshis?: MsFileSatoshiAmount): Promise<MsFileBitfsDemandSnapshot>;
+  /** 在尚未产生付款签名时取消购买，并通过 Kind 12/13 协商回收池内余款。 */
+  cancelBitfsPurchase?(seedHashHex: string, sessionId: string): Promise<MsFileBitfsDemandSnapshot>;
   /** 停止本地接收该需求的新报价；不会撤回已经发布的公开 Hash 请求。 */
   cancelBitfsDemand?(seedHashHex: string): Promise<void>;
 

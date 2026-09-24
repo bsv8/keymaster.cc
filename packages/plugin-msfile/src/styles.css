@@ -219,6 +219,28 @@
   padding: 0;
 }
 
+.msfile-home-file__bitfs-price-limit {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+.msfile-home-file__bitfs-price-limit label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.msfile-home-file__bitfs-price-limit input[type="range"] {
+  width: 100%;
+}
+
+.msfile-home-file__bitfs-price-limit p {
+  margin: 0;
+}
+
 .msfile-home-file__bitfs-demand li {
   display: flex;
   flex-wrap: wrap;
@@ -455,6 +477,131 @@
 .msfile-bucket__header p {
   color: var(--km-text-muted, #6b7280);
   margin: 0;
+}
+
+.msfile-bucket__tasks {
+  border-top: 1px solid var(--km-border, #e5e7eb);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.msfile-bucket__tasks-head,
+.msfile-bucket__task-head {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.msfile-bucket__tasks-head h4 {
+  margin: 0 0 4px;
+}
+
+.msfile-bucket__task {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.msfile-bucket__task-title {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.msfile-bucket__task-title code {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.8rem;
+}
+
+.msfile-bucket__task-message {
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.msfile-bucket__task-metrics {
+  display: grid;
+  gap: 8px 14px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  margin: 0;
+}
+
+.msfile-bucket__task-metrics div {
+  min-width: 0;
+}
+
+.msfile-bucket__task-metrics dt {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.75rem;
+}
+
+.msfile-bucket__task-metrics dd {
+  font-size: 0.85rem;
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.msfile-bucket__task-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.msfile-bucket__price-limit {
+  display: grid;
+  gap: 6px;
+}
+
+.msfile-bucket__price-limit input {
+  accent-color: var(--km-primary, #2563eb);
+  width: 100%;
+}
+
+.msfile-bucket__price-limit label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: space-between;
+}
+
+.msfile-bucket__quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.msfile-bucket__quotes li {
+  align-items: center;
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+
+.msfile-bucket__quote-info {
+  display: flex;
+  flex: 1 1 300px;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.msfile-bucket__quote-info span {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.8rem;
 }
 
 .msfile-bucket__hint {

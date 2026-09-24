@@ -10,6 +10,7 @@
 //   - 预览复用首页的 MIME 白名单、签名检查与 32 MiB / 256 MiB 上限。
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { MsFileBitfsQuoteView, MsFileBitfsTaskSnapshot } from "@keymaster/contracts";
 import type { MsFileSeedEntry, MsFileSeedStoreProgress } from "./storage/msfileSeedStore.js";
 import { isMsFileSeedStoreError } from "./storage/msfileSeedStore.js";
 import {
@@ -88,6 +89,43 @@ function formatBytes(value: string): string {
   return `${tenths / 10n}.${tenths % 10n} ${units[index]}`;
 }
 
+interface BitfsTaskPriceRange {
+  /** 当前已验签报价中的最低完整 Block 价。 */
+  min: bigint;
+  /** 当前报价中的最高价；报价同价时为最高报价的 120%。 */
+  max: bigint;
+  /** 首次显示时的预选上限。 */
+  initial: bigint;
+  /** 报价列表版本，仅用于判断范围变化。 */
+  key: string;
+}
+
+/** 按施工单计算单个文件的强制下载价格范围，金额全程使用整数聪。 */
+function bitfsTaskPriceRange(quotes: readonly MsFileBitfsQuoteView[]): BitfsTaskPriceRange | undefined {
+  if (quotes.length === 0) return undefined;
+  const prices = quotes.map((quote) => BigInt(quote.fullBlockPriceSatoshis));
+  const min = prices.reduce((value, price) => price < value ? price : value);
+  const maxQuote = prices.reduce((value, price) => price > value ? price : value);
+  const key = quotes.map((quote) => `${quote.sessionId}:${quote.fullBlockPriceSatoshis}`).sort().join("|");
+  if (maxQuote > min) return { min, max: maxQuote, initial: min + (maxQuote - min) / 5n, key };
+  const uint64Max = 0xffffffffffffffffn;
+  const max = (min * 6n + 4n) / 5n;
+  const cappedMax = max > uint64Max ? uint64Max : max;
+  return { min, max: cappedMax, initial: cappedMax, key };
+}
+
+/** 将 0–1000 的滑块刻度换算成整数聪。 */
+function bitfsTaskPriceAtTick(range: BitfsTaskPriceRange, tick: number): bigint {
+  return range.max <= range.min ? range.min : range.min + ((range.max - range.min) * BigInt(tick)) / 1_000n;
+}
+
+/** 将已选上限映射为滑块刻度；报价刷新时保留金额本身。 */
+function bitfsTaskTickAtPrice(range: BitfsTaskPriceRange, price: bigint): number {
+  if (range.max <= range.min || price <= range.min) return 0;
+  if (price >= range.max) return 1_000;
+  return Number(((price - range.min) * 1_000n) / (range.max - range.min));
+}
+
 function isCancellation(cause: unknown): boolean {
   return (isMsFileSeedStoreError(cause) && cause.code === "cancelled")
     || (cause instanceof DOMException && cause.name === "AbortError");
@@ -124,6 +162,10 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
   );
 
   const [entries, setEntries] = useState<MsFileSeedEntry[]>([]);
+  const [bitfsTasks, setBitfsTasks] = useState<MsFileBitfsTaskSnapshot[]>([]);
+  const [bitfsTasksLoading, setBitfsTasksLoading] = useState(false);
+  const [bitfsTaskBusyId, setBitfsTaskBusyId] = useState<string | null>(null);
+  const [bitfsPriceDrafts, setBitfsPriceDrafts] = useState<Record<string, { key: string; value: string; dirty: boolean }>>({});
   const [listPhase, setListPhase] = useState<ListPhase>("idle");
   const [listError, setListError] = useState<BucketError | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>(INITIAL_UPLOAD_STATE);
@@ -184,6 +226,111 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
     }
   }, [bucketError, service]);
 
+  const reloadBitfsTasks = useCallback(async () => {
+    if (!service.listBitfsTasks) {
+      setBitfsTasks([]);
+      return;
+    }
+    setBitfsTasksLoading(true);
+    try {
+      const next = await service.listBitfsTasks();
+      setBitfsTasks(next);
+    } catch (cause) {
+      setNotice({ kind: "error", text: bucketError(cause).message });
+    } finally {
+      setBitfsTasksLoading(false);
+    }
+  }, [bucketError, service]);
+
+  const cancelBitfsTask = useCallback(async (task: MsFileBitfsTaskSnapshot) => {
+    if (task.discoveryOnly ? !service.cancelBitfsDemand : !service.cancelBitfsTask) return;
+    setBitfsTaskBusyId(task.sessionId);
+    try {
+      if (task.discoveryOnly) await service.cancelBitfsDemand!(task.seedHashHex);
+      else await service.cancelBitfsTask!(task.seedHashHex, task.sessionId);
+      await reloadBitfsTasks();
+    } catch (cause) {
+      setNotice({ kind: "error", text: bucketError(cause).message });
+      await reloadBitfsTasks();
+    } finally {
+      setBitfsTaskBusyId(null);
+    }
+  }, [bucketError, reloadBitfsTasks, service]);
+
+  const reconnectBitfsTask = useCallback(async (task: MsFileBitfsTaskSnapshot) => {
+    if (!service.reconnectBitfsTask) return;
+    setBitfsTaskBusyId(task.sessionId);
+    try {
+      await service.reconnectBitfsTask(task.seedHashHex);
+      await reloadBitfsTasks();
+    } catch (cause) {
+      setNotice({ kind: "error", text: bucketError(cause).message });
+      await reloadBitfsTasks();
+    } finally {
+      setBitfsTaskBusyId(null);
+    }
+  }, [bucketError, reloadBitfsTasks, service]);
+
+  const startBitfsTask = useCallback(async (task: MsFileBitfsTaskSnapshot, quote: MsFileBitfsQuoteView, maxPrice: string) => {
+    if (!service.startBitfsTask) return;
+    setBitfsTaskBusyId(task.sessionId);
+    try {
+      await service.startBitfsTask(task.seedHashHex, quote.sessionId, maxPrice);
+      await reloadBitfsTasks();
+    } catch (cause) {
+      setNotice({ kind: "error", text: bucketError(cause).message });
+      await reloadBitfsTasks();
+    } finally {
+      setBitfsTaskBusyId(null);
+    }
+  }, [bucketError, reloadBitfsTasks, service]);
+
+  const saveBitfsPriceLimit = useCallback(async (task: MsFileBitfsTaskSnapshot, maxPrice: string) => {
+    if (!service.saveBitfsPriceLimit) return;
+    setBitfsTaskBusyId(task.sessionId);
+    try {
+      await service.saveBitfsPriceLimit(task.seedHashHex, maxPrice);
+      setBitfsPriceDrafts((previous) => {
+        const draft = previous[task.seedHashHex];
+        return draft ? { ...previous, [task.seedHashHex]: { ...draft, value: maxPrice, dirty: false } } : previous;
+      });
+      setNotice({ kind: "ok", text: t("msfile.bucket.bitfs.priceSaved", { defaultValue: "本文件最高价已保存；不会改变自动购买上限。" }) });
+      await reloadBitfsTasks();
+    } catch (cause) {
+      setNotice({ kind: "error", text: bucketError(cause).message });
+    } finally {
+      setBitfsTaskBusyId(null);
+    }
+  }, [bucketError, reloadBitfsTasks, service, t]);
+
+  useEffect(() => {
+    setBitfsPriceDrafts((previous) => {
+      let changed = false;
+      const next = { ...previous };
+      for (const task of bitfsTasks) {
+        if (!task.discoveryOnly) continue;
+        const range = bitfsTaskPriceRange(task.availableQuotes ?? []);
+        if (!range) continue;
+        const draft = previous[task.seedHashHex];
+        if (draft?.dirty) {
+          if (draft.key !== range.key) {
+            next[task.seedHashHex] = { ...draft, key: range.key };
+            changed = true;
+          }
+        } else if (!draft || draft.key !== range.key
+          || (task.currentMaxFullBlockPriceSatoshis != null && draft.value !== task.currentMaxFullBlockPriceSatoshis)) {
+          next[task.seedHashHex] = {
+            key: range.key,
+            value: task.currentMaxFullBlockPriceSatoshis ?? range.initial.toString(10),
+            dirty: false,
+          };
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  }, [bitfsTasks]);
+
   const canOperate = vault === "unlocked" && Boolean(lifecycle.activePublicKeyHex);
 
   // active key / 世代变化或锁定时，放弃在途任务并清空展示内容。
@@ -196,6 +343,9 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
       opControllerRef.current = null;
       uploadControllerRef.current = null;
       setEntries([]);
+      setBitfsTasks([]);
+      setBitfsTasksLoading(false);
+      setBitfsTaskBusyId(null);
       setListPhase("idle");
       setListError(null);
       setUploadState(INITIAL_UPLOAD_STATE);
@@ -205,12 +355,15 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
       return undefined;
     }
     void reload();
+    void reloadBitfsTasks();
+    const taskTimer = setInterval(() => { void reloadBitfsTasks(); }, 5_000);
     return () => {
+      clearInterval(taskTimer);
       listControllerRef.current?.abort();
       opControllerRef.current?.abort();
       uploadControllerRef.current?.abort();
     };
-  }, [canOperate, lifecycle.activePublicKeyHex, lifecycle.generation, reload, releasePreview]);
+  }, [canOperate, lifecycle.activePublicKeyHex, lifecycle.generation, reload, reloadBitfsTasks, releasePreview]);
 
   useEffect(() => () => releasePreview(), [releasePreview]);
 
@@ -487,6 +640,194 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
           <p>{t("msfile.bucket.description", { defaultValue: "按 MasterSeed 格式存入本桶的种子与文件块；可直接下载、预览、校验或删除。" })}</p>
         </div>
       </header>
+
+      <section className="msfile-bucket__tasks" aria-labelledby="msfile-bucket-tasks-title">
+        <header className="msfile-bucket__tasks-head">
+          <div>
+            <h4 id="msfile-bucket-tasks-title">{t("msfile.bucket.bitfs.title", { defaultValue: "BitFS 购买任务" })}</h4>
+            <p className="msfile-bucket__hint">{t("msfile.bucket.bitfs.hint", { defaultValue: "任务从本地购买日志和专款账本恢复；页面每 5 秒刷新一次。" })}</p>
+          </div>
+          <Button variant="ghost" size="sm" disabled={!canOperate || bitfsTasksLoading} onClick={() => { void reloadBitfsTasks(); }}>
+            {bitfsTasksLoading
+              ? t("msfile.bucket.bitfs.refreshing", { defaultValue: "正在刷新…" })
+              : t("msfile.bucket.bitfs.refresh", { defaultValue: "刷新任务" })}
+          </Button>
+        </header>
+        {bitfsTasksLoading && bitfsTasks.length === 0 ? (
+          <p className="msfile-bucket__hint" role="status">{t("msfile.bucket.bitfs.loading", { defaultValue: "正在读取购买日志和资金状态…" })}</p>
+        ) : null}
+        {!bitfsTasksLoading && bitfsTasks.length === 0 ? (
+          <p className="msfile-bucket__hint">{t("msfile.bucket.bitfs.empty", { defaultValue: "当前 Key 没有未完成的 BitFS 购买任务。" })}</p>
+        ) : null}
+        {bitfsTasks.map((task) => {
+          const progress = task.discoveryOnly
+            ? t("msfile.bucket.bitfs.quoteProgress", { defaultValue: "资金尚未拆分；已验签报价 {{count}} 条。", count: task.availableQuotes?.length ?? 0 })
+            : task.totalBlockCount === null
+              ? t("msfile.bucket.bitfs.verifiedUnknown", { defaultValue: "已验收 {{count}} 个 Block、{{bytes}}；总数未知。", count: task.verifiedBlockCount, bytes: task.verifiedBytes === null ? "未知字节数" : formatBytes(task.verifiedBytes) })
+              : t("msfile.bucket.bitfs.verified", { defaultValue: "已验收 {{done}} / {{total}} 个 Block、{{bytes}}", done: task.verifiedBlockCount, total: task.totalBlockCount, bytes: task.verifiedBytes === null ? "未知字节数" : formatBytes(task.verifiedBytes) });
+          const quotes = task.availableQuotes ?? [];
+          const priceRange = task.discoveryOnly ? bitfsTaskPriceRange(quotes) : undefined;
+          const priceDraft = bitfsPriceDrafts[task.seedHashHex];
+          const selectedMaxPrice = priceRange
+            ? priceDraft?.value ?? priceRange.initial.toString(10)
+            : null;
+          const selectedMax = selectedMaxPrice === null ? 0n : BigInt(selectedMaxPrice);
+          const isDiscovery = task.discoveryOnly === true;
+          const isTerminal = task.phase === "completed" || task.phase === "cancelled" || task.phase === "refunded";
+          return (
+            <article className="msfile-bucket__task" key={`${task.seedHashHex}:${task.sessionId}`}>
+              <header className="msfile-bucket__task-head">
+                <div className="msfile-bucket__task-title">
+                  <strong>{task.recommendedFilename ?? t("msfile.bucket.bitfs.unknownFile", { defaultValue: "未知文件名" })}</strong>
+                  <code title={task.seedHashHex}>{shortHex(task.seedHashHex)}</code>
+                </div>
+                <span className="msfile-bucket__badge">{t(`msfile.bucket.bitfs.phase.${task.phase}`, { defaultValue: task.phase })}</span>
+              </header>
+              <p className="msfile-bucket__hint">{progress}</p>
+              {task.message ? <p className="msfile-bucket__task-message">{task.message}</p> : null}
+              {priceRange && selectedMaxPrice !== null ? (
+                <div className="msfile-bucket__price-limit">
+                  <label htmlFor={`bitfs-price-${task.seedHashHex}`}>
+                    {t("msfile.bucket.bitfs.priceLimit", { defaultValue: "本文件完整 Block 最高价" })}: <strong>{selectedMaxPrice} sats</strong>
+                  </label>
+                  <input
+                    id={`bitfs-price-${task.seedHashHex}`}
+                    type="range"
+                    min="0"
+                    max="1000"
+                    step="1"
+                    value={bitfsTaskTickAtPrice(priceRange, selectedMax)}
+                    disabled={!isDiscovery || bitfsTaskBusyId === task.sessionId}
+                    onChange={(event) => setBitfsPriceDrafts((previous) => ({
+                      ...previous,
+                      [task.seedHashHex]: {
+                        key: priceRange.key,
+                        value: bitfsTaskPriceAtTick(priceRange, Number(event.target.value)).toString(10),
+                        dirty: true,
+                      },
+                    }))}
+                  />
+                  <p className="msfile-bucket__hint">
+                    {t("msfile.bucket.bitfs.priceRange", { defaultValue: "可选 {{min}}–{{max}} sats；新报价不会提高已选上限。", min: priceRange.min.toString(10), max: priceRange.max.toString(10) })}
+                  </p>
+                  {priceDraft?.dirty ? (
+                    <div className="msfile-bucket__task-actions">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={!service.saveBitfsPriceLimit || bitfsTaskBusyId === task.sessionId}
+                        onClick={() => { void saveBitfsPriceLimit(task, selectedMaxPrice); }}
+                      >
+                        {t("msfile.bucket.bitfs.savePrice", { defaultValue: "保存本文件最高价" })}
+                      </Button>
+                    </div>
+                  ) : null}
+                  {selectedMax < priceRange.min ? (
+                    <p className="msfile-bucket__hint" role="status">{t("msfile.bucket.bitfs.noMatchingQuote", { defaultValue: "已选上限低于当前最低报价，目前没有卖家符合。" })}</p>
+                  ) : null}
+                </div>
+              ) : null}
+              {!isDiscovery ? <dl className="msfile-bucket__task-metrics">
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.fileSize", { defaultValue: "文件大小" })}</dt>
+                  <dd>{task.fileSizeBytes === null ? "—" : formatBytes(task.fileSizeBytes)}</dd>
+                </div>
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.blockPrice", { defaultValue: "完整 Block 单价" })}</dt>
+                  <dd>{task.fullBlockPriceSatoshis === null ? "—" : `${task.fullBlockPriceSatoshis} sats`}</dd>
+                </div>
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.currentMaxBlockPrice", { defaultValue: "本文件已选 Block 最高价" })}</dt>
+                  <dd>{task.currentMaxFullBlockPriceSatoshis == null ? "—" : `${task.currentMaxFullBlockPriceSatoshis} sats`}</dd>
+                </div>
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.openingAmount", { defaultValue: "开池金额" })}</dt>
+                  <dd>{task.openingAmountSatoshis === null ? "—" : `${task.openingAmountSatoshis} sats`}</dd>
+                </div>
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.paid", { defaultValue: "已付卖家" })}</dt>
+                  <dd>{task.paidSatoshis} sats</dd>
+                </div>
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.minerFee", { defaultValue: "已知矿工费" })}</dt>
+                  <dd>{task.minerFeeSatoshis} sats</dd>
+                </div>
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.locked", { defaultValue: "受保护金额" })}</dt>
+                  <dd>{task.lockedSatoshis} sats</dd>
+                </div>
+                <div>
+                  <dt>{t("msfile.bucket.bitfs.pendingReturn", { defaultValue: "待回收金额" })}</dt>
+                  <dd>{task.pendingReturnSatoshis} sats</dd>
+                </div>
+              </dl> : null}
+              {quotes.length > 0 ? (
+                <ul className="msfile-bucket__quotes">
+                  {quotes.map((quote) => {
+                    const overLimit = priceRange !== undefined && BigInt(quote.fullBlockPriceSatoshis) > selectedMax;
+                    return (
+                      <li key={quote.sessionId}>
+                        <div className="msfile-bucket__quote-info">
+                          <strong>{quote.recommendedFilename}</strong>
+                          <span>{formatBytes(quote.fileSizeBytes)}</span>
+                          <span>{t("msfile.bucket.bitfs.quote.seller", { defaultValue: "卖家 {{key}}", key: shortHex(quote.sellerPublicKeyHex) })}</span>
+                          <span>{t("msfile.bucket.bitfs.quote.seedPrice", { defaultValue: "Seed {{price}} sats", price: quote.seedPriceSatoshis })}</span>
+                          <span>{t("msfile.bucket.bitfs.quote.blockPrice", { defaultValue: "完整 Block {{price}} sats", price: quote.fullBlockPriceSatoshis })}</span>
+                          <span>{quote.recentBytesPerSecond === null || quote.recentBytesPerSecond === undefined
+                            ? t("msfile.bucket.bitfs.quote.speedUnknown", { defaultValue: "最近速度未知" })
+                            : t("msfile.bucket.bitfs.quote.speed", { defaultValue: "最近速度 {{speed}} B/s", speed: quote.recentBytesPerSecond })}</span>
+                        </div>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={!isDiscovery || !service.startBitfsTask || overLimit || bitfsTaskBusyId === task.sessionId}
+                          onClick={() => { if (selectedMaxPrice !== null) void startBitfsTask(task, quote, selectedMaxPrice); }}
+                        >
+                          {bitfsTaskBusyId === task.sessionId
+                            ? t("msfile.bucket.bitfs.starting", { defaultValue: "正在启动…" })
+                            : isDiscovery
+                              ? t("msfile.bucket.bitfs.forceDownload", { defaultValue: "强制下载此报价" })
+                              : t("msfile.bucket.bitfs.currentPurchase", { defaultValue: "当前购买任务" })}
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
+              {task.canReconnect === true ? (
+                <div className="msfile-bucket__task-actions">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!canOperate || bitfsTaskBusyId === task.sessionId || !service.reconnectBitfsTask}
+                    onClick={() => { void reconnectBitfsTask(task); }}
+                  >
+                    {bitfsTaskBusyId === task.sessionId
+                      ? t("msfile.bucket.bitfs.reconnecting", { defaultValue: "正在重新连接…" })
+                      : t("msfile.bucket.bitfs.reconnect", { defaultValue: "重新连接卖家并续接" })}
+                  </Button>
+                </div>
+              ) : null}
+              {!isTerminal && (isDiscovery || task.canCancel === true) ? (
+                <div className="msfile-bucket__task-actions">
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    disabled={!canOperate || bitfsTaskBusyId === task.sessionId}
+                    onClick={() => { void cancelBitfsTask(task); }}
+                  >
+                    {bitfsTaskBusyId === task.sessionId
+                      ? t("msfile.bucket.bitfs.cancelling", { defaultValue: "正在提交取消…" })
+                      : isDiscovery
+                        ? t("msfile.bucket.bitfs.stopDemand", { defaultValue: "停止收集报价" })
+                        : t("msfile.bucket.bitfs.cancel", { defaultValue: "取消整份下载并回收费用池" })}
+                  </Button>
+                </div>
+              ) : null}
+            </article>
+          );
+        })}
+      </section>
 
       <div className="msfile-bucket__upload">
         <label className="msfile-bucket__file-label" htmlFor="msfile-bucket-file">

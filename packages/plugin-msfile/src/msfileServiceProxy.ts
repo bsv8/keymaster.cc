@@ -8,6 +8,7 @@ import type {
   CoordinatorValueResult,
   MsFileApprovalDecision,
   MsFileBitfsDemandSnapshot,
+  MsFileBitfsBuyerSettings,
   MsFileAppAuthorizationView,
   MsFileAppIdentityKey,
   MsFileAppPriceOverrideUpdate,
@@ -253,6 +254,16 @@ export class MsFileServiceProxy implements MsFileService {
     return this.control({ type: "settings.seller.update", input }).then(() => undefined);
   }
 
+  /** 读取 Worker 持久化的 BitFS 自动购买策略。 */
+  getBitfsBuyerSettings(): Promise<MsFileBitfsBuyerSettings> {
+    return this.control({ type: "settings.bitfsBuyer.get" });
+  }
+
+  /** 保存 Worker 持久化的 BitFS 自动购买策略。 */
+  updateBitfsBuyerSettings(input: MsFileBitfsBuyerSettings): Promise<void> {
+    return this.control({ type: "settings.bitfsBuyer.update", input }).then(() => undefined);
+  }
+
   updateMediaBlockReadConcurrency(value: number): Promise<void> {
     return this.getReadConcurrencySettings()
       .then((settings) => this.updateReadConcurrencySettings({ ...settings, mediaBlockReadConcurrency: value }));
@@ -303,6 +314,16 @@ export class MsFileServiceProxy implements MsFileService {
   /** 读取当前需求编号和已经验签的报价摘要。 */
   getBitfsDemand(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
     return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.snapshot", seedHashHex });
+  }
+
+  /** 用户选中已验签报价后启动购买；返回当前买方会话进度摘要。 */
+  startBitfsPurchase(seedHashHex: string, sessionId: string, maxFullBlockPriceSatoshis?: string): Promise<MsFileBitfsDemandSnapshot> {
+    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.start", seedHashHex, sessionId, ...(maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis }) });
+  }
+
+  /** 在还没有付款签名时取消购买，并返回关池回收进度。 */
+  cancelBitfsPurchase(seedHashHex: string, sessionId: string): Promise<MsFileBitfsDemandSnapshot> {
+    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.cancel", seedHashHex, sessionId });
   }
 
   /** 停止本地接收该需求后续报价。 */

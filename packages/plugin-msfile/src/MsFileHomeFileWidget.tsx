@@ -179,6 +179,59 @@ function shortHex(value: string): string {
   return `${value.slice(0, 10)}…${value.slice(-6)}`;
 }
 
+function bitfsOpeningBudgetEstimate(quote: MsFileBitfsDemandSnapshot["quotes"][number]): string {
+  try {
+    const size = BigInt(quote.fileSizeBytes);
+    const blocks = (size + 262_143n) / 262_144n;
+    // 这是内容价上限估算，不含 Worker 按当前设置计算的链上手续费余量。
+    return (BigInt(quote.seedPriceSatoshis) + BigInt(quote.fullBlockPriceSatoshis) * blocks).toString(10);
+  } catch {
+    return "未知";
+  }
+}
+
+interface BitfsPriceRange {
+  /** 当前报价中的最低完整 Block 价。 */
+  min: bigint;
+  /** 当前报价中的最高完整 Block 价或单价的 120%。 */
+  max: bigint;
+  /** 首次出现报价时使用的初始上限。 */
+  initial: bigint;
+  /** 报价变更标识；只用于保留用户已经选择的上限。 */
+  key: string;
+}
+
+/** 按施工单计算每个 Seed 的强制下载上限范围，不使用浮点金额。 */
+function bitfsPriceRange(quotes: MsFileBitfsDemandSnapshot["quotes"]): BitfsPriceRange | undefined {
+  if (quotes.length === 0) return undefined;
+  const prices = quotes.map((quote) => BigInt(quote.fullBlockPriceSatoshis));
+  const min = prices.reduce((value, price) => price < value ? price : value);
+  const quoteMax = prices.reduce((value, price) => price > value ? price : value);
+  const key = quotes.map((quote) => `${quote.sessionId}:${quote.fullBlockPriceSatoshis}`).sort().join("|");
+  if (quoteMax > min) return { min, max: quoteMax, initial: min + (quoteMax - min) / 5n, key };
+  const uint64Max = 0xffffffffffffffffn;
+  const cap120Percent = (min * 6n + 4n) / 5n;
+  const max = cap120Percent > uint64Max ? uint64Max : cap120Percent;
+  return { min, max, initial: max, key };
+}
+
+/** 把滑块千分刻度换成整数聪。 */
+function bitfsPriceAtSliderTick(range: BitfsPriceRange, tick: number): bigint {
+  if (range.max <= range.min) return range.min;
+  return range.min + ((range.max - range.min) * BigInt(tick)) / 1_000n;
+}
+
+/** 把既有上限映射回滑块千分刻度；报价范围变化不会改写上限本身。 */
+function bitfsSliderTickForPrice(range: BitfsPriceRange, price: bigint): number {
+  if (range.max <= range.min || price <= range.min) return 0;
+  if (price >= range.max) return 1_000;
+  return Number(((price - range.min) * 1_000n) / (range.max - range.min));
+}
+
+function isBitfsPurchaseActive(purchase: MsFileBitfsDemandSnapshot["purchase"]): boolean {
+  return Boolean(purchase && purchase.phase !== "completed" && purchase.phase !== "cancelled" && purchase.phase !== "refunded" && purchase.phase !== "failed" && purchase.phase !== "connection-closed");
+}
+
 function safeSupplierName(config: MsFileSupplierConfig | undefined): string {
   if (!config || typeof config.name !== "string") return "Supplier";
   const cleaned = config.name.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim();
@@ -371,6 +424,25 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState(false);
   const [state, setState] = useState<HomeState>(INITIAL_STATE);
+  const [forcedPriceDraft, setForcedPriceDraft] = useState<{ seedHashHex: string; value: string; dirty: boolean } | null>(null);
+  const activeQuotes = state.bitfsDemand?.quotes ?? [];
+  const priceRange = bitfsPriceRange(activeQuotes);
+  const forcedPriceLimit = priceRange
+    ? forcedPriceDraft?.seedHashHex === state.hash ? forcedPriceDraft.value : priceRange.initial.toString(10)
+    : null;
+
+  useEffect(() => {
+    if (!state.hash || !priceRange) return;
+    const savedLimit = state.bitfsDemand?.purchase?.currentMaxFullBlockPriceSatoshis
+      ?? state.bitfsDemand?.currentMaxFullBlockPriceSatoshis;
+    if (forcedPriceDraft?.seedHashHex === state.hash) {
+      if (!forcedPriceDraft.dirty && savedLimit && forcedPriceDraft.value !== savedLimit) {
+        setForcedPriceDraft({ seedHashHex: state.hash, value: savedLimit, dirty: false });
+      }
+      return;
+    }
+    setForcedPriceDraft({ seedHashHex: state.hash, value: savedLimit ?? priceRange.initial.toString(10), dirty: false });
+  }, [forcedPriceDraft, priceRange?.key, state.bitfsDemand?.currentMaxFullBlockPriceSatoshis, state.bitfsDemand?.purchase?.currentMaxFullBlockPriceSatoshis, state.hash]);
 
   const taskRef = useRef<FetchTask | null>(null);
   const taskSequenceRef = useRef(0);
@@ -683,9 +755,10 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
       if (!isCurrent(task)) return;
       setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
       const expiresAtMs = snapshot.expiresAtMs ?? Date.now() + 10 * 60 * 1_000;
+      let keepPollingAfterDemandExpires = isBitfsPurchaseActive(snapshot.purchase);
       if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
       task.bitfsDemandPollTimer = setInterval(() => {
-        if (!isCurrent(task) || Date.now() >= expiresAtMs) {
+        if (!isCurrent(task) || (Date.now() >= expiresAtMs && !keepPollingAfterDemandExpires)) {
           if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
           task.bitfsDemandPollTimer = undefined;
           return;
@@ -694,7 +767,10 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
         task.bitfsDemandPollBusy = true;
         void service.getBitfsDemand(task.hash)
           .then((nextSnapshot) => {
-            if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemand: nextSnapshot, bitfsDemandError: undefined }));
+            if (isCurrent(task)) {
+              keepPollingAfterDemandExpires = isBitfsPurchaseActive(nextSnapshot.purchase);
+              setState((previous) => ({ ...previous, bitfsDemand: nextSnapshot, bitfsDemandError: undefined }));
+            }
           })
           .catch((cause) => {
             if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemandError: makeError(cause).message }));
@@ -722,6 +798,26 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
     };
     void publish();
   }, [isCurrent, makeError, service, t]);
+
+  const startBitfsPurchase = useCallback(async (task: FetchTask, sessionId: string, maxFullBlockPriceSatoshis?: string) => {
+    if (!service.startBitfsPurchase || !isCurrent(task)) return;
+    try {
+      const snapshot = await service.startBitfsPurchase(task.hash, sessionId, maxFullBlockPriceSatoshis);
+      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
+    } catch (cause) {
+      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemandError: makeError(cause).message }));
+    }
+  }, [isCurrent, makeError, service]);
+
+  const cancelBitfsPurchase = useCallback(async (task: FetchTask, sessionId: string) => {
+    if (!service.cancelBitfsPurchase || !isCurrent(task)) return;
+    try {
+      const snapshot = await service.cancelBitfsPurchase(task.hash, sessionId);
+      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
+    } catch (cause) {
+      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemandError: makeError(cause).message }));
+    }
+  }, [isCurrent, makeError, service]);
 
   const submitQuery = useCallback(async () => {
     // 无论新输入是否合法，先取消并释放旧文件，保证“新查询覆盖旧查询”。
@@ -958,6 +1054,47 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
           {state.bitfsDemand && state.bitfsDemand.quotes.length === 0 ? (
             <p className="msfile-home-file__supplier-detail" role="status">{t("msfile.home.bitfs.noQuotes", { defaultValue: "需求已发出，尚未收到有效报价；页面会继续刷新报价。" })}</p>
           ) : null}
+          {state.bitfsDemand?.purchase ? (
+            <div className="msfile-home-file__supplier-detail" role="status">
+              <strong>{t("msfile.home.bitfs.purchaseProgress", { defaultValue: "BitFS 购买进度" })}</strong>
+              <p>{state.bitfsDemand.purchase.message ?? t("msfile.home.bitfs.purchaseWorking", { defaultValue: "购买流程正在进行。" })}</p>
+              {state.bitfsDemand.purchase.openingAmountSatoshis !== null ? (
+                <p>{t("msfile.home.bitfs.openingAmount", { defaultValue: "开池金额上限" })}: {state.bitfsDemand.purchase.openingAmountSatoshis} sats</p>
+              ) : null}
+              {state.bitfsDemand.purchase.totalBlockCount !== null ? (
+                <p>{t("msfile.home.bitfs.verifiedBlocks", { defaultValue: "已验收 Block" })}: {state.bitfsDemand.purchase.verifiedBlockCount} / {state.bitfsDemand.purchase.totalBlockCount}</p>
+              ) : null}
+            </div>
+          ) : null}
+          {state.bitfsDemand && priceRange && forcedPriceLimit !== null ? (
+            <div className="msfile-home-file__bitfs-price-limit">
+              <label htmlFor="msfile-home-bitfs-price-limit">
+                {t("msfile.home.bitfs.forcePrice", { defaultValue: "本文件完整 Block 最高价" })}: {forcedPriceLimit} sats
+              </label>
+              <input
+                id="msfile-home-bitfs-price-limit"
+                type="range"
+                min={0}
+                max={1_000}
+                step={1}
+                value={bitfsSliderTickForPrice(priceRange, BigInt(forcedPriceLimit))}
+                aria-label={t("msfile.home.bitfs.forcePrice", { defaultValue: "本文件完整 Block 最高价" })}
+                onChange={(event) => setForcedPriceDraft({
+                  seedHashHex: state.hash,
+                  value: bitfsPriceAtSliderTick(priceRange, Number(event.target.value)).toString(10),
+                  dirty: true,
+                })}
+              />
+              <p className="msfile-home-file__supplier-detail">
+                {t("msfile.home.bitfs.forcePriceRange", { defaultValue: "可选范围 {{min}}–{{max}} sats；报价变化不会自动提高已选上限。", min: priceRange.min.toString(10), max: priceRange.max.toString(10) })}
+              </p>
+              {BigInt(forcedPriceLimit) < priceRange.min ? (
+                <p className="msfile-home-file__supplier-detail" role="status">
+                  {t("msfile.home.bitfs.forcePriceBelowQuotes", { defaultValue: "当前上限低于所有报价；提高上限后才能选择报价。" })}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {state.bitfsDemand && state.bitfsDemand.quotes.length > 0 ? (
             <ul>
               {state.bitfsDemand.quotes.map((quote) => (
@@ -965,6 +1102,84 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
                   <strong>{quote.recommendedFilename}</strong>
                   <span> · {t("msfile.home.bitfs.seller", { defaultValue: "卖家" })} <code title={quote.sellerPublicKeyHex}>{shortHex(quote.sellerPublicKeyHex)}</code></span>
                   <span> · Seed {quote.seedPriceSatoshis} sats · Block {quote.fullBlockPriceSatoshis} sats</span>
+                  <span> · {t("msfile.home.fileSize", { defaultValue: "文件大小" })} {formatBytes(BigInt(quote.fileSizeBytes))}</span>
+                  <span> · {t("msfile.home.bitfs.arbiters", { defaultValue: "可选仲裁方" })} {quote.supportedArbiterPublicKeys.length}</span>
+                  <p className="msfile-home-file__supplier-detail">
+                    {t("msfile.home.bitfs.contentBudget", { defaultValue: "内容费上限估算" })}: {bitfsOpeningBudgetEstimate(quote)} sats；{t("msfile.home.bitfs.feeExcluded", { defaultValue: "另计链上手续费" })}。
+                  </p>
+                  <p className="msfile-home-file__supplier-detail">
+                    {t("msfile.home.bitfs.refundLock", { defaultValue: "点击购买后会开一个约 30 天退款锁的资金池；当前批次付款签名前可取消并协商关池，文件交付付款后也会协商关池，余款退回当前 Key。" })}
+                  </p>
+                  {(() => {
+                    const purchase = state.bitfsDemand?.purchase;
+                    const samePurchase = purchase?.sessionId === quote.sessionId;
+                    const emptyFile = BigInt(quote.fileSizeBytes) === 0n;
+                    const aboveForcedLimit = forcedPriceLimit === null || BigInt(quote.fullBlockPriceSatoshis) > BigInt(forcedPriceLimit);
+                    const hasArbiter = quote.supportedArbiterPublicKeys.length > 0;
+                    const purchaseFinished = samePurchase && (purchase.phase === "completed" || purchase.phase === "cancelled" || purchase.phase === "refunded" || purchase.phase === "failed" || purchase.phase === "connection-closed");
+                    const blockedByOtherPurchase = Boolean(purchase && !samePurchase
+                      && purchase.phase !== "cancelled" && purchase.phase !== "refunded" && purchase.phase !== "failed" && purchase.phase !== "connection-closed");
+                    const disabled = !service.startBitfsPurchase || emptyFile || !hasArbiter || aboveForcedLimit || blockedByOtherPurchase || purchaseFinished || samePurchase;
+                    let label = t("msfile.home.bitfs.buyQuote", { defaultValue: "购买此报价" });
+                    if (emptyFile) {
+                      label = t("msfile.home.bitfs.emptyFileUnsupported", { defaultValue: "暂不支持购买空文件" });
+                    } else if (aboveForcedLimit) {
+                      label = t("msfile.home.bitfs.quoteAboveLimit", { defaultValue: "超过本文件已选上限" });
+                    } else if (!hasArbiter) {
+                      label = t("msfile.home.bitfs.arbiterMissing", { defaultValue: "此报价没有可用仲裁方" });
+                    } else if (samePurchase && purchase) {
+                      if (purchase.phase === "completed") label = t("msfile.home.bitfs.purchaseCompleted", { defaultValue: "购买完成" });
+                      else if (purchase.phase === "closing-pool") label = t("msfile.home.bitfs.closingPool", { defaultValue: "正在协商关池" });
+                      else if (purchase.phase === "close-unknown") label = t("msfile.home.bitfs.closeUnknown", { defaultValue: "正在核对关池交易" });
+                      else if (purchase.phase === "cancelling-pool") label = t("msfile.home.bitfs.cancellingPool", { defaultValue: "正在取消并回收余款" });
+                      else if (purchase.phase === "cancel-unknown") label = t("msfile.home.bitfs.cancelUnknown", { defaultValue: "取消结果待核对，资金仍受保护" });
+                      else if (purchase.phase === "cancelled") label = t("msfile.home.bitfs.purchaseCancelled", { defaultValue: "购买已取消，余款已收回" });
+                      else if (purchase.phase === "refund-ready") label = t("msfile.home.bitfs.refundReady", { defaultValue: "退款锁已到期，正在收回资金" });
+                      else if (purchase.phase === "refund-unknown") label = t("msfile.home.bitfs.refundUnknown", { defaultValue: "退款结果待核对，资金仍受保护" });
+                      else if (purchase.phase === "refunded") label = t("msfile.home.bitfs.refunded", { defaultValue: "退款已确认，余款已收回" });
+                      else if (purchase.phase === "failed") label = t("msfile.home.bitfs.purchaseUnavailable", { defaultValue: "此报价需要重新连接后再买" });
+                      else if (purchase.phase === "connection-closed") label = t("msfile.home.bitfs.connectionClosed", { defaultValue: "数据连接已断开" });
+                      else label = t("msfile.home.bitfs.purchaseWorking", { defaultValue: "购买进行中" });
+                    } else if (blockedByOtherPurchase) {
+                      label = purchase?.phase === "completed"
+                        ? t("msfile.home.bitfs.seedAlreadyPurchased", { defaultValue: "该 Seed 已购买" })
+                        : t("msfile.home.bitfs.otherPurchaseActive", { defaultValue: "请先完成当前购买" });
+                    }
+                    const canCancelPurchase = samePurchase && purchase && (
+                      purchase.phase === "requesting-seed"
+                      || purchase.phase === "requesting-blocks"
+                      || purchase.phase === "cancelling-pool"
+                      || purchase.phase === "cancel-unknown"
+                    );
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          disabled={disabled}
+                          onClick={() => {
+                            const task = taskRef.current;
+                            if (task && forcedPriceLimit !== null) void startBitfsPurchase(task, quote.sessionId, forcedPriceLimit);
+                          }}
+                        >
+                          {label}
+                        </button>
+                        {canCancelPurchase ? (
+                          <button
+                            type="button"
+                            disabled={!service.cancelBitfsPurchase}
+                            onClick={() => {
+                              const task = taskRef.current;
+                              if (task) void cancelBitfsPurchase(task, quote.sessionId);
+                            }}
+                          >
+                            {purchase?.phase === "requesting-seed" || purchase?.phase === "requesting-blocks"
+                              ? t("msfile.home.bitfs.cancelPurchase", { defaultValue: "取消整份下载并回收费用池" })
+                              : t("msfile.home.bitfs.retryCancelPurchase", { defaultValue: "继续关池回收" })}
+                          </button>
+                        ) : null}
+                      </>
+                    );
+                  })()}
                 </li>
               ))}
             </ul>

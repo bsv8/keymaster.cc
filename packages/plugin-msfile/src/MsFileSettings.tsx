@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   MsFileAppAuthorizationView,
+  MsFileBitfsBuyerSettings,
   MsFilePendingApprovalView,
   MsFileReadConcurrencySettings,
   MsFileSatoshiAmount,
@@ -25,7 +26,10 @@ import {
   MSFILE_READ_CONCURRENCY_HARD_LIMITS,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SELLER_SETTINGS_DEFAULT,
+  MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
+  MSFILE_BITFS_BUYER_LIMITS,
   normalizeMsFileSellerSettings,
+  normalizeMsFileBitfsBuyerSettings,
   normalizeMsFileReadConcurrencySettings,
   normalizeMsFileSatoshiAmount,
 } from "@keymaster/contracts";
@@ -44,6 +48,10 @@ export interface MsFileStatusResourceSnapshot {
 type AmountDraft = { text: string; unlimited: boolean };
 type ConcurrencyField = keyof MsFileReadConcurrencySettings;
 type ConcurrencyDraft = Record<ConcurrencyField, string>;
+type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions"> & {
+  maxConcurrentDownloads: string;
+  maxConcurrentSellerSessions: string;
+};
 
 /** 卖方运行状态的中文说明；状态值本身是稳定契约，不翻译持久化字段。 */
 const SELLER_RUNTIME_STATUS_LABELS: Record<MsFileSellerRuntimeStatus, string> = {
@@ -129,6 +137,11 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     supportedArbiterPublicKeys: [],
   });
   const [sellerArbitersDraft, setSellerArbitersDraft] = useState("");
+  const [bitfsBuyerDraft, setBitfsBuyerDraft] = useState<BitfsBuyerSettingsDraft>({
+    ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
+    maxConcurrentDownloads: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentDownloads),
+    maxConcurrentSellerSessions: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentSellerSessions),
+  });
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probeResult, setProbeResult] = useState<{ key: string; ok: boolean; detail: string } | null>(null);
@@ -137,6 +150,12 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     try {
       const next = await service.getSettingsSnapshot();
       setSnapshot(next);
+      const buyerSettings = await service.getBitfsBuyerSettings?.() ?? { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+      setBitfsBuyerDraft({
+        ...buyerSettings,
+        maxConcurrentDownloads: String(buyerSettings.maxConcurrentDownloads),
+        maxConcurrentSellerSessions: String(buyerSettings.maxConcurrentSellerSessions),
+      });
       setAuthorizations(await service.listAppAuthorizations());
       setError(null);
     } catch (cause) {
@@ -185,6 +204,35 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       await service.updateSellerSettings(candidate);
       await reload();
       setStatusMessage("卖方设置已保存。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function saveBitfsBuyerSettings() {
+    setError(null);
+    setStatusMessage(null);
+    const candidate = normalizeMsFileBitfsBuyerSettings({
+      ...bitfsBuyerDraft,
+      maxConcurrentDownloads: Number(bitfsBuyerDraft.maxConcurrentDownloads),
+      maxConcurrentSellerSessions: Number(bitfsBuyerDraft.maxConcurrentSellerSessions),
+    });
+    if (!candidate) {
+      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数和单文件卖家数（1–16）。");
+      return;
+    }
+    if (!service.updateBitfsBuyerSettings) {
+      setError("当前 MSFile 连接不支持 BitFS 买方设置。");
+      return;
+    }
+    try {
+      await service.updateBitfsBuyerSettings(candidate);
+      setBitfsBuyerDraft({
+        ...candidate,
+        maxConcurrentDownloads: String(candidate.maxConcurrentDownloads),
+        maxConcurrentSellerSessions: String(candidate.maxConcurrentSellerSessions),
+      });
+      setStatusMessage("BitFS 买方设置已保存。已开始的购买不会改变开池报价。");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -551,6 +599,62 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
           <input type="number" min={1} max={16} value={sellerDraft.maxConcurrentSales} onChange={(event) => setSellerDraft((current) => ({ ...current, maxConcurrentSales: Number(event.target.value) }))} />
         </label>
         <Button onClick={() => void saveSellerSettings()}>保存卖方设置</Button>
+      </div>
+
+      <h3>{t("msfile.settings.bitfsBuyer.title", { defaultValue: "BitFS 买方自动购买" })}</h3>
+      <p className="msfile-settings__hint">
+        {t("msfile.settings.bitfsBuyer.hint", { defaultValue: "自动购买默认关闭。启用后只在完整 Block 单价不高于下方上限时自动开始；该上限按单块计算，不限制文件总价。强制下载仍由每个文件任务单独决定；单文件卖家数决定同时参与传输的费用池数量。" })}
+      </p>
+      <div className="msfile-settings__form">
+        <label className="msfile-settings__checkbox">
+          <input
+            type="checkbox"
+            checked={bitfsBuyerDraft.buyerAutoPurchaseEnabled}
+            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, buyerAutoPurchaseEnabled: event.target.checked }))}
+          />
+          <span>{t("msfile.settings.bitfsBuyer.enabled", { defaultValue: "允许合格报价自动开始购买" })}</span>
+        </label>
+        <label>
+          <span>{t("msfile.settings.bitfsBuyer.maxBlockPrice", { defaultValue: "自动购买完整 Block 最高价（聪）" })}</span>
+          <input
+            inputMode="numeric"
+            value={bitfsBuyerDraft.maxFullBlockPriceSatoshis}
+            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxFullBlockPriceSatoshis: event.target.value }))}
+          />
+        </label>
+        <label>
+          <span>{t("msfile.settings.bitfsBuyer.priority", { defaultValue: "卖家选择优先级" })}</span>
+          <select
+            value={bitfsBuyerDraft.sellerSelectionPriority}
+            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, sellerSelectionPriority: event.target.value as MsFileBitfsBuyerSettings["sellerSelectionPriority"] }))}
+          >
+            <option value="price">{t("msfile.settings.bitfsBuyer.priority.price", { defaultValue: "价格优先" })}</option>
+            <option value="recent-speed">{t("msfile.settings.bitfsBuyer.priority.speed", { defaultValue: "最近速度优先（无速度记录时按价格）" })}</option>
+          </select>
+        </label>
+        <label>
+          <span>{t("msfile.settings.bitfsBuyer.concurrency", { defaultValue: "同时购买文件任务数（1–16）" })}</span>
+          <input
+            type="number"
+            min={1}
+            max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentDownloads}
+            value={bitfsBuyerDraft.maxConcurrentDownloads}
+            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentDownloads: event.target.value }))}
+          />
+        </label>
+        <label>
+          <span>{t("msfile.settings.bitfsBuyer.sellerConcurrency", { defaultValue: "单个文件同时传输的卖家数（1–16）" })}</span>
+          <input
+            type="number"
+            min={1}
+            max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions}
+            value={bitfsBuyerDraft.maxConcurrentSellerSessions}
+            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentSellerSessions: event.target.value }))}
+          />
+        </label>
+        <Button onClick={() => void saveBitfsBuyerSettings()}>
+          {t("msfile.settings.bitfsBuyer.save", { defaultValue: "保存 BitFS 买方设置" })}
+        </Button>
       </div>
 
       <h3>{t("msfile.settings.suppliers", { defaultValue: "Suppliers" })}</h3>

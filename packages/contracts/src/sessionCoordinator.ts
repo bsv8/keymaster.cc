@@ -57,6 +57,7 @@ import type {
   MsFileReadConcurrencySettings,
   MsFileSellerRuntimeStatus,
   MsFileSellerSettings,
+  MsFileBitfsBuyerSettings,
   MsFilePendingApprovalView,
   MsFileServiceStatus,
   MsFileSettingsSnapshot,
@@ -231,10 +232,28 @@ export type CoordinatorMsFileControl =
   | { type: "settings.global.update"; input: MsFileGlobalPriceSettings }
   /** 保存当前 Key 的 BitFS 卖方设置。 */
   | { type: "settings.seller.update"; input: MsFileSellerSettings }
+  /** 读取当前 Key 的 BitFS 自动购买策略。 */
+  | { type: "settings.bitfsBuyer.get" }
+  /** 保存当前 Key 的 BitFS 自动购买策略。 */
+  | { type: "settings.bitfsBuyer.update"; input: MsFileBitfsBuyerSettings }
+  | {
+      /** 按 Seed 保存用户手动强制下载上限；不修改自动购买上限。 */
+      type: "bitfs.buyerPriceLimit.update";
+      /** 被设置限价的文件 Seed Hash。 */
+      seedHashHex: string;
+      /** 完整 Block 的最高价，单位聪。 */
+      maxFullBlockPriceSatoshis: string;
+    }
   /** 发布或复用指定 Seed 的 ChannelProtocol Hash 需求；不触发资金操作。 */
   | { type: "bitfs.demand.publish"; seedHashHex: string }
   /** 读取指定 Seed 当前需求编号及已验签报价。 */
   | { type: "bitfs.demand.snapshot"; seedHashHex: string }
+  /** 用户明确选择报价后开始买方开池、交付和付款流程。 */
+  | { type: "bitfs.purchase.start"; seedHashHex: string; sessionId: string; /** 当前文件手动选择的完整 Block 最高价（聪）。 */ maxFullBlockPriceSatoshis?: string }
+  /** 在尚未产生付款签名时取消该报价购买，并尝试通过 Kind 12/13 回收费用池余款。 */
+  | { type: "bitfs.purchase.cancel"; seedHashHex: string; sessionId: string }
+  /** 读取当前 Key 下已经持久化的买方任务及其资金恢复摘要。 */
+  | { type: "bitfs.purchase.tasks.list" }
   /** 停止本地接收该需求的新报价并关闭其待处理 WebRTC 连接。 */
   | { type: "bitfs.demand.cancel"; seedHashHex: string }
   | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }

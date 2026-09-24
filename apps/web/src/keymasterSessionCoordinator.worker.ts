@@ -116,8 +116,10 @@ import {
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
   MSFILE_SELLER_SETTINGS_DEFAULT,
   isValidMsFileHashHex,
+  normalizeMsFileSatoshiAmount,
   normalizeMsFileReadConcurrencySettings,
   SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
@@ -203,6 +205,8 @@ import {
   BitfsSellerProtocol,
   BitfsSellerSessionManager,
   createBitfsBuyerTask,
+  createBitfsBuyerDownloadPlan,
+  BitfsBuyerProtocol,
   createBitfsLocalSellerContentResolver,
   BitfsTransactionBroadcaster,
   createBitfsJournal,
@@ -212,16 +216,19 @@ import {
   createBitfsVaultSigner,
   createBitfsWocChainPort,
   createMsFileLocalContentSource,
+  recoverBitfsBuyerContentCommit,
   createMsFileService,
   createUnavailableBitfsSellerContentResolver,
   openMsFileRepository,
   reconcileBitfsTransactions,
   reconcileBitfsSessionTransactions,
+  readBitfsPoolSpendChain,
   prepareBitfsFundingSplit,
   prepareBitfsFunding,
   recoverBitfsFundingSplits,
   storeMsFileSeed,
   type BitfsSellerMatch,
+  type BitfsBuyerQuoteView,
   type BitfsBuyerTask,
   type BitfsSellerProtocolPort,
   type BitfsSellerStreamTransport,
@@ -277,6 +284,13 @@ import { HASH_REQUEST_CHANNEL, newWebRTCSDPLocator, parseAndVerify as parseHashR
 import { ChannelSubscriptionMux, validateExactChannel } from "./channelSubscriptionMux.js";
 import { PendingPingRegistry } from "./channelPendingPingRegistry.js";
 import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
+import {
+  completeBuyerOpening,
+  parsePaymentState,
+  verifyAcceptedPayment,
+  verifyArbitratedPayment,
+  verifyBuyerCompletedClose,
+} from "go-bitfs";
 import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
 import {
   applyDefaultSatSupplier,
@@ -3631,11 +3645,56 @@ const msfileBitfsBuyerTasks = new Map<string, {
   requestMessageId?: string;
   /** 当前需求过期时间，Unix 毫秒。 */
   expiresAtMs: number;
+  /** 买方当前购买的安全进度摘要。 */
+  purchase?: import("@keymaster/contracts").MsFileBitfsPurchaseSnapshot;
+  /** 是否已从当前 Owner 的买方 journal 读取过上次购买摘要。 */
+  purchaseHydrated: boolean;
 }>();
+/** 每个 Seed 的购买准入串行尾，避免两个同时到达的合格报价重复开池。 */
+const msfileBitfsBuyerPurchaseTails = new Map<string, Promise<void>>();
+/** 买方恢复任务所绑定的当前 Key 和 Worker 世代。 */
+interface MsFileBitfsBuyerRecoveryScope {
+  /** 当前已解锁 Key 的公钥。 */
+  ownerPublicKeyHex: string;
+  /** 当前 Worker 会话世代。 */
+  sessionEpoch: SessionEpoch;
+  /** 当前存储世代。 */
+  keyspaceGeneration: number;
+}
+/** 最近速度样本对应卖家的速度视图。 */
+interface MsFileBitfsRecentSellerSpeed {
+  /** 样本写入时的 UTC Unix 毫秒。 */
+  recordedAtMs: number;
+  /** 最近一次已付款 Block 的整数字节/秒。 */
+  bytesPerSecond: string;
+}
+/** 解锁期间正在执行的全量买方恢复；新购买必须等扫描完成。 */
+let msfileBitfsBuyerRecoveryInFlight: {
+  /** 当前已解锁 Key 的公钥。 */
+  ownerPublicKeyHex: string;
+  /** 当前 Worker 会话世代。 */
+  sessionEpoch: SessionEpoch;
+  /** 当前存储世代。 */
+  keyspaceGeneration: number;
+  /** 当前 Key 买方会话的全量恢复任务。 */
+  promise: Promise<void>;
+} | undefined;
+/** 最近一次完成全量恢复的 owner 与会话世代。 */
+let msfileBitfsBuyerRecoveryReady: MsFileBitfsBuyerRecoveryScope | undefined;
 /** 单个需求最多允许建立的卖家 WebRTC 会话数，防止报价洪泛。 */
 const msfileBitfsBuyerOfferCounts = new Map<string, number>();
 const MSFILE_BITFS_MAX_OFFERS_PER_DEMAND = 32;
 const MSFILE_BITFS_MAX_ACTIVE_BUYER_LINKS = 128;
+
+/** 已付款且通过 Kind 5/6 验证的速度记录；速度不作为付款或资金状态依据。 */
+interface MsFileBitfsSellerSpeedSample {
+  /** 已验收的文件 Block 总字节数，不包含 Seed。 */
+  effectiveBlockBytes: number;
+  /** 从发送 Kind 5 到验收 Kind 6 的耗时毫秒数。 */
+  elapsedMs: number;
+  /** 样本写入时的 UTC Unix 毫秒。 */
+  recordedAtMs: number;
+}
 /** 收到 offer 后的买方 WebRTC DataChannel；报价需要继续逐条验签。 */
 const msfileBitfsWebRtcBuyerLinks = new Map<string, {
   /** Window lane 内的 WebRTC 会话编号。 */
@@ -3644,12 +3703,22 @@ const msfileBitfsWebRtcBuyerLinks = new Map<string, {
   requestMessageId: string;
   /** 已验签 offer 发送者公钥。 */
   peerPublicKeyHex: string;
+  /** 当前买方 Key。 */
+  ownerPublicKeyHex: string;
+  /** 当前已验签 Hash 请求对应的 Seed Hash。 */
+  seedHashHex: string;
   /** 买方会话编排任务。 */
   task: BitfsBuyerTask;
   /** 建立链接时的 owner 会话世代。 */
   ownerSessionEpoch: SessionEpoch;
   /** 首条 Kind 1 已持久化后的买方会话编号；重复报价不创建第二份记录。 */
   quoteSessionId?: string;
+  /** 首条 Kind 1 的持久化与验签过程；后续 Artifact 必须等待它完成。 */
+  quoteAccepted?: Promise<void>;
+  /** 用户选择报价后绑定此 WebRTC stream 的买方协议端口。 */
+  protocol?: BitfsBuyerProtocol;
+  /** 新连接复用了这条已经开池的买方日志会话时设置。 */
+  resumedPurchaseSessionId?: string;
 }>();
 /** 测试注入的卖方 bridge；生产为 undefined，使用 Window lane + 未就绪端口。 */
 let testMsfileSellerBridge: { transport: BitfsSellerStreamTransport; protocol: BitfsSellerProtocolPort } | undefined;
@@ -3661,6 +3730,734 @@ function sellerKeepsVaultUnlocked(): boolean {
 
 function msfileBitfsBuyerTaskKey(ownerPublicKeyHex: string, seedHashHex: string): string {
   return `${ownerPublicKeyHex.toLowerCase()}|${seedHashHex.toLowerCase()}`;
+}
+
+function msfileBitfsPurchasePhaseFromJournal(phase: string): import("@keymaster/contracts").MsFileBitfsPurchasePhase | undefined {
+  if (phase === "quote-selected") return "opening";
+  if (phase === "cancel-opening") return "cancelling-opening";
+  if (phase === "opening-presign") return "opening";
+  if (phase === "funding-prepared") return "funding";
+  if (phase === "funding-unknown") return "funding-unknown";
+  if (phase === "funded") return "requesting-seed";
+  if (phase === "request-prepared" || phase === "delivery-verified") return "requesting-blocks";
+  if (phase === "payment-unknown") return "payment-unknown";
+  if (phase === "content-committing") return "content-committing";
+  if (phase === "close-required") return "closing-pool";
+  if (phase === "close-requested") return "closing-pool";
+  if (phase === "close-unknown") return "close-unknown";
+  if (phase === "cancel-closing-pool") return "cancelling-pool";
+  if (phase === "cancel-close-unknown") return "cancel-unknown";
+  if (phase === "cancelled") return "cancelled";
+  if (phase === "refund-ready") return "refund-ready";
+  if (phase === "refund-unknown") return "refund-unknown";
+  if (phase === "refunded") return "refunded";
+  if (phase === "completed" || phase === "failed") return phase;
+  return undefined;
+}
+
+/**
+ * Worker 重建买方任务时按旧 txid 对账、恢复付款后的幂等入库并读取摘要；
+ * 只有双方完整 Kind 13 已持久化的关池交易会按原字节继续提交，不重新签名或恢复 DataChannel。
+ */
+async function restoreMsfileBitfsBuyerPurchaseSummary(input: {
+  ownerPublicKeyHex: string;
+  seedHashHex: string;
+  /** 指定只恢复此会话；省略时取该 Seed 最近更新的一条资金会话。 */
+  sessionId?: string;
+  task?: BitfsBuyerTask;
+}): Promise<import("@keymaster/contracts").MsFileBitfsPurchaseSnapshot | undefined> {
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const records = await sessions.list();
+  const candidate = records
+    .filter((record) => record.role === "buyer"
+      && record.ownerPublicKeyHex === input.ownerPublicKeyHex
+      && record.seedHashHex === input.seedHashHex
+      && (input.sessionId === undefined || record.sessionId === input.sessionId)
+      && (record.evidence.includes("kind2-opening-request")
+        || record.evidence.includes("opening-configuration")
+        || record.evidence.includes("funding-transaction")
+        || record.phase === "cancel-opening"))
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+    .at(-1);
+  if (!candidate) return undefined;
+  let recoveryErrorMessage: string | undefined;
+  if (candidate.phase === "cancel-opening" && input.task) {
+    try {
+      await input.task.cancelUnfundedOpening(candidate.sessionId);
+    } catch (error) {
+      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "未开池资金占用恢复暂不可用";
+    }
+  }
+  let fundingReconciled = false;
+  let fundingReconcileFailed = false;
+  if (candidate.phase === "funding-unknown" && input.task) {
+    try {
+      const result = await input.task.reconcileFunding(candidate.sessionId);
+      fundingReconciled = result?.outcome.status === "confirmed";
+      fundingReconcileFailed = result?.outcome.status === "failed";
+    } catch (error) {
+      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "开池交易对账暂不可用";
+    }
+  }
+  let closeReconciled = false;
+  if (input.task && await sessions.getEvidence(candidate.sessionId, "kind13-close-response")) {
+    try {
+      const result = await input.task.resumePoolRecovery(candidate.sessionId);
+      closeReconciled = result?.closed === true;
+    } catch (error) {
+      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "关池交易对账暂不可用";
+    }
+  }
+  let refundReconciled = false;
+  let refundUnknown = false;
+  let refundRecoveryMessage: string | undefined;
+  const openingWasPrepared = candidate.evidence.includes("kind3-opening-response")
+    && candidate.evidence.includes("funding-transaction");
+  if (input.task && openingWasPrepared && !(await sessions.getEvidence(candidate.sessionId, "kind13-close-response"))) {
+    try {
+      const result = await input.task.recoverMaturedRefund(candidate.sessionId);
+      refundReconciled = result?.refunded === true;
+      refundUnknown = result !== undefined && !result.refunded;
+    } catch (error) {
+      // 链查询暂不可用时不阻塞任务摘要；账本和池内 UTXO 仍保持保护。
+      refundRecoveryMessage = error instanceof Error ? error.message.slice(0, 180) : "链上退款对账暂不可用";
+    }
+  }
+  if ((closeReconciled || refundReconciled) && candidate.evidence.includes("download-plan")) {
+    try {
+      await markMsfileBitfsDownloadPlanPoolClosed({
+        ownerPublicKeyHex: input.ownerPublicKeyHex,
+        seedHashHex: input.seedHashHex,
+        sessionId: candidate.sessionId,
+      });
+    } catch (error) {
+      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "下载计划关池记录暂不可用";
+    }
+  }
+  let restoredContentCommit = false;
+  if (candidate.phase === "content-committing") {
+    const contentStore = createWorkerOwnerFileStore("msfile", "");
+    try {
+      restoredContentCommit = await recoverBitfsBuyerContentCommit({
+        sessions,
+        contentStore,
+        sessionId: candidate.sessionId,
+        nowMs: Date.now(),
+        async onContentCommitted(seedHashHex) {
+          if (coordinatorState.vaultStatus !== "unlocked"
+            || coordinatorState.activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex) {
+            throw new Error("BitFS 入库恢复期间当前 Key 已变化");
+          }
+          const index = msfileSellerIndex;
+          if (!index) return;
+          const indexGeneration = index.currentGeneration();
+          index.invalidate(seedHashHex);
+          await index.refresh(contentStore, seedHashHex, indexGeneration);
+        },
+      });
+    } catch (error) {
+      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "付款后的本地文件恢复暂不可用";
+    }
+  }
+  const latestCandidate = await sessions.get(candidate.sessionId);
+  if (!latestCandidate) throw new Error("BitFS 买方恢复期间会话记录消失");
+  const phase = msfileBitfsPurchasePhaseFromJournal(latestCandidate.phase);
+  if (!phase) return undefined;
+
+  const maxBlockPriceBytes = await sessions.getEvidence(latestCandidate.sessionId, "file-price-limit");
+  let currentMaxFullBlockPriceSatoshis: string | null = null;
+  if (maxBlockPriceBytes) {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(maxBlockPriceBytes);
+    const normalized = normalizeMsFileSatoshiAmount(decoded);
+    if (normalized === undefined) throw new Error("BitFS 买方本文件最高价证据损坏");
+    currentMaxFullBlockPriceSatoshis = normalized;
+  }
+
+  let openingAmountSatoshis: string | null = null;
+  const openingConfiguration = await sessions.getEvidence(latestCandidate.sessionId, "opening-configuration");
+  if (openingConfiguration) {
+    try {
+      const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(openingConfiguration)) as { openingAmountSatoshis?: unknown };
+      if (typeof parsed.openingAmountSatoshis === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.openingAmountSatoshis)) {
+        openingAmountSatoshis = parsed.openingAmountSatoshis;
+      }
+    } catch {
+      throw new Error("BitFS 买方开池摘要损坏；为安全起见停止恢复购买页面");
+    }
+  }
+
+  let verifiedBlockCount = 0;
+  const prefix = `bitfs-staging/${latestCandidate.sessionId}/blocks/`;
+  const contentStore = createWorkerOwnerFileStore("msfile", "");
+  let cursor: string | undefined;
+  do {
+    const page = await contentStore.list({ prefix, limit: 1000, ...(cursor === undefined ? {} : { cursor }) });
+    verifiedBlockCount += page.files.filter((file) => /^bitfs-staging\/[0-9a-z][0-9a-z._-]{0,127}\/blocks\/[0-9a-f]{64}\.bin$/u.test(file.path)).length;
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+
+  let wholeFileCancellationPending = false;
+  if (latestCandidate.evidence.includes("download-plan")) {
+    try {
+      const downloadPlan = await openMsfileBitfsBuyerDownloadPlan(input.ownerPublicKeyHex, input.seedHashHex);
+      const snapshot = await downloadPlan.snapshot();
+      wholeFileCancellationPending = snapshot.stopRequested && snapshot.pools.some((pool) => !pool.closed);
+    } catch {
+      // 计划损坏时不覆盖原会话恢复摘要；后续买卖入口仍会因读取失败而拒绝继续付款。
+    }
+  }
+  const message = wholeFileCancellationPending
+    ? "整文件取消已保存；所有池已停止领取新内容，正在等待费用池逐一关闭或退款确认。"
+    : restoredContentCommit
+    ? "已从本地会话日志恢复付款后的入库步骤，文件已重新校验并完成保存。"
+    : closeReconciled
+      ? "已按原关池交易完成链上对账，费用池余款已回到当前 Key 的专款余额。"
+    : refundReconciled
+      ? "退款锁已到期；买方预签退款已被节点观察，余款已回到当前 Key 的专款余额。"
+    : refundUnknown
+      ? "退款锁已到期；原退款交易结果尚未确定，费用池资金继续受保护。"
+    : refundRecoveryMessage
+      ? `到期退款对账暂未完成，专款继续受保护：${refundRecoveryMessage}`
+    : recoveryErrorMessage
+      ? `本轮恢复暂未完成；专款仍受保护：${recoveryErrorMessage}`
+    : fundingReconciled
+      ? "已按原 txid 对账确认开池交易，并保存 Kind 4；卖家重新连接前不会自动恢复内容传输。"
+    : fundingReconcileFailed
+      ? "开池交易对账信息不完整；原资金占用仍保留，未创建新交易。"
+    : phase === "completed"
+      ? "已从本地会话日志读取到已完成的购买记录。"
+    : phase === "cancelled"
+      ? latestCandidate.evidence.includes("kind3-opening-response")
+        ? "购买已取消；链上已确认关池，费用池余款已回收到当前 Key。"
+        : "购买已取消；卖方尚未完成开池预签，未广播资金交易，资金占用已释放。"
+    : phase === "content-committing"
+      ? "链上付款已核对，但这条旧会话缺少入库恢复清单；本地暂存已保留，尚未标记文件完成。"
+    : latestCandidate.phase === "close-required"
+      ? "文件已保存，关池请求尚未准备完成；费用池继续受专款账本保护。"
+    : latestCandidate.phase === "close-requested"
+      ? "文件已保存，已发送 Kind 12；等待卖方返回 Kind 13 后广播关池交易。"
+    : phase === "close-unknown"
+      ? "关池交易结果尚未确定；费用池和预期找回输出仍受专款账本保护。"
+    : phase === "cancel-unknown"
+      ? "取消关池结果尚未确定；原交易和费用池资金仍受专款账本保护。"
+    : phase === "cancelling-pool"
+      ? "已保存取消意图；正在通过卖方连接协商关池并回收余款。"
+    : phase === "failed"
+      ? "已从本地会话日志读取到失败记录；相关资金状态仍需按 journal/outbox 核对。"
+      : "已从本地会话日志恢复购买摘要；资金和签名证据仍保留，可在购买任务页重新连接卖家续接。";
+  return {
+    sessionId: latestCandidate.sessionId,
+    phase: wholeFileCancellationPending ? "cancelling-pool" : phase,
+    openingAmountSatoshis,
+    currentMaxFullBlockPriceSatoshis,
+    verifiedBlockCount,
+    totalBlockCount: null,
+    message,
+  };
+}
+
+/** 费用池关池或退款已链上确认后，释放同 Seed 计划中的 Block 认领和并发名额。 */
+async function markMsfileBitfsDownloadPlanPoolClosed(input: {
+  ownerPublicKeyHex: string;
+  seedHashHex: string;
+  sessionId: string;
+}): Promise<void> {
+  const plan = await openMsfileBitfsBuyerDownloadPlan(input.ownerPublicKeyHex, input.seedHashHex);
+  await plan.closePool(input.sessionId);
+}
+
+/** 从买方专用日志恢复同 Seed 的共享下载计划。 */
+async function openMsfileBitfsBuyerDownloadPlan(ownerPublicKeyHex: string, seedHashHex: string) {
+  const store = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+  const object = await store.get(`download-plans/${seedHashHex.toLowerCase()}.json`);
+  if (!object) throw new Error("已确认关池，但同 Seed 的下载计划记录缺失");
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(object.bytes)); }
+  catch { throw new Error("BitFS 同 Seed 下载计划记录损坏"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("同 Seed 下载计划格式无效");
+  const row = value as Record<string, unknown>;
+  if (typeof row.fileSizeBytes !== "string" || typeof row.recommendedFilename !== "string") {
+    throw new Error("同 Seed 下载计划缺少文件身份信息");
+  }
+  return createBitfsBuyerDownloadPlan({
+    ownerPublicKeyHex,
+    seedHashHex,
+    fileSizeBytes: row.fileSizeBytes,
+    recommendedFilename: row.recommendedFilename,
+    store,
+  });
+}
+
+/** 解锁后扫描当前 Key 的全部买方会话，先对账已保存交易，再允许新购买。 */
+async function recoverAllMsfileBitfsBuyerSessions(ownerPublicKeyHex: string): Promise<void> {
+  const owner = ownerPublicKeyHex.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked"
+    || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) return;
+  const sessionEpoch = coordinatorState.sessionEpoch;
+  const keyspaceGeneration = coordinatorState.keyspaceGeneration;
+  const assertCurrentOwner = (): void => {
+    if (coordinatorState.vaultStatus !== "unlocked"
+      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
+      || coordinatorState.sessionEpoch !== sessionEpoch
+      || coordinatorState.keyspaceGeneration !== keyspaceGeneration) {
+      throw new Error("BitFS 全量恢复期间当前 Key 或存储世代已变化");
+    }
+  };
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const records = (await sessions.list())
+    .filter((record) => record.role === "buyer"
+      && record.ownerPublicKeyHex === owner
+      && (record.evidence.includes("kind2-opening-request")
+        || record.evidence.includes("opening-configuration")
+        || record.evidence.includes("funding-transaction")
+        || record.phase === "cancel-opening")
+      && !["completed", "cancelled", "refunded"].includes(record.phase))
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+  const tasksBySeed = new Map<string, BitfsBuyerTask>();
+  const failures: string[] = [];
+  for (const record of records) {
+    try {
+      assertCurrentOwner();
+      let task = tasksBySeed.get(record.seedHashHex);
+      if (!task) {
+        task = await createMsfileBitfsBuyerTask({
+          ownerPublicKeyHex: owner,
+          seedHashHex: record.seedHashHex,
+          network: "main",
+        });
+        tasksBySeed.set(record.seedHashHex, task);
+      }
+      // 指定精确 session ID，确保同一 Seed 下较旧但仍有资金责任的会话也会恢复。
+      const summary = await restoreMsfileBitfsBuyerPurchaseSummary({
+        ownerPublicKeyHex: owner,
+        seedHashHex: record.seedHashHex,
+        sessionId: record.sessionId,
+        task,
+      });
+      if (summary?.message.startsWith("本轮恢复暂未完成；")
+        || summary?.message.startsWith("到期退款对账暂未完成，")) {
+        failures.push(record.sessionId);
+      }
+    } catch (error) {
+      // 单条记录恢复失败时保留原账本和 exact bytes，继续处理其它池；后续任务页仍可重试。
+      if (!failures.includes(record.sessionId)) failures.push(record.sessionId);
+      console.warn("[msfile] BitFS buyer session recovery deferred", {
+        sessionId: record.sessionId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`有 ${failures.length} 条买方会话未完成链上或本地恢复；会话仍保留资金保护`);
+  }
+}
+
+/** 等待当前 owner 的解锁恢复完成；恢复失败会阻止创建新的买方资金会话。 */
+async function ensureMsfileBitfsBuyerRecovery(ownerPublicKeyHex: string): Promise<void> {
+  const owner = ownerPublicKeyHex.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked"
+    || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
+    throw new Error("BitFS 全量恢复需要当前已解锁 Key");
+  }
+  const sessionEpoch = coordinatorState.sessionEpoch;
+  const keyspaceGeneration = coordinatorState.keyspaceGeneration;
+  const tokenMatches = (token: MsFileBitfsBuyerRecoveryScope | undefined): boolean =>
+    token?.ownerPublicKeyHex === owner && token.sessionEpoch === sessionEpoch && token.keyspaceGeneration === keyspaceGeneration;
+  if (tokenMatches(msfileBitfsBuyerRecoveryReady)) return;
+  let recovery = msfileBitfsBuyerRecoveryInFlight;
+  if (!tokenMatches(recovery)) {
+    const promise = recoverAllMsfileBitfsBuyerSessions(owner);
+    recovery = { ownerPublicKeyHex: owner, sessionEpoch, keyspaceGeneration, promise };
+    msfileBitfsBuyerRecoveryInFlight = recovery;
+  }
+  if (!recovery) throw new Error("BitFS 全量恢复任务没有成功启动");
+  try {
+    await recovery.promise;
+    if (coordinatorState.vaultStatus !== "unlocked"
+      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
+      || coordinatorState.sessionEpoch !== sessionEpoch
+      || coordinatorState.keyspaceGeneration !== keyspaceGeneration) {
+      throw new Error("BitFS 全量恢复期间当前 Key 或存储世代已变化");
+    }
+    msfileBitfsBuyerRecoveryReady = { ownerPublicKeyHex: owner, sessionEpoch, keyspaceGeneration };
+  } catch (error) {
+    throw new Error(`BitFS 买方会话恢复未完成，已阻止新购买：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (msfileBitfsBuyerRecoveryInFlight === recovery) msfileBitfsBuyerRecoveryInFlight = undefined;
+  }
+}
+
+/** 从本地会话日志读取有效速度样本；损坏样本按“未知速度”处理。 */
+function parseMsFileBitfsSellerSpeedSample(bytes: Uint8Array): MsFileBitfsSellerSpeedSample | undefined {
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
+  catch { return undefined; }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (typeof row.effectiveBlockBytes !== "number" || !Number.isSafeInteger(row.effectiveBlockBytes) || row.effectiveBlockBytes <= 0
+    || typeof row.elapsedMs !== "number" || !Number.isSafeInteger(row.elapsedMs) || row.elapsedMs <= 0
+    || typeof row.recordedAtMs !== "number" || !Number.isSafeInteger(row.recordedAtMs) || row.recordedAtMs < 0) return undefined;
+  return {
+    effectiveBlockBytes: row.effectiveBlockBytes as number,
+    elapsedMs: row.elapsedMs as number,
+    recordedAtMs: row.recordedAtMs as number,
+  };
+}
+
+/** 保存与已验收交付和已观察付款绑定的卖家速度样本。 */
+async function persistMsfileBitfsSellerSpeedSample(input: {
+  /** 当前买方会话编号。 */
+  sessionId: string;
+  /** 已验收 Kind 5 对应的付款授权编号。 */
+  authorizationIdHex: string;
+  /** 本次已验收文件 Block 的有效字节数，不含 Seed。 */
+  effectiveBlockBytes: number;
+  /** 从发出 Kind 5 到验收 Kind 6 的耗时毫秒数。 */
+  elapsedMs: number;
+}): Promise<void> {
+  if (!/^[0-9a-f]{64}$/u.test(input.authorizationIdHex)
+    || !Number.isSafeInteger(input.effectiveBlockBytes) || input.effectiveBlockBytes <= 0
+    || !Number.isSafeInteger(input.elapsedMs) || input.elapsedMs <= 0) return;
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const session = await sessions.get(input.sessionId);
+  const requestName = `kind5-content-request-${input.authorizationIdHex}`;
+  const deliveryName = `kind6-content-delivery-${input.authorizationIdHex}`;
+  const paymentName = `kind7-payment-update-${input.authorizationIdHex}`;
+  const observedPaymentName = `latest-payment-transaction-${input.authorizationIdHex}`;
+  if (!session || session.role !== "buyer"
+    || !session.evidence.includes(requestName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
+    || !session.evidence.includes(deliveryName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
+    || !session.evidence.includes(paymentName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
+    || !session.evidence.includes(observedPaymentName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)) {
+    throw new Error("BitFS 速度样本缺少已验收交付或已观察付款证据");
+  }
+  const evidenceName = `seller-speed-sample-${input.authorizationIdHex}` as const;
+  if (await sessions.getEvidence(session.sessionId, evidenceName)) return;
+  const sample: MsFileBitfsSellerSpeedSample = {
+    effectiveBlockBytes: input.effectiveBlockBytes,
+    elapsedMs: input.elapsedMs,
+    recordedAtMs: Date.now(),
+  };
+  await sessions.putEvidence(session.sessionId, session.revision, evidenceName, new TextEncoder().encode(JSON.stringify(sample)), Date.now());
+}
+
+/** 给有效报价附上同一 Key + Seed + 卖家的最近一次已付款传输速度。 */
+async function addMsfileBitfsRecentSellerSpeeds(
+  ownerPublicKeyHex: string,
+  seedHashHex: string,
+  quotes: readonly BitfsBuyerQuoteView[],
+): Promise<import("@keymaster/contracts").MsFileBitfsQuoteView[]> {
+  if (quotes.length === 0) return [];
+  const owner = ownerPublicKeyHex.toLowerCase();
+  const seed = seedHashHex.toLowerCase();
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const records = await sessions.list();
+  const latestBySeller = new Map<string, MsFileBitfsRecentSellerSpeed>();
+  for (const record of records) {
+    if (record.role !== "buyer" || record.ownerPublicKeyHex !== owner || record.seedHashHex !== seed) continue;
+    for (const name of record.evidence.filter((item) => item.startsWith("seller-speed-sample-"))) {
+      const bytes = await sessions.getEvidence(record.sessionId, name);
+      if (!bytes) continue;
+      const sample = parseMsFileBitfsSellerSpeedSample(bytes);
+      if (!sample) continue;
+      const prior = latestBySeller.get(record.counterpartyPublicKeyHex);
+      if (prior && prior.recordedAtMs >= sample.recordedAtMs) continue;
+      latestBySeller.set(record.counterpartyPublicKeyHex, {
+        recordedAtMs: sample.recordedAtMs,
+        bytesPerSecond: (BigInt(sample.effectiveBlockBytes) * 1_000n / BigInt(sample.elapsedMs)).toString(10),
+      });
+    }
+  }
+  return quotes.map((quote) => ({
+    ...quote,
+    recentBytesPerSecond: latestBySeller.get(quote.sellerPublicKeyHex)?.bytesPerSecond ?? null,
+  }));
+}
+
+/** 从持久 journal 与专款账本重建 `/msfile/storage` 的未完成购买任务列表。 */
+async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/contracts").MsFileBitfsTaskSnapshot[]> {
+  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault 已锁定，不能读取 BitFS 购买任务");
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const runtime = await ensureMsfileRuntime();
+  const buyerSettings = runtime.getBitfsBuyerSettings
+    ? await runtime.getBitfsBuyerSettings()
+    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+  const records = (await sessions.list()).filter((record) => record.role === "buyer"
+    && record.ownerPublicKeyHex === owner
+    && (record.evidence.includes("kind2-opening-request")
+      || record.evidence.includes("opening-configuration")
+      || record.evidence.includes("funding-transaction")
+      || record.phase === "cancel-opening")
+    && record.phase !== "completed" && record.phase !== "cancelled" && record.phase !== "refunded");
+  const ledger = currentMsfileBitfsFundingLedger();
+  const contentStore = createWorkerOwnerFileStore("msfile", "");
+  const snapshots: import("@keymaster/contracts").MsFileBitfsTaskSnapshot[] = [];
+  for (const record of records) {
+    let session = await sessions.get(record.sessionId);
+    if (!session) continue;
+    if (session.phase === "cancel-opening") {
+      const { task } = await ensureMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: session.seedHashHex });
+      await task.cancelUnfundedOpening(session.sessionId);
+      session = await sessions.get(session.sessionId);
+      if (!session) continue;
+    }
+    const phase = msfileBitfsPurchasePhaseFromJournal(session.phase);
+    if (!phase) continue;
+    let quote: {
+      recommendedFilename: string | null;
+      fileSizeBytes: string | null;
+      fullBlockPriceSatoshis: string | null;
+    } = { recommendedFilename: null, fileSizeBytes: null, fullBlockPriceSatoshis: null };
+    const quoteBytes = await sessions.getEvidence(session.sessionId, "quote-summary");
+    if (quoteBytes) {
+      try {
+        const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(quoteBytes)) as Record<string, unknown>;
+        if (typeof parsed.recommendedFilename === "string"
+          && typeof parsed.fileSizeBytes === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.fileSizeBytes)
+          && typeof parsed.fullBlockPriceSatoshis === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.fullBlockPriceSatoshis)) {
+          quote = {
+            recommendedFilename: parsed.recommendedFilename.slice(0, 512),
+            fileSizeBytes: parsed.fileSizeBytes,
+            fullBlockPriceSatoshis: parsed.fullBlockPriceSatoshis,
+          };
+        }
+      } catch {
+        throw new Error("BitFS 任务报价摘要损坏；为安全起见停止展示其价格");
+      }
+    }
+    let openingAmountSatoshis: string | null = null;
+    const configuration = await sessions.getEvidence(session.sessionId, "opening-configuration");
+    if (configuration) {
+      try {
+        const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(configuration)) as { openingAmountSatoshis?: unknown };
+        if (typeof parsed.openingAmountSatoshis === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.openingAmountSatoshis)) {
+          openingAmountSatoshis = parsed.openingAmountSatoshis;
+        }
+      } catch {
+        throw new Error("BitFS 任务开池金额摘要损坏");
+      }
+    }
+    const maxBlockPriceBytes = await sessions.getEvidence(session.sessionId, "file-price-limit");
+    const evidencePriceLimit = maxBlockPriceBytes
+      ? normalizeMsFileSatoshiAmount(new TextDecoder("utf-8", { fatal: true }).decode(maxBlockPriceBytes))
+      : null;
+    if (maxBlockPriceBytes && evidencePriceLimit === undefined) {
+      throw new Error("BitFS 任务本文件最高价证据损坏");
+    }
+    const currentMaxFullBlockPriceSatoshis = evidencePriceLimit ?? buyerSettings.filePriceLimitsBySeedHash?.[session.seedHashHex] ?? null;
+
+    let verifiedBlockCount = 0;
+    let verifiedBlockBytes = 0n;
+    let verifiedBlockBytesKnown = true;
+    const stagingPrefix = `bitfs-staging/${session.sessionId}/blocks/`;
+    let cursor: string | undefined;
+    do {
+      const page = await contentStore.list({ prefix: stagingPrefix, limit: 1_000, ...(cursor === undefined ? {} : { cursor }) });
+      for (const file of page.files) {
+        if (!/^bitfs-staging\/[0-9a-z][0-9a-z._-]{0,127}\/blocks\/[0-9a-f]{64}\.bin$/u.test(file.path)) continue;
+        verifiedBlockCount += 1;
+        if (Number.isSafeInteger(file.size) && (file.size ?? -1) >= 0) {
+          verifiedBlockBytes += BigInt(file.size!);
+        } else {
+          const object = await contentStore.get(file.path);
+          if (object) verifiedBlockBytes += BigInt(object.bytes.byteLength);
+          else verifiedBlockBytesKnown = false;
+        }
+      }
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+
+    const account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: session.seedHashHex, network: "main", nowMs: Date.now() });
+    const pool = account.pools.find((item) => item.poolId === session.sessionId);
+    const dedicatedByOutpoint = new Map(account.utxos.map((utxo) => [`${utxo.txid}:${utxo.vout}`, utxo]));
+    let lockedSatoshis = 0n;
+    let pendingReturnSatoshis = 0n;
+    if (pool && pool.state !== "closed") {
+      const opening = dedicatedByOutpoint.get(pool.openingOutpoint);
+      if (opening && (opening.state === "pool-occupied" || opening.state === "recovery-pending")) {
+        lockedSatoshis = BigInt(opening.valueSatoshis);
+      }
+    }
+    if (pool?.state === "recovery-pending" && pool.recoveryTxid) {
+      pendingReturnSatoshis = account.utxos
+        .filter((utxo) => utxo.poolId === session.sessionId && utxo.spendingTxid === pool.recoveryTxid
+          && utxo.state === "recovery-pending" && `${utxo.txid}:${utxo.vout}` !== pool.openingOutpoint)
+        .reduce((sum, utxo) => sum + BigInt(utxo.valueSatoshis), 0n);
+    }
+
+    let paidSatoshis = 0n;
+    let poolStateFeeSatoshis = 0n;
+    const openingRawKind2 = await sessions.getEvidence(session.sessionId, "kind2-opening-request");
+    const openingRawKind3 = await sessions.getEvidence(session.sessionId, "kind3-opening-response");
+    const fundingRaw = await sessions.getEvidence(session.sessionId, "funding-transaction");
+    if (openingRawKind2 && openingRawKind3 && fundingRaw) {
+      const completedOpening = await completeBuyerOpening({ rawKind2: openingRawKind2, rawKind3: new Uint8Array(), fundingTransactionRaw: fundingRaw }, openingRawKind3);
+      let latestState: Awaited<ReturnType<typeof parsePaymentState>> | undefined;
+      let latestSequence = -1;
+      for (const name of session.evidence.filter((item) => item.startsWith("latest-payment-transaction-"))) {
+        const raw = await sessions.getEvidence(session.sessionId, name);
+        if (!raw) throw new Error("BitFS 任务缺少已登记的付款状态原文");
+        const state = await parsePaymentState(raw, completedOpening.pool.opening);
+        try { await verifyAcceptedPayment(state, completedOpening.pool.opening); }
+        catch { await verifyArbitratedPayment(state, completedOpening.pool.opening); }
+        if (state.paymentSequence > latestSequence) {
+          latestSequence = state.paymentSequence;
+          latestState = state;
+        } else if (state.paymentSequence === latestSequence && latestState
+          && bytesToHex(state.rawTx) !== bytesToHex(latestState.rawTx)) {
+          throw new Error("BitFS 任务发现相同付款序号对应不同交易");
+        }
+      }
+      const closeRaw = await sessions.getEvidence(session.sessionId, "close-transaction");
+      if (closeRaw) {
+        await verifyBuyerCompletedClose({ pool: completedOpening.pool, closeRaw });
+        latestState = await parsePaymentState(closeRaw, completedOpening.pool.opening);
+      }
+      if (latestState) {
+        paidSatoshis = latestState.sellerAmountSatoshis;
+        const distributed = latestState.buyerAmountSatoshis + latestState.sellerAmountSatoshis + latestState.arbiterAmountSatoshis;
+        poolStateFeeSatoshis = latestState.poolOutputSatoshis > distributed ? latestState.poolOutputSatoshis - distributed : 0n;
+      }
+    }
+
+    let fundingFeeSatoshis = 0n;
+    const fundingPlan = account.transactions.find((item) => item.purpose === "opening" && item.poolId === session.sessionId);
+    if (fundingPlan) {
+      const inputValue = fundingPlan.inputOutpoints.reduce((sum, outpoint) => sum + BigInt(dedicatedByOutpoint.get(outpoint)?.valueSatoshis ?? "0"), 0n);
+      const outputValue = fundingPlan.expectedOutputs.reduce((sum, output) => sum + BigInt(output.valueSatoshis), 0n);
+      if (inputValue >= outputValue) fundingFeeSatoshis = inputValue - outputValue;
+    }
+    const totalBlockCount = quote.fileSizeBytes === null
+      ? null
+      : Number((BigInt(quote.fileSizeBytes) + 262_143n) / 262_144n);
+    const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, session.seedHashHex));
+    let availableQuotes: import("@keymaster/contracts").MsFileBitfsQuoteView[] = [];
+    if (taskEntry?.ownerSessionEpoch === coordinatorState.sessionEpoch && taskEntry.requestMessageId
+      && taskEntry.expiresAtMs > Date.now()) {
+      availableQuotes = await addMsfileBitfsRecentSellerSpeeds(
+        owner,
+        session.seedHashHex,
+        await (await taskEntry.taskPromise).listDiscoveredQuotes(),
+      );
+    }
+    const activeLink = [...msfileBitfsWebRtcBuyerLinks.values()].some((link) =>
+      link.ownerPublicKeyHex.toLowerCase() === owner
+        && link.ownerSessionEpoch === coordinatorState.sessionEpoch
+        && (link.quoteSessionId === session.sessionId
+          || link.resumedPurchaseSessionId === session.sessionId
+          || (link.seedHashHex === session.seedHashHex
+            && link.peerPublicKeyHex === session.counterpartyPublicKeyHex
+            && link.requestMessageId === taskEntry?.requestMessageId)));
+    const canReconnect = session.evidence.includes("kind2-opening-request")
+      && !activeLink
+      && ["opening-presign", "funding-prepared", "funding-unknown", "funded", "request-prepared", "delivery-verified",
+        "payment-unknown", "content-committing", "close-required", "close-requested", "close-unknown",
+        "cancel-closing-pool", "cancel-close-unknown"].includes(session.phase);
+    const pendingPaymentSignature = session.pendingAuthorizationId
+      ? Boolean(await sessions.getEvidence(session.sessionId, `kind7-payment-signature-${session.pendingAuthorizationId}`)
+        || await sessions.getEvidence(session.sessionId, `kind7-payment-sign-digest-${session.pendingAuthorizationId}`))
+      : false;
+    const cancelBeforePool = (session.phase === "quote-selected" || session.phase === "opening-presign" || session.phase === "funding-prepared" || session.phase === "cancel-opening")
+      && !session.evidence.includes("kind3-opening-response")
+      && !session.evidence.includes("kind4-funding-delivery");
+    const cancelPool = (session.phase === "funded" || session.phase === "request-prepared"
+      || session.phase === "cancel-closing-pool" || session.phase === "cancel-close-unknown")
+      && activeLink && !pendingPaymentSignature;
+    const statusMessage = session.phase === "refund-ready" || session.phase === "refund-unknown"
+      ? "退款锁已到期，买方资金仍在按原交易对账。"
+      : session.phase === "cancel-closing-pool" || session.phase === "cancel-close-unknown"
+        ? "正在通过已保存的关池证据回收费用池余款。"
+        : session.phase.startsWith("close-")
+          ? "文件已入库；关池交易尚未确认，池内资金仍受保护。"
+          : session.phase === "failed"
+            ? "购买流程已失败；资金仍按专款账本保护。"
+            : "购买任务已从本地日志恢复；刷新或关闭页面不会删除资金恢复记录。";
+    snapshots.push({
+      sessionId: session.sessionId,
+      seedHashHex: session.seedHashHex,
+      phase,
+      sellerPublicKeyHex: session.counterpartyPublicKeyHex,
+      recommendedFilename: quote.recommendedFilename,
+      fileSizeBytes: quote.fileSizeBytes,
+      fullBlockPriceSatoshis: quote.fullBlockPriceSatoshis,
+      openingAmountSatoshis,
+      currentMaxFullBlockPriceSatoshis,
+      verifiedBlockCount,
+      verifiedBytes: verifiedBlockBytesKnown ? verifiedBlockBytes.toString(10) : null,
+      totalBlockCount,
+      paidSatoshis: paidSatoshis.toString(10),
+      minerFeeSatoshis: (fundingFeeSatoshis + poolStateFeeSatoshis).toString(10),
+      lockedSatoshis: lockedSatoshis.toString(10),
+      pendingReturnSatoshis: pendingReturnSatoshis.toString(10),
+      discoveryOnly: false,
+      availableQuotes,
+      canCancel: cancelBeforePool || cancelPool,
+      canReconnect,
+      message: canReconnect
+        ? "卖家连接已断开；原费用池仍受保护，可重新发布需求续接该会话。"
+        : statusMessage,
+    });
+  }
+
+  const purchaseSeeds = new Set(snapshots.map((item) => item.seedHashHex));
+  for (const [taskKey, entry] of msfileBitfsBuyerTasks) {
+    if (entry.ownerPublicKeyHex !== owner || entry.ownerSessionEpoch !== coordinatorState.sessionEpoch
+      || !entry.requestMessageId || entry.expiresAtMs <= Date.now() || purchaseSeeds.has(entry.seedHashHex)) continue;
+    const task = await entry.taskPromise;
+    const availableQuotes = await addMsfileBitfsRecentSellerSpeeds(
+      owner,
+      entry.seedHashHex,
+      await task.listDiscoveredQuotes(),
+    );
+    const purchase = entry.purchase;
+    const selectedQuote = purchase
+      ? availableQuotes.find((item) => item.sessionId === purchase.sessionId)
+      : undefined;
+    const quote = selectedQuote ?? availableQuotes[0];
+    const taskId = purchase?.sessionId ?? quote?.sessionId ?? `demand-${entry.seedHashHex}`;
+    const activePurchase = purchase && !["completed", "cancelled", "refunded", "failed", "connection-closed"].includes(purchase.phase);
+    const purchaseSession = activePurchase && purchase ? await sessions.get(purchase.sessionId) : undefined;
+    const purchaseLinkActive = activePurchase && purchase
+      ? [...msfileBitfsWebRtcBuyerLinks.values()].some((link) => link.quoteSessionId === purchase.sessionId
+        && link.ownerPublicKeyHex.toLowerCase() === owner
+        && link.ownerSessionEpoch === coordinatorState.sessionEpoch)
+      : false;
+    const cancellableBeforeFunding = Boolean(purchaseSession
+      && ["quote-selected", "opening-presign", "funding-prepared", "cancel-opening"].includes(purchaseSession.phase)
+      && !purchaseSession.evidence.includes("kind3-opening-response")
+      && !purchaseSession.evidence.includes("kind4-funding-delivery"));
+    snapshots.push({
+      sessionId: taskId,
+      seedHashHex: entry.seedHashHex,
+      phase: activePurchase && purchase ? purchase.phase : "discovering",
+      openingAmountSatoshis: activePurchase && purchase ? purchase.openingAmountSatoshis : null,
+      currentMaxFullBlockPriceSatoshis: activePurchase && purchase
+        ? purchase.currentMaxFullBlockPriceSatoshis ?? buyerSettings.filePriceLimitsBySeedHash?.[entry.seedHashHex] ?? null
+        : buyerSettings.filePriceLimitsBySeedHash?.[entry.seedHashHex] ?? null,
+      verifiedBlockCount: activePurchase && purchase ? purchase.verifiedBlockCount : 0,
+      verifiedBytes: activePurchase && purchase ? purchase.verifiedBytes ?? "0" : "0",
+      totalBlockCount: activePurchase && purchase ? purchase.totalBlockCount : null,
+      sellerPublicKeyHex: quote?.sellerPublicKeyHex ?? null,
+      recommendedFilename: quote?.recommendedFilename ?? null,
+      fileSizeBytes: quote?.fileSizeBytes ?? null,
+      fullBlockPriceSatoshis: quote?.fullBlockPriceSatoshis ?? null,
+      paidSatoshis: "0",
+      minerFeeSatoshis: "0",
+      lockedSatoshis: "0",
+      pendingReturnSatoshis: "0",
+      discoveryOnly: !activePurchase,
+      availableQuotes,
+      canCancel: activePurchase ? cancellableBeforeFunding : true,
+      message: activePurchase && purchase
+        ? purchase.message
+        : availableQuotes.length === 0
+          ? "正在等待卖家报价；发布需求不会拆分或广播资金。"
+          : "已收到已验签报价；设置本文件最高单块价后可选择卖家开始下载。",
+    });
+    purchaseSeeds.add(entry.seedHashHex);
+  }
+  return snapshots.sort((left, right) => left.seedHashHex.localeCompare(right.seedHashHex));
 }
 
 /** 获取或创建当前 Owner + Seed 唯一买方任务。 */
@@ -3679,7 +4476,17 @@ async function ensureMsfileBitfsBuyerTask(input: {
   const existing = msfileBitfsBuyerTasks.get(key);
   if (existing && existing.ownerSessionEpoch === sessionEpoch) {
     try {
-      return { task: await existing.taskPromise, entry: existing };
+      const task = await existing.taskPromise;
+      if (!existing.purchaseHydrated) {
+        const restored = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: seed, task });
+        existing.purchase = restored ?? existing.purchase;
+        existing.purchaseHydrated = true;
+      }
+      if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.keyspaceGeneration !== generation
+        || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
+        throw new Error("BitFS 买方恢复摘要期间 Key 或会话世代已变化");
+      }
+      return { task, entry: existing };
     } catch (error) {
       if (msfileBitfsBuyerTasks.get(key) === existing) msfileBitfsBuyerTasks.delete(key);
       throw error;
@@ -3691,6 +4498,7 @@ async function ensureMsfileBitfsBuyerTask(input: {
     ownerSessionEpoch: sessionEpoch,
     taskPromise: Promise.resolve(undefined as unknown as BitfsBuyerTask),
     expiresAtMs: 0,
+    purchaseHydrated: false,
   };
   entry.taskPromise = createMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: seed, network: "main" });
   msfileBitfsBuyerTasks.set(key, entry);
@@ -3704,6 +4512,12 @@ async function ensureMsfileBitfsBuyerTask(input: {
     if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.keyspaceGeneration !== generation
       || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
       throw new Error("BitFS 需求任务的 Key 或会话世代已变化");
+    }
+    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: seed, task }) ?? entry.purchase;
+    entry.purchaseHydrated = true;
+    if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.keyspaceGeneration !== generation
+      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
+      throw new Error("BitFS 买方恢复摘要期间 Key 或会话世代已变化");
     }
     return { task, entry };
   } catch (error) {
@@ -3719,15 +4533,658 @@ async function msfileBitfsBuyerDemandSnapshot(
   task?: BitfsBuyerTask,
 ): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
   const normalizedSeed = seedHashHex.toLowerCase();
+  const runtime = await ensureMsfileRuntime();
+  const buyerSettings = runtime.getBitfsBuyerSettings
+    ? await runtime.getBitfsBuyerSettings()
+    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+  const savedPriceLimit = buyerSettings.filePriceLimitsBySeedHash?.[normalizedSeed] ?? null;
   if (!entry || !task) {
-    return { seedHashHex: normalizedSeed, requestMessageId: null, expiresAtMs: null, quotes: [] };
+    return { seedHashHex: normalizedSeed, requestMessageId: null, expiresAtMs: null, quotes: [], currentMaxFullBlockPriceSatoshis: savedPriceLimit };
   }
   return {
     seedHashHex: normalizedSeed,
     requestMessageId: entry.requestMessageId ?? null,
     expiresAtMs: entry.expiresAtMs > 0 ? entry.expiresAtMs : null,
-    quotes: await task.listDiscoveredQuotes(),
+    quotes: await addMsfileBitfsRecentSellerSpeeds(
+      entry.ownerPublicKeyHex,
+      normalizedSeed,
+      await task.listDiscoveredQuotes(),
+    ),
+    purchase: entry.purchase ?? null,
+    currentMaxFullBlockPriceSatoshis: savedPriceLimit,
   };
+}
+
+/** 为已经验签报价的 DataChannel 装配买方 SDK 协议端口。 */
+async function ensureMsfileBitfsBuyerProtocol(
+  webrtcSessionId: string,
+  link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>,
+): Promise<BitfsBuyerProtocol> {
+  if (link.protocol) return link.protocol;
+  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked" || link.ownerSessionEpoch !== coordinatorState.sessionEpoch) {
+    throw new Error("BitFS 买方 Key 已锁定或会话已切换");
+  }
+  const woc = p2pkhWocService;
+  if (!woc) throw new Error("BitFS 买方需要可用的 WoC 链上事实服务");
+  const sessionEpoch = coordinatorState.sessionEpoch;
+  const keyspaceGeneration = coordinatorState.keyspaceGeneration;
+  const assertCurrentContext = (): void => {
+    if (coordinatorState.vaultStatus !== "unlocked"
+      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
+      || coordinatorState.sessionEpoch !== sessionEpoch
+      || coordinatorState.keyspaceGeneration !== keyspaceGeneration
+      || msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) {
+      throw new Error("BitFS 买方购买期间 Key、存储或 DataChannel 已变化");
+    }
+  };
+  const settings = await p2pkhSettingRepository().readSetting();
+  const feeRate = settings.feeRateSatoshisPerKb.medium;
+  if (!Number.isSafeInteger(feeRate) || feeRate < 1) throw new Error("BitFS 池内手续费率配置无效");
+  const cryptoPort = await createWorkerActiveKeyCrypto(owner);
+  assertCurrentContext();
+  const journalStore = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+  const contentStore = createWorkerOwnerFileStore("msfile", "");
+  const quoteSessionId = link.quoteSessionId;
+  if (!quoteSessionId) throw new Error("BitFS 下载计划需要先持久化已验签报价");
+  const quoteViews = (await link.task.listDiscoveredQuotes()).sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+  const quoteView = quoteViews.find((item) => item.sessionId === quoteSessionId);
+  const canonicalQuote = quoteViews[0];
+  if (!quoteView || !canonicalQuote || quoteViews.some((item) => item.fileSizeBytes !== canonicalQuote.fileSizeBytes)) {
+    throw new Error("BitFS 同 Seed 报价缺少统一文件大小，不能创建共享下载计划");
+  }
+  const runtime = await ensureMsfileRuntime();
+  const buyerSettings = runtime.getBitfsBuyerSettings
+    ? await runtime.getBitfsBuyerSettings()
+    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+  const downloadPlan = createBitfsBuyerDownloadPlan({
+    ownerPublicKeyHex: owner,
+    seedHashHex: link.seedHashHex,
+    fileSizeBytes: canonicalQuote.fileSizeBytes,
+    recommendedFilename: canonicalQuote.recommendedFilename,
+    store: journalStore,
+  });
+  const protocol = new BitfsBuyerProtocol({
+    task: link.task,
+    sessions: createBitfsSessionJournal(journalStore),
+    signer: createBitfsVaultSigner(cryptoPort),
+    contentStore,
+    downloadPlan,
+    selectionPriority: buyerSettings.sellerSelectionPriority,
+    onDownloadPlanChanged() {
+      setTimeout(() => {
+        for (const [candidateSessionId, candidateLink] of msfileBitfsWebRtcBuyerLinks) {
+          if (candidateLink.ownerPublicKeyHex.toLowerCase() !== owner
+            || candidateLink.seedHashHex.toLowerCase() !== link.seedHashHex.toLowerCase()
+            || candidateLink.ownerSessionEpoch !== sessionEpoch
+            || !candidateLink.protocol || !candidateLink.quoteSessionId) continue;
+          void candidateLink.protocol.continueSharedDownload({
+            sessionId: candidateLink.quoteSessionId,
+            stream: createMsfileBitfsBuyerStream(candidateSessionId, candidateLink),
+          }).catch(() => undefined);
+        }
+        void maybeStartMsfileBitfsNextSeller({ ownerPublicKeyHex: owner, seedHashHex: link.seedHashHex, task: link.task }).catch(() => undefined);
+      }, 0);
+    },
+    blockHeight: () => woc.getChainHeight("main", { priority: "interactive" }),
+    readPoolSpendChain: (fundingTxid, afterTxid) => readBitfsPoolSpendChain({
+      woc,
+      network: "main",
+      fundingTxid,
+      ...(afterTxid === undefined ? {} : { afterTxid }),
+    }),
+    nowMs: () => Date.now(),
+    minerFeeRateSatoshisPerKilobyte: BigInt(feeRate),
+    assertCurrentContext,
+    async onContentCommitted(seedHashHex) {
+      const index = msfileSellerIndex;
+      if (!index) return;
+      const indexGeneration = index.currentGeneration();
+      index.invalidate(seedHashHex);
+      await index.refresh(contentStore, seedHashHex, indexGeneration);
+    },
+    onVerifiedDelivery: persistMsfileBitfsSellerSpeedSample,
+    onProgress(progress) {
+      const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, link.seedHashHex));
+      if (!taskEntry || taskEntry.ownerSessionEpoch !== sessionEpoch) return;
+      taskEntry.purchase = {
+        sessionId: progress.sessionId,
+        phase: progress.phase,
+        openingAmountSatoshis: progress.openingAmountSatoshis,
+        ...(taskEntry.purchase?.sessionId === progress.sessionId && taskEntry.purchase.currentMaxFullBlockPriceSatoshis !== undefined
+          ? { currentMaxFullBlockPriceSatoshis: taskEntry.purchase.currentMaxFullBlockPriceSatoshis }
+          : {}),
+        verifiedBlockCount: progress.verifiedBlockCount,
+        totalBlockCount: progress.totalBlockCount,
+        message: progress.message,
+      };
+    },
+  });
+  link.protocol = protocol;
+  return protocol;
+}
+
+/** 同一 Seed 的手动/自动购买共用准入锁；双击或同时到达报价只会进入一次开池。 */
+async function startMsfileBitfsBuyerPurchase(input: {
+  seedHashHex: string;
+  sessionId: string;
+  maxFullBlockPriceSatoshis?: string;
+  /** 只由用户手动购买入口设置；自动补池不得解除整文件取消标记。 */
+  resumeCancelledPlan?: boolean;
+}): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
+  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再购买 BitFS 文件");
+  const lockKey = msfileBitfsBuyerTaskKey(owner, input.seedHashHex);
+  const previous = msfileBitfsBuyerPurchaseTails.get(lockKey) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  msfileBitfsBuyerPurchaseTails.set(lockKey, current);
+  await previous;
+  try {
+    return await startMsfileBitfsBuyerPurchaseNow(input);
+  } finally {
+    release();
+    if (msfileBitfsBuyerPurchaseTails.get(lockKey) === current) msfileBitfsBuyerPurchaseTails.delete(lockKey);
+  }
+}
+
+/** 用户选择报价或自动规则命中后，为有界批次内的卖家按 Block 数分配独立费用池。 */
+async function startMsfileBitfsBuyerPurchaseNow(input: {
+  seedHashHex: string;
+  sessionId: string;
+  maxFullBlockPriceSatoshis?: string;
+  /** 仅显式手动重启时允许在全部旧池关闭后清除停止标记。 */
+  resumeCancelledPlan?: boolean;
+}): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
+  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再购买 BitFS 文件");
+  await ensureMsfileBitfsBuyerRecovery(owner);
+  if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
+  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
+  const { task, entry } = await ensureMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex });
+  const quotes = await addMsfileBitfsRecentSellerSpeeds(owner, input.seedHashHex, await task.listDiscoveredQuotes());
+  const selectedQuote = quotes.find((item) => item.sessionId === input.sessionId);
+  if (!selectedQuote) throw new Error("所选报价不属于当前 Seed 的已验签报价列表");
+  const maximumBlockPrice = normalizeMsFileSatoshiAmount(input.maxFullBlockPriceSatoshis ?? selectedQuote.fullBlockPriceSatoshis);
+  if (maximumBlockPrice === undefined || BigInt(selectedQuote.fullBlockPriceSatoshis) > BigInt(maximumBlockPrice)) {
+    throw new Error("所选报价的完整 Block 单价高于本文件已选择的最高价");
+  }
+  const runtime = await ensureMsfileRuntime();
+  const settings = runtime.getBitfsBuyerSettings
+    ? await runtime.getBitfsBuyerSettings()
+    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const allSessions = await sessions.list();
+  const sameSeedSessions = allSessions.filter((record) => record.role === "buyer"
+    && record.ownerPublicKeyHex === owner && record.seedHashHex === input.seedHashHex.toLowerCase());
+  const hasPlan = (record: (typeof sameSeedSessions)[number]): boolean => record.evidence.includes("download-plan");
+  const hasFunding = (record: (typeof sameSeedSessions)[number]): boolean => record.evidence.includes("kind2-opening-request")
+    || record.evidence.includes("opening-configuration") || record.evidence.includes("funding-transaction")
+    || record.pendingTxid !== undefined;
+  const terminal = new Set(["completed", "cancelled", "refunded"]);
+  const otherActiveSeeds = new Set(allSessions.filter((record) => record.role === "buyer"
+    && record.ownerPublicKeyHex === owner
+    && (record.evidence.includes("kind2-opening-request") || record.evidence.includes("opening-configuration")
+      || record.evidence.includes("funding-transaction"))
+    && !terminal.has(record.phase) && record.seedHashHex !== input.seedHashHex.toLowerCase())
+    .map((record) => record.seedHashHex));
+  if (otherActiveSeeds.size >= settings.maxConcurrentDownloads) {
+    throw new Error(`当前有 ${otherActiveSeeds.size} 个 BitFS 文件任务仍在购买或恢复；并发上限为 ${settings.maxConcurrentDownloads}`);
+  }
+  if (sameSeedSessions.some((record) => !hasPlan(record) && !terminal.has(record.phase) && hasFunding(record))) {
+    throw new Error("当前 Seed 有尚未完成的旧版单卖家费用池；请先恢复或回收后再建立共享下载计划");
+  }
+  if (entry.purchase?.phase === "completed") throw new Error("当前 Seed 已完成购买，无需再次付款");
+
+  const canonicalQuote = quotes.slice().sort((left, right) => left.sessionId.localeCompare(right.sessionId))[0];
+  if (!canonicalQuote || quotes.some((item) => item.fileSizeBytes !== canonicalQuote.fileSizeBytes)) {
+    throw new Error("同 Seed 报价的签名文件大小不一致，不能安全建立共享下载计划");
+  }
+  const totalBlocksBig = (BigInt(canonicalQuote.fileSizeBytes) + 262_143n) / 262_144n;
+  if (totalBlocksBig <= 0n || totalBlocksBig > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("BitFS 文件 Block 数量超出当前安全范围");
+  const totalBlocks = Number(totalBlocksBig);
+  const downloadPlan = createBitfsBuyerDownloadPlan({
+    ownerPublicKeyHex: owner,
+    seedHashHex: input.seedHashHex,
+    fileSizeBytes: canonicalQuote.fileSizeBytes,
+    recommendedFilename: canonicalQuote.recommendedFilename,
+    store: createWorkerOwnerFileStore("msfile", "bitfs-journal"),
+  });
+  let plan = await downloadPlan.snapshot();
+  // 尚未准备 FundingTx 的失败池没有资金责任，可释放其预留 Block；其他失败仍保留占用。
+  for (const pool of plan.pools) {
+    const record = sameSeedSessions.find((item) => item.sessionId === pool.sessionId);
+    if (!pool.closed && record?.phase === "failed" && !hasFunding(record)) await downloadPlan.closePool(pool.sessionId);
+  }
+  plan = await downloadPlan.snapshot();
+  if (plan.stopRequested) {
+    if (!input.resumeCancelledPlan) throw new Error("整文件已取消；请先完成费用池回收，再由用户重新开始下载");
+    if (plan.pools.some((pool) => !pool.closed)) {
+      throw new Error("整文件取消仍在等待费用池关闭；确认所有池关闭后才能重新开始下载");
+    }
+    await downloadPlan.resumeAfterCancellation();
+    plan = await downloadPlan.snapshot();
+  }
+  if (plan.totalBlockCount !== null && plan.completedBlockCount === plan.totalBlockCount) {
+    throw new Error("当前 Seed 的所有唯一 Block 已付款；正在执行文件提交或关池恢复");
+  }
+  const existingPools = plan.pools.filter((pool) => !pool.closed);
+  const sellerSlots = Math.max(0, settings.maxConcurrentSellerSessions - existingPools.length);
+  const inFlight = existingPools.filter((pool) => pool.inFlightBlockHashHex !== undefined).length;
+  const blockCount = plan.totalBlockCount ?? totalBlocks;
+  const unassignedByPlan = Math.max(0, blockCount - plan.completedBlockCount - inFlight);
+  const alreadyBudgeted = existingPools.reduce((sum, pool) => {
+    const balance = BigInt(pool.blockBudgetSatoshis) - BigInt(pool.blockCommittedSatoshis);
+    const capacity = balance > 0n ? balance / BigInt(pool.fullBlockPriceSatoshis) : 0n;
+    const bounded = Number(capacity > BigInt(blockCount) ? BigInt(blockCount) : capacity);
+    return Math.min(blockCount, sum + bounded - (pool.inFlightBlockHashHex ? 1 : 0));
+  }, 0);
+  const newBlockSlots = Math.max(0, unassignedByPlan - Math.max(0, alreadyBudgeted));
+
+  const links = new Map<string, { webrtcSessionId: string; link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>> }>();
+  for (const [webrtcSessionId, link] of msfileBitfsWebRtcBuyerLinks) {
+    if (link.quoteSessionId && link.ownerPublicKeyHex.toLowerCase() === owner
+      && link.seedHashHex.toLowerCase() === input.seedHashHex.toLowerCase()
+      && link.ownerSessionEpoch === coordinatorState.sessionEpoch) {
+      links.set(link.quoteSessionId, { webrtcSessionId, link });
+    }
+  }
+  const selectedLink = links.get(input.sessionId);
+  if (!selectedLink) throw new Error("所选卖家 DataChannel 已关闭；请重新发布需求并连接新的报价");
+  const selectedRecord = sameSeedSessions.find((record) => record.sessionId === input.sessionId);
+  const selectedAlreadyStarted = selectedRecord?.evidence.includes("download-plan") === true;
+  if (selectedAlreadyStarted && (sellerSlots === 0 || newBlockSlots === 0)) {
+    return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
+  }
+  const availableQuotes = quotes.filter((item) => BigInt(item.fullBlockPriceSatoshis) <= BigInt(maximumBlockPrice)
+    && links.has(item.sessionId))
+    .sort((left, right) => compareMsfileBitfsBuyerQuotes(left, right, settings.sellerSelectionPriority))
+    .filter((item) => {
+      const saved = sameSeedSessions.find((record) => record.sessionId === item.sessionId);
+      return !saved?.evidence.includes("download-plan") && !saved?.evidence.includes("kind2-opening-request");
+    });
+  // 手动选中的报价必须纳入本批；其他名额沿用持久化计划的卖家优先规则。
+  const orderedQuotes = [
+    ...availableQuotes.filter((item) => item.sessionId === input.sessionId),
+    ...availableQuotes.filter((item) => item.sessionId !== input.sessionId),
+  ];
+  const batchCount = Math.min(sellerSlots, newBlockSlots, orderedQuotes.length);
+  if (batchCount <= 0) {
+    if (selectedRecord?.evidence.includes("download-plan")) return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
+    throw new Error("可用卖家池已达到并发上限，或文件 Block 预算已全部分配");
+  }
+  const batch = orderedQuotes.slice(0, batchCount);
+  if (!selectedAlreadyStarted && !batch.some((item) => item.sessionId === input.sessionId)) {
+    throw new Error("当前并发名额已被其他报价占用；请重新选择可用报价");
+  }
+  const appSettings = await p2pkhSettingRepository().readSetting();
+  const feeRate = BigInt(appSettings.feeRateSatoshisPerKb.medium);
+  if (feeRate <= 0n) throw new Error("BitFS 池内手续费率配置无效");
+  const feeReserve = feeRate * 2n;
+  let started = 0;
+  let blockSlotsRemaining = newBlockSlots;
+  let candidatesRemaining = batch.length;
+  const failures: string[] = [];
+  for (let index = 0; index < batch.length; index += 1) {
+    const candidate = batch[index]!;
+    const assignedCount = Math.floor(blockSlotsRemaining / candidatesRemaining)
+      + (blockSlotsRemaining % candidatesRemaining > 0 ? 1 : 0);
+    candidatesRemaining -= 1;
+    const target = links.get(candidate.sessionId);
+    if (!target) continue;
+    const saved = sameSeedSessions.find((record) => record.sessionId === candidate.sessionId);
+    if (saved?.evidence.includes("download-plan") || saved?.evidence.includes("kind2-opening-request")) continue;
+    if (assignedCount <= 0) continue;
+    const assignedBlockCount = BigInt(assignedCount);
+    const blockBudget = assignedBlockCount * BigInt(candidate.fullBlockPriceSatoshis);
+    // 允许每个候选池作为唯一 Seed 买家接替失败卖家；Seed 只会由计划认领一次。
+    const seedBudget = plan.seedCompleted ? 0n : BigInt(candidate.seedPriceSatoshis);
+    const contentBudget = blockBudget + seedBudget;
+    const openingAmount = contentBudget + feeReserve;
+    if (openingAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      failures.push(`${candidate.sessionId}: 开池金额超过安全上限`);
+      continue;
+    }
+    await target.link.quoteAccepted;
+    const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link);
+    const savedSession = await sessions.get(candidate.sessionId);
+    if (!savedSession || savedSession.role !== "buyer" || savedSession.ownerPublicKeyHex !== owner
+      || savedSession.seedHashHex !== input.seedHashHex.toLowerCase()) {
+      failures.push(`${candidate.sessionId}: 买方报价会话身份不匹配`);
+      continue;
+    }
+    const limitEvidence = new TextEncoder().encode(maximumBlockPrice);
+    const priorLimit = await sessions.getEvidence(candidate.sessionId, "file-price-limit");
+    if (priorLimit && bytesToHex(priorLimit) !== bytesToHex(limitEvidence)) {
+      failures.push(`${candidate.sessionId}: 已固定不同的本文件最高价`);
+      continue;
+    }
+    if (!priorLimit) await sessions.putEvidence(candidate.sessionId, savedSession.revision, "file-price-limit", limitEvidence, Date.now());
+    try {
+      const progress = await protocol.startPurchase({
+        sessionId: candidate.sessionId,
+        stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link),
+        openingAmountSatoshis: openingAmount.toString(10),
+        contentBudgetSatoshis: contentBudget.toString(10),
+        seedBudgetSatoshis: seedBudget.toString(10),
+        seedBudgetReserved: !plan.seedCompleted,
+        blockBudgetSatoshis: blockBudget.toString(10),
+        recentBytesPerSecond: candidate.recentBytesPerSecond ?? null,
+      });
+      started += 1;
+      blockSlotsRemaining -= assignedCount;
+      if (candidate.sessionId === input.sessionId || !entry.purchase) {
+        entry.purchase = {
+          sessionId: progress.sessionId,
+          phase: progress.phase,
+          openingAmountSatoshis: progress.openingAmountSatoshis,
+          currentMaxFullBlockPriceSatoshis: maximumBlockPrice,
+          verifiedBlockCount: progress.verifiedBlockCount,
+          totalBlockCount: progress.totalBlockCount,
+          message: progress.message,
+        };
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "BitFS 卖家池开池准备失败";
+      failures.push(`${candidate.sessionId}: ${message.slice(0, 160)}`);
+      const latest = await sessions.get(candidate.sessionId);
+      if (latest && !hasFunding(latest)) {
+        await downloadPlan.closePool(candidate.sessionId).catch(() => undefined);
+        const afterClose = await downloadPlan.snapshot();
+        const pool = afterClose.pools.find((item) => item.sessionId === candidate.sessionId);
+        if (pool && !pool.closed) blockSlotsRemaining -= assignedCount;
+      } else if (latest) {
+        blockSlotsRemaining -= assignedCount;
+      }
+      if (candidate.sessionId === input.sessionId && !entry.purchase) {
+        entry.purchase = {
+          sessionId: candidate.sessionId,
+          phase: "failed",
+          openingAmountSatoshis: openingAmount.toString(10),
+          currentMaxFullBlockPriceSatoshis: maximumBlockPrice,
+          verifiedBlockCount: 0,
+          totalBlockCount: totalBlocks,
+          message: message.slice(0, 240),
+        };
+      }
+    }
+  }
+  if (started === 0) throw new Error(failures[0] ?? "没有卖家费用池可以启动");
+  return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
+}
+
+/** 按持久化下载计划采用相同的价格/速度优先规则排列已验签报价。 */
+function compareMsfileBitfsBuyerQuotes(
+  left: import("@keymaster/contracts").MsFileBitfsQuoteView,
+  right: import("@keymaster/contracts").MsFileBitfsQuoteView,
+  priority: "price" | "recent-speed",
+): number {
+  const leftSpeed = left.recentBytesPerSecond == null ? undefined : BigInt(left.recentBytesPerSecond);
+  const rightSpeed = right.recentBytesPerSecond == null ? undefined : BigInt(right.recentBytesPerSecond);
+  if (priority === "recent-speed") {
+    if (leftSpeed !== undefined && rightSpeed === undefined) return -1;
+    if (leftSpeed === undefined && rightSpeed !== undefined) return 1;
+    if (leftSpeed !== undefined && rightSpeed !== undefined && leftSpeed !== rightSpeed) return leftSpeed > rightSpeed ? -1 : 1;
+  }
+  const leftPrice = BigInt(left.fullBlockPriceSatoshis);
+  const rightPrice = BigInt(right.fullBlockPriceSatoshis);
+  if (leftPrice !== rightPrice) return leftPrice < rightPrice ? -1 : 1;
+  if (leftSpeed !== undefined && rightSpeed !== undefined && leftSpeed !== rightSpeed) return leftSpeed > rightSpeed ? -1 : 1;
+  return left.sessionId.localeCompare(right.sessionId);
+}
+
+/** 已付款池关闭并释放并发名额后，继续加入符合本文件价格上限的已连接卖家。 */
+async function maybeStartMsfileBitfsNextSeller(input: {
+  ownerPublicKeyHex: string;
+  seedHashHex: string;
+  task: BitfsBuyerTask;
+}): Promise<void> {
+  const owner = input.ownerPublicKeyHex.toLowerCase();
+  const seed = input.seedHashHex.toLowerCase();
+  const entry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, seed));
+  const maximum = entry?.purchase?.currentMaxFullBlockPriceSatoshis;
+  if (!entry || entry.ownerSessionEpoch !== coordinatorState.sessionEpoch || !maximum || entry.purchase?.phase === "completed") return;
+  const plan = await openMsfileBitfsBuyerDownloadPlan(owner, seed).catch(() => undefined);
+  if (plan && (await plan.snapshot()).stopRequested) return;
+  const runtime = await ensureMsfileRuntime();
+  const settings = runtime.getBitfsBuyerSettings
+    ? await runtime.getBitfsBuyerSettings()
+    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+  const quotes = await addMsfileBitfsRecentSellerSpeeds(owner, seed, await input.task.listDiscoveredQuotes());
+  const sessions = await createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal")).list();
+  const linkedSessionIds = new Set([...msfileBitfsWebRtcBuyerLinks.values()]
+    .filter((candidate) => candidate.ownerPublicKeyHex.toLowerCase() === owner
+      && candidate.seedHashHex.toLowerCase() === seed
+      && candidate.ownerSessionEpoch === coordinatorState.sessionEpoch
+      && candidate.quoteSessionId)
+    .map((candidate) => candidate.quoteSessionId!));
+  const next = quotes.filter((quote) => BigInt(quote.fullBlockPriceSatoshis) <= BigInt(maximum)
+    && linkedSessionIds.has(quote.sessionId)
+    && !sessions.some((record) => record.role === "buyer" && record.sessionId === quote.sessionId
+      && (record.evidence.includes("download-plan") || record.evidence.includes("kind2-opening-request"))))
+    .sort((left, right) => compareMsfileBitfsBuyerQuotes(left, right, settings.sellerSelectionPriority))[0];
+  if (!next) return;
+  await startMsfileBitfsBuyerPurchase({ seedHashHex: seed, sessionId: next.sessionId, maxFullBlockPriceSatoshis: maximum })
+    .catch(() => undefined);
+}
+
+/** 有效报价短暂收敛后，启动当前可用且符合价格上限的卖家批次。 */
+async function maybeAutoStartMsfileBitfsBuyerPurchase(input: {
+  ownerPublicKeyHex: string;
+  seedHashHex: string;
+  task: BitfsBuyerTask;
+}): Promise<void> {
+  const owner = input.ownerPublicKeyHex.toLowerCase();
+  const seed = input.seedHashHex.toLowerCase();
+  const runtime = await ensureMsfileRuntime();
+  const settings = runtime.getBitfsBuyerSettings
+    ? await runtime.getBitfsBuyerSettings()
+    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
+  if (!settings.buyerAutoPurchaseEnabled) return;
+
+  // 让同一轮已验签报价短暂收敛，再按上限和并发设置启动一个批次。
+  await new Promise<void>((resolve) => setTimeout(resolve, 750));
+  if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) return;
+  const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, seed));
+  if (!taskEntry || taskEntry.ownerSessionEpoch !== coordinatorState.sessionEpoch) return;
+  if (taskEntry.purchase?.phase === "completed") return;
+  const planObject = await createWorkerOwnerFileStore("msfile", "bitfs-journal").get(`download-plans/${seed}.json`);
+  if (planObject) {
+    const downloadPlan = await openMsfileBitfsBuyerDownloadPlan(owner, seed);
+    if ((await downloadPlan.snapshot()).stopRequested) return;
+  }
+
+  const priceLimit = BigInt(settings.maxFullBlockPriceSatoshis);
+  const candidates = (await addMsfileBitfsRecentSellerSpeeds(owner, seed, await input.task.listDiscoveredQuotes()))
+    .filter((quote) => BigInt(quote.fullBlockPriceSatoshis) <= priceLimit)
+    .sort((left, right) => {
+      const leftBlock = BigInt(left.fullBlockPriceSatoshis);
+      const rightBlock = BigInt(right.fullBlockPriceSatoshis);
+      if (settings.sellerSelectionPriority === "recent-speed") {
+        const leftSpeed = left.recentBytesPerSecond === null || left.recentBytesPerSecond === undefined
+          ? undefined
+          : BigInt(left.recentBytesPerSecond);
+        const rightSpeed = right.recentBytesPerSecond === null || right.recentBytesPerSecond === undefined
+          ? undefined
+          : BigInt(right.recentBytesPerSecond);
+        if (leftSpeed !== undefined && rightSpeed === undefined) return -1;
+        if (leftSpeed === undefined && rightSpeed !== undefined) return 1;
+        if (leftSpeed !== undefined && rightSpeed !== undefined && leftSpeed !== rightSpeed) return leftSpeed > rightSpeed ? -1 : 1;
+      }
+      if (leftBlock !== rightBlock) return leftBlock < rightBlock ? -1 : 1;
+      const leftSeed = BigInt(left.seedPriceSatoshis);
+      const rightSeed = BigInt(right.seedPriceSatoshis);
+      return leftSeed === rightSeed ? left.sessionId.localeCompare(right.sessionId) : leftSeed < rightSeed ? -1 : 1;
+    });
+  const selected = candidates[0];
+  if (!selected) return;
+  try {
+    await startMsfileBitfsBuyerPurchase({ seedHashHex: seed, sessionId: selected.sessionId, maxFullBlockPriceSatoshis: settings.maxFullBlockPriceSatoshis });
+  } catch (error) {
+    console.warn("[msfile] BitFS automatic purchase was not started", error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** 整文件取消先立持久停止栅栏，再逐池复用原连接协商 Kind 12/13 回收。 */
+async function cancelMsfileBitfsBuyerPurchase(input: { seedHashHex: string; sessionId: string }): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
+  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再取消 BitFS 购买");
+  if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
+  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
+  const { task, entry } = await ensureMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex });
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const selected = await sessions.get(input.sessionId);
+  if (!selected || selected.role !== "buyer" || selected.ownerPublicKeyHex !== owner
+    || selected.seedHashHex !== input.seedHashHex.toLowerCase()) {
+    throw new Error("找不到当前 Key 和 Seed 对应的买方购买会话");
+  }
+  if (!selected.evidence.includes("download-plan")) {
+    return cancelOneMsfileBitfsBuyerPurchase({ ...input, ownerPublicKeyHex: owner, task, entry });
+  }
+
+  const plan = await openMsfileBitfsBuyerDownloadPlan(owner, input.seedHashHex);
+  await plan.requestStop();
+  const before = await plan.snapshot();
+  const failures: string[] = [];
+  for (const pool of before.pools.filter((item) => !item.closed)) {
+    try {
+      await cancelOneMsfileBitfsBuyerPurchase({
+        seedHashHex: input.seedHashHex,
+        sessionId: pool.sessionId,
+        ownerPublicKeyHex: owner,
+        task,
+        entry,
+      });
+    } catch (error) {
+      failures.push(`${pool.sessionId}: ${error instanceof Error ? error.message : "费用池取消失败"}`);
+    }
+  }
+  const after = await plan.snapshot();
+  const pending = after.pools.filter((item) => !item.closed);
+  if (pending.length > 0) {
+    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }) ?? entry.purchase;
+    if (entry.purchase) {
+      const detail = failures[0] ? ` 首个未完成原因：${failures[0].slice(0, 140)}` : "";
+      entry.purchase = {
+        ...entry.purchase,
+        message: `整文件已暂停新内容请求；${pending.length} 个费用池仍待卖家响应或链上确认。${detail}`,
+      };
+    }
+  }
+  return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
+}
+
+/** 单个费用池取消：没有连接时只释放未广播的开池预留；已开池必须恢复连接回收。 */
+async function cancelOneMsfileBitfsBuyerPurchase(input: {
+  seedHashHex: string;
+  sessionId: string;
+  ownerPublicKeyHex: string;
+  task: BitfsBuyerTask;
+  entry: NonNullable<ReturnType<typeof msfileBitfsBuyerTasks.get>>;
+}): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
+  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再取消 BitFS 购买");
+  if (owner !== input.ownerPublicKeyHex) throw new Error("BitFS 当前 Key 已切换，不能继续取消原下载计划");
+  if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
+  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
+  const { task, entry } = input;
+  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const saved = await sessions.get(input.sessionId);
+  if (!saved || saved.role !== "buyer" || saved.ownerPublicKeyHex !== owner || saved.seedHashHex !== input.seedHashHex.toLowerCase()) {
+    throw new Error("找不到当前 Key 和 Seed 对应的买方购买会话");
+  }
+  if (saved.evidence.includes("kind13-close-response")) {
+    await task.resumePoolRecovery(input.sessionId);
+    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task });
+    return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
+  }
+  const canCancelBeforeFunding = ["quote-selected", "opening-presign", "funding-prepared", "cancel-opening"].includes(saved.phase)
+    && !saved.evidence.includes("kind3-opening-response")
+    && !saved.evidence.includes("kind4-funding-delivery");
+  const linkEntry = [...msfileBitfsWebRtcBuyerLinks.entries()].find(([, link]) =>
+    link.quoteSessionId === input.sessionId
+      && link.ownerSessionEpoch === coordinatorState.sessionEpoch
+      && link.ownerPublicKeyHex.toLowerCase() === owner
+      && link.seedHashHex === input.seedHashHex.toLowerCase());
+  if (!linkEntry) {
+    if (canCancelBeforeFunding) {
+      const openingMayHaveReservedFunding = saved.evidence.includes("opening-configuration")
+        || saved.evidence.includes("funding-transaction");
+      if (saved.phase === "quote-selected" && !openingMayHaveReservedFunding) {
+        await sessions.update(saved.sessionId, saved.revision, { phase: "cancelled" }, Date.now());
+      } else {
+        if (saved.phase !== "cancel-opening") await sessions.update(saved.sessionId, saved.revision, { phase: "cancel-opening" }, Date.now());
+        await task.cancelUnfundedOpening(saved.sessionId);
+      }
+      if (saved.evidence.includes("download-plan")) {
+        await markMsfileBitfsDownloadPlanPoolClosed({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, sessionId: saved.sessionId });
+        void maybeStartMsfileBitfsNextSeller({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }).catch(() => undefined);
+      }
+      entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }) ?? {
+        sessionId: saved.sessionId,
+        phase: "cancelled",
+        openingAmountSatoshis: null,
+        verifiedBlockCount: 0,
+        totalBlockCount: null,
+        message: "购买已取消；开池资金未广播。",
+      };
+      return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
+    }
+    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }) ?? entry.purchase;
+    throw new Error("卖方 DataChannel 已关闭；费用池仍受保护，需恢复卖方连接后继续关池回收");
+  }
+  const [webrtcSessionId, link] = linkEntry;
+  await link.quoteAccepted;
+  const protocol = await ensureMsfileBitfsBuyerProtocol(webrtcSessionId, link);
+  await protocol.cancelPurchase({ sessionId: input.sessionId, stream: createMsfileBitfsBuyerStream(webrtcSessionId, link) });
+  return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
+}
+
+function createMsfileBitfsBuyerStream(
+  webrtcSessionId: string,
+  link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>,
+) {
+  return {
+    async send(frame: Uint8Array) {
+      if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) throw new Error("BitFS 买方 DataChannel 已关闭");
+      await requestWindowP2pExecutorOperation({
+        type: "lane",
+        laneId: "msfile",
+        operation: { type: "bitfs-seller-send", sessionId: link.transportSessionId, frame },
+      });
+    },
+  };
+}
+
+/** 买方传输或协议失败后关闭该会话并保留可见恢复状态。 */
+function msfileBitfsBuyerWebRtcFailure(link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>, webrtcSessionId: string, transportSessionId: string, reason: string): void {
+  if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) return;
+  msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
+  msfileBitfsBuyerOfferCounts.set(link.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(link.requestMessageId) ?? 1) - 1));
+  const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(link.ownerPublicKeyHex, link.seedHashHex));
+  if (taskEntry?.purchase && taskEntry.purchase.phase !== "completed" && taskEntry.purchase.phase !== "cancelled") {
+    const cancelling = taskEntry.purchase.phase === "cancelling-pool" || taskEntry.purchase.phase === "cancel-unknown";
+    taskEntry.purchase = {
+      ...taskEntry.purchase,
+      phase: cancelling ? "cancel-unknown" : reason === "buyer_protocol_error" ? "failed" : "connection-closed",
+      message: cancelling
+        ? "卖方 DataChannel 已关闭；取消关池结果待核对，费用池仍受保护。"
+        : reason === "buyer_protocol_error"
+        ? "BitFS 买方协议处理失败；本地会话证据已保留。"
+        : "BitFS DataChannel 已关闭；本地会话证据已保留，可在购买任务页重新连接卖家续接。",
+    };
+    taskEntry.purchaseHydrated = false;
+  }
+  void requestWindowP2pExecutorOperation({
+    type: "lane",
+    laneId: "msfile",
+    operation: { type: "bitfs-seller-close", sessionId: transportSessionId, reason },
+  }).catch(() => undefined);
+}
+
+/** 比较 exact BitFS 报文字节；不把视图对象或哈希摘要当作会话身份。 */
+function equalMsfileBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
 }
 
 function stopMsfileSellerRuntime(): void {
@@ -4308,6 +5765,7 @@ export async function createMsfileBitfsBuyerTask(input: {
     broadcaster,
     signer,
     ownerPublicKeyHex: owner,
+    ownerP2pkhScriptHex: p2pkhAddressToScriptHex(deriveP2pkhAddress(owner, input.network), input.network).toLowerCase(),
     seedHashHex: seed,
     network: input.network,
     generation,
@@ -4322,6 +5780,14 @@ export async function createMsfileBitfsBuyerTask(input: {
     assertCurrentContext,
     releasePreparedSubmission: releaseMsfileBitfsPreparedSubmission,
     nowMs: () => Date.now(),
+    blockHeight: () => {
+      if (!woc) throw new Error("BitFS 到期退款需要可用的 WoC 链高度服务");
+      return woc.getChainHeight(input.network, { priority: "interactive" });
+    },
+    readPoolSpendChain: (fundingTxid) => {
+      if (!woc) throw new Error("BitFS 到期退款需要可用的 WoC 池状态查询服务");
+      return readBitfsPoolSpendChain({ woc, network: input.network, fundingTxid });
+    },
     async publishHashRequest(onPrepared, onDefinitelyFailed) {
       assertCurrentContext();
       const runtime = await ensureSatRuntime();
@@ -4544,6 +6010,7 @@ async function configureMsfileSellerRuntime(
       signer,
       index,
       journal,
+      sessions,
       settings: () => service.describeState().sellerSettings,
       nowMs: () => Date.now(),
       allowLoopbackWs: import.meta.env?.DEV === true,
@@ -4636,7 +6103,7 @@ async function handleMsfileSellerHashRequest(
     || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) return;
   try {
     const publicKeyHex = request.from_public_key;
-    const sessionId = crypto.randomUUID();
+    const sessionId = match.resumeSessionId ?? crypto.randomUUID();
     await manager.start({
       sessionId,
       transport: match.transport,
@@ -4683,6 +6150,8 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
     transportSessionId,
     requestMessageId: input.requestMessageId,
     peerPublicKeyHex: input.peerPublicKeyHex.toLowerCase(),
+    ownerPublicKeyHex: request.ownerPublicKeyHex,
+    seedHashHex: request.seedHashHex,
     task: request.task,
     ownerSessionEpoch: request.ownerSessionEpoch,
   };
@@ -4759,10 +6228,13 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
     if (typeof event.webrtcSessionId === "string") msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId);
     if (typeof event.webrtcSessionId === "string") {
       const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
-      msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
-      if (buyerLink && !buyerLink.quoteSessionId) {
-        msfileBitfsBuyerOfferCounts.set(buyerLink.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(buyerLink.requestMessageId) ?? 1) - 1));
-      }
+      if (buyerLink) msfileBitfsBuyerWebRtcFailure(
+        buyerLink,
+        event.webrtcSessionId,
+        event.sessionId,
+        typeof event.reason === "string" ? event.reason : "stream_error",
+      );
+      else msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
     }
     void manager?.close(event.sessionId, typeof event.reason === "string" ? event.reason : "stream_error").catch(() => undefined);
     return;
@@ -4777,7 +6249,33 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
     }
     const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
     if (!buyerLink || buyerLink.transportSessionId !== event.sessionId
-      || buyerLink.ownerSessionEpoch !== coordinatorState.sessionEpoch || buyerLink.quoteSessionId) return;
+      || buyerLink.ownerSessionEpoch !== coordinatorState.sessionEpoch) return;
+    if (buyerLink.quoteSessionId) {
+      // 公开需求只负责发现卖家。报价已验签后，后续开池、交付和付款在同一条
+      // 已关联的 DataChannel 上继续，即使公开 Hash 请求到期也不切断购买会话。
+      void (async () => {
+        await buyerLink.quoteAccepted;
+        const protocol = await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink);
+        await protocol.onFrame({
+          sessionId: buyerLink.quoteSessionId!,
+          rawArtifact: (event.frame as Uint8Array).slice(),
+          stream: {
+            send: async (frame) => {
+              if (msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId as string) !== buyerLink) throw new Error("BitFS 买方 DataChannel 已关闭");
+              await requestWindowP2pExecutorOperation({
+                type: "lane",
+                laneId: "msfile",
+                operation: { type: "bitfs-seller-send", sessionId: buyerLink.transportSessionId, frame },
+              });
+            },
+          },
+        });
+      })().catch(async (error) => {
+        console.warn("[msfile] BitFS buyer protocol frame failed", error instanceof Error ? error.message : String(error));
+        msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
+      });
+      return;
+    }
     const activeRequest = msfileBitfsBuyerRequests.get(buyerLink.requestMessageId);
     if (!activeRequest || activeRequest.expiresAtMs <= Date.now()) {
       msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
@@ -4789,14 +6287,43 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
       }).catch(() => undefined);
       return;
     }
-    const quoteSessionId = `quote-${crypto.randomUUID()}`;
-    buyerLink.quoteSessionId = quoteSessionId;
-    void buyerLink.task.acceptDiscoveredQuote({
-      sessionId: quoteSessionId,
-      requestMessageId: buyerLink.requestMessageId,
-      counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
-      rawKind1: event.frame,
-    }).catch(async () => {
+    const freshQuoteSessionId = `quote-${crypto.randomUUID()}`;
+    buyerLink.quoteSessionId = freshQuoteSessionId;
+    buyerLink.quoteAccepted = (async () => {
+      const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+      const resumablePhases = new Set([
+        "opening-presign", "funding-prepared", "funding-unknown", "funded", "request-prepared",
+        "delivery-verified", "payment-unknown", "content-committing", "close-required", "close-requested",
+        "close-unknown", "cancel-closing-pool", "cancel-close-unknown",
+      ]);
+      const matches: string[] = [];
+      for (const saved of await sessions.list()) {
+        if (saved.role !== "buyer" || saved.ownerPublicKeyHex !== buyerLink.ownerPublicKeyHex.toLowerCase()
+          || saved.counterpartyPublicKeyHex !== buyerLink.peerPublicKeyHex.toLowerCase()
+          || saved.seedHashHex !== buyerLink.seedHashHex.toLowerCase()
+          || !resumablePhases.has(saved.phase)
+          || !saved.evidence.includes("kind2-opening-request")) continue;
+        const savedQuote = await sessions.getEvidence(saved.sessionId, "kind1-quote");
+        if (savedQuote && equalMsfileBytes(savedQuote, event.frame as Uint8Array)) matches.push(saved.sessionId);
+      }
+      if (matches.length === 1) {
+        const resumedSessionId = matches[0]!;
+        buyerLink.quoteSessionId = resumedSessionId;
+        buyerLink.resumedPurchaseSessionId = resumedSessionId;
+        await buyerLink.task.acceptQuote({
+          sessionId: resumedSessionId,
+          counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
+          rawKind1: event.frame as Uint8Array,
+        });
+      } else {
+        await buyerLink.task.acceptDiscoveredQuote({
+          sessionId: freshQuoteSessionId,
+          requestMessageId: buyerLink.requestMessageId,
+          counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
+          rawKind1: event.frame as Uint8Array,
+        });
+      }
+    })().then(() => undefined).catch(async (error) => {
       if (msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId as string) === buyerLink) {
         msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId as string);
       }
@@ -4806,6 +6333,25 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
         laneId: "msfile",
         operation: { type: "bitfs-seller-close", sessionId: event.sessionId as string, reason: "invalid_quote" },
       }).catch(() => undefined);
+      throw error;
+    });
+    void buyerLink.quoteAccepted.then(async () => {
+      if (buyerLink.resumedPurchaseSessionId) {
+        const protocol = await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink);
+        await protocol.resumePurchase({
+          sessionId: buyerLink.resumedPurchaseSessionId,
+          stream: createMsfileBitfsBuyerStream(event.webrtcSessionId as string, buyerLink),
+        });
+        return;
+      }
+      await maybeAutoStartMsfileBitfsBuyerPurchase({
+        ownerPublicKeyHex: buyerLink.ownerPublicKeyHex,
+        seedHashHex: buyerLink.seedHashHex,
+        task: buyerLink.task,
+      });
+    }).catch((error) => {
+      console.warn("[msfile] BitFS automatic purchase check failed", error instanceof Error ? error.message : String(error));
+      msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
     });
     return;
   }
@@ -5522,6 +7068,9 @@ async function releaseSatRuntime(
   channelWebrtcOffers.clear();
   msfileBitfsBuyerRequests.clear();
   msfileBitfsBuyerTasks.clear();
+  msfileBitfsBuyerPurchaseTails.clear();
+  msfileBitfsBuyerRecoveryInFlight = undefined;
+  msfileBitfsBuyerRecoveryReady = undefined;
   msfileBitfsBuyerOfferCounts.clear();
   msfileBitfsWebRtcBuyerLinks.clear();
   msfileBitfsWebRtcSellerLinks.clear();
@@ -7172,6 +8721,13 @@ async function enterUnlockedState(
     // 领域任务/Provider 已在 Worker 内创建；只有 owner/session 已提交并且
     // 最终 I/O 门禁重新打开后，才把这些 unit 发布为本次实例。
     bindCoordinatorTaskUnitsToOwner();
+    // 买卖运行单元启动前先扫描所有历史买方资金责任；链上暂不可用时
+    // 保持 Vault 可用，但 BitFS 新需求与新开池会被恢复门禁拦住。
+    try {
+      await ensureMsfileBitfsBuyerRecovery(activePublicKeyHex);
+    } catch (error) {
+      console.warn("[msfile] BitFS buyer recovery gate remains closed", error instanceof Error ? error.message : String(error));
+    }
     await reconcileCoordinatorRuntime();
   } catch (error) {
     await performGlobalLock("worker-unit-bind-failed");
@@ -11065,11 +12621,15 @@ function enqueueWindowP2pExecutorIdentitySign(
 const MSFILE_MUTATION_CONTROLS = new Set<CoordinatorMsFileControl["type"]>([
   "settings.global.update",
   "settings.seller.update",
+  "settings.bitfsBuyer.update",
+  "bitfs.buyerPriceLimit.update",
   "settings.readConcurrency.update",
   "settings.readConcurrency.reset",
   "settings.mediaBlockReadConcurrency.update",
   "bitfs.demand.publish",
   "bitfs.demand.cancel",
+  "bitfs.purchase.start",
+  "bitfs.purchase.cancel",
   "supplier.upsert",
   "supplier.delete",
   "app-policy.update",
@@ -11148,14 +12708,85 @@ async function executeMsfileControlNow(
     case "settings.mediaBlockReadConcurrency.update": await service.updateMediaBlockReadConcurrency(control.mediaBlockReadConcurrency); value = null; break;
     case "settings.global.update": await service.updateGlobalPriceSettings(control.input); value = null; break;
     case "settings.seller.update": await service.updateSellerSettings(control.input); value = null; break;
+    case "settings.bitfsBuyer.get": {
+      if (!service.getBitfsBuyerSettings) throw new Error("当前 MSFile 运行单元不支持 BitFS 买方设置");
+      value = await service.getBitfsBuyerSettings();
+      break;
+    }
+    case "settings.bitfsBuyer.update": {
+      if (!service.updateBitfsBuyerSettings) throw new Error("当前 MSFile 运行单元不支持 BitFS 买方设置");
+      await service.updateBitfsBuyerSettings(control.input);
+      value = null;
+      break;
+    }
+    case "bitfs.buyerPriceLimit.update": {
+      if (!service.getBitfsBuyerSettings || !service.updateBitfsBuyerSettings) {
+        throw new Error("当前 MSFile 运行单元不支持 BitFS 单文件价格上限");
+      }
+      const settings = await service.getBitfsBuyerSettings();
+      const filePriceLimitsBySeedHash = { ...(settings.filePriceLimitsBySeedHash ?? {}) };
+      filePriceLimitsBySeedHash[control.seedHashHex] = control.maxFullBlockPriceSatoshis;
+      await service.updateBitfsBuyerSettings({ ...settings, filePriceLimitsBySeedHash });
+      value = null;
+      break;
+    }
     case "bitfs.demand.publish": {
       if (!isValidMsFileHashHex(control.seedHashHex)) {
         return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "BitFS Seed Hash 必须是 64 位小写十六进制字符" } };
       }
+      const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+      if (!owner) throw new Error("请先解锁当前 Key 再发布 BitFS 需求");
+      await ensureMsfileBitfsBuyerRecovery(owner);
       const { task, entry } = await ensureMsfileBitfsBuyerTask({
-        ownerPublicKeyHex: coordinatorState.activePublicKeyHex ?? "",
+        ownerPublicKeyHex: owner,
         seedHashHex: control.seedHashHex,
       });
+      const sessionJournal = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+      const resumable = (await sessionJournal.list()).filter((saved) => saved.role === "buyer"
+        && saved.ownerPublicKeyHex === owner
+        && saved.seedHashHex === control.seedHashHex.toLowerCase()
+        && saved.evidence.includes("kind2-opening-request")
+        && !["completed", "cancelled", "refunded", "failed"].includes(saved.phase));
+      const resumeTarget = entry.purchase?.sessionId
+        ? resumable.find((saved) => saved.sessionId === entry.purchase?.sessionId)
+        : resumable.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      const resumeLinkAlive = resumeTarget && [...msfileBitfsWebRtcBuyerLinks.values()].some((link) =>
+        link.ownerSessionEpoch === coordinatorState.sessionEpoch
+        && link.ownerPublicKeyHex.toLowerCase() === owner
+        && (link.quoteSessionId === resumeTarget.sessionId
+          || link.resumedPurchaseSessionId === resumeTarget.sessionId
+          || (link.seedHashHex === resumeTarget.seedHashHex
+            && link.peerPublicKeyHex === resumeTarget.counterpartyPublicKeyHex
+            && link.requestMessageId === entry.requestMessageId)));
+      if (entry.purchase?.phase === "connection-closed" || (resumeTarget && !resumeLinkAlive)) {
+        // 旧公开 Hash 请求仍可能收到迟到 offer，但已断开的 DataChannel
+        // 无法续用。为恢复同一卖方日志会话发布新的 Hash 请求编号。
+        const oldRequestIds = new Set<string>();
+        for (const [messageId, buyerRequest] of msfileBitfsBuyerRequests) {
+          if (buyerRequest.ownerSessionEpoch === coordinatorState.sessionEpoch
+            && buyerRequest.ownerPublicKeyHex.toLowerCase() === owner
+            && buyerRequest.seedHashHex === control.seedHashHex.toLowerCase()) {
+            oldRequestIds.add(messageId);
+            msfileBitfsBuyerRequests.delete(messageId);
+            msfileBitfsBuyerOfferCounts.delete(messageId);
+          }
+        }
+        for (const [webrtcSessionId, buyerLink] of msfileBitfsWebRtcBuyerLinks) {
+          if (buyerLink.ownerSessionEpoch !== coordinatorState.sessionEpoch
+            || buyerLink.ownerPublicKeyHex.toLowerCase() !== owner
+            || buyerLink.seedHashHex !== control.seedHashHex.toLowerCase()
+            || !oldRequestIds.has(buyerLink.requestMessageId)) continue;
+          msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
+          await requestWindowP2pExecutorOperation({
+            type: "lane",
+            laneId: "msfile",
+            operation: { type: "bitfs-seller-close", sessionId: buyerLink.transportSessionId, reason: "buyer_reconnect" },
+          }).catch(() => undefined);
+        }
+        await task.cancelDemand();
+        entry.requestMessageId = undefined;
+        entry.expiresAtMs = 0;
+      }
       const requestMessageId = await task.publishDemand();
       entry.requestMessageId = requestMessageId;
       if (entry.expiresAtMs <= Date.now()) entry.expiresAtMs = Date.now() + 10 * 60 * 1_000;
@@ -11170,6 +12801,23 @@ async function executeMsfileControlNow(
       const entry = owner ? msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, control.seedHashHex)) : undefined;
       const task = entry?.ownerSessionEpoch === coordinatorState.sessionEpoch ? await entry.taskPromise : undefined;
       value = await msfileBitfsBuyerDemandSnapshot(control.seedHashHex, entry, task);
+      break;
+    }
+    case "bitfs.purchase.start": {
+      value = await startMsfileBitfsBuyerPurchase({
+        seedHashHex: control.seedHashHex,
+        sessionId: control.sessionId,
+        resumeCancelledPlan: true,
+        ...(control.maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis: control.maxFullBlockPriceSatoshis }),
+      });
+      break;
+    }
+    case "bitfs.purchase.cancel": {
+      value = await cancelMsfileBitfsBuyerPurchase({ seedHashHex: control.seedHashHex, sessionId: control.sessionId });
+      break;
+    }
+    case "bitfs.purchase.tasks.list": {
+      value = await listMsfileBitfsBuyerTaskSnapshots();
       break;
     }
     case "bitfs.demand.cancel": {
@@ -11198,6 +12846,14 @@ async function executeMsfileControlNow(
         for (const [webrtcSessionId, buyerLink] of msfileBitfsWebRtcBuyerLinks) {
           if (buyerLink.ownerSessionEpoch !== coordinatorState.sessionEpoch
             || !cancelledRequestIds.has(buyerLink.requestMessageId)) continue;
+          // 停止需求只应关闭闲置报价连接；仍在买卖中的通道需要继续接收交付、Kind 13 或取消关池响应。
+          const activePurchase = taskEntry.purchase
+            && taskEntry.purchase.sessionId === buyerLink.quoteSessionId
+            && taskEntry.purchase.phase !== "completed"
+            && taskEntry.purchase.phase !== "cancelled"
+            && taskEntry.purchase.phase !== "failed"
+            && taskEntry.purchase.phase !== "connection-closed";
+          if (activePurchase) continue;
           msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
           await requestWindowP2pExecutorOperation({
             type: "lane",
@@ -14700,6 +16356,9 @@ export function __testResetState(): void {
   channelWebrtcOffers.clear();
   msfileBitfsBuyerRequests.clear();
   msfileBitfsBuyerTasks.clear();
+  msfileBitfsBuyerPurchaseTails.clear();
+  msfileBitfsBuyerRecoveryInFlight = undefined;
+  msfileBitfsBuyerRecoveryReady = undefined;
   msfileBitfsBuyerOfferCounts.clear();
   msfileBitfsWebRtcBuyerLinks.clear();
   msfileBitfsWebRtcSellerLinks.clear();

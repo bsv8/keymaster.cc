@@ -64,6 +64,20 @@ export {
   type BitfsBuyerTaskDeps,
 } from "./bitfs/buyerTask.js";
 export {
+  createBitfsBuyerDownloadPlan,
+  type BitfsBuyerDownloadPlan,
+  type BitfsBuyerDownloadPlanSnapshot,
+  type BitfsBuyerDownloadPool,
+} from "./bitfs/buyerDownloadPlan.js";
+export {
+  BitfsBuyerProtocol,
+  recoverBitfsBuyerContentCommit,
+  type BitfsBuyerProtocolDeps,
+  type BitfsBuyerPurchasePhase,
+  type BitfsBuyerPurchaseProgress,
+  type BitfsBuyerStream,
+} from "./bitfs/buyerProtocol.js";
+export {
   BitfsTransactionBroadcaster,
   createBitfsTransactionJournal,
   type BitfsBroadcastOutcome,
@@ -99,6 +113,7 @@ export {
   serializeMsFileSeedMeta,
   storeMsFileSeed,
   commitPurchasedMsFileContent,
+  inspectPurchasedMsFileSeed,
   type MsFileSeedMeta,
   type MsFileSeedSource,
 } from "./storage/msfileSeedStore.js";

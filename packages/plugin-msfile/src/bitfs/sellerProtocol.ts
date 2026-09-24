@@ -2,10 +2,14 @@
 // SDK 只负责每一步的协议验证/签名；本文件负责进度、证据、I/O 与恢复。
 
 import {
+  completeSellerCloseArtifact,
   completeSellerPayment,
   inspectSellerDeliveryRequest,
   prepareSellerDelivery,
   prepareSellerPresign,
+  parsePaymentState,
+  verifyAcceptedPayment,
+  verifyBuyerCompletedCloseArtifact,
   verifySellerFunding,
   type SellerDeliveryEvidence,
   type SellerOpeningEvidence,
@@ -106,11 +110,14 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     let record = await this.requiredRecord(input.sessionId);
     this.assertCurrent(record);
     if (input.kind === 2) {
-      if (record.phase !== "quoted" && record.phase !== "opening-presigned") return { type: "close", reason: "state_conflict" };
-      if (record.evidence.includes("kind3-opening-response")) {
-        const replay = await this.requiredEvidence(record.sessionId, "kind3-opening-response");
-        return { type: "send", frames: [replay] };
+      const savedKind2 = await this.deps.sessions.getEvidence(record.sessionId, "kind2-opening-request");
+      const savedKind3 = await this.deps.sessions.getEvidence(record.sessionId, "kind3-opening-response");
+      if (savedKind2 && savedKind3) {
+        if (!equalBytes(savedKind2, input.bytes)) return { type: "close", reason: "state_conflict" };
+        // 新 DataChannel 只重放已保存的预签；绝不为旧池重新签出第二个 Kind 3。
+        return { type: "send", frames: [savedKind3] };
       }
+      if (record.phase !== "quoted" && record.phase !== "opening-presigned") return { type: "close", reason: "state_conflict" };
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "kind2-opening-request", input.bytes, this.deps.nowMs());
       const prepared = await prepareSellerPresign(input.bytes, this.deps.signer);
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "kind3-opening-response", prepared.outbound.bytes(), this.deps.nowMs());
@@ -128,6 +135,17 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       return { type: "none" };
     }
     if (input.kind === 5) {
+      // 重连或发送结果未知时，买方会重放同一 Kind 5。匹配到持久化请求时，
+      // 不重新解析库存或准备另一份交付，直接重发第一次已保存的 Kind 6。
+      for (const name of record.evidence.filter((item) => item.startsWith("kind5-content-request-"))) {
+        const savedRequest = await this.deps.sessions.getEvidence(record.sessionId, name);
+        if (!savedRequest || !equalBytes(savedRequest, input.bytes)) continue;
+        const authorizationId = name.slice("kind5-content-request-".length);
+        const deliveryName = `kind6-content-delivery-${authorizationId}` as const;
+        const savedDelivery = await this.deps.sessions.getEvidence(record.sessionId, deliveryName);
+        if (savedDelivery) return { type: "send", frames: [savedDelivery] };
+        break;
+      }
       if (record.phase !== "funded" && record.phase !== "paid") return { type: "close", reason: "state_conflict" };
       const quoteRaw = await this.requiredEvidence(record.sessionId, "kind1-quote");
       const pool = await this.poolEvidence(record);
@@ -149,7 +167,8 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       return { type: "send", frames: [prepared.outbound.bytes()] };
     }
     if (input.kind === 7) {
-      if (record.phase !== "delivery-prepared" && record.phase !== "payment-signing" && record.phase !== "payment-unknown") return { type: "close", reason: "state_conflict" };
+      if (record.phase !== "delivery-prepared" && record.phase !== "payment-signing"
+        && record.phase !== "payment-unknown" && record.phase !== "paid") return { type: "close", reason: "state_conflict" };
       // Kind 7 的授权 ID 必须由前一次 Kind 5 解析结果确定；会话串行化保证只有一个待收款批次。
       const requestName = [...record.evidence].reverse().find((name) => name.startsWith("kind5-content-request-"));
       if (!requestName) return { type: "close", reason: "state_conflict" };
@@ -205,13 +224,101 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       }
       return { type: "none" };
     }
+    if (input.kind === 12) {
+      const requestName = "kind12-close-request" as const;
+      const responseName = "kind13-close-response" as const;
+      const existingRequest = await this.deps.sessions.getEvidence(record.sessionId, requestName);
+      if (existingRequest && !equalBytes(existingRequest, input.bytes)) return { type: "close", reason: "state_conflict" };
+      if (!existingRequest && await this.deps.sessions.getEvidence(record.sessionId, responseName)) {
+        throw new Error("BitFS 卖方会话保存了 Kind 13，但缺少对应 Kind 12 请求");
+      }
+      if (existingRequest && !record.evidence.includes(requestName)) {
+        record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, requestName, existingRequest, this.deps.nowMs());
+      }
+      const existingResponse = await this.deps.sessions.getEvidence(record.sessionId, responseName);
+      if (existingResponse) {
+        if (!record.evidence.includes(responseName)) {
+          record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, responseName, existingResponse, this.deps.nowMs());
+        }
+        // Kind 13 可能已落盘，但进程在保存完整交易或 pendingTxid 前崩溃。
+        // 用同一份 Kind 13 重建交易并走 outbox.resume；该路径只会广播原始字节或按 txid 对账。
+        const pool = await this.poolEvidence(record);
+        const closeTransaction = await verifyBuyerCompletedCloseArtifact({ pool, responseRaw: existingResponse });
+        const savedClose = await this.deps.sessions.getEvidence(record.sessionId, "close-transaction");
+        if (savedClose && !equalBytes(savedClose, closeTransaction)) throw new Error("同一 Kind 13 对应不同的 BitFS 关池交易");
+        if (!record.evidence.includes("close-transaction")) {
+          record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "close-transaction", closeTransaction, this.deps.nowMs());
+        }
+        const txid = toHex(transactionID(closeTransaction));
+        if (record.phase !== "closed" && (record.phase !== "close-unknown" || record.pendingTxid !== txid)) {
+          record = await this.deps.sessions.update(record.sessionId, record.revision, { phase: "close-unknown", pendingTxid: txid }, this.deps.nowMs());
+        }
+        if (record.phase !== "closed") {
+          let outcome = await this.deps.broadcaster.resume(closeTransaction);
+          if (outcome.status === "result-unknown" && outcome.retryable) {
+            // 节点明确查不到时只重放相同双签交易，不重新构造或签名。
+            outcome = await this.deps.broadcaster.retry(txid);
+          }
+          if (outcome.status === "confirmed") {
+            await this.deps.sessions.update(record.sessionId, record.revision, { phase: "closed", pendingTxid: undefined }, this.deps.nowMs());
+          }
+        }
+        return { type: "send", frames: [existingResponse] };
+      }
+      if (record.phase !== "funded" && record.phase !== "delivery-prepared" && record.phase !== "paid" && record.phase !== "payment-unknown" && record.phase !== "close-unknown") {
+        return { type: "close", reason: "state_conflict" };
+      }
+      if (!existingRequest) {
+        record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, requestName, input.bytes, this.deps.nowMs());
+      }
+      const pool = await this.poolEvidence(record);
+      const prepared = await persistSellerCloseBeforeSigning({
+        sessions: this.deps.sessions,
+        record,
+        requestBytes: input.bytes,
+        signer: this.deps.signer,
+        nowMs: this.deps.nowMs(),
+        assertCurrent: () => this.assertCurrent(record),
+      });
+      record = prepared.record;
+      const response = await completeSellerCloseArtifact(await this.facts(), { pool, requestRaw: input.bytes }, prepared.signer);
+      record = await this.requiredRecord(record.sessionId);
+      record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, responseName, response.bytes(), this.deps.nowMs());
+      const closeTransaction = await verifyBuyerCompletedCloseArtifact({ pool, responseRaw: response.bytes() });
+      const savedClose = await this.deps.sessions.getEvidence(record.sessionId, "close-transaction");
+      if (savedClose && !equalBytes(savedClose, closeTransaction)) throw new Error("同一 Kind 13 对应不同的 BitFS 关池交易");
+      if (!record.evidence.includes("close-transaction")) {
+        record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "close-transaction", closeTransaction, this.deps.nowMs());
+      }
+      const txid = toHex(transactionID(closeTransaction));
+      record = await this.deps.sessions.update(record.sessionId, record.revision, { phase: "close-unknown", pendingTxid: txid }, this.deps.nowMs());
+      let outcome = await this.deps.broadcaster.submit(closeTransaction);
+      if (outcome.status === "result-unknown") outcome = await this.deps.broadcaster.reconcile(txid);
+      if (outcome.status === "result-unknown" && outcome.retryable) outcome = await this.deps.broadcaster.retry(txid);
+      if (outcome.status === "confirmed") {
+        await this.deps.sessions.update(record.sessionId, record.revision, { phase: "closed", pendingTxid: undefined }, this.deps.nowMs());
+      }
+      return { type: "send", frames: [response.bytes()] };
+    }
     return { type: "close", reason: "unexpected_kind" };
   }
 
   private async poolEvidence(record: BitfsSessionRecord): Promise<SellerPoolEvidence> {
     const funded = await verifySellerFunding(await this.requiredEvidence(record.sessionId, "kind4-funding-delivery"), await this.openingEvidence(record.sessionId));
-    const latestName = [...record.evidence].reverse().find((name) => name.startsWith("latest-payment-transaction-"));
-    return latestName === undefined ? funded.pool : { ...funded.pool, latestPaymentRawTx: await this.requiredEvidence(record.sessionId, latestName) };
+    let latestPaymentRaw: Uint8Array | undefined;
+    let latestPaymentSequence = -1;
+    for (const name of record.evidence.filter((item) => item.startsWith("latest-payment-transaction-"))) {
+      const candidate = await this.requiredEvidence(record.sessionId, name);
+      const state = await parsePaymentState(candidate, funded.pool.opening);
+      await verifyAcceptedPayment(state, funded.pool.opening);
+      if (state.paymentSequence > latestPaymentSequence) {
+        latestPaymentSequence = state.paymentSequence;
+        latestPaymentRaw = candidate;
+      } else if (state.paymentSequence === latestPaymentSequence && latestPaymentRaw && !equalBytes(latestPaymentRaw, candidate)) {
+        throw new Error("BitFS 卖方付款日志包含相同序号的冲突交易");
+      }
+    }
+    return latestPaymentRaw === undefined ? funded.pool : { ...funded.pool, latestPaymentRawTx: latestPaymentRaw };
   }
 
   private async openingEvidence(sessionId: string): Promise<SellerOpeningEvidence> {
@@ -236,6 +343,74 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
 /** 上游事实源不可用时使用的 fail-closed 内容端口。 */
 export function createUnavailableBitfsSellerContentResolver(): BitfsSellerContentResolver {
   return { ready: false, async resolve() { throw new Error("BitFS 卖方缺少可用的链上事实或本地内容来源"); } };
+}
+
+/** Kind 12 和签名意图先落盘；重启后只重用已保存签名，不重复调用 Vault。 */
+async function persistSellerCloseBeforeSigning(input: {
+  /** 卖方会话与 exact 证据 journal。 */
+  sessions: BitfsSessionJournal;
+  /** 当前卖方会话记录。 */
+  record: BitfsSessionRecord;
+  /** 买方发来的 exact Kind 12。 */
+  requestBytes: Uint8Array;
+  /** 当前 Vault 的受限签名器。 */
+  signer: Signer;
+  /** 当前 UTC 毫秒。 */
+  nowMs: number;
+  /** 每次签名或持久化前检查当前 Worker 会话世代。 */
+  assertCurrent(): void;
+}): Promise<{ record: BitfsSessionRecord; signer: Signer }> {
+  const requestName = "kind12-close-request" as const;
+  const digestName = "kind12-close-sign-digest" as const;
+  const signatureName = "kind12-close-signature" as const;
+  let record = input.record;
+  if (record.role !== "seller" || !["funded", "delivery-prepared", "paid", "payment-unknown", "close-unknown"].includes(record.phase)) {
+    throw new Error("BitFS 卖方会话不在关池阶段");
+  }
+  const priorRequest = await input.sessions.getEvidence(record.sessionId, requestName);
+  if (priorRequest && !equalBytes(priorRequest, input.requestBytes)) throw new Error("同一 BitFS 会话已绑定另一条 Kind 12 关池请求");
+  if (!record.evidence.includes(requestName)) {
+    record = await input.sessions.putEvidence(record.sessionId, record.revision, requestName, input.requestBytes, input.nowMs);
+  }
+  const persist = async (name: typeof digestName | typeof signatureName, bytes: Uint8Array): Promise<void> => {
+    input.assertCurrent();
+    const latest = await input.sessions.get(record.sessionId);
+    if (!latest || latest.role !== "seller") throw new Error("BitFS 卖方关池签名会话不存在");
+    const existing = await input.sessions.getEvidence(record.sessionId, name);
+    if (existing && !equalBytes(existing, bytes)) throw new Error("BitFS 卖方关池签名恢复证据冲突");
+    if (!latest.evidence.includes(name)) {
+      record = await input.sessions.putEvidence(record.sessionId, latest.revision, name, bytes, input.nowMs);
+    } else {
+      record = latest;
+    }
+  };
+  const guardedSigner: Signer = {
+    publicKey: () => input.signer.publicKey().slice(),
+    async sign(request: Readonly<import("go-bitfs").SigningRequest>, signal?: AbortSignal): Promise<Uint8Array> {
+      input.assertCurrent();
+      if (signal?.aborted) throw new DOMException("BitFS 卖方关池签名已取消", "AbortError");
+      if (request.purpose !== "transaction" || request.wireKind !== 0 || request.digest.byteLength !== 32) {
+        throw new TypeError("BitFS 卖方关池只允许签署一笔明确交易");
+      }
+      const savedDigest = await input.sessions.getEvidence(record.sessionId, digestName);
+      const savedSignature = await input.sessions.getEvidence(record.sessionId, signatureName);
+      if (savedDigest) {
+        if (!equalBytes(savedDigest, request.digest)) throw new Error("BitFS 卖方关池恢复交易摘要不一致");
+        await persist(digestName, savedDigest);
+        if (!savedSignature) throw new Error("BitFS 卖方关池签名结果不确定；恢复路径禁止再次签名");
+        await persist(signatureName, savedSignature);
+        return savedSignature.slice();
+      }
+      if (savedSignature) throw new Error("BitFS 卖方关池签名缺少对应摘要");
+      await persist(digestName, request.digest);
+      input.assertCurrent();
+      const signature = await input.signer.sign(request, signal);
+      input.assertCurrent();
+      await persist(signatureName, signature);
+      return signature.slice();
+    },
+  };
+  return { record, signer: guardedSigner };
 }
 
 /** 使用 go-bitfs 预检 Kind 5，再从当前 Owner 的 MSFile 内容库按授权顺序取内容。 */

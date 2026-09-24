@@ -90,14 +90,16 @@ function confirmedPhase(record: BitfsSessionRecord): BitfsSessionRecord["phase"]
     if (record.phase === "close-unknown") return "closed";
     return undefined;
   }
-  if (record.phase === "funding-unknown") return "funded";
-  if (record.phase === "payment-unknown") return "completed";
+  // 买方的交易阶段还必须同步专款账本、生成 Kind 4，或核对已验收内容。
+  // 单凭 outbox 的 confirmed 不能完成这些应用状态转换；由买方任务按 exact
+  // FundingTx 专项恢复，避免把 FundingTx 误当作内容付款并标记文件已完成。
   return undefined;
 }
 
 /**
- * 从资金交易 output[0] 开始追踪支付池花费链，返回每一笔完整交易原文。
- * 调用方必须再用 go-bitfs pool evidence 全量验证，不得只信 WoC 的 spender 关系。
+ * 读取费用池开池输出当前被哪一版累计付款状态花费，并返回其 exact 原文。
+ * MultisigPool 的付款更新都竞争花费同一个开池输出，不是前后交易串接；调用方
+ * 仍须用 go-bitfs 验证新状态，不得只信 WoC 的 spender 关系。
  */
 export async function readBitfsPoolSpendChain(input: {
   /** Worker 内 WoC 句柄。 */
@@ -106,31 +108,26 @@ export async function readBitfsPoolSpendChain(input: {
   network: BsvNetwork;
   /** 资金交易 canonical txid。 */
   fundingTxid: string;
+  /** 最近一次已经验收的累计池状态交易；相同 spender 表示没有新状态。 */
+  afterTxid?: string;
   /** 取消对账。 */
   signal?: AbortSignal;
-  /** 最多跟踪付款数，防止恶意/损坏关系无界扫描。 */
+  /** 保持旧调用兼容的扫描上限；现在每次最多读取开池输出的一个当前 spender。 */
   maxPayments?: number;
 }): Promise<Array<{ txid: string; rawTransaction: Uint8Array; status: "confirmed" | "unconfirmed" }>> {
-  let current = assertTxid(input.fundingTxid);
-  const maxPayments = input.maxPayments ?? 4_096;
+  const fundingTxid = assertTxid(input.fundingTxid);
+  const afterTxid = input.afterTxid === undefined ? undefined : assertTxid(input.afterTxid);
+  const maxPayments = input.maxPayments ?? 8_194;
   if (!Number.isSafeInteger(maxPayments) || maxPayments < 1 || maxPayments > 100_000) throw new TypeError("BitFS 支付链扫描上限不合法");
-  const seen = new Set<string>([current]);
-  const result: Array<{ txid: string; rawTransaction: Uint8Array; status: "confirmed" | "unconfirmed" }> = [];
-  for (let index = 0; index < maxPayments; index += 1) {
-    if (input.signal?.aborted) throw new DOMException("BitFS 支付链对账已取消", "AbortError");
-    const spent = await input.woc.getSpentOutput(input.network, current, 0, { signal: input.signal, priority: "interactive" });
-    if (!spent) return result;
-    const txid = assertTxid(spent.txid);
-    if (seen.has(txid)) throw new Error("BitFS 支付链出现循环 spender 关系");
-    const rawHex = await input.woc.getRawTransaction?.(input.network, txid, { signal: input.signal, priority: "interactive" });
-    if (typeof rawHex !== "string") throw new Error("WoC 未提供 BitFS 支付交易原文");
-    const rawTransaction = fromHex(rawHex);
-    if (toHex(transactionID(rawTransaction)) !== txid) throw new Error("BitFS 支付交易原文与 txid 不匹配");
-    result.push({ txid, rawTransaction, status: spent.status });
-    seen.add(txid);
-    current = txid;
-  }
-  throw new Error("BitFS 支付链超过扫描上限");
+  if (input.signal?.aborted) throw new DOMException("BitFS 支付状态查询已取消", "AbortError");
+  const spent = await input.woc.getSpentOutput(input.network, fundingTxid, 0, { signal: input.signal, priority: "interactive" });
+  if (!spent || spent.txid === afterTxid) return [];
+  const txid = assertTxid(spent.txid);
+  const rawHex = await input.woc.getRawTransaction?.(input.network, txid, { signal: input.signal, priority: "interactive" });
+  if (typeof rawHex !== "string") throw new Error("WoC 未提供 BitFS 付款交易原文");
+  const rawTransaction = fromHex(rawHex);
+  if (toHex(transactionID(rawTransaction)) !== txid) throw new Error("BitFS 付款交易原文与 txid 不匹配");
+  return [{ txid, rawTransaction, status: spent.status }];
 }
 
 function assertTxid(value: string): string { if (!/^[0-9a-f]{64}$/u.test(value)) throw new TypeError("BitFS txid 不合法"); return value; }

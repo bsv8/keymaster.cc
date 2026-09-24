@@ -23,8 +23,24 @@ export type BitfsBuyerPhase =
   | "delivery-verified"
   | "content-committing"
   | "payment-unknown"
-  | "completed"
+  | "close-required"
+  | "close-requested"
+  | "close-unknown"
+  /** 开池尚未由卖方 Kind 3 完成；取消流程正在释放未派发的资金预留。 */
+  | "cancel-opening"
+  /** 买方已持久化取消意图，正在发送或等待 Kind 13。 */
+  | "cancel-closing-pool"
+  /** 取消关池结果暂时未知；恢复时只能重用原关池交易。 */
+  | "cancel-close-unknown"
+  /** 费用池已关闭且余款已由账本确认回收。 */
+  | "cancelled"
+  /** 已按到期锁验证并固定买方退款交易。 */
   | "refund-ready"
+  /** 到期退款交易的广播或链上观察结果尚未确定。 */
+  | "refund-unknown"
+  /** 到期退款已被观察，余款已由专款账本确认回收。 */
+  | "refunded"
+  | "completed"
   | "arbitration-retrieval"
   | "failed";
 
@@ -56,12 +72,26 @@ type BitfsFixedEvidenceName =
   | "kind9-arbitration-response"
   | "kind10-retrieval-request"
   | "kind11-retrieval-response"
+  | "kind12-close-request"
+  | "kind13-close-response"
+  /** Kind 12 关池交易的签名摘要；存在摘要但缺签名时恢复路径禁止重签。 */
+  | "kind12-close-sign-digest"
+  /** Kind 12 关池交易已返回的卖方签名。 */
+  | "kind12-close-signature"
   | "funding-transaction"
   /** 开池前固定金额、仲裁方与退款规则，恢复时禁止改绑。 */
   | "opening-configuration"
   /** ChannelProtocol 中需求的真实 message_id，用于恢复报价关联。 */
   | "hash-request-message-id"
+  /** 从已验签 Kind 1 导出的静态报价摘要，供旧任务视图显示。 */
+  | "quote-summary"
+  /** 用户启动购买时固定的本文件完整 Block 价格上限（聪）。 */
+  | "file-price-limit"
   | "latest-payment-transaction"
+  /** 报价验签后固定的入库元信息；Worker 重启后不依赖已过期报价恢复提交。 */
+  | "purchase-manifest"
+  /** 同 Seed 多卖家下载计划的固定池预算与调度优先级。 */
+  | "download-plan"
   | "close-transaction"
   | "refund-transaction"
   | "arbitrated-payment-transaction"
@@ -71,12 +101,20 @@ type BitfsFixedEvidenceName =
 
 /** 多批交付按 PaymentAuthorizationID 建立独立 exact 证据，不会覆盖上一轮。 */
 export type BitfsEvidenceName = BitfsFixedEvidenceName
+  | `kind2-sign-digest-${string}`
+  | `kind2-signature-${string}`
+  | `kind5-sign-digest-${string}`
+  | `kind5-signature-${string}`
+  | `kind12-close-sign-digest-${string}`
+  | `kind12-close-signature-${string}`
   | `kind5-content-request-${string}`
   | `kind6-content-delivery-${string}`
   | `kind7-payment-update-${string}`
   | `kind7-payment-sign-digest-${string}`
   | `kind7-payment-signature-${string}`
-  | `latest-payment-transaction-${string}`;
+  | `latest-payment-transaction-${string}`
+  /** 按付款授权 ID 保存已付款 Block 的传输速度样本。 */
+  | `seller-speed-sample-${string}`;
 
 export interface BitfsSessionRecord {
   /** 应用会话编号，不是 SDK 对象 ID。 */
@@ -97,6 +135,8 @@ export interface BitfsSessionRecord {
   evidence: BitfsEvidenceName[];
   /** 当前需对账的 canonical txid。 */
   pendingTxid?: string;
+  /** 当前唯一等待交付/付款处理的 PaymentAuthorizationID。 */
+  pendingAuthorizationId?: string;
   /** 下一个时间截止点，UTC Unix 秒字符串。 */
   deadlineUnixSeconds?: string;
   /** 退款模板高度锁或时间锁数值。 */
@@ -115,7 +155,7 @@ export interface BitfsSessionJournal {
   /** 读取会话记录。 */
   get(sessionId: string): Promise<BitfsSessionRecord | undefined>;
   /** 按 revision + Provider ETag 原子推进阶段。 */
-  update(sessionId: string, expectedRevision: number, patch: Partial<Pick<BitfsSessionRecord, "phase" | "pendingTxid" | "deadlineUnixSeconds" | "refundLockTime" | "failureCode">>, nowMs: number): Promise<BitfsSessionRecord>;
+  update(sessionId: string, expectedRevision: number, patch: Partial<Pick<BitfsSessionRecord, "phase" | "pendingTxid" | "pendingAuthorizationId" | "deadlineUnixSeconds" | "refundLockTime" | "failureCode">>, nowMs: number): Promise<BitfsSessionRecord>;
   /** 先以 create-only 保存 exact bytes，回读一致后再把引用加入会话。 */
   putEvidence(sessionId: string, expectedRevision: number, name: BitfsEvidenceName, bytes: Uint8Array, nowMs: number): Promise<BitfsSessionRecord>;
   /** 读取 exact evidence 防御性副本。 */
@@ -218,6 +258,7 @@ function validateRecord(record: BitfsSessionRecord): BitfsSessionRecord {
   if (!Number.isSafeInteger(record.revision) || record.revision < 1) throw new Error("BitFS 会话修订号错误");
   if (!Number.isFinite(Date.parse(record.updatedAt)) || new Date(Date.parse(record.updatedAt)).toISOString() !== record.updatedAt) throw new Error("BitFS 会话时间错误");
   if (record.pendingTxid !== undefined && !HASH_HEX.test(record.pendingTxid)) throw new Error("BitFS 会话 txid 错误");
+  if (record.pendingAuthorizationId !== undefined && !HASH_HEX.test(record.pendingAuthorizationId)) throw new Error("BitFS 待处理付款授权编号错误");
   if (record.deadlineUnixSeconds !== undefined && !/^[1-9][0-9]*$/u.test(record.deadlineUnixSeconds)) throw new Error("BitFS 会话截止时间错误");
   if (record.refundLockTime !== undefined && (!Number.isSafeInteger(record.refundLockTime) || record.refundLockTime < 0 || record.refundLockTime > 0xffffffff)) throw new Error("BitFS 会话退款锁错误");
   if (record.failureCode !== undefined && !/^[a-z0-9._-]{1,64}$/u.test(record.failureCode)) throw new Error("BitFS 会话失败码错误");
@@ -229,23 +270,28 @@ function validateRecord(record: BitfsSessionRecord): BitfsSessionRecord {
 
 const allPhases = new Set<BitfsBuyerPhase | BitfsSellerPhase>([
   "discovering", "quote-selected", "opening-presign", "funding-prepared", "funding-unknown", "funded",
-  "request-prepared", "delivery-verified", "content-committing", "payment-unknown", "completed",
-  "refund-ready", "arbitration-retrieval", "quoted", "opening-presigned", "delivery-prepared", "payment-signing", "paid",
+  "request-prepared", "delivery-verified", "content-committing", "payment-unknown", "close-required", "completed",
+  "close-requested", "close-unknown", "cancel-opening", "cancel-closing-pool", "cancel-close-unknown", "cancelled", "refund-ready", "refund-unknown", "refunded", "arbitration-retrieval", "quoted", "opening-presigned", "delivery-prepared", "payment-signing", "paid",
   "close-unknown", "closed", "arbitration-prepared", "arbitration-payment-unknown", "failed",
 ]);
 
 const evidenceNames = new Set<BitfsFixedEvidenceName>([
   "kind1-quote", "kind2-opening-request", "kind3-opening-response", "kind4-funding-delivery",
   "kind5-content-request", "kind6-content-delivery", "kind7-payment-update", "kind8-arbitration-request",
-  "kind9-arbitration-response", "kind10-retrieval-request", "kind11-retrieval-response", "funding-transaction",
-  "opening-configuration", "hash-request-message-id", "latest-payment-transaction", "close-transaction", "refund-transaction", "arbitrated-payment-transaction",
+  "kind9-arbitration-response", "kind10-retrieval-request", "kind11-retrieval-response", "kind12-close-request",
+  "kind13-close-response", "funding-transaction",
+  "kind12-close-sign-digest", "kind12-close-signature",
+  "opening-configuration", "hash-request-message-id", "quote-summary", "latest-payment-transaction", "close-transaction",
+  "refund-transaction", "arbitrated-payment-transaction",
+  "purchase-manifest",
+  "download-plan",
   "opening-evidence", "pool-evidence", "delivery-evidence",
 ]);
 
 function assertSessionId(value: string): string { if (!SESSION_ID.test(value)) throw new TypeError("BitFS 会话 ID 不合法"); return value; }
 function assertEvidenceName(value: BitfsEvidenceName): BitfsEvidenceName {
   if (evidenceNames.has(value as BitfsFixedEvidenceName)
-    || /^(kind5-content-request|kind6-content-delivery|kind7-payment-update|kind7-payment-sign-digest|kind7-payment-signature|latest-payment-transaction)-[0-9a-f]{64}$/u.test(value)) return value;
+    || /^(kind2-sign-digest|kind2-signature|kind5-sign-digest|kind5-signature|kind5-content-request|kind6-content-delivery|kind7-payment-update|kind7-payment-sign-digest|kind7-payment-signature|kind12-close-sign-digest|kind12-close-signature|latest-payment-transaction|seller-speed-sample)-[0-9a-f]{64}$/u.test(value)) return value;
   throw new TypeError("BitFS 证据名不合法");
 }
 function uniqueEvidence(values: readonly BitfsEvidenceName[]): BitfsEvidenceName[] { return [...new Set(values.map(assertEvidenceName))].sort(); }
