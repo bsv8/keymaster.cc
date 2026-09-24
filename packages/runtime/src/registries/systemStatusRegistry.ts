@@ -7,7 +7,7 @@ export interface SystemStatusRegistry {
   _ids(): string[];
 }
 
-/** 系统状态模块钩子：仅承载常驻模块的实时状态视图。 */
+/** 广播网关模块钩子：承载常驻模块的实时状态视图。 */
 export function createSystemStatusRegistry(): SystemStatusRegistry {
   const modules = new Map<string, SystemStatusModule>();
 

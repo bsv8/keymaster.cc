@@ -3,8 +3,8 @@
 //
 // 设计缘由：
 //   - plugin-webrtc 是极薄业务插件，只通过 Coordinator Channel 私信收发信令；
-//   - 页面 = `/settings/webrtc`（STUN 设置）；
-//   - settings 走 `settings.registry` 单一真值。
+//   - STUN 设置作为模块挂到「设置 → 广播网关」；
+//   - 模块注册走 `system-status.registry` 单一真值。
 //   - i18n namespace：`webrtc`。
 
 import type {
@@ -21,7 +21,7 @@ import {
   KEYSPACE_SERVICE_CAPABILITY,
   NOTICE_REGISTRY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
+  SYSTEM_STATUS_REGISTRY_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import {
@@ -114,7 +114,14 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.settings.field.stun.label": "STUN servers",
       "webrtc.page.settings.field.stun.add": "Add",
       "webrtc.page.settings.field.stun.remove": "Remove",
+      "webrtc.page.settings.stun.add": "Add STUN server",
+      "webrtc.page.settings.stun.description": "Enter a STUN server URL and test it before saving.",
+      "webrtc.page.settings.stun.url": "STUN server URL",
+      "webrtc.page.settings.stun.duplicate": "This STUN server is already in the list.",
+      "webrtc.page.settings.stun.save": "Save STUN server",
       "webrtc.page.settings.field.stun.placeholder": "stun:host:port",
+      "webrtc.page.settings.actions.test": "Test STUN server",
+      "webrtc.page.settings.actions.test.running": "Testing…",
       "webrtc.page.settings.actions.testAll": "Test all STUN",
       "webrtc.page.settings.actions.testAll.running": "Testing…",
       "webrtc.page.settings.actions.testAll.done": "Done",
@@ -187,7 +194,14 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.settings.field.stun.label": "STUN 服务器",
       "webrtc.page.settings.field.stun.add": "新增",
       "webrtc.page.settings.field.stun.remove": "删除",
+      "webrtc.page.settings.stun.add": "新增 STUN 服务器",
+      "webrtc.page.settings.stun.description": "输入 STUN 服务器地址，测试成功后才能保存。",
+      "webrtc.page.settings.stun.url": "STUN 服务器地址",
+      "webrtc.page.settings.stun.duplicate": "该 STUN 服务器已在列表中。",
+      "webrtc.page.settings.stun.save": "保存 STUN 服务器",
       "webrtc.page.settings.field.stun.placeholder": "stun:host:port",
+      "webrtc.page.settings.actions.test": "测试 STUN 服务器",
+      "webrtc.page.settings.actions.test.running": "测试中…",
       "webrtc.page.settings.actions.testAll": "测试全部 STUN",
       "webrtc.page.settings.actions.testAll.running": "测试中…",
       "webrtc.page.settings.actions.testAll.done": "完成",
@@ -227,7 +241,7 @@ const webrtcPluginDefinition = {
       { capability: CONTACTS_SERVICE_CAPABILITY, reason: "只允许当前 owner 通讯录中的发送者进入确认" },
       { capability: CONTACTS_COORDINATOR_CONTROL_CAPABILITY, reason: "读取 Coordinator 通讯录在线快照做拨号门禁", optional: true },
       { capability: NOTICE_REGISTRY_CAPABILITY, reason: "投递全局紧急 notice" },
-      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册 WebRTC 系统设置" },
+      { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, reason: "注册 WebRTC 广播网关模块" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 WebRTC session resources" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册 WebRTC 设置面包屑" },
     ]),
@@ -325,26 +339,22 @@ const webrtcPluginDefinition = {
       ]
     });
 
-    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
-    systemSettings.register({
-      id: "webrtc.system-settings.stun",
-      group: {
-        id: "webrtc",
-        label: { key: "webrtc.page.settings.title", fallback: "WebRTC" },
-        order: 50
-      },
-      label: { key: "webrtc.page.settings.field.stun.label", fallback: "STUN servers" },
+    const systemStatus = ctx.capability(SYSTEM_STATUS_REGISTRY_CAPABILITY);
+    const statusId = "webrtc.system-status";
+    systemStatus.register({
+      id: statusId,
+      path: "/settings/system-status",
+      label: { key: "webrtc.menu", fallback: "WebRTC" },
       description: {
         key: "webrtc.page.settings.desc",
         fallback: "STUN-only config; no TURN."
       },
       component: WebrtcSettingsPage,
-      order: 10,
-      replacesSettingsRouteId: "webrtc.settings",
-      visibleWhen: ({ unlocked }) => unlocked
+      order: 50
     });
 
     return async () => {
+      systemStatus.unregister(statusId);
       await service.dispose();
     };
   }

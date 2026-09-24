@@ -1,8 +1,8 @@
-// packages/plugin-vault/src/AutoLockSettingsSection.test.tsx
 // @vitest-environment jsdom
+
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { AutoLockSettingsSection } from "./AutoLockSettingsSection.js";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { AutoLockSettingsPage, AutoLockSettingsSection } from "./AutoLockSettingsSection.js";
 import type { AutoLockService, AutoLockSettings } from "@keymaster/contracts";
 
 const hostState: { settings: AutoLockSettings } = { settings: { timeoutMs: 5 * 60 * 1000 } };
@@ -73,16 +73,21 @@ afterEach(() => {
 });
 
 describe("AutoLockSettingsSection", () => {
-  it("缺省 5 分钟高亮并显示当前状态，自定义输入默认隐藏", () => {
+  it("独立设置页显示自动锁屏标题", () => {
+    const fake = makeFakeService();
+    activeService.service = fake.service;
+    render(<AutoLockSettingsPage />);
+    expect(screen.getByRole("heading", { name: "自动锁屏" })).toBeTruthy();
+  });
+
+  it("显示当前策略，并高亮默认的 5 分钟选项", () => {
     const fake = makeFakeService();
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
-    const btn5 = screen.getByRole("button", { name: "5 分钟" });
-    expect(btn5.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "5 分钟" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByText(/无操作 5 分钟后自动锁定/)).toBeTruthy();
-    // 自定义折叠态：输入框隐藏，只见自定义入口。
-    expect(screen.queryByPlaceholderText(/例如/)).toBeNull();
-    expect(screen.getByRole("button", { name: "自定义" })).toBeTruthy();
+    expect(screen.getByText("当前策略")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("点击 2 分钟预设立即生效", async () => {
@@ -99,36 +104,31 @@ describe("AutoLockSettingsSection", () => {
     render(<AutoLockSettingsSection />);
     fireEvent.click(screen.getByRole("button", { name: "永不" }));
     await waitFor(() => expect(fake.calls).toEqual([0]));
-    hostState.settings = { timeoutMs: 0 };
   });
 
-  it("点自定义后收起快捷选项并显示输入框，返回 icon 可回到快捷选项", async () => {
+  it("自定义在弹窗中编辑，取消不会保存", () => {
     const fake = makeFakeService();
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
     fireEvent.click(screen.getByRole("button", { name: "自定义" }));
-    // 快捷选项收起。
-    expect(screen.queryByRole("button", { name: "2 分钟" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "永不" })).toBeNull();
-    const input = screen.getByPlaceholderText(/例如/) as HTMLInputElement;
-    expect(input).toBeTruthy();
-    // 返回 icon 回到快捷选项。
-    fireEvent.click(screen.getByRole("button", { name: "返回快捷选项" }));
-    expect(await screen.findByRole("button", { name: "2 分钟" })).toBeTruthy();
-    expect(screen.queryByPlaceholderText(/例如/)).toBeNull();
+    const editor = screen.getByRole("dialog");
+    fireEvent.change(within(editor).getByPlaceholderText(/例如/), { target: { value: "10" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(fake.calls).toEqual([]);
   });
 
-  it("自定义输入点应用才保存，输入过程不打断", async () => {
+  it("自定义输入点应用才保存", async () => {
     const fake = makeFakeService();
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
     fireEvent.click(screen.getByRole("button", { name: "自定义" }));
-    const input = screen.getByPlaceholderText(/例如/) as HTMLInputElement;
+    const editor = screen.getByRole("dialog");
+    const input = within(editor).getByPlaceholderText(/例如/) as HTMLInputElement;
     fireEvent.change(input, { target: { value: "10" } });
-    // 未点应用：不保存，输入框保持可用。
     expect(fake.calls).toEqual([]);
     expect(input.disabled).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "应用" }));
+    fireEvent.click(within(editor).getByRole("button", { name: "应用" }));
     await waitFor(() => expect(fake.calls).toEqual([10 * 60 * 1000]));
   });
 
@@ -137,7 +137,7 @@ describe("AutoLockSettingsSection", () => {
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
     fireEvent.click(screen.getByRole("button", { name: "自定义" }));
-    const input = screen.getByPlaceholderText(/例如/) as HTMLInputElement;
+    const input = within(screen.getByRole("dialog")).getByPlaceholderText(/例如/) as HTMLInputElement;
     fireEvent.change(input, { target: { value: "12" } });
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", charCode: 13 });
     await waitFor(() => expect(fake.calls).toEqual([12 * 60 * 1000]));
@@ -148,24 +148,11 @@ describe("AutoLockSettingsSection", () => {
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
     fireEvent.click(screen.getByRole("button", { name: "自定义" }));
-    const input = screen.getByPlaceholderText(/例如/) as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "0" } });
-    // 输入过程只清错误、不打断；点应用才校验。
+    const editor = screen.getByRole("dialog");
+    fireEvent.change(within(editor).getByPlaceholderText(/例如/), { target: { value: "0" } });
     expect(screen.queryByText(/至少 1 分钟/)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "应用" }));
-    expect(await screen.findByText(/至少 1 分钟/)).toBeTruthy();
-    expect(fake.calls).toEqual([]);
-  });
-
-  it("返回丢弃未保存的草稿", async () => {
-    const fake = makeFakeService();
-    activeService.service = fake.service;
-    render(<AutoLockSettingsSection />);
-    fireEvent.click(screen.getByRole("button", { name: "自定义" }));
-    const input = screen.getByPlaceholderText(/例如/) as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "13" } });
-    fireEvent.click(screen.getByRole("button", { name: "返回快捷选项" }));
-    expect(await screen.findByRole("button", { name: "2 分钟" })).toBeTruthy();
+    fireEvent.click(within(editor).getByRole("button", { name: "应用" }));
+    expect(await within(editor).findByText(/至少 1 分钟/)).toBeTruthy();
     expect(fake.calls).toEqual([]);
   });
 
@@ -173,65 +160,66 @@ describe("AutoLockSettingsSection", () => {
     const fake = makeFakeService();
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
-    const btn24 = screen.getByRole("button", { name: "24小时" });
-    expect(btn24.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(btn24);
+    const button = screen.getByRole("button", { name: "24 小时" });
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(button);
     await waitFor(() => expect(fake.calls).toEqual([24 * 60 * 60 * 1000]));
   });
 
-  it("已有 24 小时显示 24 小时而非 1440 分钟", () => {
+  it("已有 24 小时时概览显示小时", () => {
     hostState.settings = { timeoutMs: 24 * 60 * 60 * 1000 };
     const fake = makeFakeService(24 * 60 * 60 * 1000);
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
     expect(screen.getByText(/无操作 24 小时后自动锁定/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "24小时" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "24 小时" }).getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("自定义 1440 分钟点应用可保存，1441 分钟被拦", async () => {
+  it("自定义 1440 分钟可保存，1441 分钟被拦截", async () => {
     const fake = makeFakeService();
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
     fireEvent.click(screen.getByRole("button", { name: "自定义" }));
-    const input = screen.getByPlaceholderText(/例如/) as HTMLInputElement;
+    const editor = screen.getByRole("dialog");
+    const input = within(editor).getByPlaceholderText(/例如/) as HTMLInputElement;
     fireEvent.change(input, { target: { value: "1441" } });
-    fireEvent.click(screen.getByRole("button", { name: "应用" }));
-    expect(await screen.findByText(/最多 24 小时/)).toBeTruthy();
+    fireEvent.click(within(editor).getByRole("button", { name: "应用" }));
+    expect(await within(editor).findByText(/最多 24 小时/)).toBeTruthy();
     expect(fake.calls).toEqual([]);
     fireEvent.change(input, { target: { value: "1440" } });
-    fireEvent.click(screen.getByRole("button", { name: "应用" }));
+    fireEvent.click(within(editor).getByRole("button", { name: "应用" }));
     await waitFor(() => expect(fake.calls).toEqual([24 * 60 * 60 * 1000]));
   });
 
-  it("自定义值为 10 分钟时自动展开并高亮自定义入口", () => {
+  it("已有自定义值时高亮自定义选项但不自动打开弹窗", () => {
     hostState.settings = { timeoutMs: 10 * 60 * 1000 };
     const fake = makeFakeService(10 * 60 * 1000);
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
+    expect(screen.getByRole("button", { name: "自定义" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByText(/无操作 10 分钟后自动锁定/)).toBeTruthy();
-    // 自动展开自定义行。
-    expect(screen.getByPlaceholderText(/例如/)).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("已有自定义值异步到达时自动切到自定义 UI", async () => {
+  it("异步到达自定义值时更新当前选择", async () => {
     const fake = makeFakeService();
     activeService.service = fake.service;
     const { rerender } = render(<AutoLockSettingsSection />);
-    // 初值命中候选 → 快捷行。
     expect(screen.getByRole("button", { name: "2 分钟" })).toBeTruthy();
-    // 跨 tab / 异步加载到达自定义值 → 收敛到自定义行。
     hostState.settings = { timeoutMs: 10 * 60 * 1000 };
     rerender(<AutoLockSettingsSection />);
-    expect(await screen.findByPlaceholderText(/例如/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "2 分钟" })).toBeNull();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "自定义" }).getAttribute("aria-pressed")).toBe("true");
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("保存失败回滚并提示", async () => {
+  it("保存失败时显示错误", async () => {
     const fake = makeFakeService();
     fake.failNext();
     activeService.service = fake.service;
     render(<AutoLockSettingsSection />);
     fireEvent.click(screen.getByRole("button", { name: "15 分钟" }));
-    await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("boom"));
   });
 });

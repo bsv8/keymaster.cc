@@ -7,6 +7,7 @@
 //   - 只订阅激活服务器的频道；切换服务器立即重订阅，切换交易对只改展示；
 //   - 「恢复原始设置」回到缺省 bsv8 服务器 + gate/bsvusdt；没有"清空公钥"；
 //   - 保存按钮显式提交，便于严格校验与回滚。
+//   - 数据区把快照里的全部收到数据显示出来：运行状态、频道、快照与全部行情。
 
 import { useEffect, useState, type ReactElement } from "react";
 import { Button, PageHeader, Select, TextInput } from "@keymaster/ui";
@@ -83,6 +84,14 @@ function BsvPriceSettingsPageInner({ service }: { service: BsvPriceService }): R
   const unit = deriveUnitFromPair(pairDraft);
   const channelPreview = snap.configured ? snap.channelId : NOT_CONFIGURED_LABEL;
   const statusLabel = statusText(snap.status, t);
+  const configuredLabel = snap.configured
+    ? t("bsv-price.settings.configured.true", { defaultValue: "是" })
+    : t("bsv-price.settings.configured.false", { defaultValue: "否" });
+  const quotes = snap.snapshot
+    ? Object.entries(snap.snapshot.markets).flatMap(([market, pairs]) =>
+        Object.entries(pairs).map(([pair, price]) => ({ market, pair, price }))
+      )
+    : [];
 
   async function run(action: () => Promise<unknown>, successMessage: string): Promise<void> {
     setBusy(true);
@@ -173,7 +182,15 @@ function BsvPriceSettingsPageInner({ service }: { service: BsvPriceService }): R
                     disabled={busy}
                     onChange={() => setServerDraft(server.publisherPublicKeyHex)}
                   />
-                  <span className="km-bsv-price-settings-page__server-name">{server.name}</span>
+                  <span className="km-bsv-price-settings-page__server-text">
+                    <span className="km-bsv-price-settings-page__server-name">{server.name}</span>
+                    <span
+                      className="km-bsv-price-settings-page__server-key km-bsv-price-settings-page__mono"
+                      data-bsv-price-server-pubkey
+                    >
+                      {server.publisherPublicKeyHex}
+                    </span>
+                  </span>
                   {isDefault ? (
                     <span className="km-bsv-price-settings-page__server-badge">
                       {t("bsv-price.settings.server.default", { defaultValue: "默认" })}
@@ -280,6 +297,14 @@ function BsvPriceSettingsPageInner({ service }: { service: BsvPriceService }): R
       </div>
 
       <div className="km-bsv-price-settings-page__card">
+        <h2 className="km-bsv-price-settings-page__section-title">
+          {t("bsv-price.settings.data.label", { defaultValue: "收到的数据" })}
+        </h2>
+        <p className="km-bsv-price-settings-page__hint">
+          {t("bsv-price.settings.data.desc", {
+            defaultValue: "本次订阅拿到的全部数据：运行状态、快照与全部行情。"
+          })}
+        </p>
         <div className="km-bsv-price-settings-page__row">
           <div className="km-bsv-price-settings-page__label">
             {t("bsv-price.settings.price.label", { defaultValue: "当前价格" })}
@@ -309,11 +334,107 @@ function BsvPriceSettingsPageInner({ service }: { service: BsvPriceService }): R
         </div>
         <div className="km-bsv-price-settings-page__row">
           <div className="km-bsv-price-settings-page__label">
+            {t("bsv-price.settings.coreState.label", { defaultValue: "Channel 运行状态" })}
+          </div>
+          <div
+            className="km-bsv-price-settings-page__value km-bsv-price-settings-page__mono"
+            data-bsv-price-settings-core-state
+          >
+            {snap.coreState}
+          </div>
+        </div>
+        <div className="km-bsv-price-settings-page__row">
+          <div className="km-bsv-price-settings-page__label">
+            {t("bsv-price.settings.configured.label", { defaultValue: "已配置" })}
+          </div>
+          <div className="km-bsv-price-settings-page__value" data-bsv-price-settings-configured>
+            {configuredLabel}
+          </div>
+        </div>
+        <div className="km-bsv-price-settings-page__row">
+          <div className="km-bsv-price-settings-page__label">
+            {t("bsv-price.settings.active.key.label", { defaultValue: "激活发布器公钥" })}
+          </div>
+          <div
+            className="km-bsv-price-settings-page__value km-bsv-price-settings-page__mono"
+            data-bsv-price-settings-active-key
+          >
+            {snap.active.publisherPublicKeyHex}
+          </div>
+        </div>
+        <div className="km-bsv-price-settings-page__row">
+          <div className="km-bsv-price-settings-page__label">
+            {t("bsv-price.settings.snapshot.protocol.label", { defaultValue: "快照协议" })}
+          </div>
+          <div
+            className="km-bsv-price-settings-page__value km-bsv-price-settings-page__mono"
+            data-bsv-price-settings-protocol
+          >
+            {snap.snapshot?.protocol ?? "—"}
+          </div>
+        </div>
+        <div className="km-bsv-price-settings-page__row">
+          <div className="km-bsv-price-settings-page__label">
+            {t("bsv-price.settings.snapshot.sourceAt.label", { defaultValue: "源快照时间" })}
+          </div>
+          <div className="km-bsv-price-settings-page__value" data-bsv-price-settings-source-at>
+            {snap.snapshot ? formatTimestamp(snap.snapshot.snapshotAtMs, locale) : "—"}
+          </div>
+        </div>
+        <div className="km-bsv-price-settings-page__row">
+          <div className="km-bsv-price-settings-page__label">
             {t("bsv-price.settings.snapshotAt.label", { defaultValue: "快照时间" })}
           </div>
           <div className="km-bsv-price-settings-page__value" data-bsv-price-settings-snapshot-at>
             {formatTimestamp(snap.price.updatedAtMs, locale)}
           </div>
+        </div>
+        <div className="km-bsv-price-settings-page__row">
+          <div className="km-bsv-price-settings-page__label">
+            {t("bsv-price.settings.lastError.label", { defaultValue: "最近解析错误" })}
+          </div>
+          <div
+            className="km-bsv-price-settings-page__value km-bsv-price-settings-page__mono"
+            data-bsv-price-settings-last-error
+          >
+            {snap.lastError ?? "—"}
+          </div>
+        </div>
+
+        <div className="km-bsv-price-settings-page__quotes">
+          <h3 className="km-bsv-price-settings-page__quotes-title">
+            {t("bsv-price.settings.quotes.label", { defaultValue: "收到的行情" })}
+          </h3>
+          {quotes.length === 0 ? (
+            <p className="km-bsv-price-settings-page__hint" data-bsv-price-settings-quotes-empty>
+              {t("bsv-price.settings.quotes.empty", { defaultValue: "（等待激活服务器的快照）" })}
+            </p>
+          ) : (
+            <table className="km-bsv-price-settings-page__table" data-bsv-price-settings-quotes>
+              <thead>
+                <tr>
+                  <th>{t("bsv-price.settings.quotes.table.market", { defaultValue: "交易所" })}</th>
+                  <th>{t("bsv-price.settings.quotes.table.pair", { defaultValue: "交易对" })}</th>
+                  <th>{t("bsv-price.settings.quotes.table.price", { defaultValue: "价格" })}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {quotes.map(({ market, pair, price }) => {
+                  const isActive = market === snap.active.market && pair === snap.active.pair;
+                  return (
+                    <tr
+                      key={`${market}:${pair}`}
+                      data-bsv-price-settings-quote-active={isActive ? "true" : undefined}
+                    >
+                      <td>{market}</td>
+                      <td className="km-bsv-price-settings-page__mono">{pair}</td>
+                      <td className="km-bsv-price-settings-page__mono">{price}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
 
         <p className="km-bsv-price-settings-page__hint">

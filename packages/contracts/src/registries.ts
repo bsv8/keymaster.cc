@@ -6,7 +6,7 @@ import { PROTECTED_OUTPOINT_REGISTRY_CAPABILITY } from "./spendProtection.js";
 // 设计缘由：plugin 通过 capability 拿到这些 registry；类型契约放在 contracts，
 // 实现放在 runtime。这避免 plugin 直接依赖 runtime 内部模块。
 
-import type { AppRoute, ApplicationSettingsItem, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, SettingsRoute, SystemSettingsItem, SystemStatusModule, TransferRegistry as ITransferRegistry, VaultSettingsSection } from "./index.js";
+import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, SettingsRoute, SystemSettingsItem, SystemStatusModule, TransferRegistry as ITransferRegistry, VaultSettingsSection } from "./index.js";
 import type { TokenRegistry } from "./tokens.js";
 import type { CollectibleRegistry } from "./collectibles.js";
 import type { CollectibleTransferRegistry } from "./collectibleTransfer.js";
@@ -23,7 +23,6 @@ export const SETTINGS_REGISTRY_CAPABILITY = defineCapability<SettingsRegistry>({
 export const SYSTEM_SETTINGS_REGISTRY_CAPABILITY = defineCapability<SystemSettingsRegistry>({ kind: "local", id: "system-settings.registry", version: "1" });
 export const SYSTEM_STATUS_REGISTRY_CAPABILITY = defineCapability<SystemStatusRegistry>({ kind: "local", id: "system-status.registry", version: "1" });
 export const VAULT_SETTINGS_REGISTRY_CAPABILITY = defineCapability<VaultSettingsRegistry>({ kind: "local", id: "vault-settings.registry", version: "1" });
-export const APPLICATION_SETTINGS_REGISTRY_CAPABILITY = defineCapability<ApplicationSettingsRegistry>({ kind: "local", id: "application-settings.registry", version: "1" });
 export const HOME_REGISTRY_CAPABILITY = defineCapability<HomeRegistry>({ kind: "local", id: "home.registry", version: "1" });
 export const BUSINESS_REGISTRY_CAPABILITY = defineCapability<BusinessFeatureRegistry>({ kind: "local", id: "business.registry", version: "1" });
 export const COMMAND_REGISTRY_CAPABILITY = defineCapability<CommandRegistry>({ kind: "local", id: "command.registry", version: "1" });
@@ -85,7 +84,7 @@ export interface SystemSettingsRegistry {
   _ids(): string[];
 }
 
-/** 常驻系统模块向「设置 → 系统状态」注入实时状态视图。 */
+/** 常驻系统模块向「设置 → 广播网关」注入实时状态视图。 */
 export interface SystemStatusRegistry {
   register(module: SystemStatusModule): void;
   unregister(id: string): void;
@@ -98,14 +97,6 @@ export interface VaultSettingsRegistry {
   register(section: VaultSettingsSection): void;
   unregister(id: string): void;
   list(): VaultSettingsSection[];
-  _ids(): string[];
-}
-
-/** 应用插件向「设置 → 应用设置」注册自己的二级入口。 */
-export interface ApplicationSettingsRegistry {
-  register(item: ApplicationSettingsItem): void;
-  unregister(id: string): void;
-  list(): ApplicationSettingsItem[];
   _ids(): string[];
 }
 

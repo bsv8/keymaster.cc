@@ -672,15 +672,15 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
     await expect(controlPage.getByRole("heading", { name: "Get a file by Seed", exact: true })).toBeVisible();
     await expect(controlPage.getByRole("button", { name: "Get a file by Seed", exact: true })).toBeVisible();
 
-    // defaultEnabled=true 必须同时让正式设置入口可见；数据面仍由组件的
+    // defaultEnabled=true 必须同时让正式的本地文件设置入口可见；数据面仍由组件的
     // 已配置检查 fail closed，而不是靠关闭插件隐藏配置。
-    await controlPage.goto("/settings/system?msfileE2E=1", { waitUntil: "load" });
+    await controlPage.goto("/settings/local-files?msfileE2E=1", { waitUntil: "load" });
     await waitForHooks(controlPage);
     await controlPage.evaluate(async () => {
       const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
       await api.bootstrap();
     });
-    await expect(controlPage.getByRole("heading", { name: "MSFile", exact: true })).toBeVisible();
+    await expect(controlPage.getByRole("heading", { name: "Local files", exact: true })).toBeVisible();
     await bootstrapProductionPage(controlPage);
 
     await controlPage.evaluate(() => {

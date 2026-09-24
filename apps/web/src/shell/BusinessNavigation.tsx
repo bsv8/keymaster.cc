@@ -6,7 +6,7 @@ export function sortBusinessDomains<T extends { id: string; order: number }>(dom
   return [...domains].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 }
 
-/** 入口可声明自己的子路由激活范围（例如「应用设置」下的某个应用）。 */
+/** 入口可声明自己的子路由激活范围（例如扑克大厅下的某张桌）。 */
 export function isBusinessFeatureActive(feature: BusinessFeature, path: string): boolean {
   return path === feature.entry.path || feature.entry.activeWhen?.(path) === true;
 }

@@ -27,7 +27,7 @@ function wrongSupplierPublicKeyHex(publicKeyHex: string): string {
 }
 
 /**
- * 业务目标：用户在真实 /settings/system 页面配置 SatSubscription 供应商，
+ * 业务目标：用户在真实 /settings/system-status 广播网关页面配置 SatSubscription 供应商，
  * 先看到故意错误身份的失败，再用 satsubscription.json 中的正确身份看到在线。
  *
  * 开始状态：全新 Chromium context；用户先通过真实 Local 页面建立 active Key。
@@ -73,11 +73,11 @@ test(JOURNEY_ID + "：真实页面保存 Sat 供应商并比较错误身份", as
       );
     });
 
-    await test.step("用户从正式菜单打开系统设置", async () => {
+    await test.step("用户从正式菜单打开广播网关", async () => {
       await openSettingsPage(page, {
-        label: /^System$|^系统$/u,
-        path: /\/settings\/system$/u,
-        heading: /^System$|^系统$/u,
+        label: /^Broadcast gateway$|^广播网关$/u,
+        path: /\/settings\/system-status$/u,
+        heading: /^Broadcast gateway$|^广播网关$/u,
       });
     });
 

@@ -10,16 +10,30 @@ describe("BusinessNavigation", () => {
 
   it("keeps a parent entry active for its declared child paths", () => {
     const feature = {
-      id: "settings.application-settings",
-      label: { key: "settings.applicationSettings.title", fallback: "Application settings" },
-      order: 20,
+      id: "home.poker",
+      label: { key: "poker.route.lobby", fallback: "Poker lobby" },
+      order: 30,
       entry: {
-        path: "/settings/apps",
-        component: () => null,
-        activeWhen: (path: string) => path.startsWith("/settings/apps/")
+        path: "/poker",
+        routeId: "poker.lobby",
+        activeWhen: (path: string) => path.startsWith("/poker/")
       }
     };
-    expect(isBusinessFeatureActive(feature, "/settings/apps/bsv-price")).toBe(true);
+    expect(isBusinessFeatureActive(feature, "/poker/table/abc")).toBe(true);
+    expect(isBusinessFeatureActive(feature, "/settings/plugins")).toBe(false);
+  });
+
+  it("matches direct settings entries by exact path", () => {
+    const feature = {
+      id: "settings.bsv-price",
+      label: { key: "bsv-price.menu", fallback: "BSV Price" },
+      order: 20,
+      entry: {
+        path: "/settings/bsv-price",
+        routeId: "bsv-price.settings"
+      }
+    };
+    expect(isBusinessFeatureActive(feature, "/settings/bsv-price")).toBe(true);
     expect(isBusinessFeatureActive(feature, "/settings/plugins")).toBe(false);
   });
 });

@@ -20,9 +20,8 @@ describe("parseLegacyHashPath", () => {
     expect(parseLegacyHashPath("/", "#/settings/vault")).toBe("/settings/vault");
   });
 
-  it("migrates legacy #/settings to /settings/system", () => {
-    // 旧 hash /settings 已不再有聚合页面；统一迁移到语言设置页（最稳定的系统级）。
-    expect(parseLegacyHashPath("/", "#/settings")).toBe("/settings/system");
+  it("migrates legacy #/settings to /settings/auto-lock", () => {
+    expect(parseLegacyHashPath("/", "#/settings")).toBe("/settings/auto-lock");
   });
 
   it("preserves hash query string", () => {
@@ -107,12 +106,12 @@ describe("normalizeLegacyHashRoute (side effect)", () => {
     expect(calls[0]?.url).toBe("/settings/vault");
   });
 
-  it("migrates legacy #/settings to /settings/system", () => {
+  it("migrates legacy #/settings to /settings/auto-lock", () => {
     installWindow("/", "#/settings");
     const migrated = normalizeLegacyHashRoute();
     expect(migrated).toBe(true);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.url).toBe("/settings/system");
+    expect(calls[0]?.url).toBe("/settings/auto-lock");
   });
 
   it("preserves query string when migrating", () => {

@@ -119,6 +119,7 @@ function makeFakeService(): {
     sendFile: vi.fn(async () => undefined),
     consumeRemoteNotice: vi.fn(() => undefined),
     attachToVideo: vi.fn(() => () => undefined),
+    testStunServer: vi.fn(async (url: string): Promise<StunDiagnosticResult> => ({ url, status: "ok" })),
     runStunDiagnostics: vi.fn(async (): Promise<StunDiagnosticResult[]> => []),
     getStunServers: vi.fn(() => ["stun:stun.l.google.com:19302"]),
     applyStunServers: vi.fn(async () => undefined),

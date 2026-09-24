@@ -95,12 +95,12 @@ async function launchUser(input: {
   };
 }
 
-/** 通过真实设置页保存真实供应商，并启用接收与默认发布。 */
+/** 通过真实广播网关页保存真实供应商，并启用接收与默认发布。 */
 async function configureRealSupplier(user: RealUser, server: SatSubscriptionLocalServer): Promise<void> {
   await openSettingsPage(user.page, {
-    label: /^System$|^系统$/u,
-    path: /\/settings\/system$/u,
-    heading: /^System$|^系统$/u,
+    label: /^Broadcast gateway$|^广播网关$/u,
+    path: /\/settings\/system-status$/u,
+    heading: /^Broadcast gateway$|^广播网关$/u,
   });
   await saveSatSupplierFromPage(user.page, {
     supplierId: SUPPLIER_ID,

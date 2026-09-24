@@ -9,7 +9,6 @@ import type {
 } from "../pluginHostContract.js";
 import { createKeymasterPluginHost } from "../keymasterHostAdapter.js";
 import {
-  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
   ASSET_DATA_NOTIFIER_CAPABILITY,
   ASSET_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
@@ -100,7 +99,6 @@ export type TestPluginManifest = Omit<Partial<PluginManifest>, "units"> & {
 };
 
 const builtinCapabilities: readonly Capability[] = [
-  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
   ASSET_DATA_NOTIFIER_CAPABILITY,
   ASSET_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,

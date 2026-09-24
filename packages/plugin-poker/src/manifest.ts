@@ -11,11 +11,10 @@
 //
 // 新导航迁移：
 //   - 扑克大厅通过 business.registry 挂到「首页」；
-//   - 设置页通过 application-settings.registry 挂到「设置 → 应用设置」；
-//   - 不再保留旧 Poker 设置入口。
+//   - 设置页通过 business.registry 直接挂到「设置」；
+//   - 不再有「应用设置」聚合目录。
 
 import type {
-  ApplicationSettingsRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
   BusinessFeatureRegistry,
@@ -34,7 +33,6 @@ import type {
   VaultService
 } from "@keymaster/contracts";
 import {
-  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   HOME_REGISTRY_CAPABILITY,
@@ -291,8 +289,7 @@ const pokerPluginDefinition = {
       { capability: RUNTIME_MESSAGE_BUS, reason: "event subscription + publish" },
       { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },
       { capability: ROUTE_REGISTRY_CAPABILITY, reason: "register poker pages" },
-      { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "register poker lobby in the Home business navigation" },
-      { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, reason: "register poker application settings entry" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "register poker lobby in the Home business navigation and settings page in Settings" },
       { capability: HOME_REGISTRY_CAPABILITY, reason: "register poker home widget" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "register poker breadcrumbs" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "register poker resources" },
@@ -388,14 +385,13 @@ const pokerPluginDefinition = {
       }
     });
 
-    const applicationSettings = ctx.capability(APPLICATION_SETTINGS_REGISTRY_CAPABILITY);
-    applicationSettings.register({
-      id: "poker.settings",
-      path: POKER_SETTINGS_PATH,
+    business.registerFeature("poker", "settings", {
+      id: "settings.poker",
       label: { key: "poker.crumb.poker", fallback: "Poker" },
       description: { key: "poker.provider.description", fallback: "Multi-tenant peer poker." },
-      order: 140,
-      icon: "Spade"
+      order: 30,
+      icon: "Spade",
+      entry: { path: POKER_SETTINGS_PATH, routeId: "poker.settings" }
     });
 
     const home = ctx.capability(HOME_REGISTRY_CAPABILITY);
@@ -417,7 +413,6 @@ const pokerPluginDefinition = {
         if (path === POKER_SETTINGS_PATH) {
           return [
             { label: { key: "poker.crumb.settings", fallback: "Settings" } },
-            { label: { key: "settings.applicationSettings.title", fallback: "Application settings" } },
             { label: { key: "poker.crumb.poker", fallback: "Poker" } }
           ];
         }

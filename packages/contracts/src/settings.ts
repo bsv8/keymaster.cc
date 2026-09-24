@@ -43,7 +43,7 @@ export interface SystemSettingsItem {
   visibleWhen?: (ctx: { unlocked: boolean }) => boolean;
 }
 
-/** 由常驻系统模块注入到「设置 → 系统状态」的实时状态视图。 */
+/** 由常驻系统模块注入到「设置 → 广播网关」的实时状态视图。 */
 export interface SystemStatusModule {
   /** 全局唯一、带模块命名空间的 id。 */
   id: string;
@@ -70,24 +70,12 @@ export interface VaultSettingsSection {
   order: number;
 }
 
-/** 「设置 → 应用设置」中的一个应用入口。 */
-export interface ApplicationSettingsItem {
-  /** 全局唯一、带插件命名空间的应用设置 id。 */
-  id: string;
-  /** 应用设置详情页路径，由应用插件注册为隐藏路由。 */
-  path: string;
-  label: I18nText;
-  description?: I18nText;
-  icon?: string;
-  order: number;
-}
-
 /**
  * 设置详情页描述。
  *
  * 严格字段：
  *   - id：唯一 id，使用命名空间，例如 "poker.settings"。
- *   - path：路由路径，必须以 "/" 开头；详情页自带的真值路径。
+ *   - path：路由路径，必须以 "/" 开头，例如 "/settings/poker"；
  *   - label：菜单 / 页面标题 / 面包屑首段之外的位置都可能用到；硬切换后是 I18nText。
  *   - description：可选页内描述（用于页面副标题等位置），不参与菜单。
  *   - component：渲染该设置详情页的 React 组件。
@@ -99,7 +87,7 @@ export interface ApplicationSettingsItem {
 export interface SettingsRoute {
   /** page id，使用命名空间。 */
   id: string;
-  /** 路由路径，必须以 "/" 开头，例如 "/settings/apps/poker"。 */
+  /** 路由路径，必须以 "/" 开头，例如 "/settings/poker"。 */
   path: string;
   /** 菜单 / 页面标题。硬切换后为 I18nText。 */
   label: I18nText;
@@ -120,4 +108,3 @@ export type { SettingsRegistry } from "./registries.js";
 export type { SystemSettingsRegistry } from "./registries.js";
 export type { SystemStatusRegistry } from "./registries.js";
 export type { VaultSettingsRegistry } from "./registries.js";
-export type { ApplicationSettingsRegistry } from "./registries.js";

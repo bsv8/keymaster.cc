@@ -16,7 +16,7 @@ const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
 
 export function P2pkhSettingsPage() {
   const host = usePluginHost();
-  // owner 作用域 capability 会在锁定时被撤销；设置区可能正好挂载在系统设置
+  // owner 作用域 capability 会在锁定时被撤销；设置区可能正好挂载在 BSV 链
   // 页面上，这里必须按"暂不可用"渲染，而不是让 useCapability 抛异常。
   const service = useOptionalCapability(P2PKH_CAPABILITY);
   const coordinator = useOptionalCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);

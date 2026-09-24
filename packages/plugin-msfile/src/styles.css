@@ -1,103 +1,399 @@
-/* packages/plugin-msfile/src/styles.css —— MSFile 系统设置区域 */
+/* packages/plugin-msfile/src/styles.css —— 本地文件设置页面 */
+
+.msfile-settings-page {
+  width: min(100%, 1120px);
+}
 
 .msfile-settings {
   display: flex;
   flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.msfile-settings__overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
-.msfile-settings h3 {
-  margin: 8px 0 0;
-}
-
-.msfile-settings__hint {
-  color: var(--km-text-muted, #6b7280);
-  font-size: 0.85rem;
-  margin: 2px 0;
-}
-
-.msfile-settings__row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  align-items: end;
-}
-
-.msfile-settings__row > label {
+.msfile-settings__overview-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface);
+}
+
+.msfile-settings__overview-card > span {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.msfile-settings__overview-card strong {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.msfile-settings__section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+  padding: 20px;
+  scroll-margin-top: 72px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.msfile-settings__section-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.msfile-settings__section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.msfile-settings__section-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.msfile-settings__section-header p {
+  margin: 5px 0 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.msfile-settings__count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.msfile-settings__price-grid,
+.msfile-settings__form-grid,
+.msfile-settings__concurrency-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.msfile-settings__field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.msfile-settings__field.is-wide,
+.msfile-settings__form-grid > .is-wide,
+.msfile-settings__checkbox.is-wide {
+  grid-column: 1 / -1;
+}
+
+.msfile-settings__field > label,
+.msfile-settings__app-header span {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.msfile-settings__control {
+  width: 100%;
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+textarea.msfile-settings__control {
+  min-height: 104px;
+  resize: vertical;
+}
+
+.msfile-settings__control:focus-visible {
+  border-color: var(--primary);
+  outline: 2px solid color-mix(in srgb, var(--primary) 28%, transparent);
+  outline-offset: 1px;
+}
+
+.msfile-settings__control:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.msfile-settings__checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
 }
 
 .msfile-settings__checkbox {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 0.85rem;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.msfile-settings__hint,
+.msfile-settings__empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.msfile-settings__empty {
+  padding: 18px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.msfile-settings__callout,
+.msfile-settings__feedback {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.msfile-settings__callout p {
+  margin: 0;
+}
+
+.msfile-settings__callout p + p {
+  margin-top: 5px;
+}
+
+.msfile-settings__feedback {
+  position: sticky;
+  top: 72px;
+  z-index: 5;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.msfile-settings__callout.is-warning {
+  border-color: color-mix(in srgb, var(--warning, #d97706) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning, #d97706) 8%, var(--surface));
+}
+
+.msfile-settings__feedback.is-error {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+
+.msfile-settings__feedback.is-success {
+  border-color: color-mix(in srgb, var(--success, #16a34a) 45%, var(--border));
+  color: var(--success, #16a34a);
+}
+
+.msfile-settings__section-actions,
+.msfile-settings__supplier-actions,
+.msfile-settings__app-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.msfile-settings__status,
+.msfile-settings__badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.msfile-settings .is-ready {
+  color: var(--success, #16a34a) !important;
+}
+
+.msfile-settings .is-unconfigured,
+.msfile-settings .is-waiting-unlock,
+.msfile-settings .is-indexing,
+.msfile-settings .is-configuration-error {
+  color: var(--warning, #d97706) !important;
+}
+
+.msfile-settings .is-selling {
+  color: var(--primary) !important;
+}
+
+.msfile-settings .is-degraded,
+.msfile-settings .is-unavailable,
+.msfile-settings .is-error {
+  color: var(--danger) !important;
+}
+
+.msfile-settings .is-disabled {
+  color: var(--text-dim) !important;
 }
 
 .msfile-settings__suppliers,
 .msfile-settings__apps {
-  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  list-style: none;
 }
 
-.msfile-settings__suppliers li,
-.msfile-settings__apps li {
-  border: 1px solid var(--km-border, #e5e7eb);
-  border-radius: 8px;
-  padding: 8px 12px;
+.msfile-settings__supplier-card,
+.msfile-settings__app-card {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
 }
 
-.msfile-settings__supplier-line {
+.msfile-settings__supplier-header,
+.msfile-settings__supplier-identity,
+.msfile-settings__app-header,
+.msfile-settings__app-limits {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
+  gap: 9px;
+}
+
+.msfile-settings__supplier-header,
+.msfile-settings__app-header {
+  justify-content: space-between;
+}
+
+.msfile-settings__supplier-header,
+.msfile-settings__supplier-actions {
+  flex-wrap: wrap;
+}
+
+.msfile-settings__metadata,
+.msfile-settings__app-limits {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+  margin: 12px 0 0;
 }
 
-.msfile-settings__badge {
-  border: 1px solid var(--km-border, #e5e7eb);
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 0.75rem;
-  color: var(--km-text-muted, #6b7280);
-  background: var(--km-surface-subtle, #f3f4f6);
+.msfile-settings__metadata div,
+.msfile-settings__app-limits div {
+  min-width: 0;
 }
 
-.msfile-settings__fixed {
-  font-size: 0.8rem;
-  color: var(--km-text-muted, #6b7280);
+.msfile-settings__metadata dt,
+.msfile-settings__app-limits span {
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
-.msfile-settings__form {
+.msfile-settings__metadata dd,
+.msfile-settings__app-limits strong {
+  margin: 3px 0 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.msfile-settings__supplier-editor {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-width: 560px;
+  gap: 16px;
 }
 
-.msfile-settings__form label {
+.msfile-settings__app-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 12px;
 }
 
-.msfile-settings__actions {
+.msfile-settings__app-header > div {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.msfile-settings__app-limits > div {
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--surface);
 }
 
 .msfile-settings__error {
-  color: var(--km-danger, #dc2626);
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 .msfile-settings__ok {
-  color: var(--km-success, #16a34a);
+  margin: 0;
+  color: var(--success, #16a34a);
+  font-size: 12px;
+}
+
+.msfile-settings__unavailable {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-dim);
+}
+
+@media (max-width: 620px) {
+  .msfile-settings__overview,
+  .msfile-settings__price-grid,
+  .msfile-settings__form-grid,
+  .msfile-settings__concurrency-grid,
+  .msfile-settings__metadata,
+  .msfile-settings__app-limits {
+    grid-template-columns: 1fr;
+  }
+
+  .msfile-settings__section {
+    padding: 16px;
+  }
+
+  .msfile-settings__section-header,
+  .msfile-settings__supplier-header,
+  .msfile-settings__app-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 /* ---------- 首页 Seed 文件获取 ---------- */

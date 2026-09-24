@@ -9,10 +9,10 @@ import {
   expectMsFileAbsent,
   expectMsFileTextPreview,
   openMsFileFilesPage,
+  openMsFileSettingsPage,
   saveMsFilePriceLimits,
   testMsFileSupplierConnection,
 } from "../../drivers/msfileDriver.js";
-import { openSettingsPage } from "../../drivers/settingsDriver.js";
 import { reloadAndAssertSameKey, unlockWalletInPlace } from "../../drivers/vaultDriver.js";
 import {
   MSFILE_NAS_ABSENT_SEED_HASH,
@@ -87,12 +87,8 @@ test(JOURNEY_ID + "：真实 msfile-nas 的 Seed 文件获取与下载", async (
       expect(publicKeyHex).toMatch(/^(02|03)[0-9a-f]{64}$/u);
     });
 
-    await test.step("用户在真实设置页保存金额上限并 pin 真实 NAS 身份", async () => {
-      await openSettingsPage(page, {
-        label: /^System$|^系统$/u,
-        path: /\/settings\/system$/u,
-        heading: /^System$|^系统$/u,
-      });
+    await test.step("用户在本地文件页保存金额上限并 pin 真实 NAS 身份", async () => {
+      await openMsFileSettingsPage(page);
       await saveMsFilePriceLimits(page, {
         seedMaxPriceSatoshis: SEED_MAX_PRICE_SATOSHIS,
         blockMaxPriceSatoshis: BLOCK_MAX_PRICE_SATOSHIS,

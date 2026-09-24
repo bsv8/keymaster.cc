@@ -4,11 +4,11 @@ import {
   expectMsFileTextPreview,
   openMsFileFilesPage,
   openMsFileMediaBySeedHash,
+  openMsFileSettingsPage,
   playMsFileMedia,
   saveMsFilePriceLimits,
   testMsFileSupplierConnection,
 } from "../../drivers/msfileDriver.js";
-import { openSettingsPage } from "../../drivers/settingsDriver.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
 import { REAL_MSFILE_OFFICIAL_SCENARIO } from "../../support/scenarioMetadata.js";
@@ -95,16 +95,12 @@ test(JOURNEY_ID + "：BSV8 官方 msfiles 服务的四个文件按正确方式�
     });
 
     await test.step("内置官方供应商无需手工添加即可测试连接", async () => {
-      await openSettingsPage(page, {
-        label: /^System$|^系统$/u,
-        path: /\/settings\/system$/u,
-        heading: /^System$|^系统$/u,
-      });
+      await openMsFileSettingsPage(page);
       await saveMsFilePriceLimits(page, {
         seedMaxPriceSatoshis: SEED_MAX_PRICE_SATOSHIS,
         blockMaxPriceSatoshis: BLOCK_MAX_PRICE_SATOSHIS,
       });
-      const settings = page.getByRole("region", { name: /^MSFile$/u });
+      const settings = page.getByRole("region", { name: /^Local files$|^本地文件$/u });
       const row = settings.locator("li").filter({ hasText: SUPPLIER_NAME }).first();
       await expect(row).toBeVisible();
       await expect(row.getByText(/System default|系统内置/u)).toBeVisible();

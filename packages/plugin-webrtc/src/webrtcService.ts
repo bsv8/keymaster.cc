@@ -145,6 +145,7 @@ export interface WebrtcService {
    */
   attachToVideo(direction: "local" | "remote", videoEl: HTMLVideoElement): () => void;
 
+  testStunServer(url: string): Promise<StunDiagnosticResult>;
   runStunDiagnostics(): Promise<StunDiagnosticResult[]>;
   getStunServers(): readonly string[];
   applyStunServers(input: string[]): Promise<void>;
@@ -3167,12 +3168,16 @@ export function createWebrtcService(input: {
    * `setLocalDescription()` 才能让浏览器真的开始收集 srflx 候选。fake env
    * 的实现也必须遵循这一行为以让测试有意义。
    */
+  async function testStunServer(url: string): Promise<StunDiagnosticResult> {
+    return testOneStun(url);
+  }
+
   async function runStunDiagnostics(): Promise<StunDiagnosticResult[]> {
     const cfg = store.snapshot();
     const urls = cfg.stunServers.filter((u) => u.trim().length > 0);
     const result: StunDiagnosticResult[] = [];
     for (const url of urls) {
-      result.push(await testOneStun(url));
+      result.push(await testStunServer(url));
     }
     return result;
   }
@@ -3388,6 +3393,7 @@ export function createWebrtcService(input: {
       }
     },
     attachToVideo,
+    testStunServer,
     runStunDiagnostics,
     getStunServers: () => store.snapshot().stunServers.slice(),
     applyStunServers: async (input: string[]): Promise<void> => {

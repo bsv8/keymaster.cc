@@ -1,7 +1,7 @@
 /* packages/plugin-sat-subscription/src/styles.css
  * SatSubscription 系统设置页样式。
  *
- * 设置页由 system-settings.registry 装配到公共设置容器中；这里仅负责
+ * 设置页由 system-status.registry 装配到广播网关页；这里仅负责
  * SatSubscription 自己的供应商卡片、表单和 SPI 操作区域，不污染全局样式。
  */
 
@@ -11,13 +11,6 @@
   flex-direction: column;
   gap: 14px;
   color: var(--text);
-}
-
-.sat-subscription-settings > h1 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 750;
-  letter-spacing: -0.02em;
 }
 
 .sat-subscription-settings > p:not([role]) {
@@ -50,21 +43,29 @@
   overflow-wrap: anywhere;
 }
 
-.sat-subscription-settings > h2,
-.sat-subscription-settings > h3 {
+.sat-subscription-settings__section-title {
   margin: 8px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 15px;
   font-weight: 750;
   letter-spacing: -0.01em;
 }
 
-.sat-subscription-settings > h2 {
+.sat-subscription-settings__section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
-  font-size: 15px;
 }
 
-.sat-subscription-settings > h3 {
-  font-size: 14px;
+.sat-subscription-settings__section-header .sat-subscription-settings__section-title {
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .sat-subscription-settings__supplier {
@@ -220,6 +221,68 @@
   color: color-mix(in srgb, var(--text-dim) 72%, transparent);
 }
 
+.sat-supplier-editor__description {
+  margin: 0 0 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.sat-supplier-editor__fields {
+  display: grid;
+  gap: 12px;
+}
+
+.sat-supplier-editor__field {
+  display: grid;
+  gap: 6px;
+}
+
+.sat-supplier-editor__field > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sat-supplier-editor__field input,
+.sat-supplier-editor__field textarea {
+  width: 100%;
+}
+
+.sat-supplier-editor__field input:disabled,
+.sat-supplier-editor__field textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.sat-supplier-editor__checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sat-supplier-editor__checkbox input {
+  width: 16px;
+  min-height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.sat-supplier-editor__error {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger) 44%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .sat-subscription-settings > label {
   display: inline-flex;
   align-items: center;
@@ -241,7 +304,7 @@
   align-self: flex-start;
 }
 
-.sat-subscription-settings > [role="dialog"] {
+.sat-subscription-settings > .sat-subscription-settings__topup-dialog {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -252,11 +315,11 @@
   background: color-mix(in srgb, var(--primary) 6%, var(--surface));
 }
 
-.sat-subscription-settings > [role="dialog"] > strong {
+.sat-subscription-settings > .sat-subscription-settings__topup-dialog > strong {
   font-size: 13px;
 }
 
-.sat-subscription-settings > [role="dialog"] > div {
+.sat-subscription-settings > .sat-subscription-settings__topup-dialog > div {
   color: var(--text-dim);
   font-size: 12px;
   line-height: 1.55;

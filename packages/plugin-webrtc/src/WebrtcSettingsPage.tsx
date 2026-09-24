@@ -1,42 +1,17 @@
-// packages/plugin-webrtc/src/WebrtcSettingsPage.tsx
-// WebRTC 设置页（施工单 2026-07-04 002 硬切换）。
-//
-// 设计缘由：
-//   - STUN 配置随 active owner 保存（`p2p/setting.json`）；
-//   - 每条 STUN 服务器一行；新增 / 删除 / blur 自动保存——**无 Save 按钮**；
-//   - 提交失败回滚到上一个已落库的真值（与 `OriginSettingsTray` 同样模式）；
-//   - "批量测试"按钮只在本地做 ICE gather 自检，**不**宣称任意两端网络
-//     一定能建立通话。
-//   - **不**支持 TURN：UI 上**不**给 TURN 字段入口；service 测试只发 STUN。
-
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useOptionalCapability } from "webloom-framework/react";
+import { Button, Modal } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
-import {
-  validateStunUrl,
-  type WebrtcConfig
-} from "./webrtcConfig.js";
-import type {
-  StunDiagnosticResult,
-  WebrtcService
-} from "./webrtcService.js";
+import { validateStunUrl, type WebrtcConfig } from "./webrtcConfig.js";
+import type { StunDiagnosticResult, WebrtcService } from "./webrtcService.js";
 
-/** STUN URL 字段的本地字符串编辑态。 */
-type Edits = Record<number, string>;
-
-/**
- * 设置页根组件：拿不到 service → 降级空态；拿到 → 渲染 Inner。
- */
 export function WebrtcSettingsPage(): React.ReactElement {
   const { t } = useI18n();
   const service = useOptionalCapability(WEBRTC_SERVICE_CAPABILITY);
   if (!service) {
     return (
-      <section
-        className="km-webrtc-page"
-        data-webrtc-settings="missing-service"
-      >
+      <section className="km-webrtc-page" data-webrtc-settings="missing-service">
         <p>{t("webrtc.page.settings.desc", { defaultValue: "webrtc service is not available" })}</p>
       </section>
     );
@@ -53,235 +28,171 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
   const [saved, setSaved] = useState<WebrtcConfig>(() => ({
     stunServers: [...service.getStunServers()]
   }));
-  const [draft, setDraft] = useState<string[]>(() => [...saved.stunServers]);
-  /** 行索引 -> 编辑中字符串。命中某行时 input 显示这个；否则显示 draft[i]。 */
-  const [edits, setEdits] = useState<Edits>({});
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [diagResults, setDiagResults] = useState<StunDiagnosticResult[] | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
-  /** config store 变 → 重新拉一次（其它 tab 修改 / 装配层触发 save）。 */
-  const genRef = React.useRef(0);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorValue, setEditorValue] = useState("");
+  const [editorError, setEditorError] = useState<string | null>(null);
+  const [editorTesting, setEditorTesting] = useState(false);
+  const [editorTestResult, setEditorTestResult] = useState<StunDiagnosticResult | null>(null);
 
-  // 订阅 store：被外部更新时同步到本地 draft。
-  // 这里直接在 service 上挂的 subscribe——service 把 store.subscribe 透出。
   useEffect(() => {
-    const refresh = () => {
-      const next: WebrtcConfig = {
-        stunServers: [...service.getStunServers()]
-      };
-      genRef.current += 1;
-      setSaved(next);
-      setDraft([...next.stunServers]);
-      setEdits({});
-      setError(null);
-    };
-    refresh();
+    setSaved({ stunServers: [...service.getStunServers()] });
   }, [service]);
 
-  const onChangeRow = useCallback((i: number, v: string) => {
-    setEdits((cur) => ({ ...cur, [i]: v }));
-  }, []);
+  async function commitConfig(nextServers: string[]): Promise<string | null> {
+    setSaving(true);
+    setError(null);
+    try {
+      await service.applyStunServers(nextServers);
+      setSaved({ stunServers: [...service.getStunServers()] });
+      setDiagResults(null);
+      return null;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      return message;
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  /**
-   * 把第 `i` 行提交到 draft。仅在校验通过时落 draft；删除动作（按 X）
-   * 直接改 draft。`blur` 行为：先校验这一行；如果失败 → 回滚 edits[i]
-   * 到 draft[i]；如果成功 → 写 store。
-   */
-  const onCommitRow = useCallback(
-    async (i: number, display: string) => {
-      setError(null);
-      const trimmed = display.trim();
-      if (trimmed.length === 0) {
-        // 视为"删除"
-        const nextDraft = draft.filter((_, idx) => idx !== i);
-        await commitConfig(nextDraft);
-        return;
-      }
-      const check = validateStunUrl(trimmed);
-      if (!check.ok || check.value === undefined) {
-        // 回滚：把这一行恢复成 draft[i]，记错误。
-        setEdits((cur) => ({ ...cur, [i]: draft[i] ?? "" }));
-        setError(
-          t("webrtc.page.settings.invalid", {
-            defaultValue: check.error ?? "invalid"
-          })
-        );
-        return;
-      }
-      const nextDraft = [...draft];
-      nextDraft[i] = check.value;
-      // 去掉空 / 规范化后重复。
-      const deduped: string[] = [];
-      const seen = new Set<string>();
-      for (const u of nextDraft) {
-        const trimmedU = u.trim();
-        if (trimmedU.length === 0) continue;
-        if (!seen.has(trimmedU)) {
-          seen.add(trimmedU);
-          deduped.push(trimmedU);
-        }
-      }
-      await commitConfig(deduped);
-    },
-    [draft, t]
-  );
+  function openAddEditor() {
+    if (saving) return;
+    setEditorValue("");
+    setEditorError(null);
+    setEditorTestResult(null);
+    setEditorOpen(true);
+  }
 
-  const commitConfig = useCallback(
-    async (nextDraft: string[]) => {
-      const myGen = genRef.current;
-      const prev = saved;
-      setSaving(true);
-      setError(null);
-      try {
-        await service.applyStunServers(nextDraft);
-        if (myGen !== genRef.current) return;
-        const after = { stunServers: [...service.getStunServers()] };
-        setSaved(after);
-        setDraft([...after.stunServers]);
-        setEdits({});
-      } catch (err) {
-        if (myGen !== genRef.current) return;
-        setSaved(prev);
-        setDraft([...prev.stunServers]);
-        setEdits({});
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (myGen === genRef.current) setSaving(false);
-      }
-    },
-    [saved, service]
-  );
+  function closeAddEditor() {
+    if (saving || editorTesting) return;
+    setEditorOpen(false);
+    setEditorValue("");
+    setEditorError(null);
+    setEditorTestResult(null);
+  }
 
-  const onAddRow = useCallback(() => {
-    setDraft((cur) => [...cur, ""]);
-    // 不立刻写 store——空行留作占位，blur 后再 commit。
-  }, []);
+  function changeEditorValue(value: string) {
+    setEditorValue(value);
+    setEditorError(null);
+    setEditorTestResult(null);
+  }
 
-  const onRemoveRow = useCallback(
-    async (i: number) => {
-      const next = draft.filter((_, idx) => idx !== i);
-      await commitConfig(next);
-    },
-    [commitConfig, draft]
-  );
+  async function testEditorServer() {
+    const check = validateStunUrl(editorValue);
+    if (!check.ok || check.value === undefined) {
+      setEditorTestResult(null);
+      setEditorError(t("webrtc.page.settings.invalid", {
+        defaultValue: check.error ?? "invalid"
+      }));
+      return;
+    }
+    if (saved.stunServers.includes(check.value)) {
+      setEditorTestResult(null);
+      setEditorError(t("webrtc.page.settings.stun.duplicate", {
+        defaultValue: "This STUN server is already in the list."
+      }));
+      return;
+    }
 
-  const onRunDiagnostics = useCallback(async () => {
+    setEditorTesting(true);
+    setEditorError(null);
+    setEditorTestResult(null);
+    try {
+      setEditorTestResult(await service.testStunServer(check.value));
+    } catch (err) {
+      setEditorError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEditorTesting(false);
+    }
+  }
+
+  async function saveEditorServer() {
+    const check = validateStunUrl(editorValue);
+    const testedUrl = editorTestResult?.status === "ok" ? editorTestResult.url : null;
+    if (!check.ok || check.value === undefined || testedUrl !== check.value) return;
+    const failure = await commitConfig([...saved.stunServers, check.value]);
+    if (failure) {
+      setEditorError(failure);
+      return;
+    }
+    closeAddEditor();
+  }
+
+  async function removeServer(server: string) {
+    await commitConfig(saved.stunServers.filter((item) => item !== server));
+  }
+
+  async function runAllDiagnostics() {
     setDiagRunning(true);
     setDiagResults(null);
     setError(null);
     try {
-      // 诊断前先 commit 当前 draft，保证 service 用的是最新 STUN。
-      if (draft.length > 0) {
-        await commitConfig(draft);
-      }
-      const res = await service.runStunDiagnostics();
-      setDiagResults(res);
+      setDiagResults(await service.runStunDiagnostics());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setDiagRunning(false);
     }
-  }, [commitConfig, draft, service]);
+  }
 
-  // 把当前 store 真值显示回 draft，便于 UI 立刻反映已成功 commit。
-  useEffect(() => {
-    setDraft([...saved.stunServers]);
-  }, [saved.stunServers]);
-
-  const rows = useMemo(() => {
-    return draft.map((u, i) => ({
-      i,
-      value: edits[i] ?? u,
-      display: edits[i] ?? u
-    }));
-  }, [draft, edits]);
+  const normalizedEditorValue = validateStunUrl(editorValue);
+  const saveEnabled =
+    normalizedEditorValue.ok &&
+    normalizedEditorValue.value !== undefined &&
+    editorTestResult?.status === "ok" &&
+    editorTestResult.url === normalizedEditorValue.value;
 
   return (
     <section className="km-webrtc-page" data-webrtc-settings="main">
-      <div>
-        <h2 style={{ margin: "0 0 8px 0", fontSize: 16 }}>
-          {t("webrtc.page.settings.field.stun.label", { defaultValue: "STUN servers" })}
-        </h2>
-        <div>
-          {rows.map((row) => (
-            <div key={`row-${row.i}`} className="km-webrtc-page__stun-row">
-              <input
-                className="km-webrtc-page__input km-webrtc-page__stun-row__url"
-                type="text"
-                value={row.display}
-                onChange={(e) => onChangeRow(row.i, e.currentTarget.value)}
-                onBlur={(e) => {
-                  const v = e.currentTarget.value;
-                  void onCommitRow(row.i, v);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    const v = e.currentTarget.value;
-                    void onCommitRow(row.i, v);
-                    (e.currentTarget as HTMLInputElement).blur();
-                  }
-                }}
-                placeholder={t("webrtc.page.settings.field.stun.placeholder", {
-                  defaultValue: "stun:host:port"
-                })}
-                disabled={saving}
-              />
-              <button
-                type="button"
-                className="km-webrtc-page__button"
-                onClick={() => void onRemoveRow(row.i)}
-                disabled={saving}
-                aria-label={t("webrtc.page.settings.field.stun.remove", {
-                  defaultValue: "Remove"
-                })}
-              >
-                {t("webrtc.page.settings.field.stun.remove", { defaultValue: "Remove" })}
-              </button>
-            </div>
-          ))}
-          <div className="km-webrtc-page__row" style={{ marginTop: 8 }}>
-            <button
-              type="button"
-              className="km-webrtc-page__button"
-              onClick={onAddRow}
-              disabled={saving}
-            >
-              {t("webrtc.page.settings.field.stun.add", { defaultValue: "Add" })}
-            </button>
-          </div>
-        </div>
+      <div className="km-webrtc-page__section-header">
+        <h3>{t("webrtc.page.settings.field.stun.label", { defaultValue: "STUN servers" })}</h3>
+        <Button size="sm" onClick={openAddEditor} disabled={saving}>
+          {t("webrtc.page.settings.stun.add", { defaultValue: "Add STUN server" })}
+        </Button>
       </div>
 
-      {error ? <div className="km-webrtc-page__error">{error}</div> : null}
+      <div className="km-webrtc-page__stun-list">
+        {saved.stunServers.map((server) => (
+          <div key={server} className="km-webrtc-page__stun-row">
+            <code>{server}</code>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void removeServer(server)}
+              disabled={saving}
+            >
+              {t("webrtc.page.settings.field.stun.remove", { defaultValue: "Remove" })}
+            </Button>
+          </div>
+        ))}
+      </div>
 
-      <div>
-        <button
-          type="button"
-          className="km-webrtc-page__button km-webrtc-page__button--primary"
-          onClick={() => void onRunDiagnostics()}
+      {error ? <div className="km-webrtc-page__error" role="alert">{error}</div> : null}
+
+      <div className="km-webrtc-page__diagnostics">
+        <Button
+          variant="secondary"
+          onClick={() => void runAllDiagnostics()}
           disabled={diagRunning}
+          loading={diagRunning}
         >
           {diagRunning
             ? t("webrtc.page.settings.actions.testAll.running", { defaultValue: "Testing…" })
             : t("webrtc.page.settings.actions.testAll", { defaultValue: "Test all STUN" })}
-        </button>
+        </Button>
         {diagResults ? (
-          <div style={{ marginTop: 12 }}>
+          <div className="km-webrtc-page__diagnostic-results">
             <table className="km-webrtc-page__stun-table">
               <tbody>
-                {diagResults.map((r) => (
-                  <tr key={`diag-${r.url}`}>
-                    <td className="km-webrtc-page__stun-row__url">
-                      <code>{r.url}</code>
-                    </td>
-                    <td
-                      className={`km-webrtc-page__stun-row__status km-webrtc-page__stun-row__status--${r.status}`}
-                    >
-                      {t(`webrtc.page.settings.diag.${r.status}`, {
-                        defaultValue: r.status
-                      })}
+                {diagResults.map((result) => (
+                  <tr key={result.url}>
+                    <td className="km-webrtc-page__stun-row__url"><code>{result.url}</code></td>
+                    <td className={`km-webrtc-page__stun-row__status km-webrtc-page__stun-row__status--${result.status}`}>
+                      {t(`webrtc.page.settings.diag.${result.status}`, { defaultValue: result.status })}
                     </td>
                   </tr>
                 ))}
@@ -289,13 +200,72 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
             </table>
             <p className="km-webrtc-page__hint">
               {t("webrtc.page.settings.diag.note", {
-                defaultValue:
-                  "this only verifies STUN availability locally"
+                defaultValue: "This only verifies STUN availability locally."
               })}
             </p>
           </div>
         ) : null}
       </div>
+
+      <Modal
+        open={editorOpen}
+        title={t("webrtc.page.settings.stun.add", { defaultValue: "Add STUN server" })}
+        onClose={closeAddEditor}
+        data-testid="webrtc-stun-editor"
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeAddEditor} disabled={saving || editorTesting}>
+              {t("common.action.cancel", { defaultValue: "Cancel" })}
+            </Button>
+            <Button
+              onClick={() => void saveEditorServer()}
+              disabled={!saveEnabled || saving || editorTesting}
+              loading={saving}
+            >
+              {t("webrtc.page.settings.stun.save", { defaultValue: "Save STUN server" })}
+            </Button>
+          </>
+        }
+      >
+        <p className="webrtc-stun-editor__description">
+          {t("webrtc.page.settings.stun.description", {
+            defaultValue: "Enter a STUN server URL and test it before saving."
+          })}
+        </p>
+        <label className="webrtc-stun-editor__field">
+          <span>{t("webrtc.page.settings.stun.url", { defaultValue: "STUN server URL" })}</span>
+          <input
+            className="km-webrtc-page__input"
+            aria-label={t("webrtc.page.settings.stun.url", { defaultValue: "STUN server URL" })}
+            placeholder={t("webrtc.page.settings.field.stun.placeholder", { defaultValue: "stun:host:port" })}
+            value={editorValue}
+            disabled={saving || editorTesting}
+            autoFocus
+            onChange={(event) => changeEditorValue(event.currentTarget.value)}
+          />
+        </label>
+        <Button
+          variant="secondary"
+          onClick={() => void testEditorServer()}
+          disabled={saving || editorTesting}
+          loading={editorTesting}
+        >
+          {editorTesting
+            ? t("webrtc.page.settings.actions.test.running", { defaultValue: "Testing…" })
+            : t("webrtc.page.settings.actions.test", { defaultValue: "Test STUN server" })}
+        </Button>
+        {editorTestResult ? (
+          <div
+            className={`webrtc-stun-editor__result webrtc-stun-editor__result--${editorTestResult.status}`}
+            role="status"
+          >
+            {t(`webrtc.page.settings.diag.${editorTestResult.status}`, {
+              defaultValue: editorTestResult.status
+            })}
+          </div>
+        ) : null}
+        {editorError ? <p className="webrtc-stun-editor__error" role="alert">{editorError}</p> : null}
+      </Modal>
     </section>
   );
 }

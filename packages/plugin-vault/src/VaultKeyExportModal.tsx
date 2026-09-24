@@ -74,7 +74,7 @@ export function VaultKeyExportModal({
       const a = document.createElement("a");
       const slug = safeSlug(keyLabel || publicKeyHex.slice(0, 8));
       a.href = url;
-      a.download = `keymaster-key-${slug}-${fileTimestamp()}.json`;
+      a.download = `keymaster-private-key-${slug}-${fileTimestamp()}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -91,7 +91,7 @@ export function VaultKeyExportModal({
   return (
     <Modal
       open={open}
-      title={t("vault.keyExport.title", { defaultValue: "导出备份" })}
+      title={t("vault.keyExport.title", { defaultValue: "导出私钥" })}
       onClose={close}
       footer={
         <>
@@ -99,13 +99,13 @@ export function VaultKeyExportModal({
             {t("common.action.cancel", { defaultValue: "取消" })}
           </Button>
           <Button onClick={submit} loading={busy}>
-            {t("vault.keyExport.submit", { defaultValue: "下载备份文件" })}
+            {t("vault.keyExport.submit", { defaultValue: "导出私钥" })}
           </Button>
         </>
       }
     >
       <p className="vault-export-modal__hint">
-        {t("vault.keyExport.hint", { defaultValue: "导出当前 Catalog Hold Key 的加密备份。" })}
+        {t("vault.keyExport.hint", { defaultValue: "将下载当前私钥的加密备份。文件不包含明文私钥，但必须与对应凭据一起妥善保管。" })}
       </p>
       {error ? <p className="vault-export-modal__error">{error}</p> : null}
     </Modal>

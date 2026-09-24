@@ -8,7 +8,6 @@ import type {
   AssetDataInvalidationEvent,
   AssetDataNotifier,
   AssetRegistry,
-  ApplicationSettingsRegistry,
   BreadcrumbRegistry,
   BusinessFeatureRegistry,
   ChannelRuntime,
@@ -78,7 +77,6 @@ export interface PluginHost {
   systemSettings: SystemSettingsRegistry;
   systemStatus: SystemStatusRegistry;
   vaultSettings: VaultSettingsRegistry;
-  applicationSettings: ApplicationSettingsRegistry;
   home: import("./registries/homeRegistry.js").HomeRegistry;
   business: BusinessFeatureRegistry;
   commands: CommandRegistry;

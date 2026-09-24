@@ -71,12 +71,12 @@ async function expectUnlocked(page: Page, label: string): Promise<void> {
   ).toBeVisible({ timeout: 20_000 });
 }
 
-/** 打开系统设置并断言缺省 bsv8 供应商可见（含默认标记）。 */
+/** 打开广播网关并断言缺省 bsv8 供应商可见（含默认标记）。 */
 async function expectDefaultSupplierVisible(page: Page, label: string): Promise<void> {
   await openSettingsPage(page, {
-    label: /^System$|^系统$/u,
-    path: /\/settings\/system$/u,
-    heading: /^System$|^系统$/u,
+    label: /^Broadcast gateway$|^广播网关$/u,
+    path: /\/settings\/system-status$/u,
+    heading: /^Broadcast gateway$|^广播网关$/u,
   });
   const settings = page.locator(".sat-subscription-settings");
   await expect(settings, `${label} 必须显示 SatSubscription 设置区`).toBeVisible({ timeout: 20_000 });
@@ -137,7 +137,7 @@ test(JOURNEY_ID + "：缺省 SatSubscription、刷新锁定与多 tab 共享解�
 
     await test.step("B 在 A 已解锁时打开：共享解锁且能看到缺省供应商", async () => {
       pageTwo = await context.newPage();
-      await pageTwo.goto("/settings/system", { waitUntil: "domcontentloaded" });
+      await pageTwo.goto("/settings/system-status", { waitUntil: "domcontentloaded" });
       await expectUnlocked(pageTwo, "tab B 首次打开");
       await expectDefaultSupplierVisible(pageTwo, "tab B 首次打开");
     });

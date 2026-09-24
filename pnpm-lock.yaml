@@ -541,8 +541,8 @@ importers:
         specifier: 0.6.0
         version: 0.6.0
       go-bitfs:
-        specifier: file:../../../go-bitfs/typescript
-        version: file:../go-bitfs/typescript(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.2
+        version: 0.3.2(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       masterseed:
         specifier: 1.1.0
         version: 1.1.0
@@ -2792,8 +2792,8 @@ packages:
     deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
     hasBin: true
 
-  go-bitfs@file:../go-bitfs/typescript:
-    resolution: {directory: ../go-bitfs/typescript, type: directory}
+  go-bitfs@0.3.2:
+    resolution: {integrity: sha512-t4wm0OTRyvN57WHshH/OMdqlVgmS7ZfPAB7DpRHzZW+D2bJg8lC9xL3fm8jIVBGRcVFFXHxLXylzRFuXhjIWbg==}
 
   gopd@1.2.0:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
@@ -6601,7 +6601,7 @@ snapshots:
       package-json-from-dist: 1.0.1
       path-scurry: 1.11.1
 
-  go-bitfs@file:../go-bitfs/typescript(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+  go-bitfs@0.3.2(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@bsv/sdk': 2.0.5
       '@noble/curves': 2.0.1

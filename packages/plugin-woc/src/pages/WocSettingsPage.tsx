@@ -1,19 +1,18 @@
 // packages/plugin-woc/src/pages/WocSettingsPage.tsx
 // WOC 设置页面：URL、频率、队列快照。
 // 设计缘由：WOC 配置是 WOC 服务配置，必须独立于 P2PKH 设置页。
-// 错误信息使用英文（validateWocBaseUrl/validateRequestsPerSecond 抛英文错），
-// 页面展示文案走 i18n。
+// 错误信息使用英文（请求频率校验抛英文错），页面展示文案走 i18n。
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalCapability } from "webloom-framework/react";
 import { useI18n, useLocale } from "@keymaster/runtime";
 import { WOC_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
-import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } from "../wocSettings.js";
+import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond } from "../wocSettings.js";
 
 export function WocSettingsPage() {
   const { t } = useI18n();
-  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统设置
+  // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在 BSV 链
   // 页面上，必须按"暂不可用"渲染而不是抛错。
   const service = useOptionalCapability(WOC_CAPABILITY);
   const coordinator = useOptionalCapability(WOC_COORDINATOR_CONTROL_CAPABILITY);
@@ -40,27 +39,26 @@ function WocSettingsPageInner({
     () => new Intl.DateTimeFormat(locale, { timeStyle: "medium" }),
     [locale]
   );
-  const [draft, setDraft] = useState<WocConfig>(service.getConfig());
+  const [draft, setDraft] = useState<WocConfig>({ ...service.getConfig(), baseUrl: DEFAULT_WOC_CONFIG.baseUrl });
   const [error, setError] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<WocQueueSnapshot>(service.getQueueSnapshot());
 
   useEffect(() => {
-    setDraft(service.getConfig());
+    setDraft({ ...service.getConfig(), baseUrl: DEFAULT_WOC_CONFIG.baseUrl });
   }, [service]);
 
   useEffect(() => {
     let alive = true;
     void coordinator.p2pkhProviderConfigGet("woc").then((result) => {
       if (!alive || result.status !== "ok") return;
-      const endpoint = typeof result.value.endpoint === "string" ? result.value.endpoint : service.getConfig().baseUrl;
       const requestsPerSecond = typeof result.value.requestsPerSecond === "number" ? result.value.requestsPerSecond : service.getConfig().requestsPerSecond;
-      setDraft({ baseUrl: endpoint, requestsPerSecond });
+      setDraft({ baseUrl: DEFAULT_WOC_CONFIG.baseUrl, requestsPerSecond });
     });
     return () => { alive = false; };
   }, [coordinator, service]);
 
   useEffect(() => {
-    return service.onConfigChange((c) => setDraft(c));
+    return service.onConfigChange((c) => setDraft({ ...c, baseUrl: DEFAULT_WOC_CONFIG.baseUrl }));
   }, [service]);
 
   useEffect(() => {
@@ -68,21 +66,17 @@ function WocSettingsPageInner({
   }, [service]);
 
   async function apply(next: WocConfig) {
-    const previous = service.getConfig();
-    setDraft(next);
+    const previous = { ...service.getConfig(), baseUrl: DEFAULT_WOC_CONFIG.baseUrl };
+    const nextConfig = { ...next, baseUrl: DEFAULT_WOC_CONFIG.baseUrl };
+    setDraft(nextConfig);
     setError(null);
-    const urlCheck = validateWocBaseUrl(next.baseUrl);
-    if (!urlCheck.ok) {
-      setError(urlCheck.error);
-      return;
-    }
-    const rateCheck = validateRequestsPerSecond(next.requestsPerSecond);
+    const rateCheck = validateRequestsPerSecond(nextConfig.requestsPerSecond);
     if (!rateCheck.ok) {
       setError(rateCheck.error);
       return;
     }
     try {
-      const result = await coordinator.p2pkhProviderConfigUpdate("woc", { endpoint: urlCheck.value, requestsPerSecond: rateCheck.value });
+      const result = await coordinator.p2pkhProviderConfigUpdate("woc", { endpoint: DEFAULT_WOC_CONFIG.baseUrl, requestsPerSecond: rateCheck.value });
       if (result.status !== "accepted" && result.status !== "ok") {
         setDraft(previous);
         setError("message" in result ? result.message : "Coordinator configuration update failed");
@@ -94,7 +88,7 @@ function WocSettingsPageInner({
       return;
     }
     // Coordinator 已确认持久化成功后，才更新 actor 的运行时配置。
-    service.updateConfig({ baseUrl: urlCheck.value, requestsPerSecond: rateCheck.value });
+    service.updateConfig({ baseUrl: DEFAULT_WOC_CONFIG.baseUrl, requestsPerSecond: rateCheck.value });
   }
 
   function reset() {
@@ -105,10 +99,9 @@ function WocSettingsPageInner({
     <div className="woc-settings">
       <TextInput
         label={t("woc.field.baseUrl", { defaultValue: "WOC base URL" })}
-        description={t("woc.field.baseUrlDesc", { defaultValue: "网络路径之前的根 URL；缺省 https://api.whatsonchain.com/v1/bsv" })}
-        value={draft.baseUrl}
-        onChange={(e) => setDraft((current) => ({ ...current, baseUrl: e.currentTarget.value }))}
-        onBlur={() => void apply(draft)}
+        description={t("woc.field.baseUrlDesc", { defaultValue: "固定地址：https://api.whatsonchain.com/v1/bsv" })}
+        value={DEFAULT_WOC_CONFIG.baseUrl}
+        readOnly
       />
       <TextInput
         label={t("woc.field.rps", { defaultValue: "每秒请求数" })}

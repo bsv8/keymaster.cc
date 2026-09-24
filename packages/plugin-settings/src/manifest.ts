@@ -1,8 +1,9 @@
 // packages/plugin-settings/src/manifest.ts
 // 设置页（硬切换 003）：
-//   - 不再有 /settings 聚合页。
+//   - 不再有 /settings 聚合页，也不再有 /settings/apps 应用设置目录。
 //   - plugin-settings 通过 business.registry 提供「设置」业务域。
-//   - 系统设置、应用设置、插件设置和系统状态各自拥有明确的新导航入口。
+//   - 插件设置、广播网关及其他配置各自拥有明确的新导航入口；
+//     bsv-price / poker 等业务插件的设置页直接挂到「设置」域下。
 //   - 不再向 breadcrumb.registry 注册指向 /settings 的可点击父级。
 //
 // 设计缘由：
@@ -17,16 +18,11 @@ import type {
   PluginSetup,
 } from "@keymaster/contracts";
 import {
-  APPLICATION_SETTINGS_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import { PluginManagerPage } from "./PluginManagerPage.js";
-import { LanguageSection } from "./LanguageSection.js";
-import { SystemSettingsPage } from "./SystemSettingsPage.js";
 import { SystemStatusPage } from "./SystemStatusPage.js";
-import { ApplicationSettingsPage } from "./ApplicationSettingsPage.js";
 
 /** 设置 i18n 资源。设计缘由：route / menu / 设置项 label 全部走 I18nText。 */
 const settingsResources: I18nPluginResources = {
@@ -36,27 +32,14 @@ const settingsResources: I18nPluginResources = {
   namespace: "common",
   resources: {
     en: {
-      "settings.route.language": "Language",
       "settings.route.plugins": "Plugins",
       "settings.business.domain": "Settings",
-      "settings.system.title": "System",
-      "settings.system.description": "Changes take effect immediately.",
-      "settings.system.group.language": "Language",
       "settings.business.plugins": "Plugin settings",
-      "settings.applicationSettings.title": "Application settings",
-      "settings.applicationSettings.description": "Choose an application to configure.",
-      "settings.applicationSettings.directory": "Configured applications",
-      "settings.applicationSettings.count": "{{count}} apps",
-      "settings.applicationSettings.open": "Open {{name}} settings",
-      "settings.applicationSettings.empty.title": "No application settings",
-      "settings.applicationSettings.empty.description": "Enabled applications with settings will appear here.",
-      "settings.systemStatus.title": "System status",
-      "settings.systemStatus.description": "Live status for always-on system modules.",
-      "settings.systemStatus.empty": "No system status modules are available.",
-      "settings.menu.language": "Language",
+      "settings.systemStatus.title": "Broadcast gateway",
+      "settings.systemStatus.description": "Manage broadcast gateway suppliers and service status.",
+      "settings.systemStatus.empty": "No broadcast gateway modules are available.",
       "settings.menu.plugins": "Plugins",
       "settings.crumb.settings": "Settings",
-      "settings.crumb.language": "Language",
       "settings.crumb.plugins": "Plugins",
       "settings.language.title": "Language",
       "settings.language.description": "Choose display language. Affects all UI text; switch is instant.",
@@ -104,26 +87,13 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.state.registered": "Registered",
     },
     "zh-CN": {
-      "settings.route.language": "语言",
       "settings.route.plugins": "插件",
       "settings.business.domain": "设置",
-      "settings.system.title": "系统",
-      "settings.system.description": "修改会立即生效。",
-      "settings.system.group.language": "语言",
       "settings.business.plugins": "插件设置",
-      "settings.applicationSettings.title": "应用设置",
-      "settings.applicationSettings.description": "选择要配置的应用。",
-      "settings.applicationSettings.directory": "已配置的应用",
-      "settings.applicationSettings.count": "{{count}} 个应用",
-      "settings.applicationSettings.open": "打开 {{name}} 设置",
-      "settings.applicationSettings.empty.title": "暂无应用设置",
-      "settings.applicationSettings.empty.description": "已启用且提供设置的应用会显示在这里。",
-      "settings.systemStatus.title": "系统状态",
-      "settings.systemStatus.description": "查看常驻系统模块的实时状态。",
-      "settings.systemStatus.empty": "当前没有可用的系统状态模块。",
-      "settings.menu.language": "语言",
+      "settings.systemStatus.title": "广播网关",
+      "settings.systemStatus.description": "管理广播网关供应商与服务状态。",
+      "settings.systemStatus.empty": "当前没有可用的广播网关模块。",
       "settings.menu.plugins": "插件",
-      "settings.crumb.language": "语言",
       "settings.crumb.settings": "设置",
       "settings.crumb.plugins": "插件",
       "settings.language.title": "语言",
@@ -174,7 +144,7 @@ const settingsResources: I18nPluginResources = {
 const settingsPluginDefinition = {
   id: "settings",
   name: "Settings",
-  description: "系统级设置页：语言、插件管理。",
+  description: "插件管理、广播网关及其他独立设置入口。",
   kind: "core",
   startup: "optional",
   bootstrapStage: "vault-selection",
@@ -186,8 +156,6 @@ const settingsPluginDefinition = {
     runtime: "window-main",
     scopeKind: "root",
     dependencies: defineRuntimeUnitDependencies([
-      { capability: SYSTEM_SETTINGS_REGISTRY_CAPABILITY, reason: "注册系统语言设置" },
-      { capability: APPLICATION_SETTINGS_REGISTRY_CAPABILITY, reason: "展示应用设置目录" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为设置详情页提供面包屑" },
     ]),
     business: {
@@ -196,30 +164,14 @@ const settingsPluginDefinition = {
         label: { key: "settings.business.domain", fallback: "Settings" },
         order: 900,
         features: [{
-          id: "settings.system",
-          label: { key: "settings.system.title", fallback: "System" },
-          order: 10,
-          icon: "Settings",
-          entry: { path: "/settings/system", component: SystemSettingsPage }
-        }, {
-          id: "settings.application-settings",
-          label: { key: "settings.applicationSettings.title", fallback: "Application settings" },
-          order: 20,
-          icon: "PanelsTopLeft",
-          entry: {
-            path: "/settings/apps",
-            component: ApplicationSettingsPage,
-            activeWhen: (path) => path.startsWith("/settings/apps/")
-          }
-        }, {
           id: "settings.plugins",
           label: { key: "settings.business.plugins", fallback: "Plugin settings" },
-          order: 30,
+          order: 40,
           icon: "Puzzle",
           entry: { path: "/settings/plugins", component: PluginManagerPage }
         }, {
           id: "settings.system-status",
-          label: { key: "settings.systemStatus.title", fallback: "System status" },
+          label: { key: "settings.systemStatus.title", fallback: "Broadcast gateway" },
           order: 50,
           icon: "Activity",
           entry: { path: "/settings/system-status", component: SystemStatusPage }
@@ -229,34 +181,10 @@ const settingsPluginDefinition = {
   }],
   i18n: settingsResources,
   setup(ctx) {
-    const systemSettings = ctx.capability(SYSTEM_SETTINGS_REGISTRY_CAPABILITY);
-    systemSettings.register({
-      id: "settings.system.language",
-      group: {
-        id: "language",
-        label: { key: "settings.system.group.language", fallback: "Language" },
-        order: 10
-      },
-      label: { key: "settings.language.title", fallback: "Language" },
-      description: { key: "settings.language.description", fallback: "Choose display language. Switch is instant." },
-      component: LanguageSection,
-      order: 10,
-      replacesSettingsRouteId: "settings.language",
-      visibleWhen: () => true
-    });
     // 面包屑：当前路径匹配时第一段固定为不可点击的"设置"分类节点。
     // 这样 plugin 的 settings breadcrumb 不再回指不存在的 /settings，
-    // 同时与 /settings/apps/poker 等其它设置详情页保持一致的第一段样式。
+    // 同时与 /settings/poker 等其它设置详情页保持一致的第一段样式。
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
-    breadcrumbs.register({
-      id: "settings.application-settings.crumbs",
-      order: 5,
-      match: (path) => path === "/settings/apps",
-      resolve: () => [
-        { label: { key: "settings.crumb.settings", fallback: "Settings" } },
-        { label: { key: "settings.applicationSettings.title", fallback: "Application settings" } }
-      ]
-    });
     breadcrumbs.register({
       id: "settings.plugins.crumbs",
       order: 5,

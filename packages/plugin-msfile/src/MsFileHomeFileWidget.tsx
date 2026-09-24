@@ -1021,7 +1021,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
       {configurationState === "unavailable" ? (
         <div className="msfile-home-file__notice" role="status">
           <p>{t("msfile.home.config.unavailable", { defaultValue: "MSFile 当前不可用，请稍后重试。" })}</p>
-          <AppLink to="/settings/system">{t("msfile.home.settings", { defaultValue: "打开 MSFile 设置" })}</AppLink>
+          <AppLink to="/settings/local-files">{t("msfile.home.settings", { defaultValue: "打开本地文件设置" })}</AppLink>
         </div>
       ) : null}
       {configurationState === "unconfigured" ? (
@@ -1030,7 +1030,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
             ? t("msfile.home.config.priceMissing", { defaultValue: "请先保存全局 Seed/Block 金额上限。" })
             : t("msfile.home.config.supplierMissing", { defaultValue: "请先启用至少一个供应商。" })}</p>
           <p>{t("msfile.home.config.bitfsIndependent", { defaultValue: "BitFS 需求广播不依赖普通 MSFile 供应商；本地缺失时仍可收集 BitFS 报价。" })}</p>
-          <AppLink to="/settings/system">{t("msfile.home.settings", { defaultValue: "打开 MSFile 设置" })}</AppLink>
+          <AppLink to="/settings/local-files">{t("msfile.home.settings", { defaultValue: "打开本地文件设置" })}</AppLink>
         </div>
       ) : null}
 

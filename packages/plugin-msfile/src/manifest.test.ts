@@ -81,12 +81,22 @@ describe("msfilePlugin manifest", () => {
       order: 0,
       features: [],
     });
+    host.business.register("settings", {
+      id: "settings",
+      label: { key: "test.settings", fallback: "Settings" },
+      order: 900,
+      features: [],
+    });
 
     await host.register(msfilePlugin);
 
     expect(host.state("msfile").kind).toBe("enabled");
     expect(host.routes.byId("msfile.home.file")?.path).toBe("/msfile/files");
     expect(host.routes.byId("msfile.bucket.storage")?.path).toBe("/msfile/storage");
+    expect(host.routes.byId("msfile.settings")?.path).toBe("/settings/local-files");
+    expect(host.business.listDomains().find((domain) => domain.id === "settings")?.features.map((feature) => feature.id)).toContain("settings.msfile");
+    expect(host.systemSettings._ids()).not.toContain("msfile.system-settings");
+    expect(host.breadcrumbs.match("/settings/local-files")?.id).toBe("msfile.settings.crumbs");
     expect(host.business.listHomeProjections().map((projection) => projection.id)).toContain("msfile.file-fetch");
     expect(host.business.listHomeProjections().map((projection) => projection.id)).toContain("msfile.bucket-storage");
     expect(host.capabilities.has(MSFILE_SERVICE_CAPABILITY)).toBe(true);
@@ -96,6 +106,8 @@ describe("msfilePlugin manifest", () => {
     expect(await host.disable("msfile")).toEqual({ ok: false, reason: "Plugin is marked canDisable=false" });
 
     expect(host.routes.byId("msfile.home.file")?.path).toBe("/msfile/files");
+    expect(host.routes.byId("msfile.settings")?.path).toBe("/settings/local-files");
+    expect(host.business.listDomains().find((domain) => domain.id === "settings")?.features.map((feature) => feature.id)).toContain("settings.msfile");
     expect(host.business.listHomeProjections().map((projection) => projection.id)).toContain("msfile.file-fetch");
     expect(host.capabilities.has(MSFILE_SERVICE_CAPABILITY)).toBe(true);
   });
