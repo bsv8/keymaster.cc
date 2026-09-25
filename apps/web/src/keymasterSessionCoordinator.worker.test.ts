@@ -2124,7 +2124,7 @@ describe("Session Coordinator worker", () => {
 
   it("isolates a submitting P2PKH submission when the broadcast provider fails", async () => {
     __testResetState();
-    const owner = "e".repeat(64);
+    const owner = validPublisherKey(41);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `failed-broadcast-${Date.now()}`;
     const rawTxHex = makeTestP2pkhRawTx("ab".repeat(32));
@@ -2148,7 +2148,7 @@ describe("Session Coordinator worker", () => {
 
   it("keeps input claims after a failed broadcast (claims survive)", async () => {
     __testResetState();
-    const owner = "d".repeat(64);
+    const owner = validPublisherKey(42);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `failed-claims-${Date.now()}`;
     const inputTxid = "ef".repeat(32);
@@ -2232,7 +2232,7 @@ describe("Session Coordinator worker", () => {
 
   it("creates the write-ahead submission from the page broadcast payload", async () => {
     __testResetState();
-    const owner = "a1".repeat(32);
+    const owner = validPublisherKey(43);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `page-payload-${Date.now()}`;
     // 页面本地提交只存在于页面内存；Worker 必须能从请求负载重建审计记录。
@@ -2278,7 +2278,7 @@ describe("Session Coordinator worker", () => {
 
   it("confirms a submitting P2PKH submission when the broadcast provider accepts", async () => {
     __testResetState();
-    const owner = "f".repeat(64);
+    const owner = validPublisherKey(44);
     __testSetVaultStatus("unlocked", owner);
     const submissionId = `double-axis-${Date.now()}`;
     const rawTxHex = makeTestP2pkhRawTx("fc".repeat(32));

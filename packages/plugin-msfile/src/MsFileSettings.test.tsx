@@ -4,7 +4,7 @@
 // 设置页交互：空金额不得变成 0、供应商表单提交形状、App override 编辑与恢复继承。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import type {
   MsFileAppAuthorizationView,
@@ -193,8 +193,12 @@ describe("MsFileSettings", () => {
     state.service = service;
     render(<MsFileSettings />);
     await waitFor(() => expect(screen.getByDisplayValue("5000")).toBeTruthy());
-    // 四项读取并发 + 卖方报价有效期/最大并发销售数。
-    expect(screen.getAllByRole("spinbutton")).toHaveLength(6);
+    // 四项读取并发 + 卖方报价有效期/最大并发销售数。计数限定在「读取性能」与
+    // 「出售本地文件」两个 region 内，BitFS 买方设置后续再加数字输入也不会误伤。
+    const performance = within(screen.getByRole("region", { name: "读取性能" }));
+    expect(performance.getAllByRole("spinbutton")).toHaveLength(4);
+    const selling = within(screen.getByRole("region", { name: "出售本地文件" }));
+    expect(selling.getAllByRole("spinbutton")).toHaveLength(2);
     expect(screen.getByText("全局 Stat 查询并发数")).toBeTruthy();
     expect(screen.getByText("Keymaster 同时处理的 Stat 查询任务数量。每个查询仍会询问所有已启用的 Supplier。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保存播放策略/ })).toBeNull();
