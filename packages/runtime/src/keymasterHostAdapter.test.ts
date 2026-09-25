@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { defineCapability } from "webloom-framework";
 import { createPluginIntentController, createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
 import type { PluginIntentCoordinator } from "webloom-framework";
-import { defineRuntimeUnitDependencies, type PluginSetup } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies, type CoordinatorUnitUnavailableReason, type PluginSetup } from "@keymaster/contracts";
 import { createKeymasterPluginHost } from "./keymasterHostAdapter.js";
 import { getWebLoomHost } from "./pluginHostContract.js";
 
@@ -180,8 +180,10 @@ describe("Keymaster WebLoom v4 adapter", () => {
       snapshotRevision: number;
       serviceIds: string[];
       taskIds: string[];
+      dependsOn: string[];
+      reasons: CoordinatorUnitUnavailableReason[];
       instanceId: string;
-      state: "ready" | "starting" | "failed";
+      state: "ready" | "failed";
     }[] = [{
       productId: "split-plugin",
       unitId: "split-plugin.worker",
@@ -190,6 +192,8 @@ describe("Keymaster WebLoom v4 adapter", () => {
       snapshotRevision: 1,
       serviceIds: [],
       taskIds: [],
+      dependsOn: [],
+      reasons: [],
       instanceId: "worker-instance:1",
       state: "ready",
     }];

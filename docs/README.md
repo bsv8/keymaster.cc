@@ -31,4 +31,3 @@
 
 - [BitFS 本地 MSFile 与卖方模式需求](./proposals/msfile/BitFS本地代理与卖方模式需求.md)
 - [BitFS 本地 MSFile 与卖方模式施工单](./proposals/msfile/BitFS本地代理与卖方模式施工单.md)
-- [单元可用性统一判定](./proposals/coordinator/单元可用性统一判定.md)

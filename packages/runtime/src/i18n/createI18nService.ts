@@ -58,7 +58,16 @@ const PLATFORM_RESOURCES: I18nPluginResources = {
       "common.status.empty": "No data",
       "common.locale.en": "English",
       "common.locale.zh-CN": "Simplified Chinese",
-      "common.menu.close": "Close menu"
+      "common.menu.close": "Close menu",
+      // 单元可用性原因。key 带完整前缀落在 common namespace，因此不依赖
+      // `coordinator` namespace 是否被注册。
+      "coordinator.unitUnavailable.pluginDisabled": "Plugin disabled: {{product}}",
+      "coordinator.unitUnavailable.dependencyDisabled": "Required plugin disabled: {{product}}",
+      "coordinator.unitUnavailable.dependencyNotReady": "Required runtime unit is not ready: {{unit}}",
+      "coordinator.unitUnavailable.storageRootUnavailable": "Storage root is not ready",
+      "coordinator.unitUnavailable.ownerSessionUnavailable": "Vault is not unlocked",
+      "coordinator.unitUnavailable.unitNotReady": "Runtime unit has not finished starting",
+      "coordinator.unitUnavailable.unitUnknown": "Runtime unit is not registered"
     },
     "zh-CN": {
       "common.action.save": "保存",
@@ -77,7 +86,14 @@ const PLATFORM_RESOURCES: I18nPluginResources = {
       "common.status.empty": "暂无数据",
       "common.locale.en": "English",
       "common.locale.zh-CN": "简体中文",
-      "common.menu.close": "关闭菜单"
+      "common.menu.close": "关闭菜单",
+      "coordinator.unitUnavailable.pluginDisabled": "插件已停用：{{product}}",
+      "coordinator.unitUnavailable.dependencyDisabled": "依赖的插件已停用：{{product}}",
+      "coordinator.unitUnavailable.dependencyNotReady": "依赖的运行单元尚未就绪：{{unit}}",
+      "coordinator.unitUnavailable.storageRootUnavailable": "中央存储尚未就绪",
+      "coordinator.unitUnavailable.ownerSessionUnavailable": "保险库尚未解锁",
+      "coordinator.unitUnavailable.unitNotReady": "运行单元尚未启动完成",
+      "coordinator.unitUnavailable.unitUnknown": "运行单元未登记：{{unit}}"
     }
   }
 };

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
@@ -25,12 +26,17 @@ import {
   __testDispatchMsfileData,
   __testDispatchMsfileGrant,
   __testDispatchMsfileSessionAbort,
+  __testEnsureSatRuntime,
+  __testReleaseSatRuntime,
+  __testAwaitMsfileSellerDependencyResume,
   __testReleaseMsfileRuntime,
   __testSetMsfileReadConcurrencySettings,
   __testSetMsfileRuntimeOverride,
   __testBuildChannelPublicMessageTimes,
   __testBuildChannelSeenMessageKey,
 } from "./keymasterSessionCoordinator.worker.js";
+import { COORDINATOR_WORKER_UNIT_CATALOG } from "./coordinator/workerUnitCatalog.js";
+import { CoordinatorUnitUnavailableError, isCoordinatorUnitUnavailableError } from "./coordinator/workerUnitAvailability.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { calcTxidFromRawTxHex } from "@keymaster/plugin-p2pkh/coordinator";
 import { HASH_REQUEST_CHANNEL, messageIDFromBytes, newMessageID, newSessionID, parsePrivateKey, parsePublicKey, parseSHA256Hash } from "bsv8-channel-protocol";
@@ -223,6 +229,29 @@ const TEST_PRIV_2 = "00000000000000000000000000000000000000000000000000000000000
 const TEST_PRIV_3 = "0000000000000000000000000000000000000000000000000000000000000003";
 
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
+
+/**
+ * 从源码里取出某个顶层函数的函数体（含签名行，按花括号配对）。
+ *
+ * 中文说明：用于结构性门禁——断言 `ensure*Runtime()` 内部只走统一可用性判定、
+ * 不再自带 reconcile-and-pray 兜底。按源码断言比按错误文案断言可靠：文案会被
+ * 改写，也可能被新代码合法复用。
+ */
+function extractFunctionBody(source: string, name: string): string {
+  const signature = new RegExp(`^(?:async )?function ${name}\\(`, "m").exec(source);
+  if (!signature) throw new Error(`源码中找不到函数 ${name}`);
+  const start = source.indexOf("{", signature.index);
+  let depth = 0;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(signature.index, index + 1);
+    }
+  }
+  throw new Error(`函数 ${name} 的花括号不配对`);
+}
 
 type CoordinatorTestPeer = Pick<PeerController, "peerId" | "scope" | "capability" | "exposeGroup">;
 type CoordinatorBridgeCall = (request: unknown, signal: AbortSignal) => Promise<LocalStorageBridgeResponse>;
@@ -1771,7 +1800,29 @@ describe("Session Coordinator worker", () => {
     __testSetVaultStatus("locked");
     const snapshot = __testGetSnapshot();
     expect(snapshot.vaultStatus).toBe("locked");
-    expect(JSON.stringify(snapshot)).not.toMatch(/password|privateKey|token/i);
+    // 单元快照公开了 `dependsOn`（产品 id 与单元 id），这些是公开标识符而不是
+    // 凭据；先剔除再扫，否则 `token-bsv21` 这类产品 id 会把守卫变成永远失败。
+    const publicIds = COORDINATOR_WORKER_UNIT_CATALOG.flatMap((unit) => [
+      unit.productId,
+      unit.unitId,
+      ...unit.taskIds,
+      ...(unit.serviceIds ?? []),
+      ...unit.dependsOn,
+    ]).join("|");
+    const withoutPublicIds = JSON.stringify(snapshot).replace(new RegExp(publicIds, "g"), "<public-id>");
+    expect(withoutPublicIds).not.toMatch(/password|privateKey|token/i);
+  });
+
+  it("单元快照的 state 与 reasons 不会互相矛盾", () => {
+    __testResetState();
+    __testSetVaultStatus("locked");
+    // 框架可能仍认为 owner-session 单元 enabled，但 owner 会话已锁定。
+    for (const unit of __testGetSnapshot().coordinatorWorkerUnits ?? []) {
+      expect(unit.state === "ready").toBe(unit.reasons.length === 0);
+      if (unit.state === "ready") expect(unit.reasons).toEqual([]);
+      // 有任务的单元必须把自身产品写进依赖清单；服务单元不需要。
+      if (unit.taskIds.length > 0) expect(unit.dependsOn).toContain(unit.productId);
+    }
   });
 
   it("persists sync management settings and restores locked state after Worker restart", async () => {
@@ -3109,6 +3160,88 @@ describe("Session Coordinator MSFile RPC lane", () => {
     expect(__testGetMsfileSellerLifecycle()).toEqual({ indexActive: false, runtimeActive: false });
   });
 
+  it("事故回归：依赖未就绪时开卖方报等待依赖而不是永久错误，依赖随后就绪自动转就绪且无需再切一次开关", async () => {
+    await unlockVault();
+    // MSFile 已在运行，收款运行时随后掉线——等价于「解锁后立刻打开卖方开关，
+    // 但收款运行时仍在预热」的那段窗口。
+    await __testDispatchMsfileControl({ type: "settings.get" });
+    await __testReleaseSatRuntime();
+
+    const onFrame = vi.fn(async () => ({ type: "none" }) as const);
+    __testSetMsfileSellerBridge({ transport: { async open() {}, async send() {}, async close() {} }, protocol: { ready: true, onFrame } });
+    try {
+      const arbiter = validPublisherKey(27);
+      const waiting = await __testDispatchMsfileControl({
+        type: "settings.seller.update",
+        input: { sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+      });
+      expect(waiting.ack.status).toBe("ok");
+      const waitingStatus = await __testDispatchMsfileControl({ type: "settings.get" });
+      // 依赖未就绪是「还没好」，绝不能用永久配置错误表达。
+      expect(waitingStatus.operationResult).toMatchObject({ sellerRuntimeStatus: "waiting-dependency" });
+      expect(waitingStatus.operationResult).not.toMatchObject({ sellerRuntimeStatus: "configuration-error" });
+      // 不拆解：不可用时如实报不可用，不留坏掉的索引与运行时。
+      expect(__testGetMsfileSellerLifecycle()).toMatchObject({ indexActive: false, runtimeActive: false });
+
+      // 依赖随后就绪：经进程内订阅自动重跑装配并转就绪，全程没有再碰一次开关。
+      await __testEnsureSatRuntime();
+      await __testAwaitMsfileSellerDependencyResume();
+      const converged = await __testDispatchMsfileControl({ type: "settings.get" });
+      expect(converged.operationResult).toMatchObject({ sellerRuntimeStatus: "ready" });
+      expect(__testGetMsfileSellerLifecycle()).toMatchObject({ indexActive: true, runtimeActive: true });
+    } finally {
+      __testSetMsfileSellerBridge(undefined);
+    }
+  });
+
+  it("事故回归：解锁后立刻开卖方，全程只切一次开关就自动可接单", async () => {
+    await unlockVault();
+    const onFrame = vi.fn(async () => ({ type: "none" }) as const);
+    __testSetMsfileSellerBridge({ transport: { async open() {}, async send() {}, async close() {} }, protocol: { ready: true, onFrame } });
+    try {
+      const arbiter = validPublisherKey(27);
+      const updated = await __testDispatchMsfileControl({
+        type: "settings.seller.update",
+        input: { sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+      });
+      expect(updated.ack.status).toBe("ok");
+      // 只读，不再碰开关。
+      const observed = await __testDispatchMsfileControl({ type: "settings.get" });
+      expect(observed.operationResult).toMatchObject({ sellerRuntimeStatus: "ready" });
+      expect(observed.operationResult).not.toMatchObject({ sellerRuntimeStatus: "configuration-error" });
+      expect(__testGetMsfileSellerLifecycle()).toMatchObject({ indexActive: true, runtimeActive: true });
+    } finally {
+      __testSetMsfileSellerBridge(undefined);
+    }
+  });
+
+  it("卖方开关关闭时短路：不评估依赖可用性，也不残留索引与运行时", async () => {
+    await unlockVault();
+    await __testEnsureSatRuntime();
+    await __testDispatchMsfileControl({ type: "settings.get" });
+    const arbiter = validPublisherKey(27);
+    const onFrame = vi.fn(async () => ({ type: "none" }) as const);
+    __testSetMsfileSellerBridge({ transport: { async open() {}, async send() {}, async close() {} }, protocol: { ready: true, onFrame } });
+    try {
+      await __testDispatchMsfileControl({
+        type: "settings.seller.update",
+        input: { sellerEnabled: true, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+      });
+      // 依赖不可用也不影响关闭：短路发生在可用性判定之前。
+      await __testReleaseSatRuntime();
+      const disabled = await __testDispatchMsfileControl({
+        type: "settings.seller.update",
+        input: { sellerEnabled: false, seedPriceSatoshis: "1", fullBlockPriceSatoshis: "2", quoteLifetimeSeconds: 60, maxConcurrentSales: 1, supportedArbiterPublicKeys: [arbiter] },
+      });
+      expect(disabled.ack.status).toBe("ok");
+      expect((await __testDispatchMsfileControl({ type: "settings.get" })).operationResult)
+        .toMatchObject({ sellerRuntimeStatus: "disabled" });
+      expect(__testGetMsfileSellerLifecycle()).toMatchObject({ indexActive: false, runtimeActive: false });
+    } finally {
+      __testSetMsfileSellerBridge(undefined);
+    }
+  });
+
   it("已验证 Hash 请求命中本地 Seed 时建立卖方会话，未命中与重复请求保持静默", async () => {
     await unlockVault();
     const opened: Array<{ sessionId: string; addresses: string[]; publicKeyHex: string; expectedPeerId: string; firstFrame: Uint8Array }> = [];
@@ -3453,5 +3586,151 @@ describe("Session Coordinator MSFile RPC lane", () => {
     // 其他端口的 grant 不能使用。
     const stolen = await __testDispatchMsfileData({ type: "read-seed", grantId, sourceId: "remote-proxy:02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-b");
     expect(stolen.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
+  });
+});
+
+describe("单元可用性：ensure* 的结构化不可用契约", () => {
+  // 施工单硬点：`ensure*Runtime()` 不得再「reconcile 一下然后祈祷它已就绪」。
+  // 不可用必须如实报不可用，且原因是结构化的——调用方据 reasons 判断是哪一条
+  // 前置不成立，而不是去匹配一句会随时被改写的英文错误文案。
+
+  beforeEach(() => {
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testReleaseSatRuntime();
+    await __testDeleteVault().catch(() => undefined);
+    __testResetState();
+  });
+
+  async function disableProduct(productId: string, portId: string): Promise<void> {
+    __testAttachPort(portId, () => undefined);
+    const snapshot = __testGetSnapshot();
+    const requestId = `${portId}:disable:${productId}`;
+    await __testDispatchStorageMessage(portId, {
+      kind: "plugin.intent.submit",
+      clientId: portId,
+      requestId,
+      command: {
+        commandId: requestId,
+        authorityInstanceId: snapshot.authorityInstanceId,
+        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+        pluginId: productId,
+        desiredEnabled: false,
+      },
+    });
+    expect(__testGetSnapshot().pluginIntent?.desiredEnabled[productId]).toBe(false);
+  }
+
+  it("插件被停用时抛 CoordinatorUnitUnavailableError，reasons 逐条给出 code 与英文文案", async () => {
+    const created = await __testCreateVault("vault-pw", { label: "availability-key" });
+    await __testUnlock("vault-pw", created.publicKeyHex);
+    // 用 p2pkh 而不是 sat-subscription：后者是系统必需产品，产品意图不允许关闭，
+    // 走「插件被停用」这条路构造不出来。
+    await disableProduct("p2pkh", "availability-port");
+
+    const error = await __testEnsureSatP2pkhService().then(() => undefined, (reason: unknown) => reason);
+    expect(isCoordinatorUnitUnavailableError(error)).toBe(true);
+    const reasons = (error as CoordinatorUnitUnavailableError).reasons;
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toMatchObject({
+      code: "plugin-disabled",
+      dependencyId: "p2pkh",
+    });
+    // 兜底文案必须是英文，且带稳定 key 供界面翻译。
+    expect(reasons[0]!.text).toEqual({
+      key: "coordinator.unitUnavailable.pluginDisabled",
+      fallback: "Plugin disabled: p2pkh",
+      values: { product: "p2pkh" },
+    });
+  });
+
+  it("Vault 锁定时同样抛结构化错误，原因是 owner 会话不可用", async () => {
+    const created = await __testCreateVault("vault-pw", { label: "availability-locked" });
+    await __testUnlock("vault-pw", created.publicKeyHex);
+    await __testEnsureSatRuntime();
+    await __testLock();
+
+    const error = await __testEnsureSatRuntime().then(() => undefined, (reason: unknown) => reason);
+    expect(isCoordinatorUnitUnavailableError(error)).toBe(true);
+    expect((error as CoordinatorUnitUnavailableError).reasons).toContainEqual(
+      expect.objectContaining({ code: "owner-session-unavailable" }),
+    );
+  });
+
+  it("不再出现「reconcile 一下祈祷它已就绪」：ensure* 不得再 await reconcile", () => {
+    // 这条是结构性门禁。早期用 `rg "is not ready"` 做门禁是错的：新代码本身就要用
+    // 这些词（依赖原因文案），按文案检索既拦不住回归也会误报。改为直接断言源码。
+    //
+    // 被禁的形态是「await reconcile 之后如果还没起来就抛 not ready」。因此只禁
+    // `await` 形式；通知式的 `reconcileCoordinatorRuntime()`（不等、只通知框架
+    // 重判）是合法机制，`ensureStorageRuntime` 仍在用。
+    const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
+    for (const name of ["ensureMsfileRuntime", "ensureSatRuntime", "ensureStorageRuntime", "ensureSatP2pkhService"]) {
+      const body = extractFunctionBody(source, name);
+      expect(body, `${name} 不得再 await reconcile 后祈祷就绪`).not.toContain("await reconcileCoordinatorRuntime()");
+    }
+  });
+
+  it("能由构造前置条件判定的 ensure* 走统一判定", () => {
+    // storage 单元是例外且必须如此：构造前置条件里含「中央存储根已就绪」，而
+    // ensureStorageRuntime 正是建立存储根的那一方，对它断言会自锁。因此这里
+    // 只覆盖另外三个。
+    const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
+    for (const name of ["ensureMsfileRuntime", "ensureSatRuntime", "ensureSatP2pkhService"]) {
+      expect(extractFunctionBody(source, name), `${name} 必须走统一可用性判定`)
+        .toContain("assertCoordinatorUnitConstructible");
+    }
+  });
+});
+
+describe("单元可用性：对外单元名单的可见性", () => {
+  // 被依赖挡住的单元必须出现在名单里，且如实报 failed + 原因；只有「用户主动关掉
+  // 自己的产品」才不进名单——那是用户的选择，不是故障。
+
+  beforeEach(() => {
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testDeleteVault().catch(() => undefined);
+    __testResetState();
+  });
+
+  it("用户关掉本单元自己的产品时不进名单（那是选择，不是故障）", async () => {
+    const created = await __testCreateVault("vault-pw", { label: "units-visibility" });
+    await __testUnlock("vault-pw", created.publicKeyHex);
+    __testAttachPort("units-visibility-port", () => undefined);
+    const snapshot = __testGetSnapshot();
+    await __testDispatchStorageMessage("units-visibility-port", {
+      kind: "plugin.intent.submit",
+      clientId: "units-visibility-port",
+      requestId: "units-visibility:disable",
+      command: {
+        commandId: "units-visibility:disable",
+        authorityInstanceId: snapshot.authorityInstanceId,
+        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+        pluginId: "p2pkh",
+        desiredEnabled: false,
+      },
+    });
+    expect(__testGetSnapshot().pluginIntent?.desiredEnabled.p2pkh).toBe(false);
+    expect(__testGetSnapshot().coordinatorWorkerUnits?.some((unit) => unit.unitId === "p2pkh.coordinator-worker")).toBe(false);
+  });
+
+  it("名单里的每一条都带 state 与 reasons，且契约校验接受缺省实例标识", async () => {
+    const created = await __testCreateVault("vault-pw", { label: "units-shape" });
+    await __testUnlock("vault-pw", created.publicKeyHex);
+    const units = __testGetSnapshot().coordinatorWorkerUnits ?? [];
+    expect(units.length).toBeGreaterThan(0);
+    for (const unit of units) {
+      expect(["ready", "failed"]).toContain(unit.state);
+      // ready 必须没有原因；failed 必须至少给出一条原因，否则就是「不可用但说不清」。
+      if (unit.state === "ready") expect(unit.reasons).toEqual([]);
+      else expect(unit.reasons.length, `${unit.unitId} 不可用必须给出原因`).toBeGreaterThan(0);
+      // 实例标识允许缺省：正在启动、或从未启动的单元还没有它。给了就必须合法。
+      if (unit.instanceId !== undefined) expect(unit.instanceId.length).toBeGreaterThan(0);
+    }
   });
 });

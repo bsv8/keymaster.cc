@@ -26,7 +26,9 @@ import type {
   CoordinatorSessionBinding,
   SessionEpoch,
   CoordinatorAuthorityRecovery,
-  CoordinatorWorkerUnitSnapshot,
+  CoordinatorWorkerUnitPublicSnapshot,
+  CoordinatorUnitUnavailableCode,
+  CoordinatorUnitUnavailableReason,
   P2pkhProviderConfig,
   CoordinatorTaskSnapshot,
   SessionStateEvent,
@@ -2482,7 +2484,7 @@ function parseMsFileSettingsSnapshot(value: unknown, field: string): MsFileSetti
     suppliers: result.suppliers.map((item, index) => parseMsFileSupplier(item)),
     supplierGeneration: boundedNumber(result.supplierGeneration, field + ".supplierGeneration"),
     sellerSettings: parseMsFileSellerSettings(result.sellerSettings, field + ".sellerSettings"),
-    sellerRuntimeStatus: enumValue(result.sellerRuntimeStatus, ["disabled", "waiting-unlock", "indexing", "configuration-error", "ready", "selling", "degraded"] as const, field + ".sellerRuntimeStatus"),
+    sellerRuntimeStatus: enumValue(result.sellerRuntimeStatus, ["disabled", "waiting-unlock", "waiting-dependency", "indexing", "configuration-error", "ready", "selling", "degraded"] as const, field + ".sellerRuntimeStatus"),
   };
 }
 
@@ -3713,7 +3715,7 @@ function parseMsFileStateEvent(value: unknown): CoordinatorMsFileStateEvent {
     globalSettings,
     ...concurrency,
     sellerSettings: parseMsFileSellerSettings(event.sellerSettings, "event.sellerSettings"),
-    sellerRuntimeStatus: enumValue(event.sellerRuntimeStatus, ["disabled", "waiting-unlock", "indexing", "configuration-error", "ready", "selling", "degraded"] as const, "event.sellerRuntimeStatus"),
+    sellerRuntimeStatus: enumValue(event.sellerRuntimeStatus, ["disabled", "waiting-unlock", "waiting-dependency", "indexing", "configuration-error", "ready", "selling", "degraded"] as const, "event.sellerRuntimeStatus"),
     pendingApprovals: event.pendingApprovals.map((approval, index) => parseMsFilePendingApproval(approval, `event.pendingApprovals[${index}]`)),
   };
 }
@@ -3917,19 +3919,45 @@ function parsePluginIntentStateEvent(value: unknown): PluginIntentStateEvent {
   };
 }
 
-function parseWorkerUnitSnapshot(value: unknown, field: string): CoordinatorWorkerUnitSnapshot {
+const COORDINATOR_UNIT_UNAVAILABLE_CODES = [
+  "plugin-disabled",
+  "dependency-disabled",
+  "dependency-not-ready",
+  "storage-root-unavailable",
+  "owner-session-unavailable",
+  "unit-not-ready",
+  "unit-unknown",
+] as const satisfies readonly CoordinatorUnitUnavailableCode[];
+
+function parseUnitUnavailableReason(value: unknown, field: string): CoordinatorUnitUnavailableReason {
+  const input = expectRecord(value, field);
+  const dependencyId = optionalText(input.dependencyId, field + ".dependencyId", 256);
+  return {
+    code: enumValue(input.code, COORDINATOR_UNIT_UNAVAILABLE_CODES, field + ".code"),
+    text: parseI18nText(input.text, field + ".text"),
+    ...(dependencyId === undefined ? {} : { dependencyId }),
+  };
+}
+
+function parseWorkerUnitSnapshot(value: unknown, field: string): CoordinatorWorkerUnitPublicSnapshot {
   const unit = expectRecord(value, field);
   const ownerPublicKeyHex = optionalText(unit.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 256);
   const sessionEpoch = optionalText(unit.sessionEpoch, field + ".sessionEpoch", 256);
   const error = optionalText(unit.error, field + ".error", 4_096);
+  const instanceId = optionalText(unit.instanceId, field + ".instanceId", 256);
   if (unit.runtime !== "shared-worker") throw new TypeError(`Coordinator ${field}.runtime is invalid`);
+  if (!Array.isArray(unit.reasons) || unit.reasons.length > 64) throw new TypeError(`Coordinator ${field}.reasons are invalid`);
   return {
     productId: text(unit.productId, field + ".productId", 256),
     unitId: text(unit.unitId, field + ".unitId", 256),
     runtime: "shared-worker",
     scopeKind: enumValue(unit.scopeKind, ["root", "storage", "owner-session", "connect-session"] as const, field + ".scopeKind") as KeymasterScopeKind,
-    instanceId: text(unit.instanceId, field + ".instanceId", 256),
-    state: enumValue(unit.state, ["starting", "ready", "failed"] as const, field + ".state"),
+    // 从未启动过的单元没有实例标识（见 CoordinatorWorkerUnitPublicSnapshot 说明），
+    // 因此这里允许缺省，而不是要求必填。
+    ...(instanceId === undefined ? {} : { instanceId }),
+    state: enumValue(unit.state, ["ready", "failed"] as const, field + ".state"),
+    dependsOn: stringList(unit.dependsOn, field + ".dependsOn", 64, 64),
+    reasons: unit.reasons.map((reason, index) => parseUnitUnavailableReason(reason, `${field}.reasons[${index}]`)),
     snapshotRevision: boundedNumber(unit.snapshotRevision, field + ".snapshotRevision"),
     serviceIds: stringList(unit.serviceIds, field + ".serviceIds", 256, 256),
     taskIds: stringList(unit.taskIds, field + ".taskIds", 1_024, 256),

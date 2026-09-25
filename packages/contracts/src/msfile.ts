@@ -611,10 +611,17 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
   };
 }
 
-/** 卖方运行状态；用户开关与实际可接单状态分开表达。 */
+/**
+ * 卖方运行状态；用户开关与实际可接单状态分开表达。
+ *
+ * 关键区分：`waiting-dependency` 是**依赖还没好**，不是配置坏了。它绝不能用
+ * `configuration-error` 表达，否则用户会被要求手动再切一次开关才能恢复。
+ */
 export type MsFileSellerRuntimeStatus =
   | "disabled"
   | "waiting-unlock"
+  /** 已开开关，但声明的依赖单元当前不可用；就绪后自动转就绪，无需用户重切。 */
+  | "waiting-dependency"
   | "indexing"
   | "configuration-error"
   | "ready"

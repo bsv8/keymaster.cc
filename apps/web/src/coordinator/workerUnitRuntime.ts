@@ -32,13 +32,15 @@ export interface CoordinatorWorkerUnitRegistry {
   snapshots(): CoordinatorWorkerUnitSnapshot[];
   /** 当前快照修订；每次实际状态/实例集合变化都会递增。 */
   revision(): number;
+  /**
+   * 订阅单元可用性变化；返回取消函数。
+   *
+   * `ready` 与 `failed` 双向都触发，不是只在变好时通知：消费方订阅后重判
+   * 自身状态，重判必须幂等。任何环节不得用轮询、等待休眠或超时猜测代替订阅。
+   */
+  onChange(handler: () => void): () => void;
   /** 测试模拟 Worker 重启；生产代码不会调用。 */
   reset(): void;
-}
-
-export interface CoordinatorWorkerUnitRegistryOptions {
-  /** 快照发生变化后的发布钩子；异常不能阻断 Worker 的生命周期状态。 */
-  onChange?: () => void;
 }
 
 function errorText(error: unknown): string {
@@ -67,20 +69,24 @@ function cloneSnapshot(snapshot: CoordinatorWorkerUnitSnapshot): CoordinatorWork
 
 export function createCoordinatorWorkerUnitRegistry(
   catalog: readonly CoordinatorWorkerUnitDescriptor[] = COORDINATOR_WORKER_UNIT_CATALOG,
-  options: CoordinatorWorkerUnitRegistryOptions = {},
 ): CoordinatorWorkerUnitRegistry {
   const byUnitId = new Map(catalog.map((unit) => [unit.unitId, unit]));
   const active = new Map<string, CoordinatorWorkerUnitSnapshot>();
+  const subscribers = new Set<() => void>();
   let nextInstance = 0;
   let snapshotRevision = 0;
 
   function touch(): void {
     snapshotRevision += 1;
     for (const snapshot of active.values()) snapshot.snapshotRevision = snapshotRevision;
-    try {
-      options.onChange?.();
-    } catch {
-      // 发布是观察面，不能让观察者异常破坏生命周期状态转换。
+    // 订阅快照是观察面，不能让观察者异常破坏生命周期状态转换；因此每个
+    // 订阅者单独捕获，不让一个坏订阅者掐断其余订阅者的通知。
+    for (const handler of [...subscribers]) {
+      try {
+        handler();
+      } catch {
+        // 忽略单个订阅者的异常。
+      }
     }
   }
 
@@ -119,7 +125,11 @@ export function createCoordinatorWorkerUnitRegistry(
         runtime: unit.runtime,
         scopeKind: unit.scopeKind,
         instanceId: identity.instanceId ?? `coordinator-unit:${unitId}:${++nextInstance}`,
-        state: "starting",
+        // 单元一被激活就已经进入「不可用」这一档：还没就绪就是不能用。二值化
+        // 之后消费者只会看到 ready/failed，未就绪的细节由 `reasons` 承担。
+        state: "failed",
+        dependsOn: [...unit.dependsOn],
+        reasons: [],
         snapshotRevision,
         serviceIds: [...(unit.serviceIds ?? [])],
         taskIds: [...unit.taskIds],
@@ -136,9 +146,9 @@ export function createCoordinatorWorkerUnitRegistry(
       if (!current || current.instanceId !== instanceId) {
         throw new Error(`Coordinator Worker unit ready 身份已过期: ${unitId}`);
       }
-      if (current.state === "failed") {
-        throw new Error(`Coordinator Worker unit 已失败，不能恢复原实例: ${unitId}`);
-      }
+      // `failed` 不是终态：状态二值化之后「已激活但未就绪」与「启动失败」共用
+      // 同一档，因此这里必须允许 failed → ready。作废旧启动由 instanceId 身份
+      // 负责，不靠状态。
       if (current.state !== "ready" || current.error !== undefined) {
         current.state = "ready";
         current.error = undefined;
@@ -179,6 +189,13 @@ export function createCoordinatorWorkerUnitRegistry(
 
     revision() {
       return snapshotRevision;
+    },
+
+    onChange(handler) {
+      subscribers.add(handler);
+      return () => {
+        subscribers.delete(handler);
+      };
     },
 
     reset() {

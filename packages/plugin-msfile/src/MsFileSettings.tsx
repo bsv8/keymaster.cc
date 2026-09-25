@@ -58,6 +58,7 @@ type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDown
 const SELLER_RUNTIME_STATUS_LABELS: Record<MsFileSellerRuntimeStatus, string> = {
   "disabled": "已关闭",
   "waiting-unlock": "等待解锁",
+  "waiting-dependency": "等待依赖就绪",
   "indexing": "正在建立本地索引",
   "configuration-error": "配置不完整",
   "ready": "可以接单",

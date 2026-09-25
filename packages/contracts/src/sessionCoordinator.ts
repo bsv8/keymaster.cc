@@ -112,6 +112,54 @@ export interface CoordinatorAuthorityRecovery {
   handoverGeneration: number;
 }
 
+/**
+ * 单元不可用的稳定代码。程序据此判断、测试据此断言。
+ *
+ * 设计约束：瞬时与永久在代码上不可区分。「还没好」与「永远不会好」都必须
+ * 表达成同一个 `failed`，靠 `reasons` 解释，而不是靠不同的状态取值。
+ */
+export type CoordinatorUnitUnavailableCode =
+  /** 本单元所属产品的插件开关关闭。 */
+  | "plugin-disabled"
+  /** 依赖的产品插件开关关闭。 */
+  | "dependency-disabled"
+  /** 依赖的单元当前不可用（尚未就绪或自身依赖不满足）。 */
+  | "dependency-not-ready"
+  /** 作用域前置条件不满足：Storage 根未就绪。 */
+  | "storage-root-unavailable"
+  /** 作用域前置条件不满足：owner 会话未解锁。 */
+  | "owner-session-unavailable"
+  /** 本单元自身尚未就绪。 */
+  | "unit-not-ready"
+  /** 单元 id 不在 Coordinator Worker 单元目录中。 */
+  | "unit-unknown";
+
+/**
+ * 一条不可用原因。
+ *
+ * 多依赖可能同时不满足，原因逐条列出并支持依赖链下钻，不允许只报第一个。
+ */
+export interface CoordinatorUnitUnavailableReason {
+  /** 不可用的稳定代码。 */
+  code: CoordinatorUnitUnavailableCode;
+  /** 不可用的依赖：产品 id 或单元 id；自身作用域类原因不填写。 */
+  dependencyId?: string;
+  /** 界面直接可用的文案；`text.fallback` 一律英文，中文走 i18n 资源。 */
+  text: I18nText;
+}
+
+/** 单元可用性判定结果。`reasons` 为空即完全可用。 */
+export interface CoordinatorUnitAvailability {
+  /** 被判定的单元。 */
+  unitId: string;
+  /** `ready` 或 `failed`；二值化，不存在第三种「还在启动」。 */
+  state: "ready" | "failed";
+  /** 本单元可用所依赖的全部对象：产品 id 与单元 id。 */
+  dependsOn: string[];
+  /** 失败原因的全部分解；`ready` 时为空数组。 */
+  reasons: CoordinatorUnitUnavailableReason[];
+}
+
 /** Coordinator Worker 当前已激活的运行单元快照。 */
 export interface CoordinatorWorkerUnitSnapshot {
   /** 用户可启停的产品标识。 */
@@ -124,8 +172,17 @@ export interface CoordinatorWorkerUnitSnapshot {
   scopeKind: KeymasterScopeKind;
   /** 本次 Worker 装配生成的单元实例标识。 */
   instanceId: string;
-  /** 单元是否仍在初始化、已经就绪或启动失败。 */
-  state: "starting" | "ready" | "failed";
+  /**
+   * 单元是否可用：`ready` 或 `failed`。
+   *
+   * 刻意二值化——`starting` 对消费者是废信息，收到了也不能用。尚未就绪一律
+   * 表达为 `failed`，由 `reasons` 解释为什么不能用。
+   */
+  state: "ready" | "failed";
+  /** 本单元可用所依赖的全部对象：产品 id 与单元 id。 */
+  dependsOn: string[];
+  /** 失败原因的全部分解；`state === "ready"` 时为空数组。 */
+  reasons: CoordinatorUnitUnavailableReason[];
   /** Worker 单元快照的单调修订号；页面用它丢弃乱序或重复快照。 */
   snapshotRevision: number;
   /** 该单元拥有的后台服务稳定标识。 */
@@ -136,9 +193,22 @@ export interface CoordinatorWorkerUnitSnapshot {
   ownerPublicKeyHex?: string;
   /** owner-session 单元绑定的当前会话世代。 */
   sessionEpoch?: SessionEpoch;
-  /** 启动失败的脱敏诊断文本。 */
+  /** 启动失败的脱敏诊断文本；仅诊断用，判定一律看 `reasons`。 */
   error?: string;
 }
+
+/**
+ * 对外发布的单元快照：与运行态注册表的差别只有一处——实例标识可以不填写。
+ *
+ * 从未启动过的单元没有实例标识：框架在「能不能启动」被否时就返回了，还没走到
+ * 分配实例标识那一步。而实例标识的作用是分辨「哪一次运行」，没运行过就没有
+ * 哪一次可分辨，因此这里不编造占位值，直接省略。WebLoom 自身的状态投影也是
+ * 在该值为空时省略这个键，两边保持一致。
+ *
+ * 消费方需要按实例比对时必须先判空，不得假定它存在。
+ */
+export type CoordinatorWorkerUnitPublicSnapshot =
+  Omit<CoordinatorWorkerUnitSnapshot, "instanceId"> & { instanceId?: string };
 
 // ============================================================
 // 2. Client -> Coordinator RPC
@@ -642,7 +712,7 @@ export interface CoordinatorWorkerUnitStateEvent {
   /** Worker 单元快照的单调修订号；旧 revision 不能覆盖新实例。 */
   workerUnitRevision: number;
   sessionEpoch: SessionEpoch;
-  units: CoordinatorWorkerUnitSnapshot[];
+  units: CoordinatorWorkerUnitPublicSnapshot[];
 }
 
 export interface AssetDataChangedEvent {
@@ -688,7 +758,7 @@ export interface CoordinatorBootstrapSnapshot {
   /** 旧 Worker 租约未释放时的可恢复状态；不代表可以安全强制接管。 */
   authorityRecovery?: CoordinatorAuthorityRecovery;
   /** 当前 Worker 实际激活的服务/任务单元；未激活的静态单元不会出现在这里。 */
-  coordinatorWorkerUnits?: CoordinatorWorkerUnitSnapshot[];
+  coordinatorWorkerUnits?: CoordinatorWorkerUnitPublicSnapshot[];
   /** 当前 Worker 单元快照修订；缺失单元不是 blocked，而是 unknown。 */
   coordinatorWorkerUnitSnapshotRevision?: number;
   taskSnapshots: CoordinatorTaskSnapshot[];

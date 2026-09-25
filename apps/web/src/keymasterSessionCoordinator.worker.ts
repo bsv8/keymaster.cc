@@ -59,6 +59,7 @@ import type {
   ChannelSubscriptionStatus,
   CoordinatorContactsPresenceEvent,
   CoordinatorWorkerUnitStateEvent,
+  CoordinatorWorkerUnitPublicSnapshot,
   CoordinatorWorkerUnitSnapshot,
   ChannelPrivateMessageEvent,
   ChannelRuntime,
@@ -154,6 +155,16 @@ import {
   getCoordinatorWorkerUnitForTask,
 } from "./coordinator/workerUnitCatalog.js";
 import { createCoordinatorWorkerUnitRegistry } from "./coordinator/workerUnitRuntime.js";
+import {
+  COORDINATOR_TRANSPORT_UNIT_ID,
+  describeUnitUnavailableForFramework,
+  evaluateCoordinatorUnitAvailability,
+  evaluateCoordinatorUnitConstructionPreconditions,
+  evaluateCoordinatorUnitStartupPreconditions,
+  isCoordinatorUnitUnavailableError,
+  CoordinatorUnitUnavailableError,
+  type CoordinatorUnitAvailabilityContext,
+} from "./coordinator/workerUnitAvailability.js";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
 import { createCentralBroadcastService, createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotResource, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
 import { createP2pkhCoordinatorTasks, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
@@ -3585,8 +3596,6 @@ function assertOwnerStorageBindingFresh(ownerPublicKeyHex: string, generation: n
 let msfileRuntime: MsFileServiceImpl | undefined;
 /** 仅测试替身；生产请求永远只读取 Host-owned msfileRuntime。 */
 let testMsfileRuntimeOverride: MsFileServiceImpl | undefined;
-/** 测试模拟 Worker/domain teardown 后允许按现有 Host instance 恢复一次。 */
-let testMsfileRuntimeRecoveryAllowed = false;
 /** MSFile 首次装配 single-flight；首页资源与设置命令可能同时触发启动。 */
 let msfileRuntimeStarting: Promise<MsFileServiceImpl> | undefined;
 /** 释放/切换 owner 时递增，阻止迟到的候选实例重新发布。 */
@@ -5282,6 +5291,65 @@ function stopMsfileSellerRuntime(): void {
   msfilePendingSellerHashRequests.clear();
   msfileSellerIndex?.clear();
   msfileSellerIndex = undefined;
+  offMsfileSellerDependencyWatch();
+}
+
+/**
+ * 卖方「等待依赖」的进程内订阅。
+ *
+ * 依赖就绪与否只由唯一判定实现回答，变化靠进程内订阅推过来：没有轮询、没有
+ * 等待休眠、没有超时猜测。双向都处理——依赖掉线如实报不可用，依赖回来自动
+ * 重跑装配，用户不需要手动再切一次开关。重判是幂等的：只有依赖可用性真的翻转
+ * 才动作，其它单元的抖动只做一次同态重判。
+ */
+let msfileSellerDependencyUnsubscribe: (() => void) | undefined;
+/** 上一次观察到的依赖可用性；`undefined` 表示当前没有在观察。 */
+let msfileSellerDependencyReady: boolean | undefined;
+/** 「依赖就绪后自动重跑」的在途装配；只用于测试 await 与诊断，不参与判定。 */
+let msfileSellerDependencyResume: Promise<void> | undefined;
+
+function offMsfileSellerDependencyWatch(): void {
+  const off = msfileSellerDependencyUnsubscribe;
+  msfileSellerDependencyUnsubscribe = undefined;
+  msfileSellerDependencyReady = undefined;
+  off?.();
+}
+
+/** 卖方等待依赖时订阅的依赖单元；与目录声明保持一致，不在调用点另写副本。 */
+const MSFILE_SELLER_DEPENDENCY_UNIT_ID = "sat-subscription.coordinator-worker";
+
+/**
+ * 订阅依赖可用性。
+ *
+ * - 依赖不可用：如实报「等待依赖」，**不拆解**已建好的部分、**不要求用户重切**。
+ * - 依赖可用：重跑一次装配（幂等），把状态推进到就绪。
+ */
+function watchMsfileSellerDependency(
+  service: MsFileServiceImpl,
+  ownerPublicKeyHex: string,
+): void {
+  offMsfileSellerDependencyWatch();
+  const serviceRef = service;
+  msfileSellerDependencyReady = coordinatorUnitAvailability(MSFILE_SELLER_DEPENDENCY_UNIT_ID).state === "ready";
+  msfileSellerDependencyUnsubscribe = coordinatorWorkerUnitRegistry.onChange(() => {
+    // 订阅已被同一次变化里的清理动作取消（开关关闭 / 锁定）时直接退出。
+    if (msfileSellerDependencyUnsubscribe === undefined) return;
+    if (msfileRuntime !== serviceRef) return;
+    if (coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) return;
+    const settings = serviceRef.describeState().sellerSettings;
+    if (!settings.sellerEnabled) return;
+    const ready = coordinatorUnitAvailability(MSFILE_SELLER_DEPENDENCY_UNIT_ID).state === "ready";
+    if (ready === msfileSellerDependencyReady) return;
+    msfileSellerDependencyReady = ready;
+    if (!ready) {
+      serviceRef.setSellerRuntimeStatus("waiting-dependency");
+      return;
+    }
+    offMsfileSellerDependencyWatch();
+    msfileSellerDependencyResume = configureMsfileSellerRuntime(serviceRef, ownerPublicKeyHex, settings)
+      .then((status) => { serviceRef.setSellerRuntimeStatus(status); })
+      .catch((error) => console.warn("[msfile] seller runtime resume failed", error instanceof Error ? error.message : String(error)));
+  });
 }
 
 /** 返回绑定当前 owner 的唯一 BitFS 专款账本；不在锁定状态打开明文存储。 */
@@ -6071,6 +6139,8 @@ async function configureMsfileSellerRuntime(
   settings: import("@keymaster/contracts").MsFileSellerSettings,
 ): Promise<import("@keymaster/contracts").MsFileSellerRuntimeStatus> {
   stopMsfileSellerRuntime();
+  // 用户开关与实际可接单状态是两个正交维度：开关关 → 短路，不评估可用性，
+  // 不残留索引与运行时。
   if (!settings.sellerEnabled) {
     // 关闭后从当前时刻重新计算自动锁定，而不是沿用暂停前的旧 deadline。
     resetAutoLockTimer();
@@ -6081,6 +6151,11 @@ async function configureMsfileSellerRuntime(
   autoLockTimer = undefined;
   coordinatorState.autoLockDeadline = undefined;
   if (settings.supportedArbiterPublicKeys.length === 0) return "configuration-error";
+  // 依赖先判、且只判一次；同时订阅双向变化——依赖掉线如实报不可用，依赖回来
+  // 自动重跑。收款运行时还在预热时这不是永久配置错误：不拆索引、不要求用户
+  // 再切一次开关。
+  watchMsfileSellerDependency(service, ownerPublicKeyHex);
+  if (msfileSellerDependencyReady !== true) return "waiting-dependency";
   service.setSellerRuntimeStatus("indexing");
   const controller = new AbortController();
   msfileSellerIndexController = controller;
@@ -6198,6 +6273,13 @@ async function configureMsfileSellerRuntime(
     return protocolPort.ready ? "ready" : "degraded";
   } catch (error) {
     if (controller.signal.aborted) return "waiting-unlock";
+    // 依赖在装配途中变得不可用：这仍然是「还没好」，不是配置坏了。不拆解、
+    // 不报永久错误；订阅就绪后自动重跑，用户不需要手动再切一次开关。
+    if (isCoordinatorUnitUnavailableError(error)) {
+      controller.abort();
+      watchMsfileSellerDependency(service, ownerPublicKeyHex);
+      return "waiting-dependency";
+    }
     console.warn("[msfile] seller runtime configuration failed", error instanceof Error ? error.message : String(error));
     stopMsfileSellerRuntime();
     return "configuration-error";
@@ -7153,17 +7235,13 @@ function rejectMsfileDataWaiters(error = msfileError("msfile_unavailable", "MSFi
 }
 
 async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileServiceImpl> {
-  // 审查修复：锁定 / 未初始化 / fatal 状态不得创建 MSFile runtime。
-  if (!isCoordinatorProductEnabled("msfile")) {
-    throw msfileError("msfile_unavailable", "MSFile plugin is disabled");
-  }
-  if (coordinatorState.vaultStatus !== "unlocked") {
-    throw msfileError("msfile_unavailable", "MSFile requires an unlocked Vault");
-  }
-  // owner K-V 只能在统一 Storage 健康门禁打开后装配。尤其是首次解锁
-  // 时，Window Host 与 Coordinator owner-apps 阶段可能并发到达；不能让
-  // 一个在 recovery 窗口中启动的 service 把临时 unavailable 永久缓存成
-  // initializationError。
+  // 唯一可用性判定：插件开? 解锁? 作用域就绪? 一次求值给出全部原因，不再手写
+  // 同一串检查，也不再 reconcile 一下祈祷它已就绪。锁定 / 未初始化 / fatal 状态
+  // 因此同样由这一条路径表达。
+  assertCoordinatorUnitConstructible("msfile.coordinator-worker");
+  // owner K-V 只能在统一 Storage 健康门禁打开后装配。这是数据面准入门，不是单元
+  // 可用性判定：它对同一个 `platformStorageReady` 事实负责，与 7 个 storage.data
+  // 入口共用，因此仍由本模块自己读事实。
   assertStorageDataAvailable();
   if (testMsfileRuntimeOverride) return testMsfileRuntimeOverride;
   if (msfileRuntime) {
@@ -7182,20 +7260,6 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       if (ready.instanceId !== expectedInstanceId) throw msfileError("msfile_unavailable", "MSFile runtime instance identity mismatch");
     }
     return runtime;
-  }
-  // Requests must enter through the WebLoom unit setup.  This prevents a
-  // lazy RPC from creating a second registry instance that is not owned by the
-  // Host context.  The setup path below supplies the real instance identity.
-  if (!expectedInstanceId && coordinatorRuntimeApp && !testMsfileRuntimeRecoveryAllowed) {
-    await reconcileCoordinatorRuntime();
-    if (msfileRuntime) return msfileRuntime;
-    throw msfileError("msfile_unavailable", "MSFile WebLoom runtime unit is not ready");
-  }
-  if (!expectedInstanceId && coordinatorRuntimeApp && testMsfileRuntimeRecoveryAllowed) {
-    const hostUnit = coordinatorRuntimeApp.state().units.find((unit) => unit.unitId === "msfile.coordinator-worker");
-    if (hostUnit?.instanceId && (hostUnit.state === "enabled" || hostUnit.state === "starting" || hostUnit.state === "error-disabled")) {
-      expectedInstanceId = hostUnit.instanceId;
-    }
   }
   if (!platformRootStore) throw msfileError("msfile_unavailable", "Platform storage has not been bootstrapped");
   const startToken = msfileRuntimeStartToken;
@@ -7242,7 +7306,6 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       msfileRuntime = service;
       const sellerStatus = await configureMsfileSellerRuntime(service, ownerPublicKeyHex, service.describeState().sellerSettings);
       service.setSellerRuntimeStatus(sellerStatus);
-      testMsfileRuntimeRecoveryAllowed = false;
       coordinatorWorkerUnitRegistry.ready(workerUnit.unitId, workerUnit.instanceId);
       emitMsFileState();
       return service;
@@ -7275,21 +7338,12 @@ function emitSatState(event: import("@keymaster/contracts").CoordinatorSatEvent)
 }
 
 async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerRuntimeState> {
-  if (!isCoordinatorProductEnabled("sat-subscription")) {
-    throw new Error("SatSubscription plugin is disabled");
-  }
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
-    throw new Error("SatSubscription requires an unlocked active key");
-  }
+  // 同一把尺子：插件开? 解锁? 作用域就绪?（自身就绪正是本函数要做的事）
+  assertCoordinatorUnitConstructible("sat-subscription.coordinator-worker");
   // owner 切换/锁定的退订和连接关闭必须完成后，才能把任何请求交给
   // 新 runtime；否则旧 owner 的清理可能和新 owner 的收费请求并发。
   await satRuntimeRelease.catch(() => undefined);
-  if (!isCoordinatorProductEnabled("sat-subscription")) {
-    throw new Error("SatSubscription plugin is disabled");
-  }
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
-    throw new Error("SatSubscription owner is no longer unlocked");
-  }
+  assertCoordinatorUnitConstructible("sat-subscription.coordinator-worker");
   if (satRuntime) {
     if (expectedInstanceId) {
       const unit = activateCoordinatorOwnerWorkerUnit("sat-subscription.coordinator-worker", expectedInstanceId);
@@ -7313,15 +7367,9 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
       return satRuntime;
     }
   }
-  // A request-side lazy load must be reconciled through the real WebLoom unit
-  // setup first, otherwise it could publish a registry instance unrelated to
-  // the Host context that owns the public runtime snapshot.
-  if (!expectedInstanceId && coordinatorRuntimeApp) {
-    await reconcileCoordinatorRuntime();
-    if (satRuntime) return satRuntime;
-    throw new Error("SatSubscription WebLoom runtime unit is not ready");
-  }
-  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
+  // 上面的断言已覆盖「解锁 + 有 active key」；这里把判定结果落到局部变量，
+  // 不再重复判一次。
+  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex!;
   const ownerGeneration = Math.max(1, coordinatorState.keyspaceGeneration);
   const expectedSessionEpoch = coordinatorState.sessionEpoch;
   const startToken = satRuntimeStartToken;
@@ -8471,21 +8519,96 @@ const coordinatorState: CoordinatorState = {
 };
 
 /**
- * 领域兼容运行态表。
+ * 领域运行态表，同时是「单元自身是否已就绪」的唯一来源。
  *
- * WebLoom Host 是对外运行单元状态的唯一来源；这张表暂时保留给现有
- * Coordinator 任务和最终 I/O 清理代码保存领域句柄。它不再直接生成
- * `worker.units` / bootstrap 的公开快照，避免手工 Registry 伪装成 Runtime
- * Host。
+ * 对外运行单元状态的唯一来源仍是 WebLoom Host：它拥有单元的启停与 Scope，并决定
+ * `worker.units` 公开快照的枚举范围与 instanceId。这张表不生成公开快照，避免手工
+ * Registry 伪装成 Runtime Host；但它持有领域句柄供任务与最终 I/O 清理使用，并且
+ * 因为是就绪判定的唯一来源，必须与 Host 的 setup 顺序保持一致：每个插件的 setup
+ * 钩子先 activate 再 ready，Host 之后才置 enabled。
+ *
+ * 「就绪判定只有一个来源」是硬约束，不是实现细节：判定里若再读 Host 状态，就必须
+ * 同时订阅 Host 状态，否则会出现「判定翻成 ready 但没人被叫醒重判」的静默卡死。
  */
-const coordinatorWorkerUnitRegistry = createCoordinatorWorkerUnitRegistry(undefined, {
-  onChange: () => publishCoordinatorWorkerUnitSnapshot(),
+const coordinatorWorkerUnitRegistry = createCoordinatorWorkerUnitRegistry();
+// 可用性变化是推式的：注册表一变就发布快照并推一次框架重判，不新增轮询。
+// 单元就绪的每一条边沿都经过这里，因此订阅是完整的。
+coordinatorWorkerUnitRegistry.onChange(() => {
+  publishCoordinatorWorkerUnitSnapshot();
+  scheduleCoordinatorRuntimeReconcile();
 });
 
 let coordinatorRuntimeApp: ReturnType<typeof startSharedWorkerApp> | undefined;
 let coordinatorRuntimeUnitSnapshotRevision = 0;
 type CoordinatorPeerHandoffNotifier = (peerId: string, handoffRevision?: number) => boolean;
 let testCoordinatorPeerHandoffNotifier: CoordinatorPeerHandoffNotifier | undefined;
+
+/**
+ * 单元可用性判定的事实来源。
+ *
+ * 这里只提供无副作用读取：判定实现本身不轮询、不休眠、不猜超时；状态变化由
+ * `coordinatorWorkerUnitRegistry.onChange` 推给订阅方重判。
+ *
+ * 「单元自身是否已就绪」只读运行态注册表，因此这四把尺子与注册表订阅构成完整的一组：
+ * 每一条就绪边沿都来自注册表，也都会推给订阅方。Host 不参与就绪判定，只负责调度
+ * 与枚举单元。
+ */
+function coordinatorUnitAvailabilityContext(): CoordinatorUnitAvailabilityContext {
+  return {
+    isProductEnabled: (productId) => isCoordinatorProductEnabled(productId),
+    isUnitReady: (unitId) => coordinatorRuntimeUnitReady(unitId),
+    isStorageReady: () => platformStorageReady,
+    isOwnerSessionAvailable: () => coordinatorState.vaultStatus === "unlocked" && Boolean(coordinatorState.activePublicKeyHex),
+  };
+}
+
+/**
+ * 单元自身是否已就绪。**只读运行态注册表这一个来源。**
+ *
+ * 收敛到单一来源是必要的：`activate` / `ready` / `fail` / `stop` 四条边沿都会
+ * `touch()` 并推 `onChange`，卖方订阅与框架门重判都挂在这条边上，因此只读注册表
+ * 既不缺边沿，也不需要第二把尺子。
+ *
+ * 去掉 Host `enabled` 那一侧不会丢信息，因为顺序是单向的：
+ * `coordinatorRuntimePlugins` 的 setup 钩子对全部领域单元都先 activate 再 ready，
+ * 而 Host 只在 setup resolve 之后才把单元置 enabled。注册表 ready 严格早于 Host
+ * enabled，Host 分支永远不可能带来注册表没有的信息。
+ *
+ * 反过来，Host 状态没有订阅边沿：判定里读它就必须同时订阅它，否则「某单元经 Host
+ * 路径变成 enabled 而注册表没动」会翻成 ready 却没有任何回调触发重判——卖方就此
+ * 永久停在 `waiting-dependency`，无报错、无日志，只能手动重切开关。Host 自身的
+ * 健康度不由这里把关：`coordinatorRuntimeUnitSnapshots()` 在 app failed/disposed 时
+ * 直接返回空快照，`reconcileCoordinatorRuntime()` 无 app 时空转，两处各自已经
+ * fail closed。
+ */
+function coordinatorRuntimeUnitReady(unitId: string): boolean {
+  return coordinatorWorkerUnitRegistry.get(unitId)?.state === "ready";
+}
+
+/**
+ * 单元当前完整可用性。公开快照投影与卖方等「现在能不能用」的判定都从这里取值。
+ */
+function coordinatorUnitAvailability(unitId: string) {
+  return evaluateCoordinatorUnitAvailability(unitId, coordinatorUnitAvailabilityContext());
+}
+
+/**
+ * 本地构造断言：不可用时抛带结构化原因的 `CoordinatorUnitUnavailableError`。
+ *
+ * 这是设计第 6 节「框架门与 Worker 本地判定合并为同一实现」的落点：`ensure*`
+ * 不再手写「插件开? 解锁?」那一串检查，也不再 reconcile 一下祈祷它已就绪；不可用
+ * 就如实报不可用。
+ *
+ * 断言的是**构造前置条件**（插件开 + 作用域就绪）。声明的依赖不参与：依赖是使用
+ * 前置条件（卖方要收款运行时），不是 MSFile 运行对象的构造前置条件——依赖掉线时
+ * 仍然必须能把用户开关关掉。依赖由框架门（启动前置条件）与各能力自己的依赖门
+ * （完整可用性）分别把关，三者共用 `workerUnitAvailability.ts` 同一份规则。
+ */
+function assertCoordinatorUnitConstructible(unitId: string): void {
+  const availability = evaluateCoordinatorUnitConstructionPreconditions(unitId, coordinatorUnitAvailabilityContext());
+  if (availability.state === "ready") return;
+  throw new CoordinatorUnitUnavailableError(unitId, [...availability.reasons]);
+}
 
 /**
  * 领域 owner/session 交接完成后通知 WebLoom 当前物理 peer。
@@ -8502,17 +8625,16 @@ function notifyCoordinatorStorageIoHandoff(owner: CoordinatorStorageIoOwner | un
   coordinatorRuntimeApp?.notifyPeerHandoff(owner.peerId, owner.commitOrder);
 }
 
-function coordinatorRuntimeUnitVisible(unit: (typeof COORDINATOR_WORKER_UNIT_CATALOG)[number]): boolean {
-  if (!isCoordinatorProductEnabled(unit.productId)) return false;
-  if (unit.scopeKind === "storage" && !platformStorageReady) return false;
-  if (unit.scopeKind === "owner-session") {
-    return coordinatorState.vaultStatus === "unlocked" && Boolean(coordinatorState.activePublicKeyHex);
-  }
-  return true;
-}
-
-/** 将 WebLoom Host 的 unit state 投影为 Keymaster 旧协议的领域快照。 */
-function coordinatorRuntimeUnitSnapshots(): CoordinatorWorkerUnitSnapshot[] {
+/**
+ * 将 WebLoom Host 的 unit state 投影为 Keymaster 协议的领域快照。
+ *
+ * `state` 与 `reasons` 都取自同一个判定实现，二者不可能互相矛盾：Host 只会说
+ * 「这个单元被调度起来了」，判定实现才回答「现在能不能用」。两者不一致时（例如
+ * 框架仍认为 enabled 但 owner 会话已锁定）以判定实现为准——状态字段只回答
+ * 「能不能用」。状态二值化：Host 的 `starting` 归入 `failed`，未就绪的细节由
+ * `reasons` 承担。
+ */
+function coordinatorRuntimeUnitSnapshots(): CoordinatorWorkerUnitPublicSnapshot[] {
   const app = coordinatorRuntimeApp;
   // Host 尚未完成装配时 fail closed；公开协议不能退回到领域兼容表，
   // 否则首个 bootstrap 可能把手工 Registry 误报成已由 WebLoom 启动。
@@ -8521,20 +8643,31 @@ function coordinatorRuntimeUnitSnapshots(): CoordinatorWorkerUnitSnapshot[] {
   if (runtimeState.state === "failed" || runtimeState.state === "disposed") return [];
   const revision = Math.max(1, runtimeState.revision);
   coordinatorRuntimeUnitSnapshotRevision = Math.max(coordinatorRuntimeUnitSnapshotRevision, revision);
-  const snapshots: CoordinatorWorkerUnitSnapshot[] = [];
+  const snapshots: CoordinatorWorkerUnitPublicSnapshot[] = [];
   for (const runtimeUnit of runtimeState.units) {
     const descriptor = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === runtimeUnit.unitId);
-    if (!descriptor || runtimeUnit.runtime !== "shared-worker" || !coordinatorRuntimeUnitVisible(descriptor)) continue;
-    if (runtimeUnit.state !== "enabled" && runtimeUnit.state !== "starting" && runtimeUnit.state !== "error-disabled") continue;
-    if (!runtimeUnit.instanceId) continue;
-    const state = runtimeUnit.state === "error-disabled" ? "failed" : runtimeUnit.state === "enabled" ? "ready" : "starting";
+    if (!descriptor || runtimeUnit.runtime !== "shared-worker") continue;
+    if (runtimeUnit.state !== "enabled" && runtimeUnit.state !== "starting"
+      && runtimeUnit.state !== "error-disabled" && runtimeUnit.state !== "blocked") continue;
+    const availability = coordinatorUnitAvailability(descriptor.unitId);
+    // 用户主动关掉本单元自己的产品时不进名单：那是用户的选择，不是故障。只因
+    // 依赖不就绪而被挡住的单元必须出现，否则监控页会把它读成「不存在」，而实际
+    // 上它只是现在不能用——两者对排查的含义完全不同。
+    //
+    // 只看「本单元自己的产品」这一条，不能要求 reasons 全是 plugin-disabled：
+    // 目录里单元把自己的产品也写进了 dependsOn（例如 p2pkh 依赖 background 与
+    // p2pkh），关掉产品会同时产生 dependency-disabled 那一条。
+    if (availability.reasons.some((item) => item.code === "plugin-disabled" && item.dependencyId === descriptor.productId)) continue;
     snapshots.push({
       productId: descriptor.productId,
       unitId: descriptor.unitId,
       runtime: "shared-worker",
       scopeKind: descriptor.scopeKind,
-      instanceId: runtimeUnit.instanceId,
-      state,
+      // 从未启动的单元没有实例标识，省略而不是编造（见契约字段说明）。
+      ...(runtimeUnit.instanceId ? { instanceId: runtimeUnit.instanceId } : {}),
+      state: availability.state,
+      dependsOn: availability.dependsOn,
+      reasons: availability.reasons.map((item) => ({ ...item })),
       snapshotRevision: revision,
       serviceIds: [...(descriptor.serviceIds ?? [])],
       taskIds: [...descriptor.taskIds],
@@ -8569,6 +8702,29 @@ function reconcileCoordinatorRuntime(): Promise<void> {
     synchronizeCoordinatorTaskUnitInstances();
   }).catch((error) => {
     console.warn("[coordinator] WebLoom runtime unit reconcile failed", error instanceof Error ? error.message : String(error));
+  });
+}
+
+/**
+ * 可用性变化推给框架门重判。
+ *
+ * 框架把有理由的单元置 `blocked` 之后只在 `reconcile()` 时重试；依赖可用性变化
+ * 必须主动推一次，否则「依赖已经好了却没人再问一次」就等于退化成了轮询。
+ *
+ * 合并与去重都靠同一个标志位：reconcile 期间发生的所有变化被合并成一次，且标志
+ * 在整段 reconcile 期间保持为真，因此不可能自激。这是去重，不是等待、休眠或定时器。
+ */
+let coordinatorRuntimeReconcileScheduled = false;
+
+function scheduleCoordinatorRuntimeReconcile(): void {
+  if (coordinatorRuntimeReconcileScheduled) return;
+  coordinatorRuntimeReconcileScheduled = true;
+  void Promise.resolve().then(async () => {
+    try {
+      await reconcileCoordinatorRuntime();
+    } finally {
+      coordinatorRuntimeReconcileScheduled = false;
+    }
   });
 }
 
@@ -8699,7 +8855,7 @@ function stopCoordinatorOwnerWorkerUnits(): void {
 /** Vault 的私钥/Keyspace 管理外壳属于 Worker root，随 Worker 重启而重建。 */
 function activateCoordinatorRootWorkerUnits(): void {
   const vaultUnit = coordinatorWorkerUnitRegistry.activate("vault.coordinator-worker");
-  if (vaultUnit.state === "starting") {
+  if (vaultUnit.state !== "ready") {
     coordinatorWorkerUnitRegistry.ready(vaultUnit.unitId, vaultUnit.instanceId);
   }
 }
@@ -9552,13 +9708,11 @@ async function createWorkerActiveKeyCrypto(publicKeyHex: string): Promise<Active
  * 充值只注入一个内部 Coordinator facade，避免从 SharedWorker 再绕回页面。
  */
 async function ensureSatP2pkhService(): Promise<P2pkhService> {
-  if (!isCoordinatorProductEnabled("p2pkh")) {
-    throw new Error("Plugin disabled: p2pkh");
-  }
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
-    throw new Error("P2PKH top-up requires an unlocked active key");
-  }
-  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
+  // 同一把尺子：插件开? 解锁? 作用域就绪?
+  assertCoordinatorUnitConstructible("p2pkh.coordinator-worker");
+  // 上面的断言已覆盖「解锁 + 有 active key」；这里把判定结果落到局部变量，
+  // 不再重复判一次。
+  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex!;
   const ownerSessionEpoch = coordinatorState.sessionEpoch;
   await loadP2pkhSettingForOwner(ownerPublicKeyHex);
   const existingService = satP2pkhService;
@@ -16429,22 +16583,13 @@ coordinatorRuntimeApp = startSharedWorkerApp({
   ],
   configurePeer: configureCoordinatorPeer,
   runtimeUnitAvailability: ({ unitId }: { unitId: string }) => {
-    // The transport plugin is the Coordinator Host's required foundation; it
-    // is intentionally not part of the domain worker-unit catalog because it
-    // owns the RPC/topic entrypoints rather than a product task/service.
-    if (unitId === "keymaster.coordinator.transport") return undefined;
-    const unit = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === unitId);
-    if (!unit) return "coordinator-unit-unknown";
-    if (!isCoordinatorProductEnabled(unit.productId)) return `plugin-disabled:${unit.productId}`;
-    if (unit.scopeKind === "storage" && !platformStorageReady) return "storage-root-unavailable";
-    if (unit.scopeKind === "owner-session"
-      && (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex)) {
-      return "owner-session-unavailable";
-    }
-    for (const dependency of unit.requiredProductIds ?? []) {
-      if (!isCoordinatorProductEnabled(dependency)) return `plugin-dependency-disabled:${dependency}`;
-    }
-    return undefined;
+    // 与 Worker 本地判定、公开快照投影共用同一个实现：框架门与本地不允许各
+    // 判一次。传输插件是 Coordinator Host 的基础设施底座，不在领域目录里。
+    if (unitId === COORDINATOR_TRANSPORT_UNIT_ID) return undefined;
+    // 门问的是「能不能启动」，因此排除「自身已就绪」这一项。
+    return describeUnitUnavailableForFramework(
+      evaluateCoordinatorUnitStartupPreconditions(unitId, coordinatorUnitAvailabilityContext()),
+    );
   },
   runtimeUnitAttributes: ({ unitId }: { unitId: string }) => {
     const unit = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === unitId);
@@ -16745,7 +16890,6 @@ export function __testResetState(): void {
   // its old owner scopes before the next test unlocks a new owner.
   releaseMsfileRuntime("test-reset");
   testMsfileRuntimeOverride = undefined;
-  testMsfileRuntimeRecoveryAllowed = true;
   coordinatorWorkerUnitRegistry.reset();
   if (storageController) {
     const storageUnit = coordinatorWorkerUnitRegistry.activate("storage.coordinator-worker");
@@ -16972,6 +17116,32 @@ export async function __testRegisterRealCoordinatorTasks(): Promise<void> {
 export async function __testEnsureSatP2pkhService(): Promise<P2pkhService> {
   await ensureTestP2pkhProviders();
   return ensureSatP2pkhService();
+}
+
+/**
+ * 测试专用：显式预热收款运行时。
+ *
+ * 这是「公开测试钩子」而不是判定逃生口——它只调用与生产完全相同的
+ * `ensureSatRuntime`，可用来确定性表达「收款运行时已就绪 / 仍在预热」两个场景，
+ * 不改变任何可用性判定结果。
+ */
+export async function __testEnsureSatRuntime(): Promise<void> {
+  await ensureSatRuntime();
+}
+
+/** 测试专用：只释放收款运行时，用来制造「依赖掉线但 MSFile 仍在运行」。 */
+export async function __testReleaseSatRuntime(): Promise<void> {
+  await releaseSatRuntime("test");
+}
+
+/**
+ * 测试专用：等待「依赖就绪后自动重跑卖方装配」那一次重判收敛。
+ *
+ * 收敛本身由订阅推式触发；这里只把在途的 Promise 交给测试 await，不引入轮询。
+ */
+export async function __testAwaitMsfileSellerDependencyResume(): Promise<void> {
+  await msfileSellerDependencyResume?.catch(() => undefined);
+  msfileSellerDependencyResume = undefined;
 }
 
 export function __testFailNextCoordinatorSnapshotPersist(): void {
@@ -17311,7 +17481,6 @@ export async function __testResolveStorageGrant(grantId: string, actualPortId: s
 /** MSFile 测试接缝：会话解析与 RPC 分发。 */
 export function __testSetMsfileRuntimeOverride(runtime: Partial<MsFileServiceImpl> | undefined): void {
   testMsfileRuntimeOverride = runtime as MsFileServiceImpl | undefined;
-  if (!runtime) testMsfileRuntimeRecoveryAllowed = true;
 }
 
 /** 测试专用：直接切换 Worker 数据面设置，验证队列不依赖真实 Window executor。 */
@@ -17609,7 +17778,6 @@ export async function __testExecutorSignPeerRecord(input: { leaseId: string; exp
 export async function __testReleaseMsfileRuntime(): Promise<void> {
   releaseMsfileRuntime("test");
   testMsfileRuntimeOverride = undefined;
-  testMsfileRuntimeRecoveryAllowed = true;
   await releaseSatRuntime("test");
 }
 

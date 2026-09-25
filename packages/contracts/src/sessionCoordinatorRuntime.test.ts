@@ -179,6 +179,87 @@ describe("Coordinator runtime contract parsers", () => {
     expect(Object.prototype.hasOwnProperty.call(response, "operationResult")).toBe(true);
   });
 
+  it("接受单元快照的二值状态、依赖清单与原因分解", () => {
+    const unit = {
+      productId: "msfile",
+      unitId: "msfile.coordinator-worker",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
+      instanceId: "coordinator-unit:msfile:1",
+      state: "failed",
+      dependsOn: ["sat-subscription.coordinator-worker"],
+      reasons: [
+        { code: "dependency-not-ready", dependencyId: "sat-subscription.coordinator-worker", text: { key: "coordinator.unitUnavailable.dependencyNotReady", fallback: "Required runtime unit is not ready: sat-subscription.coordinator-worker", values: { unit: "sat-subscription.coordinator-worker" } } },
+        { code: "unit-not-ready", dependencyId: "msfile.coordinator-worker", text: { key: "coordinator.unitUnavailable.unitNotReady", fallback: "Runtime unit has not finished starting" } },
+      ],
+      snapshotRevision: 3,
+      serviceIds: ["msfile.service"],
+      taskIds: [],
+    };
+    const result = parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      topic: "worker.units",
+      type: "coordinator.worker-units.changed",
+      authorityInstanceId: "authority:1",
+      workerUnitRevision: 3,
+      sessionEpoch: "epoch-1",
+      units: [unit],
+    }) as { units: unknown[] };
+    expect(result.units).toEqual([unit]);
+  });
+
+  it("接受缺省实例标识的单元：从未启动过的单元没有运行编号", () => {
+    // 框架在「能不能启动」被否时就返回，实例标识还没分配。契约必须接受这种条目，
+    // 否则被依赖挡住的单元会在线上被判为非法载荷而整批丢弃。
+    const unit = {
+      productId: "msfile",
+      unitId: "msfile.coordinator-worker",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
+      state: "failed",
+      dependsOn: ["sat-subscription.coordinator-worker"],
+      reasons: [{
+        code: "dependency-not-ready",
+        dependencyId: "sat-subscription.coordinator-worker",
+        text: { key: "coordinator.unitUnavailable.dependencyNotReady", fallback: "Required runtime unit is not ready", values: { unit: "sat" } },
+      }],
+      snapshotRevision: 1,
+      serviceIds: ["msfile.service"],
+      taskIds: [],
+    };
+    const result = parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      topic: "worker.units",
+      type: "coordinator.worker-units.changed",
+      authorityInstanceId: "authority:1",
+      workerUnitRevision: 1,
+      sessionEpoch: "epoch-1",
+      units: [unit],
+    }) as { units: Array<{ instanceId?: string }> };
+    expect(result.units[0]!.instanceId).toBeUndefined();
+  });
+
+  it("拒绝已移除的 starting 状态与未知原因代码", () => {
+    const base = {
+      productId: "storage",
+      unitId: "storage.coordinator-worker",
+      runtime: "shared-worker",
+      scopeKind: "storage",
+      instanceId: "coordinator-unit:storage:1",
+      dependsOn: [],
+      reasons: [],
+      snapshotRevision: 1,
+      serviceIds: [],
+      taskIds: [],
+    };
+    const event = { topic: "worker.units", type: "coordinator.worker-units.changed", authorityInstanceId: "authority:1", workerUnitRevision: 1, sessionEpoch: "epoch-1" };
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...event, units: [{ ...base, state: "ready" }] })).toBeTruthy();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...event, units: [{ ...base, state: "starting" }] })).toThrow();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      ...event,
+      units: [{ ...base, state: "failed", reasons: [{ code: "mystery", text: "x" }] }],
+    })).toThrow();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...event, units: [{ ...base, state: "ready", dependsOn: undefined }] })).toThrow();
+  });
+
   it("uses topic/type discriminators and strips unknown event fields", () => {
     const result = parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
       topic: "session.state",
@@ -586,6 +667,34 @@ describe("Coordinator runtime contract parsers", () => {
     expect(response(rpcRequest("storage.platform.data", { data: { type: "platform.get" } }), ownerEntry).operationResult).toEqual(ownerEntry);
 
     expect(response(rpcRequest("msfile.control", { control: { type: "settings.mediaBlockReadConcurrency.get" } }), 2).operationResult).toBe(2);
+
+    // 卖方新增「等待依赖」一档：依赖还没好不是配置坏了，UI 必须能分开显示。
+    const sellerSettings = (sellerRuntimeStatus: string) => ({
+      globalSettings: null,
+      mediaBlockReadConcurrency: 4,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 4,
+      globalStatConcurrency: 4,
+      suppliers: [],
+      supplierGeneration: 0,
+      globalSettingsUpdatedAt: 0,
+      sellerSettings: {
+        sellerEnabled: true,
+        seedPriceSatoshis: "1",
+        fullBlockPriceSatoshis: "2",
+        quoteLifetimeSeconds: 60,
+        supportedArbiterPublicKeys: [],
+        maxConcurrentSales: 1,
+      },
+      sellerRuntimeStatus,
+    });
+    for (const status of ["disabled", "waiting-unlock", "waiting-dependency", "indexing", "configuration-error", "ready", "selling", "degraded"]) {
+      expect(response(rpcRequest("msfile.control", { control: { type: "settings.get" } }), sellerSettings(status)).operationResult)
+        .toMatchObject({ sellerRuntimeStatus: status });
+    }
+    expect(() => response(rpcRequest("msfile.control", { control: { type: "settings.get" } }), sellerSettings("starting")))
+      .toThrow(/sellerRuntimeStatus/);
+
     expect(response(rpcRequest("msfile.control", {
       control: { type: "bucket.put-block", seedHashHex: "aa".repeat(32), blockHashHex: "bb".repeat(32), bytes: new Uint8Array([1, 2, 3]).buffer },
     }), null).operationResult).toBeNull();

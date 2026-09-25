@@ -247,6 +247,7 @@ textarea.msfile-settings__control {
 
 .msfile-settings .is-unconfigured,
 .msfile-settings .is-waiting-unlock,
+.msfile-settings .is-waiting-dependency,
 .msfile-settings .is-indexing,
 .msfile-settings .is-configuration-error {
   color: var(--warning, #d97706) !important;

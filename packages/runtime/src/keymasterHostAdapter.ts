@@ -810,11 +810,7 @@ export function createKeymasterPluginHost(
       unitId: snapshot.unitId,
       runtime: snapshot.runtime,
       instanceId: snapshot.instanceId,
-      state: snapshot.state === "ready"
-        ? "enabled" as const
-        : snapshot.state === "starting"
-          ? "starting" as const
-          : "error-disabled" as const,
+      state: snapshot.state === "ready" ? "enabled" as const : "error-disabled" as const,
     }));
   };
   let coreHost: WebLoomPluginHost | undefined;
@@ -1385,11 +1381,8 @@ export function createKeymasterPluginHost(
           unitId: unit.unitId,
           runtime: unit.runtime,
           instanceId: unit.instanceId,
-          state: unit.state === "enabled"
-            ? "ready" as const
-            : unit.state === "starting"
-              ? "starting" as const
-              : "failed" as const,
+          // 契约状态已二值化：未就绪一律表达为 failed，由 reasons 解释。
+          state: unit.state === "enabled" ? "ready" as const : "failed" as const,
           error: unit.state === "error-disabled" ? "远程运行单元失败" : undefined,
         }))
       : (options.runtimeUnitSnapshots?.() ?? []);
@@ -1399,7 +1392,7 @@ export function createKeymasterPluginHost(
         ? undefined
         : snapshots.find((snapshot) => snapshot.productId === manifest.id && snapshot.unitId === declared.id);
       const remoteKind = remote
-        ? remote.state === "ready" ? "enabled" : remote.state === "starting" ? "starting" : "error-disabled"
+        ? remote.state === "ready" ? "enabled" : "error-disabled"
         : "unknown";
       return {
         pluginId: manifest.id,
