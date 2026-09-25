@@ -38,9 +38,14 @@ export function createBitfsVaultSigner(cryptoPort: ActiveKeyCrypto): Signer {
       if (current.publicKeyHex.toLowerCase() !== identity.publicKeyHex.toLowerCase()) {
         throw new WireError("unauthorized", request.wireKind, "signer", "签名期间 active Key 已变化");
       }
-      const result = await cryptoPort.signDigest({ publicKeyHex: identity.publicKeyHex, digest: request.digest.slice().buffer as ArrayBuffer, format: "der" });
-      if (result.format !== "der") throw new TypeError("Vault 返回了错误的签名格式");
-      return new Uint8Array(result.signature).slice();
+       try {
+         const result = await cryptoPort.signDigest({ publicKeyHex: identity.publicKeyHex, digest: request.digest.slice().buffer as ArrayBuffer, format: "der" });
+         if (result.format !== "der") throw new TypeError("Vault 返回了错误的签名格式");
+         return new Uint8Array(result.signature).slice();
+       } catch (error) {
+         console.warn("[msfile] BitFS Vault digest signing failed", error instanceof Error ? error.message : String(error));
+         throw error;
+       }
     },
   };
 }

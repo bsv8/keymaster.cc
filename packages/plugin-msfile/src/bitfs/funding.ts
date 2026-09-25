@@ -803,11 +803,12 @@ export async function prepareBitfsFundingSplit(input: {
   const snapshot = await deps.getAvailableSnapshot({ ownerPublicKeyHex: owner, network });
   deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
   if (!snapshot.available || snapshot.state !== "fresh") throw new BitfsFundingError("insufficient_funds", "普通 P2PKH 余额快照尚未就绪，请刷新余额后重试");
-  if (snapshot.items.some((item) => item.isSpentInMempoolTx)) throw new BitfsFundingError("input_unavailable", "普通余额快照含有已被内存池花费的输入，请刷新后重试");
+  const spendableItems = snapshot.items.filter((item) => !item.isSpentInMempoolTx);
+  if (spendableItems.length === 0) throw new BitfsFundingError("insufficient_funds", "普通 P2PKH 余额没有可花费输入，请刷新余额后重试");
 
   const ownerAddress = await deps.resolveOwnerAddress({ ownerPublicKeyHex: owner, network });
   const ownerScript = assertScript(ownerAddress.scriptHex);
-  const candidates = snapshot.items.map((item) => {
+  const candidates = spendableItems.map((item) => {
     if (!Number.isSafeInteger(item.value) || item.value <= 0 || !Number.isSafeInteger(item.vout) || item.vout < 0) {
       throw new BitfsFundingError("integrity", "P2PKH 普通余额快照包含无效 UTXO");
     }

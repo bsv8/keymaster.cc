@@ -70,6 +70,15 @@ export interface LoadedE2EConfig {
   readonly testnet: E2ETestnetSeed;
 }
 
+export interface E2ETestnetKeysConfig {
+  readonly directory: string;
+  readonly seedPrivateKeyHex: SecretString;
+  readonly key01PrivateKeyHex: SecretString;
+  readonly key02PrivateKeyHex: SecretString;
+}
+
+export type LoadedE2ETestnetKeysConfig = E2ETestnetKeysConfig;
+
 /** 只运行真实 S3 Journey 时的最小配置投影，不读取其它真实资源秘密。 */
 export interface LoadedE2ES3Config {
   readonly directory: string;

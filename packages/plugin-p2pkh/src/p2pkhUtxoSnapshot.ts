@@ -109,14 +109,19 @@ export function validateP2pkhUnspentAll(rows: readonly WocUtxoResponse[]): P2pkh
     const outpointKey = `${txid}:${row.vout}`;
     const existing = byOutpoint.get(outpointKey);
     if (existing) {
-      // 同 outpoint 重复且任一保留字段冲突 → 整次快照失败；完全一致则视为去重。
       if (existing.value !== item.value
-        || existing.height !== item.height
-        || existing.status !== item.status
-        || existing.isSpentInMempoolTx !== item.isSpentInMempoolTx
-        || existing.script !== item.script) {
+        || (existing.script !== undefined && item.script !== undefined && existing.script !== item.script)) {
         throw new Error(`WoC unspent/all returned conflicting duplicates for ${outpointKey}`);
       }
+      const status = existing.status === "confirmed" || item.status === "confirmed" ? "confirmed" : "unconfirmed";
+      byOutpoint.set(outpointKey, {
+        ...existing,
+        value: item.value,
+        status,
+        height: status === "confirmed" ? Math.max(existing.height, item.height) : 0,
+        isSpentInMempoolTx: existing.isSpentInMempoolTx || item.isSpentInMempoolTx,
+        ...(existing.script === undefined ? {} : item.script === undefined ? {} : { script: item.script }),
+      });
       continue;
     }
     byOutpoint.set(outpointKey, item);
@@ -268,7 +273,7 @@ export function createP2pkhUtxoSnapshotStore(deps: { woc: WocService; now?: () =
         // 观察失败不能改变 consumed；下一次同步仍会继续检查。
         return false;
       }
-      if (observation.observation !== undefined) return false;
+      if (observation.observation !== undefined && observation.observation !== "confirmed") return false;
 
       // observation 跨越 await，必须再次确认期间没有刷新、消费、清除或
       // 回滚，避免旧观察结果解封新一代快照。

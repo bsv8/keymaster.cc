@@ -823,6 +823,76 @@ describe("KeymasterSessionCoordinatorClient", () => {
     }
   });
 
+  it("applies chain.height into the reader cache and rejects stale revisions", async () => {
+    const hub = new Hub();
+    const Constructor = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = Constructor;
+    try {
+      const client = createCoordinatorClient({ clientId: "chain-height-domain" });
+      await client.connect();
+      // 连接后还没有任何链高度事件：读取器必须返回不可用快照，而不是高度 0 的假读数。
+      expect(client.getChainHeightSnapshot()).toEqual({ height: 0, network: "main", available: false, revision: 0 });
+
+      const events: unknown[] = [];
+      client.subscribeTopic("chain.height", (event) => events.push(event));
+
+      await hub.broadcast({
+        topic: "chain.height",
+        type: "chain.height.changed",
+        chainHeightRevision: 1,
+        sessionEpoch: "shared-epoch",
+        chainHeight: { height: 900_123, network: "main", available: true, updatedAtMs: 1, revision: 1 }
+      });
+      await hub.broadcast({
+        topic: "chain.height",
+        type: "chain.height.changed",
+        chainHeightRevision: 2,
+        sessionEpoch: "shared-epoch",
+        chainHeight: { height: 900_124, network: "main", available: true, updatedAtMs: 2, revision: 2 }
+      });
+      // 旧 revision 不得覆盖当前读数。
+      await hub.broadcast({
+        topic: "chain.height",
+        type: "chain.height.changed",
+        chainHeightRevision: 1,
+        sessionEpoch: "shared-epoch",
+        chainHeight: { height: 1, network: "main", available: true, updatedAtMs: 0, revision: 1 }
+      });
+
+      expect(events).toHaveLength(2);
+      expect(client.getChainHeightSnapshot()).toMatchObject({ height: 900_124, available: true, revision: 2 });
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
+  it("discards a malformed chain.height event instead of caching a partial height", async () => {
+    const hub = new Hub();
+    const Constructor = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = Constructor;
+    try {
+      const client = createCoordinatorClient({ clientId: "chain-height-malformed" });
+      await client.connect();
+      const events: unknown[] = [];
+      client.subscribeTopic("chain.height", (event) => events.push(event));
+
+      await hub.broadcast({
+        topic: "chain.height",
+        type: "chain.height.changed",
+        chainHeightRevision: 1,
+        sessionEpoch: "shared-epoch",
+        chainHeight: { height: "900_123", network: "main", available: true, revision: 1 }
+      });
+
+      expect(events).toHaveLength(0);
+      expect(client.getChainHeightSnapshot()).toEqual({ height: 0, network: "main", available: false, revision: 0 });
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
   it("applies topic baselines returned by subscribe before exposing the client", async () => {
     const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => {

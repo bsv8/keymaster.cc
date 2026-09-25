@@ -31,6 +31,7 @@ import type {
   CoordinatorTaskSnapshot,
   SessionStateEvent,
   BackgroundSnapshotEvent,
+  CoordinatorChainHeightEvent,
   AssetDataChangedEvent,
   CoordinatorStorageStateEvent,
   CoordinatorMsFileStateEvent,
@@ -1707,7 +1708,26 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "autolock.settings.update": return { kind, settings: parseAutoLockSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.settings.update": {
       const settings = expectRecord(request.settings, kind + ".settings");
-      return { kind, settings: { includeTestnet: booleanValue(settings.includeTestnet, kind + ".settings.includeTestnet") }, expectedSessionEpoch: epoch("expectedSessionEpoch") };
+      const feeRates = settings.feeRateSatoshisPerKb;
+      let parsedFeeRates: Partial<Record<"low" | "medium" | "high", number>> | undefined;
+      if (feeRates !== undefined) {
+        const values = expectRecord(feeRates, kind + ".settings.feeRateSatoshisPerKb");
+        parsedFeeRates = {};
+        for (const tier of ["low", "medium", "high"] as const) {
+          if (values[tier] === undefined) continue;
+          const value = integer(values[tier], kind + `.settings.feeRateSatoshisPerKb.${tier}`);
+          if (value < 1) throw new TypeError(`Coordinator ${kind}.settings.feeRateSatoshisPerKb.${tier} is invalid`);
+          parsedFeeRates[tier] = value;
+        }
+      }
+      return {
+        kind,
+        settings: {
+          includeTestnet: booleanValue(settings.includeTestnet, kind + ".settings.includeTestnet"),
+          ...(parsedFeeRates === undefined ? {} : { feeRateSatoshisPerKb: parsedFeeRates })
+        },
+        expectedSessionEpoch: epoch("expectedSessionEpoch")
+      };
     }
     case "p2pkh.provider-config.get": return { kind, providerId: text(request.providerId, kind + ".providerId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.provider-config.update": return { kind, providerId: text(request.providerId, kind + ".providerId", 256), config: parseJsonRecord(request.config, kind + ".config"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
@@ -3042,7 +3062,7 @@ function parseMsFileBitfsTaskSnapshot(value: unknown, field: string): MsFileBitf
   const row = expectRecord(value, field);
   const progress = parseMsFileBitfsPurchaseSnapshot(row, field);
   const seedHashHex = text(row.seedHashHex, `${field}.seedHashHex`, 64);
-  const discoveryOnly = row.discoveryOnly === undefined ? false : bool(row.discoveryOnly, `${field}.discoveryOnly`);
+  const discoveryOnly = row.discoveryOnly === undefined ? false : booleanValue(row.discoveryOnly, `${field}.discoveryOnly`);
   const sellerPublicKeyHex = row.sellerPublicKeyHex === null
     ? null
     : text(row.sellerPublicKeyHex, `${field}.sellerPublicKeyHex`, 66);
@@ -3067,8 +3087,8 @@ function parseMsFileBitfsTaskSnapshot(value: unknown, field: string): MsFileBitf
       if (!Array.isArray(row.availableQuotes) || row.availableQuotes.length > 256) throw new TypeError(`Coordinator ${field}.availableQuotes is invalid`);
       return row.availableQuotes.map((item, index) => parseMsFileBitfsQuoteView(item, `${field}.availableQuotes[${index}]`));
     })();
-  const canCancel = row.canCancel === undefined ? undefined : bool(row.canCancel, `${field}.canCancel`);
-  const canReconnect = row.canReconnect === undefined ? undefined : bool(row.canReconnect, `${field}.canReconnect`);
+  const canCancel = row.canCancel === undefined ? undefined : booleanValue(row.canCancel, `${field}.canCancel`);
+  const canReconnect = row.canReconnect === undefined ? undefined : booleanValue(row.canReconnect, `${field}.canReconnect`);
   return {
     ...progress,
     seedHashHex,
@@ -3415,7 +3435,7 @@ function parseCoordinatorTopic(value: unknown, field: string): CoordinatorTopic 
     case "session.state": case "background.snapshot": case "asset.data-changed":
     case "storage.state": case "msfile.state":
     case "sat.events": case "channel.events": case "contacts.presence":
-    case "plugin.intent": case "worker.units":
+    case "plugin.intent": case "worker.units": case "chain.height":
       return topic;
     default:
       throw new TypeError(`Coordinator ${field} is not supported`);
@@ -3822,6 +3842,34 @@ function parsePresenceMap(value: unknown, field: string): ContactPresenceMap {
   return result;
 }
 
+function parseChainHeightEvent(value: unknown): CoordinatorChainHeightEvent {
+  const event = topicEnvelope(value, "chain.height", "chain.height.changed");
+  const chainHeight = expectRecord(event.chainHeight, "event.chainHeight");
+  const network = enumValue(chainHeight.network, ["main", "test"] as const, "event.chainHeight.network");
+  const available = booleanValue(chainHeight.available, "event.chainHeight.available");
+  // 链高度是不透明的非负整数；boundedNumber 已保证 >= 0 且落在安全整数范围内。
+  const height = boundedNumber(chainHeight.height, "event.chainHeight.height");
+  const updatedAtMs = chainHeight.updatedAtMs === undefined
+    ? undefined
+    : boundedNumber(chainHeight.updatedAtMs, "event.chainHeight.updatedAtMs");
+  if (available && updatedAtMs === undefined) {
+    throw new TypeError("Coordinator event.chainHeight.updatedAtMs is required when available");
+  }
+  return {
+    topic: "chain.height",
+    type: "chain.height.changed",
+    chainHeightRevision: boundedNumber(event.chainHeightRevision, "event.chainHeightRevision"),
+    sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),
+    chainHeight: {
+      height,
+      network,
+      available,
+      ...(updatedAtMs === undefined ? {} : { updatedAtMs }),
+      revision: boundedNumber(chainHeight.revision, "event.chainHeight.revision"),
+    },
+  };
+}
+
 function parseContactsPresenceEvent(value: unknown): CoordinatorContactsPresenceEvent {
   const event = topicEnvelope(value, "contacts.presence", "contacts.presence.changed");
   return {
@@ -3917,6 +3965,7 @@ function parseTopicEvent(value: unknown): CoordinatorTopicEvent {
   switch (topic) {
     case "session.state": return parseSessionStateEvent(value);
     case "background.snapshot": return parseBackgroundSnapshotEvent(value);
+    case "chain.height": return parseChainHeightEvent(value);
     case "asset.data-changed": return parseAssetDataChangedEvent(value);
     case "storage.state": return parseStorageStateEvent(value);
     case "msfile.state": return parseMsFileStateEvent(value);

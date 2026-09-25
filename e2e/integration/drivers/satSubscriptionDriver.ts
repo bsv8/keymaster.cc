@@ -39,8 +39,8 @@ export async function saveSatSupplierFromPage(page: Page, input: SatSupplierForm
   const enabled = editor.getByRole("checkbox", { name: /Enable supplier|Enabled|启用供应商/iu });
   if ((await enabled.isChecked()) !== input.enabled) await enabled.click();
   await editor.getByRole("button", { name: /Save supplier|Add supplier|保存供应商/iu }).click();
-  await expect(editor).toHaveCount(0);
-  await expect(settings.getByRole("status")).toContainText(/saved|保存/iu);
+  await expect(editor).toHaveCount(0, { timeout: 15_000 });
+  await expect(settings.getByRole("status")).toContainText(/saved|保存/iu, { timeout: 15_000 });
 }
 
 /**

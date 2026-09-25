@@ -37,6 +37,7 @@ export type FinalIoAuditOperation =
   | "window-p2p.identity.sign"
   | "window-p2p.spike-transfer"
   | "contacts.presence-probe"
+  | "chain.height-sync"
   | "p2pkh.sync"
   | "p2pkh.utxo-snapshot"
   | "token-bsv21.sync"

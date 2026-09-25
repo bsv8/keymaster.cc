@@ -54,8 +54,8 @@ export function P2pkhSettingsPage() {
     }
   }
 
-  async function saveFeeRate(tier: P2pkhFeeRateTier) {
-    const value = Number(feeRates[tier]);
+  async function saveFeeRate(tier: P2pkhFeeRateTier, rawValue = feeRates[tier]) {
+    const value = Number(rawValue);
     if (!Number.isInteger(value) || value < 1) {
       setError(t("p2pkh.settings.feeRateInvalid", { defaultValue: "费率必须是大于 0 的整数（sats/kB）。" }));
       setFeeRates((current) => ({ ...current, [tier]: String(resolveP2pkhFeeRateSatoshisPerKb(settings)[tier]) }));
@@ -116,7 +116,7 @@ export function P2pkhSettingsPage() {
               const value = event.currentTarget.value;
               setFeeRates((current) => ({ ...current, [tier]: value }));
             }}
-            onBlur={() => void saveFeeRate(tier)}
+            onBlur={(event) => void saveFeeRate(tier, event.currentTarget.value)}
             hint={t("p2pkh.unit.satsPerKb", { defaultValue: "sats/kB" })}
           />
         ))}

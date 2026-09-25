@@ -336,7 +336,15 @@ export class WocTestnetChainAdapter implements TestnetChainAdapter {
       }
       return { status: "broadcast", txid, ...accounting };
     } catch {
-      // 广播结果未知：调用方必须先观察链上再决定是否重试，这里绝不盲目重发。
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const observed = await this.observeTransaction(txid);
+          if (observed !== "not-found") return { status: "broadcast", txid, ...accounting };
+        } catch {
+          // 继续用同一 txid 观察，绝不盲目重发。
+        }
+        if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+      }
       return { status: "uncertain" };
     }
   }

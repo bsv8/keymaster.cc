@@ -1,7 +1,7 @@
 // BitFS 交易 outbox：persist-before-broadcast、结果未知对账、exact bytes 重放。
 
 import { describe, expect, it, vi } from "vitest";
-import { transactionID } from "go-bitfs";
+import { bitfsTxidHex } from "./txid.js";
 import { createInMemoryOwnerFileStore } from "../storage/inMemoryOwnerFileStore.testutil.js";
 import {
   BitfsTransactionBroadcaster,
@@ -22,7 +22,7 @@ function rawTransaction(marker = 0): Uint8Array {
 }
 
 function txidOf(rawTx: Uint8Array): string {
-  return Array.from(transactionID(rawTx), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return bitfsTxidHex(rawTx);
 }
 
 function fixture(chainOverrides: Partial<BitfsChainPort> = {}) {
@@ -38,7 +38,7 @@ function fixture(chainOverrides: Partial<BitfsChainPort> = {}) {
 }
 
 describe("BitFS 交易 outbox 与广播对账", () => {
-  it("广播前先持久化 exact bytes，accepted 后仍等待链上观察", async () => {
+  it("广播前先持久化 exact bytes，成功回执立即推进且不额外查询", async () => {
     const raw = rawTransaction();
     const txid = txidOf(raw);
     const fixtureValue = fixture();
@@ -49,8 +49,24 @@ describe("BitFS 交易 outbox 与广播对账", () => {
       expect(stored).toEqual(raw);
       return { outcome: "accepted" };
     });
-    await expect(fixtureValue.broadcaster.submit(raw)).resolves.toEqual({ status: "result-unknown", txid, attempts: 1, retryable: false, reason: "provider-accepted-awaiting-observation" });
-    expect(await fixtureValue.journal.getTransactionRecord(txid)).toMatchObject({ state: "result-unknown", attempts: 1 });
+    await expect(fixtureValue.broadcaster.submit(raw)).resolves.toEqual({ status: "confirmed", txid, attempts: 1 });
+    expect(await fixtureValue.journal.getTransactionRecord(txid)).toMatchObject({ state: "confirmed", attempts: 1 });
+    expect(fixtureValue.chain.lookupTransaction).not.toHaveBeenCalled();
+  });
+
+  it("开池交易被独立观察到进入 mempool 后即可使用，无需等出块", async () => {
+    const raw = rawTransaction();
+    const txid = txidOf(raw);
+    const lookup = vi.fn(async () => "mempool" as const);
+    const { journal, broadcaster, chain } = fixture({
+      broadcast: vi.fn(async () => { throw new Error("response lost"); }),
+      lookupTransaction: lookup,
+    });
+    await expect(broadcaster.submit(raw)).resolves.toMatchObject({ status: "result-unknown" });
+    await expect(broadcaster.reconcile(txid)).resolves.toMatchObject({ status: "confirmed", txid });
+    expect(lookup).toHaveBeenCalledWith(txid);
+    expect(await journal.getTransactionRecord(txid)).toMatchObject({ state: "confirmed", attempts: 1 });
+    expect(chain.broadcast).toHaveBeenCalledTimes(1);
   });
 
   it("网络错误按结果未知处理，再按 txid 对账为 confirmed", async () => {
@@ -79,7 +95,7 @@ describe("BitFS 交易 outbox 与广播对账", () => {
     expect(await journal.getTransactionRecord(txid)).toMatchObject({ state: "failed" });
 
     broadcast.mockImplementationOnce(async () => ({ outcome: "already-known" }));
-    await expect(broadcaster.retry(txid)).resolves.toEqual({ status: "result-unknown", txid, attempts: 2, retryable: false, reason: "provider-accepted-awaiting-observation" });
+    await expect(broadcaster.retry(txid)).resolves.toEqual({ status: "confirmed", txid, attempts: 2 });
     const calls = broadcast.mock.calls as unknown as Array<[{ txid: string; rawTxHex: string }]>;
     expect(calls[0]![0].rawTxHex).toBe(calls[1]![0].rawTxHex);
   });
@@ -101,10 +117,13 @@ describe("BitFS 交易 outbox 与广播对账", () => {
     const txid = txidOf(raw);
     const prepared = fixture();
     await prepared.journal.putTransaction(txid, raw, NOW);
-    await expect(prepared.broadcaster.resume(raw)).resolves.toMatchObject({ status: "result-unknown", txid, attempts: 1 });
+    await expect(prepared.broadcaster.resume(raw)).resolves.toMatchObject({ status: "confirmed", txid, attempts: 1 });
     expect(prepared.chain.broadcast).toHaveBeenCalledTimes(1);
 
-    const alreadyDispatched = fixture({ lookupTransaction: vi.fn(async () => "mempool" as const) });
+    const alreadyDispatched = fixture({
+      broadcast: vi.fn(async () => { throw new Error("response lost"); }),
+      lookupTransaction: vi.fn(async () => "mempool" as const),
+    });
     await alreadyDispatched.broadcaster.submit(raw);
     (alreadyDispatched.chain.broadcast as ReturnType<typeof vi.fn>).mockClear();
     await expect(alreadyDispatched.broadcaster.resume(raw)).resolves.toMatchObject({ status: "confirmed", txid });

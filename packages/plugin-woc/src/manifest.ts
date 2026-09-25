@@ -21,15 +21,19 @@ import type {
 import type { MessageBus } from "webloom-framework";
 import {
   RUNTIME_MESSAGE_BUS,
+  RESOURCE_REGISTRY_CAPABILITY,
   WOC_COORDINATOR_CONTROL_CAPABILITY,
   type P2pkhCoordinatorControl,
   WOC_1SAT_ORDINALS_CAPABILITY,
   WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
   WOC_STAS_CAPABILITY,
+  CHAIN_HEIGHT_READER_CAPABILITY,
+  CHAIN_HEIGHT_RESOURCE_ID,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
+import { createChainHeightReader } from "./chainHeightReader.js";
 import { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
 import { createWocBsv21Service } from "./wocBsv21Service.js";
 import { createWocService } from "./wocService.js";
@@ -105,9 +109,11 @@ const wocPluginDefinition = {
       capabilityDescriptor(WOC_STAS_CAPABILITY),
       capabilityDescriptor(WOC_1SAT_ORDINALS_CAPABILITY),
       capabilityDescriptor(WOC_COORDINATOR_CONTROL_CAPABILITY),
+      capabilityDescriptor(CHAIN_HEIGHT_READER_CAPABILITY),
     ],
     dependencies: defineRuntimeUnitDependencies([
       { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "注册 WOC actor handlers（target=woc）" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册链高度资源（跨标签同步）" },
     ]),
   }, {
     id: "woc.coordinator-worker",
@@ -152,10 +158,36 @@ const wocPluginDefinition = {
     const oneSatService = createWoc1SatOrdinalsService({ messageBus });
     ctx.provide(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
 
+    // 链高度读取器：把 Coordinator 的 `chain.height` 广播转成页面侧的
+    // get / 订阅 / 退订。刷新由后台同步任务按用户设置的间隔驱动，
+    // 页面只读内存中的最近一次节点读数。
+    const chainHeightReader = createChainHeightReader({ coordinatorClient: coordinator });
+    ctx.provide(CHAIN_HEIGHT_READER_CAPABILITY, chainHeightReader);
+
+    // chain.height：页面用 Resource Store 读链高度；订阅即退订，跨标签
+    // 更新由 Coordinator 单点广播驱动。
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
+    resources.register<import("@keymaster/contracts").ChainHeightSnapshot, readonly string[]>({
+      id: CHAIN_HEIGHT_RESOURCE_ID,
+      scope: "global",
+      key: () => [CHAIN_HEIGHT_RESOURCE_ID],
+      load: async () => chainHeightReader.get(),
+      subscribe: (_args, _context, invalidate) => chainHeightReader.subscribe(invalidate),
+      equals: (previous, next) => {
+        if (previous === next) return true;
+        if (!previous || !next) return false;
+        return previous.height === next.height
+          && previous.available === next.available
+          && previous.network === next.network;
+      },
+      invalidation: "immediate"
+    });
+
     return () => {
       // 硬切换 001：bridge 到 service.dispose()。
       // actor detach + 取消 messageBus handle 都在 dispose 内。
       service.dispose();
+      chainHeightReader.dispose?.();
     };
   }
 } satisfies PluginManifest & { setup: PluginSetup };

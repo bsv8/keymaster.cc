@@ -7,14 +7,25 @@ import { defineCapability } from "webloom-framework";
 import type { I18nText } from "./i18n.js";
 
 /**
+ * 区块链高度同步任务 id。
+ * 设计缘由（2026-09-26）：链高度是全系统共享的公共链状态，不属于任何 key。
+ * 任务本身只负责按用户设置的间隔向节点读取一次高度并广播；读取结果由
+ * `ChainHeightReader` 暴露给系统内其它消费者。
+ */
+export const CHAIN_HEIGHT_SYNC_TASK_ID = "chain.chain-height-sync";
+
+/**
  * 可在「智能调度 → 同步管理」中单独配置同步间隔的后台任务。
- * 设计缘由（2026-09-20）：
+ * 设计缘由（2026-09-20，2026-09-26 追加链高度）：
  *   - 这些任务按各自配置的间隔自动运行，用户可以设 30 秒 / 1 分钟 /
- *     5 分钟，也可以关闭（0）。
+ *     2 分钟 / 5 分钟，也可以关闭（0）。
+ *   - 每个任务的缺省间隔不同（见 `backgroundSyncDefaultIntervalMs`），
+ *     因此未配置时不能一律套用平台缺省。
  *   - UTXO 余额快照不在这个列表里：它是 smart 任务，由 WoC 空闲 2 秒
  *     的智能调度驱动，永远保持最新。
  */
 export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
+  CHAIN_HEIGHT_SYNC_TASK_ID,
   "p2pkh.transactions-sync",
   "token-bsv21.sync",
   "token-stas.sync",
@@ -23,10 +34,28 @@ export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
 ] as const;
 
 /** 用户可选的同步间隔（毫秒）；0 = 关闭该任务的自动同步（手动仍可触发）。 */
-export const BACKGROUND_SYNC_INTERVAL_OPTIONS_MS = [30_000, 60_000, 300_000, 0] as const;
+export const BACKGROUND_SYNC_INTERVAL_OPTIONS_MS = [30_000, 60_000, 120_000, 300_000, 0] as const;
 
 /** 任务缺省同步间隔：5 分钟。 */
 export const BACKGROUND_SYNC_DEFAULT_INTERVAL_MS = 300_000;
+
+/** 区块链高度同步缺省同步间隔：2 分钟。 */
+export const CHAIN_HEIGHT_SYNC_DEFAULT_INTERVAL_MS = 120_000;
+
+/**
+ * 每个 managed 任务的缺省间隔。
+ * 设计缘由：不同数据的新鲜度要求不同。链高度每隔几分钟就会变，过快轮询
+ * 只会浪费 WOC 配额，因此缺省 2 分钟；资产持仓类任务仍按 5 分钟。
+ * 未列出的任务退回 `BACKGROUND_SYNC_DEFAULT_INTERVAL_MS`。
+ */
+const BACKGROUND_SYNC_DEFAULT_INTERVAL_MS_BY_TASK_ID: Readonly<Record<string, number>> = Object.freeze({
+  [CHAIN_HEIGHT_SYNC_TASK_ID]: CHAIN_HEIGHT_SYNC_DEFAULT_INTERVAL_MS,
+});
+
+/** 读取某个 managed 任务的缺省间隔；未登记的任务使用平台缺省 5 分钟。 */
+export function backgroundSyncDefaultIntervalMs(taskId: string): number {
+  return BACKGROUND_SYNC_DEFAULT_INTERVAL_MS_BY_TASK_ID[taskId] ?? BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+}
 
 /**
  * 后台同步设置。

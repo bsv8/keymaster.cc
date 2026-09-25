@@ -92,8 +92,9 @@ export async function readRawLocalStorage(page: Page): Promise<RawEntry[]> {
  * 这是 Local 桶的正式物理真值；设备记录与 session 不在这里。对象值按
  * UTF-8 文本返回，KeyHold 与锁文件都是 JSON，调用方只校验公开结构。
  */
-export async function readRawLocalBucketObjects(page: Page): Promise<RawBucketObjectEntry[]> {
-  return page.evaluate(() => new Promise<Array<{ bucketId: string; path: string; text: string }>>((resolve, reject) => {
+export async function readRawLocalBucketObjects(page: Page, pathPattern?: string): Promise<RawBucketObjectEntry[]> {
+  return page.evaluate((pattern) => new Promise<Array<{ bucketId: string; path: string; text: string }>>((resolve, reject) => {
+    const pathFilter = pattern ? new RegExp(pattern, "u") : undefined;
     const request = indexedDB.open("keymaster.local", 1);
     request.onupgradeneeded = () => {
       const database = request.result;
@@ -119,12 +120,16 @@ export async function readRawLocalBucketObjects(page: Page): Promise<RawBucketOb
           return;
         }
         const [bucketId, path] = position.key as [string, string];
+        if (pathFilter && !pathFilter.test(path)) {
+          position.continue();
+          return;
+        }
         const record = position.value as { bytes?: Uint8Array };
         entries.push({ bucketId, path, text: new TextDecoder("utf-8", { fatal: false }).decode(record.bytes ?? new Uint8Array()) });
         position.continue();
       };
     };
-  }));
+  }), pathPattern);
 }
 
 /** 删除 Local 桶里的单个对象；只用于验证"raw 缺失"这类失败展示。 */

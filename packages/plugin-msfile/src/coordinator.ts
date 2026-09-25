@@ -78,6 +78,14 @@ export {
   type BitfsBuyerStream,
 } from "./bitfs/buyerProtocol.js";
 export {
+  assertBitfsBuyerCloseBinding,
+  encodeBitfsBuyerCloseBinding,
+  parseBitfsBuyerCloseBinding,
+  readBitfsBuyerLocalPaymentState,
+  type BitfsBuyerCloseBinding,
+  type BitfsBuyerLocalPaymentState,
+} from "./bitfs/buyerPoolState.js";
+export {
   BitfsTransactionBroadcaster,
   createBitfsTransactionJournal,
   type BitfsBroadcastOutcome,
@@ -86,7 +94,7 @@ export {
   type BitfsTransactionRecord,
   type BitfsTransactionState,
 } from "./bitfs/broadcast.js";
-export { createBitfsWocChainPort, reconcileBitfsTransactions, reconcileBitfsSessionTransactions, readBitfsPoolSpendChain } from "./bitfs/wocChain.js";
+export { createBitfsWocChainPort, reconcileBitfsTransactions, reconcileBitfsSessionTransactions, readBitfsPoolSpendChain, type BitfsPoolSpendChain } from "./bitfs/wocChain.js";
 export { BitfsSeedIndex, BITFS_SEED_INDEX_PAGE_SIZE, BITFS_SEED_INDEX_VERIFY_CONCURRENCY, type BitfsSeedIndexEntry } from "./bitfs/seedIndex.js";
 export { BitfsSellerRuntime, type BitfsSellerMatch, type BitfsSellerRuntimeDeps } from "./bitfs/sellerRuntime.js";
 export {

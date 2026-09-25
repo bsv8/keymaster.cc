@@ -67,10 +67,16 @@ describe("validateP2pkhUnspentAll", () => {
     expect(validateP2pkhUnspentAll([utxo({ script: "76a914" + "00".repeat(20) + "88ac" }), utxo({ script: "76a914" + "00".repeat(20) + "88ac" })])).toHaveLength(1);
   });
 
-  it("dedupes identical duplicates and rejects conflicting duplicates", () => {
+  it("dedupes transport status duplicates and rejects value conflicts", () => {
     expect(validateP2pkhUnspentAll([utxo(), utxo()])).toHaveLength(1);
+    expect(validateP2pkhUnspentAll([utxo(), utxo({ status: "unconfirmed", height: 0 })])).toEqual([
+      { txid: TXID_A, vout: 0, value: 1_000, height: 100, status: "confirmed", isSpentInMempoolTx: false },
+    ]);
+    expect(validateP2pkhUnspentAll([
+      utxo({ status: "unconfirmed", height: 0, isSpentInMempoolTx: false }),
+      utxo({ status: "confirmed", height: 100, isSpentInMempoolTx: true }),
+    ])[0]).toMatchObject({ status: "confirmed", isSpentInMempoolTx: true });
     expect(() => validateP2pkhUnspentAll([utxo(), utxo({ value: 999 })])).toThrow(/conflicting duplicates/u);
-    expect(() => validateP2pkhUnspentAll([utxo(), utxo({ status: "unconfirmed", height: 0 })])).toThrow(/conflicting duplicates/u);
   });
 
   it("rejects unknown status, invalid txid, vout and value", () => {
@@ -260,6 +266,24 @@ describe("createP2pkhUtxoSnapshotStore", () => {
     const reopened = await store.refresh(resource);
     expect(reopened.state).toBe("fresh");
     expect(reopened.seq).toBeGreaterThan(first.seq ?? 0);
+  });
+
+  it("releases a consumed snapshot after the spending transaction is confirmed", async () => {
+    let nowValue = "2026-09-20T00:00:00.000Z";
+    const woc = {
+      getAddressUnspentAll: vi.fn(async () => [utxo({ value: 100 })]),
+      getTransactionObservation: vi.fn(async () => ({ canonicalTxid: TXID_A, observation: "confirmed" as const })),
+    } as unknown as WocService;
+    const store = createP2pkhUtxoSnapshotStore({ woc, now: () => nowValue });
+    const first = await store.refresh(resource);
+    expect(store.consume(resource, {
+      binding: { resourceId: resource.resourceId, seq: first.seq! },
+      inputOutpointKeys: [`${TXID_A}:0`],
+      txid: TXID_A,
+    }).status).toBe("consumed");
+    nowValue = "2026-09-20T00:01:00.000Z";
+    expect(await store.reconcileConsumed(resource, { thresholdMs: 0 })).toBe(true);
+    expect(store.get(resource)).toMatchObject({ available: true, state: "fresh", seq: first.seq });
   });
 
   it("allows pure non-wallet inputs without a binding and rejects stale bindings", async () => {

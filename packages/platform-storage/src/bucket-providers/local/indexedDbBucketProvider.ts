@@ -214,7 +214,13 @@ export function createIndexedDbBucketProvider(options: IndexedDbBucketProviderOp
       const records = await requestToPromise<StoredObjectRecord[]>(transaction.objectStore(storeName).getAll(range));
       await transactionDone(transaction);
       const objects = records
-        .map(toObject)
+        .map((record) => ({
+          path: record.path,
+          bytes: new Uint8Array(0),
+          size: record.bytes.byteLength,
+          etag: record.etag,
+          lastModified: record.lastModified
+        }))
         .filter((object) => object.path.startsWith(prefix))
         .sort((left, right) => left.path.localeCompare(right.path));
       const start = decodeCursor(input.cursor);

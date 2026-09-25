@@ -52,6 +52,7 @@ e2e/runs/<执行档>/<run-id>/
 | lifecycle-local | `e2e/playwright.lifecycle.config.ts` | `pnpm test:e2e:lifecycle:local` | `gates/lifecycle` | 本地 WebLoom 0.5.0 tarball 的临时副本验收 |
 | lifecycle-registry | `e2e/playwright.lifecycle.registry.config.ts` | `pnpm test:e2e:lifecycle:registry` | `gates/lifecycle` | npm registry 0.5.0 的临时副本验收，`workers: 1` 串行 |
 | msfile | `e2e/playwright.msfile.config.ts` | `pnpm test:e2e:msfile` | `gates/msfile`、`journeys/msfile` | 需临时 Go supplier，360s 超时，`workers: 1` |
+| bitfs | `e2e/playwright.bitfs.config.ts` | `pnpm test:e2e:bitfs` | `journeys/bitfs` | 双浏览器真实 BitFS 买卖；使用 key01/key02、免费 SatSubscription 和 testnet，购买测试本体 1800s、执行器默认 1860s 硬超时（含构建时间），`workers: 1` |
 | satsubscription | `e2e/playwright.satsubscription.config.ts` | `pnpm test:e2e:satsubscription` | `journeys/satsubscription/{real-channel-message,ss-server-settings,ss-server-settings-bsv8}` | 从仓库外 SatSubscription 构建正式服务 + 一次性 PostgreSQL；需 `SATS_SUBSCRIPTION_DIR`、Go、PostgreSQL，360s 超时，`workers: 1` |
 | resources | `e2e/playwright.resources.config.ts` | `pnpm test:e2e:resources` | `resources/*`、`journeys/p2pkh/*`、`journeys/satsubscription/real-satsubscription-(health|page)` | 资源准备 + 链上资产/SatSubscription 健康；setup → 场景 → teardown 投影，真实资金场景串行(`workers: 1`)，`trace/screenshot/video` 全关 |
 | s3 | `e2e/playwright.s3.config.ts` | `pnpm test:e2e:s3` | `resources/s3-*`、`gates/s3/resource-safety`、`journeys/s3/real-s3-*` | 只读取仓库外 `s3.json`，不碰 testnet/Sat 秘密 |
@@ -127,7 +128,17 @@ Gate(3 项)：
 
 ---
 
-## 4.1 satsubscription
+## 4.1 bitfs
+
+BitFS 执行档启动一个真实 SatSubscription 和一次性 PostgreSQL。浏览器 A 导入 `key01.hex` 作为买方，浏览器 B 导入 `key02.hex` 作为卖方；Node 从 `seed-key.hex` 按购买预算的反推值乘以 120% 资助 key01。卖方上传固定 MP4，买方通过免费 Hash 频道发现报价，保持连接超过 30 秒建连期限后完成 testnet 购买、关池、文件校验和回款。测试核验持久化 Kind 1–7、Kind 12/13、关池交易和双方错误诊断；购买等待输出状态变化及待确认 txid。`BITFS_E2E_TIMEOUT_MS` 可覆盖执行器的整体期限，需为真实网络调用及文件传输留出时间；业务按 WOC 广播成功回执推进，不等待出块。
+
+| 编号 | 文件 | 中文说明 | 覆盖需求 |
+| --- | --- | --- | --- |
+| J-REAL-BITFS-PURCHASE | `journeys/bitfs/real-bitfs-purchase.spec.ts` | 双浏览器、单数字标价、真实 WebRTC BitFS DataChannel、testnet 专款/关池/回款与源文件 SHA-256 对账 | KM-MSFILE-001、KM-SATSUB-001、KM-ASSET-001、KM-BROADCAST-001 |
+
+---
+
+## 4.2 satsubscription
 
 真实 SatSubscription 源码执行档；辅助入口 `node scripts/run-satsubscription-e2e.mjs`
 会解析 Go/PostgreSQL 并透传 Playwright 参数。资源由场景里
@@ -204,6 +215,7 @@ testnet 资金恢复：固定 key01 钱包 + 每轮开始的可花费输出门�
 pnpm test:e2e                    # 本地核心 + 非安全 HTTP 边界
 pnpm test:e2e:integration        # 完整本地集成
 pnpm test:e2e:msfile             # 本地/临时 Go supplier 的 MSFile Journey 与 Gate
+pnpm test:e2e:bitfs             # 双浏览器 BitFS 买卖与 testnet 购买
 pnpm test:e2e:satsubscription    # 真实 SatSubscription 源码 + 一次性 PostgreSQL 的 Channel 消息
 pnpm test:e2e:s3                 # 真实 S3
 pnpm test:e2e:resources          # 资源准备 + 真实资源集合

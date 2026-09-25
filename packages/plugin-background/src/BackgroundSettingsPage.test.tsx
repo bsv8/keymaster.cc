@@ -1,5 +1,6 @@
 // packages/plugin-background/src/BackgroundSettingsPage.test.tsx
 // 智能调度设置页交互测试：
+//   - 每个任务都缺省按自己的间隔显示（区块链高度 2 分钟，其余 5 分钟）；
 //   - 保存失败时回滚乐观更新，不显示未生效的值；
 //   - 保存期间串行化，避免不同任务并发保存用旧快照互相覆盖；
 //   - 保存成功后保留新值，并提交合并后的任务间隔。
@@ -7,21 +8,30 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { BackgroundSettingsPage } from "./BackgroundSettingsPage.js";
+import { BACKGROUND_MANAGED_SYNC_TASK_IDS, CHAIN_HEIGHT_SYNC_TASK_ID } from "@keymaster/contracts";
 import type {
   BackgroundCommandResult,
   BackgroundService,
-  BackgroundSyncSettings
+  BackgroundSyncSettings,
+  ChainHeightSnapshot
 } from "@keymaster/contracts";
 
 /** 测试用 i18n 文案：只覆盖断言需要的 key，其余回落到 defaultValue。 */
 const I18N: Record<string, string> = {
   "background.settings.option.30s": "30 秒",
   "background.settings.option.1min": "1 分钟",
+  "background.settings.option.2min": "2 分钟",
   "background.settings.option.5min": "5 分钟",
   "background.settings.option.off": "关闭"
 };
 
-const hostState: { settings: BackgroundSyncSettings } = { settings: { taskIntervals: {} } };
+const hostState: {
+  settings: BackgroundSyncSettings;
+  chainHeight: ChainHeightSnapshot;
+} = {
+  settings: { taskIntervals: {} },
+  chainHeight: { height: 0, network: "main", available: false, revision: 0 }
+};
 const activeService: { service: BackgroundService | undefined } = { service: undefined };
 
 vi.mock("@keymaster/runtime", async () => {
@@ -30,7 +40,8 @@ vi.mock("@keymaster/runtime", async () => {
     ...actual,
     usePluginHost: () => ({ resourceStore: {} }),
     useI18n: () => ({
-      t: (key: string, opts?: { defaultValue?: string }) => I18N[key] ?? opts?.defaultValue ?? key,
+      t: (key: string, opts?: { defaultValue?: string; [key: string]: unknown }) =>
+        I18N[key] ?? String(opts?.defaultValue ?? key).replace(/{{(\w+)}}/g, (_m, name: string) => String(opts?.[name] ?? "")),
       text: (input: unknown) => (typeof input === "string" ? input : (input as { fallback?: string })?.fallback ?? ""),
       language: () => "zh-CN" as const,
       mode: () => "manual" as const,
@@ -40,11 +51,14 @@ vi.mock("@keymaster/runtime", async () => {
     // 资源快照只在跨标签同步时变化；本测试用固定快照驱动初始值。
     useOptionalResourceSelector: (
       _store: unknown,
-      _id: string,
+      id: string,
       _args: unknown,
-      selector: (snapshot: { data: BackgroundSyncSettings }) => BackgroundSyncSettings,
-      fallback: BackgroundSyncSettings
-    ): BackgroundSyncSettings => selector({ data: hostState.settings }) ?? fallback
+      selector: (snapshot: { data: unknown }) => unknown,
+      fallback: unknown
+    ): unknown => {
+      if (id === "chain.height") return selector({ data: hostState.chainHeight }) ?? fallback;
+      return selector({ data: hostState.settings }) ?? fallback;
+    }
   };
 });
 
@@ -98,6 +112,7 @@ function optionButton(taskId: string, label: string): HTMLButtonElement {
 afterEach(() => {
   cleanup();
   hostState.settings = { taskIntervals: {} };
+  hostState.chainHeight = { height: 0, network: "main", available: false, revision: 0 };
   activeService.service = undefined;
 });
 
@@ -107,6 +122,53 @@ describe("BackgroundSettingsPage 同步管理", () => {
     activeService.service = fake.service;
     render(<BackgroundSettingsPage />);
     expect(screen.getByRole("heading", { name: "智能调度" })).toBeTruthy();
+  });
+
+  it("区块链高度同步缺省 2 分钟，其余任务缺省 5 分钟", () => {
+    const fake = makeFakeService();
+    activeService.service = fake.service;
+    render(<BackgroundSettingsPage />);
+
+    expect(optionButton(CHAIN_HEIGHT_SYNC_TASK_ID, "2 分钟").getAttribute("aria-pressed")).toBe("true");
+    expect(optionButton(CHAIN_HEIGHT_SYNC_TASK_ID, "5 分钟").getAttribute("aria-pressed")).toBe("false");
+    expect(optionButton("p2pkh.transactions-sync", "5 分钟").getAttribute("aria-pressed")).toBe("true");
+    expect(optionButton("token-bsv21.sync", "2 分钟").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("区块链高度同步可以手动改为 2 分钟以外的值并提交 120 秒", async () => {
+    const fake = makeFakeService();
+    activeService.service = fake.service;
+    render(<BackgroundSettingsPage />);
+
+    fireEvent.click(optionButton(CHAIN_HEIGHT_SYNC_TASK_ID, "1 分钟"));
+    await waitFor(() => expect(fake.calls).toHaveLength(1));
+    expect(fake.calls[0]?.taskIntervals).toEqual({ [CHAIN_HEIGHT_SYNC_TASK_ID]: 60_000 });
+
+    // 显式选择 2 分钟也必须落盘为 120_000，而不是被当成「缺省」而省略。
+    fireEvent.click(optionButton(CHAIN_HEIGHT_SYNC_TASK_ID, "2 分钟"));
+    await waitFor(() => expect(fake.calls).toHaveLength(2));
+    expect(fake.calls[1]?.taskIntervals).toEqual({ [CHAIN_HEIGHT_SYNC_TASK_ID]: 120_000 });
+  });
+
+  it("每个同步任务都提供手动间隔选项", () => {
+    const fake = makeFakeService();
+    activeService.service = fake.service;
+    render(<BackgroundSettingsPage />);
+
+    for (const taskId of BACKGROUND_MANAGED_SYNC_TASK_IDS) {
+      const row = taskRow(taskId);
+      for (const label of ["30 秒", "1 分钟", "2 分钟", "5 分钟", "关闭"]) {
+        expect(within(row).getByRole("button", { name: label })).toBeTruthy();
+      }
+    }
+  });
+
+  it("展示当前区块链高度，尚未同步时显示等待文案", () => {
+    const fake = makeFakeService();
+    activeService.service = fake.service;
+    hostState.chainHeight = { height: 912_345, network: "main", available: true, updatedAtMs: 1, revision: 3 };
+    render(<BackgroundSettingsPage />);
+    expect(screen.getByText("主网高度 912,345")).toBeTruthy();
   });
 
   it("保存失败时回滚乐观更新，并显示错误", async () => {

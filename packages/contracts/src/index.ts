@@ -26,6 +26,7 @@ export * from "./registries.js";
 export * from "./topbar.js";
 export * from "./notice.js";
 export * from "./background.js";
+export * from "./chainHeight.js";
 export * from "./autolock.js";
 export * from "./activeKeyCrypto.js";
 export * from "./woc.js";

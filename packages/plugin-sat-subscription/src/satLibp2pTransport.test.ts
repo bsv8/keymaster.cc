@@ -166,11 +166,11 @@ describe("SatSubscription libp2p adapter", () => {
     expect(stream.sent).toHaveLength(2);
 
     releaseInbound();
-    await waitFor(() => stream.sent.length === 3);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     stream.push(encodeUvarintFrame(responseA));
     await expect(pendingA).resolves.toEqual(responseA);
 
-    expect(stream.sent[2]).toEqual(encodeUvarintFrame(inboundResponse));
+    expect(stream.sent).toHaveLength(2);
     off();
     adapter.close();
   });
@@ -195,7 +195,8 @@ describe("SatSubscription libp2p adapter", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     const response = newActionResult({ requestId, success: true, chargedAmount: "0", errorCode: "" });
     adapter.subscribeSspRequests(async () => response);
-    await waitFor(() => stream.sent.some((value) => equalBytes(value, encodeUvarintFrame(response))));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(stream.sent).toHaveLength(0);
     adapter.close();
   });
 

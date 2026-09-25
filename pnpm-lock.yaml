@@ -7,6 +7,9 @@ settings:
 overrides:
   bitcoin-libp2p: 0.3.0
 
+patchedDependencies:
+  go-bitfs@0.3.2: fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad
+
 importers:
 
   .:
@@ -219,6 +222,9 @@ importers:
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
+      go-bitfs:
+        specifier: 0.3.2
+        version: 0.3.2(patch_hash=fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       keyhold:
         specifier: 2.1.0
         version: 2.1.0
@@ -542,7 +548,7 @@ importers:
         version: 0.6.0
       go-bitfs:
         specifier: 0.3.2
-        version: 0.3.2(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        version: 0.3.2(patch_hash=fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       masterseed:
         specifier: 1.1.0
         version: 1.1.0
@@ -6601,7 +6607,7 @@ snapshots:
       package-json-from-dist: 1.0.1
       path-scurry: 1.11.1
 
-  go-bitfs@0.3.2(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+  go-bitfs@0.3.2(patch_hash=fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@bsv/sdk': 2.0.5
       '@noble/curves': 2.0.1

@@ -42,10 +42,12 @@ describe("indexedDB bucket provider", () => {
       await provider.put("other/c", new Uint8Array([9]));
       const page = await provider.list({ prefix: "keys/", limit: 1 });
       expect(page.objects.map((object) => object.path)).toEqual(["keys/a"]);
-      expect(page.objects[0]?.bytes).toEqual(new Uint8Array([1, 2, 3]));
+      expect(page.objects[0]?.bytes).toEqual(new Uint8Array());
+      expect(await provider.get("keys/a")).toMatchObject({ bytes: new Uint8Array([1, 2, 3]) });
       const next = await provider.list({ prefix: "keys/", cursor: page.nextCursor, limit: 1 });
       expect(next.objects.map((object) => object.path)).toEqual(["keys/b"]);
-      expect(next.objects[0]?.bytes).toEqual(bytes);
+      expect(next.objects[0]?.bytes).toEqual(new Uint8Array());
+      expect(await provider.get("keys/b")).toMatchObject({ bytes });
       expect(next.nextCursor).toBeUndefined();
     } finally {
       provider.dispose();

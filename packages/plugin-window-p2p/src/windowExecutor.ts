@@ -18,6 +18,7 @@ import {
   type WindowP2pExecutorOperation,
 } from "./executorTransport.js";
 import { KeymasterWindowP2pIdentitySigner } from "./identitySigner.js";
+import { createWindowWebRtcInterconnect, type WindowWebRtcInterconnectContext } from "./webrtcInterconnect.js";
 
 type Host = Awaited<ReturnType<typeof createHost>>;
 
@@ -136,6 +137,7 @@ export class WindowP2pExecutor {
   private lease?: import("@keymaster/contracts").WindowP2pExecutorLease;
   private signer?: KeymasterWindowP2pIdentitySigner;
   private host?: Host;
+  private webRtcInterconnect?: WindowWebRtcInterconnectContext;
   private readonly pending = new Map<string, AbortController>();
   /** 已从 Window 发出的 SSP 入站 Wire；Worker 完成/拒绝后显式释放。 */
   private readonly inboundEventReservations = new Map<string, InboundEventReservation>();
@@ -240,9 +242,11 @@ export class WindowP2pExecutor {
     this.lease = acquired.value;
     try {
       this.signer = new KeymasterWindowP2pIdentitySigner({ ...acquired.value, rpc: this.coordinator });
+      const webRtcInterconnect = createWindowWebRtcInterconnect();
+      this.webRtcInterconnect = webRtcInterconnect;
       const host = await createHost({
         signer: this.signer,
-        transports: [webRTCDirect(), webSockets()],
+        transports: [webRTCDirect(), webSockets(), webRtcInterconnect.dialer.transport],
         listenAddrs: [],
         // Supplier 地址由受信任设置页保存并经过 public-key/PeerId/certhash
         // 校验。MSFile 的主要部署形态包含 loopback/LAN NAS，因此不能沿用
@@ -256,12 +260,14 @@ export class WindowP2pExecutor {
         return false;
       }
       this.host = host;
-      await this.laneRegistry?.attach({
+      const laneContext = {
         host,
         ownerSessionEpoch: this.lease.sessionEpoch,
-        emit: (event, transfer) => this.emitLaneEvent(event, transfer),
-        releaseEvent: (eventId) => this.releaseInboundEvent(eventId)
-      });
+        emit: (event: unknown, transfer?: Transferable[]) => this.emitLaneEvent(event, transfer),
+        releaseEvent: (eventId: string) => this.releaseInboundEvent(eventId),
+        webRtcInterconnect
+      };
+      await this.laneRegistry?.attach(laneContext);
       // stop() 可能在 lane.attach() 等待期间撤销了 lease；attach 完成后再
       // 检查一次，避免旧 host/lane 在锁定或接管后发送 ready 或继续持有连接。
       if (this.disposed || lifecycleToken !== this.lifecycleToken || this.lease?.leaseId !== leaseId || this.host !== host) {
@@ -313,8 +319,11 @@ export class WindowP2pExecutor {
 
     await this.laneRegistry?.detach().catch(() => undefined);
     const host = this.host;
+    const webRtcInterconnect = this.webRtcInterconnect;
     this.host = undefined;
+    this.webRtcInterconnect = undefined;
     if (host) await this.stopHostOnce(host);
+    webRtcInterconnect?.dispose();
     this.signer?.close();
     this.signer = undefined;
     await releaseLease;

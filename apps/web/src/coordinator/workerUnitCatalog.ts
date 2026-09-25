@@ -151,10 +151,13 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   },
   {
     unitId: "woc.coordinator-worker",
-    taskIds: [],
+    // 链高度同步读一次节点 `/chain/info` 就完成，没有本地写入；
+    // 仍登记最终 I/O 审计入口，因为它和其它链上任务共用同一出口与配额。
+    taskIds: ["chain.chain-height-sync"],
+    requiredProductIds: ["background", "woc"],
     serviceIds: ["woc.service", "woc.bsv21", "woc.stas", "woc.1satordinals"],
     storagePurposes: [],
-    finalIoAuditEntries: [],
+    finalIoAuditEntries: [{ taskId: "chain.chain-height-sync", operation: "chain.height-sync" }],
   },
 ] as const satisfies readonly CoordinatorWorkerUnitRuntimeDetails[];
 

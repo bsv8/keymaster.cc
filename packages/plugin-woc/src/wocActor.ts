@@ -425,7 +425,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         throw new Error(`WOC 429`);
       }
       if (!res.ok) {
-        throw new Error(`WOC ${res.status} ${res.statusText}`);
+        throw new Error(`WOC ${res.status} ${res.statusText} ${path}`);
       }
       try {
         return (await res.json()) as T;
@@ -453,7 +453,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         throw new Error(`WOC 429`);
       }
       if (!res.ok) {
-        throw new Error(`WOC ${res.status} ${res.statusText}`);
+        throw new Error(`WOC ${res.status} ${res.statusText} ${path}`);
       }
       return {
         contentType: res.headers.get("content-type") ?? undefined,
@@ -479,7 +479,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         throw new Error(`WOC 429`);
       }
       if (!res.ok) {
-        throw new Error(`WOC ${res.status} ${res.statusText}`);
+        throw new Error(`WOC ${res.status} ${res.statusText} ${path}`);
       }
       return await res.text();
     } finally {
@@ -526,6 +526,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
   function isWocNotFoundError(err: unknown): boolean {
     if (!(err instanceof Error)) return false;
     return /^WOC 404\b/.test(err.message);
+  }
+
+  function isConfirmedTransactionDetail(value: unknown): boolean {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const detail = value as { confirmations?: unknown; blockheight?: unknown };
+    return (typeof detail.confirmations === "number" && detail.confirmations > 0)
+      || (typeof detail.blockheight === "number" && detail.blockheight > 0);
   }
 
   /**
@@ -749,14 +756,16 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       label: WOC_MSG.TX_OBSERVATION,
       fn: async (signal) => {
         try {
-          await fetchJson(
+          const detail = await fetchJson<unknown>(
             network,
             `/tx/hash/${encodeURIComponent(txid)}`,
             { method: "GET" },
             signal,
             opts.timeoutMs
           );
-          return { canonicalTxid: txid, observation: "confirmed" as const };
+          if (isConfirmedTransactionDetail(detail)) {
+            return { canonicalTxid: txid, observation: "confirmed" as const };
+          }
         } catch (err) {
           if (!isWocNotFoundError(err)) {
             throw err;

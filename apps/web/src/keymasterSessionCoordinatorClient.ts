@@ -32,6 +32,7 @@ import type {
   CoordinatorSatOperation,
   CoordinatorChannelOperation,
   ContactPresenceMap,
+  ChainHeightSnapshot,
   CoordinatorWorkerUnitStateEvent,
   CoordinatorSessionBinding,
   StorageBootstrapState,
@@ -40,6 +41,7 @@ import {
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
   COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
+  emptyChainHeightSnapshot,
 } from "@keymaster/contracts";
 import type {
   CoordinatorRpcRequest,
@@ -221,12 +223,14 @@ function storageObjectDto(object: {
   size?: number;
   etag?: string;
   lastModified?: string;
-}): import("@keymaster/contracts").CoordinatorLocalStorageObject {
+}, emptyBytes = new ArrayBuffer(0)): import("@keymaster/contracts").CoordinatorLocalStorageObject {
   return {
     path: object.path,
-    bytes: object.bytes.byteOffset === 0 && object.bytes.byteLength === object.bytes.buffer.byteLength
-      ? object.bytes.buffer as ArrayBuffer
-      : object.bytes.slice().buffer as ArrayBuffer,
+    bytes: object.bytes.byteLength === 0
+      ? emptyBytes
+      : object.bytes.byteOffset === 0 && object.bytes.byteLength === object.bytes.buffer.byteLength
+        ? object.bytes.buffer as ArrayBuffer
+        : object.bytes.slice().buffer as ArrayBuffer,
     ...(object.size === undefined ? {} : { size: object.size }),
     ...(object.etag === undefined ? {} : { etag: object.etag }),
     ...(object.lastModified === undefined ? {} : { lastModified: object.lastModified }),
@@ -285,6 +289,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private topicCaches = new Map<CoordinatorTopic, CoordinatorTopicEvent>();
   private sessionRevisionCache = -1;
   private backgroundSnapshotRevisionCache = -1;
+  private chainHeightRevisionCache = -1;
   private assetDataRevisionCache = -1;
   private storageRevisionCache = -1;
   private msfileRevisionCache = -1;
@@ -299,6 +304,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
    * 不把断线期间的事件变成长期缓存。
    */
   private pendingWorkerUnitEvents = new Map<SessionEpoch, CoordinatorWorkerUnitStateEvent>();
+  private chainHeightSnapshotCache: ChainHeightSnapshot = emptyChainHeightSnapshot();
   private contactsPresenceOwnerPublicKeyHex: string | null = null;
   private contactsPresenceSnapshotCache: ContactPresenceMap = {};
 
@@ -423,7 +429,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.beginLocalStorageLease();
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
       await this.lockSolePageOnFirstConnect();
 
       if (this.shutdownRequested || attempt !== this.connectionAttempt || this.runtimeHandle !== runtime) {
@@ -681,6 +687,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     // trackers below are reset, so cached data cannot authorize a request.
     this.sessionRevisionCache = -1;
     this.backgroundSnapshotRevisionCache = -1;
+    this.chainHeightRevisionCache = -1;
     this.assetDataRevisionCache = -1;
     this.storageRevisionCache = -1;
     this.msfileRevisionCache = -1;
@@ -844,9 +851,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           response = object === undefined ? { type: "object" } : { type: "object", object: storageObjectDto(object) };
         } else if (request.type === "list") {
           const page = await provider.list({ prefix: request.prefix, cursor: request.cursor, limit: request.limit, signal });
+          const emptyListBytes = new ArrayBuffer(0);
           response = {
             type: "list",
-            objects: page.objects.map((object) => storageObjectDto(object)),
+            objects: page.objects.map((object) => storageObjectDto(object, emptyListBytes)),
             ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
           };
         } else if (request.type === "put") {
@@ -1415,7 +1423,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult> {
+  async p2pkhSettingsUpdate(settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "p2pkh.settings.update", clientId: this.clientId, requestId: this.generateRequestId(), settings, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
@@ -1648,6 +1656,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return Object.fromEntries(Object.entries(this.contactsPresenceSnapshotCache).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
   }
 
+  /** 读取 Coordinator 广播的最新链高度快照；不会触发网络请求。 */
+  getChainHeightSnapshot(): ChainHeightSnapshot {
+    return { ...this.chainHeightSnapshotCache };
+  }
+
   // ============================================================
   // 8. Event Listeners
   // ============================================================
@@ -1747,6 +1760,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ...(event.bucketId ? { storageBucketId: event.bucketId } : { storageBucketId: undefined }),
         ...(event.bucketGeneration ? { storageBucketGeneration: event.bucketGeneration } : { storageBucketGeneration: undefined }),
       };
+    } else if (event.topic === "chain.height") {
+      // 链高度是公共链状态：只缓存读数，不参与 Session 身份推进。
+      this.chainHeightSnapshotCache = { ...event.chainHeight };
     } else if (event.type === "coordinator.worker-units.changed") {
       this.bootstrapSnapshotCache = {
         ...this.bootstrapSnapshotCache,
@@ -1771,6 +1787,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private getCachedTopicRevision(topic: CoordinatorTopic): number {
     if (topic === "session.state") return this.sessionRevisionCache;
     if (topic === "background.snapshot") return this.backgroundSnapshotRevisionCache;
+    if (topic === "chain.height") return this.chainHeightRevisionCache;
     if (topic === "storage.state") return this.storageRevisionCache;
     if (topic === "msfile.state") return this.msfileRevisionCache;
     if (topic === "sat.events") return this.satRevisionCache;
@@ -1784,6 +1801,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private getEventRevision(event: CoordinatorTopicEvent): number | undefined {
     if (event.topic === "session.state") return event.sessionRevision;
     if (event.topic === "background.snapshot") return event.backgroundSnapshotRevision;
+    if (event.topic === "chain.height") return event.chainHeightRevision;
     if (event.topic === "storage.state") return event.storageRevision;
     if (event.topic === "msfile.state") return event.msfileRevision;
     if (event.topic === "sat.events") return event.satRevision;
@@ -1797,6 +1815,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private setTopicRevision(event: CoordinatorTopicEvent): void {
     if (event.topic === "session.state") this.sessionRevisionCache = event.sessionRevision;
     else if (event.topic === "background.snapshot") this.backgroundSnapshotRevisionCache = event.backgroundSnapshotRevision;
+    else if (event.topic === "chain.height") this.chainHeightRevisionCache = event.chainHeightRevision;
     else if (event.topic === "storage.state") this.storageRevisionCache = event.storageRevision;
     else if (event.topic === "msfile.state") this.msfileRevisionCache = event.msfileRevision;
     else if (event.topic === "sat.events") this.satRevisionCache = event.satRevision;
@@ -1822,6 +1841,18 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && (event.authorityRecovery === undefined || this.isValidAuthorityRecovery(event.authorityRecovery));
     }
     if (event.topic === "background.snapshot") return event.type === "background.snapshot.changed" && Number.isSafeInteger(event.backgroundSnapshotRevision) && Array.isArray(event.snapshots);
+    if (event.topic === "chain.height") {
+      return event.type === "chain.height.changed"
+        && Number.isSafeInteger(event.chainHeightRevision)
+        && event.chainHeightRevision >= 0
+        && Boolean(event.chainHeight)
+        && typeof event.chainHeight.height === "number"
+        && Number.isSafeInteger(event.chainHeight.height)
+        && event.chainHeight.height >= 0
+        && typeof event.chainHeight.available === "boolean"
+        && (event.chainHeight.network === "main" || event.chainHeight.network === "test")
+        && Number.isSafeInteger(event.chainHeight.revision);
+    }
     if (event.topic === "storage.state") return event.type === "storage.state.changed"
       && Number.isSafeInteger(event.storageRevision)
       && event.storageRevision >= 0

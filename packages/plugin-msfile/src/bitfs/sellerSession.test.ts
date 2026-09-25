@@ -111,6 +111,34 @@ describe("BitFS 卖方会话管理器", () => {
     expect(manager.activeCount()).toBe(1);
   });
 
+  it("同一费用池的后续帧等待上一帧处理并落盘后才进入协议", async () => {
+    let releaseFirst!: () => void;
+    const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const processed: number[] = [];
+    const { manager, onFrame } = fixture({
+      protocol: {
+        ready: true,
+        onFrame: async ({ bytes }) => {
+          const index = processed.length + 1;
+          processed.push(index);
+          if (index === 1) await firstPending;
+          return { type: "none" };
+        },
+      },
+    });
+    await manager.start(START);
+    const frame = await quoteFrame();
+    const first = manager.handleFrame({ sessionId: "session-1", frame });
+    const second = manager.handleFrame({ sessionId: "session-1", frame });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(processed).toEqual([1]);
+    expect(onFrame).not.toHaveBeenCalled();
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(processed).toEqual([1, 2]);
+  });
+
   it("协议端口要求关闭时结束会话", async () => {
     const { manager, closed, onFrame } = fixture();
     onFrame.mockResolvedValueOnce({ type: "close", reason: "seller_pool_amount_unavailable" });

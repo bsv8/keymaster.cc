@@ -502,13 +502,14 @@ export class SatLibp2pConnection {
       this.resolvePending(billing.requestId, wire, stream);
       return;
     } catch { /* 继续尝试入站 Publish */ }
-    let publishRequestId: Uint8Array;
+    let publish;
     try {
-      publishRequestId = parsePublish(wire).requestId;
+      publish = parsePublish(wire);
     } catch (error) {
       throw new SatTransportError("SSP frame is neither a response nor Publish", { sentBoundary: "unknown", cause: error });
     }
     this.noteActivity();
+    console.warn("[sat] inbound Publish delivery", JSON.stringify({ channel: publish.channel, content: new TextDecoder().decode(publish.contentJson).slice(0, 120) }));
     const handler = this.incomingHandlers.values().next().value as ((wire: Uint8Array) => Promise<Uint8Array>) | undefined;
     if (!handler) {
       if (this.queuedIncoming.length >= this.limits.maxPendingIncomingPerLane) throw new SatTransportError("SSP inbound Publish queue is full", { sentBoundary: "unknown" });
@@ -520,11 +521,6 @@ export class SatLibp2pConnection {
     try {
       const response = await handler(wire.slice());
       if (!(response instanceof Uint8Array)) throw new SatTransportError("SSP request handler returned invalid response", { sentBoundary: "unknown" });
-      let responseAction;
-      try { responseAction = parseActionResult(response); } catch (error) { throw new SatTransportError("SSP request handler did not return ActionResult", { sentBoundary: "unknown", cause: error }); }
-      if (!equalBytes(responseAction.requestId, publishRequestId)) throw new SatTransportError("SSP response request_id does not match Publish", { sentBoundary: "unknown" });
-      if (this.sspStream !== stream) throw new SatTransportError("SSP stream changed before response", { sentBoundary: "unknown" });
-      await this.sendFrame(stream, response);
     } finally {
       this.incomingInFlight = Math.max(0, this.incomingInFlight - 1);
     }

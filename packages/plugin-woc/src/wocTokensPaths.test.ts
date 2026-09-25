@@ -288,7 +288,7 @@ describe("BSV-21 / STAS / 1Sat WOC 路径映射", () => {
     installFetchMock((url) => {
       fetchLog.push(url);
       if (url.includes("/tx/hash/tx-confirmed")) {
-        return new Response(JSON.stringify({ txid: "tx-confirmed" }), { status: 200 });
+        return new Response(JSON.stringify({ txid: "tx-confirmed", confirmations: 1, blockheight: 1 }), { status: 200 });
       }
       throw new Error(`unhandled URL in mock: ${url}`);
     });
@@ -308,7 +308,7 @@ describe("BSV-21 / STAS / 1Sat WOC 路径映射", () => {
         if (url.endsWith("/propagation")) {
           return new Response(JSON.stringify({ propagated: true }), { status: 200 });
         }
-        return new Response("not found", { status: 404 });
+        return new Response(JSON.stringify({ txid: "tx-unconfirmed" }), { status: 200 });
       }
       if (url.includes("/tx/hash/tx-missing")) {
         return new Response("not found", { status: 404 });

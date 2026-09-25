@@ -24,19 +24,19 @@ export interface BitfsBuyerDownloadPool {
   seedBudgetReserved: boolean;
   /** 专用于本池购买 Block 的预算，不含 Seed 预算。 */
   blockBudgetSatoshis: string;
-  /** 已链上确认的 Seed 付款，单位聪。 */
+  /** 已由本地 Kind 5/7 验收的 Seed 付款，单位聪。 */
   seedCommittedSatoshis: string;
-  /** 已链上确认的 Block 付款，单位聪。 */
+  /** 已由本地 Kind 5/7 验收的 Block 付款，单位聪。 */
   blockCommittedSatoshis: string;
-  /** 本池已链上确认的累计内容付款，单位聪。 */
+  /** 本池已由本地 Kind 5/7 验收的累计内容付款，单位聪。 */
   committedSatoshis: string;
-  /** 最近已确认速度，单位字节/秒；没有样本时为 null。 */
+  /** 最近已验收速度，单位字节/秒；没有样本时为 null。 */
   recentBytesPerSecond: string | null;
   /** FundingTx 已确认且本池可以请求内容时为 true。 */
   active: boolean;
   /** 费用池已确认关闭或退款时为 true。 */
   closed: boolean;
-  /** 本池唯一尚未完成的 Block 认领。 */
+  /** 本池当前批次的首个 Block；其余认领由 blocks 中的 sessionId 归属恢复。 */
   inFlightBlockHashHex?: string;
 }
 
@@ -44,9 +44,9 @@ export interface BitfsBuyerDownloadPool {
 export interface BitfsBuyerDownloadPlanSnapshot {
   /** Seed 验收后登记的唯一 Block Hash 列表；Seed 尚未付款时为 null。 */
   blockHashesHex: string[] | null;
-  /** 已链上确认付款的不同 Block 数量。 */
+  /** 已由本地 Kind 5/7 验收付款的不同 Block 数量。 */
   completedBlockCount: number;
-  /** Seed 及其链上付款已确认时为 true。 */
+  /** Seed 及其本地 Kind 5/7 付款已验收时为 true。 */
   seedCompleted: boolean;
   /** 文件取消后已暂停所有新 Seed/Block 请求时为 true。 */
   stopRequested: boolean;
@@ -60,7 +60,7 @@ export interface BitfsBuyerDownloadPlanSnapshot {
 export interface BitfsBuyerDownloadPlan {
   /** 固定该卖家池的预算和身份；重试值必须一致。 */
   registerPool(input: Omit<BitfsBuyerDownloadPool, "committedSatoshis" | "seedCommittedSatoshis" | "blockCommittedSatoshis" | "active" | "closed">): Promise<void>;
-  /** FundingTx 链上确认后启用卖家池。 */
+  /** FundingTx 被 WOC 接受后启用卖家池。 */
   activatePool(sessionId: string): Promise<void>;
   /** 按当前价格/速度优先规则认领唯一 Seed。 */
   claimSeed(sessionId: string, priority: "price" | "recent-speed"): Promise<"assigned" | "waiting" | "completed" | "stopped">;
@@ -68,14 +68,18 @@ export interface BitfsBuyerDownloadPlan {
   requestStop(): Promise<void>;
   /** 所有费用池确认关闭后，允许显式重新开始未完成的文件下载。 */
   resumeAfterCancellation(): Promise<void>;
-  /** Seed 付款链上确认后记账。 */
+  /** Seed 付款由本地 Kind 5/7 验收后记账。 */
   completeSeed(sessionId: string, paidSatoshis: string): Promise<void>;
   /** 固定由已验收 Seed 算出的不同 Block Hash 列表。 */
   setBlockHashes(blockHashesHex: readonly string[]): Promise<void>;
   /** 按预算与优先级认领一个尚未购买的 Block。 */
   claimNextBlock(sessionId: string, priority: "price" | "recent-speed"): Promise<string | undefined>;
-  /** Block 的付款链上确认后标为全局完成。 */
+  /** 原子认领一个有界批次；重试返回当前池已认领的同一批 Hash。 */
+  claimNextBlocks(sessionId: string, priority: "price" | "recent-speed", limit: number): Promise<string[]>;
+  /** Block 付款由本地 Kind 5/7 验收后标为全局完成。 */
   completeBlock(sessionId: string, blockHashHex: string, paidSatoshis: string): Promise<void>;
+  /** 一笔 Kind 7 原子验收整批 Block，避免部分完成后误发下一批。 */
+  completeBlocks(sessionId: string, blocks: readonly { blockHashHex: string; paidSatoshis: string }[]): Promise<void>;
   /** 池关闭/退款确认后释放该池未完成的认领。 */
   closePool(sessionId: string): Promise<void>;
   /** 读取当前计划快照。 */
@@ -97,7 +101,7 @@ interface StoredPlan {
   recommendedFilename: string;
   /** 唯一 Seed 买家池会话编号。 */
   seedOwnerSessionId?: string;
-  /** Seed 已验收且其付款在链上确认时为 true。 */
+  /** Seed 已验收且其付款已由本地 Kind 5/7 验收时为 true。 */
   seedCompleted: boolean;
   /** Seed 检验后得出的不同 Block Hash 顺序。 */
   blockHashesHex?: string[];
@@ -260,16 +264,16 @@ export function createBitfsBuyerDownloadPlan(input: {
       await mutate((plan) => {
         if (plan.seedCompleted && plan.seedOwnerSessionId === sessionId) {
           const previous = needPool(plan, sessionId).seedCommittedSatoshis;
-          if (previous !== paid.toString(10)) throw new Error("BitFS 重放的 Seed 付款金额与已确认记录不一致");
+          if (previous !== paid) throw new Error("BitFS 重放的 Seed 付款金额与已验收记录不一致");
           return { plan, result: undefined };
         }
         if (plan.seedOwnerSessionId !== sessionId) throw new Error("BitFS Seed 付款未由当前费用池认领");
         const pool = needPool(plan, sessionId);
-        if (BigInt(pool.seedCommittedSatoshis) > 0n || paid > BigInt(pool.seedBudgetSatoshis)) {
+        if (BigInt(pool.seedCommittedSatoshis) > 0n || BigInt(paid) > BigInt(pool.seedBudgetSatoshis)) {
           throw new Error("BitFS Seed 付款超过本池专用 Seed 预算");
         }
         addPayment(pool, paid);
-        pool.seedCommittedSatoshis = paid.toString(10);
+        pool.seedCommittedSatoshis = paid;
         plan.seedCompleted = true;
         return { plan, result: undefined };
       });
@@ -278,7 +282,7 @@ export function createBitfsBuyerDownloadPlan(input: {
       const hashes = [...new Set(values.map(assertHash))];
       if (hashes.length === 0) throw new Error("BitFS Seed 没有文件 Block");
       await mutate((plan) => {
-        if (!plan.seedCompleted) throw new Error("BitFS Seed 付款确认前不能登记 Block");
+        if (!plan.seedCompleted) throw new Error("BitFS Seed 付款由 Kind 5/7 验收前不能登记 Block");
         if (plan.blockHashesHex && !same(plan.blockHashesHex, hashes)) throw new Error("BitFS 同 Seed 收到冲突的 Block Hash 清单");
         plan.blockHashesHex = hashes;
         plan.fileComplete = hashes.every((hash) => plan.blocks[hash]?.state === "completed");
@@ -303,6 +307,32 @@ export function createBitfsBuyerDownloadPlan(input: {
         return { plan, result: hash };
       });
     },
+    async claimNextBlocks(sessionId, priority, limit) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 16) throw new Error("BitFS 批次块数必须在 1–16 之间");
+      return mutate((plan) => {
+        plan.priority = priority;
+        if (plan.stopRequested || !plan.seedCompleted || !plan.blockHashesHex || plan.fileComplete) return { plan, result: [] };
+        const pool = needPool(plan, sessionId);
+        if (!pool.active || pool.closed) return { plan, result: [] };
+        const claimed = plan.blockHashesHex.filter((hash) => {
+          const block = plan.blocks[hash];
+          return block?.sessionId === sessionId && block.state === "claimed";
+        });
+        if (claimed.length > 0) {
+          if (pool.inFlightBlockHashHex !== claimed[0]) throw new Error("BitFS 批次认领与池内状态不一致");
+          return { plan, result: claimed };
+        }
+        if (pool.inFlightBlockHashHex) throw new Error("BitFS 池内首块认领缺失");
+        const nextPool = sortedPools(plan).find((item) => item.active && !item.closed && !item.inFlightBlockHashHex
+          && BigInt(item.blockBudgetSatoshis) - BigInt(item.blockCommittedSatoshis) >= BigInt(item.fullBlockPriceSatoshis));
+        if (!nextPool || nextPool.sessionId !== sessionId) return { plan, result: [] };
+        const affordable = Number((BigInt(pool.blockBudgetSatoshis) - BigInt(pool.blockCommittedSatoshis)) / BigInt(pool.fullBlockPriceSatoshis));
+        const hashes = plan.blockHashesHex.filter((hash) => !plan.blocks[hash]).slice(0, Math.min(limit, affordable));
+        for (const hash of hashes) plan.blocks[hash] = { sessionId, state: "claimed" };
+        pool.inFlightBlockHashHex = hashes[0];
+        return { plan, result: hashes };
+      });
+    },
     async completeBlock(sessionId, blockHashHex, paidSatoshis) {
       const hash = assertHash(blockHashHex);
       const paid = assertAmount(paidSatoshis, true);
@@ -312,14 +342,45 @@ export function createBitfsBuyerDownloadPlan(input: {
         if (!block || block.sessionId !== sessionId || block.state !== "claimed") throw new Error("BitFS 当前池没有独占认领此 Block");
         const pool = needPool(plan, sessionId);
         if (pool.inFlightBlockHashHex !== hash) throw new Error("BitFS 池内 Block 与下载计划不一致");
-        if (BigInt(pool.blockCommittedSatoshis) + paid > BigInt(pool.blockBudgetSatoshis)) {
+        if (BigInt(pool.blockCommittedSatoshis) + BigInt(paid) > BigInt(pool.blockBudgetSatoshis)) {
           throw new Error("BitFS Block 付款超过本池专用 Block 预算");
         }
         addPayment(pool, paid);
-        pool.blockCommittedSatoshis = (BigInt(pool.blockCommittedSatoshis) + paid).toString(10);
+        pool.blockCommittedSatoshis = (BigInt(pool.blockCommittedSatoshis) + BigInt(paid)).toString(10);
         pool.inFlightBlockHashHex = undefined;
         plan.blocks[hash] = { sessionId, state: "completed", paidSatoshis: paid };
         plan.fileComplete = plan.blockHashesHex?.every((item) => plan.blocks[item]?.state === "completed") ?? false;
+        return { plan, result: undefined };
+      });
+    },
+    async completeBlocks(sessionId, blocks) {
+      if (blocks.length < 1 || blocks.length > 16) throw new Error("BitFS 验收批次块数无效");
+      const entries = blocks.map(({ blockHashHex, paidSatoshis }) => ({
+        hash: assertHash(blockHashHex), paid: assertAmount(paidSatoshis, true),
+      }));
+      if (new Set(entries.map((entry) => entry.hash)).size !== entries.length) throw new Error("BitFS 批次含重复 Block");
+      await mutate((plan) => {
+        const pool = needPool(plan, sessionId);
+        if (entries.every(({ hash, paid }) => {
+          const block = plan.blocks[hash];
+          return block?.sessionId === sessionId && block.state === "completed" && block.paidSatoshis === paid;
+        })) return { plan, result: undefined };
+        const claimed = plan.blockHashesHex?.filter((hash) => {
+          const block = plan.blocks[hash];
+          return block?.sessionId === sessionId && block.state === "claimed";
+        }) ?? [];
+        if (pool.inFlightBlockHashHex !== claimed[0] || !same(claimed, entries.map((entry) => entry.hash))) {
+          throw new Error("BitFS 验收批次与当前池独占认领不一致");
+        }
+        const total = entries.reduce((sum, entry) => sum + BigInt(entry.paid), 0n);
+        if (BigInt(pool.blockCommittedSatoshis) + total > BigInt(pool.blockBudgetSatoshis)) {
+          throw new Error("BitFS 批次付款超过本池专用 Block 预算");
+        }
+        addPayment(pool, total.toString(10));
+        pool.blockCommittedSatoshis = (BigInt(pool.blockCommittedSatoshis) + total).toString(10);
+        for (const { hash, paid } of entries) plan.blocks[hash] = { sessionId, state: "completed", paidSatoshis: paid };
+        pool.inFlightBlockHashHex = undefined;
+        plan.fileComplete = plan.blockHashesHex?.every((hash) => plan.blocks[hash]?.state === "completed") ?? false;
         return { plan, result: undefined };
       });
     },
@@ -329,11 +390,10 @@ export function createBitfsBuyerDownloadPlan(input: {
         if (!pool) return { plan, result: undefined };
         pool.active = false;
         pool.closed = true;
-        if (pool.inFlightBlockHashHex) {
-          const claim = plan.blocks[pool.inFlightBlockHashHex];
-          if (claim?.sessionId === sessionId && claim.state === "claimed") delete plan.blocks[pool.inFlightBlockHashHex];
-          pool.inFlightBlockHashHex = undefined;
+        for (const [hash, claim] of Object.entries(plan.blocks)) {
+          if (claim.sessionId === sessionId && claim.state === "claimed") delete plan.blocks[hash];
         }
+        pool.inFlightBlockHashHex = undefined;
         if (!plan.seedCompleted && plan.seedOwnerSessionId === sessionId) plan.seedOwnerSessionId = undefined;
         plan.fileComplete = plan.blockHashesHex?.every((hash) => plan.blocks[hash]?.state === "completed") ?? false;
         return { plan, result: undefined };

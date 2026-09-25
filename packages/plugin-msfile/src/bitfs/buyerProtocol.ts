@@ -5,18 +5,16 @@
 
 import {
   acceptBuyerQuote,
+  contentHashesPriceSatoshis,
   completeBuyerOpening,
-  inspectSellerDeliveryRequest,
+  inspectBuyerContentRequest,
+  inspectBuyerPool,
   parse,
-  parsePaymentState,
   prepareBuyerCloseArtifact,
   prepareBuyerContentRequest,
-  verifyAcceptedPayment,
   verifyBuyerCompletedCloseArtifact,
   verifyBuyerDelivery,
-  transactionID,
   type BuyerPoolEvidence,
-  type SellerPoolEvidence,
   type Signer,
   type WireKind,
 } from "go-bitfs";
@@ -25,11 +23,21 @@ import type { BitfsBuyerTask } from "./buyerTask.js";
 import type { BitfsBuyerDownloadPlan } from "./buyerDownloadPlan.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 import { createJournaledBitfsBuyerSigner } from "./signerJournal.js";
+import {
+  assertBitfsBuyerCloseBinding,
+  encodeBitfsBuyerCloseBinding,
+  parseBitfsBuyerCloseBinding,
+  readBitfsBuyerLocalPaymentState,
+  type BitfsBuyerLocalPaymentState,
+} from "./buyerPoolState.js";
 import { bitfsWorkflowFacts } from "./sdk.js";
+import { bitfsTxidHex } from "./txid.js";
 import { commitPurchasedMsFileContent, inspectPurchasedMsFileSeed } from "../storage/msfileSeedStore.js";
 
 const MAX_CHAIN_WAIT_MS = 120_000;
-const CHAIN_POLL_INTERVAL_MS = 2_000;
+const MAX_FUNDING_RECONCILIATION_MS = 15 * 60_000;
+const CHAIN_POLL_INTERVAL_MS = 10_000;
+const KEEP_ALIVE_INTERVAL_MS = 30_000;
 const POOL_FEE_RESERVE_MULTIPLIER = 2n;
 const PURCHASE_MANIFEST_FORMAT = "keymaster.bitfs-purchase-manifest";
 
@@ -49,7 +57,7 @@ interface BitfsBuyerPurchaseManifest {
 
 /**
  * Worker 重启后续做已进入 content-committing 的本地提交。
- * 该阶段只会在付款交易已按 Kind 5 授权观察后写入；这里不签名、不广播，
+ * 该阶段只会在付款 Kind 5/7 已签证据保存后写入；这里不签名、不广播，
  * 只从已验收暂存区重新执行幂等的 Block → Seed → meta 入库。
  */
 export async function recoverBitfsBuyerContentCommit(input: {
@@ -74,9 +82,7 @@ export async function recoverBitfsBuyerContentCommit(input: {
   const paymentIds = evidence
     .filter((name) => name.startsWith("kind7-payment-update-"))
     .map((name) => name.slice("kind7-payment-update-".length));
-  if (!paymentIds.some((id) => evidence.includes(`latest-payment-transaction-${id}` as const))) {
-    throw new Error("BitFS 入库恢复缺少与已验收付款对应的交易证据");
-  }
+  if (paymentIds.length === 0) throw new Error("BitFS 入库恢复缺少已签付款证据");
 
   const shared = evidence.includes("download-plan");
   const seedObject = await input.contentStore.get(shared
@@ -157,21 +163,22 @@ export interface BitfsBuyerProtocolDeps {
   downloadPlan: BitfsBuyerDownloadPlan;
   /** 已保存到同 Seed 下载计划的卖家优先策略。 */
   selectionPriority: "price" | "recent-speed";
+  /** 每笔池内付款最多请求的不同文件 Block 数。 */
+  blocksPerBatch: number;
   /** 下载计划更新后唤醒其他可接收内容的卖家池。 */
   onDownloadPlanChanged?(): void;
   /** 获取当前明确的链高度；无高度时拒绝使用高度锁事实。 */
   blockHeight(): Promise<number>;
-  /** 从 FundingTx 池输出查询并返回当前完整付款交易原文。 */
-  readPoolSpendChain(fundingTxid: string, afterTxid?: string): Promise<Array<{ txid: string; rawTransaction: Uint8Array; status: "confirmed" | "unconfirmed" }>>;
   /** 当前 Worker 的可信 UTC 毫秒。 */
   nowMs(): number;
   /** 从调用者绑定的配置读取池内手续费率，单位聪/千字节。 */
   minerFeeRateSatoshisPerKilobyte: bigint;
   /** 每次异步边界前核对 owner、generation 和 Vault。 */
   assertCurrentContext(): void;
+  onSignerError?(error: unknown): void | Promise<void>;
   /** 文件完成入库后通知 Worker 刷新卖方 Seed 索引。 */
   onContentCommitted?(seedHashHex: string): Promise<void> | void;
-  /** 买方验证内容并在链上确认付款后，保存可用于卖家排序的速度样本。 */
+  /** 买方验证内容并保存已签付款后，记录可用于卖家排序的速度样本。 */
   onVerifiedDelivery?(input: {
     /** 买方会话编号。 */
     sessionId: string;
@@ -189,9 +196,20 @@ export interface BitfsBuyerProtocolDeps {
 /** 单报价买方协议端口；相同会话串行处理并可按 exact bytes 重放。 */
 export class BitfsBuyerProtocol {
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly fundingReconciliations = new Map<string, Promise<void>>();
   private readonly purchaseConfigs = new Map<string, { openingAmountSatoshis: string }>();
   /** 当前 Worker 进程内各买方会话的 Kind 5 发送时刻；重启后不伪造速度样本。 */
   private readonly contentRequestStartedAtMs = new Map<string, number>();
+  private readonly poolStateCache = new Map<string, {
+    state: BitfsBuyerLocalPaymentState;
+    openingPool: BuyerPoolEvidence;
+    paymentIds: Set<string>;
+    legacyCount: number;
+  }>();
+  private readonly deliveryLookupCache = new Map<string, {
+    seenNames: Set<string>;
+    authorizationByDigest: Map<string, string>;
+  }>();
 
   constructor(private readonly deps: BitfsBuyerProtocolDeps) {}
 
@@ -268,6 +286,7 @@ export class BitfsBuyerProtocol {
       if (!kind2) throw new Error("BitFS 重连缺少已保存的 Kind 2 开池请求");
       this.deps.assertCurrentContext();
       await input.stream.send(kind2);
+      if (record.phase === "funding-unknown") this.scheduleFundingReconciliation(input.sessionId, input.stream);
       this.progress(input.sessionId, "opening", openingAmount, await this.countStagedBlocks(input.sessionId), totalBlocks,
         "已在新连接重发原 Kind 2，等待卖方返回同一份开池预签");
       return this.progressForSession(input.sessionId);
@@ -288,42 +307,17 @@ export class BitfsBuyerProtocol {
         return this.progressForSession(input.sessionId);
       }
 
-      const pool = await this.readCurrentPool(input.sessionId);
+      const pool = await this.readCurrentPool(input.sessionId, authorizationId);
       const summary = await this.inspectKind5({ sessionId: input.sessionId, quoteRaw, pool, rawKind5: requestRaw });
       if (summary.authorizationIdHex !== authorizationId) throw new Error("恢复中的 Kind 5 授权编号与会话不一致");
       this.deps.assertCurrentContext();
-      // 重连后先重放完全相同的付款凭证，卖方据此恢复链上付款对账。
+      // 重连后重放同一买方签名；卖方按本地日志幂等补签。
       await input.stream.send(paymentRaw);
-      const latestPaymentName = `latest-payment-transaction-${authorizationId}` as const;
-      let nextPayment: { txid: string; rawTransaction: Uint8Array } | undefined;
-      const savedLatest = await this.deps.sessions.getEvidence(input.sessionId, latestPaymentName);
-      const currentRaw = savedLatest ?? pool.latestPaymentRawTx;
-      if (currentRaw) {
-        const state = await parsePaymentState(currentRaw, pool.opening);
-        await verifyAcceptedPayment(state, pool.opening);
-        if (state.paymentSequence === summary.paymentSequence
-          && state.sellerAmountSatoshis.toString(10) === summary.sellerAmountAfterSatoshis) {
-          nextPayment = { txid: bytesToHex(transactionID(currentRaw)), rawTransaction: currentRaw };
-        }
-      }
-      nextPayment ??= await this.waitForNextPayment(input.sessionId, pool, {
-        paymentSequence: summary.paymentSequence,
-        sellerAmountAfterSatoshis: summary.sellerAmountAfterSatoshis,
-      });
-      if (!nextPayment) return this.progressForSession(input.sessionId);
       record = await this.requiredSession(input.sessionId);
-      if (record.evidence.includes(latestPaymentName)) {
-        const existing = await this.requiredEvidence(input.sessionId, latestPaymentName);
-        if (!equal(existing, nextPayment.rawTransaction)) throw new Error("重连观察到的付款交易与既有证据冲突");
-      } else {
-        record = await this.deps.sessions.putEvidence(input.sessionId, record.revision, latestPaymentName, nextPayment.rawTransaction, this.deps.nowMs());
-      }
       if (record.evidence.includes("download-plan")) {
         await this.completeSharedPayment({ sessionId: input.sessionId, quote, summary, pool });
         this.deps.onDownloadPlanChanged?.();
       }
-      this.deps.assertCurrentContext();
-      await input.stream.send(paymentRaw);
       record = await this.requiredSession(input.sessionId);
       record = await this.deps.sessions.update(input.sessionId, record.revision, {
         phase: "funded",
@@ -469,6 +463,7 @@ export class BitfsBuyerProtocol {
       fileSizeBytes: quote.terms.fileSizeBytes.toString(10),
       recommendedFilename: quote.terms.recommendedFilename,
     });
+    record = await this.requiredSession(record.sessionId);
     const blockCount = (quote.terms.fileSizeBytes + 262_143n) / 262_144n;
     // 预算按 Seed 价 + 每块完整价的上界计算，另预留两笔池内交易手续费。
     // 真正付款仍由 SDK 根据 exact Seed 和 Block 长度逐批计算。
@@ -631,9 +626,15 @@ export class BitfsBuyerProtocol {
     await this.deps.task.acceptOpeningResponse({ sessionId, rawKind3 });
     this.progress(sessionId, "funding", amount, 0, totalBlocks, "卖方已预签，正在提交并核对开池资金交易");
     const deadline = this.deps.nowMs() + MAX_CHAIN_WAIT_MS;
+    let lastKeepAliveAt = this.deps.nowMs();
+    const keepAliveFrame = await this.requiredEvidence(sessionId, "kind2-opening-request");
     let kind4: Uint8Array | undefined;
     while (this.deps.nowMs() < deadline) {
       this.deps.assertCurrentContext();
+      if (this.deps.nowMs() - lastKeepAliveAt >= KEEP_ALIVE_INTERVAL_MS) {
+        try { await stream.send(keepAliveFrame); } catch {}
+        lastKeepAliveAt = this.deps.nowMs();
+      }
       const result = await this.deps.task.submitOrReconcileFunding(sessionId);
       if (result.outcome.status === "failed") throw new Error("BitFS 开池资金交易未广播；可用余额未解锁前请先检查专款状态");
       if (result.kind4) {
@@ -646,6 +647,7 @@ export class BitfsBuyerProtocol {
     }
     if (!kind4) {
       this.progress(sessionId, "funding-unknown", amount, 0, totalBlocks, "资金交易结果暂时未知；保留原交易等待恢复");
+      this.scheduleFundingReconciliation(sessionId, stream);
       return;
     }
     this.deps.assertCurrentContext();
@@ -657,6 +659,52 @@ export class BitfsBuyerProtocol {
     }
     this.progress(sessionId, "requesting-seed", amount, 0, totalBlocks, "已发送资金证明，正在请求 Seed");
     await this.prepareAndSendRequest({ sessionId, contentHashes: [quote.terms.seedHash.slice()], stream });
+  }
+
+  private scheduleFundingReconciliation(sessionId: string, stream: BitfsBuyerStream): void {
+    if (this.fundingReconciliations.has(sessionId)) return;
+    const pending = this.serial(sessionId, () => this.reconcileFundingUntilSettled(sessionId, stream))
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.fundingReconciliations.get(sessionId) === pending) this.fundingReconciliations.delete(sessionId);
+      });
+    this.fundingReconciliations.set(sessionId, pending);
+  }
+
+  private async reconcileFundingUntilSettled(sessionId: string, stream: BitfsBuyerStream): Promise<void> {
+    const deadline = this.deps.nowMs() + MAX_FUNDING_RECONCILIATION_MS;
+    let lastKeepAliveAt = this.deps.nowMs();
+    const keepAliveFrame = await this.requiredEvidence(sessionId, "kind2-opening-request");
+    while (this.deps.nowMs() < deadline) {
+      this.deps.assertCurrentContext();
+      const record = await this.requiredSession(sessionId);
+      if (record.phase !== "funding-unknown") return;
+      if (this.deps.nowMs() - lastKeepAliveAt >= KEEP_ALIVE_INTERVAL_MS) {
+        try { await stream.send(keepAliveFrame); } catch {}
+        lastKeepAliveAt = this.deps.nowMs();
+      }
+      const quoteRaw = await this.requiredEvidence(sessionId, "kind1-quote");
+      const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
+      const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+      const result = await this.deps.task.reconcileFunding(sessionId);
+      if (result?.kind4) {
+        await stream.send(result.kind4);
+        const latest = await this.requiredSession(sessionId);
+        if (latest.evidence.includes("download-plan")) {
+          await this.continueFundedPool(sessionId, quote, stream);
+        } else {
+          this.progress(sessionId, "requesting-seed", this.readOpeningAmount(sessionId), 0, totalBlocks, "已发送资金证明，正在请求 Seed");
+          await this.prepareAndSendRequest({ sessionId, contentHashes: [quote.terms.seedHash.slice()], stream });
+        }
+        return;
+      }
+      if (result?.outcome.status === "failed") {
+        this.progress(sessionId, "failed", this.readOpeningAmount(sessionId), 0, totalBlocks, "开池资金交易未广播；请检查专款状态");
+        return;
+      }
+      this.progress(sessionId, "funding-unknown", this.readOpeningAmount(sessionId), 0, totalBlocks, "资金交易结果仍在核对；不会创建第二笔交易");
+      await delay(CHAIN_POLL_INTERVAL_MS);
+    }
   }
 
   /** 已有会话沿用原有逐池下载逻辑；新会话改走 Seed 级共享计划。 */
@@ -708,7 +756,7 @@ export class BitfsBuyerProtocol {
     }
     if (!plan.seedCompleted) {
       this.progress(sessionId, "requesting-seed", this.readOpeningAmount(sessionId), 0,
-        Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n), "已收到 Seed，正在等待对应付款交易确认");
+        Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n), "已收到 Seed，正在等待本地付款证据提交");
       return;
     }
     if (plan.blockHashesHex === null) {
@@ -725,12 +773,12 @@ export class BitfsBuyerProtocol {
       await this.commitAndCloseSharedFile(sessionId, quote, allBlockHashes, latest.completedBlockCount, stream);
       return;
     }
-    const nextHash = await this.deps.downloadPlan.claimNextBlock(sessionId, this.deps.selectionPriority);
+    const nextHashes = await this.deps.downloadPlan.claimNextBlocks(sessionId, this.deps.selectionPriority, this.deps.blocksPerBatch);
     if ((await this.deps.downloadPlan.snapshot()).stopRequested) {
       await this.closeStoppedSharedPool(sessionId, quote, stream);
       return;
     }
-    if (!nextHash) {
+    if (nextHashes.length === 0) {
       const ownPool = latest.pools.find((pool) => pool.sessionId === sessionId);
       const blockBudgetLeft = ownPool
         ? BigInt(ownPool.blockBudgetSatoshis) - BigInt(ownPool.blockCommittedSatoshis)
@@ -757,8 +805,8 @@ export class BitfsBuyerProtocol {
     }
     const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
     this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), latest.completedBlockCount, totalBlocks,
-      `正在请求文件块 ${latest.completedBlockCount + 1}/${allBlockHashes.length}`);
-    await this.prepareAndSendRequest({ sessionId, contentHashes: [hexToBytes(nextHash)], seed: seedBytes, stream });
+      `正在请求文件块批次（${nextHashes.length} 块，已完成 ${latest.completedBlockCount}/${allBlockHashes.length}）`);
+    await this.prepareAndSendRequest({ sessionId, contentHashes: nextHashes.map(hexToBytes), seed: seedBytes, stream });
     this.deps.onDownloadPlanChanged?.();
   }
 
@@ -864,11 +912,10 @@ export class BitfsBuyerProtocol {
   private async handleContentDelivery(sessionId: string, _kind: WireKind, rawKind6: Uint8Array, stream: BitfsBuyerStream): Promise<void> {
     const contentReceivedAtMs = monotonicNowMs();
     let record = await this.requiredSession(sessionId);
-    const priorDeliveries = record.evidence.filter((name): name is `kind6-content-delivery-${string}` => name.startsWith("kind6-content-delivery-"));
-    for (const priorName of priorDeliveries) {
-      const priorRaw = await this.deps.sessions.getEvidence(sessionId, priorName);
-      if (!priorRaw || !equal(priorRaw, rawKind6)) continue;
-      const priorAuthorizationId = priorName.slice("kind6-content-delivery-".length);
+    const priorAuthorizationId = await this.findSavedDeliveryAuthorization(record, rawKind6);
+    if (priorAuthorizationId) {
+      const priorRaw = await this.requiredEvidence(sessionId, `kind6-content-delivery-${priorAuthorizationId}`);
+      if (!equal(priorRaw, rawKind6)) throw new Error("BitFS Kind 6 摘要与已保存交付不一致");
       const priorPayment = await this.deps.sessions.getEvidence(sessionId, `kind7-payment-update-${priorAuthorizationId}`);
       if (priorPayment) {
         await stream.send(priorPayment);
@@ -899,14 +946,13 @@ export class BitfsBuyerProtocol {
     if (kind5Summary.authorizationIdHex !== authorizationId) throw new Error("Kind 5 授权编号与会话待处理编号不一致");
     const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
     const seedHashHex = bytesToHex(quote.terms.seedHash);
-    const seedStaged = await this.readStagedSeed(sessionId);
+    const needsStagedSeed = kind5Summary.contentHashes.some((hash) => bytesToHex(hash) !== seedHashHex);
+    const seedStaged = needsStagedSeed ? await this.readStagedSeed(sessionId) : undefined;
     const result = await verifyBuyerDelivery(await this.facts(), {
       authorization: { rawKind1: quoteRaw, rawKind5 },
       pool,
       deliveryRaw: rawKind6,
-      ...(kind5Summary.contentHashes.some((hash) => bytesToHex(hash) !== seedHashHex)
-        ? { seed: seedStaged }
-        : {}),
+      ...(needsStagedSeed && seedStaged ? { seed: seedStaged } : {}),
     }, createJournaledBitfsBuyerSigner({
       sessions: this.deps.sessions,
       sessionId,
@@ -915,6 +961,7 @@ export class BitfsBuyerProtocol {
       authorizationIdHex: authorizationId,
       assertCurrentContext: this.deps.assertCurrentContext,
       nowMs: this.deps.nowMs,
+      onError: this.deps.onSignerError,
     }));
     this.deps.assertCurrentContext();
     const expectedPayloads = kind5Summary.contentHashes;
@@ -943,21 +990,8 @@ export class BitfsBuyerProtocol {
     }
     this.deps.assertCurrentContext();
     await stream.send(result.outbound.bytes());
-    this.progress(sessionId, "payment-unknown", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, "已发送付款凭证，正在核对卖方累计付款");
-    const nextPayment = await this.waitForNextPayment(sessionId, pool, {
-      paymentSequence: kind5Summary.paymentSequence,
-      sellerAmountAfterSatoshis: kind5Summary.sellerAmountAfterSatoshis,
-    });
-    if (!nextPayment) return;
+    this.progress(sessionId, "payment-unknown", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, "已发送买方付款签名，继续池内递进");
     record = (await this.deps.sessions.get(sessionId)) ?? record;
-    const savedKind7 = await this.requiredEvidence(sessionId, paymentName);
-    const latestPaymentName = `latest-payment-transaction-${authorizationId}` as const;
-    if (record.evidence.includes(latestPaymentName)) {
-      const savedLatestPayment = await this.requiredEvidence(sessionId, latestPaymentName);
-      if (!equal(savedLatestPayment, nextPayment.rawTransaction)) throw new Error("同一 Kind 5 授权对应了不同付款交易，已停止自动购买");
-    } else {
-      record = await this.deps.sessions.putEvidence(sessionId, record.revision, latestPaymentName, nextPayment.rawTransaction, this.deps.nowMs());
-    }
     if (record.evidence.includes("download-plan")) {
       await this.completeSharedPayment({ sessionId, quote, summary: kind5Summary, pool });
       const downloadPlan = await this.deps.downloadPlan.snapshot();
@@ -975,12 +1009,10 @@ export class BitfsBuyerProtocol {
           elapsedMs: deliveryElapsedMs,
         });
       } catch {
-        // 速度只影响后续卖家排序；样本写入失败不回滚已经确认的付款。
+        // 速度只影响后续卖家排序；样本写入失败不回滚已签付款。
       }
     }
-    // 卖方在 Kind 7 首次处理后处于 payment-unknown；重放同一凭证让其按 txid
-    // 对账并推进阶段。DataChannel 有序，因此随后发出的下一个 Kind 5 不会抢跑。
-    await stream.send(savedKind7);
+    // DataChannel 有序：卖方处理本轮 Kind 7 后才会收到下一轮 Kind 5 或关池 Kind 12。
     record = (await this.deps.sessions.get(sessionId)) ?? record;
     if (fileReady) {
       record = await this.deps.sessions.update(sessionId, record.revision, {
@@ -988,7 +1020,7 @@ export class BitfsBuyerProtocol {
         pendingTxid: undefined,
         pendingAuthorizationId: undefined,
       }, this.deps.nowMs());
-      this.progress(sessionId, "content-committing", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, "所有块已验货且付款已在链上观察，正在提交本地文件");
+      this.progress(sessionId, "content-committing", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, "所有块已验货并签署付款，正在提交本地文件");
       await this.commitStagedFile(sessionId, quote.terms.fileSizeBytes.toString(10), quote.terms.recommendedFilename, seedHashHex, allBlockHashes);
       record = (await this.deps.sessions.get(sessionId)) ?? record;
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: "close-required", pendingTxid: undefined }, this.deps.nowMs());
@@ -1023,15 +1055,25 @@ export class BitfsBuyerProtocol {
 
   private async prepareAndSendClose(sessionId: string, verifiedBlockCount: number, totalBlockCount: number, stream: BitfsBuyerStream): Promise<void> {
     let record = await this.requiredSession(sessionId);
+    const current = await this.readCurrentPoolState(sessionId);
+    const bindingBytes = encodeBitfsBuyerCloseBinding({
+      authorizationIdHex: current.authorizationIdHex,
+      paymentSequence: current.paymentSequence,
+      sellerAmountSatoshis: current.sellerAmountSatoshis,
+    });
+    const bindingName = "kind12-close-binding" as const;
+    const savedBinding = await this.deps.sessions.getEvidence(sessionId, bindingName);
+    if (savedBinding && !equal(savedBinding, bindingBytes)) {
+      throw new Error("BitFS 关池请求已绑定另一组本地 Kind 5/7 状态");
+    }
+    if (!savedBinding) {
+      record = await this.deps.sessions.putEvidence(sessionId, record.revision, bindingName, bindingBytes, this.deps.nowMs());
+    }
     let rawKind12 = await this.deps.sessions.getEvidence(sessionId, "kind12-close-request");
     if (!rawKind12) {
-      const pool = await this.readCurrentPool(sessionId);
-      const latestPayment = pool.latestPaymentRawTx
-        ? await parsePaymentState(pool.latestPaymentRawTx, pool.opening)
-        : undefined;
       rawKind12 = (await prepareBuyerCloseArtifact(await this.facts(), {
-        pool,
-        targetSellerAmountSatoshis: latestPayment?.sellerAmountSatoshis ?? 0n,
+        pool: current.pool,
+        targetSellerAmountSatoshis: current.sellerAmountSatoshis,
       }, createJournaledBitfsBuyerSigner({
         sessions: this.deps.sessions,
         sessionId,
@@ -1039,6 +1081,7 @@ export class BitfsBuyerProtocol {
         family: "kind12-close",
         assertCurrentContext: this.deps.assertCurrentContext,
         nowMs: this.deps.nowMs,
+        onError: this.deps.onSignerError,
       }))).bytes();
       this.deps.assertCurrentContext();
       record = (await this.deps.sessions.get(sessionId)) ?? record;
@@ -1047,7 +1090,6 @@ export class BitfsBuyerProtocol {
       record = await this.deps.sessions.putEvidence(sessionId, record.revision, "kind12-close-request", rawKind12, this.deps.nowMs());
     }
     if (record.phase === "cancel-closing-pool") {
-      // 持久化发送未知状态后才碰 DataChannel；Worker 中断时可识别需重发同一 Kind 12。
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: "cancel-close-unknown" }, this.deps.nowMs());
     }
     const cancelling = record.phase === "cancel-closing-pool" || record.phase === "cancel-close-unknown";
@@ -1068,8 +1110,25 @@ export class BitfsBuyerProtocol {
     if (!record.evidence.includes("kind12-close-request")) throw new Error("收到 Kind 13，但买方尚未发送 Kind 12 关池请求");
     const savedResponse = await this.deps.sessions.getEvidence(sessionId, "kind13-close-response");
     if (savedResponse && !equal(savedResponse, rawKind13)) throw new Error("同一 BitFS 会话收到不同 Kind 13，已拒绝替换关池交易");
-    const pool = await this.readCurrentPool(sessionId);
-    const closeTransaction = await verifyBuyerCompletedCloseArtifact({ pool, responseRaw: rawKind13 });
+    const current = await this.readCurrentPoolState(sessionId);
+    const savedBinding = await this.deps.sessions.getEvidence(sessionId, "kind12-close-binding");
+    const binding = savedBinding === undefined ? undefined : parseBitfsBuyerCloseBinding(savedBinding);
+    const expectedSequence = binding?.paymentSequence ?? current.paymentSequence;
+    const expectedAmount = binding === undefined ? current.sellerAmountSatoshis : BigInt(binding.sellerAmountSatoshis);
+    if (binding !== undefined
+      && (binding.paymentSequence !== current.paymentSequence
+        || binding.sellerAmountSatoshis !== current.sellerAmountSatoshis.toString(10)
+        || binding.authorizationIdHex !== (current.authorizationIdHex ?? null))) {
+      throw new Error("BitFS 关池回执绑定与当前 Kind 5/7 状态不一致");
+    }
+    const requestRaw = await this.requiredEvidence(sessionId, "kind12-close-request");
+    const closeTransaction = await verifyBuyerCompletedCloseArtifact({ pool: current.pool, responseRaw: rawKind13, requestRaw });
+    await assertBitfsBuyerCloseBinding({
+      pool: current.pool,
+      closeTransactionRaw: closeTransaction,
+      paymentSequence: expectedSequence,
+      sellerAmountSatoshis: expectedAmount,
+    });
     this.deps.assertCurrentContext();
     if (!record.evidence.includes("kind13-close-response")) {
       record = await this.deps.sessions.putEvidence(sessionId, record.revision, "kind13-close-response", rawKind13, this.deps.nowMs());
@@ -1079,7 +1138,7 @@ export class BitfsBuyerProtocol {
     if (!record.evidence.includes("close-transaction")) {
       record = await this.deps.sessions.putEvidence(sessionId, record.revision, "close-transaction", closeTransaction, this.deps.nowMs());
     }
-    const txid = bytesToHex(transactionID(closeTransaction));
+    const txid = bitfsTxidHex(closeTransaction);
     record = (await this.deps.sessions.get(sessionId)) ?? record;
     const cancelling = record.phase === "cancel-closing-pool" || record.phase === "cancel-close-unknown";
     const pendingPhase = cancelling ? "cancel-close-unknown" : "close-unknown";
@@ -1139,12 +1198,12 @@ export class BitfsBuyerProtocol {
       family: "kind5",
       assertCurrentContext: this.deps.assertCurrentContext,
       nowMs: this.deps.nowMs,
+      onError: this.deps.onSignerError,
     }));
     const latestRecord = await this.requiredSession(input.sessionId);
-    const sellerPool = await this.asSellerPool(input.sessionId, pool);
-    const summary = await inspectSellerDeliveryRequest(await this.facts(), {
+    const summary = await inspectBuyerContentRequest(await this.facts(), {
       quoteRaw,
-      pool: sellerPool,
+      pool,
       requestRaw: prepared.outbound.bytes(),
     });
     const authorizationIdHex = bytesToHex(summary.paymentAuthorizationID);
@@ -1163,46 +1222,84 @@ export class BitfsBuyerProtocol {
     void updated;
   }
 
-  private async readCurrentPool(sessionId: string): Promise<BuyerPoolEvidence> {
+  private async readCurrentPoolState(sessionId: string, excludeAuthorizationId?: string): Promise<BitfsBuyerLocalPaymentState> {
+    const record = await this.requiredSession(sessionId);
+    const paymentIds = record.evidence
+      .filter((name) => name.startsWith("kind7-payment-update-"))
+      .map((name) => name.slice("kind7-payment-update-".length));
+    const paymentIdSet = new Set(paymentIds);
+    const legacyCount = record.evidence.filter((name) => name.startsWith("latest-payment-transaction-")).length;
+    const cached = excludeAuthorizationId === undefined ? this.poolStateCache.get(sessionId) : undefined;
+    if (cached && legacyCount === cached.legacyCount
+      && cached.paymentIds.size <= paymentIds.length
+      && [...cached.paymentIds].every((id) => paymentIdSet.has(id))) {
+      const newIds = paymentIds.filter((id) => !cached.paymentIds.has(id));
+      if (newIds.length === 0) return cached.state;
+      if (newIds.length === 1) {
+        const authorizationIdHex = newIds[0]!;
+        const rawKind5 = await this.requiredEvidence(sessionId, `kind5-content-request-${authorizationIdHex}`);
+        const rawKind7 = await this.requiredEvidence(sessionId, `kind7-payment-update-${authorizationIdHex}`);
+        const payment = { rawKind5, rawKind7 };
+        const inspected = await inspectBuyerPool({ ...cached.openingPool, latestBuyerPayment: payment });
+        if (inspected.paymentSequence !== cached.state.paymentSequence + 1
+          || inspected.sellerAmountSatoshis < cached.state.sellerAmountSatoshis) {
+          throw new Error("BitFS 买方付款日志序号不连续或累计金额倒退");
+        }
+        const state: BitfsBuyerLocalPaymentState = {
+          pool: { ...cached.openingPool, latestBuyerPayment: payment },
+          paymentSequence: inspected.paymentSequence,
+          sellerAmountSatoshis: inspected.sellerAmountSatoshis,
+          authorizationIdHex,
+          source: "local",
+        };
+        cached.paymentIds.add(authorizationIdHex);
+        cached.state = state;
+        return state;
+      }
+    }
     const rawKind2 = await this.requiredEvidence(sessionId, "kind2-opening-request");
     const rawKind3 = await this.requiredEvidence(sessionId, "kind3-opening-response");
     const fundingRaw = await this.requiredEvidence(sessionId, "funding-transaction");
     const completed = await completeBuyerOpening({ rawKind2, rawKind3: new Uint8Array(), fundingTransactionRaw: fundingRaw }, rawKind3);
-    const fundingTxid = bytesToHex(transactionID(fundingRaw));
-    const record = await this.requiredSession(sessionId);
-    let savedLatest: Uint8Array | undefined;
-    let savedSequence = -1;
-    for (const name of record.evidence.filter((item) => item.startsWith("latest-payment-transaction-"))) {
-      const candidate = await this.deps.sessions.getEvidence(sessionId, name);
-      if (!candidate) throw new Error("BitFS 买方会话缺少已登记的付款交易原文");
-      const state = await parsePaymentState(candidate, completed.pool.opening);
-      await verifyAcceptedPayment(state, completed.pool.opening);
-      if (state.paymentSequence > savedSequence) {
-        savedSequence = state.paymentSequence;
-        savedLatest = candidate;
-      } else if (state.paymentSequence === savedSequence && savedLatest && !equal(savedLatest, candidate)) {
-        throw new Error("BitFS 买方付款日志包含相同序号的冲突交易");
-      }
+    const state = await readBitfsBuyerLocalPaymentState({
+      sessions: this.deps.sessions,
+      session: record,
+      completedOpening: completed.pool,
+      ...(excludeAuthorizationId === undefined ? {} : { excludeAuthorizationId }),
+      includeLegacyPaymentEvidence: true,
+    });
+    if (excludeAuthorizationId === undefined) {
+      this.poolStateCache.set(sessionId, {
+        state,
+        openingPool: completed.pool,
+        paymentIds: new Set(paymentIds),
+        legacyCount,
+      });
     }
-    const latestTxid = savedLatest === undefined ? undefined : bytesToHex(transactionID(savedLatest));
-    // Kind 12 freezes the buyer-selected latest payment state. After the seller
-    // broadcasts the final close, that chain spend must not be mistaken for a
-    // newer ordinary payment while verifying the exact Kind 13 response.
-    const chain = record.evidence.includes("kind12-close-request")
-      ? []
-      : await this.deps.readPoolSpendChain(fundingTxid, latestTxid);
-    if (chain.length > 1) throw new Error("BitFS 池链出现多笔尚未写入会话日志的付款，已停止自动购买");
-    const last = chain.at(-1);
-    const currentRaw = last?.rawTransaction ?? savedLatest;
-    return { ...completed.pool, ...(currentRaw === undefined ? {} : { latestPaymentRawTx: currentRaw.slice() }) };
+    return state;
   }
 
-  private async asSellerPool(sessionId: string, pool: BuyerPoolEvidence): Promise<SellerPoolEvidence> {
-    return {
-      opening: pool.opening,
-      fundingTransactionRaw: await this.requiredEvidence(sessionId, "funding-transaction"),
-      ...(pool.latestPaymentRawTx === undefined ? {} : { latestPaymentRawTx: pool.latestPaymentRawTx.slice() }),
-    };
+  private async findSavedDeliveryAuthorization(record: BitfsSessionRecord, rawKind6: Uint8Array): Promise<string | undefined> {
+    let lookup = this.deliveryLookupCache.get(record.sessionId);
+    if (!lookup) {
+      lookup = { seenNames: new Set(), authorizationByDigest: new Map() };
+      this.deliveryLookupCache.set(record.sessionId, lookup);
+    }
+    for (const name of record.evidence) {
+      if (!name.startsWith("kind6-content-delivery-") || lookup.seenNames.has(name)) continue;
+      const saved = await this.requiredEvidence(record.sessionId, name);
+      const authorizationId = name.slice("kind6-content-delivery-".length);
+      const digest = await bitfsFrameDigest(saved);
+      const prior = lookup.authorizationByDigest.get(digest);
+      if (prior && prior !== authorizationId) throw new Error("BitFS 买方交付日志包含摘要冲突");
+      lookup.authorizationByDigest.set(digest, authorizationId);
+      lookup.seenNames.add(name);
+    }
+    return lookup.authorizationByDigest.get(await bitfsFrameDigest(rawKind6));
+  }
+
+  private async readCurrentPool(sessionId: string, excludeAuthorizationId?: string): Promise<BuyerPoolEvidence> {
+    return (await this.readCurrentPoolState(sessionId, excludeAuthorizationId)).pool;
   }
 
   private async inspectKind5(input: { sessionId: string; quoteRaw: Uint8Array; pool: BuyerPoolEvidence; rawKind5: Uint8Array }): Promise<{
@@ -1211,9 +1308,9 @@ export class BitfsBuyerProtocol {
     paymentSequence: number;
     sellerAmountAfterSatoshis: string;
   }> {
-    const summary = await inspectSellerDeliveryRequest(await this.facts(), {
+    const summary = await inspectBuyerContentRequest(await this.facts(), {
       quoteRaw: input.quoteRaw,
-      pool: await this.asSellerPool(input.sessionId, input.pool),
+      pool: input.pool,
       requestRaw: input.rawKind5,
     });
     return {
@@ -1222,38 +1319,6 @@ export class BitfsBuyerProtocol {
       paymentSequence: summary.paymentSequence,
       sellerAmountAfterSatoshis: summary.sellerAmountAfterSatoshis.toString(10),
     };
-  }
-
-  private async waitForNextPayment(
-    sessionId: string,
-    previousPool: BuyerPoolEvidence,
-    expected: { paymentSequence: number; sellerAmountAfterSatoshis: string },
-  ): Promise<{ txid: string; rawTransaction: Uint8Array } | undefined> {
-    const fundingRaw = await this.requiredEvidence(sessionId, "funding-transaction");
-    const fundingTxid = bytesToHex(transactionID(fundingRaw));
-    const previousTxid = previousPool.latestPaymentRawTx
-      ? bytesToHex(transactionID(previousPool.latestPaymentRawTx))
-      : undefined;
-    const deadline = this.deps.nowMs() + MAX_CHAIN_WAIT_MS;
-    while (this.deps.nowMs() < deadline) {
-      this.deps.assertCurrentContext();
-      const chain = await this.deps.readPoolSpendChain(fundingTxid, previousTxid);
-      const last = chain.at(-1);
-      if (chain.length > 1) throw new Error("BitFS 池链出现多笔尚未核对的付款，已停止自动购买");
-      if (last) {
-        const state = await parsePaymentState(last.rawTransaction, previousPool.opening);
-        await verifyAcceptedPayment(state, previousPool.opening);
-        if (state.paymentSequence !== expected.paymentSequence
-          || state.sellerAmountSatoshis.toString(10) !== expected.sellerAmountAfterSatoshis) {
-          throw new Error("链上 BitFS 付款状态与本轮 Kind 5 授权不一致");
-        }
-        return { txid: last.txid, rawTransaction: last.rawTransaction.slice() };
-      }
-      await delay(CHAIN_POLL_INTERVAL_MS);
-    }
-    const record = await this.requiredSession(sessionId);
-    await this.deps.sessions.update(sessionId, record.revision, { phase: "payment-unknown" }, this.deps.nowMs());
-    return undefined;
   }
 
   private async commitStagedFile(sessionId: string, fileSizeBytes: string, fileName: string, seedHashHex: string, blockHashes: readonly string[]): Promise<void> {
@@ -1381,35 +1446,36 @@ export class BitfsBuyerProtocol {
     summary: { contentHashes: Uint8Array[]; paymentSequence: number; sellerAmountAfterSatoshis: string };
     pool: BuyerPoolEvidence;
   }): Promise<void> {
-    if (input.summary.contentHashes.length !== 1) throw new Error("BitFS 共享计划每次只能结算一个内容 Hash");
-    const priorSellerAmount = await this.readPriorSellerAmount(input.sessionId, input.pool.opening, input.summary.paymentSequence);
+    // 重启后设置可能改变；已持久化的旧批次仍按协议上限完成。
+    if (input.summary.contentHashes.length < 1 || input.summary.contentHashes.length > 16) {
+      throw new Error("BitFS 共享计划付款批次块数无效");
+    }
+    const priorState = await inspectBuyerPool(input.pool);
+    if (priorState.paymentSequence + 1 !== input.summary.paymentSequence) throw new Error("BitFS 共享计划付款序号未紧接本地上一状态");
+    const priorSellerAmount = priorState.sellerAmountSatoshis;
     const paid = BigInt(input.summary.sellerAmountAfterSatoshis) - priorSellerAmount;
-    if (paid <= 0n) throw new Error("BitFS 共享计划本轮已确认付款金额无效");
-    const hashHex = bytesToHex(input.summary.contentHashes[0]!);
+    if (paid <= 0n) throw new Error("BitFS 共享计划本轮已签付款金额无效");
+    const hashes = input.summary.contentHashes.map(bytesToHex);
+    if (new Set(hashes).size !== hashes.length) throw new Error("BitFS 共享计划付款批次含重复内容 Hash");
+    const hashHex = hashes[0]!;
     const seedHashHex = bytesToHex(input.quote.terms.seedHash);
     if (hashHex === seedHashHex) {
+      if (hashes.length !== 1) throw new Error("BitFS Seed 必须单独验收付款");
       await this.deps.downloadPlan.completeSeed(input.sessionId, paid.toString(10));
-      const hashes = await this.getAllBlockHashes(input.sessionId, input.quote.terms.fileSizeBytes.toString(10), seedHashHex);
-      await this.deps.downloadPlan.setBlockHashes(hashes);
+      const blockHashes = await this.getAllBlockHashes(input.sessionId, input.quote.terms.fileSizeBytes.toString(10), seedHashHex);
+      await this.deps.downloadPlan.setBlockHashes(blockHashes);
     } else {
-      await this.deps.downloadPlan.completeBlock(input.sessionId, hashHex, paid.toString(10));
-    }
-  }
-
-  private async readPriorSellerAmount(sessionId: string, opening: BuyerPoolEvidence["opening"], paymentSequence: number): Promise<bigint> {
-    const record = await this.requiredSession(sessionId);
-    let bestSequence = -1;
-    let bestAmount = 0n;
-    for (const name of record.evidence.filter((item) => item.startsWith("latest-payment-transaction-"))) {
-      const raw = await this.deps.sessions.getEvidence(sessionId, name as `latest-payment-transaction-${string}`);
-      if (!raw) throw new Error("BitFS 共享下载恢复缺少已登记付款交易原文");
-      const state = await parsePaymentState(raw, opening);
-      if (state.paymentSequence < paymentSequence && state.paymentSequence > bestSequence) {
-        bestSequence = state.paymentSequence;
-        bestAmount = state.sellerAmountSatoshis;
+      if (hashes.includes(seedHashHex)) throw new Error("BitFS Block 批次不能混入 Seed");
+      const seed = await this.readStagedSeed(input.sessionId);
+      const prices = await Promise.all(input.summary.contentHashes.map((hash) =>
+        contentHashesPriceSatoshis(input.quote.terms, [hash], seed)));
+      if (prices.reduce((sum, price) => sum + price, 0n) !== paid) {
+        throw new Error("BitFS 批次付款增量与各 Block 报价之和不一致");
       }
+      await this.deps.downloadPlan.completeBlocks(input.sessionId, hashes.map((blockHashHex, index) => ({
+        blockHashHex, paidSatoshis: prices[index]!.toString(10),
+      })));
     }
-    return bestAmount;
   }
 
   private async markFailed(sessionId: string, amount: string, total: number, error: unknown): Promise<void> {
@@ -1422,7 +1488,9 @@ export class BitfsBuyerProtocol {
   }
 
   private async facts() {
-    return bitfsWorkflowFacts(this.deps.nowMs(), await this.deps.blockHeight());
+    // 新费用池使用 UTC 时间型的远期退款锁；SDK 按当前时间验到期，
+    // 每个文件块无需为这一固定规则再次向 WoC 查询区块高度。
+    return bitfsWorkflowFacts(this.deps.nowMs());
   }
 
   private async requiredSession(sessionId: string): Promise<BitfsSessionRecord> {
@@ -1532,6 +1600,10 @@ function parseSatoshiAmount(value: string): bigint {
   return BigInt(value);
 }
 function equal(left: Uint8Array, right: Uint8Array): boolean { return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]); }
+async function bitfsFrameDigest(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
+  return bytesToHex(new Uint8Array(digest));
+}
 function monotonicNowMs(): number {
   const performanceNow = globalThis.performance?.now();
   return typeof performanceNow === "number" && Number.isFinite(performanceNow) ? performanceNow : Date.now();

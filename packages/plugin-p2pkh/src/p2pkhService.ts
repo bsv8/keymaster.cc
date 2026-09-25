@@ -949,7 +949,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     async applyGlobalSettings(settings) {
       const prev = cachedSettings;
       if (deps.coordinator) {
-        const result = await deps.coordinator.p2pkhSettingsUpdate({ includeTestnet: settings.includeTestnet });
+        const result = await deps.coordinator.p2pkhSettingsUpdate({
+          includeTestnet: settings.includeTestnet,
+          ...(settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb })
+        });
         if (result.status !== "accepted" && result.status !== "ok") throw new Error("Coordinator rejected P2PKH network settings");
       }
       setCachedSettingsAndEmit(settings);

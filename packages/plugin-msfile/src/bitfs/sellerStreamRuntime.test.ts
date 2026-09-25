@@ -22,23 +22,41 @@ const BUYER_PUBLIC_KEY_HEX = toHex(new TestSigner(0x44).publicKey());
 
 class FakeStream extends EventTarget {
   readonly sent: Uint8Array[] = [];
+  readonly sendResults: boolean[] = [];
   closed = false;
+  aborted = false;
+  writableNeedsDrain = false;
+  closeGate?: Promise<void>;
   /** 分帧层读取的最小 Stream 状态字段。 */
   status = "open";
   remoteWriteStatus = "writable";
   readableEnded = false;
+  readBufferLength = 0;
+  writeBufferLength = 0;
   send(data: Uint8Array): boolean {
     this.sent.push(data.slice());
-    return true;
+    const result = this.sendResults.shift() ?? true;
+    this.writableNeedsDrain = !result;
+    return result;
+  }
+  releaseDrain(): void {
+    this.writableNeedsDrain = false;
+    this.dispatchEvent(new Event("drain"));
   }
   async close(): Promise<void> {
+    if (this.closeGate != null) await this.closeGate;
     this.closed = true;
     this.status = "closed";
+    this.writableNeedsDrain = false;
     this.dispatchEvent(new Event("close"));
   }
-  async onDrain(): Promise<void> {}
-  abort(): void {
+  abort(error?: Error): void {
+    this.aborted = true;
     this.status = "aborted";
+    this.writableNeedsDrain = false;
+    const event = new Event("close");
+    if (error !== undefined) Object.defineProperty(event, "error", { value: error });
+    this.dispatchEvent(event);
   }
   /** 模拟远端发来一个已分帧 chunk。 */
   pushChunk(chunk: Uint8Array): void {
@@ -57,6 +75,7 @@ class FakeStream extends EventTarget {
 class FakeConnection {
   aborted = false;
   closed = false;
+  closeGate?: Promise<void>;
   readonly streams: FakeStream[] = [];
   async newStream(): Promise<FakeStream> {
     const stream = new FakeStream();
@@ -64,7 +83,10 @@ class FakeConnection {
     return stream;
   }
   abort(): void { this.aborted = true; }
-  async close(): Promise<void> { this.closed = true; }
+  async close(): Promise<void> {
+    if (this.closeGate != null) await this.closeGate;
+    this.closed = true;
+  }
 }
 
 async function quoteFrame(): Promise<Uint8Array> {
@@ -107,6 +129,70 @@ describe("BitFS 卖方 stream runtime", () => {
     expect(connection.streams).toHaveLength(1);
     expect(connection.streams[0]!.sent).toEqual([encodeUvarintFrame(frame)]);
     await runtime.dispose();
+  });
+
+  it("串行发送并在每次真实 drain 周期后继续", async () => {
+    const { runtime, connection } = fixture();
+    const frame = await quoteFrame();
+    await runtime.open({
+      sessionId: "session-1",
+      addresses: ["/dns4/buyer.example/tcp/443/tls/ws/p2p/peer"],
+      publicKeyHex: BUYER_PUBLIC_KEY_HEX,
+      expectedPeerId: expectedPeerIdFor(BUYER_PUBLIC_KEY_HEX),
+      firstFrame: frame,
+    });
+    const stream = connection.streams[0]!;
+    stream.sendResults.push(false, false, true);
+    const first = runtime.send("session-1", frame);
+    const second = runtime.send("session-1", frame);
+    await vi.waitFor(() => expect(stream.sent).toHaveLength(2));
+    expect(stream.writableNeedsDrain).toBe(true);
+    stream.releaseDrain();
+    await vi.waitFor(() => expect(stream.sent).toHaveLength(3));
+    expect(stream.writableNeedsDrain).toBe(true);
+    stream.releaseDrain();
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+    expect(stream.sent).toHaveLength(3);
+    await runtime.dispose();
+  });
+
+  it("关闭会中止等待 drain 的发送", async () => {
+    const { runtime, connection } = fixture();
+    const frame = await quoteFrame();
+    await runtime.open({
+      sessionId: "session-1",
+      addresses: ["/dns4/buyer.example/tcp/443/tls/ws/p2p/peer"],
+      publicKeyHex: BUYER_PUBLIC_KEY_HEX,
+      expectedPeerId: expectedPeerIdFor(BUYER_PUBLIC_KEY_HEX),
+      firstFrame: frame,
+    });
+    const stream = connection.streams[0]!;
+    stream.sendResults.push(false);
+    const pending = runtime.send("session-1", frame);
+    await vi.waitFor(() => expect(stream.writableNeedsDrain).toBe(true));
+    await runtime.close("session-1", "worker_closed");
+    await expect(pending).rejects.toThrow();
+    expect(stream.aborted).toBe(true);
+  });
+
+  it("teardown 在底层 close 不返回时仍有上限", async () => {
+    const { runtime, connection } = fixture();
+    const frame = await quoteFrame();
+    await runtime.open({
+      sessionId: "session-1",
+      addresses: ["/dns4/buyer.example/tcp/443/tls/ws/p2p/peer"],
+      publicKeyHex: BUYER_PUBLIC_KEY_HEX,
+      expectedPeerId: expectedPeerIdFor(BUYER_PUBLIC_KEY_HEX),
+      firstFrame: frame,
+    });
+    connection.closeGate = new Promise<void>(() => undefined);
+    connection.streams[0]!.closeGate = new Promise<void>(() => undefined);
+    const startedAt = Date.now();
+    await runtime.dispose();
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(connection.aborted).toBe(true);
+    expect(connection.streams[0]!.aborted).toBe(true);
   });
 
   it("入站 Artifact 以 exact 字节发回 Worker，远端关闭上报会话结束", async () => {

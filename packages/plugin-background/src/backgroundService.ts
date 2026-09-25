@@ -28,7 +28,7 @@ import {
   BACKGROUND_MANAGED_SYNC_TASK_IDS,
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
-  BACKGROUND_SYNC_DEFAULT_INTERVAL_MS,
+  backgroundSyncDefaultIntervalMs,
   BACKGROUND_SYNC_INTERVAL_OPTIONS_MS
 } from "@keymaster/contracts";
 
@@ -66,10 +66,10 @@ function normalizeBackgroundSyncSettings(settings: BackgroundSyncSettings | unde
   return { taskIntervals };
 }
 
-/** managed 任务的当前间隔；未配置时使用平台缺省。 */
+/** managed 任务的当前间隔；未配置时使用该任务自己的缺省间隔。 */
 function managedIntervalFor(settings: BackgroundSyncSettings, taskId: string): number {
   const configured = settings.taskIntervals[taskId];
-  return typeof configured === "number" ? configured : BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+  return typeof configured === "number" ? configured : backgroundSyncDefaultIntervalMs(taskId);
 }
 
 /** 普通事件冷却时间：2 分钟。 */

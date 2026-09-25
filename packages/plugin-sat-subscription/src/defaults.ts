@@ -12,6 +12,15 @@
 import type { SatSupplierConfigV1 } from "@keymaster/contracts";
 import type { SatSubscriptionStateSnapshot } from "./satState.js";
 
+declare global {
+  interface ImportMetaEnv {
+    readonly VITE_BITFS_E2E?: string;
+  }
+  interface ImportMeta {
+    readonly env: ImportMetaEnv;
+  }
+}
+
 /** 缺省供应商对应的网络选择。 */
 export type SatDefaultNetwork = "mainnet" | "testnet";
 
@@ -73,6 +82,29 @@ export function applyDefaultSatSupplier(
   network: SatDefaultNetwork
 ): SatSubscriptionStateSnapshot {
   if (!snapshot.ownerPublicKeyHex) return snapshot;
+  if (import.meta.env.VITE_BITFS_E2E === "true") {
+    const supplier = { ...createDefaultSatSupplierConfig(network), enabled: false };
+    const customSuppliers = snapshot.suppliers.filter((item) => item.supplierId !== SAT_DEFAULT_SUPPLIER_ID);
+    const customById = new Map(customSuppliers.map((supplier) => [supplier.supplierId, supplier]));
+    const previousSettings = snapshot.ownerSettings;
+    const customDefault = previousSettings?.defaultPublishSupplierId
+      && previousSettings.defaultPublishSupplierId !== SAT_DEFAULT_SUPPLIER_ID
+      && customById.get(previousSettings.defaultPublishSupplierId)?.enabled === true
+      ? previousSettings.defaultPublishSupplierId
+      : null;
+    const customReceive = (previousSettings?.receiveSupplierIds ?? [])
+      .filter((supplierId) => supplierId !== SAT_DEFAULT_SUPPLIER_ID)
+      .filter((supplierId) => customById.get(supplierId)?.enabled === true);
+    return {
+      ...snapshot,
+      suppliers: [supplier, ...customSuppliers],
+      ownerSettings: {
+        ownerPublicKeyHex: snapshot.ownerPublicKeyHex,
+        defaultPublishSupplierId: customDefault,
+        receiveSupplierIds: customReceive
+      }
+    };
+  }
   const supplier = createDefaultSatSupplierConfig(network);
   const customSuppliers = snapshot.suppliers.filter((item) => item.supplierId !== SAT_DEFAULT_SUPPLIER_ID);
   const customById = new Map(customSuppliers.map((item) => [item.supplierId, item]));

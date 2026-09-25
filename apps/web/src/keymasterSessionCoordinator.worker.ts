@@ -12,6 +12,8 @@
 //   - 生产跨 realm 连接只由 WebLoom SharedWorker Runtime 接管
 //   - Worker 重启后必为 locked，禁止恢复为 unlocked
 
+import "./shims/buffer.js";
+
 import type {
   CoordinatorOwnerStorageData,
   CoordinatorPlatformStorageData,
@@ -93,7 +95,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, backgroundSyncDefaultIntervalMs, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, CHAIN_HEIGHT_SYNC_TASK_ID, emptyChainHeightSnapshot, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -159,7 +161,7 @@ import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordi
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { BorrowedOwnerFileStore, DeviceRecordV1, DeviceLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupKeyResult, InitialSetupResult, KeyHoldDocumentV1, KeymasterSessionKeyDerivationV1, KeymasterSessionV1, KeyspaceService, KeyValueStore, OwnerFileStore, PlatformRootStore, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService, WocServiceHandle, WocQueueSnapshot } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore, DeviceRecordV1, DeviceLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupKeyResult, InitialSetupResult, KeyHoldDocumentV1, KeymasterSessionKeyDerivationV1, KeymasterSessionV1, KeyspaceService, KeyValueStore, OwnerFileStore, PlatformRootStore, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService, WocServiceHandle, WocQueueSnapshot, BsvNetwork, ChainHeightSnapshot } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -217,6 +219,9 @@ import {
   createBitfsWocChainPort,
   createMsFileLocalContentSource,
   recoverBitfsBuyerContentCommit,
+  readBitfsBuyerLocalPaymentState,
+  assertBitfsBuyerCloseBinding,
+  parseBitfsBuyerCloseBinding,
   createMsFileService,
   createUnavailableBitfsSellerContentResolver,
   openMsFileRepository,
@@ -278,7 +283,8 @@ import {
 import { marshalEnvelope, marshalPrivateMessage, signPrivateMessage, sealSigned, verifySignedPrivateMessage, open as openPrivateMessage, validatePongRelation, validateWebRTCRelation, reviewOfferForHashRequest, dedupKey as privateDedupKey, privateMessageMaxLifetimeMs, PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/inbox";
 import { APP_MESSAGE_PROTOCOL, newAck, newDeliver } from "bsv8-channel-protocol/app-message";
 import { PING_PROTOCOL, parseBodyValue as parsePingBodyValue, newPong } from "bsv8-channel-protocol/ping";
-import { WEBRTC_SIGNAL_PROTOCOL, newAnswer, newOffer, parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
+import { WEBRTC_SIGNAL_PROTOCOL, newAnswer, newOffer, newICECandidate as newIceSignal, newEndOfCandidates as newEndOfCandidatesSignal, parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
+import type { WebRTCInterconnectEnvelope } from "bitcoin-libp2p/webrtc-interconnect";
 import { sign as signPublicMessage, marshal as marshalPublicMessage, parseAndVerify as parsePublicMessage, dedupKey as publicDedupKey, PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
 import { HASH_REQUEST_CHANNEL, newWebRTCSDPLocator, parseAndVerify as parseHashRequest, sign as signHashRequest, marshal as marshalHashRequest } from "bsv8-channel-protocol/hash-request";
 import { ChannelSubscriptionMux, validateExactChannel } from "./channelSubscriptionMux.js";
@@ -287,8 +293,6 @@ import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
 import {
   completeBuyerOpening,
   parsePaymentState,
-  verifyAcceptedPayment,
-  verifyArbitratedPayment,
   verifyBuyerCompletedClose,
 } from "go-bitfs";
 import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
@@ -975,9 +979,17 @@ let keyDeletionTail: Promise<void> = Promise.resolve();
 let p2pkhRegistry: P2pkhProviderRegistry | undefined;
 let p2pkhWocService: WocServiceHandle | undefined;
 let p2pkhUtxoSnapshots: P2pkhUtxoSnapshotStore | undefined;
+/**
+ * Worker 内唯一链高度读数（2026-09-26）。
+ * 真值只来自节点 `/chain/info`；读取失败保留旧值并保持 available=true，
+ * 首次成功之前为 available=false。消费者必须先看 available。
+ */
+let coordinatorChainHeight: ChainHeightSnapshot = emptyChainHeightSnapshot();
 let testP2pkhBroadcastProvider: P2pkhTransactionBroadcastProvider | undefined;
 /** 测试专用：替换快照 store 的 `unspent/all` 数据源，避免测试出网。 */
 let testP2pkhUnspentAllProvider: ((network: "main" | "test", address: string) => Promise<WocUtxoResponse[]>) | undefined;
+/** 测试专用：替换链高度读取源，避免单测出网。 */
+let testChainHeightProvider: ((network: BsvNetwork) => Promise<number>) | undefined;
 /** 测试专用：缩短 Worker 内中心广播服务的重试预算。 */
 let testSatBroadcastRetryOverrides: { maxAttempts?: number; deadlineMs?: number; initialBackoffMs?: number; maxBackoffMs?: number } | undefined;
 let testPersistCoordinatorSnapshotFailure = false;
@@ -3598,6 +3610,8 @@ let msfileSellerRuntime: BitfsSellerRuntime | undefined;
 let msfileSellerProtocolPort: BitfsSellerProtocolPort | undefined;
 /** 当前 owner 唯一的卖方会话管理器；多 Tab 只共享这一份。 */
 let msfileSellerSessionManager: BitfsSellerSessionManager | undefined;
+const msfilePendingSellerHashRequests = new Map<string, import("bsv8-channel-protocol/hash-request").VerifiedHashRequest>();
+let msfilePendingSellerHashRequestDrain: Promise<void> | undefined;
 /** 当前 owner 的 BitFS 交易 outbox；与普通 P2PKH 业务记录隔离。 */
 let msfileBitfsTransactionJournal: BitfsTransactionJournal | undefined;
 /** 当前 owner 的 BitFS 专款账本；普通 P2PKH 读取和广播都用它检查受保护输出。 */
@@ -4023,7 +4037,7 @@ async function recoverAllMsfileBitfsBuyerSessions(ownerPublicKeyHex: string): Pr
         task = await createMsfileBitfsBuyerTask({
           ownerPublicKeyHex: owner,
           seedHashHex: record.seedHashHex,
-          network: "main",
+          network: bitfsNetwork(),
         });
         tasksBySeed.set(record.seedHashHex, task);
       }
@@ -4034,8 +4048,8 @@ async function recoverAllMsfileBitfsBuyerSessions(ownerPublicKeyHex: string): Pr
         sessionId: record.sessionId,
         task,
       });
-      if (summary?.message.startsWith("本轮恢复暂未完成；")
-        || summary?.message.startsWith("到期退款对账暂未完成，")) {
+      if (summary?.message?.startsWith("本轮恢复暂未完成；")
+        || summary?.message?.startsWith("到期退款对账暂未完成，")) {
         failures.push(record.sessionId);
       }
     } catch (error) {
@@ -4123,13 +4137,11 @@ async function persistMsfileBitfsSellerSpeedSample(input: {
   const requestName = `kind5-content-request-${input.authorizationIdHex}`;
   const deliveryName = `kind6-content-delivery-${input.authorizationIdHex}`;
   const paymentName = `kind7-payment-update-${input.authorizationIdHex}`;
-  const observedPaymentName = `latest-payment-transaction-${input.authorizationIdHex}`;
   if (!session || session.role !== "buyer"
     || !session.evidence.includes(requestName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
     || !session.evidence.includes(deliveryName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
-    || !session.evidence.includes(paymentName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
-    || !session.evidence.includes(observedPaymentName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)) {
-    throw new Error("BitFS 速度样本缺少已验收交付或已观察付款证据");
+    || !session.evidence.includes(paymentName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)) {
+    throw new Error("BitFS 速度样本缺少已验收交付或买方付款证据");
   }
   const evidenceName = `seller-speed-sample-${input.authorizationIdHex}` as const;
   if (await sessions.getEvidence(session.sessionId, evidenceName)) return;
@@ -4268,7 +4280,7 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
       cursor = page.nextCursor;
     } while (cursor !== undefined);
 
-    const account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: session.seedHashHex, network: "main", nowMs: Date.now() });
+    const account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: session.seedHashHex, network: bitfsNetwork(), nowMs: Date.now() });
     const pool = account.pools.find((item) => item.poolId === session.sessionId);
     const dedicatedByOutpoint = new Map(account.utxos.map((utxo) => [`${utxo.txid}:${utxo.vout}`, utxo]));
     let lockedSatoshis = 0n;
@@ -4293,31 +4305,39 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
     const fundingRaw = await sessions.getEvidence(session.sessionId, "funding-transaction");
     if (openingRawKind2 && openingRawKind3 && fundingRaw) {
       const completedOpening = await completeBuyerOpening({ rawKind2: openingRawKind2, rawKind3: new Uint8Array(), fundingTransactionRaw: fundingRaw }, openingRawKind3);
-      let latestState: Awaited<ReturnType<typeof parsePaymentState>> | undefined;
-      let latestSequence = -1;
-      for (const name of session.evidence.filter((item) => item.startsWith("latest-payment-transaction-"))) {
-        const raw = await sessions.getEvidence(session.sessionId, name);
-        if (!raw) throw new Error("BitFS 任务缺少已登记的付款状态原文");
-        const state = await parsePaymentState(raw, completedOpening.pool.opening);
-        try { await verifyAcceptedPayment(state, completedOpening.pool.opening); }
-        catch { await verifyArbitratedPayment(state, completedOpening.pool.opening); }
-        if (state.paymentSequence > latestSequence) {
-          latestSequence = state.paymentSequence;
-          latestState = state;
-        } else if (state.paymentSequence === latestSequence && latestState
-          && bytesToHex(state.rawTx) !== bytesToHex(latestState.rawTx)) {
-          throw new Error("BitFS 任务发现相同付款序号对应不同交易");
+      const localState = await readBitfsBuyerLocalPaymentState({
+        sessions,
+        session,
+        completedOpening: completedOpening.pool,
+        includeLegacyPaymentEvidence: true,
+      });
+      const closeRaw = await sessions.getEvidence(session.sessionId, "close-transaction");
+      const bindingRaw = await sessions.getEvidence(session.sessionId, "kind12-close-binding");
+      if (bindingRaw) {
+        const binding = parseBitfsBuyerCloseBinding(bindingRaw);
+        if (binding.paymentSequence !== localState.paymentSequence
+          || binding.sellerAmountSatoshis !== localState.sellerAmountSatoshis.toString(10)
+          || binding.authorizationIdHex !== (localState.authorizationIdHex ?? null)) {
+          throw new Error("BitFS 任务关池绑定与当前付款状态不一致");
         }
       }
-      const closeRaw = await sessions.getEvidence(session.sessionId, "close-transaction");
       if (closeRaw) {
-        await verifyBuyerCompletedClose({ pool: completedOpening.pool, closeRaw });
-        latestState = await parsePaymentState(closeRaw, completedOpening.pool.opening);
-      }
-      if (latestState) {
-        paidSatoshis = latestState.sellerAmountSatoshis;
-        const distributed = latestState.buyerAmountSatoshis + latestState.sellerAmountSatoshis + latestState.arbiterAmountSatoshis;
-        poolStateFeeSatoshis = latestState.poolOutputSatoshis > distributed ? latestState.poolOutputSatoshis - distributed : 0n;
+        await verifyBuyerCompletedClose({ pool: localState.pool, closeRaw });
+        if (bindingRaw) {
+          const binding = parseBitfsBuyerCloseBinding(bindingRaw);
+          await assertBitfsBuyerCloseBinding({
+            pool: localState.pool,
+            closeTransactionRaw: closeRaw,
+            paymentSequence: binding.paymentSequence,
+            sellerAmountSatoshis: BigInt(binding.sellerAmountSatoshis),
+          });
+        }
+        const state = await parsePaymentState(closeRaw, completedOpening.pool.opening);
+        paidSatoshis = state.sellerAmountSatoshis;
+        const distributed = state.buyerAmountSatoshis + state.sellerAmountSatoshis + state.arbiterAmountSatoshis;
+        poolStateFeeSatoshis = state.poolOutputSatoshis > distributed ? state.poolOutputSatoshis - distributed : 0n;
+      } else if (localState.source !== "initial") {
+        paidSatoshis = localState.sellerAmountSatoshis;
       }
     }
 
@@ -4500,7 +4520,7 @@ async function ensureMsfileBitfsBuyerTask(input: {
     expiresAtMs: 0,
     purchaseHydrated: false,
   };
-  entry.taskPromise = createMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: seed, network: "main" });
+  entry.taskPromise = createMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: seed, network: bitfsNetwork() });
   msfileBitfsBuyerTasks.set(key, entry);
   while (msfileBitfsBuyerTasks.size > 256) {
     const oldestKey = msfileBitfsBuyerTasks.keys().next().value as string | undefined;
@@ -4604,13 +4624,29 @@ async function ensureMsfileBitfsBuyerProtocol(
     recommendedFilename: canonicalQuote.recommendedFilename,
     store: journalStore,
   });
+  const vaultSigner = createBitfsVaultSigner(cryptoPort);
+  const signer = {
+    publicKey: () => vaultSigner.publicKey(),
+    async sign(request: Parameters<typeof vaultSigner.sign>[0], signal?: AbortSignal): Promise<Uint8Array> {
+      try {
+        return await vaultSigner.sign(request, signal);
+      } catch (error) {
+        await writeBitfsE2eDiagnostic("buyer-signer-error.json", {
+          message: error instanceof Error ? error.message : String(error),
+          name: error instanceof Error ? error.name : typeof error,
+        });
+        throw error;
+      }
+    },
+  };
   const protocol = new BitfsBuyerProtocol({
     task: link.task,
     sessions: createBitfsSessionJournal(journalStore),
-    signer: createBitfsVaultSigner(cryptoPort),
+    signer,
     contentStore,
     downloadPlan,
     selectionPriority: buyerSettings.sellerSelectionPriority,
+    blocksPerBatch: buyerSettings.blocksPerBatch,
     onDownloadPlanChanged() {
       setTimeout(() => {
         for (const [candidateSessionId, candidateLink] of msfileBitfsWebRtcBuyerLinks) {
@@ -4626,16 +4662,15 @@ async function ensureMsfileBitfsBuyerProtocol(
         void maybeStartMsfileBitfsNextSeller({ ownerPublicKeyHex: owner, seedHashHex: link.seedHashHex, task: link.task }).catch(() => undefined);
       }, 0);
     },
-    blockHeight: () => woc.getChainHeight("main", { priority: "interactive" }),
-    readPoolSpendChain: (fundingTxid, afterTxid) => readBitfsPoolSpendChain({
-      woc,
-      network: "main",
-      fundingTxid,
-      ...(afterTxid === undefined ? {} : { afterTxid }),
-    }),
+    blockHeight: () => readCoordinatorBitfsBlockHeight(bitfsNetwork()),
     nowMs: () => Date.now(),
-    minerFeeRateSatoshisPerKilobyte: BigInt(feeRate),
-    assertCurrentContext,
+     minerFeeRateSatoshisPerKilobyte: BigInt(feeRate),
+     assertCurrentContext,
+     onSignerError: (error) => writeBitfsE2eDiagnostic("buyer-signer-error.json", {
+       message: error instanceof Error ? error.message : String(error),
+       name: error instanceof Error ? error.name : typeof error,
+       stack: error instanceof Error ? error.stack : undefined,
+     }),
     async onContentCommitted(seedHashHex) {
       const index = msfileSellerIndex;
       if (!index) return;
@@ -4645,6 +4680,7 @@ async function ensureMsfileBitfsBuyerProtocol(
     },
     onVerifiedDelivery: persistMsfileBitfsSellerSpeedSample,
     onProgress(progress) {
+      void writeBitfsE2eDiagnostic("buyer-purchase-progress.json", progress);
       const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, link.seedHashHex));
       if (!taskEntry || taskEntry.ownerSessionEpoch !== sessionEpoch) return;
       taskEntry.purchase = {
@@ -4681,7 +4717,27 @@ async function startMsfileBitfsBuyerPurchase(input: {
   msfileBitfsBuyerPurchaseTails.set(lockKey, current);
   await previous;
   try {
-    return await startMsfileBitfsBuyerPurchaseNow(input);
+    const result = await startMsfileBitfsBuyerPurchaseNow(input);
+    await writeBitfsE2eDiagnostic("buyer-purchase-return.json", {
+      seedHashHex: input.seedHashHex,
+      sessionId: input.sessionId,
+      purchase: result.purchase
+    });
+    return result;
+  } catch (error) {
+    const owner = coordinatorState.activePublicKeyHex?.toLowerCase();
+    const sessions = owner
+      ? await createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal")).list().catch(() => [])
+      : [];
+    await writeBitfsE2eDiagnostic("buyer-purchase-error.json", {
+       seedHashHex: input.seedHashHex,
+       sessionId: input.sessionId,
+       message: error instanceof Error ? error.message : String(error),
+       stack: error instanceof Error ? error.stack : undefined,
+       sessions: sessions.filter((session) => session.ownerPublicKeyHex === owner)
+        .map((session) => ({ sessionId: session.sessionId, phase: session.phase, evidence: session.evidence, pendingTxid: session.pendingTxid, pendingAuthorizationId: session.pendingAuthorizationId }))
+    });
+    throw error;
   } finally {
     release();
     if (msfileBitfsBuyerPurchaseTails.get(lockKey) === current) msfileBitfsBuyerPurchaseTails.delete(lockKey);
@@ -4884,9 +4940,15 @@ async function startMsfileBitfsBuyerPurchaseNow(input: {
           message: progress.message,
         };
       }
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "BitFS 卖家池开池准备失败";
-      failures.push(`${candidate.sessionId}: ${message.slice(0, 160)}`);
+     } catch (cause) {
+       const message = cause instanceof Error ? cause.message : "BitFS 卖家池开池准备失败";
+       await writeBitfsE2eDiagnostic("buyer-purchase-candidate-error.json", {
+         seedHashHex: input.seedHashHex,
+         sessionId: candidate.sessionId,
+         message,
+         stack: cause instanceof Error ? cause.stack : undefined
+       });
+       failures.push(`${candidate.sessionId}: ${message.slice(0, 160)}`);
       const latest = await sessions.get(candidate.sessionId);
       if (latest && !hasFunding(latest)) {
         await downloadPlan.closePool(candidate.sessionId).catch(() => undefined);
@@ -5147,17 +5209,34 @@ function createMsfileBitfsBuyerStream(
   return {
     async send(frame: Uint8Array) {
       if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) throw new Error("BitFS 买方 DataChannel 已关闭");
-      await requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-seller-send", sessionId: link.transportSessionId, frame },
-      });
+      try {
+        await requestWindowP2pExecutorOperation({
+          type: "lane",
+          laneId: "msfile",
+          operation: { type: "bitfs-seller-send", sessionId: link.transportSessionId, frame },
+        });
+      } catch (error) {
+        await writeBitfsE2eDiagnostic("buyer-stream-send-error.json", {
+          webrtcSessionId,
+          transportSessionId: link.transportSessionId,
+          frameBytes: frame.byteLength,
+          message: error instanceof Error ? error.message : String(error),
+          name: error instanceof Error ? error.name : typeof error,
+        });
+        throw error;
+      }
     },
   };
 }
 
 /** 买方传输或协议失败后关闭该会话并保留可见恢复状态。 */
 function msfileBitfsBuyerWebRtcFailure(link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>, webrtcSessionId: string, transportSessionId: string, reason: string): void {
+  void writeBitfsE2eDiagnostic("buyer-webrtc-failure.json", {
+    requestMessageId: link.requestMessageId,
+    webrtcSessionId,
+    transportSessionId,
+    reason
+  });
   if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) return;
   msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
   msfileBitfsBuyerOfferCounts.set(link.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(link.requestMessageId) ?? 1) - 1));
@@ -5200,6 +5279,7 @@ function stopMsfileSellerRuntime(): void {
   msfileBitfsBroadcaster = undefined;
   manager?.clear();
   msfileBitfsWebRtcSellerLinks.clear();
+  msfilePendingSellerHashRequests.clear();
   msfileSellerIndex?.clear();
   msfileSellerIndex = undefined;
 }
@@ -5257,8 +5337,6 @@ async function reconcileMsfileBitfsFundingInputs(
 
 /** 普通 P2PKH 当前 Key 找零输出的网络尘额门槛，单位聪。 */
 const BITFS_FUNDING_MIN_OUTPUT_SATOSHIS = 546;
-/** BitFS 资金拆分交易的单笔手续费硬上限，单位聪。 */
-const BITFS_FUNDING_MAX_FEE_SATOSHIS = 10_000;
 
 /**
  * 构造只供 BitFS 专款流程使用的 P2PKH 受控签名适配器。
@@ -5304,6 +5382,30 @@ function releaseMsfileBitfsPreparedSubmission(input: {
     laneId: "msfile",
     operation: { type: "bitfs-funding-release-submission", ...input },
   }).then(() => undefined);
+}
+
+async function waitForMsfileFundingSnapshot(input: {
+  ownerPublicKeyHex: string;
+  seedHashHex: string;
+  network: "main" | "test";
+  ledger: BitfsFundingLedger;
+}): Promise<P2pkhUtxoSnapshotResult> {
+  const resources = await ensureWorkerP2pkhResources(input.ownerPublicKeyHex, input.network === "test");
+  const resource = resources.find((item) => item.network === input.network);
+  if (!resource || !p2pkhUtxoSnapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
+  const account = await input.ledger.getAccount({ ownerPublicKeyHex: input.ownerPublicKeyHex, seedHashHex: input.seedHashHex, network: input.network, nowMs: Date.now() });
+  const expected = account.utxos.filter((utxo) => utxo.state === "available").map((utxo) => `${utxo.txid}:${utxo.vout}`);
+  const deadline = Date.now() + 30_000;
+  let latest: P2pkhUtxoSnapshotResult = { available: false, state: "unavailable", items: [] };
+  while (Date.now() < deadline) {
+    await p2pkhUtxoSnapshots.reconcileConsumed(resource, { thresholdMs: 0 });
+    latest = await p2pkhUtxoSnapshots.refresh(resource);
+    await reconcileMsfileBitfsFundingInputs(input.ownerPublicKeyHex, input.network, latest);
+    const available = new Set(latest.items.filter((item) => !item.isSpentInMempoolTx).map((item) => `${item.txid}:${item.vout}`));
+    if (latest.available && latest.state === "fresh" && expected.every((key) => available.has(key))) return latest;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`BitFS FundingTx 新鲜快照未包含专款输出：${latest.items.map((item) => `${item.txid}:${item.vout}`).join(",")}`);
 }
 
 /** 为指定 Seed 创建专款拆分准备端口；本函数不提交交易。 */
@@ -5418,7 +5520,7 @@ export async function prepareMsfileBitfsFundingSplit(input: {
     ...input,
     ownerPublicKeyHex: owner,
     feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb.medium,
-    maxFeeSatoshis: BITFS_FUNDING_MAX_FEE_SATOSHIS,
+    maxFeeSatoshis: bitfsFundingMaxFeeSatoshis(),
     minimumOutputSatoshis: String(BITFS_FUNDING_MIN_OUTPUT_SATOSHIS),
   }, createMsfileBitfsFundingSplitDeps({ ...input, ownerPublicKeyHex: owner, ledger, transactions }));
 }
@@ -5511,8 +5613,14 @@ async function settleMsfileBitfsFundingSplit(input: {
         nowMs: Date.now(),
       });
     }
-    return outcome;
+    const observationDeadline = Date.now() + 60_000;
+    while (outcome.status === "result-unknown" && Date.now() < observationDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+      input.assertCurrentContext();
+      outcome = await input.broadcaster.reconcile(input.txid);
+    }
   }
+  if (outcome.status === "result-unknown") return outcome;
   if (outcome.status === "failed") {
     if (plan.state !== "failed" && plan.state !== "observed") {
       if (!plan.p2pkhSubmissionId) throw new Error("拆分交易缺少 P2PKH 提交编号，保留输入占用等待人工恢复");
@@ -5728,7 +5836,7 @@ export async function createMsfileBitfsBuyerTask(input: {
     const availableSatoshis = account.utxos
       .filter((utxo) => utxo.state === "available")
       .reduce((total, utxo) => total + BigInt(utxo.valueSatoshis), 0n);
-    const minimumFundingSatoshis = BigInt(openingAmountSatoshis) + BigInt(BITFS_FUNDING_MAX_FEE_SATOSHIS);
+    const minimumFundingSatoshis = BigInt(openingAmountSatoshis) + BigInt(bitfsFundingMaxFeeSatoshis());
     if (availableSatoshis >= minimumFundingSatoshis) return;
 
     const split = await prepareMsfileBitfsFundingSplit({
@@ -5780,10 +5888,7 @@ export async function createMsfileBitfsBuyerTask(input: {
     assertCurrentContext,
     releasePreparedSubmission: releaseMsfileBitfsPreparedSubmission,
     nowMs: () => Date.now(),
-    blockHeight: () => {
-      if (!woc) throw new Error("BitFS 到期退款需要可用的 WoC 链高度服务");
-      return woc.getChainHeight(input.network, { priority: "interactive" });
-    },
+    blockHeight: () => readCoordinatorBitfsBlockHeight(input.network),
     readPoolSpendChain: (fundingTxid) => {
       if (!woc) throw new Error("BitFS 到期退款需要可用的 WoC 池状态查询服务");
       return readBitfsPoolSpendChain({ woc, network: input.network, fundingTxid });
@@ -5848,20 +5953,26 @@ export async function createMsfileBitfsBuyerTask(input: {
       const resources = await ensureWorkerP2pkhResources(owner, settings.includeTestnet);
       fundingSnapshotResource = resources.find((resource) => resource.network === input.network);
       if (!fundingSnapshotResource || !p2pkhUtxoSnapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
-      await p2pkhUtxoSnapshots.reconcileConsumed(fundingSnapshotResource);
-      const snapshot = await p2pkhUtxoSnapshots.refresh(fundingSnapshotResource);
-      if (!snapshot.available || snapshot.state !== "fresh") throw new Error("BitFS FundingTx 需要新鲜普通余额快照");
-      assertCurrentContext();
-      return prepareBitfsFunding({
-        sessionId: fundingInput.sessionId,
-        ownerPublicKeyHex: owner,
-        seedHashHex: seed,
-        network: input.network,
-        generation,
-        openingOutput: fundingInput.openingOutput,
-        feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb.medium,
-        maxFeeSatoshis: BITFS_FUNDING_MAX_FEE_SATOSHIS,
-      }, fundingDeps);
+      for (let attempt = 0; ; attempt += 1) {
+        await waitForMsfileFundingSnapshot({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, ledger });
+        assertCurrentContext();
+        try {
+          return await prepareBitfsFunding({
+            sessionId: fundingInput.sessionId,
+            ownerPublicKeyHex: owner,
+            seedHashHex: seed,
+            network: input.network,
+            generation,
+            openingOutput: fundingInput.openingOutput,
+            feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb.medium,
+            maxFeeSatoshis: bitfsFundingMaxFeeSatoshis(),
+          }, fundingDeps);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (attempt >= 2 || !/新鲜快照|输入占用被拒绝：snapshot-(stale|consumed)/u.test(message)) throw error;
+          await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+        }
+      }
     },
   });
   return buyerTask;
@@ -5895,14 +6006,9 @@ function createMsfileSellerStreamTransport(): BitfsSellerStreamTransport {
         await requestWindowP2pExecutorOperation(operation, input.signal);
         return;
       }
-      const result = await requestWindowP2pExecutorOperation(operation, input.signal);
-      if (!result || typeof result !== "object" || typeof (result as { sdp?: unknown }).sdp !== "string") {
-        throw new Error("BitFS WebRTC lane did not return an offer SDP");
-      }
-      const sdp = (result as { sdp: string }).sdp;
       const runtime = satRuntime;
       if (!runtime || runtime.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
-        throw new Error("Channel runtime is not ready to publish the BitFS WebRTC offer");
+        throw new Error("Channel runtime is not ready to start the BitFS WebRTC transport");
       }
       const link = {
         sessionId: input.sessionId,
@@ -5912,13 +6018,7 @@ function createMsfileSellerStreamTransport(): BitfsSellerStreamTransport {
       };
       msfileBitfsWebRtcSellerLinks.set(input.webrtcSessionId, link);
       try {
-        await publishPrivateEnvelope({
-          runtime,
-          recipientPublicKeyHex: input.publicKeyHex,
-          protocol: WEBRTC_SIGNAL_PROTOCOL,
-          body: newOffer(parseMessageID(input.requestMessageId), parseSessionID(input.webrtcSessionId), sdp),
-          signal: input.signal,
-        });
+        await requestWindowP2pExecutorOperation(operation, input.signal);
       } catch (error) {
         if (msfileBitfsWebRtcSellerLinks.get(input.webrtcSessionId) === link) {
           msfileBitfsWebRtcSellerLinks.delete(input.webrtcSessionId);
@@ -5932,11 +6032,21 @@ function createMsfileSellerStreamTransport(): BitfsSellerStreamTransport {
       }
     },
     async send(sessionId, frame) {
-      await requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-seller-send", sessionId, frame },
-      });
+      try {
+        await requestWindowP2pExecutorOperation({
+          type: "lane",
+          laneId: "msfile",
+          operation: { type: "bitfs-seller-send", sessionId, frame },
+        });
+      } catch (error) {
+        await writeBitfsE2eDiagnostic("seller-stream-send-error.json", {
+          sessionId,
+          frameBytes: frame.byteLength,
+          message: error instanceof Error ? error.message : String(error),
+          name: error instanceof Error ? error.name : typeof error,
+        });
+        throw error;
+      }
     },
     async close(sessionId, reason) {
       await requestWindowP2pExecutorOperation({
@@ -5990,7 +6100,7 @@ async function configureMsfileSellerRuntime(
     const woc = p2pkhWocService;
     // WoC 未装配时仍允许派生索引和 fail-closed 协议端口启动；
     // 任何真实交易广播/高度查询都会明确失败，不会伪造链上事实。
-    const chain = woc ? createBitfsWocChainPort(woc, "main") : {
+    const chain = woc ? createBitfsWocChainPort(woc, bitfsNetwork()) : {
       async broadcast(): Promise<never> { throw new Error("BitFS Worker 内 WoC 服务未就绪"); },
       async lookupTransaction(): Promise<"unknown"> { return "unknown"; },
     };
@@ -6000,10 +6110,16 @@ async function configureMsfileSellerRuntime(
       nowMs: () => Date.now(),
     });
     const sessions = createBitfsSessionJournal(journalStore);
+    const persistedSellerGenerations = (await sessions.list())
+      .filter((record) => record.role === "seller" && record.ownerPublicKeyHex === ownerPublicKeyHex)
+      .map((record) => record.generation);
+    msfileSellerSessionEpoch = Math.max(msfileSellerSessionEpoch, ...persistedSellerGenerations.map((value) => value + 1), 1);
+    const runtimeInstanceId = crypto.randomUUID();
     // 恢复阶段只查询已持久化的 txid，不自动重播不可逆交易。
     const outcomes = await reconcileBitfsTransactions({ journal: transactionJournal, broadcaster, signal: controller.signal });
     await reconcileBitfsSessionTransactions({ sessions, outcomes, nowMs: Date.now() });
-    if (controller.signal.aborted) return "waiting-unlock";
+    if (controller.signal.aborted || msfileSellerIndexController !== controller
+      || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) return "waiting-unlock";
     msfileBitfsTransactionJournal = transactionJournal;
     msfileBitfsBroadcaster = broadcaster;
     msfileSellerRuntime = new BitfsSellerRuntime({
@@ -6013,13 +6129,13 @@ async function configureMsfileSellerRuntime(
       sessions,
       settings: () => service.describeState().sellerSettings,
       nowMs: () => Date.now(),
-      allowLoopbackWs: import.meta.env?.DEV === true,
+      allowLoopbackWs: bitfsAllowsLoopbackWebsocket(),
     });
     const sellerContent = woc
       ? createBitfsLocalSellerContentResolver({
         content: createMsFileLocalContentSource(contentStore, { onReadFailure: (seedHashHex) => index.invalidate(seedHashHex) }),
         nowMs: () => Date.now(),
-        blockHeight: () => woc.getChainHeight("main", { priority: "interactive" }),
+        blockHeight: () => readCoordinatorBitfsBlockHeight(bitfsNetwork()),
       })
       : createUnavailableBitfsSellerContentResolver();
     const protocolPort = testMsfileSellerBridge?.protocol ?? new BitfsSellerProtocol({
@@ -6027,12 +6143,19 @@ async function configureMsfileSellerRuntime(
       sessions,
       content: sellerContent,
       broadcaster,
-      ownerPublicKeyHex,
-      generation: () => msfileSellerSessionEpoch,
-      nowMs: () => Date.now(),
-      blockHeight: () => {
-        if (!woc) throw new Error("BitFS Worker 内 WoC 服务未就绪");
-        return woc.getChainHeight("main", { priority: "interactive" });
+       ownerPublicKeyHex,
+       generation: () => msfileSellerSessionEpoch,
+       runtimeInstanceId: () => runtimeInstanceId,
+       nowMs: () => Date.now(),
+      blockHeight: () => readCoordinatorBitfsBlockHeight(bitfsNetwork()),
+      onPaymentTransaction: async ({ txid, rawTxHex }) => {
+        const wocConfig = p2pkhWocService?.getConfig();
+        await writeBitfsE2eDiagnostic("seller-payment-transaction.json", {
+          txid,
+          rawTxHex,
+          network: bitfsNetwork(),
+          wocBaseUrl: wocConfig?.baseUrl,
+        });
       },
     });
     const transport = testMsfileSellerBridge?.transport ?? createMsfileSellerStreamTransport();
@@ -6041,7 +6164,7 @@ async function configureMsfileSellerRuntime(
       protocol: protocolPort,
       nowMs: () => Date.now(),
       // 报价期限是最短会话空闲时间；给对端留出付款与交付窗口。
-      idleTimeoutMs: () => Math.max(30_000, settings.quoteLifetimeSeconds * 1_000),
+      idleTimeoutMs: () => Math.max(30_000, service.describeState().sellerSettings.quoteLifetimeSeconds * 1_000),
       maxSessions: () => service.describeState().sellerSettings.maxConcurrentSales,
       onActiveSessionsChanged: (activeCount) => {
         if (msfileSellerSessionManager !== manager) return;
@@ -6054,9 +6177,23 @@ async function configureMsfileSellerRuntime(
         && !controller.signal.aborted
         && coordinatorState.activePublicKeyHex === ownerPublicKeyHex
         && msfileRuntime === service,
+      onProtocolError: async ({ sessionId, message, stack }) => {
+        await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", { sessionId, message, stack });
+      },
+      onSessionClosed: async ({ sessionId, reason, atMs }) => {
+        await writeBitfsE2eDiagnostic("seller-session-close.json", { sessionId, reason, atMs });
+      },
     });
+    const sat = await ensureSatRuntime();
+    if (sat.ownerPublicKeyHex !== ownerPublicKeyHex) return "waiting-unlock";
+    if (controller.signal.aborted || msfileSellerIndexController !== controller
+      || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) return "waiting-unlock";
+    await ensureMsfileBitfsSellerSubscriptions(sat);
+    if (controller.signal.aborted || msfileSellerIndexController !== controller
+      || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) return "waiting-unlock";
     msfileSellerProtocolPort = protocolPort;
     msfileSellerSessionManager = manager;
+    void drainMsfilePendingSellerHashRequests();
     // 协议端口未就绪时只能保持 degraded：不报价、不暴露库存。
     return protocolPort.ready ? "ready" : "degraded";
   } catch (error) {
@@ -6073,6 +6210,33 @@ async function configureMsfileSellerRuntime(
  * 中文说明：只处理 ChannelProtocol 已验签的 VerifiedHashRequest；未命中保持
  * 静默。报价只在协议端口就绪时产生，且报价字节由 journal 先落盘。
  */
+async function writeBitfsE2eDiagnostic(path: string, value: unknown): Promise<void> {
+  if (import.meta.env.VITE_BITFS_E2E !== "true") return;
+  try {
+    const store = createWorkerOwnerFileStore("msfile", "");
+    await store.put(`bitfs-e2e-diagnostics/${path}`, new TextEncoder().encode(JSON.stringify(value)));
+  } catch (error) {
+    console.warn("[msfile] BitFS E2E diagnostic write failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function drainMsfilePendingSellerHashRequests(): Promise<void> {
+  if (msfilePendingSellerHashRequestDrain) return;
+  msfilePendingSellerHashRequestDrain = (async () => {
+    while (msfileSellerRuntime && msfileSellerSessionManager && msfileSellerProtocolPort && msfileRuntime && msfileSellerTransportAvailable()) {
+      const next = msfilePendingSellerHashRequests.entries().next().value as [string, import("bsv8-channel-protocol/hash-request").VerifiedHashRequest] | undefined;
+      if (!next) return;
+      const [key, request] = next;
+      msfilePendingSellerHashRequests.delete(key);
+      if (request.expires_at_ms <= Date.now()) continue;
+      await handleMsfileSellerHashRequest(request);
+    }
+  })().finally(() => {
+    msfilePendingSellerHashRequestDrain = undefined;
+  });
+  await msfilePendingSellerHashRequestDrain;
+}
+
 async function handleMsfileSellerHashRequest(
   request: import("bsv8-channel-protocol/hash-request").VerifiedHashRequest,
 ): Promise<void> {
@@ -6080,21 +6244,88 @@ async function handleMsfileSellerHashRequest(
   const manager = msfileSellerSessionManager;
   const protocolPort = msfileSellerProtocolPort;
   const service = msfileRuntime;
-  if (!runtime || !manager || !protocolPort || !service) return;
-  if (!protocolPort.ready) return;
+  await writeBitfsE2eDiagnostic("seller-hash-request-entry.json", {
+    hash: request.body.hash,
+    from: request.from_public_key,
+    expiresAtMs: request.expires_at_ms,
+    hasRuntime: runtime !== undefined,
+    hasManager: manager !== undefined,
+    hasProtocol: protocolPort !== undefined,
+    protocolReady: protocolPort?.ready === true,
+    hasService: service !== undefined,
+    activeCount: manager?.activeCount(),
+    maxSales: service?.describeState().sellerSettings.maxConcurrentSales,
+    quoteLifetimeSeconds: service?.describeState().sellerSettings.quoteLifetimeSeconds,
+    observedAtMs: Date.now(),
+    owner: coordinatorState.activePublicKeyHex,
+    sessionEpoch: coordinatorState.sessionEpoch
+  });
+  if (!runtime || !manager || !protocolPort || !service || !msfileSellerTransportAvailable()) {
+    if (request.expires_at_ms > Date.now()) {
+      msfilePendingSellerHashRequests.set(`${request.from_public_key}:${request.message_id}`, request);
+    }
+    return;
+  }
+  if (!protocolPort.ready) {
+    if (request.expires_at_ms > Date.now()) {
+      msfilePendingSellerHashRequests.set(`${request.from_public_key}:${request.message_id}`, request);
+    }
+    return;
+  }
   if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
   const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
   const epoch = msfileSellerSessionEpoch;
   if (manager.activeCount() >= service.describeState().sellerSettings.maxConcurrentSales) return;
+  const index = msfileSellerIndex;
+  let indexedSeed = index?.get(request.body.hash);
+  if (index && (!indexedSeed || indexedSeed.availability !== "available")) {
+    try {
+      const contentStore = createWorkerOwnerFileStore("msfile", "");
+      const indexGeneration = index.currentGeneration();
+      index.invalidate(request.body.hash);
+      await index.refresh(contentStore, request.body.hash, indexGeneration);
+      indexedSeed = index.get(request.body.hash);
+    } catch (error) {
+      console.warn("[msfile] seller hash request index refresh failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+  console.warn("[msfile] seller hash request", request.body.hash, indexedSeed?.availability ?? "missing");
+  const indexDiagnosticStore = createWorkerOwnerFileStore("msfile", "");
+  const indexMeta = await indexDiagnosticStore.get(`meta/${request.body.hash}.json`).catch(() => undefined);
+  const indexSeed = await indexDiagnosticStore.get(`seeds/${request.body.hash}.ms`).catch(() => undefined);
+  let indexBlocks: Awaited<ReturnType<typeof indexDiagnosticStore.list>> | undefined;
+  let indexListError: string | undefined;
+  try {
+    indexBlocks = await indexDiagnosticStore.list({ prefix: `storage/${request.body.hash}/`, limit: 200 });
+  } catch (error) {
+    indexListError = error instanceof Error ? error.message : String(error);
+  }
+  await writeBitfsE2eDiagnostic("seller-hash-request-index.json", {
+    hash: request.body.hash,
+    availability: indexedSeed?.availability ?? "missing",
+    fileName: indexedSeed?.fileName,
+    fileSizeBytes: indexedSeed?.fileSizeBytes,
+    blockCount: indexedSeed?.blockCount,
+    metaBytes: indexMeta?.bytes.byteLength ?? null,
+    seedBytes: indexSeed?.bytes.byteLength ?? null,
+    listedBlocks: indexBlocks?.files.length ?? null,
+    nextCursor: indexBlocks?.nextCursor ?? null,
+    listError: indexListError ?? null
+  });
   let match: BitfsSellerMatch | null;
   try {
     match = await runtime.match(request);
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") return;
     console.warn("[msfile] seller hash request match failed", error instanceof Error ? error.message : String(error));
+    await writeBitfsE2eDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, error: error instanceof Error ? error.message : String(error) });
     return;
   }
-  if (!match) return;
+  await writeBitfsE2eDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, matched: match !== null });
+  if (!match) {
+    console.warn("[msfile] seller hash request did not match", request.body.hash);
+    return;
+  }
   // match 期间可能发生锁定、切 Key、关闭卖方或 runtime 重建；迟到结果不得建会话。
   if (epoch !== msfileSellerSessionEpoch
     || msfileSellerRuntime !== runtime
@@ -6104,19 +6335,22 @@ async function handleMsfileSellerHashRequest(
   try {
     const publicKeyHex = request.from_public_key;
     const sessionId = match.resumeSessionId ?? crypto.randomUUID();
+    const webrtcSessionId = newSessionID();
     await manager.start({
       sessionId,
       transport: match.transport,
       requestMessageId: match.requestMessageId,
       addresses: match.addresses,
-      webrtcSessionId: newSessionID(),
+      webrtcSessionId,
       publicKeyHex,
       // 只从已验证公钥派生 PeerId；不使用请求者自报的 locator PeerId。
       expectedPeerId: peerIdFromPublicKeyBytes(cryptoHexToBytes(publicKeyHex)).toString(),
       quoteBytes: match.quoteBytes,
       seedHashHex: match.seedHashHex,
     });
+    await writeBitfsE2eDiagnostic("seller-session-start.json", { sessionId, webrtcSessionId, matched: true });
   } catch (error) {
+    await writeBitfsE2eDiagnostic("seller-session-start.json", { matched: true, error: error instanceof Error ? error.message : String(error) });
     console.warn("[msfile] seller session start failed", error instanceof Error ? error.message : String(error));
   }
 }
@@ -6130,6 +6364,19 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
   offerSdp: string;
 }): Promise<void> {
   const request = msfileBitfsBuyerRequests.get(input.requestMessageId);
+  await writeBitfsE2eDiagnostic("buyer-webrtc-offer.json", {
+    requestMessageId: input.requestMessageId,
+    webrtcSessionId: input.webrtcSessionId,
+    peerPublicKeyHex: input.peerPublicKeyHex,
+    seedHashHex: input.seedHashHex,
+    hasRequest: request !== undefined,
+    requestMatches: request?.ownerPublicKeyHex === coordinatorState.activePublicKeyHex
+      && request?.ownerSessionEpoch === coordinatorState.sessionEpoch
+      && request?.seedHashHex === input.seedHashHex,
+    requestExpired: request !== undefined && request.expiresAtMs <= Date.now(),
+    hasRuntime: satRuntime !== undefined,
+    existingLink: msfileBitfsWebRtcBuyerLinks.has(input.webrtcSessionId)
+  });
   if (!request || request.expiresAtMs <= Date.now()
     || request.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex
     || request.ownerSessionEpoch !== coordinatorState.sessionEpoch
@@ -6158,11 +6405,11 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
   // 在创建 PeerConnection 和发布 answer 前登记，容纳 DataChannel 立即回传的 Kind 1。
   msfileBitfsWebRtcBuyerLinks.set(input.webrtcSessionId, link);
   try {
-    const result = await requestWindowP2pExecutorOperation({
+    await requestWindowP2pExecutorOperation({
       type: "lane",
       laneId: "msfile",
       operation: {
-        type: "bitfs-webrtc-buyer-answer",
+        type: "bitfs-webrtc-buyer-offer",
         sessionId: transportSessionId,
         requestMessageId: input.requestMessageId,
         webrtcSessionId: input.webrtcSessionId,
@@ -6170,26 +6417,14 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
         offerSdp: input.offerSdp,
       },
     }, runtime.signal);
-    if (!result || typeof result !== "object" || typeof (result as { sdp?: unknown }).sdp !== "string") {
-      throw new Error("BitFS WebRTC lane did not return an answer SDP");
-    }
     if (link.ownerSessionEpoch !== coordinatorState.sessionEpoch
       || coordinatorState.vaultStatus !== "unlocked"
       || coordinatorState.activePublicKeyHex !== request.ownerPublicKeyHex) {
       throw new Error("BitFS buyer owner changed while accepting an offer");
     }
-    await publishPrivateEnvelope({
-      runtime,
-      recipientPublicKeyHex: input.peerPublicKeyHex,
-      protocol: WEBRTC_SIGNAL_PROTOCOL,
-      body: newAnswer(
-        parseMessageID(input.requestMessageId),
-        parseSessionID(input.webrtcSessionId),
-        (result as { sdp: string }).sdp,
-      ),
-      signal: runtime.signal,
-    });
+    await writeBitfsE2eDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: true });
   } catch (error) {
+    await writeBitfsE2eDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: false, error: error instanceof Error ? error.message : String(error) });
     if (msfileBitfsWebRtcBuyerLinks.get(input.webrtcSessionId) === link) {
       msfileBitfsWebRtcBuyerLinks.delete(input.webrtcSessionId);
     }
@@ -6201,6 +6436,23 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
     }).catch(() => undefined);
     throw error;
   }
+}
+
+function bitfsWebRtcEnvelopeBody(requestMessageId: string, webrtcSessionId: string, envelope: WebRTCInterconnectEnvelope): ReturnType<typeof newOffer> | undefined {
+  const requestId = parseMessageID(requestMessageId);
+  const sessionId = parseSessionID(webrtcSessionId);
+  if (envelope.signal.type === "offer") return newOffer(requestId, sessionId, envelope.signal.sdp);
+  if (envelope.signal.type === "answer") return newAnswer(requestId, sessionId, envelope.signal.sdp);
+  if (envelope.signal.type === "end-of-candidates") return newEndOfCandidatesSignal(requestId, sessionId);
+  if (envelope.signal.type === "ice-candidate") {
+    if (envelope.signal.candidate == null) return newEndOfCandidatesSignal(requestId, sessionId);
+    return newIceSignal(requestId, sessionId, {
+      candidate: envelope.signal.candidate.candidate,
+      sdp_mid: envelope.signal.candidate.sdpMid ?? null,
+      sdp_m_line_index: envelope.signal.candidate.sdpMLineIndex ?? null
+    });
+  }
+  return undefined;
 }
 
 /** Window lane 的 BitFS 事件只允许路由到当前唯一卖方会话管理器。 */
@@ -6217,14 +6469,109 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
     webrtcSessionId?: unknown;
     /** 已通过接收侧校验的原始 Artifact。 */
     frame?: unknown;
-    /** 稳定关闭原因。 */
-    reason?: unknown;
-  };
+     /** 稳定关闭原因。 */
+       reason?: unknown;
+       errorCode?: unknown;
+       errorMessage?: unknown;
+       errorName?: unknown;
+       /** WebRTC runtime 错误方向。 */
+     direction?: unknown;
+     /** WebRTC runtime 错误消息。 */
+     message?: unknown;
+      /** WebRTC runtime 错误名称。 */
+      name?: unknown;
+      requestMessageId?: unknown;
+      publicKeyHex?: unknown;
+      envelope?: unknown;
+   };
   const manager = msfileSellerSessionManager;
   if (typeof event.sessionId !== "string" || event.sessionId.length === 0) return;
   // 旧 lease/旧 owner 的迟到事件不得进入新会话。
   if (event.ownerSessionEpoch !== lease.sessionEpoch) return;
+  void writeBitfsE2eDiagnostic("webrtc-stream-event.json", {
+    type: event.type,
+    sessionId: event.sessionId,
+    webrtcSessionId: event.webrtcSessionId,
+    reason: event.reason,
+    errorCode: event.errorCode,
+    errorMessage: event.errorMessage,
+    errorName: event.errorName,
+    frameBytes: event.frame instanceof Uint8Array ? event.frame.byteLength : null,
+    observedAtMs: Date.now(),
+    leaseSessionEpoch: lease.sessionEpoch
+  });
+  if (event.type === "bitfs-webrtc-signal-outbound") {
+    if (typeof event.webrtcSessionId !== "string" || typeof event.requestMessageId !== "string"
+      || typeof event.publicKeyHex !== "string" || event.envelope == null || typeof event.envelope !== "object") return;
+    const sellerLink = msfileBitfsWebRtcSellerLinks.get(event.webrtcSessionId);
+    const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
+    const link = sellerLink ?? buyerLink;
+    if (!link || link.requestMessageId !== event.requestMessageId
+      || link.peerPublicKeyHex !== event.publicKeyHex.toLowerCase()
+      || link.ownerSessionEpoch !== coordinatorState.sessionEpoch) return;
+    const envelope = event.envelope as WebRTCInterconnectEnvelope;
+    if (envelope.signal.type === "close") {
+      if (sellerLink) msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId);
+      else msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
+      void requestWindowP2pExecutorOperation({
+        type: "lane",
+        laneId: "msfile",
+        operation: { type: "bitfs-seller-close", sessionId: event.sessionId, reason: "transport_closed" },
+      }).catch(() => undefined);
+      return;
+    }
+    let body;
+    try {
+      body = bitfsWebRtcEnvelopeBody(event.requestMessageId, event.webrtcSessionId, envelope);
+    } catch {
+      return;
+    }
+    if (body == null) return;
+    const runtime = satRuntime;
+    if (!runtime || runtime.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) return;
+    void publishPrivateEnvelope({
+      runtime,
+      recipientPublicKeyHex: event.publicKeyHex,
+      protocol: WEBRTC_SIGNAL_PROTOCOL,
+      body,
+      signal: runtime.signal
+    }).catch(async error => {
+      if (sellerLink) msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId as string);
+      else msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId as string);
+      await requestWindowP2pExecutorOperation({
+        type: "lane",
+        laneId: "msfile",
+        operation: { type: "bitfs-seller-close", sessionId: event.sessionId as string, reason: "signal_publish_failed" },
+      }).catch(() => undefined);
+      await writeBitfsE2eDiagnostic("webrtc-signal-publish-error.json", {
+        webrtcSessionId: event.webrtcSessionId,
+        sessionId: event.sessionId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return;
+  }
+  if (event.type === "bitfs-webrtc-runtime-error") {
+    void writeBitfsE2eDiagnostic("webrtc-runtime-error.json", {
+      sessionId: event.sessionId,
+      webrtcSessionId: event.webrtcSessionId,
+      direction: event.direction,
+      message: event.message,
+      name: event.name,
+      leaseSessionEpoch: lease.sessionEpoch,
+    });
+    return;
+  }
   if (event.type === "bitfs-webrtc-session-closed") {
+    void writeBitfsE2eDiagnostic("webrtc-session-close.json", {
+      sessionId: event.sessionId,
+      webrtcSessionId: event.webrtcSessionId,
+      reason: event.reason,
+      errorCode: event.errorCode,
+      errorMessage: event.errorMessage,
+      errorName: event.errorName,
+      observedAtMs: Date.now(),
+    });
     if (typeof event.webrtcSessionId === "string") msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId);
     if (typeof event.webrtcSessionId === "string") {
       const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
@@ -6244,8 +6591,16 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
     const sellerLink = msfileBitfsWebRtcSellerLinks.get(event.webrtcSessionId);
     if (sellerLink && sellerLink.sessionId === event.sessionId
       && sellerLink.ownerSessionEpoch === coordinatorState.sessionEpoch) {
-      void manager?.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(() => undefined);
-      return;
+       void manager?.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
+         const message = error instanceof Error ? error.message : String(error);
+         await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", {
+           sessionId: event.sessionId,
+           webrtcSessionId: event.webrtcSessionId,
+           message,
+           stack: error instanceof Error ? error.stack : undefined
+         });
+       });
+       return;
     }
     const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
     if (!buyerLink || buyerLink.transportSessionId !== event.sessionId
@@ -6270,10 +6625,23 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
             },
           },
         });
-      })().catch(async (error) => {
-        console.warn("[msfile] BitFS buyer protocol frame failed", error instanceof Error ? error.message : String(error));
-        msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
-      });
+       })().catch(async (error) => {
+         const message = error instanceof Error ? error.message : String(error);
+         console.warn("[msfile] BitFS buyer protocol frame failed", message);
+         await writeBitfsE2eDiagnostic("buyer-protocol-frame-error.json", {
+           webrtcSessionId: event.webrtcSessionId,
+           sessionId: event.sessionId,
+           message,
+           stack: error instanceof Error ? error.stack : undefined
+         });
+         await writeBitfsE2eDiagnostic(`buyer-protocol-${Date.now()}-error.json`, {
+           webrtcSessionId: event.webrtcSessionId,
+           sessionId: event.sessionId,
+           message,
+           stack: error instanceof Error ? error.stack : undefined
+         });
+         msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
+       });
       return;
     }
     const activeRequest = msfileBitfsBuyerRequests.get(buyerLink.requestMessageId);
@@ -6323,8 +6691,13 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
           rawKind1: event.frame as Uint8Array,
         });
       }
-    })().then(() => undefined).catch(async (error) => {
-      if (msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId as string) === buyerLink) {
+     })().then(() => undefined).catch(async (error) => {
+       void writeBitfsE2eDiagnostic("buyer-webrtc-quote-error.json", {
+         requestMessageId: buyerLink.requestMessageId,
+         webrtcSessionId: event.webrtcSessionId,
+         message: error instanceof Error ? error.message : String(error)
+       });
+       if (msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId as string) === buyerLink) {
         msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId as string);
       }
       msfileBitfsBuyerOfferCounts.set(buyerLink.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(buyerLink.requestMessageId) ?? 1) - 1));
@@ -6349,10 +6722,17 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
         seedHashHex: buyerLink.seedHashHex,
         task: buyerLink.task,
       });
-    }).catch((error) => {
-      console.warn("[msfile] BitFS automatic purchase check failed", error instanceof Error ? error.message : String(error));
-      msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
-    });
+     }).catch(async (error) => {
+       const message = error instanceof Error ? error.message : String(error);
+       console.warn("[msfile] BitFS automatic purchase check failed", message);
+        await writeBitfsE2eDiagnostic("buyer-protocol-auto-error.json", {
+          webrtcSessionId: event.webrtcSessionId,
+          sessionId: event.sessionId,
+          message,
+          stack: error instanceof Error ? error.stack : undefined
+        });
+       msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
+     });
     return;
   }
   if (!manager) return;
@@ -6361,7 +6741,15 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
     return;
   }
   if (event.type !== "bitfs-seller-frame" || !(event.frame instanceof Uint8Array)) return;
-  void manager.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(() => undefined);
+  void manager.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", {
+      sessionId: event.sessionId,
+      webrtcSessionId: event.webrtcSessionId,
+      message,
+      stack: error instanceof Error ? error.stack : undefined
+    });
+  });
 }
 
 /* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
@@ -6376,8 +6764,34 @@ const SAT_WINDOW_LANE_ID = "sat-subscription";
  *   - Worker 与页面由同一次 Vite 构建处理，`import.meta.env.DEV` 语义一致。
  */
 function satDefaultNetwork(): SatDefaultNetwork {
-  const meta = import.meta as ImportMeta & { env?: { DEV?: boolean } };
-  return meta.env?.DEV === true ? "testnet" : "mainnet";
+  return import.meta.env.DEV === true ? "testnet" : "mainnet";
+}
+
+type BitfsNetwork = "main" | "test";
+
+function bitfsNetwork(): BitfsNetwork {
+  return import.meta.env.VITE_BITFS_NETWORK === "test" ? "test" : "main";
+}
+
+async function readCoordinatorBitfsBlockHeight(network: BitfsNetwork): Promise<number> {
+  const snapshot = coordinatorChainHeight;
+  if (!snapshot.available || snapshot.network !== network || !Number.isSafeInteger(snapshot.height) || snapshot.height < 0) {
+    throw new Error(`BitFS ${network} 链高度尚未由统一同步任务提供`);
+  }
+  return snapshot.height;
+}
+
+function bitfsAllowsLoopbackWebsocket(): boolean {
+  return import.meta.env.DEV === true || (bitfsNetwork() === "test" && import.meta.env.VITE_BITFS_ALLOW_LOOPBACK_WS === "true");
+}
+
+function bitfsFundingMaxFeeSatoshis(): number {
+  const raw = import.meta.env.VITE_BITFS_MAX_FEE_SATOSHIS;
+  if (raw === undefined || raw === "") return 10_000;
+  if (!/^[1-9][0-9]{0,6}$/u.test(raw)) throw new Error("BitFS E2E 手续费上限配置无效");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error("BitFS E2E 手续费上限配置无效");
+  return value;
 }
 interface SatWorkerRuntimeState {
   ownerPublicKeyHex: string;
@@ -8351,6 +8765,7 @@ const channelCallersByClient = new Map<string, Set<string>>();
 
 let sessionRevision = 0;
 let backgroundSnapshotRevision = 0;
+let chainHeightRevision = 0;
 let assetDataRevision = 0;
 let contactsPresenceRevision = 0;
 /** 统一主会话只保留一个自动锁定计时器；旧计时器不能跨解锁世代存活。 */
@@ -8482,10 +8897,10 @@ const WOC_IDLE_SYNC_DEBOUNCE_MS = 2_000;
 let smartSyncIdleTimer: ReturnType<typeof setTimeout> | undefined;
 let smartSyncDebounceMs = WOC_IDLE_SYNC_DEBOUNCE_MS;
 
-/** managed 任务的当前间隔；未配置时使用平台缺省（5 分钟）。 */
+/** managed 任务的当前间隔；未配置时使用该任务自己的缺省值。 */
 function managedIntervalFor(taskId: string): number {
   const configured = coordinatorState.scheduleSettings.taskIntervals[taskId];
-  return typeof configured === "number" ? configured : BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+  return typeof configured === "number" ? configured : backgroundSyncDefaultIntervalMs(taskId);
 }
 
 /** 归一化同步管理设置：只保留已登记任务与合法选项，非法值直接丢弃。 */
@@ -8571,6 +8986,46 @@ function triggerImmediateSync(reason: string): void {
       void executeTask(runtime.id, reason).catch(() => undefined);
     }
   }
+}
+
+/**
+ * 链高度同步任务体（2026-09-26）。
+ *
+ * 设计缘由：
+ *   - 只向节点读一次 `/chain/info`，不做任何本地推算或高度锁判断。
+ *   - 读数成功后写内存并广播 `chain.height`；`ChainHeightReader` 的订阅者
+ *     因此不需要各自轮询节点。
+ *   - 失败时抛错保留旧读数（available 仍为 true），让任务快照展示错误，
+ *     而不是把高度写回 0 让消费者误判「链回退了」。
+ */
+async function refreshCoordinatorChainHeight(signal: AbortSignal): Promise<void> {
+  const woc = p2pkhWocService;
+  if (!woc) throw new Error("Chain height sync requires the WOC provider");
+  const network: BsvNetwork = bitfsNetwork();
+  const height = testChainHeightProvider
+    ? await testChainHeightProvider(network)
+    : await woc.getChainHeight(network, { priority: "background", signal });
+  if (!Number.isSafeInteger(height) || height < 0) {
+    throw new Error(`Chain height provider returned an invalid height: ${String(height)}`);
+  }
+  // 读数相同也推进来源时间：它证明本轮同步确实完成过，UI 的「上次更新」
+  // 不能因为高度没变而停在旧值上。revision 只在高度或可用性变化时递增。
+  const available = true;
+  const changed = height !== coordinatorChainHeight.height
+    || available !== coordinatorChainHeight.available
+    || coordinatorChainHeight.network !== network;
+  coordinatorChainHeight = {
+    height,
+    network,
+    available,
+    updatedAtMs: Date.now(),
+    revision: changed ? coordinatorChainHeight.revision + 1 : coordinatorChainHeight.revision,
+  };
+  publishTopicEvent("chain.height", {
+    type: "chain.height.changed",
+    sessionEpoch: coordinatorState.sessionEpoch,
+    chainHeight: { ...coordinatorChainHeight },
+  });
 }
 
 /** 让定时器本身也服从产品意图，避免 disable 后留下隐藏的 Worker 入口。 */
@@ -9347,6 +9802,18 @@ async function registerCoordinatorTasks(): Promise<void> {
   p2pkhRegistry = createP2pkhProviderRegistry();
   registerWocP2pkhProviders({ registry: p2pkhRegistry, woc });
   p2pkhUtxoSnapshots = createP2pkhUtxoSnapshotStore({ woc: createP2pkhSnapshotWocSource(woc) });
+  // 链高度同步：按同步管理间隔（缺省 2 分钟）读一次节点高度并广播。
+  // 它不归属任何 key，因此没有 keyScope；锁定期不运行，锁定前的读数保留。
+  coordinatorState.taskRuntimes.set(CHAIN_HEIGHT_SYNC_TASK_ID, createCoordinatorTaskRuntime({
+    id: CHAIN_HEIGHT_SYNC_TASK_ID,
+    pluginId: "woc",
+    syncPolicy: "managed",
+    intervalMs: managedIntervalFor(CHAIN_HEIGHT_SYNC_TASK_ID),
+    run: async ({ signal, assertSessionFresh }) => {
+      await refreshCoordinatorChainHeight(signal);
+      assertSessionFresh();
+    }
+  }));
   const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerOwnerFileStore("p2pkh", ""), woc, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
   // P2PKH 拆成两个任务：
   //   - p2pkh.transactions-sync：链上历史元数据，按同步管理间隔运行；
@@ -9474,6 +9941,22 @@ async function buildTopicBaselines(
 
   const baselines: CoordinatorTopicBaseline[] = request.topics.flatMap((topic): CoordinatorTopicBaseline[] => {
     if (topic === "asset.data-changed") return [];
+    if (topic === "chain.height") {
+      // 链高度是公共链状态：新 Tab 拿到的 baseline 就是 Worker 当前读数；
+      // 从未成功读取过时携带 available=false，而不是伪造高度 0。
+      return [{
+        topic,
+        baselineRevision: chainHeightRevision,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        snapshot: {
+          topic: "chain.height" as const,
+          type: "chain.height.changed" as const,
+          chainHeightRevision,
+          sessionEpoch: coordinatorState.sessionEpoch,
+          chainHeight: { ...coordinatorChainHeight },
+        },
+      }];
+    }
     if (topic === "storage.state") {
       const baselineRevision = storageRevision;
       const summary = typeof storageController?.getProviderSummary === "function"
@@ -10518,6 +11001,13 @@ async function ensureMsfileBitfsBuyerSubscriptions(runtime: SatWorkerRuntimeStat
   await mux.set(callerId, [HASH_REQUEST_CHANNEL, ownerInbox], runtime.signal);
 }
 
+async function ensureMsfileBitfsSellerSubscriptions(runtime: SatWorkerRuntimeState): Promise<void> {
+  const mux = await ensureChannelSubscriptionMux(runtime);
+  const ownerInbox = inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex));
+  const callerId = channelCallerId({ kind: "plugin", pluginId: "msfile" }, "bitfs-seller-runtime");
+  await mux.set(callerId, [HASH_REQUEST_CHANNEL, ownerInbox], runtime.signal);
+}
+
 function channelCallerId(caller: ChannelCaller, clientId?: string): string {
   const epoch = coordinatorState.sessionEpoch;
   // Window Host 是独立运行实例；把 Coordinator 生成的端口身份加入
@@ -10557,12 +11047,15 @@ async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Pro
         // 订阅是可撤销的网络副作用，但仍必须绑定当前 Coordinator
         // authority。这样初始 owner inbox、请求中的 set/release 以及退避
         // 重试都不会在旧 Worker 接管后继续使用旧连接身份。
-        subscribe: (channel, signal) => withCoordinatorFinalIoLease(
+        subscribe: (channel, signal) => {
+          if (bitfsNetwork() === "test" && channel.startsWith("bsvprice.")) return Promise.resolve();
+          return withCoordinatorFinalIoLease(
           "write",
           signal,
           (leaseSignal) => runtime.handle.subscribePhysical(channel, leaseSignal),
           { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.subscribe" },
-        ),
+        );
+        },
         unsubscribe: (channel, signal) => withCoordinatorFinalIoLease(
           "write",
           signal,
@@ -11895,6 +12388,7 @@ function handleWindowP2pExecutorPortMessage(event: MessageEvent): void {
       // 新 Host 就绪后卖方 stream 通道恢复；若卖方仍启用则回到 ready/selling。
       if (msfileSellerProtocolPort?.ready && coordinatorState.vaultStatus === "unlocked" && msfileRuntime) {
         msfileRuntime.setSellerRuntimeStatus((msfileSellerSessionManager?.activeCount() ?? 0) > 0 ? "selling" : "ready");
+        void drainMsfilePendingSellerHashRequests();
       }
       void syncWindowP2pExecutorConfig().catch(() => {
         if (windowP2pExecutorLease?.leaseId === lease.leaseId) clearWindowP2pExecutorLeaseLocked();
@@ -11958,7 +12452,11 @@ function handleWindowP2pExecutorPortMessage(event: MessageEvent): void {
     }
     if (eventValue && typeof eventValue === "object"
       && ((eventValue as { type?: unknown }).type === "bitfs-seller-frame"
-        || (eventValue as { type?: unknown }).type === "bitfs-seller-session-closed")) {
+        || (eventValue as { type?: unknown }).type === "bitfs-seller-session-closed"
+        || (eventValue as { type?: unknown }).type === "bitfs-webrtc-frame"
+        || (eventValue as { type?: unknown }).type === "bitfs-webrtc-signal-outbound"
+        || (eventValue as { type?: unknown }).type === "bitfs-webrtc-runtime-error"
+        || (eventValue as { type?: unknown }).type === "bitfs-webrtc-session-closed")) {
       // BitFS 卖方会话事件：只允许路由到当前唯一会话管理器；无 bridge 额度。
       handleBitfsSellerStreamEvent(eventValue, lease);
       return;
@@ -12104,7 +12602,7 @@ async function requestWindowP2pExecutorOperation(operation: WindowP2pExecutorOpe
   const requestId = "window-p2p-exec-data-" + crypto.randomUUID();
   const request = { type: "request", leaseId: currentLease.leaseId, requestId, operation: dispatchOperation };
   const laneOperation = dispatchOperation.type === "lane" && dispatchOperation.operation && typeof dispatchOperation.operation === "object"
-    ? dispatchOperation.operation as { type?: unknown; kind?: unknown; wire?: unknown }
+    ? dispatchOperation.operation as { type?: unknown; kind?: unknown; wire?: unknown; frame?: unknown }
     : undefined;
   const reservedBytes = windowP2pExecutorBridgeBytesForOperation(dispatchOperation);
   await reserveWindowP2pExecutorBridgeBytes(reservedBytes, signal);
@@ -12136,7 +12634,9 @@ async function requestWindowP2pExecutorOperation(operation: WindowP2pExecutorOpe
     try {
       const transfer: Transferable[] = laneOperation?.wire instanceof Uint8Array
         ? [laneOperation.wire.buffer]
-        : [];
+        : laneOperation?.frame instanceof Uint8Array
+          ? [laneOperation.frame.buffer]
+          : [];
       currentLease.transportPort!.postMessage(request, transfer);
     } catch (error) {
       if (windowP2pExecutorBridgePending.delete(requestId)) {
@@ -12151,13 +12651,19 @@ async function requestWindowP2pExecutorOperation(operation: WindowP2pExecutorOpe
 /** 只复制实际 Wire 字节；禁止窄 Uint8Array 把更大的底层 buffer 带过 bridge。 */
 function cloneWindowP2pOperationWire(operation: WindowP2pExecutorOperation): WindowP2pExecutorOperation {
   if (operation.type !== "lane" || !operation.operation || typeof operation.operation !== "object") return operation;
-  const laneOperation = operation.operation as { wire?: unknown };
-  if (!(laneOperation.wire instanceof Uint8Array)) return operation;
+  const laneOperation = operation.operation as { wire?: unknown; frame?: unknown };
+  const binaryKey = laneOperation.wire instanceof Uint8Array
+    ? "wire"
+    : laneOperation.frame instanceof Uint8Array
+      ? "frame"
+      : undefined;
+  if (!binaryKey) return operation;
+  const binary = binaryKey === "wire" ? laneOperation.wire : laneOperation.frame;
   return {
     ...operation,
     operation: {
       ...(operation.operation as Record<string, unknown>),
-      wire: laneOperation.wire.slice(),
+      [binaryKey]: binary instanceof Uint8Array ? binary.slice() : undefined,
     },
   };
 }
@@ -12168,11 +12674,12 @@ function cloneWindowP2pOperationWire(operation: WindowP2pExecutorOperation): Win
  */
 function windowP2pExecutorBridgeBytesForOperation(operation: WindowP2pExecutorOperation): number {
   if (operation.type !== "lane" || !operation.operation || typeof operation.operation !== "object") return 0;
-  const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown };
+  const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown; frame?: unknown };
   if ((laneOperation.type === "requestSsp" || laneOperation.type === "requestSpi") && laneOperation.wire instanceof Uint8Array) {
     return laneOperation.wire.byteLength + MAX_WIRE_BYTES;
   }
   if (laneOperation.wire instanceof Uint8Array) return laneOperation.wire.byteLength;
+  if (laneOperation.frame instanceof Uint8Array) return laneOperation.frame.byteLength;
   if (laneOperation.type === "read") return laneOperation.kind === "block" ? MSFILE_MAX_BLOCK_BYTES : MSFILE_MAX_SEED_BYTES;
   return 0;
 }
@@ -14542,7 +15049,7 @@ async function handleBackgroundSettingsUpdate(
   coordinatorState.scheduleSettings = nextSettings;
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     if (runtime.syncPolicy !== "managed") continue;
-    runtime.intervalMs = nextSettings.taskIntervals[runtime.id] ?? BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+    runtime.intervalMs = nextSettings.taskIntervals[runtime.id] ?? backgroundSyncDefaultIntervalMs(runtime.id);
     scheduleRuntime(runtime);
   }
 
@@ -14650,6 +15157,7 @@ function resetP2pkhSettingsRuntime(): void {
 /** 读-改-写 setting.json；failure 时调用方不得更新内存镜像。 */
 async function writeP2pkhSettingFile(patch: {
   includeTestnet?: boolean;
+  feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>>;
   providerConfigs?: Record<string, Record<string, unknown>>;
 }): Promise<void> {
   if (testFailNextP2pkhSettingWrite) {
@@ -14660,7 +15168,10 @@ async function writeP2pkhSettingFile(patch: {
   const current = await repository.readSetting();
   await repository.writeSetting({
     includeTestnet: patch.includeTestnet ?? current.includeTestnet,
-    feeRateSatoshisPerKb: current.feeRateSatoshisPerKb,
+    feeRateSatoshisPerKb: {
+      ...current.feeRateSatoshisPerKb,
+      ...(patch.feeRateSatoshisPerKb ?? {})
+    },
     providerConfigs: patch.providerConfigs ?? current.providerConfigs,
   });
 }
@@ -14749,8 +15260,18 @@ async function handleP2pkhSettingsUpdate(
   if (typeof request.settings.includeTestnet !== "boolean") {
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid P2PKH network settings" } };
   }
+  if (request.settings.feeRateSatoshisPerKb !== undefined) {
+    for (const value of Object.values(request.settings.feeRateSatoshisPerKb)) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid P2PKH fee settings" } };
+      }
+    }
+  }
   // 先写 owner 的 setting.json,成功后才更新内存镜像。
-  await writeP2pkhSettingFile({ includeTestnet: request.settings.includeTestnet });
+  await writeP2pkhSettingFile({
+    includeTestnet: request.settings.includeTestnet,
+    ...(request.settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: request.settings.feeRateSatoshisPerKb })
+  });
   coordinatorMeta.p2pkhSettings = { includeTestnet: request.settings.includeTestnet };
   await cancelP2pkhSyncForProviderChange();
   publishTopicEvent("background.snapshot", {
@@ -15362,7 +15883,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot"
       ? {
@@ -16266,6 +16787,11 @@ export function __testResetState(): void {
   testPersistCoordinatorSnapshotFailure = false;
   testFailNextP2pkhSettingWrite = false;
   testFailColdStartInstall = false;
+  // 链高度是进程级公共状态：reset 必须清回「尚无可信读数」，
+  // 否则上个用例的高度会泄漏进下一个用例的 baseline 断言。
+  testChainHeightProvider = undefined;
+  coordinatorChainHeight = emptyChainHeightSnapshot();
+  chainHeightRevision = 0;
     testFailAfterBucketPasswordCatalogUpdate = false;
     testFailAfterBucketConfigCatalogUpdate = false;
     testFailNextVaultAuthMetadataRollback = false;
@@ -16420,6 +16946,26 @@ export function __testSetP2pkhUnspentAllProvider(provider: ((network: "main" | "
 /** 测试专用：缩短 Worker 内中心广播服务的重试预算。传 undefined 恢复生产默认值。 */
 export function __testSetSatBroadcastRetryOverrides(input: { maxAttempts?: number; deadlineMs?: number; initialBackoffMs?: number; maxBackoffMs?: number } | undefined): void {
   testSatBroadcastRetryOverrides = input;
+}
+
+/** 测试专用：替换链高度读取源。传 undefined 恢复真实 WoC `/chain/info`。 */
+export function __testSetChainHeightProvider(provider: ((network: BsvNetwork) => Promise<number>) | undefined): void {
+  testChainHeightProvider = provider;
+}
+
+/** 测试专用：读取 Worker 内当前链高度快照。 */
+export function __testGetChainHeight(): ChainHeightSnapshot {
+  return { ...coordinatorChainHeight };
+}
+
+/** 测试专用：确认 BitFS 只消费统一同步的正确网络高度。 */
+export function __testReadBitfsBlockHeight(network: BitfsNetwork): Promise<number> {
+  return readCoordinatorBitfsBlockHeight(network);
+}
+
+/** 测试专用：装配真实 Coordinator 任务（含链高度同步），避免出网。 */
+export async function __testRegisterRealCoordinatorTasks(): Promise<void> {
+  await registerCoordinatorTasks();
 }
 
 /** 测试专用：取得 Worker 内 SatSubscription 使用的 P2PKH service。 */

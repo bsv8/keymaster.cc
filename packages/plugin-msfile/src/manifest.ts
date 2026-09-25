@@ -70,6 +70,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.bitfsBuyer.priority.speed": "Recent speed first (falls back to price when unknown)",
       "msfile.settings.bitfsBuyer.concurrency": "Concurrent file purchases (1–16)",
       "msfile.settings.bitfsBuyer.sellerConcurrency": "Concurrent seller pools per file (1–16)",
+      "msfile.settings.bitfsBuyer.blocksPerBatch": "File blocks requested per payment batch (1–16, default 10)",
       "msfile.settings.bitfsBuyer.save": "Save BitFS buyer settings",
       "msfile.settings.priceLimits": "Price limits",
       "msfile.settings.priceLimits.hint":
@@ -429,6 +430,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.bitfsBuyer.priority.speed": "最近速度优先（无速度记录时按价格）",
       "msfile.settings.bitfsBuyer.concurrency": "同时购买文件任务数（1–16）",
       "msfile.settings.bitfsBuyer.sellerConcurrency": "单个文件同时传输的卖家数（1–16）",
+      "msfile.settings.bitfsBuyer.blocksPerBatch": "每次请求的文件块数（1–16，默认 10）",
       "msfile.settings.bitfsBuyer.save": "保存 BitFS 买方设置",
       "msfile.settings.priceLimits": "价格限制",
       "msfile.settings.priceLimits.hint": "单个内容对象的最高金额——按每个 Seed 或每个 Block 计，不是整个文件。",
@@ -808,7 +810,7 @@ const msfilePluginDefinition = {
     const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
     // MSFile 只注册自己的业务 lane；公共 Host 与 executor 由 Window P2P
     // 系统插件拥有，避免两个插件各自建立网络实例。
-    const protocolSpend = ctx.optionalCapability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
+    const protocolSpend = () => ctx.optionalCapability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
     const webRtcService = ctx.optionalCapability(WEBRTC_SERVICE_CAPABILITY);
     const offLane = laneRegistry.register(new MsFileP2pLane(
       protocolSpend,

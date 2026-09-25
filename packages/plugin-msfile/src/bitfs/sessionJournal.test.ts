@@ -25,6 +25,36 @@ describe("BitFS 会话 journal", () => {
     await expect(journal.list()).resolves.toEqual([expect.objectContaining({ sessionId: "seller-001", revision: 2 })]);
   });
 
+  it("持久化运行实例 fence 和关池绑定证据", async () => {
+    const journal = createBitfsSessionJournal(createInMemoryOwnerFileStore());
+    const created = await journal.create({
+      sessionId: "seller-runtime-fence", role: "seller", ownerPublicKeyHex: SELLER,
+      counterpartyPublicKeyHex: BUYER, seedHashHex: "dd".repeat(32), generation: 2,
+      runtimeInstanceId: "runtime-a", phase: "quoted",
+    }, 1_000);
+    const adopted = await journal.update(created.sessionId, created.revision, {
+      generation: 3, runtimeInstanceId: "runtime-b",
+    }, 2_000);
+    expect(adopted).toMatchObject({ generation: 3, runtimeInstanceId: "runtime-b" });
+    const withBinding = await journal.putEvidence(created.sessionId, adopted.revision, "kind12-close-binding", new Uint8Array([1]), 3_000);
+    expect(withBinding.evidence).toContain("kind12-close-binding");
+  });
+
+  it("接受已声明的固定证据名", async () => {
+    const journal = createBitfsSessionJournal(createInMemoryOwnerFileStore());
+    const created = await journal.create({
+      sessionId: "buyer-price-limit",
+      role: "buyer",
+      ownerPublicKeyHex: BUYER,
+      counterpartyPublicKeyHex: SELLER,
+      seedHashHex: "cc".repeat(32),
+      generation: 1,
+      phase: "quote-selected",
+    }, 1_000);
+    const saved = await journal.putEvidence("buyer-price-limit", created.revision, "file-price-limit", new Uint8Array([1]), 2_000);
+    expect(saved.evidence).toContain("file-price-limit");
+  });
+
   it("证据必须先可靠回读，同名不得覆盖不同 exact bytes", async () => {
     const journal = createBitfsSessionJournal(createInMemoryOwnerFileStore());
     await journal.create({

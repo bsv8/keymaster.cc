@@ -102,6 +102,9 @@ export interface BitfsSellerSessionManagerDeps {
   onActiveSessionsChanged(activeCount: number): void;
   /** 当前管理器是否仍属于当前 generation。 */
   isCurrent(): boolean;
+  /** 生产诊断；协议错误仍由管理器关闭会话。 */
+  onProtocolError?(input: { sessionId: string; message: string; stack?: string }): void | Promise<void>;
+  onSessionClosed?(input: { sessionId: string; reason: string; atMs: number }): void | Promise<void>;
 }
 
 interface SellerSessionEntry {
@@ -114,6 +117,7 @@ interface SellerSessionEntry {
 
 /** 卖方会话管理器；所有异步回调都复核 generation，迟到结果不得写入新会话。 */
 export class BitfsSellerSessionManager {
+  private readonly frameQueues = new Map<string, Promise<void>>();
   private readonly sessions = new Map<string, SellerSessionEntry>();
   private epoch = 0;
 
@@ -207,6 +211,17 @@ export class BitfsSellerSessionManager {
 
   /** 处理一条来自 Window lane 的入站帧。 */
   async handleFrame(event: { sessionId: string; frame: Uint8Array }): Promise<void> {
+    const prior = this.frameQueues.get(event.sessionId) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(() => this.handleFrameNow(event));
+    this.frameQueues.set(event.sessionId, next);
+    try {
+      await next;
+    } finally {
+      if (this.frameQueues.get(event.sessionId) === next) this.frameQueues.delete(event.sessionId);
+    }
+  }
+
+  private async handleFrameNow(event: { sessionId: string; frame: Uint8Array }): Promise<void> {
     const entry = this.sessions.get(event.sessionId);
     if (!entry || entry.closing || !this.deps.isCurrent()) return;
     if (!(event.frame instanceof Uint8Array) || event.frame.byteLength === 0) {
@@ -229,7 +244,13 @@ export class BitfsSellerSessionManager {
     let result: BitfsSellerProtocolResult;
     try {
       result = await this.deps.protocol.onFrame({ sessionId: event.sessionId, kind: artifact.kind, bytes: artifact.bytes() });
-    } catch {
+    } catch (error) {
+      console.warn("[msfile] seller protocol frame failed", error instanceof Error ? error.message : String(error));
+      await Promise.resolve(this.deps.onProtocolError?.({
+        sessionId: event.sessionId,
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
+      })).catch(() => undefined);
       await this.close(event.sessionId, "protocol_error");
       return;
     }
@@ -264,6 +285,7 @@ export class BitfsSellerSessionManager {
     this.sessions.delete(sessionId);
     this.clearIdleTimer(entry);
     this.notifyCount();
+    await Promise.resolve(this.deps.onSessionClosed?.({ sessionId, reason, atMs: this.deps.nowMs() })).catch(() => undefined);
     await this.deps.transport.close(sessionId, reason).catch(() => undefined);
   }
 

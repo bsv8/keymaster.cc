@@ -44,6 +44,21 @@ export const REAL_SATSUB_MESSAGE_SCENARIO = {
   resourceProfile: "satsubscription",
 } as const satisfies IntegrationScenarioMetadata;
 
+export const REAL_BITFS_PURCHASE_SCENARIO = {
+  id: "J-REAL-BITFS-PURCHASE",
+  level: "bitfs",
+  requirementIds: ["KM-MSFILE-001", "KM-SATSUB-001", "KM-ASSET-001", "KM-BROADCAST-001"],
+  startingState: "两个独立浏览器分别导入 key01.hex 与 key02.hex；Node 使用 seed-key.hex、真实 testnet 链和一个免费白名单 SatSubscription 服务。key02 上传固定 MP4，key01 获得按采购预算反推 120% 的 testnet 启动资金。",
+  successCriteria: [
+    "key02 通过真实桶页面完成 MP4 上传，页面 Seed Hash 与 Node 独立计算一致，并进入可以出售状态。",
+    "key01 通过免费 SatSubscription 发布真实 Hash 需求，收到单数字 Seed/Block 报价后完成 BitFS WebRTC 购买。",
+    "key01 页面显示购买完成，专款账本的 testnet 费用池已关池且无 pool-occupied/recovery-pending 输出。",
+    "购买后的文件在 key01 桶中可校验、下载，字节长度和 SHA-256 与源 MP4 一致。",
+    "key01 剩余 testnet 输出按低费率归集回 seed，SatSubscription 所有操作 charged_subunits 为 0。",
+  ],
+  resourceProfile: "testnet",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 真实 SS server 设置页 Journey：单免费用户验证 SPI/订阅/账单真实翻页。不测内置 bsv8 缺省供应商。 */
 export const REAL_SATSUB_SERVER_SETTINGS_SCENARIO = {
   id: "J-REAL-SATSUB-SERVER-SETTINGS",

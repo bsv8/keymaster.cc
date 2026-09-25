@@ -10,6 +10,7 @@ const SESSION_VERSION = 1;
 const SESSION_ID = /^[0-9a-z][0-9a-z._-]{0,127}$/u;
 const HASH_HEX = /^[0-9a-f]{64}$/u;
 const PUBLIC_KEY_HEX = /^(02|03)[0-9a-f]{64}$/u;
+const RUNTIME_INSTANCE_ID = /^[0-9A-Za-z._-]{1,128}$/u;
 
 /** 可持久化的买方阶段。 */
 export type BitfsBuyerPhase =
@@ -78,6 +79,8 @@ type BitfsFixedEvidenceName =
   | "kind12-close-sign-digest"
   /** Kind 12 关池交易已返回的卖方签名。 */
   | "kind12-close-signature"
+  /** Kind 12 使用的最新本地 Kind 5/7 序号和累计金额绑定。 */
+  | "kind12-close-binding"
   | "funding-transaction"
   /** 开池前固定金额、仲裁方与退款规则，恢复时禁止改绑。 */
   | "opening-configuration"
@@ -129,6 +132,8 @@ export interface BitfsSessionRecord {
   seedHashHex: string;
   /** 创建会话时的 Worker generation 记录；本次异步请求另由 Coordinator 当前 generation 拦截迟到结果。 */
   generation: number;
+  /** 卖方运行实例标识；旧实例不得在重启后继续写入已接管会话。 */
+  runtimeInstanceId?: string;
   /** 买方或卖方阶段。 */
   phase: BitfsBuyerPhase | BitfsSellerPhase;
   /** 已可靠写入的证据文件名。 */
@@ -155,7 +160,7 @@ export interface BitfsSessionJournal {
   /** 读取会话记录。 */
   get(sessionId: string): Promise<BitfsSessionRecord | undefined>;
   /** 按 revision + Provider ETag 原子推进阶段。 */
-  update(sessionId: string, expectedRevision: number, patch: Partial<Pick<BitfsSessionRecord, "phase" | "pendingTxid" | "pendingAuthorizationId" | "deadlineUnixSeconds" | "refundLockTime" | "failureCode">>, nowMs: number): Promise<BitfsSessionRecord>;
+  update(sessionId: string, expectedRevision: number, patch: Partial<Pick<BitfsSessionRecord, "phase" | "pendingTxid" | "pendingAuthorizationId" | "deadlineUnixSeconds" | "refundLockTime" | "failureCode" | "generation" | "runtimeInstanceId">>, nowMs: number): Promise<BitfsSessionRecord>;
   /** 先以 create-only 保存 exact bytes，回读一致后再把引用加入会话。 */
   putEvidence(sessionId: string, expectedRevision: number, name: BitfsEvidenceName, bytes: Uint8Array, nowMs: number): Promise<BitfsSessionRecord>;
   /** 读取 exact evidence 防御性副本。 */
@@ -254,6 +259,7 @@ function validateRecord(record: BitfsSessionRecord): BitfsSessionRecord {
   if (!PUBLIC_KEY_HEX.test(record.ownerPublicKeyHex) || !PUBLIC_KEY_HEX.test(record.counterpartyPublicKeyHex)) throw new Error("BitFS 会话公钥错误");
   if (!HASH_HEX.test(record.seedHashHex)) throw new Error("BitFS 会话 Seed Hash 错误");
   if (!Number.isSafeInteger(record.generation) || record.generation < 0) throw new Error("BitFS 会话 generation 错误");
+  if (record.runtimeInstanceId !== undefined && !RUNTIME_INSTANCE_ID.test(record.runtimeInstanceId)) throw new Error("BitFS 会话运行实例标识错误");
   if (!allPhases.has(record.phase)) throw new Error("BitFS 会话阶段错误");
   if (!Number.isSafeInteger(record.revision) || record.revision < 1) throw new Error("BitFS 会话修订号错误");
   if (!Number.isFinite(Date.parse(record.updatedAt)) || new Date(Date.parse(record.updatedAt)).toISOString() !== record.updatedAt) throw new Error("BitFS 会话时间错误");
@@ -280,8 +286,8 @@ const evidenceNames = new Set<BitfsFixedEvidenceName>([
   "kind5-content-request", "kind6-content-delivery", "kind7-payment-update", "kind8-arbitration-request",
   "kind9-arbitration-response", "kind10-retrieval-request", "kind11-retrieval-response", "kind12-close-request",
   "kind13-close-response", "funding-transaction",
-  "kind12-close-sign-digest", "kind12-close-signature",
-  "opening-configuration", "hash-request-message-id", "quote-summary", "latest-payment-transaction", "close-transaction",
+  "kind12-close-sign-digest", "kind12-close-signature", "kind12-close-binding",
+  "opening-configuration", "hash-request-message-id", "quote-summary", "file-price-limit", "latest-payment-transaction", "close-transaction",
   "refund-transaction", "arbitrated-payment-transaction",
   "purchase-manifest",
   "download-plan",

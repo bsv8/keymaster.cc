@@ -5,7 +5,7 @@ import type { BsvNetwork, WocServiceHandle } from "@keymaster/contracts";
 import type { BitfsChainPort, BitfsBroadcastOutcome, BitfsTransactionJournal } from "./broadcast.js";
 import { BitfsTransactionBroadcaster } from "./broadcast.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
-import { transactionID } from "go-bitfs";
+import { bitfsTxidHex } from "./txid.js";
 
 /** 创建只能在 Coordinator Worker 内装配的 BitFS 链端口。 */
 export function createBitfsWocChainPort(woc: WocServiceHandle, network: BsvNetwork): BitfsChainPort {
@@ -96,6 +96,12 @@ function confirmedPhase(record: BitfsSessionRecord): BitfsSessionRecord["phase"]
   return undefined;
 }
 
+export type BitfsPoolSpendChain =
+  | { kind: "unspent" }
+  | { kind: "unknown"; reason: "spender_raw_unavailable" }
+  | { kind: "unchanged"; txid: string }
+  | { kind: "spender"; txid: string; rawTransaction: Uint8Array; status: "confirmed" | "unconfirmed" };
+
 /**
  * 读取费用池开池输出当前被哪一版累计付款状态花费，并返回其 exact 原文。
  * MultisigPool 的付款更新都竞争花费同一个开池输出，不是前后交易串接；调用方
@@ -114,25 +120,55 @@ export async function readBitfsPoolSpendChain(input: {
   signal?: AbortSignal;
   /** 保持旧调用兼容的扫描上限；现在每次最多读取开池输出的一个当前 spender。 */
   maxPayments?: number;
-}): Promise<Array<{ txid: string; rawTransaction: Uint8Array; status: "confirmed" | "unconfirmed" }>> {
+}): Promise<BitfsPoolSpendChain> {
   const fundingTxid = assertTxid(input.fundingTxid);
   const afterTxid = input.afterTxid === undefined ? undefined : assertTxid(input.afterTxid);
   const maxPayments = input.maxPayments ?? 8_194;
   if (!Number.isSafeInteger(maxPayments) || maxPayments < 1 || maxPayments > 100_000) throw new TypeError("BitFS 支付链扫描上限不合法");
   if (input.signal?.aborted) throw new DOMException("BitFS 支付状态查询已取消", "AbortError");
-  const spent = await input.woc.getSpentOutput(input.network, fundingTxid, 0, { signal: input.signal, priority: "interactive" });
-  if (!spent || spent.txid === afterTxid) return [];
+  let spent: Awaited<ReturnType<WocServiceHandle["getSpentOutput"]>> = null;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      spent = await input.woc.getSpentOutput(input.network, fundingTxid, 0, { signal: input.signal, priority: "interactive" });
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= 20 || !/WOC 400/u.test(message)) throw new Error(`BitFS WOC spender query failed for ${fundingTxid}: ${message}`, { cause: error });
+      await waitForAbortableDelay(3_000, input.signal);
+    }
+  }
+  if (!spent) return { kind: "unspent" };
   const txid = assertTxid(spent.txid);
-  const rawHex = await input.woc.getRawTransaction?.(input.network, txid, { signal: input.signal, priority: "interactive" });
-  if (typeof rawHex !== "string") throw new Error("WoC 未提供 BitFS 付款交易原文");
+  if (afterTxid !== undefined && txid === afterTxid) return { kind: "unchanged", txid };
+  let rawHex: string | undefined;
+  try {
+    rawHex = await input.woc.getRawTransaction?.(input.network, txid, { signal: input.signal, priority: "interactive" });
+  } catch (error) {
+    if (spent.status === "unconfirmed" && error instanceof Error && /WOC 404/u.test(error.message)) {
+      return { kind: "unknown", reason: "spender_raw_unavailable" };
+    }
+    throw error;
+  }
+  if (typeof rawHex !== "string") {
+    if (spent.status === "unconfirmed") return { kind: "unknown", reason: "spender_raw_unavailable" };
+    throw new Error("WoC 未提供 BitFS 付款交易原文");
+  }
   const rawTransaction = fromHex(rawHex);
-  if (toHex(transactionID(rawTransaction)) !== txid) throw new Error("BitFS 付款交易原文与 txid 不匹配");
-  return [{ txid, rawTransaction, status: spent.status }];
+  if (bitfsTxidHex(rawTransaction) !== txid) throw new Error("BitFS 付款交易原文与 txid 不匹配");
+  return { kind: "spender", txid, rawTransaction, status: spent.status };
 }
 
 function assertTxid(value: string): string { if (!/^[0-9a-f]{64}$/u.test(value)) throw new TypeError("BitFS txid 不合法"); return value; }
+async function waitForAbortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new DOMException("BitFS 支付状态查询已取消", "AbortError");
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); resolve(); }, ms);
+    const onAbort = (): void => { clearTimeout(timer); cleanup(); reject(new DOMException("BitFS 支付状态查询已取消", "AbortError")); };
+    const cleanup = (): void => signal?.removeEventListener("abort", onAbort);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 function fromHex(value: string): Uint8Array {
   if (!/^(?:[0-9a-f]{2})+$/u.test(value)) throw new Error("WoC 交易原文不是小写 hex");
   return Uint8Array.from(value.match(/../gu) ?? [], (part) => Number.parseInt(part, 16));
 }
-function toHex(value: Uint8Array): string { return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join(""); }

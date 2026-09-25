@@ -8,7 +8,7 @@
 
 import type { OwnerFileStore } from "@keymaster/contracts";
 import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
-import { transactionID } from "go-bitfs";
+import { bitfsTxidHex } from "./txid.js";
 
 const TX_FORMAT = "keymaster.bitfs-tx";
 const TX_VERSION = 1;
@@ -20,7 +20,7 @@ export type BitfsTransactionState =
   | "prepared"
   /** 已广播但结果未知；必须按 txid 对账。 */
   | "result-unknown"
-  /** 已确认上链或进入内存池。 */
+  /** 节点已明确接受，或对账观察到上链/内存池；不代表区块确认数。 */
   | "confirmed"
   /** 确定未派发；允许重放同一 exact bytes。 */
   | "failed";
@@ -135,7 +135,7 @@ export interface BitfsChainPort {
   lookupTransaction(txid: string): Promise<"confirmed" | "mempool" | "absent" | "unknown">;
 }
 
-/** 一次广播/对账的稳定结果。 */
+/** 一次广播/对账的稳定结果；confirmed 表示节点明确接受，不代表已经进块。 */
 export type BitfsBroadcastOutcome =
   | { status: "confirmed"; txid: string; attempts: number }
   | { status: "result-unknown"; txid: string; attempts: number; retryable: boolean; reason?: string }
@@ -226,10 +226,10 @@ export class BitfsTransactionBroadcaster {
     }
     try {
       await this.deps.chain.broadcast({ txid, rawTxHex: toHex(rawTx) });
-      // Provider 2xx 只证明已接收请求，不是 mempool/链上事实。
-      // 业务状态必须等 reconcile 观察到 unconfirmed/confirmed 后才推进。
-      await this.mark(txid, "result-unknown", attempts, "provider-accepted-awaiting-observation");
-      return { status: "result-unknown", txid, attempts, retryable: false, reason: "provider-accepted-awaiting-observation" };
+      // 链端口已验证 WOC 成功回执与 canonical txid；业务可立即花费其输出。
+      // confirmed 是 outbox 的确定成功状态，不要求交易已经进块。
+      await this.mark(txid, "confirmed", attempts);
+      return { status: "confirmed", txid, attempts };
     } catch (error) {
       const reason = errorText(error);
       if (isDefinitelyNotDispatchedBroadcastError(error)) {
@@ -282,9 +282,7 @@ function encodeRecord(record: Omit<BitfsTransactionRecord, "lastError"> & { last
 }
 
 function canonicalTxid(rawTx: Uint8Array): string {
-  const digest = transactionID(rawTx);
-  if (digest.byteLength !== 32) throw new Error("BitFS 交易 txid 宽度错误");
-  return toHex(digest);
+  return bitfsTxidHex(rawTx);
 }
 
 function assertId(value: string): string {

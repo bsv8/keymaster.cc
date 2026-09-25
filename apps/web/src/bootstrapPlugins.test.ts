@@ -339,6 +339,7 @@ describe("web startup capability contract", () => {
         storageBucketGeneration: 1,
       }),
       subscribeTopic: () => () => undefined,
+      getChainHeightSnapshot: () => ({ height: 0, network: "main", available: false, revision: 0 }),
       storageControl: async () => ({ status: "ok", value: "ready" }),
       storageGrant: async () => ({ status: "ok", value: "grant" }),
       storageData: async () => ({ status: "ok", value: undefined }),
@@ -384,6 +385,10 @@ describe("web startup capability contract", () => {
     await host.registerAll(stage("owner-apps-ready"));
     expect(host.state("p2pkh").kind).toBe("enabled");
     expect(host.capabilities.has((await import("@keymaster/plugin-p2pkh")).P2PKH_CAPABILITY)).toBe(true);
+    // WOC 装配后必须已经提供链高度读取器（get / 订阅 / 退订），
+    // 否则「智能调度」页读不到当前链高度。
+    const { CHAIN_HEIGHT_READER_CAPABILITY } = await import("@keymaster/contracts");
+    expect(host.capabilities.has(CHAIN_HEIGHT_READER_CAPABILITY)).toBe(true);
 
     await host.registerAll(stage("connect-apps-ready"));
     expect(host.state("message").kind).toBe("enabled");

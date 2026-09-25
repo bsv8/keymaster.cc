@@ -3,7 +3,7 @@ import type { WocServiceHandle } from "@keymaster/contracts";
 import { createInMemoryOwnerFileStore } from "../storage/inMemoryOwnerFileStore.testutil.js";
 import { createBitfsSessionJournal } from "./sessionJournal.js";
 import { BitfsTransactionBroadcaster, createBitfsTransactionJournal } from "./broadcast.js";
-import { createBitfsWocChainPort, reconcileBitfsSessionTransactions, reconcileBitfsTransactions } from "./wocChain.js";
+import { createBitfsWocChainPort, readBitfsPoolSpendChain, reconcileBitfsSessionTransactions, reconcileBitfsTransactions } from "./wocChain.js";
 
 describe("BitFS WoC 链端口", () => {
   it("广播时核对 canonical txid，查询时区分已确认与 mempool", async () => {
@@ -49,6 +49,23 @@ describe("BitFS WoC 链端口", () => {
     await expect(sessions.get("sale-confirmed")).resolves.toMatchObject({ phase: "paid" });
     expect((await sessions.get("sale-confirmed"))?.pendingTxid).toBeUndefined();
     await expect(sessions.get("sale-unknown")).resolves.toMatchObject({ phase: "payment-unknown", pendingTxid: unknownTxid });
+  });
+
+  it("明确未花费时返回可退款状态", async () => {
+    const woc = {
+      getSpentOutput: vi.fn(async () => null),
+    } as unknown as WocServiceHandle;
+    await expect(readBitfsPoolSpendChain({ woc, network: "test", fundingTxid: "66".repeat(32) })).resolves.toEqual({ kind: "unspent" });
+  });
+
+  it("未确认付款的原始交易尚未可读时返回未知状态而不是无花费", async () => {
+    const fundingTxid = "66".repeat(32);
+    const spenderTxid = "77".repeat(32);
+    const woc = {
+      getSpentOutput: vi.fn(async () => ({ txid: spenderTxid, vin: 0, status: "unconfirmed" as const })),
+      getRawTransaction: vi.fn(async () => { throw new Error("WOC 404 /tx/hash/missing/hex"); }),
+    } as unknown as WocServiceHandle;
+    await expect(readBitfsPoolSpendChain({ woc, network: "test", fundingTxid })).resolves.toEqual({ kind: "unknown", reason: "spender_raw_unavailable" });
   });
 
   it("outbox 已 confirmed 但会话未回写时，启动扫描仍返回确认事实", async () => {

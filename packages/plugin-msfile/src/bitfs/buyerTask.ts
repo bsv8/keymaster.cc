@@ -12,9 +12,7 @@ import {
   parsePaymentState,
   prepareBuyerFundingDelivery,
   prepareBuyerOpening,
-  transactionID,
   buildBuyerMaturedRefund,
-  verifyAcceptedPayment,
   verifyBuyerCompletedCloseArtifact,
   verifyBuyerCompletedClose,
   WireError,
@@ -27,6 +25,13 @@ import type { BitfsFundingLedger, BitfsFundingTransactionView, PreparedBitfsFund
 import type { BitfsBroadcastOutcome, BitfsTransactionBroadcaster, BitfsTransactionJournal } from "./broadcast.js";
 import { createJournaledBitfsBuyerSigner } from "./signerJournal.js";
 import { bitfsWorkflowFacts, deriveBitfsPoolLockingScript } from "./sdk.js";
+import { bitfsTxidHex } from "./txid.js";
+import {
+  assertBitfsBuyerCloseBinding,
+  parseBitfsBuyerCloseBinding,
+  readBitfsBuyerLocalPaymentState,
+} from "./buyerPoolState.js";
+import type { BitfsPoolSpendChain } from "./wocChain.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 
 /** 关池交易查询确认缺失后，允许重放同一 exact bytes 前等待的间隔。 */
@@ -76,8 +81,8 @@ export interface BitfsBuyerTaskDeps {
   nowMs(): number;
   /** 查询退款锁所需的当前链高度；时间锁仍由显式 nowMs 判定。 */
   blockHeight?(): Promise<number>;
-  /** 查询开池输出当前被哪一笔累计池状态花费；查询失败必须抛错。 */
-  readPoolSpendChain?(fundingTxid: string): Promise<Array<{ txid: string; rawTransaction: Uint8Array; status: "confirmed" | "unconfirmed" }>>;
+  /** 查询开池输出当前被哪一笔累计池状态花费；未知状态必须显式返回 unknown。 */
+  readPoolSpendChain?(fundingTxid: string): Promise<BitfsPoolSpendChain>;
 }
 
 /** ChannelProtocol Hash 请求允许的最长有效期；单位毫秒。 */
@@ -683,31 +688,38 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
       const rawKind3 = await deps.sessions.getEvidence(session.sessionId, "kind3-opening-response");
       if (!rawKind3) throw new Error("BitFS 关池恢复缺少已验收的 Kind 3");
       const completedOpening = await completeBuyerOpening({ ...openingEvidence, rawKind3 }, rawKind3);
-      let latestPaymentRaw: Uint8Array | undefined;
-      let latestPaymentSequence = -1;
-      for (const name of session.evidence.filter((item) => item.startsWith("latest-payment-transaction-"))) {
-        const candidate = await deps.sessions.getEvidence(session.sessionId, name);
-        if (!candidate) throw new Error("BitFS 关池恢复缺少已登记的付款交易原文");
-        const state = await parsePaymentState(candidate, completedOpening.pool.opening);
-        await verifyAcceptedPayment(state, completedOpening.pool.opening);
-        if (state.paymentSequence > latestPaymentSequence) {
-          latestPaymentSequence = state.paymentSequence;
-          latestPaymentRaw = candidate;
-        } else if (state.paymentSequence === latestPaymentSequence && latestPaymentRaw && !equal(latestPaymentRaw, candidate)) {
-          throw new Error("BitFS 关池恢复发现序号相同但原文不同的付款交易");
-        }
+      const current = await readBitfsBuyerLocalPaymentState({
+        sessions: deps.sessions,
+        session,
+        completedOpening: completedOpening.pool,
+        includeLegacyPaymentEvidence: true,
+      });
+      const bindingRaw = await deps.sessions.getEvidence(session.sessionId, "kind12-close-binding");
+      const binding = bindingRaw === undefined ? undefined : parseBitfsBuyerCloseBinding(bindingRaw);
+      const expectedSequence = binding?.paymentSequence ?? current.paymentSequence;
+      const expectedAmount = binding === undefined ? current.sellerAmountSatoshis : BigInt(binding.sellerAmountSatoshis);
+      if (binding !== undefined
+        && (binding.paymentSequence !== current.paymentSequence
+          || binding.sellerAmountSatoshis !== current.sellerAmountSatoshis.toString(10)
+          || binding.authorizationIdHex !== (current.authorizationIdHex ?? null))) {
+        throw new Error("BitFS 关池恢复绑定与当前 Kind 5/7 状态不一致");
       }
-      const pool: BuyerPoolEvidence = latestPaymentRaw === undefined
-        ? completedOpening.pool
-        : { ...completedOpening.pool, latestPaymentRawTx: latestPaymentRaw };
-      const rawTransaction = await verifyBuyerCompletedCloseArtifact({ pool, responseRaw });
+      const requestRaw = await deps.sessions.getEvidence(session.sessionId, "kind12-close-request");
+      if (!requestRaw) throw new Error("BitFS 关池恢复缺少已保存的 Kind 12 请求");
+      const rawTransaction = await verifyBuyerCompletedCloseArtifact({ pool: current.pool, responseRaw, requestRaw });
+      await assertBitfsBuyerCloseBinding({
+        pool: current.pool,
+        closeTransactionRaw: rawTransaction,
+        paymentSequence: expectedSequence,
+        sellerAmountSatoshis: expectedAmount,
+      });
       session = (await deps.sessions.get(session.sessionId)) ?? session;
       const priorClose = await deps.sessions.getEvidence(session.sessionId, "close-transaction");
       if (priorClose && !equal(priorClose, rawTransaction)) throw new Error("BitFS 已保存的关池交易与 Kind 13 验证结果不一致");
       if (!session.evidence.includes("close-transaction")) {
         session = await deps.sessions.putEvidence(session.sessionId, session.revision, "close-transaction", rawTransaction, deps.nowMs());
       }
-      const txid = assertHash(bytesToHex(transactionID(rawTransaction)));
+      const txid = assertHash(bitfsTxidHex(rawTransaction));
       const pendingPhase = cancellationIntent ? "cancel-close-unknown" : "close-unknown";
       if (session.phase !== "completed" && session.phase !== "cancelled" && (session.phase !== pendingPhase || session.pendingTxid !== txid)) {
         session = await deps.sessions.update(session.sessionId, session.revision, { phase: pendingPhase, pendingTxid: txid }, deps.nowMs());
@@ -766,17 +778,12 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
         throw new Error("BitFS 关池交易与专款账本计划不一致");
       }
       const savedRaw = await deps.transactions.getTransaction(txid);
-      const transactionRecord = await deps.transactions.getTransactionRecord(txid);
       if (savedRaw && !equal(savedRaw, rawTransaction)) throw new Error("BitFS 关池 txid 已绑定不同交易原文");
       deps.assertCurrentContext();
-      let outcome = transactionRecord?.state === "result-unknown" || transactionRecord?.state === "confirmed"
-        ? await deps.broadcaster.reconcile(txid)
-        : await deps.broadcaster.submit(rawTransaction);
-      if (outcome.status === "result-unknown" && outcome.retryable && transactionRecord
-        && deps.nowMs() - Date.parse(transactionRecord.updatedAt) >= POOL_RECOVERY_RETRY_INTERVAL_MS) {
-        // 节点明确查不到旧广播时，只重放 outbox 已保存的双签交易原文；不改交易、不再次签名。
-        outcome = await deps.broadcaster.retry(txid);
-      }
+      // 正常关池由卖方广播。买方只保存相同的完整交易并按 txid 观察，
+      // 不对 WOC 提交池内付款或最终关池交易。
+      await deps.transactions.putTransaction(txid, rawTransaction, deps.nowMs());
+      const outcome = await deps.broadcaster.reconcile(txid);
       deps.assertCurrentContext();
       if (outcome.status === "confirmed") {
         await deps.ledger.observePoolRecovery({
@@ -819,7 +826,7 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
       const rawKind3 = await deps.sessions.getEvidence(session.sessionId, "kind3-opening-response");
       if (!rawKind3) return undefined;
       const completedOpening = await completeBuyerOpening({ ...openingEvidence, rawKind3: new Uint8Array() }, rawKind3);
-      const fundingTxid = assertHash(bytesToHex(transactionID(openingEvidence.fundingTransactionRaw)));
+      const fundingTxid = assertHash(bitfsTxidHex(openingEvidence.fundingTransactionRaw));
       const currentAccount = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
       let poolRecord = currentAccount.pools.find((item) => item.poolId === session.sessionId);
       if (!poolRecord || poolRecord.state === "funding-pending" || poolRecord.state === "funding-failed") return undefined;
@@ -828,16 +835,15 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
           ? currentAccount.transactions.find((item) => item.txid === poolRecord!.recoveryTxid)
           : undefined;
         if (recovery?.purpose !== "refund") return undefined;
-        if (session.phase !== "refunded") {
-          deps.assertCurrentContext();
-          session = await deps.sessions.update(session.sessionId, session.revision, { phase: "refunded", pendingTxid: undefined }, deps.nowMs());
-        }
+        deps.assertCurrentContext();
+        session = await deps.sessions.update(session.sessionId, session.revision, { phase: "refunded", pendingTxid: undefined }, deps.nowMs());
         const record = recovery ? await deps.transactions.getTransactionRecord(recovery.txid) : undefined;
         return { outcome: { status: "confirmed", txid: recovery!.txid, attempts: record?.attempts ?? 1 }, refunded: true };
       }
 
       let recoveryRaw = await deps.sessions.getEvidence(session.sessionId, "refund-transaction");
       let recoveryTxid: string | undefined;
+      let constructedRefund = false;
       if (poolRecord.state === "recovery-pending") {
         recoveryTxid = poolRecord.recoveryTxid;
         const plan = recoveryTxid ? currentAccount.transactions.find((item) => item.txid === recoveryTxid) : undefined;
@@ -846,32 +852,28 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
         if (!recoveryRaw) recoveryRaw = outboxRaw;
         if (!recoveryRaw || !outboxRaw || !equal(recoveryRaw, outboxRaw)) throw new Error("BitFS 到期退款账本与交易 outbox 原文不一致");
       } else {
-        // 检查链上的当前池状态。最终 Kind 12/13 结算优先，绝不与它争抢同一输入。
-        const spenders = await deps.readPoolSpendChain(fundingTxid);
-        if (spenders.length > 1) throw new Error("BitFS 开池输出返回多个当前花费，停止自动退款");
-        let poolEvidence = completedOpening.pool;
-        const currentSpender = spenders[0];
-        if (currentSpender) {
-          const currentTxid = assertHash(currentSpender.txid);
-          if (assertHash(bytesToHex(transactionID(currentSpender.rawTransaction))) !== currentTxid) {
+        const observation = await deps.readPoolSpendChain(fundingTxid);
+        if (observation.kind === "unknown" || observation.kind === "unchanged") return undefined;
+        if (observation.kind === "spender") {
+          const currentTxid = assertHash(observation.txid);
+          if (assertHash(bitfsTxidHex(observation.rawTransaction)) !== currentTxid) {
             throw new Error("BitFS 当前池状态原文与节点 txid 不一致");
           }
-          const currentState = await parsePaymentState(currentSpender.rawTransaction, completedOpening.pool.opening);
+          const currentState = await parsePaymentState(observation.rawTransaction, completedOpening.pool.opening);
           if (currentState.paymentSequence === 0xffff_ffff) {
-            await verifyBuyerCompletedClose({ pool: completedOpening.pool, closeRaw: currentSpender.rawTransaction });
-            return undefined;
+            await verifyBuyerCompletedClose({ pool: completedOpening.pool, closeRaw: observation.rawTransaction });
           }
-          poolEvidence = { ...completedOpening.pool, latestPaymentRawTx: currentSpender.rawTransaction };
+          return undefined;
         }
-
         try {
           const blockHeight = await deps.blockHeight();
-          recoveryRaw = await buildBuyerMaturedRefund(bitfsWorkflowFacts(deps.nowMs(), blockHeight), poolEvidence);
+          recoveryRaw = await buildBuyerMaturedRefund(bitfsWorkflowFacts(deps.nowMs(), blockHeight), completedOpening.pool);
         } catch (error) {
           if (error instanceof WireError && error.code === "not_matured") return undefined;
           throw error;
         }
-        recoveryTxid = assertHash(bytesToHex(transactionID(recoveryRaw)));
+        recoveryTxid = assertHash(bitfsTxidHex(recoveryRaw));
+        constructedRefund = true;
         const parsed = deps.parseTransaction(toHex(recoveryRaw), recoveryTxid);
         if (parsed.canonicalTxid !== recoveryTxid || parsed.inputs.length !== 1
           || parsed.inputs[0] !== `${fundingTxid}:0`) {
@@ -880,11 +882,11 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
         const ownerOutputs = parsed.outputs.filter((output) => output.scriptHex.toLowerCase() === deps.ownerP2pkhScriptHex.toLowerCase());
         const otherPositiveOutputs = parsed.outputs.filter((output) => output.scriptHex.toLowerCase() !== deps.ownerP2pkhScriptHex.toLowerCase() && BigInt(output.valueSatoshis) > 0n);
         if (ownerOutputs.length === 0 || otherPositiveOutputs.length > 0) throw new Error("BitFS 到期退款输出没有全部退回当前买方 Key");
+        const latestObservation = await deps.readPoolSpendChain(fundingTxid);
+        if (latestObservation.kind !== "unspent") return undefined;
         const prior = await deps.sessions.getEvidence(session.sessionId, "refund-transaction");
         if (prior && !equal(prior, recoveryRaw)) throw new Error("BitFS 到期退款会话已固定另一笔退款交易");
-        if (!prior) {
-          session = await saveExactEvidence(session, "refund-transaction", recoveryRaw);
-        }
+        if (!prior) session = await saveExactEvidence(session, "refund-transaction", recoveryRaw);
         if (session.phase !== "refund-ready" || session.pendingTxid !== recoveryTxid) {
           deps.assertCurrentContext();
           session = await deps.sessions.update(session.sessionId, session.revision, { phase: "refund-ready", pendingTxid: recoveryTxid }, deps.nowMs());
@@ -901,6 +903,10 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
         .map((output) => ({ txid: recoveryTxid!, vout: output.vout, valueSatoshis: String(output.valueSatoshis), scriptHex: output.scriptHex.toLowerCase() }));
       if (ownerOutputs.length === 0 || parsed.outputs.some((output) => output.scriptHex.toLowerCase() !== deps.ownerP2pkhScriptHex.toLowerCase() && BigInt(output.valueSatoshis) > 0n)) {
         throw new Error("BitFS 待恢复退款交易没有把可退金额全部付回当前 Key");
+      }
+      if (constructedRefund) {
+        const beforeSubmitObservation = await deps.readPoolSpendChain(fundingTxid);
+        if (beforeSubmitObservation.kind !== "unspent") return undefined;
       }
       await deps.transactions.putTransaction(recoveryTxid, recoveryRaw, deps.nowMs());
       let account = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
@@ -928,6 +934,10 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
         throw new Error("BitFS 到期退款与专款账本恢复计划不一致");
       }
       const outboxRecord = await deps.transactions.getTransactionRecord(recoveryTxid);
+      if (constructedRefund) {
+        const beforeBroadcastObservation = await deps.readPoolSpendChain(fundingTxid);
+        if (beforeBroadcastObservation.kind !== "unspent") return undefined;
+      }
       deps.assertCurrentContext();
       let outcome = outboxRecord?.state === "result-unknown" || outboxRecord?.state === "confirmed"
         ? await deps.broadcaster.reconcile(recoveryTxid)
@@ -974,7 +984,7 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
       if (!session.evidence.includes("kind13-close-response")) {
         session = await deps.sessions.putEvidence(session.sessionId, session.revision, "kind13-close-response", responseRaw, deps.nowMs());
       }
-      // 双方签名和完整响应已持久化；恢复时只重放这笔 exact 交易，绝不重新签名或改交易。
+      // 双方签名和完整响应已持久化；恢复时只按 txid 观察卖方广播的交易。
       return task.submitOrReconcilePoolRecovery(sessionId);
     },
   };

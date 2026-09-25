@@ -49,6 +49,8 @@
     "test:e2e:msfile:list": "playwright test --config=e2e/playwright.msfile.config.ts --project=msfile --list",
     "test:e2e:satsubscription": "pnpm check:integration-coverage && pnpm typecheck:e2e && node scripts/run-satsubscription-e2e.mjs",
     "test:e2e:satsubscription:list": "playwright test --config=e2e/playwright.satsubscription.config.ts --project=satsubscription --list",
+    "test:e2e:bitfs": "pnpm check:integration-coverage && pnpm typecheck:e2e && node scripts/run-bitfs-e2e.mjs",
+    "test:e2e:bitfs:list": "playwright test --config=e2e/playwright.bitfs.config.ts --project=bitfs --list",
     "typecheck:e2e": "tsc -p e2e/tsconfig.integration.json --noEmit",
     "check:integration-coverage": "node scripts/check-integration-coverage.mjs",
     "generate:integration-coverage": "node scripts/check-integration-coverage.mjs --write",

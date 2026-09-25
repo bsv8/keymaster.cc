@@ -240,6 +240,45 @@ describe("Coordinator runtime contract parsers", () => {
     expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, utxoSeqs: { main: "5" } })).toThrow();
   });
 
+  it("parses chain.height events and refuses forged or incomplete height claims", () => {
+    const base = {
+      topic: "chain.height",
+      type: "chain.height.changed",
+      sessionEpoch: "epoch-1",
+      chainHeightRevision: 4,
+      chainHeight: { height: 900_123, network: "main", available: true, updatedAtMs: 1_700_000_000_000, revision: 7 },
+    };
+    // 未知字段必须被剥掉：链高度快照只信任契约里列出的字段。
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, untrusted: { postMessage() {} } })).toEqual(base);
+    // 尚未成功读取过的 baseline 允许没有 updatedAtMs。
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      ...base,
+      chainHeight: { height: 0, network: "main", available: false, revision: 0 },
+    })).toEqual({ ...base, chainHeight: { height: 0, network: "main", available: false, revision: 0 } });
+    // 主题/类型判别符不可伪造。
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, type: "chain.height.changed.forged" })).toThrow();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, topic: "chain.height.unknown" })).toThrow();
+    // 高度必须是安全非负整数；负数、字符串、小数都不得进入系统。
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      ...base, chainHeight: { ...base.chainHeight, height: -1 },
+    })).toThrow();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      ...base, chainHeight: { ...base.chainHeight, height: "900123" },
+    })).toThrow();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      ...base, chainHeight: { ...base.chainHeight, height: 1.5 },
+    })).toThrow();
+    // 可用读数必须带来源时间，否则「上次更新」会退化成未知。
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      ...base, chainHeight: { height: 1, network: "main", available: true, revision: 1 },
+    })).toThrow();
+    // 未知网络名不得冒充 mainnet。
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
+      ...base, chainHeight: { ...base.chainHeight, network: "regtest" },
+    })).toThrow();
+    expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...base, chainHeight: undefined })).toThrow();
+  });
+
   it("parses channel baselines and typed Sat incoming events", () => {
     expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
       topic: "channel.events",

@@ -12,6 +12,7 @@
 | Connect | [Connect](./Connect.md) | 外部 App 会话、能力和身份边界 |
 | P2PKH | [P2PKH](./P2PKH.md) | 链上事实、本地交易和转账 |
 | MSFile | [MSFile](./MSFile.md) | 文件读取、价格、并发和媒体播放 |
+| BitFS 文件买卖 | [BitFS 文档索引](./bitfs/README.md) | 买方、卖方、资金、交易、签名和恢复 |
 | SatSubscription / Channel | [SatSubscription 与 Channel](./SatSubscription与Channel.md) | 供应商、频道、消息和 SPI 资金 |
 | 集成测试 | [集成测试](./集成测试/README.md) | 测试层级、运行方法和证据状态 |
 | Connect SDK 使用手册 | [文档站](../apps/connect-docs/site/index.md) | 外部开发者如何接入 |

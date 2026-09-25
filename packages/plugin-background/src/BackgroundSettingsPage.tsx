@@ -18,24 +18,34 @@ import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/
 import {
   BACKGROUND_MANAGED_SYNC_TASK_IDS,
   BACKGROUND_SERVICE_CAPABILITY,
-  BACKGROUND_SYNC_DEFAULT_INTERVAL_MS,
-  type BackgroundSyncSettings
+  CHAIN_HEIGHT_RESOURCE_ID,
+  backgroundSyncDefaultIntervalMs,
+  emptyChainHeightSnapshot,
+  type BackgroundSyncSettings,
+  type ChainHeightSnapshot
 } from "@keymaster/contracts";
 
-/** 同步管理选项：间隔毫秒 + 文案 key。0 表示关闭自动同步。 */
+/**
+ * 同步管理选项：间隔毫秒 + 文案 key。0 表示关闭自动同步。
+ * 顺序即展示顺序；2 分钟是区块链高度同步的缺省间隔。
+ */
 const INTERVAL_OPTIONS: Array<{ label: string; value: number }> = [
   { label: "background.settings.option.30s", value: 30_000 },
   { label: "background.settings.option.1min", value: 60_000 },
+  { label: "background.settings.option.2min", value: 120_000 },
   { label: "background.settings.option.5min", value: 300_000 },
   { label: "background.settings.option.off", value: 0 }
 ];
 
 const DEFAULT_SETTINGS: BackgroundSyncSettings = { taskIntervals: {} };
 
-/** 读取任务当前生效的间隔：未配置时使用平台缺省（5 分钟）。 */
+/**
+ * 读取任务当前生效的间隔：未配置时使用该任务自己的缺省
+ * （区块链高度 2 分钟，其余 5 分钟），而不是统一的平台缺省。
+ */
 function effectiveInterval(settings: BackgroundSyncSettings, taskId: string): number {
   const configured = settings.taskIntervals?.[taskId];
-  return typeof configured === "number" ? configured : BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+  return typeof configured === "number" ? configured : backgroundSyncDefaultIntervalMs(taskId);
 }
 
 export function BackgroundSettingsPage() {
@@ -169,7 +179,7 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
         </p>
         <ul className="background-settings__tasks">
           {BACKGROUND_MANAGED_SYNC_TASK_IDS.map((taskId) => {
-            const active = intervals[taskId] ?? BACKGROUND_SYNC_DEFAULT_INTERVAL_MS;
+            const active = intervals[taskId] ?? backgroundSyncDefaultIntervalMs(taskId);
             const saving = pendingTaskIds.has(taskId);
             const busy = pendingTaskIds.size > 0;
             const label = t(`background.settings.task.${taskId}`, { defaultValue: taskId });
@@ -196,7 +206,43 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
           })}
         </ul>
       </section>
+      <ChainHeightReadout />
       {saveError ? <p className="background-settings__error">{saveError}</p> : null}
     </div>
+  );
+}
+
+/**
+ * 当前区块链高度。
+ *
+ * 设计缘由：这里的值来自 `chain.height` 资源，底层是 Coordinator 单点广播的
+ * `chain.height` 主题；本页通过 Resource Store 订阅，等价于 ChainHeightReader
+ * 的订阅/退订，因此后台同步任务每成功一次，本区块就自动重渲染一次。
+ */
+function ChainHeightReadout() {
+  const { t } = useI18n();
+  const host = usePluginHost();
+  // 资源未注册时（例如 WOC 单元尚未装配）回落为空快照，不抛错。
+  const chainHeight = useOptionalResourceSelector<ChainHeightSnapshot, ChainHeightSnapshot>(
+    host.resourceStore,
+    CHAIN_HEIGHT_RESOURCE_ID,
+    [],
+    (snapshot) => snapshot.data ?? emptyChainHeightSnapshot(),
+    emptyChainHeightSnapshot()
+  );
+  return (
+    <section className="background-settings__section">
+      <h4 className="background-settings__section-title">
+        {t("background.settings.chainHeightTitle", { defaultValue: "当前区块链高度" })}
+      </h4>
+      <p className="background-settings__hint">
+        {chainHeight.available
+          ? t("background.settings.chainHeightValue", {
+              defaultValue: "主网高度 {{height}}",
+              height: chainHeight.height.toLocaleString()
+            })
+          : t("background.settings.chainHeightPending", { defaultValue: "尚未取得节点高度：等待后台同步任务完成第一次读取。" })}
+      </p>
+    </section>
   );
 }

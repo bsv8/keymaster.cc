@@ -4,7 +4,7 @@ import {
   hexToBytes,
 } from "@keymaster/plugin-vault/coordinator";
 import type { CoordinatorClientRequest, CoordinatorRpcRequest, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, DeviceRecordV1, ExistingRemoteStorageConnectResult, InitialSetupPlan, InitialSetupResult, JSONValue, KeymasterSessionV1, StorageBucketConnectionConfigV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1 } from "@keymaster/contracts";
-import { parseCoordinatorResponseFor } from "@keymaster/contracts";
+import { CHAIN_HEIGHT_SYNC_TASK_ID, backgroundSyncDefaultIntervalMs, parseCoordinatorResponseFor } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testAcquireExecutorLease,
@@ -139,6 +139,10 @@ import {
   __testSetP2pkhBroadcastProvider,
   __testSetP2pkhUnspentAllProvider,
   __testSetSatBroadcastRetryOverrides,
+  __testSetChainHeightProvider,
+  __testGetChainHeight,
+  __testReadBitfsBlockHeight,
+  __testRegisterRealCoordinatorTasks,
   __testEnsureSatP2pkhService,
   __testSetActive,
   __testSealLocalSecret,
@@ -2309,6 +2313,214 @@ describe("Session Coordinator worker", () => {
 
 
 
+});
+
+describe("区块链高度同步与 chain.height 广播", () => {
+  afterEach(() => {
+    __testSetChainHeightProvider(undefined);
+  });
+
+  it("BitFS 仅使用已同步且网络匹配的高度", async () => {
+    __testResetState();
+    await expect(__testReadBitfsBlockHeight("main")).rejects.toThrow("尚未由统一同步任务提供");
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetChainHeightProvider(async () => 900_123);
+    await __testRegisterRealCoordinatorTasks();
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await vi.waitFor(() => expect(__testGetChainHeight().available).toBe(true));
+    await expect(__testReadBitfsBlockHeight("main")).resolves.toBe(900_123);
+    await expect(__testReadBitfsBlockHeight("test")).rejects.toThrow("尚未由统一同步任务提供");
+  });
+
+  it("缺省 2 分钟，并在同步管理里以 120000 落盘", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetChainHeightProvider(async () => 900_100);
+    await __testRegisterRealCoordinatorTasks();
+
+    const snapshot = __testGetSnapshot().taskSnapshots.find((task) => task.id === CHAIN_HEIGHT_SYNC_TASK_ID);
+    expect(snapshot).toMatchObject({ id: CHAIN_HEIGHT_SYNC_TASK_ID });
+    // 缺省 2 分钟：未配置时 nextRunAt 必须在 2 分钟附近，而不是平台的 5 分钟缺省。
+    const nextRunAt = Date.parse(snapshot?.nextRunAt ?? "");
+    expect(nextRunAt).toBeGreaterThan(Date.now() + 100_000);
+    expect(nextRunAt).toBeLessThanOrEqual(Date.now() + 120_000);
+    expect(backgroundSyncDefaultIntervalMs(CHAIN_HEIGHT_SYNC_TASK_ID)).toBe(120_000);
+
+    const accepted = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 120_000 } });
+    expect(accepted.ack).toEqual({ status: "accepted" });
+    expect(__testGetSnapshot().scheduleSettings?.taskIntervals).toEqual({ [CHAIN_HEIGHT_SYNC_TASK_ID]: 120_000 });
+  });
+
+  it("同步成功后写内存高度并广播 chain.height", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetChainHeightProvider(async () => 900_123);
+    await __testRegisterRealCoordinatorTasks();
+
+    expect(__testGetChainHeight()).toMatchObject({ available: false, height: 0, revision: 0 });
+
+    const messages: unknown[] = [];
+    __testAttachPort("chain-height-port", (message) => messages.push(message));
+    await __testDispatchStorageMessage("chain-height-port", {
+      kind: "subscribe",
+      clientId: "chain-height-port",
+      requestId: "chain-height-sub",
+      topics: ["chain.height"]
+    });
+    // 新订阅者的 baseline 必须携带 Worker 当前读数，而不是伪造高度 0。
+    const baseline = messages.find((message) => (message as { requestId?: string }).requestId === "chain-height-sub") as {
+      operationResult?: { baselines?: Array<{ topic: string; snapshot: { chainHeight?: { available?: boolean } } }> };
+    } | undefined;
+    expect(baseline?.operationResult?.baselines?.[0]?.topic).toBe("chain.height");
+    expect(baseline?.operationResult?.baselines?.[0]?.snapshot.chainHeight?.available).toBe(false);
+
+    messages.length = 0;
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(__testGetChainHeight()).toMatchObject({ height: 900_123, network: "main", available: true, revision: 1 });
+    const events = messages.filter((message) => (message as { topic?: string }).topic === "chain.height") as Array<{
+      type: string;
+      chainHeightRevision: number;
+      chainHeight: { height: number; available: boolean };
+    }>;
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("chain.height.changed");
+    expect(events[0]?.chainHeightRevision).toBe(1);
+    expect(events[0]?.chainHeight).toMatchObject({ height: 900_123, available: true });
+    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === CHAIN_HEIGHT_SYNC_TASK_ID)?.state).toBe("idle");
+  });
+
+  it("读数未变时刷新来源时间但不推进 revision", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetChainHeightProvider(async () => 900_123);
+    await __testRegisterRealCoordinatorTasks();
+
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const first = __testGetChainHeight();
+    expect(first.revision).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = __testGetChainHeight();
+    // 高度没变 -> 消费者无需重渲染；来源时间仍然前进，证明本轮同步确实跑过。
+    expect(second.revision).toBe(1);
+    expect(second.height).toBe(900_123);
+    expect((second.updatedAtMs ?? 0) as number).toBeGreaterThan(first.updatedAtMs ?? 0);
+  });
+
+  it("读取失败保留旧高度并把错误留在任务快照上", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    let failing = false;
+    __testSetChainHeightProvider(async () => {
+      if (failing) throw new Error("provider down");
+      return 900_123;
+    });
+    await __testRegisterRealCoordinatorTasks();
+
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(__testGetChainHeight().height).toBe(900_123);
+
+    failing = true;
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // 失败绝不能把高度写回 0：消费者会误判「链回退了」。
+    expect(__testGetChainHeight()).toMatchObject({ height: 900_123, available: true, revision: 1 });
+    const snapshot = __testGetSnapshot().taskSnapshots.find((task) => task.id === CHAIN_HEIGHT_SYNC_TASK_ID);
+    expect(snapshot?.state).toBe("idle");
+    expect(snapshot?.error).toContain("provider down");
+  });
+
+  it("节点返回非法高度时拒绝写入", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testSetChainHeightProvider(async () => -1);
+    await __testRegisterRealCoordinatorTasks();
+
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(__testGetChainHeight()).toMatchObject({ available: false, height: 0 });
+    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === CHAIN_HEIGHT_SYNC_TASK_ID)?.error)
+      .toContain("invalid height");
+  });
+
+  it("关闭自动同步后定时器停摆，但手动立即同步仍可读取高度", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    let reads = 0;
+    __testSetChainHeightProvider(async () => { reads += 1; return 900_200; });
+    await __testRegisterRealCoordinatorTasks();
+    // 注册完成时 INIT 已按缺省间隔触发过一次同步，但那是 fire-and-forget：
+    // 必须等它落地再清零，否则这轮补跑的读取会算进关闭之后的计数里。
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    reads = 0;
+
+    const disabled = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 0 } });
+    expect(disabled.ack).toEqual({ status: "accepted" });
+    const snapshot = __testGetSnapshot().taskSnapshots.find((task) => task.id === CHAIN_HEIGHT_SYNC_TASK_ID);
+    expect(snapshot?.nextRunAt).toBeUndefined();
+
+    // 关闭后解锁 / 初始化也不再自动拉起任务。
+    await __testTriggerImmediateSync("unlock");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reads).toBe(0);
+
+    // 托盘的「立即同步一次」绕过关闭开关。
+    const runNow = await __testBackgroundRunNow(CHAIN_HEIGHT_SYNC_TASK_ID);
+    expect(runNow.ack).toMatchObject({ status: "accepted" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reads).toBe(1);
+    expect(__testGetChainHeight().height).toBe(900_200);
+  });
+
+  it("拒绝把链高度间隔设成非法值", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await __testRegisterRealCoordinatorTasks();
+    const response = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 45_000 } });
+    expect(response.ack).toMatchObject({ status: "validation-error" });
+  });
+
+  it("禁用 WOC 产品后链高度同步在入口处阻塞", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    let reads = 0;
+    __testSetChainHeightProvider(async () => { reads += 1; return 900_300; });
+    await __testRegisterRealCoordinatorTasks();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    reads = 0;
+
+    const messages: unknown[] = [];
+    __testAttachPort("chain-height-intent-port", (message) => messages.push(message));
+    const snapshot = __testGetSnapshot();
+    await __testDispatchStorageMessage("chain-height-intent-port", {
+      kind: "plugin.intent.submit",
+      clientId: "chain-height-intent-port",
+      requestId: "chain-height-intent-disable-woc",
+      command: {
+        commandId: "chain-height-intent:disable-woc",
+        authorityInstanceId: snapshot.authorityInstanceId,
+        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+        pluginId: "woc",
+        desiredEnabled: false,
+      },
+    });
+    expect(messages.find((message) => (message as { requestId?: string }).requestId === "chain-height-intent-disable-woc"))
+      .toMatchObject({ operationResult: { status: "accepted" } });
+    expect(__testGetSnapshot().pluginIntent?.desiredEnabled.woc).toBe(false);
+    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === CHAIN_HEIGHT_SYNC_TASK_ID))
+      .toMatchObject({ state: "blocked", blockedReason: { fallback: "Plugin disabled: woc" } });
+
+    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reads).toBe(0);
+    expect(__testGetChainHeight().available).toBe(false);
+  });
 });
 
 describe("S3 桶本机 ID", () => {

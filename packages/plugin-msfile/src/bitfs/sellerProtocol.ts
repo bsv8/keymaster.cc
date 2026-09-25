@@ -4,6 +4,7 @@
 import {
   completeSellerCloseArtifact,
   completeSellerPayment,
+  buildRefundSubmission,
   inspectSellerDeliveryRequest,
   prepareSellerDelivery,
   prepareSellerPresign,
@@ -16,8 +17,8 @@ import {
   type SellerPoolEvidence,
   type Signer,
   type SigningRequest,
-  transactionID,
 } from "go-bitfs";
+import { bitfsTxidHex } from "./txid.js";
 import { BitfsTransactionBroadcaster } from "./broadcast.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 import type { BitfsSellerProtocolPort, BitfsSellerProtocolResult } from "./sellerSession.js";
@@ -63,16 +64,29 @@ export interface BitfsSellerProtocolDeps {
   ownerPublicKeyHex: string;
   /** 当前 Worker generation。 */
   generation(): number;
+  /** 当前卖方运行实例；用于重启后显式接管旧 journal。 */
+  runtimeInstanceId?(): string;
   /** 可信时钟。 */
   nowMs(): number;
   /** 明确区块高度；不可用本地估算。 */
   blockHeight(): Promise<number>;
+  onPaymentTransaction?(input: { txid: string; rawTxHex: string }): void | Promise<void>;
 }
 
 /** 生产卖方端口；每条输出字节均在返回前已持久化。 */
 export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
   readonly ready: boolean;
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly poolStateCache = new Map<string, {
+    pool: SellerPoolEvidence;
+    paymentIds: Set<string>;
+    paymentSequence: number;
+    sellerAmountSatoshis: bigint;
+  }>();
+  private readonly kind7LookupCache = new Map<string, {
+    seenNames: Set<string>;
+    authorizationByBytesHex: Map<string, string>;
+  }>();
 
   constructor(private readonly deps: BitfsSellerProtocolDeps) {
     this.ready = deps.content.ready;
@@ -80,23 +94,47 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
 
   async openSession(input: { sessionId: string; quoteBytes: Uint8Array; seedHashHex: string; counterpartyPublicKeyHex: string }): Promise<void> {
     if (!this.ready) throw new Error("BitFS 卖方内容解析端口未就绪");
+    if (!(input.quoteBytes instanceof Uint8Array) || input.quoteBytes.byteLength === 0) throw new Error("BitFS 卖方报价证据不能为空");
+    const counterpartyPublicKeyHex = normalizePublicKey(input.counterpartyPublicKeyHex);
+    const seedHashHex = normalizeHash(input.seedHashHex);
     await this.serial(input.sessionId, async () => {
       let record = await this.deps.sessions.get(input.sessionId);
+      const generation = this.deps.generation();
+      const runtimeInstanceId = this.deps.runtimeInstanceId?.();
       if (!record) {
         record = await this.deps.sessions.create({
           sessionId: input.sessionId,
           role: "seller",
           ownerPublicKeyHex: this.deps.ownerPublicKeyHex,
-          counterpartyPublicKeyHex: input.counterpartyPublicKeyHex,
-          seedHashHex: input.seedHashHex,
-          generation: this.deps.generation(),
+          counterpartyPublicKeyHex,
+          seedHashHex,
+          generation,
+          ...(runtimeInstanceId === undefined ? {} : { runtimeInstanceId }),
           phase: "quoted",
         }, this.deps.nowMs());
+      } else {
+        if (record.role !== "seller"
+          || record.ownerPublicKeyHex !== this.deps.ownerPublicKeyHex
+          || record.counterpartyPublicKeyHex !== counterpartyPublicKeyHex
+          || record.seedHashHex !== seedHashHex) {
+          throw new Error("BitFS 卖方恢复会话身份已变化");
+        }
+        const savedQuote = await this.deps.sessions.getEvidence(input.sessionId, "kind1-quote");
+        if (savedQuote && !equalBytes(savedQuote, input.quoteBytes)) throw new Error("BitFS 卖方恢复会话已绑定另一条报价");
+        if (record.generation > generation) throw new Error("BitFS 卖方恢复会话 generation 新于当前运行态");
+        if (record.generation !== generation || (runtimeInstanceId !== undefined && record.runtimeInstanceId !== runtimeInstanceId)) {
+          record = await this.deps.sessions.update(input.sessionId, record.revision, {
+            generation,
+            ...(runtimeInstanceId === undefined ? {} : { runtimeInstanceId }),
+          }, this.deps.nowMs());
+        }
       }
       this.assertCurrent(record);
       if (!record.evidence.includes("kind1-quote")) {
-        await this.deps.sessions.putEvidence(input.sessionId, record.revision, "kind1-quote", input.quoteBytes, this.deps.nowMs());
+        record = await this.deps.sessions.putEvidence(input.sessionId, record.revision, "kind1-quote", input.quoteBytes, this.deps.nowMs());
       }
+      const savedQuote = await this.deps.sessions.getEvidence(input.sessionId, "kind1-quote");
+      if (!savedQuote || !equalBytes(savedQuote, input.quoteBytes)) throw new Error("BitFS 卖方报价证据回读失败");
     });
   }
 
@@ -163,16 +201,29 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
         ...(content.seed === undefined ? {} : { seed: content.seed }),
       }, this.deps.signer);
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, deliveryName, prepared.outbound.bytes(), this.deps.nowMs());
-      await this.deps.sessions.update(record.sessionId, record.revision, { phase: "delivery-prepared" }, this.deps.nowMs());
+      await this.deps.sessions.update(record.sessionId, record.revision, {
+        phase: "delivery-prepared",
+        pendingAuthorizationId: content.authorizationIdHex,
+      }, this.deps.nowMs());
       return { type: "send", frames: [prepared.outbound.bytes()] };
     }
     if (input.kind === 7) {
       if (record.phase !== "delivery-prepared" && record.phase !== "payment-signing"
         && record.phase !== "payment-unknown" && record.phase !== "paid") return { type: "close", reason: "state_conflict" };
-      // Kind 7 的授权 ID 必须由前一次 Kind 5 解析结果确定；会话串行化保证只有一个待收款批次。
-      const requestName = [...record.evidence].reverse().find((name) => name.startsWith("kind5-content-request-"));
-      if (!requestName) return { type: "close", reason: "state_conflict" };
-      const authorizationIdHex = requestName.slice("kind5-content-request-".length);
+      const duplicateAuthorizationId = await this.findSavedKind7Authorization(record, input.bytes);
+      if (duplicateAuthorizationId && record.evidence.includes(`latest-payment-transaction-${duplicateAuthorizationId}`)) {
+        return { type: "none" };
+      }
+      const unpaidAuthorizationIds = record.evidence
+        .filter((name) => name.startsWith("kind6-content-delivery-"))
+        .map((name) => name.slice("kind6-content-delivery-".length))
+        .filter((id) => !record.evidence.includes(`latest-payment-transaction-${id}`));
+      const authorizationIdHex = record.pendingAuthorizationId
+        ?? (unpaidAuthorizationIds.length === 1 ? unpaidAuthorizationIds[0] : undefined);
+      if (!authorizationIdHex || !unpaidAuthorizationIds.includes(authorizationIdHex)) {
+        return { type: "close", reason: "state_conflict" };
+      }
+      const requestName = `kind5-content-request-${authorizationIdHex}` as const;
       const deliveryName = `kind6-content-delivery-${authorizationIdHex}` as const;
       const paymentName = `kind7-payment-update-${authorizationIdHex}` as const;
       const transactionName = `latest-payment-transaction-${authorizationIdHex}` as const;
@@ -185,14 +236,11 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
         : undefined;
       if (priorPayment && !equalBytes(priorPayment, input.bytes)) return { type: "close", reason: "state_conflict" };
       if (record.evidence.includes(transactionName)) {
-        const rawTransaction = await this.requiredEvidence(record.sessionId, transactionName);
-        const txid = toHex(transactionID(rawTransaction));
-        if (record.phase !== "payment-unknown" || record.pendingTxid !== txid) {
-          record = await this.deps.sessions.update(record.sessionId, record.revision, { phase: "payment-unknown", pendingTxid: txid }, this.deps.nowMs());
-        }
-        const outcome = await this.deps.broadcaster.resume(rawTransaction);
-        if (outcome.status === "confirmed") {
-          await this.deps.sessions.update(record.sessionId, record.revision, { phase: "paid", pendingTxid: undefined }, this.deps.nowMs());
+        // 池内累计付款是离线状态；重复 Kind 7 只复用已保存的双签交易。
+        if (record.phase !== "paid") {
+          await this.deps.sessions.update(record.sessionId, record.revision, {
+            phase: "paid", pendingTxid: undefined, pendingAuthorizationId: undefined,
+          }, this.deps.nowMs());
         }
         return { type: "none" };
       }
@@ -211,17 +259,13 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       const completed = await completeSellerPayment(await this.facts(), {
         pool: await this.poolEvidence(record), delivery, requestRaw, updateRaw: input.bytes,
       }, prepared.signer);
+      record = await this.requiredRecord(record.sessionId);
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, transactionName, completed.rawTransaction, this.deps.nowMs());
-      const txid = toHex(transactionID(completed.rawTransaction));
-      record = await this.deps.sessions.update(record.sessionId, record.revision, {
-        phase: "payment-unknown",
-        pendingTxid: txid,
+      const txid = bitfsTxidHex(completed.rawTransaction);
+      await this.deps.onPaymentTransaction?.({ txid, rawTxHex: toHex(completed.rawTransaction) });
+      await this.deps.sessions.update(record.sessionId, record.revision, {
+        phase: "paid", pendingTxid: undefined, pendingAuthorizationId: undefined,
       }, this.deps.nowMs());
-      // 会话必须先持有 exact 交易和 pendingTxid；即使广播期间崩溃，启动恢复也能关联并对账。
-      const outcome = await this.deps.broadcaster.submit(completed.rawTransaction);
-      if (outcome.status === "confirmed") {
-        await this.deps.sessions.update(record.sessionId, record.revision, { phase: "paid", pendingTxid: undefined }, this.deps.nowMs());
-      }
       return { type: "none" };
     }
     if (input.kind === 12) {
@@ -243,13 +287,13 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
         // Kind 13 可能已落盘，但进程在保存完整交易或 pendingTxid 前崩溃。
         // 用同一份 Kind 13 重建交易并走 outbox.resume；该路径只会广播原始字节或按 txid 对账。
         const pool = await this.poolEvidence(record);
-        const closeTransaction = await verifyBuyerCompletedCloseArtifact({ pool, responseRaw: existingResponse });
+        const closeTransaction = await this.verifyCloseForPool(pool, existingResponse, existingRequest!);
         const savedClose = await this.deps.sessions.getEvidence(record.sessionId, "close-transaction");
         if (savedClose && !equalBytes(savedClose, closeTransaction)) throw new Error("同一 Kind 13 对应不同的 BitFS 关池交易");
         if (!record.evidence.includes("close-transaction")) {
           record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "close-transaction", closeTransaction, this.deps.nowMs());
         }
-        const txid = toHex(transactionID(closeTransaction));
+        const txid = bitfsTxidHex(closeTransaction);
         if (record.phase !== "closed" && (record.phase !== "close-unknown" || record.pendingTxid !== txid)) {
           record = await this.deps.sessions.update(record.sessionId, record.revision, { phase: "close-unknown", pendingTxid: txid }, this.deps.nowMs());
         }
@@ -284,13 +328,13 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       const response = await completeSellerCloseArtifact(await this.facts(), { pool, requestRaw: input.bytes }, prepared.signer);
       record = await this.requiredRecord(record.sessionId);
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, responseName, response.bytes(), this.deps.nowMs());
-      const closeTransaction = await verifyBuyerCompletedCloseArtifact({ pool, responseRaw: response.bytes() });
+      const closeTransaction = await this.verifyCloseForPool(pool, response.bytes(), input.bytes);
       const savedClose = await this.deps.sessions.getEvidence(record.sessionId, "close-transaction");
       if (savedClose && !equalBytes(savedClose, closeTransaction)) throw new Error("同一 Kind 13 对应不同的 BitFS 关池交易");
       if (!record.evidence.includes("close-transaction")) {
         record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "close-transaction", closeTransaction, this.deps.nowMs());
       }
-      const txid = toHex(transactionID(closeTransaction));
+      const txid = bitfsTxidHex(closeTransaction);
       record = await this.deps.sessions.update(record.sessionId, record.revision, { phase: "close-unknown", pendingTxid: txid }, this.deps.nowMs());
       let outcome = await this.deps.broadcaster.submit(closeTransaction);
       if (outcome.status === "result-unknown") outcome = await this.deps.broadcaster.reconcile(txid);
@@ -303,22 +347,95 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     return { type: "close", reason: "unexpected_kind" };
   }
 
+  private async verifyCloseForPool(pool: SellerPoolEvidence, responseRaw: Uint8Array, requestRaw: Uint8Array): Promise<Uint8Array> {
+    const closeTransaction = await verifyBuyerCompletedCloseArtifact({ pool, responseRaw, requestRaw });
+    const previousRaw = pool.latestPaymentRawTx ?? await buildRefundSubmission(pool.opening);
+    const previous = await parsePaymentState(previousRaw, pool.opening);
+    const close = await parsePaymentState(closeTransaction, pool.opening);
+    if (close.sellerAmountSatoshis < previous.sellerAmountSatoshis) {
+      throw new Error("BitFS 卖方关池金额低于最新已签付款");
+    }
+    return closeTransaction;
+  }
+
   private async poolEvidence(record: BitfsSessionRecord): Promise<SellerPoolEvidence> {
+    const paymentIds = record.evidence
+      .filter((name) => name.startsWith("latest-payment-transaction-"))
+      .map((name) => name.slice("latest-payment-transaction-".length));
+    const paymentIdSet = new Set(paymentIds);
+    const cached = this.poolStateCache.get(record.sessionId);
+    if (cached && cached.paymentIds.size <= paymentIds.length
+      && [...cached.paymentIds].every((id) => paymentIdSet.has(id))) {
+      const newIds = paymentIds.filter((id) => !cached.paymentIds.has(id));
+      if (newIds.length === 0) return cached.pool;
+      if (newIds.length === 1) {
+        const authorizationIdHex = newIds[0]!;
+        if (!/^[0-9a-f]{64}$/u.test(authorizationIdHex)) throw new Error("BitFS 卖方付款授权编号无效");
+        const rawTransaction = await this.requiredEvidence(record.sessionId, `latest-payment-transaction-${authorizationIdHex}`);
+        const state = await parsePaymentState(rawTransaction, cached.pool.opening);
+        await verifyAcceptedPayment(state, cached.pool.opening);
+        if (state.paymentSequence !== cached.paymentSequence + 1
+          || state.sellerAmountSatoshis < cached.sellerAmountSatoshis) {
+          throw new Error("BitFS 卖方付款日志序号不连续或累计金额倒退");
+        }
+        cached.pool = { ...cached.pool, latestPaymentRawTx: rawTransaction };
+        cached.paymentIds.add(authorizationIdHex);
+        cached.paymentSequence = state.paymentSequence;
+        cached.sellerAmountSatoshis = state.sellerAmountSatoshis;
+        return cached.pool;
+      }
+    }
     const funded = await verifySellerFunding(await this.requiredEvidence(record.sessionId, "kind4-funding-delivery"), await this.openingEvidence(record.sessionId));
-    let latestPaymentRaw: Uint8Array | undefined;
-    let latestPaymentSequence = -1;
+    const initialRaw = await buildRefundSubmission(funded.pool.opening);
+    const initial = await parsePaymentState(initialRaw, funded.pool.opening);
+    await verifyAcceptedPayment(initial, funded.pool.opening);
+    const states: Array<{ sequence: number; amount: bigint; rawTransaction: Uint8Array }> = [];
     for (const name of record.evidence.filter((item) => item.startsWith("latest-payment-transaction-"))) {
       const candidate = await this.requiredEvidence(record.sessionId, name);
       const state = await parsePaymentState(candidate, funded.pool.opening);
       await verifyAcceptedPayment(state, funded.pool.opening);
-      if (state.paymentSequence > latestPaymentSequence) {
-        latestPaymentSequence = state.paymentSequence;
-        latestPaymentRaw = candidate;
-      } else if (state.paymentSequence === latestPaymentSequence && latestPaymentRaw && !equalBytes(latestPaymentRaw, candidate)) {
-        throw new Error("BitFS 卖方付款日志包含相同序号的冲突交易");
-      }
+      if (state.paymentSequence === 0xffff_ffff) throw new Error("BitFS 卖方付款日志包含最终关池状态");
+      states.push({ sequence: state.paymentSequence, amount: state.sellerAmountSatoshis, rawTransaction: candidate });
     }
-    return latestPaymentRaw === undefined ? funded.pool : { ...funded.pool, latestPaymentRawTx: latestPaymentRaw };
+    states.sort((left, right) => left.sequence - right.sequence);
+    let expectedSequence = initial.paymentSequence + 1;
+    let previousAmount = initial.sellerAmountSatoshis;
+    let latestPaymentRaw: Uint8Array | undefined;
+    for (const state of states) {
+      if (state.sequence !== expectedSequence || state.amount < previousAmount) {
+        throw new Error("BitFS 卖方付款日志序号不连续或累计金额倒退");
+      }
+      latestPaymentRaw = state.rawTransaction;
+      expectedSequence += 1;
+      previousAmount = state.amount;
+    }
+    const pool = latestPaymentRaw === undefined ? funded.pool : { ...funded.pool, latestPaymentRawTx: latestPaymentRaw };
+    this.poolStateCache.set(record.sessionId, {
+      pool,
+      paymentIds: new Set(paymentIds),
+      paymentSequence: expectedSequence - 1,
+      sellerAmountSatoshis: previousAmount,
+    });
+    return pool;
+  }
+
+  private async findSavedKind7Authorization(record: BitfsSessionRecord, rawKind7: Uint8Array): Promise<string | undefined> {
+    let lookup = this.kind7LookupCache.get(record.sessionId);
+    if (!lookup) {
+      lookup = { seenNames: new Set(), authorizationByBytesHex: new Map() };
+      this.kind7LookupCache.set(record.sessionId, lookup);
+    }
+    for (const name of record.evidence) {
+      if (!name.startsWith("kind7-payment-update-") || lookup.seenNames.has(name)) continue;
+      const saved = await this.requiredEvidence(record.sessionId, name);
+      const authorizationId = name.slice("kind7-payment-update-".length);
+      const key = toHex(saved);
+      const prior = lookup.authorizationByBytesHex.get(key);
+      if (prior && prior !== authorizationId) throw new Error("BitFS 卖方付款日志含有重复 Kind 7 对应不同授权");
+      lookup.authorizationByBytesHex.set(key, authorizationId);
+      lookup.seenNames.add(name);
+    }
+    return lookup.authorizationByBytesHex.get(toHex(rawKind7));
   }
 
   private async openingEvidence(sessionId: string): Promise<SellerOpeningEvidence> {
@@ -328,10 +445,18 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     };
   }
 
-  private async facts() { return bitfsWorkflowFacts(this.deps.nowMs(), await this.deps.blockHeight()); }
+  private async facts() { return bitfsWorkflowFacts(this.deps.nowMs()); }
   private async requiredRecord(sessionId: string): Promise<BitfsSessionRecord> { const value = await this.deps.sessions.get(sessionId); if (!value) throw new Error("BitFS 卖方会话不存在"); return value; }
   private async requiredEvidence(sessionId: string, name: import("./sessionJournal.js").BitfsEvidenceName): Promise<Uint8Array> { const value = await this.deps.sessions.getEvidence(sessionId, name); if (!value) throw new Error(`BitFS 卖方证据缺失: ${name}`); return value; }
-  private assertCurrent(record: BitfsSessionRecord): void { if (record.generation !== this.deps.generation() || record.ownerPublicKeyHex !== this.deps.ownerPublicKeyHex) throw new Error("BitFS 卖方会话 generation 已失效"); }
+  private assertCurrent(record: BitfsSessionRecord): void {
+    const runtimeInstanceId = this.deps.runtimeInstanceId?.();
+    if (record.role !== "seller"
+      || record.generation !== this.deps.generation()
+      || record.ownerPublicKeyHex !== this.deps.ownerPublicKeyHex
+      || (runtimeInstanceId !== undefined && record.runtimeInstanceId !== runtimeInstanceId)) {
+      throw new Error("BitFS 卖方会话 generation 已失效");
+    }
+  }
   private async serial(sessionId: string, action: () => Promise<void>): Promise<void> {
     const prior = this.locks.get(sessionId) ?? Promise.resolve();
     const next = prior.catch(() => undefined).then(action);
@@ -427,7 +552,7 @@ export function createBitfsLocalSellerContentResolver(input: {
     async resolve(request) {
       const seedHashHex = assertSeedHash(request.seedHashHex);
       const summary = await inspectSellerDeliveryRequest(
-        bitfsWorkflowFacts(input.nowMs(), await input.blockHeight()),
+        bitfsWorkflowFacts(input.nowMs()),
         { quoteRaw: request.quoteRaw, pool: request.pool, requestRaw: request.requestRaw },
       );
       const hashes = summary.contentHashes.map(toHex);
@@ -531,5 +656,15 @@ export async function persistSellerKind7BeforeSigning(input: {
 
 function assertHash(value: string): void { if (!/^[0-9a-f]{64}$/u.test(value)) throw new TypeError("PaymentAuthorizationID 不合法"); }
 function assertSeedHash(value: string): string { if (!/^[0-9a-f]{64}$/u.test(value)) throw new TypeError("BitFS Seed Hash 不合法"); return value; }
+function normalizePublicKey(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!/^(02|03)[0-9a-f]{64}$/u.test(normalized)) throw new TypeError("BitFS 卖方公钥无效");
+  return normalized;
+}
+function normalizeHash(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/u.test(normalized)) throw new TypeError("BitFS Seed Hash 无效");
+  return normalized;
+}
 function toHex(value: Uint8Array): string { return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join(""); }
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean { return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]); }

@@ -7,6 +7,7 @@ export type IntegrationLevel =
   | "satsubscription"
   | "s3"
   | "msfile"
+  | "bitfs"
   | "deployment-acceptance";
 
 /** 场景使用的资源类型；`none` 表示不读取仓库外资源。 */

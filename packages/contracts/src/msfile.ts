@@ -357,6 +357,8 @@ export interface MsFileBitfsBuyerSettings {
   maxConcurrentDownloads: number;
   /** 单个文件同时参与传输的卖家费用池数量；旧设置缺失时保持单卖家。 */
   maxConcurrentSellerSessions: number;
+  /** 一个 Kind 5/6/7 批次最多购买的不同 Block 数。 */
+  blocksPerBatch: number;
   /** 用户按 Seed 单独保存的强制下载完整 Block 最高价；与自动购买上限分开。 */
   filePriceLimitsBySeedHash?: Record<string, MsFileSatoshiAmount>;
 }
@@ -368,6 +370,7 @@ export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSetti
   sellerSelectionPriority: "price",
   maxConcurrentDownloads: 1,
   maxConcurrentSellerSessions: 3,
+  blocksPerBatch: 10,
   filePriceLimitsBySeedHash: Object.freeze({}),
 });
 
@@ -375,6 +378,7 @@ export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSetti
 export const MSFILE_BITFS_BUYER_LIMITS = Object.freeze({
   maxConcurrentDownloads: 16,
   maxConcurrentSellerSessions: 16,
+  blocksPerBatch: 16,
 });
 
 /** 严格校验买方设置；非法输入整体拒绝保存。 */
@@ -395,6 +399,7 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     }
   }
   const maxConcurrentSellerSessions = value.maxConcurrentSellerSessions === undefined ? 1 : value.maxConcurrentSellerSessions;
+  const blocksPerBatch = value.blocksPerBatch === undefined ? 10 : value.blocksPerBatch;
   if (typeof value.buyerAutoPurchaseEnabled !== "boolean"
     || maxFullBlockPriceSatoshis === undefined
     || (value.sellerSelectionPriority !== "price" && value.sellerSelectionPriority !== "recent-speed")
@@ -403,13 +408,17 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     || (value.maxConcurrentDownloads as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentDownloads
     || !Number.isSafeInteger(maxConcurrentSellerSessions)
     || (maxConcurrentSellerSessions as number) < 1
-    || (maxConcurrentSellerSessions as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions) return undefined;
+    || (maxConcurrentSellerSessions as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions
+    || !Number.isSafeInteger(blocksPerBatch)
+    || (blocksPerBatch as number) < 1
+    || (blocksPerBatch as number) > MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch) return undefined;
   return {
     buyerAutoPurchaseEnabled: value.buyerAutoPurchaseEnabled,
     maxFullBlockPriceSatoshis,
     sellerSelectionPriority: value.sellerSelectionPriority,
     maxConcurrentDownloads: value.maxConcurrentDownloads as number,
     maxConcurrentSellerSessions: maxConcurrentSellerSessions as number,
+    blocksPerBatch: blocksPerBatch as number,
     filePriceLimitsBySeedHash,
   };
 }
@@ -513,7 +522,7 @@ export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
   fileSizeBytes: MsFileSatoshiAmount | null;
   /** 完整 Block 单价；旧会话缺少时为 null。 */
   fullBlockPriceSatoshis: MsFileSatoshiAmount | null;
-  /** 已支付给卖家的累计金额；尚无链上付款时为 0。 */
+  /** 已由本地 Kind 5/7 验收并应付给卖家的累计金额；尚无付款授权时为 0。 */
   paidSatoshis: MsFileSatoshiAmount;
   /** FundingTx 与当前费用池状态交易已知的矿工费合计。 */
   minerFeeSatoshis: MsFileSatoshiAmount;

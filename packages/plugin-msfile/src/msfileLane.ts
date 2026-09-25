@@ -10,7 +10,8 @@ import type {
   ProtocolSpendService,
 } from "@keymaster/contracts";
 import { BitfsStreamRuntime } from "./bitfs/sellerStreamRuntime.js";
-import { BitfsWebRtcStreamRuntime } from "./bitfs/webrtcStreamRuntime.js";
+import type { WindowWebRtcInterconnectContext } from "@keymaster/plugin-window-p2p/webrtc-interconnect";
+import { BitfsWebRtcStreamRuntime, type BitfsWebRtcHost } from "./bitfs/webrtcStreamRuntime.js";
 import { MsFileSupplierRuntime } from "./supplierRuntime.js";
 import type {
   MsFileP2pLaneOperation,
@@ -28,7 +29,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
 
   constructor(
     /** P2PKH 受控预签能力；P2PKH 未启用时专款准备保持不可用。 */
-    private readonly protocolSpend?: ProtocolSpendService,
+    private readonly protocolSpend?: ProtocolSpendService | (() => ProtocolSpendService | undefined),
     /** 当前 WebRTC 插件的 STUN 配置；未启用插件时使用项目默认 STUN。 */
     private readonly stunServers: () => readonly string[] = () => ["stun:stun.l.google.com:19302"],
   ) {}
@@ -36,17 +37,35 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   start(context: WindowP2pExecutorLaneContext): void {
     this.ownerSessionEpoch = context.ownerSessionEpoch ?? "";
     this.runtime = new MsFileSupplierRuntime(context.host as MsFileHost);
-    // BitFS stream 与供应商读取共用唯一 Host；owner/session epoch 写入事件 fence。
     this.bitfs = new BitfsStreamRuntime({
       host: context.host as MsFileHost,
       emit: (event, transfer) => context.emit(event, transfer),
       ownerSessionEpoch: context.ownerSessionEpoch ?? "",
     });
-    this.bitfsWebRtc = new BitfsWebRtcStreamRuntime({
-      stunServers: this.stunServers,
-      emit: (event, transfer) => context.emit(event, transfer),
-      ownerSessionEpoch: context.ownerSessionEpoch ?? "",
-    });
+    const interconnect = (context as WindowP2pExecutorLaneContext & { webRtcInterconnect?: WindowWebRtcInterconnectContext }).webRtcInterconnect;
+    if (interconnect != null) {
+      this.bitfsWebRtc = new BitfsWebRtcStreamRuntime({
+        interconnect,
+        host: context.host as BitfsWebRtcHost,
+        stunServers: this.stunServers,
+        emit: (event, transfer) => context.emit(event, transfer),
+        onError: (error, errorContext) => {
+          const eventError = error && typeof error === "object" && "error" in error
+            ? (error as { error?: unknown }).error
+            : undefined;
+          void context.emit({
+            type: "bitfs-webrtc-runtime-error",
+            sessionId: errorContext.sessionId,
+            webrtcSessionId: errorContext.webrtcSessionId,
+            ownerSessionEpoch: context.ownerSessionEpoch ?? "",
+            direction: errorContext.direction,
+            message: error instanceof Error ? error.message : eventError === undefined ? String(error) : String(eventError),
+            name: error instanceof Error ? error.name : eventError === undefined ? typeof error : "RTCErrorEvent",
+          });
+        },
+        ownerSessionEpoch: context.ownerSessionEpoch ?? "",
+      });
+    }
   }
 
   async stop(): Promise<void> {
@@ -71,23 +90,26 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
     const runtime = this.runtime;
     const value = operation as MsFileP2pLaneOperation;
     if (value.type === "bitfs-funding-prepare") {
-      if (!this.protocolSpend) throw new Error("P2PKH protocol spend capability is unavailable");
+      const protocolSpend = this.getProtocolSpend();
+      if (!protocolSpend) throw new Error("P2PKH protocol spend capability is unavailable");
       if (signal.aborted) throw new DOMException("BitFS funding prepare was cancelled", "AbortError");
-      const preview = await this.protocolSpend.prepare(value.input);
+      const preview = await protocolSpend.prepare(value.input);
       if (signal.aborted) {
-        await this.protocolSpend.releasePrepared?.(preview);
+        await protocolSpend.releasePrepared?.(preview);
         throw new DOMException("BitFS funding prepare was cancelled", "AbortError");
       }
       return preview;
     }
     if (value.type === "bitfs-funding-release") {
-      if (!this.protocolSpend?.releasePrepared) throw new Error("P2PKH prepared-spend release is unavailable");
-      await this.protocolSpend.releasePrepared(value.preview);
+      const protocolSpend = this.getProtocolSpend();
+      if (!protocolSpend?.releasePrepared) throw new Error("P2PKH prepared-spend release is unavailable");
+      await protocolSpend.releasePrepared(value.preview);
       return null;
     }
     if (value.type === "bitfs-funding-release-submission") {
-      if (!this.protocolSpend?.releasePreparedSubmission) throw new Error("P2PKH prepared-submission release is unavailable");
-      await this.protocolSpend.releasePreparedSubmission({
+      const protocolSpend = this.getProtocolSpend();
+      if (!protocolSpend?.releasePreparedSubmission) throw new Error("P2PKH prepared-submission release is unavailable");
+      await protocolSpend.releasePreparedSubmission({
         ownerPublicKeyHex: value.ownerPublicKeyHex,
         network: value.network,
         txid: value.txid,
@@ -124,7 +146,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
       });
       return null;
     }
-    if (value.type === "bitfs-webrtc-buyer-answer") {
+    if (value.type === "bitfs-webrtc-buyer-offer") {
       const bitfsWebRtc = this.bitfsWebRtc;
       if (!bitfsWebRtc) throw new Error("MSFile lane WebRTC runtime is not attached");
       if (typeof value.sessionId !== "string" || typeof value.requestMessageId !== "string"
@@ -215,6 +237,10 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
       throw new Error("MSFile lane BitFS first frame is invalid");
     }
     if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
+  }
+
+  private getProtocolSpend(): ProtocolSpendService | undefined {
+    return typeof this.protocolSpend === "function" ? this.protocolSpend() : this.protocolSpend;
   }
 
   private bitfsOwnerSessionEpoch(): string {

@@ -234,7 +234,7 @@ export function createLocalStorageBucketProvider(options: LocalStorageBucketProv
       const path = key.slice(prefix.length);
       if (!path.startsWith(prefixValue)) continue;
       const bytes = base64ToBytes(storage!.getItem(key) ?? "");
-      objects.push({ path, bytes, size: bytes.byteLength, etag: etagFor(bytes) });
+      objects.push({ path, bytes: new Uint8Array(0), size: bytes.byteLength, etag: etagFor(bytes) });
     }
     objects.sort((left, right) => left.path.localeCompare(right.path));
     const start = decodeCursor(input.cursor);

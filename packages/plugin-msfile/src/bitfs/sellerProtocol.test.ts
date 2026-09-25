@@ -131,6 +131,74 @@ describe("BitFS 卖方协议端口", () => {
     await expect(sessions.getEvidence(record.sessionId, signatureName)).resolves.toBeUndefined();
     await expect(sessions.get(record.sessionId)).resolves.toMatchObject({ phase: "payment-signing" });
   });
+
+  it("重启后显式接管同一卖方 journal，并拒绝身份或报价变化", async () => {
+    const store = createInMemoryOwnerFileStore();
+    const sessions = createBitfsSessionJournal(store);
+    const seller = fixedSigner(0x22);
+    const buyer = fixedSigner(0x44);
+    const quote = await createSellerQuote({ nowUnixSeconds: 1n }, seller, {
+      seedHash: new Uint8Array(32).fill(1), buyerPublicKey: buyer.publicKey(), seedPriceSatoshis: 1n,
+      fullBlockPriceSatoshis: 1n, fileSizeBytes: 1n, quoteExpiresAtUnixSeconds: 2_000_000_000n,
+      supportedArbiterPublicKeys: [fixedSigner(0x33).publicKey()], recommendedFilename: "resume.bin",
+    });
+    const record = await sessions.create({
+      sessionId: "seller-resume", role: "seller", ownerPublicKeyHex: toHex(seller.publicKey()),
+      counterpartyPublicKeyHex: toHex(buyer.publicKey()), seedHashHex: "01".repeat(32), generation: 1,
+      runtimeInstanceId: "old-runtime", phase: "quoted",
+    }, 1_000);
+    await sessions.putEvidence(record.sessionId, record.revision, "kind1-quote", quote.outbound.bytes(), 1_000);
+    const protocol = new BitfsSellerProtocol({
+      signer: seller,
+      sessions,
+      content: { ready: true, async resolve() { throw new Error("not used"); } },
+      broadcaster: {} as BitfsTransactionBroadcaster,
+      ownerPublicKeyHex: toHex(seller.publicKey()),
+      generation: () => 2,
+      runtimeInstanceId: () => "new-runtime",
+      nowMs: () => 2_000,
+      blockHeight: async () => 900_000,
+    });
+    await protocol.openSession({ sessionId: record.sessionId, quoteBytes: quote.outbound.bytes(), seedHashHex: "01".repeat(32), counterpartyPublicKeyHex: toHex(buyer.publicKey()) });
+    await expect(sessions.get(record.sessionId)).resolves.toMatchObject({ generation: 2, runtimeInstanceId: "new-runtime" });
+    await expect(protocol.openSession({ sessionId: record.sessionId, quoteBytes: new Uint8Array([1]), seedHashHex: "01".repeat(32), counterpartyPublicKeyHex: toHex(buyer.publicKey()) })).rejects.toThrow(/报价/u);
+  });
+
+  it("接受已保存旧授权的延迟 Kind 7 重放", async () => {
+    const sessions = createBitfsSessionJournal(createInMemoryOwnerFileStore());
+    const ownerPublicKeyHex = "02".padEnd(66, "1");
+    const counterpartyPublicKeyHex = "03".padEnd(66, "2");
+    const oldAuthorizationIdHex = "11".repeat(32);
+    const currentAuthorizationIdHex = "22".repeat(32);
+    let record = await sessions.create({
+      sessionId: "seller-delayed-payment-replay",
+      role: "seller",
+      ownerPublicKeyHex,
+      counterpartyPublicKeyHex,
+      seedHashHex: "01".repeat(32),
+      generation: 1,
+      phase: "delivery-prepared",
+    }, 1_000);
+    const oldKind7 = new Uint8Array([7, 1, 2, 3]);
+    const oldPayment = new Uint8Array([1, 2, 3]);
+    record = await sessions.putEvidence(record.sessionId, record.revision, `kind5-content-request-${oldAuthorizationIdHex}`, new Uint8Array([5, 1]), 1_000);
+    record = await sessions.putEvidence(record.sessionId, record.revision, `kind5-content-request-${currentAuthorizationIdHex}`, new Uint8Array([5, 2]), 1_000);
+    record = await sessions.putEvidence(record.sessionId, record.revision, `kind7-payment-update-${oldAuthorizationIdHex}`, oldKind7, 1_000);
+    await sessions.putEvidence(record.sessionId, record.revision, `latest-payment-transaction-${oldAuthorizationIdHex}`, oldPayment, 1_000);
+    const resume = vi.fn(async () => ({ status: "confirmed" as const }));
+    const seller = new BitfsSellerProtocol({
+      signer: fixedSigner(0x22),
+      sessions,
+      content: { ready: true, async resolve() { throw new Error("not used"); } },
+      broadcaster: { resume } as unknown as BitfsTransactionBroadcaster,
+      ownerPublicKeyHex,
+      generation: () => 1,
+      nowMs: () => 2_000,
+      blockHeight: async () => 900_000,
+    });
+    await expect(seller.onFrame({ sessionId: record.sessionId, kind: 7, bytes: oldKind7 })).resolves.toEqual({ type: "none" });
+    expect(resume).not.toHaveBeenCalled();
+  });
 });
 
 function hex(value: string): Uint8Array { return Uint8Array.from(value.match(/../gu) ?? [], (part) => Number.parseInt(part, 16)); }

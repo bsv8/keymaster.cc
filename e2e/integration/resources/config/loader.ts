@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { SecretString } from "../../support/secretString.js";
-import type { E2ES3Config, E2ESatSubscriptionConfig, E2ESatSubscriptionPageConfig, LoadedE2EConfig, LoadedE2ES3Config, LoadedE2ESatSubscriptionConfig } from "./types.js";
+import type { E2ES3Config, E2ESatSubscriptionConfig, E2ESatSubscriptionPageConfig, E2ETestnetKeysConfig, LoadedE2EConfig, LoadedE2ES3Config, LoadedE2ESatSubscriptionConfig } from "./types.js";
 
 /** secp256k1 的阶；这里只用于检查资金种子格式，不导出或记录私钥。 */
 const SECP256K1_ORDER = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
@@ -145,6 +145,16 @@ function parseSeed(text: string, filename: string): SecretString {
   const scalar = BigInt(`0x${normalized}`);
   if (scalar <= 0n || scalar >= SECP256K1_ORDER) reject("seed-scalar-invalid", `${filename} 不是合法 secp256k1 私钥标量`);
   return new SecretString(normalized.toLowerCase());
+}
+
+export async function loadE2ETestnetKeysConfig(options: { readonly workspaceRoot?: string; readonly configDir?: string } = {}): Promise<E2ETestnetKeysConfig> {
+  const directory = await checkDirectory(options.configDir ?? process.env.KEYMASTER_E2E_CONFIG_DIR ?? DEFAULT_CONFIG_DIR, options.workspaceRoot ?? process.cwd());
+  const seedPrivateKeyHex = parseSeed(await readPrivateFile(directory, "seed-key.hex"), "seed-key.hex");
+  const key01PrivateKeyHex = parseSeed(await readPrivateFile(directory, "key01.hex"), "key01.hex");
+  const key02PrivateKeyHex = parseSeed(await readPrivateFile(directory, "key02.hex"), "key02.hex");
+  const identities = [seedPrivateKeyHex.read(), key01PrivateKeyHex.read(), key02PrivateKeyHex.read()];
+  if (new Set(identities).size !== identities.length) reject("seed-identity-duplicate", "seed-key.hex、key01.hex、key02.hex 必须使用不同私钥");
+  return { directory, seedPrivateKeyHex, key01PrivateKeyHex, key02PrivateKeyHex };
 }
 
 /**

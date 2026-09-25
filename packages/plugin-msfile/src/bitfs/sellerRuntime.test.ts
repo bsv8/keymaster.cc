@@ -13,7 +13,7 @@ import { BitfsSellerRuntime } from "./sellerRuntime.js";
 const SEED_HASH = "11".repeat(32);
 const NOW = 1_000;
 
-function verifiedRequest(locator: ReturnType<typeof newMultiaddrLocator> | ReturnType<typeof newWebRTCSDPLocator>, messageByte = 0x44) {
+function verifiedRequest(locator: ReturnType<typeof newMultiaddrLocator> | ReturnType<typeof newWebRTCSDPLocator>, messageByte = 0x44, seedHash = SEED_HASH) {
   const privateBytes = new Uint8Array(32);
   privateBytes[31] = 2;
   const privateKey = parsePrivateKey(privateBytes);
@@ -23,7 +23,7 @@ function verifiedRequest(locator: ReturnType<typeof newMultiaddrLocator> | Retur
     message_id: messageIDFromBytes(new Uint8Array(32).fill(messageByte)),
     issued_at_ms: NOW - 100,
     expires_at_ms: NOW + 10_000,
-    body: { hash: parseSHA256Hash(SEED_HASH), locators: [locator] },
+    body: { hash: parseSHA256Hash(seedHash), locators: [locator] },
   }, privateKey);
   return parseAndVerify(HASH_REQUEST_CHANNEL, marshal(signed));
 }
@@ -67,11 +67,20 @@ describe("BitFS 卖方 Channel 匹配", () => {
     await expect(runtime.match(request)).resolves.toBeNull();
   });
 
-  it("未命中、webrtc-sdp 和伪造未品牌化对象均不会被当作可销售请求", async () => {
+  it("webrtc-sdp 请求创建持久化报价且不需要 multiaddr", async () => {
     const { runtime, prepareOutbound } = fixture();
-    const noLocator = verifiedRequest(newWebRTCSDPLocator());
-    await expect(runtime.match(noLocator)).resolves.toBeNull();
+    const request = verifiedRequest(newWebRTCSDPLocator());
+    await expect(runtime.match(request)).resolves.toMatchObject({ transport: "webrtc-sdp", addresses: [], quoteBytes: new Uint8Array([1, 2, 3]) });
+    expect(prepareOutbound).toHaveBeenCalledTimes(1);
+    expect(parse((prepareOutbound.mock.calls[0]?.[2] as { bytes(): Uint8Array }).bytes()).kind).toBe(1);
+    await expect(runtime.match(request)).resolves.toBeNull();
+  });
+
+  it("未命中库存和伪造未品牌化对象不会生成报价", async () => {
+    const { runtime, prepareOutbound } = fixture();
+    const missingSeed = verifiedRequest(newWebRTCSDPLocator(), 0x45, "22".repeat(32));
+    await expect(runtime.match(missingSeed)).resolves.toBeNull();
+    await expect(runtime.match({ ...verifiedRequest(newWebRTCSDPLocator()) })).rejects.toThrow(/VerifiedHashRequest/u);
     expect(prepareOutbound).not.toHaveBeenCalled();
-    await expect(runtime.match({ ...noLocator })).rejects.toThrow(/VerifiedHashRequest/u);
   });
 });

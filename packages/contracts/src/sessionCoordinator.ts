@@ -15,6 +15,7 @@ import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller, Cha
 import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundSyncSettings, BackgroundTaskProgress } from "./background.js";
+import type { ChainHeightSnapshot } from "./chainHeight.js";
 import type { AutoLockSettings } from "./autolock.js";
 import type { VaultSealedSecret } from "./vault.js";
 import { defineCapability } from "webloom-framework";
@@ -371,7 +372,7 @@ export type CoordinatorClientRequest =
     | { kind: "background.cancel-by-key"; clientId: string; requestId: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
     | { kind: "autolock.settings.update"; clientId: string; requestId: string; settings: AutoLockSettings; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { includeTestnet: boolean }; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.utxos.get"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
@@ -380,7 +381,7 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "plugin.intent" | "worker.units";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "chain.height" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "plugin.intent" | "worker.units";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -503,6 +504,7 @@ export type CoordinatorCryptoResult =
 export type CoordinatorTopicEvent =
   | SessionStateEvent
   | BackgroundSnapshotEvent
+  | CoordinatorChainHeightEvent
   | AssetDataChangedEvent
   | CoordinatorStorageStateEvent
   | CoordinatorMsFileStateEvent
@@ -541,6 +543,22 @@ export interface CoordinatorChannelStateEvent {
     content: JSONValue;
   };
   privateMessage?: ChannelPrivateMessageEvent;
+}
+
+/**
+ * Coordinator 唯一链高度快照。
+ *
+ * 设计缘由：链高度是公共链状态，不归属任何 owner，因此没有 activePublicKeyHex，
+ * 也不在锁定时被清空。值只由 `chain.chain-height-sync` 后台任务写入；页面只读。
+ */
+export interface CoordinatorChainHeightEvent {
+  topic: "chain.height";
+  type: "chain.height.changed";
+  /** 事件序号，用于跨 Tab 去重和乱序防护。 */
+  chainHeightRevision: number;
+  sessionEpoch: SessionEpoch;
+  /** 产生该快照的网络读数；`available=false` 表示还没有成功读取过。 */
+  chainHeight: ChainHeightSnapshot;
 }
 
 /** Coordinator 唯一联系人在线状态快照；页面只消费该脱敏投影。 */
@@ -644,7 +662,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | PluginIntentStateEvent | CoordinatorWorkerUnitStateEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | CoordinatorChainHeightEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | PluginIntentStateEvent | CoordinatorWorkerUnitStateEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -754,6 +772,8 @@ export interface SessionCoordinatorClient {
   getSessionEpoch(): SessionEpoch;
   /** 返回当前 active owner；异步插件操作完成后用它判断 owner 是否仍一致。 */
   getActivePublicKeyHex(): string | undefined;
+  /** 读取 Coordinator 广播的最新链高度快照；纯内存读取，不会发起网络请求。 */
+  getChainHeightSnapshot(): ChainHeightSnapshot;
   subscribeTopic(topic: CoordinatorTopic, listener: (event: any) => void): () => void;
   unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
   lock(): Promise<CoordinatorCommandResult>;
@@ -795,7 +815,7 @@ export interface SessionCoordinatorClient {
   pluginIntentSnapshot(): Promise<CoordinatorValueResult<PluginIntentSnapshot>>;
   /** 提交绝对启停意图；accepted 只表示 Worker 已持久化。 */
   pluginIntentSubmit(command: PluginIntentCommand): Promise<PluginIntentSubmissionResult>;
-  p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;
+  p2pkhSettingsUpdate(settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult>;
   p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
   p2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorCommandResult>;
   /** 读取 Coordinator Worker 内存中的 UTXO 快照；`available=false` 表示尚无可信快照。 */
@@ -812,7 +832,7 @@ export interface SessionCoordinatorClient {
 /** Coordinator 的共同只读/生命周期面。插件只能拿到自己的扩展接口。 */
 export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
   "connect" | "getIsConnected" | "getConnectionState" | "getBootstrapSnapshot" | "getSessionEpoch" |
-  "getActivePublicKeyHex" | "subscribeTopic" | "sendActivity"
+  "getActivePublicKeyHex" | "getChainHeightSnapshot" | "subscribeTopic" | "sendActivity"
 >;
 
 /** Storage 插件 Coordinator 面。 */

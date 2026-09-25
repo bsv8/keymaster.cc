@@ -48,9 +48,10 @@ export interface MsFileStatusResourceSnapshot {
 type AmountDraft = { text: string; unlimited: boolean };
 type ConcurrencyField = keyof MsFileReadConcurrencySettings;
 type ConcurrencyDraft = Record<ConcurrencyField, string>;
-type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions"> & {
+type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions" | "blocksPerBatch"> & {
   maxConcurrentDownloads: string;
   maxConcurrentSellerSessions: string;
+  blocksPerBatch: string;
 };
 
 /** 卖方状态缺省文案；正式界面优先使用 i18n 资源。 */
@@ -146,6 +147,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
     maxConcurrentDownloads: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentDownloads),
     maxConcurrentSellerSessions: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentSellerSessions),
+    blocksPerBatch: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.blocksPerBatch),
   });
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [supplierEditorOpen, setSupplierEditorOpen] = useState(false);
@@ -161,6 +163,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         ...buyerSettings,
         maxConcurrentDownloads: String(buyerSettings.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(buyerSettings.maxConcurrentSellerSessions),
+        blocksPerBatch: String(buyerSettings.blocksPerBatch),
       });
       setAuthorizations(await service.listAppAuthorizations());
       setError(null);
@@ -222,9 +225,10 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       ...bitfsBuyerDraft,
       maxConcurrentDownloads: Number(bitfsBuyerDraft.maxConcurrentDownloads),
       maxConcurrentSellerSessions: Number(bitfsBuyerDraft.maxConcurrentSellerSessions),
+      blocksPerBatch: Number(bitfsBuyerDraft.blocksPerBatch),
     });
     if (!candidate) {
-      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数和单文件卖家数（1–16）。");
+      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数、单文件卖家数和每批块数（1–16）。");
       return;
     }
     if (!service.updateBitfsBuyerSettings) {
@@ -237,6 +241,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         ...candidate,
         maxConcurrentDownloads: String(candidate.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(candidate.maxConcurrentSellerSessions),
+        blocksPerBatch: String(candidate.blocksPerBatch),
       });
       setStatusMessage("BitFS 买方设置已保存。已开始的购买不会改变开池报价。");
     } catch (cause) {
@@ -519,13 +524,13 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
                   value={seedDraft.unlimited ? "" : seedDraft.text}
                   disabled={seedDraft.unlimited}
                   placeholder={seedDraft.unlimited ? t("msfile.settings.unlimited", { defaultValue: "Unlimited" }) : ""}
-                  onChange={(event) => setSeedDraft({ ...seedDraft, text: event.currentTarget.value })}
+                  onChange={(event) => setSeedDraft({ ...seedDraft, text: event.target.value })}
                 />
                 <label className="msfile-settings__checkbox">
                   <input
                     type="checkbox"
                     checked={seedDraft.unlimited}
-                    onChange={(event) => setSeedDraft({ text: "", unlimited: event.currentTarget.checked })}
+                    onChange={(event) => setSeedDraft({ text: "", unlimited: event.target.checked })}
                   />
                   <span>{t("msfile.settings.unlimited", { defaultValue: "Unlimited" })}</span>
                 </label>
@@ -539,13 +544,13 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
                   value={blockDraft.unlimited ? "" : blockDraft.text}
                   disabled={blockDraft.unlimited}
                   placeholder={blockDraft.unlimited ? t("msfile.settings.unlimited", { defaultValue: "Unlimited" }) : ""}
-                  onChange={(event) => setBlockDraft({ ...blockDraft, text: event.currentTarget.value })}
+                  onChange={(event) => setBlockDraft({ ...blockDraft, text: event.target.value })}
                 />
                 <label className="msfile-settings__checkbox">
                   <input
                     type="checkbox"
                     checked={blockDraft.unlimited}
-                    onChange={(event) => setBlockDraft({ text: "", unlimited: event.currentTarget.checked })}
+                    onChange={(event) => setBlockDraft({ text: "", unlimited: event.target.checked })}
                   />
                   <span>{t("msfile.settings.unlimited", { defaultValue: "Unlimited" })}</span>
                 </label>
@@ -647,7 +652,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
             <input
               type="checkbox"
               checked={sellerDraft.sellerEnabled}
-              onChange={(event) => setSellerDraft((current) => ({ ...current, sellerEnabled: event.currentTarget.checked }))}
+              onChange={(event) => setSellerDraft((current) => ({ ...current, sellerEnabled: event.target.checked }))}
             />
             <span>{t("msfile.settings.seller.enable", { defaultValue: "允许当前 Key 出售本地文件" })}</span>
           </label>
@@ -658,7 +663,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               className="msfile-settings__control"
               inputMode="numeric"
               value={sellerDraft.seedPriceSatoshis}
-              onChange={(event) => setSellerDraft((current) => ({ ...current, seedPriceSatoshis: event.currentTarget.value }))}
+              onChange={(event) => setSellerDraft((current) => ({ ...current, seedPriceSatoshis: event.target.value }))}
             />
           </div>
           <div className="msfile-settings__field">
@@ -668,7 +673,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               className="msfile-settings__control"
               inputMode="numeric"
               value={sellerDraft.fullBlockPriceSatoshis}
-              onChange={(event) => setSellerDraft((current) => ({ ...current, fullBlockPriceSatoshis: event.currentTarget.value }))}
+              onChange={(event) => setSellerDraft((current) => ({ ...current, fullBlockPriceSatoshis: event.target.value }))}
             />
           </div>
           <div className="msfile-settings__field">
@@ -680,7 +685,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               min={30}
               max={86400}
               value={sellerDraft.quoteLifetimeSeconds}
-              onChange={(event) => setSellerDraft((current) => ({ ...current, quoteLifetimeSeconds: Number(event.currentTarget.value) }))}
+              onChange={(event) => setSellerDraft((current) => ({ ...current, quoteLifetimeSeconds: Number(event.target.value) }))}
             />
           </div>
           <div className="msfile-settings__field">
@@ -692,7 +697,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               min={1}
               max={16}
               value={sellerDraft.maxConcurrentSales}
-              onChange={(event) => setSellerDraft((current) => ({ ...current, maxConcurrentSales: Number(event.currentTarget.value) }))}
+              onChange={(event) => setSellerDraft((current) => ({ ...current, maxConcurrentSales: Number(event.target.value) }))}
             />
           </div>
           <div className="msfile-settings__field is-wide">
@@ -702,7 +707,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               className="msfile-settings__control"
               rows={4}
               value={sellerArbitersDraft}
-              onChange={(event) => setSellerArbitersDraft(event.currentTarget.value)}
+              onChange={(event) => setSellerArbitersDraft(event.target.value)}
             />
           </div>
         </div>
@@ -760,6 +765,16 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
             max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions}
             value={bitfsBuyerDraft.maxConcurrentSellerSessions}
             onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentSellerSessions: event.target.value }))}
+          />
+        </label>
+        <label>
+          <span>{t("msfile.settings.bitfsBuyer.blocksPerBatch", { defaultValue: "每次请求的文件块数（1–16，默认 10）" })}</span>
+          <input
+            type="number"
+            min={1}
+            max={MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch}
+            value={bitfsBuyerDraft.blocksPerBatch}
+            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, blocksPerBatch: event.target.value }))}
           />
         </label>
         <Button onClick={() => void saveBitfsBuyerSettings()}>
@@ -860,7 +875,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
                 id="msfile-supplier-name"
                 className="msfile-settings__control"
                 value={nameDraft}
-                onChange={(event) => setNameDraft(event.currentTarget.value)}
+                onChange={(event) => setNameDraft(event.target.value)}
               />
             </div>
             <div className="msfile-settings__field">
@@ -870,7 +885,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
                 className="msfile-settings__control"
                 value={keyDraft}
                 disabled={editingKey !== null}
-                onChange={(event) => setKeyDraft(event.currentTarget.value.toLowerCase())}
+                onChange={(event) => setKeyDraft(event.target.value.toLowerCase())}
               />
             </div>
             {peerIdPreview ? (
@@ -885,14 +900,14 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
                 className="msfile-settings__control"
                 rows={4}
                 value={addressesDraft}
-                onChange={(event) => setAddressesDraft(event.currentTarget.value)}
+                onChange={(event) => setAddressesDraft(event.target.value)}
               />
             </div>
             <label className="msfile-settings__checkbox is-wide">
               <input
                 type="checkbox"
                 checked={enabledDraft}
-                onChange={(event) => setEnabledDraft(event.currentTarget.checked)}
+                onChange={(event) => setEnabledDraft(event.target.checked)}
               />
               <span>{t("msfile.settings.supplier.enabled", { defaultValue: "Enabled" })}</span>
             </label>
@@ -963,7 +978,7 @@ function ConcurrencySettingRow(props: {
         step={1}
         inputMode="numeric"
         value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        onChange={(event) => onChange(event.target.value)}
       />
       {hint ? <p className="msfile-settings__hint">{hint}</p> : null}
     </div>
@@ -1031,13 +1046,13 @@ function AppAuthorizationRow(props: {
               inputMode="numeric"
               value={seedDraft.unlimited ? "" : seedDraft.text}
               disabled={seedDraft.unlimited}
-              onChange={(event) => setSeedDraft({ ...seedDraft, text: event.currentTarget.value })}
+              onChange={(event) => setSeedDraft({ ...seedDraft, text: event.target.value })}
             />
             <label className="msfile-settings__checkbox">
               <input
                 type="checkbox"
                 checked={seedDraft.unlimited}
-                onChange={(event) => setSeedDraft({ text: "", unlimited: event.currentTarget.checked })}
+                onChange={(event) => setSeedDraft({ text: "", unlimited: event.target.checked })}
               />
               <span>{t("msfile.settings.unlimited", { defaultValue: "Unlimited" })}</span>
             </label>
@@ -1050,13 +1065,13 @@ function AppAuthorizationRow(props: {
               inputMode="numeric"
               value={blockDraft.unlimited ? "" : blockDraft.text}
               disabled={blockDraft.unlimited}
-              onChange={(event) => setBlockDraft({ ...blockDraft, text: event.currentTarget.value })}
+              onChange={(event) => setBlockDraft({ ...blockDraft, text: event.target.value })}
             />
             <label className="msfile-settings__checkbox">
               <input
                 type="checkbox"
                 checked={blockDraft.unlimited}
-                onChange={(event) => setBlockDraft({ text: "", unlimited: event.currentTarget.checked })}
+                onChange={(event) => setBlockDraft({ text: "", unlimited: event.target.checked })}
               />
               <span>{t("msfile.settings.unlimited", { defaultValue: "Unlimited" })}</span>
             </label>
