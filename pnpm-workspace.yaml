@@ -8,10 +8,10 @@ allowBuilds:
   esbuild: true
 
 overrides:
-  bitcoin-libp2p: 0.3.0
+  bitcoin-libp2p: 0.3.1
 
 minimumReleaseAgeExclude:
-  - bitcoin-libp2p@0.3.0
+  - bitcoin-libp2p@0.3.1
   - bsv8-channel-protocol@0.5.0 || 0.6.0
   - keymaster-hold@0.1.0
   - webloom-framework@0.5.0

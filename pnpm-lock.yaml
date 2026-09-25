@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  bitcoin-libp2p: 0.3.0
+  bitcoin-libp2p: 0.3.1
 
 patchedDependencies:
   go-bitfs@0.3.2: fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad
@@ -79,8 +79,8 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(vitest@3.2.4(@types/node@24.13.3)(jsdom@25.0.1)(terser@5.51.2))
       bitcoin-libp2p:
-        specifier: 0.3.0
-        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
@@ -214,8 +214,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       bitcoin-libp2p:
-        specifier: 0.3.0
-        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
@@ -541,8 +541,8 @@ importers:
         specifier: 13.0.3
         version: 13.0.3
       bitcoin-libp2p:
-        specifier: 0.3.0
-        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
@@ -655,8 +655,8 @@ importers:
         specifier: 1.8.0
         version: 1.8.0
       bitcoin-libp2p:
-        specifier: 0.3.0
-        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
@@ -782,8 +782,8 @@ importers:
         specifier: 10.1.20
         version: 10.1.20
       bitcoin-libp2p:
-        specifier: 0.3.0
-        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
 
   packages/plugin-woc:
     dependencies:
@@ -2360,8 +2360,8 @@ packages:
   birpc@2.9.0:
     resolution: {integrity: sha512-KrayHS5pBi69Xi9JmvoqrIgYGDkD6mcSe/i6YKi3w5kekCLzrX4+nawcXqrj2tIp50Kw/mT/s3p+GVK0A0sKxw==}
 
-  bitcoin-libp2p@0.3.0:
-    resolution: {integrity: sha512-Xn4HaDVgN2EKrITvWBC10PZ7nzUPIU0fRFRzqXNRKrXE/xtR4EFgX+Rs3e5xvV72NbU5nmhiwvUdYnM5qsix/Q==}
+  bitcoin-libp2p@0.3.1:
+    resolution: {integrity: sha512-zSbFrv+PIwdVLHicysOFHniA+2/Bglc58rIyLgWBPlOmW6U37C6a7C1HsOkb2An7ZvZ2wr5Ul+CYqbAL8jSvgA==}
 
   bowser@2.14.1:
     resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
@@ -4703,7 +4703,7 @@ snapshots:
       '@libp2p/crypto': 5.1.23
       '@libp2p/interface': 3.3.0
       '@libp2p/peer-id': 6.0.15
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       '@noble/ciphers': 2.2.0
       '@noble/curves': 2.2.0
       '@noble/hashes': 2.2.0
@@ -5090,7 +5090,7 @@ snapshots:
     dependencies:
       '@libp2p/interface': 3.3.0
       '@libp2p/peer-id': 6.0.15
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       multiformats: 14.0.5
 
   '@libp2p/peer-collections@7.0.28':
@@ -6137,7 +6137,7 @@ snapshots:
 
   birpc@2.9.0: {}
 
-  bitcoin-libp2p@0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+  bitcoin-libp2p@0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -6147,6 +6147,7 @@ snapshots:
       '@libp2p/peer-id': 6.0.15
       '@libp2p/peer-id-factory': 4.2.4
       '@libp2p/peer-record': 9.0.16
+      '@libp2p/utils': 7.4.1
       '@libp2p/webrtc': 6.0.31(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       '@libp2p/websockets': 10.1.20
       '@multiformats/multiaddr': 13.0.3
@@ -6612,7 +6613,7 @@ snapshots:
       '@bsv/sdk': 2.0.5
       '@noble/curves': 2.0.1
       '@noble/hashes': 2.0.1
-      bitcoin-libp2p: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      bitcoin-libp2p: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       keymaster-multisig-pool: 4.0.0
       masterseed: 1.1.0
     transitivePeerDependencies:
@@ -7688,7 +7689,7 @@ snapshots:
       '@libp2p/interface': 3.3.0
       '@noble/curves': 2.0.1
       '@noble/hashes': 2.0.1
-      bitcoin-libp2p: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      bitcoin-libp2p: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
     transitivePeerDependencies:
       - bufferutil
       - react-native

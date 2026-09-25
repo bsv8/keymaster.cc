@@ -82,7 +82,7 @@
     "@vitest/coverage-v8": "3.2.4",
     "@noble/hashes": "^1.8.0",
     "@noble/secp256k1": "^2.2.0",
-    "bitcoin-libp2p": "0.3.0",
+    "bitcoin-libp2p": "0.3.1",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^25.0.1",
     "typescript": "^5.5.4",
