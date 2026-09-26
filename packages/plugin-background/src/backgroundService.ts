@@ -29,7 +29,7 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   backgroundSyncDefaultIntervalMs,
-  BACKGROUND_SYNC_INTERVAL_OPTIONS_MS
+  isValidBackgroundSyncIntervalMs
 } from "@keymaster/contracts";
 
 interface TaskRuntime {
@@ -54,14 +54,15 @@ const DEFAULT_SYNC_SETTINGS: BackgroundSyncSettings = {
 };
 
 /**
- * 归一化同步管理设置：只保留已登记任务与合法选项；非法值直接丢弃。
+ * 归一化同步管理设置：只保留已登记任务与合法间隔；非法值直接丢弃。
+ * 设计缘由（2026-09-26）：合法间隔含自定义整秒值，因此判定走
+ * `isValidBackgroundSyncIntervalMs`，不再用预设白名单。
  */
 function normalizeBackgroundSyncSettings(settings: BackgroundSyncSettings | undefined): BackgroundSyncSettings {
   const taskIntervals: Record<string, number> = {};
-  const options = BACKGROUND_SYNC_INTERVAL_OPTIONS_MS as readonly number[];
   for (const taskId of BACKGROUND_MANAGED_SYNC_TASK_IDS) {
     const raw = settings?.taskIntervals?.[taskId];
-    if (typeof raw === "number" && options.includes(raw)) taskIntervals[taskId] = raw;
+    if (isValidBackgroundSyncIntervalMs(raw)) taskIntervals[taskId] = raw;
   }
   return { taskIntervals };
 }

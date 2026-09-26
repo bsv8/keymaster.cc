@@ -17,8 +17,9 @@ export const CHAIN_HEIGHT_SYNC_TASK_ID = "chain.chain-height-sync";
 /**
  * 可在「智能调度 → 同步管理」中单独配置同步间隔的后台任务。
  * 设计缘由（2026-09-20，2026-09-26 追加链高度）：
- *   - 这些任务按各自配置的间隔自动运行，用户可以设 30 秒 / 1 分钟 /
- *     2 分钟 / 5 分钟，也可以关闭（0）。
+ *   - 这些任务按各自配置的间隔自动运行，用户可以选 30 秒 / 1 分钟 /
+ *     2 分钟 / 5 分钟，也可以关闭（0），还可以自定义 10 秒～24 小时之间的
+ *     任意整秒间隔。
  *   - 每个任务的缺省间隔不同（见 `backgroundSyncDefaultIntervalMs`），
  *     因此未配置时不能一律套用平台缺省。
  *   - UTXO 余额快照不在这个列表里：它是 smart 任务，由 WoC 空闲 2 秒
@@ -33,8 +34,23 @@ export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
   "contacts.presence-probe"
 ] as const;
 
-/** 用户可选的同步间隔（毫秒）；0 = 关闭该任务的自动同步（手动仍可触发）。 */
-export const BACKGROUND_SYNC_INTERVAL_OPTIONS_MS = [30_000, 60_000, 120_000, 300_000, 0] as const;
+/**
+ * 同步间隔快捷预设（毫秒），UI 按此顺序展示。
+ * 设计缘由（2026-09-26）：预设只是方便，不是可选值的全集——用户仍可在
+ * 「自定义」里输入自己期望的间隔。合法值判定请用
+ * `isValidBackgroundSyncIntervalMs`，不要用本列表做白名单。
+ * 0 = 关闭该任务的自动同步（手动仍可触发）。
+ */
+export const BACKGROUND_SYNC_PRESET_OPTIONS_MS = [30_000, 60_000, 120_000, 300_000, 0] as const;
+
+/** 自定义间隔下限：10 秒。更密的轮询只会浪费 WoC 配额。 */
+export const BACKGROUND_SYNC_MIN_CUSTOM_INTERVAL_MS = 10_000;
+
+/** 自定义间隔上限：24 小时。再长的等待等价于「关闭」。 */
+export const BACKGROUND_SYNC_MAX_CUSTOM_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/** 自定义间隔上限（秒），供 UI 输入框做边界提示。 */
+export const BACKGROUND_SYNC_MAX_CUSTOM_SECONDS = BACKGROUND_SYNC_MAX_CUSTOM_INTERVAL_MS / 1000;
 
 /** 任务缺省同步间隔：5 分钟。 */
 export const BACKGROUND_SYNC_DEFAULT_INTERVAL_MS = 300_000;
@@ -58,9 +74,34 @@ export function backgroundSyncDefaultIntervalMs(taskId: string): number {
 }
 
 /**
+ * 校验同步间隔是否合法：0（关闭），或 10 秒～24 小时之间的整秒毫秒值。
+ * 设计缘由（2026-09-26）：自定义间隔放开后，合法值不再是预设白名单，
+ * 但仍然要求整秒、限定区间，避免把任意脏值写进 Coordinator 快照。
+ */
+export function isValidBackgroundSyncIntervalMs(value: unknown): value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return false;
+  if (value === 0) return true;
+  if (value < BACKGROUND_SYNC_MIN_CUSTOM_INTERVAL_MS || value > BACKGROUND_SYNC_MAX_CUSTOM_INTERVAL_MS) return false;
+  return value % 1000 === 0;
+}
+
+/**
+ * 归一化用户输入的秒数到间隔毫秒；非法（空、非数字、超界、溢出）返回 undefined。
+ * 与自动锁屏的 `normalizeAutoLockMinutesToMs` 同构：UI 只提交归一化后的整数值。
+ */
+export function normalizeBackgroundSyncSecondsToMs(seconds: unknown): number | undefined {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return undefined;
+  const rounded = Math.round(seconds);
+  const ms = rounded * 1000;
+  if (!isValidBackgroundSyncIntervalMs(ms)) return undefined;
+  return ms;
+}
+
+/**
  * 后台同步设置。
  * 设计缘由：同步管理只描述「任务 id -> 间隔毫秒」；平台不保存业务字段。
- * 0 表示关闭自动同步；未列出的任务使用平台缺省值。
+ * 0 表示关闭自动同步；未列出的任务使用平台缺省值。合法值判定见
+ * `isValidBackgroundSyncIntervalMs`。
  */
 export interface BackgroundSyncSettings {
   taskIntervals: Record<string, number>;

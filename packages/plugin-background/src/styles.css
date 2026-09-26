@@ -107,6 +107,52 @@
 .background-settings__interval:disabled { cursor: wait; opacity: 0.6; }
 .background-settings__error { margin: 10px 0 0; color: var(--danger); font-size: 13px; }
 
+.background-settings__custom-desc {
+  margin: 0 0 14px;
+  color: var(--text-muted, var(--text));
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.background-settings__custom-field {
+  display: grid;
+  gap: 7px;
+}
+
+.background-settings__custom-field > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.background-settings__custom-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.background-settings__custom-input-row input {
+  width: 120px;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.background-settings__custom-input-row input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.background-settings__custom-input-row > span {
+  color: var(--text-muted, var(--text));
+  font-size: 13px;
+}
+
 @media (max-width: 640px) {
   .background-settings { padding: 14px; }
 }

@@ -10,34 +10,99 @@
 //   - 保存后不立即触发网络同步，新周期从保存时刻开始计时。
 //
 // 硬切换 003：使用 Resource Store 读取后台设置，跨标签同步由 resource subscribe 处理。
+// 自定义间隔（2026-09-26）：预设（30 秒 / 1 分钟 / 2 分钟 / 5 分钟 / 关闭）只是
+// 方便，用户仍可在「自定义」里输入自己期望的间隔（10 秒～24 小时整秒）。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { useOptionalCapability } from "webloom-framework/react";
-import { PageHeader } from "@keymaster/ui";
+import { Button, Modal, PageHeader } from "@keymaster/ui";
 import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
 import {
   BACKGROUND_MANAGED_SYNC_TASK_IDS,
   BACKGROUND_SERVICE_CAPABILITY,
+  BACKGROUND_SYNC_MAX_CUSTOM_SECONDS,
+  BACKGROUND_SYNC_MIN_CUSTOM_INTERVAL_MS,
+  BACKGROUND_SYNC_PRESET_OPTIONS_MS,
   CHAIN_HEIGHT_RESOURCE_ID,
   backgroundSyncDefaultIntervalMs,
   emptyChainHeightSnapshot,
+  normalizeBackgroundSyncSecondsToMs,
   type BackgroundSyncSettings,
   type ChainHeightSnapshot
 } from "@keymaster/contracts";
 
 /**
- * 同步管理选项：间隔毫秒 + 文案 key。0 表示关闭自动同步。
- * 顺序即展示顺序；2 分钟是区块链高度同步的缺省间隔。
+ * 预设文案 key（key 是毫秒值）。
+ * 设计缘由（2026-09-26）：间隔选项从契约常量 `BACKGROUND_SYNC_PRESET_OPTIONS_MS`
+ * 派生，UI 不再自己复制一份数值表；契约新增预设但这里没有专用文案时，回落到
+ * `formatIntervalMs` 的通用时长文案，而不是让用户看到一个谁都不选中的值。
  */
-const INTERVAL_OPTIONS: Array<{ label: string; value: number }> = [
-  { label: "background.settings.option.30s", value: 30_000 },
-  { label: "background.settings.option.1min", value: 60_000 },
-  { label: "background.settings.option.2min", value: 120_000 },
-  { label: "background.settings.option.5min", value: 300_000 },
-  { label: "background.settings.option.off", value: 0 }
-];
+const INTERVAL_OPTION_LABEL_KEYS: ReadonlyMap<number, string> = new Map([
+  [30_000, "background.settings.option.30s"],
+  [60_000, "background.settings.option.1min"],
+  [120_000, "background.settings.option.2min"],
+  [300_000, "background.settings.option.5min"],
+  [0, "background.settings.option.off"]
+]);
+
+/**
+ * 同步管理快捷预设。顺序与 0（关闭）语义都由契约常量决定；
+ * 2 分钟是区块链高度同步的缺省间隔，自定义值不在此列表里。
+ */
+const INTERVAL_OPTIONS: ReadonlyArray<{ value: number; labelKey: string | undefined }> =
+  BACKGROUND_SYNC_PRESET_OPTIONS_MS.map((value) => ({ value, labelKey: INTERVAL_OPTION_LABEL_KEYS.get(value) }));
 
 const DEFAULT_SETTINGS: BackgroundSyncSettings = { taskIntervals: {} };
+
+type I18nT = (key: string, values?: { defaultValue?: string; [key: string]: string | number | boolean | null | undefined }) => string;
+
+/** 间隔是否命中快捷预设；0（关闭）也是预设。 */
+function isPresetInterval(intervalMs: number): boolean {
+  return INTERVAL_OPTIONS.some((option) => option.value === intervalMs);
+}
+
+/**
+ * 自定义间隔的展示文案：优先用能整除的最大单位，
+ * 避免 90 秒被写成 "1.5 分钟"。
+ */
+function formatIntervalMs(intervalMs: number, t: I18nT): string {
+  const seconds = Math.round(intervalMs / 1000);
+  if (seconds !== 0 && seconds % 3600 === 0) {
+    return t("background.settings.interval.hours", { defaultValue: "{{hours}} 小时", hours: seconds / 3600 });
+  }
+  if (seconds !== 0 && seconds % 60 === 0) {
+    return t("background.settings.interval.minutes", { defaultValue: "{{minutes}} 分钟", minutes: seconds / 60 });
+  }
+  return t("background.settings.interval.seconds", { defaultValue: "{{seconds}} 秒", seconds });
+}
+
+function parseCustomSeconds(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return undefined;
+  return normalizeBackgroundSyncSecondsToMs(parsed);
+}
+
+/** 输入框的错误文案；与自动锁屏的 customInputError 同构。 */
+function customInputError(raw: string, t: I18nT): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) {
+    return t("background.settings.custom.invalid", { defaultValue: "请输入有效的秒数。" });
+  }
+  const rounded = Math.round(parsed);
+  const minSeconds = BACKGROUND_SYNC_MIN_CUSTOM_INTERVAL_MS / 1000;
+  if (rounded < minSeconds) {
+    return t("background.settings.custom.min", { defaultValue: "至少 {{seconds}} 秒，更短的间隔请选择「关闭」。", seconds: minSeconds });
+  }
+  if (rounded > BACKGROUND_SYNC_MAX_CUSTOM_SECONDS) {
+    return t("background.settings.custom.max", { defaultValue: "最多 24 小时（{{seconds}} 秒），更长请选择「关闭」。", seconds: BACKGROUND_SYNC_MAX_CUSTOM_SECONDS });
+  }
+  // 走到这里必然 10 ≤ rounded ≤ 86400，毫秒值一定是安全整数，无需再判溢出。
+  return null;
+}
 
 /**
  * 读取任务当前生效的间隔：未配置时使用该任务自己的缺省
@@ -122,9 +187,9 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
     });
   }, [settings]);
 
-  function applyInterval(taskId: string, nextIntervalMs: number) {
+  async function applyInterval(taskId: string, nextIntervalMs: number): Promise<boolean> {
     // 串行保存：已有保存在途时忽略新的点击（按钮同时已禁用）。
-    if (pendingRef.current.size > 0) return;
+    if (pendingRef.current.size > 0) return false;
     // 以平台最近一次生效设置为基准合并本次修改：优先使用本页最近成功保存
     // 但事件尚未回流的值，避免用旧快照覆盖其它任务已经保存成功的值。
     const base = backgroundService.getScheduleSettings();
@@ -136,27 +201,71 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
     setPendingTaskIds(pendingRef.current);
     setIntervals((previous) => ({ ...previous, [taskId]: nextIntervalMs }));
     setSaveError(null);
-    void (async () => {
-      try {
-        const result = await backgroundService.updateScheduleSettings({
-          taskIntervals: {
-            ...baseIntervals,
-            [taskId]: nextIntervalMs
-          }
-        });
-        if (result.status !== "accepted") {
-          throw new Error("message" in result ? result.message : t("background.settings.saveFailed", { defaultValue: "保存失败，请稍后重试。" }));
+    try {
+      const result = await backgroundService.updateScheduleSettings({
+        taskIntervals: {
+          ...baseIntervals,
+          [taskId]: nextIntervalMs
         }
-        savedRef.current = { ...savedRef.current, [taskId]: nextIntervalMs };
-      } catch (error: unknown) {
-        // 保存失败：回滚乐观更新到实际生效值，并提示用户。
-        setIntervals((previous) => ({ ...previous, [taskId]: previousIntervalMs }));
-        setSaveError(error instanceof Error ? error.message : String(error));
-      } finally {
-        pendingRef.current = new Set();
-        setPendingTaskIds(pendingRef.current);
+      });
+      if (result.status !== "accepted") {
+        throw new Error("message" in result ? result.message : t("background.settings.saveFailed", { defaultValue: "保存失败，请稍后重试。" }));
       }
-    })();
+      savedRef.current = { ...savedRef.current, [taskId]: nextIntervalMs };
+      return true;
+    } catch (error: unknown) {
+      // 保存失败：回滚乐观更新到实际生效值，并提示用户。
+      setIntervals((previous) => ({ ...previous, [taskId]: previousIntervalMs }));
+      setSaveError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      pendingRef.current = new Set();
+      setPendingTaskIds(pendingRef.current);
+    }
+  }
+
+  // 自定义间隔编辑弹窗：正在编辑的任务 id、输入值与校验错误。
+  const [customTaskId, setCustomTaskId] = useState<string | null>(null);
+  const [customSeconds, setCustomSeconds] = useState("");
+  const [customError, setCustomError] = useState<string | null>(null);
+  const customInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (customTaskId !== null) customInputRef.current?.focus();
+  }, [customTaskId]);
+
+  function openCustomEditor(taskId: string) {
+    // 关闭态没有「当前间隔」可回填，改用该任务缺省值作为起点。
+    const current = intervals[taskId] ?? backgroundSyncDefaultIntervalMs(taskId);
+    setCustomTaskId(taskId);
+    setCustomSeconds(current === 0 ? String(backgroundSyncDefaultIntervalMs(taskId) / 1000) : String(current / 1000));
+    setCustomError(null);
+    setSaveError(null);
+  }
+
+  function closeCustomEditor() {
+    if (pendingRef.current.size > 0) return;
+    setCustomTaskId(null);
+    setCustomError(null);
+  }
+
+  async function applyCustomInterval() {
+    if (customTaskId === null || pendingRef.current.size > 0) return;
+    const trimmed = customSeconds.trim();
+    if (trimmed === "") {
+      setCustomError(t("background.settings.custom.required", { defaultValue: "请输入秒数（至少 10 秒）。" }));
+      return;
+    }
+    const intervalMs = parseCustomSeconds(customSeconds);
+    if (intervalMs === undefined) {
+      setCustomError(
+        customInputError(customSeconds, t) ??
+          t("background.settings.custom.invalid", { defaultValue: "请输入有效的秒数。" })
+      );
+      return;
+    }
+    setCustomSeconds(String(intervalMs / 1000));
+    if (await applyInterval(customTaskId, intervalMs)) setCustomTaskId(null);
   }
 
   return (
@@ -175,7 +284,7 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
           {t("background.settings.syncManagement", { defaultValue: "同步管理" })}
         </h4>
         <p className="background-settings__hint">
-          {t("background.settings.syncManagementDesc", { defaultValue: "每个任务可以单独设置同步间隔；选择「关闭」后该任务不再自动同步，托盘的「立即同步一次」仍然可用。" })}
+          {t("background.settings.syncManagementDesc", { defaultValue: "每个任务可以单独设置同步间隔；「自定义」可输入 10 秒～24 小时之间的任意整秒间隔。选择「关闭」后该任务不再自动同步，托盘的「立即同步一次」仍然可用。" })}
         </p>
         <ul className="background-settings__tasks">
           {BACKGROUND_MANAGED_SYNC_TASK_IDS.map((taskId) => {
@@ -183,6 +292,8 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
             const saving = pendingTaskIds.has(taskId);
             const busy = pendingTaskIds.size > 0;
             const label = t(`background.settings.task.${taskId}`, { defaultValue: taskId });
+            // 命中预设时「自定义」只是入口；生效值是自定义值时按钮直接显示该值。
+            const isCustomValue = active !== 0 && !isPresetInterval(active);
             return (
               <li key={taskId} className="background-settings__task">
                 <span className="background-settings__task-label">{label}</span>
@@ -195,11 +306,26 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
                       aria-pressed={active === opt.value}
                       disabled={busy}
                       aria-busy={saving}
-                      onClick={() => applyInterval(taskId, opt.value)}
+                      onClick={() => void applyInterval(taskId, opt.value)}
                     >
-                      {t(opt.label, { defaultValue: opt.label })}
+                      {opt.labelKey ? t(opt.labelKey, { defaultValue: opt.labelKey }) : formatIntervalMs(opt.value, t)}
                     </button>
                   ))}
+                  {/* 可访问名固定为「自定义」，生效值变化只改可见文本：读屏用户
+                      不会因为按钮改名而找不到同一个入口。 */}
+                  <button
+                    type="button"
+                    className={`background-settings__interval ${isCustomValue ? "is-active" : ""}`}
+                    aria-label={t("background.settings.option.custom", { defaultValue: "自定义" })}
+                    aria-pressed={isCustomValue}
+                    disabled={busy}
+                    aria-haspopup="dialog"
+                    onClick={() => openCustomEditor(taskId)}
+                  >
+                    {isCustomValue
+                      ? formatIntervalMs(active, t)
+                      : t("background.settings.option.custom", { defaultValue: "自定义" })}
+                  </button>
                 </div>
               </li>
             );
@@ -207,8 +333,113 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
         </ul>
       </section>
       <ChainHeightReadout />
-      {saveError ? <p className="background-settings__error">{saveError}</p> : null}
+      {/* 弹窗打开时页面级错误不可见（被遮罩挡住），错误改由弹窗内的 alert 呈现。 */}
+      {saveError && customTaskId === null ? <p className="background-settings__error" role="alert">{saveError}</p> : null}
+      <CustomIntervalEditor
+        taskId={customTaskId}
+        seconds={customSeconds}
+        error={customError}
+        saveError={saveError}
+        busy={pendingTaskIds.size > 0}
+        inputRef={customInputRef}
+        onSecondsChange={(next) => {
+          setCustomSeconds(next);
+          setCustomError(null);
+        }}
+        onSubmit={() => void applyCustomInterval()}
+        onCancel={closeCustomEditor}
+      />
     </div>
+  );
+}
+
+/**
+ * 自定义同步间隔弹窗。
+ *
+ * 设计缘由：预设按钮只是快捷入口，真正需要的是「用户自己期望的时间」。
+ * 这里的输入只接受整秒，边界由 contracts 的
+ * `normalizeBackgroundSyncSecondsToMs` 统一判定，UI 不自行放宽。
+ *
+ * 保存失败时弹窗不关闭（用户改完可以再试），因此失败原因必须显示在弹窗内：
+ * 页面级错误区在 `.ui-modal` 遮罩之下，弹窗外看不到了。
+ */
+function CustomIntervalEditor({
+  taskId,
+  seconds,
+  error,
+  saveError,
+  busy,
+  inputRef,
+  onSecondsChange,
+  onSubmit,
+  onCancel
+}: {
+  taskId: string | null;
+  seconds: string;
+  error: string | null;
+  saveError: string | null;
+  busy: boolean;
+  inputRef: RefObject<HTMLInputElement>;
+  onSecondsChange: (value: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  if (taskId === null) return null;
+  const taskLabel = t(`background.settings.task.${taskId}`, { defaultValue: taskId });
+  return (
+    <Modal
+      open
+      title={t("background.settings.custom.modalTitle", { defaultValue: "自定义同步间隔：{{task}}", task: taskLabel })}
+      onClose={onCancel}
+      data-testid="background-custom-interval-editor"
+      footer={
+        <>
+          <Button variant="ghost" disabled={busy} onClick={onCancel}>
+            {t("common.action.cancel", { defaultValue: "取消" })}
+          </Button>
+          {/* 不用 Button 的 loading：它会把 children 换成硬编码的
+              "Loading…"，本页的「保存中…」文案就永远显示不出来。 */}
+          <Button variant="primary" disabled={busy} aria-busy={busy} onClick={onSubmit}>
+            {busy
+              ? t("background.settings.custom.applying", { defaultValue: "保存中…" })
+              : t("background.settings.custom.apply", { defaultValue: "应用" })}
+          </Button>
+        </>
+      }
+    >
+      <p className="background-settings__custom-desc">
+        {t("background.settings.custom.modalDescription", {
+          defaultValue: "输入 10 到 86400 秒之间的整数间隔；保存后新周期从保存时刻开始计时。"
+        })}
+      </p>
+      <label className="background-settings__custom-field">
+        <span>{t("background.settings.custom.label", { defaultValue: "自定义间隔（10～86400 秒）" })}</span>
+        <div className="background-settings__custom-input-row">
+          <input
+            ref={inputRef}
+            id="background-custom-interval-seconds"
+            type="number"
+            min={BACKGROUND_SYNC_MIN_CUSTOM_INTERVAL_MS / 1000}
+            max={BACKGROUND_SYNC_MAX_CUSTOM_SECONDS}
+            step={1}
+            inputMode="numeric"
+            placeholder={t("background.settings.custom.placeholder", { defaultValue: "例如：45" })}
+            value={seconds}
+            disabled={busy}
+            onChange={(event) => onSecondsChange(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                onSubmit();
+              }
+            }}
+          />
+          <span>{t("background.settings.custom.unit", { defaultValue: "秒" })}</span>
+        </div>
+      </label>
+      {error ?? saveError ? <p className="background-settings__error" role="alert">{error ?? saveError}</p> : null}
+    </Modal>
   );
 }
 

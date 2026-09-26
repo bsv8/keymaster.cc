@@ -8,7 +8,7 @@ import {
   defineCapability,
   type ValueParser,
 } from "webloom-framework";
-import { BACKGROUND_SYNC_INTERVAL_OPTIONS_MS } from "./background.js";
+import { isValidBackgroundSyncIntervalMs } from "./background.js";
 import {
   AUTO_LOCK_DEFAULT_TIMEOUT_MS,
   isValidAutoLockTimeoutMs,
@@ -1602,9 +1602,6 @@ function parsePluginIntentCommand(value: unknown): PluginIntentCommand {
   };
 }
 
-/** 同步管理允许的间隔取值；解析时 fail closed，避免任意周期写入快照。 */
-const BACKGROUND_SYNC_INTERVAL_OPTION_SET: ReadonlySet<number> = new Set(BACKGROUND_SYNC_INTERVAL_OPTIONS_MS);
-
 function parseAutoLockSettings(value: unknown): import("./autolock.js").AutoLockSettings {
   const settings = expectRecord(value, "autolock settings");
   const timeoutMs = settings.timeoutMs;
@@ -1622,13 +1619,14 @@ function parseAutoLockTimeoutMsField(value: unknown, field: string): number | un
   return value as number;
 }
 
+/** 同步管理允许的间隔取值；解析时 fail closed，避免任意周期写入快照。 */
 function parseBackgroundSettings(value: unknown): CoordinatorBackgroundSyncSettings {
   const settings = expectRecord(value, "background settings");
   const intervals = expectRecord(settings.taskIntervals, "background settings.taskIntervals");
   const taskIntervals: Record<string, number> = {};
   for (const [taskId, interval] of Object.entries(intervals)) {
     if (taskId.length === 0 || taskId.length > 128) throw new TypeError("Coordinator background settings task id is invalid");
-    if (typeof interval !== "number" || !BACKGROUND_SYNC_INTERVAL_OPTION_SET.has(interval)) {
+    if (!isValidBackgroundSyncIntervalMs(interval)) {
       throw new TypeError(`Coordinator background settings interval for ${taskId} is invalid`);
     }
     taskIntervals[taskId] = interval;

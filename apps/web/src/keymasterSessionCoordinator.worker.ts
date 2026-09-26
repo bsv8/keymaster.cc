@@ -96,7 +96,7 @@ import type {
   StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, backgroundSyncDefaultIntervalMs, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, BACKGROUND_SYNC_INTERVAL_OPTIONS_MS, CHAIN_HEIGHT_SYNC_TASK_ID, emptyChainHeightSnapshot, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, backgroundSyncDefaultIntervalMs, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, isValidBackgroundSyncIntervalMs, CHAIN_HEIGHT_SYNC_TASK_ID, emptyChainHeightSnapshot, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
@@ -862,7 +862,7 @@ function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSetting
   const taskIntervals: Record<string, number> = {};
   for (const [taskId, interval] of Object.entries(intervals)) {
     if (typeof taskId !== "string" || taskId.length === 0 || taskId.length > 128
-      || typeof interval !== "number" || !BACKGROUND_SYNC_INTERVAL_OPTIONS_MS.includes(interval as never)) {
+      || !isValidBackgroundSyncIntervalMs(interval)) {
       throw new StorageRuntimeError("storage_provider_error", "Coordinator schedule settings are invalid");
     }
     taskIntervals[taskId] = interval;
@@ -9059,13 +9059,12 @@ function managedIntervalFor(taskId: string): number {
   return typeof configured === "number" ? configured : backgroundSyncDefaultIntervalMs(taskId);
 }
 
-/** 归一化同步管理设置：只保留已登记任务与合法选项，非法值直接丢弃。 */
+/** 归一化同步管理设置：只保留已登记任务与合法间隔，非法值直接丢弃。 */
 function normalizeBackgroundSyncSettings(settings: CoordinatorBackgroundSyncSettings | undefined): CoordinatorBackgroundSyncSettings {
   const taskIntervals: Record<string, number> = {};
-  const options = BACKGROUND_SYNC_INTERVAL_OPTIONS_MS as readonly number[];
   for (const taskId of BACKGROUND_MANAGED_SYNC_TASK_IDS) {
     const raw = settings?.taskIntervals?.[taskId];
-    if (typeof raw === "number" && options.includes(raw)) taskIntervals[taskId] = raw;
+    if (isValidBackgroundSyncIntervalMs(raw)) taskIntervals[taskId] = raw;
   }
   return { taskIntervals };
 }
@@ -15184,10 +15183,9 @@ async function handleBackgroundSettingsUpdate(
   if (!rawIntervals || typeof rawIntervals !== "object" || Array.isArray(rawIntervals)) {
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid sync settings" } };
   }
-  const options = BACKGROUND_SYNC_INTERVAL_OPTIONS_MS as readonly number[];
   for (const [taskId, interval] of Object.entries(rawIntervals)) {
     if (!(BACKGROUND_MANAGED_SYNC_TASK_IDS as readonly string[]).includes(taskId)
-      || typeof interval !== "number" || !options.includes(interval)) {
+      || !isValidBackgroundSyncIntervalMs(interval)) {
       return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Invalid sync interval for ${taskId}` } };
     }
   }

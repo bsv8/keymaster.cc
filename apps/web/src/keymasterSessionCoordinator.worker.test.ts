@@ -1865,6 +1865,46 @@ describe("Session Coordinator worker", () => {
     expect(illegal.ack.status).toBe("validation-error");
   });
 
+  it("accepts custom whole-second intervals inside the allowed range", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    const custom = await __testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": 45_000 } });
+    expect(custom.ack.status).toBe("accepted");
+    expect(__testGetSnapshot().scheduleSettings.taskIntervals).toEqual({ "token-bsv21.sync": 45_000 });
+    // 自定义值必须跨 Worker 重启保留，而不是被归一化回预设。
+    await __testRestartWorker();
+    expect(__testGetSnapshot().scheduleSettings.taskIntervals).toEqual({ "token-bsv21.sync": 45_000 });
+  });
+
+  it("rejects custom intervals below 10 seconds, above 24 hours, or not whole seconds", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    // 设置快照是模块级持久状态：__testResetState 不会清空它，所以本用例
+    // 自建前置，不依赖相邻用例的写入（单独运行也必须成立）。
+    const baseline = await __testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": 45_000 } });
+    expect(baseline.ack.status).toBe("accepted");
+    for (const interval of [9_000, 86_401_000, 12_345, 1_500.5]) {
+      const result = await __testUpdateScheduleSettings({ taskIntervals: { "token-bsv21.sync": interval } });
+      expect(result.ack.status).toBe("validation-error");
+    }
+    // 非法值不得覆盖上一轮已经生效的设置。
+    expect(__testGetSnapshot().scheduleSettings.taskIntervals).toEqual({ "token-bsv21.sync": 45_000 });
+  });
+
+  it("链高度同步接受自定义间隔并按新周期排下一次运行", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await __testRegisterRealCoordinatorTasks();
+    const accepted = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 45_000 } });
+    expect(accepted.ack).toMatchObject({ status: "accepted" });
+    const task = __testGetSnapshot().taskSnapshots.find((item) => item.id === CHAIN_HEIGHT_SYNC_TASK_ID);
+    // 排程用的是自定义值本身，而不是回落到缺省 2 分钟。
+    expect(new Date(task?.nextRunAt ?? 0).getTime() - Date.now()).toBeLessThanOrEqual(45_000);
+    expect(new Date(task?.nextRunAt ?? 0).getTime()).toBeGreaterThan(Date.now());
+    // 设置快照是模块级持久状态：本用例必须还原，否则会漏进后续用例。
+    await __testUpdateScheduleSettings({ taskIntervals: {} });
+  });
+
   it("marks tasks as blocked when vault is locked", async () => {
     __testResetState();
     __testSetVaultStatus("locked");
@@ -2533,7 +2573,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
     await __testRegisterRealCoordinatorTasks();
-    const response = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 45_000 } });
+    // 9 秒低于自定义下限 10 秒；45 秒是合法自定义值，不再是这个用例的目标。
+    const response = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 9_000 } });
     expect(response.ack).toMatchObject({ status: "validation-error" });
   });
 

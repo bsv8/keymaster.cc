@@ -73,6 +73,14 @@ test(JOURNEY_ID + "：从正式菜单查看独立设置并热切换界面语言"
         heading: /^Smart scheduling$|^智能调度$/u,
       });
       await expect(page.locator(".background-settings")).toBeVisible();
+      // 同步管理的预设只是快捷入口，用户还能自定义自己期望的间隔。
+      const syncIntervals = page.locator(".background-settings__intervals").first();
+      await expect(syncIntervals.getByRole("button", { name: /^Custom$|^自定义$/u })).toBeVisible();
+      await syncIntervals.getByRole("button", { name: /^Custom$|^自定义$/u }).click();
+      const syncIntervalEditor = page.getByRole("dialog");
+      await expect(syncIntervalEditor.getByPlaceholder(/e\.g\.|例如/u)).toBeVisible();
+      await syncIntervalEditor.getByRole("button", { name: /^Cancel$|^取消$/u }).click();
+      await expect(syncIntervalEditor).toHaveCount(0);
       await openSettingsPage(page, {
         label: /^Export private key$|^导出私钥$/u,
         path: /\/settings\/current-key$/u,
