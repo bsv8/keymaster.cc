@@ -24,12 +24,33 @@ const CUSTOM = {
 function memoryFiles(seed?: string): BorrowedOwnerFileStore & { files: Map<string, Uint8Array> } {
   const files = new Map<string, Uint8Array>();
   if (seed !== undefined) files.set(SAT_SUBSCRIPTION_SETTING_FILE, new TextEncoder().encode(seed));
+  const stamp = () => new Date().toISOString();
   return {
     files,
-    list: async () => ({ files: [...files.keys()].map((path) => ({ path })) }),
-    get: async (path) => files.has(path) ? { path, bytes: new Uint8Array(files.get(path)!) } : undefined,
-    put: async (path, bytes) => { files.set(path, new Uint8Array(bytes)); return {}; },
+    walletGeneration: "test-wallet",
+    sessionEpoch: "test-epoch",
+    runGeneration: "test-run",
+    list: async () => ({
+      files: [...files.keys()].map((path) => ({ path, size: files.get(path)!.byteLength, revision: "r1", lastModified: stamp() })),
+    }),
+    get: async (path) => files.has(path)
+      ? { path, bytes: new Uint8Array(files.get(path)!), revision: "r1", lastModified: stamp() }
+      : undefined,
+    getRange: async (path, range) => files.has(path)
+      ? { path, bytes: new Uint8Array(files.get(path)!).slice(range.offset, range.offset + range.length), revision: "r1", lastModified: stamp() }
+      : undefined,
+    put: async (path, bytes) => {
+      files.set(path, new Uint8Array(bytes));
+      return { revision: "r1", lastModified: stamp() };
+    },
     delete: async (path) => { files.delete(path); },
+    batch: async (input) => {
+      for (const operation of input.operations) {
+        if (operation.type === "put") files.set(operation.path, new Uint8Array(operation.bytes));
+        else files.delete(operation.path);
+      }
+      return { paths: input.operations.map((operation) => operation.path), committedAt: stamp() };
+    },
   };
 }
 

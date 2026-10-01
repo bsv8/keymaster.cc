@@ -57,7 +57,7 @@ Keymaster 与 Connect App 通过 `price.get`（一次）和 `price.changed`（�
 ## 生命周期与限制
 
 P2P Host 只有一个 Window 执行租约，MSFile 和 Sat 使用独立 lane。Worker 对待响应请求、写入
-队列、入站 handler、ACK 和桥接字节都有硬上限。锁定、切 Key、删除 Supplier 或代际变化会
+队列、入站 handler、ACK 和桥接字节都有硬上限。锁定、钱包重置、删除 Supplier 或代际变化会
 先撤权再关闭连接；网络超时不能被当成明确失败或成功。
 
 ## 验收状态

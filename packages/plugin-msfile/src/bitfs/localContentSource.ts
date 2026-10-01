@@ -3,7 +3,7 @@
 // 本模块只持有 Host 预绑定的当前 Owner `msfiles/` 文件句柄，不接触 Provider、
 // React 或 libp2p。local 读取永远不编码 `/msfile/1.0.0` Frame。
 
-import type { OwnerFileStore, MsFileSourceStat } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore, MsFileSourceStat } from "@keymaster/contracts";
 import { MSFILE_LOCAL_SOURCE_ID } from "@keymaster/contracts";
 import {
   inspectLocalMsFileSeed,
@@ -27,7 +27,7 @@ export interface MsFileLocalContentSource {
 
 /** 使用当前 Owner 文件根创建 local 来源。 */
 export function createMsFileLocalContentSource(
-  store: OwnerFileStore,
+  store: BorrowedOwnerFileStore,
   options: {
     /** 内容读取失败时使卖方派生索引中的 Seed 失效。 */
     onReadFailure?(seedHashHex: string, error: unknown): void;

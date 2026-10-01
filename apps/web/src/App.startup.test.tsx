@@ -152,10 +152,6 @@ vi.mock("./shell/InitialSetupPage.js", () => ({
   }
 }));
 
-vi.mock("./shell/StorageAuthenticationPage.js", () => ({
-  StorageAuthenticationPage: () => <div data-testid="storage-authentication">authentication</div>
-}));
-
 vi.mock("./shell/LockedShell.js", () => ({
   LockedShell: () => <div data-testid="locked-shell">locked</div>
 }));
@@ -202,19 +198,17 @@ describe("App startup gate", () => {
     expect(testState.setupRecoveryReads).toBeGreaterThan(0);
   });
 
-  it("routes an existing storage authentication snapshot to the authentication page", () => {
-    setResource("ready", bootstrapSnapshot({
-      phase: "storage-authentication",
-      storageReady: false,
-      vaultCapabilityReady: false,
-      vaultSelectionReady: false
-    }));
+  it("keeps a locked wallet out of the setup page while the lock screen owns the flow", () => {
+    // 锁定态与未初始化态共用 LockedShell，但入口语义不同：已存在 Key 的钱包
+    // 绝不能回到创建入口，否则会出现「用新 Key 覆盖现有钱包」的路径。
+    testState.vaultStatus = "locked";
+    testState.runtimeVault = "locked";
+    setResource("ready", bootstrapSnapshot({ phase: "vault-selection" }));
 
     render(<App />);
 
-    expect(screen.getByTestId("storage-authentication")).toBeTruthy();
+    expect(screen.getByTestId("locked-shell")).toBeTruthy();
     expect(screen.queryByTestId("initial-setup")).toBeNull();
-    expect(testState.setupRecoveryReads).toBe(0);
   });
 
   it("enters first setup for a resolved uninitialized vault", () => {
@@ -237,7 +231,7 @@ describe("App startup gate", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("alert").textContent).toContain("存储启动状态不一致");
+    expect(screen.getByRole("alert").textContent).toContain("本地钱包状态不一致");
     expect(screen.queryByTestId("initial-setup")).toBeNull();
     expect(testState.setupRecoveryReads).toBe(0);
   });

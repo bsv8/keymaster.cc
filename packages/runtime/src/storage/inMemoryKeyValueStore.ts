@@ -7,15 +7,33 @@ import type {
   KeyValueListResult,
   KeyValueStore,
   KeyValueValue,
-  StorageBucketProvider,
   StorageNamespaceBinding
 } from "@keymaster/contracts";
+
+/** 测试夹具用的固定世代；生产绑定由 Coordinator 逐次发放。 */
+export const IN_MEMORY_TEST_BINDING = Object.freeze({
+  walletGeneration: "in-memory-wallet-generation",
+  sessionEpoch: "in-memory-session-epoch",
+  runGeneration: "in-memory-run-generation",
+});
+
+/**
+ * 用固定世代补全一份中央声明，得到测试用的 namespace 绑定。
+ *
+ * 测试夹具不再关心桶或钱包 Owner：物理数据按逻辑根隔离，绑定只需要坐标与
+ * 三件世代标识。
+ */
+export function withTestStorageBinding(
+  declaration: Omit<StorageNamespaceBinding, keyof typeof IN_MEMORY_TEST_BINDING | "appStorageName" | "verifiedAppIdentity">,
+): StorageNamespaceBinding {
+  return { ...declaration, ...IN_MEMORY_TEST_BINDING };
+}
 
 /**
  * 仅供测试夹具使用的 K-V 实现。
  *
- * 生产代码必须注入 OPFS/S3 绑定的 KeyValueStore；这里不连接浏览器
- * 持久化 API，避免测试为了构造 Vault 而重新引入旧存储后端。
+ * 生产代码必须注入本地钱包绑定的 KeyValueStore；这里不连接浏览器
+ * 持久化 API，避免测试为了构造 Vault 而重新引入底层存储后端。
  */
 export function createInMemoryKeyValueStore(
   binding: StorageNamespaceBinding,
@@ -23,7 +41,9 @@ export function createInMemoryKeyValueStore(
 ): KeyValueStore {
   const partitions = new Map<string, { revision: number; committedAt: number; values: Map<string, { value: unknown; updatedAt: number }> }>();
   let closed = false;
-  const provider = { bucketId: binding.bucketId } as StorageBucketProvider;
+  if (binding.authority === "third-party-app") {
+    throw new Error("In-memory K-V store does not model third-party-app storage");
+  }
   const clone = <T>(value: T): T => value instanceof Uint8Array ? new Uint8Array(value) as T : structuredClone(value);
   const semanticValue = (value: unknown): string => {
     if (value instanceof Uint8Array) return `bytes:${Array.from(value).join(",")}`;
@@ -78,12 +98,11 @@ export function createInMemoryKeyValueStore(
     return { revision, commitId, committedAt };
   };
   const store: KeyValueStore = {
-    bucketId: provider.bucketId,
-    bucketGeneration: binding.bucketGeneration,
-    ownerPublicKeyHex: binding.ownerPublicKeyHex ?? "",
+    walletGeneration: binding.walletGeneration,
+    sessionEpoch: binding.sessionEpoch,
+    runGeneration: binding.runGeneration,
     moduleId: binding.moduleId,
     purposeId: binding.purposeId,
-    scope: binding.scope,
     authority: binding.authority,
     model: "kv",
     schemaVersion: binding.schemaVersion,

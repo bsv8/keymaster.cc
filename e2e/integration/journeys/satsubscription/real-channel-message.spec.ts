@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { bytesToHex, publicKeyFromPrivateKey } from "bitcoin-libp2p/identity";
-import { readLocalCatalog } from "../../drivers/appDriver.js";
 import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
 import {
   enableSatSupplierReceiveAndDefault,
@@ -23,7 +22,7 @@ import {
   type SatSubscriptionLocalServer,
 } from "../../resources/satsubscription/localServerResource.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
-import { deleteRawLocalBucketObject, readRawLocalBucketObjects, type RawBucketObjectEntry } from "../../support/localBucketFormats.js";
+import { deleteRawWalletObject, readRawWalletObjects, type RawWalletObjectEntry } from "../../support/walletStorageFormats.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
 import { REAL_SATSUB_MESSAGE_SCENARIO } from "../../support/scenarioMetadata.js";
 import type { BrowserErrorEvidence } from "../../support/types.js";
@@ -53,8 +52,8 @@ function masterSeedHashHex(text: string): string {
   return createHash("sha256").update(Buffer.concat(digests)).digest("hex");
 }
 
-function messageObjects(entries: readonly RawBucketObjectEntry[], owner: string): RawBucketObjectEntry[] {
-  return entries.filter((entry) => entry.path.startsWith(`${owner}/messages/`));
+function messageObjects(entries: readonly RawWalletObjectEntry[]): RawWalletObjectEntry[] {
+  return entries.filter((entry) => entry.path.startsWith("messages/"));
 }
 
 interface RealUser {
@@ -71,7 +70,6 @@ interface RealUser {
 async function launchUser(input: {
   readonly password: string;
   readonly privateKeyHex: string;
-  readonly bucketLabel: string;
   readonly keyLabel: string;
 }): Promise<RealUser> {
   const browser = await chromium.launch();
@@ -79,7 +77,6 @@ async function launchUser(input: {
   const page = await context.newPage();
   const browserErrors = captureBrowserErrors(page, context);
   const ready = await initializeLocalUserWithImportedHexKey(page, {
-    bucketLabel: input.bucketLabel,
     keyLabel: input.keyLabel,
     password: input.password,
     privateKeyHex: input.privateKeyHex,
@@ -157,9 +154,9 @@ test(JOURNEY_ID + "：真实 SatSubscription 供应商的 Channel 私信", async
   try {
     await test.step("三个用户使用独立浏览器进程建立可恢复身份", async () => {
       const [userA, userB, userC] = await Promise.all([
-        launchUser({ password: USER_A_PASSWORD, privateKeyHex: USER_A_PRIVATE_KEY_HEX, bucketLabel: "真实 Sat 消息 A", keyLabel: "真实 Sat 消息 A Key" }),
-        launchUser({ password: USER_B_PASSWORD, privateKeyHex: USER_B_PRIVATE_KEY_HEX, bucketLabel: "真实 Sat 消息 B", keyLabel: "真实 Sat 消息 B Key" }),
-        launchUser({ password: USER_C_PASSWORD, privateKeyHex: USER_C_PRIVATE_KEY_HEX, bucketLabel: "真实 Sat 消息 C", keyLabel: "真实 Sat 消息 C Key" }),
+        launchUser({ password: USER_A_PASSWORD, privateKeyHex: USER_A_PRIVATE_KEY_HEX, keyLabel: "真实 Sat 消息 A Key" }),
+        launchUser({ password: USER_B_PASSWORD, privateKeyHex: USER_B_PRIVATE_KEY_HEX, keyLabel: "真实 Sat 消息 B Key" }),
+        launchUser({ password: USER_C_PASSWORD, privateKeyHex: USER_C_PRIVATE_KEY_HEX, keyLabel: "真实 Sat 消息 C Key" }),
       ]);
       users.push(userA, userB, userC);
       expect(new Set(users.map((user) => user.publicKeyHex)).size).toBe(3);
@@ -195,28 +192,28 @@ test(JOURNEY_ID + "：真实 SatSubscription 供应商的 Channel 私信", async
       await expectChatMessageBubble(userB!.page, MESSAGE_BODY, "peer");
     });
 
-    await test.step("本地桶按 formats 保存 raw 证据与时间索引", async () => {
+    await test.step("本地钱包按 formats 保存 raw 证据与时间索引", async () => {
       const [userA, userB] = users;
-      const aObjects = messageObjects(await readRawLocalBucketObjects(userA!.page), userA!.publicKeyHex);
-      const bObjects = messageObjects(await readRawLocalBucketObjects(userB!.page), userB!.publicKeyHex);
+      const aObjects = messageObjects(await readRawWalletObjects(userA!.page, "^messages/"));
+      const bObjects = messageObjects(await readRawWalletObjects(userB!.page, "^messages/"));
 
       // 出站：签名明文 raw + kind=sent 的时间索引。
-      const sentPath = `${userA!.publicKeyHex}/messages/${userB!.publicKeyHex}/sent/`;
+      const sentPath = `messages/${userB!.publicKeyHex}/sent/`;
       const sentRaw = aObjects.find((entry) => entry.path.startsWith(sentPath));
-      expect(sentRaw, "A 桶缺少 sent raw").toBeTruthy();
+      expect(sentRaw, "A 的本地钱包缺少 sent raw").toBeTruthy();
       const sentHash = sentRaw!.path.slice(sentPath.length).replace(/\.json$/u, "");
       expect(sentHash).toBe(masterSeedHashHex(sentRaw!.text));
       const sentPlaintext = JSON.parse(sentRaw!.text) as Record<string, unknown>;
       expect(sentPlaintext.protocol).toBe("bsv8.message.v1");
       expect(typeof sentPlaintext.message_id).toBe("string");
-      const sentIndex = aObjects.find((entry) => entry.path.startsWith(`${userA!.publicKeyHex}/messages/${userB!.publicKeyHex}/timeindex/`));
-      expect(sentIndex, "A 桶缺少 sent 时间索引").toBeTruthy();
+      const sentIndex = aObjects.find((entry) => entry.path.startsWith(`messages/${userB!.publicKeyHex}/timeindex/`));
+      expect(sentIndex, "A 的本地钱包缺少 sent 时间索引").toBeTruthy();
       expect(JSON.parse(sentIndex!.text)).toMatchObject({ format: "keymaster.message-index", version: 1, kind: "sent", rawHash: sentHash, messageId: sentPlaintext.message_id });
 
       // 入站：加密信封 raw + kind=received 的时间索引。
-      const receivedPath = `${userB!.publicKeyHex}/messages/${userA!.publicKeyHex}/received/`;
+      const receivedPath = `messages/${userA!.publicKeyHex}/received/`;
       const receivedRaw = bObjects.find((entry) => entry.path.startsWith(receivedPath));
-      expect(receivedRaw, "B 桶缺少 received raw").toBeTruthy();
+      expect(receivedRaw, "B 的本地钱包缺少 received raw").toBeTruthy();
       const receivedHash = receivedRaw!.path.slice(receivedPath.length).replace(/\.json$/u, "");
       expect(receivedHash).toBe(masterSeedHashHex(receivedRaw!.text));
       const envelope = JSON.parse(receivedRaw!.text) as Record<string, unknown>;
@@ -224,12 +221,12 @@ test(JOURNEY_ID + "：真实 SatSubscription 供应商的 Channel 私信", async
       expect(envelope.from_public_key).toBe(userA!.publicKeyHex);
       expect(typeof envelope.ciphertext).toBe("string");
       expect("protocol" in envelope).toBe(false);
-      const receivedIndex = bObjects.find((entry) => entry.path.startsWith(`${userB!.publicKeyHex}/messages/${userA!.publicKeyHex}/timeindex/`));
-      expect(receivedIndex, "B 桶缺少 received 时间索引").toBeTruthy();
+      const receivedIndex = bObjects.find((entry) => entry.path.startsWith(`messages/${userA!.publicKeyHex}/timeindex/`));
+      expect(receivedIndex, "B 的本地钱包缺少 received 时间索引").toBeTruthy();
       expect(JSON.parse(receivedIndex!.text)).toMatchObject({ kind: "received", rawHash: receivedHash, messageId: sentPlaintext.message_id });
 
-      // 第三方 C 的桶里不应出现任何 messages 证据目录。
-      const cObjects = messageObjects(await readRawLocalBucketObjects(users[2]!.page), users[2]!.publicKeyHex);
+      // 第三方 C 的钱包里不应出现任何 messages 证据目录。
+      const cObjects = messageObjects(await readRawWalletObjects(users[2]!.page, "^messages/"));
       expect(cObjects).toHaveLength(0);
     });
 
@@ -255,13 +252,10 @@ test(JOURNEY_ID + "：真实 SatSubscription 供应商的 Channel 私信", async
     await test.step("raw 缺失时索引保留并显示缺失", async () => {
       const userA = users[0]!;
       const userB = users[1]!;
-      const catalog = await readLocalCatalog(userB.page);
-      const bucketId = catalog?.selectedBucketId;
-      if (!bucketId) throw new Error("B 缺少选中桶 ID");
-      const objects = messageObjects(await readRawLocalBucketObjects(userB.page), userB.publicKeyHex);
-      const receivedRaw = objects.find((entry) => entry.path.startsWith(`${userB.publicKeyHex}/messages/${userA.publicKeyHex}/received/`));
-      expect(receivedRaw, "B 桶缺少 received raw").toBeTruthy();
-      await deleteRawLocalBucketObject(userB.page, bucketId, receivedRaw!.path);
+      const objects = messageObjects(await readRawWalletObjects(userB.page, "^messages/"));
+      const receivedRaw = objects.find((entry) => entry.path.startsWith(`messages/${userA.publicKeyHex}/received/`));
+      expect(receivedRaw, "B 的本地钱包缺少 received raw").toBeTruthy();
+      await deleteRawWalletObject(userB.page, receivedRaw!.path);
       await reloadAndAssertSameKey(userB.page, "");
       await unlockWalletInPlace(userB.page, userB.password);
       await expect(userB.page.locator('[data-message-detail="ok"]')).toBeVisible({ timeout: 30_000 });

@@ -3,7 +3,7 @@
 // 该存储必须绑定独立 `bitfs-journal` purpose。协议字节逐文件原样保存，不放入
 // MSFile 内容、设置或 App 用量文件；发送方只能发送 `prepareOutbound` 返回的副本。
 
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 import { parse, type Artifact, type WireKind } from "go-bitfs";
 
 const RECORD_FORMAT = "keymaster.bitfs-journal";
@@ -41,7 +41,7 @@ export interface BitfsJournal {
   getRecord(idHex: string): Promise<BitfsJournalRecord | undefined>;
 }
 
-export function createBitfsJournal(store: OwnerFileStore): BitfsJournal {
+export function createBitfsJournal(store: BorrowedOwnerFileStore): BitfsJournal {
   const recordPath = (id: string) => `records/${assertId(id)}.json`;
   const checkpointPath = (id: string) => `checkpoints/${assertId(id)}.bin`;
   const outboxPath = (id: string) => `outbox/${assertId(id)}.cbor`;
@@ -79,7 +79,7 @@ export function createBitfsJournal(store: OwnerFileStore): BitfsJournal {
       const existing = await readRecord(idHex);
       const prior = await store.get(outboxPath(idHex));
       if (prior && !equal(prior.bytes, exact)) throw new Error("BitFS outbox ID 已绑定不同 exact bytes");
-      if (!prior) await store.put(outboxPath(idHex), exact.slice(), { ifNoneMatch: "*" });
+      if (!prior) await store.put(outboxPath(idHex), exact.slice(), { ifNoneMatch: true });
       // 回读是 persist-before-send 的提交门禁，Provider 未可靠提交时不得返回。
       const committed = await store.get(outboxPath(idHex));
       if (!committed || !equal(committed.bytes, exact)) throw new Error("BitFS outbox 持久化校验失败");

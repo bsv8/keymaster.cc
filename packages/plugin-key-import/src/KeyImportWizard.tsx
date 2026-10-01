@@ -3,14 +3,16 @@
 //   业务流程固定为：
 //     1) 选择导入类型（importer）
 //     2) 输入 / 解析导入材料
-//     3) 解析成功后决定标签（以及 LockedShell 模式下的本机锁屏密码）
+//     3) 解析成功后决定标签（以及 LockedShell 模式下的 Key 密码）
 //     4) 回调 onComplete：draft 模式只交还内存草稿；首启模式直接落库
 //
-// 双模式：
-//   - `vaultPassword + onComplete(draft)`（draft 模式）：只解析并把材料草稿
-//     交还宿主；真正的持久化由宿主事务完成（初始化 / 新建桶 / 桶内导入共用）。
-//   - 无 `vaultPassword`（首启模式）：解析后用 `createVaultWithImportedKey`
-//     一次性建 Vault + 落首把 Key + 切 active。
+// 单 Key 本地存储（docs/存储.md）之后只剩一种提交语义：
+//   - `onComplete(draft)`（draft 模式）：只解析并把材料草稿交还宿主；真正的
+//     持久化由宿主的一次性 `vault.initialize()` 事务完成。
+//   - 没有 draft 回调（自持模式）：解析后直接用 `vault.initialize()` 原子
+//     提交唯一 Key。初始化要么整体成功，要么整体不落盘——不存在"Key 已保存
+//     但没切成 active"这种中间状态，因此不再有
+//     `KeyPersistedButActivationFailedError` 分支。
 //
 // 设计缘由：
 //   - 解析失败时导入源密码草稿必须保留以便重试；解析成功时才转存为
@@ -27,7 +29,6 @@ import {
 } from "@keymaster/runtime";
 import { useOptionalCapability } from "webloom-framework/react";
 import {
-  KeyPersistedButActivationFailedError,
   VAULT_SERVICE_CAPABILITY,
   type KeyImportMaterial
 } from "@keymaster/contracts";
@@ -230,7 +231,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
       return;
     }
 
-    // 首启模式：根据 useSamePassword 显式选择最终的 vaultPassword。
+    // 自持模式：根据 useSamePassword 显式选择最终的 Key 密码。
     let finalVaultPassword: string;
     if (vaultPassword) {
       finalVaultPassword = vaultPassword;
@@ -284,24 +285,22 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
     dispatch({ type: "import", action: { type: "parse-start" } });
     try {
       const parsed = state.importState.result;
-      await vault.createVaultWithImportedKey({
-        vaultPassword: finalVaultPassword,
-        key: {
+      await vault.initialize({
+        transactionId: `key-import-${Date.now()}`,
+        firstKey: {
+          kind: "import",
           label: state.label.trim() || `key-${Date.now()}`,
           material: parsed.material,
           format: parsed.detectedFormat,
           capabilities: ["p2pkh"],
-          source: importer?.id
+          ...(importer?.id === undefined ? {} : { source: importer.id }),
+          password: finalVaultPassword
         }
       });
-      // 成功：vault 内部会切到 unlocked，App 卸载 LockedShell。
+      // 成功：Coordinator 已经装好运行绑定，App 卸载 LockedShell。
       onComplete?.();
       dispatch({ type: "reset" });
     } catch (err) {
-      if (err instanceof KeyPersistedButActivationFailedError) {
-        dispatch({ type: "reset" });
-        return;
-      }
       dispatch({
         type: "import",
         action: {
@@ -593,7 +592,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
             defaultValue: "导入私钥：3. 确认解析结果"
           })}
           description={t("shell.import.wizard.confirmKeyDesc", {
-            defaultValue: isDraftMode ? "确认解析结果并填写这把 Key 的标签名称。" : "解析成功后，确认标签后继续设置本机系统锁屏密码。"
+            defaultValue: isDraftMode ? "确认解析结果并填写这把 Key 的标签名称。" : "解析成功后，确认标签后继续设置 Key 密码。"
           })}
         />
         <section className="first-time-import__confirm">
@@ -645,7 +644,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
       />
       <PageHeader
         title={t("shell.import.wizard.setPasswordTitle", {
-          defaultValue: "导入私钥：4. 设置本机系统锁屏密码"
+          defaultValue: "导入私钥：4. 设置 Key 密码"
         })}
         description={t("shell.import.wizard.setPasswordDesc", {
           defaultValue:
@@ -667,7 +666,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
             />
             <span className="first-time-import__reuse-toggle-label">
               {t("shell.import.wizard.useSamePassword", {
-                defaultValue: "使用导入源密码作为本机系统锁屏密码"
+                defaultValue: "使用导入源密码作为 Key 密码"
               })}
             </span>
           </label>
@@ -678,7 +677,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
             <p className="first-time-import__reuse-headline">
               {t("shell.import.wizard.reuseNotice", {
                 defaultValue:
-                  "将复用第 2 步已输入的导入源密码，Vault 将使用该密码创建并解锁。"
+                  "将复用第 2 步已输入的导入源密码，钱包将使用该密码创建并解锁。"
               })}
             </p>
             <p className="first-time-import__reuse-meta">
@@ -698,7 +697,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
           <>
             <p className="first-time-import__new-password-intro">
               {t("shell.import.wizard.newPasswordTitle", {
-                defaultValue: "设置新的本机系统锁屏密码"
+                defaultValue: "设置新的 Key 密码"
               })}
             </p>
             <TextInput
@@ -746,7 +745,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
                 state.vaultPasswordDraft !== state.vaultPasswordConfirmDraft
           }
         >
-          {t("shell.import.wizard.confirm", { defaultValue: "创建 Vault 并导入" })}
+          {t("shell.import.wizard.confirm", { defaultValue: "创建并导入" })}
         </Button>
         <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
           {t("common.action.back", { defaultValue: "返回" })}

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { readSessionPublicKey } from "../../drivers/appDriver.js";
+import { readWalletPublicKey } from "../../drivers/appDriver.js";
 import { initializeLocalUser } from "../../drivers/initialSetupDriver.js";
 import {
   addMsFileSupplier,
@@ -79,7 +79,6 @@ test(JOURNEY_ID + "：真实 msfile-nas 的 Seed 文件获取与下载", async (
 
     await test.step("用户建立可恢复的 Local 身份", async () => {
       const ready = await initializeLocalUser(page, {
-        bucketLabel: "真实 MSFile NAS",
         keyLabel: "真实 MSFile NAS Key",
         password: USER_PASSWORD,
       });
@@ -148,7 +147,7 @@ test(JOURNEY_ID + "：真实 msfile-nas 的 Seed 文件获取与下载", async (
     await test.step("刷新并重新解锁后同一身份仍能取得同一文件", async () => {
       await reloadAndAssertSameKey(page, "");
       await unlockWalletInPlace(page, USER_PASSWORD);
-      expect(await readSessionPublicKey(page)).toBe(publicKeyHex);
+      expect(await readWalletPublicKey(page)).toBe(publicKeyHex);
       const text = nas.fileByFilename(MSFILE_NAS_TEXT_FILENAME);
       await expectMsFileTextPreview(page, text.seedHashHex, MSFILE_NAS_TEXT_CONTENT);
     });

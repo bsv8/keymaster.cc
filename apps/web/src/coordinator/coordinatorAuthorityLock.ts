@@ -49,19 +49,23 @@ function nativeWebLocks(): NativeWebLockManager | undefined {
  * Node/Vitest 没有 SharedWorker 的 Navigator；测试只在显式 test build 中
  * 使用这个进程内替身，生产/预览构建绝不把它当作跨 Worker 保证。
  */
-let testAuthorityLockHeld = false;
+// Vitest 每个测试文件跑在自己的 worker 线程里，模块实例不共享；这里按
+// globalThis 记账，这样同一文件内的并发 reset 也会看到彼此持有的锁。
+const TEST_AUTHORITY_LOCK_STATE = globalThis as typeof globalThis & {
+  __keymasterTestAuthorityLockHeld?: boolean;
+};
 
 async function acquireTestAuthorityLock(): Promise<CoordinatorAuthorityLock> {
-  if (testAuthorityLockHeld) {
+  if (TEST_AUTHORITY_LOCK_STATE.__keymasterTestAuthorityLockHeld) {
     throw authorityError("upgrade.authority_conflict", "Another Coordinator authority already owns the test lock");
   }
-  testAuthorityLockHeld = true;
+  TEST_AUTHORITY_LOCK_STATE.__keymasterTestAuthorityLockHeld = true;
   let released = false;
   return {
     release: async () => {
       if (released) return;
       released = true;
-      testAuthorityLockHeld = false;
+      TEST_AUTHORITY_LOCK_STATE.__keymasterTestAuthorityLockHeld = false;
     },
   };
 }

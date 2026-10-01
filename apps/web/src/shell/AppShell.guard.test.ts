@@ -1,227 +1,115 @@
 // apps/web/src/shell/AppShell.guard.test.ts
-// 验证硬切换 005 收尾 + 反馈修复后的 AppShell 壳层守卫：
-//   - normal：vault 未解锁 或 activePublicKeyHex 存在。
-//   - empty-vault-recovery：activePublicKeyHex 缺失 + listKeys() 长度 0
-//     + 触发 onEmpty 回调。
-//   - needs-repair：activePublicKeyHex 缺失 + listKeys() 返回 failed /
-//     uninitialized key 列表（**不**触发 onEmpty）。
-//   - diagnostic：activePublicKeyHex 缺失 + listKeys() 抛错（**不**触发
-//     onEmpty，避免把"读失败"误判为 0 key 触发空 Vault 收敛）。
+// 单 Key 本地存储（docs/存储.md）之后的 AppShell 壳层守卫。
 //
-// 抽出 evaluateShellGuard 纯函数后可独立单测，不依赖 React runtime。
+// 守卫要回答的问题只有一个：已经 unlocked 的钱包，唯一 Key 的公开身份
+// 能不能读出来。
+//   - normal：读得到。
+//   - needs-repair：已解锁却读不到身份（状态不一致）。**不**做任何自动收敛
+//     ——系统里只有一把 Key，没有「切到另一把」的退路，也不能把钱包重置回
+//     uninitialized 来掩盖问题。
+//   - diagnostic：读取抛错。fail closed，绝不把「读失败」当成「没有 Key」。
 //
-// 关键不变量（硬切换 005 反馈修复）：
-//   - listKeys() 抛错**绝不**走 empty-vault-recovery 路径。
-//   - listKeys() 返回失败 key 列表**不**走 empty-vault-recovery。
-//   - empty-vault-recovery 路径下必须**实际**调用 onEmpty 副作用。
-//   - 修复态只阻断普通业务页并显示恢复提示（Key 管理页已删除）。
-//     锁定该字符串以防被改坏。
+// 判定逻辑抽在 evaluateShellGuard 纯函数里，可以脱离 React runtime 单测。
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { areShellGuardStatesEqual, evaluateShellGuard } from "./AppShell.js";
-import type { KeyIdentity } from "@keymaster/contracts";
 
-
-const READY_KEY: KeyIdentity = {
-  publicKeyHex: "02".padEnd(66, "1"),
-  label: "ready",
-  capabilities: ["p2pkh"],
-  createdAt: "2024-01-01T00:00:00.000Z"
-};
-
-const FAILED_KEY: KeyIdentity = {
-  publicKeyHex: "02".padEnd(66, "2"),
-  label: "failed",
-  capabilities: ["p2pkh"],
-  createdAt: "2024-01-01T00:00:00.000Z"
-};
-
-const UNINITIALIZED_KEY: KeyIdentity = {
-  publicKeyHex: "02".padEnd(66, "3"),
-  label: "uninit",
-  capabilities: ["p2pkh"],
-  createdAt: "2024-01-01T00:00:00.000Z"
-};
-
-beforeEach(() => {
-  // 静默 evaluateShellGuard 内部的 console.error；测试只关心判定结果。
-  vi.spyOn(console, "error").mockImplementation(() => undefined);
-});
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
+const READY_KEY = { publicKeyHex: "02".padEnd(66, "1") };
 
 describe("evaluateShellGuard: normal 状态", () => {
-  it("相同 normal 状态视为相等，避免重复 setState", () => {
-    expect(areShellGuardStatesEqual({ kind: "normal" }, { kind: "normal" })).toBe(true);
-  });
   it("vault.status 不是 unlocked 时直接 normal", async () => {
-    const result = await evaluateShellGuard({
+    expect(await evaluateShellGuard({
       vaultStatus: "locked",
-      active: { activePublicKeyHex: "x" },
-      listKeys: async () => [READY_KEY]
-    });
-    expect(result.state).toEqual({ kind: "normal" });
-  });
-
-  it("activePublicKeyHex 存在时直接 normal", async () => {
-    const result = await evaluateShellGuard({
-      vaultStatus: "unlocked",
-      active: { activePublicKeyHex: "h".repeat(64) },
-      listKeys: async () => []
-    });
-    expect(result.state).toEqual({ kind: "normal" });
+      getCurrentKey: async () => undefined
+    })).toEqual({ kind: "normal" });
   });
 
   it("vault.status = booting 时也直接 normal", async () => {
-    const result = await evaluateShellGuard({
+    expect(await evaluateShellGuard({
       vaultStatus: "booting",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => [READY_KEY]
-    });
-    expect(result.state).toEqual({ kind: "normal" });
-  });
-});
-
-describe("ShellGuard 状态语义比较", () => {
-  const key = {
-    publicKeyHex: "a",
-    label: "A",
-    capabilities: ["p2pkh"],
-    createdAt: "2026-01-01"
-  };
-
-  it("相同 needs-repair key 内容视为相等，不依赖对象引用", () => {
-    expect(areShellGuardStatesEqual(
-      { kind: "needs-repair", keys: [key] },
-      { kind: "needs-repair", keys: [{ ...key, capabilities: ["p2pkh"] }] }
-    )).toBe(true);
+      getCurrentKey: async () => undefined
+    })).toEqual({ kind: "normal" });
   });
 
-  it("key 列表内容变化时视为不相等", () => {
-    expect(areShellGuardStatesEqual(
-      { kind: "needs-repair", keys: [key] },
-      { kind: "needs-repair", keys: [{ ...key, label: "B" }] }
-    )).toBe(false);
+  it("已解锁且能读到唯一 Key 的身份时 normal", async () => {
+    expect(await evaluateShellGuard({
+      vaultStatus: "unlocked",
+      getCurrentKey: async () => READY_KEY
+    })).toEqual({ kind: "normal" });
   });
 });
 
 describe("evaluateShellGuard: needs-repair 状态", () => {
-  it("activePublicKeyHex 缺失 + listKeys 返回 failed key 列表", async () => {
-    const onEmpty = vi.fn();
-    const result = await evaluateShellGuard({
+  it("已解锁但读不到身份时进入 needs-repair，并带上投影公钥用于诊断", async () => {
+    expect(await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => [FAILED_KEY],
-      onEmpty
-    });
-    expect(result.state.kind).toBe("needs-repair");
-    if (result.state.kind === "needs-repair") {
-      expect(result.state.keys).toEqual([FAILED_KEY]);
-    }
-    // **关键**：有 key 时**不**触发 onEmpty（不能误触发空 Vault 收敛）。
-    expect(onEmpty).not.toHaveBeenCalled();
+      getCurrentKey: async () => undefined,
+      projectedPublicKeyHex: READY_KEY.publicKeyHex
+    })).toEqual({ kind: "needs-repair", publicKeyHex: READY_KEY.publicKeyHex });
   });
 
-  it("activePublicKeyHex 缺失 + listKeys 返回 uninitialized key 列表", async () => {
-    const result = await evaluateShellGuard({
-      vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => [UNINITIALIZED_KEY]
-    });
-    expect(result.state.kind).toBe("needs-repair");
-    if (result.state.kind === "needs-repair") {
-      expect(result.state.keys).toEqual([UNINITIALIZED_KEY]);
-    }
+  it("未解锁时读不到身份也不进入 needs-repair", async () => {
+    expect(await evaluateShellGuard({
+      vaultStatus: "uninitialized",
+      getCurrentKey: async () => undefined
+    })).toEqual({ kind: "normal" });
   });
 
-  it("activePublicKeyHex 缺失 + listKeys 返回 mixed 列表", async () => {
-    const result = await evaluateShellGuard({
+  it("读不到身份时没有「0 key 自动收敛」分支", async () => {
+    // 关键不变量：needs-repair 不触发任何副作用。单 Key 钱包没有「回未初始化」
+    // 这种退路——那要求重建钱包，会破坏用户本地数据。
+    const state = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => [FAILED_KEY, UNINITIALIZED_KEY, READY_KEY]
+      getCurrentKey: async () => undefined
     });
-    expect(result.state.kind).toBe("needs-repair");
+    expect(state.kind).toBe("needs-repair");
   });
 });
 
-describe("evaluateShellGuard: empty-vault-recovery 状态", () => {
-  it("activePublicKeyHex 缺失 + listKeys 返回 0 把", async () => {
-    const onEmpty = vi.fn();
-    const result = await evaluateShellGuard({
+describe("evaluateShellGuard: diagnostic 状态", () => {
+  it("读取抛错时 fail closed 成 diagnostic，不当成「没有 Key」", async () => {
+    const state = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => [],
-      onEmpty
-    });
-    expect(result.state).toEqual({ kind: "empty-vault-recovery" });
-    // **关键**：listKeys 返回 0 时必须**实际**调 onEmpty（recoverEmptyVault
-    // 收尾入口），recorderError 必须为 false。
-    expect(onEmpty).toHaveBeenCalledTimes(1);
-    expect(result.recorderError).toBe(false);
-  });
-
-  it("onEmpty 抛错时 recorderError 仍能让守卫结果是 empty-vault-recovery", async () => {
-    // 关键：副作用抛错不能让状态被错误归类。
-    const result = await evaluateShellGuard({
-      vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => [],
-      onEmpty: async () => {
-        throw new Error("recover failed");
+      getCurrentKey: async () => {
+        throw new Error("indexedDB read failed");
       }
     });
-    expect(result.state).toEqual({ kind: "empty-vault-recovery" });
-    expect(result.recorderError).toBe(true);
+    expect(state.kind).toBe("diagnostic");
+    if (state.kind === "diagnostic") expect(state.error).toBe("indexedDB read failed");
   });
 
-  it("onEmpty 不传时仍然返回 empty-vault-recovery", async () => {
-    // 关键：onEmpty 是可选回调，缺省不能导致状态变成别的。
-    const result = await evaluateShellGuard({
+  it("抛非 Error 异常时也能正确归类为 diagnostic", async () => {
+    const state = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => []
-    });
-    expect(result.state).toEqual({ kind: "empty-vault-recovery" });
-  });
-});
-
-describe("evaluateShellGuard: diagnostic 状态（硬切换 005 反馈修复）", () => {
-  it("listKeys 抛错时**绝不**走 empty-vault-recovery", async () => {
-    // 硬切换 005 反馈修复 #2：listKeys 抛错必须 fail-closed 成
-    // diagnostic，**不**误判为 0 key 触发空 Vault 收敛。误判会
-    // 走到 vault.recoverEmptyVaultToUninitialized() 把 meta 清掉，
-    // 把"读失败"变成"meta 残留"——会丢失用户数据。
-    const onEmpty = vi.fn();
-    const result = await evaluateShellGuard({
-      vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => {
-        throw new Error("indexedDB read failed");
-      },
-      onEmpty
-    });
-    expect(result.state.kind).toBe("diagnostic");
-    if (result.state.kind === "diagnostic") {
-      expect(result.state.error).toBe("indexedDB read failed");
-    }
-    // 关键：onEmpty 必须**不**被调用。
-    expect(onEmpty).not.toHaveBeenCalled();
-  });
-
-  it("listKeys 抛非 Error 异常时也能正确归类为 diagnostic", async () => {
-    const result = await evaluateShellGuard({
-      vaultStatus: "unlocked",
-      active: { activePublicKeyHex: undefined },
-      listKeys: async () => {
-        // 故意抛出非 Error 类型的异常。
+      getCurrentKey: async () => {
         throw "string error";
       }
     });
-    expect(result.state.kind).toBe("diagnostic");
-    if (result.state.kind === "diagnostic") {
-      expect(result.state.error).toBe("string error");
-    }
+    expect(state.kind).toBe("diagnostic");
+    if (state.kind === "diagnostic") expect(state.error).toBe("string error");
+  });
+});
+
+describe("ShellGuard 状态语义比较", () => {
+  it("相同 normal 视为相等，避免重复 setState", () => {
+    expect(areShellGuardStatesEqual({ kind: "normal" }, { kind: "normal" })).toBe(true);
+  });
+
+  it("相同 needs-repair 投影视为相等，不依赖对象引用", () => {
+    expect(areShellGuardStatesEqual(
+      { kind: "needs-repair", publicKeyHex: "02ab" },
+      { kind: "needs-repair", publicKeyHex: "02ab" }
+    )).toBe(true);
+  });
+
+  it("投影公钥变化时视为不相等", () => {
+    expect(areShellGuardStatesEqual(
+      { kind: "needs-repair", publicKeyHex: "02ab" },
+      { kind: "needs-repair", publicKeyHex: "02cd" }
+    )).toBe(false);
+  });
+
+  it("kind 不同时视为不相等", () => {
+    expect(areShellGuardStatesEqual({ kind: "normal" }, { kind: "diagnostic", error: "x" })).toBe(false);
   });
 });

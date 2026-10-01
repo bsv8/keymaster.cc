@@ -6,5 +6,14 @@
 // narrower contracts module) so a development bundler cannot pull the Window
 // module graph into the Worker.
 
-export { createInMemoryKeyValueStore } from "./inMemoryKeyValueStore.js";
+export {
+  createInMemoryKeyValueStore,
+  withTestStorageBinding,
+  IN_MEMORY_TEST_BINDING,
+} from "./inMemoryKeyValueStore.js";
 export { createKeyValueSettingsStore, type KeyValueSettingsStore } from "../keyValueSettingsStore.js";
+export {
+  createInMemoryModuleFileStore,
+  type InMemoryModuleFileStore,
+  type InMemoryModuleFileStoreOptions,
+} from "./inMemoryModuleFileStore.js";

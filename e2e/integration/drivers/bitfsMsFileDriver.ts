@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import { expect, type Download, type Page } from "@playwright/test";
 import { navigateToBusinessPage } from "./navigationDriver.js";
 import { openMsFileFilesPage, openMsFileSettingsPage } from "./msfileDriver.js";
-import { readRawLocalBucketObjects } from "../support/localBucketFormats.js";
+import { readRawWalletObjects } from "../support/walletStorageFormats.js";
 
 export interface BitfsSellerSettingsInput {
   readonly seedPriceSatoshis: string;
@@ -141,7 +141,7 @@ export async function waitForBitfsPurchaseCompleted(page: Page, seedHashHex: str
     }
     if (Date.now() >= nextDiagnosticAt) {
       await assertBitfsDiagnosticsHealthy(page);
-      const entries = await readRawLocalBucketObjects(page, "/bitfs-journal/sessions/.*\\.json$");
+      const entries = await readRawWalletObjects(page, "^msfiles/bitfs-journal/sessions/.*\\.json$");
       const summaries = entries.map(entry => JSON.parse(entry.text) as {
         phase: string; pendingTxid?: string; evidence: string[];
       }).map(session => ({ phase: session.phase, pendingTxid: session.pendingTxid, evidenceCount: session.evidence.length }));
@@ -158,9 +158,9 @@ export async function waitForBitfsPurchaseCompleted(page: Page, seedHashHex: str
 }
 
 export async function assertBitfsFundingPoolClosed(page: Page, seedHashHex: string): Promise<void> {
-  const entries = await readRawLocalBucketObjects(page, "/funding/accounts/.*\\.json$");
-  const accountEntry = entries.find((entry) => entry.path.endsWith(`/funding/accounts/test/${seedHashHex}.json`));
-  if (!accountEntry) throw new Error("买方本地桶缺少 testnet BitFS 专款账本");
+  const entries = await readRawWalletObjects(page, "^msfiles/bitfs-journal/funding/accounts/.*\\.json$");
+  const accountEntry = entries.find((entry) => entry.path.endsWith(`/test/${seedHashHex}.json`));
+  if (!accountEntry) throw new Error("买方本地钱包缺少 testnet BitFS 专款账本");
   const account = JSON.parse(accountEntry.text) as {
     network?: unknown;
     pools?: Array<{ state?: unknown }>;
@@ -187,8 +187,8 @@ export async function verifyDownloadedMsFile(page: Page, seedHashHex: string): P
 
 /** Verify durable protocol evidence independently of the purchase button. */
 export async function assertBitfsPurchaseEvidence(page: Page, seedHashHex: string): Promise<void> {
-  const entries = await readRawLocalBucketObjects(page, "/bitfs-journal/sessions/.*\\.json$|/bitfs-e2e-diagnostics/");
-  const sessions = entries.filter(entry => entry.path.includes("/bitfs-journal/sessions/"))
+  const entries = await readRawWalletObjects(page, "^msfiles/(?:bitfs-journal/sessions/.*\\.json|bitfs-e2e-diagnostics/)");
+  const sessions = entries.filter(entry => entry.path.includes("msfiles/bitfs-journal/sessions/"))
     .map(entry => JSON.parse(entry.text) as { role: string; seedHashHex: string; phase: string; evidence: string[] })
     .filter(session => session.role === "buyer" && session.seedHashHex === seedHashHex);
   expect(sessions.length, "purchase must have a durable buyer session").toBeGreaterThan(0);
@@ -207,8 +207,8 @@ export async function assertBitfsPurchaseEvidence(page: Page, seedHashHex: strin
 
 /** 用持久化付款轮数验证批量调度，而非仅凭设置界面的显示值。 */
 export async function assertBitfsPurchaseBatching(page: Page, seedHashHex: string, blocksPerBatch: number): Promise<{ blockCount: number; paymentRounds: number }> {
-  const entries = await readRawLocalBucketObjects(page, `/bitfs-journal/sessions/.*\\.json$|/bitfs-journal/download-plans/${seedHashHex}\\.json$`);
-  const planEntry = entries.find((entry) => entry.path.endsWith(`/bitfs-journal/download-plans/${seedHashHex}.json`));
+  const entries = await readRawWalletObjects(page, `^msfiles/bitfs-journal/(?:sessions/.*\\.json|download-plans/${seedHashHex}\\.json$)`);
+  const planEntry = entries.find((entry) => entry.path.endsWith(`msfiles/bitfs-journal/download-plans/${seedHashHex}.json`));
   expect(planEntry, "买方必须保存同 Seed 下载计划").toBeDefined();
   const plan = JSON.parse(planEntry!.text) as {
     format: string; seedHashHex: string; blockHashesHex?: string[];
@@ -219,7 +219,7 @@ export async function assertBitfsPurchaseBatching(page: Page, seedHashHex: strin
   const blockCount = plan.blockHashesHex?.length ?? 0;
   expect(blockCount, "集成测试文件至少要有两个完整批次").toBeGreaterThan(blocksPerBatch);
   expect(Object.values(plan.blocks).filter((block) => block.state === "completed")).toHaveLength(blockCount);
-  const sessions = entries.filter((entry) => entry.path.includes("/bitfs-journal/sessions/"))
+  const sessions = entries.filter((entry) => entry.path.includes("msfiles/bitfs-journal/sessions/"))
     .map((entry) => JSON.parse(entry.text) as { role: string; seedHashHex: string; evidence: string[] })
     .filter((session) => session.role === "buyer" && session.seedHashHex === seedHashHex);
   const count = (prefix: string) => sessions.reduce((total, session) =>
@@ -233,7 +233,7 @@ export async function assertBitfsPurchaseBatching(page: Page, seedHashHex: strin
 }
 
 export async function assertBitfsDiagnosticsHealthy(page: Page): Promise<void> {
-  const entries = await readRawLocalBucketObjects(page, "/bitfs-e2e-diagnostics/");
+  const entries = await readRawWalletObjects(page, "^msfiles/bitfs-e2e-diagnostics/");
   const errors = entries.filter(entry => /(?:error|failure)\.json$/u.test(entry.path));
   expect(errors.map(entry => ({ path: entry.path, detail: entry.text })), "BitFS must have no runtime or protocol failures").toEqual([]);
 }

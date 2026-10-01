@@ -22,6 +22,8 @@ import type { RouteRegistry } from "./registries/routeRegistry.js";
 import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 import { createInMemoryKeyValueStore } from "./storage/inMemoryKeyValueStore.js";
+import { withTestStorageBinding } from "./storage/inMemoryKeyValueStore.js";
+import { createInMemoryModuleFileStore } from "./storage/inMemoryModuleFileStore.js";
 import { createPluginIntentController, createRuntimeUnitImplementationRegistry, StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
 import {
   KEYSPACE_SERVICE_CAPABILITY,
@@ -62,7 +64,7 @@ const TEST_RUNTIME_IDENTITY = {
   vaultStatus: "unlocked" as const,
   ownerPublicKeyHex: "02" + "11".repeat(32),
   sessionEpoch: "test-session:1",
-  bucketGeneration: 1,
+  walletGeneration: "test-wallet:1",
 };
 
 function makeA(): PluginManifest {
@@ -135,31 +137,20 @@ function makeC(dependsOn: readonly LocalCapability<unknown>[] = []): PluginManif
 describe("createPluginHost - runtime resource binding", () => {
   it("closes an owner store that finishes opening after the plugin was revoked", async () => {
     const owner = "02" + "11".repeat(32);
-    const storageDeclaration = {
-      moduleId: "late-owner-store",
-      purposeId: "settings",
-      scope: "owner",
-      authority: "third-party-app",
-      model: "kv",
-      schemaVersion: 1,
-    } as const;
+    // 借用一个已登记的内置模块坐标：内置插件不能自报未登记的坐标。
+    const storageDeclaration = CENTRAL_STORAGE_DECLARATIONS.bsvPrice;
     let resolveOpen!: (store: KeyValueStore) => void;
     const openPromise = new Promise<KeyValueStore>((resolve) => { resolveOpen = resolve; });
     const authority: StorageBindingAuthority = {
       getActivePublicKeyHex: () => owner,
-      openOwnerFileStore: async () => ({
-        list: async () => ({ files: [] }),
-        get: async () => undefined,
-        put: async () => ({}),
-        delete: async () => undefined,
-      }),
+      openOwnerFileStore: async () => createInMemoryModuleFileStore(),
       openOwnerAppStore: async () => openPromise,
-      openPlatformStore: async () => createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, bucketId: "bucket", bucketGeneration: 1 }),
-      deleteOwnerStorage: async () => undefined,
+      openPlatformStore: async () => createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings)),
+      clearStorageRoot: async () => undefined,
     };
     const host = createPluginHost({ disableConfigPersistence: true, storageBindingAuthority: authority });
     const plugin: PluginManifest = {
-      id: "late-owner-store",
+      id: "bsv-price",
       name: "Late owner store",
       storage: storageDeclaration,
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
@@ -172,12 +163,7 @@ describe("createPluginHost - runtime resource binding", () => {
     await Promise.resolve();
     expect(host.state(plugin.id).kind).toBe("starting");
     const disabling = host.disable(plugin.id);
-    const rawStore = createInMemoryKeyValueStore({
-      ...storageDeclaration,
-      bucketId: "bucket",
-      bucketGeneration: 1,
-      ownerPublicKeyHex: owner,
-    });
+    const rawStore = createInMemoryKeyValueStore(withTestStorageBinding(storageDeclaration));
     let closed = false;
     const store: KeyValueStore = { ...rawStore, close: () => { closed = true; rawStore.close(); } };
     resolveOpen(store);
@@ -682,7 +668,7 @@ describe("createPluginHost - lifecycle", () => {
       lifecycleIdentityForPlugin: () => ({
         ownerPublicKeyHex: "02" + "22".repeat(32),
         sessionEpoch: "owner-session:1",
-        bucketGeneration: 7,
+        walletGeneration: "owner-wallet:7",
         authorizationRevision: 3,
       }),
     });
@@ -699,7 +685,7 @@ describe("createPluginHost - lifecycle", () => {
         expect(ctx.permissionLease.binding.attributes).toMatchObject({
           ownerPublicKeyHex: "02" + "22".repeat(32),
           sessionEpoch: "owner-session:1",
-          bucketGeneration: 7,
+          walletGeneration: "owner-wallet:7",
           authorizationRevision: 3,
         });
       },
@@ -767,10 +753,10 @@ describe("createPluginHost - lifecycle", () => {
       disableConfigPersistence: true,
       runtime: "window-main",
       initialRuntimeIdentity: {
-        vaultStatus: "unlocked",
-        ownerPublicKeyHex: ownerA,
-        sessionEpoch: "session:a:1",
-        bucketGeneration: 1,
+      vaultStatus: "unlocked",
+      ownerPublicKeyHex: ownerA,
+      sessionEpoch: "session:a:1",
+      walletGeneration: "wallet:a:1",
       },
     });
     await host.register({
@@ -804,7 +790,7 @@ describe("createPluginHost - lifecycle", () => {
     const lockTransition = host.transitionRuntimeIdentity({
       vaultStatus: "locked",
       sessionEpoch: "session:a:2",
-      bucketGeneration: 1,
+      walletGeneration: "wallet:a:1",
     });
     // 同步撤权发生在 transition API 返回前，不等待 teardown。
     expect(host.routes.byId("owner-session-plugin.route")).toBeUndefined();
@@ -820,7 +806,7 @@ describe("createPluginHost - lifecycle", () => {
       vaultStatus: "unlocked",
       ownerPublicKeyHex: ownerA,
       sessionEpoch: "session:a:3",
-      bucketGeneration: 1,
+      walletGeneration: "wallet:a:1",
     });
     const secondInstanceId = host.scope("owner-session-plugin")?.identity.instanceId;
     expect(host.state("owner-session-plugin").kind).toBe("enabled");
@@ -831,7 +817,7 @@ describe("createPluginHost - lifecycle", () => {
       vaultStatus: "unlocked",
       ownerPublicKeyHex: ownerB,
       sessionEpoch: "session:b:1",
-      bucketGeneration: 1,
+      walletGeneration: "wallet:a:1",
     });
     const thirdInstanceId = host.scope("owner-session-plugin")?.identity.instanceId;
     expect(thirdInstanceId).not.toBe(secondInstanceId);
@@ -841,7 +827,7 @@ describe("createPluginHost - lifecycle", () => {
       vaultStatus: "unlocked",
       ownerPublicKeyHex: ownerA,
       sessionEpoch: "session:a:4",
-      bucketGeneration: 1,
+      walletGeneration: "wallet:a:1",
     });
     const fourthInstanceId = host.scope("owner-session-plugin")?.identity.instanceId;
     expect(fourthInstanceId).not.toBe(thirdInstanceId);
@@ -862,7 +848,7 @@ describe("createPluginHost - lifecycle", () => {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: ownerA,
         sessionEpoch: "session:init:1",
-        bucketGeneration: 1,
+        walletGeneration: "wallet:init:1",
       },
     });
     const instances: string[] = [];
@@ -899,7 +885,7 @@ describe("createPluginHost - lifecycle", () => {
     const locking = host.transitionRuntimeIdentity({
       vaultStatus: "locked",
       sessionEpoch: "session:init:2",
-      bucketGeneration: 1,
+      walletGeneration: "wallet:init:1",
     });
     // lock 的同步阶段先撤销所有本地入口，再等待 setup 完成。
     expect(host.routes.byId("owner-session-starting.route")).toBeUndefined();
@@ -917,7 +903,7 @@ describe("createPluginHost - lifecycle", () => {
       vaultStatus: "unlocked",
       ownerPublicKeyHex: ownerA,
       sessionEpoch: "session:init:3",
-      bucketGeneration: 1,
+      walletGeneration: "wallet:init:1",
     });
     expect(host.state("owner-session-starting").kind).toBe("enabled");
     expect(instances).toHaveLength(2);

@@ -63,8 +63,6 @@ interface SettingsUser {
 }
 
 function clearSecrets(config: LoadedE2EConfig | undefined): void {
-  config?.s3.secretAccessKey.clear();
-  config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
   config?.testnet.trackingKeyPrivateKeyHex.clear();
@@ -184,7 +182,6 @@ test(JOURNEY_ID + "：SS server 设置页 testnet 小额充值只查余额与回
       // 充值与回收都要弹 window.confirm；无监听时 Playwright 默认取消，必须先自动确认。
       page.on("dialog", (dialog) => void dialog.accept());
       const ready = await initializeLocalUserWithImportedHexKey(page, {
-        bucketLabel: "SS 设置页桶",
         keyLabel: "SS 设置页 Key",
         password: PASSWORD,
         privateKeyHex: oneTimePrivateKeyHex,

@@ -26,33 +26,33 @@ import { contactsResources } from "./manifest.js";
 const INITIAL_KEY = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEXT_KEY = "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-function makeFakeKeyspace(): KeyspaceService {
+type TestKeyspace = KeyspaceService & { setActive(publicKeyHex: string): void };
+
+function makeFakeKeyspace(): TestKeyspace {
   let active: ActiveKeyState = { activePublicKeyHex: INITIAL_KEY };
   const listeners = new Set<(state: ActiveKeyState) => void>();
+  const setActive = (publicKeyHex: string) => {
+    active = { activePublicKeyHex: publicKeyHex };
+    for (const listener of listeners) listener(active);
+  };
   return {
-    listKeys: async () => [],
-    getKey: async () => undefined,
     active: () => active,
-    selected: () => active.activePublicKeyHex,
-    setActive: async (publicKeyHex: string) => {
-      active = { activePublicKeyHex: publicKeyHex };
-      for (const listener of listeners) listener(active);
-    },
     requireActiveKey: () => ({
       publicKeyHex: INITIAL_KEY,
       label: "test",
       capabilities: [],
       createdAt: "2024-01-01T00:00:00.000Z"
     }),
-    onActiveKeyChanged: (handler) => {
+    onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
       listeners.add(handler);
-      return () => listeners.delete(handler);
+      return () => {
+        listeners.delete(handler);
+      };
     },
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
-  };
+    // 单 Key 钱包没有切换入口；这个私有钩子只用来模拟「当前唯一 Key 换成了
+    // 另一个身份」，验证编辑中的联系人页面会丢弃草稿。
+    setActive,
+  } as unknown as TestKeyspace;
 }
 
 function makeFakeContactsService() {
@@ -132,7 +132,7 @@ describe("ContactsEditor", () => {
     });
 
     await act(async () => {
-      await keyspace.setActive(NEXT_KEY);
+      keyspace.setActive(NEXT_KEY);
     });
 
     await waitFor(() => {

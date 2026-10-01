@@ -16,7 +16,7 @@ import {
 } from "@keymaster/contracts";
 import type { VaultCoordinatorControl } from "@keymaster/contracts";
 import type { RuntimeHandle, RuntimeStatusSnapshot } from "webloom-framework";
-import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator";
+import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
 import { createSessionCryptoEngine } from "@keymaster/plugin-vault";
 import {
   __testArmCoordinatorBridgeBarrier,
@@ -53,7 +53,6 @@ async function ensureUnlocked(
   diagnostics?: { storageSelection?: unknown },
 ): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }> {
   let lastSnapshot: { vaultStatus: string; sessionEpoch: string; activePublicKeyHex?: string } | undefined;
-  let lastStorageRecovery: string | undefined;
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const snapshot = coordinator.getBootstrapSnapshot();
     lastSnapshot = {
@@ -65,29 +64,31 @@ async function ensureUnlocked(
       return { ownerPublicKeyHex: snapshot.activePublicKeyHex, sessionEpoch: snapshot.sessionEpoch };
     }
     if (snapshot.vaultStatus === "uninitialized") {
-      const result = await coordinator.vaultOperation({
-        type: "createVaultWithInitialKey",
-        password: E2E_VAULT_PASSWORD,
-        label: "Lifecycle production E2E",
-        capabilities: ["p2pkh"],
+      // 单 Key 本地钱包：创建唯一 Key 的唯一入口就是 storage initialize，
+      // KeyHold、meta 与初始系统数据在同一 IndexedDB 事务内提交。
+      const result = await client.storageControl({
+        type: "initialize",
+        plan: {
+          transactionId: `lifecycle-e2e-${crypto.randomUUID()}`,
+          firstKey: {
+            kind: "generate",
+            label: "Lifecycle production E2E",
+            capabilities: ["p2pkh"],
+            password: E2E_VAULT_PASSWORD,
+          },
+        },
       });
+      diagnostics && (diagnostics.storageSelection = result.status === "ok" ? result.value : result.status);
       if (result.status !== "ok") throw new Error(`Lifecycle E2E Vault creation failed: ${result.status}`);
     } else if (snapshot.vaultStatus === "locked") {
       const result = await coordinator.unlock(E2E_VAULT_PASSWORD);
       if (result.status !== "accepted" && result.status !== "already-unlocked") {
         throw new Error(`Lifecycle E2E Vault unlock failed: ${result.status}`);
       }
-    } else if (snapshot.vaultStatus === "booting") {
-      // 首次 hello 可能在 onboarding 状态结束后已经完成了初始化 Promise，
-      // 但没有消费新的 Storage ready 事件；retry 会走正式恢复编排，不在
-      // E2E 中直接修改 Coordinator 内部状态。
-      const result = await client.storageControl({ type: "retry" });
-      lastStorageRecovery = result.status === "ok" ? String(result.value) : result.status;
-      if (result.status !== "ok") throw new Error(`Lifecycle E2E Storage recovery failed: ${result.status}`);
     }
     await delay(25);
   }
-  throw new Error(`Lifecycle E2E Vault did not become unlocked: ${JSON.stringify({ lastSnapshot, lastStorageRecovery, storageSelection: diagnostics?.storageSelection })}`);
+  throw new Error(`Lifecycle E2E Vault did not become unlocked: ${JSON.stringify({ lastSnapshot, storageSelection: diagnostics?.storageSelection })}`);
 }
 
 async function waitForReadyRuntime(client: ReturnType<typeof getCoordinatorClient>): Promise<RuntimeHandle> {
@@ -134,10 +135,11 @@ async function waitForStorageReady(client: ReturnType<typeof getCoordinatorClien
       ...(status.status !== "ok" && "message" in status ? { error: status.message } : {}),
     });
     if (observations.length > 8) observations.shift();
-    if (status.status === "ok" && status.value === "ready") return;
-    // Storage 首次选择和 Coordinator 初始化是两个异步阶段；不能只看
-    // Vault snapshot 已变成 uninitialized 就提前发起 createVault。
-    await client.storageControl({ type: "retry" });
+    // 本地钱包结构完整即可继续装配：ready（已解锁）与 locked（等待 Key
+    // 密码）都满足；uninitialized 需要先 initialize，corrupt/unsupported/
+    // degraded 必须 fail closed，不能在这里重试成空钱包。
+    if (status.status === "ok" && (status.value === "ready" || status.value === "locked")) return;
+    if (status.status === "ok" && status.value === "uninitialized") return;
     await delay(25);
   }
   throw new Error(`Lifecycle E2E Storage did not become ready: ${JSON.stringify(observations)}`);
@@ -238,20 +240,13 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
 
   const bootstrap = async () => {
     const storageStatus = await client.storageControl({ type: "status" });
-    if (storageStatus.status === "ok" && storageStatus.value === "authentication") {
-      const unlocked = await client.storageControl({ type: "unlock-bucket", password: E2E_VAULT_PASSWORD });
-      diagnostics.storageSelection = unlocked.status === "ok" ? unlocked.value : unlocked.status;
-      if (unlocked.status !== "ok") throw new Error(`Lifecycle E2E Local unlock failed: ${unlocked.status}`);
-    } else if (storageStatus.status !== "ok" || storageStatus.value !== "ready") {
-      const selected = await client.storageControl({ type: "initial-setup", plan: {
-        transactionId: `lifecycle-e2e-${crypto.randomUUID()}`,
-        bucketLabel: "Lifecycle E2E Local",
-        backend: "local",
-        connection: { kind: "local" },
-        firstKey: { kind: "generate", label: "Lifecycle E2E", capabilities: ["p2pkh"], password: E2E_VAULT_PASSWORD },
-      } });
-      diagnostics.storageSelection = selected.status === "ok" ? selected.value : selected.status;
-      if (selected.status !== "ok") throw new Error(`Lifecycle E2E Local setup failed: ${selected.status}`);
+    // corrupt / unsupported / degraded 是明确的本地格式或宿主故障：E2E
+    // 必须在这里失败，而不是尝试 initialize 覆盖仍可能可恢复的数据。
+    if (storageStatus.status !== "ok") {
+      throw new Error(`Lifecycle E2E storage status failed: ${storageStatus.status}`);
+    }
+    if (storageStatus.value === "corrupt" || storageStatus.value === "unsupported") {
+      throw new Error(`Lifecycle E2E local wallet is unusable: ${storageStatus.value}`);
     }
     await waitForStorageReady(client);
     const owner = await ensureUnlocked(coordinator, client, diagnostics);
@@ -266,16 +261,12 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
 
   const ownerStorageRoundTrip = async () => {
     await bootstrap();
-    // session.open 的真实响应携带当前 owner peer 投影；重读一次让
-    // survivor 在其它 tab 完成 handoff 后也观察到最新 revision。
-    await client.refreshStorageBootstrap();
     // P2PKH 同时有 owner K-V 状态和 owner 文件根；不能用会拒绝
     // 多声明模块的单一声明解析器。这里要打开的是 round-trip 使用的
     // owner K-V 状态，因此必须显式选择 purpose=state。
     const declaration = systemStorageDeclarationForPurpose("p2pkh", "state");
     if (!declaration) throw new Error("Lifecycle E2E p2pkh storage declaration is missing");
-    const authority = createStorageBindingAuthority(client, {
-    });
+    const authority = createStorageBindingAuthority(client);
     const store = await authority.openOwnerAppStore({ pluginId: "p2pkh", declaration });
     const key = `lifecycle-e2e-${Date.now().toString(36)}`;
     const value = { source: "browser-shared-worker-message-port", ok: true };

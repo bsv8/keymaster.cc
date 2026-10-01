@@ -39,7 +39,7 @@ import { TestnetFundingResource, type OneTimeWallet } from "../../resources/test
 import { createWocTestnetChainAdapter, type WocTestnetChainAdapter } from "../../resources/testnet/wocChainAdapter.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
-import { readRawLocalBucketObjects } from "../../support/localBucketFormats.js";
+import { readRawWalletObjects } from "../../support/walletStorageFormats.js";
 import { currentRunId } from "../../support/ids.js";
 import { REAL_BITFS_PURCHASE_SCENARIO } from "../../support/scenarioMetadata.js";
 import type { BrowserErrorEvidence } from "../../support/types.js";
@@ -71,7 +71,7 @@ interface BitfsUser {
   readonly browserErrors: BrowserErrorEvidence;
 }
 
-async function launchUser(input: { readonly password: string; readonly privateKeyHex: string; readonly bucketLabel: string; readonly keyLabel: string }): Promise<BitfsUser> {
+async function launchUser(input: { readonly password: string; readonly privateKeyHex: string; readonly keyLabel: string }): Promise<BitfsUser> {
   const browser = await chromium.launch();
   const context = await browser.newContext({ baseURL: PREVIEW_ORIGIN, acceptDownloads: true });
   const page = await context.newPage();
@@ -213,7 +213,6 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
     const buyer = await launchUser({
       password: BUYER_PASSWORD,
       privateKeyHex: material.config.key01PrivateKeyHex.read(),
-      bucketLabel: "BitFS E2E 买方桶",
       keyLabel: "BitFS E2E key01",
     });
     users.push(buyer);
@@ -222,7 +221,6 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
     const seller = await launchUser({
       password: SELLER_PASSWORD,
       privateKeyHex: material.config.key02PrivateKeyHex.read(),
-      bucketLabel: "BitFS E2E 卖方桶",
       keyLabel: "BitFS E2E key02",
     });
     users.push(seller);
@@ -295,14 +293,14 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
       } });
     } catch (error) {
       const ledger = await server.ledgerSummary();
-       const sellerEntries = await readRawLocalBucketObjects(seller.page, "/msfiles/.*\\.json$|sat-subscription|setting");
-       const buyerEntries = users[0] ? await readRawLocalBucketObjects(users[0].page, "/msfiles/.*\\.json$") : [];
-       const sellerMeta = sellerEntries.find((entry) => entry.path.includes(`/msfiles/meta/${expectedSeedHashHex}.json`));
+       const sellerEntries = await readRawWalletObjects(seller.page, "^msfiles/|^sat-subscription/");
+       const buyerEntries = users[0] ? await readRawWalletObjects(users[0].page, "^msfiles/") : [];
+       const sellerMeta = sellerEntries.find((entry) => entry.path === `msfiles/meta/${expectedSeedHashHex}.json`);
        const sellerSat = sellerEntries.filter((entry) => /sat-subscription|setting/u.test(entry.path));
-       const sellerDiagnostics = sellerEntries.filter((entry) => entry.path.includes("/bitfs-e2e-diagnostics/"));
-       const buyerDiagnostics = buyerEntries.filter((entry) => entry.path.includes("/bitfs-e2e-diagnostics/"));
-       const sellerJournal = sellerEntries.filter((entry) => entry.path.includes("/bitfs-journal/"));
-       const buyerJournal = buyerEntries.filter((entry) => entry.path.includes("/bitfs-journal/"));
+       const sellerDiagnostics = sellerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-e2e-diagnostics/"));
+       const buyerDiagnostics = buyerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-e2e-diagnostics/"));
+       const sellerJournal = sellerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-journal/"));
+       const buyerJournal = buyerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-journal/"));
        process.stdout.write(`[bitfs-e2e] 报价等待失败账本：${JSON.stringify(ledger)}\n`);
        process.stdout.write(`[bitfs-e2e] 卖方 SatSubscription 状态：${JSON.stringify(sellerSat.map((entry) => ({ path: entry.path, text: entry.text.slice(0, 1000) })))}\n`);
        process.stdout.write(`[bitfs-e2e] 卖方 BitFS 诊断：${JSON.stringify(sellerDiagnostics.map((entry) => ({ path: entry.path, text: entry.text })))}\n`);
@@ -310,7 +308,7 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
        process.stdout.write(`[bitfs-e2e] 买方 BitFS Journal：${JSON.stringify(buyerJournal.map((entry) => ({ path: entry.path, text: entry.text.slice(0, 2000) })))}\n`);
        process.stdout.write(`[bitfs-e2e] 卖方 BitFS Journal：${JSON.stringify(sellerJournal.map((entry) => ({ path: entry.path, text: entry.text.slice(0, 2000) })))}\n`);
        process.stdout.write(`[bitfs-e2e] 卖方 BitFS 元数据：${sellerMeta?.text ?? "missing"}\n`);
-      process.stdout.write(`[bitfs-e2e] 卖方 BitFS 桶路径：${JSON.stringify(sellerEntries.map((entry) => entry.path).filter((path) => /bitfs|msfile/u.test(path)))}\n`);
+      process.stdout.write(`[bitfs-e2e] 卖方 BitFS 物理路径：${JSON.stringify(sellerEntries.map((entry) => entry.path).filter((path) => /bitfs|msfile/u.test(path)))}\n`);
       process.stdout.write(`[bitfs-e2e] SatSubscription 日志：${server.serverLogTail(20).join(" | ")}\n`);
       throw error;
     }
@@ -318,12 +316,12 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
     try {
        await waitForBitfsPurchaseCompleted(buyer.page, expectedSeedHashHex);
      } catch (error) {
-       const buyerEntries = users[0] ? await readRawLocalBucketObjects(users[0].page, "/msfiles/.*\\.json$") : [];
-       const sellerEntries = await readRawLocalBucketObjects(seller.page, "/msfiles/.*\\.json$|sat-subscription|setting");
-       const buyerDiagnostics = buyerEntries.filter((entry) => entry.path.includes("/bitfs-e2e-diagnostics/"));
-       const sellerDiagnostics = sellerEntries.filter((entry) => entry.path.includes("/bitfs-e2e-diagnostics/"));
-       const buyerJournal = buyerEntries.filter((entry) => entry.path.includes("/bitfs-journal/"));
-       const sellerJournal = sellerEntries.filter((entry) => entry.path.includes("/bitfs-journal/"));
+       const buyerEntries = users[0] ? await readRawWalletObjects(users[0].page, "^msfiles/") : [];
+       const sellerEntries = await readRawWalletObjects(seller.page, "^msfiles/|^sat-subscription/");
+       const buyerDiagnostics = buyerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-e2e-diagnostics/"));
+       const sellerDiagnostics = sellerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-e2e-diagnostics/"));
+       const buyerJournal = buyerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-journal/"));
+       const sellerJournal = sellerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-journal/"));
        process.stdout.write(`[bitfs-e2e] 购买等待失败买方诊断：${JSON.stringify(buyerDiagnostics.map((entry) => ({ path: entry.path, text: entry.text })))}\n`);
        process.stdout.write(`[bitfs-e2e] 购买等待失败卖方诊断：${JSON.stringify(sellerDiagnostics.map((entry) => ({ path: entry.path, text: entry.text })))}\n`);
        process.stdout.write(`[bitfs-e2e] 购买等待失败买方 Journal：${JSON.stringify(buyerJournal.map((entry) => ({ path: entry.path, text: entry.text.slice(0, 3000) })))}\n`);

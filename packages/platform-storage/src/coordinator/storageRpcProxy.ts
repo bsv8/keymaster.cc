@@ -1,185 +1,262 @@
+// 页面侧 Storage 门面。
+//
+// 它不持有 Provider 配置、数据库连接、游标或任何物理路径：所有 I/O 都转成
+// Coordinator RPC。这里只做三件事：把 Worker 结果解包成领域错误、维护跨 Tab
+// 状态订阅、缓存当前 Connect 会话的目录授权。
+//
+// 相对旧实现的变化：没有桶、没有条件写能力探测、没有远程健康状态、没有
+// multipart 上传。生命周期入口直接对应单钱包的创建/导入/解锁/锁定/改密/
+// 改名/导出 KeyHold/重置。
+
 import type {
   CoordinatorStorageControl,
   CoordinatorStorageData,
   CoordinatorValueResult,
   StorageCoordinatorControl,
   OwnerAppStorageGrant,
-  BucketConditionalCapabilitiesView,
-  BucketConditionalCapabilityProbeResult,
+  StorageDeleteResult,
   StorageDirectoryResult,
+  StorageGetResult,
   StorageListResult,
-  StorageProbeResult,
-  StorageProviderConfigDraft,
-  StorageProviderConnectionView,
-  StorageProviderSummary,
   StoragePutResult,
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
-  StorageRuntimeStatus,
-  CoordinatorAuthorityRecovery,
-  InitialSetupRecoveryRecordV1,
-  InitialSetupRecoveryResult,
-  StorageUploadAbortResult,
-  StorageUploadBeginResult,
-  StorageUploadPartResult,
-  StorageRuntimeBucketV1,
-  StorageBucketConnectionConfigV1,
-  StorageBucketSwitchResultV1,
+  StorageRuntimeSummary,
+  WalletColdStartSnapshot,
+  WalletInitializePlan,
+  WalletInitializeResult,
+  WalletUnlockResult,
 } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageError.js";
 
-type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: StorageRuntimeControllerStatus; healthStatus?: StorageRuntimeStatus; catalogBucket?: boolean; bucketId?: string; bucketGeneration?: number; authorityRecovery?: CoordinatorAuthorityRecovery; summary: StorageProviderSummary | null; capabilities: BucketConditionalCapabilitiesView | null };
+type StateEvent = {
+  topic: "storage.state";
+  sessionEpoch: string;
+  status: StorageRuntimeControllerStatus;
+  summary?: StorageRuntimeSummary | null;
+};
 
+/** 把 Coordinator 的结果信封解包；失败一律成为可区分的 StorageRuntimeError。 */
 function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
   if (result.status === "ok") return Promise.resolve(result.value as T);
-  if (result.status === "transport-error") throw new StorageRuntimeError("storage_unavailable", result.message || "Storage Coordinator request cancelled");
-  const code = "code" in result && typeof result.code === "string" ? result.code as import("@keymaster/contracts").StorageErrorCode : undefined;
+  if (result.status === "transport-error") {
+    throw new StorageRuntimeError("storage_unavailable", result.message || "Storage Coordinator request was cancelled");
+  }
+  const code = "code" in result && typeof result.code === "string"
+    ? result.code as import("@keymaster/contracts").StorageErrorCode
+    : undefined;
   const message = "message" in result && typeof result.message === "string"
     ? result.message
     : result.status === "blocked"
       ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
       : "Storage Coordinator request failed";
-  throw new StorageRuntimeError(code ?? (result.status === "stale-epoch" || result.status === "locked" ? "storage_unavailable" : "storage_provider_error"), message);
+  throw new StorageRuntimeError(code ?? "storage_provider_error", message);
 }
 
-/** Page-side facade. It owns no provider config, client, cursor, or S3 I/O. */
 export class StorageRpcProxy implements StorageRuntimeController {
-  private current: StateEvent = { topic: "storage.state", sessionEpoch: "boot", status: "locked", healthStatus: "unselected", catalogBucket: false, summary: null, capabilities: null };
+  private current: StateEvent = {
+    topic: "storage.state",
+    sessionEpoch: "boot",
+    status: "locked",
+    summary: null,
+  };
   private readonly listeners = new Set<() => void>();
   private readonly grants = new Map<string, Promise<string>>();
   private readonly unsubscribeState: () => void;
 
   constructor(private readonly coordinator: StorageCoordinatorControl) {
     this.unsubscribeState = coordinator.subscribeTopic("storage.state", (event: StateEvent) => {
+      // 会话世代变化意味着旧授权全部失效：缓存必须一起清掉，否则下一个请求
+      // 会带着已经撤销的 grant 去访问数据。
       if (event.sessionEpoch !== this.current.sessionEpoch) this.grants.clear();
       this.current = event;
       for (const listener of this.listeners) listener();
     });
   }
 
-  status(): StorageRuntimeControllerStatus { return this.current.status; }
-  hasCatalogBuckets(): boolean {
-    return this.current.catalogBucket === true;
+  status(): StorageRuntimeControllerStatus {
+    return this.current.status;
   }
-  healthStatus(): StorageRuntimeStatus { return this.current.healthStatus ?? "degraded"; }
-  /** 当前是否为新版桶目录；页面据此决定是否必须再次输入桶密码。 */
-  isCatalogBucket(): boolean { return this.current.catalogBucket === true; }
-  /** 当前目录桶身份；仅用于页面把桶树与 Worker 当前会话对齐。 */
-  selectedBucketId(): string | undefined { return this.current.bucketId; }
-  /** 返回旧 Worker 租约阻塞信息；页面只能据此等待并重试，不能强制接管。 */
-  authorityRecovery(): CoordinatorAuthorityRecovery | undefined { return this.current.authorityRecovery; }
-  /** 由 Storage Onboarding 或网络恢复事件触发一次全局探测。 */
-  retry(): Promise<unknown> { return this.control({ type: "retry" }); }
-  subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
   dispose(): void {
     this.unsubscribeState();
     this.listeners.clear();
+    this.grants.clear();
   }
-  private control<T>(control: CoordinatorStorageControl): Promise<T> { return this.coordinator.storageControl(control).then(unwrap<T>); }
-  private grantFor(ctx: OwnerAppStorageGrant): Promise<string> {
-    const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
-    const existing = this.grants.get(key); if (existing) return existing;
-    const pending = this.coordinator.storageGrant(ctx).then(unwrap<string>).catch((error) => { this.grants.delete(key); throw error; });
-    this.grants.set(key, pending); return pending;
+
+  summary(): Promise<StorageRuntimeSummary> {
+    return this.control<StorageRuntimeSummary>({ type: "summary" });
   }
-  private dataFor<T>(ctx: OwnerAppStorageGrant, build: (grantId: string) => CoordinatorStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<T> {
-    if (signal?.aborted) return Promise.reject(new StorageRuntimeError("storage_unavailable"));
-    const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
-    return this.grantFor(ctx).then((grantId) => {
-      if (signal?.aborted) throw new StorageRuntimeError("storage_unavailable");
-      return this.coordinator.storageData(build(grantId), transfer, signal);
-    }).then(unwrap<T>).catch((error) => {
-      if (error instanceof StorageRuntimeError && (error.code === "storage_identity_required" || error.code === "storage_unavailable")) this.grants.delete(key);
-      throw error;
+
+  coldStart(): Promise<WalletColdStartSnapshot> {
+    return this.control<WalletColdStartSnapshot>({ type: "cold-start" });
+  }
+
+  initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
+    return this.control<WalletInitializeResult>({ type: "initialize", plan });
+  }
+
+  unlock(password: string): Promise<WalletUnlockResult> {
+    return this.control<WalletUnlockResult>({ type: "unlock", password });
+  }
+
+  lock(): Promise<void> {
+    return this.control<void>({ type: "lock" });
+  }
+
+  changeKeyPassword(input: { oldPassword: string; newPassword: string }): Promise<void> {
+    return this.control<void>({ type: "change-key-password", oldPassword: input.oldPassword, newPassword: input.newPassword });
+  }
+
+  renameKey(label: string): Promise<void> {
+    return this.control<void>({ type: "rename-key", label });
+  }
+
+  exportKeyHold(): Promise<Uint8Array> {
+    return this.control<unknown>({ type: "export-key-hold" }).then((value) => {
+      if (value instanceof Uint8Array) return value;
+      if (value instanceof ArrayBuffer) return new Uint8Array(value);
+      throw new StorageRuntimeError("storage_provider_error", "KeyHold export returned invalid bytes");
     });
   }
 
-  getProviderSummary(): Promise<StorageProviderSummary | null> { return Promise.resolve(this.current.summary); }
-  getProviderConnection(): Promise<StorageProviderConnectionView | null> { return this.control({ type: "connection" }); }
-  /** 首次初始化的唯一高层入口；页面不再分别调用桶/Vault 持久化 API。 */
-  initialSetup(plan: import("@keymaster/contracts").InitialSetupPlan): Promise<import("@keymaster/contracts").InitialSetupResult> {
-    return this.control({ type: "initial-setup", plan });
-  }
-  connectExistingRemote(plan: import("@keymaster/contracts").ExistingRemoteStorageConnectPlan): Promise<import("@keymaster/contracts").ExistingRemoteStorageConnectResult> {
-    return this.control({ type: "connect-existing-remote", plan });
-  }
-  /** 只读探测：连接并列出 keys/,判定“已有钱包”还是“空桶”。 */
-  probeBucket(plan: import("@keymaster/contracts").BucketProbePlan): Promise<import("@keymaster/contracts").BucketProbeResult> {
-    return this.control({ type: "probe-bucket", plan });
-  }
-  getInitialSetupResult(transactionId: string): Promise<import("@keymaster/contracts").InitialSetupResult | undefined> {
-    return this.control({ type: "initial-setup-result", transactionId });
-  }
-  listInitialSetupRecoveries(): Promise<InitialSetupRecoveryRecordV1[]> {
-    return this.control({ type: "initial-setup-recovery-list" });
-  }
-  retryInitialSetupCleanup(transactionId: string, input: { password?: string; connection?: StorageBucketConnectionConfigV1 } = {}): Promise<InitialSetupRecoveryResult> {
-    return this.control({
-      type: "initial-setup-cleanup",
-      transactionId,
-      ...(input.password === undefined ? {} : { password: input.password }),
-      ...(input.connection === undefined ? {} : { connection: input.connection }),
+  resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }> {
+    return this.control<{ walletGeneration: string; clearedAt: string }>({
+      type: "reset-wallet",
+      confirmationLabel: input.confirmationLabel,
     });
   }
-  /** 新版桶目录的临时解锁；密码只进入本次 Worker bootstrap。 */
-  async unlockBucket(password: string): Promise<unknown> {
-    await this.coordinator.refreshStorageBootstrap?.();
-    return this.control({ type: "unlock-bucket", password });
-  }
-  /** 目标桶先在 Worker 暂存并认证，成功后才更新目录和当前运行时。 */
-  switchBucket(bucket: StorageRuntimeBucketV1, password: string, options: { keyPassword?: string; publicKeyHex?: string } = {}): Promise<StorageBucketSwitchResultV1> {
-    return this.control({
-      type: "switch-bucket",
-      bucket,
-      password,
-      ...(options.keyPassword === undefined ? {} : { keyPassword: options.keyPassword }),
-      ...(options.publicKeyHex === undefined ? {} : { publicKeyHex: options.publicKeyHex }),
+
+  abortSession(connectSessionId: string): Promise<void> {
+    return this.coordinator.storageSessionAbort(connectSessionId).then((result) => {
+      if (result.status !== "ok") throw new StorageRuntimeError("storage_unavailable", "Storage session abort failed");
+      for (const key of [...this.grants.keys()]) {
+        if (key.startsWith(`${connectSessionId}|`)) this.grants.delete(key);
+      }
     });
   }
-  /** 当前桶配置改动必须由 Coordinator 同步 Provider、快照和目录。 */
-  changeBucketConnectionConfig(config: StorageBucketConnectionConfigV1, password: string, label?: string): Promise<StorageRuntimeBucketV1> {
-    return this.control({ type: "change-bucket-config", config, ...(label === undefined ? {} : { label }), password });
-  }
-  /** 当前桶改名与 Coordinator 运行态/目录保持同一条 CAS 边界。 */
-  renameBucket(label: string): Promise<StorageRuntimeBucketV1> {
-    return this.control({ type: "rename-bucket", label });
-  }
-  /** 删除非当前 Local 桶的 Key：KeyHold 文件 + 该 Key 的 owner 数据。 */
-  deleteLocalBucketKey(bucket: StorageRuntimeBucketV1, publicKeyHex: string): Promise<void> {
-    return this.control({ type: "delete-local-bucket-key", bucket, publicKeyHex });
-  }
-  /**
-   * 冷导出当前 Coordinator 已绑定桶的已提交 Hold 快照。
-   * 返回值只允许二进制；页面不会接触桶密码或解密配置。
-   */
-  async coldExportBucket(): Promise<Uint8Array> {
-    const value = await this.control<unknown>({ type: "cold-export" });
-    if (value instanceof Uint8Array) return value;
-    if (value instanceof ArrayBuffer) return new Uint8Array(value);
-    throw new StorageRuntimeError("storage_provider_error", "Storage cold export returned invalid bytes");
-  }
-  cancelProbe(): void { void this.control({ type: "cancel-probe" }); }
-  getConditionalCapabilities(): BucketConditionalCapabilitiesView | null { return this.current.capabilities; }
-  probeConditionalCapabilities(signal?: AbortSignal): Promise<BucketConditionalCapabilityProbeResult> {
-    if (signal?.aborted) return Promise.reject(new StorageRuntimeError("storage_unavailable"));
-    const abort = () => { void this.control({ type: "cancel-probe" }).catch(() => undefined); };
-    signal?.addEventListener("abort", abort, { once: true });
-    return this.control<BucketConditionalCapabilityProbeResult>({ type: "probe-capabilities" }).finally(() => signal?.removeEventListener("abort", abort));
-  }
-  abortSession(connectSessionId: string): Promise<void> { return this.coordinator.storageSessionAbort(connectSessionId).then((result) => { if (result.status !== "ok") throw new StorageRuntimeError("storage_unavailable"); for (const key of this.grants.keys()) if (key.startsWith(`${connectSessionId}|`)) this.grants.delete(key); }); }
 
   list(ctx: OwnerAppStorageGrant, input: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<StorageListResult> {
-    return this.dataFor(ctx, (grantId) => ({ type: "list", grantId, input: { prefix: input.prefix, cursor: input.cursor, limit: input.limit } }), [], input.signal);
+    return this.dataFor<StorageListResult>(ctx, (grantId) => ({
+      type: "list",
+      grantId,
+      input: {
+        ...(input.prefix === undefined ? {} : { prefix: input.prefix }),
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      },
+    }), [], input.signal);
   }
-  createDirectory(ctx: OwnerAppStorageGrant, input: { path: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StorageDirectoryResult> { return this.dataFor(ctx, (grantId) => ({ type: "create-directory", grantId, input: { path: input.path, overwrite: input.overwrite } }), [], input.signal); }
-  deleteDirectory(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDirectoryResult> { return this.dataFor(ctx, (grantId) => ({ type: "delete-directory", grantId, input: { path: input.path } }), [], input.signal); }
-  put(ctx: OwnerAppStorageGrant, input: { path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StoragePutResult> {
-    return this.dataFor(ctx, (grantId) => ({ type: "put", grantId, input: { path: input.path, content: input.content, contentType: input.contentType, overwrite: input.overwrite } }), [input.content.bytes], input.signal);
+
+  createDirectory(ctx: OwnerAppStorageGrant, input: { path: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StorageDirectoryResult> {
+    return this.dataFor<StorageDirectoryResult>(ctx, (grantId) => ({
+      type: "create-directory",
+      grantId,
+      input: { path: input.path, ...(input.overwrite === undefined ? {} : { overwrite: input.overwrite }) },
+    }), [], input.signal);
   }
-  getRange(ctx: OwnerAppStorageGrant, input: { path: string; offset?: number; length?: number; ifMatch?: string; signal?: AbortSignal }) { return this.dataFor<Awaited<ReturnType<StorageRuntimeController["getRange"]>>>(ctx, (grantId) => ({ type: "get-range", grantId, input: { path: input.path, offset: input.offset, length: input.length, ifMatch: input.ifMatch } }), [], input.signal); }
-  delete(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }) { return this.dataFor<Awaited<ReturnType<StorageRuntimeController["delete"]>>>(ctx, (grantId) => ({ type: "delete", grantId, input: { path: input.path } }), [], input.signal); }
-  beginUpload(ctx: OwnerAppStorageGrant, input: { path: string; contentType?: string; size: number; overwrite?: boolean; signal?: AbortSignal }): Promise<StorageUploadBeginResult> { return this.dataFor(ctx, (grantId) => ({ type: "begin-upload", grantId, input: { path: input.path, contentType: input.contentType, size: input.size, overwrite: input.overwrite } }), [], input.signal); }
-  uploadPart(ctx: OwnerAppStorageGrant, input: { uploadId: string; partNumber: number; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; signal?: AbortSignal }): Promise<StorageUploadPartResult> { return this.dataFor(ctx, (grantId) => ({ type: "upload-part", grantId, input: { uploadId: input.uploadId, partNumber: input.partNumber, content: input.content } }), [input.content.bytes], input.signal); }
-  completeUpload(ctx: OwnerAppStorageGrant, input: { uploadId: string; signal?: AbortSignal }) { return this.dataFor<Awaited<ReturnType<StorageRuntimeController["completeUpload"]>>>(ctx, (grantId) => ({ type: "complete-upload", grantId, input: { uploadId: input.uploadId } }), [], input.signal); }
-  abortUpload(ctx: OwnerAppStorageGrant, input: { uploadId: string; signal?: AbortSignal }): Promise<StorageUploadAbortResult> { return this.dataFor(ctx, (grantId) => ({ type: "abort-upload", grantId, input: { uploadId: input.uploadId } }), [], input.signal); }
+
+  deleteDirectory(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDirectoryResult> {
+    return this.dataFor<StorageDirectoryResult>(ctx, (grantId) => ({
+      type: "delete-directory",
+      grantId,
+      input: { path: input.path },
+    }), [], input.signal);
+  }
+
+  put(ctx: OwnerAppStorageGrant, input: {
+    path: string;
+    content: { $type: "binary"; bytes: ArrayBuffer; mime?: string };
+    contentType?: string;
+    overwrite?: boolean;
+    signal?: AbortSignal;
+  }): Promise<StoragePutResult> {
+    return this.dataFor<StoragePutResult>(ctx, (grantId) => ({
+      type: "put",
+      grantId,
+      input: {
+        path: input.path,
+        content: input.content,
+        ...(input.contentType === undefined ? {} : { contentType: input.contentType }),
+        ...(input.overwrite === undefined ? {} : { overwrite: input.overwrite }),
+      },
+    }), [input.content.bytes], input.signal);
+  }
+
+  getRange(ctx: OwnerAppStorageGrant, input: {
+    path: string;
+    offset?: number;
+    length?: number;
+    ifMatch?: string;
+    signal?: AbortSignal;
+  }): Promise<StorageGetResult> {
+    return this.dataFor<StorageGetResult>(ctx, (grantId) => ({
+      type: "get-range",
+      grantId,
+      input: {
+        path: input.path,
+        ...(input.offset === undefined ? {} : { offset: input.offset }),
+        ...(input.length === undefined ? {} : { length: input.length }),
+        ...(input.ifMatch === undefined ? {} : { ifMatch: input.ifMatch }),
+      },
+    }), [], input.signal);
+  }
+
+  delete(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDeleteResult> {
+    return this.dataFor<StorageDeleteResult>(ctx, (grantId) => ({
+      type: "delete",
+      grantId,
+      input: { path: input.path },
+    }), [], input.signal);
+  }
+
+  private control<T>(control: CoordinatorStorageControl): Promise<T> {
+    return this.coordinator.storageControl(control).then(unwrap<T>);
+  }
+
+  /** 同一 Connect 会话 + 同一 App 身份复用同一个目录授权。 */
+  private grantFor(ctx: OwnerAppStorageGrant): Promise<string> {
+    const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
+    const existing = this.grants.get(key);
+    if (existing) return existing;
+    const pending = this.coordinator.storageGrant(ctx).then(unwrap<string>).catch((error) => {
+      this.grants.delete(key);
+      throw error;
+    });
+    this.grants.set(key, pending);
+    return pending;
+  }
+
+  private dataFor<T>(
+    ctx: OwnerAppStorageGrant,
+    build: (grantId: string) => CoordinatorStorageData,
+    transfer: ArrayBuffer[] = [],
+    signal?: AbortSignal,
+  ): Promise<T> {
+    if (signal?.aborted) return Promise.reject(new StorageRuntimeError("storage_unavailable", "Storage request was cancelled"));
+    const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
+    return this.grantFor(ctx)
+      .then((grantId) => {
+        if (signal?.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage request was cancelled");
+        return this.coordinator.storageData(build(grantId), transfer, signal);
+      })
+      .then(unwrap<T>)
+      .catch((error) => {
+        // 身份或可用性失败说明这份授权不再可信：丢弃缓存，下次重新申请。
+        if (error instanceof StorageRuntimeError
+          && (error.code === "storage_identity_required" || error.code === "storage_unavailable")) {
+          this.grants.delete(key);
+        }
+        throw error;
+      });
+  }
+}
+
+export function createStorageRuntimeController(coordinator: StorageCoordinatorControl): StorageRuntimeController {
+  return new StorageRpcProxy(coordinator);
 }

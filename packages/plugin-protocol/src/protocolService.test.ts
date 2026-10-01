@@ -206,42 +206,20 @@ function makeVaultStub(publicKeyHex: string): VaultService {
 // KeyspaceService stub：与 makeVaultStub 配套使用，cipher.* / connect.* 测试
 // 默认返回"单 key ready"，让 ownerPublicKeyHex 查 key 路径可以跑通。
 function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
+  const identity = {
+    publicKeyHex,
+    label: "Key A",
+    capabilities: ["p2pkh"],
+    createdAt: new Date().toISOString()
+  };
   return {
-    listKeys: async () => [
-      {
-        publicKeyHex,
-        label: "Key A",
-        capabilities: ["p2pkh"],
-        createdAt: new Date().toISOString()
-      }
-    ],
-    // 施工单 2026-06-28 001：cipher.* / connect.* 现在按 session.ownerPublicKeyHex
-    // 查 key。fake stub 默认返回"单 key ready"，让 cipher/connect 测试可以跑通。
-    getKey: async (hex: string) => {
-      if (hex !== publicKeyHex) return undefined;
-      return {
-        publicKeyHex,
-        label: "Key A",
-        capabilities: ["p2pkh"],
-        createdAt: new Date().toISOString()
-      };
-    },
+    // 单 Key 本地钱包（docs/存储.md）：keyspace 只投影「当前唯一 Key 是谁」。
+    // cipher.* / connect.* 按 session.ownerPublicKeyHex 核对这个身份是否就是
+    // 当前 Key，没有 listKeys / getKey / setActive。
     active: () => ({ activePublicKeyHex: publicKeyHex }),
-    setActive: async () => undefined,
-    requireActiveKey: () => ({
-      publicKeyHex,
-      label: "Key A",
-      capabilities: ["p2pkh"],
-      createdAt: new Date().toISOString() }),
-    onActiveChange: () => () => undefined,
-    openOwnerAppStore: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
-    registerStorageDeclaration: () => undefined,
-    listOwnerStorageDeclarations: () => [],
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
-  } as unknown as KeyspaceService;
+    requireActiveKey: () => ({ ...identity }),
+    onActiveKeyChanged: () => () => undefined
+  };
 }
 
 /**
@@ -5896,16 +5874,13 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const otherKeyspace: KeyspaceService = {
       ...makeKeyspaceStub(otherActive),
       active: () => ({ activePublicKeyHex: otherActive }),
-      // 业务方仍然可以查得到 session owner，但 active 不等于 owner。
-      getKey: async (hex: string) =>
-        hex === TEST_PUB_HEX || hex === otherActive
-          ? {
-              publicKeyHex: hex,
-              label: hex === TEST_PUB_HEX ? "A" : "C",
-              capabilities: ["p2pkh"],
-              createdAt: new Date().toISOString()
-            }
-          : undefined
+      // session owner（TEST_PUB_HEX）不是当前唯一 Key，active 指向另一把。
+      requireActiveKey: () => ({
+        publicKeyHex: otherActive,
+        label: "C",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString()
+      })
     };
     const { service, opener, storageRepository } = makeService(otherActive, undefined, {
       p2pkhService: p2pkh as never,
@@ -5961,15 +5936,12 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const otherKeyspace: KeyspaceService = {
       ...makeKeyspaceStub(otherActive),
       active: () => ({ activePublicKeyHex: otherActive }),
-      getKey: async (hex: string) =>
-        hex === TEST_PUB_HEX || hex === otherActive
-          ? {
-              publicKeyHex: hex,
-              label: hex === TEST_PUB_HEX ? "A" : "D",
-              capabilities: ["p2pkh"],
-              createdAt: new Date().toISOString()
-            }
-          : undefined
+      requireActiveKey: () => ({
+        publicKeyHex: otherActive,
+        label: "D",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString()
+      })
     };
     const p2pkh = {
       listUtxos: vi.fn(async () => [{ txid: "00".repeat(32), vout: 0, value: 100000 }])
@@ -6297,15 +6269,12 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     expect(card?.errorCode).toBe("asset_not_enabled");
   });
 
-  it("feepool.prepare / commit 同 origin 不同 owner 不会串池", async () => {
-    // 施工单 7.5.6：feepool.prepare / commit 在同 origin 不同 owner 下
-    // 不会串池。ownerA 在 origin 建一个池，ownerB 在同 origin 同一个
-    // counterparty 下 prepare 应该走 create 路径（找不到 ownerB 的 prior）。
-    // 这里只校验 record.bind owner = session.ownerPublicKeyHex，且
-    // feepool poolKey 含 owner 维度。
-    const ownerB = "02" + "bb".repeat(32);
+  it("feepool.prepare / commit 的 poolKey 绑定当前 owner 与资产维度，不跨 counterparty 串池", async () => {
+    // 单 Key 本地钱包（docs/存储.md）之后不再存在"同 origin 第二把 owner"，
+    // 串池风险转移到剩下的两个维度：counterparty 与 asset。poolKey 仍然把
+    // owner 公钥写进 key（它是证据与身份核对字段），并按 counterparty 与
+    // asset 分段，因此不同交易对手/资产各自建池，互不可见。
     const { service, opener, storageRepository, deps } = makeService(TEST_PUB_HEX);
-    // ownerA 建池并 commit。
     await storageRepository.putConnectSession({
       sessionId: "sess-ownerA",
       origin: ORIGIN,
@@ -6316,32 +6285,13 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       lastUsedAt: Date.now(),
       revokedAt: null
     });
-    // ownerB 在 keyspace stub 内也注册好（getKey(publicKeyHex=ownerB)）。
-    deps.keyspace.getKey = async (hex: string) => {
-      if (hex === TEST_PUB_HEX) {
-        return {
-          publicKeyHex: "kA",
-          label: "Owner A",
-          capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString()
-        };
-      }
-      if (hex === ownerB) {
-        return {
-          publicKeyHex: "kB",
-          label: "Owner B",
-          capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString()
-        };
-      }
-      return undefined;
-    };
-    // ownerB 的 session。
+    // 另一个交易对手的 session（同一 owner）。
+    const counterpartyB = "02" + "ab".repeat(32);
     await storageRepository.putConnectSession({
-      sessionId: "sess-ownerB",
+      sessionId: "sess-counterpartyB",
       origin: ORIGIN,
-      ownerPublicKeyHex: ownerB,
-      ownerLabel: "Owner B",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Owner A",
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
@@ -6359,18 +6309,18 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       updatedAt: 1
     });
     service.startSession();
-    // ownerB 发 prepare：应走 create 路径（ownerA 的 prior 不可见）。
+    // 另一个 counterparty 发 prepare：应走 create 路径，看不到既有 prior。
     await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
           type: "request",
-          id: "fp-ownerB",
+          id: "fp-counterpartyB",
           method: "feepool.prepare",
           params: {
-            counterpartyPublicKeyHex: COUNTERPARTY,
+            counterpartyPublicKeyHex: counterpartyB,
             amountSatoshis: 1000,
-            connectSessionId: "sess-ownerB"
+            connectSessionId: "sess-counterpartyB"
           }
         },
         ORIGIN,
@@ -6379,16 +6329,18 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     );
     await service.confirmByUser();
     await new Promise((r) => setTimeout(r, 50));
-    const card = service.feedSnapshot().commands.find((c) => c.requestId === "fp-ownerB");
-    expect(card?.ownerPublicKeyHex).toBe(ownerB);
-    expect(card?.connectSessionId).toBe("sess-ownerB");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "fp-counterpartyB");
+    // record 绑定的是当前唯一 Key 与发起它的 session。
+    expect(card?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+    expect(card?.connectSessionId).toBe("sess-counterpartyB");
+    // 两个 counterparty 的池彼此不可见：既有池只存在于 COUNTERPARTY 维度下。
+    expect(await storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`)).toBeNull();
   });
 
   it("feepool.commit 用旧 session 的 operationId 提交时必须失败", async () => {
     // 施工单 7.5.7：feepool.commit 用旧 session 的 operationId 提交时必须失败。
     // 准备：先在 sessionA 下 prepare 出 operationId；logout sessionA；
     // 在 sessionB 下用同 operationId 提交 → fail。
-    const ownerB = "02" + "bb".repeat(32);
     const p2pkh = makeP2pkhServiceStub002();
     const { service, opener, storageRepository, deps } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
@@ -6403,35 +6355,18 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       lastUsedAt: Date.now(),
       revokedAt: null
     });
+    // 第二个 session：同一个唯一 Key，但属于另一个 Connect 会话。跨会话
+    // 的 operationId 仍然不可复用，这正是这个测试要守的不变量。
     await storageRepository.putConnectSession({
       sessionId: "sess-B",
       origin: ORIGIN,
-      ownerPublicKeyHex: ownerB,
-      ownerLabel: "Owner B",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Owner A",
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       revokedAt: null
     });
-    deps.keyspace.getKey = async (hex: string) => {
-      if (hex === TEST_PUB_HEX) {
-        return {
-          publicKeyHex: "kA",
-          label: "Owner A",
-          capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString()
-        };
-      }
-      if (hex === ownerB) {
-        return {
-          publicKeyHex: "kB",
-          label: "Owner B",
-          capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString()
-        };
-      }
-      return undefined;
-    };
     await service.setOriginSettings({
       origin: ORIGIN,
       p2pkhAutoApproveEnabled: false,
@@ -6734,30 +6669,21 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     const env = setupWindow();
     try {
       const storageRepository = makeFakeMultipartUploadRepository();
-      const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
-      let resolveKey!: (value: unknown) => void;
-      (keyspace as unknown as { getKey: () => Promise<unknown> }).getKey = () =>
-        new Promise((resolve) => {
-          resolveKey = resolve;
-        });
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace,
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
 
       const launch = service.launchAppView(JUSTNOTE);
-      // private-key ready 查询在预开后进行，以保留浏览器 user activation。
+      // 单 Key 本地钱包：owner 身份校验已经是同步投影，所以这里要断言的是
+      // 窗口仍在任何 await（connect session 落库、appView runtime bootstrap）
+      // 之前就预开好了——即 user activation 还没被 async 边界清掉。
       expect(env.openCalls).toHaveLength(1);
       expect(env.openCalls[0]?.url).toBe("about:blank");
       expect(env.navigationCalls).toHaveLength(0);
 
-      resolveKey({
-        publicKeyHex: TEST_PUB_HEX,
-        label: "Key A",
-        capabilities: []
-      });
       await launch;
       expect(env.navigationCalls).toHaveLength(1);
     } finally {
@@ -6929,10 +6855,10 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     try {
       const storageRepository = makeFakeMultipartUploadRepository();
       const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
-      // 硬切换 002 收尾：identityStatus 已删除，per-key "not ready" 不再是
-      // 合法稳态。本测试在新模型下覆盖"owner key 找不到"分支——
-      // getKey 返回 undefined，launchAppView 必须抛 LaunchAppViewError("no_active_key")。
-      (keyspace as unknown as { getKey: (h: string) => Promise<unknown> }).getKey = async () => undefined;
+      // 单 Key 本地钱包："owner key 找不到" 表现为当前没有可用 Key——
+      // active() 缺省且 requireActiveKey() 抛错，launchAppView 必须抛
+      // LaunchAppViewError("no_active_key")。
+      (keyspace as { active: () => unknown }).active = () => ({});
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace,
@@ -8368,8 +8294,10 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
   });
 });
 
-  it("probeExecutionCondition：locked + keyspace 查不到 owner → 直接 fail-fast（不卡 waiting_unlock）", async () => {
-    // 验证施工单 7.5:已删 / 根本不在本地 vault 的 owner key 不应让用户先去解锁。
+  it("probeExecutionCondition：locked + session owner 已不是当前唯一 Key → 直接 fail-fast（不卡 waiting_unlock）", async () => {
+    // 单 Key 本地钱包（docs/存储.md）之后 "owner key 被删除" 这一形态
+    // 变成 "钱包已重置并重新初始化为另一把 Key"：session 里记录的公钥不再
+    // 是当前唯一 Key。这种情况下不应让用户先白解锁一次。
     const storageRepository = makeFakeMultipartUploadRepository();
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
@@ -8379,7 +8307,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     service.startSession();
     const now = Date.now();
     await storageRepository.putConnectSession({
-      sessionId: "sess-key-removed",
+      sessionId: "sess-old-owner",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
       ownerLabel: "Key A",
@@ -8388,9 +8316,8 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       lastUsedAt: now,
       revokedAt: null
     });
-    // 让 keyspace 显式返回 undefined：模拟 owner key 已被用户从 vault 删除。
-    const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
-    (keyspace as unknown as { getKey: () => Promise<undefined> }).getKey = async () => undefined;
+    // 当前唯一 Key 已经是另一把：钱包被重置并重新初始化为不同私钥。
+    const keyspace = makeKeyspaceStub("02" + "ff".repeat(32));
     (service as unknown as { deps: { keyspace: typeof keyspace } }).deps.keyspace = keyspace;
     // 强制 service 仍处于 locked 态。
     (service as unknown as { lockStateValue: "locked" | "unlocked" }).lockStateValue = "locked";
@@ -8406,13 +8333,13 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       recordId: "rec-test",
       transportRequestId: "x",
       method: "cipher.encrypt",
-      params: { connectSessionId: "sess-key-removed", text: "x" },
+      params: { connectSessionId: "sess-old-owner", text: "x" },
       phase: "queued",
       decision: "pending",
       status: "queued",
       enteredPhaseAt: 0,
       autoApproved: false,
-      connectSessionId: "sess-key-removed",
+      connectSessionId: "sess-old-owner",
       ownerPublicKeyHex: TEST_PUB_HEX,
       createdAt: 0,
       updatedAt: 0,

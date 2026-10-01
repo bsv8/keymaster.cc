@@ -78,7 +78,7 @@ export interface WizardState {
   resolvedImportPassword: string | null;
   /** "使用同一密码"勾选。 */
   useSamePassword: boolean;
-  /** 用户**新设**的本机系统锁屏密码草稿（双输入框）。 */
+  /** 用户**新设**的 Key 密码草稿（双输入框）。 */
   vaultPasswordDraft: string;
   vaultPasswordConfirmDraft: string;
   /** 用户给 key 设的 label。reducer 仅透传，调用方负责持久化。 */

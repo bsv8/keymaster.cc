@@ -60,9 +60,6 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
   trackSubscribe<{ status: P2pkhSyncStatus }>(P2PKH_MSG.SYNC, () => notify());
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
   unsubs.push(deps.keyspace.onActiveKeyChanged(() => notify()));
-  // 硬切换 008 收尾：额外订阅初始化变化——keyspace 初始化结束后资产平台
-  // 必须重拉，否则"未就绪"期间返回的空列表会一直显示。
-  unsubs.push(deps.keyspace.onInitializationChange(() => notify()));
   // 硬切换 001：global settings 变化也要触发重拉（testnet asset 显隐切换）。
   unsubs.push(deps.service.onGlobalSettingsChange(() => notify()));
 
@@ -77,14 +74,13 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
   }
 
   /**
-   * 平台未就绪时（isInitializing === true 或无 active key）直接返回 true。
+   * 平台未就绪时（无当前唯一 Key）直接返回 true。
    * 这是 listAssets / getAsset / listActivity / sync 的统一闸门。
    *
    * 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"，
    * 不再有 `mode === "all"` 分支；"未就绪"只看 activePublicKeyHex 缺省。
    */
   function isNotReady(): boolean {
-    if (deps.keyspace.isInitializing()) return true;
     return !deps.keyspace.active().activePublicKeyHex;
   }
 

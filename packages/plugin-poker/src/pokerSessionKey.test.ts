@@ -54,8 +54,13 @@ class FakeKeyspace {
   clearActive() {
     this.state = {};
   }
-  async getKey(pkh: string) {
-    return this.meta.get(pkh);
+  /** 单 Key 本地钱包：身份投影只描述当前唯一 Key，没有 getKey(hex)。 */
+  requireActiveKey() {
+    const pkh = this.state.activePublicKeyHex;
+    if (!pkh) throw new Error("Active key is not ready");
+    const meta = this.meta.get(pkh);
+    if (!meta) throw new Error("Active key is not ready");
+    return meta;
   }
   setKeyMeta(pkh: string, meta: any) {
     if (meta === null) {

@@ -5,7 +5,7 @@
 // OwnerFileStore 完成。MasterSeed 算法全部来自 `masterseed` 官方 SDK。
 
 import { defineCapability } from "webloom-framework";
-import type { MsFileBitfsTaskSnapshot, MsFileCoordinatorControl, OwnerFileStore } from "@keymaster/contracts";
+import type { MsFileBitfsTaskSnapshot, MsFileCoordinatorControl, BorrowedOwnerFileStore } from "@keymaster/contracts";
 import {
   MsFileSeedStoreError,
   deleteMsFileSeed,
@@ -87,7 +87,7 @@ export function createBrowserMsFileSeedSource(file: File): MsFileSeedSource {
 
 export interface MsFileBucketServiceDeps {
   /** Host 预绑定的 owner 文件根句柄（`<owner>/msfiles/`）。 */
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   /** Coordinator 控制面：块写入绕过页面 storage 数据面的端口并发上限。 */
   coordinator: MsFileCoordinatorControl;
   now?(): number;

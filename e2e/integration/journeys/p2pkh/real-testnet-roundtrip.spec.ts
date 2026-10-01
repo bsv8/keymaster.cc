@@ -37,8 +37,6 @@ const FEE_RATE_SATOSHIS_PER_KB = 1;
 const MAX_LOSS_SATOSHIS = 10;
 
 function clearSecrets(config: LoadedE2EConfig | undefined): void {
-  config?.s3.secretAccessKey.clear();
-  config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
   config?.testnet.trackingKeyPrivateKeyHex.clear();
@@ -48,8 +46,8 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
  * 业务目标：用户在真实 testnet 上收币、看到余额，再用页面「全部」把余额
  * 转回 seed；本项目唯一的 testnet 资产 Journey（原 asset/arrival-probe 已合并）。
  *
- * 开始状态：resource-setup 已完成 s3.json 指定桶的 lease、SatSubscription 配置
- * 投影和 testnet seed 余额/网络门禁；本浏览器是全新 context。页面从仓库外
+ * 开始状态：resource-setup 已完成 SatSubscription 配置投影和 testnet seed
+ * 余额/网络门禁；本浏览器是全新 context。页面从仓库外
  * key01.hex 正式导入固定测试 Key，该地址在上一轮必须已无可花费输出。
  * 固定 Key 的私钥一直在仓库外配置里：任何一轮失败都能人工归集，因此不再
  * 需要跨轮恢复账本；每轮开始的可花费输出门禁 + 手工归集脚本是恢复保障。
@@ -117,7 +115,6 @@ test(JOURNEY_ID + "：真实 testnet 收币、到账观察与全额回款", asyn
       ).toBe(true);
 
       const ready = await initializeLocalUserWithImportedHexKey(page, {
-        bucketLabel: "真实 testnet 回款测试桶",
         keyLabel: "真实 testnet 回款 Key",
         password,
         privateKeyHex: wallet!.privateKey.read(),

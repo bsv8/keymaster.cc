@@ -1,8 +1,8 @@
-// 桶内单 Key 文件 `keys/<公钥>.keyhold` 的契约。
+// 唯一钱包 Key 的 KeyHold 契约。
 //
-// 一个文件只描述一把 Key，不再存在 `keymaster/keys.json` 容器、Key 列表
-// 索引或整档 HMAC。每个文件都有自己的密码和 KDF；桶参数由
-// device-bootstrap 独立保存，不能把两种密码混成一个密码域。
+// 一个文件只描述一把 Key，固定路径是 `key.json`。取消 Key 列表、Key 容器
+// 索引、跨浏览器 Key 租约和 S3 连接凭据密码域：Key 密码是本系统唯一的持久
+// 秘密认证域。
 
 /** KeyHold v1 的公开 PBKDF2 参数。 */
 export interface KeyHoldKeyDerivationV1 {

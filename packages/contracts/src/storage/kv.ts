@@ -9,7 +9,6 @@ export const STORAGE_MAX_LIST_LIMIT = 1_000;
 export const STORAGE_CURSOR_TTL_MS = 10 * 60 * 1000;
 export const STORAGE_MAX_CURSORS_GLOBAL = 512;
 export const STORAGE_MAX_CURSORS_PER_SESSION = 64;
-export const STORAGE_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** JSON K-V 值；二进制值使用 Uint8Array，不做 Base64 放大。 */
 export type KeyValueJson = null | boolean | number | string | KeyValueJson[] | { [key: string]: KeyValueJson };
@@ -137,29 +136,57 @@ export interface KeyValueCommitResult {
   committedAt: number;
 }
 
-/** 已绑定 bucket + owner + App 的受限 K-V 句柄。 */
+/** 孤儿 value object 回收结果。 */
+export interface KeyValueGarbageResult {
+  /** 本次扫描到的 value object 数量。 */
+  scanned: number;
+  /** 确认不再被任何 head 引用的数量。 */
+  candidates: number;
+  /** 实际删除的数量（受 maxDeletes 限制）。 */
+  deleted: number;
+  /** 因删除失败而保留的数量。 */
+  failed: number;
+}
+
+/**
+ * K-V 存储维护能力：只有真正持有本地介质的句柄才实现它。
+ *
+ * 回收孤儿 value object 是介质维护，不是业务读写能力：经 RPC 代理的句柄
+ * （插件 Host、Connect App）没有本地介质，无法诚实实现它。因此它是独立于
+ * `KeyValueStore` 的可选能力，而不是业务接口的一部分。
+ */
+export interface KeyValueMaintenanceCapable {
+  /** 回收本 namespace 内不再被任何 partition head 引用的 value object。 */
+  collectGarbage(input?: { minAgeMs?: number; maxDeletes?: number }): Promise<KeyValueGarbageResult>;
+}
+
+/**
+ * 已绑定身份世代与模块根的受限 K-V 句柄。
+ *
+ * 句上没有 bucketId、bucketGeneration 或 ownerPublicKeyHex：物理数据不再按桶
+ * 和钱包 Owner 隔离。调用方拿到的 `moduleId`/`purposeId` 只能读，不能用来
+ * 打开别的 namespace。
+ */
 export interface KeyValueStore {
-  /** 抽象桶身份；只读，调用者不能替换。 */
-  readonly bucketId: string;
-  /** 打开句柄时的桶运行世代。 */
-  readonly bucketGeneration: number;
-  /** owner 句柄的压缩公钥 hex；bucket 句柄没有 owner。 */
-  readonly ownerPublicKeyHex?: string;
+  /** 打开句柄时的钱包身份世代；重置后旧句柄永久失效。 */
+  readonly walletGeneration: string;
+  /** 打开句柄时的会话世代；锁定或重新解锁后旧句柄失效。 */
+  readonly sessionEpoch: string;
+  /** 打开句柄时的 Worker 运行世代；Worker 重启后旧句柄失效。 */
+  readonly runGeneration: string;
   /** 中央声明绑定的稳定模块身份。 */
   readonly moduleId: string;
   /** 中央声明绑定的稳定用途身份。 */
   readonly purposeId: string;
-  /** 中央声明作用域。 */
-  readonly scope: "bucket" | "owner";
   /** 中央声明授权主体。 */
-  readonly authority: "platform-only" | "built-in-module" | "third-party-app";
+  readonly authority: "platform-only" | "built-in-module";
   /** 中央声明数据模型；此句柄必须是 kv。 */
   readonly model: "kv";
   /** 中央声明 schema 版本。 */
   readonly schemaVersion: number;
   /** 读取 K-V。 */
   get<T = KeyValueValue>(key: string, options?: { partition?: string }): Promise<KeyValueEntry<T> | undefined>;
-  /** 分页列出 K-V；不会返回 `.keymaster/` 保留区。 */
+  /** 分页列出 K-V；只列出本 namespace 内的键。 */
   list(input?: KeyValueListInput): Promise<KeyValueListResult>;
   /** 写入单个 K-V，内部仍通过一次 commit 发布。 */
   put<T = KeyValueValue>(key: string, value: T, condition?: KeyValueWriteCondition): Promise<KeyValueEntryMeta>;

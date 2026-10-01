@@ -42,7 +42,7 @@ test(JOURNEY_ID + "：保存联系人并打开会话入口", async ({ page, cont
   try {
     const ready = await test.step("用户先建立可恢复的本地身份", async () => initializeNewLocalUser(
       { page },
-      { bucketLabel: "联系人集成测试桶", keyLabel: "联系人测试首 Key", password },
+      { keyLabel: "联系人测试首 Key", password },
     ));
 
     await test.step("用户把对方保存为联系人", async () => {

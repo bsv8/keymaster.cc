@@ -1,19 +1,17 @@
 import { expect, type Page } from "@playwright/test";
-import { readRawLocalBucketObjects } from "../support/localBucketFormats.js";
+import { readRawWalletObjects } from "../support/walletStorageFormats.js";
 
 /**
- * 本机桶的最小非敏感投影（新模型）。
+ * 本地钱包的最小非敏感投影。
  *
- * 真值来源：一桶一条的 `keymaster.device.<ID>` 记录 + `keymaster.session`
- * 的 activeBucketId。密码与凭据都不允许出现在这里。
+ * 真值来源只有一个：`keymaster.wallet` 里的 `key.json` 与 `.keymaster/meta`。
+ * 没有桶目录、没有 Key 列表，密码与凭据都不允许出现在这里。
  */
-export interface LocalCatalogSnapshot {
-  readonly selectedBucketId?: string;
-  readonly buckets?: readonly {
-    readonly bucketId?: string;
-    readonly label?: string;
-    readonly backend?: string;
-  }[];
+export interface WalletSnapshot {
+  readonly initialized?: boolean;
+  readonly walletGeneration?: string;
+  readonly publicKeyHex?: string;
+  readonly keyLabel?: string;
 }
 
 /** 打开生产 preview，确认页面本身已进入可观察状态。 */
@@ -23,55 +21,41 @@ export async function openApplication(page: Page): Promise<void> {
 }
 
 /**
- * 从真实页面的 localStorage 读取桶投影，不读取业务私钥。
+ * 从真实页面的 IndexedDB 读取钱包投影，不读取业务私钥。
  *
- * 新模型没有目录键：桶清单 = `keymaster.device.<ID>`（一桶一条）；
- * 当前桶 = `keymaster.session` 的 activeBucketId。
+ * 只读两份固定路径：`key.json`（唯一 KeyHold）与 `.keymaster/meta`
+ * （initialized 与 walletGeneration）。仍未初始化时返回 null。
  */
-export async function readLocalCatalog(page: Page): Promise<LocalCatalogSnapshot | null> {
-  return page.evaluate(() => {
-    const buckets: Array<{ bucketId?: string; label?: string; backend?: string }> = [];
-    for (let index = 0; index < window.localStorage.length; index += 1) {
-      const key = window.localStorage.key(index);
-      if (!key || !key.startsWith("keymaster.device.")) continue;
-      const bucketId = key.slice("keymaster.device.".length);
-      let label: string | undefined;
-      let backend: string | undefined;
-      try {
-        const record = JSON.parse(window.localStorage.getItem(key) ?? "null") as { displayName?: unknown; location?: { providerId?: unknown } } | null;
-        if (record && typeof record === "object") {
-          if (typeof record.displayName === "string") label = record.displayName;
-          if (record.location && typeof record.location === "object" && typeof record.location.providerId === "string") backend = record.location.providerId;
-        }
-      } catch {
-        // 损坏记录仍然如实报告键名,由上层判断。
-      }
-      buckets.push({
-        bucketId,
-        ...(label === undefined ? {} : { label }),
-        ...(backend === undefined ? {} : { backend }),
-      });
-    }
-    let selectedBucketId: string | undefined;
+export async function readWalletSnapshot(page: Page): Promise<WalletSnapshot | null> {
+  const objects = await readRawWalletObjects(page, "^(?:key\\.json|\\.keymaster/meta)$");
+  const metaText = objects.find((entry) => entry.path === ".keymaster/meta")?.text;
+  const keyHoldText = objects.find((entry) => entry.path === "key.json")?.text;
+  if (metaText === undefined) return null;
+  const snapshot: { -readonly [K in keyof WalletSnapshot]: WalletSnapshot[K] } = {};
+  try {
+    const meta = JSON.parse(metaText) as { initialized?: unknown; walletGeneration?: unknown };
+    if (typeof meta.initialized === "boolean") snapshot.initialized = meta.initialized;
+    if (typeof meta.walletGeneration === "string") snapshot.walletGeneration = meta.walletGeneration;
+  } catch {
+    // 损坏的 meta 仍然如实报告已解析到的字段,由上层判断。
+  }
+  if (keyHoldText !== undefined) {
     try {
-      const session = JSON.parse(window.localStorage.getItem("keymaster.session") ?? "null") as { activeBucketId?: unknown } | null;
-      if (session && typeof session === "object" && typeof session.activeBucketId === "string") selectedBucketId = session.activeBucketId;
+      const keyHold = JSON.parse(keyHoldText) as { publicKeyHex?: unknown; label?: unknown };
+      if (typeof keyHold.publicKeyHex === "string") snapshot.publicKeyHex = keyHold.publicKeyHex;
+      if (typeof keyHold.label === "string") snapshot.keyLabel = keyHold.label;
     } catch {
-      // 无 session 或损坏:不报告选择。
+      // 同上：损坏的 KeyHold 不伪造字段。
     }
-    if (buckets.length === 0 && selectedBucketId === undefined) return null;
-    return {
-      ...(selectedBucketId === undefined ? {} : { selectedBucketId }),
-      buckets: buckets.sort((left, right) => (left.bucketId ?? "").localeCompare(right.bucketId ?? "")),
-    };
-  });
+  }
+  return snapshot;
 }
 
 /**
  * 初始化/解锁完成 = 已解锁壳层可用（主导航可见，且不在任何安全入口页）。
  *
  * Key 管理页（/settings/vault）已删除，初始化后落在首页；这里不再依赖
- * 具体业务页或 Key 标签文案，Key 真值由 readSessionPublicKey 与
+ * 具体业务页或 Key 标签文案，Key 真值由 readWalletPublicKey 与
  * KeymasterFormats 文件校验负责。
  */
 export async function waitForUnlockedHome(page: Page, timeoutMs = 20_000): Promise<void> {
@@ -79,7 +63,7 @@ export async function waitForUnlockedHome(page: Page, timeoutMs = 20_000): Promi
     if (await page.getByRole("heading", { name: /启动\/运行失败/ }).isVisible().catch(() => false)) return "failed";
     if (await page.getByRole("alert").first().isVisible().catch(() => false)) return "failed";
     const gateway = page.getByRole("heading", {
-      name: /Choose a bucket type|选择桶类型|存储需要认证|Storage authentication required|钱包已锁定|Wallet locked/u,
+      name: /欢迎使用 Keymaster|Welcome to Keymaster|钱包已锁定|Wallet locked/u,
     });
     if (await gateway.first().isVisible().catch(() => false)) return "pending";
     const navigation = page.getByRole("navigation", { name: /Primary navigation|主导航/ });
@@ -96,21 +80,14 @@ export async function waitForUnlockedHome(page: Page, timeoutMs = 20_000): Promi
   await page.waitForTimeout(600);
 }
 
-/** 读取浏览器 session 的 active Key（存储真值；不读私钥）。 */
-export async function readSessionPublicKey(page: Page): Promise<string> {
-  const activeKey = await page.evaluate(() => {
-    try {
-      const session = JSON.parse(window.localStorage.getItem("keymaster.session") ?? "null") as { activeKey?: unknown } | null;
-      return session && typeof session === "object" && typeof session.activeKey === "string" ? session.activeKey : null;
-    } catch {
-      return null;
-    }
-  });
-  expect(activeKey, "session 必须记录 active Key 公钥").toMatch(/^(02|03)[0-9a-f]{64}$/u);
-  return (activeKey ?? "").toLowerCase();
+/** 读取唯一钱包 Key 的公钥（`key.json` 的存储真值；不读私钥）。 */
+export async function readWalletPublicKey(page: Page): Promise<string> {
+  const snapshot = await readWalletSnapshot(page);
+  expect(snapshot?.publicKeyHex, "key.json 必须记录唯一钱包 Key 的公钥").toMatch(/^(02|03)[0-9a-f]{64}$/u);
+  return (snapshot?.publicKeyHex ?? "").toLowerCase();
 }
 
-/** Local 初始化成功后，确认密码没有进入浏览器持久化目录（localStorage + IndexedDB）。 */
+/** 初始化成功后，确认密码没有进入浏览器持久化目录（localStorage + IndexedDB）。 */
 export async function assertSetupSecretNotPersisted(page: Page, password: string): Promise<void> {
   const persisted = await page.evaluate(() => {
     const entries: string[] = [];
@@ -121,7 +98,7 @@ export async function assertSetupSecretNotPersisted(page: Page, password: string
     return entries.join("\n");
   });
   expect(persisted, "初始化密码不能写入浏览器 localStorage").not.toContain(password);
-  const bucketObjects = await readRawLocalBucketObjects(page);
-  const persistedObjects = bucketObjects.map((entry) => `${entry.bucketId}/${entry.path}=${entry.text}`).join("\n");
+  const walletObjects = await readRawWalletObjects(page);
+  const persistedObjects = walletObjects.map((entry) => `${entry.path}=${entry.text}`).join("\n");
   expect(persistedObjects, "初始化密码不能写入浏览器 IndexedDB").not.toContain(password);
 }

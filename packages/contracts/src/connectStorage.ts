@@ -1,10 +1,12 @@
 // Connect 文件 API 契约。
 //
-// 这里保留 Connect 的文件/Multipart wire shape；它与 platform-storage 的
-// Provider、K-V 引擎和 OwnerAppStore 契约分离，Connect 调用方不能接触物理 Provider。
+// 这里保留 Connect 的文件 wire shape；它与 platform-storage 的本地引擎、
+// K-V 引擎和受限句柄契约分离，Connect 调用方不能接触物理路径或数据库。
+//
+// S3 multipart 已随远程存储体系一起移除：纯本地介质没有分片续传语义，
+// 一次性 put 已经是完整写入。大文件调用方改用分多次 put 或自带业务传输。
 
 import type { BinaryField } from "./protocol.js";
-import { STORAGE_PART_SIZE_BYTES, STORAGE_MAX_PARTS } from "./storage/kv.js";
 import type { AppIdentitySnapshot } from "./appIdentity.js";
 
 /** 已验证 Connect App 的 owner 访问授权。 */
@@ -15,18 +17,18 @@ export interface OwnerAppStorageGrant {
   transportOrigin: string;
   /** 装配层验证后的 App 身份。 */
   appIdentity: AppIdentitySnapshot;
-  /** 当前统一抽象桶 ID。 */
-  bucketId: string;
-  /** 当前统一抽象桶世代；切桶后旧授权必须失效。 */
-  bucketGeneration: number;
-  /** 当前 Keymaster owner 公钥；不能使用 App 发布者公钥替代。 */
-  ownerPublicKeyHex: string;
+  /** 平台登记并规范化后的稳定存储名称；决定该 App 的独立目录。 */
+  appStorageName: string;
   /** 从验证后的 App 身份派生的稳定中央 moduleId。 */
   moduleId: string;
   /** Connect 文件 namespace 的固定用途坐标。 */
   purposeId: "files";
   /** 发放授权时的 Coordinator session 世代。 */
   sessionEpoch: string;
+  /** 发放授权时的钱包身份世代；重置后旧授权永久失效。 */
+  walletGeneration: string;
+  /** 发放授权时的 Worker 运行世代。 */
+  runGeneration: string;
 }
 
 export interface StorageListParams {
@@ -47,8 +49,8 @@ export interface StorageListEntry {
   name: string;
   /** 文件大小（字节）。 */
   size: number;
-  /** Provider 版本标签。 */
-  etag?: string;
+  /** 抽象版本标签。 */
+  revision?: string;
   /** 最后修改时间。 */
   lastModified?: string;
 }
@@ -104,8 +106,8 @@ export interface StoragePutResult {
   path: string;
   /** 写入大小（字节）。 */
   size: number;
-  /** Provider 版本标签。 */
-  etag?: string;
+  /** 抽象版本标签。 */
+  revision?: string;
   /** 写入时间戳（毫秒）。 */
   updatedAt: number;
 }
@@ -119,7 +121,7 @@ export interface StorageGetParams {
   offset?: number;
   /** 读取长度（字节）。 */
   length?: number;
-  /** 期望的 Provider 版本标签。 */
+  /** 期望的抽象版本标签。 */
   ifMatch?: string;
 }
 
@@ -136,8 +138,8 @@ export interface StorageGetResult {
   totalSize: number;
   /** 是否已读到文件结尾。 */
   eof: boolean;
-  /** Provider 版本标签。 */
-  etag?: string;
+  /** 抽象版本标签。 */
+  revision?: string;
   /** 最后修改时间。 */
   lastModified?: string;
 }
@@ -156,67 +158,4 @@ export interface StorageDeleteResult {
   deleted: true;
   /** 删除时间戳（毫秒）。 */
   updatedAt: number;
-}
-
-export interface StorageUploadBeginParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
-  /** 目标文件路径。 */
-  path: string;
-  /** MIME 类型。 */
-  contentType?: string;
-  /** 声明的文件大小（字节）。 */
-  size: number;
-  /** 是否覆盖已有对象。 */
-  overwrite?: boolean;
-}
-
-export interface StorageUploadBeginResult {
-  /** 逻辑上传 ID。 */
-  uploadId: string;
-  /** 固定分片大小（字节）。 */
-  partSize: typeof STORAGE_PART_SIZE_BYTES;
-  /** 最大分片数。 */
-  maxParts: typeof STORAGE_MAX_PARTS;
-}
-
-export interface StorageUploadPartParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
-  /** 逻辑上传 ID。 */
-  uploadId: string;
-  /** 从 1 开始的分片编号。 */
-  partNumber: number;
-  /** 分片二进制内容。 */
-  content: BinaryField;
-}
-
-export interface StorageUploadPartResult {
-  /** 逻辑上传 ID。 */
-  uploadId: string;
-  /** 分片编号。 */
-  partNumber: number;
-  /** 分片大小（字节）。 */
-  size: number;
-}
-
-export interface StorageUploadCompleteParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
-  /** 逻辑上传 ID。 */
-  uploadId: string;
-}
-
-export interface StorageUploadAbortParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
-  /** 逻辑上传 ID。 */
-  uploadId: string;
-}
-
-export interface StorageUploadAbortResult {
-  /** 逻辑上传 ID。 */
-  uploadId: string;
-  /** 固定成功标记。 */
-  aborted: true;
 }

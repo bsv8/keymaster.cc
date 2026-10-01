@@ -502,14 +502,15 @@ export class SatLibp2pConnection {
       this.resolvePending(billing.requestId, wire, stream);
       return;
     } catch { /* 继续尝试入站 Publish */ }
-    let publish;
+    // 合法入站 Publish 才算活动信号；解析失败说明这是未知帧，直接升级成
+    // 传输错误。已经解析过的 Publish 正文不再逐条打印：bsvprice 这类
+    // 高频通道每 tick 一行 warn 会把正常流噪声成故障。
     try {
-      publish = parsePublish(wire);
+      parsePublish(wire);
     } catch (error) {
       throw new SatTransportError("SSP frame is neither a response nor Publish", { sentBoundary: "unknown", cause: error });
     }
     this.noteActivity();
-    console.warn("[sat] inbound Publish delivery", JSON.stringify({ channel: publish.channel, content: new TextDecoder().decode(publish.contentJson).slice(0, 120) }));
     const handler = this.incomingHandlers.values().next().value as ((wire: Uint8Array) => Promise<Uint8Array>) | undefined;
     if (!handler) {
       if (this.queuedIncoming.length >= this.limits.maxPendingIncomingPerLane) throw new SatTransportError("SSP inbound Publish queue is full", { sentBoundary: "unknown" });

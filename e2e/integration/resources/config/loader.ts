@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { SecretString } from "../../support/secretString.js";
-import type { E2ES3Config, E2ESatSubscriptionConfig, E2ESatSubscriptionPageConfig, E2ETestnetKeysConfig, LoadedE2EConfig, LoadedE2ES3Config, LoadedE2ESatSubscriptionConfig } from "./types.js";
+import type { E2ESatSubscriptionConfig, E2ESatSubscriptionPageConfig, E2ETestnetKeysConfig, LoadedE2EConfig, LoadedE2ESatSubscriptionConfig } from "./types.js";
 
 /** secp256k1 的阶；这里只用于检查资金种子格式，不导出或记录私钥。 */
 const SECP256K1_ORDER = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
@@ -90,22 +90,6 @@ function validateEndpoint(value: string, field: string, filename: string): strin
   return url.toString().replace(/\/$/u, "");
 }
 
-function parseS3(value: Record<string, unknown>): E2ES3Config {
-  const filename = "s3.json";
-  const endpoint = validateEndpoint(requiredString(value.endpoint, "endpoint", filename), "endpoint", filename);
-  const region = requiredString(value.region, "region", filename);
-  // 不根据名称判断是否“专用桶”；s3.json 给出的桶就是本次测试使用的桶。
-  const bucket = requiredString(value.bucket, "bucket", filename);
-  const accessKeyId = requiredString(value.accessKeyId, "accessKeyId", filename);
-  const secret = requiredString(value.secretAccessKey, "secretAccessKey", filename);
-  const session = value.sessionToken === undefined ? undefined : requiredString(value.sessionToken, "sessionToken", filename);
-  return {
-    endpoint, region, bucket, accessKeyId,
-    secretAccessKey: new SecretString(secret),
-    ...(session === undefined ? {} : { sessionToken: new SecretString(session) }),
-  };
-}
-
 /** 只解析页面表单需要的三个公开 Sat 字段，不触碰链 API 或授权字段。 */
 function parseSatSubscriptionPage(value: Record<string, unknown>): E2ESatSubscriptionPageConfig {
   const websocket = requiredString(value.websocket, "websocket", "satsubscription.json");
@@ -165,32 +149,19 @@ export async function loadE2ETestnetKeysConfig(options: { readonly workspaceRoot
  */
 export async function loadE2EConfig(options: { readonly workspaceRoot?: string; readonly configDir?: string } = {}): Promise<LoadedE2EConfig> {
   const directory = await checkDirectory(options.configDir ?? process.env.KEYMASTER_E2E_CONFIG_DIR ?? DEFAULT_CONFIG_DIR, options.workspaceRoot ?? process.cwd());
-  const s3 = parseS3(parseObject(await readPrivateFile(directory, "s3.json"), "s3.json"));
   const satsubscription = parseSatSubscription(parseObject(await readPrivateFile(directory, "satsubscription.json"), "satsubscription.json"));
   const testnet = {
     privateKeyHex: parseSeed(await readPrivateFile(directory, "seed-key.hex"), "seed-key.hex"),
     // 固定导入 Key：收币与回款都落在同一地址，方便跨轮追踪和失败回收。
     trackingKeyPrivateKeyHex: parseSeed(await readPrivateFile(directory, "key01.hex"), "key01.hex"),
   };
-  return { directory, s3, satsubscription, testnet };
-}
-
-/**
- * 只加载真实 S3 Journey 所需的配置。
- *
- * 这样 S3 初始化不会因为同一目录里的 SatSubscription/testnet 配置暂时
- * 不可用而无法执行；该 Journey 仍然只连接 s3.json 指定的真实桶。
- */
-export async function loadE2ES3Config(options: { readonly workspaceRoot?: string; readonly configDir?: string } = {}): Promise<LoadedE2ES3Config> {
-  const directory = await checkDirectory(options.configDir ?? process.env.KEYMASTER_E2E_CONFIG_DIR ?? DEFAULT_CONFIG_DIR, options.workspaceRoot ?? process.cwd());
-  const s3 = parseS3(parseObject(await readPrivateFile(directory, "s3.json"), "s3.json"));
-  return { directory, s3 };
+  return { directory, satsubscription, testnet };
 }
 
 /**
  * 只加载真实 SatSubscription 页面 Journey 所需的配置。
  *
- * 该函数只读取公开连接入口和供应商公钥，不读取 S3 凭据或 testnet 私钥；
+ * 该函数只读取公开连接入口和供应商公钥，不读取 testnet 私钥；
  * 页面测试仍必须通过 page.fill/page.click 把映射后的字段交给真实页面。
  */
 export async function loadE2ESatSubscriptionConfig(options: { readonly workspaceRoot?: string; readonly configDir?: string } = {}): Promise<LoadedE2ESatSubscriptionConfig> {
@@ -200,13 +171,7 @@ export async function loadE2ESatSubscriptionConfig(options: { readonly workspace
 }
 
 /** 仅用于测试/诊断配置指纹，输入不包含任何秘密值。 */
-export function publicConfigFingerprint(config: Pick<LoadedE2EConfig, "directory" | "s3" | "satsubscription">): string {
-  const publicShape = JSON.stringify({ directory: config.directory, endpoint: config.s3.endpoint, bucket: config.s3.bucket, region: config.s3.region, websocket: config.satsubscription.websocket, webrtcDirect: config.satsubscription.webrtcDirect, supplierPublicKeyHex: config.satsubscription.supplierPublicKeyHex, testnetApiBaseUrl: config.satsubscription.testnetApiBaseUrl });
-  return createHash("sha256").update(publicShape).digest("hex").slice(0, 16);
-}
-
-/** 真实 S3 单资源运行状态使用的公开配置指纹。 */
-export function publicS3ConfigFingerprint(config: Pick<LoadedE2ES3Config, "directory" | "s3">): string {
-  const publicShape = JSON.stringify({ directory: config.directory, endpoint: config.s3.endpoint, bucket: config.s3.bucket, region: config.s3.region });
+export function publicConfigFingerprint(config: Pick<LoadedE2EConfig, "directory" | "satsubscription">): string {
+  const publicShape = JSON.stringify({ directory: config.directory, websocket: config.satsubscription.websocket, webrtcDirect: config.satsubscription.webrtcDirect, supplierPublicKeyHex: config.satsubscription.supplierPublicKeyHex, testnetApiBaseUrl: config.satsubscription.testnetApiBaseUrl });
   return createHash("sha256").update(publicShape).digest("hex").slice(0, 16);
 }

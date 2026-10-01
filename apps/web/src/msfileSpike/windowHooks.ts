@@ -32,8 +32,13 @@ export interface MsFileExecutorSpikeHooks {
   beginNoiseSign(): { pendingAfterStart: number };
   finishNoiseSign(): Promise<{ signResult: string; pendingAfter: number; startedAt: number; finishedAt: number }>;
   lock(): Promise<{ status: string; startedAt: number; finishedAt: number }>;
-  generateReplacementKey(): Promise<{ publicKeyHex: string }>;
-  setActive(publicKeyHex: string): Promise<{ status: string }>;
+  /**
+   * 更换 owner 身份的唯一路径：清空钱包后重新创建唯一 Key。
+   *
+   * 单钱包单 Key 模式没有第二把 Key，也没有运行中换绑；signer 的身份栅栏
+   * 因此由 walletGeneration 换绑驱动，而不是 setActive 切换 owner。
+   */
+  resetAndRecreateWallet(): Promise<{ previousPublicKeyHex: string; walletGeneration: string; activePublicKeyHex: string }>;
   connectAndInspect(address: string): Promise<{
     hostStarted: boolean;
     localPublicKeyHex: string;
@@ -170,53 +175,76 @@ function parseEchoFrame(frame: Uint8Array): string {
 async function ensureStorageReady(coordinator: ReturnType<typeof getCoordinatorClient>): Promise<void> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
     const status = await coordinator.storageControl({ type: "status" });
-    if (status.status === "ok" && status.value === "ready") return;
-    if (status.status === "ok" && status.value === "unselected") {
-      const selected = await coordinator.storageControl({ type: "initial-setup", plan: {
-        transactionId: `msfile-spike-${crypto.randomUUID()}`,
-        bucketLabel: "MSFile Spike Local",
-        backend: "local",
-        connection: { kind: "local" },
-        firstKey: { kind: "generate", label: "MSFile executor spike", capabilities: ["p2pkh"], password: SPIKE_PASSWORD },
-      } });
-      if (selected.status !== "ok") throw new Error(`spike Local setup failed: ${selected.status}`);
-    } else if (status.status === "ok" && status.value === "authentication") {
-      const unlocked = await coordinator.storageControl({ type: "unlock-bucket", password: SPIKE_PASSWORD });
-      if (unlocked.status !== "ok") throw new Error(`spike Local unlock failed: ${unlocked.status}`);
-    } else {
-      await coordinator.storageControl({ type: "retry" });
-    }
-    await delay(25);
+    if (status.status !== "ok") throw new Error(`spike Storage status failed: ${status.status}`);
+    // 钱包结构完整（ready 或 locked）即可继续；uninitialized 由
+    // ensureUnlocked 走唯一的 initialize 入口。corrupt / unsupported /
+    // degraded 必须 fail closed，不能靠初始化覆盖可能可恢复的数据。
+    if (status.value === "ready" || status.value === "locked" || status.value === "uninitialized") return;
+    throw new Error(`spike local storage is unusable: ${status.value}`);
   }
   throw new Error("spike Storage did not become ready");
+}
+
+async function initializeSpikeWallet(coordinator: ReturnType<typeof getCoordinatorClient>, label: string): Promise<void> {
+  const created = await coordinator.storageControl({
+    type: "initialize",
+    plan: {
+      transactionId: `msfile-spike-${crypto.randomUUID()}`,
+      firstKey: { kind: "generate", label, capabilities: ["p2pkh"], password: SPIKE_PASSWORD },
+    },
+  });
+  if (created.status !== "ok") throw new Error(`spike wallet creation failed: ${created.status}`);
+}
+
+async function resetSpikeWallet(coordinator: ReturnType<typeof getCoordinatorClient>): Promise<string> {
+  const reset = await coordinator.storageControl({
+    type: "reset-wallet",
+    confirmationLabel: "MSFile executor spike identity replacement",
+  });
+  if (reset.status !== "ok") throw new Error(`spike wallet reset failed: ${reset.status}`);
+  const walletGeneration = (reset.value as { walletGeneration?: unknown }).walletGeneration;
+  if (typeof walletGeneration !== "string" || walletGeneration === "") {
+    throw new Error("spike wallet reset returned no wallet generation");
+  }
+  return walletGeneration;
+}
+
+/**
+ * 单钱包单 Key 模式下重新建立 owner 身份的唯一序列。
+ *
+ * reset-wallet 先撤销运行根与全部会话，随后 initialize 在唯一 Key 原子
+ * 事务中建立新的 owner。调用方必须自己重新取得 lease，旧 lease 不可复用。
+ */
+async function replaceSpikeWalletIdentity(
+  coordinator: ReturnType<typeof getCoordinatorClient>,
+  label: string,
+): Promise<{ previousPublicKeyHex: string; walletGeneration: string; activePublicKeyHex: string }> {
+  const previous = await ensureUnlocked(coordinator);
+  const walletGeneration = await resetSpikeWallet(coordinator);
+  await initializeSpikeWallet(coordinator, label);
+  const owner = await ensureUnlocked(coordinator);
+  if (owner.ownerPublicKeyHex === previous.ownerPublicKeyHex) {
+    throw new Error("spike replacement wallet reused the previous owner identity");
+  }
+  return { previousPublicKeyHex: previous.ownerPublicKeyHex, walletGeneration, activePublicKeyHex: owner.ownerPublicKeyHex };
 }
 
 async function ensureUnlocked(coordinator: ReturnType<typeof getCoordinatorClient>): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }> {
   await ensureStorageReady(coordinator);
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const snapshot = coordinator.getBootstrapSnapshot();
-    if (snapshot.vaultStatus !== "booting") {
-      if (snapshot.vaultStatus === "unlocked" && snapshot.activePublicKeyHex) {
-        return { ownerPublicKeyHex: snapshot.activePublicKeyHex, sessionEpoch: snapshot.sessionEpoch };
-      }
-      if (snapshot.vaultStatus === "uninitialized") {
-        const created = await coordinator.vaultOperation({ type: "createVaultWithInitialKey", password: SPIKE_PASSWORD, label: "MSFile executor spike" });
-        if (created.status === "ok") {
-          const value = created.value as { publicKeyHex?: string };
-          if (value.publicKeyHex) return { ownerPublicKeyHex: value.publicKeyHex, sessionEpoch: created.sessionEpoch };
-        } else {
-          // 两个真实页面可以同时完成 bootstrap；第二个页面重读状态即可。
-          await delay(10);
-          continue;
-        }
-      } else if (snapshot.vaultStatus === "locked") {
-        const unlocked = await coordinator.unlock(SPIKE_PASSWORD);
-        if (unlocked.status !== "accepted" && unlocked.status !== "already-unlocked" && unlocked.status !== "ok") {
-          throw new Error(`spike Vault unlock failed: ${unlocked.status}`);
-        }
+    if (snapshot.vaultStatus === "unlocked" && snapshot.activePublicKeyHex) {
+      return { ownerPublicKeyHex: snapshot.activePublicKeyHex, sessionEpoch: snapshot.sessionEpoch };
+    }
+    if (snapshot.vaultStatus === "uninitialized") {
+      await initializeSpikeWallet(coordinator, "MSFile executor spike");
+    } else if (snapshot.vaultStatus === "locked") {
+      const unlocked = await coordinator.unlock(SPIKE_PASSWORD);
+      if (unlocked.status !== "accepted" && unlocked.status !== "already-unlocked" && unlocked.status !== "ok") {
+        throw new Error(`spike Vault unlock failed: ${unlocked.status}`);
       }
     }
-    await delay(10);
+    await delay(25);
   }
   throw new Error("spike Vault did not become unlocked");
 }
@@ -327,16 +355,8 @@ export function installMsFileSpikeHooks(): void {
       const result = await coordinator.lock();
       return { status: result.status, startedAt, finishedAt: Date.now() };
     },
-    async generateReplacementKey() {
-      const result = await coordinator.vaultOperation({ type: "generateKey", password: SPIKE_PASSWORD, label: "MSFile executor replacement", capabilities: ["p2pkh"] });
-      if (result.status !== "ok") throw new Error(`replacement key generation failed: ${result.status}`);
-      const value = result.value as { publicKeyHex?: string };
-      if (!value.publicKeyHex) throw new Error("replacement key generation returned no public key");
-      return { publicKeyHex: value.publicKeyHex };
-    },
-    async setActive(publicKeyHex) {
-      const result = await coordinator.vaultOperation({ type: "setActive", publicKeyHex });
-      return { status: result.status };
+    async resetAndRecreateWallet() {
+      return replaceSpikeWalletIdentity(coordinator, "MSFile executor replacement");
     },
     async connectAndInspect(address) {
       if (!signer || !lease) throw new Error("executor lease is not acquired");

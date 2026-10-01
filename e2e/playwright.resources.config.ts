@@ -47,15 +47,15 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
     {
-      // 资源可用性：断言 setup 之后的 lease 与运行状态。
+      // 资源可用性：断言 setup 写下的受保护运行状态。
       name: "resources",
       dependencies: ["resource-setup"],
       testMatch: /resources\/resource-availability\.spec\.ts$/u,
       use: { ...devices["Desktop Chrome"] },
     },
     {
-      // 页面 Journey 只需要仓库外 satsubscription.json；不依赖会做 S3/
-      // testnet 资源准备的项目，避免资源层阻断掩盖真实页面结果。
+      // 页面 Journey 只需要仓库外 satsubscription.json；不依赖会做 testnet
+      // 资金准备的项目，避免资源层阻断掩盖真实页面结果。
       name: "satsubscription-page",
       testMatch: /journeys\/satsubscription\/real-satsubscription-page\.spec\.ts$/u,
       use: { ...devices["Desktop Chrome"] },

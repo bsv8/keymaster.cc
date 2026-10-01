@@ -137,7 +137,9 @@ const keyImportPluginDefinition = {
   description: "统一导入平台：选择 importer、解析、调用 vault。",
   kind: "business",
   startup: "optional",
-  bootstrapStage: "vault-selection",
+  // 首启导入向导由 LockedShell 直接渲染，是「导入钱包 Key」的两条入口之一。
+  // 它必须在第一阶段可用：此时钱包尚未初始化，vault-selection 尚未开始。
+  bootstrapStage: "storage-onboarding",
   defaultEnabled: true,
   canDisable: true,
   displayGroup: "business",

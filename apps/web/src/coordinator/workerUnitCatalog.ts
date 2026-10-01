@@ -207,7 +207,6 @@ export const COORDINATOR_WORKER_UNIT_CATALOG: readonly CoordinatorWorkerUnitDesc
 function sameStorageDeclaration(left: PluginStorageDeclaration, right: PluginStorageDeclaration): boolean {
   return left.moduleId === right.moduleId
     && left.purposeId === right.purposeId
-    && left.scope === right.scope
     && left.authority === right.authority
     && left.model === right.model
     && left.schemaVersion === right.schemaVersion;

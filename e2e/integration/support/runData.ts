@@ -8,7 +8,7 @@ import { assertSafeIdentifier, createRunId, currentRunId } from "./ids.js";
  *
  * 仓库内 `e2e/runs/<执行档>/<run-id>/{state,logs,artifacts}` 保存一轮运行产生的
  * 非秘密数据；该目录不进入 git，可以按轮或按执行档整体删除。仓库外的
- * `~/.config/keymaster-e2e/` 只保留秘密配置（s3.json 等），两者不混用。
+ * `~/.config/keymaster-e2e/` 只保留秘密配置，两者不混用。
  *
  * 设计缘由：一次 Playwright 命令 = 一轮（setup → journeys → teardown，同一个
  * run_id）。跨轮恢复数据已随 key01 固定钱包 + 手工归集脚本移除，因此这里

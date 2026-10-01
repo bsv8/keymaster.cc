@@ -52,7 +52,7 @@ import {
   type WindowApp,
 } from "webloom-framework";
 import type { PluginIntentCoordinator, PluginIntentSnapshot } from "webloom-framework";
-import { createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
+import { createWindowAppFromHost } from "webloom-framework/advanced";
 import type { ApplicationBootstrapPhase, ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
 import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
 import { attachKeymasterRemoteRuntime, createKeymasterPluginHost as createPluginHost, getWebLoomHost, type PluginHost } from "@keymaster/runtime";
@@ -149,34 +149,42 @@ const EMPTY_PLUGIN_INTENT_SNAPSHOT: PluginIntentSnapshot = {
 /**
  * 计算身份切换时仍可公开的最早应用装配阶段。
  *
- * Storage onboarding 尚未完成时，Coordinator 仍可能先发布一次
+ * 本地存储尚未装好可写 Root 时，Coordinator 仍可能先发布一次
  * `session.state`（例如 booting -> uninitialized）。这条事件只改变 Vault
  * 身份，不能把 storageReady=false 的启动状态提前投影成 vault-selection；
- * 否则 App 会把合法的首次存储选择误判成启动不一致。
+ * 否则 App 会把「本地钱包还不存在」误判成启动不一致。
+ *
+ * 旧的第二个参数（远程连接的存储认证阶段）已随 S3 / 桶体系一起移除：
+ * 正常冷启动只会是 uninitialized 或 locked，两者都走同一条创建/导入/
+ * 解锁路径。
  */
 export function applicationBootstrapPhaseForStorageReadiness(
   storageReadyForBootstrap: boolean,
-  storageAuthenticationRequired = false,
 ): ApplicationBootstrapPhase {
   return storageReadyForBootstrap
     ? "vault-selection"
-    : storageAuthenticationRequired
-      ? "storage-authentication"
-      : "storage-onboarding";
+    : "storage-onboarding";
 }
 
 /**
  * 把 Coordinator 返回的 Storage 状态映射成页面启动阶段。
  *
- * `authentication` 表示设备上已有选中的连接，只缺本次密码；它不能和
- * `unselected` 共用首次初始化入口。其它非 ready 状态仍然保留在首次
- * Storage 门禁，等待已有恢复/重试逻辑处理。
+ * 单 Key 本地存储之后没有远程连接与桶选择：`ready` 与 `locked` 都是
+ * 正常的启动状态，差别只是钱包是否已解密。两者都必须放行到
+ * vault-selection——否则 locked 冷启动永远拿不到 Vault/Keyspace 能力，
+ * 也就没有解锁入口。
+ *
+ * `uninitialized` 是尚未创建 Key，需要先走初始化入口；`corrupt` /
+ * `unsupported` / `degraded` 保持 fail closed，不能被折算成可重试的
+ * storage-onboarding 而静默创建空钱包覆盖本地数据。
  */
 export function applicationBootstrapPhaseForStorageStatus(
   storageStatus: unknown,
 ): ApplicationBootstrapPhase {
-  if (storageStatus === "authentication") return "storage-authentication";
-  if (storageStatus === "ready") return "vault-selection";
+  if (storageStatus === "ready" || storageStatus === "locked") return "vault-selection";
+  if (storageStatus === "uninitialized") return "storage-onboarding";
+  // corrupt / unsupported / degraded：进入明确的恢复门禁，页面不会把它
+  // 误判成「还没初始化」而提供创建或导入入口。
   return "storage-onboarding";
 }
 
@@ -188,11 +196,26 @@ function runtimeIdentityFromSnapshot(
     vaultStatus: snapshot.vaultStatus,
     ownerPublicKeyHex: snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined,
     sessionEpoch: snapshot.sessionEpoch,
-    bucketGeneration: snapshot.storageBucketGeneration,
+    ...(snapshot.walletGeneration ? { walletGeneration: snapshot.walletGeneration } : {}),
   };
 }
 
 type CoordinatorMethodName = keyof SessionCoordinatorClient | keyof StorageBindingCoordinatorClient | "sendActivity";
+
+/**
+ * Worker 在打开底层 store 之前就拒绝掉的授权失败。
+ *
+ * 这些失败说明「刚拿到的 grant 已经作废」，同一业务调用重绑一次是安全的：
+ * 重放的仍然只是授权申请与同一条数据请求，不会重复执行已经越过提交边界的
+ * 写入。final I/O 之后才出现的 stale binding 不在集合内，必须原样抛出。
+ */
+const PRE_IO_PLATFORM_GRANT_FAILURES = new Set([
+  "Platform storage grant is invalid",
+  "Platform storage session changed",
+  "Platform storage wallet generation changed",
+  "Platform storage run generation changed",
+  "Platform storage root is unavailable",
+]);
 
 function bindCoordinatorMethods<T>(
   client: SessionCoordinatorClient,
@@ -223,8 +246,7 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
 export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl {
   return bindCoordinatorMethods<StorageCoordinatorControl>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
-    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
-    "refreshStorageBootstrap"
+    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort"
   ]);
 }
 
@@ -232,7 +254,7 @@ export function createStorageCoordinatorClient(client: SessionCoordinatorClient)
 export function createVaultCoordinatorClient(client: SessionCoordinatorClient): VaultCoordinatorControl {
   const facade = bindCoordinatorMethods<VaultCoordinatorControl>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic",
-    "unlock", "lock", "activateKey", "vaultOperation", "crypto", "backgroundCancelByKey", "autolockSettingsUpdate"
+    "unlock", "lock", "vaultOperation", "crypto", "storageControl", "autolockSettingsUpdate"
   ]);
   return facade;
 }
@@ -331,8 +353,8 @@ export function createCoordinatorPlatformStore(
   declaration: PluginStorageDeclaration,
   pluginId = "runtime"
 ): KeyValueStore {
-  if (declaration.scope !== "bucket" || declaration.authority !== "platform-only" || declaration.model !== "kv") {
-    throw new Error("Coordinator platform store requires a bucket platform K-V declaration");
+  if (declaration.authority !== "platform-only" || declaration.model !== "kv") {
+    throw new Error("Coordinator platform store requires a platform-only K-V declaration");
   }
   const internalClient = client as SessionCoordinatorClient & StorageBindingCoordinatorClient;
   let currentGrant: import("@keymaster/contracts/storage-internal").StoragePlatformGrant | undefined;
@@ -362,10 +384,10 @@ export function createCoordinatorPlatformStore(
   };
   const isPreIoGrantValidationFailure = (error: unknown): boolean => {
     const message = error instanceof Error ? error.message : String(error);
-    // Worker 在打开底层 store 之前完成这两个校验；只有这里允许同一
-    // 业务调用重绑一次。越过最终 I/O 后的 stale binding 不能重放写入。
-    return message === "Platform storage grant is invalid"
-      || message === "Platform storage bucket generation changed";
+    // Worker 在打开底层 store 之前完成 grant 校验：授权本身无效，或
+    // 钱包 / 会话 / 运行世代已经变化。只有这里允许同一业务调用重绑一次；
+    // 越过最终 I/O 后的 stale binding 不能重放写入。
+    return PRE_IO_PLATFORM_GRANT_FAILURES.has(message);
   };
   let closed = false;
   const assertOpen = () => {
@@ -400,12 +422,11 @@ export function createCoordinatorPlatformStore(
     }
   };
   return {
-    bucketId: "coordinator",
-    bucketGeneration: 0,
-    ownerPublicKeyHex: "",
+    get walletGeneration() { return currentGrant?.walletGeneration ?? ""; },
+    get sessionEpoch() { return currentGrant?.sessionEpoch ?? ""; },
+    get runGeneration() { return currentGrant?.runGeneration ?? ""; },
     moduleId: declaration.moduleId,
     purposeId: declaration.purposeId,
-    scope: declaration.scope,
     authority: declaration.authority,
     model: declaration.model,
     schemaVersion: declaration.schemaVersion,
@@ -651,7 +672,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       return {
         sessionEpoch: snapshot.sessionEpoch,
         ownerPublicKeyHex: snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined,
-        bucketGeneration: snapshot.storageBucketGeneration,
+        walletGeneration: snapshot.walletGeneration,
       };
     },
     // 页面销毁时给插件一个有限的异步收尾窗口；撤权本身仍同步发生。
@@ -674,11 +695,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     operation: "bind-window-app",
     context: { appId: "keymaster-window" }
   }, () => coordinatorClient.setWindowApp(pageWindowApp!));
-  await withBootstrapErrorContext({
-    stage: "transport",
-    operation: "register-window-storage-plugin",
-    pluginId: "storage"
-  }, () => registerPlugins(pageWindowApp!, [coordinatorClient.createWindowStoragePlugin()]));
   await connectCoordinatorWithStartupRetry(coordinatorClient);
   // `sendHello()` 把 Coordinator 的权威身份快照同步写入 client，但首次
   // `session.state` topic baseline 可能稍后才到达。若此时直接进入 owner
@@ -706,13 +722,16 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     stage: "storage-status",
     operation: "read-storage-status"
   }, () => coordinatorClient.storageControl({ type: "status" }));
-  // Storage 是独立健康域。Provider/CORS/认证暂不可用时，仍需让页面看到
-  // 对应的恢复入口；此时不能再读取平台配置 K-V。尤其是 authentication
-  // 只允许已有桶认证页，不能退回首次初始化。
+  // 单 Key 本地存储没有远程 Provider 与连接认证：状态查询失败、
+  // uninitialized、locked、corrupt/unsupported/degraded 都保留在
+  // storage-onboarding 门禁，由页面给出创建/导入、解锁或恢复入口。
   const storagePhase = storageStatus.status === "ok"
     ? applicationBootstrapPhaseForStorageStatus(storageStatus.value)
     : "storage-onboarding";
-  const storageReady = storageStatus.status === "ok" && storageStatus.value === "ready";
+  // ready 与 locked 都表示本地钱包结构完整、可读可恢复，可以继续装配
+  // 后续阶段；只有它们才允许进入 vault-selection。
+  const storageReady = storageStatus.status === "ok"
+    && (storageStatus.value === "ready" || storageStatus.value === "locked");
   runWithBootstrapErrorContext({
     stage: "transport",
     operation: "publish-coordinator-activity"
@@ -837,7 +856,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   }, "asset-workspace-lifecycle"));
 
   function runtimeIdentityKeyFor(identity: RuntimeIdentityTransition): string {
-    return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.bucketGeneration ?? "unknown"}`;
+    return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.walletGeneration ?? "unknown"}`;
   }
 
   /**
@@ -1062,15 +1081,22 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       stage: "storage-onboarding",
       operation: "get-storage-runtime-controller"
     }, () => host.capabilities.get(STORAGE_RUNTIME_CONTROLLER_CAPABILITY));
+    // 本地钱包装好可写 Root 的条件：ready（已解锁）或 locked（已有钱包、
+    // 等待 Key 密码）。uninitialized 需要先走创建/导入；corrupt、
+    // unsupported 与 degraded 必须停在恢复门禁，不能折算成「可以继续」。
+    const storageCanProceed = (): boolean => {
+      const status = runWithBootstrapErrorContext({
+        stage: "storage-onboarding",
+        operation: "read-storage-readiness"
+      }, () => storageService.status());
+      return status === "ready" || status === "locked";
+    };
     const offStorageReady = runWithBootstrapErrorContext({
       stage: "storage-onboarding",
       operation: "subscribe-storage-ready"
     }, () => storageService.subscribe(() => {
       try {
-        if (runWithBootstrapErrorContext({
-          stage: "storage-onboarding",
-          operation: "read-storage-readiness"
-        }, () => storageService.status()) !== "ready") return;
+        if (!storageCanProceed()) return;
         storageReadyForBootstrap = true;
         void enterVaultSelectionStage().catch((error) => {
           // 异步回调不能再交给 bootstrapPlugins() 的 caller；状态页保留
@@ -1083,11 +1109,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       }
     }));
     // subscribe() is intentionally not an immediate callback; handle a
-    // ready baseline explicitly for a race between status() and subscription.
-    if (runWithBootstrapErrorContext({
-      stage: "storage-onboarding",
-      operation: "read-storage-readiness"
-    }, () => storageService.status()) === "ready") {
+    // baseline explicitly for a race between status() and subscription.
+    if (storageCanProceed()) {
       storageReadyForBootstrap = true;
       await enterVaultSelectionStage();
     }
@@ -1156,16 +1179,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       }, () => assetWorkspaceDisposer?.());
       assetWorkspaceDisposer = undefined;
       assetWorkspaceReady = false;
-      updateBootstrapStatus({
-        hasUnlockedActiveKey: nextIdentity.vaultStatus === "unlocked",
-        ownerAppsReady: false,
-        connectAppsReady: false,
-        assetWorkspaceReady: false,
-        phase: applicationBootstrapPhaseForStorageReadiness(
-          storageReadyForBootstrap,
-          storagePhase === "storage-authentication",
-        )
-      }, "coordinator");
+        updateBootstrapStatus({
+          hasUnlockedActiveKey: nextIdentity.vaultStatus === "unlocked",
+          ownerAppsReady: false,
+          connectAppsReady: false,
+          assetWorkspaceReady: false,
+          phase: applicationBootstrapPhaseForStorageReadiness(storageReadyForBootstrap)
+        }, "coordinator");
     }
 
     // transitionRuntimeIdentity 的同步前半段会在此调用返回前撤销旧

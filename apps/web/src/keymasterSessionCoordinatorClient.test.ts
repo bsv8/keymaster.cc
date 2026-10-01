@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, DEVICE_KEY_PREFIX, KEYMASTER_SESSION_KEY, type CoordinatorLocalStorageRequest, type CoordinatorLocalStorageResponse, type CoordinatorTopicEvent, type DeviceRecordV1, type KeymasterSessionV1, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, type CoordinatorTopicEvent, type SessionCoordinatorClient } from "@keymaster/contracts";
 import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
 import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { StorageRpcProxy } from "@keymaster/platform-storage";
 import { createCoordinatorClient as createRawCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
-import type { LocalStorageBridgeRequest } from "@keymaster/platform-storage/coordinator";
-import { createWindowApp, definePlugin, WebLoomError, type HandlerCallContext, type ServiceReference, type WindowApp } from "webloom-framework";
+import { createWindowApp, definePlugin, WebLoomError, type WindowApp } from "webloom-framework";
 import { startSharedWorkerAppForTesting, type SharedWorkerScopeLike } from "webloom-framework/testing";
 
 type TopicWaiter = { resolve: (event: CoordinatorTopicEvent | undefined) => void; signal: AbortSignal; onAbort: () => void };
@@ -69,7 +67,7 @@ class Hub {
             authorityInstanceId: "authority:hub",
             sessionEpoch: "shared-epoch",
             vaultStatus: "locked",
-            keyspaceGeneration: 0,
+            runGeneration: "run-0",
             taskSnapshots: [],
             scheduleSettings: { taskIntervals: {} },
             ...(request.kind === "session.open" ? {
@@ -277,12 +275,14 @@ const activeClients = new Set<ReturnType<typeof createRawCoordinatorClient>>();
 const activeWindowApps = new Set<Promise<WindowApp>>();
 const clientWindowApps = new WeakMap<ReturnType<typeof createRawCoordinatorClient>, Promise<WindowApp>>();
 
+// 单 Key 本地钱包之后页面侧不再挂 LocalStorage 桥：持久真值只有 IndexedDB。
+// WindowApp 仍然必须在 connect() 之前装配好，只是它不再贡献任何存储插件。
 function ensureTestWindowApp(client: ReturnType<typeof createRawCoordinatorClient>): Promise<WindowApp> {
   const existing = clientWindowApps.get(client);
   if (existing) return existing;
   const appPromise = createWindowApp({
     id: `coordinator-test-window-${activeClients.size + 1}`,
-    plugins: [client.createWindowStoragePlugin()],
+    plugins: [],
   }).then((app) => {
     client.setWindowApp(app);
     return app;
@@ -313,203 +313,6 @@ afterEach(async () => {
   activeWindowApps.clear();
   await Promise.all([...activeHubs].map((hub) => hub.dispose()));
 });
-
-class BridgeMemoryStorage {
-  private readonly values = new Map<string, string>();
-
-  get length(): number { return this.values.size; }
-  key(index: number): string | null { return [...this.values.keys()][index] ?? null; }
-  getItem(key: string): string | null { return this.values.get(key) ?? null; }
-  setItem(key: string, value: string): void { this.values.set(key, value); }
-  removeItem(key: string): void { this.values.delete(key); }
-}
-
-const bridgeLockTails = new Map<string, Promise<void>>();
-const bridgeLocks = {
-  request: async <T>(
-    name: string,
-    optionsOrCallback: (() => Promise<T>) | { signal?: AbortSignal },
-    maybeCallback?: () => Promise<T>,
-  ) => {
-    const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback;
-    if (!callback) throw new Error("Web Locks callback is missing");
-    const previous = bridgeLockTails.get(name) ?? Promise.resolve();
-    let release!: () => void;
-    const tail = new Promise<void>((resolve) => { release = resolve; });
-    bridgeLockTails.set(name, tail);
-    await previous;
-    try {
-      return await callback();
-    } finally {
-      release();
-      if (bridgeLockTails.get(name) === tail) bridgeLockTails.delete(name);
-    }
-  }
-};
-
-function bridgeDeviceRecord(label: string): DeviceRecordV1 {
-  return { format: "keymaster.device", version: 1, displayName: label, location: { providerId: "local" } };
-}
-
-function bridgeSession(activeBucketId?: string): KeymasterSessionV1 {
-  return {
-    format: "keymaster.session",
-    version: 1,
-    sessionId: "0123456789abcdef0123456789abcdef",
-    ...(activeBucketId === undefined ? {} : { activeBucketId }),
-  };
-}
-
-function seedDeviceBinding(storage: BridgeMemoryStorage, current: { bucketId: string; label: string }): void {
-  storage.setItem(`${DEVICE_KEY_PREFIX}${current.bucketId}`, JSON.stringify(bridgeDeviceRecord(current.label)));
-  storage.setItem(KEYMASTER_SESSION_KEY, JSON.stringify(bridgeSession(current.bucketId)));
-}
-
-type LocalBridgeClientInternals = {
-  handleLocalStorageCapabilityRequest(request: CoordinatorLocalStorageRequest, call: HandlerCallContext): Promise<CoordinatorLocalStorageResponse>;
-  localStorageBridgeLease: { bucketId?: string; leaseId: string; bucketGeneration: number } | null;
-  sessionBinding: { peerGeneration: number; sessionEpoch: string; leaseId: string } | null;
-  pendingSessionBinding: { peerGeneration: number; sessionEpoch: string; leaseId: string } | null;
-  applyTopicEvent(event: CoordinatorTopicEvent): void;
-};
-
-type LocalBridgeTestPort = {
-  onmessage: ((event: MessageEvent) => void) | null;
-  start(): void;
-  close(): void;
-  postMessage(message: unknown): void;
-};
-
-function localBridgeRequestWithoutTransportFields(
-  request: LocalStorageBridgeRequest,
-  fallbackBinding: { peerGeneration: number; sessionEpoch: string; leaseId: string },
-): CoordinatorLocalStorageRequest {
-  const value = request as LocalStorageBridgeRequest & { authorityInstanceId?: unknown; leaseId?: unknown; peerGeneration?: number; sessionEpoch?: string; signal?: unknown };
-  const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, signal: _signal, ...businessRequest } = value;
-  return {
-    ...businessRequest,
-    peerGeneration: value.peerGeneration ?? fallbackBinding.peerGeneration,
-    sessionEpoch: value.sessionEpoch ?? fallbackBinding.sessionEpoch,
-    leaseId: typeof value.leaseId === "string" ? value.leaseId : fallbackBinding.leaseId,
-  } as CoordinatorLocalStorageRequest;
-}
-
-function createLocalBridgeTestPort(internals: LocalBridgeClientInternals, app: WindowApp): LocalBridgeTestPort {
-  let closed = false;
-  const published = app.state().services.find((service) => service.capabilityId === "keymaster.coordinator.local-storage");
-  if (!published) throw new Error("Local storage capability reference was not published");
-  const reference: ServiceReference = {
-    ...published,
-    runtime: app.runtimeKind,
-    runtimeInstanceId: app.runtimeInstanceId,
-  };
-  const port: LocalBridgeTestPort = {
-    onmessage: null,
-    start() {},
-    close() { closed = true; },
-    postMessage(message) {
-      if (closed || !message || typeof message !== "object") return;
-      const envelope = message as { requestId?: string; request?: LocalStorageBridgeRequest; type?: string; bucketId?: string; bucketGeneration?: number };
-      if (envelope.type === "lease") {
-        const lease = internals.localStorageBridgeLease;
-        if (lease && Number.isSafeInteger(envelope.bucketGeneration)) {
-          internals.localStorageBridgeLease = {
-            ...lease,
-            ...(envelope.bucketId === undefined ? { bucketId: undefined } : { bucketId: envelope.bucketId }),
-            bucketGeneration: envelope.bucketGeneration as number,
-          };
-        }
-        return;
-      }
-      if (!envelope.requestId || !envelope.request) return;
-      const controller = new AbortController();
-      const call = {
-        signal: controller.signal,
-        deadlineAt: Date.now() + 30_000,
-        reference,
-        origin: "local" as const,
-      } satisfies HandlerCallContext;
-      const lease = internals.localStorageBridgeLease;
-      const fallbackBinding = internals.sessionBinding ?? internals.pendingSessionBinding ?? {
-        peerGeneration: 1,
-        sessionEpoch: "boot",
-        leaseId: lease?.leaseId ?? "local-storage-test",
-      };
-      void internals.handleLocalStorageCapabilityRequest(localBridgeRequestWithoutTransportFields(envelope.request, fallbackBinding), call).then(
-        (response) => port.onmessage?.({ data: { requestId: envelope.requestId, ok: true, response } } as MessageEvent),
-        (error: unknown) => port.onmessage?.({ data: { requestId: envelope.requestId, ok: false, error: { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) } } } as MessageEvent),
-      );
-    },
-  };
-  return port;
-}
-
-function installBridgeGlobals(storage: BridgeMemoryStorage): () => void {
-  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { locks: bridgeLocks } });
-  return () => {
-    if (previousStorage) Object.defineProperty(globalThis, "localStorage", previousStorage);
-    else delete (globalThis as { localStorage?: unknown }).localStorage;
-    if (previousNavigator) Object.defineProperty(globalThis, "navigator", previousNavigator);
-    else delete (globalThis as { navigator?: unknown }).navigator;
-  };
-}
-
-/** 测试侧直读正式 IndexedDB 真值，验证 Local 桶对象不再进入 localStorage。 */
-function readIndexedDbBucketRecord(bucketId: string, path: string): Promise<{ bytes?: Uint8Array } | undefined> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open("keymaster.local", 1);
-    request.onupgradeneeded = () => {
-      const database = request.result;
-      if (!database.objectStoreNames.contains("objects")) database.createObjectStore("objects");
-    };
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB open failed"));
-    request.onsuccess = () => {
-      const database = request.result;
-      const transaction = database.transaction("objects", "readonly");
-      const get = transaction.objectStore("objects").get([bucketId, path]);
-      get.onsuccess = () => { database.close(); resolve(get.result as { bytes?: Uint8Array } | undefined); };
-      get.onerror = () => { database.close(); reject(get.error ?? new Error("IndexedDB get failed")); };
-    };
-  });
-}
-
-function localStorageKeys(storage: BridgeMemoryStorage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < storage.length; index += 1) {
-    const key = storage.key(index);
-    if (key) keys.push(key);
-  }
-  return keys;
-}
-
-async function openTestLocalBridge(storage: BridgeMemoryStorage, current: { bucketId: string; label: string }): Promise<{
-  client: ReturnType<typeof createCoordinatorClient>;
-  workerPort: LocalBridgeTestPort;
-  authorityInstanceId: string;
-  leaseId: string;
-}> {
-  seedDeviceBinding(storage, current);
-  const client = createCoordinatorClient({ clientId: "local-bridge-test" });
-  const internals = client as unknown as LocalBridgeClientInternals;
-  const windowApp = await ensureTestWindowApp(client);
-  const workerPort = createLocalBridgeTestPort(internals, windowApp);
-  const lease = internals.localStorageBridgeLease;
-  if (!lease) throw new Error("Local bridge test lease was not created");
-  const authorityInstanceId = "authority:local-bridge-test";
-  workerPort.start();
-  expect(internals.localStorageBridgeLease).toMatchObject({ bucketId: current.bucketId, bucketGeneration: 1, leaseId: lease.leaseId });
-  return { client, workerPort, authorityInstanceId, leaseId: lease.leaseId };
-}
-
-function sendBridgeRequest(workerPort: LocalBridgeTestPort, requestId: string, request: LocalStorageBridgeRequest | Record<string, unknown>): Promise<unknown> {
-  return new Promise((resolve) => {
-    workerPort.onmessage = (event) => resolve(event.data);
-    workerPort.postMessage({ requestId, request });
-  });
-}
 
 describe("KeymasterSessionCoordinatorClient", () => {
   it("directly assembles the real Coordinator client with the Vault plugin", async () => {
@@ -559,7 +362,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         receivedLength = cloned.data.input.content.bytes.byteLength;
       }
       const operationResult = message.kind === "hello"
-        ? { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }
+        ? { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", runGeneration: "run-0", taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }
         : {};
       queueMicrotask(() => port.onmessage?.({ data: { requestId: message.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
@@ -576,9 +379,9 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally { globalThis.SharedWorker = original; }
   });
 
-  it("uses the module URL constructor and a session-scoped Worker name", async () => {
+  it("uses the module URL constructor and one stable Worker name per origin", async () => {
     const port = createTestMessagePort();
-    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent)); });
+    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", runGeneration: "run-0", taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent)); });
     const worker = { port } as unknown as SharedWorker;
     const Constructor = vi.fn(() => worker);
     const original = globalThis.SharedWorker;
@@ -587,7 +390,9 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client = createCoordinatorClient();
       await client.connect();
       expect(Constructor).toHaveBeenCalledWith(expect.anything(), {
-        name: expect.stringMatching(/^keymaster-coordinator-dev:([0-9a-f]{32}|default)$/u),
+        // SharedWorker 名称只表达同 Origin 的共享范围，不承载钱包或存储身份，
+        // 因此必须跨 tab、跨刷新保持稳定。
+        name: "keymaster-coordinator-dev",
         type: "module"
       });
     }
@@ -598,7 +403,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
     const port = createTestMessagePort();
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string };
-      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent));
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", runGeneration: "run-0", taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent));
     });
     const Constructor = vi.fn(() => ({ port }) as unknown as SharedWorker);
     const original = globalThis.SharedWorker;
@@ -628,9 +433,9 @@ describe("KeymasterSessionCoordinatorClient", () => {
       expect(b.getBootstrapSnapshot().sessionEpoch).toBe("shared-epoch");
       const observed: string[] = [];
       b.subscribeTopic("session.state", (event: any) => observed.push(event.vaultStatus));
-      await hub.broadcast({ topic: "session.state", sessionRevision: 1, type: "session.state.changed", cause: "unlock", sessionEpoch: "unlocked-epoch", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), selectedPublicKeyHex: "a".repeat(64), keyspaceGeneration: 1 });
+      await hub.broadcast({ topic: "session.state", sessionRevision: 1, type: "session.state.changed", cause: "unlock", sessionEpoch: "unlocked-epoch", runGeneration: "run-1", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), walletGeneration: "wallet-1" });
       expect(b.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
-      expect(b.getBootstrapSnapshot().selectedPublicKeyHex).toBe("a".repeat(64));
+      expect(b.getBootstrapSnapshot().activePublicKeyHex).toBe("a".repeat(64));
       expect(observed).toContain("unlocked");
       a.disconnect();
       expect(b.getIsConnected()).toBe(true);
@@ -656,7 +461,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         sessionEpoch: "unlocked-epoch",
         vaultStatus: "unlocked",
         activePublicKeyHex: "a".repeat(64),
-        keyspaceGeneration: 1
+        runGeneration: "run-1"
       });
       await hub.broadcast({
         topic: "session.state",
@@ -666,7 +471,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         sessionEpoch: "locked-epoch",
         vaultStatus: "locked",
         activePublicKeyHex: null,
-        keyspaceGeneration: 2
+        runGeneration: "run-2"
       });
 
       expect(client.getBootstrapSnapshot()).toMatchObject({
@@ -692,7 +497,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         sessionEpoch: "epoch-1",
         vaultStatus: "locked" as const,
         activePublicKeyHex: null,
-        keyspaceGeneration: 1,
+        runGeneration: "run-1",
       };
       await hub.broadcast({
         ...base,
@@ -749,17 +554,17 @@ describe("KeymasterSessionCoordinatorClient", () => {
         type: "session.state.changed" as const,
         sessionRevision: 2,
         sessionEpoch: "epoch-2",
-        cause: "activate-key" as const,
+        cause: "unlock" as const,
         vaultStatus: "unlocked" as const,
         activePublicKeyHex: "c".repeat(64),
-        keyspaceGeneration: 2,
+        runGeneration: "run-2",
       };
       await hub.broadcast(accepted);
       await hub.broadcast(accepted);
       await hub.broadcast({ ...accepted, sessionRevision: 1, sessionEpoch: "stale-epoch", activePublicKeyHex: "d".repeat(64) });
 
       expect(events).toEqual([accepted]);
-      expect(client.getBootstrapSnapshot()).toMatchObject({ sessionEpoch: "epoch-2", activePublicKeyHex: "c".repeat(64), keyspaceGeneration: 2 });
+      expect(client.getBootstrapSnapshot()).toMatchObject({ sessionEpoch: "epoch-2", activePublicKeyHex: "c".repeat(64), runGeneration: "run-2" });
     } finally {
       globalThis.SharedWorker = original;
     }
@@ -912,11 +717,11 @@ describe("KeymasterSessionCoordinatorClient", () => {
                 sessionEpoch: "baseline-epoch",
                 vaultStatus: "unlocked",
                 activePublicKeyHex: "b".repeat(64),
-                keyspaceGeneration: 1
+                runGeneration: "run-1"
               }
             }]
           }
-        : { authorityInstanceId: "authority:test", sessionEpoch: "boot-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } };
+        : { authorityInstanceId: "authority:test", sessionEpoch: "boot-epoch", vaultStatus: "locked", runGeneration: "run-0", taskSnapshots: [], scheduleSettings: { taskIntervals: {} } };
       queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "baseline-epoch", ack: { status: "ok" }, operationResult } } as MessageEvent));
     });
     const original = globalThis.SharedWorker;
@@ -939,7 +744,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
           authorityInstanceId: authority,
           sessionEpoch: "e",
           vaultStatus: "locked",
-          keyspaceGeneration: 0,
+          runGeneration: "run-0",
           taskSnapshots: [],
           scheduleSettings: { taskIntervals: {} },
           pluginIntent: { revision: 1, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 1 } },
@@ -1126,7 +931,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
         sessionEpoch: "next-session",
         vaultStatus: "locked" as const,
         activePublicKeyHex: null,
-        keyspaceGeneration: 2,
+        runGeneration: "run-2",
       });
       expect(client.getBootstrapSnapshot()).toMatchObject({
         sessionEpoch: "next-session",
@@ -1145,7 +950,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
 
   it("clears an unlocked snapshot on transport timeout before reconnect", async () => {
     const port = createTestMessagePort();
-    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, authorityRecovery: { status: "recovery-required", reason: "active-final-io-leases", authorityBuildId: "old-worker", activeIoLeaseCount: 1, activeIoOperations: { read: 0, write: 1 }, handoverGeneration: 1 }, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent)); });
+    port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), runGeneration: "run-1", authorityRecovery: { status: "recovery-required", reason: "active-final-io-leases", authorityBuildId: "old-worker", activeIoLeaseCount: 1, activeIoOperations: { read: 0, write: 1 }, handoverGeneration: 1 }, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent)); });
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
     try {
@@ -1168,7 +973,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
     port.postMessage.mockImplementation((message: unknown) => {
       const request = message as { requestId: string; kind: string };
       if (request.kind === "hello" || request.kind === "subscribe") {
-        queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent));
+        queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked", runGeneration: "run-0", taskSnapshots: [], scheduleSettings: { taskIntervals: {} } } } } as MessageEvent));
       }
     });
     const original = globalThis.SharedWorker;
@@ -1177,7 +982,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client = createCoordinatorClient({ requestTimeoutMs: 5, reconnectIntervalMs: 1000 });
       await client.connect();
       await expect(client.unlock("pw")).resolves.toMatchObject({ status: "transport-error" });
-      await expect(client.vaultOperation({ type: "listKeys" })).resolves.toMatchObject({ status: "transport-error" });
+      await expect(client.vaultOperation({ type: "getCurrentKey" })).resolves.toMatchObject({ status: "transport-error" });
       await expect(client.crypto({ type: "deriveP2pkhAddress", network: "main" })).resolves.toMatchObject({ ack: { status: "transport-error" } });
       expect(client.getRecoverableDiagnostics().length).toBeGreaterThan(0);
     } finally { globalThis.SharedWorker = original; }
@@ -1274,7 +1079,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
                 sessionEpoch: "channel-epoch",
                 vaultStatus: "unlocked",
                 activePublicKeyHex: "a".repeat(64),
-                keyspaceGeneration: 1,
+                runGeneration: "run-1",
                 taskSnapshots: [],
                 scheduleSettings: { taskIntervals: {} },
               },
@@ -1309,99 +1114,5 @@ describe("KeymasterSessionCoordinatorClient", () => {
         targetRequestId: expect.stringMatching(/^req-/u),
       }));
     } finally { globalThis.SharedWorker = original; }
-  });
-
-  it("通过页面桥读写设备记录与 session", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort } = await openTestLocalBridge(storage, { bucketId: "bucket-bridge", label: "桥接桶" });
-    try {
-      const put = await sendBridgeRequest(workerPort, "device-record-put-1", {
-        type: "device-record-put",
-        remoteStorageId: "bucket-other",
-        record: bridgeDeviceRecord("另一个桶"),
-      });
-      expect(put).toMatchObject({ ok: true, response: { type: "void" } });
-      expect(storage.getItem(`${DEVICE_KEY_PREFIX}bucket-other`)).not.toBeNull();
-
-      const list = await sendBridgeRequest(workerPort, "device-record-list-1", { type: "device-record-list" }) as { response?: { type?: string; entries?: Array<{ remoteStorageId: string }> } };
-      expect(list.response?.type).toBe("device-records");
-      expect(list.response?.entries?.map((entry) => entry.remoteStorageId).sort()).toEqual(["bucket-bridge", "bucket-other"]);
-
-      const got = await sendBridgeRequest(workerPort, "device-record-get-1", { type: "device-record-get", remoteStorageId: "bucket-other" }) as { response?: { record?: DeviceRecordV1 } };
-      expect(got.response?.record).toMatchObject({ format: "keymaster.device", displayName: "另一个桶" });
-
-      const read = await sendBridgeRequest(workerPort, "session-read-1", { type: "session-read" }) as { response?: { session?: KeymasterSessionV1 } };
-      expect(read.response?.session?.activeBucketId).toBe("bucket-bridge");
-
-      const nextSession = { ...bridgeSession("bucket-other"), activeKey: "02".padEnd(66, "a") };
-      const write = await sendBridgeRequest(workerPort, "session-write-1", { type: "session-write", session: nextSession });
-      expect(write).toMatchObject({ ok: true, response: { type: "void" } });
-      expect(JSON.parse(storage.getItem(KEYMASTER_SESSION_KEY) as string)).toMatchObject({ activeBucketId: "bucket-other" });
-
-      const removed = await sendBridgeRequest(workerPort, "device-record-delete-1", { type: "device-record-delete", remoteStorageId: "bucket-other" });
-      expect(removed).toMatchObject({ ok: true, response: { type: "void" } });
-      expect(storage.getItem(`${DEVICE_KEY_PREFIX}bucket-other`)).toBeNull();
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("通过页面桥把 Local 桶对象写入 IndexedDB，而不是 localStorage", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort } = await openTestLocalBridge(storage, { bucketId: "bucket-objects", label: "对象桥接桶" });
-    try {
-      const bytes = new Uint8Array([1, 2, 3]);
-      const put = await sendBridgeRequest(workerPort, "object-put-1", {
-        type: "put",
-        bucketId: "bucket-objects",
-        bucketGeneration: 1,
-        path: "keys/key-1",
-        bytes,
-      });
-      expect(put).toMatchObject({ ok: true, response: { type: "write", etag: expect.stringMatching(/^[0-9a-f]{64}$/u) } });
-
-      const stored = await readIndexedDbBucketRecord("bucket-objects", "keys/key-1");
-      expect(stored?.bytes).toEqual(bytes);
-
-      const read = await sendBridgeRequest(workerPort, "object-get-1", {
-        type: "get",
-        bucketId: "bucket-objects",
-        bucketGeneration: 1,
-        path: "keys/key-1",
-      }) as { response?: { object?: { bytes?: ArrayBuffer } } };
-      // 跨 RPC 的批量字节必须是 ArrayBuffer，DTO 校验才不会逐元素遍历。
-      expect(read.response?.object?.bytes).toBeInstanceOf(ArrayBuffer);
-      expect(new Uint8Array(read.response?.object?.bytes as ArrayBuffer)).toEqual(bytes);
-
-      // 设备记录/session 仍走 localStorage 引导层；桶对象绝不能再落进去。
-      expect(storage.getItem(`keymaster.bucket.bucket-objects.keys/key-1`)).toBeNull();
-      expect(localStorageKeys(storage).some((key) => key.startsWith("keymaster.bucket."))).toBe(false);
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
-  });
-
-  it("页面桥以服务引用过期错误拒绝旧 lease 绑定", async () => {
-    const storage = new BridgeMemoryStorage();
-    const restoreGlobals = installBridgeGlobals(storage);
-    const { client, workerPort, authorityInstanceId } = await openTestLocalBridge(storage, { bucketId: "bucket-bridge", label: "桥接桶" });
-    try {
-      const stale = await sendBridgeRequest(workerPort, "session-read-stale", {
-        type: "session-read",
-        authorityInstanceId,
-        leaseId: "local-storage-stale",
-      }) as { ok?: boolean; error?: { code?: string } };
-      expect(stale).toMatchObject({ ok: false, error: { code: "service_reference_stale" } });
-    } finally {
-      client.disconnect();
-      workerPort.close();
-      restoreGlobals();
-    }
   });
 });

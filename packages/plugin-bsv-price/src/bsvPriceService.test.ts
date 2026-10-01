@@ -9,7 +9,7 @@ import type {
   ChannelSubscriptionStatus,
   PriceValue
 } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createInMemoryKeyValueStore, withTestStorageBinding } from "@keymaster/runtime";
 import { parsePublicKey } from "bsv8-channel-protocol";
 import { BSV_PRICE_PROTOCOL, bsvPriceChannel } from "bsv8-channel-protocol/bsv-price";
 import { createBsvPriceService } from "./bsvPriceService.js";
@@ -83,7 +83,7 @@ function makeMessage(
 }
 
 function makeStorage() {
-  return createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.bsvPrice, ownerPublicKeyHex: PUBLISHER_A, bucketId: "test", bucketGeneration: 1 });
+  return createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.bsvPrice));
 }
 
 function seedStore(): ReturnType<typeof createMemoryBsvPriceSettingsStore> {

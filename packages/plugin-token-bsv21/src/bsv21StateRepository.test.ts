@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { OwnerAppStore } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createInMemoryKeyValueStore, withTestStorageBinding } from "@keymaster/runtime";
 import { createBsv21StateRepository, type Bsv21TokenSnapshot } from "./storage/bsv21StateRepository.js";
 
 const OWNER_A = "02" + "11".repeat(32);
@@ -19,7 +19,7 @@ function snapshot(origin: string, outpoint = `${origin}:0`): Bsv21TokenSnapshot 
 }
 
 function makeStore(): OwnerAppStore {
-  return createInMemoryKeyValueStore({ ...CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, ownerPublicKeyHex: OWNER_A, bucketId: "test", bucketGeneration: 1 }) as OwnerAppStore;
+  return createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State)) as OwnerAppStore;
 }
 
 describe("bsv21StateRepository", () => {

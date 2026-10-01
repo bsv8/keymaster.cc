@@ -32,14 +32,19 @@ export async function unlockWallet(page: Page, password: string, keyLabel: strin
 export async function unlockWalletInPlace(page: Page, password: string): Promise<void> {
   await page.getByLabel(/密码|password/iu).fill(password);
   await page.getByRole("button", { name: /Unlock|解锁/ }).click();
-  await expect(page.getByRole("button", { name: /^(Lock wallet|Lock|锁定钱包|锁定)$/u })).toBeVisible({ timeout: 20_000 });
+  // 只认可访问名恰为「Lock」的顶栏锁定动作。钱包 Key 页还有一个同义的页面级
+  // 「Lock wallet」；把两个名字放进同一个选择器会同时命中两者并触发 strict
+  // mode 冲突，所以这里刻意不放宽。
+  await expect(
+    page.getByRole("button", { name: /^(Lock|锁定)$/u }),
+  ).toBeVisible({ timeout: 20_000 });
 }
 
 /**
  * 刷新后确认冷启动进入锁定页，再由调用方重新解锁。
  *
- * local 桶没有启动密码：设备记录 + session 都在本机，刷新后直接回到
- * “钱包已锁定”；s3 桶才会先经过存储认证。
+ * 钱包只有一把 Key 且全部在本机：刷新后直接回到“钱包已锁定”，
+ * 不存在存储认证页，也不需要选择桶。
  */
 export async function reloadAndAssertSameKey(page: Page, keyLabel: string): Promise<void> {
   void keyLabel;
@@ -50,9 +55,9 @@ export async function reloadAndAssertSameKey(page: Page, keyLabel: string): Prom
 }
 
 /**
- * 在锁定壳里用 Key 密码解锁，并容忍 S3 冷启动的已知身份切换窗口。
+ * 在锁定壳里用 Key 密码解锁，并容忍跨 tab 会话切换的已知窗口。
  *
- * 已知产品待办：S3 冷启动解锁的第一条 session.state 可能落在窗口身份
+ * 已知产品待办：冷启动解锁的第一条 session.state 可能落在窗口身份
  * 切换窗口内，RPC 已 accepted 但 UI 仍停在锁定壳。真实用户会再点一次
  * 解锁；自动化必须显式重放（有界一次），否则冒烟会随机失败。
  */
@@ -68,38 +73,5 @@ export async function unlockWalletWithReplay(page: Page, keyPassword: string): P
     reachedUnlocked = await unlockedShellEntry.waitFor({ state: "visible", timeout: 45_000 }).then(() => true).catch(() => false);
     if (!reachedUnlocked) await expect(lockedHeading).toBeVisible({ timeout: 20_000 });
   }
-  if (!reachedUnlocked) throw new Error("S3 解锁被接受后仍未进入已解锁壳层");
-}
-
-/**
- * S3 桶刷新恢复：设备记录被启动密码保护，所以先过存储认证页，再在锁定
- * 壳里输入该 Key 自己的密码；解锁完成的 UI 结果就是已解锁壳层本身。
- */
-export async function reloadS3BucketAndUnlock(
-  page: Page,
-  startupPassword: string,
-  keyPassword: string,
-  keyLabel: string,
-): Promise<void> {
-  await page.reload({ waitUntil: "domcontentloaded" });
-  const authHeading = page.getByTestId("storage-authentication").getByRole("heading", { name: /存储需要认证|Storage authentication required/ });
-  const lockedHeading = page.getByRole("heading", { name: /钱包已锁定|Wallet locked/ });
-  await expect.poll(async () => (await authHeading.isVisible().catch(() => false)) || (await lockedHeading.isVisible().catch(() => false)), {
-    timeout: 60_000,
-    message: "S3 刷新后必须进入存储认证页或锁定页",
-  }).toBe(true);
-  if (await authHeading.isVisible().catch(() => false)) {
-    const auth = page.getByTestId("storage-authentication");
-    await auth.getByLabel(/密码|password/iu).fill(startupPassword);
-    await auth.getByRole("button", { name: /^解锁$|^Unlock$/u }).click();
-  }
-  // 启动密码与 Key 密码是两个密码域：认证通过后仍要输入该 Key 的密码。
-  await expect(lockedHeading).toBeVisible({ timeout: 90_000 });
-  // 锁定壳出现不等于恢复完成：必须等当前 Key 已经从桶里读回并选中，
-  // 否则自动化会在窗口会话尚未重新接管时提交解锁（真实用户的手速不会）。
-  await expect(page.getByRole("heading", { name: /Selected private key|已选私钥/u })).toBeVisible({ timeout: 60_000 });
-  await unlockWalletWithReplay(page, keyPassword);
-  // Key 管理页已删除：解锁完成的 UI 结果就是已解锁壳层本身；
-  // Key 的存在性与内容由调用方的 KeymasterFormats 文件真值校验负责。
-  void keyLabel;
+  if (!reachedUnlocked) throw new Error("解锁被接受后仍未进入已解锁壳层");
 }

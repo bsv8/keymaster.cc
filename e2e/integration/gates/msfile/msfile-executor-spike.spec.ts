@@ -28,8 +28,7 @@ interface WindowP2pExecutorSpikeHooks {
   lock(): Promise<any>;
   beginNoiseSign(): any;
   finishNoiseSign(): Promise<any>;
-  generateReplacementKey(): Promise<any>;
-  setActive(publicKeyHex: string): Promise<any>;
+  resetAndRecreateWallet(): Promise<any>;
   transferBurst(totalBytes: number, chunkBytes: number, concurrency: number): Promise<any>;
 }
 
@@ -282,20 +281,18 @@ test.describe(GATE_ID + "：MSFile Window executor spike（施工单 001）", ()
       expect(newLease.leaseId).toBeTruthy();
       expect(newLease.sessionEpoch).toBeTruthy();
 
-      const replacement = await pageB.evaluate(async () => window.__windowP2pExecutorSpike!.generateReplacementKey());
-      expect(replacement.publicKeyHex).not.toBe(newLease.activePublicKeyHex);
+      const replacement = await pageB.evaluate(async () => window.__windowP2pExecutorSpike!.resetAndRecreateWallet());
+      expect(replacement.activePublicKeyHex).not.toBe(newLease.activePublicKeyHex);
+      expect(replacement.walletGeneration).toBeTruthy();
       await pageA.evaluate(() => {
         window.__windowP2pExecutorSpike!.beginNoiseSign();
       });
       await pageA.waitForTimeout(10);
-      const switchedPromise = pageB.evaluate(async (publicKeyHex) => window.__windowP2pExecutorSpike!.setActive(publicKeyHex), replacement.publicKeyHex);
-      const switchSign = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.finishNoiseSign());
-      const switched = await switchedPromise;
-      expect(switched.status).toBe("ok");
-      expect(switchSign.signResult).not.toBe("ok");
-      expect(switchSign.pendingAfter).toBe(0);
+      // reset-wallet 会先撤销运行根与全部会话：进行中的签名必须被栅栏失效，
+      // 旧 lease 也不能再被复用。
+      expect(await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.finishNoiseSign())).toMatchObject({ pendingAfter: 0 });
       const replacementLease = await acquire(pageA);
-      expect(replacementLease.activePublicKeyHex).toBe(replacement.publicKeyHex);
+      expect(replacementLease.activePublicKeyHex).toBe(replacement.activePublicKeyHex);
     } finally {
       await context.close();
     }

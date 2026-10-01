@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "./storage/systemStorageDeclarations.js";
 import {
   COORDINATOR_RESPONSE_RESULT_PARSERS,
-  COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
@@ -15,34 +14,6 @@ function parse(parser: { parse(value: never): unknown }, value: unknown): unknow
   return parser.parse(value as never);
 }
 
-function catalogEntry() {
-  return {
-    bucketId: "bucket-1",
-    label: "Local",
-    backend: "local",
-    configRevision: 1,
-    keyDerivation: {
-      algorithm: "pbkdf2-hmac-sha-256",
-      passwordEncoding: "utf-8",
-      iterations: 100_000,
-      outputLengthBits: 256,
-      saltB64Url: "salt",
-    },
-    encryptedConfig: {
-      cipher: {
-        algorithm: "aes-gcm",
-        keyLengthBits: 256,
-        ivB64Url: "iv",
-        tagLengthBits: 128,
-        ciphertextAndTagB64Url: "ciphertext",
-      },
-    },
-    snapshotRevision: 0,
-    createdAt: 1,
-    updatedAt: 1,
-  };
-}
-
 function rpcRequest(kind: CoordinatorRpcRequest["kind"], nested: Record<string, unknown> = {}): CoordinatorRpcRequest {
   return { kind, ...nested } as unknown as CoordinatorRpcRequest;
 }
@@ -52,18 +23,18 @@ describe("Coordinator runtime contract parsers", () => {
     const request = {
       kind: "storage.platform.bind",
       pluginId: "vault",
-      declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads,
+      declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
       expectedSessionEpoch: "epoch-1",
     } as const satisfies CoordinatorRpcRequest;
     const grant = {
       platformGrantId: "platform-1",
-      bucketId: "bucket-1",
-      bucketGeneration: 1,
-      moduleId: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.moduleId,
-      purposeId: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.purposeId,
-      authority: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.authority,
-      model: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.model,
-      schemaVersion: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads.schemaVersion,
+      walletGeneration: "11111111-1111-4111-8111-111111111111",
+      runGeneration: "run-1",
+      moduleId: CENTRAL_STORAGE_DECLARATIONS.protocolSessions.moduleId,
+      purposeId: CENTRAL_STORAGE_DECLARATIONS.protocolSessions.purposeId,
+      authority: CENTRAL_STORAGE_DECLARATIONS.protocolSessions.authority,
+      model: CENTRAL_STORAGE_DECLARATIONS.protocolSessions.model,
+      schemaVersion: CENTRAL_STORAGE_DECLARATIONS.protocolSessions.schemaVersion,
       sessionEpoch: "epoch-1",
     };
     const response = { sessionEpoch: "epoch-1", ack: { status: "ok" }, operationResult: grant };
@@ -134,26 +105,7 @@ describe("Coordinator runtime contract parsers", () => {
     })).toThrow();
   });
 
-  it("accepts only valid recovery enums and typed acknowledgement values", () => {
-    expect(() => parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
-      type: "initial-setup-recovery-write",
-      record: {
-        format: "keymaster.storage.initial-setup-recovery",
-        version: 1,
-        transactionId: "tx-1",
-        bucketId: "bucket-1",
-        configRevision: 1,
-        snapshotRevision: 0,
-        backend: "local",
-        phase: "not-a-phase",
-        catalog: "empty",
-        runtimeInstalled: false,
-        cleanup: "unconfirmed",
-        status: "failed",
-        updatedAt: 1,
-      },
-    })).toThrow();
-
+  it("accepts only typed acknowledgement values", () => {
     const response = parse(COORDINATOR_RPC_CAPABILITY.response, {
       sessionEpoch: "epoch-1",
       ack: { status: "blocked", reason: { key: "blocked", fallback: "Blocked", values: { count: 1 } } },
@@ -266,11 +218,11 @@ describe("Coordinator runtime contract parsers", () => {
       type: "session.state.changed",
       sessionRevision: 1,
       sessionEpoch: "epoch-1",
+      runGeneration: "run-1",
+      walletGeneration: "wallet-1",
       cause: "bootstrap",
       vaultStatus: "locked",
       activePublicKeyHex: null,
-      selectedPublicKeyHex: null,
-      keyspaceGeneration: 0,
       untrusted: { postMessage() {} },
     }) as Record<string, unknown>;
     expect(result).toEqual({
@@ -278,21 +230,21 @@ describe("Coordinator runtime contract parsers", () => {
       type: "session.state.changed",
       sessionRevision: 1,
       sessionEpoch: "epoch-1",
+      runGeneration: "run-1",
+      walletGeneration: "wallet-1",
       cause: "bootstrap",
       vaultStatus: "locked",
       activePublicKeyHex: null,
-      selectedPublicKeyHex: null,
-      keyspaceGeneration: 0,
     });
     expect(() => parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, {
       topic: "session.state",
       type: "session.state.changed.forged",
       sessionRevision: 1,
       sessionEpoch: "epoch-1",
+      runGeneration: "run-1",
       cause: "bootstrap",
       vaultStatus: "locked",
       activePublicKeyHex: null,
-      keyspaceGeneration: 0,
     })).toThrow();
   });
 
@@ -433,9 +385,8 @@ describe("Coordinator runtime contract parsers", () => {
       ack: { status: "ok" },
       operationResult: {
         storageGrantId: "grant-1",
-        bucketId: "bucket-1",
-        bucketGeneration: 2,
-        ownerPublicKeyHex: "02" + "11".repeat(32),
+        walletGeneration: "11111111-1111-4111-8111-111111111111",
+        runGeneration: "run-1",
         moduleId: "message",
         purposeId: "history",
         authority: "built-in-module",
@@ -447,9 +398,8 @@ describe("Coordinator runtime contract parsers", () => {
     });
     expect(grant.operationResult).toEqual({
       storageGrantId: "grant-1",
-      bucketId: "bucket-1",
-      bucketGeneration: 2,
-      ownerPublicKeyHex: "02" + "11".repeat(32),
+      walletGeneration: "11111111-1111-4111-8111-111111111111",
+      runGeneration: "run-1",
       moduleId: "message",
       purposeId: "history",
       authority: "built-in-module",
@@ -457,11 +407,6 @@ describe("Coordinator runtime contract parsers", () => {
       schemaVersion: 1,
       sessionEpoch: "epoch-1",
     });
-    expect(() => parseCoordinatorResponseFor(rpcRequest("storage.owner.delete"), {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: false,
-    })).toThrow();
   });
 
   it("accepts an empty files purposeId in owner grants", () => {
@@ -470,9 +415,8 @@ describe("Coordinator runtime contract parsers", () => {
       ack: { status: "ok" },
       operationResult: {
         storageGrantId: "grant-1",
-        bucketId: "bucket-1",
-        bucketGeneration: 2,
-        ownerPublicKeyHex: "02" + "11".repeat(32),
+        walletGeneration: "11111111-1111-4111-8111-111111111111",
+        runGeneration: "run-1",
         moduleId: "p2p",
         // files 模型允许空 purposeId,表示模块根(webRTC p2p/setting.json)。
         purposeId: "",
@@ -500,16 +444,16 @@ describe("Coordinator runtime contract parsers", () => {
     const listed = parseCoordinatorResponseFor(request, {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
-      operationResult: { files: [{ path: "02aa.json", size: 12 }] },
+      operationResult: { files: [{ path: "02aa.json", size: 12, revision: "rev-1", lastModified: "2026-01-01T00:00:00.000Z" }] },
     });
-    expect(listed.operationResult).toEqual({ files: [{ path: "02aa.json", size: 12 }] });
+    expect(listed.operationResult).toEqual({ files: [{ path: "02aa.json", size: 12, revision: "rev-1", lastModified: "2026-01-01T00:00:00.000Z" }] });
 
     const read = parseCoordinatorResponseFor(
       rpcRequest("storage.owner.data", { data: { type: "owner.file-get", storageGrantId: "grant-1", path: "02aa.json" } }),
       {
         sessionEpoch: "epoch-1",
         ack: { status: "ok" },
-        operationResult: { path: "02aa.json", bytes: new Uint8Array([1, 2]) },
+        operationResult: { path: "02aa.json", bytes: new Uint8Array([1, 2]), revision: "rev-1", lastModified: "2026-01-01T00:00:00.000Z" },
       },
     );
     expect((read.operationResult as { bytes: Uint8Array }).bytes).toBeInstanceOf(Uint8Array);
@@ -548,11 +492,11 @@ describe("Coordinator runtime contract parsers", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       format: "generated",
     };
-    expect(parseCoordinatorResponseFor(rpcRequest("vault.operation", { operation: { type: "listKeys" } }), {
+    expect(parseCoordinatorResponseFor(rpcRequest("vault.operation", { operation: { type: "getCurrentKey" } }), {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
-      operationResult: [key],
-    }).operationResult).toEqual([key]);
+      operationResult: key,
+    }).operationResult).toEqual(key);
     expect(() => parseCoordinatorResponseFor(rpcRequest("vault.operation", { operation: { type: "verifyPassword" } }), {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
@@ -716,7 +660,7 @@ describe("Coordinator runtime contract parsers", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       format: "generated",
     };
-    expect(response(rpcRequest("vault.operation", { operation: { type: "listKeys" } }), [key]).operationResult).toEqual([key]);
+    expect(response(rpcRequest("vault.operation", { operation: { type: "getCurrentKey" } }), key).operationResult).toEqual(key);
 
     expect(parseCoordinatorResponseFor(rpcRequest("crypto", { operation: { type: "signDigest", format: "der" } }), {
       sessionEpoch: "epoch-1",
@@ -826,20 +770,6 @@ describe("Coordinator runtime contract parsers", () => {
   });
 
   it("requires ArrayBuffer for bulk bytes so DTO validation stays O(1)", () => {
-    const binding = { peerGeneration: 1, sessionEpoch: "epoch-1", leaseId: "lease-1" };
-    const putRequest = { type: "put", bucketId: "bucket-1", bucketGeneration: 1, path: "a/b", ...binding };
-    expect(parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
-      ...putRequest,
-      bytes: new Uint8Array([1, 2, 3]).buffer,
-    })).toMatchObject({ type: "put", path: "a/b" });
-    expect(() => parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.request, {
-      ...putRequest,
-      bytes: new Uint8Array([1, 2, 3]),
-    })).toThrow(/ArrayBuffer/);
-    expect(parse(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY.response, {
-      type: "object",
-      object: { path: "a/b", bytes: new Uint8Array([1, 2, 3]).buffer },
-    })).toMatchObject({ type: "object", object: { path: "a/b" } });
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.request, {
       kind: "msfile.control",
       expectedSessionEpoch: "epoch-1",

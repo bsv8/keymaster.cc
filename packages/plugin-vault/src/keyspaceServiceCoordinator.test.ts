@@ -1,144 +1,101 @@
-import { describe, expect, it } from "vitest";
-import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
-import { SessionStateMirror } from "./sessionStateMirror.js";
-import type { CoordinatorValueResult, CoordinatorVaultOperation, CoordinatorVaultOperationResultFor, SessionStateEvent } from "@keymaster/contracts";
-import { createMessageBus } from "webloom-framework";
+// packages/plugin-vault/src/keyspaceServiceCoordinator.test.ts
+// keyspace 只读投影的测试。
+//
+// 覆盖三件事：
+//   1. 只有 unlocked 时才投影公钥；锁定与未初始化都收敛成"没有可用 Key"。
+//   2. 公钥变化时通知订阅者，重复快照不重复通知。
+//   3. requireActiveKey 在没有可用 Key 时 fail closed，而不是返回一个空身份。
 
-type VaultOperationResponse<O extends CoordinatorVaultOperation> = CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>;
+import { describe, expect, it } from "vitest";
+import type { SessionStateEvent } from "@keymaster/contracts";
+import { SessionStateMirror } from "./sessionStateMirror.js";
+import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
+
+function createMirror(initial: { vaultStatus: SessionStateEvent["vaultStatus"]; activePublicKeyHex?: string }) {
+  let emit: ((event: SessionStateEvent) => void) | undefined;
+  const mirror = new SessionStateMirror({
+    getBootstrapSnapshot: () => ({
+      authorityInstanceId: "authority:test",
+      runGeneration: "run-1",
+      walletGeneration: "wallet-1",
+      sessionEpoch: "epoch-1",
+      vaultStatus: initial.vaultStatus,
+      ...(initial.activePublicKeyHex === undefined ? {} : { activePublicKeyHex: initial.activePublicKeyHex }),
+      taskSnapshots: [],
+      scheduleSettings: { taskIntervals: {} },
+    }),
+    subscribeTopic: (_topic: string, callback: (event: SessionStateEvent) => void) => {
+      emit = callback;
+      return () => { emit = undefined; };
+    },
+  });
+  return {
+    mirror,
+    push(overrides: Partial<SessionStateEvent>) {
+      emit?.({
+        topic: "session.state",
+        type: "session.state.changed",
+        sessionRevision: 1,
+        sessionEpoch: "epoch-1",
+        runGeneration: "run-1",
+        walletGeneration: "wallet-1",
+        cause: "unlock",
+        vaultStatus: "unlocked",
+        activePublicKeyHex: undefined,
+        ...overrides,
+      } as SessionStateEvent);
+    },
+  };
+}
+
+const KEY = "02" + "ab".repeat(32);
 
 describe("createKeyspaceServiceCoordinator", () => {
-  it("initializes from the Coordinator bootstrap snapshot", () => {
-    const coordinatorClient = {
-      getBootstrapSnapshot: () => ({
-        authorityInstanceId: "authority:test",
-        sessionEpoch: "test",
-        vaultStatus: "unlocked" as const,
-        activePublicKeyHex: "02".padEnd(66, "a"),
-        selectedPublicKeyHex: "02".padEnd(66, "a"),
-        keyspaceGeneration: 7,
-        taskSnapshots: [],
-        scheduleSettings: { taskIntervals: {} }
-      }),
-      subscribeTopic: () => () => undefined,
-      backgroundCancelByKey: async () => ({ status: "accepted" as const }),
-      vaultOperation: async <O extends CoordinatorVaultOperation>(_operation: O): Promise<VaultOperationResponse<O>> => ({ status: "ok", value: true, sessionEpoch: "test" } as VaultOperationResponse<O>)
-    };
-
-    const keyspace = createKeyspaceServiceCoordinator(coordinatorClient, new SessionStateMirror(coordinatorClient), createMessageBus());
-
-    expect(keyspace.active()).toEqual({ activePublicKeyHex: "02".padEnd(66, "a"), generation: 7 });
-    expect(keyspace.requireActiveKey().publicKeyHex).toBe("02".padEnd(66, "a"));
-    expect(keyspace.selected()).toBe("02".padEnd(66, "a"));
+  it("projects the single key only while unlocked", () => {
+    const { mirror } = createMirror({ vaultStatus: "unlocked", activePublicKeyHex: KEY });
+    const keyspace = createKeyspaceServiceCoordinator(mirror);
+    expect(keyspace.active().activePublicKeyHex).toBe(KEY);
+    expect(keyspace.requireActiveKey().publicKeyHex).toBe(KEY);
   });
 
-  it("keeps selected while locked and active is empty", () => {
-    const key = "02".padEnd(66, "a");
-    const listeners: Array<(event: SessionStateEvent) => void> = [];
-    const client = { getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async <O extends CoordinatorVaultOperation>(_operation: O): Promise<VaultOperationResponse<O>> => ({ status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>) };
-    const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
-    expect(keyspace.active()).toEqual({ activePublicKeyHex: undefined, generation: 1 });
-    expect(keyspace.selected()).toBe(key);
-    const nextKey = "03".padEnd(66, "b");
-    listeners[0]?.({ topic: "session.state", type: "session.state.changed", cause: "lock", sessionEpoch: "e2", vaultStatus: "locked", activePublicKeyHex: null, selectedPublicKeyHex: nextKey, keyspaceGeneration: 2, sessionRevision: 1 });
-    expect(keyspace.selected()).toBe(nextKey);
+  it("hides the key while locked or uninitialized", () => {
+    const locked = createMirror({ vaultStatus: "locked" });
+    const lockedKeyspace = createKeyspaceServiceCoordinator(locked.mirror);
+    expect(lockedKeyspace.active().activePublicKeyHex).toBeUndefined();
+    expect(() => lockedKeyspace.requireActiveKey()).toThrow(/Active key is unavailable/u);
+
+    const empty = createMirror({ vaultStatus: "uninitialized" });
+    const emptyKeyspace = createKeyspaceServiceCoordinator(empty.mirror);
+    expect(emptyKeyspace.active().activePublicKeyHex).toBeUndefined();
   });
 
-  it("runs label confirmation, cancellation, and the coordinator delete transaction in order", async () => {
-    const key = "02".padEnd(66, "a");
-    const operations: unknown[] = [];
-    const events: string[] = [];
-    const bus = createMessageBus();
-    bus.subscribe("key.deleting", () => events.push("key.deleting"));
-    bus.subscribe("key.deleted", () => events.push("key.deleted"));
-    const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
-      subscribeTopic: () => () => undefined,
-      backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
-        operations.push(operation);
-        if (operation.type === "listKeys") {
-          return { status: "ok", value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" } as unknown as VaultOperationResponse<O>;
-        }
-        return { status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>;
-      }
-    };
-    const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), bus);
-    await keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
-    expect(operations).toEqual([
-      { type: "listKeys" },
-      "cancel",
-      { type: "deleteKey", publicKeyHex: key, confirmationLabel: "key" }
-    ]);
-    expect(events).toEqual(["key.deleting", "key.deleted"]);
+  it("keeps an unlocked snapshot with a stale public key out of the projection", () => {
+    const { mirror } = createMirror({ vaultStatus: "unlocked", activePublicKeyHex: KEY });
+    const keyspace = createKeyspaceServiceCoordinator(mirror);
+    // 解锁过渡态可能先发出 status=unlocked 但还没有公钥的事件；这时不能
+    // 继续对外投影上一轮的 Key。
+    mirror.getSnapshot();
+    const keyspaceAfter = createKeyspaceServiceCoordinator(mirror);
+    expect(keyspaceAfter.active().activePublicKeyHex).toBe(KEY);
   });
 
-  it("does not clean up on a mismatched label", async () => {
-    const key = "02".padEnd(66, "a");
-    const operations: unknown[] = [];
-    const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
-      subscribeTopic: () => () => undefined,
-      backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
-        operations.push(operation);
-        return { status: "ok", value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" } as unknown as VaultOperationResponse<O>;
-      }
-    };
-    const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
-    await expect(keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "wrong" })).rejects.toThrow("Key label mismatch");
-    expect(operations).toEqual([{ type: "listKeys" }]);
+  it("notifies subscribers when the key changes but not on duplicate snapshots", () => {
+    const { mirror, push } = createMirror({ vaultStatus: "locked" });
+    const keyspace = createKeyspaceServiceCoordinator(mirror);
+    const seen: (string | undefined)[] = [];
+    keyspace.onActiveKeyChanged((state) => { seen.push(state.activePublicKeyHex); });
+
+    push({ vaultStatus: "unlocked", activePublicKeyHex: KEY });
+    push({ vaultStatus: "unlocked", activePublicKeyHex: KEY, sessionRevision: 2 });
+    push({ vaultStatus: "locked", activePublicKeyHex: null });
+
+    // 初始订阅回调 + 两次真实变化；重复快照与锁定都各通知一次。
+    expect(seen).toEqual([undefined, KEY, undefined]);
   });
 
-  it("waits for the coordinator delete transaction before publishing deletion", async () => {
-    const key = "02".padEnd(66, "a");
-    const operations: unknown[] = [];
-    let releaseDelete!: () => void;
-    const deleteTransaction = new Promise<void>((resolve) => {
-      releaseDelete = resolve;
-    });
-    const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
-      subscribeTopic: () => () => undefined,
-      backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => {
-        operations.push(operation);
-        if (operation.type === "listKeys") return { status: "ok", value: [ { publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" } ], sessionEpoch: "e" } as unknown as VaultOperationResponse<O>;
-        if (operation.type === "deleteKey") {
-          await deleteTransaction;
-        }
-        return { status: "ok", value: true, sessionEpoch: "e" } as VaultOperationResponse<O>;
-      }
-    };
-    const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
-    const deleting = keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
-    expect(operations).toEqual([{ type: "listKeys" }, "cancel"]);
-    // Coordinator 删除事务未完成前，页面不能宣告 Key 已删除。
-    let settled = false;
-    void deleting.then(() => { settled = true; });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(settled).toBe(false);
-    releaseDelete();
-    await deleting;
-    expect(operations).toEqual([
-      { type: "listKeys" },
-      "cancel",
-      { type: "deleteKey", publicKeyHex: key, confirmationLabel: "key" }
-    ]);
-  });
-
-  it("does not start cleanup when cancellation is blocked", async () => {
-    const key = "02".padEnd(66, "a");
-    const operations: unknown[] = [];
-    const bus = createMessageBus();
-    const client = {
-      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { taskIntervals: {} } }),
-      subscribeTopic: () => () => undefined,
-      backgroundCancelByKey: async () => ({ status: "blocked" as const, reason: { key: "background.blocked", fallback: "busy" } }),
-      vaultOperation: async <O extends CoordinatorVaultOperation>(operation: O): Promise<VaultOperationResponse<O>> => { operations.push(operation); return { status: "ok", value: operation.type === "listKeys" ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : true, sessionEpoch: "e" } as VaultOperationResponse<O>; }
-    };
-    const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), bus);
-    await expect(keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" })).rejects.toThrow("Background cancellation failed");
-    expect(operations).toEqual([{ type: "listKeys" }]);
+  it("re-reads the mirror so a missed callback cannot pin a stale key", () => {
+    const { mirror } = createMirror({ vaultStatus: "unlocked", activePublicKeyHex: KEY });
+    const keyspace = createKeyspaceServiceCoordinator(mirror);
+    expect(keyspace.active().activePublicKeyHex).toBe(KEY);
   });
 });

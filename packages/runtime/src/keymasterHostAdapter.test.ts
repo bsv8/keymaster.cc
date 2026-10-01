@@ -38,7 +38,7 @@ describe("Keymaster WebLoom v4 adapter", () => {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: "02" + "11".repeat(32),
         sessionEpoch: "adapter-test:1",
-        bucketGeneration: 1,
+        walletGeneration: "adapter-wallet:1",
       },
       runtimeUnitImplementationRegistry: {
         get: () => (context) => {
@@ -74,18 +74,18 @@ describe("Keymaster WebLoom v4 adapter", () => {
     expect(host.state(plugin.id).kind).toBe("enabled");
     expect(intentController.snapshot().revision).toBe(0);
 
-    // 桶世代变化会销毁并重建 storage Scope，同样不能改变持久化意图。
+    // 钱包身份世代变化会销毁并重建 storage Scope，同样不能改变持久化意图。
     await host.transitionRuntimeIdentity({
       vaultStatus: "unlocked",
       ownerPublicKeyHex: "02" + "11".repeat(32),
       sessionEpoch: "adapter-test:1",
-      bucketGeneration: 1,
+      walletGeneration: "adapter-wallet:1",
     });
     await host.transitionRuntimeIdentity({
       vaultStatus: "unlocked",
       ownerPublicKeyHex: "02" + "11".repeat(32),
       sessionEpoch: "adapter-test:1",
-      bucketGeneration: 2,
+      walletGeneration: "wallet-generation:2",
     });
     expect(host.state(plugin.id).kind).toBe("enabled");
     expect(setupCount).toBe(2);
@@ -252,7 +252,7 @@ describe("Keymaster WebLoom v4 adapter", () => {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: owner,
         sessionEpoch: "session:lock-test:1",
-        bucketGeneration: 1,
+        walletGeneration: "lock-test-wallet:1",
       },
       disableConfigPersistence: true,
       runtimeUnitImplementationRegistry: {
@@ -284,7 +284,7 @@ describe("Keymaster WebLoom v4 adapter", () => {
     await expect(host.transitionRuntimeIdentity({
       vaultStatus: "locked",
       sessionEpoch: "session:lock-test:2",
-      bucketGeneration: 1,
+      walletGeneration: "lock-test-wallet:1",
     })).resolves.toBeUndefined();
     expect(host.state("required-owner-session")).toMatchObject({
       kind: "blocked",
@@ -297,7 +297,7 @@ describe("Keymaster WebLoom v4 adapter", () => {
       vaultStatus: "unlocked",
       ownerPublicKeyHex: owner,
       sessionEpoch: "session:lock-test:3",
-      bucketGeneration: 1,
+      walletGeneration: "lock-test-wallet:1",
     });
     expect(host.state("required-owner-session").kind).toBe("enabled");
     expect(setupCount).toBe(2);

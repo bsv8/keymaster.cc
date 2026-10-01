@@ -26,22 +26,13 @@ import type {
   StorageDirectoryResult,
   StoragePutResult,
   StorageGetResult,
-  StorageDeleteResult,
-  StorageUploadBeginResult,
-  StorageUploadPartResult,
-  StorageUploadAbortResult
+  StorageDeleteResult
 } from "./connectStorage.js";
 import type {
-  BucketConditionalCapabilityProbeResult,
-  StorageProbeResult,
-  StorageProviderSummary,
-  StorageProviderConnectionView,
-  BucketConditionalCapabilitiesView,
   StorageRuntimeControllerStatus,
-  StorageRuntimeStatus
+  StorageRuntimeSummary
 } from "./storage/runtime.js";
-import type { StorageProviderConfigDraft } from "./storage/profile.js";
-import type { ExistingRemoteStorageConnectPlan, InitialSetupPlan, StorageBucketConnectionConfigV1 } from "./storage/catalog.js";
+import type { WalletInitializePlan } from "./storage/wallet.js";
 import type {
   P2pkhBroadcastSubmission,
   P2pkhUtxoSnapshotResult,
@@ -217,51 +208,22 @@ export type CoordinatorWorkerUnitPublicSnapshot =
 export type CoordinatorStorageControl =
   | { type: "status" }
   | { type: "summary" }
-  | { type: "connection" }
-  /** 新版桶目录的临时桶密码；不复用旧 Storage Profile envelope。 */
-  | { type: "unlock-bucket"; password: string }
-  /** 最终确认后的首桶 + 首 Key 单一事务；密码和材料只在本次请求内存在。 */
-  | { type: "initial-setup"; plan: InitialSetupPlan }
-  /** 只读探测：连接并列出 keys/,判定“已有钱包”还是“空桶”。 */
-  | { type: "probe-bucket"; plan: import("./storage/catalog.js").BucketProbePlan }
-  /** 连接已有钱包（已有 KeyHold 文件）入口；不得隐式创建。 */
-  | { type: "connect-existing-remote"; plan: ExistingRemoteStorageConnectPlan }
-  /** 响应丢失后的同事务结果查询；只携带公开事务 ID。 */
-  | { type: "initial-setup-result"; transactionId: string }
-  /** 页面重载后列出公开的初始化恢复记录；不含密码、凭据或私钥。 */
-  | { type: "initial-setup-recovery-list" }
-  /** 重试清理同一事务的候选对象；不携带密码、凭据或私钥。 */
-  | {
-      type: "initial-setup-cleanup";
-      transactionId: string;
-      /** S3 候选在目录回滚后没有可解密条目时，由用户临时重新提供的桶密码。 */
-      password?: string;
-      /** 只用于本次清理重建 Provider；不会写入恢复记录。 */
-      connection?: StorageBucketConnectionConfigV1;
-    }
-  /** 使用目标桶密码完成 Provider/Root/Keys 会话切换；目录由页面桥原子 CAS。 */
-  | {
-      type: "switch-bucket";
-      bucket: import("./storage/profile.js").StorageRuntimeBucketV1;
-      /** 启动密码：s3 用于解密设备记录；local 可空。 */
-      password: string;
-      /** 目标 Key 自己的 KeyHold 密码；省略时沿用 password。 */
-      keyPassword?: string;
-      /** 切换后要激活的目标 Key；省略时沿用 session active Key 或第一把 Key。 */
-      publicKeyHex?: string;
-    }
-  /** 当前桶连接配置的原子重配置；密码只用于本次验证和重新封装。 */
-  | { type: "change-bucket-config"; config: StorageBucketConnectionConfigV1; label?: string; password: string }
-  /** 当前桶显示名称的目录 CAS；必须由当前 Coordinator 执行。 */
-  | { type: "rename-bucket"; label: string }
-  /** 删除非当前 Local 桶的 Key（KeyHold + owner namespace）；不需要桶密码。 */
-  | { type: "delete-local-bucket-key"; bucket: import("./storage/profile.js").StorageRuntimeBucketV1; publicKeyHex: string }
-  | { type: "retry" }
-  | { type: "cancel-probe" }
-  | { type: "capabilities" }
-  | { type: "probe-capabilities" }
-  /** 读取当前已提交的完整 Hold 快照；不输入密码、不解密。 */
-  | { type: "cold-export" };
+  /** 冷启动只读 meta 与固定 KeyHold；不列举 Key 目录、不连接远程。 */
+  | { type: "cold-start" }
+  /** 创建或导入唯一 Key；Key、meta 与初始系统数据在同一事务提交。 */
+  | { type: "initialize"; plan: WalletInitializePlan }
+  /** 用 Key 密码解锁唯一 Key。 */
+  | { type: "unlock"; password: string }
+  /** 锁定：撤销会话、grant 与任务授权。 */
+  | { type: "lock" }
+  /** 修改 Key 密码。 */
+  | { type: "change-key-password"; oldPassword: string; newPassword: string }
+  /** 只修改显示名称。 */
+  | { type: "rename-key"; label: string }
+  /** 原样导出加密 KeyHold；不是完整钱包备份。 */
+  | { type: "export-key-hold" }
+  /** 重置钱包：先撤销授权，再原子清空新格式全部数据。 */
+  | { type: "reset-wallet"; confirmationLabel: string };
 
 export type CoordinatorStorageData =
   | { type: "list"; grantId: string; input: { prefix?: string; cursor?: string; limit?: number } }
@@ -270,10 +232,8 @@ export type CoordinatorStorageData =
   | { type: "put"; grantId: string; input: { path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string; overwrite?: boolean } }
   | { type: "get-range"; grantId: string; input: { path: string; offset?: number; length?: number; ifMatch?: string } }
   | { type: "delete"; grantId: string; input: { path: string } }
-  | { type: "begin-upload"; grantId: string; input: { path: string; contentType?: string; size: number; overwrite?: boolean } }
-  | { type: "upload-part"; grantId: string; input: { uploadId: string; partNumber: number; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string } } }
-  | { type: "complete-upload"; grantId: string; input: { uploadId: string } }
-  | { type: "abort-upload"; grantId: string; input: { uploadId: string } };
+  /** 同一事务内原子提交多个文件操作。 */
+  | { type: "batch"; grantId: string; input: { operations: Array<{ type: "put"; path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string } | { type: "delete"; path: string }>; conditions?: Array<{ path: string; ifMatch?: string }> } };
 
 export type CoordinatorClientRequestWithStorage =
   | { kind: "storage.grant"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch }
@@ -289,7 +249,8 @@ export type CoordinatorClientRequestWithInternalStorage =
   | { kind: "storage.platform.bind"; clientId: string; requestId: string; pluginId: string; declaration: import("./storage/access.js").PluginStorageDeclaration; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.owner.data"; clientId: string; requestId: string; data: import("./storage/internal.js").CoordinatorOwnerStorageData; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.platform.data"; clientId: string; requestId: string; data: import("./storage/internal.js").CoordinatorPlatformStorageData; expectedSessionEpoch: SessionEpoch }
-  | { kind: "storage.owner.delete"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch };
+  /** 清空一个已绑定根下的全部对象；只由重置与单 App 清理流程调用。 */
+  | { kind: "storage.clear.root"; clientId: string; requestId: string; input: { declaration: import("./storage/access.js").PluginStorageDeclaration; appStorageName?: string }; expectedSessionEpoch: SessionEpoch };
 
 /** MSFile 设置/App 策略真值在 Coordinator；页面只通过 control RPC 读写。 */
 export type CoordinatorMsFileControl =
@@ -429,11 +390,10 @@ export type CoordinatorClientRequest =
   | { kind: "contacts.presence.snapshot"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
   | { kind: "plugin.intent.snapshot"; clientId: string; requestId: string }
   | { kind: "plugin.intent.submit"; clientId: string; requestId: string; command: PluginIntentCommand }
-  | ({ kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: import("./storage/profile.js").StorageBootstrapState; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort; /** Local localStorage 页面桥的专用双工端口。 */ localStorageBridgePort?: MessagePort; /** 页面为本次 Coordinator hello 创建的一次性本地 I/O 租约。 */ localStorageBridgeLeaseId?: string }
+  | ({ kind: "hello"; clientId: string; requestId: string; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
-    | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "unlock"; clientId: string; requestId: string; password: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
-    | { kind: "activate-key"; clientId: string; requestId: string; password: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "vault.operation"; clientId: string; requestId: string; operation: CoordinatorVaultOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "crypto"; clientId: string; requestId: string; operation: CoordinatorCryptoOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.run-now"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
@@ -500,22 +460,13 @@ export type CoordinatorChannelOperation =
 export type CoordinatorBackgroundSyncSettings = BackgroundSyncSettings;
 
 export type CoordinatorVaultOperation =
-  | { type: "createVault"; password: string }
-  | { type: "createVaultWithInitialKey"; password: string; label?: string; capabilities?: string[] }
-  | { type: "createVaultWithImportedKey"; vaultPassword: string; key: { label: string; material: { hex: string; wif?: string }; format: string; capabilities: string[]; source?: string } }
-  | { type: "listKeys" }
-  | { type: "getKey"; publicKeyHex: string }
-  | { type: "setActive"; publicKeyHex: string }
-  | { type: "deleteKey"; publicKeyHex: string; confirmationLabel: string; bucketPassword?: string }
+  /** 读取唯一钱包 Key 的公开摘要；没有列表、没有选择、没有切换。 */
+  | { type: "getCurrentKey" }
   | { type: "verifyPassword"; password: string }
   | { type: "changePassword"; oldPassword: string; newPassword: string }
-  | { type: "finalizeEmptyVaultAfterLastKeyDeletion" }
-  | { type: "recoverEmptyVaultToUninitialized" }
-  | { type: "generateKey"; password: string; label: string; capabilities?: string[] }
-  | { type: "importPrivateKey"; password: string; label: string; material: { hex: string; wif?: string }; format: string; capabilities: string[]; source?: string }
-  | { type: "exportKeyBackup"; publicKeyHex: string }
-  | { type: "importKeyBackup"; backup: string; sourcePassword: string; targetPassword: string }
-  | { type: "exportCurrentKeyBackup" }
+  | { type: "renameKey"; label: string }
+  /** 原样导出加密 KeyHold；不是完整钱包备份。 */
+  | { type: "exportKeyHold" }
   | { type: "sealLocalSecret"; scope: string; plaintext: Uint8Array }
   | { type: "openLocalSecret"; scope: string; sealed: VaultSealedSecret };
 
@@ -648,20 +599,12 @@ export interface CoordinatorStorageStateEvent {
   type: "storage.state.changed";
   storageRevision: number;
   sessionEpoch: SessionEpoch;
-  providerGeneration: number | null;
   status: StorageRuntimeControllerStatus;
-  /** 独立于 Vault 的 Provider/统一桶健康状态。 */
-  healthStatus?: StorageRuntimeStatus;
-  /** 当前是否由新版多桶目录绑定；用于 UI 选择正确的密码生命周期。 */
-  catalogBucket?: boolean;
-  /** 当前 Coordinator 真正绑定的抽象桶身份；页面桥用于租约校验。 */
-  bucketId?: string;
-  /** 当前 Coordinator 真正绑定的桶运行世代；页面桥用于租约校验。 */
-  bucketGeneration?: number;
+  /** 当前钱包身份世代；重置后变化，各 Tab 据此使旧授权失效。 */
+  walletGeneration?: string;
   /** 旧 Coordinator 尚未释放最终 I/O；只能等待后显式重试，禁止强制接管。 */
   authorityRecovery?: CoordinatorAuthorityRecovery;
-  summary: StorageProviderSummary | null;
-  capabilities: BucketConditionalCapabilitiesView | null;
+  summary: StorageRuntimeSummary | null;
 }
 
 /** The complete public session snapshot. This is the sole cross-tab session event. */
@@ -670,21 +613,27 @@ export interface SessionStateEvent {
   type: "session.state.changed";
   sessionRevision: number;
   sessionEpoch: SessionEpoch;
+  /**
+   * Worker 运行世代；Worker 重启后变化。
+   *
+   * 纯本地钱包没有跨浏览器 Key 锁，授权句柄靠这个值绑定本次运行：重启后
+   * 旧 grant、锁与未完成任务的迟到结果全部失效。
+   */
+  runGeneration: string;
+  /** 当前钱包身份世代；重置后变化，即使重新导入同一私钥也不同。 */
+  walletGeneration?: string;
   cause:
     | "bootstrap"
+    | "initialize"
     | "unlock"
     | "lock"
-    | "activate-key"
-    | "create-vault"
-    | "create-initial-key"
-    | "import-initial-key"
-    | "delete-active-key"
-    | "recover-empty-vault"
+    | "change-password"
+    | "rename-key"
+    | "reset-wallet"
     | "autolock-settings";
   vaultStatus: CoordinatorVaultStatus;
+  /** 唯一钱包 Key；未初始化或锁定时省略。 */
   activePublicKeyHex: string | null;
-  selectedPublicKeyHex?: string | null;
-  keyspaceGeneration: number;
   /** 自动锁定超时毫秒；0 = 永不。页面无需额外 RPC 即可读取。 */
   autoLockTimeoutMs?: number;
   /** Coordinator 启动接管被旧最终 I/O 租约阻塞时的脱敏诊断。 */
@@ -748,13 +697,19 @@ export interface CoordinatorSubscribeTopicsResult {
 export interface CoordinatorBootstrapSnapshot {
   /** SharedWorker 启动身份；意图命令必须绑定此值。 */
   authorityInstanceId: string;
+  /**
+   * Worker 运行世代；Worker 重启后变化，使上一次运行的授权失效。
+   *
+   * 单 Key 本地存储后，页面不再传递 `authorityInstanceId` 之外的运行凭据，
+   * 插件句柄与 grant 都绑定这个值。
+   */
+  runGeneration: string;
   /** 构建产物不可变身份；生产证据、部署交接和 Worker 升级必须绑定同一值。 */
   buildId?: string;
   sessionEpoch: SessionEpoch;
   vaultStatus: CoordinatorVaultStatus;
+  /** 唯一钱包 Key；未初始化或锁定时省略。 */
   activePublicKeyHex?: string;
-  selectedPublicKeyHex?: string;
-  keyspaceGeneration: number;
   /** 旧 Worker 租约未释放时的可恢复状态；不代表可以安全强制接管。 */
   authorityRecovery?: CoordinatorAuthorityRecovery;
   /** 当前 Worker 实际激活的服务/任务单元；未激活的静态单元不会出现在这里。 */
@@ -768,10 +723,8 @@ export interface CoordinatorBootstrapSnapshot {
   autoLockTimeoutMs?: number;
   /** P2PKH 网络范围配置，保存在 Coordinator 平台 K-V。 */
   p2pkhSettings?: { includeTestnet: boolean };
-  /** 当前抽象存储桶世代；只用于绑定生命周期身份，不代替 owner/key 世代。 */
-  storageBucketGeneration?: number;
-  /** 当前抽象存储桶身份；与页面 Local I/O 租约绑定。 */
-  storageBucketId?: string;
+  /** 当前钱包身份世代；重置后变化，各 Tab 据此使旧授权失效。 */
+  walletGeneration?: string;
   /** 插件产品启用意图；不代表运行单元已经启动。 */
   pluginIntent?: PluginIntentSnapshot;
   /**
@@ -845,9 +798,8 @@ export interface SessionCoordinatorClient {
   /** 读取 Coordinator 广播的最新链高度快照；纯内存读取，不会发起网络请求。 */
   getChainHeightSnapshot(): ChainHeightSnapshot;
   subscribeTopic(topic: CoordinatorTopic, listener: (event: any) => void): () => void;
-  unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
+  unlock(password: string): Promise<CoordinatorCommandResult>;
   lock(): Promise<CoordinatorCommandResult>;
-  activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
   vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>>;
   crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
   backgroundRunNow(taskId: string): Promise<CoordinatorCommandResult>;
@@ -859,8 +811,6 @@ export interface SessionCoordinatorClient {
   /** 更新自动锁定设置（超时毫秒；0 = 永不）。 */
   autolockSettingsUpdate(settings: AutoLockSettings): Promise<CoordinatorCommandResult>;
   storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
-  /** 页面新增首桶后，刷新只含公开桶身份的 Local Storage bridge 启动快照。 */
-  refreshStorageBootstrap?(): Promise<void>;
   storageGrant(context: OwnerAppStorageGrant): Promise<CoordinatorValueResult<string>>;
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
@@ -907,12 +857,19 @@ export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
 
 /** Storage 插件 Coordinator 面。 */
 export type StorageCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort" | "refreshStorageBootstrap"
+  "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort"
 >;
 
-/** Vault 插件 Coordinator 面。 */
+/**
+ * Vault 插件 Coordinator 面。
+ *
+ * 除了窄的 vault operation 面，它还持有 `storageControl`：钱包生命周期
+ * （创建/导入/重置/冷启动）走这条事务级通道，成功与否以 IndexedDB 事务完
+ * 成为准，而不是靠页面分步拼装。`backgroundCancelByKey` 属于多 Key 清理
+ * 语义，单 Key 下不再需要。
+ */
 export type VaultCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto" | "backgroundCancelByKey" | "autolockSettingsUpdate"
+  "unlock" | "lock" | "vaultOperation" | "crypto" | "storageControl" | "autolockSettingsUpdate"
 >;
 
 /** 自动锁设置 Coordinator 面；vault 插件的窄面。 */

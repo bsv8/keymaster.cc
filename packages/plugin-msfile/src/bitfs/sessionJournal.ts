@@ -3,7 +3,7 @@
 // 与 go-bitfs 的边界：SDK 只返回普通 evidence 和 exact bytes；本文件
 // 记录应用进度、恢复 fence 和证据引用，不序列化 SDK 实例。
 
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 
 const SESSION_FORMAT = "keymaster.bitfs-session";
 const SESSION_VERSION = 1;
@@ -169,18 +169,18 @@ export interface BitfsSessionJournal {
   list(): Promise<BitfsSessionRecord[]>;
 }
 
-export function createBitfsSessionJournal(store: OwnerFileStore): BitfsSessionJournal {
+export function createBitfsSessionJournal(store: BorrowedOwnerFileStore): BitfsSessionJournal {
   const recordPath = (id: string) => `sessions/${assertSessionId(id)}.json`;
   const evidencePath = (id: string, name: BitfsEvidenceName) => `evidence/${assertSessionId(id)}/${name}.bin`;
-  const read = async (id: string): Promise<{ record: BitfsSessionRecord; etag?: string } | undefined> => {
+  const read = async (id: string): Promise<{ record: BitfsSessionRecord; revision?: string } | undefined> => {
     const object = await store.get(recordPath(id));
     if (!object) return undefined;
     let value: unknown;
     try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(object.bytes)); }
     catch { throw new Error("BitFS 会话索引损坏"); }
-    return { record: parseRecord(value, id), ...(object.etag === undefined ? {} : { etag: object.etag }) };
+    return { record: parseRecord(value, id), ...(object.revision === undefined ? {} : { revision: object.revision }) };
   };
-  const write = async (record: BitfsSessionRecord, options: { ifNoneMatch?: "*"; ifMatch?: string } = {}): Promise<void> => {
+  const write = async (record: BitfsSessionRecord, options: { ifNoneMatch?: true; ifRevision?: string } = {}): Promise<void> => {
     const bytes = new TextEncoder().encode(`${JSON.stringify({ format: SESSION_FORMAT, version: SESSION_VERSION, ...record }, null, 2)}\n`);
     await store.put(recordPath(record.sessionId), bytes, options);
   };
@@ -188,7 +188,7 @@ export function createBitfsSessionJournal(store: OwnerFileStore): BitfsSessionJo
     const current = await read(id);
     if (!current || current.record.revision !== expectedRevision) throw new Error("BitFS 会话修订冲突");
     const next = change(current.record);
-    await write(next, current.etag === undefined ? {} : { ifMatch: current.etag });
+    await write(next, current.revision === undefined ? {} : { ifRevision: current.revision });
     const committed = await read(id);
     if (!committed || committed.record.revision !== next.revision) throw new Error("BitFS 会话状态提交失败");
     return committed.record;
@@ -196,7 +196,7 @@ export function createBitfsSessionJournal(store: OwnerFileStore): BitfsSessionJo
   return {
     async create(input, nowMs) {
       const record = validateRecord({ ...input, evidence: uniqueEvidence(input.evidence ?? []), revision: 1, updatedAt: iso(nowMs) });
-      await write(record, { ifNoneMatch: "*" });
+      await write(record, { ifNoneMatch: true });
       return (await read(record.sessionId))!.record;
     },
     async get(sessionId) { return (await read(sessionId))?.record; },
@@ -214,7 +214,7 @@ export function createBitfsSessionJournal(store: OwnerFileStore): BitfsSessionJo
       const path = evidencePath(sessionId, name);
       const prior = await store.get(path);
       if (prior && !equal(prior.bytes, bytes)) throw new Error("BitFS 证据名已绑定不同 exact bytes");
-      if (!prior) await store.put(path, bytes.slice(), { ifNoneMatch: "*" });
+      if (!prior) await store.put(path, bytes.slice(), { ifNoneMatch: true });
       const committed = await store.get(path);
       if (!committed || !equal(committed.bytes, bytes)) throw new Error("BitFS 证据持久化校验失败");
       return mutate(sessionId, expectedRevision, (current) => validateRecord({

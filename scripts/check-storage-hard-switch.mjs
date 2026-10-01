@@ -27,22 +27,17 @@ const forbiddenText = [
 ];
 const violations = [];
 const productionRoots = /^(?:packages|apps)\//u;
-const localStorageAllowlist = new Set([
-  "packages/platform-storage/src/bootstrap/deviceStorage.ts",
-  // 浏览器组合边界：唯一允许解析浏览器存储对象的位置，且只允许导出
-  // 按桶隔离的受限 Provider 工厂，不得导出通用存储能力。
-  "packages/platform-storage/src/browser/browserBucketProvider.ts",
-]);
-// Local 桶的正式物理介质是 IndexedDB：只有这个受限 Provider 可以直接使用
-// IndexedDB API；其它生产代码仍禁止直接打开浏览器数据库。
+// 正式本地介质只有 IndexedDB，并且只有钱包引擎这一个文件可以直接操作
+// IndexedDB API。localStorage 不再保存任何桶目录、连接凭据或初始化恢复
+// 指针，因此这里没有任何白名单条目。
 const indexedDbAllowlist = new Set([
-  "packages/platform-storage/src/bucket-providers/local/indexedDbBucketProvider.ts",
+  "packages/platform-storage/src/local/indexedDbWalletStore.ts",
 ])
-// E2E Node 侧清理适配器只把 AWS SDK 转成最小的测试 Resource 接口，不会
-// 进入发布产物；生产 S3 访问仍必须位于 platform-storage/s3 Provider。
-const s3TestingAllowlist = new Set([
-  "packages/platform-storage/src/testing/s3CleanupAdapter.ts"
-]);
+// S3 体系已整体移除：任何生产代码引用 AWS SDK 都是回归。
+const forbiddenS3Dependencies = [
+  ["S3 SDK", /@aws-sdk\/client-s3/u],
+  ["Smithy fetch handler", /@smithy\/fetch-http-handler/u],
+];
 const repositoryFixtureDirectory = /(?:^|\/)(?:testing|testSupport)(?:\/|$)/u;
 const centralV1Source = /^(?:packages\/contracts\/src\/storage\/|packages\/platform-storage\/src\/(?:kv-engine|snapshot|storage-access|coordinator)\/|apps\/web\/src\/keymasterSessionCoordinator\.worker\.ts$)/u;
 
@@ -125,17 +120,14 @@ for (const scanRoot of scanRoots) {
       if (/\bsessionStorage\b/gu.test(executable)) {
         violations.push(`${relativeFile}: 生产代码禁止直接使用 sessionStorage`);
       }
-      if (/\blocalStorage\b/gu.test(executable) && !localStorageAllowlist.has(relativeFile)) {
+      if (/\blocalStorage\b/gu.test(executable)) {
         violations.push(`${relativeFile}: localStorage 不在统一存储白名单内`);
       }
-      if (localStorageAllowlist.has(relativeFile) && /\bLocalStorageLike\b/gu.test(executable)) {
-        violations.push(`${relativeFile}: 白名单模块禁止导出通用存储能力`);
+      if (/\bnavigator\.storage\b/gu.test(executable) && relativeFile !== "packages/platform-storage/src/local/indexedDbWalletStore.ts") {
+        violations.push(`${relativeFile}: 持久化配额探测只能由钱包存储引擎访问`);
       }
-      if (/\bnavigator\.storage\b/gu.test(executable) && !relativeFile.startsWith("packages/platform-storage/src/bucket-providers/opfs/")) {
-        violations.push(`${relativeFile}: OPFS StorageManager 只能由 platform-storage/opfs Provider 访问`);
-      }
-      if (/@aws-sdk\/client-s3/gu.test(executable) && relativeFile !== "packages/platform-storage/package.json" && !relativeFile.startsWith("packages/platform-storage/src/bucket-providers/s3/") && !s3TestingAllowlist.has(relativeFile)) {
-        violations.push(`${relativeFile}: S3 SDK 只能由 platform-storage/s3 Provider 访问`);
+      for (const [label, pattern] of forbiddenS3Dependencies) {
+        if (pattern.test(executable)) violations.push(`${relativeFile}: 禁止重新引入${label}`);
       }
     }
   }

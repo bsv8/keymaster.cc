@@ -24,8 +24,8 @@ export const JOURNEY_METADATA = LOCAL_SETTINGS_SCENARIO;
  *
  * 开始状态：
  * - 一个全新的 Chromium context；
- * - Local 桶、Vault 和 active Key 已在本场景前置 Flow 中一次性建立；
- * - 不读取 S3、testnet 或任何长期秘密。
+ * - 本地钱包 Key 已在本场景前置 Flow 中一次性建立；
+ * - 不读取 testnet 或任何长期秘密。
  *
  * 成功标准：
  * - 正式设置入口都能从业务导航打开；
@@ -50,11 +50,11 @@ test(JOURNEY_ID + "：从正式菜单查看独立设置并热切换界面语言"
     const ready = await test.step("用户先建立可继续使用的本地身份", async () => {
       return initializeNewLocalUser(
         { page },
-        { bucketLabel: "设置集成测试桶", keyLabel: "设置测试首 Key", password },
+        { keyLabel: "设置测试首 Key", password },
       );
     });
 
-    await test.step("安全、智能调度和私钥导出使用独立入口，设置菜单不再提供系统页", async () => {
+    await test.step("钱包 Key、智能调度和自动锁屏使用独立入口，设置菜单不再提供系统页", async () => {
       await openSettingsPage(page, {
         label: /^Auto lock$|^自动锁屏$/u,
         path: /\/settings\/auto-lock$/u,
@@ -82,15 +82,17 @@ test(JOURNEY_ID + "：从正式菜单查看独立设置并热切换界面语言"
       await syncIntervalEditor.getByRole("button", { name: /^Cancel$|^取消$/u }).click();
       await expect(syncIntervalEditor).toHaveCount(0);
       await openSettingsPage(page, {
-        label: /^Export private key$|^导出私钥$/u,
+        label: /^Wallet key$|^钱包 Key$/u,
         path: /\/settings\/current-key$/u,
-        heading: /^Export private key$|^导出私钥$/u,
+        heading: /^Wallet key$|^钱包 Key$/u,
       });
-      const exportCard = page.getByRole("region", { name: /^Encrypted private key backup$|^加密私钥备份$/u });
+      // 单 Key 模型下没有「私钥导出」：导出的是仍带密码加密的 KeyHold 副本。
+      const exportCard = page.getByRole("region", { name: /^Encrypted KeyHold export$|^加密 KeyHold 导出$/u });
       await expect(exportCard).toBeVisible();
-      await exportCard.getByRole("button", { name: /^Export private key$|^导出私钥$/u }).click();
+      await expect(exportCard.getByRole("note")).toContainText(/not a full wallet backup|不能当作完整钱包备份/u);
+      await exportCard.getByRole("button", { name: /^Export KeyHold$|^导出 KeyHold$/u }).click();
       const exportDialog = page.getByRole("dialog");
-      await expect(exportDialog).toContainText(/Export private key|导出私钥/u);
+      await expect(exportDialog).toContainText(/Export encrypted KeyHold|导出加密 KeyHold/u);
       await exportDialog.getByRole("button", { name: /^Cancel$|^取消$/u }).click();
       await expect(exportDialog).toHaveCount(0);
       const navigation = page.getByRole("navigation", { name: /Primary navigation|主导航/ });

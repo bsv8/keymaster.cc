@@ -1,22 +1,14 @@
-// apps/web/src/shell/InitialSetupPage.tsx
-// 首次 Storage 初始化的整页 onboarding 壳。
+// 首次初始化的入口页（单 Key 本地存储，docs/存储.md）。
 //
-// 业务状态机与 UI 已收敛到 @keymaster/platform-storage 的 BucketSetupWizard
-// （与桶管理页的"新建桶"Modal 共用同一模块）。本文件只负责：
-//   - 套上 OnboardingShell（首启视觉）；
-//   - 提交成功后进入 home。
+// 本地钱包没有存储类型选择、没有桶配置、没有"连接已有远程空间"。
+// 未初始化时唯一的两个路径就是创建钱包 Key 与导入钱包 Key，而这两个
+// 入口连同它们的表单、导入向导与错误处理都已经收敛到 LockedShell。
 //
-// 不变量由共享模块保证：只读探测、读取失败不当作空桶、Key 有独立密码、
-// 不在页面上回显 Endpoint / 凭据 / 密码 / 私钥材料。
+// 因此本组件只保留旧调用点（App 启动门禁）需要的名字，实际渲染
+// LockedShell；不复制任何一份初始化 UI，避免两条路径日后漂移。
 
-import { router } from "@keymaster/runtime";
-import { BucketSetupWizard } from "@keymaster/platform-storage";
-import { OnboardingShell } from "./OnboardingShell.js";
+import { LockedShell } from "./LockedShell.js";
 
 export function InitialSetupPage() {
-  return (
-    <OnboardingShell width="wizard">
-      <BucketSetupWizard variant="page" onDone={() => router.push("/")} />
-    </OnboardingShell>
-  );
+  return <LockedShell />;
 }

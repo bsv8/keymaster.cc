@@ -86,28 +86,16 @@ async function summarizeRead(result: MsFileReadResult): Promise<{
 async function ensureStorageReady(client: ReturnType<typeof getCoordinatorClient>): Promise<void> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
     const status = await client.storageControl({ type: "status" });
-    if (status.status === "ok" && status.value === "ready") return;
     if (status.status !== "ok") {
       throw new Error(`MSFile E2E Storage status failed: ${"message" in status ? status.message : status.status}`);
     }
-    if (status.status === "ok" && status.value === "unselected") {
-      const selected = await client.storageControl({ type: "initial-setup", plan: {
-        transactionId: `msfile-e2e-${crypto.randomUUID()}`,
-        bucketLabel: "MSFile E2E Local",
-        backend: "local",
-        connection: { kind: "local" },
-        firstKey: { kind: "generate", label: "MSFile E2E", capabilities: ["p2pkh"], password: E2E_VAULT_PASSWORD },
-      } });
-      if (selected.status !== "ok") throw new Error(`MSFile E2E Local setup failed: ${selected.status}`);
-    } else if (status.status === "ok" && status.value === "authentication") {
-      const unlocked = await client.storageControl({ type: "unlock-bucket", password: E2E_VAULT_PASSWORD });
-      if (unlocked.status !== "ok") throw new Error(`MSFile E2E Local unlock failed: ${unlocked.status}`);
-    } else {
-      await client.storageControl({ type: "retry" });
-    }
-    await delay(25);
+    // 本地钱包结构完整（ready 或 locked）即可继续；uninitialized 由
+    // ensureUnlocked 走唯一的 initialize 入口。
+    if (status.value === "ready" || status.value === "locked" || status.value === "uninitialized") return;
+    // corrupt / unsupported / degraded 必须 fail closed：MSFile E2E 不能
+    // 靠 initialize 覆盖仍可能可恢复的本地数据。
+    throw new Error(`MSFile E2E local storage is unusable: ${status.value}`);
   }
-  throw new Error("MSFile E2E Storage did not become ready");
 }
 
 async function ensureUnlocked(
@@ -121,13 +109,19 @@ async function ensureUnlocked(
       return { ownerPublicKeyHex: snapshot.activePublicKeyHex, sessionEpoch: snapshot.sessionEpoch };
     }
     if (snapshot.vaultStatus === "uninitialized") {
-      const created = await coordinator.vaultOperation({
-        type: "createVaultWithInitialKey",
-        password: E2E_VAULT_PASSWORD,
-        label: "MSFile production E2E",
-        capabilities: ["p2pkh"],
+      const created = await client.storageControl({
+        type: "initialize",
+        plan: {
+          transactionId: `msfile-e2e-${crypto.randomUUID()}`,
+          firstKey: {
+            kind: "generate",
+            label: "MSFile production E2E",
+            capabilities: ["p2pkh"],
+            password: E2E_VAULT_PASSWORD,
+          },
+        },
       });
-      if (created.status === "ok") continue;
+      if (created.status !== "ok") throw new Error(`MSFile E2E wallet creation failed: ${created.status}`);
     } else if (snapshot.vaultStatus === "locked") {
       await coordinator.unlock(E2E_VAULT_PASSWORD);
     }
@@ -179,7 +173,13 @@ export interface MsFileProductionE2EHooks {
   readBlocks(supplierPublicKeyHex: string, blockHashHexes: string[]): Promise<Awaited<ReturnType<typeof summarizeRead>>[]>;
   seedConnectSession(input: { sessionId: string; origin: string; proof: AppIdentityProofV1 }): Promise<{ ownerPublicKeyHex: string; appKey: MsFileAppIdentityKey }>;
   appAuthorizations(): ReturnType<MsFileService["listAppAuthorizations"]>;
-  switchToGeneratedKey(): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string }>;
+  /**
+   * 更换钱包身份的唯一路径：reset-wallet 撤销运行根，再重新创建唯一 Key。
+   *
+   * 单钱包单 Key 模式下不存在第二把 Key 可切换，也不允许在运行中直接
+   * 生成新 Key；旧 owner 身份只能通过清空钱包后重新创建获得。
+   */
+  replaceWalletIdentity(label: string): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string; walletGeneration: string }>;
   lock(): Promise<string>;
   unlock(): Promise<string>;
 }
@@ -301,20 +301,30 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
       };
     },
     appAuthorizations: () => getService().listAppAuthorizations(),
-    async switchToGeneratedKey() {
+    async replaceWalletIdentity(label) {
       const previousPublicKeyHex = (await ensureUnlocked(coordinator, client)).ownerPublicKeyHex;
-      const generated = await coordinator.vaultOperation({
-        type: "generateKey",
-        password: E2E_VAULT_PASSWORD,
-        label: "MSFile production E2E switched key",
-        capabilities: ["p2pkh"],
+      const reset = await coordinator.storageControl({
+        type: "reset-wallet",
+        confirmationLabel: "MSFile production E2E identity replacement",
       });
-      if (generated.status !== "ok") throw new Error(`MSFile E2E key switch failed: ${generated.status}`);
-      const value = generated.value as { publicKeyHex?: unknown };
-      if (typeof value.publicKeyHex !== "string") throw new Error("MSFile E2E key switch returned no public key");
+      if (reset.status !== "ok") throw new Error(`MSFile E2E wallet reset failed: ${reset.status}`);
+      const walletGeneration = (reset.value as { walletGeneration?: unknown }).walletGeneration;
+      if (typeof walletGeneration !== "string" || walletGeneration === "") {
+        throw new Error("MSFile E2E wallet reset returned no wallet generation");
+      }
+      const created = await client.storageControl({
+        type: "initialize",
+        plan: {
+          transactionId: `msfile-e2e-${crypto.randomUUID()}`,
+          firstKey: { kind: "generate", label, capabilities: ["p2pkh"], password: E2E_VAULT_PASSWORD },
+        },
+      });
+      if (created.status !== "ok") throw new Error(`MSFile E2E wallet creation failed: ${created.status}`);
       const current = await ensureUnlocked(coordinator, client);
-      if (current.ownerPublicKeyHex !== value.publicKeyHex) throw new Error("MSFile E2E generated key did not become active");
-      return { previousPublicKeyHex, activePublicKeyHex: current.ownerPublicKeyHex };
+      if (current.ownerPublicKeyHex === previousPublicKeyHex) {
+        throw new Error("MSFile E2E replacement wallet reused the previous owner key");
+      }
+      return { previousPublicKeyHex, activePublicKeyHex: current.ownerPublicKeyHex, walletGeneration };
     },
     async lock() {
       return (await coordinator.lock()).status;

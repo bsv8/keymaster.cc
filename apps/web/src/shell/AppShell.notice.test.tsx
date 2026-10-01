@@ -73,6 +73,7 @@ function makeVault(): VaultService {
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
     hasVault: async () => true,
+    getCurrentKey: async () => ({ publicKeyHex: OWNER, label: "Owner", capabilities: ["p2pkh"], createdAt: "2026-09-08T00:00:00.000Z" }),
     lock: async () => ({ status: "accepted" as const }),
     recoverEmptyVaultToUninitialized: async () => undefined
   } as unknown as VaultService;

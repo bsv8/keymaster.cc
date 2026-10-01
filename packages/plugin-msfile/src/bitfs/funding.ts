@@ -10,7 +10,7 @@ import type {
   ProtectedOutpoint,
   P2pkhUtxoSnapshotResult,
 } from "@keymaster/contracts";
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 import type { BitfsSessionJournal } from "./sessionJournal.js";
 import type { BitfsTransactionJournal } from "./broadcast.js";
 
@@ -240,18 +240,18 @@ export interface BitfsFundingLedger {
 }
 
 /** 创建使用条件写与 Worker 内串行队列的专款账本。 */
-export function createBitfsFundingLedger(store: OwnerFileStore): BitfsFundingLedger {
+export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFundingLedger {
   if (!store) throw new TypeError("BitFS 专款账本需要文件存储");
   const queuedMutations = new Map<string, Promise<void>>();
   const accountPath = (seedHashHex: string, network: BsvNetwork) => `funding/accounts/${assertNetwork(network)}/${assertHash(seedHashHex)}.json`;
 
-  async function readAccount(path: string, owner: string, seed: string, network: BsvNetwork): Promise<{ account: BitfsFundingAccount; etag?: string } | undefined> {
+  async function readAccount(path: string, owner: string, seed: string, network: BsvNetwork): Promise<{ account: BitfsFundingAccount; revision?: string } | undefined> {
     const object = await store.get(path);
     if (!object) return undefined;
     let value: unknown;
     try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(object.bytes)); }
     catch { throw new BitfsFundingError("integrity", "BitFS 专款账本格式损坏"); }
-    return { account: parseAccount(value, owner, seed, network), ...(object.etag === undefined ? {} : { etag: object.etag }) };
+    return { account: parseAccount(value, owner, seed, network), ...(object.revision === undefined ? {} : { revision: object.revision }) };
   }
 
   async function serialize<T>(path: string, operation: () => Promise<T>): Promise<T> {
@@ -294,8 +294,8 @@ export function createBitfsFundingLedger(store: OwnerFileStore): BitfsFundingLed
       }, owner, seed, network);
       const bytes = encodeAccount(next);
       const condition = existing
-        ? (existing.etag === undefined ? {} : { ifMatch: existing.etag })
-        : { ifNoneMatch: "*" as const };
+        ? (existing.revision === undefined ? {} : { ifRevision: existing.revision })
+        : { ifNoneMatch: true as const };
       await store.put(path, bytes, condition);
       const committed = await readAccount(path, owner, seed, network);
       if (!committed || committed.account.revision !== next.revision || !equal(encodeAccount(committed.account), bytes)) {

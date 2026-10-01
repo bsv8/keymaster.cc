@@ -2,55 +2,41 @@
 // vault 插件清单。
 // 设计缘由：vault 是平台依赖，必须最先注册；它不依赖任何其他 plugin capability。
 //
-// 硬切换 007：Vault 的 Keys 入口统一由当前 catalog 桶流程提供。
-//   - Vault 的 Hold 与公开元数据由 Coordinator 在 Storage bootstrap 时绑定。
-//   - keyspace service 通过 capability "keyspace.service" 暴露；key 状态
-//     切换由 keyspace 维护，shell 与业务插件只读不写。
-//
-// 硬切换 003：
-//   - /settings/vault（Key 管理页）已删除，等待并入桶管理；
-//     改为通过 settings.registry.register() 注册单一真值。
-//   - breadcrumb 第一段改为不可点击"设置"分类节点（不带 path）。
-//
-// 硬切换 002：
+// 单 Key 本地存储（docs/存储.md）后的结构：
+//   - Key 状态资源只投影"唯一 Key 是谁"，没有 keys[]、没有 active 切换、
+//     没有 key.created / key.deleted 事件。
+//   - Key 管理页只有改名、改密、导出 KeyHold、锁定和重置钱包；创建/导入
+//     只发生在未初始化状态，替换身份必须先重置。
+//   - vault 不再持有 MessageBus 依赖：唯一 Key 的变化由 session.state 事件
+//     表达，没有需要额外广播的 Key 生命周期事件。
 
 import type {
+  AutoLockService,
+  AutoLockSettings,
   BreadcrumbRegistry,
   BusinessFeatureRegistry,
   CommandRegistry,
   I18nPluginResources,
+  KeyspaceService,
   PluginManifest,
   PluginSetup,
+  ResourceRegistry,
   RouteRegistry,
   SettingsRegistry,
-  ResourceRegistry,
-  ActiveKeyState,
-  KeyIdentity,
   VaultService,
-  AutoLockService,
-  AutoLockSettings,
-  CoordinatorValueResult,
-  CoordinatorCommandResult,
-  CoordinatorCryptoOperation,
-  CoordinatorCryptoResult,
-  CoordinatorVaultStatus,
-  KeyspaceService
 } from "@keymaster/contracts";
-import type { MessageBus } from "webloom-framework";
 import {
   AUTOLOCK_SERVICE_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   COMMAND_REGISTRY_CAPABILITY,
+  KEYSPACE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   ROUTE_REGISTRY_CAPABILITY,
-  RUNTIME_MESSAGE_BUS,
   SETTINGS_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
   VAULT_COORDINATOR_CONTROL_CAPABILITY,
   VAULT_LOCAL_SECRET_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
-  type VaultLocalSecretService,
   type VaultCoordinatorControl,
 } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
@@ -63,11 +49,16 @@ import { createAutoLockServiceCoordinator } from "./autoLockServiceCoordinator.j
 import { SessionStateMirror } from "./sessionStateMirror.js";
 import { createVaultLocalSecretService } from "./localSecretService.js";
 
+/** 唯一 Key 的只读资源投影。 */
 export interface VaultKeyResourceState {
-  keys: KeyIdentity[];
-  active: ActiveKeyState;
-  initializing: boolean;
-  notice: { label: string } | null;
+  /** 唯一钱包 Key 的公钥；未初始化或锁定时缺省。 */
+  activePublicKeyHex?: string;
+  /** Worker 运行世代；Worker 重启后变化。 */
+  runGeneration: string;
+  /** 钱包身份世代；重置后变化。 */
+  walletGeneration?: string;
+  /** lifecycle 快照修订号，页面据此丢弃乱序结果。 */
+  revision: number;
 }
 
 /** Vault setup 所需的 Coordinator contract 子集。 */
@@ -83,123 +74,53 @@ const vaultResources: I18nPluginResources = {
     en: {
       "vault.route.unlock": "Unlock wallet",
       "vault.route.create": "New wallet",
-      "vault.route.settings": "Key management",
-      "vault.route.currentKey": "Export private key",
+      "vault.route.currentKey": "Wallet key",
       "vault.route.autoLock": "Auto lock",
       "vault.crumb.settings": "Settings",
-      "vault.crumb.keys": "Key management",
-      "vault.crumb.currentKey": "Export private key",
+      "vault.crumb.currentKey": "Wallet key",
       "vault.crumb.autoLock": "Auto lock",
       "vault.command.lock": "Lock wallet",
       "vault.unlock.title": "Unlock wallet",
-      "vault.unlock.description": "Enter this Key\u2019s own password to unlock it.",
+      "vault.unlock.description": "Enter the wallet key password to unlock. Only one key is kept in this browser.",
       "vault.unlock.password": "Password",
       "vault.unlock.submit": "Unlock",
       "vault.create.title": "New wallet",
-      "vault.create.description": "Set a local password. The Vault will then generate your first Key and set it as active. The password is never sent to any server and cannot be recovered if lost.",
+      "vault.create.description": "Set a password and Keymaster will generate the one wallet key for this browser. The password never leaves this device and cannot be recovered if lost.",
       "vault.create.passwordNew": "New password",
       "vault.create.passwordConfirm": "Confirm password",
       "vault.create.submit": "Create wallet",
       "vault.create.err.tooShort": "Password must be at least 8 characters",
       "vault.create.err.mismatch": "Passwords do not match",
       "vault.create.err.failed": "Create failed",
-      "vault.create.err.initialKeyFailed": "Failed to create the first Key",
       "vault.unlock.err.failed": "Unlock failed",
-      "vault.keySwitch.confirmTitle": "Confirm switch",
-      "vault.keySwitch.usePassword": "Use password",
-      "vault.keySwitch.passwordHint": "Enter this Key\u2019s own password to unlock and switch to it.",
-      "vault.keySwitch.password": "Password",
-      "vault.keySwitch.passwordSubmit": "Unlock with password",
-      "vault.keySwitch.err.failed": "Failed to switch key",
-      "vault.keySwitch.unnamed": "Unnamed",
-      "vault.settings.title": "Key management",
-      "vault.settings.description": "Manage Catalog bucket keys, the active identity, and encrypted backups.",
-      "vault.settings.col.label": "Label",
-      "vault.settings.col.status": "Status",
-      "vault.settings.col.pubkey": "Public key",
-      "vault.settings.col.caps": "Capabilities",
-      "vault.settings.col.created": "Created at",
-      "vault.settings.col.actions": "Actions",
+      "vault.currentKey.title": "Wallet key",
+      "vault.currentKey.description": "This browser keeps exactly one wallet key. Replacing it requires resetting the wallet, which deletes all local wallet data.",
+      "vault.currentKey.locked.hint": "The wallet is locked. Unlock it to manage the key.",
+      "vault.currentKey.identity.label": "Current key",
+      "vault.currentKey.export.title": "Encrypted KeyHold export",
+      "vault.currentKey.export.description": "The downloaded file is a copy of the local key.json and keeps the existing encrypted format.",
+      "vault.currentKey.export.notBackup": "This file contains the wallet key only \u2014 not contacts, messages, settings or other local data. It is not a full wallet backup.",
+      "vault.currentKey.export.action": "Export KeyHold",
       "vault.settings.empty.label": "Unnamed",
-      "vault.settings.empty.fingerprint": "Identity not available",
-      "vault.settings.status.failed": "Identity failed",
-      "vault.settings.status.initializing": "Initializing",
-      "vault.settings.status.ready": "Ready",
-      "vault.settings.action.expand": "Expand",
-      "vault.settings.action.expandPubkey": "Expand public key",
-      "vault.settings.action.collapsePubkey": "Collapse",
-      "vault.settings.action.copyPubkey": "Copy full public key",
-      "vault.settings.action.setActive": "Set active",
-      "vault.settings.action.current": "Current key",
-      "vault.settings.action.export": "Export",
-      "vault.settings.action.delete": "Delete",
-      "vault.settings.action.new": "New key",
+      "vault.settings.actions.title": "Key actions",
+      "vault.settings.action.rename": "Rename",
       "vault.settings.action.changePassword": "Change password",
-      "vault.settings.action.importBackup": "Import backup",
-      "vault.settings.action.import": "Import key",
       "vault.settings.action.lock": "Lock wallet",
-      "vault.settings.empty.title": "No keys yet",
-      "vault.settings.empty.desc": "Generate a new key locally or import an existing private key.",
-      "vault.settings.notice.persisted": "Key saved, but could not be set as active automatically. Switch it manually in the list.",
-      "vault.settings.notice.copied": "Copied full public key",
-      "vault.settings.err.load": "Failed to load keys",
-      "vault.settings.err.delete": "Delete failed",
-      "vault.settings.err.setActive": "Failed to switch key",
-      "vault.settings.err.create": "Create failed",
-      "vault.settings.err.copy": "Copy failed",
-      "vault.settings.activate.title": "Confirm switch",
-      "vault.settings.activate.submit": "Confirm",
-      "vault.settings.activate.hint": "Enter the Vault password to switch the active key.",
-      "vault.settings.activate.password": "Password",
-      "vault.settings.activate.err.failed": "Failed to switch key",
-      "vault.keyCreate.title": "New key",
-      "vault.keyCreate.successTitle": "Key created and set as active",
-      "vault.keyCreate.cancel": "Cancel",
-      "vault.keyCreate.submit": "Create key",
-      "vault.keyCreate.later": "Later",
-      "vault.keyCreate.exportBackup": "Export encrypted backup",
-      "vault.keyCreate.hint": "The Vault will securely generate a new secp256k1 private key in the browser and immediately encrypt it with the current password. The key is set as active automatically after generation.",
-      "vault.keyCreate.label": "Label",
-      "vault.keyCreate.placeholder": "e.g. Key 2026-06-06 14:30",
-      "vault.keyCreate.note": "Labels do not need to be unique. Keys are distinguished by their public key.",
-      "vault.keyCreate.copyPubkey": "Copy full public key",
-      "vault.keyCreate.success.label": "Label",
-      "vault.keyCreate.success.publicKey": "Public key",
-      "vault.keyCreate.warning": "This key is stored in the selected Catalog bucket. Losing access to the bucket or its password can make it unrecoverable. Export an encrypted backup as soon as possible.",
-      "vault.keyCreate.err.empty": "Label cannot be empty",
-      "vault.keyCreate.err.tooLong": "Label must be at most {{max}} characters",
-      "vault.keyCreate.err.failed": "Create failed",
-      "vault.keyCreate.err.password": "Enter the Vault password",
-      "vault.keyCreate.password": "Vault password",
-      "vault.keyDelete.title.warn": "Delete key",
-      "vault.keyDelete.exportBackup": "Export backup",
-      "vault.keyDelete.confirm": "Confirm delete",
-      "vault.keyDelete.danger": "Deleting will remove the key's private key and every plugin's local namespace data (asset cache, history, contacts, etc.). Without a backup or copy in another wallet, related assets will be permanently inaccessible.",
-      "vault.keyDelete.target": "Target: ",
-      "vault.keyDelete.err.failed": "Delete failed",
-      "vault.keyDelete.labelPrompt": "Type the target label to confirm:",
-      "vault.keyDelete.bucketPasswordPrompt": "Enter the current bucket password to update the security snapshot:",
-      "vault.keyExport.title": "Export private key",
-      "vault.keyExport.cancel": "Cancel",
-      "vault.keyExport.submit": "Export private key",
-      "vault.keyExport.hint": "Download an encrypted backup of the current private key. The file does not contain a plaintext key, but it and the required credentials must be kept secure.",
-      "vault.keyExport.err.failed": "Export failed",
-      "vault.keyImportBackup.title": "Import backup",
-      "vault.keyImportBackup.submit": "Restore backup",
-      "vault.keyImportBackup.hint": "Paste a Catalog Hold key backup JSON. Restoring it requires the source bucket password and the current bucket password.",
-      "vault.keyImportBackup.backup": "Backup JSON",
-      "vault.keyImportBackup.backupPlaceholder": "{\"format\":\"keymaster.storage.catalog-key-backup\",\"version\":1,...}",
-      "vault.keyImportBackup.sourcePassword": "Source bucket password",
-      "vault.keyImportBackup.targetPassword": "Target bucket password",
-      "vault.keyImportBackup.notice": "Backup restored: {{label}}",
-      "vault.keyImportBackup.err.emptyBackup": "Backup JSON cannot be empty",
-      "vault.keyImportBackup.err.emptySourcePassword": "Enter the source password",
-      "vault.keyImportBackup.err.emptyTargetPassword": "Enter the target Vault password",
-      "vault.keyImportBackup.err.unavailable": "This Vault does not support backup restore",
-      "vault.keyImportBackup.err.failed": "Import failed",
+      "vault.settings.action.resetWallet": "Reset wallet",
+      "vault.settings.rename.title": "Rename key",
+      "vault.settings.rename.label": "Name",
+      "vault.settings.rename.submit": "Save",
+      "vault.settings.err.rename": "Rename failed",
+      "vault.settings.err.renameEmpty": "Name cannot be empty",
+      "vault.settings.err.lock": "Lock failed",
+      "vault.keyHoldExport.title": "Export encrypted KeyHold",
+      "vault.keyHoldExport.submit": "Export",
+      "vault.keyHoldExport.hint": "Download the encrypted KeyHold for the current key. The file never contains a plaintext key, but it must be kept together with its password.",
+      "vault.keyHoldExport.notBackup": "This file holds the wallet key only, not contacts, messages or settings. It is not a full wallet backup.",
+      "vault.keyHoldExport.err.failed": "Export failed",
       "vault.changePassword.title": "Change password",
       "vault.changePassword.submit": "Confirm change",
-      "vault.changePassword.hint": "The Vault will lock immediately after the password is updated. You will need to unlock again with the new password.",
+      "vault.changePassword.hint": "Changing the password locks the wallet immediately. You will need to unlock again with the new password.",
       "vault.changePassword.oldPassword": "Current password",
       "vault.changePassword.newPassword": "New password",
       "vault.changePassword.confirmPassword": "Confirm new password",
@@ -207,15 +128,13 @@ const vaultResources: I18nPluginResources = {
       "vault.changePassword.err.tooShort": "New password must be at least 8 characters",
       "vault.changePassword.err.mismatch": "The new passwords do not match",
       "vault.changePassword.err.failed": "Change password failed",
-      "vault.currentKey.title": "Export private key",
-      "vault.currentKey.description": "Download an encrypted backup of the active private key for migration or recovery. The private key is never shown in plaintext.",
-      "vault.currentKey.empty.title": "No private key to export",
-      "vault.currentKey.empty.description": "Create, import, or activate a private key first.",
-      "vault.currentKey.identity.label": "Current private key",
-      "vault.currentKey.export.title": "Encrypted private key backup",
-      "vault.currentKey.export.description": "The export contains the current private key in encrypted form and can be restored with the required credentials.",
-      "vault.currentKey.export.warning": "Keep the downloaded file and credentials secure. Anyone with both may be able to restore the private key.",
-      "vault.currentKey.export.action": "Export private key",
+      "vault.resetWallet.title": "Reset wallet",
+      "vault.resetWallet.submit": "Permanently delete local wallet data",
+      "vault.resetWallet.danger": "Resetting deletes the current wallet key and all local wallet data in the new storage layout: contacts, message evidence, settings, module data and third-party app data. This cannot be undone.",
+      "vault.resetWallet.scope": "It does not undo on-chain transactions or operations a server has already accepted; those follow their own recovery rules. Existing KeyHold export files stay valid on their own.",
+      "vault.resetWallet.replace": "Afterwards you can create a new key or import an existing private key. The new wallet inherits none of this data.",
+      "vault.resetWallet.confirmPrompt": "Type the current wallet name to confirm:",
+      "vault.resetWallet.err.failed": "Reset failed",
       "vault.autolock.page.title": "Auto lock",
       "vault.autolock.page.description": "Lock the wallet automatically after inactivity. Changes take effect immediately.",
       "vault.autolock.summary.title": "Current policy",
@@ -241,7 +160,7 @@ const vaultResources: I18nPluginResources = {
       "vault.autolock.custom.placeholder": "e.g. 10",
       "vault.autolock.custom.unit": "minutes",
       "vault.autolock.custom.apply": "Apply",
-      "vault.autolock.custom.applying": "Saving…",
+      "vault.autolock.custom.applying": "Saving\u2026",
       "vault.autolock.custom.required": "Enter minutes (at least 1).",
       "vault.autolock.custom.invalid": "Enter a valid number of minutes.",
       "vault.autolock.custom.min": "At least 1 minute.",
@@ -252,123 +171,53 @@ const vaultResources: I18nPluginResources = {
     "zh-CN": {
       "vault.route.unlock": "解锁钱包",
       "vault.route.create": "创建钱包",
-      "vault.route.settings": "Key 管理",
-      "vault.route.currentKey": "导出私钥",
+      "vault.route.currentKey": "钱包 Key",
       "vault.route.autoLock": "自动锁屏",
       "vault.crumb.settings": "设置",
-      "vault.crumb.keys": "Key 管理",
-      "vault.crumb.currentKey": "导出私钥",
+      "vault.crumb.currentKey": "钱包 Key",
       "vault.crumb.autoLock": "自动锁屏",
       "vault.command.lock": "锁定钱包",
       "vault.unlock.title": "解锁钱包",
-      "vault.unlock.description": "输入这把 Key 自己的密码来解锁。",
+      "vault.unlock.description": "输入钱包 Key 密码解锁。本浏览器只保存这一把 Key。",
       "vault.unlock.password": "密码",
       "vault.unlock.submit": "解锁",
       "vault.create.title": "新建钱包",
-      "vault.create.description": "设置一个本地密码。Vault 接下来会生成你的第一把 Key 并自动设为 active。该密码不会发送到任何服务器，丢失后无法找回。",
+      "vault.create.description": "设置一个本地密码，Keymaster 会为本浏览器生成唯一一把钱包 Key。该密码不会离开本机，丢失后无法找回。",
       "vault.create.passwordNew": "新密码",
       "vault.create.passwordConfirm": "确认密码",
       "vault.create.submit": "新建钱包",
       "vault.create.err.tooShort": "密码至少 8 位",
       "vault.create.err.mismatch": "两次密码不一致",
       "vault.create.err.failed": "创建失败",
-      "vault.create.err.initialKeyFailed": "创建首把 Key 失败",
       "vault.unlock.err.failed": "解锁失败",
-      "vault.keySwitch.confirmTitle": "确认切换",
-      "vault.keySwitch.usePassword": "使用密码",
-      "vault.keySwitch.passwordHint": "输入这把 Key 自己的密码解锁并切换。",
-      "vault.keySwitch.password": "密码",
-      "vault.keySwitch.passwordSubmit": "使用密码解锁",
-      "vault.keySwitch.err.failed": "切换私钥失败",
-      "vault.keySwitch.unnamed": "未命名",
-      "vault.settings.title": "Key 管理",
-      "vault.settings.description": "管理当前 Catalog 桶中的 Key、active 身份和加密备份。",
-      "vault.settings.col.label": "标签",
-      "vault.settings.col.status": "状态",
-      "vault.settings.col.pubkey": "公钥",
-      "vault.settings.col.caps": "能力",
-      "vault.settings.col.created": "创建时间",
-      "vault.settings.col.actions": "操作",
+      "vault.currentKey.title": "钱包 Key",
+      "vault.currentKey.description": "本浏览器只保存一把钱包 Key。更换身份需要先重置钱包，那会删除全部本地钱包数据。",
+      "vault.currentKey.locked.hint": "钱包当前处于锁定状态，解锁后可管理 Key。",
+      "vault.currentKey.identity.label": "当前 Key",
+      "vault.currentKey.export.title": "加密 KeyHold 导出",
+      "vault.currentKey.export.description": "导出文件就是本地 key.json 的原样副本，保持既有加密格式。",
+      "vault.currentKey.export.notBackup": "该文件只含钱包 Key，不含联系人、消息、设置等本地业务数据，不能当作完整钱包备份。",
+      "vault.currentKey.export.action": "导出 KeyHold",
       "vault.settings.empty.label": "未命名",
-      "vault.settings.empty.fingerprint": "身份不可用",
-      "vault.settings.status.failed": "身份失败",
-      "vault.settings.status.initializing": "初始化中",
-      "vault.settings.status.ready": "可用",
-      "vault.settings.action.expand": "展开",
-      "vault.settings.action.expandPubkey": "展开公钥",
-      "vault.settings.action.collapsePubkey": "收起",
-      "vault.settings.action.copyPubkey": "复制完整公钥",
-      "vault.settings.action.setActive": "设为 active",
-      "vault.settings.action.current": "当前 key",
-      "vault.settings.action.export": "导出",
-      "vault.settings.action.delete": "删除",
-      "vault.settings.action.new": "新建 Key",
+      "vault.settings.actions.title": "Key 操作",
+      "vault.settings.action.rename": "重命名",
       "vault.settings.action.changePassword": "修改密码",
-      "vault.settings.action.importBackup": "导入备份",
-      "vault.settings.action.import": "导入 Key",
       "vault.settings.action.lock": "锁定钱包",
-      "vault.settings.empty.title": "还没有 Key",
-      "vault.settings.empty.desc": "可以在本地安全生成一把新 Key，也可以导入已有私钥。",
-      "vault.settings.notice.persisted": "Key 已保存，但未能自动设为 active。请在列表中手动切换。",
-      "vault.settings.notice.copied": "已复制完整公钥",
-      "vault.settings.err.load": "加载 keys 失败",
-      "vault.settings.err.delete": "删除失败",
-      "vault.settings.err.setActive": "切换 key 失败",
-      "vault.settings.err.create": "创建失败",
-      "vault.settings.err.copy": "复制失败",
-      "vault.settings.activate.title": "确认切换",
-      "vault.settings.activate.submit": "确认",
-      "vault.settings.activate.hint": "请输入 Vault 密码以切换 active key。",
-      "vault.settings.activate.password": "密码",
-      "vault.settings.activate.err.failed": "切换 key 失败",
-      "vault.keyCreate.title": "新建 Key",
-      "vault.keyCreate.successTitle": "Key 已创建并设为 active",
-      "vault.keyCreate.cancel": "取消",
-      "vault.keyCreate.submit": "新建 Key",
-      "vault.keyCreate.later": "稍后",
-      "vault.keyCreate.exportBackup": "导出加密备份",
-      "vault.keyCreate.hint": "Vault 会在浏览器内安全生成一把新的 secp256k1 私钥，并立即用当前密码加密保存。生成成功后会自动设为 active key。",
-      "vault.keyCreate.label": "标签",
-      "vault.keyCreate.placeholder": "例如：Key 2026-06-06 14:30",
-      "vault.keyCreate.note": "标签不要求唯一；后续管理列表按公钥区分。",
-      "vault.keyCreate.copyPubkey": "复制完整公钥",
-      "vault.keyCreate.success.label": "标签",
-      "vault.keyCreate.success.publicKey": "公钥",
-      "vault.keyCreate.warning": "该 Key 保存在当前 Catalog 桶中。失去桶或桶密码都可能导致无法恢复，请尽快导出加密备份。",
-      "vault.keyCreate.err.empty": "标签不能为空",
-      "vault.keyCreate.err.tooLong": "标签最长 {{max}} 个字符",
-      "vault.keyCreate.err.failed": "创建失败",
-      "vault.keyCreate.err.password": "请输入 Vault 密码",
-      "vault.keyCreate.password": "Vault 密码",
-      "vault.keyDelete.title.warn": "删除 key",
-      "vault.keyDelete.exportBackup": "导出备份",
-      "vault.keyDelete.confirm": "确认删除",
-      "vault.keyDelete.danger": "删除会同时移除该 key 的私钥以及所有插件在本地的命名空间数据（资产缓存、历史、联系人等）。没有备份或在其他钱包中有副本时，相关资产将永久无法使用。",
-      "vault.keyDelete.target": "目标：",
-      "vault.keyDelete.err.failed": "删除失败",
-      "vault.keyDelete.labelPrompt": "请输入目标标签以确认：",
-      "vault.keyDelete.bucketPasswordPrompt": "请输入当前桶密码以更新安全快照：",
-      "vault.keyExport.title": "导出私钥",
-      "vault.keyExport.cancel": "取消",
-      "vault.keyExport.submit": "导出私钥",
-      "vault.keyExport.hint": "将下载当前私钥的加密备份。文件不包含明文私钥，但必须与对应凭据一起妥善保管。",
-      "vault.keyExport.err.failed": "导出失败",
-      "vault.keyImportBackup.title": "导入备份",
-      "vault.keyImportBackup.submit": "恢复备份",
-      "vault.keyImportBackup.hint": "粘贴导出的 Catalog Hold Key 备份 JSON。恢复时需要来源桶密码，以及当前目标桶密码。",
-      "vault.keyImportBackup.backup": "备份 JSON",
-      "vault.keyImportBackup.backupPlaceholder": "{\"format\":\"keymaster.storage.catalog-key-backup\",\"version\":1,...}",
-      "vault.keyImportBackup.sourcePassword": "来源桶密码",
-      "vault.keyImportBackup.targetPassword": "目标桶密码",
-      "vault.keyImportBackup.notice": "备份已恢复：{{label}}",
-      "vault.keyImportBackup.err.emptyBackup": "备份内容不能为空",
-      "vault.keyImportBackup.err.emptySourcePassword": "请输入源密码",
-      "vault.keyImportBackup.err.emptyTargetPassword": "请输入目标 Vault 密码",
-      "vault.keyImportBackup.err.unavailable": "当前 Vault 不支持备份恢复",
-      "vault.keyImportBackup.err.failed": "导入失败",
+      "vault.settings.action.resetWallet": "重置钱包",
+      "vault.settings.rename.title": "重命名 Key",
+      "vault.settings.rename.label": "名称",
+      "vault.settings.rename.submit": "保存",
+      "vault.settings.err.rename": "重命名失败",
+      "vault.settings.err.renameEmpty": "名称不能为空",
+      "vault.settings.err.lock": "锁定失败",
+      "vault.keyHoldExport.title": "导出加密 KeyHold",
+      "vault.keyHoldExport.submit": "导出",
+      "vault.keyHoldExport.hint": "将下载当前 Key 的加密 KeyHold 文件。文件不包含明文私钥，但必须与对应密码一起妥善保管。",
+      "vault.keyHoldExport.notBackup": "该文件只含钱包 Key，不含联系人、消息或设置，不能当作完整钱包备份。",
+      "vault.keyHoldExport.err.failed": "导出失败",
       "vault.changePassword.title": "修改密码",
       "vault.changePassword.submit": "确认修改",
-      "vault.changePassword.hint": "密码更新后 Vault 会立即锁定。你需要用新密码重新解锁。",
+      "vault.changePassword.hint": "修改密码后钱包会立即锁定，你需要用新密码重新解锁。",
       "vault.changePassword.oldPassword": "当前密码",
       "vault.changePassword.newPassword": "新密码",
       "vault.changePassword.confirmPassword": "确认新密码",
@@ -376,15 +225,13 @@ const vaultResources: I18nPluginResources = {
       "vault.changePassword.err.tooShort": "新密码至少 8 位",
       "vault.changePassword.err.mismatch": "两次新密码不一致",
       "vault.changePassword.err.failed": "修改密码失败",
-      "vault.currentKey.title": "导出私钥",
-      "vault.currentKey.description": "下载当前私钥的加密备份，用于迁移或恢复。页面不会显示明文私钥。",
-      "vault.currentKey.empty.title": "当前没有可导出的私钥",
-      "vault.currentKey.empty.description": "请先创建、导入或激活一把私钥。",
-      "vault.currentKey.identity.label": "当前私钥",
-      "vault.currentKey.export.title": "加密私钥备份",
-      "vault.currentKey.export.description": "导出文件包含当前私钥的加密数据，可使用对应凭据恢复。",
-      "vault.currentKey.export.warning": "请妥善保管下载文件和对应凭据；两者同时泄露可能导致私钥被恢复。",
-      "vault.currentKey.export.action": "导出私钥",
+      "vault.resetWallet.title": "重置钱包",
+      "vault.resetWallet.submit": "永久删除本地钱包数据",
+      "vault.resetWallet.danger": "重置会删除当前钱包 Key 以及新存储结构中的全部本地钱包数据：联系人、消息记录、设置、模块数据和第三方 App 数据都将被清空，且无法撤销。",
+      "vault.resetWallet.scope": "这不会撤销链上交易或服务端已经接受的操作；那类结果按对应业务的恢复规则处理。已有的 KeyHold 导出文件不会因此失效。",
+      "vault.resetWallet.replace": "之后可以重新创建一把新 Key，或导入已有私钥；新钱包不会继承这里的任何数据。",
+      "vault.resetWallet.confirmPrompt": "输入当前钱包名称以确认：",
+      "vault.resetWallet.err.failed": "重置失败",
       "vault.autolock.page.title": "自动锁屏",
       "vault.autolock.page.description": "无操作一段时间后自动锁屏，修改立即生效。",
       "vault.autolock.summary.title": "当前策略",
@@ -424,10 +271,13 @@ const vaultResources: I18nPluginResources = {
 const vaultPluginDefinition = {
   id: "vault",
   name: "Vault",
-  description: "本地密码 Vault，管理私钥加解密、内存会话与 active key 状态。",
+  description: "单 Key 本地钱包：管理唯一钱包 Key 的加密存储、内存解密与生命周期。",
   kind: "core",
   startup: "required",
-  bootstrapStage: "vault-selection",
+  // Vault 必须最早可用：未初始化时它是「创建 / 导入钱包 Key」的唯一入口，
+  // locked 时是解锁页的唯一入口。这两种状态都发生在本地钱包 Root 就绪
+  // 之前或之后的冷启动路径上，晚于第一阶段就拿不到 vault.service。
+  bootstrapStage: "storage-onboarding",
   defaultEnabled: true,
   canDisable: false,
   displayGroup: "core",
@@ -437,7 +287,6 @@ const vaultPluginDefinition = {
     scopeKind: "root",
     provides: [VAULT_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, AUTOLOCK_SERVICE_CAPABILITY],
     dependencies: [
-      { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "vault lifecycle events" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault key resource" },
       { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault routes" },
       { capability: SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings" },
@@ -452,34 +301,25 @@ const vaultPluginDefinition = {
   }],
   i18n: vaultResources,
   setup(ctx) {
-    const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
-
-    // 施工单 002：优先使用 Coordinator facade
-    let service!: VaultService;
-    let keyspaceHandle: KeyspaceService | undefined = undefined;
-
-    // 尝试获取 Coordinator client（通过 capability）
-    let coordinatorClient: CoordinatorClientLike | undefined;
-    coordinatorClient = ctx.coordinator as VaultCoordinatorControl | undefined;
-    if (coordinatorClient) ctx.provide(VAULT_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
+    // 两个 facade 都只从同一个已提交的 session 镜像派生：vault 管生命周期，
+    // keyspace 只投影当前唯一 Key 的公钥身份。
+    const coordinatorClient = ctx.coordinator as VaultCoordinatorControl | undefined;
     if (!coordinatorClient) throw new Error("Session Coordinator is unavailable");
-    if (coordinatorClient.getIsConnected()) {
-      // Both facades derive from one already-committed session mirror.
-      const sessionStateMirror = new SessionStateMirror(coordinatorClient);
-      service = createVaultServiceCoordinator({ coordinatorClient, sessionStateMirror });
-      keyspaceHandle = createKeyspaceServiceCoordinator(coordinatorClient, sessionStateMirror, messageBus);
-    }
+    if (coordinatorClient.getIsConnected()) ctx.provide(VAULT_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
+    if (!coordinatorClient.getIsConnected()) throw new Error("Session Coordinator is unavailable");
+
+    const sessionStateMirror = new SessionStateMirror(coordinatorClient);
+    const service = createVaultServiceCoordinator({ coordinatorClient, sessionStateMirror });
+    const keyspaceHandle = createKeyspaceServiceCoordinator(sessionStateMirror);
 
     ctx.provide(VAULT_CAPABILITY, service);
+    ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
     ctx.provide(VAULT_LOCAL_SECRET_CAPABILITY, createVaultLocalSecretService(coordinatorClient));
 
     // 自动锁 facade：真值在 Coordinator，页面经 session.state 收敛多 tab。
-    const autoLockService = createAutoLockServiceCoordinator({ coordinatorClient });
+    const autoLockService: AutoLockService = createAutoLockServiceCoordinator({ coordinatorClient });
     ctx.provide(AUTOLOCK_SERVICE_CAPABILITY, autoLockService);
 
-    // 创建 keyspace：依赖 vault.service。
-    if (!keyspaceHandle) throw new Error("Session Coordinator is unavailable");
-    ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<AutoLockSettings, readonly string[]>({
       id: "vault.autoLockSettings",
@@ -495,38 +335,32 @@ const vaultPluginDefinition = {
     });
     resources.register<VaultKeyResourceState, readonly string[]>({
       id: "vault.key-state",
-      // 作用域绑定 active key：解锁/切换 Key 会改变资源键,注册表必须重新
-      // 加载（本地磁盘慢恢复时,session 状态事件可能落在插件实例替换的
-      // 窗口里,global 键会让“还没有 Key”的旧结果一直留在 UI 上）。
-      scope: "active-key",
-      key: (_args, context) => ["vault.key-state", context.activePublicKeyHex ?? "no-active-key"],
-      load: async (_args, context) => {
-        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY.id);
-        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY.id);
-        const keys = keyspace ? await keyspace.listKeys() : [];
+      // 资源键绑定运行世代与钱包身份世代：Worker 重启或钱包重置后必须重新
+      // 加载，否则 UI 会继续展示上一轮运行的旧授权与旧身份。
+      scope: "global",
+      key: (_args, context) => {
+        const state = context.activePublicKeyHex;
+        return ["vault.key-state", state ?? "no-wallet-key"];
+      },
+      load: async () => {
+        const snapshot = service.getLifecycleSnapshot();
         return {
-          keys,
-          active: keyspace?.active() ?? { activePublicKeyHex: undefined },
-          initializing: keyspace?.isInitializing() ?? false,
-          notice: vault?.getInitialActivationNotice?.() ?? null
+          // 锁定时不投影公钥：页面不应在未解锁时继续持有身份。
+          ...(snapshot.status === "unlocked" && snapshot.activePublicKeyHex
+            ? { activePublicKeyHex: snapshot.activePublicKeyHex }
+            : {}),
+          runGeneration: snapshot.runGeneration,
+          ...(snapshot.walletGeneration === undefined ? {} : { walletGeneration: snapshot.walletGeneration }),
+          revision: snapshot.vaultLifecycleRevision,
         };
       },
-      subscribe: (_args, context, invalidate) => {
-        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY.id);
-        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY.id);
-        const bus = context.getCapability<MessageBus>(RUNTIME_MESSAGE_BUS.id);
-        const offs = [
-          keyspace?.onActiveKeyChanged(invalidate),
-          keyspace?.onInitializationChange(invalidate),
-          vault?.onInitialActivationNoticeChange?.(invalidate),
-          bus?.subscribe("key.created", invalidate),
-          bus?.subscribe("key.deleted", invalidate),
-          bus?.subscribe("key.identity.ready", invalidate),
-          bus?.subscribe("key.identity.failed", invalidate)
-        ].filter((off): off is () => void => typeof off === "function");
-        return () => { for (const off of offs) off(); };
-      },
-      equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      subscribe: (_args, _ctx, invalidate) => service.onLifecycleChange(invalidate),
+      equals: (a, b) => (a !== undefined && b !== undefined && (
+        a.activePublicKeyHex === b.activePublicKeyHex
+        && a.runGeneration === b.runGeneration
+        && a.walletGeneration === b.walletGeneration
+        && a.revision === b.revision
+      )),
       invalidation: "immediate"
     });
 
@@ -544,17 +378,15 @@ const vaultPluginDefinition = {
       component: VaultCreatePage
     });
 
-    // 硬切换 003：/settings/vault 不再注册到旧菜单体系。
-    // 改为 settings.registry.register() 一处真值；shell 走 settings 分组渲染。
+    // /settings/* 走 settings.registry 作为页面路由真值，同时作为一个 feature
+    // 挂入「设置」业务域。vault 在 settings 之前启动，因此 registry 支持先
+    // 注册入口、等待 settings 域出现后再投影到业务导航。
     const settings = ctx.capability(SETTINGS_REGISTRY_CAPABILITY);
     settings.register({
       id: "vault.current-key",
       path: "/settings/current-key",
-      label: { key: "vault.route.currentKey", fallback: "Export private key" },
-      description: {
-        key: "vault.currentKey.description",
-        fallback: "Download an encrypted backup of the active private key."
-      },
+      label: { key: "vault.route.currentKey", fallback: "Wallet key" },
+      description: { key: "vault.currentKey.description", fallback: "Manage the single wallet key kept in this browser." },
       component: CurrentKeySettingsPage,
       order: 0,
       icon: "ShieldCheck",
@@ -571,17 +403,11 @@ const vaultPluginDefinition = {
       visibleWhen: ({ unlocked }) => unlocked
     });
 
-    // 密钥管理沿用 settings.registry 作为页面路由真值，同时作为一个 feature
-    // 挂入新的「设置」业务域。vault 在 settings 之前启动，因此 registry 支持
-    // 先注册入口、等待 settings 域出现后再投影到业务导航。
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("vault", "settings", {
       id: "settings.current-key",
-      label: { key: "vault.route.currentKey", fallback: "Export private key" },
-      description: {
-        key: "vault.currentKey.description",
-        fallback: "Download an encrypted backup of the active private key."
-      },
+      label: { key: "vault.route.currentKey", fallback: "Wallet key" },
+      description: { key: "vault.currentKey.description", fallback: "Manage the single wallet key kept in this browser." },
       order: 12,
       icon: "ShieldCheck",
       entry: { path: "/settings/current-key", component: CurrentKeySettingsPage }
@@ -595,7 +421,7 @@ const vaultPluginDefinition = {
       entry: { path: "/settings/auto-lock", component: AutoLockSettingsPage }
     });
 
-    // 硬切换 003：面包屑第一段固定为不可点击的"设置"分类节点。
+    // 面包屑第一段固定为不可点击的「设置」分类节点。
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     breadcrumbs.register({
       id: "breadcrumb.vault.current-key",
@@ -603,7 +429,7 @@ const vaultPluginDefinition = {
       match: (path) => path === "/settings/current-key",
       resolve: () => [
         { label: { key: "vault.crumb.settings", fallback: "Settings" } },
-        { label: { key: "vault.crumb.currentKey", fallback: "Export private key" } }
+        { label: { key: "vault.crumb.currentKey", fallback: "Wallet key" } }
       ]
     });
     breadcrumbs.register({
@@ -622,21 +448,18 @@ const vaultPluginDefinition = {
       label: { key: "vault.command.lock", fallback: "Lock wallet" },
       run: async () => {
         const result = await service.lock();
-        // 锁定事件本身会把所有页面收敛到最新 lifecycle snapshot。若另一
-        // 页面恰好先完成了同一轮锁定，stale-epoch 是可恢复的竞态结果，不能
-        // 抛到浏览器的 global.unhandledrejection 并把整个应用判为致命错误。
+        // 锁定事件本身会把所有页面收敛到最新 lifecycle 快照。若另一页面
+        // 恰好先完成了同一轮锁定，stale-epoch 是可恢复的竞态结果，不能抛到
+        // global.unhandledrejection 并把整个应用判为致命错误。
         if (result.status !== "accepted" && result.status !== "ok" && result.status !== "stale-epoch") {
           throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
         }
       }
     });
 
-    // 硬切换 001：vault 是 core 插件，理论上不会被 disable。
-    // 但 host 仍会要求 setup 返回 teardown。vault 自身不持有后台资源，
-    // 返回幂等空函数即可。service.lock() 等动作由 vault 命令触发，
-    // 不属于 ownership 回收范围。
+    // vault 是 core 插件，不会被 disable。这里只释放内存句柄引用；service.lock()
+    // 等动作由 vault 命令触发，不属于 ownership 回收范围。
     return () => {
-      // 幂等：清空内存 vault 句柄引用。
       service.dispose?.();
       autoLockService.dispose?.();
     };
@@ -645,3 +468,4 @@ const vaultPluginDefinition = {
 
 const { setup: vaultSetup, ...vaultPlugin } = vaultPluginDefinition;
 export { vaultSetup, vaultPlugin };
+export type { KeyspaceService, VaultService };

@@ -94,40 +94,30 @@ import {
 import type {
   CoordinatorOwnerStorageData,
   CoordinatorPlatformStorageData,
+  StorageBindingGrant,
   StorageOwnerGrant,
   StoragePlatformGrant,
 } from "./storage/internal.js";
-import type { StorageBootstrapState, StorageProviderConfigDraft, StorageConnection, StorageSecretUpdate, StorageProviderId } from "./storage/profile.js";
 import type {
   StorageDeleteResult,
   StorageDirectoryResult,
   StorageGetResult,
   StorageListResult,
   StoragePutResult,
-  StorageUploadAbortResult,
-  StorageUploadBeginResult,
-  StorageUploadPartResult,
 } from "./connectStorage.js";
 import type {
-  StorageBucketConnectionConfigV1,
-  ExistingRemoteStorageConnectPlan,
-  ExistingRemoteStorageConnectResult,
-  InitialSetupPlan,
-  InitialSetupResult,
-  InitialSetupRecoveryResult,
-  StorageBucketSwitchResultV1,
-} from "./storage/catalog.js";
-import type { StorageRuntimeBucketV1 } from "./storage/profile.js";
-import type { DeviceCapabilitiesV1, DeviceRecordV1 } from "./storage/device.js";
-import { validateDeviceRecord } from "./storage/device.js";
-import type { KeymasterSessionV1, KeymasterSessionKeyDerivationV1 } from "./storage/session.js";
-import { validateKeymasterSession, validateKeymasterSessionKeyDerivation } from "./storage/session.js";
-import type { StorageBucketWriteCondition } from "./storage/bucket.js";
-import type { InitialSetupRecoveryRecordV1 } from "./storage/catalog.js";
-import { STORAGE_MAX_PARTS, STORAGE_MAX_PAYLOAD_BYTES, STORAGE_PART_SIZE_BYTES } from "./storage/kv.js";
+  WalletColdStartSnapshot,
+  WalletInitializePhase,
+  WalletInitializePlan,
+  WalletInitializeResult,
+  WalletUnlockResult,
+  WalletUserFacingError,
+} from "./storage/wallet.js";
+import { validateWalletMeta } from "./storage/wallet.js";
 import type { KeyValueCommitResult, KeyValueEntry, KeyValueEntryMeta, KeyValueListResult, KeyValueValue } from "./storage/kv.js";
+import { STORAGE_MAX_PAYLOAD_BYTES } from "./storage/kv.js";
 import type { PluginIntentCommand, PluginIntentSnapshot, PluginIntentSubmissionResult } from "webloom-framework";
-import type { BucketConditionalCapabilityProbeResult, BucketConditionalCapabilitiesView, StorageActivationResult, StorageProviderConnectionView, StorageProbeResult, StorageProviderSummary, StorageRuntimeControllerStatus, StorageRuntimeStatus, StorageSelectedResult } from "./storage/runtime.js";
+import type { StorageRuntimeControllerStatus, StorageRuntimeSummary } from "./storage/runtime.js";
 import type {
   KeyRef,
   VaultSealedSecret,
@@ -180,11 +170,11 @@ function integer(value: unknown, field: string, maximum = Number.MAX_SAFE_INTEGE
 
 const COORDINATOR_REQUEST_KINDS = new Set<string>([
   "session.open", "session.close", "session.activity",
-  "unlock", "lock", "activate-key", "vault.operation", "crypto",
+  "unlock", "lock", "vault.operation", "crypto",
   "background.run-now", "background.trigger", "background.cancel", "background.cancel-by-key",
   "background.settings.update", "autolock.settings.update", "storage.grant", "storage.control", "storage.data",
   "storage.cancel", "storage.session.abort", "storage.owner.bind", "storage.platform.bind",
-  "storage.owner.data", "storage.platform.data", "storage.owner.delete", "msfile.control",
+  "storage.owner.data", "storage.platform.data", "storage.clear.root", "msfile.control",
   "msfile.grant", "msfile.data", "msfile.cancel", "msfile.session.abort",
   "window-p2p.executor.acquire", "window-p2p.executor.release", "window-p2p.executor.spike.transfer",
   "window-p2p.executor.identity.sign-noise", "window-p2p.executor.identity.sign-peer-record",
@@ -195,25 +185,17 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
 ]);
 
 const STORAGE_CONTROL_TYPES = [
-  "probe-bucket",
-  "status", "summary", "connection", "unlock-bucket", "initial-setup", "connect-existing-remote",
-  "initial-setup-result", "initial-setup-recovery-list", "initial-setup-cleanup",
-  "switch-bucket",
-  "change-bucket-config", "rename-bucket", "delete-local-bucket-key", "retry",
-  "cancel-probe",
-  "capabilities", "probe-capabilities", "cold-export",
+  "status", "summary", "cold-start", "initialize", "unlock", "lock",
+  "change-key-password", "rename-key", "export-key-hold", "reset-wallet",
 ] as const satisfies readonly CoordinatorStorageControl["type"][];
 
 const STORAGE_DATA_TYPES = [
-  "list", "create-directory", "delete-directory", "put", "get-range", "delete",
-  "begin-upload", "upload-part", "complete-upload", "abort-upload",
+  "list", "create-directory", "delete-directory", "put", "get-range", "delete", "batch",
 ] as const satisfies readonly CoordinatorStorageData["type"][];
 
 const VAULT_OPERATION_TYPES = [
-  "createVault", "createVaultWithInitialKey", "createVaultWithImportedKey", "listKeys", "getKey",
-  "setActive", "deleteKey", "verifyPassword", "changePassword", "generateKey", "importPrivateKey",
-  "exportKeyBackup", "exportCurrentKeyBackup", "importKeyBackup", "sealLocalSecret",
-  "openLocalSecret", "finalizeEmptyVaultAfterLastKeyDeletion", "recoverEmptyVaultToUninitialized",
+  "getCurrentKey", "verifyPassword", "changePassword", "renameKey", "exportKeyHold",
+  "sealLocalSecret", "openLocalSecret",
 ] as const satisfies readonly CoordinatorVaultOperation["type"][];
 
 const CHANNEL_OPERATION_TYPES = [
@@ -228,10 +210,8 @@ type CoordinatorCommandRequest = Exclude<
 /** 绑定一个 WebLoom peer 的显式会话打开请求；不携带 peer/client 身份。 */
 export interface CoordinatorSessionOpenRequest {
   kind: "session.open";
-  /** 页面为本次 physical peer 分配的 LocalStorage bridge lease。 */
+  /** 页面为本次 physical peer 分配的运行互斥租约。 */
   leaseId: string;
-  /** 当前 Storage 绑定（由页面从 session + 设备记录组装）。 */
-  storageBootstrapState?: StorageBootstrapState;
 }
 
 /** 关闭由 Runtime peer 生命周期承载的 Coordinator 会话。 */
@@ -264,34 +244,22 @@ export type CoordinatorClientCommandRequest = Exclude<CoordinatorClientRequest, 
 
 /** 依据 Vault 内层操作 discriminant 收窄 operationResult。 */
 export type CoordinatorVaultOperationResultFor<O extends CoordinatorVaultOperation> =
-  O extends { type: "createVault" } ? true :
-  O extends { type: "createVaultWithInitialKey" | "createVaultWithImportedKey" | "generateKey" | "importPrivateKey" | "importKeyBackup" } ? CoordinatorVaultKeyView :
-  O extends { type: "listKeys" } ? CoordinatorVaultKeyView[] :
-  O extends { type: "getKey" } ? CoordinatorVaultKeyView | undefined :
-  O extends { type: "setActive" | "deleteKey" | "verifyPassword" | "changePassword" | "finalizeEmptyVaultAfterLastKeyDeletion" | "recoverEmptyVaultToUninitialized" } ? true :
-  O extends { type: "exportKeyBackup" | "exportCurrentKeyBackup" } ? string :
+  O extends { type: "getCurrentKey" } ? CoordinatorVaultKeyView | undefined :
+  O extends { type: "verifyPassword" | "changePassword" | "renameKey" } ? true :
+  O extends { type: "exportKeyHold" } ? Uint8Array :
   O extends { type: "sealLocalSecret" } ? VaultSealedSecret :
   O extends { type: "openLocalSecret" } ? Uint8Array :
   never;
 
 /** 依据 storage.control 内层 control discriminant 收窄 operationResult。 */
 export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageControl> =
-  C extends { type: "status" | "retry" } ? StorageRuntimeControllerStatus | StorageRuntimeStatus :
-  C extends { type: "summary" } ? StorageProviderSummary | null :
-  C extends { type: "connection" } ? StorageProviderConnectionView | null :
-  C extends { type: "initial-setup" } ? InitialSetupResult :
-  C extends { type: "connect-existing-remote" } ? ExistingRemoteStorageConnectResult :
-  C extends { type: "initial-setup-result" } ? InitialSetupResult | undefined :
-  C extends { type: "initial-setup-recovery-list" } ? InitialSetupRecoveryRecordV1[] :
-  C extends { type: "initial-setup-cleanup" } ? InitialSetupRecoveryResult :
-  C extends { type: "switch-bucket" } ? StorageBucketSwitchResultV1 :
-  C extends { type: "change-bucket-config" | "rename-bucket" } ? import("./storage/profile.js").StorageRuntimeBucketV1 :
-  C extends { type: "unlock-bucket" } ? CoordinatorStorageUnlockBucketResult :
-  C extends { type: "delete-local-bucket-key" } ? undefined :
-  C extends { type: "cold-export" } ? Uint8Array :
-  C extends { type: "capabilities" } ? BucketConditionalCapabilitiesView | null :
-  C extends { type: "probe-capabilities" } ? BucketConditionalCapabilityProbeResult :
-  C extends { type: "cancel-probe" } ? undefined :
+  C extends { type: "status" } ? StorageRuntimeControllerStatus :
+  C extends { type: "summary" } ? StorageRuntimeSummary | null :
+  C extends { type: "cold-start" } ? WalletColdStartSnapshot :
+  C extends { type: "initialize" } ? WalletInitializeResult :
+  C extends { type: "unlock" } ? WalletUnlockResult :
+  C extends { type: "lock" | "change-key-password" | "rename-key" | "export-key-hold" } ? true :
+  C extends { type: "reset-wallet" } ? { walletGeneration: string; clearedAt: string } :
   never;
 
 /** 依据 storage.data 内层 data discriminant 收窄 operationResult。 */
@@ -301,10 +269,7 @@ export type CoordinatorStorageDataResultFor<D extends CoordinatorStorageData> =
   D extends { type: "put" } ? StoragePutResult :
   D extends { type: "get-range" } ? StorageGetResult :
   D extends { type: "delete" } ? StorageDeleteResult :
-  D extends { type: "begin-upload" } ? StorageUploadBeginResult :
-  D extends { type: "upload-part" } ? StorageUploadPartResult :
-  D extends { type: "complete-upload" } ? StoragePutResult :
-  D extends { type: "abort-upload" } ? StorageUploadAbortResult :
+  D extends { type: "batch" } ? { paths: string[]; committedAt: string } :
   never;
 
 /** 依据 msfile.control 内层 control discriminant 收窄 operationResult。 */
@@ -360,8 +325,10 @@ export type CoordinatorOwnerStorageResultFor<D extends CoordinatorOwnerStorageDa
   D extends { type: "owner.commit" | "platform.commit" } ? KeyValueCommitResult :
   D extends { type: "owner.file-list" } ? import("./storage/files.js").OwnerFileListPage :
   D extends { type: "owner.file-get" } ? import("./storage/files.js").OwnerFileObject | undefined :
-  D extends { type: "owner.file-put" } ? { etag?: string; lastModified?: string } :
+  D extends { type: "owner.file-range" } ? import("./storage/files.js").OwnerFileObject | undefined :
+  D extends { type: "owner.file-put" } ? { revision: string; lastModified: string } :
   D extends { type: "owner.file-delete" } ? undefined :
+  D extends { type: "owner.file-batch" } ? { paths: string[]; committedAt: string } :
   never;
 
 /** 依据 Coordinator crypto operation discriminant 收窄 cryptoResult。 */
@@ -393,12 +360,8 @@ export type CoordinatorVaultOperationResult =
   | CoordinatorVaultKeyView[]
   | { intentId: string; publicKeyHex: string };
 
-export type CoordinatorStorageUnlockBucketResult =
-  | { ok: true; vaultUnlocked: boolean }
-  | { ok: false; diagnostic: string };
-
 /** storage.control 各 control type 的 operationResult 总联合。 */
-export type CoordinatorStorageControlResult = CoordinatorStorageControlResultFor<CoordinatorStorageControl>;
+export type CoordinatorStorageControlResult = CoordinatorStorageControlResultFor<CoordinatorStorageControl> | null | undefined;
 
 export type CoordinatorStorageDataResult = CoordinatorStorageDataResultFor<CoordinatorStorageData> | undefined;
 
@@ -468,9 +431,9 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "storage.owner.data"; data: infer D } ? D extends CoordinatorOwnerStorageData ? CoordinatorOwnerStorageResultFor<D> : never :
   R extends { kind: "storage.platform.data"; data: infer D } ? D extends CoordinatorPlatformStorageData ? CoordinatorOwnerStorageResultFor<D> : never :
   R extends { kind: "storage.grant" } ? string :
-  R extends { kind: "storage.owner.bind" } ? StorageOwnerGrant :
+  R extends { kind: "storage.owner.bind" } ? StorageBindingGrant :
   R extends { kind: "storage.platform.bind" } ? StoragePlatformGrant :
-  R extends { kind: "storage.owner.delete" } ? true :
+  R extends { kind: "storage.clear.root" } ? true :
   R extends { kind: "msfile.control"; control: infer C } ? C extends CoordinatorMsFileControl ? CoordinatorMsFileControlResultFor<C> : never :
   R extends { kind: "msfile.data"; data: infer D } ? D extends CoordinatorMsFileData ? CoordinatorMsFileDataResultFor<D> : never :
   R extends { kind: "msfile.grant" } ? string :
@@ -522,7 +485,6 @@ type CoordinatorRpcVoidRequest =
       | "session.activity"
       | "unlock"
       | "lock"
-      | "activate-key"
       | "background.run-now"
       | "background.trigger"
       | "background.cancel"
@@ -719,201 +681,37 @@ function parseJsonRecord(value: unknown, field: string): P2pkhProviderConfig {
   return parsed;
 }
 
-function parseBucketConnection(value: unknown): StorageBucketConnectionConfigV1 {
-  const connection = expectRecord(value, "storage connection");
-  if (connection.kind === "local") return { kind: "local" };
-  if (connection.kind !== "s3") throw new TypeError("Coordinator storage connection kind is invalid");
-  const forcePathStyle = optionalBoolean(connection.forcePathStyle, "storage connection.forcePathStyle");
-  return {
-    kind: "s3",
-    endpoint: text(connection.endpoint, "storage connection.endpoint", 2_048),
-    region: text(connection.region, "storage connection.region", 256),
-    bucket: text(connection.bucket, "storage connection.bucket", 512),
-    accessKeyId: text(connection.accessKeyId, "storage connection.accessKeyId", 512),
-    secretAccessKey: text(connection.secretAccessKey, "storage connection.secretAccessKey", 2_048),
-    ...(optionalText(connection.sessionToken, "storage connection.sessionToken", 8_192) === undefined ? {} : { sessionToken: connection.sessionToken as string }),
-    ...(optionalText(connection.prefix, "storage connection.prefix", 2_048) === undefined ? {} : { prefix: connection.prefix as string }),
-    ...(forcePathStyle === undefined ? {} : { forcePathStyle }),
-  };
-}
-
-function parseRuntimeBucket(value: unknown, field: string): StorageRuntimeBucketV1 {
-  const record = expectRecord(value, field);
-  const bucketId = text(record.bucketId, field + ".bucketId", 128);
-  const backend = enumValue(record.backend, ["local", "s3"] as const, field + ".backend");
-  const label = optionalText(record.label, field + ".label", 128);
-  let deviceRecord: DeviceRecordV1;
-  try { deviceRecord = validateDeviceRecord(record.deviceRecord); } catch { throw new TypeError(`Coordinator ${field}.deviceRecord is invalid`); }
-  if (deviceRecord.location.providerId !== backend) throw new TypeError(`Coordinator ${field}.backend does not match its device record`);
-  let keyDerivation: KeymasterSessionKeyDerivationV1 | undefined;
-  if (record.keyDerivation !== undefined) {
-    try { keyDerivation = validateKeymasterSessionKeyDerivation(record.keyDerivation); } catch { throw new TypeError(`Coordinator ${field}.keyDerivation is invalid`); }
+/**
+ * 解析创建/导入计划。
+ *
+ * 这是唯一的初始化入口：没有存储类型选择、没有桶标签、没有远程连接，
+ * 只有一把 Key 与它自己的密码。Coordinator 在一个 IndexedDB 事务里同时
+ * 提交 `key.json`、`.keymaster/meta` 和必要初始系统数据。
+ */
+function parseWalletInitializePlan(value: unknown): WalletInitializePlan {
+  const plan = expectRecord(value, "wallet initialize plan");
+  const firstKey = expectRecord(plan.firstKey, "wallet initialize plan.firstKey");
+  const kind = enumValue(firstKey.kind, ["generate", "import"] as const, "wallet initialize plan.firstKey.kind");
+  const label = text(firstKey.label, "wallet initialize plan.firstKey.label", 256);
+  const capabilities = stringList(firstKey.capabilities, "wallet initialize plan.firstKey.capabilities", 64, 128);
+  const password = text(firstKey.password, "wallet initialize plan.firstKey.password", 4_096);
+  if (kind === "generate") {
+    return { transactionId: text(plan.transactionId, "wallet initialize plan.transactionId", 128), firstKey: { kind, label, capabilities, password } };
   }
-  return { bucketId, backend, ...(label === undefined ? {} : { label }), deviceRecord, ...(keyDerivation === undefined ? {} : { keyDerivation }) };
-}
-
-function parseStorageBootstrapState(value: unknown): StorageBootstrapState {
-  const state = expectRecord(value, "storageBootstrapState");
-  if (state.selectedBackend !== "local" && state.selectedBackend !== "s3") {
-    throw new TypeError("Coordinator storageBootstrapState.selectedBackend is invalid");
-  }
-  const selectedProfileId = text(state.selectedProfileId, "storageBootstrapState.selectedProfileId", 256);
-  const language = optionalText(state.language, "storageBootstrapState.language", 64);
-  const theme = optionalText(state.theme, "storageBootstrapState.theme", 64);
-  const selectedBucket = parseRuntimeBucket(state.selectedBucket, "storageBootstrapState.selectedBucket");
-  if (selectedBucket.bucketId !== selectedProfileId || selectedBucket.backend !== state.selectedBackend) {
-    throw new TypeError("Coordinator storageBootstrapState selection is inconsistent");
-  }
+  const material = expectRecord(firstKey.material, "wallet initialize plan.firstKey.material");
+  const wif = optionalText(material.wif, "wallet initialize plan.firstKey.material.wif", 256);
+  const source = optionalText(firstKey.source, "wallet initialize plan.firstKey.source", 512);
   return {
-    selectedBackend: state.selectedBackend,
-    selectedProfileId,
-    selectedBucket,
-    ...(language === undefined ? {} : { language }),
-    ...(theme === undefined ? {} : { theme }),
-  };
-}
-
-function parseStorageConnection(value: unknown, providerId: StorageProviderConfigDraft["providerId"]): StorageConnection {
-  const connection = expectRecord(value, "storage provider connection");
-  if (providerId === "cloudflare-r2") {
-    const endpointVariant = connection.endpointVariant;
-    if (endpointVariant !== "default" && endpointVariant !== "eu" && endpointVariant !== "fedramp") {
-      throw new TypeError("Coordinator storage R2 endpointVariant is invalid");
-    }
-    return {
-      accountId: text(connection.accountId, "storage R2 accountId", 128),
-      endpointVariant,
-      bucket: text(connection.bucket, "storage R2 bucket", 512),
-    };
-  }
-  if (providerId === "aws-s3") {
-    return {
-      region: text(connection.region, "storage AWS region", 256),
-      bucket: text(connection.bucket, "storage AWS bucket", 512),
-    };
-  }
-  const forcePathStyle = booleanValue(connection.forcePathStyle, "storage compatible forcePathStyle");
-  const sessionToken = optionalText(connection.sessionToken, "storage compatible sessionToken", 8_192);
-  const prefix = optionalText(connection.prefix, "storage compatible prefix", 2_048);
-  return {
-    endpoint: text(connection.endpoint, "storage compatible endpoint", 2_048),
-    region: text(connection.region, "storage compatible region", 256),
-    bucket: text(connection.bucket, "storage compatible bucket", 512),
-    forcePathStyle,
-    ...(sessionToken === undefined ? {} : { sessionToken }),
-    ...(prefix === undefined ? {} : { prefix }),
-  };
-}
-
-function parseStorageSecretUpdate(value: unknown): StorageSecretUpdate {
-  const credentials = expectRecord(value, "storage credentials");
-  if (credentials.mode === "retain") return { mode: "retain" };
-  if (credentials.mode !== "replace") throw new TypeError("Coordinator storage credentials mode is invalid");
-  return {
-    mode: "replace",
-    accessKeyId: text(credentials.accessKeyId, "storage credentials.accessKeyId", 512),
-    secretAccessKey: text(credentials.secretAccessKey, "storage credentials.secretAccessKey", 2_048),
-  };
-}
-
-function parseProviderConfigDraft(value: unknown): StorageProviderConfigDraft {
-  const draft = expectRecord(value, "storage provider config");
-  const providerId = text(draft.providerId, "storage providerId", 64);
-  if (providerId !== "cloudflare-r2" && providerId !== "aws-s3" && providerId !== "s3-compatible") {
-    throw new TypeError("Coordinator storage providerId is invalid");
-  }
-  const connection = parseStorageConnection(draft.connection, providerId);
-  const credentials = parseStorageSecretUpdate(draft.credentials);
-  const profilePassword = optionalText(draft.profilePassword, "storage profilePassword", 4_096);
-  return {
-    providerId,
-    connection,
-    credentials,
-    ...(profilePassword === undefined ? {} : { profilePassword }),
-  };
-}
-
-function parseInitialSetupPlan(value: unknown): InitialSetupPlan {
-  const plan = expectRecord(value, "storage initial-setup plan");
-  const backend = plan.backend;
-  if (backend !== "local" && backend !== "s3") throw new TypeError("Coordinator initial-setup backend is invalid");
-  const connection = parseBucketConnection(plan.connection);
-  if (connection.kind !== backend) throw new TypeError("Coordinator initial-setup backend and connection disagree");
-  const firstKey = expectRecord(plan.firstKey, "storage initial-setup firstKey");
-  const keyKind = text(firstKey.kind, "storage initial-setup firstKey.kind", 32);
-  const label = text(firstKey.label, "storage initial-setup firstKey.label", 256);
-  const capabilities = stringList(firstKey.capabilities, "storage initial-setup firstKey.capabilities", 64, 128);
-  const keyPassword = text(firstKey.password, "storage initial-setup firstKey.password", 4_096);
-  const parsedFirstKey = keyKind === "generate"
-    ? { kind: "generate" as const, label, capabilities, password: keyPassword }
-    : keyKind === "import"
-      ? {
-        kind: "import" as const,
-        label,
-        material: (() => {
-          const material = expectRecord(firstKey.material, "storage initial-setup firstKey.material");
-          return {
-            hex: text(material.hex, "storage initial-setup material.hex", 256),
-            ...(optionalText(material.wif, "storage initial-setup material.wif", 256) === undefined ? {} : { wif: material.wif as string }),
-          };
-        })(),
-        format: text(firstKey.format, "storage initial-setup firstKey.format", 128),
-        ...(optionalText(firstKey.source, "storage initial-setup firstKey.source", 512) === undefined ? {} : { source: firstKey.source as string }),
-        capabilities,
-        password: keyPassword,
-      }
-      : (() => { throw new TypeError("Coordinator initial-setup firstKey.kind is invalid"); })();
-  return {
-    transactionId: text(plan.transactionId, "storage initial-setup transactionId", 128),
-    bucketLabel: text(plan.bucketLabel, "storage initial-setup bucketLabel", 256),
-    ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: text(plan.remoteStorageId, "storage initial-setup remoteStorageId", 128) }),
-    backend,
-    connection,
-    ...(plan.startupPassword === undefined ? {} : { startupPassword: text(plan.startupPassword, "storage initial-setup startupPassword", 4_096) }),
-    ...(plan.capabilities === undefined ? {} : { capabilities: parseDeviceCapabilities(plan.capabilities, "storage initial-setup capabilities") }),
-    firstKey: parsedFirstKey,
-  };
-}
-
-function parseExistingRemoteStorageConnectPlan(value: unknown): ExistingRemoteStorageConnectPlan {
-  const plan = expectRecord(value, "storage connect-existing-remote plan");
-  const backend = plan.backend;
-  if (backend !== "local" && backend !== "s3") throw new TypeError("Coordinator connect-existing-remote backend is invalid");
-  const connection = parseBucketConnection(plan.connection);
-  if (connection.kind !== backend) throw new TypeError("Coordinator connect-existing-remote backend and connection disagree");
-  return {
-    operationId: text(plan.operationId, "storage connect-existing-remote operationId", 128),
-    ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: text(plan.remoteStorageId, "storage connect-existing-remote remoteStorageId", 128) }),
-    displayName: text(plan.displayName, "storage connect-existing-remote displayName", 256),
-    backend,
-    connection,
-    ...(plan.publicKeyHex === undefined ? {} : { publicKeyHex: text(plan.publicKeyHex, "storage connect-existing-remote publicKeyHex", 128) }),
-    keyPassword: text(plan.keyPassword, "storage connect-existing-remote keyPassword", 4_096),
-    ...(plan.startupPassword === undefined ? {} : { startupPassword: text(plan.startupPassword, "storage connect-existing-remote startupPassword", 4_096) }),
-    ...(plan.capabilities === undefined ? {} : { capabilities: parseDeviceCapabilities(plan.capabilities, "storage connect-existing-remote capabilities") }),
-  };
-}
-
-function parseBucketProbePlan(value: unknown): import("./storage/catalog.js").BucketProbePlan {
-  const plan = expectRecord(value, "storage probe-bucket plan");
-  const backend = plan.backend;
-  if (backend !== "local" && backend !== "s3") throw new TypeError("Coordinator probe-bucket backend is invalid");
-  const operationId = text(plan.operationId, "storage probe-bucket operationId", 128);
-  // 已登记桶：用设备记录绑定 + 启动密码探测；页面不再传明文连接。
-  if (plan.binding !== undefined) {
-    const binding = parseRuntimeBucket(plan.binding, "storage probe-bucket binding");
-    if (binding.backend !== backend) throw new TypeError("Coordinator probe-bucket backend and binding disagree");
-    const password = optionalText(plan.password, "storage probe-bucket password", 4_096);
-    const forceReprobe = optionalBoolean(plan.forceReprobe, "storage probe-bucket forceReprobe");
-    return { operationId, backend, binding, ...(password === undefined ? {} : { password }), ...(forceReprobe === undefined ? {} : { forceReprobe }) };
-  }
-  const connection = parseBucketConnection(plan.connection);
-  if (connection.kind !== backend) throw new TypeError("Coordinator probe-bucket backend and connection disagree");
-  return {
-    operationId,
-    backend,
-    connection,
-    ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: text(plan.remoteStorageId, "storage probe-bucket remoteStorageId", 128) }),
+    transactionId: text(plan.transactionId, "wallet initialize plan.transactionId", 128),
+    firstKey: {
+      kind,
+      label,
+      material: { hex: text(material.hex, "wallet initialize plan.firstKey.material.hex", 256), ...(wif === undefined ? {} : { wif }) },
+      format: text(firstKey.format, "wallet initialize plan.firstKey.format", 128),
+      ...(source === undefined ? {} : { source }),
+      capabilities,
+      password,
+    },
   };
 }
 
@@ -921,54 +719,22 @@ function parseStorageControl(value: unknown): CoordinatorStorageControl {
   const control = expectRecord(value, "storage control");
   const type = enumValue(control.type, STORAGE_CONTROL_TYPES, "storage control.type");
   switch (type) {
-    case "status": case "summary": case "connection": case "retry":
-    case "initial-setup-recovery-list": case "cancel-probe": case "capabilities": case "probe-capabilities": case "cold-export":
+    case "status": case "summary": case "cold-start": case "lock": case "export-key-hold":
       return { type };
-    case "unlock-bucket":
+    case "unlock":
       return { type, password: text(control.password, "storage control." + type + ".password", 4_096) };
-    case "initial-setup":
-      return { type, plan: parseInitialSetupPlan(control.plan) };
-    case "connect-existing-remote":
-      return { type, plan: parseExistingRemoteStorageConnectPlan(control.plan) };
-    case "probe-bucket":
-      return { type, plan: parseBucketProbePlan(control.plan) };
-    case "initial-setup-result":
-      return { type, transactionId: text(control.transactionId, "storage control." + type + ".transactionId", 128) };
-    case "initial-setup-cleanup": {
-      const password = optionalText(control.password, "storage control.initial-setup-cleanup.password", 4_096);
+    case "initialize":
+      return { type, plan: parseWalletInitializePlan(control.plan) };
+    case "change-key-password":
       return {
         type,
-        transactionId: text(control.transactionId, "storage control.initial-setup-cleanup.transactionId", 128),
-        ...(password === undefined ? {} : { password }),
-        ...(control.connection === undefined ? {} : { connection: parseBucketConnection(control.connection) }),
+        oldPassword: text(control.oldPassword, "storage control.change-key-password.oldPassword", 4_096),
+        newPassword: text(control.newPassword, "storage control.change-key-password.newPassword", 4_096),
       };
-    }
-    case "switch-bucket": {
-      const keyPassword = optionalText(control.keyPassword, "storage control.switch-bucket.keyPassword", 4_096);
-      const publicKeyHex = optionalText(control.publicKeyHex, "storage control.switch-bucket.publicKeyHex", 130);
-      // Local 桶没有启动密码：password 允许空字符串；S3 桶的密码正确性由
-      // Worker 在解密设备记录时验证，RPC 层只做类型/长度边界。
-      const password = control.password === "" ? "" : text(control.password, "storage control.switch-bucket.password", 4_096);
-      return {
-        type,
-        bucket: parseRuntimeBucket(control.bucket, "storage control.switch-bucket.bucket"),
-        password,
-        ...(keyPassword === undefined ? {} : { keyPassword }),
-        ...(publicKeyHex === undefined ? {} : { publicKeyHex }),
-      };
-    }
-    case "change-bucket-config": {
-      const label = optionalText(control.label, "storage control.change-bucket-config.label", 256);
-      return { type, config: parseBucketConnection(control.config), ...(label === undefined ? {} : { label }), password: text(control.password, "storage control.change-bucket-config.password", 4_096) };
-    }
-    case "rename-bucket":
-      return { type, label: text(control.label, "storage control.rename-bucket.label", 256) };
-    case "delete-local-bucket-key":
-      return {
-        type,
-        bucket: parseRuntimeBucket(control.bucket, "storage control.delete-local-bucket-key.bucket"),
-        publicKeyHex: text(control.publicKeyHex, "storage control.delete-local-bucket-key.publicKeyHex", 130),
-      };
+    case "rename-key":
+      return { type, label: text(control.label, "storage control.rename-key.label", 256) };
+    case "reset-wallet":
+      return { type, confirmationLabel: text(control.confirmationLabel, "storage control.reset-wallet.confirmationLabel", 256) };
     default:
       throw new TypeError("Coordinator storage control type " + type + " is unsupported");
   }
@@ -1011,15 +777,44 @@ function parseStorageData(value: unknown): CoordinatorStorageData {
     }
     case "delete":
       return { type, grantId, input: { path: text(input.path, "storage data.delete.path", 4_096) } };
-    case "begin-upload": {
-      const contentType = optionalText(input.contentType, "storage data.begin-upload.contentType", 256);
-      const overwrite = optionalBoolean(input.overwrite, "storage data.begin-upload.overwrite");
-      return { type, grantId, input: { path: text(input.path, "storage data.begin-upload.path", 4_096), ...(contentType === undefined ? {} : { contentType }), size: boundedNumber(input.size, "storage data.begin-upload.size"), ...(overwrite === undefined ? {} : { overwrite }) } };
+    case "batch": {
+      const operations = input.operations;
+      if (!Array.isArray(operations) || operations.length === 0 || operations.length > 1_000) {
+        throw new TypeError("Coordinator storage data.batch.operations is invalid");
+      }
+      const parsedOperations = operations.map((entry, index) => {
+        const field = "storage data.batch.operations[" + index + "]";
+        const operation = expectRecord(entry, field);
+        const operationType = enumValue(operation.type, ["put", "delete"] as const, field + ".type");
+        const path = text(operation.path, field + ".path", 4_096);
+        if (operationType === "delete") return { type: "delete" as const, path };
+        const contentType = optionalText(operation.contentType, field + ".contentType", 256);
+        return {
+          type: "put" as const,
+          path,
+          content: parseBinaryField(operation.content, field + ".content"),
+          ...(contentType === undefined ? {} : { contentType }),
+        };
+      });
+      const rawConditions = input.conditions;
+      let parsedConditions: Array<{ path: string; ifMatch?: string }> | undefined;
+      if (rawConditions !== undefined) {
+        if (!Array.isArray(rawConditions) || rawConditions.length > 1_000) {
+          throw new TypeError("Coordinator storage data.batch.conditions is invalid");
+        }
+        parsedConditions = rawConditions.map((entry, index) => {
+          const field = "storage data.batch.conditions[" + index + "]";
+          const condition = expectRecord(entry, field);
+          const ifMatch = optionalText(condition.ifMatch, field + ".ifMatch", 512);
+          return { path: text(condition.path, field + ".path", 4_096), ...(ifMatch === undefined ? {} : { ifMatch }) };
+        });
+      }
+      return {
+        type,
+        grantId,
+        input: { operations: parsedOperations, ...(parsedConditions === undefined ? {} : { conditions: parsedConditions }) },
+      };
     }
-    case "upload-part":
-      return { type, grantId, input: { uploadId: text(input.uploadId, "storage data.upload-part.uploadId", 256), partNumber: boundedNumber(input.partNumber, "storage data.upload-part.partNumber", 1, 10_000), content: parseBinaryField(input.content, "storage data.upload-part.content") } };
-    case "complete-upload": case "abort-upload":
-      return { type, grantId, input: { uploadId: text(input.uploadId, "storage data." + type + ".uploadId", 256) } };
     default:
       throw new TypeError("Coordinator storage data type " + type + " is unsupported");
   }
@@ -1033,8 +828,15 @@ type ParsedInternalStorageData =
   | { operation: "commit"; grantId: string; partition: string; ifRevision?: number; operations: Array<{ type: "put"; key: string; value: JSONValue } | { type: "delete"; key: string }> }
   | { operation: "file-list"; grantId: string; input?: { prefix?: string; cursor?: string; limit?: number } }
   | { operation: "file-get"; grantId: string; path: string }
+  | { operation: "file-range"; grantId: string; path: string; range: { offset: number; length: number }; ifRevision?: string }
   | { operation: "file-put"; grantId: string; path: string; bytes: Uint8Array; ifNoneMatch?: boolean; ifMatch?: string }
-  | { operation: "file-delete"; grantId: string; path: string; ifMatch?: string };
+  | { operation: "file-delete"; grantId: string; path: string; ifMatch?: string }
+  | {
+    operation: "file-batch";
+    grantId: string;
+    operations: Array<{ type: "put"; path: string; bytes: Uint8Array; contentType?: string } | { type: "delete"; path: string }>;
+    conditions?: Array<{ path: string; ifRevision?: string; ifNoneMatch?: boolean }>;
+  };
 
 function parseInternalStorageData(value: unknown, prefix: "owner" | "platform"): ParsedInternalStorageData {
   const data = expectRecord(value, prefix + " storage data");
@@ -1115,10 +917,25 @@ function parseInternalStorageData(value: unknown, prefix: "owner" | "platform"):
       },
     };
   }
-  if (type === prefix + ".file-get" || type === prefix + ".file-put" || type === prefix + ".file-delete") {
+  if (type === prefix + ".file-get" || type === prefix + ".file-range" || type === prefix + ".file-put" || type === prefix + ".file-delete") {
     if (prefix !== "owner") throw new TypeError("Coordinator platform storage operation is unsupported");
     const path = text(data.path, prefix + " storage." + type.slice(prefix.length + 1) + ".path", 4_096);
     if (type === prefix + ".file-get") return { operation: "file-get", grantId, path };
+    if (type === prefix + ".file-range") {
+      const range = expectRecord(data.range, prefix + " storage.file-range.range");
+      return {
+        operation: "file-range",
+        grantId,
+        path,
+        range: {
+          offset: boundedNumber(range.offset, prefix + " storage.file-range.range.offset", 0),
+          length: boundedNumber(range.length, prefix + " storage.file-range.range.length", 1, STORAGE_MAX_PAYLOAD_BYTES),
+        },
+        ...(data.ifRevision === undefined
+          ? {}
+          : { ifRevision: text(data.ifRevision, prefix + " storage.file-range.ifRevision", 1_024) }),
+      };
+    }
     const ifMatch = optionalText(data.ifMatch, prefix + " storage.file.ifMatch", 1_024);
     if (type === prefix + ".file-delete") return { operation: "file-delete", grantId, path, ...(ifMatch === undefined ? {} : { ifMatch }) };
     const bytes = data.bytes;
@@ -1128,6 +945,47 @@ function parseInternalStorageData(value: unknown, prefix: "owner" | "platform"):
     const ifNoneMatch = data.ifNoneMatch;
     if (ifNoneMatch !== undefined && ifNoneMatch !== true) throw new TypeError("Coordinator " + prefix + " storage.file-put.ifNoneMatch is invalid");
     return { operation: "file-put", grantId, path, bytes, ...(ifNoneMatch === undefined ? {} : { ifNoneMatch }), ...(ifMatch === undefined ? {} : { ifMatch }) };
+  }
+  if (type === prefix + ".file-batch") {
+    if (prefix !== "owner") throw new TypeError("Coordinator platform storage operation is unsupported");
+    if (!Array.isArray(data.operations) || data.operations.length === 0 || data.operations.length > 1_000) {
+      throw new TypeError("Coordinator " + prefix + " storage.file-batch.operations is invalid");
+    }
+    const operations = data.operations.map((item: unknown, index: number) => {
+      const field = prefix + " storage.file-batch.operations[" + index + "]";
+      const operation = expectRecord(item, field);
+      const path = text(operation.path, field + ".path", 4_096);
+      if (operation.type === "delete") return { type: "delete" as const, path };
+      if (operation.type !== "put") throw new TypeError(`Coordinator ${field}.type is invalid`);
+      const bytes = operation.bytes;
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength > STORAGE_MAX_PAYLOAD_BYTES) {
+        throw new TypeError(`Coordinator ${field}.bytes is invalid`);
+      }
+      const contentType = optionalText(operation.contentType, field + ".contentType", 256);
+      return {
+        type: "put" as const,
+        path,
+        bytes,
+        ...(contentType === undefined ? {} : { contentType }),
+      };
+    });
+    if (data.conditions === undefined) return { operation: "file-batch", grantId, operations };
+    if (!Array.isArray(data.conditions) || data.conditions.length > 1_000) {
+      throw new TypeError("Coordinator " + prefix + " storage.file-batch.conditions is invalid");
+    }
+    const conditions = data.conditions.map((item: unknown, index: number) => {
+      const field = prefix + " storage.file-batch.conditions[" + index + "]";
+      const condition = expectRecord(item, field);
+      const ifRevision = optionalText(condition.ifRevision, field + ".ifRevision", 1_024);
+      const ifNoneMatch = condition.ifNoneMatch;
+      if (ifNoneMatch !== undefined && ifNoneMatch !== true) throw new TypeError(`Coordinator ${field}.ifNoneMatch is invalid`);
+      return {
+        path: text(condition.path, field + ".path", 4_096),
+        ...(ifRevision === undefined ? {} : { ifRevision }),
+        ...(ifNoneMatch === undefined ? {} : { ifNoneMatch: true as const }),
+      };
+    });
+    return { operation: "file-batch", grantId, operations, conditions };
   }
   throw new TypeError("Coordinator " + prefix + " storage operation is unsupported");
 }
@@ -1149,8 +1007,10 @@ function ownerStorageDataFromParsed(parsed: ParsedInternalStorageData): Coordina
     case "commit": return { type: "owner.commit", storageGrantId: parsed.grantId, partition: parsed.partition, ...(parsed.ifRevision === undefined ? {} : { ifRevision: parsed.ifRevision }), operations: parsed.operations };
     case "file-list": return { type: "owner.file-list", storageGrantId: parsed.grantId, ...(parsed.input === undefined ? {} : { input: parsed.input }) };
     case "file-get": return { type: "owner.file-get", storageGrantId: parsed.grantId, path: parsed.path };
+    case "file-range": return { type: "owner.file-range", storageGrantId: parsed.grantId, path: parsed.path, range: parsed.range, ...(parsed.ifRevision === undefined ? {} : { ifRevision: parsed.ifRevision }) };
     case "file-put": return { type: "owner.file-put", storageGrantId: parsed.grantId, path: parsed.path, bytes: parsed.bytes, ...(parsed.ifNoneMatch === undefined ? {} : { ifNoneMatch: parsed.ifNoneMatch }), ...(parsed.ifMatch === undefined ? {} : { ifMatch: parsed.ifMatch }) };
     case "file-delete": return { type: "owner.file-delete", storageGrantId: parsed.grantId, path: parsed.path, ...(parsed.ifMatch === undefined ? {} : { ifMatch: parsed.ifMatch }) };
+    case "file-batch": return { type: "owner.file-batch", storageGrantId: parsed.grantId, operations: parsed.operations, ...(parsed.conditions === undefined ? {} : { conditions: parsed.conditions }) };
   }
 }
 
@@ -1163,15 +1023,15 @@ function platformStorageDataFromParsed(parsed: ParsedInternalStorageData): Coord
     case "commit": return { type: "platform.commit", platformGrantId: parsed.grantId, partition: parsed.partition, ...(parsed.ifRevision === undefined ? {} : { ifRevision: parsed.ifRevision }), operations: parsed.operations };
     case "file-list":
     case "file-get":
+    case "file-range":
     case "file-put":
-    case "file-delete": throw new TypeError("Coordinator platform storage operation is unsupported");
+    case "file-delete":
+    case "file-batch": throw new TypeError("Coordinator platform storage operation is unsupported");
   }
 }
 
 function parseStorageDeclaration(value: unknown, field: string): PluginStorageDeclaration {
   const declaration = expectRecord(value, field);
-  const scope = declaration.scope;
-  if (scope !== "bucket" && scope !== "owner") throw new TypeError(`Coordinator ${field}.scope is invalid`);
   const authority = declaration.authority;
   if (authority !== "platform-only" && authority !== "built-in-module" && authority !== "third-party-app") {
     throw new TypeError(`Coordinator ${field}.authority is invalid`);
@@ -1185,7 +1045,7 @@ function parseStorageDeclaration(value: unknown, field: string): PluginStorageDe
     : text(declaration.purposeId, `${field}.purposeId`, 63);
   const schemaVersion = boundedNumber(declaration.schemaVersion, `${field}.schemaVersion`, 1);
   try {
-    return validatePluginStorageDeclaration({ moduleId, purposeId, scope, authority, model, schemaVersion });
+    return validatePluginStorageDeclaration({ moduleId, purposeId, authority, model, schemaVersion });
   } catch (error) {
     throw new TypeError(`Coordinator ${field} is invalid`, { cause: error });
   }
@@ -1428,54 +1288,13 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
   const operation = expectRecord(value, "Vault operation");
   const type = enumValue(operation.type, VAULT_OPERATION_TYPES, "Vault operation.type");
   const password = (field: string): string => text(operation[field], "Vault operation." + field, 4_096);
-  const publicKey = (field = "publicKeyHex"): string => text(operation[field], "Vault operation." + field, 256);
-  const label = (): string => text(operation.label, "Vault operation.label", 256);
-  const capabilities = (): string[] => stringList(operation.capabilities, "Vault operation.capabilities", 64, 128);
   switch (type) {
-    case "createVault": return { type, password: password("password") };
-    case "createVaultWithInitialKey": {
-      const valueLabel = optionalText(operation.label, "Vault operation.label", 256);
-      const valueCapabilities = optionalStringList(operation.capabilities, "Vault operation.capabilities", 64, 128);
-      return { type, password: password("password"), ...(valueLabel === undefined ? {} : { label: valueLabel }), ...(valueCapabilities === undefined ? {} : { capabilities: valueCapabilities }) };
-    }
-    case "createVaultWithImportedKey": {
-      const key = expectRecord(operation.key, "Vault operation.key");
-      const material = expectRecord(key.material, "Vault operation.key.material");
-      const keySource = optionalText(key.source, "Vault operation.key.source", 512);
-      const wif = optionalText(material.wif, "Vault operation.key.material.wif", 256);
-      return {
-        type,
-        vaultPassword: password("vaultPassword"),
-        key: {
-          label: text(key.label, "Vault operation.key.label", 256),
-          material: { hex: text(material.hex, "Vault operation.key.material.hex", 256), ...(wif === undefined ? {} : { wif }) },
-          format: text(key.format, "Vault operation.key.format", 128),
-          capabilities: stringList(key.capabilities, "Vault operation.key.capabilities", 64, 128),
-          ...(keySource === undefined ? {} : { source: keySource }),
-        },
-      };
-    }
-    case "listKeys": case "exportCurrentKeyBackup": case "finalizeEmptyVaultAfterLastKeyDeletion": case "recoverEmptyVaultToUninitialized":
+    // 唯一 Key：读取公开摘要，不存在列表、选择、切换或第二把 Key 的入口。
+    case "getCurrentKey": case "exportKeyHold":
       return { type };
-    case "getKey": case "setActive": case "exportKeyBackup":
-      return { type, publicKeyHex: publicKey() };
-    case "deleteKey": {
-      const bucketPassword = optionalText(operation.bucketPassword, "Vault operation.bucketPassword", 4_096);
-      return { type, publicKeyHex: publicKey(), confirmationLabel: text(operation.confirmationLabel, "Vault operation.confirmationLabel", 256), ...(bucketPassword === undefined ? {} : { bucketPassword }) };
-    }
     case "verifyPassword": return { type, password: password("password") };
     case "changePassword": return { type, oldPassword: password("oldPassword"), newPassword: password("newPassword") };
-    case "generateKey": {
-      const valueCapabilities = optionalStringList(operation.capabilities, "Vault operation.capabilities", 64, 128);
-      return { type, password: password("password"), label: label(), ...(valueCapabilities === undefined ? {} : { capabilities: valueCapabilities }) };
-    }
-    case "importPrivateKey": {
-      const material = expectRecord(operation.material, "Vault operation.material");
-      const wif = optionalText(material.wif, "Vault operation.material.wif", 256);
-      const source = optionalText(operation.source, "Vault operation.source", 512);
-      return { type, password: password("password"), label: label(), material: { hex: text(material.hex, "Vault operation.material.hex", 256), ...(wif === undefined ? {} : { wif }) }, format: text(operation.format, "Vault operation.format", 128), capabilities: capabilities(), ...(source === undefined ? {} : { source }) };
-    }
-    case "importKeyBackup": return { type, backup: text(operation.backup, "Vault operation.backup", 2_000_000), sourcePassword: password("sourcePassword"), targetPassword: password("targetPassword") };
+    case "renameKey": return { type, label: text(operation.label, "Vault operation.label", 256) };
     case "sealLocalSecret": return { type, scope: text(operation.scope, "Vault operation.scope", 256), plaintext: uint8ArrayValue(operation.plaintext, "Vault operation.plaintext") };
     case "openLocalSecret": {
       const sealed = expectRecord(operation.sealed, "Vault operation.sealed");
@@ -1651,8 +1470,7 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
   switch (kind) {
     case "session.open": {
       const leaseId = text(request.leaseId, "request.leaseId", 256);
-      const bootstrap = request.storageBootstrapState === undefined ? undefined : parseStorageBootstrapState(request.storageBootstrapState);
-      return { kind, leaseId, ...(bootstrap === undefined ? {} : { storageBootstrapState: bootstrap }) };
+      return { kind, leaseId };
     }
     case "session.close": {
       const peerGeneration = boundedNumber(request.peerGeneration, "request.peerGeneration", 1);
@@ -1673,7 +1491,18 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
       return { kind, pluginId: text(request.pluginId, kind + ".pluginId", 256), declaration: parseStorageDeclaration(request.declaration, kind + ".declaration"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.owner.data": return { kind, data: parseOwnerStorageData(request.data, "owner"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.platform.data": return { kind, data: parseOwnerStorageData(request.data, "platform"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "storage.owner.delete": return { kind, ownerPublicKeyHex: text(request.ownerPublicKeyHex, "storage.owner.delete.ownerPublicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "storage.clear.root": {
+      const input = expectRecord(request.input, "storage.clear.root.input");
+      const appStorageName = optionalText(input.appStorageName, "storage.clear.root.input.appStorageName", 128);
+      return {
+        kind,
+        input: {
+          declaration: parseStorageDeclaration(input.declaration, "storage.clear.root.input.declaration"),
+          ...(appStorageName === undefined ? {} : { appStorageName }),
+        },
+        expectedSessionEpoch: epoch("expectedSessionEpoch"),
+      };
+    }
     case "msfile.grant": return { kind, context: parseMsFileConnectContext(request.context), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "msfile.control": return { kind, control: parseMsFileControl(request.control), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "msfile.data": return { kind, data: parseMsFileData(request.data), expectedSessionEpoch: epoch("expectedSessionEpoch") };
@@ -1694,9 +1523,8 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "contacts.presence.snapshot": return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "plugin.intent.snapshot": return { kind };
     case "plugin.intent.submit": return { kind, command: parsePluginIntentCommand(request.command) };
-    case "unlock": return { kind, password: text(request.password, "unlock.password", 4_096), ...(optionalText(request.publicKeyHex, "unlock.publicKeyHex", 256) === undefined ? {} : { publicKeyHex: request.publicKeyHex as string }), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "unlock": return { kind, password: text(request.password, "unlock.password", 4_096), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "lock": return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "activate-key": return { kind, password: text(request.password, "activate-key.password", 4_096), publicKeyHex: text(request.publicKeyHex, "activate-key.publicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "vault.operation": return { kind, operation: parseVaultOperation(request.operation), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "crypto": return { kind, operation: parseCryptoOperation(request.operation), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.run-now": case "background.cancel":
@@ -1770,50 +1598,6 @@ export function coordinatorClientRequestFromRpc<K extends CoordinatorRpcCommandR
 ): Extract<CoordinatorClientCommandRequest, { kind: K }> {
   return { ...request, clientId, requestId } as Extract<CoordinatorClientCommandRequest, { kind: K }>;
 }
-
-/**
- * Window 反向 LocalStorage I/O 契约。
- *
- * 这是唯一允许 Coordinator 触碰页面 localStorage 的 capability。请求不
- * 携带 AbortSignal 或 authority；AbortSignal 由 WebLoom call context 绑定。
- * peerGeneration/sessionEpoch/leaseId 是 Worker 发放的 fencing metadata，
- * 由两端 parser 保留并在执行点校验。
- */
-export interface CoordinatorLocalStorageObject {
-  path: string;
-  /**
-   * 字节必须用 `ArrayBuffer`：RPC DTO 校验对 TypedArray 是 O(bytes)，
-   * 逐元素检查会让 256 KiB 块和普通文件 I/O 都付出数百毫秒级开销。
-   */
-  bytes: ArrayBuffer;
-  size?: number;
-  etag?: string;
-  lastModified?: string;
-}
-
-export type CoordinatorLocalStorageRequest =
-  // 对象 I/O：页面桥只按当前 lease 的桶与世代读写 Local 命名空间。
-  | (CoordinatorSessionBinding & { type: "get"; bucketId: string; bucketGeneration: number; path: string; ifMatch?: string; objectPrefix?: string })
-  | (CoordinatorSessionBinding & { type: "list"; bucketId: string; bucketGeneration: number; prefix?: string; cursor?: string; limit?: number; objectPrefix?: string })
-  | (CoordinatorSessionBinding & { type: "put"; bucketId: string; bucketGeneration: number; path: string; bytes: ArrayBuffer; condition?: StorageBucketWriteCondition; objectPrefix?: string })
-  | (CoordinatorSessionBinding & { type: "delete"; bucketId: string; bucketGeneration: number; path: string; ifMatch?: string; objectPrefix?: string })
-  /** 设备桶记录（keymaster.device.<ID>）的读/写/删/枚举。 */
-  | (CoordinatorSessionBinding & { type: "device-record-list" })
-  | (CoordinatorSessionBinding & { type: "device-record-get"; remoteStorageId: string })
-  | (CoordinatorSessionBinding & { type: "device-record-put"; remoteStorageId: string; record: DeviceRecordV1; replace?: boolean })
-  | (CoordinatorSessionBinding & { type: "device-record-delete"; remoteStorageId: string })
-  /** 浏览器 session（keymaster.session）的读/写。 */
-  | (CoordinatorSessionBinding & { type: "session-read" })
-  | (CoordinatorSessionBinding & { type: "session-write"; session: KeymasterSessionV1 });
-
-export type CoordinatorLocalStorageResponse =
-  | { type: "object"; object?: CoordinatorLocalStorageObject }
-  | { type: "list"; objects: CoordinatorLocalStorageObject[]; nextCursor?: string }
-  | { type: "write"; etag?: string; lastModified?: string }
-  | { type: "void" }
-  | { type: "device-records"; entries: Array<{ remoteStorageId: string; record: DeviceRecordV1 }>; invalidKeys: string[] }
-  | { type: "device-record"; record?: DeviceRecordV1 }
-  | { type: "session"; session?: KeymasterSessionV1 };
 
 /** 事件 stream 的订阅请求。一次订阅可以覆盖多个 Coordinator topic。 */
 export interface CoordinatorTopicSubscription {
@@ -2006,7 +1790,6 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
   const snapshot = expectRecord(value, field);
   const buildId = optionalText(snapshot.buildId, field + ".buildId", 256);
   const activePublicKeyHex = optionalText(snapshot.activePublicKeyHex, field + ".activePublicKeyHex", 256);
-  const selectedPublicKeyHex = optionalText(snapshot.selectedPublicKeyHex, field + ".selectedPublicKeyHex", 256);
   const authorityRecovery = snapshot.authorityRecovery === undefined
     ? undefined
     : parseAuthorityRecovery(snapshot.authorityRecovery, field + ".authorityRecovery");
@@ -2025,8 +1808,7 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
       const settings = expectRecord(snapshot.p2pkhSettings, field + ".p2pkhSettings");
       return { includeTestnet: booleanValue(settings.includeTestnet, field + ".p2pkhSettings.includeTestnet") };
     })();
-  const storageBucketGeneration = optionalBoundedNumber(snapshot.storageBucketGeneration, field + ".storageBucketGeneration");
-  const storageBucketId = optionalText(snapshot.storageBucketId, field + ".storageBucketId", 256);
+  const walletGeneration = optionalText(snapshot.walletGeneration, field + ".walletGeneration", 256);
   const pluginIntent = snapshot.pluginIntent === undefined
     ? undefined
     : parsePluginIntentSnapshot(snapshot.pluginIntent, field + ".pluginIntent");
@@ -2046,12 +1828,11 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
     })();
   return {
     authorityInstanceId: text(snapshot.authorityInstanceId, field + ".authorityInstanceId", 256),
+    runGeneration: text(snapshot.runGeneration, field + ".runGeneration", 256),
     ...(buildId === undefined ? {} : { buildId }),
     sessionEpoch: text(snapshot.sessionEpoch, field + ".sessionEpoch", 256),
     vaultStatus: enumValue(snapshot.vaultStatus, ["booting", "uninitialized", "locked", "unlocked", "fatal"] as const, field + ".vaultStatus"),
     ...(activePublicKeyHex === undefined ? {} : { activePublicKeyHex }),
-    ...(selectedPublicKeyHex === undefined ? {} : { selectedPublicKeyHex }),
-    keyspaceGeneration: boundedNumber(snapshot.keyspaceGeneration, field + ".keyspaceGeneration"),
     ...(authorityRecovery === undefined ? {} : { authorityRecovery }),
     ...(units === undefined ? {} : { coordinatorWorkerUnits: units }),
     ...(workerRevision === undefined ? {} : { coordinatorWorkerUnitSnapshotRevision: workerRevision }),
@@ -2065,8 +1846,7 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
       return autoLockTimeoutMs === undefined ? {} : { autoLockTimeoutMs };
     })(),
     ...(p2pkhSettings === undefined ? {} : { p2pkhSettings }),
-    ...(storageBucketGeneration === undefined ? {} : { storageBucketGeneration }),
-    ...(storageBucketId === undefined ? {} : { storageBucketId }),
+    ...(walletGeneration === undefined ? {} : { walletGeneration }),
     ...(pluginIntent === undefined ? {} : { pluginIntent }),
     ...(storageIoOwnerPeer === undefined ? {} : { storageIoOwnerPeer }),
   };
@@ -2091,85 +1871,27 @@ function parseCoordinatorSessionOpenResult(value: unknown, field: string): Coord
   return { ...snapshot, sessionBinding };
 }
 
-function parseStorageProviderConnection(value: unknown, field: string): StorageProviderConnectionView {
-  const connection = expectRecord(value, field);
-  const providerId = enumValue(connection.providerId, ["cloudflare-r2", "aws-s3", "s3-compatible"] as const, field + ".providerId") as StorageProviderId;
-  return { providerId, connection: parseStorageConnection(connection.connection, providerId) };
-}
-
-const STORAGE_PROBE_DIAGNOSTICS = ["configuration", "authentication", "forbidden", "not-found", "cors", "network", "provider"] as const;
-
-function parseStorageProbeDiagnostic(value: unknown, field: string): StorageProbeResult["diagnostic"] {
-  return value === undefined ? undefined : enumValue(value, STORAGE_PROBE_DIAGNOSTICS, field);
-}
-
-function parseStorageProbeResult(value: unknown, field: string): StorageProbeResult {
-  const probe = expectRecord(value, field);
-  const providerId = enumValue(probe.providerId, ["cloudflare-r2", "aws-s3", "s3-compatible"] as const, field + ".providerId") as StorageProviderId;
-  const diagnostic = parseStorageProbeDiagnostic(probe.diagnostic, field + ".diagnostic");
-  return {
-    ok: booleanValue(probe.ok, field + ".ok"),
-    providerId,
-    latencyMs: boundedNumber(probe.latencyMs, field + ".latencyMs"),
-    ...(diagnostic === undefined ? {} : { diagnostic }),
-  };
-}
-
-function parseStorageSelectedResult(value: unknown, field: string): StorageSelectedResult {
-  const result = expectRecord(value, field);
-  if (result.status !== "selected" || result.backend !== "s3" || result.requiresRuntimeBootstrap !== true) {
-    throw new TypeError(`Coordinator ${field} is not a valid selected result`);
-  }
-  return { status: "selected", backend: "s3", requiresRuntimeBootstrap: true };
-}
-
-/** 探测结果：has-keys 只暴露公开身份与标签,不含密码或密文。 */
-function parseDeviceCapabilities(value: unknown, field: string): DeviceCapabilitiesV1 {
-  const record = expectRecord(value, field);
-  const mode = record.conditionalWrites;
-  if (mode !== "native" && mode !== "best-effort") throw new TypeError(`Coordinator ${field}.conditionalWrites is invalid`);
-  return { conditionalWrites: mode };
-}
-
-function parseBucketProbeResultFor(value: unknown, field: string): import("./storage/catalog.js").BucketProbeResult {
-  const result = expectRecord(value, field);
-  const conditionalWrites = result.conditionalWrites === undefined
-    ? undefined
-    : parseDeviceCapabilities({ conditionalWrites: result.conditionalWrites }, `${field}.conditionalWrites`).conditionalWrites;
-  if (result.ok === true) {
-    if (result.state === "empty") return { ok: true, state: "empty", ...(conditionalWrites === undefined ? {} : { conditionalWrites }) };
-    if (result.state !== "has-keys" || !Array.isArray(result.keys)) throw new TypeError(`Coordinator ${field} is invalid`);
-    const keys = result.keys.map((item, index) => {
-      const key = expectRecord(item, `${field}.keys[${index}]`);
-      return {
-        publicKeyHex: text(key.publicKeyHex, `${field}.keys[${index}].publicKeyHex`, 128),
-        label: text(key.label, `${field}.keys[${index}].label`, 256),
-      };
-    });
-    return { ok: true, state: "has-keys", keys, ...(conditionalWrites === undefined ? {} : { conditionalWrites }) };
-  }
-  if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, `${field}.error`) };
-  throw new TypeError(`Coordinator ${field} is invalid`);
-}
-
-function parseStorageUserFacingError(value: unknown, field: string): NonNullable<InitialSetupRecoveryRecordV1["error"]> {
+/**
+ * 初始化/重置失败时回给页面的可行动错误。
+ *
+ * 这里只承载阶段、错误码、脱敏诊断和关联 ID；回滚状态由 Coordinator 内部
+ * 掌握，不让页面猜测数据是否可用。
+ */
+function parseWalletUserFacingError(value: unknown, field: string): WalletUserFacingError {
   const error = expectRecord(value, field);
   const action = optionalText(error.action, field + ".action", 512);
-  const transactionId = optionalText(error.transactionId, field + ".transactionId", 128);
   return {
     title: text(error.title, field + ".title", 256),
     summary: text(error.summary, field + ".summary", 2_048),
     ...(action === undefined ? {} : { action }),
     code: text(error.code, field + ".code", 128),
     incidentId: text(error.incidentId, field + ".incidentId", 128),
-    ...(transactionId === undefined ? {} : { transactionId }),
     diagnostic: text(error.diagnostic, field + ".diagnostic", 12_000),
-    phase: enumValue(error.phase, ["validate", "stage", "hold", "catalog-commit", "runtime", "rollback", "complete"] as const, field + ".phase"),
-    rollback: enumValue(error.rollback, ["not-started", "confirmed", "unconfirmed"] as const, field + ".rollback"),
+    phase: enumValue(error.phase, ["validate", "derive-key", "commit", "rollback", "complete"] as const, field + ".phase") as WalletInitializePhase,
   };
 }
 
-function parseInitialSetupKeyResult(value: unknown, field: string): Extract<InitialSetupResult, { ok: true }>["firstKey"] {
+function parseWalletKeySummary(value: unknown, field: string): Extract<WalletInitializeResult, { ok: true }>["key"] {
   const key = expectRecord(value, field);
   const source = optionalText(key.source, field + ".source", 512);
   return {
@@ -2183,77 +1905,73 @@ function parseInitialSetupKeyResult(value: unknown, field: string): Extract<Init
   };
 }
 
-function parseInitialSetupResult(value: unknown, field: string): InitialSetupResult {
+function parseWalletInitializeResult(value: unknown, field: string): WalletInitializeResult {
   const result = expectRecord(value, field);
   if (result.ok === true) return {
     ok: true,
-    bucket: parseRuntimeBucket(result.bucket, field + ".bucket"),
-    firstKey: parseInitialSetupKeyResult(result.firstKey, field + ".firstKey"),
+    key: parseWalletKeySummary(result.key, field + ".key"),
+    walletGeneration: text(result.walletGeneration, field + ".walletGeneration", 256),
   };
-  if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, field + ".error") };
+  if (result.ok === false) return { ok: false, error: parseWalletUserFacingError(result.error, field + ".error") };
   throw new TypeError(`Coordinator ${field}.ok is invalid`);
 }
 
-function parseExistingRemoteStorageConnectResult(value: unknown, field: string): ExistingRemoteStorageConnectResult {
+/**
+ * 冷启动快照。
+ *
+ * 只有四个本地状态；`corrupt` 与 `unsupported` 携带脱敏原因供界面进入恢复
+ * 提示，绝不返回“空钱包”让页面静默重新创建。
+ */
+function parseWalletColdStartSnapshot(value: unknown, field: string): WalletColdStartSnapshot {
   const result = expectRecord(value, field);
-  if (result.ok === true) {
-    return {
-      ok: true,
-      bucket: parseRuntimeBucket(result.bucket, field + ".bucket"),
-      ...(result.activeKey === undefined ? {} : { activeKey: parseInitialSetupKeyResult(result.activeKey, field + ".activeKey") }),
-    };
+  const state = enumValue(result.state, ["uninitialized", "ready", "corrupt", "unsupported"] as const, field + ".state");
+  const reason = optionalText(result.reason, field + ".reason", 512);
+  let meta: WalletColdStartSnapshot["meta"];
+  if (result.meta !== undefined) {
+    try { meta = validateWalletMeta(result.meta); } catch { throw new TypeError(`Coordinator ${field}.meta is invalid`); }
   }
-  if (result.ok === false) return { ok: false, error: parseStorageUserFacingError(result.error, field + ".error") };
-  throw new TypeError(`Coordinator ${field}.ok is invalid`);
+  let key: WalletColdStartSnapshot["key"];
+  if (result.key !== undefined) {
+    const record = expectRecord(result.key, field + ".key");
+    key = { publicKeyHex: text(record.publicKeyHex, field + ".key.publicKeyHex", 66), label: text(record.label, field + ".key.label", 256) };
+  }
+  return { state, ...(meta === undefined ? {} : { meta }), ...(key === undefined ? {} : { key }), ...(reason === undefined ? {} : { reason }) };
 }
 
-function parseStorageRecoveryResult(value: unknown, field: string): InitialSetupRecoveryResult {
+function parseWalletUnlockResult(value: unknown, field: string): WalletUnlockResult {
   const result = expectRecord(value, field);
-  const status = text(result.status, field + ".status", 64);
-  if (status === "setup-succeeded") return {
-    status,
-    result: parseInitialSetupResult(result.result, field + ".result") as Extract<InitialSetupResult, { ok: true }>,
+  return {
+    sessionEpoch: text(result.sessionEpoch, field + ".sessionEpoch", 256),
+    walletGeneration: text(result.walletGeneration, field + ".walletGeneration", 256),
+    publicKeyHex: text(result.publicKeyHex, field + ".publicKeyHex", 66),
   };
-  if (status === "cleanup-confirmed" || status === "not-found") return { status };
-  if (status === "cleanup-required") return { status, error: parseStorageUserFacingError(result.error, field + ".error") };
-  throw new TypeError(`Coordinator ${field}.status is invalid`);
 }
 
-function parseStorageBucketSwitchResult(value: unknown, field: string): StorageBucketSwitchResultV1 {
-  const result = expectRecord(value, field);
-  if (result.ok !== true) throw new TypeError(`Coordinator ${field}.ok is invalid`);
-  return { ok: true, bucket: parseRuntimeBucket(result.bucket, field + ".bucket"), vaultUnlocked: booleanValue(result.vaultUnlocked, field + ".vaultUnlocked") };
+function parseStoragePersistenceView(value: unknown, field: string): StorageRuntimeSummary["persistence"] {
+  const persistence = expectRecord(value, field);
+  const usageBytes = optionalBoundedNumber(persistence.usageBytes, field + ".usageBytes");
+  const quotaBytes = optionalBoundedNumber(persistence.quotaBytes, field + ".quotaBytes");
+  return {
+    persisted: booleanValue(persistence.persisted, field + ".persisted"),
+    ...(usageBytes === undefined ? {} : { usageBytes }),
+    ...(quotaBytes === undefined ? {} : { quotaBytes }),
+  };
 }
 
-function parseStorageUnlockBucketResult(value: unknown, field: string): CoordinatorStorageUnlockBucketResult {
-  const result = expectRecord(value, field);
-  if (result.ok === true) return { ok: true, vaultUnlocked: booleanValue(result.vaultUnlocked, field + ".vaultUnlocked") };
-  if (result.ok === false) return { ok: false, diagnostic: text(result.diagnostic, field + ".diagnostic", 4_096) };
-  throw new TypeError(`Coordinator ${field}.ok is invalid`);
-}
-
-function parseStorageControlResult(value: unknown, field: string): CoordinatorStorageControlResult {
-  if (value === undefined || value === null) return value;
-  if (value instanceof Uint8Array) return value.slice();
-  if (typeof value === "string") {
-    return enumValue(value, ["unselected", "authentication", "checking", "ready", "degraded", "incompatible", "unconfigured", "locked", "reconfiguring"] as const, field);
-  }
-  if (Array.isArray(value)) return value.map((item, index) => parseLocalStorageRecoveryRecord(item, `${field}[${index}]`));
-  const result = expectRecord(value, field);
-  if (result.status === "setup-succeeded" || result.status === "cleanup-confirmed" || result.status === "cleanup-required" || result.status === "not-found") return parseStorageRecoveryResult(result, field);
-  if ("firstKey" in result || (result.ok === false && "error" in result)) return parseInitialSetupResult(result, field);
-  if (result.ok === true && "vaultUnlocked" in result) return parseStorageBucketSwitchResult(result, field);
-  if (result.ok === false && "diagnostic" in result && !("providerId" in result)) return parseStorageUnlockBucketResult(result, field);
-  if ("providerId" in result && "connection" in result) return parseStorageProviderConnection(result, field);
-  if ("bucketHint" in result) return parseStorageProviderSummary(result, field);
-  if ("put" in result && "complete" in result) return parseStorageCapabilities(result, field);
-  if ("put" in result && typeof result.put === "string" && "cleanupWarning" in result) {
-    const put = enumValue(result.put, ["native", "best-effort", "inconclusive"] as const, field + ".put");
-    const complete = enumValue(result.complete, ["native", "best-effort", "inconclusive"] as const, field + ".complete");
-    return { generation: boundedNumber(result.generation, field + ".generation"), put, complete, cleanupWarning: booleanValue(result.cleanupWarning, field + ".cleanupWarning") };
-  }
-  if ("bucketId" in result && "deviceRecord" in result) return parseRuntimeBucket(result, field);
-  throw new TypeError(`Coordinator ${field} is unsupported`);
+function parseStorageRuntimeSummary(value: unknown, field: string): StorageRuntimeSummary {
+  const summary = expectRecord(value, field);
+  const publicKeyHex = optionalText(summary.publicKeyHex, field + ".publicKeyHex", 66);
+  const label = optionalText(summary.label, field + ".label", 256);
+  const walletGeneration = optionalText(summary.walletGeneration, field + ".walletGeneration", 256);
+  return {
+    status: enumValue(summary.status, ["uninitialized", "locked", "ready", "degraded", "corrupt", "unsupported"] as const, field + ".status"),
+    // 正式介质固定为本地 IndexedDB；不再有 Provider 可供选择。
+    medium: "indexeddb",
+    ...(publicKeyHex === undefined ? {} : { publicKeyHex }),
+    ...(label === undefined ? {} : { label }),
+    ...(walletGeneration === undefined ? {} : { walletGeneration }),
+    persistence: parseStoragePersistenceView(summary.persistence, field + ".persistence"),
+  };
 }
 
 function parseStorageListEntry(value: unknown, field: string): StorageListResult["files"][number] {
@@ -2324,49 +2042,24 @@ function parseStorageDeleteResult(value: unknown, field: string): StorageDeleteR
   return { path: text(result.path, field + ".path", 4_096), deleted: true, updatedAt: boundedNumber(result.updatedAt, field + ".updatedAt") };
 }
 
-function parseStorageUploadResult(value: unknown, field: string): StorageUploadBeginResult | StorageUploadPartResult | StorageUploadAbortResult {
-  const result = expectRecord(value, field);
-  const uploadId = text(result.uploadId, field + ".uploadId", 256);
-  if (result.aborted === true) return { uploadId, aborted: true };
-  if (result.partSize !== undefined) {
-    if (result.partSize !== STORAGE_PART_SIZE_BYTES || result.maxParts !== STORAGE_MAX_PARTS) throw new TypeError(`Coordinator ${field} multipart limits are invalid`);
-    return { uploadId, partSize: STORAGE_PART_SIZE_BYTES, maxParts: STORAGE_MAX_PARTS };
-  }
-  if (result.partNumber !== undefined) return { uploadId, partNumber: boundedNumber(result.partNumber, field + ".partNumber", 1, STORAGE_MAX_PARTS), size: boundedNumber(result.size, field + ".size") };
-  throw new TypeError(`Coordinator ${field} upload result is unsupported`);
-}
-
-function parseStorageUploadBeginResult(value: unknown, field: string): StorageUploadBeginResult {
-  const result = parseStorageUploadResult(value, field);
-  if (!("partSize" in result)) throw new TypeError(`Coordinator ${field} is not a begin-upload result`);
-  return result;
-}
-
-function parseStorageUploadPartResult(value: unknown, field: string): StorageUploadPartResult {
-  const result = parseStorageUploadResult(value, field);
-  if (!("partNumber" in result)) throw new TypeError(`Coordinator ${field} is not an upload-part result`);
-  return result;
-}
-
-function parseStorageUploadAbortResult(value: unknown, field: string): StorageUploadAbortResult {
-  const result = parseStorageUploadResult(value, field);
-  if (!("aborted" in result)) throw new TypeError(`Coordinator ${field} is not an abort-upload result`);
-  return result;
-}
-
 function parseStorageDataResult(value: unknown, field: string): CoordinatorStorageDataResult {
   if (value === undefined) return undefined;
   const result = expectRecord(value, field);
   if ("directories" in result && "files" in result) return parseStorageListResult(result, field);
   if ("content" in result && "offset" in result) return parseStorageGetResult(result, field);
   if (result.deleted === true) return parseStorageDeleteResult(result, field);
-  if ("uploadId" in result) return parseStorageUploadResult(result, field);
   if ("path" in result && "size" in result && "updatedAt" in result) return parseStoragePutResult(result, field);
   if ("path" in result && ("created" in result || "deleted" in result)) return parseStorageDirectoryResult(result, field);
+  if (Array.isArray(result.paths) && typeof result.committedAt === "string") {
+    return {
+      paths: result.paths.map((item, index) => text(item, `${field}.paths[${index}]`, 4_096)),
+      committedAt: text(result.committedAt, field + ".committedAt", 128),
+    };
+  }
   throw new TypeError(`Coordinator ${field} is unsupported`);
 }
 
-function parseStorageOwnerGrant(value: unknown, field: string): StorageOwnerGrant {
+function parseStorageOwnerGrant(value: unknown, field: string): StorageBindingGrant {
   const grant = expectRecord(value, field);
   // owner 数据模型:K-V 或文件根;不能硬编码成 kv,否则 files 声明绑定会被判不匹配。
   const model = enumValue(grant.model, ["kv", "files"] as const, field + ".model");
@@ -2375,17 +2068,40 @@ function parseStorageOwnerGrant(value: unknown, field: string): StorageOwnerGran
   const purposeId = model === "files" && grant.purposeId === ""
     ? ""
     : text(grant.purposeId, field + ".purposeId", 63);
-  return {
+  const authority = enumValue(grant.authority, ["built-in-module", "third-party-app"] as const, field + ".authority");
+  const common = {
     storageGrantId: text(grant.storageGrantId, field + ".storageGrantId", 256),
-    bucketId: text(grant.bucketId, field + ".bucketId", 256),
-    bucketGeneration: boundedNumber(grant.bucketGeneration, field + ".bucketGeneration"),
-    ownerPublicKeyHex: text(grant.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 66),
+    walletGeneration: text(grant.walletGeneration, field + ".walletGeneration", 256),
+    runGeneration: text(grant.runGeneration, field + ".runGeneration", 256),
+    sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
+  };
+  if (authority === "third-party-app") {
+    // 第三方 App 授权按「登记 name + 验证身份」定位目录，因此不需要
+    // moduleId/purpose 坐标，也不允许携带 model。
+    const identity = expectRecord(grant.verifiedAppIdentity, field + ".verifiedAppIdentity");
+    return {
+      ...common,
+      authority,
+      appStorageName: text(grant.appStorageName, field + ".appStorageName", 63),
+      verifiedAppIdentity: {
+        publisherPublicKeyHex: text(identity.publisherPublicKeyHex, field + ".verifiedAppIdentity.publisherPublicKeyHex", 66),
+        appId: text(identity.appId, field + ".verifiedAppIdentity.appId", 63),
+      },
+      model: "files",
+      schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
+    };
+  }
+  if (purposeId === "") {
+    // 只有 files 模型可以用空 purposeId 表示模块根。
+    if (model !== "files") throw new TypeError(`Coordinator ${field}.purposeId is invalid`);
+  }
+  return {
+    ...common,
     moduleId: text(grant.moduleId, field + ".moduleId", 63),
     purposeId,
-    authority: enumValue(grant.authority, ["built-in-module", "third-party-app"] as const, field + ".authority"),
+    authority,
     model,
     schemaVersion: boundedNumber(grant.schemaVersion, field + ".schemaVersion", 1),
-    sessionEpoch: text(grant.sessionEpoch, field + ".sessionEpoch", 256),
   };
 }
 
@@ -2393,8 +2109,8 @@ function parseStoragePlatformGrant(value: unknown, field: string): StoragePlatfo
   const grant = expectRecord(value, field);
   return {
     platformGrantId: text(grant.platformGrantId, field + ".platformGrantId", 256),
-    bucketId: text(grant.bucketId, field + ".bucketId", 256),
-    bucketGeneration: boundedNumber(grant.bucketGeneration, field + ".bucketGeneration"),
+    walletGeneration: text(grant.walletGeneration, field + ".walletGeneration", 256),
+    runGeneration: text(grant.runGeneration, field + ".runGeneration", 256),
     moduleId: text(grant.moduleId, field + ".moduleId", 63),
     purposeId: text(grant.purposeId, field + ".purposeId", 63),
     authority: enumValue(grant.authority, ["platform-only", "built-in-module"] as const, field + ".authority"),
@@ -2844,27 +2560,14 @@ function parseCoordinatorVaultOperationResultFor(
   field: string,
 ): unknown {
   switch (operation.type) {
-    case "createVault":
-    case "setActive":
-    case "deleteKey":
+    case "getCurrentKey":
+      return value === undefined ? undefined : parseCoordinatorVaultKeyView(value, field);
     case "verifyPassword":
     case "changePassword":
-    case "finalizeEmptyVaultAfterLastKeyDeletion":
-    case "recoverEmptyVaultToUninitialized":
+    case "renameKey":
       return parseTrueResult(value, field);
-    case "createVaultWithInitialKey":
-    case "createVaultWithImportedKey":
-    case "generateKey":
-    case "importPrivateKey":
-    case "importKeyBackup":
-      return parseCoordinatorVaultKeyView(value, field);
-    case "listKeys":
-      return parseKeyViewArray(value, field);
-    case "getKey":
-      return value === undefined ? undefined : parseCoordinatorVaultKeyView(value, field);
-    case "exportKeyBackup":
-    case "exportCurrentKeyBackup":
-      return text(value, field, 2_000_000);
+    case "exportKeyHold":
+      return uint8ArrayValue(value, field);
     case "sealLocalSecret":
       return parseVaultSealedSecret(value, field);
     case "openLocalSecret":
@@ -2872,52 +2575,35 @@ function parseCoordinatorVaultOperationResultFor(
   }
 }
 
-function parseStorageRuntimeStatus(value: unknown, field: string): StorageRuntimeControllerStatus | StorageRuntimeStatus {
-  return enumValue(value, [
-    "unselected", "authentication", "checking", "ready", "degraded", "incompatible",
-    "unconfigured", "locked", "reconfiguring",
-  ] as const, field);
+function parseStorageRuntimeStatus(value: unknown, field: string): StorageRuntimeControllerStatus {
+  return enumValue(value, ["uninitialized", "locked", "ready", "degraded", "corrupt", "unsupported"] as const, field);
 }
 
 function parseStorageControlResultFor(control: CoordinatorStorageControl, value: unknown, field: string): unknown {
   switch (control.type) {
     case "status":
-    case "retry":
       return parseStorageRuntimeStatus(value, field);
     case "summary":
-      return value === null ? null : parseStorageProviderSummary(value, field);
-    case "connection":
-      return value === null ? null : parseStorageProviderConnection(value, field);
-    case "initial-setup":
-      return parseInitialSetupResult(value, field);
-    case "connect-existing-remote":
-      return parseExistingRemoteStorageConnectResult(value, field);
-    case "probe-bucket":
-      return parseBucketProbeResultFor(value, field);
-    case "initial-setup-result":
-      return value === undefined ? undefined : parseInitialSetupResult(value, field);
-    case "initial-setup-recovery-list":
-      if (!Array.isArray(value)) throw new TypeError(`Coordinator ${field} must be an array`);
-      return value.map((item, index) => parseLocalStorageRecoveryRecord(item, `${field}[${index}]`));
-    case "initial-setup-cleanup":
-      return parseStorageRecoveryResult(value, field);
-    case "switch-bucket":
-      return parseStorageBucketSwitchResult(value, field);
-    case "change-bucket-config":
-    case "rename-bucket":
-      return parseRuntimeBucket(value, field);
-    case "unlock-bucket":
-      return parseStorageUnlockBucketResult(value, field);
-    case "delete-local-bucket-key":
-      return parseUndefinedResult(value, field);
-    case "cold-export":
+      return value === null ? null : parseStorageRuntimeSummary(value, field);
+    case "cold-start":
+      return parseWalletColdStartSnapshot(value, field);
+    case "initialize":
+      return parseWalletInitializeResult(value, field);
+    case "unlock":
+      return parseWalletUnlockResult(value, field);
+    case "lock":
+    case "change-key-password":
+    case "rename-key":
+      return parseTrueResult(value, field);
+    case "export-key-hold":
       return uint8ArrayValue(value, field);
-    case "capabilities":
-      return value === null ? null : parseStorageCapabilities(value, field);
-    case "probe-capabilities":
-      return parseStorageCapabilitiesProbeResult(value, field);
-    case "cancel-probe":
-      return parseUndefinedResult(value, field);
+    case "reset-wallet": {
+      const result = expectRecord(value, field);
+      return {
+        walletGeneration: text(result.walletGeneration, field + ".walletGeneration", 256),
+        clearedAt: text(result.clearedAt, field + ".clearedAt", 128),
+      };
+    }
   }
 }
 
@@ -2929,10 +2615,14 @@ function parseStorageDataResultFor(data: CoordinatorStorageData, value: unknown,
     case "put": return parseStoragePutResult(value, field);
     case "get-range": return parseStorageGetResult(value, field);
     case "delete": return parseStorageDeleteResult(value, field);
-    case "begin-upload": return parseStorageUploadBeginResult(value, field);
-    case "upload-part": return parseStorageUploadPartResult(value, field);
-    case "complete-upload": return parseStoragePutResult(value, field);
-    case "abort-upload": return parseStorageUploadAbortResult(value, field);
+    case "batch": {
+      const result = expectRecord(value, field);
+      if (!Array.isArray(result.paths) || result.paths.length > 1_000) throw new TypeError(`Coordinator ${field}.paths is invalid`);
+      return {
+        paths: result.paths.map((item, index) => text(item, `${field}.paths[${index}]`, 4_096)),
+        committedAt: text(result.committedAt, field + ".committedAt", 128),
+      };
+    }
   }
 }
 
@@ -3223,17 +2913,17 @@ function parseChannelOperationResultFor(operation: CoordinatorChannelOperation, 
   }
 }
 
-function parseOwnerFileEntry(value: unknown, field: string): { path: string; size?: number; etag?: string; lastModified?: string } {
+function parseOwnerFileEntry(value: unknown, field: string): import("./storage/files.js").ModuleFileListEntry {
   const entry = expectRecord(value, field);
   return {
     path: text(entry.path, field + ".path", 4_096),
-    ...(entry.size === undefined ? {} : { size: boundedNumber(entry.size, field + ".size") }),
-    ...(entry.etag === undefined ? {} : { etag: text(entry.etag, field + ".etag", 1_024) }),
-    ...(entry.lastModified === undefined ? {} : { lastModified: text(entry.lastModified, field + ".lastModified", 1_024) }),
+    size: boundedNumber(entry.size, field + ".size"),
+    revision: text(entry.revision, field + ".revision", 1_024),
+    lastModified: text(entry.lastModified, field + ".lastModified", 128),
   };
 }
 
-function parseOwnerFileListPage(value: unknown, field: string): import("./storage/files.js").OwnerFileListPage {
+function parseOwnerFileListPage(value: unknown, field: string): import("./storage/files.js").ModuleFileListPage {
   const page = expectRecord(value, field);
   if (!Array.isArray(page.files)) throw new TypeError(`Coordinator ${field}.files is invalid`);
   return {
@@ -3242,22 +2932,22 @@ function parseOwnerFileListPage(value: unknown, field: string): import("./storag
   };
 }
 
-function parseOwnerFileObject(value: unknown, field: string): import("./storage/files.js").OwnerFileObject {
+function parseOwnerFileObject(value: unknown, field: string): import("./storage/files.js").ModuleFileObject {
   const object = expectRecord(value, field);
   if (!(object.bytes instanceof Uint8Array)) throw new TypeError(`Coordinator ${field}.bytes is invalid`);
   return {
     path: text(object.path, field + ".path", 4_096),
     bytes: object.bytes.slice(),
-    ...(object.etag === undefined ? {} : { etag: text(object.etag, field + ".etag", 1_024) }),
-    ...(object.lastModified === undefined ? {} : { lastModified: text(object.lastModified, field + ".lastModified", 1_024) }),
+    revision: text(object.revision, field + ".revision", 1_024),
+    lastModified: text(object.lastModified, field + ".lastModified", 128),
   };
 }
 
-function parseOwnerFileWriteResult(value: unknown, field: string): { etag?: string; lastModified?: string } {
+function parseOwnerFileWriteResult(value: unknown, field: string): { revision: string; lastModified: string } {
   const result = value === undefined ? {} : expectRecord(value, field);
   return {
-    ...(result.etag === undefined ? {} : { etag: text(result.etag, field + ".etag", 1_024) }),
-    ...(result.lastModified === undefined ? {} : { lastModified: text(result.lastModified, field + ".lastModified", 1_024) }),
+    revision: text(result.revision, field + ".revision", 1_024),
+    lastModified: text(result.lastModified, field + ".lastModified", 128),
   };
 }
 
@@ -3275,8 +2965,19 @@ function parseOwnerStorageResultFor(data: CoordinatorOwnerStorageData | Coordina
     case "platform.commit": return parseKeyValueCommit(value, field);
     case "owner.file-list": return parseOwnerFileListPage(value, field);
     case "owner.file-get": return value === undefined ? undefined : parseOwnerFileObject(value, field);
+    case "owner.file-range": return value === undefined ? undefined : parseOwnerFileObject(value, field);
     case "owner.file-put": return parseOwnerFileWriteResult(value, field);
     case "owner.file-delete": return parseUndefinedResult(value, field);
+    case "owner.file-batch": {
+      const result = expectRecord(value, field);
+      if (!Array.isArray(result.paths) || typeof result.committedAt !== "string") {
+        throw new TypeError(`Coordinator ${field} is invalid`);
+      }
+      return {
+        paths: result.paths.map((path, index) => text(path, `${field}.paths[${index}]`, 4_096)),
+        committedAt: text(result.committedAt, field + ".committedAt", 128),
+      };
+    }
   }
 }
 
@@ -3302,7 +3003,6 @@ function parseCoordinatorResultForRequest(request: CoordinatorRpcRequest, value:
     case "msfile.grant": return text(value, field, 256);
     case "storage.owner.bind": return parseStorageOwnerGrant(value, field);
     case "storage.platform.bind": return parseStoragePlatformGrant(value, field);
-    case "storage.owner.delete": return parseTrueResult(value, field);
     case "msfile.control": return parseMsFileControlResultFor(request.control, value, field);
     case "msfile.data": return request.data.type === "stat" ? parseMsFileStatResult(value, field) : parseMsFileReadResult(value, field);
     case "window-p2p.executor.acquire": return parseWindowExecutorLease(value, field);
@@ -3339,7 +3039,6 @@ function isVoidCoordinatorRequest(request: CoordinatorRpcRequest): boolean {
     case "session.activity":
     case "unlock":
     case "lock":
-    case "activate-key":
     case "crypto":
     case "background.run-now":
     case "background.trigger":
@@ -3359,10 +3058,6 @@ function isVoidCoordinatorRequest(request: CoordinatorRpcRequest): boolean {
     case "storage.owner.data":
     case "storage.platform.data":
       return request.data.type === "owner.delete" || request.data.type === "platform.delete";
-    case "storage.control":
-      // cancel-probe 与 delete-local-bucket-key 的业务结果就是 undefined；
-      // 响应里不携带 operationResult，必须按 void 请求解析。
-      return request.control.type === "cancel-probe" || request.control.type === "delete-local-bucket-key";
     default: return false;
   }
 }
@@ -3467,18 +3162,18 @@ function parseAuthorityRecovery(value: unknown, field: string): CoordinatorAutho
 function parseSessionStateEvent(value: unknown): SessionStateEvent {
   const event = topicEnvelope(value, "session.state", "session.state.changed");
   const authorityRecovery = event.authorityRecovery === undefined ? undefined : parseAuthorityRecovery(event.authorityRecovery, "event.authorityRecovery");
-  const selectedPublicKeyHex = event.selectedPublicKeyHex === undefined ? undefined : nullableText(event.selectedPublicKeyHex, "event.selectedPublicKeyHex", 256);
   const autoLockTimeoutMs = parseAutoLockTimeoutMsField(event.autoLockTimeoutMs, "event.autoLockTimeoutMs");
+  const walletGeneration = optionalText(event.walletGeneration, "event.walletGeneration", 256);
   return {
     topic: "session.state",
     type: "session.state.changed",
     sessionRevision: boundedNumber(event.sessionRevision, "event.sessionRevision"),
     sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),
-    cause: enumValue(event.cause, ["bootstrap", "unlock", "lock", "activate-key", "create-vault", "create-initial-key", "import-initial-key", "delete-active-key", "recover-empty-vault", "autolock-settings"] as const, "event.cause"),
+    runGeneration: text(event.runGeneration, "event.runGeneration", 256),
+    ...(walletGeneration === undefined ? {} : { walletGeneration }),
+    cause: enumValue(event.cause, ["bootstrap", "initialize", "unlock", "lock", "change-password", "rename-key", "reset-wallet", "autolock-settings"] as const, "event.cause"),
     vaultStatus: enumValue(event.vaultStatus, ["booting", "uninitialized", "locked", "unlocked", "fatal"] as const, "event.vaultStatus"),
     activePublicKeyHex: nullableText(event.activePublicKeyHex, "event.activePublicKeyHex", 256),
-    ...(selectedPublicKeyHex === undefined ? {} : { selectedPublicKeyHex }),
-    keyspaceGeneration: boundedNumber(event.keyspaceGeneration, "event.keyspaceGeneration"),
     ...(autoLockTimeoutMs === undefined ? {} : { autoLockTimeoutMs }),
     ...(authorityRecovery === undefined ? {} : { authorityRecovery }),
   };
@@ -3576,74 +3271,20 @@ function parseAssetDataChangedEvent(value: unknown): AssetDataChangedEvent {
   };
 }
 
-function parseStorageProviderSummary(value: unknown, field: string): StorageProviderSummary {
-  const summary = expectRecord(value, field);
-  const providerId = enumValue(summary.providerId, ["cloudflare-r2", "aws-s3", "s3-compatible"] as const, field + ".providerId");
-  if (summary.secretConfigured !== true) throw new TypeError(`Coordinator ${field}.secretConfigured is invalid`);
-  return {
-    providerId: providerId as StorageProviderId,
-    bucketHint: text(summary.bucketHint, field + ".bucketHint", 512),
-    ...(summary.endpointHint === undefined ? {} : { endpointHint: text(summary.endpointHint, field + ".endpointHint", 2_048) }),
-    accessKeyHint: text(summary.accessKeyHint, field + ".accessKeyHint", 512),
-    secretConfigured: true,
-    generation: boundedNumber(summary.generation, field + ".generation"),
-    updatedAt: boundedNumber(summary.updatedAt, field + ".updatedAt"),
-  };
-}
-
-function parseStorageConditionalCapability(value: unknown, field: string): NonNullable<BucketConditionalCapabilitiesView["put"]> {
-  const capability = expectRecord(value, field);
-  const source = capability.source === undefined ? undefined : enumValue(capability.source, ["automatic", "manual"] as const, field + ".source");
-  const updatedAt = capability.updatedAt === undefined ? undefined : boundedNumber(capability.updatedAt, field + ".updatedAt");
-  return {
-    mode: enumValue(capability.mode, ["unknown", "native", "best-effort"] as const, field + ".mode"),
-    ...(source === undefined ? {} : { source }),
-    ...(updatedAt === undefined ? {} : { updatedAt }),
-  };
-}
-
-function parseStorageCapabilities(value: unknown, field: string): BucketConditionalCapabilitiesView {
-  const capabilities = expectRecord(value, field);
-  return {
-    generation: boundedNumber(capabilities.generation, field + ".generation"),
-    put: parseStorageConditionalCapability(capabilities.put, field + ".put"),
-    complete: parseStorageConditionalCapability(capabilities.complete, field + ".complete"),
-  };
-}
-
-function parseStorageCapabilitiesProbeResult(value: unknown, field: string): BucketConditionalCapabilityProbeResult {
-  const result = expectRecord(value, field);
-  return {
-    generation: boundedNumber(result.generation, field + ".generation"),
-    put: enumValue(result.put, ["native", "best-effort", "inconclusive"] as const, field + ".put"),
-    complete: enumValue(result.complete, ["native", "best-effort", "inconclusive"] as const, field + ".complete"),
-    cleanupWarning: booleanValue(result.cleanupWarning, field + ".cleanupWarning"),
-  };
-}
-
 function parseStorageStateEvent(value: unknown): CoordinatorStorageStateEvent {
   const event = topicEnvelope(value, "storage.state", "storage.state.changed");
-  const healthStatus = event.healthStatus === undefined ? undefined : enumValue(event.healthStatus, ["unselected", "authentication", "checking", "ready", "degraded", "incompatible"] as const, "event.healthStatus");
-  const catalogBucket = event.catalogBucket === undefined ? undefined : booleanValue(event.catalogBucket, "event.catalogBucket");
-  const bucketId = event.bucketId === undefined ? undefined : text(event.bucketId, "event.bucketId", 256);
-  const bucketGeneration = event.bucketGeneration === undefined ? undefined : boundedNumber(event.bucketGeneration, "event.bucketGeneration");
   const authorityRecovery = event.authorityRecovery === undefined ? undefined : parseAuthorityRecovery(event.authorityRecovery, "event.authorityRecovery");
-  const summary = event.summary === null ? null : parseStorageProviderSummary(event.summary, "event.summary");
-  const capabilities = event.capabilities === null ? null : parseStorageCapabilities(event.capabilities, "event.capabilities");
+  const summary = event.summary === null ? null : parseStorageRuntimeSummary(event.summary, "event.summary");
+  const walletGeneration = optionalText(event.walletGeneration, "event.walletGeneration", 256);
   return {
     topic: "storage.state",
     type: "storage.state.changed",
     storageRevision: boundedNumber(event.storageRevision, "event.storageRevision"),
     sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),
-    providerGeneration: nullableBoundedNumber(event.providerGeneration, "event.providerGeneration"),
-    status: enumValue(event.status, ["unconfigured", "locked", "checking", "ready", "reconfiguring", "degraded"] as const, "event.status"),
-    ...(healthStatus === undefined ? {} : { healthStatus: healthStatus as StorageRuntimeStatus }),
-    ...(catalogBucket === undefined ? {} : { catalogBucket }),
-    ...(bucketId === undefined ? {} : { bucketId }),
-    ...(bucketGeneration === undefined ? {} : { bucketGeneration }),
+    status: enumValue(event.status, ["uninitialized", "locked", "ready", "degraded", "corrupt", "unsupported"] as const, "event.status"),
+    ...(walletGeneration === undefined ? {} : { walletGeneration }),
     ...(authorityRecovery === undefined ? {} : { authorityRecovery }),
     summary,
-    capabilities,
   };
 }
 
@@ -4038,266 +3679,6 @@ function parsePlatformStorageRequest(value: unknown): CoordinatorPlatformStorage
   return parseOwnerStorageData(value, "platform");
 }
 
-function localStorageText(value: unknown, field: string, maximum = 4_096): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > maximum) {
-    throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  }
-  return value;
-}
-
-function localStorageInteger(value: unknown, field: string, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
-    throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  }
-  return value as number;
-}
-
-function optionalLocalStorageBoolean(value: unknown, field: string): boolean | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "boolean") throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  return value;
-}
-
-function localStorageBytes(value: unknown, field: string): ArrayBuffer {
-  return arrayBufferValue(value, `local-storage ${field}`);
-}
-
-const LOCAL_SETUP_PHASES = ["validate", "stage", "hold", "catalog-commit", "runtime", "rollback", "complete"] as const;
-const LOCAL_SETUP_CATALOG_STATES = ["not-started", "committed", "rolled-back", "competing", "empty", "unknown"] as const;
-const LOCAL_SETUP_ROLLBACK_STATES = ["not-started", "confirmed", "unconfirmed"] as const;
-const LOCAL_SETUP_STATUSES = ["pending", "succeeded", "failed"] as const;
-
-function localStorageEnum<const Values extends readonly string[]>(value: unknown, values: Values, field: string): Values[number] {
-  if (typeof value !== "string" || !values.includes(value)) throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  return value as Values[number];
-}
-
-function parseLocalStorageRecoverySuccess(value: unknown, field: string): InitialSetupRecoveryRecordV1["success"] {
-  if (!record(value)) throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  const bucketLabel = localStorageText(value.bucketLabel, `${field}.bucketLabel`, 256);
-  const publicKeyHex = localStorageText(value.publicKeyHex, `${field}.publicKeyHex`, 66);
-  const label = localStorageText(value.label, `${field}.label`, 256);
-  const address = localStorageText(value.address, `${field}.address`, 512);
-  const format = localStorageText(value.format, `${field}.format`, 128);
-  if (!Array.isArray(value.capabilities) || value.capabilities.length === 0 || value.capabilities.length > 64) throw new TypeError(`Coordinator local-storage ${field}.capabilities is invalid`);
-  const capabilities = value.capabilities.map((item, index) => localStorageText(item, `${field}.capabilities[${index}]`, 128));
-  const createdAt = localStorageText(value.createdAt, `${field}.createdAt`, 128);
-  const source = value.source === undefined ? undefined : localStorageText(value.source, `${field}.source`, 512);
-  return { bucketLabel, publicKeyHex, label, address, format, capabilities, createdAt, ...(source === undefined ? {} : { source }) };
-}
-
-function parseLocalStorageUserFacingError(value: unknown, field: string): NonNullable<InitialSetupRecoveryRecordV1["error"]> {
-  if (!record(value)) throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  const title = localStorageText(value.title, `${field}.title`, 256);
-  const summary = localStorageText(value.summary, `${field}.summary`, 2_048);
-  const action = value.action === undefined ? undefined : localStorageText(value.action, `${field}.action`, 512);
-  const code = localStorageText(value.code, `${field}.code`, 128);
-  const incidentId = localStorageText(value.incidentId, `${field}.incidentId`, 128);
-  const transactionId = value.transactionId === undefined ? undefined : localStorageText(value.transactionId, `${field}.transactionId`, 128);
-  const diagnostic = localStorageText(value.diagnostic, `${field}.diagnostic`, 12_000);
-  const phase = localStorageEnum(value.phase, LOCAL_SETUP_PHASES, `${field}.phase`);
-  const rollback = localStorageEnum(value.rollback, LOCAL_SETUP_ROLLBACK_STATES, `${field}.rollback`);
-  return { title, summary, ...(action === undefined ? {} : { action }), code, incidentId, ...(transactionId === undefined ? {} : { transactionId }), diagnostic, phase, rollback };
-}
-
-function parseLocalStorageRecoveryRecord(value: unknown, field: string): InitialSetupRecoveryRecordV1 {
-  if (!record(value)) throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  if (value.format !== "keymaster.storage.initial-setup-recovery" || value.version !== 1) throw new TypeError(`Coordinator local-storage ${field}.format is invalid`);
-  if (value.backend !== "local" && value.backend !== "s3") throw new TypeError(`Coordinator local-storage ${field}.backend is invalid`);
-  const transactionId = localStorageText(value.transactionId, `${field}.transactionId`, 128);
-  const bucketId = localStorageText(value.bucketId, `${field}.bucketId`, 128);
-  const catalogEntryFingerprint = localStorageText(value.catalogEntryFingerprint, `${field}.catalogEntryFingerprint`, 64);
-  if (!/^[0-9a-f]{64}$/u.test(catalogEntryFingerprint)) throw new TypeError(`Coordinator local-storage ${field}.catalogEntryFingerprint is invalid`);
-  const configRevision = localStorageInteger(value.configRevision, `${field}.configRevision`);
-  const snapshotRevision = localStorageInteger(value.snapshotRevision, `${field}.snapshotRevision`);
-  const connectionFingerprint = localStorageText(value.connectionFingerprint, `${field}.connectionFingerprint`, 64);
-  if (!/^[0-9a-f]{64}$/u.test(connectionFingerprint)) throw new TypeError(`Coordinator local-storage ${field}.connectionFingerprint is invalid`);
-  const phase = localStorageEnum(value.phase, LOCAL_SETUP_PHASES, `${field}.phase`);
-  const catalog = localStorageEnum(value.catalog, LOCAL_SETUP_CATALOG_STATES, `${field}.catalog`);
-  if (typeof value.runtimeInstalled !== "boolean") throw new TypeError(`Coordinator local-storage ${field}.runtimeInstalled is invalid`);
-  const cleanup = localStorageEnum(value.cleanup, LOCAL_SETUP_ROLLBACK_STATES, `${field}.cleanup`);
-  const status = localStorageEnum(value.status, LOCAL_SETUP_STATUSES, `${field}.status`);
-  const allowedKeys = new Set([
-    "format", "version", "transactionId", "bucketId", "catalogEntryFingerprint",
-    "configRevision", "snapshotRevision", "backend", "connectionFingerprint", "phase",
-    "catalog", "runtimeInstalled", "cleanup", "status", "updatedAt",
-    ...(status === "succeeded" ? ["success"] : status === "failed" ? ["error"] : []),
-  ]);
-  if (Object.keys(value).some((key) => !allowedKeys.has(key))) throw new TypeError(`Coordinator local-storage ${field} fields are invalid`);
-  const success = value.success === undefined ? undefined : parseLocalStorageRecoverySuccess(value.success, `${field}.success`);
-  const error = value.error === undefined ? undefined : parseLocalStorageUserFacingError(value.error, `${field}.error`);
-  const updatedAt = localStorageInteger(value.updatedAt, `${field}.updatedAt`);
-  return {
-    format: "keymaster.storage.initial-setup-recovery",
-    version: 1,
-    transactionId,
-    bucketId,
-    catalogEntryFingerprint,
-    configRevision,
-    snapshotRevision,
-    backend: value.backend,
-    connectionFingerprint,
-    phase,
-    catalog,
-    runtimeInstalled: value.runtimeInstalled,
-    cleanup,
-    status,
-    ...(success === undefined ? {} : { success }),
-    ...(error === undefined ? {} : { error }),
-    updatedAt,
-  };
-}
-
-function parseLocalStorageCondition(value: unknown): StorageBucketWriteCondition | undefined {
-  if (value === undefined) return undefined;
-  if (!record(value)) throw new TypeError("Coordinator local-storage condition is invalid");
-  if (value.ifMatch !== undefined) localStorageText(value.ifMatch, "condition.ifMatch", 512);
-  if (value.ifNoneMatch !== undefined && value.ifNoneMatch !== "*") throw new TypeError("Coordinator local-storage condition.ifNoneMatch is invalid");
-  const ifMatch = value.ifMatch;
-  return {
-    ...(ifMatch === undefined ? {} : { ifMatch: ifMatch as string }),
-    ...(value.ifNoneMatch === undefined ? {} : { ifNoneMatch: "*" as const }),
-  };
-}
-
-function parseLocalStorageBinding(value: RecordValue): CoordinatorSessionBinding {
-  return {
-    peerGeneration: localStorageInteger(value.peerGeneration, "peerGeneration", 1),
-    sessionEpoch: localStorageText(value.sessionEpoch, "sessionEpoch", 256),
-    leaseId: localStorageText(value.leaseId, "leaseId", 256),
-  };
-}
-
-function assertNoLocalStorageTransportFields(value: RecordValue): void {
-  for (const field of ["authorityInstanceId", "signal", "requestId", "clientId"]) {
-    if (field in value) throw new TypeError(`Coordinator local-storage request contains transport field ${field}`);
-  }
-}
-
-function parseLocalStorageRequest(value: unknown): CoordinatorLocalStorageRequest {
-  if (!record(value)) throw new TypeError("Coordinator local-storage request must be an object");
-  assertNoLocalStorageTransportFields(value);
-  const binding = parseLocalStorageBinding(value);
-  const type = localStorageText(value.type, "request.type", 64);
-  if (type === "device-record-list" || type === "session-read") return { ...binding, type };
-  if (type === "device-record-get" || type === "device-record-delete") {
-    return { ...binding, type, remoteStorageId: localStorageText(value.remoteStorageId, "remoteStorageId", 128) };
-  }
-  if (type === "device-record-put") {
-    let record: DeviceRecordV1;
-    try {
-      record = validateDeviceRecord(value.record);
-    } catch {
-      throw new TypeError("Coordinator local-storage device record is invalid");
-    }
-    return {
-      ...binding,
-      type,
-      remoteStorageId: localStorageText(value.remoteStorageId, "remoteStorageId", 128),
-      record,
-      ...(value.replace === undefined ? {} : { replace: optionalLocalStorageBoolean(value.replace, "replace") }),
-    };
-  }
-  if (type === "session-write") {
-    let session: KeymasterSessionV1;
-    try {
-      session = validateKeymasterSession(value.session);
-    } catch {
-      throw new TypeError("Coordinator local-storage session is invalid");
-    }
-    return { ...binding, type, session };
-  }
-  if (type !== "get" && type !== "list" && type !== "put" && type !== "delete") throw new TypeError("Coordinator local-storage request type is unsupported");
-  const bucketId = localStorageText(value.bucketId, "bucketId", 128);
-  const bucketGeneration = localStorageInteger(value.bucketGeneration, "bucketGeneration", 1);
-  const objectPrefix = value.objectPrefix === undefined
-    ? undefined
-    : localStorageText(value.objectPrefix, "objectPrefix", 1_024);
-  const v1Fields = objectPrefix === undefined ? {} : { objectPrefix };
-  const path = type === "get" || type === "put" || type === "delete" ? localStorageText(value.path, "path", 4_096) : undefined;
-  if (type === "put") {
-    const bytes = localStorageBytes(value.bytes, "bytes");
-    const condition = parseLocalStorageCondition(value.condition);
-    return { ...binding, type, bucketId, bucketGeneration, path: path!, ...v1Fields, bytes, ...(condition === undefined ? {} : { condition }) };
-  }
-  if (type === "list") return {
-    ...binding, type, bucketId, bucketGeneration,
-    ...v1Fields,
-    ...(value.prefix === undefined ? {} : { prefix: localStorageText(value.prefix, "prefix", 4_096) }),
-    ...(value.cursor === undefined ? {} : { cursor: localStorageText(value.cursor, "cursor", 8_192) }),
-    ...(value.limit === undefined ? {} : { limit: localStorageInteger(value.limit, "limit", 1, 256) }),
-  };
-  if (path === undefined) throw new TypeError("Coordinator local-storage path is invalid");
-  return {
-    ...binding, type, bucketId, bucketGeneration, path,
-    ...v1Fields,
-    ...(value.ifMatch === undefined ? {} : { ifMatch: localStorageText(value.ifMatch, "ifMatch", 512) }),
-  };
-}
-
-function parseLocalStorageObject(value: unknown, field: string): CoordinatorLocalStorageObject {
-  if (!record(value)) throw new TypeError(`Coordinator local-storage ${field} is invalid`);
-  const path = localStorageText(value.path, `${field}.path`, 4_096);
-  const bytes = localStorageBytes(value.bytes, `${field}.bytes`);
-  const size = value.size === undefined ? undefined : localStorageInteger(value.size, `${field}.size`);
-  const etag = value.etag === undefined ? undefined : localStorageText(value.etag, `${field}.etag`, 512);
-  const lastModified = value.lastModified === undefined ? undefined : localStorageText(value.lastModified, `${field}.lastModified`, 128);
-  return { path, bytes, ...(size === undefined ? {} : { size }), ...(etag === undefined ? {} : { etag }), ...(lastModified === undefined ? {} : { lastModified }) };
-}
-
-function parseLocalStorageResponse(value: unknown): CoordinatorLocalStorageResponse {
-  if (!record(value)) throw new TypeError("Coordinator local-storage response must be an object");
-  const type = localStorageText(value.type, "response.type", 64);
-  if (type === "void" || type === "write") {
-    if (type === "write") {
-      const etag = value.etag === undefined ? undefined : localStorageText(value.etag, "response.etag", 512);
-      const lastModified = value.lastModified === undefined ? undefined : localStorageText(value.lastModified, "response.lastModified", 128);
-      return { type, ...(etag === undefined ? {} : { etag }), ...(lastModified === undefined ? {} : { lastModified }) };
-    }
-    return { type };
-  }
-  if (type === "object") return { type, ...(value.object === undefined ? {} : { object: parseLocalStorageObject(value.object, "response.object") }) };
-  if (type === "list") {
-    if (!Array.isArray(value.objects)) throw new TypeError("Coordinator local-storage response.objects is invalid");
-    return { type, objects: value.objects.map((item, index) => parseLocalStorageObject(item, `response.objects[${index}]`)), ...(value.nextCursor === undefined ? {} : { nextCursor: localStorageText(value.nextCursor, "response.nextCursor", 8_192) }) };
-  }
-  if (type === "device-records") {
-    if (!Array.isArray(value.entries)) throw new TypeError("Coordinator local-storage response.entries is invalid");
-    const entries = value.entries.map((item, index) => {
-      if (!record(item)) throw new TypeError(`Coordinator local-storage response.entries[${index}] is invalid`);
-      const remoteStorageId = localStorageText(item.remoteStorageId, `response.entries[${index}].remoteStorageId`, 128);
-      let deviceRecord: DeviceRecordV1;
-      try {
-        deviceRecord = validateDeviceRecord(item.record);
-      } catch {
-        throw new TypeError(`Coordinator local-storage response.entries[${index}].record is invalid`);
-      }
-      return { remoteStorageId, record: deviceRecord };
-    });
-    if (!Array.isArray(value.invalidKeys)) throw new TypeError("Coordinator local-storage response.invalidKeys is invalid");
-    return { type, entries, invalidKeys: value.invalidKeys.map((item, index) => localStorageText(item, `response.invalidKeys[${index}]`, 256)) };
-  }
-  if (type === "device-record") {
-    if (value.record === undefined) return { type };
-    let deviceRecord: DeviceRecordV1;
-    try {
-      deviceRecord = validateDeviceRecord(value.record);
-    } catch {
-      throw new TypeError("Coordinator local-storage response.record is invalid");
-    }
-    return { type, record: deviceRecord };
-  }
-  if (type === "session") {
-    if (value.session === undefined) return { type };
-    try {
-      return { type, session: validateKeymasterSession(value.session) };
-    } catch {
-      throw new TypeError("Coordinator local-storage response.session is invalid");
-    }
-  }
-  throw new TypeError("Coordinator local-storage response type is unsupported");
-}
-
 function parseKeyValueValue(value: unknown, field: string): KeyValueValue {
   if (value instanceof Uint8Array) return value.slice();
   return parseJsonValue(value, field);
@@ -4404,19 +3785,6 @@ export const COORDINATOR_TOPIC_STREAM_CAPABILITY = defineCapability<CoordinatorT
   transfer: { request: (value) => transfers(value), item: (value) => transfers(value) },
 });
 
-/** Window-side LocalStorage implementation used by the Coordinator. */
-export const COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY = defineCapability<CoordinatorLocalStorageRequest, CoordinatorLocalStorageResponse>({
-  kind: "rpc",
-  id: "keymaster.coordinator.local-storage",
-  version: "1.0.0",
-  request: { parse: parseLocalStorageRequest },
-  response: { parse: parseLocalStorageResponse },
-  transfer: {
-    request: (value) => transfers(value),
-    response: (value) => transfers(value),
-  },
-});
-
 /** Worker 暴露给已授权页面的 owner-storage 数据面。 */
 export const COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY = defineCapability<CoordinatorOwnerStorageData, CoordinatorOwnerStorageResult>({
   kind: "rpc",
@@ -4449,7 +3817,6 @@ export const COORDINATOR_CRYPTO_RPC_CAPABILITY = defineCapability<CoordinatorCry
 export const COORDINATOR_RUNTIME_CAPABILITIES = Object.freeze([
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
-  COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,

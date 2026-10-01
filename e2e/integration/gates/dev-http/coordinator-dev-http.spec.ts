@@ -197,8 +197,8 @@ test(GATE_ID + "：Vite dev Coordinator 在非安全 HTTP 上完成 Local 初始
         snapshot.runtimeKind === "shared-worker" &&
         snapshot.runtimeInstanceId.length > 0
       );
-      const setupPage = document.body.innerText.includes("Choose a bucket type") ||
-        document.body.innerText.includes("选择一个桶类型");
+      const setupPage = document.body.innerText.includes("New wallet") ||
+        document.body.innerText.includes("新建钱包");
       return evidence?.constructed === 1 && workerReady && setupPage;
     }, undefined, { timeout: 20_000 });
 
@@ -209,21 +209,15 @@ test(GATE_ID + "：Vite dev Coordinator 在非安全 HTTP 上完成 Local 初始
       snapshot.state === "ready" && snapshot.runtimeKind === "shared-worker" && snapshot.runtimeInstanceId.length > 0
     )).toBe(true);
     await expect(page.locator("[data-fatal-crash]")).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: /Choose a bucket type|选择一个桶类型/u })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /欢迎使用 Keymaster|Welcome to Keymaster/u })).toBeVisible();
 
     // 执行用户报告的确切最后一步。这会穿过 Window → 真实 SharedWorker →
     // LocalStorage bridge → keymaster-hold/browser，并包含 HMAC-SHA-256 文档完整性
     // 操作。只看到设置页不足以构成证据，因为故障只会在提交时出现。
-    await page.getByRole("button", { name: /Local/ }).click();
-    await page.getByLabel(/Bucket name|桶名称/u).fill("http-dev-bucket");
-    await page.getByRole("button", { name: /Next|Continue|继续/u }).click();
-    await page.getByLabel(/Password \(at least 8 characters\)|密码（至少 8 位）/u).fill("http-dev-password-123");
-    await page.getByLabel(/Confirm password|确认密码/u).fill("http-dev-password-123");
-    await page.getByRole("button", { name: /Next|Continue|继续/u }).click();
-    await page.getByRole("button", { name: /Create a Key|新建 Key/u }).click();
-    await page.getByLabel(/Tag Name|Key 标签名称/u).fill("http-dev-key");
-    await page.getByRole("button", { name: /Next|继续确认/u }).click();
-    await page.getByRole("button", { name: /Create bucket and first Key|创建桶和第一把 Key/u }).click();
+    await page.locator('button[data-intent="new"]').click();
+    await page.getByLabel(/^新密码$|^New password$/u).fill("http-dev-password-123");
+    await page.getByLabel(/^确认密码$|^Confirm password$/u).fill("http-dev-password-123");
+    await page.getByRole("button", { name: /^创建$|^Create$/u }).click();
 
     await expect.poll(async () => page.evaluate(() => ({
       path: new URL(location.href).pathname,
@@ -232,7 +226,8 @@ test(GATE_ID + "：Vite dev Coordinator 在非安全 HTTP 上完成 Local 初始
       timeout: 60_000,
       message: "HTTP non-secure initial setup should complete the final HMAC-backed transaction",
     }).toEqual({ path: "/", failed: false });
-    await expect(page.getByText("http-dev-key", { exact: true }).first()).toBeVisible();
+    // 新建路径的标签由应用写入默认标签，页面不再让用户输入；这里只验证壳层可用。
+    await expect(page.getByRole("navigation", { name: /Primary navigation|主导航/u })).toBeVisible({ timeout: 30_000 });
     await expect(page.locator("[data-fatal-crash]")).toHaveCount(0);
 
     const workerBootstrapErrors = browserErrors.filter((message) => /@react-refresh|window is not defined|pre-bootstrap\.plugins/u.test(message));

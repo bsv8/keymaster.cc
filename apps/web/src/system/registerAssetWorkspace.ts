@@ -418,7 +418,16 @@ function registerAssetsWorkspace(host: PluginHost): void {
     key: (_args, context) => ["assets.active-context", context.activePublicKeyHex ?? "none"],
     load: async (_args, context) => {
       if (!context.activePublicKeyHex) return null;
-      return (await keyspace.getKey(context.activePublicKeyHex)) ?? null;
+      // 单 Key 本地钱包：activePublicKeyHex 就是当前唯一 Key，身份由
+      // keyspace 直接投影；锁定/未初始化时取不到，返回 null。
+      if (context.activePublicKeyHex.toLowerCase() !== keyspace.active().activePublicKeyHex?.toLowerCase()) {
+        return null;
+      }
+      try {
+        return keyspace.requireActiveKey();
+      } catch {
+        return null;
+      }
     },
     subscribe: (_args, _context, invalidate) => keyspace.onActiveKeyChanged(invalidate),
     equals: (a, b) => a?.publicKeyHex === b?.publicKeyHex && a?.label === b?.label,

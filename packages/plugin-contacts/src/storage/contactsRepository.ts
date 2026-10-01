@@ -132,7 +132,7 @@ export function createContactsRepository(files: BorrowedOwnerFileStore) {
     },
     /** 新增：文件已存在（含并发创建）时抛 storage_conflict。 */
     async create(contact: Contact): Promise<void> {
-      await files.put(contactFileName(contact.publicKeyHex), serializeContactFile(contact), { ifNoneMatch: "*" });
+      await files.put(contactFileName(contact.publicKeyHex), serializeContactFile(contact), { ifNoneMatch: true });
     },
     /** 覆盖写入（更新或改名后的目标文件）。 */
     async put(contact: Contact): Promise<void> {

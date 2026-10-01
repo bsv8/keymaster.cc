@@ -16,27 +16,15 @@ import type {
   ProtocolFeePoolRecord,
   ProtocolOriginSettingsRecord
 } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import { createInMemoryKeyValueStore, withTestStorageBinding } from "@keymaster/runtime/storage";
 import { openProtocolStorageRepository as openBoundProtocolStorageRepository } from "./storage/protocolStorageRepository.js";
 import { PROTOCOL_STORAGE_DECLARATIONS } from "./storage/protocolStorageDeclarations.js";
 
 function createProtocolStores(suffix = Math.random().toString(36).slice(2, 8)) {
   return {
-    durablePolicy: createInMemoryKeyValueStore({
-      ...PROTOCOL_STORAGE_DECLARATIONS.durablePolicy,
-      bucketId: `protocol-policy-${suffix}`,
-      bucketGeneration: 1,
-    }),
-    sessions: createInMemoryKeyValueStore({
-      ...PROTOCOL_STORAGE_DECLARATIONS.sessions,
-      bucketId: `protocol-sessions-${suffix}`,
-      bucketGeneration: 1,
-    }),
-    commandHistory: createInMemoryKeyValueStore({
-      ...PROTOCOL_STORAGE_DECLARATIONS.commandHistory,
-      bucketId: `protocol-history-${suffix}`,
-      bucketGeneration: 1,
-    })
+    durablePolicy: createInMemoryKeyValueStore(withTestStorageBinding(PROTOCOL_STORAGE_DECLARATIONS.durablePolicy)),
+    sessions: createInMemoryKeyValueStore(withTestStorageBinding(PROTOCOL_STORAGE_DECLARATIONS.sessions)),
+    commandHistory: createInMemoryKeyValueStore(withTestStorageBinding(PROTOCOL_STORAGE_DECLARATIONS.commandHistory))
   };
 }
 

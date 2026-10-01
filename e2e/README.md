@@ -15,7 +15,7 @@ Flow     可复用业务过程，不单独注册测试(flows/*)
   ↓
 Driver   页面、协议和浏览器操作(drivers/*)
   ↓
-Resource S3、testnet、SatSubscription 等外部资源及其清理(resources/*)
+Resource testnet、SatSubscription 等外部资源及其清理(resources/*)
 
 Gate     不适合写成用户旅程的技术边界(gates/*)
 support/ 场景元数据、脱敏、诊断等横切能力
@@ -37,7 +37,7 @@ e2e/runs/<执行档>/<run-id>/
 ```
 
 - `e2e/runs/` 不进 git，可以按轮或按执行档整体删除；
-- 仓库外 `~/.config/keymaster-e2e/` 只保留秘密配置（s3.json、satsubscription.json、
+- 仓库外 `~/.config/keymaster-e2e/` 只保留秘密配置（satsubscription.json、
   seed-key.hex、key01.hex），两类数据不混用；
 - 跨轮资金账本已移除：固定 key01 + 每轮门禁 + 手工归集脚本承担恢复。
 
@@ -55,7 +55,6 @@ e2e/runs/<执行档>/<run-id>/
 | bitfs | `e2e/playwright.bitfs.config.ts` | `pnpm test:e2e:bitfs` | `journeys/bitfs` | 双浏览器真实 BitFS 买卖；使用 key01/key02、免费 SatSubscription 和 testnet，购买测试本体 1800s、执行器默认 1860s 硬超时（含构建时间），`workers: 1` |
 | satsubscription | `e2e/playwright.satsubscription.config.ts` | `pnpm test:e2e:satsubscription` | `journeys/satsubscription/{real-channel-message,ss-server-settings,ss-server-settings-bsv8}` | 从仓库外 SatSubscription 构建正式服务 + 一次性 PostgreSQL；需 `SATS_SUBSCRIPTION_DIR`、Go、PostgreSQL，360s 超时，`workers: 1` |
 | resources | `e2e/playwright.resources.config.ts` | `pnpm test:e2e:resources` | `resources/*`、`journeys/p2pkh/*`、`journeys/satsubscription/real-satsubscription-(health|page)` | 资源准备 + 链上资产/SatSubscription 健康；setup → 场景 → teardown 投影，真实资金场景串行(`workers: 1`)，`trace/screenshot/video` 全关 |
-| s3 | `e2e/playwright.s3.config.ts` | `pnpm test:e2e:s3` | `resources/s3-*`、`gates/s3/resource-safety`、`journeys/s3/real-s3-*` | 只读取仓库外 `s3.json`，不碰 testnet/Sat 秘密 |
 | deployment | `e2e/playwright.deployment.config.ts` | `pnpm test:e2e:deployment` | `journeys/deployment`、`gates/deployment` | 目标部署验收，必须提供不可变 Build ID；单项可用脚本入口(见下表) |
 
 执行档之外还有两个辅助脚本：`pnpm smoke:msfile-media-sw`(线上媒体 SW 响应头契约)和
@@ -70,8 +69,8 @@ Journey(6 项，跑在真实 Chromium 生产 preview 上，独立 BrowserContext
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
 | J-LOCAL-INIT-MENU | `journeys/local/initialization-generated.spec.ts` | 新用户生成 Key 完成初始化 → 刷新恢复 → 锁定 → 正确密码重新解锁同一身份 | KM-INIT-001、KM-VAULT-001、KM-NAV-001 |
-| J-LOCAL-INIT-IMPORTED | `journeys/local/initialization-imported-key.spec.ts` | 首次初始化走正式导入入口建立第一把 Hex Key，桶密码和私钥不落 localStorage/IndexedDB | KM-INIT-001、KM-VAULT-001 |
-| J-LOCAL-CONTACT-MESSAGE | `journeys/local/local-contact-message.spec.ts` | 保存联系人并归属当前 active Key；非法公钥在表单内失败，合法公钥打开正确会话 | KM-INIT-001、KM-CONTACT-001、KM-MESSAGE-001 |
+| J-LOCAL-INIT-IMPORTED | `journeys/local/initialization-imported-key.spec.ts` | 首次初始化走正式导入入口建立唯一一把 Hex Key，私钥不落 localStorage/IndexedDB | KM-INIT-001、KM-VAULT-001 |
+| J-LOCAL-CONTACT-MESSAGE | `journeys/local/local-contact-message.spec.ts` | 保存联系人并归属当前钱包 Key；非法公钥在表单内失败，合法公钥打开正确会话 | KM-INIT-001、KM-CONTACT-001、KM-MESSAGE-001 |
 | J-LOCAL-SETTINGS | `journeys/local/local-settings.spec.ts` | 从正式菜单打开系统/应用/插件设置；切换语言立即生效且刷新后持久化 | KM-NAV-001、KM-SETTINGS-001 |
 | J-LOCAL-P2PKH-NAVIGATION | `journeys/local/p2pkh-navigation.spec.ts` | 真实 provider 下打开链上交易和本地交易页面；无余额只验证导航，不冒充转账成功 | KM-ASSET-001、KM-NAV-001 |
 | J-LOCAL-MULTI-TAB-RECOVERY | `journeys/local/multi-tab-recovery.spec.ts` | 固定 tab1→tab2→tab1 顺序刷新，共享 Worker/catalog 下运行态可恢复 | KM-TECH-001、KM-LIFECYCLE-001 |
@@ -80,7 +79,7 @@ Gate(4 项)：
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
-| G-STORAGE-BROWSER-BOUNDARY | `gates/local/storage-browser-boundary.spec.ts` | 真实浏览器内 IndexedDB/localStorage/Web Crypto/SharedWorker 边界；Local 桶对象落在 IndexedDB，未授权时永久存储授权条持续显示，授权后消失 | KM-TECH-001 |
+| G-STORAGE-BROWSER-BOUNDARY | `gates/local/storage-browser-boundary.spec.ts` | 真实浏览器内 IndexedDB/localStorage/Web Crypto/SharedWorker 边界；钱包对象落在 IndexedDB 的 `keymaster.wallet`，未授权时永久存储授权条持续显示，授权后消失 | KM-TECH-001 |
 | G-LIFECYCLE-BOUNDARY | `gates/local/lifecycle-boundary.spec.ts` | 2 个用例：撤权同步先于 drain 并拒绝新操作；provider 注销后迟到刷新不能复活受保护 outpoint | KM-TECH-001、KM-LIFECYCLE-001 |
 | G-REDACTION-BOUNDARY | `gates/local/redaction-boundary.spec.ts` | SecretString 默认脱敏；私钥形状进入附件时在上传前被阻断 | KM-TECH-002 |
 | G-CONFIG-SAFETY | `gates/local/config-safety.spec.ts` | 2 个用例：合法仓库外配置只以 SecretString 载入；目录权限过宽时读取资源前 fail-closed | KM-TECH-002 |
@@ -147,21 +146,21 @@ BitFS 执行档启动一个真实 SatSubscription 和一次性 PostgreSQL。浏�
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
-| J-REAL-SATSUB-MESSAGE | `journeys/satsubscription/real-channel-message.spec.ts` | 三个独立浏览器进程各自建立白名单身份并连接正式供应商；验证真实 Channel 私信收发、刷新后本地历史、账本 0 扣费、第三方不可见，以及桶内 sent/received raw + timeindex 证据与 raw 缺失展示 | KM-MESSAGE-001、KM-SATSUB-001 |
+| J-REAL-SATSUB-MESSAGE | `journeys/satsubscription/real-channel-message.spec.ts` | 三个独立浏览器进程各自建立白名单身份并连接正式供应商；验证真实 Channel 私信收发、刷新后本地历史、账本 0 扣费、第三方不可见，以及 `messages/<peer>/` 下 sent/received raw + timeindex 证据与 raw 缺失展示 | KM-MESSAGE-001、KM-SATSUB-001 |
 | J-REAL-SATSUB-SERVER-SETTINGS | `journeys/satsubscription/ss-server-settings.spec.ts` | 单免费白名单用户连接本地 SS 供应商并设为默认发布方；红绿灯 online、刷新 SPI 余额、刷新远端订阅正常；一次性库预置 3 条正式正扣费账单后以每页 2 条做真实 SSP 查询，第 1 页→第 2 页→第 1 页往返且记录不重复；不测内置 bsv8 缺省供应商 | KM-SATSUB-001、KM-SETTINGS-001 |
 | J-REAL-SATSUB-DEFAULT-SETTINGS | `journeys/satsubscription/ss-server-settings-bsv8.spec.ts` | 直连内置 bsv8 缺省网关（非本地 SS）：红绿灯 online、刷新 SPI 余额、刷新远端订阅、查询空账单（翻页禁用）均正常；只读，不启用接收/发布/充值 | KM-SATSUB-001 |
 
 ## 5. p2pkh（链上资产与转账）
 
 项目依赖：`resource-setup` → `p2pkh` → `resource-teardown`；`resources` 项目断言 setup
-后的 lease 与运行状态。配置在仓库外 `~/.config/keymaster-e2e/`，缺失或权限不安全时 fail-closed。
+后的运行状态。配置在仓库外 `~/.config/keymaster-e2e/`，缺失或权限不安全时 fail-closed。
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
-| 资源准备 | `resources/resource-setup.spec.ts` | 整轮唯一 setup：配置权限预检；S3 取得 lease 并全量开场清理；testnet 网络/余额门禁 | KM-RESOURCE-001 |
-| 资源可用性 | `resources/resource-availability.spec.ts` | 断言同一 `run_id` 的资源状态存在且 lease 已取得，不读取长期秘密 | KM-RESOURCE-001 |
+| 资源准备 | `resources/resource-setup.spec.ts` | 整轮唯一 setup：配置权限预检；testnet 网络/余额门禁；写出不含秘密的运行状态 | KM-RESOURCE-001 |
+| 资源可用性 | `resources/resource-availability.spec.ts` | 断言同一 `run_id` 的运行状态存在，不读取长期秘密 | KM-RESOURCE-001 |
 | J-REAL-TESTNET-ROUNDTRIP | `journeys/p2pkh/real-testnet-roundtrip.spec.ts` | 唯一的真实 testnet 资产 Journey：页面导入仓库外 key01 固定 Key，seed 打入 50 sat 并等链上可观察；keymaster 的 WoC `unspent/all` 快照在转账 Offer 显示余额并记录到账耗时，用户以「全部」转回 seed，按原始交易核对 | KM-ASSET-001 |
-| 资源收尾 | `resources/resource-teardown.spec.ts` | 依赖失败也执行；清理指定桶并释放 lease，清理不确定时保留 lease 交给下一轮恢复 | KM-RESOURCE-001 |
+| 资源收尾 | `resources/resource-teardown.spec.ts` | 依赖失败也执行；配置指纹一致时移除本轮运行状态，不确定时保留给下一轮恢复 | KM-RESOURCE-001 |
 
 testnet 资金恢复：固定 key01 钱包 + 每轮开始的可花费输出门禁；广播结果未知时不盲目重发。
 遗留余额用 `pnpm collect:testnet:key01` 手工归集（Node 侧全部转出，自动扣费，不驱动页面）。
@@ -178,23 +177,7 @@ testnet 资金恢复：固定 key01 钱包 + 每轮开始的可花费输出门�
 | J-REAL-SATSUB-HEALTH | `journeys/satsubscription/real-satsubscription-health.spec.ts` | 只读取脱敏配置投影；Node 探针不冒充页面健康和充值/账本结果 | KM-SATSUB-001 |
 | J-REAL-SATSUB-PAGE | `journeys/satsubscription/real-satsubscription-page.spec.ts` | 真实页面把 multiaddr 映射为 supplier 配置；先验证错误公钥 disconnected/degraded，再验证正确公钥 online | KM-SATSUB-001 |
 
----
-
-## 6. s3（真实桶存储）
-
-项目依赖：`s3-resource-setup` → `s3`(安全 Gate + 初始化/切换 Journey) → `s3-resource-teardown`。
-
-| 编号 | 文件 | 中文说明 | 覆盖需求 |
-| --- | --- | --- | --- |
-| 资源准备 | `resources/s3-resource-setup.spec.ts` | 真实 S3 专用 setup：取得 lease 并执行非前缀全量开场清理，不读 testnet/Sat 秘密 | KM-RESOURCE-001、KM-INIT-002 |
-| G-RESOURCE-SAFETY | `gates/s3/resource-safety.spec.ts` | 真实业务对象只在本场景 `run_id/scenario_id` prefix 内；prefix 清理不越界，路径越界 fail-closed | KM-RESOURCE-001 |
-| J-REAL-S3-INIT | `journeys/s3/real-s3-initialization.spec.ts` | 真实 S3 表单连接探测 → 创建逻辑桶 → 首把 Key 提交到 run 隔离前缀 → 刷新恢复 → 主动锁定/仅 Key 密码解锁 → 清空本机目录的全新浏览器接入已有桶（解锁既有 Key 不覆盖）；凭据不进 localStorage | KM-INIT-002 |
-| J-REAL-S3-BUCKET-KEY-SWITCH | `journeys/s3/real-s3-bucket-key-switching.spec.ts` | Local 桶与真实 S3 桶各两把 Key（第二把在 `/storage/buckets` 新建）→ 桶内与跨桶交叉切换（以首页“我的信息”公钥为准）→ 桶管理页列出当前 S3/非当前 Local 桶 Key，并删除非当前 Local Key（KeyHold + owner 数据，不影响当前身份）；远端 keys/ 真值校验 | KM-STORAGE-001 |
-| 资源收尾 | `resources/s3-resource-teardown.spec.ts` | 全量业务清理确认后才释放 lease | KM-RESOURCE-001 |
-
----
-
-## 7. deployment
+## 6. deployment
 
 必须有非本机真实部署地址和不可变 Build ID(`commit40位-sourceDigest16位`)。前两项由
 `e2e/playwright.deployment.config.ts` 统一运行；带故障注入 runner 的 Gate 建议用脚本入口，
@@ -217,7 +200,6 @@ pnpm test:e2e:integration        # 完整本地集成
 pnpm test:e2e:msfile             # 本地/临时 Go supplier 的 MSFile Journey 与 Gate
 pnpm test:e2e:bitfs             # 双浏览器 BitFS 买卖与 testnet 购买
 pnpm test:e2e:satsubscription    # 真实 SatSubscription 源码 + 一次性 PostgreSQL 的 Channel 消息
-pnpm test:e2e:s3                 # 真实 S3
 pnpm test:e2e:resources          # 资源准备 + 真实资源集合
 pnpm test:e2e:deployment         # 指定部署验收
 pnpm collect:testnet:key01       # 手工把 key01 遗留 testnet 余额归集回 seed

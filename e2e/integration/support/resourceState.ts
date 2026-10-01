@@ -8,7 +8,6 @@ export interface ResourceRunState {
   readonly version: 1;
   readonly runId: string;
   readonly configFingerprint: string;
-  readonly s3LeaseAcquired: boolean;
   /** SatSubscription 的非敏感配置投影；真实连接结果由页面 Journey 验证。 */
   readonly satSubscription: {
     readonly network: "testnet";
@@ -59,7 +58,6 @@ export async function readResourceRunState(): Promise<ResourceRunState | null> {
       || typeof state.runId !== "string"
       || typeof state.configFingerprint !== "string"
       || !/^[0-9a-f]{16}$/iu.test(state.configFingerprint)
-      || state.s3LeaseAcquired !== true
       || !state.satSubscription
       || state.satSubscription.network !== "testnet"
       || typeof state.satSubscription.websocketVerified !== "boolean"

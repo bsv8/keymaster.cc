@@ -1,6 +1,6 @@
 // BitFS 同 Seed 下载计划：跨卖家共用唯一 Block 归属与每池付款预算。
 
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 
 const FORMAT = "keymaster.bitfs-buyer-download-plan";
 const VERSION = 2;
@@ -130,7 +130,7 @@ export function createBitfsBuyerDownloadPlan(input: {
   /** 报价绑定的文件名。 */
   recommendedFilename: string;
   /** 买方 BitFS journal 专用文件存储。 */
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
 }): BitfsBuyerDownloadPlan {
   const owner = assertKey(input.ownerPublicKeyHex);
   const seed = assertHash(input.seedHashHex);
@@ -138,13 +138,13 @@ export function createBitfsBuyerDownloadPlan(input: {
   const path = `download-plans/${seed}.json`;
   const lockKey = `${owner}:${seed}`;
 
-  const read = async (): Promise<{ plan: StoredPlan; etag?: string } | undefined> => {
+  const read = async (): Promise<{ plan: StoredPlan; revision?: string } | undefined> => {
     const object = await input.store.get(path);
     if (!object) return undefined;
     let raw: unknown;
     try { raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(object.bytes)); }
     catch { throw new Error("BitFS 同 Seed 下载计划损坏"); }
-    return { plan: validate(raw, owner, seed, size, input.recommendedFilename), ...(object.etag ? { etag: object.etag } : {}) };
+    return { plan: validate(raw, owner, seed, size, input.recommendedFilename), ...(object.revision ? { revision: object.revision } : {}) };
   };
   const fresh = (): StoredPlan => ({
     format: FORMAT, version: VERSION, ownerPublicKeyHex: owner, seedHashHex: seed,
@@ -167,8 +167,8 @@ export function createBitfsBuyerDownloadPlan(input: {
         const encoded = new TextEncoder().encode(`${JSON.stringify(changed.plan)}\n`);
         try {
           await input.store.put(path, encoded, stored
-            ? stored.etag ? { ifMatch: stored.etag } : {}
-            : { ifNoneMatch: "*" });
+            ? stored.revision ? { ifRevision: stored.revision } : {}
+            : { ifNoneMatch: true });
         } catch { continue; }
         const after = await read();
         const afterObject = await input.store.get(path);

@@ -25,7 +25,7 @@ import {
   verifySeedForSourceSize,
   type RandomAccessSeed,
 } from "masterseed";
-import type { OwnerFileListEntry, OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore, ModuleFileListEntry } from "@keymaster/contracts";
 import { sanitizeMsFileFilename } from "../fileAssembly.js";
 import { normalizeMsFileMediaType } from "../filePreviewPolicy.js";
 
@@ -355,7 +355,7 @@ async function runPool(
   if (signal?.aborted) fail("cancelled", "operation was cancelled");
 }
 
-async function putFile(store: OwnerFileStore, path: string, bytes: Uint8Array, signal: AbortSignal | undefined): Promise<void> {
+async function putFile(store: BorrowedOwnerFileStore, path: string, bytes: Uint8Array, signal: AbortSignal | undefined): Promise<void> {
   try {
     await store.put(path, bytes, signal === undefined ? {} : { signal });
   } catch (cause) {
@@ -363,7 +363,7 @@ async function putFile(store: OwnerFileStore, path: string, bytes: Uint8Array, s
   }
 }
 
-async function deleteFile(store: OwnerFileStore, path: string, signal: AbortSignal | undefined): Promise<void> {
+async function deleteFile(store: BorrowedOwnerFileStore, path: string, signal: AbortSignal | undefined): Promise<void> {
   try {
     await store.delete(path, signal === undefined ? {} : { signal });
   } catch (cause) {
@@ -371,7 +371,7 @@ async function deleteFile(store: OwnerFileStore, path: string, signal: AbortSign
   }
 }
 
-async function getFile(store: OwnerFileStore, path: string, signal: AbortSignal | undefined): Promise<Uint8Array | undefined> {
+async function getFile(store: BorrowedOwnerFileStore, path: string, signal: AbortSignal | undefined): Promise<Uint8Array | undefined> {
   try {
     const object = await store.get(path, signal === undefined ? {} : { signal });
     return object?.bytes;
@@ -380,8 +380,8 @@ async function getFile(store: OwnerFileStore, path: string, signal: AbortSignal 
   }
 }
 
-async function listPrefix(store: OwnerFileStore, prefix: string, signal: AbortSignal | undefined): Promise<OwnerFileListEntry[]> {
-  const files: OwnerFileListEntry[] = [];
+async function listPrefix(store: BorrowedOwnerFileStore, prefix: string, signal: AbortSignal | undefined): Promise<ModuleFileListEntry[]> {
+  const files: ModuleFileListEntry[] = [];
   let cursor: string | undefined;
   try {
     do {
@@ -440,7 +440,7 @@ async function createSeedBytesFromSource(
  * 重复上传同内容幂等覆盖；中断只留下无害孤儿块。
  */
 export async function storeMsFileSeed(input: {
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   source: MsFileSeedSource;
   signal?: AbortSignal;
   onProgress?(progress: MsFileSeedStoreProgress): void;
@@ -514,7 +514,7 @@ export async function storeMsFileSeed(input: {
  */
 export async function commitPurchasedMsFileContent(input: {
   /** 当前 Owner 的 `msfiles/` 根。 */
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   /** 报价与购买会话绑定的 Seed Hash。 */
   seedHashHex: string;
   /** exact Seed 原文。 */
@@ -608,7 +608,7 @@ export async function inspectPurchasedMsFileSeed(input: {
  * storage/ 的存在性、块是否完整都留到读取/校验时懒检测。
  */
 export async function listMsFileSeeds(input: {
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   signal?: AbortSignal;
 }): Promise<MsFileSeedEntry[]> {
   const { store, signal } = input;
@@ -657,7 +657,7 @@ export async function listMsFileSeeds(input: {
  */
 export async function inspectLocalMsFileSeed(input: {
   /** 当前 Owner 的 `msfiles/` 文件根。 */
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   /** 要检查的 Seed Hash。 */
   seedHashHex: string;
   /** 取消当前索引或读取操作。 */
@@ -695,7 +695,7 @@ export async function inspectLocalMsFileSeed(input: {
 /** 从 local MSFile 读取并验证一个 Seed，不加载 Block 内容。 */
 export async function readLocalMsFileSeed(input: {
   /** 当前 Owner 的 `msfiles/` 文件根。 */
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   /** 要读取的 Seed Hash。 */
   seedHashHex: string;
   /** 取消读取。 */
@@ -711,7 +711,7 @@ export async function readLocalMsFileSeed(input: {
  */
 export async function readLocalMsFileBlock(input: {
   /** 当前 Owner 的 `msfiles/` 文件根。 */
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   /** Block 所属 Seed Hash。 */
   seedHashHex: string;
   /** 要读取的 Block Hash。 */
@@ -748,7 +748,7 @@ export async function readLocalMsFileBlock(input: {
  */
 export async function readLocalMsFileBlocks(input: {
   /** 当前 Owner 的 `msfiles/` 文件根。 */
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   /** 所有 Block 共同所属的 Seed Hash。 */
   seedHashHex: string;
   /** 按调用方需要的顺序提交的 Block Hash 清单；返回 Map 按 Hash 查询。 */
@@ -805,7 +805,7 @@ export async function readLocalMsFileBlocks(input: {
  * `verifyBlock` 后组装。任何缺块、长度或摘要不符都会失败，不返回部分内容。
  */
 export async function readMsFileSeed(input: {
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   seedHashHex: string;
   signal?: AbortSignal;
   onProgress?(progress: MsFileSeedStoreProgress): void;
@@ -870,7 +870,7 @@ export async function readMsFileSeed(input: {
  * 4. 列 `storage/<seedhash>/` 一次，按种子里的去重 hash 逐一比对块文件是否存在。
  */
 export async function verifyMsFileSeed(input: {
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   seedHashHex: string;
   signal?: AbortSignal;
 }): Promise<MsFileSeedVerifyResult> {
@@ -943,7 +943,7 @@ export async function verifyMsFileSeed(input: {
  * 种子缺失或结构损坏时退回前缀列举。
  */
 export async function deleteMsFileSeed(input: {
-  store: OwnerFileStore;
+  store: BorrowedOwnerFileStore;
   seedHashHex: string;
   signal?: AbortSignal;
 }): Promise<void> {

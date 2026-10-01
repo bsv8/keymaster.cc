@@ -45,13 +45,6 @@ import {
   type StorageListResult,
   type StoragePutParams,
   type StoragePutResult,
-  type StorageUploadAbortParams,
-  type StorageUploadAbortResult,
-  type StorageUploadBeginParams,
-  type StorageUploadBeginResult,
-  type StorageUploadCompleteParams,
-  type StorageUploadPartParams,
-  type StorageUploadPartResult
 } from "@keymaster/contracts/connect-public";
 
 /** How the SDK obtains its Keymaster Session Window. */
@@ -537,54 +530,6 @@ export class KeymasterConnectClient {
    */
   storageDelete(params: StorageDeleteParams, options?: KeymasterRequestOptions): Promise<StorageDeleteResult> {
     return this.request("storage.delete", params, options);
-  }
-
-  /**
-   * Calls `storage.upload.begin` to start a multipart object upload.
-   *
-   * @group Storage
-   */
-  storageUploadBegin(
-    params: StorageUploadBeginParams,
-    options?: KeymasterRequestOptions
-  ): Promise<StorageUploadBeginResult> {
-    return this.request("storage.upload.begin", params, options);
-  }
-
-  /**
-   * Calls `storage.upload.part` to append one part to a multipart upload.
-   *
-   * @group Storage
-   */
-  storageUploadPart(
-    params: StorageUploadPartParams,
-    options?: KeymasterRequestOptions
-  ): Promise<StorageUploadPartResult> {
-    return this.request("storage.upload.part", params, options);
-  }
-
-  /**
-   * Calls `storage.upload.complete` to finalize a multipart upload.
-   *
-   * @group Storage
-   */
-  storageUploadComplete(
-    params: StorageUploadCompleteParams,
-    options?: KeymasterRequestOptions
-  ): Promise<StoragePutResult> {
-    return this.request("storage.upload.complete", params, options);
-  }
-
-  /**
-   * Calls `storage.upload.abort` to discard a multipart upload.
-   *
-   * @group Storage
-   */
-  storageUploadAbort(
-    params: StorageUploadAbortParams,
-    options?: KeymasterRequestOptions
-  ): Promise<StorageUploadAbortResult> {
-    return this.request("storage.upload.abort", params, options);
   }
 
   /**

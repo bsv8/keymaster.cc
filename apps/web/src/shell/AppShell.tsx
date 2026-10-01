@@ -25,15 +25,11 @@
 // 守卫判定已抽出到 `evaluateShellGuard` 纯函数，可单测。
 // `AppShell` 组件本身只负责订阅 + 渲染 + 路由允许。
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
 import { countRender, useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
 import { useI18n, usePluginHost, router } from "@keymaster/runtime";
 import type {
-  ActiveKeyState,
-  InitialActivationNotice,
-  KeyIdentity,
-  KeyspaceService,
   NoticeRecord,
   VaultService,
   VaultStatus
@@ -50,8 +46,7 @@ import type { ShellGuardResource } from "./shellResources.js";
 /** 已解锁壳层守卫的判定结果。 */
 export type ShellGuardState =
   | { kind: "normal" }
-  | { kind: "empty-vault-recovery" }
-  | { kind: "needs-repair"; keys: KeyIdentity[] }
+  | { kind: "needs-repair"; publicKeyHex?: string }
   | { kind: "diagnostic"; error: string };
 
 const EMPTY_NOTICE_RECORDS: NoticeRecord[] = [];
@@ -61,16 +56,7 @@ export function areShellGuardStatesEqual(a: ShellGuardState, b: ShellGuardState)
   if (a.kind !== b.kind) return false;
   if (a.kind === "diagnostic" && b.kind === "diagnostic") return a.error === b.error;
   if (a.kind !== "needs-repair" || b.kind !== "needs-repair") return true;
-  if (a.keys.length !== b.keys.length) return false;
-  return a.keys.every((key, index) => {
-    const other = b.keys[index];
-    return other !== undefined &&
-      key.publicKeyHex === other.publicKeyHex &&
-      key.label === other.label &&
-      key.createdAt === other.createdAt &&
-      key.capabilities.length === other.capabilities.length &&
-      key.capabilities.every((capability, capabilityIndex) => capability === other.capabilities[capabilityIndex]);
-  });
+  return a.publicKeyHex === b.publicKeyHex;
 }
 
 const AUTO_LOCK_ACTIVITY_EVENTS: Array<keyof WindowEventMap> = [
@@ -84,65 +70,36 @@ const AUTO_LOCK_ACTIVITY_EVENTS: Array<keyof WindowEventMap> = [
 /**
  * 纯函数：评估当前已解锁状态下的壳层守卫。
  *
- * 设计缘由（硬切换 005 反馈修复）：
- *   - "读失败" 必须 fail-closed 成 "diagnostic"，**不**误判为 0 key
- *     触发空 Vault 收敛。
- *   - "0 key" 才允许走 "empty-vault-recovery"，并通过 `onEmpty` 触发
- *     vault.recoverEmptyVaultToUninitialized() 等收敛动作。
- *   - "仍有 key 但都不可用" 走 "needs-repair"，由组件层决定如何渲染
- *     （修复态下 `/settings/vault` 仍允许渲染以避免锁死用户）。
+ * 设计缘由（单 Key 本地存储，docs/存储.md）：
+ *   - 已解锁且能读到唯一 Key 的公开身份 → normal。
+ *   - 已解锁但读不到身份 → needs-repair。**不**做任何自动收敛：系统里
+ *     只有一把 Key，没有"切到另一把"这种退路，也不需要"回未初始化"的
+ *     恢复路径；那样做只会破坏用户本地数据。
+ *   - 读取抛错 → diagnostic，fail closed。
  *
  * 抽出此函数是为了让守卫决策本身可单测，避免每次新增分支都要靠
  * mock 整个 React runtime 才能验证。
  */
 export async function evaluateShellGuard(args: {
   vaultStatus: VaultStatus;
-  active: ActiveKeyState;
-  listKeys: () => Promise<KeyIdentity[]>;
-  /**
-   * 进入 empty-vault-recovery 时触发的副作用。组件层通常在这里
-   * 调 vault.recoverEmptyVaultToUninitialized()；本函数本身不感知。
-   * 副作用抛错会被吞掉（recorderError 字段返回 true），但不影响
-   * 守卫结果。
-   */
-  onEmpty?: () => Promise<void> | void;
-}): Promise<{ state: ShellGuardState; recorderError: boolean }> {
-  if (args.vaultStatus !== "unlocked") {
-    return { state: { kind: "normal" }, recorderError: false };
-  }
-  if (args.active.activePublicKeyHex) {
-    return { state: { kind: "normal" }, recorderError: false };
-  }
-  // activePublicKeyHex 缺失：按 listKeys 决定走"恢复"/"修复"/"诊断"。
-  let list: KeyIdentity[];
+  getCurrentKey: () => Promise<{ publicKeyHex: string } | undefined>;
+  /** 身份投影里的公钥；仅用于 needs-repair 的诊断展示。 */
+  projectedPublicKeyHex?: string;
+}): Promise<ShellGuardState> {
+  if (args.vaultStatus !== "unlocked") return { kind: "normal" };
   try {
-    list = await args.listKeys();
+    const key = await args.getCurrentKey();
+    if (key) return { kind: "normal" };
+    return { kind: "needs-repair", publicKeyHex: args.projectedPublicKeyHex };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      state: { kind: "diagnostic", error: msg },
-      recorderError: false
-    };
+    return { kind: "diagnostic", error: err instanceof Error ? err.message : String(err) };
   }
-  if (list.length === 0) {
-    let recorderError = false;
-    if (args.onEmpty) {
-      try {
-        await args.onEmpty();
-      } catch {
-        recorderError = true;
-      }
-    }
-    return { state: { kind: "empty-vault-recovery" }, recorderError };
-  }
-  return { state: { kind: "needs-repair", keys: list }, recorderError: false };
 }
 
 export function AppShell() {
   countRender("apps/web/AppShell");
   const [mobileOpen, setMobileOpen] = useState(false);
   const host = usePluginHost();
-  const activationNotice = useResourceSelector<InitialActivationNotice | null, InitialActivationNotice | null>(host.resourceStore, "shell.activation-notice", [], (s) => s.data ?? null);
   const notices = useResourceSelector<NoticeRecord[], NoticeRecord[]>(host.resourceStore, "shell.notices", [], (s) => s.data ?? EMPTY_NOTICE_RECORDS);
   const guardResource = useResourceSelector<ShellGuardResource, ShellGuardResource>(host.resourceStore, "shell.guard", [], (s) => s.data ?? { kind: "normal" }, areShellGuardStatesEqual);
   const guard = guardResource as ShellGuardState;
@@ -187,45 +144,19 @@ export function AppShell() {
     };
   }, [vault, vaultStatus]);
 
-  // 硬切换 005 收尾：已解锁壳层守卫。
-  // 不变量：
-  //   - vault.status === "unlocked" + activePublicKeyHex 存在 → normal。
-  //   - vault.status === "unlocked" + activePublicKeyHex 缺失：
-  //       * listKeys() 读失败 → "diagnostic"（**不**触发空 Vault 收敛，
-  //         避免把"读失败"误判为"0 key"而误删 meta）。
-  //       * listKeys() length === 0 → "0 key 异常态"，调
-  //         `vault.recoverEmptyVaultToUninitialized()` 收敛到 uninitialized。
-  //       * listKeys() length > 0 → "修复/管理态"。
-  // 任何时候 status 切到非 unlocked 都让壳层降级到 normal，由 App 决定
-  // 切回 LockedShell。
-  useEffect(() => {
-    if (guard.kind !== "empty-vault-recovery") return;
-    void (typeof vault.recoverEmptyVaultToUninitialized === "function"
-      ? vault.recoverEmptyVaultToUninitialized()
-      : vault.lock());
-  }, [guard.kind, vault]);
-
-  function dismissNotice() {
-    if (vault && typeof vault.clearInitialActivationNotice === "function") {
-      vault.clearInitialActivationNotice();
-    }
-  }
-
   function retryGuardEvaluation() {
-    // 诊断态下让用户能重试一次 listKeys——只重新触发守卫评估，
-    // 不直接调用 listKeys（让守卫函数自己处理错误归类）。
+    // 只重新触发守卫评估；错误归类交给守卫函数自己处理。
     host.resourceStore.invalidate("shell.guard", []);
   }
 
-  // "诊断态"：listKeys 读失败。**不**触发空 Vault 收敛，暴露错误
-  // 并允许重试。
+  // "诊断态"：读取唯一 Key 身份失败。fail closed，暴露错误并允许重试。
   if (guard.kind === "diagnostic") {
     return (
       <div className="app-shell app-shell--diagnostic">
         <PageHeader
-          title={t("shell.appShell.diagnostic.title", { defaultValue: "无法读取 key 列表" })}
+          title={t("shell.appShell.diagnostic.title", { defaultValue: "无法读取钱包 Key" })}
           description={t("shell.appShell.diagnostic.desc", {
-            defaultValue: "读取 key 列表时出错；为避免误删数据，壳层守卫已暂停自动恢复路径。"
+            defaultValue: "读取钱包 Key 信息时出错；为避免误改数据，壳层守卫已暂停自动恢复路径。"
           })}
         />
         <NoticeRail host={host} notices={notices} />
@@ -242,25 +173,9 @@ export function AppShell() {
     );
   }
 
-  // "0 key 异常态"恢复期：渲染极简"正在恢复"占位，避免业务页
-  // 抢跑触发空指针。
-  if (guard.kind === "empty-vault-recovery") {
-    return (
-      <div className="app-shell app-shell--recovering">
-        <PageHeader
-          title={t("shell.appShell.recover.title", { defaultValue: "正在恢复…" })}
-          description={t("shell.appShell.recover.desc", {
-            defaultValue: "检测到 Vault 内已无 key，正在回到首启页面。"
-          })}
-        />
-        <NoticeRail host={host} notices={notices} />
-      </div>
-    );
-  }
-
-  // "修复/管理态"：active key 缺失时必须阻断普通业务页，避免用户在
-  // 没有身份的情况下继续操作。Key 管理页已删除（等待并入桶管理），
-  // 这里只给出恢复提示，不再提供跳转。
+  // "修复态"：已解锁但读不到唯一 Key 的公开身份时必须阻断普通业务页，
+  // 避免用户在身份不明的情况下继续操作。这里不做任何自动收敛——
+  // 单 Key 钱包没有"切到另一把 Key"的退路。
   if (guard.kind === "needs-repair") {
     return (
       <div className={`app-shell app-shell--repair ${mobileOpen ? "is-mobile-nav-open" : ""}`}>
@@ -281,7 +196,7 @@ export function AppShell() {
           ) : null}
           <main className="app-shell__main">
             <NoticeRail host={host} notices={notices} />
-            <RepairGuard keys={guard.keys} t={t} />
+            <RepairGuard publicKeyHex={guard.publicKeyHex} t={t} />
           </main>
         </div>
         <SiteFooter variant="app" />
@@ -292,8 +207,6 @@ export function AppShell() {
   return renderNormalShell({
     mobileOpen,
     setMobileOpen,
-    activationNotice,
-    dismissNotice,
     host,
     notices,
     t
@@ -303,8 +216,6 @@ export function AppShell() {
 interface NormalShellArgs {
   mobileOpen: boolean;
   setMobileOpen: (next: boolean | ((prev: boolean) => boolean)) => void;
-  activationNotice: InitialActivationNotice | null;
-  dismissNotice: () => void;
   host: ReturnType<typeof usePluginHost>;
   notices: NoticeRecord[];
   t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string;
@@ -313,8 +224,6 @@ interface NormalShellArgs {
 function renderNormalShell({
   mobileOpen,
   setMobileOpen,
-  activationNotice,
-  dismissNotice,
   host,
   notices,
   t
@@ -326,20 +235,6 @@ function renderNormalShell({
         mobileOpen={mobileOpen}
         onToggleMobileNav={() => setMobileOpen((v) => !v)}
       />
-      {activationNotice ? (
-        <div className="app-shell__notice" role="status">
-          <span>
-            {t("shell.unlocked.notice.activationPending", {
-              defaultValue:
-                "首把 Key 已保存，但未能自动设为 active。请在 Key 管理中手动切换。"
-            })}
-            {activationNotice.label ? ` (${activationNotice.label})` : ""}
-          </span>
-          <Button variant="ghost" size="sm" onClick={dismissNotice}>
-            {t("shell.unlocked.notice.dismiss", { defaultValue: "知道了" })}
-          </Button>
-        </div>
-      ) : null}
       <div className="app-shell__body">
         <Sidebar mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
         {mobileOpen ? (
@@ -475,53 +370,30 @@ function NoticeCard(props: {
 }
 
 interface RepairGuardProps {
-  keys: KeyIdentity[];
+  publicKeyHex?: string;
   t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string;
 }
 
-function RepairGuard({ keys, t }: RepairGuardProps) {
-  // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready；
-  // RepairGuard 永远不会再展示"failed / uninitialized"行；保留入口
-  // 仅为兜底 0-key 护栏。
-  const failedCount = useMemo(() => 0, [keys]);
-  const uninitializedCount = useMemo(() => 0, [keys]);
+function RepairGuard({ publicKeyHex, t }: RepairGuardProps) {
   return (
     <div className="app-shell__repair">
       <PageHeader
-        title={t("shell.appShell.repair.title", { defaultValue: "需要修复 Key 状态" })}
+        title={t("shell.appShell.repair.title", { defaultValue: "钱包 Key 状态不一致" })}
         description={t("shell.appShell.repair.desc", {
           defaultValue:
-            "当前 Vault 内已无可用的 active key。处理完失败或未初始化的 key 后再继续。"
+            "钱包已解锁，但读不到唯一 Key 的公开身份。已阻断其它业务页，以免在身份不明时修改数据。"
         })}
       />
       <EmptyState
-        title={t("shell.appShell.repair.emptyTitle", { defaultValue: "无可用 active key" })}
+        title={t("shell.appShell.repair.emptyTitle", { defaultValue: "读不到钱包 Key" })}
         description={t("shell.appShell.repair.emptyDesc", {
           defaultValue:
-            "检测到 Vault 内的 key 全部不可用（身份失败 / 初始化中）。Key 管理入口暂未开放（正在并入桶管理）。"
+            "请先锁定再解锁；如果仍然失败，需要重置钱包后重新创建或导入。重置会删除当前 Key 和全部本地钱包数据。"
         })}
       />
-      <ul className="app-shell__repair-list">
-        {keys.map((k) => (
-          <li key={k.publicKeyHex} className="app-shell__repair-item">
-            <span className="app-shell__repair-label">
-              {k.label || t("vault.settings.empty.label", { defaultValue: "未命名" })}
-            </span>
-            <span className="app-shell__repair-status app-shell__repair-status--ready">
-              {t("vault.settings.status.ready", { defaultValue: "可用" })}
-            </span>
-          </li>
-        ))}
-      </ul>
-      <p className="app-shell__repair-summary">
-        {t("shell.appShell.repair.summary", {
-          defaultValue:
-            "共 {{total}} 把 key：{{failed}} 失败 / {{init}} 初始化中。其它业务页已禁用。",
-          total: keys.length,
-          failed: failedCount,
-          init: uninitializedCount
-        })}
-      </p>
+      {publicKeyHex ? (
+        <p className="app-shell__repair-summary">{publicKeyHex}</p>
+      ) : null}
     </div>
   );
 }

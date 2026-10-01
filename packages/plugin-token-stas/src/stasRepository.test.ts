@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { OwnerAppStore } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createInMemoryKeyValueStore, withTestStorageBinding } from "@keymaster/runtime";
 import { createStasRepository, type StasTokenSnapshot } from "./storage/stasRepository.js";
 
 const OWNER_A = "02" + "11".repeat(32);
@@ -11,10 +11,7 @@ function snapshot(symbol: string, address = "addr-1", issuer = "issuer-1"): Stas
 }
 
 function makeStore(): OwnerAppStore {
-  return createInMemoryKeyValueStore({
-    ...CENTRAL_STORAGE_DECLARATIONS.tokenStasState, ownerPublicKeyHex: OWNER_A,
-    bucketId: "test", bucketGeneration: 1
-  }) as OwnerAppStore;
+  return createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.tokenStasState)) as OwnerAppStore;
 }
 
 describe("stasRepository", () => {

@@ -18,13 +18,6 @@ async function withConfigDirectory(run: (directory: string) => Promise<void>): P
   const directory = await mkdtemp(path.join(os.tmpdir(), "keymaster-e2e-config-"));
   await chmod(directory, 0o700);
   try {
-    await writeRestrictedFile(path.join(directory, "s3.json"), JSON.stringify({
-      endpoint: "https://s3.example.test",
-      region: "us-east-1",
-      bucket: "keymaster-e2e-bucket",
-      accessKeyId: "e2e-access",
-      secretAccessKey: "test-secret-value",
-    }));
     await writeRestrictedFile(path.join(directory, "satsubscription.json"), JSON.stringify({
       websocket: "wss://sat.example.test/socket",
       "webrtc-direct": "/dns4/sat.example.test/tcp/443/wss",
@@ -40,8 +33,6 @@ async function withConfigDirectory(run: (directory: string) => Promise<void>): P
 }
 
 function clearSecrets(config: LoadedE2EConfig | undefined): void {
-  config?.s3.secretAccessKey.clear();
-  config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
   config?.testnet.trackingKeyPrivateKeyHex.clear();
@@ -50,15 +41,14 @@ function clearSecrets(config: LoadedE2EConfig | undefined): void {
 /**
  * 业务结果：真实资源测试的配置错误必须在读取资源前被拒绝，不能让错误路径、
  * 凭据或工作树中的文件进入后续 E2E。这里验证的是配置文件安全边界，不模拟
- * S3、testnet 或 SatSubscription 的服务行为；真实服务行为由 resources/s3/satsubscription 执行档验证。
+ * testnet 或 SatSubscription 的服务行为；真实服务行为由 resources/satsubscription 执行档验证。
  */
 test(`${GATE_ID}：仓库外配置和秘密容器通过安全校验`, async () => {
   await withConfigDirectory(async (directory) => {
     let config: LoadedE2EConfig | undefined;
     try {
       config = await loadE2EConfig({ workspaceRoot: process.cwd(), configDir: directory });
-      expect(config.s3.endpoint).toBe("https://s3.example.test");
-      expect(String(config.s3.secretAccessKey)).toBe("[REDACTED_SECRET]");
+      expect(config.satsubscription.websocket).toBe("wss://sat.example.test/socket");
       expect(String(config.testnet.privateKeyHex)).toBe("[REDACTED_SECRET]");
       expect(String(config.testnet.trackingKeyPrivateKeyHex)).toBe("[REDACTED_SECRET]");
     } finally {

@@ -34,7 +34,7 @@ describe("msfilePlugin manifest", () => {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: TEST_OWNER,
         sessionEpoch: "test-msfile-session:1",
-        bucketGeneration: 1,
+        walletGeneration: "test-msfile-wallet:1",
       },
       coordinatorForPlugin: () => coordinator(),
       runtimeUnitImplementationRegistry: {
@@ -43,24 +43,14 @@ describe("msfilePlugin manifest", () => {
           : undefined,
       },
       storageBindingAuthority: {
-        openOwnerFileStore: async () => ({
-          list: async () => ({ files: [] }),
-          get: async () => undefined,
-          put: async () => ({}),
-          delete: async () => undefined,
-        }),
+        openOwnerFileStore: async () => (await import("@keymaster/runtime/storage")).createInMemoryModuleFileStore(),
         openOwnerAppStore: async ({ declaration }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
-          ...declaration,
-          ownerPublicKeyHex: TEST_OWNER,
-          bucketId: "test",
-          bucketGeneration: 1
+          ...(await import("@keymaster/runtime/storage")).withTestStorageBinding(declaration),
         }),
         openPlatformStore: async ({ declaration }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
-          ...declaration,
-          bucketId: "test",
-          bucketGeneration: 1
+          ...(await import("@keymaster/runtime/storage")).withTestStorageBinding(declaration),
         }),
-        deleteOwnerStorage: async () => undefined
+        clearStorageRoot: async () => undefined
       }
     });
     const laneRegistry: WindowP2pExecutorLaneRegistry = {

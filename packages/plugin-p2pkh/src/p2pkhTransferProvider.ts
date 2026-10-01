@@ -51,8 +51,6 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
   trackSubscribe(P2PKH_MSG.SYNC, () => notify());
   unsubs.push(deps.keyspace.onActiveKeyChanged(() => notify()));
-  // 硬切换 008 收尾：初始化结束也触发重拉。
-  unsubs.push(deps.keyspace.onInitializationChange(() => notify()));
   // 硬切换 001：global settings 变化也要触发重拉（testnet offer 显隐切换）。
   unsubs.push(deps.service.onGlobalSettingsChange(() => notify()));
 
@@ -73,7 +71,7 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
    * listOffers 的 fail-closed 防御。
    */
   function isTransferable(): boolean {
-    if (deps.keyspace.isInitializing()) return false;
+    // 没有 "初始化中" 这一独立状态：可用与否只看当前唯一 Key 是否已投影。
     return Boolean(deps.keyspace.active().activePublicKeyHex);
   }
 

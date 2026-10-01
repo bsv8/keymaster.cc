@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createInMemoryKeyValueStore, withTestStorageBinding } from "@keymaster/runtime";
 import {
   coerceBsvPriceGlobalConfig,
   createDefaultBsvPriceConfig,
@@ -15,12 +15,7 @@ import { DEFAULT_PRICE_PUBLISHER_PUBLIC_KEY_HEX } from "./constants.js";
 const PUBLISHER_A = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
 function createStore() {
-  return createInMemoryKeyValueStore({
-    ...CENTRAL_STORAGE_DECLARATIONS.bsvPrice,
-    ownerPublicKeyHex: PUBLISHER_A,
-    bucketId: "test",
-    bucketGeneration: 1
-  });
+  return createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.bsvPrice));
 }
 
 describe("normalizePublisherPublicKeyHex", () => {

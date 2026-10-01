@@ -161,23 +161,14 @@ function openIntegrationStore(publicKeyHex: string): import("./storage/testSuppo
 
 function makeIntegrationKeyspace(publicKeyHex: string): KeyspaceService {
   return {
-    listKeys: async () => [],
-    getKey: async () => undefined,
     active: () => ({ activePublicKeyHex: publicKeyHex }),
-    selected: () => publicKeyHex,
-    setActive: async () => undefined,
     requireActiveKey: () => ({
       publicKeyHex,
       label: "integration",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z"
     }),
-    onActiveKeyChanged: () => () => undefined,
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined,
-    attachBackgroundService: () => undefined
+    onActiveKeyChanged: () => () => undefined
   };
 }
 

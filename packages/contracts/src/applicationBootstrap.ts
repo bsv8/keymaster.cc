@@ -2,12 +2,15 @@
 import { defineCapability } from "webloom-framework";
 //
 // 这个状态与 Vault 状态、Storage 健康状态分开。启动不是一个简单的
-// loading/ready 二态，而是几个有明确前置条件的门禁：Storage onboarding、
-// Storage authentication、Vault selection、owner apps、Connect apps。
+// loading/ready 二态，而是几个有明确前置条件的门禁：本地钱包就绪、
+// Vault 能力、owner apps、Connect apps。
+//
+// 单 Key 本地存储（docs/存储.md）之后没有远程连接与独立的存储认证阶段：
+// 正常冷启动只会是 `uninitialized`（走创建/导入）或 `locked`（走解锁），
+// 两者由 Vault 状态机区分，不再需要 `storage-authentication`。
 
 export type ApplicationBootstrapPhase =
   | "storage-onboarding"
-  | "storage-authentication"
   | "vault-selection"
   | "owner-apps-ready"
   | "connect-apps-ready"
@@ -16,7 +19,12 @@ export type ApplicationBootstrapPhase =
 export interface ApplicationBootstrapSnapshot {
   /** 当前装配阶段。 */
   phase: ApplicationBootstrapPhase;
-  /** Coordinator Root 是否已经可读写。 */
+  /**
+   * 本地钱包结构是否完整到可以继续装配（ready 或 locked）。
+   *
+   * uninitialized 仍需先创建或导入唯一 Key；corrupt / unsupported /
+   * degraded 都必须 fail closed，不能折算成本字段为 true。
+   */
   storageReady: boolean;
   /** Vault 和 Keyspace capability 是否都已注册。 */
   vaultCapabilityReady: boolean;

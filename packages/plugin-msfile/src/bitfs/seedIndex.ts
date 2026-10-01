@@ -1,7 +1,7 @@
 // Coordinator 唯一卖方运行单元使用的 Seed 内存索引。
 // 索引是可丢弃派生缓存；锁定、切 Key、切存储或 generation 变化时清空。
 
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 import { inspectLocalMsFileSeed } from "../storage/msfileSeedStore.js";
 
 const META_PATTERN = /^meta\/([0-9a-f]{64})\.json$/u;
@@ -41,7 +41,7 @@ export class BitfsSeedIndex {
   invalidate(seedHashHex: string): void { this.entries.delete(seedHashHex); }
 
   /** 分页重建索引；迟到页或校验结果不能写入新 generation。 */
-  async build(store: OwnerFileStore, signal?: AbortSignal): Promise<number> {
+  async build(store: BorrowedOwnerFileStore, signal?: AbortSignal): Promise<number> {
     const generation = ++this.generation;
     this.entries.clear();
     let cursor: string | undefined;
@@ -79,7 +79,7 @@ export class BitfsSeedIndex {
   }
 
   /** 定向重新校验一个 Seed。 */
-  async refresh(store: OwnerFileStore, seedHashHex: string, expectedGeneration = this.generation, signal?: AbortSignal): Promise<void> {
+  async refresh(store: BorrowedOwnerFileStore, seedHashHex: string, expectedGeneration = this.generation, signal?: AbortSignal): Promise<void> {
     const descriptor = await inspectLocalMsFileSeed({ store, seedHashHex, ...(signal === undefined ? {} : { signal }) });
     if (expectedGeneration !== this.generation || signal?.aborted) return;
     if (!descriptor) { this.entries.delete(seedHashHex); return; }

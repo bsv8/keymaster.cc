@@ -6,7 +6,7 @@
 //   - 重试只重放已持久化的 exact bytes，保证幂等；
 //   - 本模块不持有私钥、不解析池业务状态、不决定业务是否完成。
 
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import { bitfsTxidHex } from "./txid.js";
 
@@ -64,7 +64,7 @@ export interface BitfsTransactionJournal {
   listTransactions(): Promise<BitfsTransactionRecord[]>;
 }
 
-export function createBitfsTransactionJournal(store: OwnerFileStore): BitfsTransactionJournal {
+export function createBitfsTransactionJournal(store: BorrowedOwnerFileStore): BitfsTransactionJournal {
   const rawPath = (txid: string) => `transactions/${assertId(txid)}.bin`;
   const recordPath = (txid: string) => `transactions/${assertId(txid)}.json`;
   const readRecord = async (txid: string): Promise<BitfsTransactionRecord | undefined> => {
@@ -80,12 +80,12 @@ export function createBitfsTransactionJournal(store: OwnerFileStore): BitfsTrans
       if (!(rawTx instanceof Uint8Array) || rawTx.byteLength === 0) throw new TypeError("BitFS 交易原文不能为空");
       const prior = await store.get(rawPath(txid));
       if (prior && !equal(prior.bytes, rawTx)) throw new Error("BitFS txid 已绑定不同交易字节");
-      if (!prior) await store.put(rawPath(txid), rawTx.slice(), { ifNoneMatch: "*" });
+      if (!prior) await store.put(rawPath(txid), rawTx.slice(), { ifNoneMatch: true });
       const committed = await store.get(rawPath(txid));
       if (!committed || !equal(committed.bytes, rawTx)) throw new Error("BitFS 交易 outbox 持久化校验失败");
       const existing = await readRecord(txid);
       if (!existing) {
-        await store.put(recordPath(txid), encodeRecord({ txid, state: "prepared", attempts: 0, updatedAt: iso(nowMs) }), { ifNoneMatch: "*" });
+        await store.put(recordPath(txid), encodeRecord({ txid, state: "prepared", attempts: 0, updatedAt: iso(nowMs) }), { ifNoneMatch: true });
       }
     },
     async getTransaction(txid) {

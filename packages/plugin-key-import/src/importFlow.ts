@@ -1,8 +1,12 @@
 // packages/plugin-key-import/src/importFlow.ts
 // 导入流程：把 importer 解析结果交给 vault 持久化。
 // 设计缘由：流程归平台，格式解析归 importer-*，vault 仅负责加密保存。
+//
+// 单 Key 本地存储（docs/存储.md）之后，导入只有一种用途：**首次**初始化
+// 钱包。系统里不会再有第二把 Key，因此不存在"向已有钱包追加一把 Key"的
+// 路径；`persistImport` 直接走 `vault.initialize()` 的原子提交。
 
-import type { KeyImportResult, VaultService } from "@keymaster/contracts";
+import type { KeyImportResult, VaultService, WalletInitializePlan, WalletKeySummary } from "@keymaster/contracts";
 
 export interface ImportOptions {
   /** 用户填写的标签。 */
@@ -19,15 +23,19 @@ export async function persistImport(
   vault: VaultService,
   result: KeyImportResult,
   options: ImportOptions
-) {
+): Promise<WalletKeySummary> {
   if (!options.label) throw new Error("Label is required");
-  const ref = await vault.importPrivateKey({
-    password: options.password,
-    label: options.label,
-    material: result.material,
-    format: result.detectedFormat,
-    capabilities: options.capabilities ?? ["p2pkh"],
-    source: options.source
-  });
-  return ref;
+  const plan: WalletInitializePlan = {
+    transactionId: `import-${crypto.randomUUID()}`,
+    firstKey: {
+      kind: "import",
+      label: options.label,
+      material: result.material,
+      format: result.detectedFormat,
+      ...(options.source === undefined ? {} : { source: options.source }),
+      capabilities: options.capabilities ?? ["p2pkh"],
+      password: options.password
+    }
+  };
+  return vault.initialize(plan);
 }

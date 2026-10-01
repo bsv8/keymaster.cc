@@ -58,7 +58,7 @@ interface ProductionHooks {
   readBlocks(supplierPublicKeyHex: string, blockHashHexes: string[]): Promise<ReadSummary[]>;
   seedConnectSession(input: { sessionId: string; origin: string; proof: typeof APP_IDENTITY_PROOF }): Promise<{ ownerPublicKeyHex: string }>;
   appAuthorizations(): Promise<Array<{ appName: string; key: { appId: string } }>>;
-  switchToGeneratedKey(): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string }>;
+  replaceWalletIdentity(label: string): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string; walletGeneration: string }>;
   lock(): Promise<string>;
   unlock(): Promise<string>;
 }
@@ -841,7 +841,7 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
 
     const keySwitch = await controlPage.evaluate(async () => {
       const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
-      return api.switchToGeneratedKey();
+      return api.replaceWalletIdentity("MSFile production E2E replacement key");
     });
     expect(keySwitch.activePublicKeyHex).not.toBe(keySwitch.previousPublicKeyHex);
     await configure(controlPage, fixture, [fixture.webRtcAddress]);

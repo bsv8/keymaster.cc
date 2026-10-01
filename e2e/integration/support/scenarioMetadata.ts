@@ -1,15 +1,15 @@
 import type { IntegrationScenarioMetadata } from "./types.js";
 
-/** 本地示例 Journey：初始化后用户可以进入首页菜单。 */
+/** 本地示例 Journey：创建钱包后用户可以进入首页菜单。 */
 export const LOCAL_INIT_MENU_SCENARIO = {
   id: "J-LOCAL-INIT-MENU",
   level: "local-integration",
   requirementIds: ["KM-INIT-001", "KM-VAULT-001", "KM-NAV-001"],
-  startingState: "全新 Chromium context，没有 Local catalog、Vault 或 active Key。",
+  startingState: "全新 Chromium context，本地钱包里没有 key.json 与 .keymaster/meta。",
   successCriteria: [
-    "初始化事务只提交一次并创建一把带标签的 Key。",
-    "运行态安装完成后进入首页，Local catalog 只有一个选中桶。",
-    "刷新页面后仍能读取同一桶和 active Key。",
+    "钱包创建事务只提交一次并创建唯一一把带标签的 Key。",
+    "运行态安装完成后进入首页，钱包只持有固定 key.json 这一把 Key。",
+    "刷新页面后仍能从 IndexedDB 读取同一把 Key 与同一 walletGeneration。",
   ],
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
@@ -19,10 +19,10 @@ export const LOCAL_CONTACT_MESSAGE_SCENARIO = {
   id: "J-LOCAL-CONTACT-MESSAGE",
   level: "local-integration",
   requirementIds: ["KM-INIT-001", "KM-CONTACT-001", "KM-MESSAGE-001"],
-  startingState: "全新 Chromium context，用户尚未建立身份或联系人。",
+  startingState: "全新 Chromium context，用户尚未创建钱包或联系人。",
   successCriteria: [
-    "初始化只发生一次。",
-    "联系人保存到当前 active Key 的业务空间。",
+    "钱包创建只发生一次。",
+    "联系人保存到当前钱包 Key 的业务空间。",
     "错误的会话身份在表单内失败，修正后可以进入对应会话页面。",
   ],
   resourceProfile: "local-browser",
@@ -50,10 +50,10 @@ export const REAL_BITFS_PURCHASE_SCENARIO = {
   requirementIds: ["KM-MSFILE-001", "KM-SATSUB-001", "KM-ASSET-001", "KM-BROADCAST-001"],
   startingState: "两个独立浏览器分别导入 key01.hex 与 key02.hex；Node 使用 seed-key.hex、真实 testnet 链和一个免费白名单 SatSubscription 服务。key02 上传固定 MP4，key01 获得按采购预算反推 120% 的 testnet 启动资金。",
   successCriteria: [
-    "key02 通过真实桶页面完成 MP4 上传，页面 Seed Hash 与 Node 独立计算一致，并进入可以出售状态。",
+    "key02 通过真实 MSFile 页面完成 MP4 上传，页面 Seed Hash 与 Node 独立计算一致，并进入可以出售状态。",
     "key01 通过免费 SatSubscription 发布真实 Hash 需求，收到单数字 Seed/Block 报价后完成 BitFS WebRTC 购买。",
     "key01 页面显示购买完成，专款账本的 testnet 费用池已关池且无 pool-occupied/recovery-pending 输出。",
-    "购买后的文件在 key01 桶中可校验、下载，字节长度和 SHA-256 与源 MP4 一致。",
+    "购买后的文件在 key01 的本地钱包中可校验、下载，字节长度和 SHA-256 与源 MP4 一致。",
     "key01 剩余 testnet 输出按低费率归集回 seed，SatSubscription 所有操作 charged_subunits 为 0。",
   ],
   resourceProfile: "testnet",
@@ -64,9 +64,9 @@ export const REAL_SATSUB_SERVER_SETTINGS_SCENARIO = {
   id: "J-REAL-SATSUB-SERVER-SETTINGS",
   level: "satsubscription",
   requirementIds: ["KM-SATSUB-001", "KM-SETTINGS-001"],
-  startingState: "Node 从仓库外 SATS_SUBSCRIPTION_DIR 构建正式 cmd/satsubscription 并启动一次性 PostgreSQL；单用户用确定性免费白名单 Hex Key 初始化本地桶并把本地 SS 供应商设为默认发布方；3 条正扣费账单由一次性库的正式 operations fixture 预置（查询走真实 SSP）。",
+  startingState: "Node 从仓库外 SATS_SUBSCRIPTION_DIR 构建正式 cmd/satsubscription 并启动一次性 PostgreSQL；单用户用确定性免费白名单 Hex Key 建立本地钱包并把本地 SS 供应商设为默认发布方；3 条正扣费账单由一次性库的正式 operations fixture 预置（查询走真实 SSP）。",
   successCriteria: [
-    "初始化桶 Key 后进入广播网关页，本地 SS 供应商红绿灯变绿（online）且中文说明为已连接。",
+    "初始化钱包 Key 后进入广播网关页，本地 SS 供应商红绿灯变绿（online）且中文说明为已连接。",
     "点击刷新 SPI 余额后行内出现 BSV/testnet 账户余额且无报错。",
     "点击刷新远端订阅后状态栏提示已刷新且无报错。",
     "以每页 2 条查询账单：第 1 页 2 条且有下一页，第 2 页 1 条且与第 1 页不重复，返回第 1 页记录一致，全程无报错。",
@@ -82,7 +82,7 @@ export const LOCAL_SATSUBSCRIPTION_DEFAULT_SCENARIO = {
   id: "J-LOCAL-SATSUB-DEFAULT",
   level: "local-integration",
   requirementIds: ["KM-SETTINGS-001", "KM-LIFECYCLE-001"],
-  startingState: "全新 Chromium context 完成 Local 初始化；缺省 SatSubscription 供应商由运行时写入。",
+  startingState: "全新 Chromium context 完成本地钱包创建；缺省 SatSubscription 供应商由运行时写入。",
   successCriteria: [
     "解锁后广播网关中的 SatSubscription 显示缺省 bsv8 供应商。",
     "单页面刷新必须回到锁定页，重新输入 Key 密码后才能进入。",
@@ -97,7 +97,7 @@ export const LOCAL_SETTINGS_SCENARIO = {
   id: "J-LOCAL-SETTINGS",
   level: "local-integration",
   requirementIds: ["KM-NAV-001", "KM-SETTINGS-001"],
-  startingState: "全新 Chromium context 已完成 Local 初始化，Vault 已解锁且存在 active Key。",
+  startingState: "全新 Chromium context 已完成本地钱包创建，钱包已解锁。",
   successCriteria: [
     "系统、价格、插件和广播网关入口都由正式业务菜单打开。",
     "BSV 链入口位于设置菜单下，并同时展示 P2PKH 与 WOC 配置。",
@@ -106,39 +106,6 @@ export const LOCAL_SETTINGS_SCENARIO = {
     "插件依赖状态和广播网关页可以读取，设置页失败时保留可诊断结果。",
   ],
   resourceProfile: "local-browser",
-} as const satisfies IntegrationScenarioMetadata;
-
-/** 真实 S3 首次初始化 Journey；物理桶由 s3.json 指定，页面创建逻辑桶。 */
-export const REAL_S3_INITIALIZATION_SCENARIO = {
-  id: "J-REAL-S3-INIT",
-  level: "s3",
-  requirementIds: ["KM-INIT-002"],
-  startingState: "s3.json 指定的真实物理桶已取得本轮 lease 并完成开场清理，浏览器是全新 Chromium context。",
-  successCriteria: [
-    "页面通过正式 S3-compatible 表单完成连接探测，并创建一个真实 S3 后端的逻辑桶。",
-    "首个 Hold、Vault 和第一把 Key 提交到本轮 run_id/scenario_id 隔离的远端对象前缀。",
-    "刷新后目录、选中桶和第一把 Key 仍可从真实 S3 恢复，访问凭据和桶密码不进入 localStorage。",
-    "主动锁定只释放 Key 应用锁，桶认证保留；仅凭 Key 密码即可重新解锁。",
-    "清空本机目录的全新浏览器连接同一已有数据的桶时必须走“解锁已有钱包”，远端 KeyHold 不被改写。",
-  ],
-  resourceProfile: "s3",
-} as const satisfies IntegrationScenarioMetadata;
-
-/** 真实 S3 + Local 双桶双 Key 交叉切换 Journey；以首页「我的信息」公钥为准。 */
-export const REAL_S3_BUCKET_KEY_SWITCH_SCENARIO = {
-  id: "J-REAL-S3-BUCKET-KEY-SWITCH",
-  level: "s3",
-  requirementIds: ["KM-STORAGE-001"],
-  startingState: "s3.json 指定的真实物理桶已取得本轮 lease 并完成开场清理；浏览器从全新 Local 桶开始建立身份。",
-  successCriteria: [
-    "Local 桶与真实 S3 桶各有两把 Key；第二把 Key 通过 /storage/buckets 的“新建 Key”产生。",
-    "Local↔S3 跨桶与桶内切换后，首页“我的信息”公钥和 session.activeKey 都与目标 Key 一致。",
-    "S3 非当前桶必须先输入桶密码读取 Keys；Local 桶无需桶密码。",
-    "真实 S3 前缀下 keys/ 只有本场景的两把 KeyHold，当前 Key 的应用锁由当前 session 持有。",
-    "条件写能力随设备记录持久化（native/best-effort），连接与列 Keys 不再自动探测；桶管理页可手工重新探测并写回。",
-    "桶管理页直接列出当前 S3 与非当前 Local 桶的 Key；删除非当前 Local Key 会移除 KeyHold 与该 Key 的 owner 数据，且不影响当前身份。",
-  ],
-  resourceProfile: "s3",
 } as const satisfies IntegrationScenarioMetadata;
 
 /** 生命周期技术 Gate：验证撤权先于 drain，并阻止旧 owner 的迟到结果回写。 */
@@ -168,7 +135,7 @@ export const REAL_TESTNET_ROUNDTRIP_SCENARIO = {
   requirementIds: ["KM-ASSET-001"],
   startingState: "真实 testnet 资金库已完成网络、余额和预算检查；浏览器是全新 Chromium context；页面从仓库外 key01.hex 正式导入固定测试 Key，该地址在上一轮必须已无可花费输出。",
   successCriteria: [
-    "页面导入后的 active Key 公钥等于 key01 派生公钥，Node 只按这个可追踪 testnet 地址从 seed 打入 50 sat 并等待链上（mempool 即可）可观察。",
+    "页面导入后的钱包 Key 公钥等于 key01 派生公钥，Node 只按这个可追踪 testnet 地址从 seed 打入 50 sat 并等待链上（mempool 即可）可观察。",
     "Keymaster 的 WoC `unspent/all` 快照在转账 Offer 上把余额检测为 50 sats，而不是 Node 侧重新查询余额；广播/链上可观察/页面可见三个时间点写入脱敏附件。",
     "用户填写 seed 地址并以“全部”转出：预览无找零、矿工费从余额扣除，页面返回 local-confirmed 和 canonical txid。",
     "转出后页面余额回到 0；Node 按原始交易核对回款消费了资助输出、seed 实收金额与页面预览一致且损失不超过声明上限；页面广播前失败时用同一把 key01 按同一低费率归集回 seed。",
@@ -214,7 +181,7 @@ export const REAL_SATSUBSCRIPTION_PAGE_SCENARIO = {
   id: "J-REAL-SATSUB-PAGE",
   level: "satsubscription",
   requirementIds: ["KM-SATSUB-001"],
-  startingState: "全新 Chromium context，用户通过真实 Local 页面建立 active Key；Node 只读取仓库外 Sat 配置。",
+  startingState: "全新 Chromium context，用户通过真实页面创建钱包 Key；Node 只读取仓库外 Sat 配置。",
   successCriteria: [
     "页面把 satsubscription.json 的 websocket/webrtc-direct libp2p multiaddr 映射为供应商 multiaddrs，并保存真实配置。",
     "正确公钥和地址在页面供应商行显示 online；故意错误公钥在同一页面显示 disconnected 或 degraded。",
@@ -228,7 +195,7 @@ export const REAL_SATSUB_DEFAULT_SETTINGS_SCENARIO = {
   id: "J-REAL-SATSUB-DEFAULT-SETTINGS",
   level: "satsubscription",
   requirementIds: ["KM-SATSUB-001"],
-  startingState: "全新 Chromium context，用户通过真实 Local 页面建立全新 active Key；不启动本地 SS，直连构建对应的缺省网关。",
+  startingState: "全新 Chromium context，用户通过真实页面创建全新钱包 Key；不启动本地 SS，直连构建对应的缺省网关。",
   successCriteria: [
     "bsv8 缺省卡片显示内置默认说明且无删除按钮，红绿灯变绿（online）。",
     "刷新 SPI 余额后行内出现 BSV 账户且无报错，刷新远端订阅后状态栏提示已刷新且无报错。",
@@ -260,7 +227,7 @@ export const STORAGE_BROWSER_GATE = {
   startingState: "真实 Chromium 打开的生产 preview，未注入 Node 存储替身。",
   successCriteria: [
     "浏览器提供 localStorage、IndexedDB、Web Crypto 和 SharedWorker 能力。",
-    "Local 桶对象只写入 IndexedDB；localStorage 只保留 keymaster.device.* 与 keymaster.session 引导记录。",
+    "唯一 Key 只写入 IndexedDB 的固定 key.json 与 .keymaster/meta；localStorage 不承载任何钱包数据。",
     "IndexedDB 未获持久化授权时授权条持续显示，授权后消失且刷新仍保持。",
   ],
   resourceProfile: "local-browser",
@@ -273,36 +240,22 @@ export const CONFIG_SAFETY_GATE = {
   requirementIds: ["KM-TECH-002"],
   startingState: "临时配置目录位于 Git 工作树之外，目录和文件权限由测试明确设置。",
   successCriteria: [
-    "合法配置可以读入，但 S3/testnet 秘密只以 SecretString 存在。",
+    "合法配置可以读入，但 testnet 秘密只以 SecretString 存在。",
     "目录权限过宽时在读取任何资源前 fail-closed。",
   ],
   resourceProfile: "none",
 } as const satisfies IntegrationScenarioMetadata;
 
-/** 真实 S3 Resource 安全 Gate：验证真实 lease、prefix 清理范围和收尾边界。 */
-export const RESOURCE_SAFETY_GATE = {
-  id: "G-RESOURCE-SAFETY",
-  level: "s3",
-  requirementIds: ["KM-RESOURCE-001"],
-  startingState: "真实 S3 setup 已读取仓库外 s3.json、取得 lease 并完成非前缀开场清理。",
-  successCriteria: [
-    "真实业务对象只在本场景 run_id/scenario_id prefix 下创建。",
-    "prefix 清理不会删除另一个 prefix，路径越界会 fail-closed。",
-    "prefix 清理和非前缀 teardown 都在释放 lease 前完成并确认。",
-  ],
-  resourceProfile: "s3",
-} as const satisfies IntegrationScenarioMetadata;
-
-/** 本地初始化 Journey：沿用正式导入入口建立第一把 Hex Key。 */
+/** 本地初始化 Journey：沿用正式导入入口建立唯一一把 Hex Key。 */
 export const LOCAL_IMPORTED_KEY_SCENARIO = {
   id: "J-LOCAL-INIT-IMPORTED",
   level: "local-integration",
   requirementIds: ["KM-INIT-001", "KM-VAULT-001"],
-  startingState: "全新 Chromium context，没有 Local catalog、Vault 或 active Key，使用一次性测试 Hex Key。",
+  startingState: "全新 Chromium context，本地钱包尚未初始化，使用一次性测试 Hex Key。",
   successCriteria: [
-    "用户可以在首次初始化中解析并导入 Hex Key，而不是只能生成 Key。",
-    "导入后的 Key 标签、公钥归属由 session 与桶文件真值可观察。",
-    "桶密码和一次性私钥原文不进入 localStorage、IndexedDB 或测试附件。",
+    "用户可以在首次创建钱包时解析并导入 Hex Key，而不是只能生成 Key。",
+    "导入后的 Key 标签、公钥归属由 key.json 真值可观察。",
+    "Key 密码和一次性私钥原文不进入 localStorage、IndexedDB 或测试附件。",
   ],
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
@@ -326,10 +279,10 @@ export const MULTI_TAB_RECOVERY_SCENARIO = {
   id: "J-LOCAL-MULTI-TAB-RECOVERY",
   level: "local-integration",
   requirementIds: ["KM-TECH-001", "KM-LIFECYCLE-001"],
-  startingState: "同一 Chromium context 中 tab1 已完成 Local 初始化，第二个 tab 共享同源 Worker 和 catalog。",
+  startingState: "同一 Chromium context 中 tab1 已创建本地钱包，第二个 tab 共享同一份 IndexedDB 钱包和同源 Worker。",
   successCriteria: [
     "tab1 刷新进入可恢复锁定态，仍能读到同一把 Key。",
-    "tab2 打开并刷新不会破坏共享 catalog 或旧 peer。",
+    "tab2 打开并刷新不会破坏共享钱包或旧 peer。",
     "回到 tab1 再刷新仍可恢复，失败时保留脱敏诊断。",
   ],
   resourceProfile: "local-browser",
@@ -343,7 +296,7 @@ export const COORDINATOR_DEV_HTTP_GATE = {
   startingState: "非 loopback 信任的 Vite dev HTTP origin，真实 Chromium 未注入 Worker 替身。",
   successCriteria: [
     "非安全上下文仍能观察真实 SharedWorker、有效 Web Crypto 和无 Service Worker 的边界。",
-    "Local 初始化最终 HMAC 提交成功，目录、Hold 和第一把 Key 都可读回。",
+    "本地钱包创建最终 HMAC 提交成功，key.json 与运行态都可读回。",
     "Worker 启动错误和页面 fatal crash 均不被吞掉。",
   ],
   resourceProfile: "local-browser",
@@ -399,7 +352,7 @@ export const REAL_MSFILE_OFFICIAL_SCENARIO = {
   id: "J-REAL-MSFILE-OFFICIAL",
   level: "msfile",
   requirementIds: ["KM-MSFILE-001"],
-  startingState: "全新 Chromium context 已完成 Local 初始化；MSFile 系统内置 BSV8 官方供应商（公钥 039da3…26，WSS /dns4/msfiles.bsv8.com/tcp/443/tls/ws）。",
+  startingState: "全新 Chromium context 已完成本地钱包创建；MSFile 系统内置 BSV8 官方供应商（公钥 039da3…26，WSS /dns4/msfiles.bsv8.com/tcp/443/tls/ws）。",
   successCriteria: [
     "内置官方供应商无需手工添加：设置页标记为系统内置且不能删除，Test connection 完成真实 WSS 连接和协议协商。",
     "sample-15s.wav、sample-15s.mp3、sample-30s.mp4 都通过虚拟媒体 URL 进入原生 Range 播放，产生真实 Block 读取，而不是整文件 Blob 下载。",

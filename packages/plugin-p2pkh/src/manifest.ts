@@ -719,11 +719,12 @@ const p2pkhPluginDefinition = {
       },
       protectedOutpoints,
       getKeyForOwner: async (ownerPublicKeyHex: string) => {
-        const key = await keyspace.getKey(ownerPublicKeyHex);
-        if (!key || !key.publicKeyHex) {
+        // 单 Key 本地钱包：只有当前唯一 Key 能作为 owner。
+        const active = keyspace.active().activePublicKeyHex;
+        if (!active || active.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
           throw new Error(`P2PKH owner key not ready: ${ownerPublicKeyHex}`);
         }
-        return { publicKeyHex: key.publicKeyHex };
+        return { publicKeyHex: keyspace.requireActiveKey().publicKeyHex };
       }
     }));
 
@@ -769,14 +770,9 @@ const p2pkhPluginDefinition = {
       id: "p2pkh.readiness",
       scope: "active-key",
       key: (_args, context) => ["p2pkh.readiness", context.activePublicKeyHex ?? "none"],
-      load: async () => keyspace.isInitializing()
-        ? "initializing"
-        : (keyspace.active().activePublicKeyHex ? "ready" : "no-active-key"),
-      subscribe: (_args, _ctx, invalidate) => {
-        const offActive = keyspace.onActiveKeyChanged(invalidate);
-        const offInit = keyspace.onInitializationChange(invalidate);
-        return () => { offActive(); offInit(); };
-      },
+      load: async () => (keyspace.active().activePublicKeyHex ? "ready" : "no-active-key"),
+      // 初始化状态不再是 keyspace 的一部分：ready 只取决于当前唯一 Key 投影。
+      subscribe: (_args, _ctx, invalidate) => keyspace.onActiveKeyChanged(invalidate),
       invalidation: "immediate"
     });
 
@@ -889,7 +885,7 @@ const p2pkhPluginDefinition = {
         const publicKeyHex = context.activePublicKeyHex;
         if (!publicKeyHex) return {};
         const [identity, resourcesForKey] = await Promise.all([
-          keyspace.getKey(publicKeyHex),
+          Promise.resolve(keyspace.requireActiveKey()),
           service.listResources(args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined)
         ]);
         return { activePublicKeyHex: publicKeyHex, identity, resource: resourcesForKey[0] };

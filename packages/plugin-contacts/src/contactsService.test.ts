@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ActiveKeyState, OwnerFileStore } from "@keymaster/contracts";
+import type { ActiveKeyState, ModuleFileStore } from "@keymaster/contracts";
 import { createContactsService } from "./contactsService.js";
 
 const OWNER = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -9,42 +9,49 @@ const BOB = "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 function keyspace() {
   const state: ActiveKeyState = { activePublicKeyHex: OWNER };
   return {
-    listKeys: async () => [],
-    getKey: async () => undefined,
     active: () => state,
-    selected: () => state.activePublicKeyHex,
-    setActive: async () => undefined,
     requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" }),
     onActiveKeyChanged: () => () => undefined,
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined,
   };
 }
 
 /** 内存 owner 文件根：只模拟 CAS 语义与相对路径,不引入第二套持久化模型。 */
-function memoryFileStore(): OwnerFileStore & { puts: Array<{ path: string; text: string }> } {
+function memoryFileStore(): ModuleFileStore & { puts: Array<{ path: string; text: string }> } {
   const files = new Map<string, Uint8Array>();
   const puts: Array<{ path: string; text: string }> = [];
   const encode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+  const stamp = () => new Date().toISOString();
   return {
     puts,
+    walletGeneration: "test-wallet",
+    sessionEpoch: "test-epoch",
+    runGeneration: "test-run",
     list: async (input = {}) => ({
       files: [...files.entries()]
         .filter(([path]) => (input.prefix === undefined || input.prefix === "" ? true : path.startsWith(input.prefix)))
-        .map(([path, bytes]) => ({ path, size: bytes.byteLength })),
+        .map(([path, bytes]) => ({ path, size: bytes.byteLength, revision: "r1", lastModified: stamp() })),
     }),
     get: async (path) => files.has(path)
-      ? { path, bytes: new Uint8Array(files.get(path)!) }
+      ? { path, bytes: new Uint8Array(files.get(path)!), revision: "r1", lastModified: stamp() }
       : undefined,
     put: async (path, bytes, condition = {}) => {
-      if (condition.ifNoneMatch === "*" && files.has(path)) throw Object.assign(new Error("目标已存在"), { code: "storage_conflict" });
+      if (condition.ifNoneMatch === true && files.has(path)) throw Object.assign(new Error("目标已存在"), { code: "storage_conflict" });
       puts.push({ path, text: encode(bytes) });
       files.set(path, new Uint8Array(bytes));
-      return {};
+      return { revision: "r1", lastModified: stamp() };
     },
     delete: async (path) => { files.delete(path); },
+    getRange: async (path, range) => files.has(path)
+      ? { path, bytes: new Uint8Array(files.get(path)!).slice(range.offset, range.offset + range.length), revision: "r1", lastModified: stamp() }
+      : undefined,
+    batch: async (input) => {
+      for (const operation of input.operations) {
+        if (operation.type === "put") files.set(operation.path, new Uint8Array(operation.bytes));
+        else files.delete(operation.path);
+      }
+      return { paths: input.operations.map((operation) => operation.path), committedAt: stamp() };
+    },
+    close: () => { files.clear(); },
   };
 }
 

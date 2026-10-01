@@ -77,7 +77,6 @@ import type {
   KeyValueValue,
   KeyValueCommitInput,
   ActiveKeyCrypto,
-  StorageBootstrapState,
   PluginIntentStateEvent,
   CoordinatorAuthorityRecovery,
   CoordinatorRpcRequest,
@@ -86,20 +85,20 @@ import type {
   CoordinatorSessionOpenRequest,
   CoordinatorSessionCloseRequest,
   CoordinatorSessionBinding,
-  CoordinatorLocalStorageRequest,
-  CoordinatorLocalStorageResponse,
   CoordinatorTopicSubscription,
   CoordinatorOwnerStorageResult,
   CoordinatorPlatformStorageResult,
   SnapshotStore,
   StorageSnapshotJsonCompatible,
-  StorageHoldHeadExpectation,
   PluginStorageDeclaration,
 } from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, REMOTE_STORAGE_HOLD_HEAD_PATH, REMOTE_STORAGE_ROOT_MANIFEST_PATH, KEYMASTER_SESSION_RECOMMENDED_ITERATIONS, createKeymasterSession, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, encodeBase64Url, parseCoordinatorResponseFor, validateKeyHoldDocument, validateKeymasterSession, BACKGROUND_MANAGED_SYNC_TASK_IDS, backgroundSyncDefaultIntervalMs, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, isValidBackgroundSyncIntervalMs, CHAIN_HEIGHT_SYNC_TASK_ID, emptyChainHeightSnapshot, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, deriveAppStorageName, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor, BACKGROUND_MANAGED_SYNC_TASK_IDS, backgroundSyncDefaultIntervalMs, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, isValidBackgroundSyncIntervalMs, CHAIN_HEIGHT_SYNC_TASK_ID, emptyChainHeightSnapshot, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
 import {
   BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
+} from "@keymaster/contracts";
+import {
+  buildWalletStorageRoot,
 } from "@keymaster/contracts";
 import {
   COORDINATOR_CRYPTO_SERVICE,
@@ -110,7 +109,6 @@ import {
 import {
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
-  COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
@@ -126,7 +124,7 @@ import {
   normalizeMsFileReadConcurrencySettings,
   SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
-import { installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, generatePrivateKeyHex as generateValidPrivateKeyHex, configureVaultStorageRepository, disposeVaultStorageRepository, vaultStorageRepository, type VaultCatalogHoldAdapter, type VaultCatalogHoldRecord, type VaultCatalogHoldSnapshot } from "@keymaster/plugin-vault/coordinator";
+import { installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, generatePrivateKeyHex as generateValidPrivateKeyHex } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import {
@@ -172,7 +170,10 @@ import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordi
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { BorrowedOwnerFileStore, DeviceRecordV1, DeviceLocationV1, ExistingRemoteStorageConnectPlan, ExistingRemoteStorageConnectResult, InitialSetupFirstKey, InitialSetupPlan, InitialSetupRecoveryRecordV1, InitialSetupRecoveryResult, InitialSetupRecoverySuccessV1, InitialSetupKeyResult, InitialSetupResult, KeyHoldDocumentV1, KeymasterSessionKeyDerivationV1, KeymasterSessionV1, KeyspaceService, KeyValueStore, OwnerFileStore, PlatformRootStore, StorageBucketConnectionConfigV1, StorageBucketProvider, StorageBucketReadOnlyProvider, StorageBucketRef, StorageRecordV1, StorageKeyDerivationV1, StorageBucketSwitchResultV1, StorageCatalogKeyIndexRecordV1, StorageRuntimeBucketV1, StorageBucketListPage, StorageBucketObject, StorageBucketProbeResult, StorageBucketWriteCondition, VaultService, WocService, WocServiceHandle, WocQueueSnapshot, BsvNetwork, ChainHeightSnapshot } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, KeyspaceService, KeyValueStore, ModuleFileListEntry, ModuleFileStore, PlatformRootStore, VaultService, WocService, WocServiceHandle, WocQueueSnapshot, BsvNetwork, ChainHeightSnapshot } from "@keymaster/contracts";
+import type { ActiveKeyState, KeyIdentity, WalletColdStartSnapshot, WalletInitializePlan, WalletInitializeResult, WalletLifecycleEvent, WalletLifecycleService } from "@keymaster/contracts";
+import type { StorageNamespaceBinding } from "@keymaster/contracts";
+import { WALLET_KEYHOLD_PATH, WALLET_META_PATH } from "@keymaster/contracts";
 import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
@@ -187,14 +188,18 @@ import type {
   AssetDataChangedEvent,
   WocUtxoResponse,
 } from "@keymaster/contracts";
-import { createStorageRuntimeController, createPlatformRootStore, createKeyValueStore, openMultipartUploadRepository, StorageHealthController, StorageRuntimeError, createLocalStorageBucketProvider, createS3BucketProvider, normalizeProviderConfig, encryptDeviceConfig, decryptDeviceConfig, createKeyLock, createKeyHoldRepository, createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument, generateSessionId, createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode } from "@keymaster/platform-storage/coordinator";
-import type { BucketObjectStoreCapabilityState, KeyHoldFile, KeyHoldRepository, KeyLock, LocalStorageBridgeRequest, LocalStorageBridgeResponse, UnlockedKeyHold } from "@keymaster/platform-storage/coordinator";
+import {
+  createStorageRuntimeController,
+  createPlatformRootStore,
+  createWalletLifecycleService,
+  createIndexedDbWalletStore,
+  createWalletKeyRepository,
+  StorageRuntimeError,
+} from "@keymaster/platform-storage/coordinator";
+import type { WalletKeyRepository, WalletStore } from "@keymaster/platform-storage/coordinator";
+import { WALLET_LIST_MAX_LIMIT } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
-
-// 旧 Hold/目录事务尚未从本文件删除前，集中定义它们所需的旧连接形状。
-// 新 device-bootstrap v1 不允许这些字段；这里只是让待删除的旧编排保持
-// 可编译，所有真正写入新文件的路径仍必须使用 v1 校验器。
 // SharedWorker 的模块状态（包括 session epoch）会在下面初始化；先安装
 // HTTP fallback，避免 insecure host 上的首个随机 ID 读取到缺失的 randomUUID。
 installInsecureContextCryptoFallback();
@@ -323,506 +328,6 @@ import {
   type SatP2pkhService,
 } from "@keymaster/plugin-sat-subscription/coordinator";
 
-// Vault 平台元数据操作（Worker 内只访问 Storage bootstrap 注入的句柄）。
-// 私钥密文永远由 Hold adapter 读写；这些 K-V 只保存公开索引、认证元数据、
-// Add/Delete 共用的生命周期日志。
-function wipeUnlockedDeviceBootstrapKeys(): void {
-  unlockedKeyHold?.privateKeyBytes.fill(0);
-  unlockedKeyHold = undefined;
-}
-
-/** v1 解锁结果只在 Worker 内存中保留，不能进入页面或任何 K-V。 */
-function adoptUnlockedDeviceBootstrapKey(unlocked: UnlockedKeyHold): void {
-  wipeUnlockedDeviceBootstrapKeys();
-  unlockedKeyHold = unlocked;
-}
-
-function unlockedDeviceBootstrapPrivateKey(publicKeyHex: string): Uint8Array | undefined {
-  const wanted = publicKeyHex.toLowerCase();
-  return unlockedKeyHold?.document.publicKeyHex === wanted ? unlockedKeyHold.privateKeyBytes : undefined;
-}
-
-async function getActiveKey(): Promise<PublicVaultKeyRecord | undefined> {
-  const selectedPublicKeyHex = coordinatorMeta.selectedPublicKeyHex;
-  if (selectedPublicKeyHex) {
-    const selected = await getPublicVaultKey(selectedPublicKeyHex);
-    if (selected) return selected;
-  }
-  const keys = await listPublicVaultKeys();
-  const first = keys[0];
-  if (first) {
-    coordinatorMeta.selectedPublicKeyHex = first.publicKeyHex;
-    await persistSelectedPublicKey();
-  }
-  return first;
-}
-
-/** Reconcile persisted selection from public key listings only. */
-async function reconcileSelectedPublicKey(): Promise<boolean> {
-  const activeKey = await getActiveKey();
-  if (activeKey) return true;
-
-  // 没有 Key 就是空状态，回到首启流程。
-  coordinatorMeta.selectedPublicKeyHex = undefined;
-  await persistSelectedPublicKey();
-  return false;
-}
-
-function selectedCatalogBucket(): StorageRuntimeBucketV1 | undefined {
-  const entry = storageBootstrapState?.selectedBucket;
-  const provider = platformBucketProvider;
-  const root = platformRootStore;
-  if (!entry || !provider || !root) return undefined;
-  if (entry.bucketId !== provider.bucketId || entry.backend !== provider.provider) return undefined;
-  if (root.bucket.bucketId !== entry.bucketId || root.bucket.provider !== entry.backend) return undefined;
-  return entry;
-}
-
-/**
- * 当前桶的设备目录投影。
- *
- * 页面设备引导只保存本机连接密文（每次加密使用随机 IV），运行态条目则绑定
- * 远端 Hold 权威 storage record。页面目录 CAS 按密文比较，因此 Worker 发起
- * 目录更新必须用这份投影做 expected/next：纯元数据更新保留本机连接密文，
- * 只有配置/改密流程显式发布新密文时才让两者收敛。
- */
-/**
- * Key 公开元数据的内存缓存。
- *
- * keys/ 下的 KeyHold 文件是唯一真值（见 KeymasterFormats）；本缓存只为
- * 列表展示保留本次会话内计算出的 address/capabilities/createdAt 等派生
- * 字段,重启后按需从文件重建,不再写入任何桶内 K-V。
- */
-const vaultKeyIndexCache = new Map<string, StorageCatalogKeyIndexRecordV1>();
-let vaultKeyIndexHydrated = false;
-
-/** 首次读取时从 KeyHold 文件重建缓存；文件读取失败保持空列表。 */
-async function hydrateVaultKeyIndex(): Promise<void> {
-  if (vaultKeyIndexHydrated) return;
-  vaultKeyIndexHydrated = true;
-  if (!hasVaultHoldBinding()) return;
-  try {
-    const snapshot = await requireVaultHoldAdapter().readCommitted({ password: "" });
-    for (const key of snapshot.keys) {
-      const lower = key.publicKeyHex.toLowerCase();
-      if (!vaultKeyIndexCache.has(lower)) vaultKeyIndexCache.set(lower, catalogIndexFromHoldKey(key));
-    }
-  } catch {
-    // 未绑定/读取失败时列表为空;后续 replaceKeys 会重新填充。
-    vaultKeyIndexHydrated = false;
-  }
-}
-
-function resetVaultKeyIndexCache(): void {
-  vaultKeyIndexCache.clear();
-  vaultKeyIndexHydrated = false;
-}
-
-function currentCatalogKeyIndex() {
-  return {
-    listKeys: async () => { await hydrateVaultKeyIndex(); return [...vaultKeyIndexCache.values()].map((record) => structuredClone(record)); },
-    getKey: async (publicKeyHex: string) => {
-      await hydrateVaultKeyIndex();
-      const record = vaultKeyIndexCache.get(publicKeyHex.toLowerCase());
-      return record ? structuredClone(record) : undefined;
-    },
-    replaceKeys: async (records: readonly StorageCatalogKeyIndexRecordV1[]) => {
-      vaultKeyIndexCache.clear();
-      for (const record of records) vaultKeyIndexCache.set(record.publicKeyHex.toLowerCase(), structuredClone(record));
-      vaultKeyIndexHydrated = true;
-    },
-    deleteKey: async (publicKeyHex: string) => { vaultKeyIndexCache.delete(publicKeyHex.toLowerCase()); },
-  };
-}
-
-type PublicVaultKeyRecord = {
-  publicKeyHex: string;
-  label: string;
-  address?: string;
-  network?: "main" | "test";
-  format: string;
-  capabilities: string[];
-  createdAt: string;
-  source?: string;
-};
-
-function catalogIndexToPublicKey(record: StorageCatalogKeyIndexRecordV1): PublicVaultKeyRecord {
-  return {
-    publicKeyHex: record.publicKeyHex,
-    label: record.label,
-    ...(record.address === undefined ? {} : { address: record.address }),
-    ...(record.network === undefined ? {} : { network: record.network }),
-    format: record.keyFormat,
-    capabilities: [...record.capabilities],
-    createdAt: record.createdAt,
-    ...(record.source === undefined ? {} : { source: record.source }),
-  };
-}
-
-/**
- * 目录桶的单 Key 备份格式。
- *
- * 它只携带一个已经用“源桶密码”加密的 Hold KeyRecord；导出不会解密
- * 私钥。导入时先用 sourcePassword 解开，再由目标桶密码重新封装并发布
- * 到目标桶的完整 Hold 快照，因此不会重新引入 KeyHold 私钥副本。
- */
-async function exportCatalogKeyBackup(publicKeyHex: string): Promise<string> {
-  const provider = platformBucketProvider;
-  if (!provider) throw new StorageRuntimeError("storage_unavailable", "The selected runtime bucket is unavailable");
-  const bytes = await createKeyHoldRepository(provider).export(publicKeyHex);
-  return new TextDecoder().decode(bytes);
-}
-
-async function exportVaultKeyBackup(publicKeyHex: string): Promise<string> {
-  if (selectedCatalogBucket()) return exportCatalogKeyBackup(publicKeyHex);
-  if (!testVaultHoldBinding) throw new StorageRuntimeError("storage_unavailable", "Vault is not bound to a bucket");
-  const encryptedKey = testVaultHoldBinding.snapshot().keys.find((item) => item.publicKeyHex.toLowerCase() === publicKeyHex.toLowerCase());
-  if (!encryptedKey) throw new Error("Key is missing from the vault");
-  return serializeKeyHoldDocument(fromVaultCatalogHoldRecord(encryptedKey));
-}
-
-function toVaultCatalogHoldRecord(document: KeyHoldDocumentV1): VaultCatalogHoldRecord {
-  return {
-    publicKeyHex: document.publicKeyHex,
-    label: document.label,
-    cipher: { ...document.cipher },
-    keyDerivation: { ...document.keyDerivation },
-  };
-}
-
-function fromVaultCatalogHoldRecord(record: VaultCatalogHoldRecord): KeyHoldDocumentV1 {
-  if (!record.keyDerivation) throw new StorageRuntimeError("storage_remote_corrupt", "KeyHold record is missing its keyDerivation");
-  return validateKeyHoldDocument({
-    format: "keyhold",
-    version: 1,
-    label: record.label,
-    publicKeyHex: record.publicKeyHex,
-    keyDerivation: { ...record.keyDerivation },
-    cipher: record.cipher,
-  });
-}
-
-/** Worker 侧扩展：单 Key 文件模型下删除必须显式按公钥进行,不能用集合快照隐式删除。 */
-interface WorkerCatalogHoldAdapter extends VaultCatalogHoldAdapter {
-  removeKey(publicKeyHex: string): Promise<void>;
-}
-
-/** 把当前桶 Provider 适配成 Vault 插件的唯一私钥入口（KeyHold 单 Key 文件）。 */
-function createCatalogHoldAdapter(provider: StorageBucketProvider): WorkerCatalogHoldAdapter {
-  const repository = createKeyHoldRepository(provider);
-  const snapshotOf = (files: readonly KeyHoldFile[]): VaultCatalogHoldSnapshot => ({
-    revision: 0,
-    keys: files.map((file) => toVaultCatalogHoldRecord(file.document)),
-  });
-  return {
-    async readCommitted() {
-      return snapshotOf(await repository.readAll());
-    },
-    async readEncryptedSnapshot() {
-      return snapshotOf(await repository.readAll());
-    },
-    async encryptPrivateKey({ password, label, privateKey }) {
-      const file = await repository.create({ label, privateKeyBytes: privateKey, password });
-      return toVaultCatalogHoldRecord(file.document);
-    },
-    async decryptPrivateKey({ password, record }) {
-      const unlocked = await repository.unlock(record.publicKeyHex, password);
-      try {
-        if (unlocked.document.publicKeyHex.toLowerCase() !== record.publicKeyHex.toLowerCase()) throw new Error("KeyHold public key mismatch");
-        verifySessionKeyPair({ publicKeyHex: unlocked.document.publicKeyHex, privateKeyBytes: unlocked.privateKeyBytes });
-        return unlocked.privateKeyBytes.slice();
-      } finally {
-        unlocked.privateKeyBytes.fill(0);
-      }
-    },
-    async publish() {
-      // KeyHold 是一 Key 一文件：publish 只回报当前全部文件,绝不按集合快照
-      // 隐式删除。删除必须走 removeKey,避免并发新增被旧快照覆盖删除。
-      return snapshotOf(await repository.readAll());
-    },
-    async removeKey(publicKeyHex) {
-      const wanted = publicKeyHex.toLowerCase();
-      const file = (await repository.readAll()).find((candidate) => candidate.document.publicKeyHex.toLowerCase() === wanted);
-      if (file) await repository.delete(file.document.publicKeyHex, file.etag);
-    },
-  };
-}
-
-/**
- * 测试专用的内存 KeyHold 装配。
- *
- * 它使用与真实桶相同的 KeyHold SDK 加解密函数，只把已经加密的单 Key
- * 文档放在测试进程内存中；不引入私钥 K-V，也不让生产路径拥有非桶持久化后门。
- */
-function createTestVaultHoldBinding(): { adapter: WorkerCatalogHoldAdapter; snapshot(): VaultCatalogHoldSnapshot; reset(): void } {
-  const documents = new Map<string, KeyHoldDocumentV1>();
-  let revision = 0;
-  const snapshot = (): VaultCatalogHoldSnapshot => ({
-    revision,
-    keys: [...documents.values()].map(toVaultCatalogHoldRecord),
-  });
-  const adapter: WorkerCatalogHoldAdapter = {
-    async readCommitted() {
-      return snapshot();
-    },
-    async readEncryptedSnapshot() {
-      return snapshot();
-    },
-    async encryptPrivateKey(input) {
-      const document = await createKeyHoldDocument({ label: input.label, privateKey: input.privateKey }, input.password);
-      documents.set(document.publicKeyHex.toLowerCase(), document);
-      revision += 1;
-      return toVaultCatalogHoldRecord(document);
-    },
-    async decryptPrivateKey(input) {
-      const document = documents.get(input.record.publicKeyHex.toLowerCase()) ?? fromVaultCatalogHoldRecord(input.record);
-      const plain = await decryptKeyHoldDocument(document, input.password);
-      try {
-        verifySessionKeyPair({ publicKeyHex: plain.publicKeyHex, privateKeyBytes: plain.privateKey });
-        return plain.privateKey.slice();
-      } finally {
-        plain.privateKey.fill(0);
-      }
-    },
-    async publish() {
-      if (testFailNextHoldRollbackCas) {
-        testFailNextHoldRollbackCas = false;
-        throw new StorageRuntimeError("storage_conflict", "injected catalog Hold rollback CAS failure");
-      }
-      revision += 1;
-      return snapshot();
-    },
-    async removeKey(publicKeyHex) {
-      documents.delete(publicKeyHex.toLowerCase());
-      revision += 1;
-    },
-  };
-  return {
-    adapter,
-    snapshot,
-    reset() {
-      documents.clear();
-      revision = 0;
-    },
-  };
-}
-
-async function listPublicVaultKeys(): Promise<PublicVaultKeyRecord[]> {
-  return (await currentCatalogKeyIndex().listKeys()).map(catalogIndexToPublicKey);
-}
-
-async function getPublicVaultKey(publicKeyHex: string): Promise<PublicVaultKeyRecord | undefined> {
-  const record = await currentCatalogKeyIndex().getKey(publicKeyHex);
-  return record ? catalogIndexToPublicKey(record) : undefined;
-}
-
-function hasVaultHoldBinding(): boolean {
-  return Boolean(selectedCatalogBucket() || testVaultHoldBinding);
-}
-
-function requireVaultHoldAdapter(): WorkerCatalogHoldAdapter {
-  if (!hasVaultHoldBinding()) throw new StorageRuntimeError("storage_unavailable", "Vault is not bound to a bucket");
-  return vaultStorageRepository.hold as WorkerCatalogHoldAdapter;
-}
-
-async function readVaultHoldSnapshot(_password: string): Promise<VaultCatalogHoldSnapshot> {
-  return requireVaultHoldAdapter().readCommitted({ password: "" });
-}
-
-async function rebuildVaultHoldKeyIndex(keys: readonly VaultCatalogHoldRecord[]): Promise<PublicVaultKeyRecord[]> {
-  const index = currentCatalogKeyIndex();
-  const previous = new Map((await index.listKeys()).map((record) => [record.publicKeyHex.toLowerCase(), record]));
-  const records = keys.map((key) => catalogIndexFromHoldKey(key, previous.get(key.publicKeyHex.toLowerCase())));
-  await index.replaceKeys(records);
-  return records.map(catalogIndexToPublicKey);
-}
-
-async function publishVaultHoldSnapshot(
-  password: string,
-  keys: readonly VaultCatalogHoldRecord[],
-  indexRecords: readonly StorageCatalogKeyIndexRecordV1[],
-  expectedHead: StorageHoldHeadExpectation,
-): Promise<VaultCatalogHoldSnapshot> {
-  // KeyHold 单 Key 文件没有共享 Head：expectedHead 不再参与 CAS,保留参数
-  // 只为兼容调用点。并发新增/删除互不冲突,索引必须按 publish 后的真实
-  // 文件集合重建,不能信任调用方基于旧快照算出的 indexRecords。
-  void expectedHead;
-  const hold = requireVaultHoldAdapter();
-  const published = await hold.publish({ password, keys, expectedHead });
-  try {
-    const metadata = new Map(indexRecords.map((record) => [record.publicKeyHex.toLowerCase(), record]));
-    const current = new Map((await currentCatalogKeyIndex().listKeys()).map((record) => [record.publicKeyHex.toLowerCase(), record]));
-    const committed = published.keys.map((key) => {
-      const lower = key.publicKeyHex.toLowerCase();
-      const base = metadata.get(lower) ?? current.get(lower);
-      const record = base ?? catalogIndexFromHoldKey(key);
-      return { ...record, label: key.label };
-    });
-    await currentCatalogKeyIndex().replaceKeys(committed);
-    return published;
-  } catch (error) {
-    // 索引可重建,这里不做任何删除补偿:失败回滚由调用方按公钥精确执行,
-    // 否则会把并发写入的其它 Key 文件一起删掉。
-    throw error;
-  }
-}
-
-async function decryptVaultPrivateKey(
-  publicKeyHex: string,
-  password: string,
-  snapshot?: VaultCatalogHoldSnapshot,
-): Promise<Uint8Array> {
-  const committed = snapshot ?? await readVaultHoldSnapshot(password);
-  const record = committed.keys.find((key) => key.publicKeyHex.toLowerCase() === publicKeyHex.toLowerCase());
-  if (!record) throw new Error("Key not found in the vault");
-  const privateKey = await requireVaultHoldAdapter().decryptPrivateKey({ password, record });
-  try {
-    verifySessionKeyPair({ publicKeyHex: publicKeyHex.toLowerCase(), privateKeyBytes: privateKey });
-    return privateKey;
-  } catch (error) {
-    privateKey.fill(0);
-    throw error;
-  }
-}
-
-/** 从 KeyHold 公开字段重建一个不含密文的桶内索引记录。 */
-function catalogIndexFromHoldKey(
-  key: { publicKeyHex: string; label: string },
-  previous?: StorageCatalogKeyIndexRecordV1,
-): StorageCatalogKeyIndexRecordV1 {
-  return {
-    format: "keymaster.storage.catalog-key-index",
-    publicKeyHex: key.publicKeyHex.toLowerCase(),
-    label: key.label,
-    address: previous?.address ?? deriveP2pkhAddress(key.publicKeyHex, "main"),
-    network: previous?.network ?? "main",
-    keyFormat: previous?.keyFormat ?? "keyhold",
-    capabilities: [...(previous?.capabilities ?? ["p2pkh"])],
-    createdAt: previous?.createdAt ?? new Date().toISOString(),
-    ...(previous?.source === undefined ? {} : { source: previous.source }),
-  };
-}
-
-async function rebuildCurrentCatalogKeyIndex(keys: readonly { publicKeyHex: string; label: string }[]): Promise<PublicVaultKeyRecord[]> {
-  const index = currentCatalogKeyIndex();
-  const previous = new Map((await index.listKeys()).map((record) => [record.publicKeyHex.toLowerCase(), record]));
-  const records = keys.map((key) => catalogIndexFromHoldKey(key, previous.get(key.publicKeyHex.toLowerCase())));
-  await index.replaceKeys(records);
-  return records.map(catalogIndexToPublicKey);
-}
-
-function expectedHoldHead(headEtag: string | undefined): StorageHoldHeadExpectation {
-  return headEtag === undefined ? { kind: "absent" } : { kind: "etag", etag: headEtag };
-}
-
-type KeyMutationRollbackStage = "hold" | "key-index" | "owner-storage" | "mutation-journal";
-
-interface KeyMutationRollbackFailure {
-  stage: KeyMutationRollbackStage;
-  error: unknown;
-}
-
-/**
- * Key mutation rollback is part of the safety boundary, not best-effort
- * logging.  Keep the original failures attached for diagnostics while
- * exposing only stable storage semantics to callers.
- */
-class KeyMutationRollbackUnconfirmedError extends StorageRuntimeError {
-  readonly rollbackUnconfirmed = true;
-  readonly failures: readonly KeyMutationRollbackFailure[];
-
-  constructor(failures: readonly KeyMutationRollbackFailure[]) {
-    const summary = failures.map(({ stage, error }) => {
-      const code = error && typeof error === "object" && "code" in error
-        ? (error as { code?: unknown }).code
-        : undefined;
-      return `${stage}: ${typeof code === "string" ? code : error instanceof Error ? error.message : "unknown error"}`;
-    }).join("; ");
-    super("storage_unavailable", `Key mutation rollback-unconfirmed${summary ? ` (${summary})` : ""}`, "provider");
-    this.name = "KeyMutationRollbackUnconfirmedError";
-    this.failures = [...failures];
-  }
-}
-
-function isKeyMutationRollbackUnconfirmed(error: unknown): error is KeyMutationRollbackUnconfirmedError {
-  return error instanceof KeyMutationRollbackUnconfirmedError
-    || Boolean(error && typeof error === "object" && (error as { rollbackUnconfirmed?: unknown }).rollbackUnconfirmed === true);
-}
-
-/** Enter degraded/fail-closed mode before returning an unconfirmed mutation. */
-async function failClosedAfterKeyMutationRollback(error: KeyMutationRollbackUnconfirmedError): Promise<void> {
-  storageStartupFailure = true;
-  storageHealthController.setStatus("degraded", "Key mutation rollback was not confirmed");
-  emitStorageState();
-  try {
-    await performGlobalLock("key-mutation-rollback-unconfirmed");
-  } catch (lockError) {
-    console.error("[vault] fail-closed lock after unconfirmed rollback failed", {
-      rollback: error.message,
-      lock: lockError instanceof Error ? lockError.message : String(lockError),
-    });
-    coordinatorState.vaultStatus = "locked";
-    coordinatorState.activePublicKeyHex = undefined;
-    dropActivePrivateKey();
-    emitStorageState();
-  }
-}
-
-function sameStorageRecord(left: unknown, right: unknown): boolean {
-  const leftCipher = (left as { cipher?: Partial<StorageRecordV1["cipher"]> } | undefined)?.cipher;
-  const rightCipher = (right as { cipher?: Partial<StorageRecordV1["cipher"]> } | undefined)?.cipher;
-  if (!leftCipher || !rightCipher) return false;
-  return leftCipher.algorithm === rightCipher.algorithm
-    && leftCipher.keyLengthBits === rightCipher.keyLengthBits
-    && leftCipher.ivB64Url === rightCipher.ivB64Url
-    && leftCipher.tagLengthBits === rightCipher.tagLengthBits
-    && leftCipher.ciphertextAndTagB64Url === rightCipher.ciphertextAndTagB64Url;
-}
-
-/**
- * 让公开 Key 索引与 \`keys/\` 目录保持一致。
- */
-async function syncSelectedCatalogHoldSnapshot(_password: string): Promise<number | undefined> {
-  const binding = selectedCatalogBucket();
-  if (!binding) {
-    if (!testVaultHoldBinding) throw new StorageRuntimeError("storage_unavailable", "Vault is not bound to a bucket");
-    const snapshot = await readVaultHoldSnapshot("");
-    await rebuildCurrentCatalogKeyIndex(snapshot.keys);
-    return snapshot.revision;
-  }
-  const provider = platformBucketProvider;
-  if (!provider) throw new StorageRuntimeError("storage_unavailable", "The selected runtime bucket is unavailable");
-  const files = await createKeyHoldRepository(provider).readAll();
-  await rebuildCurrentCatalogKeyIndex(files.map((file) => ({ publicKeyHex: file.document.publicKeyHex, label: file.document.label })));
-  return files.length;
-}
-
-/**
- * 桶内 \`keys/\` 目录是私钥唯一真值：重建公开索引并把运行态收敛为 locked。
- * 密码校验发生在单 Key 解锁，不再有桶级 verifier。
- */
-async function hydrateCatalogVaultFromSnapshot(_password: string): Promise<boolean> {
-  const binding = selectedCatalogBucket();
-  const provider = platformBucketProvider;
-  if (!binding || !provider) return false;
-  const files = await createKeyHoldRepository(provider).readAll();
-  const index = currentCatalogKeyIndex();
-  const previousIndex = new Map((await index.listKeys()).map((record) => [record.publicKeyHex.toLowerCase(), record]));
-  const records = files.map((file) => catalogIndexFromHoldKey({ publicKeyHex: file.document.publicKeyHex, label: file.document.label }, previousIndex.get(file.document.publicKeyHex.toLowerCase())));
-  if (records.length === 0) {
-    if (previousIndex.size > 0) throw new StorageRuntimeError("storage_provider_error", "Catalog Key metadata exists while the keys/ directory is empty");
-    return false;
-  }
-  await index.replaceKeys(records);
-  coordinatorState.vaultStatus = "locked";
-  coordinatorState.activePublicKeyHex = undefined;
-  coordinatorMeta.selectedPublicKeyHex = records[0]!.publicKeyHex;
-  await persistSelectedPublicKey();
-  publishSessionState("bootstrap");
-  return true;
-}
-
-/** 当前新版桶的跨目录/桶内全量改密；失败时尽量回到旧 Hold 提交头。 */
 
 function decodePersisted(value: string): Uint8Array {
   return cryptoHexToBytes(value);
@@ -892,7 +397,6 @@ function validatePluginIntentSnapshot(value: unknown): PluginIntentSnapshot {
 }
 
 interface CoordinatorRuntimeSettings {
-  selectedPublicKeyHex?: string;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockTimeoutMs: number;
   p2pkhProviderConfigs: Record<string, Record<string, unknown>>;
@@ -1004,102 +508,51 @@ let testChainHeightProvider: ((network: BsvNetwork) => Promise<number>) | undefi
 /** 测试专用：缩短 Worker 内中心广播服务的重试预算。 */
 let testSatBroadcastRetryOverrides: { maxAttempts?: number; deadlineMs?: number; initialBackoffMs?: number; maxBackoffMs?: number } | undefined;
 let testPersistCoordinatorSnapshotFailure = false;
-let testFailColdStartInstall = false;
-let testFailAfterBucketPasswordCatalogUpdate = false;
-let testFailAfterBucketConfigCatalogUpdate = false;
-let testFailNextVaultAuthMetadataRollback = false;
-let testFailNextVaultAuthMetadataRestore = false;
-let testFailNextBucketPasswordDeviceRollback = false;
-let platformRootStore: PlatformRootStore | undefined;
-/** 当前统一抽象桶 Provider；所有 K-V 与文件运行时共用这一实例。 */
-let platformBucketProvider: StorageBucketProvider | undefined;
+
 /**
- * Local Provider 在候选 Root 暂存期间必须固定到发起 peer；被 staged
- * binding 采用后，后续 I/O 必须跟随 storageIoOwner。WeakMap 让 publish
- * 只作用于对应 Provider，避免“当前已有 Root”误把另一个候选提前解锁。
+ * 测试专用：记录 Coordinator 两个中央快照在本 Worker 运行内的提交次数与
+ * 最新 revision。它只统计真实提交成功的写入，因此可以断言“设置确实落到
+ * IndexedDB 而不是只改了内存”。
  */
-const coordinatorLocalStorageProviderPublishers = new WeakMap<StorageBucketProvider, () => void>();
+const testCoordinatorSnapshotMetrics = new Map<FinalIoAuditOperation, { revision: number; writes: number }>();
 
-function createCoordinatorLocalStorageBridgeState(peerId?: string): {
-  targetPeerId(): string | undefined;
-  publish(): void;
-} {
-  let published = false;
-  return {
-    targetPeerId: () => published ? undefined : peerId,
-    publish: () => { published = true; },
-  };
+/** 读取某个中央快照的提交统计；未被提交过时 revision/writes 均为 0。 */
+function snapshotWriteMetrics(operation: FinalIoAuditOperation): { revision: number; writes: number } {
+  const current = testCoordinatorSnapshotMetrics.get(operation);
+  return { revision: current?.revision ?? 0, writes: current?.writes ?? 0 };
 }
 
-function publishCoordinatorLocalStorageProvider(provider: StorageBucketProvider): void {
-  coordinatorLocalStorageProviderPublishers.get(provider)?.();
-}
+// ============================================================
+// 单钱包本地存储：正式装配点
+// ============================================================
 
-/** Root 安装令牌；不能用 bucketGeneration 代替，因为 A→B→A 可能复用世代值。 */
+/** 唯一正式本地介质；生产路径只有这一个 IndexedDB 句柄。 */
+let walletStore: WalletStore | undefined;
+/** 固定 `key.json` 的唯一仓储；没有 list/readAll/delete，也没有切换。 */
+let walletKeys: WalletKeyRepository | undefined;
+/** 单钱包生命周期：冷启动、创建/导入、解锁、锁定、改密、改名、导出与重置。 */
+let walletLifecycle: WalletLifecycleService | undefined;
+/** 当前已装配的平台存储根；重置或 Worker 重启后重建。 */
+let platformRootStore: PlatformRootStore | undefined;
+/** Root 安装令牌；不能用 walletGeneration 代替，因为重置后可能复用世代值。 */
 let platformRootToken: object | undefined;
-
-/** 仅供 Worker 单元测试使用的 Hold 替身；生产启动永远由当前桶 Provider 装配。 */
-let testVaultHoldBinding: { adapter: VaultCatalogHoldAdapter; snapshot(): VaultCatalogHoldSnapshot; reset(): void } | undefined;
-let platformStorageStore: KeyValueStore | undefined;
 let coordinatorSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
 let coordinatorPluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
-/** 仅测试夹具保留的内存 Store 索引；生产路径没有这个观测入口。 */
-let testPlatformStores: Map<string, KeyValueStore> | undefined;
-let testCoordinatorSnapshots: Map<string, { revision: number; value?: unknown; writes: number }> | undefined;
-/** 仅测试夹具：模拟浏览器 LocalStorage 里跨 Worker 重启保留的 session。 */
-let testWorkerSession: KeymasterSessionV1 | undefined;
-/** 当前桶 Protocol 的三个 purpose K-V；切桶回滚时必须整体保留旧句柄。 */
+/** Protocol 的三个 platform-only purpose K-V。 */
 interface CoordinatorProtocolStorageStores {
   durablePolicy: KeyValueStore;
   sessions: KeyValueStore;
   commandHistory: KeyValueStore;
 }
 let coordinatorProtocolStores: CoordinatorProtocolStorageStores | undefined;
-
-/** 把当前桶 Provider 装配成 Hold 适配器；没有钱包级 K-V。 */
-function configureCoordinatorVaultStorage(provider: StorageBucketProvider): void {
-  configureVaultStorageRepository({ hold: createCatalogHoldAdapter(provider) });
-}
-
-async function openCoordinatorProtocolStorageStores(root: PlatformRootStore): Promise<CoordinatorProtocolStorageStores> {
-  const opened: KeyValueStore[] = [];
-  try {
-    const durablePolicy = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy });
-    opened.push(durablePolicy);
-    const sessions = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions });
-    opened.push(sessions);
-    const commandHistory = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory });
-    opened.push(commandHistory);
-    return { durablePolicy, sessions, commandHistory };
-  } catch (error) {
-    for (const store of opened) store.close();
-    throw error;
-  }
-}
 let platformStorageReady = false;
-let storageBootstrapState: StorageBootstrapState | null = null;
-/** v1 设备引导模式；一旦 session.open 明确发送快照，旧 catalog 不能再成为真值。 */
-/** 桶内 `keys/<公钥>.keyhold` 的唯一运行时仓储与当前解锁 Key。 */
-let keyHoldRepository: KeyHoldRepository | undefined;
-let unlockedKeyHold: UnlockedKeyHold | undefined;
-const storageHealthController = new StorageHealthController();
-/**
- * 某些 Storage control 会在成功/失败后撤销当前 Root。若控制请求本身
- * 仍持有最终 I/O lease，必须等 lease 的后置运行时校验和释放完成后
- * 再销毁 Root，否则请求结果会被错误地变成 storage error。
- */
-let catalogBindingDiscardDeferred = false;
-/** 首次初始化暂存 Root 的所有权；失败事务不能触碰赢家的全局运行态。 */
-let initialSetupRuntimeOwner: { transactionId: string; bucketId: string; rootToken: object } | undefined;
-/** Worker 内缓存的公开恢复记录；业务恢复记录仍由业务 K-V 正式持久化。 */
-const initialSetupRecoveryRecords = new Map<string, InitialSetupRecoveryRecordV1>();
-/** 只有这些 operationId 跨 Worker 重启；完整阶段账本始终只在 Worker 内存。 */
-const deviceRecoveryOperationIds = new Set<string>();
-let coordinatorInitializationInProgress = false;
-/** 仅供下方 Worker test seam 使用；生产路径没有 active-key 密码缓存。 */
-let testHarnessActivationSecret: string | undefined;
 let storageRootInstallationActive = false;
-let storageRecoveryOrchestrator: Promise<void> | undefined;
+/** 冷启动只读结果；corrupt/unsupported 时进入明确错误界面，不静默建空钱包。 */
+let storageColdStartState: WalletColdStartSnapshot | undefined;
+let coordinatorInitializationInProgress = false;
+/** 仅供 Worker 测试 seam 使用；生产路径没有 active-key 密码缓存。 */
+let testHarnessActivationSecret: string | undefined;
+
 type CoordinatorKeyValueMaintenanceStore = KeyValueStore & {
   collectGarbage(input?: { minAgeMs?: number; maxDeletes?: number }): Promise<{ scanned: number; candidates: number; deleted: number; failed: number }>;
 };
@@ -1151,59 +604,56 @@ function stopCoordinatorKeyValueMaintenance(): void {
   }
 }
 
-function maintenanceDeclarationKey(declaration: Pick<PluginStorageDeclaration, "moduleId" | "purposeId" | "scope" | "model" | "schemaVersion">, ownerPublicKeyHex?: string): string {
-  return `${declaration.scope}:${ownerPublicKeyHex?.toLowerCase() ?? ""}:${declaration.moduleId}:${declaration.purposeId}:${declaration.model}:${declaration.schemaVersion}`;
+function declarationMaintenanceKey(
+  declaration: Pick<PluginStorageDeclaration, "moduleId" | "purposeId" | "authority" | "model" | "schemaVersion">,
+): string {
+  return [declaration.moduleId, declaration.purposeId, declaration.authority, declaration.model, declaration.schemaVersion].join(":");
 }
 
-function coordinatorKeyValueMaintenanceDeclarations(ownerPublicKeyHex: string | undefined): Array<{ declaration: PluginStorageDeclaration; ownerPublicKeyHex?: string }> {
-  const declarations = new Map<string, { declaration: PluginStorageDeclaration; ownerPublicKeyHex?: string }>();
-  for (const declaration of Object.values(CENTRAL_STORAGE_DECLARATIONS)) {
-    if (declaration.scope !== "bucket" || declaration.model !== "kv") continue;
-    declarations.set(maintenanceDeclarationKey(declaration), { declaration: { ...declaration } });
-  }
-  if (!ownerPublicKeyHex) return [...declarations.values()];
-  const owner = ownerPublicKeyHex.toLowerCase();
-  for (const declaration of Object.values(SYSTEM_STORAGE_DECLARATIONS).flat()) {
-    if (declaration.scope !== "owner" || declaration.model !== "kv") continue;
-    declarations.set(maintenanceDeclarationKey(declaration, owner), { declaration: { ...declaration }, ownerPublicKeyHex: owner });
+/** 需要参与本地 K-V 垃圾回收的中央声明坐标。 */
+function coordinatorKeyValueMaintenanceDeclarations(): PluginStorageDeclaration[] {
+  const declarations = new Map<string, PluginStorageDeclaration>();
+  for (const declaration of [
+    ...Object.values(CENTRAL_STORAGE_DECLARATIONS),
+    ...Object.values(SYSTEM_STORAGE_DECLARATIONS).flat(),
+  ]) {
+    if (declaration.model !== "kv") continue;
+    declarations.set(declarationMaintenanceKey(declaration), { ...declaration });
   }
   // Host-bound built-in namespaces are normally already in SYSTEM_STORAGE_DECLARATIONS.
-  // Include active grants as well so a future centrally authorized dynamic namespace
-  // is not stranded merely because it has no long-lived Worker handle.
+  // Include live grants too so a future centrally authorized dynamic namespace is not
+  // stranded merely because it has no long-lived Worker handle.
   for (const grant of ownerStorageGrants.values()) {
-    if (grant.ownerPublicKeyHex.toLowerCase() !== owner || grant.model !== "kv") continue;
+    if (grant.model !== "kv") continue;
     const declaration: PluginStorageDeclaration = {
       moduleId: grant.moduleId,
       purposeId: grant.purposeId,
-      scope: "owner",
       authority: grant.authority,
       model: grant.model,
       schemaVersion: grant.schemaVersion,
     };
-    declarations.set(maintenanceDeclarationKey(declaration, owner), { declaration, ownerPublicKeyHex: owner });
+    declarations.set(declarationMaintenanceKey(declaration), declaration);
   }
   return [...declarations.values()];
 }
 
-function maintenanceStoreMatches(store: KeyValueStore, root: PlatformRootStore, target: { declaration: PluginStorageDeclaration; ownerPublicKeyHex?: string }): boolean {
-  return store.bucketId === root.bucket.bucketId
-    && store.bucketGeneration === root.bucket.bucketGeneration
-    && store.moduleId === target.declaration.moduleId
-    && store.purposeId === target.declaration.purposeId
-    && store.scope === target.declaration.scope
-    && store.model === target.declaration.model
-    && store.schemaVersion === target.declaration.schemaVersion
-    && (target.declaration.scope === "bucket"
-      ? !store.ownerPublicKeyHex
-      : Boolean(store.ownerPublicKeyHex)
-        && store.ownerPublicKeyHex?.toLowerCase() === target.ownerPublicKeyHex?.toLowerCase());
+function maintenanceStoreMatches(
+  store: KeyValueStore,
+  root: PlatformRootStore,
+  target: PluginStorageDeclaration,
+): boolean {
+  return store.walletGeneration === root.walletGeneration
+    && store.moduleId === target.moduleId
+    && store.purposeId === target.purposeId
+    && store.authority === target.authority
+    && store.model === target.model
+    && store.schemaVersion === target.schemaVersion;
 }
 
 async function collectCoordinatorKeyValueGarbage(input: { minAgeMs: number; maxDeletes: number }, swallowErrors: boolean): Promise<void> {
   const root = platformRootStore;
   const rootToken = platformRootToken;
   if (!root || !rootToken || !platformStorageReady) return;
-  const owner = coordinatorState.activePublicKeyHex?.toLowerCase();
   const visited = new Set<string>();
   const collect = async (store: KeyValueStore, targetKey: string): Promise<void> => {
     if (visited.has(targetKey)) return;
@@ -1219,26 +669,25 @@ async function collectCoordinatorKeyValueGarbage(input: { minAgeMs: number; maxD
   };
 
   for (const store of [...coordinatorKeyValueMaintenanceStores]) {
-    if (store.scope === "owner" && (!owner || store.ownerPublicKeyHex?.toLowerCase() !== owner)) continue;
-    const target = {
+    if (store.walletGeneration !== root.walletGeneration) continue;
+    await collect(store, declarationMaintenanceKey({
       moduleId: store.moduleId,
       purposeId: store.purposeId,
-      scope: store.scope,
+      authority: store.authority,
       model: store.model,
       schemaVersion: store.schemaVersion,
-    } as const;
-    await collect(store, maintenanceDeclarationKey(target, target.scope === "owner" ? owner : undefined));
+    }));
   }
 
-  for (const target of coordinatorKeyValueMaintenanceDeclarations(owner)) {
-    const targetKey = maintenanceDeclarationKey(target.declaration, target.ownerPublicKeyHex);
+  for (const declaration of coordinatorKeyValueMaintenanceDeclarations()) {
+    const targetKey = declarationMaintenanceKey(declaration);
     if (visited.has(targetKey)) continue;
     let store: KeyValueStore | undefined;
     try {
-      store = target.declaration.scope === "bucket"
-        ? await root.openPlatformStore({ declaration: target.declaration })
-        : await root.openKeyValueStore({ ownerPublicKeyHex: target.ownerPublicKeyHex!, declaration: target.declaration, keyspaceGeneration: coordinatorState.keyspaceGeneration });
-      if (!maintenanceStoreMatches(store, root, target)) throw new Error("Coordinator K-V maintenance binding mismatch");
+      store = declaration.authority === "platform-only"
+        ? await root.openPlatformStore({ declaration })
+        : await root.openKeyValueStore({ declaration });
+      if (!maintenanceStoreMatches(store, root, declaration)) throw new Error("Coordinator K-V maintenance binding mismatch");
       await collect(store, targetKey);
     } catch (error) {
       if (!swallowErrors) throw error;
@@ -1273,1174 +722,144 @@ export async function __testCollectCoordinatorKeyValueGarbage(): Promise<void> {
   scheduleCoordinatorKeyValueMaintenance();
 }
 
-/**
- * 测试专用：在一个已关闭的桶/Owner K-V 句柄中制造可回收孤儿。
- * 返回值只用于测试 Provider 夹具观测，不属于生产接口。
- */
-export async function __testSeedCoordinatorKeyValueGarbage(scope: "bucket" | "owner"): Promise<string> {
-  ensureTestPlatformStorage();
-  const root = platformRootStore;
-  const providerState = testCoordinatorGarbageProviderState;
-  if (!root || !providerState) throw new Error("Test Coordinator garbage storage is not ready");
-  const ownerPublicKeyHex = scope === "owner" ? coordinatorState.activePublicKeyHex : undefined;
-  if (scope === "owner" && !ownerPublicKeyHex) throw new Error("An active owner is required for the test garbage namespace");
-  const declaration = scope === "bucket"
-    ? CENTRAL_STORAGE_DECLARATIONS.bsvPrice
-    : CENTRAL_STORAGE_DECLARATIONS.messageHistory;
-  const before = new Set(providerState.objects.keys());
-  const store = scope === "bucket"
-    ? await root.openPlatformStore({ declaration })
-    : await root.openKeyValueStore({ ownerPublicKeyHex: ownerPublicKeyHex!, declaration, keyspaceGeneration: coordinatorState.keyspaceGeneration });
+/** 测试专用：在测试本地介质的一个 K-V 句柄里制造可回收孤儿。 */
+export async function __testSeedCoordinatorKeyValueGarbage(): Promise<string> {
+  const store = walletStore;
+  if (!store || !platformRootStore) throw new Error("Test Coordinator garbage storage is not ready");
+  const declaration = CENTRAL_STORAGE_DECLARATIONS.bsvPrice;
+  const handle = await platformRootStore.openPlatformStore({ declaration });
+  const valuePrefix = `${buildWalletStorageRoot({
+    authority: declaration.authority,
+    moduleId: declaration.moduleId,
+    purposeId: declaration.purposeId,
+  })}.keymaster/values/`;
+  const listValueIds = async (): Promise<Set<string>> => {
+    const valueIds = new Set<string>();
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await store.list({ prefix: valuePrefix, ...(cursor === undefined ? {} : { cursor }), limit: WALLET_LIST_MAX_LIMIT });
+      for (const object of page.objects) valueIds.add(object.path);
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    return valueIds;
+  };
+  const before = await listValueIds();
   try {
     const key = `gc-orphan-${crypto.randomUUID()}`;
-    await store.put(key, { source: "coordinator-gc-test" }, { partition: "gc-test" });
-    await store.delete(key, { partition: "gc-test" });
+    await handle.put(key, { source: "coordinator-gc-test" }, { partition: "gc-test" });
+    // value object 的文件名是内容哈希，不是业务 key：靠 put 前后差集才能拿到
+    // 那个被 delete 变成孤儿的真实路径。
+    const created = [...(await listValueIds())].filter((path) => !before.has(path));
+    if (created.length !== 1) throw new Error(`Test Coordinator garbage expected one new value object, saw ${created.length}`);
+    await handle.delete(key, { partition: "gc-test" });
+    return created[0]!;
   } finally {
     // The next collection must discover this namespace through declarations,
     // not through a resident handle retained in the Coordinator registry.
-    store.close();
+    handle.close();
   }
-  const orphanPath = [...providerState.objects.keys()].find((path) => path.includes("/.keymaster/values/") && !before.has(path));
-  if (!orphanPath) throw new Error("Test Coordinator garbage orphan was not created");
-  return orphanPath;
 }
 
-/** 测试专用：解析 s3 桶 ID（同物理位置复用,否则随机生成）。 */
-export async function __testResolveS3BucketStorageId(connection: StorageBucketConnectionConfigV1): Promise<string> {
-  return resolveS3BucketStorageId(connection);
-}
-
-export function __testCoordinatorKeyValueObjectExists(path: string): boolean {
-  return Boolean(testCoordinatorGarbageProviderState?.objects.has(path));
-}
-
-async function waitForTestCatalogHoldPublishBarrier(): Promise<void> {
-  const barrier = testCatalogHoldPublishBarrier;
-  if (!barrier) return;
-  testCatalogHoldPublishBarrier = undefined;
-  barrier.resolveEntered();
-  await barrier.released;
-}
-
-async function waitForTestCatalogHoldRollbackBarrier(): Promise<void> {
-  const barrier = testCatalogHoldRollbackBarrier;
-  if (!barrier) return;
-  testCatalogHoldRollbackBarrier = undefined;
-  barrier.resolveEntered();
-  await barrier.released;
-}
-
-async function waitForTestKeyLifecycleOwnerBarrier(): Promise<void> {
-  const barrier = testKeyLifecycleOwnerBarrier;
-  if (!barrier) return;
-  testKeyLifecycleOwnerBarrier = undefined;
-  barrier.resolveEntered();
-  await barrier.released;
-}
-
-function asColdStartReadOnlyProvider(provider: StorageBucketProvider): import("@keymaster/contracts").StorageBucketReadOnlyProvider {
-  return Object.freeze({
-    provider: provider.provider,
-    bucketId: provider.bucketId,
-    probe: (signal?: AbortSignal) => provider.probe(signal),
-    get: (path: string, options?: { signal?: AbortSignal; ifMatch?: string }) => provider.get(path, options),
-    list: (input?: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }) => provider.list(input),
-  });
-}
-
-type WorkerS3ProviderConfig = Parameters<typeof createS3BucketProvider>[0];
-type WorkerS3ProviderOptions = NonNullable<Parameters<typeof createS3BucketProvider>[1]>;
-type WorkerS3ProviderOptionsFactory = (config: WorkerS3ProviderConfig) => WorkerS3ProviderOptions | undefined;
-
-let testS3BucketProviderOptionsFactory: WorkerS3ProviderOptionsFactory | undefined;
-
-/** 测试专用：注入 S3 Provider 的对象存储/能力状态，验证凭据来源。 */
-export function __testSetS3BucketProviderOptionsFactory(factory: WorkerS3ProviderOptionsFactory | undefined): void {
-  testS3BucketProviderOptionsFactory = factory;
-}
-
-function workerS3ProviderOptions(
-  config: WorkerS3ProviderConfig,
-  bucketId: string,
-  capabilityState?: BucketObjectStoreCapabilityState,
-): WorkerS3ProviderOptions {
-  const override = testS3BucketProviderOptionsFactory?.(config);
-  if (override) return { ...override, bucketId: override.bucketId ?? bucketId };
-  return { bucketId, ...(capabilityState === undefined ? {} : { capabilityState }) };
-}
-
-/**
- * 把设备记录里已探测到的条件写能力灌入新的 Provider 能力状态，冷启动/切桶
- * 时不再重复发送条件写探针；字段缺失表示尚未探测，由首次连接时探测并写回。
- */
-function capabilityStateForRecord(record: DeviceRecordV1): BucketObjectStoreCapabilityState | undefined {
-  if (record.location.providerId !== "s3") return undefined;
-  // 判别字段在嵌套 location 上，TS 不会自动收窄整个联合；这里按 s3 形态读取。
-  const mode = (record as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>).capabilities?.conditionalWrites;
-  if (!mode) return undefined;
-  const state = createBucketObjectStoreCapabilityState();
-  setBucketObjectStoreCapabilityMode(state, "put", mode, "automatic");
-  setBucketObjectStoreCapabilityMode(state, "complete", mode, "automatic");
-  return state;
-}
-
-/** 由运行时绑定创建 Provider；s3 用启动密码与 session KDF 解开设备记录密文。 */
-async function createRuntimeProvider(
-  binding: StorageRuntimeBucketV1,
-  password: string | undefined,
-  peerId?: string,
-): Promise<StorageBucketProvider> {
-  if (binding.backend === "local") {
-    const bridgeState = createCoordinatorLocalStorageBridgeState(peerId);
-    const provider = createLocalStorageBucketProvider({
-      bucketId: binding.bucketId,
-      bucketGeneration: 1,
-      bridge: (request) => requestLocalStorageBridge(request, bridgeState.targetPeerId()),
-    });
-    coordinatorLocalStorageProviderPublishers.set(provider, bridgeState.publish);
-    return provider;
-  }
-  if (!binding.keyDerivation) throw new StorageRuntimeError("storage_provider_error", "Startup password KDF is missing for the s3 bucket");
-  if (!password) throw new StorageRuntimeError("storage_identity_required", "Startup password is required");
-  const deviceRecord = binding.deviceRecord as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>;
-  if (deviceRecord.location.providerId !== "s3") throw new StorageRuntimeError("storage_provider_error", "Device record backend does not match the binding");
-  const plaintext = await decryptDeviceConfig({
-    password,
-    keyDerivation: binding.keyDerivation,
-    location: deviceRecord.location,
-    cipher: deviceRecord.cipher,
-  });
-  const normalized: WorkerS3ProviderConfig = {
-    version: 1,
-    providerId: "s3-compatible",
-    connection: {
-      endpoint: plaintext.endpoint,
-      region: plaintext.region,
-      bucket: plaintext.bucket,
-      forcePathStyle: plaintext.forcePathStyle === true,
-      ...(plaintext.sessionToken === undefined ? {} : { sessionToken: plaintext.sessionToken }),
-      ...(plaintext.prefix === undefined ? {} : { prefix: plaintext.prefix }),
-    },
-    credentials: { kind: "access-key", accessKeyId: plaintext.accessKeyId, secretAccessKey: plaintext.secretAccessKey },
-  };
+async function openCoordinatorProtocolStorageStores(root: PlatformRootStore): Promise<CoordinatorProtocolStorageStores> {
+  const opened: KeyValueStore[] = [];
   try {
-    return createS3BucketProvider(normalized, workerS3ProviderOptions(normalized, binding.bucketId, capabilityStateForRecord(binding.deviceRecord)));
-  } finally {
-    plaintext.accessKeyId = "";
-    plaintext.secretAccessKey = "";
-    if (plaintext.sessionToken !== undefined) plaintext.sessionToken = "";
-  }
-}
-
-/**
- * 带密码的冷启动：解开设备记录凭据、确认 `keys/` 已有钱包，再安装可写运行态。
- * 认证前零远端写入；失败不得降级为首次初始化。
- */
-async function bootstrapColdStartAuthenticated(password: string, peerId?: string): Promise<void> {
-  const binding = storageBootstrapState?.selectedBucket;
-  if (!binding) throw storageUnavailableError("Storage bootstrap selection is unavailable");
-  if (platformRootStore) return;
-  let provider = await createRuntimeProvider(binding, password, peerId);
-  let candidateOwned = true;
-  try {
-    const listed = await createKeyHoldRepository(provider).list();
-    if (listed.keys.length === 0) {
-      throw new StorageRuntimeError("storage_remote_not_initialized", "The remote storage namespace is not initialized");
-    }
-    if (testFailColdStartInstall) {
-      testFailColdStartInstall = false;
-      throw new StorageRuntimeError("storage_unavailable", "injected cold start install failure after authentication");
-    }
-    storageRootInstallationActive = true;
-    try {
-      await installPlatformStorage(provider, {
-        bucketId: binding.bucketId,
-        bucketGeneration: 1,
-        provider: binding.backend,
-      });
-    } finally {
-      storageRootInstallationActive = false;
-    }
-    storageBootstrapState = {
-      ...(storageBootstrapState ?? { selectedBackend: binding.backend }),
-      selectedBackend: binding.backend,
-      selectedProfileId: binding.bucketId,
-      selectedBucket: binding,
-    };
-    candidateOwned = false;
-  } finally {
-    if (candidateOwned) provider.dispose();
-  }
-}
-
-/** 切换到另一个已登记桶：先验证目标 Key 密码，再抢 Key 锁并安装运行态。 */
-async function switchSelectedRuntimeBucket(
-  binding: StorageRuntimeBucketV1,
-  password: string,
-  peerId?: string,
-  options: { keyPassword?: string; publicKeyHex?: string } = {},
-): Promise<StorageBucketSwitchResultV1> {
-  if (!binding || typeof binding !== "object" || !binding.bucketId) throw new StorageRuntimeError("storage_provider_error", "Switch bucket binding is invalid");
-  const provider = await createRuntimeProvider(binding, password, peerId);
-  const repository = createKeyHoldRepository(provider);
-  let adopted = false;
-  try {
-    const listed = await repository.list();
-    if (listed.keys.length === 0) throw new StorageRuntimeError("storage_remote_not_initialized", "The remote storage namespace is not initialized");
-    const session = await ensureWorkerSession(peerId);
-    const requested = options.publicKeyHex?.toLowerCase();
-    if (requested !== undefined && !listed.keys.some((key) => key.publicKeyHex.toLowerCase() === requested)) {
-      throw new StorageRuntimeError("storage_not_found", "The selected Key does not exist in this bucket");
-    }
-    const publicKeyHex = requested
-      ?? (session.activeKey !== undefined && listed.keys.some((key) => key.publicKeyHex === session.activeKey)
-        ? session.activeKey
-        : listed.keys[0]!.publicKeyHex);
-    const keyPassword = options.keyPassword ?? password;
-    // 先在临时 Provider 上验证目标 Key 密码。验证失败时当前运行态、桶
-    // 目录和 session 都没有被触碰，用户可以安全重试或取消。
-    const verification = await repository.unlock(publicKeyHex, keyPassword);
-    verification.privateKeyBytes.fill(0);
-    if (platformRootStore) {
-      await performGlobalLock("switch-bucket");
-      discardCurrentPlatformStorageBinding();
-    }
-    storageRootInstallationActive = true;
-    try {
-      await installPlatformStorage(provider, { bucketId: binding.bucketId, bucketGeneration: 1, provider: binding.backend });
-    } finally {
-      storageRootInstallationActive = false;
-    }
-    adopted = true;
-    storageBootstrapState = { selectedBackend: binding.backend, selectedProfileId: binding.bucketId, selectedBucket: binding };
-    // 跨桶切换后必须重建 Storage 运行态：顶栏/桶管理页切换不会刷新页面，
-    // 缺少 storageController 时 storage.state 的 status 会停在 checking，
-    // 存储守卫会把用户挡在业务页外。
-    storageController = undefined;
-    await ensureStorageRuntime(peerId);
-    await writeWorkerSession({ ...session, activeBucketId: binding.bucketId, activeKey: publicKeyHex }, peerId);
-    const lock = createKeyLock(provider, { ownerPublicKeyHex: publicKeyHex, holder: session.sessionId });
-    await lock.acquire();
-    installActiveKeyLock(lock);
-    const unlocked = await repository.unlock(publicKeyHex, keyPassword);
-    const privateKeyBytes = unlocked.privateKeyBytes;
-    unlocked.privateKeyBytes = new Uint8Array(0);
-    await enterUnlockedState(publicKeyHex, privateKeyBytes, "unlock");
-    storageHealthController.setStatus("ready");
-    emitStorageState();
-    return { ok: true, bucket: binding, vaultUnlocked: true };
-  } finally {
-    if (!adopted && platformBucketProvider !== provider) provider.dispose();
-  }
-}
-
-/** 更新当前桶的连接配置：重封设备记录密文并重建运行态。 */
-async function changeRuntimeBucketConnection(
-  config: StorageBucketConnectionConfigV1,
-  label: string | undefined,
-  password: string,
-  peerId?: string,
-): Promise<StorageRuntimeBucketV1> {
-  const binding = selectedCatalogBucket();
-  if (!binding) throw new StorageRuntimeError("storage_unavailable", "The current runtime bucket is not available");
-  if (config.kind !== binding.backend) throw new StorageRuntimeError("storage_provider_error", "Storage bucket backend cannot be changed in-place");
-  const displayName = (label?.trim() || binding.label || binding.bucketId);
-  if (displayName.length > 128) throw new StorageRuntimeError("storage_provider_error", "Storage bucket label is invalid");
-  const built = await buildDeviceRecordForConnection({
-    connection: config,
-    remoteStorageId: binding.bucketId,
-    displayName,
-    password,
-    keyDerivation: binding.keyDerivation,
-  });
-  const next = runtimeBinding({
-    remoteStorageId: binding.bucketId,
-    backend: binding.backend,
-    displayName,
-    record: built.record,
-    ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }),
-  });
-  await performGlobalLock("change-bucket-config");
-  discardCurrentPlatformStorageBinding();
-  const nextProvider = await createRuntimeProvider(next, password, peerId);
-  let adopted = false;
-  try {
-    await installPlatformStorage(nextProvider, { bucketId: next.bucketId, bucketGeneration: 1, provider: next.backend });
-    adopted = true;
-    await putDeviceRecord(next.bucketId, built.record, true, peerId);
-    const session = await ensureWorkerSession(peerId);
-    await writeWorkerSession({
-      ...session,
-      activeBucketId: next.bucketId,
-      ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }),
-    }, peerId);
-    storageBootstrapState = { selectedBackend: next.backend, selectedProfileId: next.bucketId, selectedBucket: next };
-    storageHealthController.setStatus("ready");
-    emitStorageState();
-    return next;
-  } finally {
-    if (!adopted && platformBucketProvider !== nextProvider) nextProvider.dispose();
-  }
-}
-
-/**
- * 删除非当前 Local 桶中的一把 Key：KeyHold 文件 + 该 Key 的 owner 数据。
- *
- * Local 桶数据就在本机 localStorage，不需要桶密码；但当前运行态桶不能走
- * 这条路径（必须走 keyspace.deleteKey 取消任务、关闭句柄并修复 active）。
- */
-async function deleteLocalBucketKey(
-  binding: StorageRuntimeBucketV1,
-  publicKeyHexInput: string,
-  peerId?: string,
-): Promise<void> {
-  const publicKeyHex = publicKeyHexInput.toLowerCase();
-  if (binding.backend !== "local") {
-    throw new StorageRuntimeError("storage_forbidden", "Only local bucket keys can be deleted without an active session");
-  }
-  if (selectedCatalogBucket()?.bucketId === binding.bucketId) {
-    throw new StorageRuntimeError("storage_conflict", "The current bucket key must be deleted through keyspace.deleteKey");
-  }
-  const provider = await createRuntimeProvider(binding, "", peerId);
-  try {
-    const repository = createKeyHoldRepository(provider);
-    const listed = await repository.list();
-    const target = listed.keys.find((key) => key.publicKeyHex.toLowerCase() === publicKeyHex);
-    if (!target) throw new StorageRuntimeError("storage_not_found", "Key not found");
-    const file = await repository.read(target.publicKeyHex);
-    await repository.delete(target.publicKeyHex, file?.etag);
-    // 一 Key 一文件：删除 KeyHold 后清掉该 Key 的 owner namespace 数据
-    // （含 lock.json 与全部业务 K-V），避免留下无归属数据。
-    const root = createPlatformRootStore({
-      provider,
-      bucket: { bucketId: binding.bucketId, bucketGeneration: 1, provider: binding.backend },
-    });
-    await root.deleteOwnerStorage({ ownerPublicKeyHex: publicKeyHex });
-  } finally {
-    provider.dispose();
-  }
-}
-
-/** 修改当前桶显示名；只更新设备记录，不触碰 Provider 与 Key。 */
-async function renameRuntimeBucket(label: string, peerId?: string): Promise<StorageRuntimeBucketV1> {
-  const binding = selectedCatalogBucket();
-  if (!binding) throw new StorageRuntimeError("storage_unavailable", "The current runtime bucket is not available");
-  const trimmed = label.trim();
-  if (!trimmed || trimmed.length > 128) throw new StorageRuntimeError("storage_provider_error", "Storage bucket label is invalid");
-  const record: DeviceRecordV1 = { ...binding.deviceRecord, displayName: trimmed } as DeviceRecordV1;
-  await putDeviceRecord(binding.bucketId, record, true, peerId);
-  const next: StorageRuntimeBucketV1 = { ...binding, label: trimmed, deviceRecord: record };
-  storageBootstrapState = { ...(storageBootstrapState ?? { selectedBackend: next.backend }), selectedBackend: next.backend, selectedProfileId: next.bucketId, selectedBucket: next };
-  emitStorageState();
-  return next;
-}
-
-/** Storage-first：先验证抽象桶，再打开 keys/ 与平台状态区。 */
-async function bootstrapPlatformStorage(profilePassword?: string, peerId?: string): Promise<void> {
-  // 冷启动/恢复的第一步也可能打开 Provider；必须先取得跨物理 Worker
-  // authority，不能因为当前还没有 Root 就绕过 authority lock。
-  await ensureCoordinatorAuthorityClaim();
-  if (platformRootStore) return;
-  const binding = storageBootstrapState?.selectedBucket;
-  if (!binding) throw storageUnavailableError("Storage bootstrap selection is unavailable");
-  if (binding.backend === "s3" && !profilePassword) {
-    storageHealthController.setStatus("authentication", "Startup password is required");
-    emitStorageState();
-    throw Object.assign(new Error("Startup password is required"), { code: "storage_identity_required" });
-  }
-  await bootstrapColdStartAuthenticated(profilePassword ?? "", peerId);
-}
-
-/** 冷启动候选 Provider：只解密设备连接，不触碰远端。 */
-type InitialSetupFailure = Extract<InitialSetupResult, { ok: false }>;
-type InitialSetupPhase = NonNullable<InitialSetupFailure["error"]["phase"]>;
-
-
-/**
- * s3 桶的本机 ID 规则：
- *   - 名字形如 `bucket_<16 位小写 hex>`(随机 64 bit)；
- *   - 生成前逐条查本机设备记录,重复则重生成；
- *   - 同一物理位置(endpoint+region+bucket+prefix)已有记录时**复用其 ID**,
- *     不产生第二条记录。
- *
- * 64 bit 的依据：设备记录上限 32 条,生日碰撞概率 ≈ 32²/2^65 ≈ 1.4e-17;
- * 叠加生成前查重后实际为零。
- */
-const S3_BUCKET_ID_PREFIX = "bucket_";
-const S3_BUCKET_ID_BYTES = 8;
-
-function normalizeS3LocationPart(value: string | undefined): string {
-  return (value ?? "").trim().toLowerCase().replace(/\/+$/u, "");
-}
-
-function sameS3PhysicalLocation(
-  left: Extract<DeviceLocationV1, { providerId: "s3" }>,
-  right: Extract<DeviceLocationV1, { providerId: "s3" }>,
-): boolean {
-  return normalizeS3LocationPart(left.endpoint) === normalizeS3LocationPart(right.endpoint)
-    && normalizeS3LocationPart(left.region) === normalizeS3LocationPart(right.region)
-    && normalizeS3LocationPart(left.bucket) === normalizeS3LocationPart(right.bucket)
-    && (left.prefix ?? "").replace(/^\/+|\/+$/gu, "") === (right.prefix ?? "").replace(/^\/+|\/+$/gu, "");
-}
-
-/** 解析 s3 桶的本机 ID：同物理位置复用,否则随机生成并查重。 */
-async function resolveS3BucketStorageId(connection: StorageBucketConnectionConfigV1, peerId?: string): Promise<string> {
-  if (connection.kind !== "s3") throw new StorageRuntimeError("storage_provider_error", "S3 bucket ID requires an s3 connection");
-  const location = deviceLocationFromConnection(connection, "");
-  if (location.providerId !== "s3") throw new StorageRuntimeError("storage_provider_error", "S3 bucket ID requires an s3 location");
-  const listed = await requestLocalStorageBridge({ type: "device-record-list" }, peerId);
-  if (listed.type !== "device-records") throw new StorageRuntimeError("storage_unavailable", "Device record bridge returned an invalid list result");
-  const existing = listed.entries.find((entry) => entry.record.location.providerId === "s3" && sameS3PhysicalLocation(entry.record.location, location));
-  if (existing) return existing.remoteStorageId;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const id = S3_BUCKET_ID_PREFIX + bytesToHex(crypto.getRandomValues(new Uint8Array(S3_BUCKET_ID_BYTES))).toLowerCase();
-    const found = await requestLocalStorageBridge({ type: "device-record-get", remoteStorageId: id }, peerId);
-    if (found.type !== "device-record") throw new StorageRuntimeError("storage_unavailable", "Device record bridge returned an invalid read result");
-    if (!found.record) return id;
-  }
-  throw new StorageRuntimeError("storage_provider_error", "Failed to allocate a unique S3 bucket ID");
-}
-
-function initialSetupBucketId(transactionId: string): string {
-  // transactionId 是外部契约输入，不能通过有损替换/截断映射到物理命名空间；
-  // 完整 SHA-256 保留确定性，同时把碰撞概率降到密码学可接受范围。
-  const digest = bytesToHex(sha256Bytes(new TextEncoder().encode("keymaster.initial-setup-bucket.v1:" + transactionId)));
-  return "setup-" + digest;
-}
-
-function deviceLocationFromConnection(connection: StorageBucketConnectionConfigV1, remoteStorageId: string): DeviceLocationV1 {
-  if (connection.kind === "local") return { providerId: "local" };
-  const normalized = normalizeProviderConfig({
-    providerId: "s3-compatible",
-    connection: {
-      endpoint: connection.endpoint,
-      region: connection.region,
-      bucket: connection.bucket,
-      ...(connection.prefix === undefined ? {} : { prefix: connection.prefix }),
-      ...(connection.sessionToken === undefined ? {} : { sessionToken: connection.sessionToken }),
-      forcePathStyle: connection.forcePathStyle === true,
-    },
-    credentials: {
-      mode: "replace",
-      accessKeyId: connection.accessKeyId,
-      secretAccessKey: connection.secretAccessKey,
-    },
-  });
-  const target = normalized.connection as {
-    endpoint: string;
-    region: string;
-    bucket: string;
-    prefix?: string;
-    forcePathStyle?: boolean;
-  };
-  const prefix = target.prefix?.replace(/^\/+|\/+$/gu, "");
-  return {
-    providerId: "s3",
-    endpoint: target.endpoint,
-    region: target.region,
-    bucket: target.bucket,
-    ...(!prefix ? {} : { prefix }),
-    ...(target.forcePathStyle === undefined ? {} : { forcePathStyle: target.forcePathStyle }),
-  };
-}
-
-function validateInitialSetupPlan(plan: InitialSetupPlan): void {
-  if (!plan || typeof plan !== "object") throw new StorageRuntimeError("storage_provider_error", "Initial setup plan is invalid");
-  if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(plan.transactionId)) throw new StorageRuntimeError("storage_provider_error", "Initial setup transaction ID is invalid");
-  if (!plan.bucketLabel.trim() || plan.bucketLabel.trim().length > 128) throw new StorageRuntimeError("storage_provider_error", "Initial setup bucket label is invalid");
-  if (plan.backend !== "local" && plan.backend !== "s3") throw new StorageRuntimeError("storage_provider_error", "Initial setup backend is invalid");
-  if (plan.connection.kind !== plan.backend) throw new StorageRuntimeError("storage_provider_error", "Initial setup connection backend is inconsistent");
-  // 两个密码域：s3 必须有启动密码；local 不设启动密码。首 Key 的密码始终必填。
-  if (plan.connection.kind === "s3") {
-    if (typeof plan.startupPassword !== "string" || plan.startupPassword.length < 8) throw new StorageRuntimeError("storage_identity_required", "Startup password must contain at least 8 characters");
-  } else if (plan.startupPassword !== undefined && plan.startupPassword.length > 0) {
-    throw new StorageRuntimeError("storage_provider_error", "Local buckets must not set a startup password");
-  }
-  // Local 桶 ID 由 Worker 随机生成；页面显式传入时仍校验格式并复用。
-  if (plan.connection.kind === "local" && plan.remoteStorageId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(plan.remoteStorageId)) {
-    throw new StorageRuntimeError("storage_provider_error", "Local bucket namespace is invalid");
-  }
-  if (!plan.firstKey || (plan.firstKey.kind !== "generate" && plan.firstKey.kind !== "import")) throw new StorageRuntimeError("storage_provider_error", "Initial setup Key kind is invalid");
-  if (typeof plan.firstKey.label !== "string" || !plan.firstKey.label.trim() || plan.firstKey.label.trim().length > 128) throw new StorageRuntimeError("storage_provider_error", "Initial setup Key label is invalid");
-  if (typeof plan.firstKey.password !== "string" || plan.firstKey.password.length < 8) throw new StorageRuntimeError("storage_identity_required", "Key password must contain at least 8 characters");
-  if (!Array.isArray(plan.firstKey.capabilities) || plan.firstKey.capabilities.length === 0 || !plan.firstKey.capabilities.every((value) => typeof value === "string" && value.length > 0 && value.length <= 64)) {
-    throw new StorageRuntimeError("storage_provider_error", "Initial setup Key capabilities are invalid");
-  }
-  if (plan.connection.kind === "s3") {
-    if (!plan.connection.endpoint || !plan.connection.region || !plan.connection.bucket || !plan.connection.accessKeyId || !plan.connection.secretAccessKey) {
-      throw new StorageRuntimeError("storage_provider_error", "Initial setup S3 connection is incomplete");
-    }
-    try {
-      const endpoint = new URL(plan.connection.endpoint);
-      if (endpoint.protocol !== "https:") throw new Error();
-    } catch {
-      throw new StorageRuntimeError("storage_provider_error", "Initial setup S3 endpoint must be HTTPS");
-    }
-  }
-  if (plan.firstKey.kind === "import") {
-    if (!plan.firstKey.material || typeof plan.firstKey.material.hex !== "string" || !/^[0-9a-f]{64}$/iu.test(plan.firstKey.material.hex)) throw new StorageRuntimeError("storage_provider_error", "Initial setup imported Key material is invalid");
-    if (plan.firstKey.material.wif !== undefined && typeof plan.firstKey.material.wif !== "string") throw new StorageRuntimeError("storage_provider_error", "Initial setup imported WIF material is invalid");
-    if (typeof plan.firstKey.format !== "string" || !plan.firstKey.format.trim() || plan.firstKey.format.length > 128) throw new StorageRuntimeError("storage_provider_error", "Initial setup imported Key format is invalid");
-  }
-}
-
-function initialSetupKeyFormat(firstKey: InitialSetupFirstKey): string {
-  return firstKey.kind === "generate" ? "generated-secp256k1" : firstKey.format;
-}
-
-function initialSetupErrorCode(error: unknown): string {
-  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-  return typeof code === "string" && code.startsWith("storage_") ? code : "initial_setup_failed";
-}
-
-function initialSetupFailure(
-  phase: InitialSetupPhase,
-  error: unknown,
-  rollback: InitialSetupFailure["error"]["rollback"],
-  transactionId?: string,
-  details?: unknown,
-): InitialSetupFailure {
-  const code = initialSetupErrorCode(error);
-  const incidentId = `initial-${randomIdentifierSuffix()}`;
-  const message = error instanceof Error ? error.message : "Initial setup failed";
-  const summary = rollback === "confirmed"
-    ? "初始化未完成，本次暂存数据已回滚，可以修改表单后重试。"
-    : rollback === "unconfirmed"
-      ? "初始化未完成，清理结果尚未确认；请先重试清理，不要继续进入业务页面。"
-      : "初始化尚未完成，当前没有可用的完整运行态。";
-  return {
-    ok: false,
-    error: {
-      title: "无法完成初始化",
-      summary,
-      action: rollback === "unconfirmed" ? "检查存储权限或网络后重试清理。" : "检查参数和存储权限后重试。",
-      code,
-      incidentId,
-      ...(transactionId === undefined ? {} : { transactionId }),
-      phase,
-      rollback,
-      diagnostic: buildDiagnosticText({
-        phase,
-        code,
-        incidentId,
-        rollback,
-        occurredAt: new Date().toISOString(),
-        redactionVersion: "diagnostic-v2",
-        message,
-        details: details ?? { error: message },
-      }),
-    },
-  };
-}
-
-async function privateKeyForInitialSetup(firstKey: InitialSetupFirstKey): Promise<Uint8Array> {
-  const privateKey = firstKey.kind === "generate"
-    ? cryptoHexToBytes(generateValidPrivateKeyHex())
-    : cryptoHexToBytes(firstKey.material.hex);
-  try {
-    if (privateKey.byteLength !== 32) throw new Error("Private key must contain 32 bytes");
-    // getPublicKey 同时验证曲线标量范围；不把无效导入材料写入候选桶。
-    (await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(privateKey, true);
-    return privateKey;
+    const durablePolicy = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy });
+    opened.push(durablePolicy);
+    const sessions = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions });
+    opened.push(sessions);
+    const commandHistory = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory });
+    opened.push(commandHistory);
+    return { durablePolicy, sessions, commandHistory };
   } catch (error) {
-    privateKey.fill(0);
-    throw new StorageRuntimeError("storage_provider_error", error instanceof Error ? error.message : "Initial setup private key is invalid");
-  }
-}
-
-/**
- * 首次初始化事务：Hold、Vault/index、Root 暂存完成后，最后才提交目录引用。
- * 该函数只被 storage.control 的 initial-setup 调用，页面不得复制这条编排。
- */
-/**
- * 解析初始化/接入计划的本机桶 ID。
- *
- * - 显式提供时直接使用；
- * - Local 桶：物理命名空间就是设备记录 ID,按事务 ID 派生随机桶 ID；
- * - S3 桶：本机逻辑身份按物理位置复用/随机分配,必须与事务安装阶段
- *   使用同一个值,否则 Provider 与 Root 的 bucketId 会不一致。
- */
-async function resolvePlanRemoteStorageId(
-  plan: { transactionId: string; connection: StorageBucketConnectionConfigV1; remoteStorageId?: string },
-  peerId?: string,
-): Promise<string> {
-  if (plan.remoteStorageId !== undefined) return plan.remoteStorageId;
-  return plan.connection.kind === "local"
-    ? initialSetupBucketId(plan.transactionId)
-    : await resolveS3BucketStorageId(plan.connection, peerId);
-}
-
-/** 由初始化/接入计划创建 Provider；凭据只在本调用内存中存在。 */
-async function createPlanProvider(plan: { transactionId: string; connection: StorageBucketConnectionConfigV1; remoteStorageId?: string }, peerId?: string): Promise<StorageBucketProvider> {
-  const remoteStorageId = await resolvePlanRemoteStorageId(plan, peerId);
-  if (plan.connection.kind === "local") {
-    const bridgeState = createCoordinatorLocalStorageBridgeState(peerId);
-    const provider = createLocalStorageBucketProvider({
-      bucketId: remoteStorageId,
-      bucketGeneration: 1,
-      bridge: (request) => requestLocalStorageBridge(request, bridgeState.targetPeerId()),
-    });
-    coordinatorLocalStorageProviderPublishers.set(provider, bridgeState.publish);
-    return provider;
-  }
-  const normalized: WorkerS3ProviderConfig = {
-    version: 1,
-    providerId: "s3-compatible",
-    connection: {
-      endpoint: plan.connection.endpoint,
-      region: plan.connection.region,
-      bucket: plan.connection.bucket,
-      forcePathStyle: plan.connection.forcePathStyle === true,
-      ...(plan.connection.sessionToken === undefined ? {} : { sessionToken: plan.connection.sessionToken }),
-      ...(plan.connection.prefix === undefined ? {} : { prefix: plan.connection.prefix }),
-    },
-    credentials: { kind: "access-key", accessKeyId: plan.connection.accessKeyId, secretAccessKey: plan.connection.secretAccessKey },
-  };
-  try {
-    return createS3BucketProvider(normalized, workerS3ProviderOptions(normalized, remoteStorageId));
-  } finally {
-    normalized.credentials.accessKeyId = "";
-    normalized.credentials.secretAccessKey = "";
-  }
-}
-
-const activeKeyLock = { current: undefined as import("@keymaster/platform-storage/coordinator").KeyLock | undefined };
-
-/** 安装新的 Key 锁并释放旧的；同一把 Key 同一时间只有一个浏览器持有。 */
-function installActiveKeyLock(lock: import("@keymaster/platform-storage/coordinator").KeyLock): void {
-  const previous = activeKeyLock.current;
-  activeKeyLock.current = lock;
-  // 切换 Key 按规范“先抢新锁,成功后再释放旧锁”；这里旧锁已被新锁替代。
-  if (previous) void previous.release().catch(() => undefined);
-}
-
-/**
- * 浏览器 session 的 Worker 内存缓存（见《浏览器session》）。
- *
- * 选中 Key / 切换桶 / 连接桶都是低频固定动作：读取一次后常驻内存，每次
- * 写透 LocalStorage 再原地更新缓存；业务路径不再逐次反向读取页面。
- * Worker 重启（模块重载）后缓存丢失，下一次读取自然回到持久化 session。
- */
-let workerSessionCache: KeymasterSessionV1 | undefined;
-let workerSessionCacheLoaded = false;
-let workerSessionMutationTail: Promise<unknown> = Promise.resolve();
-
-function invalidateWorkerSessionCache(): void {
-  workerSessionCache = undefined;
-  workerSessionCacheLoaded = false;
-}
-
-/** 单元测试没有页面 LocalStorage bridge 时，用内存 session 夹具代替。 */
-function useTestWorkerSession(): boolean {
-  return testPlatformStores !== undefined && testLocalStorageBridgeOverride === undefined;
-}
-
-async function readWorkerSession(peerId?: string): Promise<KeymasterSessionV1 | undefined> {
-  if (workerSessionCacheLoaded) return workerSessionCache;
-  if (useTestWorkerSession()) {
-    workerSessionCache = testWorkerSession ? structuredClone(testWorkerSession) : undefined;
-    workerSessionCacheLoaded = true;
-    return workerSessionCache;
-  }
-  const response = await requestLocalStorageBridge({ type: "session-read" }, peerId);
-  if (response.type !== "session") throw storageUnavailableError("Session bridge returned an invalid read result");
-  workerSessionCache = response.session;
-  workerSessionCacheLoaded = true;
-  return workerSessionCache;
-}
-
-async function writeWorkerSession(session: KeymasterSessionV1, peerId?: string): Promise<void> {
-  const checked = validateKeymasterSession(session);
-  if (useTestWorkerSession()) {
-    testWorkerSession = structuredClone(checked);
-    workerSessionCache = structuredClone(checked);
-    workerSessionCacheLoaded = true;
-    return;
-  }
-  const response = await requestLocalStorageBridge({ type: "session-write", session: checked }, peerId);
-  if (response.type !== "void") throw storageUnavailableError("Session bridge returned an invalid write result");
-  workerSessionCache = checked;
-  workerSessionCacheLoaded = true;
-}
-
-async function ensureWorkerSession(peerId?: string): Promise<KeymasterSessionV1> {
-  const existing = await readWorkerSession(peerId);
-  if (existing) return existing;
-  const session = createKeymasterSession(generateSessionId());
-  await writeWorkerSession(session, peerId);
-  return session;
-}
-
-/**
- * 把「当前选中 Key」收敛到 session.activeKey（浏览器本地真值）。
- *
- * 只有值变化时才写透一次；`activeKey` 必须与 `activeBucketId` 成对，
- * 因此未选桶时不落盘。多次变更通过串行尾链提交，避免读-改-写互相覆盖。
- */
-function updateWorkerSessionSelection(selectedPublicKeyHex: string | undefined, peerId?: string): Promise<void> {
-  const run = workerSessionMutationTail.then(async () => {
-    if (selectedPublicKeyHex === undefined) {
-      const current = await readWorkerSession(peerId);
-      if (!current?.activeKey) return;
-      const { activeKey: _activeKey, ...rest } = current;
-      await writeWorkerSession(rest, peerId);
-      return;
-    }
-    const nextKey = selectedPublicKeyHex.toLowerCase();
-    const current = await ensureWorkerSession(peerId);
-    if (current.activeKey === nextKey) return;
-    if (current.activeBucketId === undefined) return;
-    await writeWorkerSession({ ...current, activeKey: nextKey }, peerId);
-  });
-  workerSessionMutationTail = run.catch(() => undefined);
-  return run;
-}
-
-async function putDeviceRecord(remoteStorageId: string, record: DeviceRecordV1, replace: boolean, peerId?: string): Promise<void> {
-  const response = await requestLocalStorageBridge({ type: "device-record-put", remoteStorageId, record, replace }, peerId);
-  if (response.type !== "void") throw storageUnavailableError("Device record bridge returned an invalid write result");
-}
-
-/**
- * 把一次成功的条件写探测结果写回设备记录（整记录替换，保留其它字段）。
- * 已登记桶专用；未登记桶的探测结果由页面放入提交计划。
- */
-async function updateDeviceRecordCapabilities(
-  remoteStorageId: string,
-  conditionalWrites: "native" | "best-effort",
-  peerId?: string,
-): Promise<void> {
-  const response = await requestLocalStorageBridge({ type: "device-record-get", remoteStorageId }, peerId);
-  if (response.type !== "device-record" || !response.record) return;
-  const record = response.record;
-  if (record.location.providerId !== "s3") return;
-  const s3Record = record as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>;
-  if (s3Record.capabilities?.conditionalWrites === conditionalWrites) return;
-  await putDeviceRecord(remoteStorageId, { ...s3Record, capabilities: { conditionalWrites } }, true, peerId);
-}
-
-function generateSessionKeyDerivation(): KeymasterSessionKeyDerivationV1 {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  return {
-    algorithm: "pbkdf2-hmac-sha-256",
-    passwordEncoding: "utf-8",
-    iterations: KEYMASTER_SESSION_RECOMMENDED_ITERATIONS,
-    outputLengthBits: 256,
-    saltB64Url: encodeBase64Url(salt),
-  };
-}
-
-/** 生成设备记录：local 只有公开坐标；s3 用启动密码与 session KDF 封存凭据。 */
-async function buildDeviceRecordForConnection(input: {
-  connection: StorageBucketConnectionConfigV1;
-  remoteStorageId: string;
-  displayName: string;
-  password: string;
-  keyDerivation: KeymasterSessionKeyDerivationV1 | undefined;
-  /** 页面探测阶段得到的条件写能力；缺失表示尚未探测。 */
-  capabilities?: InitialSetupPlan["capabilities"];
-}): Promise<{ record: DeviceRecordV1; keyDerivation?: KeymasterSessionKeyDerivationV1 }> {
-  const location = deviceLocationFromConnection(input.connection, input.remoteStorageId);
-  if (location.providerId === "local") {
-    return { record: { format: "keymaster.device", version: 1, displayName: input.displayName, location } };
-  }
-  if (input.connection.kind !== "s3") throw new StorageRuntimeError("storage_provider_error", "S3 device record requires an s3 connection");
-  const keyDerivation = input.keyDerivation ?? generateSessionKeyDerivation();
-  const cipher = await encryptDeviceConfig({
-    password: input.password,
-    keyDerivation,
-    location,
-    plaintext: {
-      endpoint: input.connection.endpoint,
-      region: input.connection.region,
-      bucket: input.connection.bucket,
-      accessKeyId: input.connection.accessKeyId,
-      secretAccessKey: input.connection.secretAccessKey,
-      ...(input.connection.sessionToken === undefined ? {} : { sessionToken: input.connection.sessionToken }),
-      ...(input.connection.prefix === undefined ? {} : { prefix: input.connection.prefix }),
-      ...(input.connection.forcePathStyle === undefined ? {} : { forcePathStyle: input.connection.forcePathStyle }),
-    },
-  });
-  return {
-    record: {
-      format: "keymaster.device",
-      version: 1,
-      displayName: input.displayName,
-      location,
-      cipher,
-      ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
-    },
-    keyDerivation,
-  };
-}
-
-function runtimeBinding(input: {
-  remoteStorageId: string;
-  backend: "local" | "s3";
-  displayName: string;
-  record: DeviceRecordV1;
-  keyDerivation?: KeymasterSessionKeyDerivationV1;
-}): StorageRuntimeBucketV1 {
-  return {
-    bucketId: input.remoteStorageId,
-    backend: input.backend,
-    label: input.displayName,
-    deviceRecord: input.record,
-    ...(input.keyDerivation === undefined ? {} : { keyDerivation: input.keyDerivation }),
-  };
-}
-
-function initialSetupKeyResult(publicKeyHex: string, plan: InitialSetupPlan): InitialSetupKeyResult {
-  return {
-    publicKeyHex,
-    label: plan.firstKey.label.trim(),
-    address: deriveP2pkhAddress(publicKeyHex, "main"),
-    format: initialSetupKeyFormat(plan.firstKey),
-    capabilities: [...plan.firstKey.capabilities],
-    createdAt: new Date().toISOString(),
-    ...(plan.firstKey.kind === "import" && plan.firstKey.source !== undefined ? { source: plan.firstKey.source } : {}),
-  };
-}
-
-/**
- * 首次建桶：抢新 Key 锁 → 写 `keys/<公钥>.keyhold` → 写 `keymaster.device.<ID>`
- * 与 session → 安装平台运行态。失败不回滚已写好的 KeyHold 文件：用户可以
- * 用同一 Key 密码重新接入；这比删除用户私钥更安全。
- */
-async function executeInitialSetupTransaction(plan: InitialSetupPlan, peerId?: string): Promise<InitialSetupResult> {
-  validateInitialSetupPlan(plan);
-  // 已初始化时允许"新建桶并切换"（桶管理页入口）：新桶的 KeyHold、设备
-  // 记录与 session 先完整写入，安装阶段才锁定并替换旧运行态。失败不会
-  // 删除已写好的新桶数据，用户可用同一 Key 密码重新接入。
-  // 页面不要求提供桶 ID：统一走 resolvePlanRemoteStorageId,保证 Provider
-  // 与安装阶段使用同一个本机桶 ID。
-  const remoteStorageId = await resolvePlanRemoteStorageId(plan, peerId);
-  const displayName = plan.bucketLabel.trim();
-  if (plan.connection.kind === "local") {
-    // 本机已登记同 ID 桶时不能再建：请走解锁/切换路径。
-    const existing = await requestLocalStorageBridge({ type: "device-record-get", remoteStorageId }, peerId);
-    if (existing.type !== "device-record") throw new StorageRuntimeError("storage_unavailable", "Device record bridge returned an invalid read result");
-    if (existing.record) throw new StorageRuntimeError("storage_conflict", "A bucket with this namespace is already registered on this device");
-    // 页面已做同名检查；Worker 侧再按设备记录兜底，避免绕过页面写入重名桶。
-    const listed = await requestLocalStorageBridge({ type: "device-record-list" }, peerId);
-    if (listed.type !== "device-records") throw new StorageRuntimeError("storage_unavailable", "Device record bridge returned an invalid list result");
-    if (listed.entries.some((entry) => (entry.record.displayName ?? "").trim() === displayName)) {
-      throw new StorageRuntimeError("storage_conflict", "A bucket with this name is already registered on this device");
-    }
-  }
-  let provider: StorageBucketProvider | undefined;
-  let privateKey: Uint8Array | undefined;
-  let lock: import("@keymaster/platform-storage/coordinator").KeyLock | undefined;
-  try {
-    provider = await createPlanProvider({ ...plan, remoteStorageId }, peerId);
-    privateKey = await privateKeyForInitialSetup(plan.firstKey);
-    const publicKeyHex = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(privateKey, true)).toLowerCase();
-    const repository = createKeyHoldRepository(provider);
-    // 规范顺序：先抢新 Key 的应用锁,再写 keys/<公钥>.keyhold。
-    const session = await ensureWorkerSession(peerId);
-    lock = createKeyLock(provider, { ownerPublicKeyHex: publicKeyHex, holder: session.sessionId });
-    await lock.acquire();
-    const created = await repository.create({ label: plan.firstKey.label.trim(), privateKeyBytes: privateKey, password: plan.firstKey.password });
-    if (created.document.publicKeyHex !== publicKeyHex) throw new StorageRuntimeError("storage_provider_error", "Initial setup Key public key mismatch");
-    const built = await buildDeviceRecordForConnection({
-      connection: plan.connection,
-      remoteStorageId,
-      displayName,
-      password: plan.startupPassword ?? "",
-      keyDerivation: session.keyDerivation,
-      ...(plan.capabilities === undefined ? {} : { capabilities: plan.capabilities }),
-    });
-    await putDeviceRecord(remoteStorageId, built.record, false, peerId);
-    await writeWorkerSession({
-      ...session,
-      activeBucketId: remoteStorageId,
-      activeKey: publicKeyHex,
-      ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }),
-    }, peerId);
-    const binding = runtimeBinding({ remoteStorageId, backend: plan.backend, displayName, record: built.record, ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }) });
-    // 已有运行态时先全局锁定并卸下旧绑定，再把新桶安装为当前运行态；
-    // 此时新桶数据已完整落盘，安装失败也不会破坏旧桶数据。
-    if (platformRootStore) {
-      await performGlobalLock("initial-setup");
-      discardCurrentPlatformStorageBinding();
-    }
-    storageRootInstallationActive = true;
-    try {
-      await installPlatformStorage(provider, { bucketId: remoteStorageId, bucketGeneration: 1, provider: plan.backend });
-    } finally {
-      storageRootInstallationActive = false;
-    }
-    storageBootstrapState = { selectedBackend: binding.backend, selectedProfileId: binding.bucketId, selectedBucket: binding };
-    // 初始创建后装配 Storage 运行态并发布 ready：否则页面停留在初始化向导,
-    // 只有刷新走冷启动才会看到就绪状态。
-    storageController = undefined;
-    await ensureStorageRuntime(peerId);
-    await ensureCoordinatorTasksRegistered();
-    coordinatorState.keyspaceGeneration += 1;
-    coordinatorState.sessionEpoch = generateEpoch();
-    coordinatorState.vaultStatus = "uninitialized";
-    coordinatorState.activePublicKeyHex = undefined;
-    storageHealthController.setStatus("ready");
-    storageStartupFailure = false;
-    emitStorageState();
-    installActiveKeyLock(lock);
-    lock = undefined;
-    const activePrivateKeyBytes = privateKey;
-    privateKey = undefined;
-    await enterUnlockedState(publicKeyHex, activePrivateKeyBytes, plan.firstKey.kind === "import" ? "import-initial-key" : "create-initial-key");
-    return { ok: true, bucket: binding, firstKey: initialSetupKeyResult(publicKeyHex, plan) };
-  } finally {
-    lock?.dispose();
-    privateKey?.fill(0);
-    if (provider && platformBucketProvider !== provider) provider.dispose();
-  }
-}
-
-/** 校验接入已有远端的计划。 */
-function validateExistingRemoteStorageConnectPlan(plan: ExistingRemoteStorageConnectPlan): void {
-  if (!plan || typeof plan !== "object") throw new StorageRuntimeError("storage_provider_error", "Existing remote connect plan is invalid");
-  if (!/^[A-Za-z0-9._:-]{8,128}$/u.test(plan.operationId)) throw new StorageRuntimeError("storage_provider_error", "Existing remote operation ID is invalid");
-  if (plan.backend === "local") {
-    if (typeof plan.remoteStorageId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(plan.remoteStorageId)) throw new StorageRuntimeError("storage_provider_error", "Local bucket namespace is invalid");
-  } else if (plan.remoteStorageId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(plan.remoteStorageId)) {
-    throw new StorageRuntimeError("storage_provider_error", "Existing remote storage ID is invalid");
-  }
-  if (!plan.displayName.trim() || plan.displayName.trim().length > 128) throw new StorageRuntimeError("storage_provider_error", "Existing remote display name is invalid");
-  if (plan.backend !== "local" && plan.backend !== "s3") throw new StorageRuntimeError("storage_provider_error", "Existing remote backend is invalid");
-  if (plan.connection.kind !== plan.backend) throw new StorageRuntimeError("storage_provider_error", "Existing remote connection backend is inconsistent");
-  if (typeof plan.keyPassword !== "string" || plan.keyPassword.length < 8) throw new StorageRuntimeError("storage_identity_required", "Key password must contain at least 8 characters");
-  if (plan.connection.kind === "s3") {
-    if (typeof plan.startupPassword !== "string" || plan.startupPassword.length < 8) throw new StorageRuntimeError("storage_identity_required", "Startup password must contain at least 8 characters");
-  } else if (plan.startupPassword !== undefined && plan.startupPassword.length > 0) {
-    throw new StorageRuntimeError("storage_provider_error", "Local buckets must not set a startup password");
-  }
-  if (plan.connection.kind === "s3" && (!plan.connection.endpoint || !plan.connection.region || !plan.connection.bucket || !plan.connection.accessKeyId || !plan.connection.secretAccessKey)) {
-    throw new StorageRuntimeError("storage_provider_error", "Existing remote S3 connection is incomplete");
-  }
-}
-
-/**
- * 只读探测：连接目标桶并列出 \`keys/\` 目录。
- *
- * 判定规则（KeymasterFormats《初始化流程》）：
- *   - 至少一份可解析 KeyHold 文件 → has-keys（进入解锁）；
- *   - 目录不存在/为空 → empty（进入创建）；
- *   - 读取失败（网络/权限/损坏） → 返回错误,只允许重试,绝不当作空桶。
- * 探测不加锁、不写任何对象。
- */
-async function executeBucketProbe(plan: import("@keymaster/contracts").BucketProbePlan, peerId?: string): Promise<import("@keymaster/contracts").BucketProbeResult> {
-  try {
-    // 探测是只读的,已初始化时也允许：桶管理页用它来连接已有桶。
-    // Local 新建探测不要求页面提供桶 ID：命名空间按操作 ID 派生；管理页
-    // 连接已有桶时仍会显式传入 remoteStorageId。
-    //
-    // 已登记桶（plan.binding）直接用设备记录 + 启动密码建立只读连接；
-    // S3 凭据密文只在本次探测内解密，结束后 Provider 立即释放。
-    let provider: StorageBucketProvider;
-    if (plan.binding) {
-      provider = await createRuntimeProvider(plan.binding, plan.password, peerId);
-    } else {
-      if (!plan.connection) throw new StorageRuntimeError("storage_provider_error", "Probe connection is required");
-      if (plan.connection.kind !== plan.backend) throw new StorageRuntimeError("storage_provider_error", "Probe connection backend is inconsistent");
-      provider = await createPlanProvider({
-        transactionId: plan.operationId,
-        connection: plan.connection,
-        ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: plan.remoteStorageId }),
-      }, peerId);
-    }
-    try {
-      // S3 桶必须在读取 keys/ 前确认条件写能力：设备记录里已有探测结果时
-      // 直接复用（不再发送写探针）；缺失或要求重新探测时才实测并写回。
-      // 原生条件写优先；服务忽略条件头时降级为 best-effort（HEAD 后写入）。
-      const isS3 = plan.binding ? plan.binding.backend === "s3" : plan.connection?.kind === "s3";
-      let conditionalWrites: "native" | "best-effort" | undefined;
-      if (isS3) {
-        const cached = plan.binding && plan.binding.deviceRecord.location.providerId === "s3"
-          ? (plan.binding.deviceRecord as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>).capabilities?.conditionalWrites
-          : undefined;
-        if (!plan.forceReprobe && cached) {
-          conditionalWrites = cached;
-        } else {
-          const probed = await provider.probe();
-          if (!probed.ok || probed.conditionalWrites === "unsupported") {
-            throw new StorageRuntimeError("storage_provider_error", "该桶无法提供可用的条件写入（原子或 best-effort 模拟）");
-          }
-          conditionalWrites = probed.conditionalWrites;
-          // 已登记桶：探测结果写回设备记录；未登记桶把结果返回页面，由提交
-          // 计划一并写入，避免提交时重复探测。
-          if (plan.binding) await updateDeviceRecordCapabilities(plan.binding.bucketId, probed.conditionalWrites, peerId);
-        }
-      }
-      const listed = await createKeyHoldRepository(provider).list();
-      return listed.keys.length === 0
-        ? { ok: true, state: "empty", ...(conditionalWrites === undefined ? {} : { conditionalWrites }) }
-        : {
-            ok: true,
-            state: "has-keys",
-            keys: listed.keys.map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label })),
-            ...(conditionalWrites === undefined ? {} : { conditionalWrites }),
-          };
-    } finally {
-      provider.dispose();
-    }
-  } catch (error) {
-    return { ok: false, error: initialSetupFailure("validate", error instanceof Error ? error : new Error(String(error)), "not-started", plan.operationId).error };
-  }
-}
-
-/** 生产"连接已有远端"入口：列出 `keys/`、用该 Key 自己的密码解锁，再写本机记录并接管运行态。 */
-async function executeExistingRemoteStorageConnect(
-  plan: ExistingRemoteStorageConnectPlan,
-  peerId?: string,
-): Promise<ExistingRemoteStorageConnectResult> {
-  validateExistingRemoteStorageConnectPlan(plan);
-  // 运行态已安装时允许连接第二个桶（桶管理页入口）：解锁成功后再切换运行态。
-  // 只有“正在初始化但运行态未安装完成”的中间态才拒绝。
-  if (!platformRootStore && storageBootstrapState?.selectedBucket) {
-    return { ok: false, error: initialSetupFailure("validate", new StorageRuntimeError("storage_conflict", "Storage initialization is still in progress"), "not-started", plan.operationId).error };
-  }
-  let provider: StorageBucketProvider | undefined;
-  let lock: import("@keymaster/platform-storage/coordinator").KeyLock | undefined;
-  let unlocked: UnlockedKeyHold | undefined;
-  try {
-    const remoteStorageId = await resolvePlanRemoteStorageId({ transactionId: plan.operationId, connection: plan.connection, ...(plan.remoteStorageId === undefined ? {} : { remoteStorageId: plan.remoteStorageId }) }, peerId);
-    provider = await createPlanProvider({
-      transactionId: plan.operationId,
-      connection: plan.connection,
-      remoteStorageId,
-    }, peerId);
-    const repository = createKeyHoldRepository(provider);
-    const listed = await repository.list();
-    if (listed.keys.length === 0) throw new StorageRuntimeError("storage_remote_not_initialized", "The remote storage namespace is not initialized");
-    const session = await ensureWorkerSession(peerId);
-    const requested = plan.publicKeyHex?.toLowerCase();
-    if (requested !== undefined && !listed.keys.some((key) => key.publicKeyHex.toLowerCase() === requested)) throw new StorageRuntimeError("storage_not_found", "The selected Key does not exist in this bucket");
-    const publicKeyHex = requested
-      ?? (session.activeKey !== undefined && listed.keys.some((key) => key.publicKeyHex === session.activeKey)
-        ? session.activeKey
-        : listed.keys[0]!.publicKeyHex);
-    unlocked = await repository.unlock(publicKeyHex, plan.keyPassword);
-    lock = createKeyLock(provider, { ownerPublicKeyHex: publicKeyHex, holder: session.sessionId });
-    await lock.acquire();
-    const built = await buildDeviceRecordForConnection({
-      connection: plan.connection,
-      remoteStorageId,
-      displayName: plan.displayName,
-      password: plan.startupPassword ?? "",
-      keyDerivation: session.keyDerivation,
-      ...(plan.capabilities === undefined ? {} : { capabilities: plan.capabilities }),
-    });
-    // 已初始化时先锁旧 Vault 并卸下旧绑定,再写记录、安装新运行态。
-    if (platformRootStore) {
-      await performGlobalLock("connect-bucket");
-      discardCurrentPlatformStorageBinding();
-    }
-    await putDeviceRecord(remoteStorageId, built.record, true, peerId);
-    await writeWorkerSession({
-      ...session,
-      activeBucketId: remoteStorageId,
-      activeKey: publicKeyHex,
-      ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }),
-    }, peerId);
-    const binding = runtimeBinding({
-      remoteStorageId,
-      backend: plan.backend,
-      displayName: plan.displayName,
-      record: built.record,
-      ...(built.keyDerivation === undefined ? {} : { keyDerivation: built.keyDerivation }),
-    });
-    storageRootInstallationActive = true;
-    try {
-      await installPlatformStorage(provider, { bucketId: remoteStorageId, bucketGeneration: 1, provider: plan.backend });
-    } finally {
-      storageRootInstallationActive = false;
-    }
-    storageBootstrapState = { selectedBackend: binding.backend, selectedProfileId: binding.bucketId, selectedBucket: binding };
-    // 连接成功后同样装配 Storage 运行态,页面无需刷新即可继续。
-    storageController = undefined;
-    await ensureStorageRuntime(peerId);
-    await ensureCoordinatorTasksRegistered();
-    coordinatorState.keyspaceGeneration += 1;
-    coordinatorState.sessionEpoch = generateEpoch();
-    coordinatorState.vaultStatus = "uninitialized";
-    coordinatorState.activePublicKeyHex = undefined;
-    storageHealthController.setStatus("ready");
-    storageStartupFailure = false;
-    installActiveKeyLock(lock);
-    lock = undefined;
-    const privateKeyBytes = unlocked.privateKeyBytes;
-    unlocked.privateKeyBytes = new Uint8Array(0);
-    await enterUnlockedState(publicKeyHex, privateKeyBytes, "unlock");
-    const keyFile = await repository.read(publicKeyHex);
-    return {
-      ok: true,
-      bucket: binding,
-      activeKey: {
-        publicKeyHex,
-        label: keyFile?.document.label ?? publicKeyHex,
-        address: deriveP2pkhAddress(publicKeyHex, "main"),
-        format: "keyhold",
-        capabilities: ["p2pkh"],
-        createdAt: new Date().toISOString(),
-      },
-    };
-  } catch (error) {
-    return { ok: false, error: initialSetupFailure("runtime", error instanceof Error ? error : new Error(String(error)), "not-started", plan.operationId).error };
-  } finally {
-    lock?.dispose();
-    unlocked?.privateKeyBytes.fill(0);
-    if (provider && platformBucketProvider !== provider) provider.dispose();
-  }
-}
-
-async function executeInitialSetupOnce(plan: InitialSetupPlan, peerId?: string): Promise<InitialSetupResult> {
-  const transactionId = plan && typeof plan === "object" && typeof plan.transactionId === "string"
-    ? plan.transactionId
-    : undefined;
-  if (!transactionId) return executeInitialSetupTransaction(plan, peerId);
-  const existing = initialSetupTransactions.get(transactionId);
-  if (existing instanceof Promise) return existing;
-  if (existing?.ok) return Promise.resolve(existing);
-  const run = executeInitialSetupTransaction(plan, peerId).then((result) => {
-    if (result.ok) initialSetupTransactions.set(transactionId, result);
-    else initialSetupTransactions.delete(transactionId);
-    return result;
-  }, (error) => {
-    initialSetupTransactions.delete(transactionId);
+    for (const store of opened) store.close();
     throw error;
-  });
-  initialSetupTransactions.set(transactionId, run);
-  return run;
+  }
 }
 
-/** 已完成事务的公开结果；进行中或未记录都返回 undefined。 */
-async function getInitialSetupResult(transactionId: string, _peerId?: string): Promise<InitialSetupResult | undefined> {
-  const existing = initialSetupTransactions.get(transactionId);
-  return existing instanceof Promise ? undefined : existing;
+/** 当前 grant 的撤销栅栏：锁、改密、重置和撤权让已发放句柄 fail closed。 */
+function platformRootBindingIsCurrent(binding: StorageNamespaceBinding): boolean {
+  if (platformRootToken === undefined) return false;
+  if (binding.walletGeneration !== coordinatorState.walletGeneration) return false;
+  return true;
 }
 
-interface CurrentCatalogStorageBinding {
-  provider?: StorageBucketProvider;
+/**
+ * 装配当前钱包的存储根。
+ *
+ * 只有 IndexedDB 是正式介质：没有 Provider 选择、没有桶、没有远程连接。
+ * 候选 Root 在提交前完全不可见，提交后才让旧句柄失效。
+ */
+async function installPlatformStorage(): Promise<void> {
+  const previousRootToken = platformRootToken;
+  const rootToken = {};
+  let candidatePublished = false;
+  let candidateSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
+  let candidatePluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
+  let candidateProtocol: CoordinatorProtocolStorageStores | undefined;
+  try {
+    if (!walletStore) throw new StorageRuntimeError("storage_unavailable", "Wallet storage is not available");
+    const root = createPlatformRootStore({
+      store: walletStore,
+      generations: () => ({
+        walletGeneration: coordinatorState.walletGeneration,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        runGeneration: coordinatorState.runGeneration,
+      }),
+      isCurrent: platformRootBindingIsCurrent,
+    });
+    const settingsSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validate: validateCoordinatorSettingsSnapshot });
+    candidateSettingsSnapshot = settingsSnapshot;
+    const pluginIntentSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validate: validatePluginIntentSnapshot });
+    candidatePluginIntentSnapshot = pluginIntentSnapshot;
+    const protocol = await openCoordinatorProtocolStorageStores(root);
+    candidateProtocol = protocol;
+
+    // 到这里为止只使用候选 Root；Hold、Vault 和后续恢复仍未能看到半成品。
+    // 提交前才切换全局句柄，并释放上一代平台句柄。
+    coordinatorSettingsSnapshot?.close();
+    coordinatorPluginIntentSnapshot?.close();
+    platformRootToken = rootToken;
+    candidatePublished = true;
+    configureProtocolStorageRepository(protocol);
+    platformRootStore = root;
+    registerCoordinatorProtocolMaintenanceStores(protocol);
+    coordinatorSettingsSnapshot = settingsSnapshot;
+    coordinatorPluginIntentSnapshot = pluginIntentSnapshot;
+    // 新 Root 提交后先撤销旧意图控制器；loadCoordinatorMeta 会从本次固定对象
+    // 恢复并重建，期间任何惰性读取都只能看到空的默认意图。
+    coordinatorMeta.pluginIntent = emptyPluginIntentSnapshot();
+    disposePluginIntentController();
+    coordinatorProtocolStores = protocol;
+    platformStorageReady = true;
+    scheduleCoordinatorKeyValueMaintenance();
+  } catch (error) {
+    if (!candidatePublished) {
+      closeCoordinatorProtocolStorageStores(candidateProtocol);
+      candidateSettingsSnapshot?.close();
+      candidatePluginIntentSnapshot?.close();
+      if (platformRootToken === rootToken) platformRootToken = previousRootToken;
+    }
+    throw error;
+  }
+}
+
+interface CurrentPlatformStorageBinding {
   root?: PlatformRootStore;
   rootToken?: object;
-  storageStore?: KeyValueStore;
   settingsSnapshot?: SnapshotStore<CoordinatorSettingsSnapshot>;
   pluginIntentSnapshot?: SnapshotStore<PluginIntentSnapshot>;
   protocol?: CoordinatorProtocolStorageStores;
-  storageRepository?: Awaited<ReturnType<typeof openMultipartUploadRepository>>;
   runtime?: StorageRuntimeController & { dispose?: () => void };
 }
 
-function captureCurrentCatalogStorageBinding(): CurrentCatalogStorageBinding {
+function captureCurrentPlatformStorageBinding(): CurrentPlatformStorageBinding {
   return {
-    provider: platformBucketProvider,
     root: platformRootStore,
     rootToken: platformRootToken,
-    storageStore: platformStorageStore,
     settingsSnapshot: coordinatorSettingsSnapshot,
     pluginIntentSnapshot: coordinatorPluginIntentSnapshot,
     protocol: coordinatorProtocolStores,
-    storageRepository,
     runtime: storageController as (StorageRuntimeController & { dispose?: () => void }) | undefined,
   };
 }
@@ -2462,343 +881,41 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
   replacePluginIntentController();
 }
 
-function disposeCurrentCatalogBinding(binding: CurrentCatalogStorageBinding): void {
-  unregisterCoordinatorKeyValueMaintenanceStore(binding.storageStore);
+function disposeCurrentPlatformStorageBinding(binding: CurrentPlatformStorageBinding): void {
   unregisterCoordinatorProtocolMaintenanceStores(binding.protocol);
   try { binding.runtime?.dispose?.(); } catch { /* best effort */ }
-  if (!binding.runtime) binding.storageRepository?.close();
   binding.settingsSnapshot?.close();
   binding.pluginIntentSnapshot?.close();
-  binding.storageStore?.close();
   closeCoordinatorProtocolStorageStores(binding.protocol);
-  binding.provider?.dispose();
 }
 
+/** 撤销当前存储根：所有已发放句柄与迟到结果立即失效。 */
 function discardCurrentPlatformStorageBinding(): void {
   stopCoordinatorKeyValueMaintenance();
-  const binding = captureCurrentCatalogStorageBinding();
+  const binding = captureCurrentPlatformStorageBinding();
   for (const store of workerOwnerStores) store.invalidateBinding();
-  disposeCurrentCatalogBinding(binding);
+  disposeCurrentPlatformStorageBinding(binding);
   platformRootStore = undefined;
-  platformBucketProvider = undefined;
   platformRootToken = undefined;
-  resetVaultKeyIndexCache();
-  platformStorageStore = undefined;
   coordinatorSettingsSnapshot = undefined;
   coordinatorPluginIntentSnapshot = undefined;
   coordinatorProtocolStores = undefined;
   storageController = undefined;
-  storageRepository = undefined;
   platformStorageReady = false;
   coordinatorMeta.pluginIntent = emptyPluginIntentSnapshot();
   disposePluginIntentController();
 }
 
-
-async function installPlatformStorage(
-  provider: StorageBucketProvider,
-  bucket: StorageBucketRef,
-): Promise<void> {
-  const previousRootToken = platformRootToken;
-  const rootToken = {};
-  let candidatePublished = false;
-  let candidateSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
-  let candidatePluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
-  let candidateProtocol: CoordinatorProtocolStorageStores | undefined;
-  let candidateStorageStore: KeyValueStore | undefined;
-  let candidateStorageRepository: Awaited<ReturnType<typeof openMultipartUploadRepository>> | undefined;
-  try {
-    const root = createPlatformRootStore({
-      provider,
-      bucket,
-      isCurrent: ({ ownerPublicKeyHex, bucketGeneration, keyspaceGeneration }) =>
-        (candidatePublished ? platformRootToken === rootToken : true) &&
-        bucketGeneration === bucket.bucketGeneration &&
-        (keyspaceGeneration === undefined || keyspaceGeneration === coordinatorState.keyspaceGeneration) &&
-        (!ownerPublicKeyHex || ownerPublicKeyHex.toLowerCase() === coordinatorState.activePublicKeyHex?.toLowerCase())
-    });
-    const settingsSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validate: validateCoordinatorSettingsSnapshot });
-    candidateSettingsSnapshot = settingsSnapshot;
-    const pluginIntentSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validate: validatePluginIntentSnapshot });
-    candidatePluginIntentSnapshot = pluginIntentSnapshot;
-    const protocol = await openCoordinatorProtocolStorageStores(root);
-    candidateProtocol = protocol;
-    candidateStorageStore = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
-    candidateStorageRepository = await openMultipartUploadRepository(candidateStorageStore);
-
-    // 到这里为止只使用候选 Provider/Root；Hold、Vault 和后续恢复仍未能
-    // 看到半成品。提交前才切换全局句柄，并释放上一代平台句柄。
-    if (storageRepository && storageRepository !== candidateStorageRepository) storageRepository.close();
-    coordinatorSettingsSnapshot?.close();
-    coordinatorPluginIntentSnapshot?.close();
-    disposeVaultStorageRepository();
-    platformRootToken = rootToken;
-    candidatePublished = true;
-    configureCoordinatorVaultStorage(provider);
-    configureProtocolStorageRepository(protocol);
-    platformRootStore = root;
-    platformBucketProvider = provider;
-    // 安装完成后，Local Provider 的反向 bridge 必须跟随当前 storageIoOwner，
-    // 而不是创建它的那个页面 peer；否则页面刷新/关闭后旧 peer 被回收，
-    // 后续解锁会去找一个不再存在的页面。
-    publishCoordinatorLocalStorageProvider(provider);
-    platformStorageStore = candidateStorageStore;
-    registerCoordinatorKeyValueMaintenanceStore(candidateStorageStore);
-    registerCoordinatorProtocolMaintenanceStores(protocol);
-    coordinatorSettingsSnapshot = settingsSnapshot;
-    coordinatorPluginIntentSnapshot = pluginIntentSnapshot;
-    // 新 Root 提交后先撤销旧桶意图控制器；loadCoordinatorMeta 会从本次
-    // 固定对象恢复并重建，期间任何惰性读取都只能看到空的默认意图。
-    coordinatorMeta.pluginIntent = emptyPluginIntentSnapshot();
-    disposePluginIntentController();
-    coordinatorProtocolStores = protocol;
-    storageRepository = candidateStorageRepository;
-    platformStorageReady = true;
-    scheduleCoordinatorKeyValueMaintenance();
-  } catch (error) {
-    if (!candidatePublished) {
-      candidateStorageRepository?.close();
-      candidateStorageStore?.close();
-      closeCoordinatorProtocolStorageStores(candidateProtocol);
-      candidateSettingsSnapshot?.close();
-      candidatePluginIntentSnapshot?.close();
-      // 候选 Provider 由本次 install 创建/传入，失败时不能把 S3 client
-      // 和已打开的连接凭据留在 Worker；当前 Provider 若仍是旧实例则由
-      // 上层继续持有，避免把正在工作的会话误关掉。
-      if (provider !== platformBucketProvider) provider.dispose();
-      if (platformRootToken === rootToken) platformRootToken = previousRootToken;
-    }
-    throw error;
-  }
-}
-
-/**
- * Worker 单元测试的 Storage bootstrap 夹具。
- *
- * 它只在 `__testResetState()` 中启用，使用 runtime 提供的内存 K-V
- * 实现保持跨测试的 Worker 重启语义；生产启动不会因为 Storage 缺失而
- * 自动降级到内存。
- */
-interface TestCoordinatorGarbageProviderState {
-  provider: StorageBucketProvider;
-  objects: Map<string, { bytes: Uint8Array; etag: string; lastModified: string }>;
-}
-
-let testCoordinatorGarbageProviderState: TestCoordinatorGarbageProviderState | undefined;
-/** 测试用 owner 文件对象：key = "<owner>::<相对路径>"。 */
-const testOwnerFileObjects = new Map<string, Uint8Array>();
-
-function ensureTestCoordinatorGarbageProvider(): TestCoordinatorGarbageProviderState {
-  if (testCoordinatorGarbageProviderState) return testCoordinatorGarbageProviderState;
-  const objects = new Map<string, { bytes: Uint8Array; etag: string; lastModified: string }>();
-  let etagNumber = 0;
-  const copyObject = (path: string, object: { bytes: Uint8Array; etag: string; lastModified: string }): StorageBucketObject => ({
-    path,
-    bytes: new Uint8Array(object.bytes),
-    size: object.bytes.byteLength,
-    etag: object.etag,
-    lastModified: object.lastModified,
-  });
-  const conflict = (message: string): StorageRuntimeError => new StorageRuntimeError("storage_conflict", message);
-  const provider: StorageBucketProvider = {
-    provider: "local",
-    bucketId: "test-memory",
-    async probe(): Promise<StorageBucketProbeResult> {
-      return { ok: true, conditionalWrites: "native", latencyMs: 0 };
-    },
-    async get(path: string, options: { signal?: AbortSignal; ifMatch?: string } = {}): Promise<StorageBucketObject | undefined> {
-      const current = objects.get(path);
-      if (options.ifMatch !== undefined && (!current || current.etag !== options.ifMatch)) throw conflict("test garbage provider ETag changed");
-      return current ? copyObject(path, current) : undefined;
-    },
-    async list(input: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}): Promise<StorageBucketListPage> {
-      const prefix = input.prefix ?? "";
-      const offset = input.cursor === undefined ? 0 : Number.parseInt(input.cursor, 10);
-      const limit = input.limit ?? 1000;
-      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
-        throw new StorageRuntimeError("storage_limit_exceeded", "Test garbage provider list bounds are invalid");
-      }
-      const paths = [...objects.keys()].filter((path) => path.startsWith(prefix)).sort((left, right) => left.localeCompare(right));
-      const selected = paths.slice(offset, offset + limit).map((path) => copyObject(path, objects.get(path)!));
-      return {
-        objects: selected,
-        ...(offset + selected.length < paths.length ? { nextCursor: String(offset + selected.length) } : {}),
-      };
-    },
-    async put(path: string, bytes: Uint8Array, condition: StorageBucketWriteCondition & { signal?: AbortSignal } = {}): Promise<{ etag: string; lastModified: string }> {
-      const current = objects.get(path);
-      if (condition.ifNoneMatch === "*" && current) throw conflict("test garbage provider object already exists");
-      if (condition.ifMatch !== undefined && (!current || current.etag !== condition.ifMatch)) throw conflict("test garbage provider ETag changed");
-      const object = {
-        bytes: new Uint8Array(bytes),
-        etag: `test-garbage-${++etagNumber}`,
-        // An epoch timestamp makes minAgeMs: 0 deterministic: every object is
-        // old enough for the explicit test-only collection pass.
-        lastModified: new Date(0).toISOString(),
-      };
-      objects.set(path, object);
-      return { etag: object.etag, lastModified: object.lastModified };
-    },
-    async delete(path: string, options: { signal?: AbortSignal; ifMatch?: string } = {}): Promise<void> {
-      const current = objects.get(path);
-      if (options.ifMatch !== undefined && (!current || current.etag !== options.ifMatch)) throw conflict("test garbage provider ETag changed");
-      objects.delete(path);
-    },
-    dispose(): void { /* test provider */ },
-  };
-  testCoordinatorGarbageProviderState = { provider, objects };
-  return testCoordinatorGarbageProviderState;
-}
-
-function ensureTestPlatformStorage(): void {
-  testWorkerSession ??= {
-    format: "keymaster.session",
-    version: 1,
-    sessionId: "0123456789abcdef0123456789abcdef",
-    activeBucketId: "test-memory",
-  };
-  if (platformRootStore) return;
-  const bucket: StorageBucketRef = Object.freeze({ bucketId: "test-memory", bucketGeneration: 1, provider: "local" });
-  platformRootToken = {};
-  const garbageProvider = ensureTestCoordinatorGarbageProvider();
-  const stores = new Map<string, KeyValueStore>();
-  const snapshots = new Map<string, { revision: number; value?: unknown; writes: number }>();
-  testPlatformStores = stores;
-  testCoordinatorSnapshots = snapshots;
-  const getStore = (key: string, binding: Parameters<typeof createInMemoryKeyValueStore>[0]): KeyValueStore => {
-    const existing = stores.get(key);
-    if (existing) return { ...existing, close: () => undefined };
-    const created = createInMemoryKeyValueStore(binding);
-    stores.set(key, created);
-    return { ...created, close: () => undefined };
-  };
-  const openTestGarbageStore = (declaration: PluginStorageDeclaration, ownerPublicKeyHex?: string): KeyValueStore => {
-    const binding = {
-      ...declaration,
-      bucketId: bucket.bucketId,
-      bucketGeneration: bucket.bucketGeneration,
-      ...(ownerPublicKeyHex === undefined ? {} : { ownerPublicKeyHex }),
-    } satisfies Parameters<typeof createKeyValueStore>[0]["binding"];
-    return createKeyValueStore({ provider: garbageProvider.provider, binding });
-  };
-  const isTestGarbageBucketDeclaration = (declaration: PluginStorageDeclaration): boolean =>
-    declaration.moduleId === CENTRAL_STORAGE_DECLARATIONS.bsvPrice.moduleId
-    && declaration.purposeId === CENTRAL_STORAGE_DECLARATIONS.bsvPrice.purposeId
-    && declaration.scope === "bucket"
-    && declaration.model === "kv";
-  const isTestGarbageOwnerDeclaration = (declaration: PluginStorageDeclaration): boolean =>
-    declaration.moduleId === CENTRAL_STORAGE_DECLARATIONS.messageHistory.moduleId
-    && declaration.purposeId === CENTRAL_STORAGE_DECLARATIONS.messageHistory.purposeId
-    && declaration.scope === "owner"
-    && declaration.model === "kv";
-  const makeSnapshot = <T>(declaration: PluginStorageDeclaration, validate: (value: unknown) => StorageSnapshotJsonCompatible<T>): SnapshotStore<T> => {
-    const key = `snapshot:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`;
-    return {
-      async read() {
-        const current = snapshots.get(key);
-        if (!current || current.value === undefined) return undefined;
-        return { value: validate(structuredClone(current.value)), revision: current.revision };
-      },
-      async write(value, condition = {}) {
-        const current = snapshots.get(key);
-        const revision = current?.revision ?? 0;
-        if (condition.ifRevision !== undefined && condition.ifRevision !== revision) throw new StorageRuntimeError("storage_conflict", "snapshot revision changed");
-        if (current?.value !== undefined && JSON.stringify(current.value) === JSON.stringify(value)) return { revision, wrote: false };
-        snapshots.set(key, { revision: revision + 1, value: structuredClone(value), writes: (current?.writes ?? 0) + 1 });
-        return { revision: revision + 1, wrote: true };
-      },
-      close: () => undefined,
-    };
-  };
-  const root: PlatformRootStore = {
-    bucket,
-    openOwnerFileStore: async ({ ownerPublicKeyHex, declaration, appPublisherPublicKeyHex }) => {
-      // 测试存根按 owner/module/purpose 隔离；三方 App 文件根落在
-      // `<owner>/app.<publisher>/`，与生产路径语义一致。
-      const base = appPublisherPublicKeyHex === undefined
-        ? `${ownerPublicKeyHex.toLowerCase()}::${declaration.moduleId}::${declaration.purposeId}::`
-        : `${ownerPublicKeyHex.toLowerCase()}::app.${appPublisherPublicKeyHex.toLowerCase()}::`;
-      return {
-        list: async (input = {}) => ({
-          files: [...testOwnerFileObjects.keys()]
-            .filter((key) => key.startsWith(base) && key.slice(base.length).startsWith(input.prefix ?? ""))
-            .map((key) => ({ path: key.slice(base.length), size: testOwnerFileObjects.get(key)!.byteLength })),
-        }),
-        get: async (path) => {
-          const value = testOwnerFileObjects.get(base + path);
-          return value ? { path, bytes: new Uint8Array(value) } : undefined;
-        },
-        put: async (path, bytes) => { testOwnerFileObjects.set(base + path, new Uint8Array(bytes)); return {}; },
-        delete: async (path) => { testOwnerFileObjects.delete(base + path); },
-      };
-    },
-    listOwnerAppPublishers: async ({ ownerPublicKeyHex }) => {
-      const prefix = `${ownerPublicKeyHex.toLowerCase()}::app.`;
-      const publishers = new Set<string>();
-      for (const key of testOwnerFileObjects.keys()) {
-        if (!key.startsWith(prefix)) continue;
-        const segment = key.slice(prefix.length).split("::", 1)[0] ?? "";
-        if (/^(02|03)[0-9a-f]{64}$/u.test(segment)) publishers.add(segment);
-      }
-      return [...publishers].sort();
-    },
-    openKeyValueStore: async ({ ownerPublicKeyHex, declaration }) => isTestGarbageOwnerDeclaration(declaration)
-      ? openTestGarbageStore(declaration, ownerPublicKeyHex) as import("@keymaster/contracts").OwnerAppStore
-      : getStore(
-        `owner:${ownerPublicKeyHex}:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`,
-        { ...declaration, ownerPublicKeyHex, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }
-      ) as import("@keymaster/contracts").OwnerAppStore,
-    deleteOwnerStorage: async ({ ownerPublicKeyHex }) => {
-      if (testFailNextOwnerStorageDeletion) {
-        testFailNextOwnerStorageDeletion = false;
-        throw new StorageRuntimeError("storage_provider_error", "injected owner storage deletion failure");
-      }
-      const prefix = `owner:${ownerPublicKeyHex}:`;
-      for (const key of [...stores.keys()]) {
-        if (key.startsWith(prefix)) { stores.get(key)?.close(); stores.delete(key); }
-      }
-    },
-    openPlatformStore: async ({ declaration }) => isTestGarbageBucketDeclaration(declaration)
-      ? openTestGarbageStore(declaration)
-      : getStore(
-        `bucket:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`,
-        { ...declaration, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }
-      ),
-    openPlatformSnapshot: async <T>(input: { declaration: PluginStorageDeclaration; validate: (value: unknown) => StorageSnapshotJsonCompatible<T> }) => {
-      return makeSnapshot(input.declaration, input.validate);
-    },
-  };
-  const protocol: CoordinatorProtocolStorageStores = {
-    durablePolicy: getStore(`bucket:${CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy.moduleId}:${CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy.purposeId}:1`, { ...CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }),
-    sessions: getStore(`bucket:${CENTRAL_STORAGE_DECLARATIONS.protocolSessions.moduleId}:${CENTRAL_STORAGE_DECLARATIONS.protocolSessions.purposeId}:1`, { ...CENTRAL_STORAGE_DECLARATIONS.protocolSessions, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }),
-    commandHistory: getStore(`bucket:${CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory.moduleId}:${CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory.purposeId}:1`, { ...CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }),
-  };
-  platformRootStore = root;
-  coordinatorSettingsSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validateCoordinatorSettingsSnapshot);
-  coordinatorPluginIntentSnapshot = makeSnapshot(CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validatePluginIntentSnapshot);
-  coordinatorProtocolStores = protocol;
-  configureProtocolStorageRepository(protocol);
-  platformStorageReady = true;
-  testVaultHoldBinding ??= createTestVaultHoldBinding();
-  configureVaultStorageRepository({ hold: testVaultHoldBinding.adapter });
-}
-
-
 async function loadCoordinatorMeta(): Promise<void> {
-  const [session, settings, pluginIntent] = await Promise.all([
-    readWorkerSession(),
+  const [settings, pluginIntent] = await Promise.all([
     coordinatorSettingsSnapshot?.read(),
     coordinatorPluginIntentSnapshot?.read(),
   ]);
-  // 桶级固定对象和浏览器 session 都是独立的恢复单元；缺失表示各自的
-  // V1 默认值，而不是重新创建一个聚合 Coordinator K-V 记录。
-  // 「当前选中 Key」的真值是浏览器 session.activeKey（见《浏览器session》），
-  // 不再从桶内 snapshot 恢复，两个浏览器因此互不覆盖。
+  // 冷启动不再恢复 selected Key：正常启动一律进入锁定状态。
   const defaults = defaultCoordinatorRuntimeSettings();
   replaceCoordinatorMeta({
     ...defaults,
     ...(settings?.value ?? {}),
-    selectedPublicKeyHex: session?.activeKey,
     pluginIntent: pluginIntent?.value ?? defaults.pluginIntent,
   });
   coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings;
@@ -2818,17 +935,13 @@ async function writeCoordinatorSnapshot<T>(
   await withCoordinatorFinalIoLease("write", undefined, async () => {
     const current = await store.read();
     await store.write(value, { ifRevision: current?.revision ?? 0 });
+    const metrics = testCoordinatorSnapshotMetrics.get(auditOperation)
+      ?? { revision: 0, writes: 0 };
+    testCoordinatorSnapshotMetrics.set(auditOperation, {
+      revision: (current?.revision ?? 0) + 1,
+      writes: metrics.writes + 1,
+    });
   }, { auditOperation });
-}
-
-/**
- * 持久化当前选中 Key：写浏览器 session.activeKey，桶内不再有固定对象。
- *
- * 切换 / 删除 Key 都是低频固定动作，写透后 Worker 直接复用内存缓存，
- * 不产生逐次远程 I/O。
- */
-async function persistSelectedPublicKey(selectedPublicKeyHex = coordinatorMeta.selectedPublicKeyHex): Promise<void> {
-  await updateWorkerSessionSelection(selectedPublicKeyHex);
 }
 
 async function persistCoordinatorSettings(settings: CoordinatorSettingsSnapshot = {
@@ -3118,7 +1231,7 @@ async function withCoordinatorFinalIoLease<T>(
   const session = coordinatorUpgradeSession;
   if (!gate || !session) throw coordinatorUpgradeError("upgrade.gate_unavailable", "Coordinator upgrade gate is unavailable");
   const initialSessionEpoch = coordinatorState.sessionEpoch;
-  const initialKeyspaceGeneration = coordinatorState.keyspaceGeneration;
+  const initialRunGeneration = coordinatorState.runGeneration;
   const lease: UpgradeIoLease = gate.admit({ session, operation, signal });
   let ioLease: CoordinatorFinalIoLease | undefined;
   let audit: ReturnType<ReturnType<typeof createFinalIoAudit>["begin"]> | undefined;
@@ -3146,8 +1259,9 @@ async function withCoordinatorFinalIoLease<T>(
       && gate.state === "closed"
       && coordinatorUpgradeGate !== gate
       && coordinatorState.vaultStatus === "unlocked"
-      && (coordinatorState.sessionEpoch !== initialSessionEpoch || coordinatorState.keyspaceGeneration !== initialKeyspaceGeneration);
-    const localBindingDiscard = options.allowLocalBindingDiscard === true && catalogBindingDiscardDeferred;
+      && (coordinatorState.sessionEpoch !== initialSessionEpoch || coordinatorState.runGeneration !== initialRunGeneration);
+    // 单 Key 本地存储没有「丢弃目录绑定」这一过渡态：Root 要么有效要么已被撤销。
+    const localBindingDiscard = false;
     if (!localLockReplacedGate && !localOwnerTransitionReplacedGate && !localBindingDiscard) lease.assertActive();
     // Root 销毁会在 finally 中、本地 lease 释放后执行；不读取业务桶里的
     // 临时 authority 记录。
@@ -3229,6 +1343,37 @@ let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: str
 function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"] {
   return isVerifiedAppIdentitySnapshot(identity);
 }
+
+/**
+ * 解析一个已验证 App 身份的平台登记存储名。
+ *
+ * 目录名只由验证身份派生：相同身份的 App 永远落进同一个 `apps/<name>/`，
+ * 不同身份即使显示名称相同也得到不同目录。这样「同名不同身份」在没有任何
+ * 显式登记记录时也不会共用目录，而显示名称或本地化变化不会移动已有目录。
+ */
+function resolveConnectAppStorageName(verifiedAppIdentity: { publisherPublicKeyHex: string; appId: string }): string {
+  return deriveAppStorageName({
+    publisherPublicKeyHex: verifiedAppIdentity.publisherPublicKeyHex,
+    appId: verifiedAppIdentity.appId,
+  });
+}
+
+/**
+ * 第三方 App 文件 namespace 的声明形状。
+ *
+ * 它不在中央声明目录里：每个 App 的 moduleId 由验证身份派生，目录由平台
+ * 登记的 appStorageName 决定。只有在需要「按 name 定位一个目录」（如单 App
+ * 清理）而调用方尚未提供具体身份时，才使用这条中性坐标；
+ * `buildWalletStorageRoot` 对 third-party-app 只读取 appStorageName，因此这里的
+ * moduleId 不参与任何路径计算。
+ */
+const THIRD_PARTY_APP_FILES_DECLARATION = Object.freeze({
+  moduleId: "third-party-app",
+  purposeId: "",
+  authority: "third-party-app",
+  model: "files",
+  schemaVersion: 1,
+} satisfies PluginStorageDeclaration);
 
 async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null> {
   if (testStorageSessionResolver) {
@@ -3313,16 +1458,20 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
   // Key、Storage Root 重绑都会改变 identity；先同步撤权/旋转 exposure，
   // 再广播业务状态，避免页面看到已 unlocked 但仍持有旧 service proxy。
   reconcileCoordinatorSessionExposures();
-  publishTopicEvent("session.state", {
+  const state: SessionStateEvent = {
+    topic: "session.state",
     type: "session.state.changed",
     cause,
+    sessionRevision: 0,
+    sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
-    selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null,
-    keyspaceGeneration: coordinatorState.keyspaceGeneration,
+    runGeneration: coordinatorState.runGeneration,
+    ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
     autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
-  });
+  };
+  publishTopicEvent("session.state", state);
   publishCoordinatorContactsPresence();
 }
 
@@ -3331,11 +1480,14 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
 // ============================================================
 
 interface CoordinatorState {
+  /** 钱包身份世代；来自 `.keymaster/meta`，重置或重新初始化后改变。 */
+  walletGeneration: string;
   sessionEpoch: SessionEpoch;
+  /** Worker 运行世代；每次载入生成，Worker 重启后所有旧句柄失效。 */
+  runGeneration: string;
   vaultStatus: CoordinatorVaultStatus;
   activePublicKeyHex?: string;
   activePrivateKeyBytes?: Uint8Array;
-  keyspaceGeneration: number;
   taskRuntimes: Map<string, TaskRuntime>;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockTimeoutMs: number;
@@ -3343,50 +1495,17 @@ interface CoordinatorState {
   lastActivityAt: number;
 }
 
-/**
- * 失败的 owner 切换也必须消耗一个新的 keyspace generation。
- *
- * 不能把 generation 回滚到旧值：A→B 失败后如果恢复成 A 的旧 generation，
- * 旧的 A 句柄可能再次通过 Root 的校验。这里同时刷新 session epoch，确保
- * 其它依赖会话世代的异步操作也不会复活。
- */
-function invalidateFailedKeyspaceTransition(previousGeneration: number): void {
-  coordinatorState.keyspaceGeneration = Math.max(
-    coordinatorState.keyspaceGeneration,
-    previousGeneration,
-  ) + 1;
-  coordinatorState.sessionEpoch = generateEpoch();
+/** 重新生成运行世代；用于让所有已发放句柄立即 fail closed。 */
+function rotateCoordinatorRunGeneration(): void {
+  coordinatorState.runGeneration = crypto.randomUUID();
 }
 
 let storageController: StorageRuntimeController | undefined;
-let storageRepository: Awaited<ReturnType<typeof openMultipartUploadRepository>> | undefined;
-// Test-only seams keep worker ownership/dispatch tests independent from S3 and
-// platform K-V persistence.
+let storageRecoveryOrchestrator: Promise<void> | undefined;
+// Test-only seams keep worker ownership/dispatch tests independent from
+// IndexedDB and platform K-V persistence.
 let testStorageRuntimeOverride: StorageRuntimeController | undefined;
 let testStorageStartupFailure = false;
-let testFailAfterCatalogBindingPublish = false;
-let testFailNextOwnerStorageDeletion = false;
-let testFailAfterOwnerStorageActivation = false;
-let testFailNextHoldRollbackCas = false;
-let testCatalogHoldPublishBarrier: {
-  entered: Promise<void>;
-  resolveEntered: () => void;
-  released: Promise<void>;
-  release: () => void;
-} | undefined;
-let testCatalogHoldRollbackBarrier: {
-  entered: Promise<void>;
-  resolveEntered: () => void;
-  released: Promise<void>;
-  release: () => void;
-} | undefined;
-let testKeyLifecycleOwnerBarrier: {
-  entered: Promise<void>;
-  resolveEntered: () => void;
-  released: Promise<void>;
-  release: () => void;
-} | undefined;
-let testLocalStorageBridgeOverride: ((input: LocalStorageBridgeRequest) => Promise<LocalStorageBridgeResponse>) | undefined;
 let storageStartupFailure = false;
 let storageRevision = 0;
 let msfileRevision = 0;
@@ -3399,8 +1518,6 @@ const storageGrants = new Map<string, { context: import("@keymaster/contracts").
 const ownerStorageGrants = new Map<string, StorageOwnerGrant & { clientId: string }>();
 const platformStorageGrants = new Map<string, StoragePlatformGrant & { clientId: string }>();
 let storageMutationTail: Promise<void> = Promise.resolve();
-/** 首次初始化按 transactionId single-flight；响应丢失或重复点击不得生成第二把 Key。 */
-const initialSetupTransactions = new Map<string, Promise<InitialSetupResult> | InitialSetupResult>();
 let storageDataActive = 0;
 type StorageDataWaiter = {
   resolve: () => void;
@@ -3417,13 +1534,117 @@ const STORAGE_DATA_MAX_PER_PORT = 16;
 const STORAGE_DATA_MAX_ACTIVE_PER_PORT = STORAGE_DATA_CONCURRENCY - 1;
 const storageDataActiveByPort = new Map<string, number>();
 
-/** 删除 owner 时的请求栅栏；新请求拒绝，旧请求可被等待到自然结束。 */
-const ownerStorageFences = new Map<string, number>();
-const ownerStorageRequests = new Map<string, Set<Promise<void>>>();
-/** 锁定期间未完成的旧 owner 排空；下一次解锁必须先消费它。 */
-let pendingOwnerStorageDrain: { ownerPublicKeyHex: string; promise: Promise<void> } | undefined;
-/** 删除 owner 前等待所有 KV/文件请求自然结束的上限。 */
-export const OWNER_STORAGE_DRAIN_TIMEOUT_MS = 5_000;
+/**
+ * Worker 侧的存储绑定。
+ *
+ * 物理数据不再按桶和 Owner 前缀隔离，但每次会话仍要绑定四件事才能读写：
+ * 钱包身份世代、会话 epoch、Worker 运行世代和当前平台 Root 的对象身份。
+ * 其中任何一项变化都会让已经发放的句柄与迟到结果 fail closed。
+ */
+interface CoordinatorStorageBinding {
+  /** 钱包身份世代；重置或重新初始化后改变。 */
+  walletGeneration: string;
+  /** 会话世代；锁定、解锁、改密后改变。 */
+  sessionEpoch: SessionEpoch;
+  /** Worker 运行世代；每次 Worker 启动生成。 */
+  runGeneration: string;
+  /** 平台 Root 的对象身份；换绑时改变，必须保持引用相等。 */
+  platformRootToken: object;
+}
+
+/** 正在进行的存储请求；锁定/改密/重置必须等它们排空后再动数据。 */
+const storageBindingRequests = new Set<Promise<void>>();
+/** 锁定期间未完成的旧绑定排空；下一次解锁必须先消费它。 */
+let pendingStorageBindingDrain: Promise<void> | undefined;
+/** 撤销授权前等待所有存储请求自然结束的上限。 */
+export const STORAGE_BINDING_DRAIN_TIMEOUT_MS = 5_000;
+
+/** 当前的四维存储绑定；Root 尚未安装时返回 undefined。 */
+function currentCoordinatorStorageBinding(): CoordinatorStorageBinding | undefined {
+  if (!platformRootToken) return undefined;
+  return {
+    walletGeneration: coordinatorState.walletGeneration,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    runGeneration: coordinatorState.runGeneration,
+    platformRootToken,
+  };
+}
+
+function storageBindingsEqual(left: CoordinatorStorageBinding, right: CoordinatorStorageBinding): boolean {
+  return left.walletGeneration === right.walletGeneration
+    && left.sessionEpoch === right.sessionEpoch
+    && left.runGeneration === right.runGeneration
+    && left.platformRootToken === right.platformRootToken;
+}
+
+/** 断言某个绑定仍然是当前绑定；锁定、改密、重置和 Worker 重启都会让它失效。 */
+function assertStorageBindingLive(binding: CoordinatorStorageBinding): void {
+  const current = currentCoordinatorStorageBinding();
+  if (!current || !storageBindingsEqual(current, binding)) {
+    throw storageUnavailableError("Storage binding became stale");
+  }
+}
+
+/** 登记一个存储请求；释放函数必须在 finally 中调用。 */
+function beginStorageBindingRequest(): () => void {
+  let resolveRelease!: () => void;
+  const pending = new Promise<void>((resolve) => { resolveRelease = resolve; });
+  storageBindingRequests.add(pending);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    storageBindingRequests.delete(pending);
+    resolveRelease();
+  };
+}
+
+/** 等待当前所有存储请求结束；超时抛错，调用方必须保持 fail closed。 */
+async function drainStorageBindingRequests(): Promise<void> {
+  if (storageBindingRequests.size === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const drained = await Promise.race([
+      Promise.allSettled([...storageBindingRequests]).then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), STORAGE_BINDING_DRAIN_TIMEOUT_MS);
+      }),
+    ]);
+    if (!drained) {
+      // 超时不能继续清库：忽略 AbortSignal 的迟到写入仍可能在清空之后
+      // 落到新钱包里，因此必须保留绑定世代已经推进的事实。
+      throw storageUnavailableError("Storage requests did not drain before the binding timeout");
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function rememberStorageBindingDrain(promise: Promise<void>): void {
+  const existing = pendingStorageBindingDrain;
+  if (existing === promise) return;
+  pendingStorageBindingDrain = promise;
+  // 锁定路径不能因为迟到请求而产生未处理 rejection；真正的错误由下一次
+  // 解锁再次 await 并重新 drain 时返回。
+  void promise.then(
+    () => undefined,
+    () => undefined
+  );
+}
+
+/** 等待锁定留下的旧绑定排空；超时后保留已推进的世代，并允许后续重试。 */
+async function waitForPendingStorageBindingDrain(): Promise<void> {
+  const pending = pendingStorageBindingDrain;
+  if (!pending) return;
+  try {
+    await pending;
+  } catch {
+    // 初次锁定的 drain 可能已经超时，但请求随后才自然结束；解锁时重新
+    // 观察当前集合，不能把旧的 rejected Promise 当成永久结论。
+    await drainStorageBindingRequests();
+  }
+  if (pendingStorageBindingDrain === pending) pendingStorageBindingDrain = undefined;
+}
 
 function storageUnavailableError(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: "storage_unavailable" });
@@ -3437,159 +1658,54 @@ function isStorageConflictError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "storage_conflict");
 }
 
-function assertOwnerStorageNotFenced(ownerPublicKeyHex: string): void {
-  if (ownerStorageFences.has(ownerPublicKeyHex.toLowerCase())) {
-    throw storageUnavailableError("Owner storage is fenced during a key/session transition");
-  }
-}
-
-function beginOwnerStorageRequest(ownerPublicKeyHex: string): () => void {
-  const owner = ownerPublicKeyHex.toLowerCase();
-  assertOwnerStorageNotFenced(owner);
-  let resolveRelease!: () => void;
-  const pending = new Promise<void>((resolve) => { resolveRelease = resolve; });
-  let requests = ownerStorageRequests.get(owner);
-  if (!requests) {
-    requests = new Set<Promise<void>>();
-    ownerStorageRequests.set(owner, requests);
-  }
-  requests.add(pending);
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    requests!.delete(pending);
-    if (requests!.size === 0) ownerStorageRequests.delete(owner);
-    resolveRelease();
-  };
-}
-
-async function drainOwnerStorageRequests(ownerPublicKeyHex: string): Promise<void> {
-  const requests = ownerStorageRequests.get(ownerPublicKeyHex.toLowerCase());
-  if (!requests?.size) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const drained = await Promise.race([
-      Promise.allSettled([...requests]).then(() => true),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), OWNER_STORAGE_DRAIN_TIMEOUT_MS);
-      })
-    ]);
-    if (!drained) {
-      // 超时不能继续 owner 目录清理；迟到的 Provider 写入仍可能在
-      // AbortSignal 被忽略时完成，因此必须保留 Journal 与 owner fence。
-      throw storageUnavailableError("Owner storage requests did not drain before key deletion timeout");
-    }
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-function rememberOwnerStorageDrain(ownerPublicKeyHex: string, promise: Promise<void>): void {
-  const owner = ownerPublicKeyHex.toLowerCase();
-  const existing = pendingOwnerStorageDrain;
-  if (existing?.ownerPublicKeyHex === owner) return;
-  pendingOwnerStorageDrain = { ownerPublicKeyHex: owner, promise };
-  // 锁定路径不能因为 Provider 忽略 AbortSignal 而产生未处理 rejection；
-  // 真正的错误由下一次解锁再次 await 并重新 drain 时返回。
-  void promise.then(
-    () => undefined,
-    () => undefined
-  );
-}
-
-/** 等待锁定留下的旧 owner 排空；超时后保留 fence，并允许后续重试。 */
-async function waitForPendingOwnerStorageDrain(): Promise<string | undefined> {
-  const pending = pendingOwnerStorageDrain;
-  if (!pending) return undefined;
-  try {
-    await pending.promise;
-  } catch {
-    // 初次锁定的 drain 可能已经超时，但 Provider 随后才自然结束；
-    // 解锁时重新观察当前集合，不能把旧的 rejected Promise 当成永久结论。
-    await drainOwnerStorageRequests(pending.ownerPublicKeyHex);
-  }
-  if (pendingOwnerStorageDrain?.promise === pending.promise) pendingOwnerStorageDrain = undefined;
-  return pending.ownerPublicKeyHex;
-}
-
-interface ActiveOwnerTransitionResult {
-  /** 切换前的 unlocked owner；成功公开新 owner 后才能释放它的 fence。 */
-  previousOwner?: string;
-  /** lock → unlock 时等待并排空的 owner；成功公开目标后才能释放它的 fence。 */
-  pendingOwner?: string;
+function beginStorageBindingRequestForTest(): () => void {
+  return beginStorageBindingRequest();
 }
 
 /**
- * 完成一次 active-owner 迁移后，统一释放已经排空的临时 fence。
+ * 撤销本次会话发放的全部存储授权。
  *
- * pendingOwner 与目标 owner 不一定相同：例如 lock(A) → unlock(B) 时，
- * pendingOwner 是 A，而新 active owner 是 B。只按“pending 等于目标”清理
- * 会让 A 永久保持 fenced，之后切回 A 时所有 owner K-V 都会被拒绝。
+ * 只清理运行态授权表和 Connect 游标/运行绑定，不递归调用运行时控制器的
+ * `abortSession()`：那条路径用于单个 App 断开，而这里正在推进会话世代，
+ * 两者混用会让撤销动作依赖自身正在撤销的状态。
  */
-function completeActiveStorageOwnerTransition(transition: ActiveOwnerTransitionResult | undefined): void {
-  if (!transition) return;
-  if (transition.previousOwner) ownerStorageFences.delete(transition.previousOwner);
-  if (transition.pendingOwner) ownerStorageFences.delete(transition.pendingOwner);
+function revokeStorageSessionGrants(): void {
+  storageGrants.clear();
+  ownerStorageGrants.clear();
+  platformStorageGrants.clear();
+  storageRequests.clear();
 }
 
 /**
- * 所有 active-key 入口共用的 owner 边界。
+ * 撤销当前存储绑定的统一入口。
  *
- * 顺序固定为：旧 owner fence/grant revoke → abort runtime/task → drain
- * owner storage → 调用方才可以把新 owner 写入 Coordinator state。
+ * 顺序固定为：推进绑定世代 → 撤销 grant、任务与 Connect 运行绑定 →
+ * 拒绝新 I/O → 等待旧 I/O 排空。调用方在它返回之后才可以清空或改写数据。
  */
-async function transitionActiveStorageOwner(nextPublicKeyHex: string): Promise<ActiveOwnerTransitionResult> {
-  const nextOwner = nextPublicKeyHex.toLowerCase();
-  let pendingOwner: string | undefined;
-  try {
-    pendingOwner = await waitForPendingOwnerStorageDrain();
-  } catch (error) {
-    // 只有当前仍 unlocked 时才需要主动收口；locked → unlock 失败时已经
-    // 是 fail-closed 状态，必须原样保持。
-    if (coordinatorState.vaultStatus === "unlocked") await performGlobalLock("owner-transition-failed");
-    throw error;
-  }
-
-  const previousOwner = coordinatorState.activePublicKeyHex?.toLowerCase();
-  if (!previousOwner || previousOwner === nextOwner) {
-    return { previousOwner: undefined, pendingOwner };
-  }
-
-  // owner 切换会改变最终读写边界的身份；先撤销旧接管会话，防止已经
-  // 拿到的租约在新 owner 进入期间继续提交。
-  closeCoordinatorUpgradeSession("Coordinator owner transition");
-  fenceOwnerStorage(previousOwner);
-  releaseMsfileRuntime("activate-key");
-  await releaseSatRuntime("activate-key");
+async function revokeStorageBindingAndDrain(reason: string): Promise<void> {
+  // 先推进会话世代：已经拿到 wrapper 的旧请求会在完成后被
+  // assertStorageBindingLive 拒绝，新请求从入口直接拒绝。
+  coordinatorState.sessionEpoch = generateEpoch();
+  closeCoordinatorUpgradeSession(`Storage binding revoked: ${reason}`);
+  revokeStorageSessionGrants();
+  releaseMsfileRuntime(reason);
+  await releaseSatRuntime(reason);
   clearWindowP2pExecutorLeaseLocked();
   stopCoordinatorOwnerWorkerUnits();
-  // 任务 completion 由自己的 session/generation 栅栏收口；这里不等待
-  // 一个可能永不响应 AbortSignal 的业务 task，owner storage drain 才是
-  // 新 owner 暴露前的硬门禁。
-  void cancelTaskRuntimesByKey(previousOwner).catch((error) => {
-    console.warn("[coordinator] old owner task cancellation deferred", error instanceof Error ? error.message : String(error));
-  });
-  const drain = drainOwnerStorageRequests(previousOwner);
+  // 任务 completion 由自己的绑定栅栏收口；这里不等待一个可能永不响应
+  // AbortSignal 的业务 task，存储排空才是数据变更前的硬门禁。
+  if (coordinatorState.activePublicKeyHex) {
+    void cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex).catch((error) => {
+      console.warn("[coordinator] task cancellation deferred", error instanceof Error ? error.message : String(error));
+    });
+  }
+  const drain = drainStorageBindingRequests();
   try {
     await drain;
   } catch (error) {
-    rememberOwnerStorageDrain(previousOwner, drain);
-    // 排空超时不得回滚到旧 owner，也不得继续激活目标 owner。
-    await performGlobalLock("owner-transition-failed");
+    rememberStorageBindingDrain(drain);
     throw error;
   }
-  return { previousOwner, pendingOwner };
-}
-
-function assertOwnerStorageBindingFresh(ownerPublicKeyHex: string, generation: number, rootToken: object | undefined): void {
-  const owner = ownerPublicKeyHex.toLowerCase();
-  if (
-    ownerStorageFences.has(owner) ||
-    coordinatorState.activePublicKeyHex?.toLowerCase() !== owner ||
-    coordinatorState.keyspaceGeneration !== generation ||
-    platformRootToken !== rootToken
-  ) throw storageUnavailableError("Owner storage binding became stale");
 }
 
 /* ---------- MSFile runtime state（施工单 KMMF-005/006） ---------- */
@@ -3602,9 +1718,8 @@ let msfileRuntimeStarting: Promise<MsFileServiceImpl> | undefined;
 let msfileRuntimeStartToken = 0;
 type MsFileRuntimeStores = {
   ownerPublicKeyHex: string;
-  settings: BorrowedOwnerFileStore;
-  appSettings(publisherPublicKeyHex: string): BorrowedOwnerFileStore;
-  listAppPublishers(): Promise<string[]>;
+  settings: BorrowedModuleFileStore;
+  appSettings: BorrowedModuleFileStore;
 };
 /** MSFile 的 owner 文件句柄与 App publisher 枚举；句柄由 worker 缓存与失效。 */
 let msfileRuntimeStores: MsFileRuntimeStores | undefined;
@@ -3681,8 +1796,8 @@ interface MsFileBitfsBuyerRecoveryScope {
   ownerPublicKeyHex: string;
   /** 当前 Worker 会话世代。 */
   sessionEpoch: SessionEpoch;
-  /** 当前存储世代。 */
-  keyspaceGeneration: number;
+  /** 当前 Worker 运行世代。 */
+  runGeneration: string;
 }
 /** 最近速度样本对应卖家的速度视图。 */
 interface MsFileBitfsRecentSellerSpeed {
@@ -3697,8 +1812,8 @@ let msfileBitfsBuyerRecoveryInFlight: {
   ownerPublicKeyHex: string;
   /** 当前 Worker 会话世代。 */
   sessionEpoch: SessionEpoch;
-  /** 当前存储世代。 */
-  keyspaceGeneration: number;
+  /** 当前 Worker 运行世代。 */
+  runGeneration: string;
   /** 当前 Key 买方会话的全量恢复任务。 */
   promise: Promise<void>;
 } | undefined;
@@ -3789,7 +1904,7 @@ async function restoreMsfileBitfsBuyerPurchaseSummary(input: {
   sessionId?: string;
   task?: BitfsBuyerTask;
 }): Promise<import("@keymaster/contracts").MsFileBitfsPurchaseSnapshot | undefined> {
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const records = await sessions.list();
   const candidate = records
     .filter((record) => record.role === "buyer"
@@ -3859,7 +1974,7 @@ async function restoreMsfileBitfsBuyerPurchaseSummary(input: {
   }
   let restoredContentCommit = false;
   if (candidate.phase === "content-committing") {
-    const contentStore = createWorkerOwnerFileStore("msfile", "");
+    const contentStore = createWorkerModuleFileStore("msfile", "");
     try {
       restoredContentCommit = await recoverBitfsBuyerContentCommit({
         sessions,
@@ -3911,7 +2026,7 @@ async function restoreMsfileBitfsBuyerPurchaseSummary(input: {
 
   let verifiedBlockCount = 0;
   const prefix = `bitfs-staging/${latestCandidate.sessionId}/blocks/`;
-  const contentStore = createWorkerOwnerFileStore("msfile", "");
+  const contentStore = createWorkerModuleFileStore("msfile", "");
   let cursor: string | undefined;
   do {
     const page = await contentStore.list({ prefix, limit: 1000, ...(cursor === undefined ? {} : { cursor }) });
@@ -3991,7 +2106,7 @@ async function markMsfileBitfsDownloadPlanPoolClosed(input: {
 
 /** 从买方专用日志恢复同 Seed 的共享下载计划。 */
 async function openMsfileBitfsBuyerDownloadPlan(ownerPublicKeyHex: string, seedHashHex: string) {
-  const store = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
   const object = await store.get(`download-plans/${seedHashHex.toLowerCase()}.json`);
   if (!object) throw new Error("已确认关池，但同 Seed 的下载计划记录缺失");
   let value: unknown;
@@ -4017,16 +2132,16 @@ async function recoverAllMsfileBitfsBuyerSessions(ownerPublicKeyHex: string): Pr
   if (!owner || coordinatorState.vaultStatus !== "unlocked"
     || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) return;
   const sessionEpoch = coordinatorState.sessionEpoch;
-  const keyspaceGeneration = coordinatorState.keyspaceGeneration;
+  const runGeneration = coordinatorState.runGeneration;
   const assertCurrentOwner = (): void => {
     if (coordinatorState.vaultStatus !== "unlocked"
       || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
       || coordinatorState.sessionEpoch !== sessionEpoch
-      || coordinatorState.keyspaceGeneration !== keyspaceGeneration) {
+      || coordinatorState.runGeneration !== runGeneration) {
       throw new Error("BitFS 全量恢复期间当前 Key 或存储世代已变化");
     }
   };
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const records = (await sessions.list())
     .filter((record) => record.role === "buyer"
       && record.ownerPublicKeyHex === owner
@@ -4083,14 +2198,14 @@ async function ensureMsfileBitfsBuyerRecovery(ownerPublicKeyHex: string): Promis
     throw new Error("BitFS 全量恢复需要当前已解锁 Key");
   }
   const sessionEpoch = coordinatorState.sessionEpoch;
-  const keyspaceGeneration = coordinatorState.keyspaceGeneration;
+  const runGeneration = coordinatorState.runGeneration;
   const tokenMatches = (token: MsFileBitfsBuyerRecoveryScope | undefined): boolean =>
-    token?.ownerPublicKeyHex === owner && token.sessionEpoch === sessionEpoch && token.keyspaceGeneration === keyspaceGeneration;
+    token?.ownerPublicKeyHex === owner && token.sessionEpoch === sessionEpoch && token.runGeneration === runGeneration;
   if (tokenMatches(msfileBitfsBuyerRecoveryReady)) return;
   let recovery = msfileBitfsBuyerRecoveryInFlight;
   if (!tokenMatches(recovery)) {
     const promise = recoverAllMsfileBitfsBuyerSessions(owner);
-    recovery = { ownerPublicKeyHex: owner, sessionEpoch, keyspaceGeneration, promise };
+    recovery = { ownerPublicKeyHex: owner, sessionEpoch, runGeneration, promise };
     msfileBitfsBuyerRecoveryInFlight = recovery;
   }
   if (!recovery) throw new Error("BitFS 全量恢复任务没有成功启动");
@@ -4099,10 +2214,10 @@ async function ensureMsfileBitfsBuyerRecovery(ownerPublicKeyHex: string): Promis
     if (coordinatorState.vaultStatus !== "unlocked"
       || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
       || coordinatorState.sessionEpoch !== sessionEpoch
-      || coordinatorState.keyspaceGeneration !== keyspaceGeneration) {
+      || coordinatorState.runGeneration !== runGeneration) {
       throw new Error("BitFS 全量恢复期间当前 Key 或存储世代已变化");
     }
-    msfileBitfsBuyerRecoveryReady = { ownerPublicKeyHex: owner, sessionEpoch, keyspaceGeneration };
+    msfileBitfsBuyerRecoveryReady = { ownerPublicKeyHex: owner, sessionEpoch, runGeneration };
   } catch (error) {
     throw new Error(`BitFS 买方会话恢复未完成，已阻止新购买：${error instanceof Error ? error.message : String(error)}`);
   } finally {
@@ -4141,7 +2256,7 @@ async function persistMsfileBitfsSellerSpeedSample(input: {
   if (!/^[0-9a-f]{64}$/u.test(input.authorizationIdHex)
     || !Number.isSafeInteger(input.effectiveBlockBytes) || input.effectiveBlockBytes <= 0
     || !Number.isSafeInteger(input.elapsedMs) || input.elapsedMs <= 0) return;
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const session = await sessions.get(input.sessionId);
   const requestName = `kind5-content-request-${input.authorizationIdHex}`;
   const deliveryName = `kind6-content-delivery-${input.authorizationIdHex}`;
@@ -4171,7 +2286,7 @@ async function addMsfileBitfsRecentSellerSpeeds(
   if (quotes.length === 0) return [];
   const owner = ownerPublicKeyHex.toLowerCase();
   const seed = seedHashHex.toLowerCase();
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const records = await sessions.list();
   const latestBySeller = new Map<string, MsFileBitfsRecentSellerSpeed>();
   for (const record of records) {
@@ -4199,7 +2314,7 @@ async function addMsfileBitfsRecentSellerSpeeds(
 async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/contracts").MsFileBitfsTaskSnapshot[]> {
   const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
   if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault 已锁定，不能读取 BitFS 购买任务");
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const runtime = await ensureMsfileRuntime();
   const buyerSettings = runtime.getBitfsBuyerSettings
     ? await runtime.getBitfsBuyerSettings()
@@ -4212,7 +2327,7 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
       || record.phase === "cancel-opening")
     && record.phase !== "completed" && record.phase !== "cancelled" && record.phase !== "refunded");
   const ledger = currentMsfileBitfsFundingLedger();
-  const contentStore = createWorkerOwnerFileStore("msfile", "");
+  const contentStore = createWorkerModuleFileStore("msfile", "");
   const snapshots: import("@keymaster/contracts").MsFileBitfsTaskSnapshot[] = [];
   for (const record of records) {
     let session = await sessions.get(record.sessionId);
@@ -4501,7 +2616,7 @@ async function ensureMsfileBitfsBuyerTask(input: {
   const seed = input.seedHashHex.toLowerCase();
   const key = msfileBitfsBuyerTaskKey(owner, seed);
   const sessionEpoch = coordinatorState.sessionEpoch;
-  const generation = coordinatorState.keyspaceGeneration;
+  const runGeneration = coordinatorState.runGeneration;
   const existing = msfileBitfsBuyerTasks.get(key);
   if (existing && existing.ownerSessionEpoch === sessionEpoch) {
     try {
@@ -4511,7 +2626,7 @@ async function ensureMsfileBitfsBuyerTask(input: {
         existing.purchase = restored ?? existing.purchase;
         existing.purchaseHydrated = true;
       }
-      if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.keyspaceGeneration !== generation
+      if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.runGeneration !== runGeneration
         || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
         throw new Error("BitFS 买方恢复摘要期间 Key 或会话世代已变化");
       }
@@ -4538,13 +2653,13 @@ async function ensureMsfileBitfsBuyerTask(input: {
   }
   try {
     const task = await entry.taskPromise;
-    if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.keyspaceGeneration !== generation
+    if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.runGeneration !== runGeneration
       || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
       throw new Error("BitFS 需求任务的 Key 或会话世代已变化");
     }
     entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: seed, task }) ?? entry.purchase;
     entry.purchaseHydrated = true;
-    if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.keyspaceGeneration !== generation
+    if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.runGeneration !== runGeneration
       || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
       throw new Error("BitFS 买方恢复摘要期间 Key 或会话世代已变化");
     }
@@ -4597,12 +2712,12 @@ async function ensureMsfileBitfsBuyerProtocol(
   const woc = p2pkhWocService;
   if (!woc) throw new Error("BitFS 买方需要可用的 WoC 链上事实服务");
   const sessionEpoch = coordinatorState.sessionEpoch;
-  const keyspaceGeneration = coordinatorState.keyspaceGeneration;
+  const runGeneration = coordinatorState.runGeneration;
   const assertCurrentContext = (): void => {
     if (coordinatorState.vaultStatus !== "unlocked"
       || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
       || coordinatorState.sessionEpoch !== sessionEpoch
-      || coordinatorState.keyspaceGeneration !== keyspaceGeneration
+      || coordinatorState.runGeneration !== runGeneration
       || msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) {
       throw new Error("BitFS 买方购买期间 Key、存储或 DataChannel 已变化");
     }
@@ -4612,8 +2727,8 @@ async function ensureMsfileBitfsBuyerProtocol(
   if (!Number.isSafeInteger(feeRate) || feeRate < 1) throw new Error("BitFS 池内手续费率配置无效");
   const cryptoPort = await createWorkerActiveKeyCrypto(owner);
   assertCurrentContext();
-  const journalStore = createWorkerOwnerFileStore("msfile", "bitfs-journal");
-  const contentStore = createWorkerOwnerFileStore("msfile", "");
+  const journalStore = createWorkerModuleFileStore("msfile", "bitfs-journal");
+  const contentStore = createWorkerModuleFileStore("msfile", "");
   const quoteSessionId = link.quoteSessionId;
   if (!quoteSessionId) throw new Error("BitFS 下载计划需要先持久化已验签报价");
   const quoteViews = (await link.task.listDiscoveredQuotes()).sort((left, right) => left.sessionId.localeCompare(right.sessionId));
@@ -4736,7 +2851,7 @@ async function startMsfileBitfsBuyerPurchase(input: {
   } catch (error) {
     const owner = coordinatorState.activePublicKeyHex?.toLowerCase();
     const sessions = owner
-      ? await createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal")).list().catch(() => [])
+      ? await createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal")).list().catch(() => [])
       : [];
     await writeBitfsE2eDiagnostic("buyer-purchase-error.json", {
        seedHashHex: input.seedHashHex,
@@ -4778,7 +2893,7 @@ async function startMsfileBitfsBuyerPurchaseNow(input: {
   const settings = runtime.getBitfsBuyerSettings
     ? await runtime.getBitfsBuyerSettings()
     : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const allSessions = await sessions.list();
   const sameSeedSessions = allSessions.filter((record) => record.role === "buyer"
     && record.ownerPublicKeyHex === owner && record.seedHashHex === input.seedHashHex.toLowerCase());
@@ -4813,7 +2928,7 @@ async function startMsfileBitfsBuyerPurchaseNow(input: {
     seedHashHex: input.seedHashHex,
     fileSizeBytes: canonicalQuote.fileSizeBytes,
     recommendedFilename: canonicalQuote.recommendedFilename,
-    store: createWorkerOwnerFileStore("msfile", "bitfs-journal"),
+    store: createWorkerModuleFileStore("msfile", "bitfs-journal"),
   });
   let plan = await downloadPlan.snapshot();
   // 尚未准备 FundingTx 的失败池没有资金责任，可释放其预留 Block；其他失败仍保留占用。
@@ -5022,7 +3137,7 @@ async function maybeStartMsfileBitfsNextSeller(input: {
     ? await runtime.getBitfsBuyerSettings()
     : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
   const quotes = await addMsfileBitfsRecentSellerSpeeds(owner, seed, await input.task.listDiscoveredQuotes());
-  const sessions = await createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal")).list();
+  const sessions = await createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal")).list();
   const linkedSessionIds = new Set([...msfileBitfsWebRtcBuyerLinks.values()]
     .filter((candidate) => candidate.ownerPublicKeyHex.toLowerCase() === owner
       && candidate.seedHashHex.toLowerCase() === seed
@@ -5059,7 +3174,7 @@ async function maybeAutoStartMsfileBitfsBuyerPurchase(input: {
   const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, seed));
   if (!taskEntry || taskEntry.ownerSessionEpoch !== coordinatorState.sessionEpoch) return;
   if (taskEntry.purchase?.phase === "completed") return;
-  const planObject = await createWorkerOwnerFileStore("msfile", "bitfs-journal").get(`download-plans/${seed}.json`);
+  const planObject = await createWorkerModuleFileStore("msfile", "bitfs-journal").get(`download-plans/${seed}.json`);
   if (planObject) {
     const downloadPlan = await openMsfileBitfsBuyerDownloadPlan(owner, seed);
     if ((await downloadPlan.snapshot()).stopRequested) return;
@@ -5103,7 +3218,7 @@ async function cancelMsfileBitfsBuyerPurchase(input: { seedHashHex: string; sess
   if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
   if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
   const { task, entry } = await ensureMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex });
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const selected = await sessions.get(input.sessionId);
   if (!selected || selected.role !== "buyer" || selected.ownerPublicKeyHex !== owner
     || selected.seedHashHex !== input.seedHashHex.toLowerCase()) {
@@ -5159,7 +3274,7 @@ async function cancelOneMsfileBitfsBuyerPurchase(input: {
   if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
   if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
   const { task, entry } = input;
-  const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
   const saved = await sessions.get(input.sessionId);
   if (!saved || saved.role !== "buyer" || saved.ownerPublicKeyHex !== owner || saved.seedHashHex !== input.seedHashHex.toLowerCase()) {
     throw new Error("找不到当前 Key 和 Seed 对应的买方购买会话");
@@ -5357,7 +3472,7 @@ function currentMsfileBitfsFundingLedger(): BitfsFundingLedger {
   const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
   if (coordinatorState.vaultStatus !== "unlocked" || !owner) throw new Error("Vault 已锁定，BitFS 专款视图不可用");
   if (!msfileBitfsFundingLedger || msfileBitfsFundingLedgerOwnerHex !== owner) {
-    msfileBitfsFundingLedger = createBitfsFundingLedger(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+    msfileBitfsFundingLedger = createBitfsFundingLedger(createWorkerModuleFileStore("msfile", "bitfs-journal"));
     msfileBitfsFundingLedgerOwnerHex = owner;
   }
   return msfileBitfsFundingLedger;
@@ -5581,7 +3696,7 @@ export async function prepareMsfileBitfsFundingSplit(input: {
     throw new Error("BitFS 专款拆分只允许当前已解锁 Key");
   }
   const ledger = currentMsfileBitfsFundingLedger();
-  const store = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
   const transactions = createBitfsTransactionJournal(store);
   const settings = await p2pkhSettingRepository().readSetting();
   return prepareBitfsFundingSplit({
@@ -5606,7 +3721,7 @@ export async function recoverMsfileBitfsFundingSplit(input: {
   if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
     throw new Error("BitFS 专款恢复只允许当前已解锁 Key");
   }
-  const store = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
   await recoverBitfsFundingSplits(input, {
     ledger: currentMsfileBitfsFundingLedger(),
     transactions: createBitfsTransactionJournal(store),
@@ -5742,6 +3857,13 @@ async function settleMsfileBitfsFundingSplit(input: {
 }
 
 /** 为固定报价创建当前 Worker 内的买方开池任务；页面不接触账本或签名端口。 */
+/** 单调递增的买方任务协议世代；只在 Worker 运行期有效，重启后重新开始。 */
+let msfileBuyerTaskGeneration = 0;
+function nextMsfileBuyerTaskGeneration(): number {
+  msfileBuyerTaskGeneration += 1;
+  return msfileBuyerTaskGeneration;
+}
+
 export async function createMsfileBitfsBuyerTask(input: {
   /** 当前已解锁 Key 的压缩公钥。 */
   ownerPublicKeyHex: string;
@@ -5755,17 +3877,23 @@ export async function createMsfileBitfsBuyerTask(input: {
   if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
     throw new Error("BitFS 买方任务只允许当前已解锁 Key");
   }
-  const generation = coordinatorState.keyspaceGeneration;
+  const runGeneration = coordinatorState.runGeneration;
   const sessionEpoch = coordinatorState.sessionEpoch;
+  // BitFS 买方任务的协议端口仍使用一个**数字** generation 做迟到结果撤销。
+  // 单 Key 模型下不再有随切 Key 自增的 keyspaceGeneration，这里改用已存在的
+  // `msfileSellerSessionEpoch` 同族计数：每次创建新任务都会取当前计数 + 1，
+  // 因此同一 Worker 内后创建的任务一定大于先创建的任务，重启后计数重新
+  // 开始即可（旧任务句柄本来就随 Worker 重启消失）。
+  const generation = nextMsfileBuyerTaskGeneration();
   const assertCurrentContext = (): void => {
     if (coordinatorState.vaultStatus !== "unlocked"
       || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
-      || coordinatorState.keyspaceGeneration !== generation
+      || coordinatorState.runGeneration !== runGeneration
       || coordinatorState.sessionEpoch !== sessionEpoch) {
       throw new Error("BitFS 买方任务的 Key、存储或会话世代已变化");
     }
   };
-  const store = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
   const sessions = createBitfsSessionJournal(store);
   const transactions = createBitfsTransactionJournal(store);
   const ledger = currentMsfileBitfsFundingLedger();
@@ -6162,14 +4290,14 @@ async function configureMsfileSellerRuntime(
   const index = new BitfsSeedIndex();
   msfileSellerIndex = index;
   try {
-    const contentStore = createWorkerOwnerFileStore("msfile", "");
+    const contentStore = createWorkerModuleFileStore("msfile", "");
     await index.build(contentStore, controller.signal);
     if (controller.signal.aborted || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) {
       return "waiting-unlock";
     }
     const cryptoPort = await createWorkerActiveKeyCrypto(ownerPublicKeyHex);
     const signer = createBitfsVaultSigner(cryptoPort);
-    const journalStore = createWorkerOwnerFileStore("msfile", "bitfs-journal");
+    const journalStore = createWorkerModuleFileStore("msfile", "bitfs-journal");
     const journal = createBitfsJournal(journalStore);
     const transactionJournal = createBitfsTransactionJournal(journalStore);
     const woc = p2pkhWocService;
@@ -6295,7 +4423,7 @@ async function configureMsfileSellerRuntime(
 async function writeBitfsE2eDiagnostic(path: string, value: unknown): Promise<void> {
   if (import.meta.env.VITE_BITFS_E2E !== "true") return;
   try {
-    const store = createWorkerOwnerFileStore("msfile", "");
+    const store = createWorkerModuleFileStore("msfile", "");
     await store.put(`bitfs-e2e-diagnostics/${path}`, new TextEncoder().encode(JSON.stringify(value)));
   } catch (error) {
     console.warn("[msfile] BitFS E2E diagnostic write failed", error instanceof Error ? error.message : String(error));
@@ -6362,7 +4490,7 @@ async function handleMsfileSellerHashRequest(
   let indexedSeed = index?.get(request.body.hash);
   if (index && (!indexedSeed || indexedSeed.availability !== "available")) {
     try {
-      const contentStore = createWorkerOwnerFileStore("msfile", "");
+      const contentStore = createWorkerModuleFileStore("msfile", "");
       const indexGeneration = index.currentGeneration();
       index.invalidate(request.body.hash);
       await index.refresh(contentStore, request.body.hash, indexGeneration);
@@ -6372,7 +4500,7 @@ async function handleMsfileSellerHashRequest(
     }
   }
   console.warn("[msfile] seller hash request", request.body.hash, indexedSeed?.availability ?? "missing");
-  const indexDiagnosticStore = createWorkerOwnerFileStore("msfile", "");
+  const indexDiagnosticStore = createWorkerModuleFileStore("msfile", "");
   const indexMeta = await indexDiagnosticStore.get(`meta/${request.body.hash}.json`).catch(() => undefined);
   const indexSeed = await indexDiagnosticStore.get(`seeds/${request.body.hash}.ms`).catch(() => undefined);
   let indexBlocks: Awaited<ReturnType<typeof indexDiagnosticStore.list>> | undefined;
@@ -6740,7 +4868,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecuto
     const freshQuoteSessionId = `quote-${crypto.randomUUID()}`;
     buyerLink.quoteSessionId = freshQuoteSessionId;
     buyerLink.quoteAccepted = (async () => {
-      const sessions = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+      const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
       const resumablePhases = new Set([
         "opening-presign", "funding-prepared", "funding-unknown", "funded", "request-prepared",
         "delivery-verified", "payment-unknown", "content-committing", "close-required", "close-requested",
@@ -7272,20 +5400,19 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       if (!root) throw msfileError("msfile_unavailable", "Platform storage has not been bootstrapped");
       const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
       if (!ownerPublicKeyHex) throw msfileError("msfile_unavailable", "MSFile runtime requires an unlocked active key");
-      // 设置与供应商是 owner 文件；App 覆盖额度按 publisher 惰性打开
-      // `<owner>/app.<publisher>/settings.json`。句柄由 worker 统一缓存、
-      // 切 owner/世代时失效，因此这里不 close，也不持有 K-V 生命周期。
+      // 设置与供应商是 msfiles 模块根；App 覆盖额度是平台管理的
+      // `.keymaster/system/app/app-settings/`。句柄由 worker 统一缓存、按
+      // 四维绑定失效，因此这里不 close，也不持有文件生命周期。
       stores = {
         ownerPublicKeyHex,
-        settings: createWorkerOwnerFileStore("msfile", ""),
-        appSettings: (publisherPublicKeyHex: string) => createWorkerOwnerFileStore("msfile", "app-settings", publisherPublicKeyHex),
-        listAppPublishers: listWorkerOwnerAppPublishers,
+        settings: createWorkerModuleFileStore("msfile", ""),
+        appSettings: createWorkerModuleFileStore("msfile", "app-settings"),
       };
       const repository = await openMsFileRepository(stores);
       service = createMsFileService({
         repository: repository,
         transport: windowP2pExecutorTransport,
-        localSource: createMsFileLocalContentSource(createWorkerOwnerFileStore("msfile", "")),
+        localSource: createMsFileLocalContentSource(createWorkerModuleFileStore("msfile", "")),
         onSellerSettingsChanged: (settings) => configureMsfileSellerRuntime(service!, ownerPublicKeyHex, settings),
         notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
       });
@@ -7370,7 +5497,11 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
   // 上面的断言已覆盖「解锁 + 有 active key」；这里把判定结果落到局部变量，
   // 不再重复判一次。
   const ownerPublicKeyHex = coordinatorState.activePublicKeyHex!;
-  const ownerGeneration = Math.max(1, coordinatorState.keyspaceGeneration);
+  // SPI 的 ownerGeneration 是「插件运行代次」的单调计数，不是钱包身份世代：
+  // 旧实现借用了 keyspaceGeneration（换 Key 时自增），单 Key 模型下已没有
+  // 该世代，这里改用已存在的 satRuntimeStartToken —— 它同样在每次运行代次
+  // 变化时单调递增，能让重启前后的 SPI 结果互相失效。
+  const ownerGeneration = Math.max(1, satRuntimeStartToken + 1);
   const expectedSessionEpoch = coordinatorState.sessionEpoch;
   const startToken = satRuntimeStartToken;
   const workerUnit = activateCoordinatorOwnerWorkerUnit("sat-subscription.coordinator-worker", expectedInstanceId);
@@ -7379,7 +5510,7 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
   const start = (async (): Promise<SatWorkerRuntimeState> => {
     // SatSubscription 只打开 `<owner>/sat-subscription/` 文件根；旧的
     // `.keymaster/.../subscription-state` K-V 不再读取、迁移或删除。
-    const store = createWorkerOwnerFileStore("sat-subscription", "");
+    const store = createWorkerModuleFileStore("sat-subscription", "");
     const repository = createSatSubscriptionRepository(store, ownerPublicKeyHex);
     let provider: ReturnType<typeof createSatSubscriptionProvider> | undefined;
     let handle: SatSubscriptionHandle | undefined;
@@ -7421,7 +5552,7 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
       const spi = createSatSpiService({
         getRuntime: () => boundProvider.spiRuntime(),
         getOwnerPublicKeyHex: () => coordinatorState.activePublicKeyHex ?? null,
-        getOwnerGeneration: () => coordinatorState.activePublicKeyHex === ownerPublicKeyHex ? Math.max(1, coordinatorState.keyspaceGeneration) : null,
+        getOwnerGeneration: () => coordinatorState.activePublicKeyHex === ownerPublicKeyHex ? Math.max(1, satRuntimeStartToken + 1) : null,
         stateForOwner: async (requestedOwner) => {
           if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed");
           return state;
@@ -7623,30 +5754,21 @@ function releaseStoragePortSlot(clientId: string): void {
 
 function emitStorageState(): void {
   storageStateTail = storageStateTail.then(async () => {
-    const summary = typeof storageController?.getProviderSummary === "function"
-      ? await storageController.getProviderSummary().catch(() => null)
-      : null;
-    const revision = storageRevision + 1;
-    const runtimeStatus = typeof storageController?.status === "function" ? storageController.status() : undefined;
-    const healthStatus = storageHealthController.status();
-    const status = storageStartupFailure || healthStatus === "degraded" || healthStatus === "authentication" || healthStatus === "incompatible"
+    const runtimeStatus = storageController?.status();
+    const status: StorageRuntimeControllerStatus = storageStartupFailure
       ? "degraded"
-      : !platformStorageReady || healthStatus !== "ready"
-        ? "checking"
-        : runtimeStatus ?? "checking";
+      : runtimeStatus ?? (storageColdStartState?.state === "ready" ? "locked" : "uninitialized");
+    const summary = await storageController?.summary().catch(() => null) ?? null;
+    const revision = storageRevision + 1;
     const state: CoordinatorStorageStateEvent = {
-      topic: "storage.state", type: "storage.state.changed", storageRevision: revision,
+      topic: "storage.state",
+      type: "storage.state.changed",
+      storageRevision: revision,
       sessionEpoch: coordinatorState.sessionEpoch,
-      providerGeneration: summary?.generation ?? null,
-      ...(platformRootStore ? { bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration } : {}),
       status,
-      healthStatus,
-      catalogBucket: Boolean(selectedCatalogBucket()),
+      ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
       ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
       summary,
-      capabilities: typeof storageController?.getConditionalCapabilities === "function"
-        ? storageController.getConditionalCapabilities()
-        : null,
     };
     lastStorageState = state;
     storageRevision = revision;
@@ -7654,25 +5776,18 @@ function emitStorageState(): void {
   }, () => undefined);
 }
 
-let skippedInitialStorageHealthSnapshot = false;
-storageHealthController.subscribe(() => {
-  if (!skippedInitialStorageHealthSnapshot) {
-    skippedInitialStorageHealthSnapshot = true;
-    return;
-  }
-  emitStorageState();
-});
-
 /**
- * Coordinator-owned Storage recovery pipeline. Provider 恢复只是第一步；
- * Root、Vault metadata、业务任务和旧资源句柄必须在同一条编排链上恢复。
+ * Coordinator-owned Storage recovery pipeline.
+ *
+ * 本地介质没有远程 Provider 可探测：恢复只重建当前钱包的存储根、撤销旧
+ * grant，并让任务与句柄重新绑定。IndexedDB 不可用时映射为 degraded，
+ * 不自动清库、不回退到 localStorage。
  */
 async function runStorageRecoveryOrchestrator(peerId?: string): Promise<void> {
   if (storageRecoveryOrchestrator) return storageRecoveryOrchestrator;
   storageRecoveryOrchestrator = (async () => {
     if (!platformRootStore) {
-      if (!storageBootstrapState) throw storageUnavailableError("Storage bootstrap selection is unavailable");
-      await bootstrapPlatformStorage(undefined, peerId);
+      throw storageUnavailableError("Wallet storage root is unavailable");
     } else {
       // 恢复只替换当前底层绑定；任务 runtime 仍持有 wrapper，不能把
       // wrapper 永久 close，否则恢复后的下一次调度必然失败。
@@ -7688,7 +5803,6 @@ async function runStorageRecoveryOrchestrator(peerId?: string): Promise<void> {
     // 和注册任务；这里不能越权把尚未完成的冷启动发布成 ready。
     if (!recoveryComplete) return;
     storageStartupFailure = false;
-    storageHealthController.setStatus("ready");
     emitStorageState();
   })();
   try {
@@ -7704,8 +5818,7 @@ async function runStorageRecoveryOrchestrator(peerId?: string): Promise<void> {
 
 /**
  * 记录业务 I/O 的可诊断失败，但不把一次业务读写失败升级成全局启动门禁。
- * 用户的保存/读取请求会收到原始错误并可在原页面重试；启动健康状态只由
- * 启动恢复和用户明确点击的“重试存储”改变。
+ * 用户的保存/读取请求会收到原始错误并可在原页面重试。
  */
 function markStorageIoFailure(error: unknown): void {
   if (!platformStorageReady) return;
@@ -7713,47 +5826,10 @@ function markStorageIoFailure(error: unknown): void {
     ? (error as { code?: unknown }).code
     : undefined;
   const message = error instanceof Error ? error.message : String(error);
-  if (code !== "storage_provider_error" && code !== "storage_unavailable") return;
+  if (code !== "storage_unavailable" && code !== "storage_wallet_corrupt") return;
   if (code === "storage_unavailable" && /cancel|abort|closed|stale|fenced|binding|owner storage requests did not drain|key\/session transition/i.test(message)) return;
-  // 仅保留脱敏日志；不要调用 health.setStatus、blockWorkerTasksForStorage
-  // 或 probeStorageAndRecover。业务错误必须就地返回，恢复动作由用户重试
-  // 业务操作，或显式点击存储页的“重试”触发。
-  console.warn("[storage] business I/O failed", {
-    code,
-    message: code === "storage_provider_error" ? "Storage provider operation failed" : "Storage is unavailable"
-  });
-}
-
-/** Provider 探测、Root 重绑、Journal 收敛和任务恢复的单次原子操作。 */
-async function probeStorageAndRecover(peerId?: string): Promise<void> {
-  const snapshot = await storageHealthController.probe(
-    async () => {
-      const provider = platformBucketProvider;
-      if (!provider) throw Object.assign(new Error("Storage provider is unavailable"), { code: "storage_unavailable" });
-      // 已探测过的桶直接复用能力缓存，只做读取健康检查；未探测时实测并写回。
-      const binding = selectedCatalogBucket();
-      const cached = binding && binding.deviceRecord.location.providerId === "s3"
-        ? (binding.deviceRecord as Extract<DeviceRecordV1, { location: { providerId: "s3" } }>).capabilities?.conditionalWrites
-        : undefined;
-      if (!cached) {
-        const result = await provider.probe();
-        if (!result.ok || result.conditionalWrites === "unsupported") {
-          throw Object.assign(new Error("Storage bucket does not support required conditional writes"), { code: "storage_provider_error" });
-        }
-        if (binding) await updateDeviceRecordCapabilities(binding.bucketId, result.conditionalWrites, peerId);
-      }
-    },
-    async () => {
-      await runStorageRecoveryOrchestrator(peerId);
-    }
-  );
-  if (snapshot.status !== "ready") {
-    storageStartupFailure = true;
-    emitStorageState();
-    throw storageUnavailableError(snapshot.message ?? "Storage recovery is unavailable");
-  }
-  platformStorageReady = true;
-  storageStartupFailure = false;
+  // 仅保留脱敏日志；不自动清库，也不把业务错误升级成全局断路器。
+  console.warn("[storage] business I/O failed", { code, message: "Wallet storage operation failed" });
 }
 
 function isStorageFailure(error: unknown): boolean {
@@ -7766,7 +5842,6 @@ function isStorageFailure(error: unknown): boolean {
   return (typeof code === "string" && code.startsWith("storage_"))
     || code === "upgrade.authority_claim_failed"
     || recoveryRequired
-    || storageHealthController.status() === "degraded"
     || storageStartupFailure;
 }
 
@@ -7911,40 +5986,73 @@ async function ensureStorageRuntime(peerId?: string): Promise<StorageRuntimeCont
     reconcileCoordinatorRuntime();
     return storageController;
   }
-  if (testStorageStartupFailure) { storageStartupFailure = true; storageHealthController.setStatus("degraded", "Storage startup failed"); emitStorageState(); throw storageCoordinatorError("storage_unavailable"); }
+  if (testStorageStartupFailure) {
+    storageStartupFailure = true;
+    emitStorageState();
+    throw storageCoordinatorError("storage_unavailable");
+  }
   const startupError = (error: unknown): never => {
     const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-    const currentHealth = storageHealthController.status();
-    if (currentHealth === "unselected" || currentHealth === "authentication") {
+    // corrupt/unsupported 是明确的本地格式问题：界面必须展示恢复或升级路径，
+    // 绝不能被降级成可重试的 degraded 而静默创建空钱包。
+    if (code === "storage_wallet_corrupt" || code === "storage_wallet_unsupported") {
+      storageStartupFailure = false;
+      emitStorageState();
+      throw error;
+    }
+    if (code === "storage_unavailable") {
       storageStartupFailure = false;
       emitStorageState();
     } else {
       storageStartupFailure = true;
-      storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
       emitStorageState();
     }
     if (typeof code === "string" && code.startsWith("storage_")) throw error;
     throw storageCoordinatorError("storage_unavailable");
   };
   try {
-    if (!storageRepository) {
-      if (!platformRootStore) await bootstrapPlatformStorage(undefined, peerId);
-      const root = platformRootStore;
-      if (!root) throw new Error("Platform storage root is unavailable");
-      platformStorageStore = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads });
-      registerCoordinatorKeyValueMaintenanceStore(platformStorageStore);
-      storageRepository = await openMultipartUploadRepository(platformStorageStore);
-    }
+    if (!walletLifecycle || !platformRootStore) throw new Error("Wallet storage root is unavailable");
   } catch (error) { startupError(error); }
-  const multipartUploadRepository = storageRepository;
-  if (!multipartUploadRepository) return startupError(new Error("Storage repository is unavailable"));
   let runtime: StorageRuntimeController;
   try {
+    const lifecycle = walletLifecycle!;
+    const root = platformRootStore!;
     runtime = await createStorageRuntimeController({
-      multipartUploadRepository,
-      bucketProvider: platformBucketProvider,
-      bucketGeneration: platformRootStore?.bucket.bucketGeneration,
-      logger: { warn: (event) => undefined }
+      coldStart: () => lifecycle.coldStart(),
+      initialize: (plan) => lifecycle.initialize(plan),
+      unlock: (password) => lifecycle.unlock(password),
+      lock: () => lifecycle.lock(),
+      changeKeyPassword: (input) => lifecycle.changePassword(input),
+      renameKey: (label) => lifecycle.rename(label),
+      exportKeyHold: () => lifecycle.exportKeyHold(),
+      resetWallet: (input) => lifecycle.resetWallet(input),
+      summary: async () => {
+        const meta = storageColdStartState?.meta;
+        return {
+          ...(coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : {}),
+          ...(meta ? { label: walletKeys ? await readWalletKeyLabel(walletKeys) : undefined } : {}),
+          ...(meta ? { walletGeneration: meta.walletGeneration } : {}),
+        };
+      },
+      openAppFileStore: async (ctx) => root.openModuleFileStore({
+        declaration: {
+          moduleId: deriveThirdPartyStorageModuleId(ctx.appIdentity.publisherPublicKeyHex, ctx.appIdentity.appId),
+          // App 只能访问自己的目录根，不允许用途子目录。
+          purposeId: "",
+          authority: "third-party-app",
+          model: "files",
+          schemaVersion: 1,
+        },
+        appStorageName: ctx.appStorageName,
+        verifiedAppIdentity: {
+          publisherPublicKeyHex: ctx.appIdentity.publisherPublicKeyHex,
+          appId: ctx.appIdentity.appId,
+        },
+      }),
+      abortSession: async (connectSessionId) => { abortStorageSession(connectSessionId, ""); },
+      // 配额探测只能由钱包存储引擎访问:Worker 不直接碰 navigator.storage。
+      persistence: async () => await walletStore?.persistence() ?? { persisted: false },
+      status: () => coordinatorStorageStatus(),
     });
   } catch (error) {
     startupError(error);
@@ -7959,6 +6067,26 @@ async function ensureStorageRuntime(peerId?: string): Promise<StorageRuntimeCont
   storageController.subscribe(emitStorageState);
   emitStorageState();
   return storageController;
+}
+
+/** 当前存储状态：锁定、损坏或不可用都由同一个只读投影报告。 */
+function coordinatorStorageStatus(): StorageRuntimeControllerStatus {
+  if (storageStartupFailure) return "degraded";
+  const coldStart = storageColdStartState?.state;
+  if (coldStart === "corrupt") return "corrupt";
+  if (coldStart === "unsupported") return "unsupported";
+  if (coordinatorState.vaultStatus === "unlocked") return "ready";
+  return coldStart === "ready" ? "locked" : "uninitialized";
+}
+
+/** 唯一 Key 的公开标签；KeyHold 未解锁时只读 meta 之外的公开字段。 */
+async function readWalletKeyLabel(keys: WalletKeyRepository): Promise<string | undefined> {
+  try {
+    const file = await keys.read();
+    return file ? file.document.label : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Storage 选定/解锁后统一恢复 Root、Vault metadata、runtime 与任务。 */
@@ -7999,12 +6127,10 @@ async function releaseStorageRuntime(reason: string): Promise<void> {
   storageGrants.clear();
   ownerStorageGrants.clear();
   platformStorageGrants.clear();
-  // StorageRuntimeControllerImpl's dispose aborts its request controller and destroys the
-  // S3 client without waiting for remote multipart cleanup.
+  // dispose 丢弃游标与订阅者；持久数据仍在 IndexedDB 中。
   const storageUnit = coordinatorWorkerUnitRegistry.get("storage.coordinator-worker");
   (storageController as (StorageRuntimeController & { dispose?: () => void }) | undefined)?.dispose?.();
   storageController = undefined;
-  storageRepository = undefined;
   platformStorageReady = false;
   if (storageUnit) stopCoordinatorWorkerUnit(storageUnit.unitId, storageUnit.instanceId);
   reconcileCoordinatorRuntime();
@@ -8055,7 +6181,7 @@ interface TaskRuntime {
   syncPolicy?: "managed" | "smart" | "fixed";
   run?: (context: { signal: AbortSignal; reason: string; reportProgress(progress: unknown): void; assertSessionFresh(): void }) => Promise<void>;
   startedEpoch?: SessionEpoch;
-  startedGeneration?: number;
+  startedRunGeneration?: string;
   startedPublicKeyHex?: string;
   completion?: Promise<void>;
 }
@@ -8398,120 +6524,15 @@ function enqueueCoordinatorSessionInitialization<T>(operation: () => Promise<T>)
   return current;
 }
 
-function bridgeRequestWithoutSignal(input: LocalStorageBridgeRequest): LocalStorageBridgeRequest {
-  if (input.type === "put") {
-    // Provider callers put the internal AbortSignal in the write-condition
-    // object as well as on the request. Neither copy is structured-cloneable.
-    const { signal, condition, ...request } = input;
-    void signal;
-    return { ...request, ...(condition ? { condition: { ifMatch: condition.ifMatch, ifNoneMatch: condition.ifNoneMatch } } : {}) };
-  }
-  const { signal, ...request } = input;
-  void signal;
-  return request;
-}
-
-/** TypedArray 的 RPC DTO 校验是 O(bytes)；跨桥字节统一用精确 ArrayBuffer。 */
-function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-    ? bytes.buffer as ArrayBuffer
-    : bytes.slice().buffer as ArrayBuffer;
-}
-
-/** Window reverse capability 返回的 ArrayBuffer 字节 -> Provider 内部 Uint8Array。 */
-function localStorageResponseFromDto(response: CoordinatorLocalStorageResponse): LocalStorageBridgeResponse {
-  const object = (value: import("@keymaster/contracts").CoordinatorLocalStorageObject): { path: string; bytes: Uint8Array; size?: number; etag?: string; lastModified?: string } => ({
-    path: value.path,
-    bytes: new Uint8Array(value.bytes),
-    ...(value.size === undefined ? {} : { size: value.size }),
-    ...(value.etag === undefined ? {} : { etag: value.etag }),
-    ...(value.lastModified === undefined ? {} : { lastModified: value.lastModified }),
-  });
-  if (response.type === "object") {
-    return response.object === undefined ? { type: "object" } : { type: "object", object: object(response.object) };
-  }
-  if (response.type === "list") {
-    return {
-      type: "list",
-      objects: response.objects.map(object),
-      ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }),
-    };
-  }
-  return response;
-}
-
-/** 将旧 Provider 内部请求收窄为 Window reverse capability 的纯 DTO。 */
-function coordinatorLocalStorageRequest(input: LocalStorageBridgeRequest, binding: CoordinatorSessionBinding): CoordinatorLocalStorageRequest {
-  const withoutSignal = bridgeRequestWithoutSignal(input) as unknown as Record<string, unknown>;
-  const { authorityInstanceId: _authorityInstanceId, leaseId: _leaseId, peerGeneration: _peerGeneration, sessionEpoch: _sessionEpoch, ...request } = withoutSignal;
-  const wire = request.type === "put" && request.bytes instanceof Uint8Array
-    ? { ...request, bytes: exactArrayBuffer(request.bytes) }
-    : request;
-  return { ...wire, ...binding } as unknown as CoordinatorLocalStorageRequest;
-}
-
-/**
- * Coordinator → Window 的 LocalStorage 唯一反向调用面。peerId 只来自
- * WebLoom HandlerCallContext/会话绑定；绝不从页面请求或“最后活动页面”推导。
- */
-function requestLocalStorageBridge(input: LocalStorageBridgeRequest, peerId?: string): Promise<LocalStorageBridgeResponse> {
-  const opening = coordinatorOpeningSession;
-  const temporaryPeerId = peerId === undefined && storageIoOwner === undefined && opening
-    ? (() => { assertCoordinatorSessionOpenFresh(opening); return opening.peerId; })()
-    : undefined;
-  const targetPeerId = peerId ?? storageIoOwner?.peerId ?? temporaryPeerId;
-  const signal = input.signal ?? opening?.signal;
-  if (signal?.aborted) throw storageUnavailableError("Local storage bridge request was cancelled");
-  if (testLocalStorageBridgeOverride) return testLocalStorageBridgeOverride(input);
-  const state = targetPeerId ? coordinatorPeerState(targetPeerId) : undefined;
-  if (!state || state.peer.scope.state !== "active") throw storageUnavailableError("Local storage bridge is unavailable");
-  const binding = opening !== undefined && opening.state === state && (peerId === undefined || peerId === opening.peerId)
-    ? opening.binding
-    : coordinatorSessionBinding(state);
-  if (!binding) throw coordinatorSessionStaleError("Coordinator LocalStorage bridge has no committed session binding");
-  assertCoordinatorBridgeFresh(state, binding, opening);
-  const request = coordinatorLocalStorageRequest(input, binding);
-  const controller = new AbortController();
-  const sourceSignal = signal;
-  const onAbort = (): void => controller.abort();
-  if (sourceSignal?.aborted) throw storageUnavailableError("Local storage bridge request was cancelled");
-  sourceSignal?.addEventListener("abort", onAbort, { once: true });
-  let settle!: () => void;
-  const settled = new Promise<void>((resolve) => { settle = resolve; });
-  const pending: CoordinatorBridgeRequest = { controller, settled };
-  state.bridgeRequests.add(pending);
-  const cleanup = (): void => {
-    sourceSignal?.removeEventListener("abort", onAbort);
-    state.bridgeRequests.delete(pending);
-    settle();
-  };
-  try {
-    // Capability clients normally return a rejected Promise for dispatch
-    // failures, but a peer adapter can also throw before returning one. The
-    // pending record is already visible to close/drain at this point, so the
-    // synchronous path must use the same cleanup as finally.
-    const call = state.peer.capability(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY).call(request, {
-      signal: controller.signal,
-      operationId: generateRequestId(),
-    }) as Promise<CoordinatorLocalStorageResponse>;
-    return Promise.resolve(call).then((response) => {
-      assertCoordinatorBridgeFresh(state, binding, opening);
-      return localStorageResponseFromDto(response);
-    }).finally(cleanup);
-  } catch (error) {
-    cleanup();
-    return Promise.reject(error);
-  }
-}
-
 // ============================================================
 // 2. Worker Global State
 // ============================================================
 
 const coordinatorState: CoordinatorState = {
+  walletGeneration: "",
   sessionEpoch: generateEpoch(),
+  runGeneration: makeCoordinatorAuthorityInstanceId(),
   vaultStatus: "booting",
-  keyspaceGeneration: 0,
   taskRuntimes: new Map(),
   scheduleSettings: { taskIntervals: {} },
   autoLockTimeoutMs: AUTO_LOCK_DEFAULT_TIMEOUT_MS,
@@ -9266,227 +7287,144 @@ function reconcileCoordinatorTaskIntent(snapshot: PluginIntentSnapshot): void {
 
 function assertTaskFresh(taskId: string): void {
   const runtime = coordinatorState.taskRuntimes.get(taskId);
-  if (!runtime || runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedGeneration !== coordinatorState.keyspaceGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) {
+  if (!runtime || runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedRunGeneration !== coordinatorState.runGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) {
     throw new Error("stale task session epoch");
   }
 }
 
-/**
- * 统一进入 unlocked 状态。
- * 设计缘由：unlock、创建首把 key、导入首把 key 共用状态写入、任务恢复、快照广播和自动锁定启动。
- */
-async function enterUnlockedState(
-  activePublicKeyHex: string,
-  activePrivateKeyBytes: Uint8Array,
-  cause: SessionStateEvent["cause"]
-): Promise<void> {
-  const previous = {
-    vaultStatus: coordinatorState.vaultStatus,
-    activePublicKeyHex: coordinatorState.activePublicKeyHex,
-    activePrivateKeyBytes: coordinatorState.activePrivateKeyBytes?.slice(),
-    selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex,
-    keyspaceGeneration: coordinatorState.keyspaceGeneration
+function createWorkerKeyspace(): KeyspaceService {
+  // 单 Key 模型下 keyspace 只是「当前唯一 Key 是谁」的只读投影：没有列表、
+  // 没有选择、没有切换，也没有删除第二把 Key 的入口。
+  const subscribers = new Set<(state: ActiveKeyState) => void>();
+  workerKeyspaceSubscribers = subscribers;
+  return {
+    active: workerActiveKeyState,
+    requireActiveKey: () => {
+      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
+        throw new Error("No active key");
+      }
+      return {
+        publicKeyHex: coordinatorState.activePublicKeyHex,
+        label: coordinatorActiveKeySummary()?.label ?? "",
+        capabilities: ["p2pkh"],
+        createdAt: coordinatorActiveKeySummary()?.createdAt ?? "",
+      };
+    },
+    onActiveKeyChanged: (handler) => {
+      subscribers.add(handler);
+      return () => { subscribers.delete(handler); };
+    },
   };
-  let transition: ActiveOwnerTransitionResult | undefined;
-  try {
-    transition = await transitionActiveStorageOwner(activePublicKeyHex);
-    // 旧私钥不能在新 owner 写入期间继续留在 Coordinator state；回滚使用
-    // 上面保存的独立副本，不能复用已经被覆盖/清零的旧 buffer。
-    dropActivePrivateKey();
-    coordinatorState.vaultStatus = "unlocked";
-    coordinatorState.sessionEpoch = generateEpoch();
-    coordinatorState.activePublicKeyHex = activePublicKeyHex;
-    coordinatorMeta.selectedPublicKeyHex = activePublicKeyHex;
-    replaceActivePrivateKey(activePrivateKeyBytes);
-    // 锁 / 解锁本身只发布内存会话，不写桶内固定对象；但“当前使用的 Key”
-    // 是浏览器 session.activeKey 的真值，固定动作结束时写透一次（值未变
-    // 则跳过），刷新后仍回到这把 Key。
-    // 只有新的 owner 状态准备好后，才重新打开最终 I/O 门禁。
-    await ensureCoordinatorUpgradeSession();
-    await persistSelectedPublicKey(activePublicKeyHex);
-    completeActiveStorageOwnerTransition(transition);
-  } catch (error) {
-    const failedClosed = previous.vaultStatus === "unlocked" && coordinatorState.vaultStatus !== "unlocked";
-    if (failedClosed) {
-      // drain 超时已经由 transition 主动进入 locked；绝不能把旧私钥/旧
-      // active owner 从回滚分支重新暴露出来。
-      dropActivePrivateKey();
-      coordinatorMeta.selectedPublicKeyHex = previous.selectedPublicKeyHex;
-      throw error;
-    }
-    dropActivePrivateKey();
-    coordinatorState.vaultStatus = previous.vaultStatus;
-    coordinatorState.activePublicKeyHex = previous.activePublicKeyHex;
-    if (previous.activePrivateKeyBytes) replaceActivePrivateKey(previous.activePrivateKeyBytes);
-    coordinatorMeta.selectedPublicKeyHex = previous.selectedPublicKeyHex;
-    // lock → unlock 已经排空 pending owner，但新 owner 的 metadata
-    // 提交失败时并没有公开新的 active owner；回滚必须撤销临时 fence。
-    completeActiveStorageOwnerTransition(transition);
-    // 失败回滚不能复用旧 generation/epoch；否则旧 owner 句柄可能重新通过
-    // Root 的 isCurrent 检查。
-    invalidateFailedKeyspaceTransition(previous.keyspaceGeneration);
-    throw error;
-  }
-  try {
-    // 领域任务/Provider 已在 Worker 内创建；只有 owner/session 已提交并且
-    // 最终 I/O 门禁重新打开后，才把这些 unit 发布为本次实例。
-    bindCoordinatorTaskUnitsToOwner();
-    // 买卖运行单元启动前先扫描所有历史买方资金责任；链上暂不可用时
-    // 保持 Vault 可用，但 BitFS 新需求与新开池会被恢复门禁拦住。
-    try {
-      await ensureMsfileBitfsBuyerRecovery(activePublicKeyHex);
-    } catch (error) {
-      console.warn("[msfile] BitFS buyer recovery gate remains closed", error instanceof Error ? error.message : String(error));
-    }
-    await reconcileCoordinatorRuntime();
-  } catch (error) {
-    await performGlobalLock("worker-unit-bind-failed");
-    throw error;
-  }
-  emitStorageState();
-
-  // 恢复所有 blocked 任务为 idle 并重新调度
-  for (const runtime of coordinatorState.taskRuntimes.values()) {
-    if (runtime.state === "blocked" && runtime.blockedReason === "Vault is locked") {
-      runtime.state = "idle";
-      runtime.blockedReason = undefined;
-      scheduleRuntime(runtime);
-    }
-  }
-
-  // 解锁 / 初始化完成后第一时间同步一次：余额快照立即刷新，未关闭的
-  // managed 任务也立即跑一轮，随后回到各自的同步管理间隔。
-  triggerImmediateSync(BACKGROUND_TRIGGER_REASON.UNLOCK);
-
-  publishSessionState(cause);
-  // 解锁后立即建立 owner-scoped Sat runtime 和 owner inbox 的系统 caller。
-  // 连接/供应商暂不可用时只记录诊断；owner 的本地设置仍在
-  // sat-subscription/setting.json，远端订阅事实由后续 SS server 查询取得。
-  void ensureSatRuntime()
-    .then((runtime) => ensureChannelSubscriptionMux(runtime))
-    .catch((error) => console.warn("[channel] owner runtime startup deferred", error instanceof Error ? error.message : String(error)));
-  // 广播任务快照
-  publishTopicEvent("background.snapshot", {
-    type: "background.snapshot.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    snapshots: getTaskSnapshots(),
-  });
-
-  // 启动自动锁定计时器
-  resetAutoLockTimer();
 }
 
-function createWorkerKeyspace(): KeyspaceService {
-  const active = () => ({
-    activePublicKeyHex: coordinatorState.activePublicKeyHex,
-    // 让 Worker 内部的 owner-scoped service 也能捕获会话世代。
-    generation: coordinatorState.keyspaceGeneration
-  });
+/** 当前 Worker Keyspace 投影的订阅者；锁、改密、重置都会通知它们。 */
+let workerKeyspaceSubscribers: Set<(state: ActiveKeyState) => void> | undefined;
+
+/** 身份投影修订号；每次广播递增，页面据此丢弃乱序或重复投影。 */
+let workerKeyspaceRevision = 0;
+
+/** 唯一 Key 的公开摘要缓存；只由解锁/锁定路径刷新，不单独持久化。 */
+let coordinatorActiveKeySummaryCache: KeyIdentity | undefined;
+
+function coordinatorActiveKeySummary(): KeyIdentity | undefined {
+  return coordinatorActiveKeySummaryCache;
+}
+
+/** 更新唯一 Key 的公开摘要投影。 */
+function setCoordinatorActiveKeySummary(summary: KeyIdentity | undefined): void {
+  coordinatorActiveKeySummaryCache = summary;
+}
+
+/** 读取当前身份投影；未解锁时 activePublicKeyHex 缺省。 */
+function workerActiveKeyState(): ActiveKeyState {
   return {
-    listKeys: async () => (await listPublicVaultKeys()).map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt })),
-    getKey: async (publicKeyHex) => { const key = await getPublicVaultKey(publicKeyHex); return key ? { publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt } : undefined; },
-    active,
-    selected: () => coordinatorMeta.selectedPublicKeyHex,
-    setActive: async (publicKeyHex) => {
-      await withCoordinatorFinalIoLease(
-        "write",
-        undefined,
-        () => executeVaultOperation({ type: "setActive", publicKeyHex }),
-        { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "keyspace.active.set" },
-      );
-    },
-    requireActiveKey: () => { if (!coordinatorState.activePublicKeyHex) throw new Error("No active key"); return { publicKeyHex: coordinatorState.activePublicKeyHex, label: "", capabilities: ["p2pkh"], createdAt: "" }; },
-    onActiveKeyChanged: () => () => undefined,
-    prepareDeleteKey: async () => undefined,
-    // Deletion is coordinated by the application keyspace facade so that
-    // namespace cleanup and password verification cannot be bypassed.
-    deleteKey: async () => { throw new Error("Use the coordinator keyspace deletion flow"); },
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
+    activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex : undefined,
+    generation: workerKeyspaceRevision,
   };
+}
+
+/** 通知已发放的 Keyspace 投影订阅者当前身份已变化。 */
+function publishWorkerActiveKeyChanged(): void {
+  const subscribers = workerKeyspaceSubscribers;
+  if (!subscribers || subscribers.size === 0) return;
+  workerKeyspaceRevision += 1;
+  const state = workerActiveKeyState();
+  for (const handler of subscribers) {
+    try {
+      handler(state);
+    } catch (error) {
+      console.warn("[keyspace] active key subscriber failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+function disposeWorkerKeyspace(): void {
+  workerKeyspaceSubscribers?.clear();
+  workerKeyspaceSubscribers = undefined;
 }
 
 /** Worker 任务在 locked 首屏也要先注册；真实 owner 存储延迟到解锁后绑定。 */
 /**
- * Worker 内插件使用的 owner 文件根（model: "files"，扁平布局）。
+ * Worker 内置模块使用的文件根（model: "files"）。
  *
- * 与 K-V 句柄同理：解锁后按当前 owner/keyspace 世代惰性绑定,切 Key
- * 或切桶会让旧绑定失效并在下次调用时重建。
+ * 逻辑路径由中央声明的 moduleId/purposeId 决定，没有 Owner 前缀也没有桶。
+ * 句柄按四维绑定惰性重建：锁定、改密、重置、Worker 重启和 Root 换绑都会让
+ * 旧绑定失效，并在下一次调用时重新打开。
  */
-const workerOwnerFileHandles = new Map<string, BorrowedOwnerFileStore>();
+const workerModuleFileHandles = new Map<string, BorrowedModuleFileStore>();
 
-function createWorkerOwnerFileStore(
+function createWorkerModuleFileStore(
   pluginId: string,
-  purposeId?: string,
-  appPublisherPublicKeyHex?: string,
-): BorrowedOwnerFileStore {
-  const publisherKey = appPublisherPublicKeyHex?.trim().toLowerCase();
-  const handleKey = `${pluginId}\u0000${purposeId ?? "*"}\u0000${publisherKey ?? "*"}`;
-  const cachedHandle = workerOwnerFileHandles.get(handleKey);
+  purposeId: string,
+  appStorageName?: string,
+): BorrowedModuleFileStore {
+  const handleKey = `${pluginId}\u0000${purposeId}\u0000${appStorageName ?? "*"}`;
+  const cachedHandle = workerModuleFileHandles.get(handleKey);
   if (cachedHandle) return cachedHandle;
-  const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId]?.find((candidate) => candidate.scope === "owner" && candidate.model === "files" && (purposeId === undefined || candidate.purposeId === purposeId));
-  if (!declaration || declaration.scope !== "owner" || declaration.authority !== "built-in-module" || declaration.model !== "files") throw new Error(`Unknown owner file storage declaration: ${pluginId}`);
-  if (publisherKey !== undefined && !/^(02|03)[0-9a-f]{64}$/u.test(publisherKey)) throw new Error("App publisher public key is invalid");
+  const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId]?.find((candidate) => candidate.model === "files" && candidate.purposeId === purposeId);
+  if (!declaration) throw new Error(`Unknown module file storage declaration: ${pluginId}/${purposeId}`);
   let closed = false;
-  let ownerPublicKeyHex: string | undefined;
-  let current: OwnerFileStore | undefined;
-  let generation: number | undefined;
-  let bindingRootToken: object | undefined;
+  let current: ModuleFileStore | undefined;
+  let binding: CoordinatorStorageBinding | undefined;
   const invalidateBinding = (): void => {
     current = undefined;
-    ownerPublicKeyHex = undefined;
-    generation = undefined;
-    bindingRootToken = undefined;
+    binding = undefined;
   };
-  const resolve = async (): Promise<OwnerFileStore> => {
-    if (closed) throw new Error("Worker owner file storage handle is closed");
+  const resolve = async (): Promise<ModuleFileStore> => {
+    if (closed) throw new Error("Worker module file storage handle is closed");
     assertStorageDataAvailable();
-    const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-    if (!owner) throw new Error("Owner storage requires an unlocked active key");
-    assertOwnerStorageNotFenced(owner);
-    const expectedGeneration = coordinatorState.keyspaceGeneration;
-    const expectedRootToken = platformRootToken;
-    if (!expectedRootToken) throw new Error("Owner storage root is unavailable");
-    if (!current || ownerPublicKeyHex !== owner || generation !== expectedGeneration || bindingRootToken !== expectedRootToken) {
+    const expected = currentCoordinatorStorageBinding();
+    if (!expected) throw new Error("Module file storage requires an unlocked wallet");
+    if (!current || !binding || !storageBindingsEqual(binding, expected)) {
       invalidateBinding();
-      if (!platformRootStore) throw new Error("Owner storage is not ready");
+      if (!platformRootStore) throw new Error("Module file storage is not ready");
       const root = platformRootStore;
-      const opened = await root.openOwnerFileStore({
-        ownerPublicKeyHex: owner,
-        declaration,
-        ...(publisherKey === undefined ? {} : { appPublisherPublicKeyHex: publisherKey }),
-        keyspaceGeneration: expectedGeneration,
-      });
-      if (
-        closed ||
-        platformRootStore !== root ||
-        platformRootToken !== expectedRootToken ||
-        coordinatorState.activePublicKeyHex?.toLowerCase() !== owner ||
-        coordinatorState.keyspaceGeneration !== expectedGeneration
-      ) {
-        throw storageUnavailableError("Owner file storage binding became stale while opening");
+      const opened = await root.openModuleFileStore(
+        appStorageName === undefined ? { declaration } : { declaration, appStorageName },
+      );
+      // 打开是异步的：期间可能已经发生锁定或 Root 换绑，必须重新校验。
+      if (closed || platformRootStore !== root || !currentCoordinatorStorageBinding()
+        || !storageBindingsEqual(currentCoordinatorStorageBinding()!, expected)) {
+        opened.close();
+        throw storageUnavailableError("Module file storage binding became stale while opening");
       }
       current = opened;
-      ownerPublicKeyHex = owner;
-      generation = expectedGeneration;
-      bindingRootToken = expectedRootToken;
+      binding = expected;
     }
     return current;
   };
   const run = async <T>(
     operation: "read" | "write",
-    execute: (store: OwnerFileStore) => Promise<T>,
+    execute: (store: ModuleFileStore) => Promise<T>,
   ): Promise<T> => withCoordinatorFinalIoLease(operation, undefined, async () => {
     try {
       const store = await resolve();
-      const owner = ownerPublicKeyHex;
-      const boundGeneration = generation;
-      const boundRootToken = bindingRootToken;
-      if (!owner || boundGeneration === undefined) throw storageUnavailableError("Owner file storage binding is unavailable");
-      const release = beginOwnerStorageRequest(owner);
+      const bound = binding;
+      if (!bound) throw storageUnavailableError("Module file storage binding is unavailable");
+      const release = beginStorageBindingRequest();
       try {
         const value = await execute(store);
-        assertOwnerStorageBindingFresh(owner, boundGeneration, boundRootToken);
+        assertStorageBindingLive(bound);
         return value;
       } finally {
         release();
@@ -9496,105 +7434,73 @@ function createWorkerOwnerFileStore(
       throw error;
     }
   }, {
-    auditOperation: "storage.owner.files",
+    auditOperation: "storage.module.files",
     durableLease: operation === "write",
   });
-  const handle: BorrowedOwnerFileStore = {
+  const handle: BorrowedModuleFileStore = {
+    get walletGeneration() { return binding?.walletGeneration ?? ""; },
+    get sessionEpoch() { return binding?.sessionEpoch ?? ""; },
+    get runGeneration() { return binding?.runGeneration ?? ""; },
     list: (input) => run("read", (store) => store.list(input)),
     get: (path, options) => run("read", (store) => store.get(path, options)),
-    put: (path, bytes, condition) => run("write", (store) => store.put(path, bytes, condition)),
+    getRange: (path, range, options) => run("read", (store) => store.getRange(path, range, options)),
+    put: (path, bytes, options) => run("write", (store) => store.put(path, bytes, options)),
     delete: (path, options) => run("write", (store) => store.delete(path, options)),
+    batch: (input, options) => run("write", (store) => store.batch(input, options)),
   };
-  const binding: WorkerOwnerStoreBinding = {
+  const storeBinding: WorkerOwnerStoreBinding = {
     close: () => {
       if (closed) return;
       closed = true;
+      current?.close();
       invalidateBinding();
-      workerOwnerStores.delete(binding);
-      workerOwnerFileHandles.delete(handleKey);
-      // 文件句柄关闭后该 owner 的内存本地态不可再被读取。
+      workerOwnerStores.delete(storeBinding);
+      workerModuleFileHandles.delete(handleKey);
+      // 文件句柄关闭后该模块的内存本地态不可再被读取。
       if (pluginId === "p2pkh") disposeP2pkhStateRepository();
     },
     invalidateBinding: () => {
       if (closed) return;
+      current?.close();
       invalidateBinding();
-      // 切 owner/世代/桶后旧 owner 的本地行不可见；链上真值会从文件重建。
+      // 换绑后旧模块的内存行不可见；链上真值会从文件重建。
       if (pluginId === "p2pkh") disposeP2pkhStateRepository();
     },
   };
-  workerOwnerStores.add(binding);
-  workerOwnerFileHandles.set(handleKey, handle);
+  workerOwnerStores.add(storeBinding);
+  workerModuleFileHandles.set(handleKey, handle);
   return handle;
 }
 
-/**
- * 枚举当前 owner 下已存在的三方 App publisher（`app.<publisher>/` 目录）。
- * 只返回目录名；用于 MSFile 设置页列出 App 授权，不读取 App 文件内容。
- */
-async function listWorkerOwnerAppPublishers(): Promise<string[]> {
-  assertStorageDataAvailable();
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (!owner) throw new Error("Owner storage requires an unlocked active key");
-  assertOwnerStorageNotFenced(owner);
-  if (!platformRootStore) throw new Error("Owner storage is not ready");
-  const root = platformRootStore;
-  const rootToken = platformRootToken;
-  const generation = coordinatorState.keyspaceGeneration;
-  const publishers = await root.listOwnerAppPublishers({ ownerPublicKeyHex: owner, keyspaceGeneration: generation });
-  if (
-    platformRootStore !== root
-    || platformRootToken !== rootToken
-    || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
-    || coordinatorState.keyspaceGeneration !== generation
-  ) {
-    throw storageUnavailableError("Owner app publisher listing became stale");
-  }
-  return publishers;
-}
-
-function createWorkerOwnerStore(pluginId: string, purposeId?: string): KeyValueStore {
-  const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId]?.find((candidate) => candidate.scope === "owner" && candidate.model === "kv" && (purposeId === undefined || candidate.purposeId === purposeId));
-  if (!declaration || declaration.scope !== "owner" || declaration.authority !== "built-in-module" || declaration.model !== "kv") throw new Error(`Unknown owner storage declaration: ${pluginId}`);
+function createWorkerKeyValueStore(pluginId: string, purposeId: string): KeyValueStore {
+  const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId]?.find((candidate) => candidate.model === "kv" && candidate.purposeId === purposeId);
+  if (!declaration) throw new Error(`Unknown module key-value storage declaration: ${pluginId}/${purposeId}`);
   let closed = false;
-  let ownerPublicKeyHex: string | undefined;
   let current: KeyValueStore | undefined;
-  let generation: number | undefined;
-  let bindingRootToken: object | undefined;
+  let binding: CoordinatorStorageBinding | undefined;
   const invalidateBinding = (): void => {
     current?.close();
     current = undefined;
-    ownerPublicKeyHex = undefined;
-    generation = undefined;
-    bindingRootToken = undefined;
+    binding = undefined;
   };
   const resolve = async (): Promise<KeyValueStore> => {
-    if (closed) throw new Error("Worker owner storage handle is closed");
+    if (closed) throw new Error("Worker key-value storage handle is closed");
     assertStorageDataAvailable();
-    const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-    if (!owner) throw new Error("Owner storage requires an unlocked active key");
-    assertOwnerStorageNotFenced(owner);
-    const expectedGeneration = coordinatorState.keyspaceGeneration;
-    const expectedRootToken = platformRootToken;
-    if (!expectedRootToken) throw new Error("Owner storage root is unavailable");
-    if (!current || ownerPublicKeyHex !== owner || generation !== expectedGeneration || bindingRootToken !== expectedRootToken) {
+    const expected = currentCoordinatorStorageBinding();
+    if (!expected) throw new Error("Key-value storage requires an unlocked wallet");
+    if (!current || !binding || !storageBindingsEqual(binding, expected)) {
       invalidateBinding();
-      if (!platformRootStore) throw new Error("Owner storage is not ready");
+      if (!platformRootStore) throw new Error("Key-value storage is not ready");
       const root = platformRootStore;
-      const opened = await root.openKeyValueStore({ ownerPublicKeyHex: owner, declaration, keyspaceGeneration: expectedGeneration });
-      if (
-        closed ||
-        platformRootStore !== root ||
-        platformRootToken !== expectedRootToken ||
-        coordinatorState.activePublicKeyHex?.toLowerCase() !== owner ||
-        coordinatorState.keyspaceGeneration !== expectedGeneration
-      ) {
+      const opened = await root.openKeyValueStore({ declaration });
+      // 打开是异步的：期间可能已经发生锁定或 Root 换绑，必须重新校验。
+      if (closed || platformRootStore !== root || !currentCoordinatorStorageBinding()
+        || !storageBindingsEqual(currentCoordinatorStorageBinding()!, expected)) {
         opened.close();
-        throw storageUnavailableError("Owner storage binding became stale while opening");
+        throw storageUnavailableError("Key-value storage binding became stale while opening");
       }
       current = opened;
-      ownerPublicKeyHex = owner;
-      generation = expectedGeneration;
-      bindingRootToken = expectedRootToken;
+      binding = expected;
     }
     return current;
   };
@@ -9604,14 +7510,12 @@ function createWorkerOwnerStore(pluginId: string, purposeId?: string): KeyValueS
   ): Promise<T> => withCoordinatorFinalIoLease(operation, undefined, async () => {
     try {
       const store = await resolve();
-      const owner = ownerPublicKeyHex;
-      const boundGeneration = generation;
-      const boundRootToken = bindingRootToken;
-      if (!owner || boundGeneration === undefined) throw storageUnavailableError("Owner storage binding is unavailable");
-      const release = beginOwnerStorageRequest(owner);
+      const bound = binding;
+      if (!bound) throw storageUnavailableError("Key-value storage binding is unavailable");
+      const release = beginStorageBindingRequest();
       try {
         const value = await execute(store);
-        assertOwnerStorageBindingFresh(owner, boundGeneration, boundRootToken);
+        assertStorageBindingLive(bound);
         return value;
       } finally {
         release();
@@ -9628,15 +7532,6 @@ function createWorkerOwnerStore(pluginId: string, purposeId?: string): KeyValueS
     durableLease: operation === "write",
   });
   const handle = {
-    get bucketId() { return current?.bucketId ?? "pending"; },
-    get bucketGeneration() { return current?.bucketGeneration ?? 0; },
-    get ownerPublicKeyHex() { return ownerPublicKeyHex ?? ""; },
-    moduleId: declaration.moduleId,
-    purposeId: declaration.purposeId,
-    scope: declaration.scope,
-    authority: declaration.authority,
-    model: declaration.model,
-    schemaVersion: declaration.schemaVersion,
     get: async <T = KeyValueValue>(key: string, options?: { partition?: string }) => run("read", (store) => store.get<T>(key, options)),
     list: async (input: KeyValueListInput = {}) => run("read", (store) => store.list(input)),
     put: async <T = KeyValueValue>(key: string, value: T, condition?: { ifRevision?: number; partition?: string }) => run("write", (store) => store.put<T>(key, value, condition)),
@@ -9663,8 +7558,11 @@ function createWorkerOwnerStore(pluginId: string, purposeId?: string): KeyValueS
  * session。这样 Sat top-up 复用 P2PKH 交易编排时仍然满足私钥不出 Worker。
  */
 async function createWorkerActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto> {
-  const record = await getPublicVaultKey(publicKeyHex);
-  if (!record) throw new Error(`Unknown key ${publicKeyHex}`);
+  // 单 Key 模型：公钥必须就是当前已解锁的唯一 Key，没有多 Key 目录可查。
+  const summary = coordinatorActiveKeySummaryCache;
+  if (!summary || summary.publicKeyHex.toLowerCase() !== publicKeyHex.toLowerCase()) {
+    throw new Error(`Unknown key ${publicKeyHex}`);
+  }
   const requirePrivateKey = (): Uint8Array => {
     if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== publicKeyHex || !coordinatorState.activePrivateKeyBytes) {
       throw new Error("Vault is locked or active key changed");
@@ -9672,10 +7570,10 @@ async function createWorkerActiveKeyCrypto(publicKeyHex: string): Promise<Active
     return coordinatorState.activePrivateKeyBytes;
   };
   const identity = {
-    publicKeyHex: record.publicKeyHex,
-    label: record.label,
-    capabilities: [...record.capabilities],
-    createdAt: record.createdAt,
+    publicKeyHex: summary.publicKeyHex,
+    label: summary.label,
+    capabilities: [...summary.capabilities],
+    createdAt: summary.createdAt,
     sessionId: coordinatorState.sessionEpoch,
   };
   return {
@@ -9843,7 +7741,7 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
       broadcastWithCoordinator: (input) => internalCoordinator.p2pkhBroadcast(input),
       messageBus,
       keyspace,
-      storage: createWorkerOwnerFileStore("p2pkh", ""),
+      storage: createWorkerModuleFileStore("p2pkh", ""),
     });
     try {
       // 充值首次进入时确保 owner 的 main P2PKH resource 已存在；该调用只
@@ -9907,7 +7805,7 @@ async function registerCoordinatorTasks(): Promise<void> {
   const contactsService = createContactsService({
     keyspace,
     messageBus,
-    storage: createWorkerOwnerFileStore("contacts", "address-book"),
+    storage: createWorkerModuleFileStore("contacts", "address-book"),
     channel: createCoordinatorChannelRuntime()
   });
   coordinatorContactsService = contactsService;
@@ -9967,7 +7865,7 @@ async function registerCoordinatorTasks(): Promise<void> {
       assertSessionFresh();
     }
   }));
-  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerOwnerFileStore("p2pkh", ""), woc, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
+  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerModuleFileStore("p2pkh", ""), woc, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
   // P2PKH 拆成两个任务：
   //   - p2pkh.transactions-sync：链上历史元数据，按同步管理间隔运行；
   //   - p2pkh.utxo-snapshot：BSV 余额来源（内存 UTXO 快照），由智能调度
@@ -9990,14 +7888,14 @@ async function registerCoordinatorTasks(): Promise<void> {
   const p2pkhProvider = {
     listResources: async (assetId: "bsv" | "bsvtest") => {
       if (!coordinatorState.activePublicKeyHex) return [];
-      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
       return (await repository.listResourcesByKey()).filter((resource) => assetId === (resource.network === "main" ? "bsv" : "bsvtest"));
     },
     listUtxos: async (filter?: { assetId?: "bsv" | "bsvtest"; ownerPublicKeyHex?: string }) => {
       const ownerPublicKeyHex = filter?.ownerPublicKeyHex ?? coordinatorState.activePublicKeyHex;
       if (!ownerPublicKeyHex) return [];
       if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
       const rows: Array<{ id: string; resourceId: string; publicKeyHex: string; network: "main" | "test"; address: string; txid: string; vout: number; value: number; height: number; script: string; status: "confirmed" | "unconfirmed"; isSpentInMempoolTx: boolean; syncedAt: string }> = [];
       for (const resource of await repository.listResourcesByKey()) {
         if (filter?.assetId && resource.network !== (filter.assetId === "bsv" ? "main" : "test")) continue;
@@ -10027,8 +7925,8 @@ async function registerCoordinatorTasks(): Promise<void> {
     getGlobalSettings: () => ({ includeTestnet: coordinatorMeta.p2pkhSettings?.includeTestnet === true })
   };
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
-  const bsv21Task = createBsv21CoordinatorTask({ keyspace, stateStore: createWorkerOwnerStore("token-bsv21"), p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
-  const stasTask = createStasCoordinatorTask({ keyspace, stateStore: createWorkerOwnerStore("token-stas"), p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const bsv21Task = createBsv21CoordinatorTask({ keyspace, stateStore: createWorkerKeyValueStore("token-bsv21", "token-state"), p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const stasTask = createStasCoordinatorTask({ keyspace, stateStore: createWorkerKeyValueStore("token-stas", "token-state"), p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const oneSatTask = createOrdinalsCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   coordinatorState.taskRuntimes.set(bsv21Task.id, createCoordinatorTaskRuntime({ id: bsv21Task.id, pluginId: "token-bsv21", unitId: bsv21Task.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(bsv21Task.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
   coordinatorState.taskRuntimes.set(stasTask.id, createCoordinatorTaskRuntime({ id: stasTask.id, pluginId: "token-stas", unitId: stasTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(stasTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
@@ -10048,7 +7946,7 @@ async function registerCoordinatorTasks(): Promise<void> {
 // ============================================================
 
 function generateEpoch(): SessionEpoch {
-  return `${Date.now()}-${randomIdentifierSuffix()}`;
+  return crypto.randomUUID();
 }
 
 function generateRequestId(): string {
@@ -10078,7 +7976,7 @@ async function abortNotDispatchedP2pkhSubmission(
   try {
     const keyspace = createWorkerKeyspace();
     if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
     await repository.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason });
     publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "balance"] });
   } catch {
@@ -10112,19 +8010,17 @@ async function buildTopicBaselines(
     }
     if (topic === "storage.state") {
       const baselineRevision = storageRevision;
-      const summary = typeof storageController?.getProviderSummary === "function"
-        ? storageController.getProviderSummary().catch(() => null)
-        : Promise.resolve(null);
       // Subscription response must be atomic; use the last published state
-      // when available, otherwise a locked/unconfigured baseline.
+      // when available, otherwise a baseline derived from the cold-start truth.
+      // 本地介质永远「已配置」，可失败的原因只有冷启动结论本身。
       const cached = lastStorageState ?? {
         topic: "storage.state" as const, type: "storage.state.changed" as const,
         storageRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch,
-        providerGeneration: null, status: coordinatorState.vaultStatus === "unlocked" ? "unconfigured" as const : "locked" as const,
-        catalogBucket: false,
-        summary: null, capabilities: null,
+        ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
+        ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
+        status: coordinatorStorageStatus(),
+        summary: null,
       };
-      void summary;
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
     }
     if (topic === "msfile.state") {
@@ -10225,7 +8121,7 @@ async function buildTopicBaselines(
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
-      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null, keyspaceGeneration: coordinatorState.keyspaceGeneration, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }
+      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, runGeneration: coordinatorState.runGeneration, ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}), autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }
         : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings, p2pkhSettings: coordinatorMeta.p2pkhSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
@@ -10251,7 +8147,7 @@ function handleActivity(): void {
 let coordinatorRequestTail: Promise<void> = Promise.resolve();
 
 function isStorageRequest(request: CoordinatorClientRequest): boolean {
-  return request.kind === "storage.grant" || request.kind === "storage.control" || request.kind === "storage.data" || request.kind === "storage.cancel" || request.kind === "storage.session.abort" || request.kind === "storage.owner.bind" || request.kind === "storage.platform.bind" || request.kind === "storage.owner.data" || request.kind === "storage.platform.data" || request.kind === "storage.owner.delete";
+  return request.kind === "storage.grant" || request.kind === "storage.control" || request.kind === "storage.data" || request.kind === "storage.cancel" || request.kind === "storage.session.abort" || request.kind === "storage.owner.bind" || request.kind === "storage.platform.bind" || request.kind === "storage.owner.data" || request.kind === "storage.platform.data" || request.kind === "storage.clear.root";
 }
 
 function storageErrorResponse(requestId: string, error: unknown): CoordinatorResponse {
@@ -10273,75 +8169,31 @@ function storageErrorResponse(requestId: string, error: unknown): CoordinatorRes
 function clearStorageRequestSecrets(request: CoordinatorClientRequest): void {
   if (request.kind === "storage.control") {
     const control = request.control;
-    if (control.type === "unlock-bucket" || control.type === "switch-bucket" || control.type === "change-bucket-config") {
+    if (control.type === "unlock") {
       control.password = "";
     }
-    if (control.type === "initial-setup") {
-      control.plan.startupPassword = "";
+    if (control.type === "initialize") {
       control.plan.firstKey.password = "";
-      if (control.plan.connection.kind === "s3") {
-        control.plan.connection.accessKeyId = "";
-        control.plan.connection.secretAccessKey = "";
-        control.plan.connection.sessionToken = undefined;
-      }
       if (control.plan.firstKey.kind === "import") {
         control.plan.firstKey.material.hex = "";
         control.plan.firstKey.material.wif = undefined;
       }
     }
-    if (control.type === "connect-existing-remote") {
-      control.plan.keyPassword = "";
-      control.plan.startupPassword = "";
-      if (control.plan.connection.kind === "s3") {
-        control.plan.connection.accessKeyId = "";
-        control.plan.connection.secretAccessKey = "";
-        control.plan.connection.sessionToken = undefined;
-      }
-    }
-    if (control.type === "initial-setup-cleanup") {
-      if (control.password !== undefined) control.password = "";
-      if (control.connection?.kind === "s3") {
-        control.connection.accessKeyId = "";
-        control.connection.secretAccessKey = "";
-        control.connection.sessionToken = undefined;
-      }
-    }
-    if (control.type === "change-bucket-config" && control.config.kind === "s3") {
-      control.config.accessKeyId = "";
-      control.config.secretAccessKey = "";
-      control.config.sessionToken = undefined;
+    if (control.type === "change-key-password") {
+      control.oldPassword = "";
+      control.newPassword = "";
     }
   }
 }
 
 function clearVaultOperationSecrets(operation: CoordinatorVaultOperation): void {
   switch (operation.type) {
-    case "createVault":
-    case "createVaultWithInitialKey":
-    case "generateKey":
-    case "importPrivateKey":
     case "verifyPassword":
       operation.password = "";
-      if (operation.type === "importPrivateKey") {
-        operation.material.hex = "";
-        operation.material.wif = undefined;
-      }
-      return;
-    case "createVaultWithImportedKey":
-      operation.vaultPassword = "";
-      operation.key.material.hex = "";
-      operation.key.material.wif = undefined;
-      return;
-    case "deleteKey":
-      operation.bucketPassword = undefined;
       return;
     case "changePassword":
       operation.oldPassword = "";
       operation.newPassword = "";
-      return;
-    case "importKeyBackup":
-      operation.sourcePassword = "";
-      operation.targetPassword = "";
       return;
     case "sealLocalSecret":
       operation.plaintext.fill(0);
@@ -10362,169 +8214,117 @@ async function executeStorageControl(
 ): Promise<CoordinatorResponse> {
   if (signal?.aborted) throw storageUnavailableError("Storage control request was cancelled");
   const control = request.control;
+  const ok = (operationResult?: unknown): CoordinatorResponse => ({
+    requestId: request.requestId,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    ack: { status: "ok" },
+    ...(operationResult === undefined ? {} : { operationResult }),
+  });
+
   if (control.type === "status") {
     if (storageStartupFailure) {
       const detail = coordinatorAuthorityRecoveryOperationNames.length > 0
         ? `; active final I/O=${coordinatorAuthorityRecoveryOperationNames.join(",")}`
         : "";
-      const health = storageHealthController.snapshot();
-      const healthDetail = health.message
-        ? `; ${health.diagnostic ?? "unknown"}: ${health.message}`
-        : health.diagnostic ? `; ${health.diagnostic}` : "";
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `Storage startup failed${healthDetail}${detail}`, code: "storage_unavailable" } };
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `Storage startup failed${detail}`, code: "storage_unavailable" } };
     }
-    if (storageHealthController.status() !== "ready" && !storageStartupFailure) {
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
-    }
+    // 未初始化钱包还没有平台 Root；状态是纯投影，直接用冷启动结论回答。
+    if (!platformRootStore) return ok(coordinatorStorageStatus());
     const service = await ensureStorageRuntime(peerId).catch(() => undefined);
-    if (!service) {
-      if (storageStartupFailure) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage startup failed", code: "storage_unavailable" } };
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
-    }
-    const runtimeStatus = service.status();
-    // 这里报告的是“平台存储是否可启动”，不是 S3 Profile 是否已解锁。
-    // Provider 已配置但 Profile 未解锁时，平台 keys/ 与业务 K-V 仍可用，
-    // 设置页应当先启动，再让用户输入独立 Profile 密码。
-    const status = storageStartupFailure ? "degraded" : platformStorageReady ? "ready" : runtimeStatus;
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: status };
+    return ok(service?.status() ?? coordinatorStorageStatus());
   }
-  if (control.type === "retry") {
-    try {
-      if (!platformRootStore) {
-        await bootstrapPlatformStorage(undefined, peerId);
-      } else if (platformBucketProvider) {
-        await probeStorageAndRecover(peerId);
-      } else {
-        throw storageUnavailableError("Storage provider is unavailable");
-      }
-      // 初次 bootstrap 失败时，原初始化 Promise 已经结束；恢复成功后
-      // 重新执行同一段 Vault metadata bootstrap，不绕过 Storage-first 门禁。
-      if (platformRootStore && storageHealthController.status() !== "ready") {
-        await runStorageRecoveryOrchestrator(peerId);
-      }
-      storageStartupFailure = false;
-      platformStorageReady = true;
-      emitStorageState();
-    } catch (error) {
-      const currentHealth = storageHealthController.status();
-      storageStartupFailure = currentHealth !== "unselected" && currentHealth !== "authentication";
-      if (storageStartupFailure) storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
-      emitStorageState();
-    }
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
+
+  if (control.type === "cold-start") {
+    // 冷启动是纯只读的真值查询：它必须在没有平台根时也能回答，否则 uninitialized
+    // 与 corrupt/unsupported 状态无法与「Root 装不上」区分开。
+    const lifecycle = walletLifecycle ?? requireWalletLifecycle();
+    // uninitialized 时没有可写 Root，不能为了回答只读查询去安装 runtime。
+    const service = platformRootStore ? await ensureStorageRuntime(peerId).catch(() => undefined) : undefined;
+    const snapshot = await (service?.coldStart?.() ?? lifecycle.coldStart());
+    return ok(snapshot);
   }
+
   if (control.type === "summary") {
-    const service = await ensureStorageRuntime(peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderSummary() };
-  }
-  if (control.type === "connection") {
-    const service = await ensureStorageRuntime(peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderConnection() };
-  }
-  if (control.type === "initial-setup") {
-    const result = await executeInitialSetupOnce(control.plan, peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-  }
-  if (control.type === "connect-existing-remote") {
-    const result = await executeExistingRemoteStorageConnect(control.plan, peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-  }
-  if (control.type === "probe-bucket") {
-    try {
-      const result = await executeBucketProbe(control.plan, peerId);
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-    } finally {
-      // 只读探测的启动密码同样只在本次调用内存在。
-      if (control.plan.password !== undefined) control.plan.password = "";
-    }
-  }
-  if (control.type === "initial-setup-result") {
-    const result = await getInitialSetupResult(control.transactionId, peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-  }
-  if (control.type === "initial-setup-recovery-list") {
-    // 新设计不再有设备侧恢复指针；账本只存在于当前 Worker 内存。
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: [] };
-  }
-  if (control.type === "switch-bucket") {
-    try {
-      const result = await switchSelectedRuntimeBucket(control.bucket, control.password, peerId, {
-        ...(control.keyPassword === undefined ? {} : { keyPassword: control.keyPassword }),
-        ...(control.publicKeyHex === undefined ? {} : { publicKeyHex: control.publicKeyHex }),
+    // 摘要同属只读投影：没有 Root 时从冷启动结论和浏览器持久化授权直接
+    // 构造，不把「尚未创建钱包」升级成存储故障。
+    if (!platformRootStore) {
+      return ok({
+        status: coordinatorStorageStatus(),
+        medium: "indexeddb" as const,
+        persistence: await walletStore?.persistence() ?? { persisted: false },
       });
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-    } finally {
-      control.password = "";
-      control.keyPassword = "";
     }
+    const service = await ensureStorageRuntime(peerId);
+    return ok(await service.summary());
   }
-  if (control.type === "change-bucket-config") {
-    try {
-      const result = await changeRuntimeBucketConnection(control.config, control.label, control.password, peerId);
-      emitStorageState();
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-    } finally {
-      control.password = "";
-    }
+
+  if (control.type === "initialize") {
+    return ok(await initializeWallet(control.plan));
   }
-  if (control.type === "rename-bucket") {
-    const result = await renameRuntimeBucket(control.label, peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-  }
-  if (control.type === "delete-local-bucket-key") {
-    await deleteLocalBucketKey(control.bucket, control.publicKeyHex, peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
-  }
-  if (control.type === "unlock-bucket") {
-    const hadPlatformRoot = Boolean(platformRootStore);
-    try {
-      if (!storageBootstrapState?.selectedBucket) throw Object.assign(new Error("No selected storage bucket"), { code: "storage_not_configured" });
-      if (!platformRootStore) {
-        await bootstrapPlatformStorage(control.password, peerId);
-      }
-      await runStorageRecoveryOrchestrator(peerId);
-      // Hold 冷导入文件可能已经带有完整 Keys；首次解锁桶时恢复到
-      // Coordinator 的 canonical Vault 索引，空快照则仍保留 uninitialized
-      // 供用户创建第一把 Key。
-      await hydrateCatalogVaultFromSnapshot(control.password);
-      // 启动密码与 Key 密码是两个独立密码域（规范允许取相同值，但互不
-      // 关联）。这里只在两者恰好相同时顺手解锁 Vault；失败只说明启动
-      // 密码不是该 Key 的密码，绝不能把存储认证判成失败——保持锁定态，
-      // 由锁定页继续询问 Key 自己的密码。
-      if (coordinatorState.vaultStatus === "locked" && (await listPublicVaultKeys()).length > 0) {
-        const unlockResponse = await handleUnlockUnsafe(
-          `bucket-unlock-${crypto.randomUUID()}`,
-          { kind: "unlock", password: control.password, expectedSessionEpoch: coordinatorState.sessionEpoch },
-        );
-        if (unlockResponse.ack.status !== "accepted" && unlockResponse.ack.status !== "already-unlocked") {
-          coordinatorState.vaultStatus = "locked";
-        }
-      }
-      emitStorageState();
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: true, vaultUnlocked: coordinatorState.vaultStatus === "unlocked" } };
-    } catch (error) {
-      if (!hadPlatformRoot && platformRootStore) discardCurrentPlatformStorageBinding();
-      storageHealthController.setStatus("authentication", error instanceof Error ? error.message : "Bucket password is invalid");
-      emitStorageState();
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: false, diagnostic: error instanceof Error ? error.message : "authentication" } };
-    } finally {
-      // 新版桶密码只属于本次 bootstrap 调用；Provider 建立后只保留
-      // 当前桶 S3 凭据，不保留密码或密码派生材料。
-      control.password = "";
-    }
-  }
+
+  // 生命周期写操作与冷启动读取共享同一条队列：Worker 是事务与授权的权威，
+  // 页面不能观察到「Key 已落盘但运行绑定还没换好」的中间态。
   const service = await ensureStorageRuntime(peerId);
-  if (control.type === "capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: typeof service.getConditionalCapabilities === "function" ? service.getConditionalCapabilities() : null };
-  if (control.type === "cancel-probe") { service.cancelProbe(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
-  if (control.type === "probe-capabilities") {
-    const result = await service.probeConditionalCapabilities();
-    // 手动重新探测：把确定的结果写回当前桶的设备记录，之后不再自动探测。
-    const binding = selectedCatalogBucket();
-    const mode = result.put === "native" || result.put === "best-effort" ? result.put : undefined;
-    if (binding && mode) await updateDeviceRecordCapabilities(binding.bucketId, mode, peerId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+  switch (control.type) {
+    case "unlock": {
+      if (!service.unlock) throw storageUnavailableError("Wallet unlock is unavailable");
+      const result = await service.unlock(control.password);
+      // 解锁的真正状态写入由 lifecycle 的 adoptUnlockedKey 回调完成；这里
+      // 只回传 Storage 层确立的世代，避免页面自行推导会话。
+      coordinatorState.sessionEpoch = result.sessionEpoch;
+      emitStorageState();
+      publishSessionState("unlock");
+      return ok(result);
+    }
+    case "lock": {
+      await revokeStorageBindingAndDrain("storage.control.lock");
+      if (!service.lock) throw storageUnavailableError("Wallet lock is unavailable");
+      await service.lock();
+      coordinatorState.vaultStatus = "locked";
+      setCoordinatorActiveKeySummary(undefined);
+      emitStorageState();
+      publishSessionState("lock");
+      return ok();
+    }
+    case "change-key-password": {
+      if (!service.changeKeyPassword) throw storageUnavailableError("Password change is unavailable");
+      // 改密会改变 Key 密码，必须先撤销会话让所有旧句柄与迟到结果失效，
+      // 再在同一最终边界内改密并重新建立运行绑定。
+      await revokeStorageBindingAndDrain("storage.control.change-key-password");
+      await service.changeKeyPassword({ oldPassword: control.oldPassword, newPassword: control.newPassword });
+      emitStorageState();
+      publishSessionState("change-password");
+      return ok();
+    }
+    case "rename-key": {
+      if (!service.renameKey) throw storageUnavailableError("Rename is unavailable");
+      await service.renameKey(control.label);
+      return ok({ label: control.label });
+    }
+    case "export-key-hold": {
+      if (!service.exportKeyHold) throw storageUnavailableError("KeyHold export is unavailable");
+      const bytes = await service.exportKeyHold();
+      // KeyHold 原样导出；这不是完整钱包备份，页面不得这样描述它。
+      return ok({ bytes, keyHoldFormat: "keyhold" as const });
+    }
+    case "reset-wallet": {
+      if (!service.resetWallet) throw storageUnavailableError("Wallet reset is unavailable");
+      const result = await service.resetWallet({ confirmationLabel: control.confirmationLabel });
+      // 清空完成后本地不再有 Root：丢弃全部句柄，让任何迟到写入在数据层检查
+      // 之前就被拒绝。页面会回到 uninitialized，等待创建或导入。
+      discardCurrentPlatformStorageBinding();
+      coordinatorState.vaultStatus = "uninitialized";
+      coordinatorState.walletGeneration = "";
+      coordinatorState.activePublicKeyHex = undefined;
+      storageColdStartState = { state: "uninitialized" };
+      setCoordinatorActiveKeySummary(undefined);
+      dropActivePrivateKey();
+      emitStorageState();
+      publishWorkerActiveKeyChanged();
+      publishSessionState("reset-wallet");
+      return ok(result);
+    }
   }
-  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown storage control" } };
 }
 
 /**
@@ -10536,11 +8336,7 @@ function storageControlIoKind(control: Extract<CoordinatorClientRequest, { kind:
   switch (control.type) {
     case "status":
     case "summary":
-    case "connection":
-    case "initial-setup-recovery-list":
-    case "capabilities":
-    case "probe-capabilities":
-    case "cold-export":
+    case "cold-start":
       return "read";
     default:
       return "write";
@@ -10552,43 +8348,38 @@ async function executeStorageControlAtFinalBoundary(
   signal?: AbortSignal,
   peerId?: string,
 ): Promise<CoordinatorResponse> {
-  const flushDeferredCatalogBindingDiscard = (): void => {
-    if (!catalogBindingDiscardDeferred) return;
-    catalogBindingDiscardDeferred = false;
-    try { discardCurrentPlatformStorageBinding(); }
-    catch (error) { console.warn("[coordinator] deferred catalog binding discard failed", error instanceof Error ? error.message : String(error)); }
-  };
-  try {
-    return await withCoordinatorFinalIoLease(
-      storageControlIoKind(request.control),
-      signal,
-      (leaseSignal) => executeStorageControl(request, leaseSignal, peerId),
-      {
-        auditOperation: "storage.control",
-        // 桶首次解锁可能同时把 Hold 快照中的 Key 恢复到 Coordinator，
-        // 然后进入同一把 Key 的 unlocked owner。这个有意的本地状态迁移
-        // 必须允许当前 storage control 的 final lease 观察到新 gate。
-        // 密码轮转同样会主动锁定当前 Vault，需要同一豁免。
-        // initial-setup 在已初始化时也会先锁定旧运行态再安装新桶。
-        allowLocalLock: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config" || request.control.type === "initial-setup",
-        allowLocalOwnerTransition: request.control.type === "unlock-bucket" || request.control.type === "switch-bucket" || request.control.type === "change-bucket-config" || request.control.type === "initial-setup",
-        allowLocalBindingDiscard: request.control.type === "initial-setup" || request.control.type === "connect-existing-remote" || request.control.type === "initial-setup-cleanup",
-        // status/summary/connection 等控制读取只观察本地状态；probe 也
-        // 不提交配置或远端不可逆结果。它们仍经过 authority lock、本地
-        // 运行世代和 epoch 栅栏；冷启动没有 Root 也不能绕过跨 Worker 锁。
-        durableLease: storageControlIoKind(request.control) === "write",
-      },
-    );
-  } finally {
-    // withCoordinatorFinalIoLease 已完成后置运行世代校验和内存 lease release。
-    flushDeferredCatalogBindingDiscard();
-  }
+  // 解锁、锁定、改密与重置都会主动推进会话或钱包身份世代；这些有意的
+  // 本地状态迁移必须允许当前 storage control 的 final lease 观察到新
+  // gate，否则旧 lease 会把它们误判成「未知来源的本地锁」。
+  const transitionsSession = request.control.type === "unlock"
+    || request.control.type === "lock"
+    || request.control.type === "change-key-password"
+    || request.control.type === "initialize"
+    || request.control.type === "reset-wallet";
+  return withCoordinatorFinalIoLease(
+    storageControlIoKind(request.control),
+    signal,
+    (leaseSignal) => executeStorageControl(request, leaseSignal, peerId),
+    {
+      auditOperation: "storage.control",
+      allowLocalLock: transitionsSession,
+      allowLocalOwnerTransition: transitionsSession,
+      // 重置会撤销运行根并重新安装；初始化同样要换绑到新钱包身份世代。
+      allowLocalBindingDiscard: request.control.type === "reset-wallet" || request.control.type === "initialize",
+      durableLease: storageControlIoKind(request.control) === "write",
+    },
+  );
 }
 
 async function resolvePlatformStorageGrant(grantId: string, actualClientId: string): Promise<StoragePlatformGrant & { clientId: string }> {
   const grant = platformStorageGrants.get(grantId);
-  if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch) throw new Error("Platform storage grant is invalid");
-  if (!platformRootStore || grant.bucketId !== platformRootStore.bucket.bucketId || grant.bucketGeneration !== platformRootStore.bucket.bucketGeneration) throw new Error("Platform storage bucket generation changed");
+  if (!grant || grant.clientId !== actualClientId) throw new Error("Platform storage grant is invalid");
+  // 授权绑定四件事：钱包身份世代、会话世代、Worker 运行世代和平台根身份。
+  // 任何一项变化都让已发放的 grant 立即失效，不存在第二个可选存储空间。
+  if (grant.sessionEpoch !== coordinatorState.sessionEpoch) throw new Error("Platform storage session changed");
+  if (grant.walletGeneration !== coordinatorState.walletGeneration) throw new Error("Platform storage wallet generation changed");
+  if (grant.runGeneration !== coordinatorState.runGeneration) throw new Error("Platform storage run generation changed");
+  if (!platformRootStore) throw new Error("Platform storage root is unavailable");
   return grant;
 }
 
@@ -10606,7 +8397,6 @@ async function executePlatformStorageDataUnsafe(
   const store = await root.openPlatformStore({ declaration: {
     moduleId: grant.moduleId,
     purposeId: grant.purposeId,
-    scope: "bucket",
     authority: grant.authority,
     model: grant.model,
     schemaVersion: grant.schemaVersion,
@@ -10645,9 +8435,12 @@ async function executePlatformStorageData(
 
 async function resolveOwnerStorageGrant(grantId: string, actualClientId: string): Promise<StorageOwnerGrant> {
   const grant = ownerStorageGrants.get(grantId);
-  if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch || grant.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex?.toLowerCase()) throw new Error("Owner storage grant is invalid");
-  assertOwnerStorageNotFenced(grant.ownerPublicKeyHex);
-  if (!platformRootStore || grant.bucketId !== platformRootStore.bucket.bucketId || grant.bucketGeneration !== platformRootStore.bucket.bucketGeneration) throw new Error("Owner storage bucket generation changed");
+  if (!grant || grant.clientId !== actualClientId) throw new Error("Owner storage grant is invalid");
+  if (grant.sessionEpoch !== coordinatorState.sessionEpoch) throw new Error("Owner storage session changed");
+  if (grant.walletGeneration !== coordinatorState.walletGeneration) throw new Error("Owner storage wallet generation changed");
+  if (grant.runGeneration !== coordinatorState.runGeneration) throw new Error("Owner storage run generation changed");
+  if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Owner storage requires an unlocked wallet");
+  if (!platformRootStore) throw new Error("Owner storage root is unavailable");
   return grant;
 }
 
@@ -10655,52 +8448,59 @@ async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, 
   if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
   assertStorageDataAvailable();
   const grant = await resolveOwnerStorageGrant(data.storageGrantId, actualClientId);
+  const release = beginStorageBindingRequest();
+  const expectedBinding = currentCoordinatorStorageBinding();
+  if (!expectedBinding) throw storageUnavailableError("Owner storage binding is unavailable");
   const root = platformRootStore;
-  const rootToken = platformRootToken;
-  const generation = coordinatorState.keyspaceGeneration;
-  if (!root || !rootToken) throw new Error("Platform storage has not been bootstrapped");
-  const release = beginOwnerStorageRequest(grant.ownerPublicKeyHex);
+  if (!root) throw storageUnavailableError("Platform storage has not been bootstrapped");
   let store: KeyValueStore | undefined;
   try {
     if (grant.model === "files") {
-      const files = await root.openOwnerFileStore({
-        ownerPublicKeyHex: grant.ownerPublicKeyHex,
+      const files = await root.openModuleFileStore({
         declaration: {
           moduleId: grant.moduleId,
           purposeId: grant.purposeId,
-          scope: "owner",
           authority: grant.authority,
           model: grant.model,
           schemaVersion: grant.schemaVersion,
         },
-        keyspaceGeneration: generation,
       });
       let fileValue: unknown;
       switch (data.type) {
         case "owner.file-list": fileValue = await files.list(data.input); break;
         case "owner.file-get": fileValue = await files.get(data.path); break;
+        case "owner.file-range": fileValue = await files.getRange(data.path, data.range); break;
         case "owner.file-put": fileValue = await files.put(data.path, data.bytes, {
-          ...(data.ifNoneMatch === undefined ? {} : { ifNoneMatch: "*" as const }),
-          ...(data.ifMatch === undefined ? {} : { ifMatch: data.ifMatch }),
+          ...(data.ifNoneMatch === undefined ? {} : { ifNoneMatch: true as const }),
+          ...(data.ifRevision === undefined ? {} : { ifRevision: data.ifRevision }),
         }); break;
-        case "owner.file-delete": await files.delete(data.path, data.ifMatch === undefined ? {} : { ifMatch: data.ifMatch }); fileValue = undefined; break;
+        case "owner.file-delete": await files.delete(data.path, data.ifRevision === undefined ? {} : { ifRevision: data.ifRevision }); fileValue = undefined; break;
+        case "owner.file-batch": fileValue = await files.batch({
+          operations: data.operations,
+          ...(data.conditions
+            ? {
+                conditions: data.conditions.map((condition) => ({
+                  path: condition.path,
+                  ...(condition.ifRevision === undefined ? {} : { ifRevision: condition.ifRevision }),
+                  ...(condition.ifNoneMatch === undefined ? {} : { ifNoneMatch: true as const }),
+                })),
+              }
+            : {}),
+        }); break;
         default: throw new Error("Owner file storage request is invalid");
       }
       if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-      assertOwnerStorageBindingFresh(grant.ownerPublicKeyHex, generation, rootToken);
+      assertStorageBindingLive(expectedBinding);
       return fileValue;
     }
     store = await root.openKeyValueStore({
-      ownerPublicKeyHex: grant.ownerPublicKeyHex,
       declaration: {
         moduleId: grant.moduleId,
         purposeId: grant.purposeId,
-        scope: "owner",
         authority: grant.authority,
         model: grant.model,
         schemaVersion: grant.schemaVersion,
       },
-      keyspaceGeneration: generation
     });
     if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
     let value: unknown;
@@ -10712,7 +8512,7 @@ async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, 
       case "owner.commit": value = await store.commit({ partition: data.partition, ifRevision: data.ifRevision, operations: data.operations }); break;
     }
     if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-    assertOwnerStorageBindingFresh(grant.ownerPublicKeyHex, generation, rootToken);
+    assertStorageBindingLive(expectedBinding);
     return value;
   } finally {
     store?.close();
@@ -10744,12 +8544,10 @@ async function executeStorageDataUnsafe(request: Extract<CoordinatorClientReques
   const ctx = resolvedGrant.context;
   const root = platformRootStore;
   if (!root) throw storageUnavailableError("Platform storage root is unavailable");
-  // storage.data 与 owner KV 共用同一条 owner tracker。Provider 即使忽略
-  // AbortSignal，删除事务也会等待这个 finally 释放，而不是只等待 KV。
-  const releaseOwnerRequest = beginOwnerStorageRequest(ctx.ownerPublicKeyHex);
+  const expectedBinding = currentCoordinatorStorageBinding();
+  if (!expectedBinding) throw storageUnavailableError("Storage binding is unavailable");
+  const releaseBindingRequest = beginStorageBindingRequest();
   try {
-    const initialSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
-    const capturedProviderGeneration = initialSummary?.generation ?? null;
     const signal = controller.signal;
     let value: unknown;
     switch (data.type) {
@@ -10759,26 +8557,19 @@ async function executeStorageDataUnsafe(request: Extract<CoordinatorClientReques
       case "put": value = await service.put(ctx, { ...data.input, signal }); break;
       case "get-range": value = await service.getRange(ctx, { ...data.input, signal }); break;
       case "delete": value = await service.delete(ctx, { ...data.input, signal }); break;
-      case "begin-upload": value = await service.beginUpload(ctx, { ...data.input, signal }); break;
-      case "upload-part": value = await service.uploadPart(ctx, { ...data.input, signal }); break;
-      case "complete-upload": value = await service.completeUpload(ctx, { ...data.input, signal }); break;
-      case "abort-upload": value = await service.abortUpload(ctx, { ...data.input, signal }); break;
     }
-    // A provider may ignore AbortSignal and resolve after lock/replacement. The
-    // result is never committed or returned across a session/generation fence.
+    // 本地 IndexedDB 事务可能忽略 AbortSignal 并在锁定/换绑之后才 resolve。
+    // 结果跨过会话或绑定栅栏时一律丢弃，不提交也不返回给页面。
     if (controller.signal.aborted || capturedSessionEpoch !== coordinatorState.sessionEpoch) {
       const error = new Error("Storage request became stale during owner transition") as Error & { code?: string };
       error.code = "storage_unavailable";
       throw error;
     }
-    const finalSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
-    if ((finalSummary?.generation ?? null) !== capturedProviderGeneration) {
-      const error = new Error("storage_unavailable") as Error & { code?: string }; error.code = "storage_unavailable"; throw error;
-    }
+    assertStorageBindingLive(expectedBinding);
     await resolveStorageGrant(data.grantId, actualClientId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
   } finally {
-    releaseOwnerRequest();
+    releaseBindingRequest();
   }
 }
 
@@ -10793,7 +8584,16 @@ async function resolveStorageGrant(grantId: string, actualClientId: string): Pro
     const error = new Error("Storage grant is invalid") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
   }
   const authoritative = await readProtocolConnectSession(grant.context.connectSessionId);
-  if (!authoritative || authoritative.origin !== grant.context.transportOrigin || authoritative.ownerPublicKeyHex !== grant.context.ownerPublicKeyHex || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity) || grant.context.sessionEpoch !== coordinatorState.sessionEpoch || !platformRootStore || grant.context.bucketId !== platformRootStore.bucket.bucketId || grant.context.bucketGeneration !== platformRootStore.bucket.bucketGeneration || coordinatorState.activePublicKeyHex?.toLowerCase() !== grant.context.ownerPublicKeyHex) {
+  // 授权同时绑定 Connect 会话事实、钱包身份世代与 Worker 运行世代。任一项
+  // 不匹配都说明 App 已经失去访问权：App 不能靠旧 grant 继续读写。
+  if (!authoritative
+    || authoritative.origin !== grant.context.transportOrigin
+    || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity)
+    || grant.context.sessionEpoch !== coordinatorState.sessionEpoch
+    || grant.context.walletGeneration !== coordinatorState.walletGeneration
+    || grant.context.runGeneration !== coordinatorState.runGeneration
+    || !platformRootStore
+    || coordinatorState.vaultStatus !== "unlocked") {
     const error = new Error("Storage session is invalid or revoked") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
   }
   return { context: grant.context, connectSessionId: grant.context.connectSessionId };
@@ -10808,19 +8608,39 @@ async function abortStorageSession(connectSessionId: string, peerId: string): Pr
   await service.abortSession(connectSessionId);
 }
 
-async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.owner.delete" }>, actualClientId: string): Promise<CoordinatorResponse> {
+async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string): Promise<CoordinatorResponse> {
   if (request.kind === "storage.grant") {
     const session = await readProtocolConnectSession(request.connectSessionId);
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     if (!session) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage session is invalid or revoked", code: "storage_identity_required" } };
-    const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
-    if (coordinatorState.vaultStatus !== "unlocked" || !ownerPublicKeyHex || session.ownerPublicKeyHex.toLowerCase() !== ownerPublicKeyHex || !platformRootStore) {
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage requires an unlocked active owner", code: "storage_identity_required" } };
+    if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex || !platformRootStore) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage requires an unlocked wallet", code: "storage_identity_required" } };
     }
+    const verifiedAppIdentity = {
+      publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex,
+      appId: session.appIdentity.appId,
+    };
     const moduleId = deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
+    // 目录名由平台登记并绑定验证身份；App 只能看到自己那一个目录，既不能
+    // 列举 `apps/` 根，也不能指定别的 name 切换目录。
+    const appStorageName = resolveConnectAppStorageName(verifiedAppIdentity);
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const grantId = `grant-${crypto.randomUUID()}`;
-    storageGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, appIdentity: session.appIdentity, bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration, ownerPublicKeyHex, moduleId, purposeId: "files", sessionEpoch: coordinatorState.sessionEpoch }, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
+    storageGrants.set(grantId, {
+      context: {
+        connectSessionId: session.sessionId,
+        transportOrigin: session.origin,
+        appIdentity: session.appIdentity,
+        appStorageName,
+        moduleId,
+        purposeId: "files",
+        sessionEpoch: coordinatorState.sessionEpoch,
+        walletGeneration: coordinatorState.walletGeneration,
+        runGeneration: coordinatorState.runGeneration,
+      },
+      clientId: actualClientId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+    });
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
   }
   if (request.kind === "storage.cancel") {
@@ -10833,14 +8653,13 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
   if (request.kind === "storage.platform.bind") {
-    // runtime 是页面 Host 的插件配置入口；其它 bucket 级模块必须命中
-    // 中央声明目录。请求体只用于声明匹配，grant 始终由 Coordinator
-    // 使用预绑定的 expected 值生成，调用方不能自报 module/purpose。
-    const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId]?.flat().find((candidate) => candidate.scope === "bucket" && candidate.purposeId === request.declaration.purposeId);
-    if (!expected || expected.scope !== "bucket" || expected.authority === "third-party-app" || expected.model !== "kv"
+    // platform bind 只面向平台专属 K-V。请求体只用于声明匹配，grant 始终
+    // 由 Coordinator 使用中央声明目录里的预存值生成，调用方不能自报
+    // module/purpose 来扩大权限。
+    const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId]?.flat().find((candidate) => candidate.authority === "platform-only" && candidate.purposeId === request.declaration.purposeId);
+    if (!expected || expected.authority !== "platform-only" || expected.model !== "kv"
       || request.declaration.moduleId !== expected.moduleId
       || request.declaration.purposeId !== expected.purposeId
-      || request.declaration.scope !== expected.scope
       || request.declaration.authority !== expected.authority
       || request.declaration.model !== expected.model
       || request.declaration.schemaVersion !== expected.schemaVersion) {
@@ -10849,8 +8668,8 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     if (!platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Platform storage requires a ready root", code: "storage_unavailable" } };
     const grant: StoragePlatformGrant & { clientId: string } = {
       platformGrantId: `platform-${crypto.randomUUID()}`,
-      bucketId: platformRootStore.bucket.bucketId,
-      bucketGeneration: platformRootStore.bucket.bucketGeneration,
+      walletGeneration: coordinatorState.walletGeneration,
+      runGeneration: coordinatorState.runGeneration,
       moduleId: expected.moduleId,
       purposeId: expected.purposeId,
       authority: expected.authority,
@@ -10863,25 +8682,22 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grant };
   }
   if (request.kind === "storage.owner.bind") {
-    const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId]?.find((candidate) => candidate.scope === "owner" && candidate.purposeId === request.declaration.purposeId);
-    if (!expected || expected.scope !== "owner" || expected.authority !== "built-in-module"
+    const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId]?.find((candidate) => candidate.authority === "built-in-module" && candidate.purposeId === request.declaration.purposeId);
+    if (!expected || expected.authority !== "built-in-module"
       || (expected.model !== "kv" && expected.model !== "files")
       || request.declaration.moduleId !== expected.moduleId
       || request.declaration.purposeId !== expected.purposeId
-      || request.declaration.scope !== expected.scope
       || request.declaration.authority !== expected.authority
       || request.declaration.model !== expected.model
       || request.declaration.schemaVersion !== expected.schemaVersion) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage declaration is not authorized", code: "storage_forbidden" } };
     }
-    const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
-    if (coordinatorState.vaultStatus !== "unlocked" || !ownerPublicKeyHex || !platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage requires an unlocked active key", code: "storage_unavailable" } };
+    if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex || !platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage requires an unlocked wallet", code: "storage_unavailable" } };
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const grant: StorageOwnerGrant & { clientId: string } = {
       storageGrantId: `owner-${crypto.randomUUID()}`,
-      bucketId: platformRootStore.bucket.bucketId,
-      bucketGeneration: platformRootStore.bucket.bucketGeneration,
-      ownerPublicKeyHex,
+      walletGeneration: coordinatorState.walletGeneration,
+      runGeneration: coordinatorState.runGeneration,
       moduleId: expected.moduleId,
       purposeId: expected.purposeId,
       authority: expected.authority,
@@ -10893,18 +8709,42 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     ownerStorageGrants.set(grant.storageGrantId, grant);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grant };
   }
-  if (request.kind === "storage.owner.delete") {
+  if (request.kind === "storage.clear.root") {
+    // 只清空一个已绑定根：中央声明目录里登记过的 namespace，或某个已验证 App
+    // 自己的 apps/<app-name>/ 目录。调用方不能自报未登记的坐标，也不能用
+    // 别人的 name 清理其它 App 的数据。
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (!platformRootStore) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage root is unavailable", code: "storage_unavailable" } };
+    }
+    const declaration = request.input.declaration;
+    if (declaration.authority === "third-party-app") {
+      if (request.input.appStorageName === undefined) {
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Clearing an app root requires its registered appStorageName", code: "storage_forbidden" } };
+      }
+      if (declaration.model !== "files" || declaration.purposeId !== "") {
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Third-party app storage declaration is invalid", code: "storage_forbidden" } };
+      }
+    } else {
+      const expected = Object.values(CENTRAL_STORAGE_DECLARATIONS).find((candidate) => candidate.moduleId === declaration.moduleId
+        && candidate.purposeId === declaration.purposeId
+        && candidate.authority === declaration.authority
+        && candidate.model === declaration.model
+        && candidate.schemaVersion === declaration.schemaVersion);
+      if (!expected) {
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage declaration is not authorized", code: "storage_forbidden" } };
+      }
+    }
     const controller = new AbortController();
     const requestKey = storageRequestKey(actualClientId, request.requestId);
     storageRequests.set(requestKey, { controller, clientId: actualClientId });
     try {
       await withCoordinatorFinalIoLease("write", controller.signal, async (signal) => {
-        if (signal.aborted) throw storageUnavailableError("Owner storage deletion was cancelled");
+        if (signal.aborted) throw storageUnavailableError("Storage root clearing was cancelled");
         const root = platformRootStore;
-        if (!root) throw new Error("Platform storage has not been bootstrapped");
-        await root.deleteOwnerStorage({ ownerPublicKeyHex: request.ownerPublicKeyHex });
-      }, { auditOperation: "storage.owner.delete" });
+        if (!root) throw storageUnavailableError("Platform storage has not been bootstrapped");
+        await root.clearStorageRoot(request.input);
+      }, { auditOperation: "storage.platform.data" });
     } catch (error) {
       markStorageIoFailure(error);
       throw error;
@@ -13401,7 +11241,7 @@ async function executeMsfileControlNow(
         ownerPublicKeyHex: owner,
         seedHashHex: control.seedHashHex,
       });
-      const sessionJournal = createBitfsSessionJournal(createWorkerOwnerFileStore("msfile", "bitfs-journal"));
+      const sessionJournal = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
       const resumable = (await sessionJournal.list()).filter((saved) => saved.role === "buyer"
         && saved.ownerPublicKeyHex === owner
         && saved.seedHashHex === control.seedHashHex.toLowerCase()
@@ -13544,7 +11384,7 @@ async function executeMsfileControlNow(
     case "bucket.put-block": {
       // 直接写 owner 文件根，不经过页面 storage 数据面的每端口并发上限；
       // 路径由 Worker 拼接，页面只给 hash 和字节。
-      const files = createWorkerOwnerFileStore("msfile", "");
+      const files = createWorkerModuleFileStore("msfile", "");
       await withMsfileBucketBlockWriteSlot(() => files.put(
         `storage/${control.seedHashHex}/${control.blockHashHex}`,
         new Uint8Array(control.bytes),
@@ -13553,7 +11393,7 @@ async function executeMsfileControlNow(
       break;
     }
     case "bucket.get-block": {
-      const files = createWorkerOwnerFileStore("msfile", "");
+      const files = createWorkerModuleFileStore("msfile", "");
       const object = await files.get(`storage/${control.seedHashHex}/${control.blockHashHex}`);
       if (!object) throw msfileError("msfile_content_not_found", "MSFile bucket block is missing");
       // 响应同样走 ArrayBuffer，避免 TypedArray 的逐元素 DTO 校验开销。
@@ -13973,8 +11813,6 @@ async function executeProcessRequest(
         return await handleUnlock(requestId, request);
       case "lock":
         return await handleLock(requestId, request);
-      case "activate-key":
-        return await handleActivateKey(requestId, request);
       case "vault.operation":
         return await handleVaultOperation(requestId, request);
       case "crypto":
@@ -14138,7 +11976,7 @@ async function processRequest(
 
 async function handleUnlock(
   requestId: string,
-  request: { kind: "unlock"; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
+  request: { kind: "unlock"; password: string; expectedSessionEpoch: SessionEpoch }
 ): Promise<CoordinatorResponse> {
   try {
     return await withCoordinatorFinalIoLease(
@@ -14156,7 +11994,7 @@ async function handleUnlock(
 
 async function handleUnlockUnsafe(
   requestId: string,
-  request: { kind: "unlock"; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
+  request: { kind: "unlock"; password: string; expectedSessionEpoch: SessionEpoch }
 ): Promise<CoordinatorResponse> {
   if (coordinatorState.vaultStatus === "unlocked") {
     return {
@@ -14182,92 +12020,124 @@ async function handleUnlockUnsafe(
     };
   }
 
-  let privateKey: Uint8Array | undefined;
-  let privateKeyTransferred = false;
   try {
-    // 1. keys/ 下没有任何 KeyHold 文件 = 尚未初始化,不能靠密码“解锁”。
-    const committedHold = await readVaultHoldSnapshot("");
-    await rebuildVaultHoldKeyIndex(committedHold.keys);
-    if (committedHold.keys.length === 0) {
+    // 冷启动只读固定 KeyHold：没有它说明尚未初始化，不能靠密码“解锁”。
+    const coldStart = storageColdStartState ?? await walletLifecycle?.coldStart();
+    if (!coldStart || coldStart.state !== "ready") {
       return {
         requestId,
         sessionEpoch: coordinatorState.sessionEpoch,
-        ack: { status: "validation-error", message: "Vault not initialized" },
+        ack: {
+          status: coldStart?.state === "corrupt" || coldStart?.state === "unsupported"
+            ? "error"
+            : "validation-error",
+          message: coldStart?.state === "corrupt"
+            ? "Local wallet data is incomplete or damaged"
+            : coldStart?.state === "unsupported"
+              ? "Local wallet schema is newer than this build"
+              : "Wallet is not initialized",
+          ...(coldStart?.state === "corrupt"
+            ? { code: "storage_wallet_corrupt" as const }
+            : coldStart?.state === "unsupported"
+              ? { code: "storage_wallet_unsupported" as const }
+              : {}),
+        },
       };
     }
-
-    // 2. 选择要解锁的 Key；密码由该 Key 自己的 KeyHold 文档验证。
-    const activeKey = request.publicKeyHex ? await getPublicVaultKey(request.publicKeyHex) : await getActiveKey();
-    if (!activeKey) {
-      return {
-        requestId,
-        sessionEpoch: coordinatorState.sessionEpoch,
-        ack: { status: "validation-error", message: "Invalid password" },
-      };
-    }
+    if (!walletLifecycle) throw storageUnavailableError("Wallet lifecycle is unavailable");
+    // 唯一 Key：密码由 `key.json` 自身的 KeyHold 文档验证，没有可选对象，
+    // 也不需要任何跨浏览器租约锁。
     try {
-      privateKey = await decryptVaultPrivateKey(activeKey.publicKeyHex, request.password, committedHold);
-    } catch {
+      await walletLifecycle.unlock(request.password);
+      // `adoptUnlockedKey` 已在私钥清零前写入会话状态与 KeyIdentity 摘要；
+      // 只有运行绑定和业务运行单元也重新打开之后，页面才被允许进入业务。
+      await completeUnlockedBinding();
       return {
         requestId,
         sessionEpoch: coordinatorState.sessionEpoch,
-        ack: { status: "validation-error", message: "Invalid password" },
+        ack: { status: "accepted" },
+      };
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      // 只有 KeyHold 密码本身验证失败才是 validation-error；存储不可用、
+      // 数据损坏等情况必须保留原错误码，不能伪装成“密码错误”。
+      // `storage_identity_required` 就是 key.json 解密 / 认证失败，即密码错误；
+      // 其余 storage_* 必须保留原错误码，不能伪装成“密码错误”。
+      if (code === "storage_identity_required") {
+        return {
+          requestId,
+          sessionEpoch: coordinatorState.sessionEpoch,
+          ack: { status: "validation-error", message: "Invalid password" },
+        };
+      }
+      return {
+        requestId,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        ack: {
+          status: "error",
+          message: error instanceof Error ? error.message : String(error),
+          code: code as never,
+        },
       };
     }
-
-    // 4. 验证通过后先抢该 Key 的应用锁：抢不到说明另一个浏览器正在使用,
-    //    不能进入无锁状态（规范：使用某把 Key 必须持有锁）。
-    const provider = platformBucketProvider;
-    if (provider) {
-      // 页面刷新会复用同一个 SharedWorker：上一次会话持有的锁可能仍然
-      // “存活”（s3 心跳不依赖页面桥），而 release() 是异步删除。必须先
-      // 释放旧锁，再写新锁，否则旧锁的删除会把刚写入的 lock.json 删掉，
-      // 造成“已解锁但桶里没有锁”的非法状态。
-      const previousLock = activeKeyLock.current;
-      if (previousLock) {
-        activeKeyLock.current = undefined;
-        await previousLock.release().catch(() => undefined);
-      }
-      const session = await ensureWorkerSession();
-      const keyLock = createKeyLock(provider, { ownerPublicKeyHex: activeKey.publicKeyHex, holder: session.sessionId });
-      try {
-        await keyLock.acquire();
-      } catch (error) {
-        keyLock.dispose();
-        if (isStorageConflictError(error)) {
-          return {
-            requestId,
-            sessionEpoch: coordinatorState.sessionEpoch,
-            ack: { status: "blocked", reason: { key: "vault.locked.keyInUse", fallback: "该 Key 正被另一个浏览器使用" } },
-          };
-        }
-        throw error;
-      }
-      installActiveKeyLock(keyLock);
-    }
-    // 没有物理 Provider（测试注入的 Hold 绑定）时没有可写 lock.json 的介质。
-
-    // 5. 统一进入 unlocked 状态
-    await enterUnlockedState(activeKey.publicKeyHex, privateKey, "unlock");
-    privateKeyTransferred = true;
-
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "accepted" },
-    };
   } catch (err) {
     markStorageIoFailure(err);
     // unlock 失败，回到 locked
     coordinatorState.vaultStatus = "locked";
     coordinatorState.activePublicKeyHex = undefined;
     dropActivePrivateKey();
-    privateKeyTransferred = false;
 
     return storageErrorResponse(requestId, err);
-  } finally {
-    if (privateKey && !privateKeyTransferred) privateKey.fill(0);
   }
+}
+
+/**
+ * 解锁后的运行绑定收口。
+ *
+ * 会话状态与私钥副本由 lifecycle 的 adoptUnlockedKey 写入；这里负责最终
+ * I/O 门禁、业务运行单元、任务恢复、快照广播和自动锁计时。任一步失败都
+ * fail closed 回到 locked，而不是让页面看到半解锁状态。
+ */
+async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlock"): Promise<void> {
+  const publicKeyHex = coordinatorState.activePublicKeyHex;
+  if (!publicKeyHex) throw storageUnavailableError("Unlocked wallet has no active key");
+  try {
+    await ensureCoordinatorUpgradeSession();
+    bindCoordinatorTaskUnitsToOwner();
+    try {
+      await ensureMsfileBitfsBuyerRecovery(publicKeyHex);
+    } catch (error) {
+      console.warn("[msfile] BitFS buyer recovery gate remains closed", error instanceof Error ? error.message : String(error));
+    }
+    await reconcileCoordinatorRuntime();
+  } catch (error) {
+    await performGlobalLock("worker-unit-bind-failed");
+    throw error;
+  }
+  emitStorageState();
+  publishWorkerActiveKeyChanged();
+
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    if (runtime.state === "blocked" && runtime.blockedReason === "Vault is locked") {
+      runtime.state = "idle";
+      runtime.blockedReason = undefined;
+      scheduleRuntime(runtime);
+      if (runtime.syncPolicy === "smart") armSmartSyncIfIdle();
+    }
+  }
+  triggerImmediateSync(BACKGROUND_TRIGGER_REASON.UNLOCK);
+  publishSessionState(cause);
+  void ensureSatRuntime()
+    .then((runtime) => ensureChannelSubscriptionMux(runtime))
+    .catch((error) => console.warn("[channel] owner runtime startup deferred", error instanceof Error ? error.message : String(error)));
+  publishTopicEvent("background.snapshot", {
+    type: "background.snapshot.changed",
+    sessionEpoch: coordinatorState.sessionEpoch,
+    snapshots: getTaskSnapshots(),
+  });
+  resetAutoLockTimer();
 }
 
 async function handleVaultOperation(requestId: string, request: { kind: "vault.operation"; operation: CoordinatorVaultOperation }): Promise<CoordinatorResponse> {
@@ -14305,443 +12175,178 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
 /** Vault 操作的最终边界类型；含私钥/KeyHold 读取的操作也走 read lease。 */
 function vaultOperationIoKind(operation: CoordinatorVaultOperation): "read" | "write" {
   switch (operation.type) {
-    case "listKeys":
-    case "getKey":
     case "verifyPassword":
-    case "exportCurrentKeyBackup":
-    case "exportKeyBackup":
+    case "exportKeyHold":
+    case "getCurrentKey":
       return "read";
     default:
       return "write";
   }
 }
 
-function fenceOwnerStorage(publicKeyHex: string): void {
-  const owner = publicKeyHex.toLowerCase();
-  if (ownerStorageFences.has(owner)) return;
+/**
+ * 单 Key 生命周期的唯一权威路径。
+ *
+ * 生命周期服务（WalletLifecycleService）负责 KeyHold 的解密、改密、重命名、
+ * 导出和重置；Coordinator 只负责把它的结果接进 Worker 的会话、运行绑定、
+ * grant 和业务运行单元。这里没有 Key 列表、没有选择、没有切换，也没有第二把
+ * Key 的写入口——更换身份只能走 reset-wallet 之后重新创建或导入。
+ */
 
-  // 先推进两个世代，再撤销所有 grant；已经拿到 wrapper 的旧请求会在
-  // operation 完成后被最终绑定检查拒绝，新的请求则从 grant/fence 入口拒绝。
-  ownerStorageFences.set(owner, coordinatorState.keyspaceGeneration);
-  coordinatorState.keyspaceGeneration += 1;
-  coordinatorState.sessionEpoch = generateEpoch();
-
-  const ownerConnectSessionIds = new Set(
-    [...storageGrants.values()]
-      .filter((grant) => grant.context.ownerPublicKeyHex.toLowerCase() === owner)
-      .map((grant) => grant.context.connectSessionId)
-  );
-  for (const [requestId, pending] of storageRequests) {
-    if (pending.connectSessionId && ownerConnectSessionIds.has(pending.connectSessionId)) {
-      pending.controller.abort();
-      storageRequests.delete(requestId);
-    }
-  }
-  for (const [grantId, grant] of storageGrants) {
-    if (grant.context.ownerPublicKeyHex.toLowerCase() === owner) storageGrants.delete(grantId);
-  }
-  for (const [grantId, grant] of ownerStorageGrants) {
-    if (grant.ownerPublicKeyHex.toLowerCase() === owner) ownerStorageGrants.delete(grantId);
-  }
-  // 平台 grant 同样绑定当前 session epoch；统一撤销可避免锁定/切 Key
-  // 期间已经拿到的 platform handle 继续写入新的 Root。
-  platformStorageGrants.clear();
-}
-
-function fenceOwnerForKeyDeletion(publicKeyHex: string): void {
-  fenceOwnerStorage(publicKeyHex);
-}
-
-function clearDeletedActiveOwner(publicKeyHex: string): void {
-  if (coordinatorState.activePublicKeyHex?.toLowerCase() !== publicKeyHex.toLowerCase()) return;
-  dropActivePrivateKey();
-  coordinatorState.activePublicKeyHex = undefined;
+/** 唯一 Key 的公开摘要；未解锁时只有冷启动 meta 里的公开字段。 */
+function currentKeySummary(): KeyIdentity | undefined {
+  return coordinatorActiveKeySummary();
 }
 
 /**
- * 联合删除：先删 KeyHold 文件（唯一持久化提交），再删除 owner namespace，
- * 最后收敛选择状态。没有共享索引/日志，文件本身即真值。
+ * lifecycle 的解锁接管回调。
+ *
+ * 由 WalletLifecycleService 在认证通过、私钥清零之前调用；它负责完成全部
+ * 会话状态写入与运行绑定，Coordinator 才会认为解锁已经成立。
  */
-async function executeKeyDeletionTransaction(
-  publicKeyHexInput: string,
-  confirmationLabel: string,
-  password: string | undefined,
-): Promise<true> {
-  const publicKeyHex = publicKeyHexInput.toLowerCase();
-  void confirmationLabel;
-  const hold = requireVaultHoldAdapter();
-  const encryptedHold = await hold.readEncryptedSnapshot();
-  if (encryptedHold.keys.some((key) => key.publicKeyHex.toLowerCase() === publicKeyHex)) {
-    void password;
-    await hold.removeKey(publicKeyHex);
-    await rebuildVaultHoldKeyIndex((await hold.readCommitted({ password: "" })).keys);
-  }
-  await waitForTestKeyLifecycleOwnerBarrier();
-  fenceOwnerForKeyDeletion(publicKeyHex);
-  // activePublicKeyHex 仍保留到这里完成，保证动态 keyScope 的任务也能被
-  // 准确归属；此后清空 active，防止 owner-delete 阶段再有新业务请求。
-  await cancelTaskRuntimesByKey(publicKeyHex);
-  await drainOwnerStorageRequests(publicKeyHex);
-  clearDeletedActiveOwner(publicKeyHex);
-  const root = platformRootStore;
-  if (!root) throw new Error("Storage has not been bootstrapped");
-  try {
-    await root.deleteOwnerStorage({ ownerPublicKeyHex: publicKeyHex });
-  } catch (error) {
-    markStorageIoFailure(error);
-    throw error;
-  }
-  clearDeletedActiveOwner(publicKeyHex);
-  await repairSelectedAfterDelete(publicKeyHex);
-  const remaining = await listPublicVaultKeys();
-  if (remaining.length === 0) {
-    // 最后一把 Key 删除后就是“尚未初始化”：没有 Key 也没有密码域。
-    await performGlobalLock("empty-vault");
-    coordinatorState.vaultStatus = "uninitialized";
-    publishSessionState("delete-active-key");
-  } else {
-    publishSessionState("delete-active-key");
-  }
-  ownerStorageFences.delete(publicKeyHex);
-  return true;
+function adoptUnlockedKey(input: {
+  privateKeyBytes: Uint8Array;
+  publicKeyHex: string;
+  walletGeneration: string;
+  sessionEpoch: string;
+}): void {
+  // 旧会话的所有 grant 与任务权限先撤销：解锁只授予新身份，不继承旧句柄。
+  revokeStorageSessionGrants();
+  coordinatorState.walletGeneration = input.walletGeneration;
+  // 生命周期已经生成新的会话世代，Coordinator 必须使用它而不是再造一个：
+  // grant、存储绑定和迟到结果全部按这个 epoch 判定。
+  coordinatorState.sessionEpoch = input.sessionEpoch;
+  coordinatorState.vaultStatus = "unlocked";
+  coordinatorState.activePublicKeyHex = input.publicKeyHex;
+  replaceActivePrivateKey(input.privateKeyBytes);
+  setCoordinatorActiveKeySummary({
+    publicKeyHex: input.publicKeyHex,
+    label: input.publicKeyHex,
+    capabilities: ["p2pkh"],
+    createdAt: new Date().toISOString(),
+  });
+  testHarnessActivationSecret = undefined;
 }
 
-/** 所有删除共用一条串行事务链。 */
-function executeKeyDeletion(publicKeyHex: string, confirmationLabel: string, password?: string): Promise<true> {
-  const result = keyDeletionTail.then(
-    () => executeKeyDeletionTransaction(publicKeyHex, confirmationLabel, password),
-    () => executeKeyDeletionTransaction(publicKeyHex, confirmationLabel, password)
-  );
-  keyDeletionTail = result.then(() => undefined, () => undefined);
-  return result;
+/**
+ * lifecycle 的授权撤销回调。
+ *
+ * 锁定与重置都必须先走这里：把授权、任务和 Connect 运行绑定一起撤销，
+ * 让已经拿到句柄的迟到写入在任何数据检查之前就被拒绝。
+ */
+function revokeWalletGrants(reason: "lock" | "reset"): void {
+  revokeStorageSessionGrants();
+  releaseMsfileRuntime(reason);
+  void releaseSatRuntime(reason).catch(() => undefined);
+  clearWindowP2pExecutorLeaseLocked();
+  stopCoordinatorOwnerWorkerUnits();
 }
 
-async function executeVaultOperation(operation: CoordinatorVaultOperation, internalActivationSecret?: string): Promise<unknown> {
+/** 建立新会话的运行绑定；Coordinator 侧 grant 与存储绑定都读这几个字段。 */
+function establishWalletSession(input: {
+  sessionEpoch: string;
+  walletGeneration: string;
+  publicKeyHex: string;
+}): void {
+  coordinatorState.walletGeneration = input.walletGeneration;
+  coordinatorState.sessionEpoch = input.sessionEpoch;
+  coordinatorState.activePublicKeyHex = input.publicKeyHex;
+}
+
+async function executeVaultOperation(operation: CoordinatorVaultOperation): Promise<unknown> {
   switch (operation.type) {
-    case "listKeys": {
-      let keys = await listPublicVaultKeys();
-      // 慢速远端（例如 s3）冷启动恢复后，索引可能因绑定世代切换被判空；
-      // 已解锁时按 keys/ 真实文件自愈重建，避免 UI 误显示“还没有 Key”。
-      if (keys.length === 0 && coordinatorState.vaultStatus === "unlocked" && hasVaultHoldBinding()) {
-        try {
-          const hold = await readVaultHoldSnapshot("");
-          if (hold.keys.length > 0) keys = await rebuildVaultHoldKeyIndex(hold.keys);
-        } catch {
-          // 读取失败保持原结果；下一次资源失效会再次尝试。
-        }
-      }
-      return keys.map(({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }) => ({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }));
-    }
-    case "getKey": {
-      let key = await getPublicVaultKey(operation.publicKeyHex);
-      if (!key && coordinatorState.vaultStatus === "unlocked" && hasVaultHoldBinding()) {
-        try {
-          const hold = await readVaultHoldSnapshot("");
-          if (hold.keys.length > 0) {
-            await rebuildVaultHoldKeyIndex(hold.keys);
-            key = await getPublicVaultKey(operation.publicKeyHex);
-          }
-        } catch {
-          // 同上：读取失败保持原结果。
-        }
-      }
-      if (!key) return undefined;
-      const { publicKeyHex, label, capabilities, createdAt, address, network, format, source } = key;
-      return { publicKeyHex, label, capabilities, createdAt, address, network, format, source };
+    case "getCurrentKey": {
+      const summary = currentKeySummary();
+      if (!summary) return undefined;
+      return {
+        publicKeyHex: summary.publicKeyHex,
+        label: summary.label,
+        capabilities: summary.capabilities,
+        createdAt: summary.createdAt,
+        // `KeyRef.format` 是公开摘要的必填字段：response parser 会拒绝缺少
+        // 它的结果，抛出的 TypeError 会被 transport 收成 handler_failed，
+        // 让整个壳层守卫退化成「读不到钱包 Key」。KeyHold 文档只保存
+        // label/publicKeyHex/密文，私钥来源格式不是持久真值，因此这里投影为
+        // 固定的 KeyHold 标识，而不是猜一个 generated/wif 值。
+        format: "keyhold",
+      };
     }
     case "verifyPassword": {
-      const committed = await readVaultHoldSnapshot("");
-      const target = await getActiveKey();
-      if (committed.keys.length === 0 || !target) throw new Error("Vault not initialized");
-      await decryptVaultPrivateKey(target.publicKeyHex, operation.password, committed);
+      // 校验语义与解锁一致，但不解锁：只有 KeyHold 密码本身通过验证。
+      await requireWalletLifecycle().verifyPassword(operation.password);
       return true;
     }
-    case "setActive": {
-      if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
-      // setActive 是旧的内部兼容入口，不再从 Coordinator 会话读取密码。
-      // 生产切换必须走 activate-key RPC；只有带有本次内部操作秘密的
-      // 首次导入路径，或 test seam，才允许继续使用这个内部分支。
-      const activationSecret = internalActivationSecret ?? testHarnessActivationSecret;
-      if (!activationSecret) throw new Error("Active key changes require a password");
-      const key = await getPublicVaultKey(operation.publicKeyHex); if (!key) throw new Error("Key not found");
-      const bytes = await decryptVaultPrivateKey(key.publicKeyHex, activationSecret);
-      const previousActive = coordinatorState.activePublicKeyHex;
-      const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
-      const previousGeneration = coordinatorState.keyspaceGeneration;
-      const previousSelected = coordinatorMeta.selectedPublicKeyHex;
-      let transferred = false;
-      let transition: ActiveOwnerTransitionResult | undefined;
-      try {
-        transition = await transitionActiveStorageOwner(key.publicKeyHex);
-        dropActivePrivateKey();
-        replaceActivePrivateKey(bytes);
-        transferred = true;
-        coordinatorState.activePublicKeyHex = key.publicKeyHex;
-        if (previousActive?.toLowerCase() === key.publicKeyHex.toLowerCase()) coordinatorState.keyspaceGeneration++;
-        coordinatorState.sessionEpoch = generateEpoch();
-        coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
-        await persistSelectedPublicKey(key.publicKeyHex);
-        // Key 切换只有在本地 session.activeKey 和当前 authority 都通过最终
-        // 边界后，才允许提交 owner transition；否则旧实例可能继续持有
-        // 可用 owner。
-        await ensureCoordinatorUpgradeSession();
-        completeActiveStorageOwnerTransition(transition);
-      } catch (error) {
-        const failedClosed = Boolean(previousActive) && coordinatorState.vaultStatus !== "unlocked";
-        if (failedClosed) {
-          dropActivePrivateKey();
-          coordinatorMeta.selectedPublicKeyHex = previousSelected;
-          throw error;
-        }
-        dropActivePrivateKey();
-        if (previousBytes) replaceActivePrivateKey(previousBytes);
-        coordinatorState.activePublicKeyHex = previousActive;
-        coordinatorMeta.selectedPublicKeyHex = previousSelected;
-        completeActiveStorageOwnerTransition(transition);
-        invalidateFailedKeyspaceTransition(previousGeneration);
-        emitMsFileState();
-        throw error;
-      } finally {
-        if (!transferred) bytes.fill(0);
-      }
-      publishSessionState("activate-key");
-      emitMsFileState();
+    case "changePassword": {
+      const lifecycle = requireWalletLifecycle();
+      // 改密会更换会话 epoch：先撤销并排空旧绑定，让旧句柄和迟到结果失效。
+      await revokeStorageBindingAndDrain("vault.changePassword");
+      await lifecycle.changePassword({ oldPassword: operation.oldPassword, newPassword: operation.newPassword });
+      publishWorkerActiveKeyChanged();
+      emitStorageState();
+      publishSessionState("change-password");
       return true;
     }
-    case "deleteKey": {
-      if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
-      const keys = await listPublicVaultKeys();
-      const target = keys.find((key) => key.publicKeyHex.toLowerCase() === operation.publicKeyHex.toLowerCase());
-      if (!target) throw new Error("Key not found");
-      if (!target.label || operation.confirmationLabel !== target.label) throw new Error("Key label mismatch");
-      return await executeKeyDeletion(operation.publicKeyHex, target.label, operation.bucketPassword);
+    case "renameKey": {
+      await requireWalletLifecycle().rename(operation.label);
+      const summary = coordinatorActiveKeySummaryCache;
+      if (summary) setCoordinatorActiveKeySummary({ ...summary, label: operation.label });
+      publishWorkerActiveKeyChanged();
+      return true;
     }
-    case "createVault": return await createVaultRpc(operation.password);
-    case "createVaultWithInitialKey": return await createVaultRpc(operation.password, { label: operation.label, capabilities: operation.capabilities });
-    case "createVaultWithImportedKey": return await createVaultRpc(operation.vaultPassword, operation.key);
-    case "generateKey": return await addKeyRpc(operation.password, { label: operation.label, capabilities: operation.capabilities, material: { hex: generatePrivateKeyHex() }, format: "generated", source: "vault-generated" });
-    case "importPrivateKey": return await addKeyRpc(operation.password, operation);
-    case "exportCurrentKeyBackup": {
-      const selectedHex = coordinatorMeta.selectedPublicKeyHex;
-      if (!selectedHex) throw new Error("No selected private key");
-      return exportVaultKeyBackup(selectedHex);
+    case "exportKeyHold": {
+      // 原样导出加密 KeyHold；这不是完整钱包备份。
+      return await requireWalletLifecycle().exportKeyHold();
     }
     case "sealLocalSecret": {
       if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
-      if (!operation.scope || operation.scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(operation.scope)) throw new Error("Invalid secret scope");
+      assertVaultLocalSecretScope(operation.scope);
       const localSecretKey = await deriveVaultLocalSecretKey(operation.scope);
       try {
         const blob = await encryptBytesWithSaltBoundAad(localSecretKey, operation.plaintext, localSecretAad(operation.scope));
-      return { version: 3, keySource: "active-key-hkdf-v1", saltHex: bytesToHex(blob.salt), nonceHex: bytesToHex(blob.iv), ciphertextHex: bytesToHex(blob.ciphertext) };
+        return {
+          version: 3,
+          keySource: "active-key-hkdf-v1",
+          saltHex: bytesToHex(blob.salt),
+          nonceHex: bytesToHex(blob.iv),
+          ciphertextHex: bytesToHex(blob.ciphertext),
+        };
       } finally {
         operation.plaintext.fill(0);
       }
     }
     case "openLocalSecret": {
       if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
-      if (!operation.scope || operation.scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(operation.scope)) throw new Error("Invalid secret scope");
+      assertVaultLocalSecretScope(operation.scope);
       const sealed = operation.sealed;
       if (sealed.version !== 3 || sealed.keySource !== "active-key-hkdf-v1") {
-        throw new Error("Legacy local secret requires explicit re-sealing with the current active Key");
+        throw new Error("Legacy local secret requires explicit re-sealing with the current active key");
       }
-      const blob = { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) };
+      const blob = {
+        salt: cryptoHexToBytes(sealed.saltHex),
+        iv: cryptoHexToBytes(sealed.nonceHex),
+        ciphertext: cryptoHexToBytes(sealed.ciphertextHex),
+      };
       const localSecretKey = await deriveVaultLocalSecretKey(operation.scope);
       return decryptBytesWithSaltBoundAad(localSecretKey, blob, localSecretAad(operation.scope));
-    }
-    case "changePassword": return await changePasswordRpc(operation.oldPassword, operation.newPassword);
-    case "finalizeEmptyVaultAfterLastKeyDeletion": {
-      if ((await listPublicVaultKeys()).length !== 0) throw new Error("Vault still has keys");
-      await performGlobalLock("empty-vault");
-      coordinatorState.vaultStatus = "uninitialized";
-      return true;
-    }
-    case "recoverEmptyVaultToUninitialized": await performGlobalLock("recover-empty"); coordinatorState.vaultStatus = "uninitialized"; return true;
-    case "exportKeyBackup": {
-      return exportVaultKeyBackup(operation.publicKeyHex);
-    }
-    case "importKeyBackup": {
-      // KeyHold 单 Key 文件导入：原样写入，不重加密、不需要密码。
-      const provider = platformBucketProvider;
-      if (!provider) throw new StorageRuntimeError("storage_unavailable", "The selected runtime bucket is unavailable");
-      const repository = createKeyHoldRepository(provider);
-      const imported = await repository.import(new TextEncoder().encode(operation.backup));
-      await rebuildCurrentCatalogKeyIndex((await repository.readAll()).map((file) => ({ publicKeyHex: file.document.publicKeyHex, label: file.document.label })));
-      return { publicKeyHex: imported.document.publicKeyHex, label: imported.document.label };
     }
     default: throw new Error(`Unsupported vault operation: ${(operation as { type: string }).type}`);
   }
 }
 
-async function repairSelectedAfterDelete(deleted: string): Promise<void> {
-  const remaining = await listPublicVaultKeys();
-  if (remaining.length === 0) {
-    coordinatorMeta.selectedPublicKeyHex = undefined;
-    await persistSelectedPublicKey();
-    return;
-  }
-  if (coordinatorMeta.selectedPublicKeyHex?.toLowerCase() === deleted.toLowerCase() || !await getPublicVaultKey(coordinatorMeta.selectedPublicKeyHex ?? "")) {
-    coordinatorMeta.selectedPublicKeyHex = remaining[0]!.publicKeyHex;
-    coordinatorState.keyspaceGeneration++;
-    await persistSelectedPublicKey();
-    publishSessionState("delete-active-key");
+function assertVaultLocalSecretScope(scope: string): void {
+  if (!scope || scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(scope)) {
+    throw new Error("Invalid secret scope");
   }
 }
 
-function generatePrivateKeyHex(): string { return generateValidPrivateKeyHex(); }
-async function createVaultRpc(password: string, key?: { label?: string; capabilities?: string[]; material?: { hex: string; wif?: string }; format?: string; source?: string }): Promise<unknown> {
-  // 新模型没有“空钱包”：创建钱包 = 写入第一把 Key（以它自己的密码加密）。
-  if ((await listPublicVaultKeys()).length > 0) throw new Error("Vault already exists");
-  await syncSelectedCatalogHoldSnapshot(password);
-  const material = key?.material ?? { hex: generatePrivateKeyHex() };
-  return await addKeyRpc(
-    password,
-    {
-      ...key,
-      material,
-      label: key?.label ?? "Key",
-      capabilities: key?.capabilities ?? ["p2pkh"],
-      format: key?.format ?? (key?.material ? "imported" : "generated"),
-      source: key?.source,
-    },
-    key?.format === "imported" ? "import-initial-key" : "create-initial-key",
-  );
-}
-
-/**
- * 新版目录桶新增 Key 的唯一写入路径。
- *
- * Hold `KeyRecord` 先成为提交快照中的唯一密文，然后公开索引随之更新；
- * 不再生成或保存 KeyHold 文档。owner namespace 的创建失败时恢复旧快照，
- * 这样业务 Root 不会看到一把只有半套归属的 Key。
- */
-async function addCatalogKeyMaterialRpc(
-  password: string,
-  privateKey: Uint8Array,
-  input: { label: string; capabilities?: string[]; format: string; source?: string },
-  initialCause: Extract<SessionStateEvent["cause"], "create-initial-key" | "import-initial-key"> = "create-initial-key",
-): Promise<unknown> {
-  let published: VaultCatalogHoldSnapshot | undefined;
-  let privateKeyTransferred = false;
-  let publicKeyHex: string | undefined;
-  let ownerActivated = false;
-  let previousStatus: CoordinatorVaultStatus | undefined;
-  try {
-    publicKeyHex = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(privateKey, true)).toLowerCase();
-    await syncSelectedCatalogHoldSnapshot(password);
-    const previous = await readVaultHoldSnapshot(password);
-    previousStatus = coordinatorState.vaultStatus;
-    const keepLocked = previousStatus === "locked" && previous.keys.length === 0;
-    if (previous.keys.some((key) => key.publicKeyHex.toLowerCase() === publicKeyHex)) throw new Error("Key already exists");
-    // 一 Key 一文件：加密写入即本次新增的唯一持久化提交。
-    const encryptedKey = await requireVaultHoldAdapter().encryptPrivateKey({ password, label: input.label, privateKey });
-    await waitForTestCatalogHoldPublishBarrier();
-    published = await publishVaultHoldSnapshot(password, [...previous.keys, encryptedKey], [], expectedHoldHead(previous.headEtag));
-    await waitForTestKeyLifecycleOwnerBarrier();
-    // 桶内没有 owner 生命周期记录可激活；标记激活成功以保留失败回滚语义。
-    if (!platformRootStore) throw new StorageRuntimeError("storage_unavailable", "Platform storage root is unavailable during Key activation");
-    ownerActivated = true;
-    if (testFailAfterOwnerStorageActivation) {
-      testFailAfterOwnerStorageActivation = false;
-      throw new StorageRuntimeError("storage_provider_error", "injected post-activation Key mutation failure");
-    }
-    const createdAt = new Date().toISOString();
-    if (keepLocked) {
-      // 锁定的空 Vault 中导入：只建立加密文件与归属,不暴露私钥、不建立会话。
-      coordinatorState.vaultStatus = "locked";
-      coordinatorState.activePublicKeyHex = undefined;
-      coordinatorMeta.selectedPublicKeyHex = undefined;
-      dropActivePrivateKey();
-      await persistSelectedPublicKey(undefined);
-    } else {
-      coordinatorState.keyspaceGeneration++;
-      try {
-        await enterUnlockedState(publicKeyHex, privateKey, previousStatus === "unlocked" ? "activate-key" : initialCause);
-      } catch (error) {
-        if (coordinatorState.vaultStatus === "unlocked" || previousStatus !== "unlocked") coordinatorState.vaultStatus = previousStatus;
-        throw error;
-      }
-    }
-    privateKeyTransferred = !keepLocked;
-    return {
-      publicKeyHex,
-      label: input.label,
-      address: deriveP2pkhAddress(publicKeyHex, "main"),
-      network: "main",
-      format: input.format,
-      capabilities: input.capabilities ?? ["p2pkh"],
-      createdAt,
-      ...(input.source === undefined ? {} : { source: input.source }),
-    };
-  } catch (error) {
-    const rollbackFailures: KeyMutationRollbackFailure[] = [];
-    if (published && publicKeyHex) {
-      // 文件是唯一真值：回滚 = 删除自己的文件并重建内存索引。
-      await waitForTestCatalogHoldRollbackBarrier();
-      try {
-        await requireVaultHoldAdapter().removeKey(publicKeyHex);
-        await rebuildVaultHoldKeyIndex((await requireVaultHoldAdapter().readCommitted({ password })).keys);
-      } catch (rollbackError) {
-        rollbackFailures.push({ stage: "hold", error: rollbackError });
-      }
-    }
-    if (ownerActivated) {
-      try {
-        const root = platformRootStore;
-        if (!root) throw new StorageRuntimeError("storage_unavailable", "Platform storage root is unavailable during Key rollback");
-        await root.deleteOwnerStorage({ ownerPublicKeyHex: publicKeyHex! });
-      } catch (cleanupError) {
-        rollbackFailures.push({ stage: "owner-storage", error: cleanupError });
-      }
-    }
-    if (rollbackFailures.length > 0) {
-      const rollbackError = new KeyMutationRollbackUnconfirmedError(rollbackFailures);
-      await failClosedAfterKeyMutationRollback(rollbackError);
-      throw rollbackError;
-    }
-    if (isKeyMutationRollbackUnconfirmed(error)) {
-      await failClosedAfterKeyMutationRollback(error instanceof KeyMutationRollbackUnconfirmedError
-        ? error
-        : new KeyMutationRollbackUnconfirmedError([{ stage: "hold", error }])
-      );
-    }
-    throw error;
-  } finally {
-    if (!privateKeyTransferred) privateKey.fill(0);
-  }
-}
-
-async function addCatalogKeyRpc(
-  password: string,
-  input: { label: string; capabilities?: string[]; material: { hex: string; wif?: string }; format: string; source?: string },
-  initialCause: Extract<SessionStateEvent["cause"], "create-initial-key" | "import-initial-key"> = "create-initial-key",
-): Promise<unknown> {
-  const privateKey = cryptoHexToBytes(input.material.hex);
-  return addCatalogKeyMaterialRpc(password, privateKey, input, initialCause);
-}
-
-async function addKeyRpc(password: string, input: { label: string; capabilities?: string[]; material: { hex: string; wif?: string }; format: string; source?: string }, initialCause: Extract<SessionStateEvent["cause"], "create-initial-key" | "import-initial-key"> = "create-initial-key"): Promise<unknown> {
-  return addCatalogKeyRpc(password, input, initialCause);
-}
-/**
- * 修改 active Key 自己的密码（KeyHold 文件整文件替换）。
- *
- * 只影响密钥文件：解锁会话与会话里的明文私钥保持不变；其他 Key 的
- * 密码互不影响。旧密码错误时 KeyHold 解锁失败,不写任何东西。
- */
-async function changePasswordRpc(oldPassword: string, newPassword: string): Promise<boolean> {
-  if (coordinatorState.vaultStatus !== "unlocked") throw new StorageRuntimeError("storage_unavailable", "Vault is locked");
-  const publicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
-  if (!publicKeyHex) throw new StorageRuntimeError("storage_unavailable", "No active key to change password for");
-  if (typeof newPassword !== "string" || newPassword.length === 0) throw new StorageRuntimeError("storage_provider_error", "New password is required");
-  const provider = platformBucketProvider;
-  if (!provider) throw new StorageRuntimeError("storage_unavailable", "The selected runtime bucket is unavailable");
-  await createKeyHoldRepository(provider).changePassword({ publicKeyHex, oldPassword, newPassword });
-  return true;
+function requireWalletLifecycle(): WalletLifecycleService {
+  if (!walletLifecycle) throw storageUnavailableError("Wallet lifecycle is unavailable");
+  return walletLifecycle;
 }
 
 async function handleLock(
   requestId: string,
-  request: { kind: "lock"; expectedSessionEpoch: SessionEpoch }
+  request: { kind: "lock"; expectedSessionEpoch: SessionEpoch },
 ): Promise<CoordinatorResponse> {
   await performGlobalLock("manual");
   return {
@@ -14751,193 +12356,55 @@ async function handleLock(
   };
 }
 
+/**
+ * 锁定：先撤销授权，再清空内存身份。
+ *
+ * 不再有任何跨浏览器 Key 锁、lock.json 租约或持久化心跳：本地钱包只保证
+ * 本浏览器本 Origin 的单实例，锁定是完全的内存态迁移。
+ */
 async function performGlobalLock(reason: string): Promise<void> {
-  // 规范：用户主动锁定 = 释放该 Key 的应用锁（删除 lock.json）。
-  const heldKeyLock = activeKeyLock.current;
-  activeKeyLock.current = undefined;
-  if (heldKeyLock) await heldKeyLock.release().catch(() => undefined);
-  // 锁定时智能调度计时也必须停止；解锁后会立即同步一次并重新开始计时。
   cancelSmartSyncIdleTimer();
-  // 第一阶段必须完全脱离网络：先递增 epoch、撤销 capability、覆盖密钥
-  // 并广播 locked。Supplier 永不返回时，锁屏请求也不能被远端拖住。
-  closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
+  // 先撤销会话、grant 与任务权限；迟到的写入在数据层检查之前就已经被拒。
+  revokeWalletGrants("lock");
   const previousActive = coordinatorState.activePublicKeyHex?.toLowerCase();
-  // 锁定也属于 owner 边界：先 fence/grant revoke，再 abort 任务和请求。
-  // fence 保留到下一次解锁完成 drain 后，防止旧 owner 在 lock → unlock
-  // 窗口中重新取得底层存储绑定。
-  if (previousActive) fenceOwnerStorage(previousActive);
+  if (previousActive) void cancelTaskRuntimesByKey(previousActive).catch(() => undefined);
+
   const lockedEpoch = generateEpoch();
-  // 先推进会话世代并切换为 locked，使所有已经排队的请求立即失效；
-  // 后续释放连接/写清理意图都只能作为第二阶段后台工作。
   coordinatorState.sessionEpoch = lockedEpoch;
-  coordinatorState.vaultStatus = reason === "recover-empty" || reason === "empty-vault" ? "uninitialized" : "locked";
-  const completions: Promise<void>[] = [];
+  coordinatorState.vaultStatus = "locked";
   for (const [, runtime] of coordinatorState.taskRuntimes) {
     runtime.controller?.abort();
-    if (runtime.completion) completions.push(runtime.completion);
-    if (runtime.timer) {
-      clearTimeout(runtime.timer);
-    }
-    // 锁定时将任务标记为 blocked，而非 idle，让 UI 显示"等待解锁"
+    if (runtime.timer) clearTimeout(runtime.timer);
     runtime.state = "blocked";
     runtime.blockedReason = "Vault is locked";
     runtime.timer = undefined;
   }
 
-  // 撤销 capability、清空 active key；replace/drop 会覆盖旧 Uint8Array。
   coordinatorState.activePublicKeyHex = undefined;
   dropActivePrivateKey();
-  // 保留 wrapper 给未来 unlock/恢复复用，但立即丢弃所有旧底层绑定。
+  setCoordinatorActiveKeySummary(undefined);
   for (const store of workerOwnerStores) store.invalidateBinding();
   testHarnessActivationSecret = undefined;
-
   coordinatorState.autoLockDeadline = undefined;
   if (autoLockTimer) clearTimeout(autoLockTimer);
   autoLockTimer = undefined;
-
-  // 这些 release 函数在调用期间只摘除本地句柄；真正的远端退订、连接
-  // 关闭和 K-V 清理在第二阶段后台执行，并由 releaseSatRuntime 限时。
-  // 这样旧 runtime 不会在 locked 状态继续对外提供能力。
-  releaseMsfileRuntime(reason);
-  const satCleanup = releaseSatRuntime(reason);
-  clearWindowP2pExecutorLeaseLocked();
   stopCoordinatorOwnerWorkerUnits();
   reconcileCoordinatorRuntime();
 
-  if (previousActive) {
-    rememberOwnerStorageDrain(previousActive, drainOwnerStorageRequests(previousActive));
-  }
+  closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
+  if (walletLifecycle) await walletLifecycle.lock().catch((error) => {
+    console.warn("[wallet] lifecycle lock failed", error instanceof Error ? error.message : String(error));
+  });
 
-  coordinatorState.keyspaceGeneration++;
-  if (reason === "empty-vault" || reason === "recover-empty") coordinatorMeta.selectedPublicKeyHex = undefined;
-  publishSessionState(reason === "key-deleted" || reason === "empty-vault" ? "delete-active-key" : reason === "recover-empty" ? "recover-empty-vault" : "lock");
+  publishWorkerActiveKeyChanged();
   emitMsFileState();
   emitStorageState();
-
-  // 广播任务快照，让 UI 立即显示 blocked 状态
   publishTopicEvent("background.snapshot", {
     type: "background.snapshot.changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     snapshots: getTaskSnapshots(),
   });
-
-  // 普通 lock/unlock 不写持久化：只有清空 Vault 这种业务状态变化需要
-  // 把本机 session.activeKey 收敛到“无选择”；安全锁定本身始终只改内存。
-  if (reason === "empty-vault" || reason === "recover-empty") {
-    await persistSelectedPublicKey().catch((error) => {
-      markStorageIoFailure(error);
-      console.warn("[coordinator] session activeKey persistence failed", error instanceof Error ? error.message : String(error));
-    });
-  }
-
-  // 任务 completion 只能在仍处于本次 locked epoch 时清理；若期间已经
-  // 解锁，新 runtime 的 controller 不能被旧任务迟到完成覆盖。
-  void Promise.allSettled(completions).then(() => {
-    if (coordinatorState.sessionEpoch !== lockedEpoch) return;
-    for (const runtime of coordinatorState.taskRuntimes.values()) runtime.controller = undefined;
-  });
-  void satCleanup.catch((error) => console.warn("[sat-subscription] locked cleanup failed", error instanceof Error ? error.message : String(error)));
-}
-
-async function handleActivateKey(
-  requestId: string,
-  request: { kind: "activate-key"; password: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
-): Promise<CoordinatorResponse> {
-  try {
-    return await withCoordinatorFinalIoLease(
-      "write",
-      undefined,
-      () => handleActivateKeyUnsafe(requestId, request),
-      { allowLocalOwnerTransition: true, auditOperation: "vault.activate-key" },
-    );
-  } finally {
-    request.password = "";
-  }
-}
-
-async function handleActivateKeyUnsafe(
-  requestId: string,
-  request: { kind: "activate-key"; password: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
-): Promise<CoordinatorResponse> {
-  if (coordinatorState.vaultStatus !== "unlocked") {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: { key: "background.blocked.unlock", fallback: "Vault is locked" } },
-    };
-  }
-
-  try {
-    // 只有当前解密出的 Key 密码能解开目标 KeyHold 文档即视为验证通过。
-    const committed = await readVaultHoldSnapshot("");
-    if (committed.keys.length === 0) throw new Error("Vault not initialized");
-    await decryptVaultPrivateKey(request.publicKeyHex ?? (await getActiveKey())?.publicKeyHex ?? "", request.password, committed);
-    const committedHold = await readVaultHoldSnapshot(request.password);
-    await rebuildVaultHoldKeyIndex(committedHold.keys);
-    const key = await getPublicVaultKey(request.publicKeyHex);
-    if (!key) throw new Error("Key not found");
-    // 同桶切换必须重新使用本次请求提供的桶密码；不能从当前 Key 会话
-    // 或 Coordinator 状态取可复用的密码材料。
-    const privateKey = await decryptVaultPrivateKey(key.publicKeyHex, request.password, committedHold);
-    const previousActive = coordinatorState.activePublicKeyHex;
-    const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
-    const previousGeneration = coordinatorState.keyspaceGeneration;
-    const previousSelected = coordinatorMeta.selectedPublicKeyHex;
-    let transferred = false;
-    let transition: ActiveOwnerTransitionResult | undefined;
-    try {
-      transition = await transitionActiveStorageOwner(key.publicKeyHex);
-      dropActivePrivateKey();
-      replaceActivePrivateKey(privateKey);
-      transferred = true;
-      coordinatorState.activePublicKeyHex = key.publicKeyHex;
-      if (previousActive?.toLowerCase() === key.publicKeyHex.toLowerCase()) coordinatorState.keyspaceGeneration++;
-      coordinatorState.sessionEpoch = generateEpoch();
-      coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
-      await persistSelectedPublicKey(key.publicKeyHex);
-      await ensureCoordinatorUpgradeSession();
-      completeActiveStorageOwnerTransition(transition);
-    } catch (error) {
-      const failedClosed = Boolean(previousActive) && coordinatorState.vaultStatus !== "unlocked";
-      if (failedClosed) {
-        dropActivePrivateKey();
-        coordinatorMeta.selectedPublicKeyHex = previousSelected;
-        throw error;
-      }
-      dropActivePrivateKey();
-      if (previousBytes) replaceActivePrivateKey(previousBytes);
-      coordinatorState.activePublicKeyHex = previousActive;
-      coordinatorMeta.selectedPublicKeyHex = previousSelected;
-      completeActiveStorageOwnerTransition(transition);
-      invalidateFailedKeyspaceTransition(previousGeneration);
-      emitMsFileState();
-      throw error;
-    } finally {
-      if (!transferred) privateKey.fill(0);
-    }
-
-    publishSessionState("activate-key");
-    emitMsFileState();
-
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "accepted" },
-    };
-  } catch (err) {
-    markStorageIoFailure(err);
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: {
-        status: "error",
-        message: err instanceof Error ? err.message : String(err),
-        ...((err as { code?: unknown })?.code && typeof (err as { code?: unknown }).code === "string"
-          ? { code: (err as { code: string }).code as never }
-          : {})
-      },
-    };
-  }
+  publishSessionState("lock");
 }
 
 // ============================================================
@@ -15275,7 +12742,7 @@ export function __testFailNextP2pkhSettingWrite(): void {
 }
 
 function p2pkhSettingRepository(): ReturnType<typeof createP2pkhFileRepository> {
-  return createP2pkhFileRepository(createWorkerOwnerFileStore("p2pkh", ""));
+  return createP2pkhFileRepository(createWorkerModuleFileStore("p2pkh", ""));
 }
 
 /** 从 setting.json 载入运行时镜像；同 owner 只载入一次。 */
@@ -15337,7 +12804,7 @@ async function writeP2pkhSettingFile(patch: {
  * 地址，余额永远停在“未知”。
  */
 async function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   const existing = await repository.listResourcesByKey();
   const networks: Array<"main" | "test"> = includeTestnet ? ["main", "test"] : ["main"];
   const createdAt = new Date().toISOString();
@@ -15489,7 +12956,7 @@ async function handleP2pkhProviderConfigUpdate(
 async function p2pkhResourceForOwner(ownerPublicKeyHex: string, network: "main" | "test") {
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   return repository.getResource(`p2pkh:${network}`);
 }
 
@@ -15577,7 +13044,7 @@ async function handleP2pkhBroadcastUnsafe(
 
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   let consumed = false;
   let snapshotResource: P2pkhUtxoSnapshotResource | undefined;
   const consumedBinding = request.submission?.utxoBinding;
@@ -15809,7 +13276,7 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
   const controller = new AbortController();
   runtime.controller = controller;
   runtime.startedEpoch = coordinatorState.sessionEpoch;
-  runtime.startedGeneration = coordinatorState.keyspaceGeneration;
+  runtime.startedRunGeneration = coordinatorState.runGeneration;
   runtime.startedPublicKeyHex = coordinatorState.activePublicKeyHex;
   runtime.blockedReason = undefined;
   runtime.error = undefined;
@@ -15826,7 +13293,7 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
   let execution!: Promise<void>;
   execution = (async () => {
    try {
-    if (runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedGeneration !== coordinatorState.keyspaceGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) throw new Error("stale task epoch");
+    if (runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedRunGeneration !== coordinatorState.runGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) throw new Error("stale task epoch");
     if (!runtime.run) throw new Error(`Task ${taskId} has no Coordinator handler`);
     const run = (signal: AbortSignal) => runtime.run!({
       signal,
@@ -15844,7 +13311,7 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
       // 必须在上面的显式审计表中登记，否则发布审计脚本会拒绝通过。
       await run(controller.signal);
     }
-    if (runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedGeneration !== coordinatorState.keyspaceGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) throw new Error("stale task result");
+    if (runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedRunGeneration !== coordinatorState.runGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) throw new Error("stale task result");
     runtime.state = "idle";
     runtime.lastCompletedAt = new Date().toISOString();
     runtime.error = undefined;
@@ -15885,7 +13352,7 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
     // 若当前 Vault 已锁定或 epoch 已变化，保留 blocked，不得把任务重写为 idle
     } else if (coordinatorState.vaultStatus !== "unlocked" ||
         runtime.startedEpoch !== coordinatorState.sessionEpoch ||
-        runtime.startedGeneration !== coordinatorState.keyspaceGeneration ||
+        runtime.startedRunGeneration !== coordinatorState.runGeneration ||
         runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) {
       runtime.state = "blocked";
       runtime.blockedReason = "Vault is locked";
@@ -15909,7 +13376,7 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
       && coordinatorState.vaultStatus === "unlocked"
       && coordinatorState.activePublicKeyHex
       && runtime.startedEpoch === coordinatorState.sessionEpoch
-      && runtime.startedGeneration === coordinatorState.keyspaceGeneration
+      && runtime.startedRunGeneration === coordinatorState.runGeneration
       && runtime.startedPublicKeyHex === coordinatorState.activePublicKeyHex) {
       armSmartSyncIfIdle();
     }
@@ -15952,12 +13419,14 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
   const storageIoOwnerPeer = coordinatorStorageIoOwnerPeerSnapshot();
   return {
     authorityInstanceId: coordinatorAuthorityInstanceId,
+    runGeneration: coordinatorState.runGeneration,
     buildId: COORDINATOR_BUILD_ID,
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
     activePublicKeyHex: coordinatorState.activePublicKeyHex,
-    selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex,
-    keyspaceGeneration: coordinatorState.keyspaceGeneration,
+    // 钱包身份世代：单 Key 模型下没有 selectedPublicKeyHex（没有可切换的
+    // Key），页面只用它判断重置/重新初始化后旧授权是否已经失效。
+    walletGeneration: coordinatorState.walletGeneration || undefined,
     ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
     coordinatorWorkerUnits: coordinatorRuntimeUnitSnapshots(),
     coordinatorWorkerUnitSnapshotRevision: coordinatorRuntimeUnitRevision(),
@@ -15965,8 +13434,6 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     scheduleSettings: coordinatorState.scheduleSettings,
     autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhSettings: coordinatorMeta.p2pkhSettings,
-    storageBucketGeneration: platformRootStore?.bucket.bucketGeneration,
-    ...(platformRootStore ? { storageBucketId: platformRootStore.bucket.bucketId } : {}),
     ...(storageIoOwnerPeer ? { storageIoOwnerPeer } : {}),
     // Worker 重启后 controller 可能尚未惰性创建，但持久化快照已经是
     // 当前产品意图真值；首个页面不能拿 revision=0 覆盖它。
@@ -16207,19 +13674,18 @@ function coordinatorSessionServicesReady(): boolean {
     && Boolean(coordinatorState.activePublicKeyHex && coordinatorState.activePrivateKeyBytes)
     && Boolean(platformRootStore && platformRootToken)
     && platformStorageReady
-    && !storageStartupFailure
-    && storageHealthController.status() === "ready";
+    && !storageStartupFailure;
 }
 
 function coordinatorSessionExposureIdentity(): string {
-  const bucket = platformRootStore?.bucket;
+  // 服务暴露的身份由运行代次、会话世代和钱包身份世代决定；单 Key 模型下
+  // 不再有桶身份，也不再有「切换 Key」这件事需要额外参与判定。
   return [
     coordinatorAuthorityInstanceId,
     coordinatorHandoverGeneration,
     coordinatorState.sessionEpoch,
-    coordinatorState.keyspaceGeneration,
-    bucket?.bucketId ?? "null",
-    bucket?.bucketGeneration ?? "null",
+    coordinatorState.runGeneration,
+    coordinatorState.walletGeneration,
   ].join("\u0000");
 }
 
@@ -16336,20 +13802,13 @@ async function openCoordinatorSession(
     };
     return enqueueCoordinatorSessionInitialization(async () => {
       assertCoordinatorSessionOpenFresh(attempt);
-    const previousBootstrapState = storageBootstrapState;
-    const hadInitialization = coordinatorInitialization !== undefined;
-    let bootstrapHintAssigned = false;
     coordinatorOpeningSession = attempt;
     try {
       // The two awaits below are deliberately followed by the same freshness
       // check. Their results are temporary until the final synchronous
       // exposure commit succeeds.
       assertCoordinatorSessionOpenFresh(attempt);
-      if (!platformRootStore && !storageBootstrapState?.selectedBucket && request.storageBootstrapState?.selectedBucket) {
-        storageBootstrapState = request.storageBootstrapState;
-        bootstrapHintAssigned = true;
-      }
-      await startCoordinatorInitialization(request.storageBootstrapState, attempt.peerId);
+      await startCoordinatorInitialization(undefined, attempt.peerId);
       assertCoordinatorSessionOpenFresh(attempt);
 
       // No await is allowed between this check and exposeGroup. The group
@@ -16386,11 +13845,8 @@ async function openCoordinatorSession(
       };
     } catch (error) {
       // Never revoke/clear a newer session from a stale open. A failed first
-      // open has not changed sessionOpen or storageIoOwner; the only local
-      // temporary assignment we may undo is the uncommitted bootstrap hint.
-      if (!state.sessionOpen && coordinatorOpeningSession === attempt && !hadInitialization && bootstrapHintAssigned) {
-        storageBootstrapState = previousBootstrapState;
-      }
+      // open has not changed sessionOpen or storageIoOwner, so there is no
+      // local temporary assignment left to undo.
       if (!state.sessionOpen && state.sessionBinding?.leaseId === attempt.binding.leaseId) {
         state.sessionBinding = undefined;
         state.status = "active";
@@ -16504,11 +13960,6 @@ const coordinatorTransportPlugin = definePlugin({
     COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
     COORDINATOR_CRYPTO_RPC_CAPABILITY,
   ] as const,
-  dependencies: [{
-    capability: COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
-    source: "peer",
-    reason: "Coordinator LocalStorage I/O is implemented by the bound Window peer",
-  }] as const,
   startup: "required",
   defaultEnabled: true,
   canDisable: false,
@@ -16596,7 +14047,8 @@ coordinatorRuntimeApp = startSharedWorkerApp({
       ...(unit?.scopeKind === "owner-session" && coordinatorState.activePublicKeyHex
         ? { ownerPublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch }
         : {}),
-      ...(platformRootStore ? { bucketGeneration: platformRootStore.bucket.bucketGeneration } : {}),
+      // 本地介质没有桶世代：运行单元的身份由钱包世代与会话世代决定。
+      ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
     };
   },
 });
@@ -16606,8 +14058,20 @@ installSharedWorkerRetirement(
 );
 }
 
-// Worker 启动时从 K-V 读取仅公开的 Vault metadata
-// 状态为 uninitialized 或 locked；绝不读取/解密私钥直到 unlock RPC
+/**
+ * Worker 冷启动。
+ *
+ * 单 Key 本地存储没有 Provider 选择、没有桶、没有远程连接，也没有可恢复的
+ * 「选中的 Key」。顺序固定为：
+ *
+ *   authority claim -> IndexedDB store -> 固定 KeyHold 仓储 -> 生命周期服务
+ *   -> coldStart() -> installPlatformStorage() -> ready / locked / uninitialized
+ *
+ * coldStart 只读 `.keymaster/meta` 与 `key.json`：
+ *   - ready：装配平台 Root，进入 **locked**（不读取、不解密私钥）；
+ *   - uninitialized：只提供创建或导入，不触碰任何其它记录；
+ *   - corrupt / unsupported：进入明确错误界面，绝不静默创建空钱包。
+ */
 async function initializeCoordinator(skipStorageBootstrap = false, propagateFailure = false, peerId?: string): Promise<void> {
   coordinatorInitializationInProgress = true;
   try {
@@ -16618,8 +14082,7 @@ async function initializeCoordinator(skipStorageBootstrap = false, propagateFail
 }
 
 async function initializeCoordinatorInternal(skipStorageBootstrap = false, propagateFailure = false, peerId?: string): Promise<void> {
-  // 必须先取得 Keymaster 自己的跨 Worker authority，再触碰任何 Provider
-  // 或恢复对象；否则不同 Worker URL 可能同时初始化同一个物理桶。
+  // 必须先取得 Keymaster 自己的跨 Worker authority，再触碰任何持久化对象。
   try {
     await ensureCoordinatorAuthorityClaim();
   } catch (error) {
@@ -16628,9 +14091,9 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
     const code = error && typeof error === "object" && "code" in error
       ? (error as { code?: unknown }).code
       : undefined;
-    // authority 冲突/能力缺失不是 Storage onboarding 的可恢复状态；
-    // 必须让 session.open 失败，不能只返回一个没有 capability 的 fatal
-    // snapshot，让新页面看起来已经连上了一个不可用 Worker。
+    // authority 冲突/能力缺失不是可恢复的本地状态：必须让 session.open 失败，
+    // 不能只返回一个没有 capability 的 fatal snapshot，让新页面看起来已经
+    // 连上了一个不可用的 Worker。
     if (propagateFailure || code === "upgrade.authority_conflict" || code === "upgrade.authority_unavailable") throw error;
     return;
   }
@@ -16639,70 +14102,74 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
   }
   if (!skipStorageBootstrap) {
     try {
-      // Storage 是独立健康域；失败时保持 Vault booting，等待页面重试，
-      // 不能把可恢复的 Provider/CORS/认证问题升级成 Vault fatal。
-      await bootstrapPlatformStorage(undefined, peerId);
+      await bootstrapWalletStorage();
     } catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-      const healthStatus = storageHealthController.status();
-      // 未选择后端、以及已选择 S3 但还没有输入 Profile 密码，都是可恢复的
-      // onboarding 状态；不能把它们伪装成 degraded，否则 UI 会丢失原始入口。
-      const preservesOnboardingState = healthStatus === "unselected" || healthStatus === "authentication";
-      storageStartupFailure = !preservesOnboardingState;
-      if (code === "storage_identity_required" && healthStatus !== "unselected") {
-        storageHealthController.setStatus("authentication", error instanceof Error ? error.message : String(error));
-      } else if (!preservesOnboardingState) {
-        storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
-      }
+      // IndexedDB 打不开、事务/配额失败或版本升级失败都属于 Storage 可用性
+      // 问题：Vault 保持 booting，页面可重试；不升级成 Vault fatal，也不回退
+      // 到 localStorage，更不自动清库。
+      storageStartupFailure = true;
       emitStorageState();
       publishSessionState("bootstrap");
+      if (propagateFailure) throw error;
       return;
     }
   }
   try {
-    // Storage ready 后，Vault/Keyspace 才允许读取 keys/。
     await withCoordinatorFinalIoLease(
       "write",
       undefined,
       async () => {
         await loadCoordinatorMeta();
-        // Key lifecycle Journal 优先恢复；这一步不依赖 Vault 解锁，因为
-        // Journal 和 Hold 成员关系都只需要公开恢复信息。
-        const hasKeys = (await listPublicVaultKeys()).length > 0;
-        if (hasKeys) {
-          coordinatorState.vaultStatus = "locked";
-          coordinatorState.activePublicKeyHex = undefined;
-          coordinatorState.keyspaceGeneration = Math.max(1, coordinatorState.keyspaceGeneration);
-          // 只校正持久化的公开选择，不解析或解密私钥文档。
-          if (!await reconcileSelectedPublicKey()) coordinatorState.vaultStatus = "uninitialized";
-        } else {
-          coordinatorState.vaultStatus = "uninitialized";
+        // 冷启动只依据 coldStart 的结论决定 Vault 状态；不列举 Key 目录、
+        // 不恢复 selected Key，也不解密私钥。
+        const coldStart = storageColdStartState ?? await walletLifecycle?.coldStart();
+        storageColdStartState = coldStart;
+        switch (coldStart?.state) {
+          case "ready":
+            coordinatorState.walletGeneration = coldStart.meta?.walletGeneration ?? coordinatorState.walletGeneration;
+            coordinatorState.vaultStatus = "locked";
+            coordinatorState.activePublicKeyHex = undefined;
+            break;
+          case "uninitialized":
+            coordinatorState.walletGeneration = "";
+            coordinatorState.vaultStatus = "uninitialized";
+            break;
+          case "corrupt":
+          case "unsupported":
+            // 不静默创建空钱包：抛出可区分的存储错误，让页面进入错误界面。
+            throw new StorageRuntimeError(
+              coldStart.state === "corrupt" ? "storage_wallet_corrupt" : "storage_wallet_unsupported",
+              coldStart.reason ?? "Local wallet data is unusable",
+            );
+          default:
+            coordinatorState.walletGeneration = "";
+            coordinatorState.vaultStatus = "uninitialized";
+            break;
         }
       },
       { allowLocalLock: true, auditOperation: "coordinator.bootstrap.recover" },
     );
-    await ensureStorageRuntime(peerId);
-    await ensureCoordinatorTasksRegistered();
-    // 启动时如果 vault 是 locked 状态，将所有任务标记为 blocked
+    // 只有冷启动结论为 ready 时才存在可写 Root。未初始化钱包本地没有任何
+    // Root，corrupt/unsupported 已在上方抛出：这两种情况下**不得**安装
+    // runtime 与任务，否则会把「没有钱包」误报成存储故障，或用空绑定覆盖
+    // 仍可能可恢复的数据。可写 runtime 与任务由 initializeWallet() 在唯一
+    // Key 事务提交成功后再安装。
     if (coordinatorState.vaultStatus === "locked") {
+      await ensureStorageRuntime(peerId);
+      await ensureCoordinatorTasksRegistered();
+      // 启动时钱包是 locked：所有任务保持 blocked，等解锁后再恢复。
       for (const runtime of coordinatorState.taskRuntimes.values()) {
         runtime.state = "blocked";
         runtime.blockedReason = "Vault is locked";
       }
     }
-    // bootstrapPlatformStorage 只完成 Provider/Root 装配；metadata、Journal
-    // 和任务注册也成功后，才把 Storage 健康状态发布为 ready。
     storageStartupFailure = false;
-    storageHealthController.setStatus("ready");
     emitStorageState();
   } catch (error) {
-    // Root 已建立后发生的 Provider/CORS/network/K-V 错误仍属于 Storage
-    // 健康域；Vault 保持 booting，等待 Storage 恢复编排，不得伪装成 fatal。
+    // Root 已建立后发生的 IndexedDB/事务/配额错误仍属于 Storage 可用性域；
+    // Vault 保持 booting，等待 Storage 恢复编排，不得伪装成 fatal。
     if (isStorageFailure(error)) {
       storageStartupFailure = true;
-      if (storageHealthController.status() !== "unselected" && storageHealthController.status() !== "authentication") {
-        storageHealthController.setStatus("degraded", "Storage initialization failed");
-      }
       emitStorageState();
       coordinatorState.vaultStatus = "booting";
       if (propagateFailure) throw error;
@@ -16711,22 +14178,153 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
       if (propagateFailure) throw error;
     }
   } finally {
-    // hello 只在存储启动完成后处理。无论初始化成功或失败，
-    // 都必须广播最终状态，否则首个页面会永久停留在 booting。
+    // hello 只在存储启动完成后处理。无论初始化成功或失败，都必须广播最终
+    // 状态，否则首个页面会永久停留在 booting。
     publishSessionState("bootstrap");
   }
 }
 
+/** 删除一个已撤销第三方 App 的独立目录；只作用于该目录。 */
+async function clearThirdPartyAppRoot(appStorageName: string): Promise<void> {
+  if (!platformRootStore) return;
+  // 第三方 App 的 namespace 不在中央声明目录里：它的 moduleId 由验证身份派生，
+  // 目录由平台登记的 name 决定。buildWalletStorageRoot 对 third-party-app 只使用
+  // appStorageName，因此 moduleId 在这里只是一条不参与路径计算的稳定坐标。
+  await platformRootStore.clearStorageRoot({
+    declaration: THIRD_PARTY_APP_FILES_DECLARATION,
+    appStorageName,
+  });
+}
+
+/** 把生命周期事件翻译成跨 Tab 广播；具体状态提交仍由 Coordinator 完成。 */
+function publishWalletLifecycleEvent(event: WalletLifecycleEvent): void {
+  switch (event.type) {
+    case "initialized":
+      coordinatorState.walletGeneration = event.walletGeneration;
+      storageColdStartState = undefined;
+      break;
+    case "unlocked":
+      // adoptUnlockedKey 已经写好会话状态；这里只补广播所需的冷启动结论。
+      storageColdStartState = undefined;
+      break;
+    case "locked":
+      storageColdStartState = storageColdStartState?.state === "ready"
+        ? { ...storageColdStartState }
+        : storageColdStartState;
+      break;
+    case "reset":
+      // 重置后回到未初始化：清掉冷启动结论，下一次判断重新读本地真值。
+      coordinatorState.walletGeneration = "";
+      storageColdStartState = undefined;
+      break;
+    case "renamed":
+      publishWorkerActiveKeyChanged();
+      break;
+    case "password-changed":
+    case "app-revoked":
+      break;
+    default:
+      break;
+  }
+}
+
+/**
+ * 装配单钱包本地存储：IndexedDB -> 固定 KeyHold 仓储 -> 生命周期服务 -> 平台 Root。
+ *
+ * 这是本系统唯一的存储装配点：没有远程探测，也不列举 Key 目录。
+ */
+async function bootstrapWalletStorage(): Promise<void> {
+  if (!walletStore) {
+    walletStore = createIndexedDbWalletStore();
+  }
+  if (!walletKeys) {
+    walletKeys = createWalletKeyRepository(walletStore);
+  }
+  walletLifecycle = createWalletLifecycleService({
+    store: walletStore,
+    keys: walletKeys,
+    generateWalletGeneration: () => crypto.randomUUID(),
+    generateSessionEpoch: () => generateEpoch(),
+    // `address` 只是兼容展示字段，不是身份真值；本 Worker 不在存储层派生
+    // 地址，摘要会退回公钥 hex，业务插件需要时从 P2PKH resource 自行派生。
+    deriveAddress: () => undefined,
+    revokeGrants: revokeWalletGrants,
+    establishSession: establishWalletSession,
+    adoptUnlockedKey,
+    publish: publishWalletLifecycleEvent,
+    runGeneration: () => coordinatorState.runGeneration,
+    currentSessionEpoch: () => coordinatorState.sessionEpoch,
+    clearAppRoot: clearThirdPartyAppRoot,
+  });
+  // 冷启动只读 meta 与固定 KeyHold；这里不恢复任何运行态授权。
+  storageColdStartState = await walletLifecycle.coldStart();
+  if (storageColdStartState.state === "ready") {
+    coordinatorState.walletGeneration = storageColdStartState.meta?.walletGeneration ?? coordinatorState.walletGeneration;
+    await installPlatformStorage();
+    return;
+  }
+  if (storageColdStartState.state === "corrupt" || storageColdStartState.state === "unsupported") {
+    // 数据不可用时不装配可写 Root，避免任何路径覆盖仍可能可恢复的数据。
+    throw new StorageRuntimeError(
+      storageColdStartState.state === "corrupt" ? "storage_wallet_corrupt" : "storage_wallet_unsupported",
+      storageColdStartState.reason ?? "Local wallet data is unusable",
+    );
+  }
+  // uninitialized：没有 Root，也没有任何本地业务数据；等待创建或导入。
+}
+
+/**
+ * 创建或导入唯一 Key，并完成解锁后的全部运行绑定。
+ *
+ * uninitialized 时本地没有 Root，因此这一步自己驱动完整装配顺序：
+ *   lifecycle.initialize(plan) -> adoptUnlockedKey 写入会话状态
+ *   -> 安装新钱包的 Root -> 读取 Coordinator meta -> 装配可写 runtime
+ *   -> 注册任务 -> completeUnlockedBinding("initialize")
+ *
+ * lifecycle 只返回事务结果：只有 `ok: true` 才继续装配；失败路径保持
+ * uninitialized，不装 Root、不发布 unlocked。
+ */
+async function initializeWallet(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
+  const lifecycle = requireWalletLifecycle();
+  // 提交前必须确认本地确实还没有钱包；并发初始化由 lifecycle 的条件创建
+  // 拒绝，这里只提前给出可行动的失败。
+  const before = await lifecycle.coldStart();
+  if (before.state !== "uninitialized") {
+    if (before.state === "unsupported") {
+      throw new StorageRuntimeError("storage_wallet_unsupported", "Local wallet schema is newer than this build");
+    }
+    if (before.state === "corrupt") {
+      throw new StorageRuntimeError("storage_wallet_corrupt", "Wallet data is incomplete or damaged");
+    }
+    throw new StorageRuntimeError("storage_conflict", "This wallet already has a key");
+  }
+
+  const result = await lifecycle.initialize(plan);
+  if (!result.ok) return result;
+
+  // adoptUnlockedKey 已经写入 sessionEpoch、钱包世代与私钥副本。
+  try {
+    coordinatorState.walletGeneration = result.walletGeneration;
+    storageColdStartState = undefined;
+    await installPlatformStorage();
+    await loadCoordinatorMeta();
+    await ensureStorageRuntime();
+    await ensureCoordinatorTasksRegistered();
+    await completeUnlockedBinding("initialize");
+  } catch (error) {
+    // 装配失败不回滚已提交的 Key（那是事务真相），但会话必须 fail closed
+    // 回 locked：页面看到的是「需要重新解锁」，而不是半装配的可用状态。
+    await performGlobalLock("initialize-binding-failed").catch(() => undefined);
+    throw error;
+  }
+  return result;
+}
+
 let coordinatorInitialization: Promise<void> | undefined;
-function startCoordinatorInitialization(state?: StorageBootstrapState, peerId?: string): Promise<void> {
+function startCoordinatorInitialization(_removedBootstrapState?: unknown, peerId?: string): Promise<void> {
   if (!coordinatorInitialization) {
-    // Worker 没有 localStorage；首个 session.open 提供启动选择和反向
-    // LocalStorage peer。这个 Promise 是 Worker 级 single-flight：首个
-    // 到达者的 state/peer 被闭包固定，后续 session 只等待同一初始化，
-    // 不能替换 peer 或重启初始化。peer 失效时 bridge freshness fence
-    // fail-closed；后续显式 storage/recovery 请求再绑定新的 active peer。
-    // 缺失选择时保持 unselected，任何 keys/ 与 Vault 初始化都不得发生。
-    storageBootstrapState = state ?? null;
+    // Worker 级 single-flight：首个到达者的 peer 被闭包固定，后续 session 只
+    // 等待同一次初始化。冷启动不再有任何「启动选择」，第一个参数已被忽略。
     coordinatorInitialization = initializeCoordinator(false, false, peerId);
   }
   return coordinatorInitialization;
@@ -16827,7 +14425,7 @@ export async function __testMsfileStoreSeed(input: {
 }): Promise<{ seedHashHex: string }> {
   const bytes = input.bytes.slice();
   const result = await storeMsFileSeed({
-    store: createWorkerOwnerFileStore("msfile", ""),
+    store: createWorkerModuleFileStore("msfile", ""),
     source: {
       name: input.name,
       mediaType: input.mediaType,
@@ -16841,12 +14439,12 @@ export async function __testMsfileStoreSeed(input: {
 
 /** 测试专用：直接写入当前 owner `msfiles/` 根下的相对路径。 */
 export async function __testMsfileOwnerStorageWrite(path: string, bytes: Uint8Array): Promise<void> {
-  await createWorkerOwnerFileStore("msfile", "").put(path, bytes);
+  await createWorkerModuleFileStore("msfile", "").put(path, bytes);
 }
 
 /** 测试专用：删除当前 owner `msfiles/` 根下的相对路径。 */
 export async function __testMsfileOwnerStorageDelete(path: string): Promise<void> {
-  await createWorkerOwnerFileStore("msfile", "").delete(path);
+  await createWorkerModuleFileStore("msfile", "").delete(path);
 }
 
 /** 测试专用：观测领域 owner handoff 对 WebLoom peer 的通知参数。 */
@@ -16880,7 +14478,6 @@ export async function __testGetCoordinatorUpgradePartition(): Promise<{ revision
 }
 
 export function __testResetState(): void {
-  ensureTestPlatformStorage();
   stopCoordinatorKeyValueMaintenance();
   coordinatorKeyValueMaintenanceStores.clear();
   // Drop domain-owned resources before resetting the compatibility table. The
@@ -16915,42 +14512,18 @@ export function __testResetState(): void {
   });
   // 测试夹具也模拟一次 Root 重装；旧句柄不能跨“重启”复用同一个令牌。
   platformRootToken = {};
-  // 测试夹具复用同一个内存 Root；每个用例从 ready 的 Storage 健康基线开始，
-  // 避免上一个用例注入的 degraded/authentication 状态污染后续业务断言。
-  storageHealthController.resetForTesting("ready");
   storageStartupFailure = false;
-  catalogBindingDiscardDeferred = false;
-  initialSetupRuntimeOwner = undefined;
-  initialSetupTransactions.clear();
-  initialSetupRecoveryRecords.clear();
   // releaseSatRuntime 会同步摘除旧 owner 的全局句柄，并把真实退订放入
   // satRuntimeRelease；下一次测试创建 runtime 时会等待该 Promise。
   void releaseSatRuntime("test");
   testPersistCoordinatorSnapshotFailure = false;
+  testCoordinatorSnapshotMetrics.clear();
   testFailNextP2pkhSettingWrite = false;
-  testFailColdStartInstall = false;
   // 链高度是进程级公共状态：reset 必须清回「尚无可信读数」，
   // 否则上个用例的高度会泄漏进下一个用例的 baseline 断言。
   testChainHeightProvider = undefined;
   coordinatorChainHeight = emptyChainHeightSnapshot();
   chainHeightRevision = 0;
-    testFailAfterBucketPasswordCatalogUpdate = false;
-    testFailAfterBucketConfigCatalogUpdate = false;
-    testFailNextVaultAuthMetadataRollback = false;
-    testFailNextVaultAuthMetadataRestore = false;
-    testFailNextBucketPasswordDeviceRollback = false;
-  testFailAfterCatalogBindingPublish = false;
-  testFailNextOwnerStorageDeletion = false;
-  testFailAfterOwnerStorageActivation = false;
-  testFailNextHoldRollbackCas = false;
-  testCatalogHoldPublishBarrier?.release();
-  testCatalogHoldPublishBarrier = undefined;
-  testCatalogHoldRollbackBarrier?.release();
-  testCatalogHoldRollbackBarrier = undefined;
-  testKeyLifecycleOwnerBarrier?.release();
-  testKeyLifecycleOwnerBarrier = undefined;
-  testLocalStorageBridgeOverride = undefined;
-  invalidateWorkerSessionCache();
   cancelSmartSyncIdleTimer();
   smartSyncDebounceMs = WOC_IDLE_SYNC_DEBOUNCE_MS;
   for (const runtime of coordinatorState.taskRuntimes.values()) {
@@ -16962,7 +14535,6 @@ export function __testResetState(): void {
   coordinatorState.activePublicKeyHex = undefined;
   dropActivePrivateKey();
   testHarnessActivationSecret = undefined;
-  coordinatorState.keyspaceGeneration = 0;
   coordinatorState.taskRuntimes.clear();
   coordinatorState.autoLockDeadline = undefined;
   if (autoLockTimer) clearTimeout(autoLockTimer);
@@ -16985,11 +14557,9 @@ export function __testResetState(): void {
   channelCallersByClient.clear();
   storageRequests.clear();
   storageGrants.clear();
+  ownerStorageGrants.clear();
   platformStorageGrants.clear();
   for (const store of workerOwnerStores) store.invalidateBinding();
-  ownerStorageFences.clear();
-  pendingOwnerStorageDrain = undefined;
-  ownerStorageRequests.clear();
   storagePortCounts.clear();
   storageDataActive = 0;
   storageDataActiveByPort.clear();
@@ -17100,6 +14670,18 @@ export function __testGetChainHeight(): ChainHeightSnapshot {
   return { ...coordinatorChainHeight };
 }
 
+/**
+ * 测试专用：把内存链高度读数清回「尚无可信读数」。
+ *
+ * 已解锁钱包注册任务时 INIT 会先同步一次高度；断言「禁用后入口阻塞」的用例
+ * 需要一个干净的起点，但不能用 `__testResetState()`——那会连同平台 Root 一起
+ * 丢掉，插件意图就再也落不了盘。
+ */
+export function __testResetChainHeight(): void {
+  coordinatorChainHeight = emptyChainHeightSnapshot();
+  chainHeightRevision = 0;
+}
+
 /** 测试专用：确认 BitFS 只消费统一同步的正确网络高度。 */
 export function __testReadBitfsBlockHeight(network: BitfsNetwork): Promise<number> {
   return readCoordinatorBitfsBlockHeight(network);
@@ -17146,184 +14728,6 @@ export function __testFailNextCoordinatorSnapshotPersist(): void {
   testPersistCoordinatorSnapshotFailure = true;
 }
 
-/** 测试专用：在切桶目标绑定已发布后注入一次后续初始化失败。 */
-export function __testFailAfterCatalogBindingPublish(): void {
-  testFailAfterCatalogBindingPublish = true;
-}
-
-/** 测试专用：在冷启动认证成功、Root 安装前注入一次安装失败。 */
-export function __testFailColdStartInstall(): void {
-  testFailColdStartInstall = true;
-}
-
-/** 测试专用：在密码轮转目录更新成功后注入一次失败以触发设备层回滚。 */
-export function __testFailAfterBucketPasswordCatalogUpdate(): void {
-  testFailAfterBucketPasswordCatalogUpdate = true;
-}
-
-/** 测试专用：在配置更新目录提交后注入一次失败以触发设备层回滚。 */
-export function __testFailAfterBucketConfigCatalogUpdate(): void {
-  testFailAfterBucketConfigCatalogUpdate = true;
-}
-
-/** 测试专用：让密码轮转的 Vault verifier 回滚失败一次，验证事务会保留到重启恢复。 */
-export function __testFailNextVaultAuthMetadataRollback(): void {
-  testFailNextVaultAuthMetadataRollback = true;
-}
-
-/** 测试专用：让 revoked 恢复的 Vault verifier 写入失败一次。 */
-export function __testFailNextVaultAuthMetadataRestore(): void {
-  testFailNextVaultAuthMetadataRestore = true;
-}
-
-/** 测试专用：让密码轮转失败后的设备回滚 CAS 失败一次。 */
-export function __testFailNextBucketPasswordDeviceRollback(): void {
-  testFailNextBucketPasswordDeviceRollback = true;
-}
-
-/** 测试专用：模拟 Hold 已发布后，生命周期 Journal 的阶段推进写入失败。 */
-
-/** 测试专用：让下一次 Owner namespace 删除失败。 */
-export function __testFailNextOwnerStorageDeletion(): void {
-  testFailNextOwnerStorageDeletion = true;
-}
-
-/** 测试专用：在 Owner 激活后、事务阶段推进前注入一次新增 Key 失败。 */
-export function __testFailAfterOwnerStorageActivation(): void {
-  testFailAfterOwnerStorageActivation = true;
-}
-
-/** 测试专用：暂停下一次新增 Key 的 Hold publish，制造旧快照并发窗口。 */
-export function __testBlockNextCatalogHoldPublish(): { entered: Promise<void>; release: () => void } {
-  if (testCatalogHoldPublishBarrier) throw new Error("Catalog Hold publish barrier is already armed");
-  let resolveEntered!: () => void;
-  let release!: () => void;
-  const entered = new Promise<void>((resolve) => { resolveEntered = resolve; });
-  const released = new Promise<void>((resolve) => { release = resolve; });
-  testCatalogHoldPublishBarrier = { entered, resolveEntered, released, release };
-  return { entered, release };
-}
-
-/** 测试专用：暂停新增 Key 的 Hold 回滚，制造回滚与新 Head 的竞争。 */
-export function __testBlockNextCatalogHoldRollback(): { entered: Promise<void>; release: () => void } {
-  if (testCatalogHoldRollbackBarrier) throw new Error("Catalog Hold rollback barrier is already armed");
-  let resolveEntered!: () => void;
-  let release!: () => void;
-  const entered = new Promise<void>((resolve) => { resolveEntered = resolve; });
-  const released = new Promise<void>((resolve) => { release = resolve; });
-  testCatalogHoldRollbackBarrier = { entered, resolveEntered, released, release };
-  return { entered, release };
-}
-
-/** 测试专用：暂停 Add/Delete 的 Owner 副作用，制造跨客户端事务窗口。 */
-export function __testBlockNextKeyLifecycleOwnerSideEffect(): { entered: Promise<void>; release: () => void } {
-  if (testKeyLifecycleOwnerBarrier) throw new Error("Key lifecycle Owner barrier is already armed");
-  let resolveEntered!: () => void;
-  let release!: () => void;
-  const entered = new Promise<void>((resolve) => { resolveEntered = resolve; });
-  const released = new Promise<void>((resolve) => { release = resolve; });
-  testKeyLifecycleOwnerBarrier = { entered, resolveEntered, released, release };
-  return { entered, release };
-}
-
-/** 测试专用：让下一次新 Key 回滚 Hold 的 CAS 失败。 */
-export function __testFailNextHoldRollbackCas(): void {
-  testFailNextHoldRollbackCas = true;
-}
-
-/** 测试专用：替换页面 Local bridge，覆盖候选 Root 和目录 CAS 的真实切桶流程。 */
-export function __testSetLocalStorageBridgeOverride(
-  bridge: ((input: LocalStorageBridgeRequest) => Promise<LocalStorageBridgeResponse>) | undefined,
-): void {
-  testLocalStorageBridgeOverride = bridge;
-  // 桥切换后不能复用上一条 session 缓存的真值。
-  invalidateWorkerSessionCache();
-}
-
-/** 测试专用：清空内存 Root，进入真正的“尚未初始化”首桶事务前置态。 */
-export function __testPrepareInitialSetup(): void {
-  if (platformRootStore) discardCurrentPlatformStorageBinding();
-  storageBootstrapState = null;
-  platformStorageReady = false;
-  storageStartupFailure = false;
-  catalogBindingDiscardDeferred = false;
-  storageHealthController.resetForTesting("unselected");
-  coordinatorState.vaultStatus = "uninitialized";
-  coordinatorState.activePublicKeyHex = undefined;
-  dropActivePrivateKey();
-  initialSetupRuntimeOwner = undefined;
-  initialSetupTransactions.clear();
-  initialSetupRecoveryRecords.clear();
-}
-
-/** 测试专用：验证不同 transactionId 不会因可见字符截断而共享桶命名空间。 */
-export function __testInitialSetupBucketId(transactionId: string): string {
-  return initialSetupBucketId(transactionId);
-}
-
-/**
- * 测试专用：模拟 Worker 真重启后的 session.open 冷启动。
- *
- * 页面只提供设备引导投影（revision=0）；本接缝通过真实
- * initializeCoordinator 执行 Storage-first 装配与 Vault metadata 恢复，
- * 不提前安装可写 Root。返回后重置 single-flight，避免污染后续用例。
- */
-export async function __testColdStartFromDeviceHint(
-  state: StorageBootstrapState | null,
-  peerId = "test",
-): Promise<void> {
-  coordinatorInitialization = undefined;
-  try {
-    await startCoordinatorInitialization(state ?? undefined, peerId);
-  } finally {
-    coordinatorInitialization = undefined;
-  }
-}
-
-/** 测试专用：把一个已加密目录条目安装成当前 Local catalog binding。 */
-export async function __testInstallCatalogLocalBinding(binding: StorageRuntimeBucketV1): Promise<void> {
-  if (!testLocalStorageBridgeOverride) throw new Error("Local storage bridge test override is not installed");
-  if (platformRootStore) discardCurrentPlatformStorageBinding();
-  storageBootstrapState = {
-    selectedBackend: binding.backend,
-    selectedProfileId: binding.bucketId,
-    selectedBucket: structuredClone(binding),
-  };
-  const provider = createLocalStorageBucketProvider({
-    bucketId: binding.bucketId,
-    bucketGeneration: 1,
-    bridge: requestLocalStorageBridge,
-  });
-  try {
-    await installPlatformStorage(provider, {
-      bucketId: binding.bucketId,
-      bucketGeneration: 1,
-      provider: binding.backend,
-    });
-  } catch (error) {
-    provider.dispose();
-    storageBootstrapState = null;
-    throw error;
-  }
-}
-
-/** 测试专用：释放 catalog binding，并恢复普通内存 Storage 夹具。 */
-export async function __testReleaseCatalogLocalBinding(): Promise<void> {
-  if (platformRootStore && platformBucketProvider?.provider === "local") discardCurrentPlatformStorageBinding();
-  storageBootstrapState = null;
-  testLocalStorageBridgeOverride = undefined;
-  ensureTestPlatformStorage();
-}
-
-/** 测试专用：调用真实 Worker 的跨桶切换编排。 */
-export async function __testSwitchCatalogBucket(
-  target: StorageRuntimeBucketV1,
-  password: string,
-  options: { keyPassword?: string; publicKeyHex?: string } = {},
-): Promise<StorageBucketSwitchResultV1> {
-  return switchSelectedRuntimeBucket(target, password, undefined, options);
-}
-
 /** Test-only seams for the worker-owned P2PKH provider state machine. */
 async function ensureTestP2pkhProviders(): Promise<void> {
   if (!p2pkhRegistry) await registerCoordinatorTasks();
@@ -17359,7 +14763,7 @@ export async function __testSeedP2pkhLocalSubmission(input: { ownerPublicKeyHex:
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   await repository.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never });
 }
 
@@ -17367,7 +14771,7 @@ export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHe
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   await repository.finishLocalSubmission({ submissionId: input.submissionId, localState: input.localState });
 }
 
@@ -17375,7 +14779,7 @@ export async function __testSetP2pkhChainResolution(input: { ownerPublicKeyHex: 
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   const row = (await repository.listLocalTransactions()).find((candidate) => candidate.id === input.submissionId);
   if (!row) throw new Error(`P2PKH submission not found: ${input.submissionId}`);
   const next = { ...row, chainResolution: input.chainResolution, ...(input.chainResolution === "chain-confirmed" ? { confirmedHistoryId: `${row.resourceId}:${row.txid}` } : { confirmedHistoryId: undefined }) };
@@ -17386,7 +14790,7 @@ export async function __testListP2pkhLocalTransactions(ownerPublicKeyHex: string
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   return repository.listLocalTransactions();
 }
 
@@ -17394,7 +14798,7 @@ export async function __testListP2pkhLocalInputClaims(ownerPublicKeyHex: string)
   const keyspace = createWorkerKeyspace();
   if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerFileStore("p2pkh", "")));
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   return repository.listLocalInputClaims();
 }
 
@@ -17430,7 +14834,6 @@ export function __testSetStorageRuntime(runtime: Partial<StorageRuntimeControlle
     coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId);
     platformStorageReady = true;
     storageStartupFailure = false;
-    storageHealthController.setStatus("ready");
   }
   if (!runtime && previousUnit) stopCoordinatorWorkerUnit(previousUnit.unitId, previousUnit.instanceId);
 }
@@ -17439,14 +14842,11 @@ export function __testSetStorageStartupFailure(enabled: boolean): void {
   testStorageStartupFailure = enabled;
   storageStartupFailure = enabled;
   if (enabled) {
-    storageHealthController.setStatus("degraded", "Storage startup failed");
     emitStorageState();
-  }
-  if (!enabled) {
+  } else {
     storageStartupFailure = false;
-    storageHealthController.resetForTesting("ready");
   }
-  if (enabled) { storageController = undefined; storageRepository = undefined; }
+  if (enabled) storageController = undefined;
 }
 
 export async function __testReleaseStorageRuntime(): Promise<void> {
@@ -17801,11 +15201,6 @@ export function __testSeedStorageRequest(requestId: string, actualPortId: string
   return controller.signal;
 }
 
-/** 测试专用：模拟 Provider 忽略 AbortSignal 的 owner-scoped 在途请求。 */
-export function __testSeedOwnerStorageRequest(ownerPublicKeyHex: string): () => void {
-  return beginOwnerStorageRequest(ownerPublicKeyHex);
-}
-
 export async function __testDispatchStorageCancel(targetRequestId: string, actualPortId: string): Promise<CoordinatorResponse> {
   return executeStorageRequest({ kind: "storage.cancel", clientId: actualPortId, requestId: crypto.randomUUID(), targetRequestId }, actualPortId);
 }
@@ -17869,7 +15264,7 @@ export function __testAttachPort(clientId: string, postMessage: (message: unknow
  * binding，不绕过 requestLocalStorageBridge 的 pending/drain 路径。
  */
 export function __testInstallCoordinatorBridgePeer(
-  peer: Pick<PeerController, "peerId" | "scope" | "capability">,
+  peer: Pick<PeerController, "peerId" | "scope">,
   binding: CoordinatorSessionBinding,
 ): void {
   configureCoordinatorPeer(peer as PeerController);
@@ -17927,14 +15322,6 @@ export async function __testHandleCoordinatorSessionRpc(
 /** 测试专用：等待真实 close handler 发起的 bridge drain 完成。 */
 export async function __testAwaitCoordinatorPeerDrain(peerId: string): Promise<void> {
   await coordinatorPeerState(peerId)?.drainPromise;
-}
-
-/** 测试专用：直接走 Worker 的 LocalStorage reverse capability 请求路径。 */
-export function __testRequestCoordinatorLocalStorageBridge(
-  input: LocalStorageBridgeRequest,
-  peerId?: string,
-): Promise<LocalStorageBridgeResponse> {
-  return requestLocalStorageBridge(input, peerId);
 }
 
 /** 测试专用：执行 session close 并等待 Worker 的 bridge drain。 */
@@ -18095,7 +15482,20 @@ export async function __testCancelByKey(publicKeyHex: string): Promise<boolean> 
 
 export function __testInvalidateSession(): void {
   coordinatorState.sessionEpoch = generateEpoch();
-  coordinatorState.keyspaceGeneration++;
+  workerKeyspaceRevision++;
+}
+
+/**
+ * 测试专用：推进钱包身份世代，等价于 reset 后重新初始化（或重新导入同一把
+ * 私钥）。这正是 `docs/存储.md` 要求的不变量：重置前的迟到结果不能写入
+ * 重新创建的钱包，即使导入的是同一把私钥。
+ *
+ * 只推进世代而不动 Root：栅栏必须由绑定栅栏本身拒绝迟到结果，而不是靠
+ * Root 被销毁这种副作用。
+ */
+export function __testAdvanceWalletGeneration(): void {
+  coordinatorState.walletGeneration = `test-wallet-generation-${crypto.randomUUID()}`;
+  workerKeyspaceRevision++;
 }
 
 export async function __testBackgroundRunNow(taskId: string): Promise<CoordinatorResponse> {
@@ -18139,92 +15539,47 @@ export async function __testReloadCoordinatorMeta(): Promise<void> {
   await loadCoordinatorMeta();
 }
 
-/** 测试专用：写入指定 Coordinator settings 快照值（模拟旧桶遗留数据）。 */
-export function __testSeedCoordinatorSettingsSnapshot(value: unknown): void {
-  ensureTestPlatformStorage();
-  const declaration = CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings;
-  const key = `snapshot:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`;
-  testCoordinatorSnapshots?.set(key, { revision: 1, value: structuredClone(value), writes: 1 });
+/** 测试专用：写入一份原始 settings 快照，用来构造旧格式兼容路径。 */
+export async function __testSeedCoordinatorSettingsSnapshot(settings: unknown): Promise<void> {
+  await persistCoordinatorSettings(structuredClone(settings) as CoordinatorSettingsSnapshot);
 }
 
 export function __testCoordinatorSnapshotMetrics(): Record<"settings" | "pluginIntent", { revision: number; writes: number }> {
-  ensureTestPlatformStorage();
-  const metric = (declaration: PluginStorageDeclaration) => {
-    const key = `snapshot:${declaration.moduleId}:${declaration.purposeId}:${declaration.schemaVersion}`;
-    const current = testCoordinatorSnapshots?.get(key);
-    return { revision: current?.revision ?? 0, writes: current?.writes ?? 0 };
-  };
   return {
-    settings: metric(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings),
-    pluginIntent: metric(CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent),
+    settings: snapshotWriteMetrics("coordinator.settings.persist"),
+    pluginIntent: snapshotWriteMetrics("coordinator.plugin-intent.persist"),
   };
-}
-
-/** 测试专用：读取 Worker 缓存/测试夹具中的浏览器 session（含 activeKey）。 */
-export function __testGetWorkerSession(): KeymasterSessionV1 | undefined {
-  const session = workerSessionCacheLoaded ? workerSessionCache : testWorkerSession;
-  return session ? structuredClone(session) : undefined;
 }
 
 export async function __testRestartWorker(): Promise<void> {
   __testResetState();
   await ensureCoordinatorAuthorityClaim();
+  // reset 只清内存里的 Root 指针，没有关闭上一代快照句柄；直接读取会撞上
+  // isCurrent 栅栏。重启语义要求旧句柄全部作废并从本地真值重新安装。
+  discardCurrentPlatformStorageBinding();
+  if (walletStore) {
+    const coldStart = await walletLifecycle?.coldStart();
+    if (coldStart?.state === "ready") await installPlatformStorage();
+  }
   await loadCoordinatorMeta();
-  // 冷启动状态只由 keys/ 文件决定：有 Key = locked,没有 = uninitialized。
-  const hasKeys = (await listPublicVaultKeys()).length > 0;
-  coordinatorState.vaultStatus = hasKeys ? "locked" : "uninitialized";
+  // 冷启动状态只由 meta 与固定 KeyHold 决定：ready = locked,uninitialized =
+  // 还没有 Key；corrupt/unsupported 不得静默变成空钱包。
+  const coldStart = await walletLifecycle?.coldStart();
+  coordinatorState.vaultStatus = coldStart?.state === "ready"
+    ? "locked"
+    : coldStart?.state === "uninitialized" ? "uninitialized" : "fatal";
   coordinatorState.activePublicKeyHex = undefined;
   dropActivePrivateKey();
-  if (hasKeys && !await reconcileSelectedPublicKey()) coordinatorState.vaultStatus = "uninitialized";
-}
-
-// ============================================================
-// 15. Backup Import Test Helpers
-// ============================================================
-
-/** 测试专用：删除 Vault 密钥材料。 */
-export async function __testDeleteVault(): Promise<void> {
-  resetVaultKeyIndexCache();
-  testVaultHoldBinding?.reset();
-  if (testVaultHoldBinding) configureVaultStorageRepository({ hold: testVaultHoldBinding.adapter });
-  // 重置内存状态
-  coordinatorState.vaultStatus = "uninitialized";
-  coordinatorState.activePublicKeyHex = undefined;
-  dropActivePrivateKey();
-  testHarnessActivationSecret = undefined;
-  coordinatorState.keyspaceGeneration = 0;
-  coordinatorState.autoLockDeadline = undefined;
-  if (autoLockTimer) clearTimeout(autoLockTimer);
-  autoLockTimer = undefined;
 }
 
 /** 测试专用：清空一个中央 namespace，不连接浏览器持久化 API。 */
 export async function __testClearCentralNamespace(moduleId: string): Promise<void> {
-  ensureTestPlatformStorage();
   if (!platformRootStore) throw new Error("Test platform storage is not ready");
   const normalizedModuleId = moduleId.toLowerCase();
   const declarations = Object.values(CENTRAL_STORAGE_DECLARATIONS).filter(
     (candidate) => candidate.moduleId === normalizedModuleId,
   );
   if (declarations.length === 0) throw new Error(`Unknown central module: ${moduleId}`);
-  // owner 声明（含 owner 文件模型）没有 bucket 级 store 可清；这里直接
-  // 清掉内存 owner 文件对象与 owner K-V 句柄，保持测试隔离。
-  if (declarations.some((declaration) => declaration.scope === "owner")) {
-    const stores = testPlatformStores;
-    if (stores) {
-      const suffix = `:${normalizedModuleId}:`;
-      for (const key of [...stores.keys()]) {
-        if (key.includes(suffix)) {
-          stores.get(key)?.close();
-          stores.delete(key);
-        }
-      }
-    }
-    for (const key of [...testOwnerFileObjects.keys()]) {
-      if (key.includes(`::${normalizedModuleId}::`)) testOwnerFileObjects.delete(key);
-    }
-    return;
-  }
   for (const declaration of declarations) {
     if (declaration.model !== "kv") continue;
     const store = await platformRootStore.openPlatformStore({ declaration });
@@ -18242,115 +15597,22 @@ export async function __testClearCentralNamespace(moduleId: string): Promise<voi
   }
 }
 
-/** 创建 Vault（空或带初始 key）。 */
-export async function __testCreateVault(password: string, options?: { label?: string; capabilities?: string[] }): Promise<{ publicKeyHex?: string }> {
-  const result = await executeVaultOperation({ type: "createVaultWithInitialKey", password, label: options?.label ?? "Key", capabilities: options?.capabilities ?? ["p2pkh"] });
-  testHarnessActivationSecret = password;
-  return result as { publicKeyHex?: string };
-}
-
-/** 创建没有 key 的 locked Vault。 */
-export async function __testCreateEmptyVault(password: string): Promise<void> {
-  await executeVaultOperation({ type: "createVault", password });
-}
-
-/** 测试专用：通过新的中央 Vault repository 读取公开状态。 */
-export async function __testListVaultKeys(): Promise<PublicVaultKeyRecord[]> {
-  return listPublicVaultKeys();
-}
-
-export async function __testGetVaultAuthMetadata(): Promise<undefined> {
-  return undefined;
-}
-
-
-/** 测试专用：清空 Hold/index 以覆盖“当前会话仍在线但没有 Key”的导入分支。 */
-export async function __testClearVaultHold(password: string): Promise<void> {
-  const current = await readVaultHoldSnapshot(password);
-  const hold = requireVaultHoldAdapter();
-  for (const key of current.keys) await hold.removeKey(key.publicKeyHex);
-  await publishVaultHoldSnapshot(password, [], [], expectedHoldHead(current.headEtag));
-}
-
 /** 为 Storage rotation 测试生成当前 Vault 可解开的 local secret。 */
 export async function __testSealLocalSecret(scope: string, plaintext: string): Promise<VaultSealedSecret> {
   const bytes = new TextEncoder().encode(plaintext);
   return await executeVaultOperation({ type: "sealLocalSecret", scope, plaintext: bytes }) as VaultSealedSecret;
 }
 
-/** 导入私钥。 */
-export async function __testImportPrivateKey(password: string, input: { label: string; material: { hex: string; wif?: string }; format: string; capabilities: string[]; source?: string }): Promise<{ publicKeyHex: string }> {
-  const result = await executeVaultOperation({ type: "importPrivateKey", password, ...input });
-  testHarnessActivationSecret = password;
-  return result as { publicKeyHex: string };
-}
-
-export async function __testSetActive(publicKeyHex: string): Promise<void> {
-  await executeVaultOperation({ type: "setActive", publicKeyHex }, testHarnessActivationSecret);
-}
-
 /** 测试专用：直接通过一个 Worker owner 文件 handle 验证当前 owner 可写。 */
 export async function __testOwnerStoragePut(path: string, bytes: Uint8Array): Promise<void> {
-  const store = createWorkerOwnerFileStore("p2pkh", "");
+  const store = createWorkerModuleFileStore("p2pkh", "");
   await store.put(path, bytes);
 }
 
-/** 测试专用：观测内存 Root 中指定 owner 是否仍有 namespace 句柄。 */
-export function __testOwnerStorageNamespaceExists(publicKeyHex: string): boolean {
-  const prefix = `owner:${publicKeyHex.toLowerCase()}:`;
-  return [...(testPlatformStores?.keys() ?? [])].some((key) => key.startsWith(prefix));
-}
-
-/** 导出备份。 */
-export async function __testExportKeyBackup(publicKeyHex: string): Promise<string> {
-  const result = await executeVaultOperation({ type: "exportKeyBackup", publicKeyHex });
-  return result as string;
-}
-
-/** Locked-state cold export through the persisted selected record. */
-export async function __testExportCurrentKeyBackup(): Promise<string> {
-  const result = await executeVaultOperation({ type: "exportCurrentKeyBackup" });
-  return result as string;
-}
-
-/** Test-only facade for the worker's atomic key deletion primitive. */
-export async function __testDeleteKeyMaterial(publicKeyHex: string, bucketPassword?: string): Promise<void> {
-  // 测试接缝也走与生产相同的 Journal + owner namespace 联合删除，
-  // 只放宽“必须 unlocked”的 RPC 前置条件以覆盖 locked cold path。
-  const key = await getPublicVaultKey(publicKeyHex);
-  if (!key) throw new Error("Key not found");
-  await executeKeyDeletion(publicKeyHex, key.label, bucketPassword);
-}
-
-/** Test-only invocation of the single empty-vault finalization operation. */
-export async function __testFinalizeEmptyVaultAfterLastKeyDeletion(): Promise<void> {
-  await executeVaultOperation({ type: "finalizeEmptyVaultAfterLastKeyDeletion" });
-}
-
-/** 导入备份。 */
-export async function __testImportKeyBackup(backup: string, sourcePassword: string, targetPassword: string): Promise<{ publicKeyHex: string }> {
-  // 测试接缝也必须经过真实 vault.operation RPC handler，覆盖请求 epoch、
-  // Coordinator authority 和最终 I/O lease；否则直接调用领域函数会把
-  // 生产入口上的接管竞态隐藏起来。
-  const response = await processRequest({
-    kind: "vault.operation",
-    clientId: "test",
-    requestId: `test-import-key-backup-${Date.now()}`,
-    operation: { type: "importKeyBackup", backup, sourcePassword, targetPassword },
-    expectedSessionEpoch: coordinatorState.sessionEpoch,
-  });
-  if (response.ack.status !== "ok") {
-    const message = "message" in response.ack ? response.ack.message : `Backup import failed: ${response.ack.status}`;
-    const error = new Error(message) as Error & { code?: string };
-    if ("code" in response.ack && typeof response.ack.code === "string") error.code = response.ack.code;
-    throw error;
-  }
-  return response.operationResult as { publicKeyHex: string };
-}
 
 /** 解锁 Vault。 */
-export async function __testUnlock(password: string, publicKeyHex?: string): Promise<CoordinatorResponse> {
-  const response = await processRequest({ kind: "unlock", password, publicKeyHex, requestId: `test-unlock-${Date.now()}`, clientId: "test", expectedSessionEpoch: coordinatorState.sessionEpoch });
+export async function __testUnlock(password: string): Promise<CoordinatorResponse> {
+  const response = await processRequest({ kind: "unlock", password, requestId: `test-unlock-${Date.now()}`, clientId: "test", expectedSessionEpoch: coordinatorState.sessionEpoch });
   if (response.ack.status === "accepted" || response.ack.status === "already-unlocked") testHarnessActivationSecret = password;
   return response;
 }
@@ -18373,4 +15635,110 @@ export function __testGetVaultStatus(): CoordinatorVaultStatus {
 /** 获取 active key。 */
 export function __testGetActivePublicKeyHex(): string | undefined {
   return coordinatorState.activePublicKeyHex;
+}
+
+/**
+ * 测试专用：以生产顺序装配单钱包本地存储（冷启动 -> Root -> runtime/任务）。
+ *
+ * 单元测试必须走真实 IndexedDB 与真实生命周期服务，才能覆盖「未初始化不装
+ * Root」「locked 门禁下仍装 runtime」这类冷启动断言。返回冷启动快照，让测试
+ * 能区分「无钱包」与「钱包数据不可用」。
+ */
+export async function __testBootstrapWalletStorage(): Promise<WalletColdStartSnapshot> {
+  await ensureCoordinatorAuthorityClaim();
+  await bootstrapWalletStorage();
+  const coldStart = storageColdStartState ?? await walletLifecycle?.coldStart();
+  coordinatorState.walletGeneration = coldStart?.state === "ready"
+    ? coldStart.meta?.walletGeneration ?? ""
+    : "";
+  if (coldStart?.state === "ready") {
+    // 已解锁的会话不能被幂等 bootstrap 顺带锁掉：调用方按需重复 bootstrap
+    // 是正常用法（例如先冷启动、再导入第二把 Key 观察拒绝路径），被拒绝的
+    // 请求不得留下「会话已撤销」的副作用。这里只在没有活动身份时回到锁定
+    // 投影，保持与生产冷启动一致的 fail closed 默认值。
+    if (coordinatorState.vaultStatus !== "unlocked") {
+      coordinatorState.vaultStatus = "locked";
+      coordinatorState.activePublicKeyHex = undefined;
+    }
+    await ensureStorageRuntime();
+    await ensureCoordinatorTasksRegistered();
+    for (const runtime of coordinatorState.taskRuntimes.values()) {
+      runtime.state = "blocked";
+      runtime.blockedReason = "Vault is locked";
+    }
+  } else if (coldStart?.state === "uninitialized") {
+    coordinatorState.walletGeneration = "";
+    coordinatorState.vaultStatus = "uninitialized";
+  }
+  storageStartupFailure = false;
+  emitStorageState();
+  return coldStart ?? { state: "uninitialized" };
+}
+
+/** 测试专用：读取当前冷启动结论；uninitialized 时也能在没有 Root 的情况下回答。 */
+export async function __testColdStart(): Promise<WalletColdStartSnapshot> {
+  return await (walletLifecycle ?? requireWalletLifecycle()).coldStart();
+}
+
+/**
+ * 测试专用：把新格式本地数据清空，并丢弃 Root 与唯一 Key 的运行绑定。
+ *
+ * `__testResetState()` 只清 Worker 内存。fake-indexeddb 的数据跨用例保留，
+ * 因此「未初始化冷启动」这类断言必须先清库，否则会继承上一个用例的
+ * `key.json` 与 meta。这里走生产的原子 reset，随后丢弃安装好的 Root、
+ * 生命周期服务与身份世代，让下一个用例真的从 uninitialized 开始。
+ */
+export async function __testResetWalletStore(): Promise<void> {
+  __testResetState();
+  const store = walletStore;
+  if (store) await store.resetWallet().catch(() => undefined);
+  discardCurrentPlatformStorageBinding();
+  walletStore = undefined;
+  walletKeys = undefined;
+  walletLifecycle = undefined;
+  storageColdStartState = undefined;
+  coordinatorState.walletGeneration = "";
+  coordinatorState.vaultStatus = "uninitialized";
+  coordinatorState.activePublicKeyHex = undefined;
+}
+
+/**
+ * 测试专用：直接写入/清除本地钱包记录，用来构造 corrupt 与 unsupported 冷启动。
+ *
+ * 省略某个字段表示「保持原样」。删除必须显式写 `delete: true`：把「没传」
+ * 解释成删除会让只想写坏 meta 的用例顺手删掉 key.json，构造出另一种损坏，
+ * 断言随之失去意义。
+ */
+export async function __testSeedWalletLocalRecords(input: {
+  /** meta 原文；省略表示不改动 `.keymaster/meta`。 */
+  meta?: string;
+  /** `key.json` 原文；省略表示不改动固定 KeyHold 路径。 */
+  keyHold?: string;
+  /** 删除固定 KeyHold 路径，构造「缺少唯一 KeyHold」。 */
+  deleteKeyHold?: boolean;
+}): Promise<void> {
+  const store = walletStore;
+  if (!store) throw new Error("Test wallet store is not ready");
+  if (input.meta !== undefined) {
+    await store.put(WALLET_META_PATH, new TextEncoder().encode(input.meta));
+  }
+  if (input.keyHold !== undefined) {
+    await store.put(WALLET_KEYHOLD_PATH, new TextEncoder().encode(input.keyHold));
+  }
+  if (input.deleteKeyHold) await store.delete(WALLET_KEYHOLD_PATH).catch(() => undefined);
+}
+
+/** 测试专用：列出本地钱包对象路径；用于断言根目录不含桶或 Owner 前缀。 */
+export async function __testListWalletObjectPaths(): Promise<string[]> {
+  const store = walletStore;
+  if (!store) throw new Error("Test wallet store is not ready");
+  const paths: string[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await store.list({ limit: WALLET_LIST_MAX_LIMIT, ...(cursor === undefined ? {} : { cursor }) });
+    paths.push(...page.objects.map((object) => object.path));
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  return paths.sort();
 }

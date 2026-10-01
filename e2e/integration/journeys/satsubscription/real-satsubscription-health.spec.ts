@@ -9,7 +9,7 @@ export const JOURNEY_METADATA = REAL_SATSUBSCRIPTION_HEALTH_SCENARIO;
  * 业务目标：真实资源运行开始前，维护者能确认 resource-state 只携带了
  * SatSubscription 的公开配置投影，并且不会把它误读成实时连接成功。
  *
- * 开始状态：resource-setup 已完成配置权限、S3 lease 和 testnet 资金门禁，
+ * 开始状态：resource-setup 已完成配置权限和 testnet 资金门禁，
  * 但没有由 Node 直接探测 Sat WebSocket/WebRTC，也尚未执行充值或收费业务。
  *
  * 成功标准：运行状态包含 setup 写入的 testnet 配置投影，两个探针标志明确为未验证。
@@ -18,7 +18,7 @@ export const JOURNEY_METADATA = REAL_SATSUBSCRIPTION_HEALTH_SCENARIO;
  * 和账本对账已完成”。
  *
  * 外部资源与收尾：只读取本轮 setup 写入的非敏感投影，不写服务端业务账本；
- * S3 lease 和其它真实资源由 resource-teardown 统一收尾。
+ * 其它真实资源由 resource-teardown 统一收尾。
  *
  * 覆盖需求：KM-SATSUB-001。
  */

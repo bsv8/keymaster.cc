@@ -57,24 +57,20 @@ function makeFakeKeyspace(): KeyspaceService {
   const listeners = new Set<(state: ActiveKeyState) => void>();
   let active: ActiveKeyState = { activePublicKeyHex: OWNER };
   return {
-    listKeys: async () => [],
-    getKey: async () => undefined,
     active: () => active,
-    selected: () => active.activePublicKeyHex,
-    setActive: async (publicKeyHex: string) => {
-      active = { activePublicKeyHex: publicKeyHex };
-      for (const listener of listeners) listener(active);
-    },
     requireActiveKey: () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" }),
     onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
       listeners.add(handler);
-      return () => listeners.delete(handler);
+      return () => {
+        listeners.delete(handler);
+      };
     },
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
-  };
+    // 单 Key 钱包没有切换入口；仅用于测试投影变化通知。
+    setActive: async (publicKeyHex: string) => {
+      active = { activePublicKeyHex: publicKeyHex };
+      for (const listener of listeners) listener(active);
+    }
+  } as unknown as KeyspaceService;
 }
 
 function makeFakeService(opts?: {

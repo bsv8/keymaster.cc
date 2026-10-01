@@ -87,7 +87,6 @@ test(JOURNEY_ID + "：BSV8 官方 msfiles 服务的四个文件按正确方式�
   try {
     await test.step("用户建立可恢复的 Local 身份", async () => {
       const ready = await initializeLocalUser(page, {
-        bucketLabel: "官方 MSFiles",
         keyLabel: "官方 MSFiles Key",
         password: USER_PASSWORD,
       });

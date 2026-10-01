@@ -19,8 +19,8 @@ export interface RuntimeIdentityTransition {
   ownerPublicKeyHex?: string | null;
   /** 当前会话世代；unlock、lock、切 Key、Worker 接管都会变化。 */
   sessionEpoch: string;
-  /** 当前存储桶世代；桶切换时重建 storage Scope 绑定实例。 */
-  bucketGeneration?: number;
+  /** 当前钱包身份世代；重置或初始化后变化，此时重建 storage Scope 绑定实例。 */
+  walletGeneration?: string;
 }
 
 /** Keymaster 平台定义的权限 allowlist；WebLoom 只把权限当开放字符串。 */

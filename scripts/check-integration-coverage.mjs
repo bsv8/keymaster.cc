@@ -24,7 +24,7 @@ const REQUIRED_FIELDS = [
   "cleanup_policy", "gate_level", "scenario_ids", "evidence", "status"
 ];
 const STATUS = new Set(["已覆盖", "部分覆盖", "未覆盖", "阻断"]);
-const LEVELS = new Set(["local-integration", "p2pkh", "satsubscription", "s3", "msfile", "bitfs", "deployment-acceptance"]);
+const LEVELS = new Set(["local-integration", "p2pkh", "satsubscription", "msfile", "bitfs", "deployment-acceptance"]);
 
 function fail(message) {
   throw new Error(`[integration-coverage] ${message}`);
@@ -173,7 +173,6 @@ const EXECUTION_PROFILES = [
   { name: "satsubscription", pattern: /^journeys\/satsubscription\/[^/]+\.spec\.ts$/u },
   { name: "deployment", pattern: /^(?:journeys\/deployment|gates\/deployment)\/[^/]+\.spec\.ts$/u },
   { name: "p2pkh", pattern: /^journeys\/p2pkh\/[^/]+\.spec\.ts$/u },
-  { name: "s3", pattern: /^(?:journeys\/s3\/[^/]+|gates\/s3\/[^/]+|resources\/s3-resource-(?:setup|teardown))\.spec\.ts$/u },
   { name: "resources", pattern: /^resources\/(?:resource-setup|resource-teardown|resource-availability)\.spec\.ts$/u },
 ];
 
@@ -232,7 +231,6 @@ function expectedScenarioLevel(relativeFile) {
   if (/^(?:journeys\/local|gates\/(?:local|dev-http|lifecycle))\//u.test(relativeFile)) return "local-integration";
   if (/^journeys\/p2pkh\//u.test(relativeFile)) return "p2pkh";
   if (/^journeys\/satsubscription\//u.test(relativeFile)) return "satsubscription";
-  if (/^(?:journeys\/s3|gates\/s3)\//u.test(relativeFile)) return "s3";
   if (/^(?:journeys\/msfile|gates\/msfile)\//u.test(relativeFile)) return "msfile";
   if (/^journeys\/bitfs\//u.test(relativeFile)) return "bitfs";
   if (/^(?:journeys\/deployment|gates\/deployment)\//u.test(relativeFile)) return "deployment-acceptance";
@@ -392,7 +390,7 @@ function generatedMarkdown(matrix) {
   }
   lines.push("", "## 资源与清理索引", "", "| 编号 | 资源声明 | 清理规则 |", "| --- | --- | --- |");
   for (const row of rows) lines.push(`| ${escapeCell(row.requirement_id)} | ${escapeCell(row.resource_profile)} | ${escapeCell(row.cleanup_policy)} |`);
-  lines.push("", "## 执行档边界", "", "| 执行档 | 目录 | 中文含义 |", "| --- | --- | --- |", "| local-core | `journeys/local`、`gates/local` | 普通本地浏览器 Journey 与本地 Gate |", "| dev-http | `gates/dev-http` | 非安全 HTTP 开发服务器回归 |", "| lifecycle | `gates/lifecycle` | 本地/registry Coordinator 生命周期验收 |", "| msfile | `journeys/msfile`、`gates/msfile` | 需要临时 Go supplier 的 MSFile 页面 Journey 与技术 Gate |", "| bitfs | `journeys/bitfs` | 双浏览器 BitFS 买卖与 testnet 购买验收 |", "| p2pkh | `journeys/p2pkh` | 链上资产与转账（真实 testnet 资金） |", "| satsubscription | `journeys/satsubscription` | SatSubscription 真实服务、页面与健康 Journey |", "| s3 | `journeys/s3`、`gates/s3`、`resources/s3-resource-*` | 真实 S3 桶存储 Journey 与资源安全 Gate |", "| resources | `resources/resource-setup`、`resource-teardown`、`resource-availability` | 受保护外部资源的准备、可用性与收尾 |", "| deployment | `journeys/deployment`、`gates/deployment` | 目标部署和不可逆 I/O 验收 |");
+  lines.push("", "## 执行档边界", "", "| 执行档 | 目录 | 中文含义 |", "| --- | --- | --- |", "| local-core | `journeys/local`、`gates/local` | 普通本地浏览器 Journey 与本地 Gate |", "| dev-http | `gates/dev-http` | 非安全 HTTP 开发服务器回归 |", "| lifecycle | `gates/lifecycle` | 本地/registry Coordinator 生命周期验收 |", "| msfile | `journeys/msfile`、`gates/msfile` | 需要临时 Go supplier 的 MSFile 页面 Journey 与技术 Gate |", "| bitfs | `journeys/bitfs` | 双浏览器 BitFS 买卖与 testnet 购买验收 |", "| p2pkh | `journeys/p2pkh` | 链上资产与转账（真实 testnet 资金） |", "| satsubscription | `journeys/satsubscription` | SatSubscription 真实服务、页面与健康 Journey |", "", "| resources | `resources/resource-setup`、`resource-teardown`、`resource-availability` | 受保护外部资源的准备、可用性与收尾 |", "| deployment | `journeys/deployment`、`gates/deployment` | 目标部署和不可逆 I/O 验收 |");
   return lines.join("\n");
 }
 

@@ -13,8 +13,6 @@ const FEE_RATE_SATOSHIS_PER_KB = 1;
 const SCENARIO_ID = "MANUAL-COLLECT-KEY01";
 
 function clearSecrets(config: LoadedE2EConfig | undefined): void {
-  config?.s3.secretAccessKey.clear();
-  config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
   config?.testnet.trackingKeyPrivateKeyHex.clear();

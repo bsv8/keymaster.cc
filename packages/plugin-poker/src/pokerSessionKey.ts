@@ -28,10 +28,9 @@ import type {
  * 行为约定（硬切换 002 + 硬切换 004 + 硬切换 005 收尾）：
  *   - vault 未解锁 → `{ kind: "vaultLocked" }`。
  *   - activePublicKeyHex 缺省 → `{ kind: "noActiveKey" }`。
- *   - 有 activePublicKeyHex：尝试 `keyspace.getKey(publicKeyHex)`；
- *       * 未找到 / 缺 publicKeyHex → `{ kind: "missing" }`。
- *       * 找到 → `{ kind: "ready", key }`（vault canonical store 主键
- *         = publicKeyHex，缺它即该记录已不存在于 canonical，按 missing 处理）。
+ *   - 有 activePublicKeyHex：它就是当前唯一 Key，读取其身份投影；
+ *       * 读取失败（锁定过渡态）→ `{ kind: "missing" }`。
+ *       * 读到 → `{ kind: "ready", key }`。
  *
  * 硬切换 002 收尾：identityStatus 字段已删除，per-key uninitialized / failed
  * 不再是合法稳态；本函数不再返回 `notReady` 这一 kind。
@@ -40,12 +39,18 @@ import type {
  */
 export async function resolvePokerSessionKey(
   vault: Pick<VaultService, "status">,
-  keyspace: Pick<KeyspaceService, "active" | "getKey">
+  keyspace: Pick<KeyspaceService, "active" | "requireActiveKey">
 ): Promise<PokerSessionKeyState> {
   if (vault.status() !== "unlocked") return { kind: "vaultLocked" };
   const active: ActiveKeyState = keyspace.active();
   if (!active.activePublicKeyHex) return { kind: "noActiveKey" };
-  const key: KeyIdentity | undefined = await keyspace.getKey(active.activePublicKeyHex);
+  // 单 Key 本地钱包：没有 getKey(hex)——当前唯一 Key 的身份就是它本身。
+  let key: KeyIdentity | undefined;
+  try {
+    key = keyspace.requireActiveKey();
+  } catch {
+    key = undefined;
+  }
   if (!key) return { kind: "missing" };
   // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
   // canonical store 主键 = publicKeyHex；vault 落库前已派生，缺 hex

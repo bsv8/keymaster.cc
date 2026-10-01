@@ -18,7 +18,11 @@ import {
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 import { createKeymasterPluginHost as createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import {
+  createInMemoryKeyValueStore,
+  createInMemoryModuleFileStore,
+  withTestStorageBinding,
+} from "@keymaster/runtime/storage";
 import {
   connectCoordinatorWithStartupRetry,
   applicationBootstrapPhaseForStorageReadiness,
@@ -71,22 +75,26 @@ function makeHost(registerImpl: (plugin: PluginManifest) => Promise<void>): Plug
 }
 
 function makeStorageBindingAuthority(): StorageBindingAuthority {
-  const open = (declaration: import("@keymaster/contracts").PluginStorageDeclaration, ownerPublicKeyHex = "") => createInMemoryKeyValueStore({
-    ...declaration,
-    ...(declaration.scope === "owner" ? { ownerPublicKeyHex } : {}),
-    bucketId: "test-memory",
-    bucketGeneration: 1
-  });
+  const open = (declaration: import("@keymaster/contracts").PluginStorageDeclaration) =>
+    createInMemoryKeyValueStore(withTestStorageBinding(declaration));
   return {
-    openOwnerFileStore: async () => ({
-      list: async () => ({ files: [] }),
-      get: async () => undefined,
-      put: async () => ({}),
-      delete: async () => undefined,
-    }),
-    openOwnerAppStore: async ({ declaration }) => open(declaration, "02" + "11".repeat(32)),
+    getActivePublicKeyHex: () => "02" + "11".repeat(32),
+    getWalletGeneration: () => "wallet-test",
+    openOwnerFileStore: async () => createInMemoryModuleFileStore(),
+    openOwnerAppStore: async ({ declaration }) => open(declaration),
     openPlatformStore: async ({ declaration }) => open(declaration),
-    deleteOwnerStorage: async () => undefined
+    clearStorageRoot: async () => undefined
+  };
+}
+
+/** 一份合法的平台 K-V 授权：坐标 + 三件世代身份。 */
+function platformGrant(platformGrantId: string) {
+  return {
+    platformGrantId,
+    walletGeneration: "wallet-1",
+    runGeneration: "run-1",
+    ...CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
+    sessionEpoch: "epoch" as const,
   };
 }
 
@@ -157,33 +165,43 @@ describe("bootstrapPlugins hang detection", () => {
 });
 
 describe("application bootstrap phase projection", () => {
-  it("keeps storage onboarding while storage readiness is still false", () => {
-    // session.state can report booting -> uninitialized before the user has
-    // selected a storage backend. That identity event must not advance the
-    // application gate past storage onboarding.
+  it("keeps storage onboarding until the wallet structure is complete enough to assemble", () => {
+    // 单 Key 之后没有远程连接与桶选择：storageReady 表示钱包结构已经完整到
+    // 可以继续装配，locked 也算 true——否则 locked 冷启动永远拿不到解锁入口。
     expect(applicationBootstrapPhaseForStorageReadiness(false)).toBe("storage-onboarding");
     expect(applicationBootstrapPhaseForStorageReadiness(true)).toBe("vault-selection");
   });
 
-  it("keeps an existing selected bucket on the authentication page", () => {
-    expect(applicationBootstrapPhaseForStorageStatus("unselected")).toBe("storage-onboarding");
-    expect(applicationBootstrapPhaseForStorageStatus("authentication")).toBe("storage-authentication");
+  it("lets both ready and locked reach vault-selection", () => {
     expect(applicationBootstrapPhaseForStorageStatus("ready")).toBe("vault-selection");
-    expect(applicationBootstrapPhaseForStorageReadiness(false, true)).toBe("storage-authentication");
+    expect(applicationBootstrapPhaseForStorageStatus("locked")).toBe("vault-selection");
+  });
+
+  it("keeps uninitialized on storage onboarding and fails closed on damaged storage", () => {
+    expect(applicationBootstrapPhaseForStorageStatus("uninitialized")).toBe("storage-onboarding");
+    // corrupt / unsupported / degraded 只能停在恢复门禁，绝不能被折算成
+    // 「还没初始化」而提供创建或导入入口去覆盖本地数据。
+    expect(applicationBootstrapPhaseForStorageStatus("corrupt")).toBe("storage-onboarding");
+    expect(applicationBootstrapPhaseForStorageStatus("unsupported")).toBe("storage-onboarding");
+    expect(applicationBootstrapPhaseForStorageStatus("degraded")).toBe("storage-onboarding");
   });
 });
 
 describe("Coordinator startup recovery", () => {
   it("only rebinds a platform grant before the remote operation reaches physical I/O", async () => {
-    const firstGrant = { platformGrantId: "platform-old", bucketId: "bucket", bucketGeneration: 1, ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, sessionEpoch: "epoch", clientId: "test" };
-    const secondGrant = { ...firstGrant, platformGrantId: "platform-new", bucketGeneration: 2 };
+    const firstGrant = platformGrant("platform-old");
+    // 钱包身份世代变化必须让旧 grant 立即失效，即使重新绑定的仍然是同一个钱包。
+    const secondGrant = { ...platformGrant("platform-new"), walletGeneration: "wallet-2" };
     const storageBindPlatform = vi.fn()
       .mockResolvedValueOnce({ status: "ok", value: firstGrant })
       .mockResolvedValueOnce({ status: "ok", value: secondGrant });
     const storagePlatformData = vi.fn()
-      .mockResolvedValueOnce({ status: "error", message: "Platform storage bucket generation changed" })
+      .mockResolvedValueOnce({ status: "error", message: "Platform storage wallet generation changed" })
       .mockResolvedValueOnce({ status: "ok", value: { revision: 1 } });
-    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads);
+    const store = createCoordinatorPlatformStore(
+      { storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient,
+      CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
+    );
 
     await expect(store.put("key", { ok: true })).resolves.toEqual({ revision: 1 });
     expect(storageBindPlatform).toHaveBeenCalledTimes(2);
@@ -191,10 +209,13 @@ describe("Coordinator startup recovery", () => {
   });
 
   it("does not replay a platform write after the final I/O boundary is stale", async () => {
-    const grant = { platformGrantId: "platform-one", bucketId: "bucket", bucketGeneration: 1, ...CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads, sessionEpoch: "epoch", clientId: "test" };
+    const grant = platformGrant("platform-one");
     const storageBindPlatform = vi.fn().mockResolvedValue({ status: "ok", value: grant });
     const storagePlatformData = vi.fn().mockResolvedValue({ status: "error", message: "Platform storage binding became stale" });
-    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, CENTRAL_STORAGE_DECLARATIONS.storageMultipartUploads);
+    const store = createCoordinatorPlatformStore(
+      { storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient,
+      CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
+    );
 
     await expect(store.put("key", { ok: true })).rejects.toThrow("Platform storage binding became stale");
     expect(storageBindPlatform).toHaveBeenCalledTimes(1);
@@ -220,7 +241,7 @@ describe("Coordinator startup recovery", () => {
       storageData: async () => ({ status: "ok", value: undefined }),
       storageCancel: async () => ({ status: "ok" }),
       storageSessionAbort: async () => ({ status: "ok" }),
-      refreshStorageBootstrap: vi.fn(async () => undefined)
+      storageClearRoot: async () => ({ status: "ok", value: undefined })
     });
 
     const publicClient = createPublicCoordinatorClient(rawClient);
@@ -232,13 +253,18 @@ describe("Coordinator startup recovery", () => {
 
     const storageClient = createStorageCoordinatorClient(rawClient);
     expect(storageClient.storageControl).toBeTypeOf("function");
-    expect(storageClient.refreshStorageBootstrap).toBeTypeOf("function");
+    expect(storageClient.storageCancel).toBeTypeOf("function");
+    expect(storageClient.storageSessionAbort).toBeTypeOf("function");
+    // Storage 插件不允许触碰私钥或 Vault 生命周期 RPC。
+    expect((storageClient as unknown as Record<string, unknown>).unlock).toBeUndefined();
     expect((storageClient as unknown as Record<string, unknown>).vaultOperation).toBeUndefined();
 
     const vaultClient = createVaultCoordinatorClient(rawClient);
     expect(vaultClient.vaultOperation).toBeTypeOf("function");
     expect(vaultClient.autolockSettingsUpdate).toBeTypeOf("function");
     expect((vaultClient as unknown as Record<string, unknown>).storageDeleteOwner).toBeUndefined();
+    expect((vaultClient as unknown as Record<string, unknown>).storageGrant).toBeUndefined();
+    expect((vaultClient as unknown as Record<string, unknown>).storageData).toBeUndefined();
   });
 
   it("disconnects a failed first attempt and retries once", async () => {
@@ -336,7 +362,7 @@ describe("web startup capability contract", () => {
         vaultStatus: "unlocked",
         sessionEpoch: "test-session:1",
         activePublicKeyHex: undefined,
-        storageBucketGeneration: 1,
+        walletGeneration: "wallet-1",
       }),
       subscribeTopic: () => () => undefined,
       getChainHeightSnapshot: () => ({ height: 0, network: "main", available: false, revision: 0 }),
@@ -365,21 +391,26 @@ describe("web startup capability contract", () => {
         vaultStatus: "unlocked",
         ownerPublicKeyHex: "02" + "11".repeat(32),
         sessionEpoch: "test-session:1",
-        bucketGeneration: 1,
+        walletGeneration: "wallet-1",
       }
     }));
     const stage = (name: string) => WEB_PLUGIN_CATALOG.filter((plugin) => plugin.bootstrapStage === name);
     host.validateManifestSet([...WEB_PLUGIN_CATALOG]);
 
-    // 按真实装配顺序推进四道门禁：Owner 插件（含 P2PKH）不能在
-    // Vault capability 建立前进入 Host；Connect 应用必须最后才注册。
+    // 按真实装配顺序推进四道门禁。
+    //
+    // 单 Key 之后第一阶段同时装 Storage、Vault 和 key-import：locked 冷启动
+    // 必须在这一阶段就拿到 Vault capability，否则根本没有解锁入口。因此这条
+    // 断言改的是「能力先后顺序」，不再是「Vault 要等第二个阶段」。
     await host.registerAll(stage("storage-onboarding"));
-    expect(host.getManifest("vault")).toBeUndefined();
+    expect(host.capabilities.has(VAULT_SERVICE_CAPABILITY)).toBe(true);
+    expect(host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY)).toBe(true);
+    expect(host.getManifest("key-import")).toBeDefined();
     expect(host.getManifest("p2pkh")).toBeUndefined();
 
     await host.registerAll(stage("vault-selection"));
-    expect(host.capabilities.has(VAULT_SERVICE_CAPABILITY)).toBe(true);
-    expect(host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY)).toBe(true);
+    expect(host.getManifest("protocol")).toBeDefined();
+    expect(host.getManifest("settings")).toBeDefined();
     expect(host.getManifest("p2pkh")).toBeUndefined();
 
     await host.registerAll(stage("owner-apps-ready"));

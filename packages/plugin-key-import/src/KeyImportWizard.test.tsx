@@ -249,7 +249,7 @@ describe("FirstTimeImportWizard - JSON 文本路径端到端", () => {
     // 下一步到 set-password 步
     await user.click(screen.getByRole("button", { name: /下一步|Next/ }));
     await waitFor(() => {
-      expect(screen.getByText(/设置本机系统锁屏密码|Set a local Vault password/)).toBeTruthy();
+      expect(screen.getByText(/设置 Key 密码|Set the Key password/)).toBeTruthy();
     });
     // 明文路径下不应显示 reuseNotice
     expect(screen.queryByText(/Reusing|将复用/)).toBeNull();

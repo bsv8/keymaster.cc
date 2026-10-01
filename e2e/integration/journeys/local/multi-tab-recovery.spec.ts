@@ -36,19 +36,18 @@ function captureTabBrowserErrors(
 }
 
 /**
- * 冷启动成功的业务结果是“停在安全入口”，不是进入首次初始化向导：
- * local 桶刷新后停在钱包锁定页（选 Key + 输入该 Key 密码即可恢复），
- * s3 等需要启动密码的形态才会停在存储认证页。两页出现前都不会安装
+ * 冷启动成功的业务结果是“停在安全入口”，不是进入首次创建钱包向导：
+ * 刷新后停在钱包锁定页（输入该 Key 密码即可恢复）。该页出现前不会安装
  * 可读 Vault Root，因此这里只断言安全入口和无 fatal。
  */
-async function expectStorageAuthenticationTab(page: Page, tabLabel: string): Promise<void> {
+async function expectWalletLockedTab(page: Page, tabLabel: string): Promise<void> {
   await expect(
-    page.getByRole("heading", { name: /Wallet locked|钱包已锁定|Storage authentication required|存储需要认证/ }),
-    `${tabLabel} 刷新后必须进入安全入口（钱包锁定/存储认证）`,
+    page.getByRole("heading", { name: /Wallet locked|钱包已锁定/ }),
+    `${tabLabel} 刷新后必须进入钱包锁定安全入口`,
   ).toBeVisible({ timeout: 20_000 });
   await expect(
-    page.getByRole("heading", { name: /Choose a bucket type|选择桶类型/ }),
-    `${tabLabel} 已有连接不能退回首次初始化向导`,
+    page.getByRole("heading", { name: /Create a wallet|创建钱包|Welcome|欢迎/ }),
+    `${tabLabel} 已有钱包不能退回首次创建钱包向导`,
   ).toHaveCount(0);
   await expect(
     page.locator("[data-fatal-crash]"),
@@ -79,37 +78,37 @@ async function attachTabDiagnostic(page: Page, testInfo: TestInfo, name: string)
  * 之前的 local-initialization-smoke 只有一个 Page，无法证明旧页面的
  * SharedWorker peer 在新页面接管时正确撤权，也无法捕获“第二页刷新后把
  * 第一页刷新拖入失败”的顺序性问题。本测试保留单页 smoke，同时覆盖
- * 两个标签页共享 Local catalog/Worker 的真实生命周期。
+ * 两个标签页共享同一份 IndexedDB 钱包与 Worker 的真实生命周期。
  */
-test(JOURNEY_ID + "：tab1→tab2→tab1 刷新后 Local 运行态可恢复", async ({ page, context }, testInfo) => {
+test(JOURNEY_ID + "：tab1→tab2→tab1 刷新后本地钱包运行态可恢复", async ({ page, context }, testInfo) => {
   test.setTimeout(90_000);
   const pageTwo = await context.newPage();
   const browserErrors = captureTabBrowserErrors(page, pageTwo, context);
   const password = "multi-tab-refresh-e2e-password-123";
 
   try {
-    const ready = await test.step("tab1 用户完成 Local 初始化", async () => initializeNewLocalUser(
+    const ready = await test.step("tab1 用户创建本地钱包", async () => initializeNewLocalUser(
       { page },
-      { bucketLabel: "Multi-tab refresh E2E bucket", keyLabel: "Multi-tab refresh E2E Key", password },
+      { keyLabel: "Multi-tab refresh E2E Key", password },
     ));
 
     await test.step("tab1 首次刷新后进入安全入口", async () => {
       await reloadAndAssertSameKey(page, ready.keyLabel);
-      await expectStorageAuthenticationTab(page, "tab1");
+      await expectWalletLockedTab(page, "tab1");
     });
 
-    await test.step("tab2 打开后刷新，仍使用同一个 Local catalog", async () => {
+    await test.step("tab2 打开后刷新，仍使用同一个本地钱包", async () => {
       await pageTwo.goto("/", { waitUntil: "domcontentloaded" });
       await expect(pageTwo).toHaveTitle("KeyMaster");
-      await expectStorageAuthenticationTab(pageTwo, "tab2 open");
+      await expectWalletLockedTab(pageTwo, "tab2 open");
 
       await pageTwo.reload({ waitUntil: "domcontentloaded" });
-      await expectStorageAuthenticationTab(pageTwo, "tab2");
+      await expectWalletLockedTab(pageTwo, "tab2");
     });
 
     await test.step("回到 tab1 再刷新，旧 tab2 peer 不得破坏恢复", async () => {
       await page.reload({ waitUntil: "domcontentloaded" });
-      await expectStorageAuthenticationTab(page, "tab1 second refresh");
+      await expectWalletLockedTab(page, "tab1 second refresh");
     });
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password]);

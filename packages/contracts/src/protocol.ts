@@ -37,14 +37,7 @@ import type {
   StorageListParams,
   StorageListResult,
   StoragePutParams,
-  StoragePutResult,
-  StorageUploadAbortParams,
-  StorageUploadAbortResult,
-  StorageUploadBeginParams,
-  StorageUploadBeginResult,
-  StorageUploadCompleteParams,
-  StorageUploadPartParams,
-  StorageUploadPartResult
+  StoragePutResult
 } from "./connectStorage.js";
 import type {
   MsFileBlockReadParams,
@@ -197,10 +190,6 @@ export const PROTOCOL_METHODS = [
   "storage.put",
   "storage.get",
   "storage.delete",
-  "storage.upload.begin",
-  "storage.upload.part",
-  "storage.upload.complete",
-  "storage.upload.abort",
   // MSFile 对外方法族，见 docs/MSFile.md。与 storage.* 同为
   // session-bound 且强制要求 verified App Identity；Seed/Block 显式区分，
   // Read 不接受 maxPriceSatoshis（金额只能来自 Keymaster 设置或用户确认）。
@@ -255,7 +244,6 @@ export type ProtocolErrorCode =
   | "storage_conflict"
   | "storage_forbidden"
   | "storage_limit_exceeded"
-  | "storage_invalid_upload"
   | "storage_provider_error"
   | "storage_identity_required"
   // MSFile 稳定公开错误码（施工单 §6）。supplier wire error code 保留为
@@ -1748,10 +1736,6 @@ export interface MethodParamsMap {
   "storage.put": StoragePutParams;
   "storage.get": StorageGetParams;
   "storage.delete": StorageDeleteParams;
-  "storage.upload.begin": StorageUploadBeginParams;
-  "storage.upload.part": StorageUploadPartParams;
-  "storage.upload.complete": StorageUploadCompleteParams;
-  "storage.upload.abort": StorageUploadAbortParams;
   "msfile.stat": MsFileStatParams;
   "msfile.seed.read": MsFileSeedReadParams;
   "msfile.block.read": MsFileBlockReadParams;
@@ -1784,10 +1768,6 @@ export interface MethodResultMap {
   "storage.put": StoragePutResult;
   "storage.get": StorageGetResult;
   "storage.delete": StorageDeleteResult;
-  "storage.upload.begin": StorageUploadBeginResult;
-  "storage.upload.part": StorageUploadPartResult;
-  "storage.upload.complete": StoragePutResult;
-  "storage.upload.abort": StorageUploadAbortResult;
   "msfile.stat": MsFileStatResult;
   "msfile.seed.read": MsFileReadResult;
   "msfile.block.read": MsFileReadResult;

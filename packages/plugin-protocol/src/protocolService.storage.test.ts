@@ -8,7 +8,7 @@ import type {
   StorageRuntimeController,
   VaultService
 } from "@keymaster/contracts";
-import { PROTOCOL_VERSION, STORAGE_PART_SIZE_BYTES } from "@keymaster/contracts";
+import { PROTOCOL_VERSION } from "@keymaster/contracts";
 import { ProtocolServiceImpl } from "./protocolService.js";
 
 const ORIGIN = "https://storage-app.example";
@@ -46,7 +46,7 @@ function makeVault(): VaultService {
   return {
     status: () => "unlocked",
     onLifecycleChange: () => () => undefined,
-    getLifecycleSnapshot: () => ({ status: "unlocked", activePublicKeyHex: OWNER_PUBLIC_KEY_HEX, sessionEpoch: "epoch", vaultLifecycleRevision: 1 }),
+    getLifecycleSnapshot: () => ({ status: "unlocked", activePublicKeyHex: OWNER_PUBLIC_KEY_HEX, sessionEpoch: "epoch", runGeneration: "run", vaultLifecycleRevision: 1 }),
     lock: vi.fn(async () => ({ status: "accepted" as const })),
     unlock: vi.fn(async () => ({ status: "accepted" as const })),
     verifyPassword: vi.fn(async () => undefined)
@@ -58,9 +58,11 @@ function makeStorage(overrides: Partial<StorageRuntimeController> = {}): Storage
   return {
     status: () => "ready",
     subscribe: () => () => undefined,
-    getProviderSummary: async () => null,
-    getProviderConnection: async () => null,
-    cancelProbe: () => undefined,
+    summary: async () => ({
+      publicKeyHex: OWNER_PUBLIC_KEY_HEX,
+      label: "Owner",
+      walletGeneration: "wallet-generation-1"
+    }),
     abortSession: vi.fn(async () => undefined),
     list: vi.fn(async () => emptyResult),
     createDirectory: vi.fn(),
@@ -68,10 +70,6 @@ function makeStorage(overrides: Partial<StorageRuntimeController> = {}): Storage
     put: vi.fn(),
     getRange: vi.fn(),
     delete: vi.fn(),
-    beginUpload: vi.fn(),
-    uploadPart: vi.fn(),
-    completeUpload: vi.fn(),
-    abortUpload: vi.fn(),
     ...overrides
   } as unknown as StorageRuntimeController;
 }
@@ -90,7 +88,8 @@ function makeHarness(storageController: StorageRuntimeController, session: Conne
   const opener = { closed: false } as Window;
   const results: ProtocolResultMessage[] = [];
   const keyspace = {
-    getKey: async (publicKeyHex: string) => publicKeyHex === OWNER_PUBLIC_KEY_HEX ? { publicKeyHex, label: "Owner", capabilities: [], createdAt: "now" } : undefined
+    active: () => ({ activePublicKeyHex: OWNER_PUBLIC_KEY_HEX }),
+    requireActiveKey: () => ({ publicKeyHex: OWNER_PUBLIC_KEY_HEX, label: "Owner", capabilities: [], createdAt: "now" })
   };
   const service = new ProtocolServiceImpl({
     vault: makeVault(),
@@ -195,11 +194,7 @@ describe("ProtocolService storage adapter", () => {
       deleteDirectory: vi.fn(async () => ({ path: "dir/", deleted: true })),
       put: vi.fn(async () => ({ path: "file", size: 1, updatedAt: 1 })),
       getRange: vi.fn(async () => ({ path: "file", content: { $type: "binary" as const, bytes: new Uint8Array([1]).buffer }, offset: 0, totalSize: 1, eof: true })),
-      delete: vi.fn(async () => ({ path: "file", deleted: true as const, updatedAt: 1 })),
-      beginUpload: vi.fn(async () => ({ uploadId: "upload", partSize: STORAGE_PART_SIZE_BYTES, maxParts: 10_000 as 10_000 })),
-      uploadPart: vi.fn(async () => ({ uploadId: "upload", partNumber: 1, size: 1 })),
-      completeUpload: vi.fn(async () => ({ path: "file", size: 1, updatedAt: 1 })),
-      abortUpload: vi.fn(async () => ({ uploadId: "upload", aborted: true as const }))
+      delete: vi.fn(async () => ({ path: "file", deleted: true as const, updatedAt: 1 }))
     });
     const harness = makeHarness(storage);
     harness.service.startSession();
@@ -209,11 +204,7 @@ describe("ProtocolService storage adapter", () => {
       storageMethodRequest("m-delete-dir", "storage.directory.delete", { path: "dir" }),
       storageMethodRequest("m-put", "storage.put", { path: "file", content: { $type: "binary", bytes: new Uint8Array([1]).buffer } }),
       storageMethodRequest("m-get", "storage.get", { path: "file" }),
-      storageMethodRequest("m-delete", "storage.delete", { path: "file" }),
-      storageMethodRequest("m-begin", "storage.upload.begin", { path: "file", size: 1 }),
-      storageMethodRequest("m-part", "storage.upload.part", { uploadId: "upload", partNumber: 1, content: { $type: "binary", bytes: new Uint8Array([1]).buffer } }),
-      storageMethodRequest("m-complete", "storage.upload.complete", { uploadId: "upload" }),
-      storageMethodRequest("m-abort", "storage.upload.abort", { uploadId: "upload" })
+      storageMethodRequest("m-delete", "storage.delete", { path: "file" })
     ];
     for (const request of requests) {
       await harness.service.handleMessage({ data: request, origin: ORIGIN, source: harness.opener } as MessageEvent);
@@ -225,10 +216,6 @@ describe("ProtocolService storage adapter", () => {
     expect(storage.put).toHaveBeenCalled();
     expect(storage.getRange).toHaveBeenCalled();
     expect(storage.delete).toHaveBeenCalled();
-    expect(storage.beginUpload).toHaveBeenCalled();
-    expect(storage.uploadPart).toHaveBeenCalled();
-    expect(storage.completeUpload).toHaveBeenCalled();
-    expect(storage.abortUpload).toHaveBeenCalled();
   });
 
   it("fails closed when the current Storage provider is unavailable", async () => {

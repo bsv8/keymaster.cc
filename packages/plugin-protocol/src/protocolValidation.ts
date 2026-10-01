@@ -45,10 +45,6 @@ import type {
   StorageGetParams,
   StorageListParams,
   StoragePutParams,
-  StorageUploadAbortParams,
-  StorageUploadBeginParams,
-  StorageUploadCompleteParams,
-  StorageUploadPartParams,
   MsFileBlockReadParams,
   MsFileSeedReadParams,
   MsFileStatParams,
@@ -59,7 +55,6 @@ import {
   PROTOCOL_VERSION,
   STORAGE_DEFAULT_LIST_LIMIT,
   STORAGE_MAX_LIST_LIMIT,
-  STORAGE_MAX_PARTS,
   STORAGE_MAX_PAYLOAD_BYTES,
   isValidMsFileSourceId,
 } from "@keymaster/contracts";
@@ -153,14 +148,6 @@ function validateParams(
       return validateStorageGetParams(raw);
     case "storage.delete":
       return validateStorageDeleteParams(raw);
-    case "storage.upload.begin":
-      return validateStorageUploadBeginParams(raw);
-    case "storage.upload.part":
-      return validateStorageUploadPartParams(raw);
-    case "storage.upload.complete":
-      return validateStorageUploadCompleteParams(raw);
-    case "storage.upload.abort":
-      return validateStorageUploadAbortParams(raw);
     // MSFile 方法族与 storage.* 同语义：
     // session-bound + verified App Identity；金额与身份字段一律禁止注入。
     case "msfile.stat":
@@ -567,38 +554,6 @@ function validateStorageDeleteParams(raw: unknown): StorageDeleteParams {
   const path = storagePath(obj.path, "path");
   if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
   return { connectSessionId, path };
-}
-
-function validateStorageUploadBeginParams(raw: unknown): StorageUploadBeginParams {
-  const obj = storageObject(raw, "storage.upload.begin params");
-  const connectSessionId = storageSession(obj, "storage.upload.begin");
-  const path = storagePath(obj.path, "path");
-  if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
-  const size = obj.size;
-  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) throw new ProtocolValidationError("invalid_request", "size must be a non-negative safe integer");
-  const contentType = obj.contentType === undefined ? undefined : expectString(obj.contentType, "contentType");
-  const overwrite = obj.overwrite === undefined ? undefined : obj.overwrite;
-  if (overwrite !== undefined && typeof overwrite !== "boolean") throw new ProtocolValidationError("invalid_request", "overwrite must be boolean");
-  return { connectSessionId, path, size, contentType, overwrite };
-}
-
-function validateStorageUploadPartParams(raw: unknown): StorageUploadPartParams {
-  const obj = storageObject(raw, "storage.upload.part params");
-  const connectSessionId = storageSession(obj, "storage.upload.part");
-  const uploadId = expectNonEmptyString(obj.uploadId, "uploadId");
-  const partNumber = obj.partNumber;
-  if (typeof partNumber !== "number" || !Number.isInteger(partNumber) || partNumber < 1 || partNumber > STORAGE_MAX_PARTS) throw new ProtocolValidationError("invalid_request", "partNumber must be between 1 and 10000");
-  return { connectSessionId, uploadId, partNumber, content: storageBinary(obj.content, "content") };
-}
-
-function validateStorageUploadCompleteParams(raw: unknown): StorageUploadCompleteParams {
-  const obj = storageObject(raw, "storage.upload.complete params");
-  return { connectSessionId: storageSession(obj, "storage.upload.complete"), uploadId: expectNonEmptyString(obj.uploadId, "uploadId") };
-}
-
-function validateStorageUploadAbortParams(raw: unknown): StorageUploadAbortParams {
-  const obj = storageObject(raw, "storage.upload.abort params");
-  return { connectSessionId: storageSession(obj, "storage.upload.abort"), uploadId: expectNonEmptyString(obj.uploadId, "uploadId") };
 }
 
 /* ============== msfile.* validation（现行说明：docs/MSFile.md） ============== */

@@ -27,8 +27,8 @@ export interface KeymasterScopeAttributes extends Readonly<Record<string, unknow
   readonly ownerPublicKeyHex?: string;
   /** owner/session 运行世代；变化时旧实例必须失效。 */
   readonly sessionEpoch?: string;
-  /** Storage bucket 运行世代；变化时旧 Storage 句柄必须失效。 */
-  readonly bucketGeneration?: number;
+  /** 钱包身份世代；变化时旧 Storage 句柄必须失效。 */
+  readonly walletGeneration?: string;
   /** Keymaster 权限策略或外部授权修订。 */
   readonly authorizationRevision?: number;
 }

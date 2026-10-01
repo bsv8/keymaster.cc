@@ -59,9 +59,6 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
       if (vault.status() !== "unlocked") {
         return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
       }
-      if (keyspace.isInitializing()) {
-        return { ready: false, reason: { key: "background.blocked.keyReady", fallback: "密钥空间初始化中" }, retryOn: "key-ready" };
-      }
       const state = keyspace.active();
       if (!Boolean(state.activePublicKeyHex)) {
         return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };

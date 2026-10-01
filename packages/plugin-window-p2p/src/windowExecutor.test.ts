@@ -22,7 +22,7 @@ function makeFixture(input: { attach?: (context: WindowP2pExecutorLaneContext) =
     vaultStatus: "unlocked" as const,
     activePublicKeyHex: OWNER_A,
     sessionEpoch: "epoch-a",
-    keyspaceGeneration: 1,
+    runGeneration: "run-a",
     taskSnapshots: [],
     scheduleSettings: { taskIntervals: {} }
   };

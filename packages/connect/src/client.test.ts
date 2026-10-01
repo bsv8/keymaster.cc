@@ -194,11 +194,7 @@ describe("KeymasterConnectClient", () => {
     ["storageDirectoryDelete", "storage.directory.delete"],
     ["storagePut", "storage.put"],
     ["storageGet", "storage.get"],
-    ["storageDelete", "storage.delete"],
-    ["storageUploadBegin", "storage.upload.begin"],
-    ["storageUploadPart", "storage.upload.part"],
-    ["storageUploadComplete", "storage.upload.complete"],
-    ["storageUploadAbort", "storage.upload.abort"]
+    ["storageDelete", "storage.delete"]
   ] as const)("forwards %s to %s", async (clientMethod, protocolMethod) => {
     const ctx = createHarness();
     const request = vi.spyOn(ctx.client, "request").mockResolvedValue(undefined as never);

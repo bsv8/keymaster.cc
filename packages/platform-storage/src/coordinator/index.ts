@@ -1,39 +1,26 @@
-// Worker-safe Storage runtime exports. Keep this entrypoint free of the page
-// manifest and React settings UI so it can be bundled into SharedWorker.
-export { createStorageRuntimeController, StorageRuntimeControllerImpl } from "../runtime/storageController.js";
-export { openMultipartUploadRepository, MULTIPART_REPOSITORY_NAME, MULTIPART_REPOSITORY_VERSION } from "../bootstrap/multipartUploadRepository.js";
-export type { MultipartUploadRepository, StoredMultipartUploadRecord } from "../bootstrap/multipartUploadRepository.js";
-export { StorageRuntimeError } from "../runtime/storageError.js";
-export { browserStorageLocks, browserStorageLockMode } from "../runtime/browserLocks.js";
-export { createS3BucketProvider } from "../bucket-providers/s3/s3BucketProvider.js";
-export { createS3BucketObjectStore } from "../bucket-providers/s3/s3BucketObjectStore.js";
-export { createBucketObjectStoreCapabilityState, setBucketObjectStoreCapabilityMode, commitAutomaticBucketObjectStoreCapability } from "../bucket-providers/bucketObjectStore.js";
-export type { BucketObjectStoreCapabilityState, BucketConditionalWriteMode } from "../bucket-providers/bucketObjectStore.js";
-export { createKeyValueStore } from "../kv-engine/partitionedKvEngine.js";
-export type { KeyValueStoreOptions, KeyValueStoreMaintenance, KeyValueGarbageCollectionResult } from "../kv-engine/partitionedKvEngine.js";
+// Worker-safe 存储运行时导出。
+//
+// 这个入口会被打进 SharedWorker，所以它不含页面 manifest 与 React 设置界面；
+// 旧实现里的 S3 客户端、桶 Provider 与 multipart 仓储已全部移除。
+export {
+  createIndexedDbWalletStore,
+  WALLET_DATABASE_NAME,
+  WALLET_OBJECT_STORE,
+  WALLET_INDEX_STORE,
+  WALLET_LIST_DEFAULT_LIMIT,
+  WALLET_LIST_MAX_LIMIT,
+  WALLET_SCHEMA_VERSION,
+} from "../local/indexedDbWalletStore.js";
+export type { WalletStore } from "../local/indexedDbWalletStore.js";
+export { createWalletKeyRepository, WALLET_KEYHOLD_FILE_PATH } from "../keys/walletKeyRepository.js";
+export type { UnlockedWalletKey, WalletKeyFile, WalletKeyRepository } from "../keys/walletKeyRepository.js";
+export { createWalletLifecycleService } from "../wallet/walletLifecycleService.js";
+export type { WalletLifecycleDeps } from "../wallet/walletLifecycleService.js";
+export { createKeyValueStore } from "../kv-engine/walletKvEngine.js";
+export { createModuleFileStore } from "../storage-access/wallet/moduleFileStore.js";
 export { createFixedCasSnapshotStore } from "../snapshot/fixedCasSnapshotStore.js";
 export { createPlatformRootStore } from "../storage-access/platform-root/platformRootStore.js";
-export { createStorageBindingAuthority } from "./storageBindingAuthority.js";
-export type { StorageBindingAuthorityOptions } from "./storageBindingAuthority.js";
-export { createOwnerAppStore } from "../storage-access/owner-app/ownerAppStore.js";
-export { createOwnerFileStore } from "../storage-access/owner-app/ownerFileStore.js";
-export type { OwnerFileStoreOptions } from "../storage-access/owner-app/ownerFileStore.js";
-export { createKeyHoldDocument, decryptKeyHoldDocument, parseKeyHoldDocument, serializeKeyHoldDocument } from "../keys/keyholdDocument.js";
-export { createKeyHoldRepository, KEYHOLD_KEYS_PREFIX, KEYHOLD_FILE_EXTENSION, KEYHOLD_LIST_LIMIT } from "../keys/keyholdRepository.js";
-export type { KeyHoldRepository, KeyHoldFile, KeyHoldFileSummary, KeyHoldInvalidFile, KeyHoldListResult, UnlockedKeyHold } from "../keys/keyholdRepository.js";
-export { defaultDeviceStorage, listStorageKeys } from "../bootstrap/deviceStorage.js";
-export type { DeviceLocalStorage } from "../bootstrap/deviceStorage.js";
-export { createDeviceRecordRepository } from "../bootstrap/deviceRecordRepository.js";
-export type { DeviceRecordEntry, DeviceRecordListResult, DeviceRecordRepository } from "../bootstrap/deviceRecordRepository.js";
-export { readSession, writeSession, ensureSessionId, updateSession, setActiveBucket, setActiveKey, setSessionKeyDerivation, clearSession, generateSessionId, isValidSessionId } from "../bootstrap/sessionRecord.js";
-export { encryptDeviceConfig, decryptDeviceConfig } from "../bootstrap/deviceConfigCrypto.js";
-export type { DeviceS3LocationV1 } from "../bootstrap/deviceConfigCrypto.js";
-export { createKeyLock } from "../bootstrap/keyLock.js";
-export type { KeyLock, KeyLockOptions, KeyLockReadResult } from "../bootstrap/keyLock.js";
-export { normalizeProviderConfig } from "../bucket-providers/s3/s3ClientFactory.js";
-export { StorageHealthController } from "../runtime/storageHealthController.js";
-export type { StorageHealthSnapshot, StorageProbeOptions } from "../runtime/storageHealthController.js";
-export { createLocalStorageBucketProvider } from "../bucket-providers/local/localStorageBucketProvider.js";
-export type { LocalStorageLike, LocalStorageBridgeRequest, LocalStorageBridgeResponse } from "../bucket-providers/local/localStorageBucketProvider.js";
-export { createIndexedDbBucketProvider, LOCAL_INDEXED_DATABASE_NAME, LOCAL_INDEXED_OBJECT_STORE, LOCAL_INDEXED_SCHEMA_VERSION } from "../bucket-providers/local/indexedDbBucketProvider.js";
-export type { IndexedDbBucketProviderOptions } from "../bucket-providers/local/indexedDbBucketProvider.js";
+export type { PlatformRootStoreOptions } from "../storage-access/platform-root/platformRootStore.js";
+export { createStorageRuntimeController, StorageRuntimeControllerImpl } from "../runtime/storageController.js";
+export type { StorageRuntimeControllerDeps } from "../runtime/storageController.js";
+export { StorageRuntimeError, storageErrorCode } from "../runtime/storageError.js";

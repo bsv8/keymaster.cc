@@ -5,14 +5,13 @@
 export { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "./manifest.js";
 export { AutoLockSettingsPage, AutoLockSettingsSection } from "./AutoLockSettingsSection.js";
 export { createAutoLockServiceCoordinator } from "./autoLockServiceCoordinator.js";
-export { VaultKeyExportModal } from "./VaultKeyExportModal.js";
-export { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
+export { VaultKeyHoldExportModal } from "./VaultKeyHoldExportModal.js";
+export { VaultResetWalletModal } from "./VaultResetWalletModal.js";
 export { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
-export { VaultKeyDeleteModal } from "./VaultKeyDeleteModal.js";
+
 export * from "./crypto.js";
 export { deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, bytesToHex, hexToBytes } from "./sessionCryptoCore.js";
 export { createSessionCryptoEngine } from "./sessionCryptoClient.js";
 export type { SessionCryptoClientOptions, SessionCryptoEngine } from "./sessionCryptoClient.js";
 export * from "./vaultCoordinator.js";
-export * from "./storage/vaultStorageRepository.js";
 export { createVaultLocalSecretService } from "./localSecretService.js";

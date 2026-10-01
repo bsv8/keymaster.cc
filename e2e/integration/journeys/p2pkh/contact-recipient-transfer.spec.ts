@@ -59,8 +59,6 @@ const STRANGER_PUBLIC_KEY_HEX = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce2
 const P2SH_ADDRESS = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy";
 
 function clearSecrets(config: LoadedE2EConfig | undefined): void {
-  config?.s3.secretAccessKey.clear();
-  config?.s3.sessionToken?.clear();
   config?.satsubscription.testnetApiAuthorization?.clear();
   config?.testnet.privateKeyHex.clear();
   config?.testnet.trackingKeyPrivateKeyHex.clear();
@@ -126,7 +124,7 @@ async function ensureUnlockedBusinessTab(page: import("@playwright/test").Page, 
     }, { timeout: 30_000, message: "第二 tab 必须进入可解锁或已解锁状态" }).not.toBe("pending");
 
     if (await locked.isVisible().catch(() => false)) {
-      // S3/跨 tab 的 session 切换窗口可能让第一次解锁点击落在旧状态上；
+      // 跨 tab 的 session 切换窗口可能让第一次解锁点击落在旧状态上；
       // 复用已有的最多一次重放逻辑，确认最终真的出现“锁定”按钮。
       await unlockWalletWithReplay(page, password);
     }
@@ -226,7 +224,6 @@ test(JOURNEY_ID + "：通讯录收款方与真实 testnet 多笔转账", async (
         `key01 地址 ${wallet!.address} 仍有可花费输出；请先运行 pnpm collect:testnet:key01，Journey 拒绝自动清理`,
       ).toBe(0);
       const ready = await initializeLocalUserWithImportedHexKey(page, {
-        bucketLabel: "真实 testnet 通讯录转账测试桶",
         keyLabel: "真实 testnet 通讯录转账 Key",
         password,
         privateKeyHex: wallet!.privateKey.read(),

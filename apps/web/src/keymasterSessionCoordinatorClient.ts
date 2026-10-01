@@ -35,12 +35,10 @@ import type {
   ChainHeightSnapshot,
   CoordinatorWorkerUnitStateEvent,
   CoordinatorSessionBinding,
-  StorageBootstrapState,
 } from "@keymaster/contracts";
 import {
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
-  COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY,
   emptyChainHeightSnapshot,
 } from "@keymaster/contracts";
 import type {
@@ -50,8 +48,6 @@ import type {
   CoordinatorRpcRequestFromClient,
   CoordinatorSessionOpenRequest,
   CoordinatorSessionCloseRequest,
-  CoordinatorLocalStorageRequest,
-  CoordinatorLocalStorageResponse,
   CoordinatorClientCommandRequest,
   P2pkhProviderConfig,
 } from "@keymaster/contracts";
@@ -59,15 +55,13 @@ import type {
   CoordinatorOwnerStorageData,
   CoordinatorPlatformStorageData,
   StorageBindingCoordinatorClient,
-  StorageOwnerGrant,
+  StorageBindingGrant,
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { parseCoordinatorResponseFor, toCoordinatorRpcRequest } from "@keymaster/contracts";
-import { createDeviceRecordRepository, createIndexedDbBucketProvider, defaultDeviceStorage, ensureSessionId, readSession, StorageRuntimeError, writeSession } from "@keymaster/platform-storage/coordinator";
 import {
   connectSharedWorker,
   definePlugin,
-  WebLoomError,
   type HandlerCallContext,
   type RuntimeDrainResult,
   type RuntimeHandle,
@@ -80,22 +74,12 @@ import {
 import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?sharedworker&url";
 
 /**
- * SharedWorker 的共享边界必须与设备引导 profile 一致：同一个 profile
- * 的多个 tab 继续共享 Coordinator，而不同的 Chromium storage context
- * 不能因为 URL 相同而互相污染首次初始化状态。
+ * SharedWorker 的共享边界现在是单一 Origin：一个 Origin 只保存一把钱包
+ * Key，页面不再读取任何本地引导 profile 目录或存储身份。
  */
 
 function isTestBuild(): boolean {
   return (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE === "test";
-}
-
-/** 为同一浏览器分配稳定的 SharedWorker 名称片段；身份来自 keymaster.session。 */
-async function ensureCoordinatorWorkerProfileId(): Promise<string | undefined> {
-  try {
-    return ensureSessionId(defaultDeviceStorage());
-  } catch {
-    return undefined;
-  }
 }
 
 // ============================================================
@@ -216,27 +200,6 @@ export function __testArmCoordinatorBridgeBarrier(): CoordinatorTestBridgeBarrie
   });
 }
 
-/** 页面对象字节 -> RPC DTO：TypedArray 的 DTO 校验是 O(bytes)，用 ArrayBuffer。 */
-function storageObjectDto(object: {
-  path: string;
-  bytes: Uint8Array;
-  size?: number;
-  etag?: string;
-  lastModified?: string;
-}, emptyBytes = new ArrayBuffer(0)): import("@keymaster/contracts").CoordinatorLocalStorageObject {
-  return {
-    path: object.path,
-    bytes: object.bytes.byteLength === 0
-      ? emptyBytes
-      : object.bytes.byteOffset === 0 && object.bytes.byteLength === object.bytes.buffer.byteLength
-        ? object.bytes.buffer as ArrayBuffer
-        : object.bytes.slice().buffer as ArrayBuffer,
-    ...(object.size === undefined ? {} : { size: object.size }),
-    ...(object.etag === undefined ? {} : { etag: object.etag }),
-    ...(object.lastModified === undefined ? {} : { lastModified: object.lastModified }),
-  };
-}
-
 // ============================================================
 // 2. Coordinator Client
 // ============================================================
@@ -247,8 +210,13 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private removeRuntimeSubscription: (() => void) | undefined;
   /** 页面 WindowApp 必须先于 SharedWorker 连接建立并保持到重连结束。 */
   private windowApp: WindowApp | null = null;
-  /** 页面端维护的当前 Coordinator 本地 I/O 租约；不进入任何 wire DTO。 */
-  private localStorageBridgeLease: { bucketId?: string; leaseId: string; bucketGeneration: number } | null = null;
+  /**
+   * 页面连接的纯内存 lease ID。
+   *
+   * 它只用于 session.open/session.close 的 WebLoom peer fencing，与任何存储
+   * 身份无关，也不进入持久介质。
+   */
+  private pageConnectionLeaseId: string | null = null;
   /** Worker 在 session.open 提交后发放的完整 peer/session fencing binding。 */
   private sessionBinding: CoordinatorSessionBinding | null = null;
   /** session.open 期间 Worker 可能先反向调用 Window bridge；先暂存其 binding。 */
@@ -278,8 +246,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private bootstrapSnapshotCache: CoordinatorBootstrapSnapshot = {
     authorityInstanceId: "authority:boot",
     sessionEpoch: "boot",
+    runGeneration: "boot",
     vaultStatus: "booting",
-    keyspaceGeneration: 0,
     taskSnapshots: [],
     scheduleSettings: { taskIntervals: {} },
     autoLockTimeoutMs: 5 * 60 * 1000,
@@ -345,25 +313,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   setWindowApp(app: WindowApp): void {
     if (this.windowApp && this.windowApp !== app) throw new Error("Coordinator client WindowApp cannot be replaced");
     this.windowApp = app;
-    this.beginLocalStorageLease();
-  }
-
-  /** 页面端只提供 Coordinator 所需的一个 typed LocalStorage capability。 */
-  createWindowStoragePlugin(): RuntimePluginDefinition {
-    const client = this;
-    return definePlugin({
-      id: "keymaster.coordinator.local-storage",
-      name: "Keymaster Coordinator LocalStorage",
-      runtime: "window-main",
-      unitId: "keymaster.coordinator.local-storage",
-      provides: [COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY],
-      startup: "required",
-      defaultEnabled: true,
-      canDisable: false,
-      setup(ctx) {
-        ctx.handle(COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY, (request, call) => client.handleLocalStorageCapabilityRequest(request, call));
-      },
-    });
   }
 
   // ============================================================
@@ -389,17 +338,14 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         this.workerUrl ?? coordinatorWorkerUrl,
         typeof globalThis.location?.href === "string" ? globalThis.location.href : import.meta.url,
       );
-      const workerProfileId = !this.workerName
-        ? await ensureCoordinatorWorkerProfileId()
-        : undefined;
+      // SharedWorker 名称只表达同一 Origin 内的共享范围；它不承载任何
+      // 钱包或存储身份，因此必须跨 tab、跨刷新保持稳定。
       const workerName = this.workerName ?? (!this.workerUrl
-        ? `${isDevelopment ? "keymaster-coordinator-dev" : "keymaster-coordinator"}:${workerProfileId ?? "default"}`
+        ? (isDevelopment ? "keymaster-coordinator-dev" : "keymaster-coordinator")
         : undefined);
       // 页面在场锁要在连接会话之前取得，且同一 profile 跨刷新/tab 稳定；
       // 不使用 workerUrl 作为锁名，避免旧/新构建各自误判为唯一页面。
-      const pagePresenceNamespace = workerProfileId
-        ? `profile:${workerProfileId}`
-        : `origin:${globalThis.location?.origin ?? "unknown"}`;
+      const pagePresenceNamespace = `origin:${globalThis.location?.origin ?? "unknown"}`;
       await this.beginPagePresence(pagePresenceNamespace);
       let runtimePublishedReady = false;
       const runtime = connectSharedWorker({
@@ -409,7 +355,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         defaultCallTimeoutMs: this.requestTimeoutMs,
         client: {
           app: windowApp,
-          expose: [COORDINATOR_LOCAL_STORAGE_RPC_CAPABILITY],
         },
       });
       this.runtimeHandle = runtime;
@@ -426,7 +371,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         }
       });
 
-      this.beginLocalStorageLease();
       this.isConnected = true;
       await this.sendHello();
       await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
@@ -550,7 +494,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
     this.isConnected = false;
     this.connectionState = this.shutdownRequested ? "fatal" : "recoverable";
-    this.disposeLocalStorageBridge();
+    this.disposePageConnectionLease();
     this.resetDisconnectedState();
 
     if (this.reconnectTimer) {
@@ -606,16 +550,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           ? { coordinatorWorkerUnits: snapshot.coordinatorWorkerUnits.map((unit) => ({ ...unit, serviceIds: [...unit.serviceIds], taskIds: [...unit.taskIds] })) }
           : {}),
       };
-      if (this.localStorageBridgeLease) {
-        // 首个桶刚由页面提交时，Worker 的快照还没有 Root，因此 storage
-        // 事件中的空 bucket 不能清掉页面刚从目录建立的临时租约。
-        if (snapshot.storageBucketId) {
-          this.localStorageBridgeLease.bucketId = snapshot.storageBucketId;
-          this.localStorageBridgeLease.bucketGeneration = snapshot.storageBucketGeneration ?? 0;
-        } else if (!this.localStorageBridgeLease.bucketId) {
-          this.localStorageBridgeLease.bucketGeneration = 0;
-        }
-      }
       if (snapshot.pluginIntent) this.cachePluginIntentSnapshot(snapshot.pluginIntent, snapshot.authorityInstanceId);
     }
   }
@@ -675,7 +609,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (runtime) void runtime.dispose(message);
     this.topicSubscription?.cancel(message);
     this.topicSubscription = null;
-    this.disposeLocalStorageBridge();
+    this.disposePageConnectionLease();
     this.resetDisconnectedState();
     this.clearDisconnectedAuthorityRecovery();
     if (!this.shutdownRequested) this.scheduleReconnect();
@@ -707,180 +641,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   // 5. RPC Methods
   // ============================================================
 
-  private disposeLocalStorageBridge(): void {
-    this.localStorageBridgeLease = null;
+  private disposePageConnectionLease(): void {
+    this.pageConnectionLeaseId = null;
     this.sessionBinding = null;
     this.pendingSessionBinding = null;
-  }
-
-  /** 从 keymaster.session + keymaster.device.<ID> 组装 hello 绑定；不完整时返回 undefined。 */
-  private readStorageBootstrapBinding(): StorageBootstrapState | undefined {
-    try {
-      const storage = defaultDeviceStorage();
-      const session = readSession(storage);
-      if (!session?.activeBucketId) return undefined;
-      const record = createDeviceRecordRepository(storage).read(session.activeBucketId);
-      if (!record) return undefined;
-      return {
-        selectedBackend: record.location.providerId,
-        selectedProfileId: session.activeBucketId,
-        selectedBucket: {
-          bucketId: session.activeBucketId,
-          backend: record.location.providerId,
-          ...(record.displayName === undefined ? {} : { label: record.displayName }),
-          deviceRecord: record,
-          ...(session.keyDerivation === undefined ? {} : { keyDerivation: session.keyDerivation }),
-        },
-      };
-    } catch {
-      return undefined;
-    }
-  }
-
-  private beginLocalStorageLease(): void {
-    if (this.localStorageBridgeLease) return;
-    let selectedBucketId: string | undefined;
-    try {
-      selectedBucketId = readSession(defaultDeviceStorage())?.activeBucketId;
-    } catch {
-      // 目录错误由实际 I/O 返回；这里不能把它伪装成一个合法桶。
-    }
-    this.localStorageBridgeLease = {
-      ...(selectedBucketId ? { bucketId: selectedBucketId } : {}),
-      leaseId: `local-storage-${randomIdentifierSuffix()}`,
-      bucketGeneration: this.bootstrapSnapshotCache.storageBucketGeneration ?? (selectedBucketId ? 1 : 0)
-    };
-  }
-
-  private async handleLocalStorageCapabilityRequest(
-    request: CoordinatorLocalStorageRequest,
-    call: HandlerCallContext,
-  ): Promise<CoordinatorLocalStorageResponse> {
-    const signal = call.signal;
-    const lease = this.localStorageBridgeLease;
-    if (!lease) throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is unavailable");
-    const requestBinding = request.peerGeneration !== undefined
-      && request.sessionEpoch !== undefined
-      && request.leaseId !== undefined
-      ? {
-          peerGeneration: request.peerGeneration,
-          sessionEpoch: request.sessionEpoch,
-          leaseId: request.leaseId,
-        }
-      : undefined;
-    if (!requestBinding
-      || !Number.isSafeInteger(requestBinding.peerGeneration)
-      || requestBinding.peerGeneration < 1
-      || requestBinding.sessionEpoch.length === 0
-      || requestBinding.leaseId.length === 0) {
-      throw new WebLoomError("service_reference_stale", "Local storage bridge request has no complete session binding", "execute");
-    }
-    if (requestBinding.leaseId !== lease.leaseId) {
-      throw new WebLoomError("service_reference_stale", "Local storage bridge lease is stale", "execute");
-    }
-    if (this.sessionBinding && !sameCoordinatorSessionBinding(this.sessionBinding, requestBinding)) {
-      throw new WebLoomError("service_reference_stale", "Local storage bridge session binding is stale", "execute");
-    }
-    if (this.sessionBinding === null) {
-      if (this.pendingSessionBinding && !sameCoordinatorSessionBinding(this.pendingSessionBinding, requestBinding)) {
-        throw new WebLoomError("service_reference_stale", "Local storage bridge pending binding changed", "execute");
-      }
-      this.pendingSessionBinding ??= requestBinding;
-    }
-    const bridgeBarrier = coordinatorTestBridgeBarrier;
-    if (bridgeBarrier) {
-      // Consume before awaiting so a second reverse call cannot join this
-      // deliberately held request. The test release is the only completion
-      // path; this models an AbortSignal-ignoring late browser callback.
-      coordinatorTestBridgeBarrier = undefined;
-      bridgeBarrier.start();
-      await bridgeBarrier.released;
-    }
-    try {
-      if (request.type === "device-record-list"
-        || request.type === "device-record-get"
-        || request.type === "device-record-put"
-        || request.type === "device-record-delete"
-        || request.type === "session-read"
-        || request.type === "session-write") {
-        if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-        const storage = defaultDeviceStorage();
-        if (request.type === "session-read") {
-          const session = readSession(storage);
-          return session ? { type: "session", session } : { type: "session" };
-        }
-        if (request.type === "session-write") {
-          writeSession(request.session, storage);
-          return { type: "void" };
-        }
-        const repository = createDeviceRecordRepository(storage);
-        if (request.type === "device-record-list") {
-          const result = repository.list();
-          return { type: "device-records", entries: result.entries, invalidKeys: result.invalidKeys };
-        }
-        if (request.type === "device-record-get") {
-          const deviceRecord = repository.read(request.remoteStorageId);
-          return deviceRecord ? { type: "device-record", record: deviceRecord } : { type: "device-record" };
-        }
-        if (request.type === "device-record-put") {
-          repository.put(request.remoteStorageId, request.record, request.replace === undefined ? {} : { replace: request.replace });
-          return { type: "void" };
-        }
-        repository.delete(request.remoteStorageId);
-        return { type: "void" };
-      }
-      const isObjectRequest = request.type === "get"
-        || request.type === "list"
-        || request.type === "put"
-        || request.type === "delete";
-      if (!isObjectRequest) throw new StorageRuntimeError("storage_provider_error", "Local storage bridge request is invalid");
-      // 初始设置/连接阶段 session 还没有 active 桶(lease.bucketId 为空)：
-      // 此时 Worker 只能按未选桶的租约访问它正在创建/探测的命名空间。
-      // 一旦 session 选中了桶,必须严格匹配,拒绝旧租约访问别的桶。
-      if (lease.bucketId !== undefined && request.bucketId !== lease.bucketId) {
-        throw new StorageRuntimeError("storage_forbidden", "Local storage bridge lease is no longer current");
-      }
-      // Local 桶的物理介质是 IndexedDB；页面是唯一执行点，Worker 只持
-      // 有受 lease 保护的桥。设备记录与 session 仍走上面的 localStorage
-      // 引导分支，两者不混用同一介质。
-      const provider = createIndexedDbBucketProvider({ bucketId: request.bucketId });
-      let response: CoordinatorLocalStorageResponse;
-      try {
-        if (request.type === "get") {
-          const object = await provider.get(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal });
-          response = object === undefined ? { type: "object" } : { type: "object", object: storageObjectDto(object) };
-        } else if (request.type === "list") {
-          const page = await provider.list({ prefix: request.prefix, cursor: request.cursor, limit: request.limit, signal });
-          const emptyListBytes = new ArrayBuffer(0);
-          response = {
-            type: "list",
-            objects: page.objects.map((object) => storageObjectDto(object, emptyListBytes)),
-            ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
-          };
-        } else if (request.type === "put") {
-          response = { type: "write", ...(await provider.put(request.path, new Uint8Array(request.bytes), { ...request.condition, signal })) };
-        } else {
-          await provider.delete(request.path, { ...(request.ifMatch ? { ifMatch: request.ifMatch } : {}), signal });
-          response = { type: "void" };
-        }
-      } finally {
-        provider.dispose();
-      }
-      if (signal.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage operation was cancelled");
-      return response;
-    } catch (error) {
-      // WebLoom 只会在线上传递 WebLoomError.code；直接抛 StorageRuntimeError
-      // 会退化成 handler_failed，使 Worker 丢失 storage_conflict 等 CAS 语义。
-      if (error instanceof WebLoomError) throw error;
-      if (error instanceof StorageRuntimeError) {
-        throw new WebLoomError(error.code, "Local storage capability operation failed", "execute");
-      }
-      throw new StorageRuntimeError("storage_provider_error", error instanceof Error ? error.message : "Local storage bridge request failed");
-    } finally {
-      // 这个 resolve 只用于隔离 lifecycle E2E：它位于 handler 的 finally，
-      // 因而比 release() 更强，证明迟到请求已经完成页面侧真实清理。
-      bridgeBarrier?.complete();
-    }
   }
 
   /** 当前 WebLoom SharedWorker 句柄；重连后旧句柄永不复用。 */
@@ -905,9 +669,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   private closeSessionBestEffort(runtime: RuntimeHandle | null): void {
-    const lease = this.localStorageBridgeLease;
+    const leaseId = this.pageConnectionLeaseId;
     const binding = this.sessionBinding;
-    if (!runtime || !lease || !binding || binding.leaseId !== lease.leaseId) return;
+    if (!runtime || !leaseId || !binding || binding.leaseId !== leaseId) return;
     const request: CoordinatorSessionCloseRequest = {
       kind: "session.close",
       peerGeneration: binding.peerGeneration,
@@ -928,20 +692,20 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   private async sendHello(): Promise<void> {
-    const lease = this.localStorageBridgeLease;
-    if (!lease) throw coordinatorSendError("Coordinator LocalStorage lease is unavailable", "not-dispatched");
-    const storageBootstrapState = this.readStorageBootstrapBinding();
+    // 每次连接尝试换一个 lease ID：它只 fencing 本页面的 WebLoom peer，
+    // 不携带也不派生任何存储身份。
+    const leaseId = `page-${randomIdentifierSuffix()}`;
+    this.pageConnectionLeaseId = leaseId;
     const request: CoordinatorSessionOpenRequest = {
       kind: "session.open",
-      leaseId: lease.leaseId,
-      ...(storageBootstrapState === undefined ? {} : { storageBootstrapState }),
+      leaseId,
     };
     const response = await this.sendTypedRequest(request);
     if (response.ack.status !== "ok") {
       throw coordinatorSendError("Coordinator session.open was not accepted", "unknown");
     }
     const binding = requiredCoordinatorOperationResult(response, "session.open").sessionBinding;
-    if (!binding || binding.leaseId !== lease.leaseId) {
+    if (!binding || binding.leaseId !== leaseId) {
       this.connectionState = "fatal";
       throw coordinatorSendError("Coordinator session.open returned an invalid session binding", "unknown");
     }
@@ -978,14 +742,13 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   async unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult> {
-    const request: CoordinatorClientRequest = {
+    const request = {
       kind: "unlock",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       password,
-      publicKeyHex,
       expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
-    };
+    } as const;
     return this.requestCommand(request);
   }
 
@@ -994,18 +757,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       kind: "lock",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
-      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
-    };
-    return this.requestCommand(request);
-  }
-
-  async activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult> {
-    const request: CoordinatorClientRequest = {
-      kind: "activate-key",
-      clientId: this.clientId,
-      requestId: this.generateRequestId(),
-      password,
-      publicKeyHex,
       expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     return this.requestCommand(request);
@@ -1078,28 +829,14 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   async storageControl(control: CoordinatorStorageControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     const request = { kind: "storage.control" as const, clientId: this.clientId, requestId: this.generateRequestId(), control, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    // 首次初始化/接入已有桶包含 KDF、远端正则化和多轮条件写；这些事务的
-    // 时长由 Worker 的恢复记录与页面重查保证，不能被通用 RPC 超时中断。
-    const longRunning = control.type === "initial-setup"
-      || control.type === "connect-existing-remote"
-      || control.type === "initial-setup-cleanup"
-      || control.type === "unlock-bucket"
-      || control.type === "switch-bucket";
+    // 首次 initialize 与 unlock 包含 PBKDF2 派生和一次 IndexedDB 事务提交，
+    // 时长由 Worker 的失败结果与事务原子性保证，不被通用 RPC 超时中断。
+    const longRunning = control.type === "initialize" || control.type === "unlock" || control.type === "reset-wallet";
     try {
       const response = await this.sendRequest(request, longRunning ? 120_000 : undefined);
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-  }
-
-  /**
-   * 首个桶由页面完成“快照先落地、目录后提交”后，SharedWorker 仍持有启动时
-   * 的未选择状态。重发 hello 只替换公开桶身份与 Local I/O bridge，不重启
-   * Worker，也不传递密码；随后的 unlock-bucket 才携带一次性密码。
-   */
-  async refreshStorageBootstrap(): Promise<void> {
-    this.beginLocalStorageLease();
-    await this.sendHello();
   }
 
   async storageGrant(context: import("@keymaster/contracts").OwnerAppStorageGrant): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
@@ -1134,7 +871,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
-  async storageBindOwner(input: { pluginId: string; declaration: import("@keymaster/contracts").PluginStorageDeclaration }): Promise<import("@keymaster/contracts").CoordinatorValueResult<StorageOwnerGrant>> {
+  async storageBindOwner(input: { pluginId: string; declaration: import("@keymaster/contracts").PluginStorageDeclaration }): Promise<import("@keymaster/contracts").CoordinatorValueResult<StorageBindingGrant>> {
     const request = { kind: "storage.owner.bind" as const, clientId: this.clientId, requestId: this.generateRequestId(), ...input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
       const response = await this.sendRequest(request);
@@ -1165,8 +902,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async storageDeleteOwner(ownerPublicKeyHex: string): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
-    const request = { kind: "storage.owner.delete" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+  async storageClearRoot(input: { declaration: import("@keymaster/contracts").PluginStorageDeclaration; appStorageName?: string }): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "storage.clear.root" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
       const response = await this.sendRequest(request);
       if (response.ack.status !== "ok") return response.ack;
@@ -1526,7 +1263,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (runtime) void runtime.dispose(`Coordinator request failed: ${kind}`);
     this.topicSubscription?.cancel(`Coordinator request failed: ${kind}`);
     this.topicSubscription = null;
-    this.disposeLocalStorageBridge();
+    this.disposePageConnectionLease();
     this.resetDisconnectedState();
     // A transport failure is not evidence that the currently cached Worker
     // still owns the old authority. Keep ordinary non-sensitive continuity,
@@ -1631,10 +1368,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.bootstrapSnapshotCache.activePublicKeyHex;
   }
 
-  getKeyspaceGeneration(): number {
-    return this.bootstrapSnapshotCache.keyspaceGeneration;
-  }
-
   getTaskSnapshots(): CoordinatorTaskSnapshot[] {
     return [...this.bootstrapSnapshotCache.taskSnapshots];
   }
@@ -1716,8 +1449,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
-        selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
-        keyspaceGeneration: event.keyspaceGeneration,
+        // session.state 是权威全量投影：运行世代与钱包身份世代都随它一起推进。
+        // 漏掉这两项会让页面继续按旧世代签发存储授权，reset 之后仍写入旧钱包。
+        runGeneration: event.runGeneration,
+        walletGeneration: event.walletGeneration,
         authorityRecovery: event.authorityRecovery,
         ...(event.autoLockTimeoutMs === undefined
           ? {}
@@ -1757,8 +1492,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } else if (event.topic === "storage.state") {
       this.bootstrapSnapshotCache = {
         ...this.bootstrapSnapshotCache,
-        ...(event.bucketId ? { storageBucketId: event.bucketId } : { storageBucketId: undefined }),
-        ...(event.bucketGeneration ? { storageBucketGeneration: event.bucketGeneration } : { storageBucketGeneration: undefined }),
+        walletGeneration: event.walletGeneration,
       };
     } else if (event.topic === "chain.height") {
       // 链高度是公共链状态：只缓存读数，不参与 Session 身份推进。
@@ -1835,8 +1569,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && typeof event.cause === "string"
         && typeof event.vaultStatus === "string"
         && (typeof event.activePublicKeyHex === "string" || event.activePublicKeyHex === null)
-        && Number.isSafeInteger(event.keyspaceGeneration)
-        && event.keyspaceGeneration >= 0
+        && typeof event.runGeneration === "string"
         && (event.vaultStatus === "unlocked" || event.activePublicKeyHex === null)
         && (event.authorityRecovery === undefined || this.isValidAuthorityRecovery(event.authorityRecovery));
     }
@@ -1856,9 +1589,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "storage.state") return event.type === "storage.state.changed"
       && Number.isSafeInteger(event.storageRevision)
       && event.storageRevision >= 0
-      && (event.providerGeneration === null || Number.isSafeInteger(event.providerGeneration))
-      && (event.bucketId === undefined || typeof event.bucketId === "string")
-      && (event.bucketGeneration === undefined || (Number.isSafeInteger(event.bucketGeneration) && event.bucketGeneration > 0));
+      && typeof event.status === "string"
+      && (event.walletGeneration === undefined || typeof event.walletGeneration === "string")
+      && (event.summary === null || typeof event.summary === "object");
     if (event.topic === "msfile.state") {
       return event.type === "msfile.state.changed"
         && Number.isSafeInteger(event.msfileRevision)

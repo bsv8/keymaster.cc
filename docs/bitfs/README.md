@@ -69,7 +69,7 @@ flowchart LR
 | 池内付款状态 | Kind 5/7 验证和双方签名形成的累计状态；不表示每轮都已广播 |
 | WOC | Coordinator 使用的链服务；只接收已签名 raw transaction，并返回 txid 事实 |
 | exact bytes | 首次保存后不能被另一份字节覆盖的原始 Artifact 或交易原文 |
-| generation / owner epoch | 用来拒绝锁定、切 Key、切存储或旧 Worker 的迟到结果 |
+| generation / owner epoch | 用来拒绝锁定、钱包重置或旧 Worker 的迟到结果 |
 
 ## 代码入口
 

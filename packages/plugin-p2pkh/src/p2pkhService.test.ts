@@ -12,7 +12,7 @@ const resource: P2pkhKeyResource = { resourceId: "p2pkh:main", publicKeyHex: OWN
 function keyspace(): KeyspaceService {
   return {
     active: () => ({ activePublicKeyHex: OWNER }),
-    getKey: async () => ({ publicKeyHex: OWNER, label: "test", capabilities: ["p2pkh"], createdAt: new Date(0).toISOString() }),
+    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: ["p2pkh"], createdAt: new Date(0).toISOString() }),
     onActiveKeyChanged: () => () => undefined,
   } as unknown as KeyspaceService;
 }

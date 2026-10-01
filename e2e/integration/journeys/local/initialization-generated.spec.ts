@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
 import { lockWallet, unlockWallet } from "../../drivers/vaultDriver.js";
-import { readLocalCatalog, readSessionPublicKey, waitForUnlockedHome } from "../../drivers/appDriver.js";
-import { assertLocalBucketLockReleased, assertLocalBucketStorage, identityFileMap, readRawLocalBucketObjects, readRawLocalStorage } from "../../support/localBucketFormats.js";
+import { readWalletPublicKey, readWalletSnapshot, waitForUnlockedHome } from "../../drivers/appDriver.js";
+import { assertWalletStorage, identityFileMap, readRawLocalStorage, readRawWalletObjects } from "../../support/walletStorageFormats.js";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
 import { LOCAL_INIT_MENU_SCENARIO } from "../../support/scenarioMetadata.js";
@@ -12,19 +12,19 @@ export const JOURNEY_METADATA = LOCAL_INIT_MENU_SCENARIO;
 
 /**
  * 业务目标：
- * 新用户建立第一个 Local 保险箱和身份，并在刷新、锁定后继续使用 Keymaster。
+ * 新用户建立唯一钱包 Key，并在刷新、锁定后继续使用 Keymaster。
  *
  * 用户价值：
  * 证明用户首次打开浏览器时能完成存储优先的初始化，而不是只看到一个已改变的 URL。
  *
  * 开始状态：
  * - 一个全新的 Chromium context；
- * - 没有历史 Local catalog、Vault 或 active Key；
- * - 不读取 S3、testnet 或任何长期秘密。
+ * - 没有历史钱包数据、Vault 或钱包 Key；
+ * - 不读取 testnet 或任何长期秘密。
  *
  * 成功标准：
- * - 初始化事务只执行一次并创建一把带标签的 Key；
- * - Local catalog 只有一个选中桶，密码没有进入 localStorage；
+ * - 初始化事务只执行一次并创建唯一一把带标签的 Key；
+ * - 固定路径 `key.json` 与 `.keymaster/meta` 内容正确，密码没有进入浏览器存储；
  * - 刷新和锁定/重新解锁后仍是同一业务身份。
  *
  * 业务风险：
@@ -32,7 +32,7 @@ export const JOURNEY_METADATA = LOCAL_INIT_MENU_SCENARIO;
  * 如果锁定后旧运行态仍可用，私钥相关能力会越过用户的安全边界。
  *
  * 外部资源与收尾：
- * 只使用本次浏览器 context 的 Local 数据；context 关闭后由 Playwright 丢弃，未产生远端影响。
+ * 只使用本次浏览器 context 的本地数据；context 关闭后由 Playwright 丢弃。
  *
  * 覆盖需求：KM-INIT-001、KM-VAULT-001、KM-NAV-001。
  */
@@ -42,26 +42,23 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
   const browserErrors = captureBrowserErrors(page, context);
 
   try {
-    const ready = await test.step("用户创建第一个本地保险箱和身份", async () => initializeNewLocalUser(
+    const ready = await test.step("用户创建唯一钱包 Key", async () => initializeNewLocalUser(
       { page },
-      { bucketLabel: "Local 集成测试桶", keyLabel: "集成测试首 Key", password },
+      { keyLabel: "集成测试钱包 Key", password },
     ));
 
-    // 存储真值：按 KeymasterFormats 检查桶内实际文件（device 记录、session、
-    // keys/<公钥>.keyhold、lock.json）是否齐全且内容正确。
-    const initialStorage = await test.step("检查桶内实际文件符合 KeymasterFormats", async () =>
-      assertLocalBucketStorage(page, {
-        bucketId: ready.bucketId,
+    // 存储真值：按 KeymasterFormats 检查 `key.json` 与 `.keymaster/meta`。
+    const initialStorage = await test.step("检查钱包固定路径符合 KeymasterFormats", async () =>
+      assertWalletStorage(page, {
         ownerPublicKeyHex: ready.publicKeyHex,
         keyLabel: ready.keyLabel,
       }));
-    expect(initialStorage.keyLock, "解锁使用中的 Key 必须持有未过期的应用锁").toBeDefined();
+    expect(initialStorage.walletGeneration, "钱包 meta 必须记录 walletGeneration").toBe(ready.walletGeneration);
 
-    await test.step("用户刷新后直接回到锁定页,并用该 Key 的密码重新解锁", async () => {
+    await test.step("用户刷新后直接回到锁定页,并用 Key 密码重新解锁", async () => {
       await page.reload({ waitUntil: "domcontentloaded" });
-      const catalogBeforeWrongPassword = await readLocalCatalog(page);
-      const filesBeforeWrongPassword = identityFileMap(await readRawLocalStorage(page), await readRawLocalBucketObjects(page));
-      await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
+      const snapshotBeforeWrongPassword = await readWalletSnapshot(page);
+      const filesBeforeWrongPassword = identityFileMap(await readRawLocalStorage(page), await readRawWalletObjects(page));
       await expect(page.getByRole("heading", {
         name: /钱包已锁定|Wallet locked/,
       })).toBeVisible();
@@ -76,21 +73,19 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
       await expect(page.getByRole("heading", {
         name: /钱包已锁定|Wallet locked/,
       })).toBeVisible();
-      await expect(page.getByText(/选择桶类型|Choose a bucket type/)).toHaveCount(0);
-      await expect(readLocalCatalog(page), "错误密码不能删除设备记录或 session").resolves.toEqual(catalogBeforeWrongPassword);
-      // 文件真值：错误密码不能改动设备记录/session（localStorage）或 KeyHold（IndexedDB）中任何一个字节。
-      expect(identityFileMap(await readRawLocalStorage(page), await readRawLocalBucketObjects(page)), "错误密码不能改动身份文件").toEqual(filesBeforeWrongPassword);
+      await expect(readWalletSnapshot(page), "错误密码不能删除或改写钱包存储").resolves.toEqual(snapshotBeforeWrongPassword);
+      // 文件真值：错误密码不能改动 key.json 或 meta 中任何一个字节。
+      expect(identityFileMap(await readRawLocalStorage(page), await readRawWalletObjects(page)), "错误密码不能改动身份文件").toEqual(filesBeforeWrongPassword);
 
       await passwordField.fill(password);
       const unlockButton = page.getByRole("button", { name: /解锁|Unlock/ });
       await expect(unlockButton).toBeEnabled();
       await unlockButton.click();
       await waitForUnlockedHome(page);
-      // 解锁后 session 必须还是同一把 Key（存储真值,不再依赖页面文案）。
-      await expect(readSessionPublicKey(page)).resolves.toBe(ready.publicKeyHex);
-      // 解锁成功后重新持锁，KeyHold 文件不变。
-      await assertLocalBucketStorage(page, {
-        bucketId: ready.bucketId,
+      // 解锁后必须还是同一把 Key（存储真值,不依赖页面文案）。
+      await expect(readWalletPublicKey(page)).resolves.toBe(ready.publicKeyHex);
+      // 解锁成功后 KeyHold 与 meta 都不变，钱包世代也不变。
+      await assertWalletStorage(page, {
         ownerPublicKeyHex: ready.publicKeyHex,
         keyLabel: ready.keyLabel,
       });
@@ -98,15 +93,15 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
 
     await test.step("用户锁定后重新解锁自己的钱包", async () => {
       await lockWallet(page);
-      // 主动锁定 = 释放该 Key 的应用锁。
-      await assertLocalBucketLockReleased(page, {
-        bucketId: ready.bucketId,
+      // 主动锁定不删除 KeyHold，也不推进钱包世代。
+      const lockedStorage = await assertWalletStorage(page, {
         ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: ready.keyLabel,
       });
+      expect(lockedStorage.walletGeneration, "锁定不推进 walletGeneration").toBe(ready.walletGeneration);
       await unlockWallet(page, password, ready.keyLabel);
-      await expect(readSessionPublicKey(page)).resolves.toBe(ready.publicKeyHex);
-      await assertLocalBucketStorage(page, {
-        bucketId: ready.bucketId,
+      await expect(readWalletPublicKey(page)).resolves.toBe(ready.publicKeyHex);
+      await assertWalletStorage(page, {
         ownerPublicKeyHex: ready.publicKeyHex,
         keyLabel: ready.keyLabel,
       });

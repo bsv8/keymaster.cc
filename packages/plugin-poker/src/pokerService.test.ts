@@ -12,7 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import { createInMemoryKeyValueStore, withTestStorageBinding } from "@keymaster/runtime/storage";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import type { KeyValueCommitInput, KeyValueCommitResult, KeyValueEntry, KeyValueEntryMeta, KeyValueListInput, KeyValueListResult, KeyValueStore, KeyValueValue } from "@keymaster/contracts";
 import { createPokerService } from "./pokerService.js";
@@ -179,11 +179,7 @@ class FakeKeyspace {
   // 存在 / 缺省；老 `mode: "all" / setAll()` 已删除。
   private state: { activePublicKeyHex?: string } = { activePublicKeyHex: PUB_A };
   private stores = new Map<string, KeyValueStore>();
-  private readonly settings = createInMemoryKeyValueStore({
-    ...CENTRAL_STORAGE_DECLARATIONS.pokerSettings,
-    bucketId: "test-memory",
-    bucketGeneration: 1
-  });
+  private readonly settings = createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.pokerSettings));
   private activeHandlers = new Set<(s: any) => void>();
   private keyMeta = new Map<string, any>([
     [PUB_A, KEY_A],
@@ -209,7 +205,12 @@ class FakeKeyspace {
     for (const h of this.activeHandlers) h(this.state);
   }
   requireActiveKey() {
-    return KEY_A as any;
+    // 单 Key 本地钱包：身份投影只描述当前唯一 Key，切换 active 后返回的就是新 Key。
+    const pkh = this.state.activePublicKeyHex;
+    if (!pkh) throw new Error("Active key is not ready");
+    const meta = this.keyMeta.get(pkh);
+    if (!meta) throw new Error("Active key is not ready");
+    return meta as any;
   }
   onActiveKeyChanged(h: (s: any) => void) {
     this.activeHandlers.add(h);
@@ -241,12 +242,7 @@ class FakeKeyspace {
     const key = `${ownerPublicKeyHex}:PokerSessionHistory:1`;
     const existing = this.stores.get(key);
     if (existing) return { ...existing, close: () => undefined };
-    const created = createInMemoryKeyValueStore({
-      ...CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory,
-      ownerPublicKeyHex,
-      bucketId: "test-memory",
-      bucketGeneration: 1
-    });
+    const created = createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory));
     this.stores.set(key, created);
     return { ...created, close: () => undefined };
   }
@@ -281,15 +277,14 @@ class FakeKeyspace {
 function activeOwnerStore(ownerKeyspace: FakeKeyspace): KeyValueStore {
   const open = () => ownerKeyspace.openOwnerAppStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory });
   return {
-    get bucketId() { return "test-memory"; },
-    get bucketGeneration() { return 1; },
-    get ownerPublicKeyHex() { return ownerKeyspace.active().activePublicKeyHex ?? ""; },
     moduleId: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.moduleId,
     purposeId: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.purposeId,
-    scope: "owner",
     authority: "built-in-module",
     model: "kv",
     schemaVersion: CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory.schemaVersion,
+    walletGeneration: "00000000-0000-4000-8000-000000000000",
+    sessionEpoch: "00000000-0000-4000-8000-000000000001",
+    runGeneration: "00000000-0000-4000-8000-000000000002",
     async get<T = KeyValueValue>(key: string, input: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> { return (await open()).get<T>(key, input); },
     async list(input: KeyValueListInput = {}): Promise<KeyValueListResult> { return (await open()).list(input); },
     async put<T = KeyValueValue>(key: string, value: T, condition: { ifRevision?: number; partition?: string } = {}): Promise<KeyValueEntryMeta> { return (await open()).put(key, value, condition); },

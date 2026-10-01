@@ -1,6 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
-import { readRawLocalBucketObjects, readRawLocalStorage } from "../../support/localBucketFormats.js";
+import {
+  WALLET_KEYHOLD_PATH,
+  WALLET_META_PATH,
+  assertWalletStorage,
+  readRawLocalStorage,
+  readRawWalletObjects,
+} from "../../support/walletStorageFormats.js";
 import { grantPersistentStorage } from "../../support/persistentStorage.js";
 import { STORAGE_BROWSER_GATE } from "../../support/scenarioMetadata.js";
 import { initializeNewLocalUser } from "../../flows/initializeLocalUser.js";
@@ -9,8 +15,8 @@ export const GATE_ID = STORAGE_BROWSER_GATE.id;
 export const GATE_METADATA = STORAGE_BROWSER_GATE;
 
 /**
- * 业务结果：用户的 Local 数据必须写入真实浏览器 IndexedDB，并在获得
- * persistent-storage 授权前后表现一致；localStorage 只保留设备引导记录。
+ * 业务结果：用户的唯一钱包数据必须写入真实浏览器 IndexedDB 的固定路径，并在
+ * 获得 persistent-storage 授权前后表现一致；localStorage 不承载任何钱包数据。
  *
  * 开始状态：真实 Chromium + 生产 preview，没有注入 localStorage、Worker 或 MessageChannel 替身。
  * 失败影响：存储物理入口错了会导致刷新、Worker 重启或多页面状态丢失；
@@ -54,23 +60,23 @@ test(GATE_ID + "：真实浏览器存储边界", async ({ page, context }, testI
 
     const ready = await test.step("建立 Local 身份", async () => initializeNewLocalUser(
       { page },
-      { bucketLabel: "存储边界 Gate 桶", keyLabel: "存储边界 Gate Key", password },
+      { keyLabel: "存储边界 Gate Key", password },
     ));
 
-    await test.step("Local 桶对象只写 IndexedDB，localStorage 只保留引导记录", async () => {
-      const bucketObjects = await readRawLocalBucketObjects(page);
+    await test.step("唯一 Key 只写 IndexedDB，localStorage 不承载钱包数据", async () => {
+      const snapshot = await assertWalletStorage(page, {
+        ownerPublicKeyHex: ready.publicKeyHex,
+        keyLabel: ready.keyLabel,
+      });
+      expect(snapshot.walletGeneration).toBe(ready.walletGeneration);
+      const walletObjects = await readRawWalletObjects(page);
       expect(
-        bucketObjects.filter((entry) => entry.bucketId === ready.bucketId).map((entry) => entry.path),
-        "IndexedDB 必须保存 KeyHold 与当前 Key 的应用锁",
-      ).toEqual(expect.arrayContaining([
-        `keys/${ready.publicKeyHex}.keyhold`,
-        `${ready.publicKeyHex}/lock.json`,
-      ]));
+        walletObjects.map((entry) => entry.path),
+        "IndexedDB 必须保存固定 key.json 与 .keymaster/meta",
+      ).toEqual(expect.arrayContaining([WALLET_KEYHOLD_PATH, WALLET_META_PATH]));
       const entries = await readRawLocalStorage(page);
-      const bucketKeys = entries.filter((entry) => entry.key.startsWith("keymaster.bucket."));
-      expect(bucketKeys, `Local 桶对象不得再写入 localStorage: ${bucketKeys.map((entry) => entry.key).join(", ")}`).toEqual([]);
-      expect(entries.some((entry) => entry.key === `keymaster.device.${ready.bucketId}`)).toBe(true);
-      expect(entries.some((entry) => entry.key === "keymaster.session")).toBe(true);
+      const walletKeys = entries.filter((entry) => /^keymaster\.(?:bucket|device|session|storage\.catalog|storage\.catalog\.v2)\b/u.test(entry.key));
+      expect(walletKeys, "localStorage 不得保存任何钱包指针: " + walletKeys.map((entry) => entry.key).join(", ")).toEqual([]);
     });
 
     await test.step("授权永久存储后授权条消失，刷新仍保持", async () => {
@@ -79,8 +85,8 @@ test(GATE_ID + "：真实浏览器存储边界", async ({ page, context }, testI
       await expect(page.getByTestId("indexeddb-persistence-bar")).toHaveCount(0);
       await page.reload({ waitUntil: "domcontentloaded" });
       await expect(page.getByTestId("indexeddb-persistence-bar")).toHaveCount(0);
-      const afterReload = await readRawLocalBucketObjects(page);
-      expect(afterReload.map((entry) => entry.path)).toContain(`keys/${ready.publicKeyHex}.keyhold`);
+      const afterReload = await readRawWalletObjects(page);
+      expect(afterReload.map((entry) => entry.path)).toContain(WALLET_KEYHOLD_PATH);
     });
   } finally {
     await attachBrowserErrors(testInfo, errors, [password]);

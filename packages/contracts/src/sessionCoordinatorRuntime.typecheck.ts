@@ -4,35 +4,35 @@ import type {
   SessionCoordinatorClient,
 } from "./index.js";
 
-const listKeysRequest = {
+const getCurrentKeyRequest = {
   kind: "vault.operation",
-  operation: { type: "listKeys" },
+  operation: { type: "getCurrentKey" },
   expectedSessionEpoch: "epoch-1",
 } as const satisfies CoordinatorRpcRequest;
 
-const listKeysOk: CoordinatorRpcResponseForRequest<typeof listKeysRequest> = {
+const getCurrentKeyOk: CoordinatorRpcResponseForRequest<typeof getCurrentKeyRequest> = {
   sessionEpoch: "epoch-1",
   ack: { status: "ok" },
-  operationResult: [],
+  operationResult: undefined,
 };
-void listKeysOk;
+void getCurrentKeyOk;
 
 // A non-void request cannot publish an ok response without its result.
 // @ts-expect-error response/result association requires operationResult
-const listKeysMissingResult: CoordinatorRpcResponseForRequest<typeof listKeysRequest> = {
+const getCurrentKeyMissingResult: CoordinatorRpcResponseForRequest<typeof getCurrentKeyRequest> = {
   sessionEpoch: "epoch-1",
   ack: { status: "ok" },
 };
-void listKeysMissingResult;
+void getCurrentKeyMissingResult;
 
 // The nested operation discriminant prevents a result from another Vault operation.
-const listKeysWrongResult: CoordinatorRpcResponseForRequest<typeof listKeysRequest> = {
+const getCurrentKeyWrongResult: CoordinatorRpcResponseForRequest<typeof getCurrentKeyRequest> = {
   sessionEpoch: "epoch-1",
   ack: { status: "ok" },
-  // @ts-expect-error listKeys returns a key view array, not a boolean
+  // @ts-expect-error getCurrentKey returns a key view, not a boolean
   operationResult: true,
 };
-void listKeysWrongResult;
+void getCurrentKeyWrongResult;
 
 const unlockRequest = {
   kind: "unlock",
@@ -57,12 +57,18 @@ void unlockWithResult;
 
 // Failures never carry a successful operation result.
 // @ts-expect-error non-ok responses forbid operationResult
-const listKeysFailureWithResult: CoordinatorRpcResponseForRequest<typeof listKeysRequest> = {
+const getCurrentKeyFailureWithResult: CoordinatorRpcResponseForRequest<typeof getCurrentKeyRequest> = {
   sessionEpoch: "epoch-1",
   ack: { status: "locked" },
-  operationResult: [],
+  operationResult: {
+    publicKeyHex: "02" + "11".repeat(32),
+    label: "key",
+    capabilities: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    format: "p2pkh",
+  },
 };
-void listKeysFailureWithResult;
+void getCurrentKeyFailureWithResult;
 
 const cryptoRequest = {
   kind: "crypto",
@@ -91,4 +97,4 @@ declare const coordinatorClient: Pick<SessionCoordinatorClient, "vaultOperation"
 
 // The legacy string-plus-input compatibility wrapper is intentionally absent.
 // @ts-expect-error vaultOperation requires a typed discriminated request object
-coordinatorClient.vaultOperation("listKeys");
+coordinatorClient.vaultOperation("getCurrentKey");

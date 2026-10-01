@@ -12,7 +12,8 @@
 //     真值并存。
 //   - 钱包状态与协议路径互不干扰：uninitialized / locked / unlocked 都
 //     能进入协议页；locked 态在 popup 内先解锁再继续当前请求。
-//   - 其它路径保持原壳层逻辑（LockedShell / UnlockedShell）。
+//   - 其它路径保持单 Key 本地钱包的壳层逻辑（LockedShell /
+//     UnlockedShell）：uninitialized 走创建/导入，locked 走解锁。
 
 import { useEffect, useRef } from "react";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, VaultService, VaultStatus } from "@keymaster/contracts";
@@ -30,7 +31,6 @@ import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
 import { LockedShell } from "./shell/LockedShell.js";
 import { UnlockedShell } from "./shell/UnlockedShell.js";
 import { InitialSetupPage } from "./shell/InitialSetupPage.js";
-import { StorageAuthenticationPage } from "./shell/StorageAuthenticationPage.js";
 import { StartupError, StartupPlaceholder } from "./shell/StartupPlaceholder.js";
 
 /** 协议 popup 单一路由。 */
@@ -165,7 +165,7 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
 
   // StorageUnavailableGuard 内部会读取 storage.status；先检查定义，
   // 避免短暂回收窗口中挂载子树并调用 ensure()。这条路径必须是恢复页，
-  // 不能退回 InitialSetupPage。
+  // 不能退回创建/导入入口。
   if (!hasStorageStatusResource) {
     if (hadStorageStatusResource.current) return <StartupPlaceholder />;
     return (
@@ -177,33 +177,22 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
     );
   }
 
-  if (bootstrapSnapshot.phase === "storage-authentication") {
-    if (hasStorageController) return <StorageAuthenticationPage />;
-    return (
-      <StartupError
-        title="存储认证服务未就绪"
-        message="已检测到已有存储连接，但存储认证能力尚未注册。请稍后重试。"
-        onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
-      />
-    );
-  }
-
+  // 本地钱包尚未就绪（uninitialized / corrupt / unsupported / degraded）：
+  // 只有 uninitialized 是正常的「还没有钱包 Key」，可以提供创建或导入入口。
+  // 其余状态必须由 StorageUnavailableGuard 呈现明确的恢复/升级说明，绝不能
+  // 退回创建入口——那会用空钱包覆盖仍可能可恢复的本地数据。
   if (bootstrapSnapshot.phase === "storage-onboarding") {
-    if (!bootstrapSnapshot.storageReady && hasStorageController) return <InitialSetupPage />;
-    return (
-      <StartupError
-        title="存储启动状态不一致"
-        message="存储初始化服务与启动快照不一致，未进入首次设置，以避免覆盖已有数据。请重试。"
-        onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
-      />
-    );
+    if (hasStorageController && hasVaultService) {
+      return <StorageUnavailableGuard><InitialSetupPage /></StorageUnavailableGuard>;
+    }
+    return <StartupPlaceholder />;
   }
 
   if (!bootstrapSnapshot.storageReady) {
     return (
       <StartupError
-        title="存储启动状态不一致"
-        message="应用快照尚未确认存储可用，不能继续装配钱包。请重试。"
+        title="本地钱包状态不一致"
+        message="启动快照尚未确认本地钱包结构完整，不能继续装配。请重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
       />
     );
@@ -218,13 +207,6 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
     );
   }
 
-  // Vault/Keyspace capability 和 vault-selection 都是读取 Vault 真值前的
-  // 前置门禁。它们还未完成时只能显示启动占位，不能把缺能力误判为空 Vault。
-  if (!bootstrapSnapshot.vaultCapabilityReady || !hasVaultService || !hasKeyspaceService) {
-    return <StartupPlaceholder />;
-  }
-  if (!bootstrapSnapshot.vaultSelectionReady) return <StartupPlaceholder />;
-
   const vaultStatus = readVaultStatus(vaultService);
   if (vaultStatus === "booting" || vaultStatus === undefined) return <StartupPlaceholder />;
 
@@ -233,11 +215,21 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   if (vaultStatus === "uninitialized" && isProtocolPopupPath(path)) {
     return <StorageUnavailableGuard><RuntimeApp /></StorageUnavailableGuard>;
   }
-  if (vaultStatus === "uninitialized") return <InitialSetupPage />;
 
+  // Vault 与 Keyspace 是读取钱包真值和提供创建/解锁入口的前置条件。
+  // 缺能力时只能停在占位页：不能把「capability 还没注册」误判成空钱包而
+  // 渲染创建入口，那会诱导用户在错误的判断上覆盖数据。
+  if (!bootstrapSnapshot.vaultCapabilityReady || !hasVaultService || !hasKeyspaceService) {
+    return <StartupPlaceholder />;
+  }
+  // locked 不需要等 vault-selection 之后的业务插件装配：解锁页与创建/导入
+  // 入口都只依赖第一阶段就已经注册的 Vault 能力。
   if (vaultStatus === "locked") {
     return <StorageUnavailableGuard><RuntimeApp initialVaultStatus="locked" /></StorageUnavailableGuard>;
   }
+  if (vaultStatus === "uninitialized") return <InitialSetupPage />;
+
+  if (!bootstrapSnapshot.vaultSelectionReady) return <StartupPlaceholder />;
 
   const applicationReady = bootstrapSnapshot.phase === "connect-apps-ready"
     && bootstrapSnapshot.storageReady

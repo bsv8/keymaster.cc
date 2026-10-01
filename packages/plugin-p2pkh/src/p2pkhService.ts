@@ -388,13 +388,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       return activeIdentity;
     },
     getKeyForOwner: async (ownerPublicKeyHex: string) => {
-      const key = await deps.keyspace.getKey(ownerPublicKeyHex);
-      if (!key) {
+      // 单 Key 本地钱包（docs/存储.md）：只有一把 Key，业务对象里的
+      // ownerPublicKeyHex 仍然要与当前身份比对，但不是目录前缀，也不能用来
+      // 列举或选择第二把 Key。
+      const active = deps.keyspace.active().activePublicKeyHex;
+      if (!active || active.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
         throw new Error(`P2PKH owner key not found: ${ownerPublicKeyHex}`);
       }
-      if (!key.publicKeyHex) {
-        throw new Error(`P2PKH owner key not ready: ${ownerPublicKeyHex}`);
-      }
+      const key = deps.keyspace.requireActiveKey();
       return {
         publicKeyHex: key.publicKeyHex,
         label: key.label,
@@ -567,11 +568,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       activeIdentity = undefined;
       return;
     }
-    const identity = await deps.keyspace.getKey(state.activePublicKeyHex);
-    if (!identity) {
-      throw new Error("Active key identity not found");
-    }
-    activeIdentity = requireReadyKey(identity);
+    // keyspace 只投影「当前唯一 Key 是谁」；锁定/未初始化时 active() 缺省，
+    // requireActiveKey() 抛错由调用方收敛到锁定态。
+    activeIdentity = requireReadyKey(deps.keyspace.requireActiveKey());
   }
 
   const keyspaceUnsubs: Array<() => void> = [];

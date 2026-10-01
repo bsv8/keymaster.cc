@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
-import { createInMemoryKeyValueStore } from "./inMemoryKeyValueStore.js";
+import { createInMemoryKeyValueStore, withTestStorageBinding } from "./inMemoryKeyValueStore.js";
 
 function createStore(now?: () => number) {
-  return createInMemoryKeyValueStore({
-    ...CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
-    bucketId: "in-memory-test",
-    bucketGeneration: 1,
-  }, { ...(now ? { now } : {}), generateId: () => "test-commit" });
+  return createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.protocolSessions), {
+    ...(now ? { now } : {}),
+    generateId: () => "test-commit",
+  });
 }
 
 describe("in-memory K-V fixture", () => {

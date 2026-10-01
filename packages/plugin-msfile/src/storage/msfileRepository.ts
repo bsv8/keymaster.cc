@@ -1,10 +1,11 @@
 // MSFile 文件 Repository（KeymasterFormats：《msfiles/setting.json》与
-// 《app.publickeyhex/settings.json》）。
+// 平台管理的 App 授权设置）。
 //
 // 布局：
-//   - `<owner>/msfiles/setting.json`：金额上限、读取并发、用户供应商；
-//   - `<owner>/app.<publisher 公钥>/settings.json`：按 appId 的 MSFile 覆盖
-//     额度与本机观察（name/firstSeenAt/lastSeenAt）。
+//   - `msfiles/setting.json`：金额上限、读取并发、用户供应商；
+//   - `.keymaster/system/app/app-settings/app-settings.json`：按发布者分组、
+//     组内按 appId 的 MSFile 覆盖额度与本机观察（name/firstSeenAt/
+//     lastSeenAt）。这是平台管理记录，App 不能通过自己的文件权限修改它。
 //
 // 平台只提供已绑定 owner/module/purpose 的文件句柄；本文件负责格式解析、
 // 严格校验和整文件读-改-写。未知顶层字段拒绝；`apps.<appId>` 下其它模块的
@@ -34,7 +35,8 @@ import {
 
 const SETTING_FILE = "setting.json";
 const BITFS_BUYER_SETTING_FILE = "bitfs-buyer-settings.json";
-const APP_SETTINGS_FILE = "settings.json";
+/** 平台管理的 App 授权设置文件；同一发布者的不同 appId 共享这一份真值。 */
+const APP_SETTINGS_FILE = "app-settings.json";
 const MSFILES_SETTING_FORMAT = "keymaster.msfiles-setting";
 const APP_SETTINGS_FORMAT = "keymaster.app-settings";
 const BITFS_BUYER_SETTINGS_FORMAT = "keymaster.msfile-bitfs-buyer-settings";
@@ -101,15 +103,16 @@ export interface MsFileGlobalSettingsSnapshot {
 /**
  * Repository 依赖的文件句柄。
  *
- * settings 是 `<owner>/msfiles/`；appSettings 按 publisher 打开
- * `<owner>/app.<publisher>/`；listAppPublishers 只枚举目录名，用于授权列表。
+ * settings 是 `msfiles/` 模块根；appSettings 是平台管理的
+ * `.keymaster/system/app/app-settings/`。App 管理设置是平台记录而不是 App
+ * 自有数据，因此按 appId 分文件保存，不再按 publisher 分目录——物理数据不再
+ * 按钱包 Owner 前缀分目录。
  */
 export interface MsFileRepositoryStores {
   /** 当前 active owner；用于生成 App 授权行的稳定身份键。 */
   ownerPublicKeyHex: string;
   settings: BorrowedOwnerFileStore;
-  appSettings(publisherPublicKeyHex: string): BorrowedOwnerFileStore;
-  listAppPublishers(): Promise<string[]>;
+  appSettings: BorrowedOwnerFileStore;
 }
 
 interface StoredSettingSnapshot {
@@ -125,12 +128,6 @@ interface StoredAppEntry {
   firstSeenAt: string;
   lastSeenAt: string;
   msfiles?: MsFileAppPriceOverride;
-}
-
-interface ParsedAppSettings {
-  /** 原样保留的 JSON 对象；写回未知模块段时使用。 */
-  raw: Record<string, unknown>;
-  apps: Map<string, StoredAppEntry>;
 }
 
 function fail(message: string): never {
@@ -317,34 +314,44 @@ function parseAppEntry(value: unknown, appId: string): StoredAppEntry {
   return { name: record.name, firstSeenAt, lastSeenAt, ...(msfiles === undefined ? {} : { msfiles }) };
 }
 
-function parseAppSettingsFile(bytes: Uint8Array, expectedPublisherPublicKeyHex: string): ParsedAppSettings {
-  const label = "MSFile app settings.json";
+function parseAppSettingsFile(bytes: Uint8Array): Map<string, Map<string, StoredAppEntry>> {
+  const label = "Keymaster app settings";
   const raw = decodeJsonObject(bytes, MAX_APP_SETTINGS_FILE_BYTES, label);
-  assertKnownKeys(raw, ["format", "version", "publisherPublicKeyHex", "apps"], label);
-  if (raw.format !== APP_SETTINGS_FORMAT || raw.version !== 1) fail(`${label} format/version is invalid`);
-  if (raw.publisherPublicKeyHex !== expectedPublisherPublicKeyHex) fail(`${label} publisher does not match its directory`);
-  const appsRecord = expectRecord(raw.apps, `${label} apps`);
-  const apps = new Map<string, StoredAppEntry>();
-  for (const [appId, entry] of Object.entries(appsRecord)) {
-    if (!APP_ID_PATTERN.test(appId)) fail(`${label} has an invalid appId: ${appId}`);
-    apps.set(appId, parseAppEntry(entry, appId));
+  assertKnownKeys(raw, ["format", "version", "publishers"], label);
+  if (raw.format !== APP_SETTINGS_FORMAT || raw.version !== 2) fail(`${label} format/version is invalid`);
+  const publishersRecord = expectRecord(raw.publishers, `${label} publishers`);
+  const publishers = new Map<string, Map<string, StoredAppEntry>>();
+  for (const [publisher, entry] of Object.entries(publishersRecord)) {
+    if (!/^(02|03)[0-9a-f]{64}$/u.test(publisher)) fail(`${label} has an invalid publisher: ${publisher}`);
+    const appsRecord = expectRecord(entry, `${label} publishers.${publisher}`);
+    const apps = new Map<string, StoredAppEntry>();
+    for (const [appId, appEntry] of Object.entries(appsRecord)) {
+      if (!APP_ID_PATTERN.test(appId)) fail(`${label} has an invalid appId: ${appId}`);
+      apps.set(appId, parseAppEntry(appEntry, appId));
+    }
+    publishers.set(publisher, apps);
   }
-  return { raw, apps };
+  return publishers;
 }
 
 function serializeAppSettingsFile(
-  raw: Record<string, unknown>,
-  publisherPublicKeyHex: string,
-  apps: Record<string, unknown>,
+  publishers: Map<string, Map<string, StoredAppEntry>>,
 ): Uint8Array {
-  const record = {
-    ...raw,
-    format: APP_SETTINGS_FORMAT,
-    version: 1,
-    publisherPublicKeyHex,
-    apps,
-  };
-  return encodeJsonObject(record);
+  const record: Record<string, unknown> = {};
+  for (const [publisher, apps] of [...publishers.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const appsRecord: Record<string, unknown> = {};
+    for (const appId of [...apps.keys()].sort()) {
+      const entry = apps.get(appId)!;
+      appsRecord[appId] = {
+        name: entry.name,
+        firstSeenAt: entry.firstSeenAt,
+        lastSeenAt: entry.lastSeenAt,
+        ...(entry.msfiles === undefined ? {} : { msfiles: { ...entry.msfiles } }),
+      };
+    }
+    record[publisher] = appsRecord;
+  }
+  return encodeJsonObject({ format: APP_SETTINGS_FORMAT, version: 2, publishers: record });
 }
 
 export function isValidPersistedSupplier(value: unknown): value is MsFileSupplierConfig {
@@ -369,7 +376,7 @@ export function sanitizeAppOverride(input: unknown): MsFileAppPriceOverride | un
 }
 
 export async function openMsFileRepository(stores: MsFileRepositoryStores): Promise<MsFileRepository> {
-  if (!stores?.settings || typeof stores.appSettings !== "function" || typeof stores.listAppPublishers !== "function") {
+  if (!stores?.settings || !stores.appSettings) {
     throw new Error("MSFile file storage bindings are required");
   }
   const ownerPublicKeyHex = stores.ownerPublicKeyHex;
@@ -400,33 +407,29 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
     await writeSetting(snapshot);
   };
 
-  const readAppSettings = async (publisherPublicKeyHex: string): Promise<ParsedAppSettings> => {
-    const file = await stores.appSettings(publisherPublicKeyHex).get(APP_SETTINGS_FILE);
-    if (!file) {
-      return {
-        raw: { format: APP_SETTINGS_FORMAT, version: 1, publisherPublicKeyHex, apps: {} },
-        apps: new Map(),
-      };
-    }
-    return parseAppSettingsFile(file.bytes, publisherPublicKeyHex);
+  const readAppSettings = async (): Promise<Map<string, Map<string, StoredAppEntry>>> => {
+    const file = await stores.appSettings.get(APP_SETTINGS_FILE);
+    return file ? parseAppSettingsFile(file.bytes) : new Map();
   };
   const mutateAppEntry = async (
     key: MsFileAppIdentityKey,
     mutate: (entry: Record<string, unknown>, appId: string) => void,
   ): Promise<void> => {
     const publisher = key.publisherPublicKeyHex;
-    const { raw } = await readAppSettings(publisher);
-    const apps = { ...expectRecord(raw.apps, "MSFile app settings.json apps") };
+    const publishers = await readAppSettings();
+    const apps = new Map(publishers.get(publisher) ?? []);
     const appId = key.appId;
-    const existing = apps[appId];
-    const entry = existing !== undefined && typeof existing === "object" && existing !== null && !Array.isArray(existing)
-      ? { ...(existing as Record<string, unknown>) }
+    const existing = apps.get(appId);
+    const entry: Record<string, unknown> = existing
+      ? { name: existing.name, firstSeenAt: existing.firstSeenAt, lastSeenAt: existing.lastSeenAt, ...(existing.msfiles === undefined ? {} : { msfiles: { ...existing.msfiles } }) }
       : {};
     mutate(entry, appId);
-    // 写前校验已知字段；未知模块段原样保留。
+    // 写前校验已知字段；未知模块段按 appId 原样保留。
     parseAppEntry(entry, appId);
-    apps[appId] = entry;
-    await stores.appSettings(publisher).put(APP_SETTINGS_FILE, serializeAppSettingsFile(raw, publisher, apps));
+    const parsed = parseAppEntry(entry, appId);
+    apps.set(appId, parsed);
+    publishers.set(publisher, apps);
+    await stores.appSettings.put(APP_SETTINGS_FILE, serializeAppSettingsFile(publishers));
   };
 
   return {
@@ -521,8 +524,7 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
     async listAppPolicies() {
       assertOpen();
       const rows: StoredAppPolicyRow[] = [];
-      for (const publisher of await stores.listAppPublishers()) {
-        const { apps } = await readAppSettings(publisher);
+      for (const [publisher, apps] of await readAppSettings()) {
         for (const [appId, entry] of apps) {
           if (!entry.msfiles) continue;
           const key: MsFileAppIdentityKey = { ownerPublicKeyHex, publisherPublicKeyHex: publisher, appId };
@@ -538,8 +540,7 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
     },
     async getAppPolicy(key) {
       assertOpen();
-      const { apps } = await readAppSettings(key.publisherPublicKeyHex);
-      const entry = apps.get(key.appId);
+      const entry = (await readAppSettings()).get(key.publisherPublicKeyHex)?.get(key.appId);
       if (!entry?.msfiles) return null;
       return {
         policyKey: msFileAppPolicyKeyString(key),
@@ -567,8 +568,7 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
     async listAppUsages() {
       assertOpen();
       const rows: StoredAppUsageRow[] = [];
-      for (const publisher of await stores.listAppPublishers()) {
-        const { apps } = await readAppSettings(publisher);
+      for (const [publisher, apps] of await readAppSettings()) {
         for (const [appId, entry] of apps) {
           const key: MsFileAppIdentityKey = { ownerPublicKeyHex, publisherPublicKeyHex: publisher, appId };
           rows.push({

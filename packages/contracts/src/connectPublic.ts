@@ -93,9 +93,7 @@ export type {
 export {
   STORAGE_DEFAULT_LIST_LIMIT,
   STORAGE_MAX_LIST_LIMIT,
-  STORAGE_MAX_PARTS,
-  STORAGE_MAX_PAYLOAD_BYTES,
-  STORAGE_PART_SIZE_BYTES
+  STORAGE_MAX_PAYLOAD_BYTES
 } from "./storage/kv.js";
 
 export type {
@@ -109,14 +107,7 @@ export type {
   StorageListParams,
   StorageListResult,
   StoragePutParams,
-  StoragePutResult,
-  StorageUploadAbortParams,
-  StorageUploadAbortResult,
-  StorageUploadBeginParams,
-  StorageUploadBeginResult,
-  StorageUploadCompleteParams,
-  StorageUploadPartParams,
-  StorageUploadPartResult
+  StoragePutResult
 } from "./connectStorage.js";
 
 export {

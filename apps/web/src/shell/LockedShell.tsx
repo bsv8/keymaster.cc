@@ -1,147 +1,68 @@
 // apps/web/src/shell/LockedShell.tsx
-// 空白/锁定状态界面（硬切换 011：onboarding 共享壳层）：
-//   - 全部 4 种模式（welcome / new-wallet-form / first-time-import /
-//     unlock-form）必须使用 OnboardingShell 作为统一壳层，共享
-//     OnboardingHeader（品牌 / 安全说明 / 主题切换 / 语言切换）。
-//   - uninitialized（首次启动）：显示两个入口卡片："新建钱包" /
-//     "导入私钥"。
-//     * "新建钱包" 走 vault.createVaultWithInitialKey()：一次创建
-//       Vault + 落首 Key；
-//     * "导入私钥" 进入首启导入向导（FirstTimeImportWizard），走
-//       vault.createVaultWithImportedKey()。
-//   - locked（已有 vault）：只显示解锁入口 —— 不再提供"已有私钥？
-//     导入"按钮。原因：locked 状态下 /import 无法保存私钥，给用户
-//     一条不可完成的路径毫无意义。
+// 未初始化 / 锁定状态界面（单 Key 本地存储，docs/存储.md）。
 //
-// 设计缘由：让空白状态首页就承担"选择流程"的责任，而不是一个纯
-// 密码表单；同时让首启阶段的视觉与"已解锁态"完全分离——这是
-// 两种不同的 IA。
+// 只有两种模式，共用 OnboardingShell：
+//   - `uninitialized`：只有两条路径 —— 新建钱包 Key，或导入钱包 Key。
+//     两者都走同一个原子入口 `vault.initialize(plan)`；没有存储类型选择、
+//     没有桶配置、没有"连接已有远程空间"。
+//   - `locked`：只解锁。已有 Key 时创建/导入入口必须不可用——要更换身份
+//     只能先重置钱包，因此本页不提供第二条路径。
 //
-// 硬切换 003：所有展示文案走 i18n。表单校验错误信息也走 t()，缺
-// key 时回退到 fallback。
+// 关于错误处理：初始化要么整体落盘、要么什么都没写。因此这里没有
+// "Key 已保存但未激活"这类可恢复中间态；失败直接回到当前模式并给出
+ // 可行动错误。
 //
-// 硬切换 009：首启"新建钱包"必须改走 createVaultWithInitialKey；该
-// 高层能力在 Vault 内部事务化（meta + 首 Key + active 切换），失败
-// 时统一回滚到 uninitialized。本页面只负责把"已落库但未自动激活"
-// 的可恢复状态以 notice 形式带到下一屏，不要展示成"完全失败"。
-//
-// 硬切换 010：首启"导入私钥"必须改走首启导入向导
-// （FirstTimeImportWizard），该向导走 vault.createVaultWithImportedKey()。
-// **不再**让本页面要求用户先设密码、createVault、再跳 /import——
-// 那是会产生"有锁屏密码但 0 key"空 Vault 的旧路径，已被本施工单
-// 硬切废弃。
-//
-// 硬切换 011：把锁屏态 shell 收敛成 OnboardingShell；welcome / new-
-// wallet-form / first-time-import / unlock-form 都使用同一套 header
-// 容器；OnboardingHeader 是锁屏态系统级能力，与 unlocked topbar /
-// sidebar 严格分离。
+// 所有展示文案走 i18n，缺 key 时回退到 defaultValue。
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { router, useI18n, usePluginHost } from "@keymaster/runtime";
-import type { KeyspaceService } from "@keymaster/contracts";
-import {
-  KeyPersistedButActivationFailedError,
-  KEYSPACE_SERVICE_CAPABILITY,
-  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
-  type VaultService
-} from "@keymaster/contracts";
+import { useCapability, useResourceSelector } from "webloom-framework/react";
+import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { VAULT_SERVICE_CAPABILITY, type VaultService } from "@keymaster/contracts";
 import { KeyImportWizard } from "@keymaster/plugin-key-import/KeyImportWizard";
 import { OnboardingShell } from "./OnboardingShell.js";
-import { VaultKeyDeleteModal } from "@keymaster/plugin-vault";
 
 type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "unlock-form";
 
 export function LockedShell() {
   const vault = useCapability(VAULT_SERVICE_CAPABILITY);
-  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
-  const storage = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  const status = useResourceSelector<ReturnType<VaultService["status"]>, ReturnType<VaultService["status"]>>(host.resourceStore, "shell.vault-status", [], (s) => s.data ?? "uninitialized");
+  const status = useResourceSelector<ReturnType<VaultService["status"]>, ReturnType<VaultService["status"]>>(
+    host.resourceStore,
+    "shell.vault-status",
+    [],
+    (s) => s.data ?? "uninitialized"
+  );
   const [mode, setMode] = useState<Mode>("welcome");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [selectedKey, setSelectedKey] = useState<{ publicKeyHex: string; label: string } | null>(null);
-  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [lockedKeyLabel, setLockedKeyLabel] = useState<string | undefined>(undefined);
 
-  const loadSelectedKey = useCallback(async () => {
-    const selectedHex = keyspace.selected();
-    if (selectedHex) {
-      try {
-        const selected = await vault.getKey(selectedHex);
-        if (selected) return { publicKeyHex: selected.publicKeyHex, label: selected.label };
-      } catch {
-        // Fall back to the persisted key list below. A stale selected value
-        // must not hide the locked-state management actions.
-      }
-    }
-
-    // `activePublicKeyHex` is intentionally empty while locked. If the
-    // selected snapshot has not arrived yet (or points at a deleted key),
-    // use the first persisted key as the cold-management target. The
-    // Coordinator uses the same fallback when unlocking.
-    const first = (await keyspace.listKeys())[0];
-    return first ? { publicKeyHex: first.publicKeyHex, label: first.label } : null;
-  }, [keyspace, vault]);
-
+  // 锁定态只需要知道"这把 Key 叫什么"，好让用户确认自己解锁的是哪个身份。
+  // 读取失败不阻断解锁：冷启动路径本身不依赖这个标签。
   useEffect(() => {
-    if (status !== "locked") return;
+    if (status !== "locked") {
+      setLockedKeyLabel(undefined);
+      return;
+    }
     let cancelled = false;
-    setSelectedKey(null);
-    void loadSelectedKey()
+    void vault.getCurrentKey()
       .then((key) => {
-        if (!cancelled) setSelectedKey(key);
+        if (!cancelled) setLockedKeyLabel(key?.label);
       })
       .catch(() => {
-        if (!cancelled) setSelectedKey(null);
+        if (!cancelled) setLockedKeyLabel(undefined);
       });
-    return () => { cancelled = true; };
-  }, [status, loadSelectedKey]);
+    return () => {
+      cancelled = true;
+    };
+  }, [status, vault]);
 
-  async function exportSelected() {
-    if (!selectedKey) return;
-    try {
-      const json = await vault.exportKeyBackup(selectedKey.publicKeyHex);
-      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${(selectedKey.label || "key").replace(/[^a-zA-Z0-9._-]+/g, "_")}.keyhold.json`;
-      anchor.style.display = "none";
-      document.body.appendChild(anchor);
-      anchor.click();
-      window.setTimeout(() => {
-        anchor.remove();
-        URL.revokeObjectURL(url);
-      }, 1000);
-    } catch (err) { setError(err instanceof Error ? err.message : "Export failed"); }
-  }
-
-  async function deleteSelected(confirmationLabel: string, bucketPassword?: string) {
-    if (!selectedKey) return;
-    setBusy(true); setError(null);
-    try {
-      await keyspace.deleteKey({
-        publicKeyHex: selectedKey.publicKeyHex,
-        confirmationLabel,
-        ...(bucketPassword ? { bucketPassword } : {})
-      });
-      setDeleteOpen(false);
-      setSelectedKey(await loadSelectedKey());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed");
-      throw err;
-    }
-    finally { setBusy(false); }
-  }
-
-  // uninitialized -> 始终显示欢迎页；
-  // locked -> 跳到 unlock 模式。
+  // uninitialized -> 欢迎页（可选两条路径）；locked -> 解锁表单。
   useEffect(() => {
     if (status === "uninitialized") {
       setMode("welcome");
@@ -181,31 +102,24 @@ export function LockedShell() {
     }
     setBusy(true);
     try {
-      // 硬切换 009：必须走 createVaultWithInitialKey 一次性完成
-      // Vault + 首 Key + active 切换。失败由 Vault 内部事务化回滚。
-      try {
-        await vault.createVaultWithInitialKey({ password });
-        // 成功：vault 内部会在 generateKey 成功后才宣布 unlocked，
-        // 订阅器会看到 status === "unlocked"，App 切到 UnlockedShell。
-      } catch (initErr) {
-        if (initErr instanceof KeyPersistedButActivationFailedError) {
-          // 可恢复场景：首 Key 已落库，active 没切上。Vault 仍然宣布
-          // 了 unlocked（让用户能进入主界面手动切），并把 notice 存到
-          // 可查询的 state；AppShell / VaultSettingsPage 会自动展示
-          // 横幅。本页面无需再做任何事——status 切换后 LockedShell
-          // 会被卸载。
-          return;
+      // 一次性原子提交：`key.json` + `.keymaster/meta` + 必要初始系统数据
+      // 在同一个 IndexedDB 事务里完成。只有事务结束才报告成功。
+      await vault.initialize({
+        transactionId: `create-${Date.now()}`,
+        firstKey: {
+          kind: "generate",
+          label: t("shell.locked.defaultKeyLabel", { defaultValue: "我的钱包" }),
+          capabilities: ["p2pkh"],
+          password
         }
-        // 真失败：Vault 已内部回滚到 uninitialized，给明确错误。
-        setError(
-          initErr instanceof Error
-            ? initErr.message
-            : t("shell.locked.createInitialKeyFailed", { defaultValue: "创建钱包失败" })
-        );
-        return;
-      }
+      });
+      // 成功：Coordinator 已装好运行绑定，App 切到 UnlockedShell。
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("shell.locked.createFailed", { defaultValue: "创建失败" }));
+      setError(
+        err instanceof Error
+          ? err.message
+          : t("shell.locked.createInitialKeyFailed", { defaultValue: "创建钱包失败" })
+      );
     } finally {
       setBusy(false);
       setPassword("");
@@ -217,9 +131,15 @@ export function LockedShell() {
     setError(null);
     setBusy(true);
     try {
-      const result = await vault.unlock(password, selectedKey?.publicKeyHex);
+      const result = await vault.unlock(password);
       if (result.status !== "accepted" && result.status !== "already-unlocked") {
-        setError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Unlock failed: ${result.status}`);
+        setError(
+          "message" in result
+            ? result.message
+            : result.status === "blocked"
+              ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
+              : `Unlock failed: ${result.status}`
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("shell.locked.unlockFailed", { defaultValue: "解锁失败" }));
@@ -229,46 +149,32 @@ export function LockedShell() {
     }
   }
 
-  // ---------- 空白系统：欢迎页 ----------
+  // ---------- 未初始化：欢迎页 ----------
   if (mode === "welcome") {
     return (
       <OnboardingShell width="wide">
         <div className="locked-shell locked-shell--welcome">
           <header className="locked-shell__hero">
             <h1>{t("shell.locked.welcome.title", { defaultValue: "欢迎使用 Keymaster" })}</h1>
-            <p>
-              {t("shell.locked.welcome.subtitle", { defaultValue: "欢迎。选择你要开始的流程：" })}
-            </p>
+            <p>{t("shell.locked.welcome.subtitle", { defaultValue: "欢迎。选择你要开始的流程：" })}</p>
           </header>
           <div className="locked-shell__cards">
-            <button
-              type="button"
-              className="locked-shell__card"
-              onClick={chooseNewWallet}
-              data-intent="new"
-            >
+            <button type="button" className="locked-shell__card" onClick={chooseNewWallet} data-intent="new">
               <h2>{t("shell.locked.card.newTitle", { defaultValue: "新建钱包" })}</h2>
               <p>
                 {t("shell.locked.card.newBody", {
-                  defaultValue:
-                    "设置一个本地密码，并立即生成你的第一把 Key。之后可以继续导入其他私钥。"
+                  defaultValue: "设置一个 Key 密码，生成你的钱包 Key。数据只保存在本机浏览器的 IndexedDB。"
                 })}
               </p>
               <span className="locked-shell__card-cta">
                 {t("shell.locked.card.newCta", { defaultValue: "设置密码 →" })}
               </span>
             </button>
-            <button
-              type="button"
-              className="locked-shell__card"
-              onClick={chooseFirstTimeImport}
-              data-intent="import"
-            >
-              <h2>{t("shell.locked.card.importTitle", { defaultValue: "导入私钥" })}</h2>
+            <button type="button" className="locked-shell__card" onClick={chooseFirstTimeImport} data-intent="import">
+              <h2>{t("shell.locked.card.importTitle", { defaultValue: "导入钱包 Key" })}</h2>
               <p>
                 {t("shell.locked.card.importBody", {
-                  defaultValue:
-                    "已经有 WIF / Hex / JSON 文件私钥？先解析导入材料，再设置本机系统锁屏密码一次性创建 Vault。"
+                  defaultValue: "已经有 WIF / Hex / 加密 KeyHold 文件？解析并设置 Key 密码，一次性提交为钱包的唯一 Key。"
                 })}
               </p>
               <span className="locked-shell__card-cta">
@@ -278,19 +184,16 @@ export function LockedShell() {
           </div>
           <EmptyState
             title={t("shell.locked.notice.title", { defaultValue: "私钥不会离开你的浏览器" })}
-            description={t("shell.locked.notice.body", { defaultValue: "所有私钥在本地用 WebCrypto AES-GCM 加密，密码不会上传到任何服务器。" })}
+            description={t("shell.locked.notice.body", {
+              defaultValue: "钱包 Key 以加密形式保存在本机 IndexedDB；Key 密码不会上传到任何服务器。清除浏览器数据会一并删除钱包。"
+            })}
           />
-          <div className="locked-shell__actions">
-            <Button variant="ghost" onClick={() => router.push("/storage/buckets")}>
-              {t("storage.bucketManager.topbar", { defaultValue: "管理存储桶" })}
-            </Button>
-          </div>
         </div>
       </OnboardingShell>
     );
   }
 
-  // ---------- 新建钱包：设置密码 ----------
+  // ---------- 新建钱包：设置 Key 密码 ----------
   if (mode === "new-wallet-form") {
     return (
       <OnboardingShell width="narrow">
@@ -299,7 +202,7 @@ export function LockedShell() {
             title={t("shell.locked.newWallet", { defaultValue: "新建钱包" })}
             description={t("shell.locked.newWalletDesc", {
               defaultValue:
-                "设置一个本地密码。Vault 接下来会生成你的第一把 Key 并自动设为 active。该密码仅保存在本机，用于加密你的私钥。"
+                "设置一个 Key 密码。钱包 Key 会和初始化标记在同一个 IndexedDB 事务里写入；提交失败不会留下半成品。"
             })}
           />
           <TextInput
@@ -330,27 +233,32 @@ export function LockedShell() {
     );
   }
 
-  // ---------- 首启导入：向导 ----------
+  // ---------- 首次导入：向导 ----------
   if (mode === "first-time-import") {
     return (
       <OnboardingShell width="wizard">
         <div className="locked-shell locked-shell--wizard">
-          <KeyImportWizard
-            onCancel={backToWelcome}
-          />
+          <KeyImportWizard onCancel={backToWelcome} />
         </div>
       </OnboardingShell>
     );
   }
 
-  // ---------- 已有 vault：解锁 ----------
+  // ---------- 已有钱包：解锁 ----------
   return (
     <OnboardingShell width="narrow">
       <div className="locked-shell locked-shell--form">
         <PageHeader
           title={t("shell.locked.lockedTitle", { defaultValue: "钱包已锁定" })}
-          description={t("shell.locked.lockedDesc", { defaultValue: "需要先解锁本地 Vault，解锁后可以导入或管理私钥。" })}
+          description={t("shell.locked.lockedDesc", {
+            defaultValue: "输入 Key 密码解锁本机钱包。更换身份需要先重置钱包。"
+          })}
         />
+        {lockedKeyLabel ? (
+          <p className="locked-shell__locked-key">
+            {lockedKeyLabel}
+          </p>
+        ) : null}
         <TextInput
           label={t("shell.locked.password", { defaultValue: "密码" })}
           type="password"
@@ -363,27 +271,7 @@ export function LockedShell() {
           <Button onClick={unlock} loading={busy} disabled={!password}>
             {t("common.action.unlock", { defaultValue: "解锁" })}
           </Button>
-          <Button variant="ghost" onClick={() => router.push("/storage/buckets")} disabled={busy}>
-            {t("storage.bucketManager.topbar", { defaultValue: "管理存储桶" })}
-          </Button>
         </div>
-        {selectedKey ? <section aria-label={t("shell.locked.selected.title", { defaultValue: "当前选择的私钥" })}>
-          <h2>{t("shell.locked.selected.title", { defaultValue: "当前选择的私钥" })}</h2>
-          <p>{selectedKey.label} · <code>{selectedKey.publicKeyHex.slice(0, 10)}…{selectedKey.publicKeyHex.slice(-8)}</code></p>
-          <Button variant="ghost" onClick={() => void exportSelected()}>{t("shell.locked.selected.export", { defaultValue: "导出私钥" })}</Button>
-          <Button variant="danger" onClick={() => setDeleteOpen(true)}>{t("shell.locked.selected.delete", { defaultValue: "删除私钥" })}</Button>
-        </section> : null}
-        {selectedKey ? (
-          <VaultKeyDeleteModal
-            open={deleteOpen}
-            keyLabel={selectedKey.label}
-            publicKeyHex={selectedKey.publicKeyHex}
-            requiresBucketPassword={storage?.isCatalogBucket?.() === true}
-            onExportBackup={() => void exportSelected()}
-            onConfirmDelete={deleteSelected}
-            onClose={() => setDeleteOpen(false)}
-          />
-        ) : null}
       </div>
     </OnboardingShell>
   );

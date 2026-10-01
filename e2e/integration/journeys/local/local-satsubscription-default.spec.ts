@@ -118,7 +118,7 @@ test(JOURNEY_ID + "：缺省 SatSubscription、刷新锁定与多 tab 共享解�
     await test.step("A 完成 Local 初始化并看到缺省供应商", async () => {
       await initializeNewLocalUser(
         { page },
-        { bucketLabel: "缺省 Sat 供应商桶", keyLabel: "缺省 Sat 供应商 Key", password: PASSWORD },
+        { keyLabel: "缺省 Sat 供应商 Key", password: PASSWORD },
       );
       await expectDefaultSupplierVisible(page, "初始化后 tab A");
     });

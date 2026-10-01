@@ -21,7 +21,6 @@ describe("central storage declarations", () => {
     expect(() => assertSystemStorageDeclaration("unknown-plugin", {
       moduleId: "unknown-plugin",
       purposeId: "state",
-      scope: "owner",
       authority: "built-in-module",
       model: "kv",
       schemaVersion: 1,
@@ -37,9 +36,8 @@ describe("central storage declarations", () => {
     expect(() => assertSystemStorageDeclaration("unknown-app", {
       moduleId: "unknown-app",
       purposeId: "files",
-      scope: "owner",
       authority: "third-party-app",
-      model: "kv",
+      model: "files",
       schemaVersion: 1,
     })).not.toThrow();
   });
@@ -49,19 +47,16 @@ describe("central storage declarations", () => {
     expect(CENTRAL_STORAGE_DECLARATIONS.msfilesFiles).toMatchObject({
       moduleId: "msfiles",
       purposeId: "",
-      scope: "owner",
       model: "files",
     });
     expect(CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles).toMatchObject({
       moduleId: "msfiles",
       purposeId: "bitfs-journal",
-      scope: "owner",
       model: "files",
     });
     expect(CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles).toMatchObject({
       moduleId: "app",
       purposeId: "app-settings",
-      scope: "owner",
       model: "files",
     });
     // 旧桶级 K-V 声明必须彻底移除，避免新旧两套路径并存。

@@ -18,7 +18,7 @@ test(JOURNEY_ID + "：P2PKH 钱包通过真实 provider 展示链上和本地交
 
   await initializeNewLocalUser(
     { page },
-    { bucketLabel: "p2pkh-e2e", keyLabel: "p2pkh-e2e-key", password: "playwright-password" },
+    { keyLabel: "p2pkh-e2e-key", password: "playwright-password" },
   );
   await expect(page.getByRole("button", { name: "Lock", exact: true })).toBeVisible({ timeout: 15_000 });
 

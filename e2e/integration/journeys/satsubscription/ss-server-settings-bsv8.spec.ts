@@ -76,7 +76,7 @@ test(JOURNEY_ID + "：bsv8 缺省网关设置页三功能", async ({ page, conte
     await test.step("用户通过真实 Local 页面建立 active Key", async () => {
       await initializeNewLocalUser(
         { page },
-        { bucketLabel: "缺省网关测试桶", keyLabel: "缺省网关测试 Key", password: LOCAL_PASSWORD },
+        { keyLabel: "缺省网关测试 Key", password: LOCAL_PASSWORD },
       );
     });
 

@@ -1,9 +1,12 @@
-import type { StorageErrorCode, StorageProbeResult } from "@keymaster/contracts";
+import type { StorageErrorCode } from "@keymaster/contracts";
+
+/** 脱敏诊断文本：只用于诊断展示，不得包含秘密。 */
+export type StorageDiagnostic = string;
 
 export class StorageRuntimeError extends Error {
   readonly code: StorageErrorCode;
-  readonly diagnostic?: StorageProbeResult["diagnostic"];
-  constructor(code: StorageErrorCode, message: string = code, diagnostic?: StorageProbeResult["diagnostic"]) {
+  readonly diagnostic?: StorageDiagnostic;
+  constructor(code: StorageErrorCode, message: string = code, diagnostic?: StorageDiagnostic) {
     super(message);
     this.name = "StorageRuntimeError";
     this.code = code;

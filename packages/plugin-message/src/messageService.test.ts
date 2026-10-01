@@ -12,35 +12,37 @@ import type {
 } from "@keymaster/contracts";
 import { masterSeedHashHex } from "./storage/masterSeed.js";
 import { createMessageService } from "./messageService.js";
+import { createInMemoryModuleFileStore } from "@keymaster/runtime/storage";
 
 const OWNER = "02" + "aa".repeat(32);
 const PEER = "03" + "bb".repeat(32);
 const OTHER = "03" + "cc".repeat(32);
 
 function memoryFiles(): { files: BorrowedOwnerFileStore; map: Map<string, Uint8Array> } {
+  const store = createInMemoryModuleFileStore();
+  // 镜像只供断言与“制造 raw 缺失”使用；句柄行为仍由 in-memory store 决定。
   const map = new Map<string, Uint8Array>();
   const files: BorrowedOwnerFileStore = {
-    async list(input = {}) {
-      const prefix = input.prefix ?? "";
-      const limit = input.limit ?? 1000;
-      const offset = input.cursor ? Number(input.cursor) : 0;
-      const keys = [...map.keys()].filter((key) => key.startsWith(prefix)).sort();
-      const page = keys.slice(offset, offset + limit);
-      return {
-        files: page.map((path) => ({ path, size: map.get(path)!.byteLength })),
-        ...(offset + page.length < keys.length ? { nextCursor: String(offset + page.length) } : {})
-      };
-    },
-    async get(path) {
-      const bytes = map.get(path);
-      return bytes ? { path, bytes: new Uint8Array(bytes) } : undefined;
-    },
-    async put(path, bytes) {
+    walletGeneration: store.walletGeneration,
+    sessionEpoch: store.sessionEpoch,
+    runGeneration: store.runGeneration,
+    list: (input) => store.list(input),
+    get: (path, options) => store.get(path, options),
+    getRange: (path, range, options) => store.getRange(path, range, options),
+    async put(path, bytes, options) {
       map.set(path, new Uint8Array(bytes));
-      return {};
+      return store.put(path, bytes, options);
     },
-    async delete(path) {
+    async delete(path, options) {
       map.delete(path);
+      return store.delete(path, options);
+    },
+    async batch(input, options) {
+      for (const operation of input.operations) {
+        if (operation.type === "put") map.set(operation.path, new Uint8Array(operation.bytes));
+        else map.delete(operation.path);
+      }
+      return store.batch(input, options);
     }
   };
   return { files, map };
@@ -49,17 +51,9 @@ function memoryFiles(): { files: BorrowedOwnerFileStore; map: Map<string, Uint8A
 function keyspace(): { keyspace: KeyspaceService; state: ActiveKeyState } {
   const state: ActiveKeyState = { activePublicKeyHex: OWNER };
   const service: KeyspaceService = {
-    listKeys: async () => [],
-    getKey: async () => undefined,
     active: () => state,
-    selected: () => OWNER,
-    setActive: async () => undefined,
     requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" }),
-    onActiveKeyChanged: () => () => undefined,
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
+    onActiveKeyChanged: () => () => undefined
   };
   return { keyspace: service, state };
 }
@@ -230,7 +224,8 @@ describe("messageService evidence storage", () => {
     const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
     await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "会被删", clientMessageId: "c-3" });
 
-    for (const key of [...map.keys()]) if (key.startsWith(`${PEER}/sent/`)) map.delete(key);
+    // 通过句柄删除，确保底层 store 真的丢掉 raw（索引仍保留）。
+    for (const key of [...map.keys()]) if (key.startsWith(`${PEER}/sent/`)) await files.delete(key);
     const messages = await service.listMessages({ peerPublicKeyHex: PEER });
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ body: "", rawMissing: true, messageId: expect.any(String) });

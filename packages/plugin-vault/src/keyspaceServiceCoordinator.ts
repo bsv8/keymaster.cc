@@ -1,87 +1,77 @@
-// 页面侧 Keyspace facade。
+// packages/plugin-vault/src/keyspaceServiceCoordinator.ts
+// 页面侧 Keyspace facade —— 当前唯一 Key 的只读投影。
 //
-// Keyspace 只暴露 key 生命周期；存储绑定通过 Host/Coordinator 内部权威
-// 注入，业务插件只能使用 Host 已绑定的 ctx.storage。
+// 单 Key 本地存储（docs/存储.md）之后，keyspace 不再是 Key 容器：
+//   - 没有 listKeys / getKey / setActive / deleteKey：系统里只有一把 Key，
+//     不存在列举、切换或删除第二把 Key 的入口。
+//   - 替换身份的唯一路径是 vault.resetWallet 之后的重新创建或导入；那不是
+//     keyspace 的职责，也不允许沿用旧业务数据。
+//   - 业务插件的持久化通过统一存储接口（ctx.storage）进入已绑定模块目录；
+//     keyspace 不再提供任何存储入口或 background 取消。
+//   - 业务对象里的 ownerPublicKeyHex、收款身份等字段仍然存在，它们是证据与
+//     身份核对字段，不是多 Key 目录前缀。
+//
+// 因此这个 facade 是纯函数式的：它不发 RPC、不排任务、不持有 timer，所有
+// 状态都从已提交的 SessionStateMirror 投影而来。
 
-import type {
-  CoordinatorValueResult,
-  KeyIdentity,
-  KeyspaceService,
-  SessionCoordinatorClient
-} from "@keymaster/contracts";
-import type { SessionStateMirror } from "./sessionStateMirror.js";
-import type { MessageBus } from "webloom-framework";
+import type { KeyspaceService } from "@keymaster/contracts";
+import type { SessionStateMirror, SessionStateSnapshot } from "./sessionStateMirror.js";
 
-type CoordinatorClientLike = Pick<SessionCoordinatorClient, "backgroundCancelByKey" | "vaultOperation">;
 export type KeyspaceCoordinatorHandle = KeyspaceService;
 
-function unwrap<T>(result: CoordinatorValueResult<T>, operation: string): T {
-  if (result.status === "ok") return result.value;
-  const message = "message" in result
-    ? result.message
-    : result.status === "blocked"
-      ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
-      : `${operation} failed: ${result.status}`;
-  throw new Error(message);
-}
+/** 锁定/未初始化时 requireActiveKey 使用的统一错误码。 */
+const ACTIVE_KEY_UNAVAILABLE = "Active key is unavailable";
 
-export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, mirror: SessionStateMirror, messageBus: MessageBus): KeyspaceCoordinatorHandle {
-  const handlers = new Set<(value: { activePublicKeyHex?: string; generation?: number }) => void>();
-  let state = mirror.getSnapshot();
+export function createKeyspaceServiceCoordinator(mirror: SessionStateMirror): KeyspaceCoordinatorHandle {
+  const handlers = new Set<(state: ReturnType<KeyspaceService["active"]>) => void>();
+  let projection: ReturnType<KeyspaceService["active"]> = mirror.getSnapshot().activePublicKeyHex
+    ? { activePublicKeyHex: mirror.getSnapshot().activePublicKeyHex }
+    : {};
+  let last: Readonly<SessionStateSnapshot> = mirror.getSnapshot();
+
+  const project = (snapshot: Readonly<SessionStateSnapshot>): ReturnType<KeyspaceService["active"]> =>
+    // 公钥只在 unlocked 时可见；锁定过渡态不继续对外投影身份。
+    snapshot.vaultStatus === "unlocked" && snapshot.activePublicKeyHex
+      ? { activePublicKeyHex: snapshot.activePublicKeyHex }
+      : {};
+
   mirror.subscribe((snapshot) => {
-    const previous = state;
-    state = snapshot;
-    if (previous.activePublicKeyHex !== snapshot.activePublicKeyHex || previous.keyspaceGeneration !== snapshot.keyspaceGeneration) {
-      for (const handler of handlers) handler({ activePublicKeyHex: snapshot.activePublicKeyHex, generation: snapshot.keyspaceGeneration });
+    const next = project(snapshot);
+    if (next.activePublicKeyHex === projection.activePublicKeyHex) return;
+    projection = next;
+    for (const handler of handlers) {
+      try { handler(next); } catch { /* noop */ }
     }
   });
 
-  const current = () => mirror.getSnapshot();
-  const requireReady = (): string => {
-    const snapshot = current();
-    if (snapshot.vaultStatus !== "unlocked" || !snapshot.activePublicKeyHex) throw new Error("Active key is unavailable");
-    return snapshot.activePublicKeyHex.toLowerCase();
+  const current = (): ReturnType<KeyspaceService["active"]> => {
+    // 订阅回调可能在 handler 抛错时中断；这里每次读现值而不是缓存。
+    last = mirror.getSnapshot();
+    const next = project(last);
+    if (next.activePublicKeyHex !== projection.activePublicKeyHex) projection = next;
+    return projection;
   };
 
-  async function prepareDeleteKeyInternal(publicKeyHex: string): Promise<void> {
-    const cancelResult = await client.backgroundCancelByKey(publicKeyHex);
-    if (cancelResult.status !== "accepted" && cancelResult.status !== "ok") throw new Error("Background cancellation failed");
-    messageBus.publish("key.deleting", { publicKeyHex });
-  }
+  const requireActiveKey = () => {
+    const snapshot = mirror.getSnapshot();
+    if (snapshot.vaultStatus !== "unlocked" || !snapshot.activePublicKeyHex) throw new Error(ACTIVE_KEY_UNAVAILABLE);
+    // 身份标签与创建时间由 vault.getCurrentKey() 提供；keyspace 只投影
+    // 公钥身份，不读取也不缓存完整 KeyRef。
+    return {
+      publicKeyHex: snapshot.activePublicKeyHex.toLowerCase(),
+      label: "",
+      capabilities: [],
+      createdAt: "",
+    };
+  };
 
   return {
-    async listKeys() { return unwrap(await client.vaultOperation({ type: "listKeys" }), "listKeys"); },
-    async getKey(publicKeyHex) { return unwrap(await client.vaultOperation({ type: "getKey", publicKeyHex }), "getKey"); },
-    active: () => ({ activePublicKeyHex: current().activePublicKeyHex, generation: current().keyspaceGeneration }),
-    selected: () => current().selectedPublicKeyHex,
-    async setActive() { throw new Error("Active key changes must go through vault.activateKey with password"); },
-    requireActiveKey: () => {
-      const publicKeyHex = requireReady();
-      return { publicKeyHex, label: "", capabilities: [], createdAt: "" };
-    },
+    active: current,
+    requireActiveKey,
     onActiveKeyChanged(handler) {
       handlers.add(handler);
-      const snapshot = current();
-      handler({ activePublicKeyHex: snapshot.activePublicKeyHex, generation: snapshot.keyspaceGeneration });
-      return () => handlers.delete(handler);
+      handler(current());
+      return () => { handlers.delete(handler); };
     },
-    async prepareDeleteKey(publicKeyHex) { await prepareDeleteKeyInternal(publicKeyHex); },
-    async deleteKey(input) {
-      const keys = unwrap(await client.vaultOperation({ type: "listKeys" }), "listKeys");
-      const target = keys.find((key) => key.publicKeyHex === input.publicKeyHex);
-      if (!target) throw new Error("Key not found");
-      if (!target.label) throw new Error("Key label is unavailable");
-      if (input.confirmationLabel !== target.label) throw new Error("Key label mismatch");
-      await prepareDeleteKeyInternal(input.publicKeyHex);
-      await unwrap(await client.vaultOperation({
-        type: "deleteKey",
-        publicKeyHex: input.publicKeyHex,
-        confirmationLabel: input.confirmationLabel,
-        ...(input.bucketPassword ? { bucketPassword: input.bucketPassword } : {})
-      }), "deleteKey");
-      messageBus.publish("key.deleted", { publicKeyHex: input.publicKeyHex });
-    },
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
   };
 }

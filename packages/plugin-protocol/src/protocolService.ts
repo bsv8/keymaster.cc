@@ -65,7 +65,7 @@
 // 不依赖 React；可单测。
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
+import { deriveAppStorageName, deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
 import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
@@ -104,6 +104,7 @@ import {
   type IdentityGetResult,
   type IntentSignParams,
   type IntentSignResult,
+  type KeyIdentity,
   type KeyspaceService,
   type LaunchAppViewInput,
   type LaunchAppViewResult,
@@ -153,9 +154,6 @@ import {
   type StoragePutResult,
   type StorageGetResult,
   type StorageDeleteResult,
-  type StorageUploadBeginResult,
-  type StorageUploadPartResult,
-  type StorageUploadAbortResult,
   type VaultService
 } from "@keymaster/contracts";
 import { AppIdentityValidationError, identityDigestBytes, verifyAppIdentityProof } from "./appIdentity.js";
@@ -2061,13 +2059,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     let sessionWindowNavigated = false;
     try {
     // 5) 校验目标 key ready。
-    let key;
-    try {
-      key = this.deps.keyspace ? await this.deps.keyspace.getKey(input.publicKeyHex) : undefined;
-    } catch {
-      key = undefined;
-    }
-    if (!key || !key.publicKeyHex) {
+    const key = this.requireCurrentOwnerKey(input.publicKeyHex);
+    if (!key) {
       throw new LaunchAppViewError(
         "no_active_key",
         "launchAppView: selected key not found"
@@ -2969,14 +2962,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (session.origin !== origin) {
       return { code: "invalid_origin", reason: "internal_error" };
     }
-    try {
-      const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-      // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-      if (!key || !key.publicKeyHex) {
-        return { code: "user_rejected", reason: "internal_error" };
-      }
-    } catch {
-      // owner key 查询失败 → 走 fail-fast。
+    const active = this.deps.keyspace.active().activePublicKeyHex;
+    if (active && active.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase()) {
+      // 单 Key 本地钱包下这是唯一的「owner 不匹配」形态：session 绑定的
+      // 公钥不是当前唯一 Key。给出精确 reason，执行阶段的
+      // `assertSessionOwnerIsActive` 会给出同一结论。
+      return { code: "user_rejected", reason: "session_owner_mismatch" };
+    }
+    if (!this.requireCurrentOwnerKey(session.ownerPublicKeyHex)) {
+      // 没有可用 Key（锁定/未初始化）：session 仍然存在，但当前无法执行。
       return { code: "user_rejected", reason: "internal_error" };
     }
     return null;
@@ -3125,12 +3119,12 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async bootstrapConnectLoginRecord(rec: RequestRecord, _params: ConnectLoginParams): Promise<void> {
     try {
-      const keys = await this.deps.keyspace.listKeys();
-      const candidates = keys
-        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-        .filter((k) => k.publicKeyHex)
-        .map((k) => ({ publicKeyHex: k.publicKeyHex as string, label: k.label }));
-      rec.connectLoginCandidates = candidates;
+      // 单 Key 本地钱包：候选列表最多只有一个元素——当前唯一 Key。
+      // connect.login 不再让用户在多把 Key 之间选择。
+      const current = this.requireCurrentOwnerKey(this.deps.keyspace.active().activePublicKeyHex ?? "");
+      rec.connectLoginCandidates = current
+        ? [{ publicKeyHex: current.publicKeyHex, label: current.label }]
+        : [];
     } catch (err) {
       rec.connectLoginCandidates = [];
     }
@@ -3168,9 +3162,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (session.revokedAt !== null) return { code: "user_rejected", reason: "internal_error" };
     if (session.origin !== origin) return { code: "invalid_origin", reason: "internal_error" };
     try {
-      const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-      // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-      if (!key || !key.publicKeyHex) {
+      const key = this.requireCurrentOwnerKey(session.ownerPublicKeyHex);
+      if (!key) {
         return { code: "user_rejected", reason: "internal_error" };
       }
     } catch (err) {
@@ -3564,14 +3557,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (rec.phase === "executing") {
       rec.cancelRequested = true;
       rec.abortController?.abort();
-      // Request cancellation must stay request-scoped. In particular a
-      // cancelled list/get must not tear down every multipart upload owned by
-      // the same Connect session. Multipart operations may retire only the
-      // upload id explicitly carried by that request.
-      if (rec.method === "storage.upload.part" || rec.method === "storage.upload.complete" || rec.method === "storage.upload.abort") {
-        const params = rec.params as { connectSessionId?: string; uploadId?: string };
-        if (params.connectSessionId && params.uploadId) void this.abortCancelledUpload(rec, params.connectSessionId, params.uploadId);
-      }
+      // 取消只作用于本条请求：中止它的 AbortSignal 即可，媒体之外的持久写
+      // 都由 IndexedDB 事务原子提交，不存在需要额外回收的远端上传会话。
       return;
     }
     // queued：从执行队列里移除。
@@ -3750,9 +3737,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 2. vault_runtime 来源：本窗口 vault 已 unlock 且能拿到 owner key。
     if (this.lockStateValue === "unlocked") {
       try {
-        const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-        if (key && key.publicKeyHex) {
+        const key = this.requireCurrentOwnerKey(session.ownerPublicKeyHex);
+        if (key) {
           return { kind: "execute" };
         }
       } catch {
@@ -3764,23 +3750,20 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 3. 当前窗口 locked。
     //   - 先**预判**"解锁后能不能拿到 owner runtime"——这一步只读
     //     keyspace 元数据，**不**要求 vault 解锁：
-    //       - keyspace 根本查不到该 owner key（用户已删 / 同步丢失）
-    //         → 解锁了也拿不到 → 直接 fail-fast，让用户明确知道
-    //         "session 绑定的 key 已经不在本地 vault 里"。
-    //       - key 存在但 `identityStatus` 是 `failed` / `uninitialized`
-    //         → 解锁后即便读到也用不了 → 同样 fail-fast。
-    //       - key 存在且 ready → 等解锁；解锁后由 setVaultLockState
+    //       - session 绑定的 owner 公钥不是当前唯一 Key（钱包已重置并
+    //         重新初始化为另一把 Key）→ 解锁了也拿不到 → 直接 fail-fast，
+    //         让用户明确知道 "session 绑定的 Key 已不是本钱包的 Key"。
+    //       - owner 公钥与当前唯一 Key 一致 → 等解锁；解锁后由 setVaultLockState
     //         重新触发 drainExecutionQueue → 走第 2 步拿到 execute。
     //   - 这把 "locked + 等下去也无解" 的请求挡在 unlocked 流程之前；
     //     避免无谓解锁。
-    try {
-      const keyMeta = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-      // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-      if (!keyMeta || !keyMeta.publicKeyHex) {
-        return { kind: "fail" };
-      }
-    } catch {
-      // keyspace 异常：保守走 unlock 路径（解锁后由第 2 步再判定）。
+    //
+    // 关键：这里**不能**用 requireCurrentOwnerKey()——它在锁定态必然返回
+    // undefined，会把"owner 就是这把 Key、只是还没解锁"误判成 fail-fast。
+    // 判定只需要比对公钥身份，那是纯投影读取。
+    const active = this.deps.keyspace.active().activePublicKeyHex;
+    if (active && active.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase()) {
+      return { kind: "fail" };
     }
     // - 如果该方法是 connect.launch，bootstrap 没就绪就根本不会被
     //   consume；这里 probe 也会命中该路径。
@@ -3891,14 +3874,6 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeStorageGet(rec);
         case "storage.delete":
           return await this.executeStorageDelete(rec);
-        case "storage.upload.begin":
-          return await this.executeStorageUploadBegin(rec);
-        case "storage.upload.part":
-          return await this.executeStorageUploadPart(rec);
-        case "storage.upload.complete":
-          return await this.executeStorageUploadComplete(rec);
-      case "storage.upload.abort":
-        return await this.executeStorageUploadAbort(rec);
       // MSFile 走 Connect gateway；
       // App context 只由持久 session snapshot 与 MessageEvent.origin 构造。
       case "msfile.stat":
@@ -3949,7 +3924,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     const session = await this.requireConnectSession(rec, connectSessionId);
     if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity proof snapshot");
     if (!session.ownerPublicKeyHex) throw protocolError("storage_identity_required", "Storage requires an active owner");
-    const summary = await service.getProviderSummary();
+    const summary = await service.summary();
+    if (!summary.walletGeneration) throw protocolError("storage_unavailable", "Storage requires an initialized wallet");
     const lifecycle = this.deps.vault.getLifecycleSnapshot();
     const moduleId = deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
     return {
@@ -3958,41 +3934,19 @@ export class ProtocolServiceImpl implements ProtocolService {
         connectSessionId: session.sessionId,
         transportOrigin: rec.origin,
         appIdentity: session.appIdentity,
-        bucketId: service.selectedBucketId?.() ?? summary?.bucketHint ?? "unknown",
-        bucketGeneration: summary?.generation ?? 1,
-        ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
+        // 目录由验证身份派生的稳定 name 决定；重置后 walletGeneration 改变，
+        // 重置前的 Connect 运行绑定无法再写进新钱包。
+        appStorageName: deriveAppStorageName({
+          publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex,
+          appId: session.appIdentity.appId,
+        }),
         moduleId,
         purposeId: "files",
-        sessionEpoch: lifecycle.sessionEpoch
+        sessionEpoch: lifecycle.sessionEpoch,
+        walletGeneration: summary.walletGeneration,
+        runGeneration: lifecycle.runGeneration,
       }
     };
-  }
-
-  private async abortCancelledUpload(rec: RequestRecord, connectSessionId: string, uploadId: string): Promise<void> {
-    const service = this.currentStorageController();
-    if (!service) return;
-    try {
-      const session = await this.requireConnectSession(rec, connectSessionId);
-      if (!session.appIdentity) return;
-      if (!session.ownerPublicKeyHex) return;
-      const summary = await service.getProviderSummary();
-      const lifecycle = this.deps.vault.getLifecycleSnapshot();
-      await service.abortUpload(
-        {
-          connectSessionId,
-          transportOrigin: rec.origin,
-          appIdentity: session.appIdentity,
-          bucketId: service.selectedBucketId?.() ?? summary?.bucketHint ?? "unknown",
-          bucketGeneration: summary?.generation ?? 1,
-          ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
-          moduleId: deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId),
-          purposeId: "files",
-          sessionEpoch: lifecycle.sessionEpoch
-        },
-        { uploadId }
-      );
-    } catch {
-    }
   }
 
   private async executeStorageList(rec: RequestRecord): Promise<StorageListResult> {
@@ -4030,31 +3984,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     const params = rec.params as import("@keymaster/contracts").StorageDeleteParams;
     const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
     return service.delete(context, { path: params.path, signal: rec.abortController?.signal });
-  }
-
-  private async executeStorageUploadBegin(rec: RequestRecord): Promise<StorageUploadBeginResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageUploadBeginParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.beginUpload(context, { path: params.path, contentType: params.contentType, size: params.size, overwrite: params.overwrite, signal: rec.abortController?.signal });
-  }
-
-  private async executeStorageUploadPart(rec: RequestRecord): Promise<StorageUploadPartResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageUploadPartParams;
-    rec.payloadSize = params.content.bytes.byteLength;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.uploadPart(context, { uploadId: params.uploadId, partNumber: params.partNumber, content: params.content, signal: rec.abortController?.signal });
-  }
-
-  private async executeStorageUploadComplete(rec: RequestRecord): Promise<StoragePutResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageUploadCompleteParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.completeUpload(context, { uploadId: params.uploadId, signal: rec.abortController?.signal });
-  }
-
-  private async executeStorageUploadAbort(rec: RequestRecord): Promise<StorageUploadAbortResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageUploadAbortParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.abortUpload(context, { uploadId: params.uploadId, signal: rec.abortController?.signal });
   }
 
   /* ============== MSFile 执行 ============== */
@@ -4346,11 +4275,30 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async resolveOwnerKeyMaterial(
     ownerPublicKeyHex: string
   ): Promise<{ publicKeyHex: string; label: string } | null> {
-    const key = await this.deps.keyspace.getKey(ownerPublicKeyHex);
-    if (!key || !key.publicKeyHex) {
-      return null;
-    }
+    const key = this.requireCurrentOwnerKey(ownerPublicKeyHex);
+    if (!key) return null;
     return { publicKeyHex: key.publicKeyHex, label: key.label };
+  }
+
+  /**
+   * 单 Key 本地钱包下的 owner 身份解析（docs/存储.md）。
+   *
+   * 系统里只有一把 Key，所以 `keyspace` 不再提供 `getKey(hex)`：这里的
+   * 「按公钥查 Key」退化为「这个公钥就是当前唯一 Key 吗」。业务对象与 Connect
+   * session 里的 `ownerPublicKeyHex` 仍然是证据与身份核对字段，必须与当前
+   * 身份严格比对，但它们不能用来列举或切换第二把 Key。
+   *
+   * 返回 undefined 表示：当前没有已解锁的 Key，或者该公钥不是当前唯一 Key。
+   */
+  private requireCurrentOwnerKey(ownerPublicKeyHex: string): KeyIdentity | undefined {
+    const active = this.deps.keyspace.active().activePublicKeyHex;
+    if (!active || active.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) return undefined;
+    try {
+      return this.deps.keyspace.requireActiveKey();
+    } catch {
+      // active() 已投影但 requireActiveKey() 失败 = 锁定过渡态：同样 fail closed。
+      return undefined;
+    }
   }
 
   /**
@@ -4525,8 +4473,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!ownerPublicKeyHex) {
       throw localFailure("internal_error", "connect.login: no owner selected");
     }
-    const key = await this.deps.keyspace.getKey(ownerPublicKeyHex);
-    if (!key || !key.publicKeyHex) {
+    const key = this.requireCurrentOwnerKey(ownerPublicKeyHex);
+    if (!key) {
       throw localFailure("internal_error", "connect.login: owner key not found");
     }
     // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
@@ -4600,8 +4548,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!storageRepository) {
       throw localFailure("internal_error", "connect.resume: session storage unavailable");
     }
-    const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-    if (!key || !key.publicKeyHex) {
+    const key = this.requireCurrentOwnerKey(session.ownerPublicKeyHex);
+    if (!key) {
       throw localFailure("internal_error", "connect.resume: owner key not found");
     }
     // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。

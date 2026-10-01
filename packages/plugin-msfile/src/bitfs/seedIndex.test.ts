@@ -1,7 +1,7 @@
 // 卖方 Seed 索引：固定分页、固定校验并发，以及 generation 对迟到结果的撤销。
 
 import { describe, expect, it } from "vitest";
-import type { OwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
 import { BITFS_SEED_INDEX_PAGE_SIZE, BITFS_SEED_INDEX_VERIFY_CONCURRENCY, BitfsSeedIndex } from "./seedIndex.js";
 
 function hash(index: number): string { return index.toString(16).padStart(64, "0"); }
@@ -12,12 +12,20 @@ describe("BitFS Seed 索引", () => {
     let activeGets = 0;
     let maxActiveGets = 0;
     const pageLimits: number[] = [];
-    const store: OwnerFileStore = {
+    const store: BorrowedOwnerFileStore = {
+      walletGeneration: "test-wallet",
+      sessionEpoch: "test-epoch",
+      runGeneration: "test-run",
       async list(input = {}) {
         const limit = input.limit ?? BITFS_SEED_INDEX_PAGE_SIZE;
         pageLimits.push(limit);
         const offset = input.cursor === undefined ? 0 : Number(input.cursor);
-        const files = paths.slice(offset, offset + limit).map((path) => ({ path, size: 1 }));
+        const files = paths.slice(offset, offset + limit).map((path) => ({
+          path,
+          size: 1,
+          revision: "r1",
+          lastModified: "2026-01-01T00:00:00.000Z",
+        }));
         const next = offset + files.length;
         return { files, ...(next < paths.length ? { nextCursor: String(next) } : {}) };
       },
@@ -28,8 +36,10 @@ describe("BitFS Seed 索引", () => {
         activeGets -= 1;
         return undefined;
       },
-      async put() { return {}; },
+      async put() { return { revision: "r1", lastModified: "2026-01-01T00:00:00.000Z" }; },
       async delete() {},
+      async getRange() { return undefined; },
+      async batch() { return { paths: [], committedAt: "2026-01-01T00:00:00.000Z" }; },
     };
     const index = new BitfsSeedIndex();
     await index.build(store);
@@ -43,11 +53,18 @@ describe("BitFS Seed 索引", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const candidate = hash(1);
-    const store: OwnerFileStore = {
-      async list() { return { files: [{ path: `meta/${candidate}.json`, size: 1 }] }; },
+    const store: BorrowedOwnerFileStore = {
+      walletGeneration: "test-wallet",
+      sessionEpoch: "test-epoch",
+      runGeneration: "test-run",
+      async list() {
+        return { files: [{ path: `meta/${candidate}.json`, size: 1, revision: "r1", lastModified: "2026-01-01T00:00:00.000Z" }] };
+      },
       async get() { await gate; return undefined; },
-      async put() { return {}; },
+      async put() { return { revision: "r1", lastModified: "2026-01-01T00:00:00.000Z" }; },
       async delete() {},
+      async getRange() { return undefined; },
+      async batch() { return { paths: [], committedAt: "2026-01-01T00:00:00.000Z" }; },
     };
     const index = new BitfsSeedIndex();
     const build = index.build(store);

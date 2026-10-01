@@ -36,8 +36,8 @@ interface ProductionHooks {
   lock(): Promise<string>;
   /** 仅测试使用：解锁当前 Vault。 */
   unlock(): Promise<string>;
-  /** 仅测试使用：切换 active key，触发生命周期撤销。 */
-  switchToGeneratedKey(): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string }>;
+  /** 仅测试使用：reset 后重建唯一 Key，触发生命周期撤销。 */
+  replaceWalletIdentity(label: string): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string; walletGeneration: string }>;
 }
 
 interface IndexedNativeFile {
@@ -393,11 +393,11 @@ async function lockPage(page: Page): Promise<string> {
   });
 }
 
-async function switchKeyPage(page: Page): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string }> {
+async function replaceWalletIdentityPage(page: Page): Promise<{ previousPublicKeyHex: string; activePublicKeyHex: string; walletGeneration: string }> {
   return page.evaluate(async () => {
     const api = (window as Window & { __msfileProductionE2E?: ProductionHooks }).__msfileProductionE2E;
     if (!api) throw new Error("MSFile production E2E hook 未安装");
-    return api.switchToGeneratedKey();
+    return api.replaceWalletIdentity("MSFile Native Range Gate replacement key");
   });
 }
 
@@ -1033,22 +1033,22 @@ test.describe(GATE_ID + "：MSFile 原生 Range production Gate（施工单 003�
     }));
   });
 
-  test("R18：active key、supplier generation 和文件切换都会撤销旧媒体 session", async ({ page }) => {
+  test("R18：钱包身份更换、supplier generation 和文件切换都会撤销旧媒体 session", async ({ page }) => {
     test.setTimeout(360_000);
     await preparePage(page, fixture);
     await setReadDelay(page, 750);
 
     const keySelected = await startNativePlayback(page, fixture.files["fixture-native-long.wav"]!);
     const beforeKeySwitch = await supplierReadMetrics(fixture);
-    const keySwitch = await switchKeyPage(page);
+    const keySwitch = await replaceWalletIdentityPage(page);
     expect(keySwitch.activePublicKeyHex).not.toBe(keySwitch.previousPublicKeyHex);
-    const keyRevokedStatus = await expectRevokedMediaUrl(page, keySelected.url, "active-key-change");
+    const keyRevokedStatus = await expectRevokedMediaUrl(page, keySelected.url, "wallet-identity-change");
     await wait(1_500);
     const afterKeySwitch = await supplierReadMetrics(fixture);
     expect(afterKeySwitch.started).toBe(afterKeySwitch.completed + afterKeySwitch.aborted);
     expect(afterKeySwitch.aborted).toBeGreaterThan(beforeKeySwitch.aborted);
 
-    // 换 key 后重新进入干净页面，验证新 active key 下仍能建立正式 supplier
+    // 换钱包身份后重新进入干净页面，验证新 owner key 下仍能建立正式 supplier
     // 配置；旧媒体 URL 必须保持撤销，不能被新页面复用。
     await preparePage(page, fixture);
     await setReadDelay(page, 750);

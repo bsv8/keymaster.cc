@@ -5,7 +5,6 @@ export type IntegrationLevel =
   | "local-integration"
   | "p2pkh"
   | "satsubscription"
-  | "s3"
   | "msfile"
   | "bitfs"
   | "deployment-acceptance";
@@ -14,7 +13,6 @@ export type IntegrationLevel =
 export type ResourceProfile =
   | "none"
   | "local-browser"
-  | "s3"
   | "testnet"
   | "satsubscription"
   | "p2p"
@@ -41,16 +39,14 @@ export interface FreshUserState {
   readonly page: Page;
 }
 
-/** 已完成 Local 初始化、解锁并选中第一把 Key 的业务状态。 */
+/** 已完成初始化、解锁唯一钱包 Key 的业务状态。 */
 export interface ReadyUserState {
   readonly page: Page;
-  /** 本机桶 ID(= device 记录键名,local 也是对象前缀)。 */
-  readonly bucketId: string;
-  /** 用户可读的逻辑桶名称，不是物理 S3 目标。 */
-  readonly bucketLabel: string;
-  /** 用户可读的 Key 标签。 */
+  /** 钱包世代：重置或重新导入后变化。 */
+  readonly walletGeneration: string;
+  /** 用户可读的唯一 Key 标签。 */
   readonly keyLabel: string;
-  /** 当前 active Key 的完整压缩公钥；不是私钥。 */
+  /** 唯一钱包 Key 的完整压缩公钥；不是私钥。 */
   readonly publicKeyHex: string;
 }
 

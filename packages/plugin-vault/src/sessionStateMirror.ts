@@ -1,3 +1,4 @@
+// packages/plugin-vault/src/sessionStateMirror.ts
 import type {
   CoordinatorBootstrapSnapshot,
   SessionCoordinatorClient,
@@ -11,9 +12,12 @@ import {
 export interface SessionStateSnapshot {
   sessionEpoch: string;
   vaultStatus: CoordinatorBootstrapSnapshot["vaultStatus"];
+  /** 唯一钱包 Key；未初始化或锁定时省略。 */
   activePublicKeyHex?: string;
-  selectedPublicKeyHex?: string;
-  keyspaceGeneration: number;
+  /** Worker 运行世代；Worker 重启后变化，使旧授权失效。 */
+  runGeneration: string;
+  /** 当前钱包身份世代；重置后变化，即使重新导入同一私钥也不同。 */
+  walletGeneration?: string;
   sessionRevision: number;
   autoLockTimeoutMs: number;
 }
@@ -22,7 +26,12 @@ export interface SessionStateSnapshot {
  * The tab-local, immutable projection of Coordinator session.state.
  *
  * This is deliberately the only plugin-vault subscriber to the transport topic:
- * facades derive their narrow APIs from this already-committed snapshot.
+ * facades derive their narrow APIs from this already-committed snapshot. Two
+ * generations ride along because they are the only handle bindings that matter
+ * in a purely local wallet:
+ *   - runGeneration: this Worker run. A restart invalidates every old grant.
+ *   - walletGeneration: reset/re-initialize. An async result from before a
+ *     reset must not write into the recreated wallet, even for the same key.
  */
 export class SessionStateMirror {
   private snapshot: Readonly<SessionStateSnapshot>;
@@ -37,8 +46,8 @@ export class SessionStateMirror {
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
-        selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
-        keyspaceGeneration: event.keyspaceGeneration,
+        runGeneration: event.runGeneration,
+        ...(event.walletGeneration === undefined ? {} : { walletGeneration: event.walletGeneration }),
         sessionRevision: event.sessionRevision,
         autoLockTimeoutMs: normalizeAutoLockTimeoutMs(event.autoLockTimeoutMs),
       });
@@ -61,10 +70,10 @@ export class SessionStateMirror {
       sessionEpoch: snapshot.sessionEpoch,
       vaultStatus: snapshot.vaultStatus,
       activePublicKeyHex: snapshot.activePublicKeyHex,
-      selectedPublicKeyHex: snapshot.selectedPublicKeyHex,
-      keyspaceGeneration: snapshot.keyspaceGeneration,
+      runGeneration: snapshot.runGeneration,
+      ...(snapshot.walletGeneration === undefined ? {} : { walletGeneration: snapshot.walletGeneration }),
       sessionRevision: 0,
-      autoLockTimeoutMs: normalizeAutoLockTimeoutMs(snapshot.autoLockTimeoutMs),
+      autoLockTimeoutMs: normalizeAutoLockTimeoutMs(snapshot.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS),
     });
   }
 }

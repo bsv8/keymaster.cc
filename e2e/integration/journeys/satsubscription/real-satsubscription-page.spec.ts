@@ -69,7 +69,7 @@ test(JOURNEY_ID + "：真实页面保存 Sat 供应商并比较错误身份", as
     await test.step("用户通过真实 Local 页面建立 active Key", async () => {
       await initializeNewLocalUser(
         { page },
-        { bucketLabel: "真实 Sat 页面测试桶", keyLabel: "真实 Sat 页面测试 Key", password: LOCAL_PASSWORD },
+        { keyLabel: "真实 Sat 页面测试 Key", password: LOCAL_PASSWORD },
       );
     });
 

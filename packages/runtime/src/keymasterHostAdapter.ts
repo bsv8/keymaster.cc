@@ -179,8 +179,8 @@ export interface KeymasterRuntimeScopeAttributes extends Readonly<Record<string,
   readonly ownerPublicKeyHex?: string;
   /** owner/session 运行世代。 */
   readonly sessionEpoch?: string;
-  /** Storage bucket 运行世代。 */
-  readonly bucketGeneration?: number;
+  /** 钱包身份世代；重置或初始化后变化。 */
+  readonly walletGeneration?: string;
   /** 当前授权策略修订。 */
   readonly authorizationRevision?: number;
 }
@@ -255,7 +255,7 @@ function attributesFromRuntimeIdentity(
     vaultStatus: identity.vaultStatus,
     ...(identity.ownerPublicKeyHex ? { ownerPublicKeyHex: identity.ownerPublicKeyHex } : {}),
     sessionEpoch: identity.sessionEpoch,
-    ...(identity.bucketGeneration !== undefined ? { bucketGeneration: identity.bucketGeneration } : {}),
+    ...(identity.walletGeneration !== undefined ? { walletGeneration: identity.walletGeneration } : {}),
   });
 }
 
@@ -313,23 +313,31 @@ function createAssetDataNotifier(): AssetDataNotifier {
   };
 }
 
-/** 创建延迟 owner Storage 句柄；领域 authority 仍在最终 I/O 边界复核绑定。 */
+/** 创建延迟模块 K-V 句柄；领域 authority 仍在最终 I/O 边界复核绑定。 */
 function createDeferredOwnerAppStore(
   authority: StorageBindingAuthority,
   pluginId: string,
   declaration: PluginStorageDeclaration,
   scope: import("webloom-framework").LifecycleScope,
 ): KeyValueStore {
+  // 第三方 App 只能拿到自己目录里的文件读写；K-V 与 snapshot 属于平台和
+  // 内置模块，不对 App 开放，所以这里拒绝而不是降级成别的句柄。
+  if (declaration.authority === "third-party-app") {
+    throw new Error("Third-party app storage cannot be bound to a K-V store");
+  }
   let closed = false;
-  let ownerPublicKeyHex: string | undefined;
-  let bucketGeneration: number | undefined;
   let current: OwnerAppStore | undefined;
+  // 打开句柄时锁定的三件世代：任一变化都必须重新申请 grant，旧句柄不再复用。
+  let boundWalletGeneration: string | undefined;
+  let boundSessionEpoch: string | undefined;
+  let boundRunGeneration: string | undefined;
 
   const invalidateCurrent = (): void => {
     current?.close();
     current = undefined;
-    ownerPublicKeyHex = undefined;
-    bucketGeneration = undefined;
+    boundWalletGeneration = undefined;
+    boundSessionEpoch = undefined;
+    boundRunGeneration = undefined;
   };
 
   const removeScopeRevoke = scope.onRevoke(() => {
@@ -345,22 +353,25 @@ function createDeferredOwnerAppStore(
   async function resolve(): Promise<OwnerAppStore> {
     scope.assertActive();
     if (closed) throw new Error("Owner storage handle is closed");
-    const activeOwner = authority.getActivePublicKeyHex?.()?.toLowerCase();
-    const ownerChanged = authority.getActivePublicKeyHex !== undefined
-      && (!activeOwner || ownerPublicKeyHex !== activeOwner);
-    if (!current || !ownerPublicKeyHex || ownerChanged || bucketGeneration !== current.bucketGeneration) {
+    // 会话 epoch 与运行世代只由 Worker 自己推进；Host 侧能观察到的是钱包
+    // 身份世代（重置/重新初始化后改变）。任何一个变了就丢弃旧 grant 重绑。
+    const liveWalletGeneration = authority.getWalletGeneration?.();
+    const walletChanged = liveWalletGeneration !== undefined
+      && boundWalletGeneration !== undefined
+      && boundWalletGeneration !== liveWalletGeneration;
+    if (!current || walletChanged) {
       invalidateCurrent();
       const opened = await authority.openOwnerAppStore({ pluginId, declaration });
       try {
         scope.assertActive();
-        if (!opened.ownerPublicKeyHex) throw new Error("Owner storage binding has no owner");
-        const latestOwner = authority.getActivePublicKeyHex?.()?.toLowerCase();
-        if (latestOwner && opened.ownerPublicKeyHex.toLowerCase() !== latestOwner) {
-          throw new Error("Owner storage owner changed while opening binding");
+        const latestWalletGeneration = authority.getWalletGeneration?.();
+        if (latestWalletGeneration && opened.walletGeneration !== latestWalletGeneration) {
+          throw new Error("Owner storage wallet generation changed while opening binding");
         }
         current = opened;
-        ownerPublicKeyHex = opened.ownerPublicKeyHex.toLowerCase();
-        bucketGeneration = opened.bucketGeneration;
+        boundWalletGeneration = opened.walletGeneration;
+        boundSessionEpoch = opened.sessionEpoch;
+        boundRunGeneration = opened.runGeneration;
       } catch (error) {
         opened.close();
         throw error;
@@ -372,13 +383,21 @@ function createDeferredOwnerAppStore(
 
   const run = async <T>(operation: (store: OwnerAppStore) => Promise<T>): Promise<T> => {
     const store = await resolve();
-    const boundOwner = ownerPublicKeyHex;
-    const boundBucket = bucketGeneration;
+    const boundEpoch = boundSessionEpoch;
+    const boundRun = boundRunGeneration;
+    const boundWallet = boundWalletGeneration;
     try {
       scope.assertActive();
       const result = await operation(store);
       scope.assertActive();
-      if (current !== store || ownerPublicKeyHex !== boundOwner || bucketGeneration !== boundBucket) {
+      // 锁、改密、重置、撤权与 Worker 重启都会改变其中一项；跨过栅栏的迟到
+      // 结果在这里被丢弃，不允许把旧授权下的写入当作成功。
+      if (current !== store
+        || boundSessionEpoch !== boundEpoch
+        || boundRunGeneration !== boundRun
+        || boundWalletGeneration !== boundWallet
+        || (authority.getWalletGeneration?.() !== undefined
+          && boundWalletGeneration !== authority.getWalletGeneration?.())) {
         throw new Error("Owner storage binding changed while operation was running");
       }
       return result;
@@ -389,12 +408,11 @@ function createDeferredOwnerAppStore(
   };
 
   return {
-    get bucketId() { return current?.bucketId ?? "pending"; },
-    get bucketGeneration() { return current?.bucketGeneration ?? 0; },
-    get ownerPublicKeyHex() { return ownerPublicKeyHex ?? ""; },
+    get walletGeneration() { return boundWalletGeneration ?? "pending"; },
+    get sessionEpoch() { return boundSessionEpoch ?? "pending"; },
+    get runGeneration() { return boundRunGeneration ?? "pending"; },
     moduleId: declaration.moduleId,
     purposeId: declaration.purposeId,
-    scope: declaration.scope,
     authority: declaration.authority,
     model: "kv",
     schemaVersion: declaration.schemaVersion,
@@ -411,7 +429,7 @@ function createDeferredOwnerAppStore(
   };
 }
 
-/** 创建延迟 owner 文件句柄（model: "files"）；authority 在最终 I/O 边界复核绑定。 */
+/** 创建延迟模块文件句柄（model: "files"）；authority 在最终 I/O 边界复核绑定。 */
 function createDeferredOwnerFileStore(
   authority: StorageBindingAuthority,
   pluginId: string,
@@ -438,7 +456,9 @@ function createDeferredOwnerFileStore(
   async function resolve(): Promise<import("@keymaster/contracts").OwnerFileStore> {
     scope.assertActive();
     if (closed) throw new Error("Owner file storage handle is closed");
-    if (!current) {
+    const liveWalletGeneration = authority.getWalletGeneration?.();
+    if (!current || (liveWalletGeneration !== undefined && current.walletGeneration !== liveWalletGeneration)) {
+      current?.close();
       current = await authority.openOwnerFileStore({ pluginId, declaration });
       scope.assertActive();
       if (closed) {
@@ -451,10 +471,22 @@ function createDeferredOwnerFileStore(
 
   const run = async <T>(operation: (store: import("@keymaster/contracts").OwnerFileStore) => Promise<T>): Promise<T> => {
     const store = await resolve();
+    const boundEpoch = store.sessionEpoch;
+    const boundRun = store.runGeneration;
+    const boundWallet = store.walletGeneration;
     try {
       scope.assertActive();
       const result = await operation(store);
       scope.assertActive();
+      // 锁、改密、重置、撤权与 Worker 重启都会改变其中一项；跨过栅栏的迟到
+      // 结果在这里被丢弃。
+      if (current !== store
+        || store.sessionEpoch !== boundEpoch
+        || store.runGeneration !== boundRun
+        || store.walletGeneration !== boundWallet
+        || (authority.getWalletGeneration?.() !== undefined && boundWallet !== authority.getWalletGeneration?.())) {
+        throw new Error("Owner file storage binding changed while operation was running");
+      }
       return result;
     } catch (error) {
       if (isStaleOwnerStorageBinding(error)) invalidateCurrent();
@@ -463,10 +495,21 @@ function createDeferredOwnerFileStore(
   };
 
   return {
+    get walletGeneration() { return current?.walletGeneration ?? "pending"; },
+    get sessionEpoch() { return current?.sessionEpoch ?? "pending"; },
+    get runGeneration() { return current?.runGeneration ?? "pending"; },
     list: (input) => run((store) => store.list(input)),
     get: (path, options) => run((store) => store.get(path, options)),
+    getRange: (path, range, options) => run((store) => store.getRange(path, range, options)),
     put: (path, bytes, condition) => run((store) => store.put(path, bytes, condition)),
     delete: (path, options) => { return run((store) => store.delete(path, options)); },
+    batch: (input, options) => run((store) => store.batch(input, options)),
+    close: () => {
+      if (closed) return;
+      closed = true;
+      current?.close();
+      current = undefined;
+    },
   };
 }
 
@@ -491,7 +534,7 @@ async function bindStorageDeclaration(
   scope: import("webloom-framework").LifecycleScope,
 ): Promise<KeyValueStore | undefined> {
   const authority = requireStorageBindingAuthority(options, host, pluginId);
-  if (declaration.scope === "bucket") {
+  if (declaration.authority === "platform-only") {
     return authority.openPlatformStore({ pluginId, declaration });
   }
   return createDeferredOwnerAppStore(authority, pluginId, declaration, scope);
@@ -499,12 +542,11 @@ async function bindStorageDeclaration(
 
 function borrowKeyValueStore(store: KeyValueStore): import("@keymaster/contracts").BorrowedKeyValueStore {
   return {
-    get bucketId() { return store.bucketId; },
-    get bucketGeneration() { return store.bucketGeneration; },
-    get ownerPublicKeyHex() { return store.ownerPublicKeyHex; },
+    get walletGeneration() { return store.walletGeneration; },
+    get sessionEpoch() { return store.sessionEpoch; },
+    get runGeneration() { return store.runGeneration; },
     get moduleId() { return store.moduleId; },
     get purposeId() { return store.purposeId; },
-    get scope() { return store.scope; },
     get authority() { return store.authority; },
     get model() { return store.model; },
     get schemaVersion() { return store.schemaVersion; },
@@ -854,7 +896,7 @@ export function createKeymasterPluginHost(
     if (!root) return undefined;
     const attributes = attributesFromRuntimeIdentity(runtimeIdentity);
     const key = scopeKind === "storage"
-      ? `storage:${attributes.bucketGeneration ?? "unknown"}`
+      ? `storage:${attributes.walletGeneration ?? "unknown"}`
       : `${scopeKind}:${attributes.ownerPublicKeyHex ?? "none"}:${attributes.sessionEpoch ?? "none"}`;
     const existing = runtimeParentScopes.get(scopeKind);
     if (existing?.scope.state === "active" && existing.key === key) return existing.scope;
@@ -1727,8 +1769,8 @@ export function createKeymasterPluginHost(
     const run = async (): Promise<void> => {
       if (runtimeIdentityKey(runtimeIdentity) === runtimeIdentityKey(next)) return;
       const previousIdentity = runtimeIdentity;
-      const storageChanged = (previousIdentity?.bucketGeneration ?? "unknown")
-        !== (next.bucketGeneration ?? "unknown");
+      const storageChanged = (previousIdentity?.walletGeneration ?? "unknown")
+        !== (next.walletGeneration ?? "unknown");
       const ownerChanged = previousIdentity?.vaultStatus !== next.vaultStatus
         || (previousIdentity?.ownerPublicKeyHex ?? "") !== (next.ownerPublicKeyHex ?? "")
         || previousIdentity?.sessionEpoch !== next.sessionEpoch;
@@ -1754,12 +1796,12 @@ export function createKeymasterPluginHost(
       runtimeIdentity = { ...next };
       // WebLoom 负责当前实例的 Scope；身份边界变化时先同步撤权，再等待
       // 有界清理。desiredEnabled 保持不变，解锁/重绑后由分阶段装配重新启动。
-      // 新身份如果没有就绪存储（bucketGeneration 未知，例如冷启动停在存储
+      // 新身份如果没有就绪存储（walletGeneration 未知，例如冷启动停在存储
       // 认证页、或切换过程中旧绑定已卸下），storage 作用域单元的 setup 会
       // 立刻因“Platform storage requires a ready root”失败并把插件打成
       // error-disabled；这不是用户意图变化。此时保持挂起，等下一个带就绪
       // 存储的身份事件再重试，避免把安全入口打成启动失败页。
-      const storageReadyForIdentity = next.bucketGeneration !== undefined;
+      const storageReadyForIdentity = next.walletGeneration !== undefined;
       for (const item of toSuspend) {
         await coreHost!.suspend(item.pluginId, "runtime identity changed");
         if (item.scopeKind === "storage" && item.shouldRestart && storageReadyForIdentity) {
@@ -1785,7 +1827,7 @@ export function createKeymasterPluginHost(
 
 function runtimeIdentityKey(identity: RuntimeIdentityTransition | undefined): string {
   if (!identity) return "none";
-  return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.bucketGeneration ?? "unknown"}`;
+  return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.walletGeneration ?? "unknown"}`;
 }
 
 function validateKeymasterManifest(

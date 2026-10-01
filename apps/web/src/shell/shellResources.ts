@@ -1,10 +1,16 @@
-import type { ActiveKeyState, ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, KeyIdentity, KeyspaceService, NoticeRecord, NoticeRegistry, ResourceRegistry, VaultService, VaultStatus } from "@keymaster/contracts";
+import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, KeyspaceService, NoticeRecord, NoticeRegistry, ResourceRegistry, VaultService, VaultStatus } from "@keymaster/contracts";
 import { APPLICATION_BOOTSTRAP_RESOURCE_ID } from "@keymaster/contracts";
 
+/**
+ * 单 Key 钱包下的壳层守卫结果。
+ *
+ * 没有「0 key 回退」和「Key 列表修复」这类分支：系统里只有一把 Key，
+ * 已经 unlocked 却读不到公开身份就是状态不一致，必须阻断业务页而不是
+ * 自动收敛或清空钱包。读失败同样 fail closed，不当成「没有 Key」。
+ */
 export type ShellGuardResource =
   | { kind: "normal" }
-  | { kind: "empty-vault-recovery" }
-  | { kind: "needs-repair"; keys: KeyIdentity[] }
+  | { kind: "needs-repair"; publicKeyHex?: string }
   | { kind: "diagnostic"; error: string };
 
 export function registerShellResources(registry: ResourceRegistry, applicationBootstrap?: ApplicationBootstrapStatus): void {
@@ -33,23 +39,17 @@ export function registerShellResources(registry: ResourceRegistry, applicationBo
     subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onLifecycleChange(() => invalidate()) ?? (() => {}),
     invalidation: "immediate"
   });
-  registry.register<unknown, readonly string[]>({
-    id: "shell.activation-notice", scope: "global", key: () => ["shell.activation-notice"],
-    load: async (_args, context) => context.getCapability<VaultService>("vault.service")?.getInitialActivationNotice?.() ?? null,
-    subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onInitialActivationNoticeChange(() => invalidate()) ?? (() => {}),
-    invalidation: "immediate"
-  });
   registry.register<ShellGuardResource, readonly string[]>({
     id: "shell.guard", scope: "global", key: () => ["shell.guard"],
     load: async (_args, context) => {
       const vault = context.getCapability<VaultService>("vault.service");
-      const keyspace = context.getCapability<KeyspaceService>("keyspace.service");
-      if (!vault || !keyspace || vault.status() !== "unlocked") return { kind: "normal" };
-      const active: ActiveKeyState = keyspace.active();
-      if (active.activePublicKeyHex) return { kind: "normal" };
+      if (!vault || vault.status() !== "unlocked") return { kind: "normal" };
       try {
-        const keys = await keyspace.listKeys();
-        return keys.length === 0 ? { kind: "empty-vault-recovery" } : { kind: "needs-repair", keys };
+        const active = context.getCapability<KeyspaceService>("keyspace.service")?.active();
+        const key = await vault.getCurrentKey();
+        if (key) return { kind: "normal" };
+        // 已解锁却读不到唯一 Key 的公开身份：KeyHold 已解密但身份投影缺失。
+        return { kind: "needs-repair", publicKeyHex: active?.activePublicKeyHex };
       } catch (err) {
         return { kind: "diagnostic", error: err instanceof Error ? err.message : String(err) };
       }

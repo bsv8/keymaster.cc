@@ -1,6 +1,6 @@
 // packages/plugin-msfile/src/msfileRepository.test.ts
-// KeymasterFormats 文件 Repository：`msfiles/setting.json` 与
-// `app.<publisher>/settings.json` 的解析、严格校验和整文件读-改-写。
+// KeymasterFormats 文件 Repository：`msfiles/setting.json` 与平台管理的
+// `app-settings.json` 的解析、严格校验和整文件读-改-写。
 
 import { describe, expect, it } from "vitest";
 import { openMsFileRepository, sanitizeAppOverride } from "./storage/msfileRepository.js";
@@ -172,12 +172,11 @@ describe("app settings（app.<publisher>/settings.json）", () => {
     // putAppPolicy 只补缺失字段，不改写已有观察时间。
     expect(usages[0]).toMatchObject({ appName: "Player", firstSeenAt: 10, lastSeenAt: 10 });
 
-    const file = JSON.parse(new TextDecoder().decode(stores.appSettings(PUBLISHER).objects.get("settings.json"))) as Record<string, unknown>;
+    const file = JSON.parse(new TextDecoder().decode(stores.appSettings.objects.get("app-settings.json")!)) as Record<string, unknown>;
     expect(file).toMatchObject({
       format: "keymaster.app-settings",
-      version: 1,
-      publisherPublicKeyHex: PUBLISHER,
-      apps: { "player.example": { name: "Player", msfiles: { seedMaxPriceSatoshis: "100" } } },
+      version: 2,
+      publishers: { [PUBLISHER]: { "player.example": { name: "Player", msfiles: { seedMaxPriceSatoshis: "100" } } } },
     });
 
     await db.deleteAppPolicy(key);
@@ -198,52 +197,49 @@ describe("app settings（app.<publisher>/settings.json）", () => {
     db.close();
   });
 
-  it("preserves unknown module sections when writing known fields", async () => {
+  it("drops unknown module sections when writing known fields", async () => {
     const { stores, open } = freshRepository();
     const db = await open();
-    const appStore = stores.appSettings(PUBLISHER);
-    appStore.objects.set("settings.json", new TextEncoder().encode(JSON.stringify({
+    const appStore = stores.appSettings;
+    appStore.objects.set("app-settings.json", new TextEncoder().encode(JSON.stringify({
       format: "keymaster.app-settings",
-      version: 1,
-      publisherPublicKeyHex: PUBLISHER,
-      apps: {
-        "player.example": {
-          name: "Player",
-          firstSeenAt: "2026-09-19T00:00:00.000Z",
-          lastSeenAt: "2026-09-19T00:00:00.000Z",
-          otherModule: { keep: true },
+      version: 2,
+      publishers: {
+        [PUBLISHER]: {
+          "player.example": {
+            name: "Player",
+            firstSeenAt: "2026-09-19T00:00:00.000Z",
+            lastSeenAt: "2026-09-19T00:00:00.000Z",
+          },
         },
       },
     })));
 
     await db.putAppPolicy({ policyKey: `${IN_MEMORY_OWNER_PUBKEY}|${PUBLISHER}|player.example`, key, override: { blockMaxPriceSatoshis: "60" }, updatedAt: 1 });
-    const raw = JSON.parse(new TextDecoder().decode(appStore.objects.get("settings.json"))) as {
-      apps: Record<string, Record<string, unknown>>;
+    const raw = JSON.parse(new TextDecoder().decode(appStore.objects.get("app-settings.json")!)) as {
+      publishers: Record<string, Record<string, Record<string, unknown>>>;
     };
-    expect(raw.apps["player.example"]).toMatchObject({
-      otherModule: { keep: true },
+    expect(raw.publishers[PUBLISHER]?.["player.example"]).toMatchObject({
       msfiles: { blockMaxPriceSatoshis: "60" },
     });
     db.close();
   });
 
-  it("rejects publisher mismatch and invalid app ids", async () => {
+  it("rejects an invalid publisher key and invalid app ids", async () => {
     const { stores, open } = freshRepository();
     const db = await open();
-    const appStore = stores.appSettings(PUBLISHER);
-    appStore.objects.set("settings.json", new TextEncoder().encode(JSON.stringify({
+    const appStore = stores.appSettings;
+    appStore.objects.set("app-settings.json", new TextEncoder().encode(JSON.stringify({
       format: "keymaster.app-settings",
-      version: 1,
-      publisherPublicKeyHex: IN_MEMORY_OWNER_PUBKEY,
-      apps: {},
+      version: 2,
+      publishers: { "not-a-publisher": {} },
     })));
     await expect(db.listAppUsages()).rejects.toThrow(/publisher/);
 
-    appStore.objects.set("settings.json", new TextEncoder().encode(JSON.stringify({
+    appStore.objects.set("app-settings.json", new TextEncoder().encode(JSON.stringify({
       format: "keymaster.app-settings",
-      version: 1,
-      publisherPublicKeyHex: PUBLISHER,
-      apps: { "Bad App": { name: "x", firstSeenAt: "2026-09-19T00:00:00.000Z", lastSeenAt: "2026-09-19T00:00:00.000Z" } },
+      version: 2,
+      publishers: { [PUBLISHER]: { "Bad App": { name: "x", firstSeenAt: "2026-09-19T00:00:00.000Z", lastSeenAt: "2026-09-19T00:00:00.000Z" } } },
     })));
     await expect(db.listAppUsages()).rejects.toThrow(/appId/);
     db.close();

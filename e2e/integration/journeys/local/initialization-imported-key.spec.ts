@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { readSessionPublicKey } from "../../drivers/appDriver.js";
+import { readWalletPublicKey } from "../../drivers/appDriver.js";
 import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
@@ -23,15 +23,14 @@ test(JOURNEY_ID + "：首次初始化导入 Hex Key 后进入首页", async ({ p
 
   try {
     const ready = await initializeLocalUserWithImportedHexKey(page, {
-      bucketLabel: "Imported E2E bucket",
       keyLabel: "Imported E2E Key",
       password,
       privateKeyHex,
     });
     expect(ready.publicKeyHex).toMatch(/^(02|03)[0-9a-f]{64}$/iu);
-    // 初始化完成后落在首页；身份真值由 session 记录确认。
+    // 初始化完成后落在首页；身份真值由 key.json 确认。
     expect(new URL(page.url()).pathname).toBe("/");
-    await expect(readSessionPublicKey(page)).resolves.toBe(ready.publicKeyHex);
+    await expect(readWalletPublicKey(page)).resolves.toBe(ready.publicKeyHex);
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password, privateKeyHex]);
     await attachVisibleDiagnostic(page, testInfo);
