@@ -18,6 +18,7 @@ import type {
   SnapshotStore,
   StorageNamespaceBinding,
   StorageSnapshotJsonCompatible,
+  StorageBrowseWallet,
 } from "@keymaster/contracts";
 import {
   CENTRAL_STORAGE_DECLARATIONS,
@@ -95,6 +96,14 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
       return options.isCurrent?.(binding) ?? true;
     };
   }
+
+  /** 浏览视图是否仍对应当前这一代 Root 装配。 */
+function platformRootMatchesGeneration(live: { walletGeneration: string; sessionEpoch: string; runGeneration: string }): boolean {
+  const bound = options.generations();
+  return bound.walletGeneration === live.walletGeneration
+    && bound.sessionEpoch === live.sessionEpoch
+    && bound.runGeneration === live.runGeneration;
+}
 
   function currentBinding(): StorageNamespaceBinding {
     const live = options.generations();
@@ -186,6 +195,32 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Plat
   return {
     get walletGeneration(): string {
       return options.generations().walletGeneration;
+    },
+    async openBrowseStore(): Promise<StorageBrowseWallet> {
+      // 每次打开都重新绑定当前世代：上一代 Root 拆掉的句柄不能继续读新钱包。
+      const isCurrent = (): boolean => {
+        const live = options.generations();
+        if (options.isCurrent?.({ ...currentBinding() } as StorageNamespaceBinding) === false) return false;
+        return platformRootMatchesGeneration(live);
+      };
+      const assertCurrent = (): void => {
+        if (!isCurrent()) throw new StorageRuntimeError("storage_unavailable", "Storage browse root is stale");
+      };
+      return {
+        async list(input) {
+          assertCurrent();
+          return options.store.list({
+            ...(input?.prefix === undefined ? {} : { prefix: input.prefix }),
+            ...(input?.cursor === undefined ? {} : { cursor: input.cursor }),
+            ...(input?.limit === undefined ? {} : { limit: input.limit }),
+            ...(input?.signal === undefined ? {} : { signal: input.signal }),
+          });
+        },
+        async get(path, getOptions) {
+          assertCurrent();
+          return options.store.get(path, getOptions?.signal === undefined ? undefined : { signal: getOptions.signal });
+        },
+      };
     },
     async openKeyValueStore(input): Promise<OwnerAppStore> {
       const declaration = validatePluginStorageDeclaration(input.declaration);

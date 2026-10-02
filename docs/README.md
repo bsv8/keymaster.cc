@@ -31,3 +31,4 @@
 
 - [BitFS 本地 MSFile 与卖方模式需求](./proposals/msfile/BitFS本地代理与卖方模式需求.md)
 - [BitFS 本地 MSFile 与卖方模式施工单](./proposals/msfile/BitFS本地代理与卖方模式施工单.md)
+- [存储浏览器施工单](./proposals/storage/存储浏览器施工单.md)：代码已实施，真实浏览器验收已覆盖 JSON 预览、渲染量上界、锁定清空与窄屏键盘；Markdown/TXT 渲染与超大目录翻页仍未验证。

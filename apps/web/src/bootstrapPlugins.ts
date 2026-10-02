@@ -35,6 +35,7 @@ import {
   type AssetDataNotifier,
   type SessionCoordinatorClient,
   type StorageCoordinatorControl,
+  type StorageBrowseCoordinatorControl,
   type VaultCoordinatorControl,
   type BackgroundCoordinatorControl,
   type P2pkhCoordinatorControl,
@@ -242,11 +243,32 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
   ]);
 }
 
-/** Storage 插件专用 facade：只允许页面侧 StorageRuntimeController 所需 RPC。 */
-export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl {
-  return bindCoordinatorMethods<StorageCoordinatorControl>(client, [
+/**
+ * Storage 插件专用 facade：页面侧 StorageRuntimeController 与只读浏览代理所需 RPC。
+ *
+ * 浏览的三条 RPC 合并在这里而不是另开一个 plugin id：Worker 侧只认
+ * `storage.window` 这一个受信任运行单元，而该单元正是 storage 产品的 window
+ * 单元。拆成另一个插件会凭空多出一个带根浏览权限的产品级 id，与「不向普通
+ * 插件发放根浏览权限」相冲突。
+ */
+export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl & StorageBrowseCoordinatorControl {
+  return bindCoordinatorMethods<StorageCoordinatorControl & StorageBrowseCoordinatorControl>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
-    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort"
+    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
+    "storageBrowseOpen", "storageBrowseData", "storageBrowseClose"
+  ]);
+}
+
+/**
+ * 存储浏览专用的窄 Coordinator 面。
+ *
+ * 它与 createStorageCoordinatorClient 分开：后者带 Connect grant 与 owner 绑定，
+ * 而浏览只需要只读的三条 RPC。误把其中一份发出去也不会连带放大可见范围。
+ */
+export function createStorageBrowseCoordinatorClient(client: SessionCoordinatorClient): StorageBrowseCoordinatorControl {
+  return bindCoordinatorMethods<StorageBrowseCoordinatorControl>(client, [
+    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
+    "storageBrowseOpen", "storageBrowseData", "storageBrowseClose"
   ]);
 }
 

@@ -44,6 +44,7 @@ import type {
   CoordinatorChannelOperation,
   CoordinatorStorageControl,
   CoordinatorStorageData,
+  CoordinatorStorageBrowseData,
   CoordinatorMsFileControl,
   CoordinatorMsFileData,
   CoordinatorVaultOperation,
@@ -119,6 +120,15 @@ import { STORAGE_MAX_PAYLOAD_BYTES } from "./storage/kv.js";
 import type { PluginIntentCommand, PluginIntentSnapshot, PluginIntentSubmissionResult } from "webloom-framework";
 import type { StorageRuntimeControllerStatus, StorageRuntimeSummary } from "./storage/runtime.js";
 import type {
+  StorageBrowseEntry,
+  StorageBrowseKvPayload,
+  StorageBrowsePage,
+  StorageBrowsePreview,
+  StorageBrowseSession,
+  StoragePreviewFormat,
+} from "./storage/browse.js";
+import { STORAGE_BROWSE_PREVIEW_MAX_BYTES } from "./storage/browse.js";
+import type {
   KeyRef,
   VaultSealedSecret,
 } from "./vault.js";
@@ -174,6 +184,7 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
   "background.run-now", "background.trigger", "background.cancel", "background.cancel-by-key",
   "background.settings.update", "autolock.settings.update", "storage.grant", "storage.control", "storage.data",
   "storage.cancel", "storage.session.abort", "storage.owner.bind", "storage.platform.bind",
+  "storage.browse.open", "storage.browse.data", "storage.browse.close",
   "storage.owner.data", "storage.platform.data", "storage.clear.root", "msfile.control",
   "msfile.grant", "msfile.data", "msfile.cancel", "msfile.session.abort",
   "window-p2p.executor.acquire", "window-p2p.executor.release", "window-p2p.executor.spike.transfer",
@@ -192,6 +203,18 @@ const STORAGE_CONTROL_TYPES = [
 const STORAGE_DATA_TYPES = [
   "list", "create-directory", "delete-directory", "put", "get-range", "delete", "batch",
 ] as const satisfies readonly CoordinatorStorageData["type"][];
+
+const STORAGE_BROWSE_DATA_TYPES = [
+  "browse.list", "browse.preview",
+] as const satisfies readonly CoordinatorStorageBrowseData["type"][];
+
+const STORAGE_PREVIEW_FORMATS = [
+  "json", "json-broken", "markdown", "text", "empty", "kv-value", "kv-invalid", "binary", "truncated",
+] as const satisfies readonly StoragePreviewFormat[];
+
+const STORAGE_BROWSE_KV_ERRORS = [
+  "envelope-invalid", "version-unsupported", "hash-mismatch", "payload-unsupported",
+] as const satisfies readonly NonNullable<StorageBrowsePreview["kvError"]>[];
 
 const VAULT_OPERATION_TYPES = [
   "getCurrentKey", "verifyPassword", "changePassword", "renameKey", "exportKeyHold",
@@ -270,6 +293,12 @@ export type CoordinatorStorageDataResultFor<D extends CoordinatorStorageData> =
   D extends { type: "get-range" } ? StorageGetResult :
   D extends { type: "delete" } ? StorageDeleteResult :
   D extends { type: "batch" } ? { paths: string[]; committedAt: string } :
+  never;
+
+/** 依据 storage.browse.data 内层 data discriminant 收窄 operationResult。 */
+export type CoordinatorStorageBrowseDataResultFor<D extends CoordinatorStorageBrowseData> =
+  D extends { type: "browse.list" } ? StorageBrowsePage :
+  D extends { type: "browse.preview" } ? StorageBrowsePreview :
   never;
 
 /** 依据 msfile.control 内层 control discriminant 收窄 operationResult。 */
@@ -428,6 +457,8 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "vault.operation"; operation: infer O } ? O extends CoordinatorVaultOperation ? CoordinatorVaultOperationResultFor<O> : never :
   R extends { kind: "storage.control"; control: infer C } ? C extends CoordinatorStorageControl ? CoordinatorStorageControlResultFor<C> : never :
   R extends { kind: "storage.data"; data: infer D } ? D extends CoordinatorStorageData ? CoordinatorStorageDataResultFor<D> : never :
+  R extends { kind: "storage.browse.open" } ? StorageBrowseSession :
+  R extends { kind: "storage.browse.data"; data: infer D } ? D extends CoordinatorStorageBrowseData ? CoordinatorStorageBrowseDataResultFor<D> : never :
   R extends { kind: "storage.owner.data"; data: infer D } ? D extends CoordinatorOwnerStorageData ? CoordinatorOwnerStorageResultFor<D> : never :
   R extends { kind: "storage.platform.data"; data: infer D } ? D extends CoordinatorPlatformStorageData ? CoordinatorOwnerStorageResultFor<D> : never :
   R extends { kind: "storage.grant" } ? string :
@@ -493,6 +524,7 @@ type CoordinatorRpcVoidRequest =
       | "autolock.settings.update"
       | "storage.cancel"
       | "storage.session.abort"
+      | "storage.browse.close"
       | "msfile.cancel"
       | "msfile.session.abort"
       | "window-p2p.executor.release"
@@ -818,6 +850,100 @@ function parseStorageData(value: unknown): CoordinatorStorageData {
     default:
       throw new TypeError("Coordinator storage data type " + type + " is unsupported");
   }
+}
+
+/**
+ * 浏览数据面解析。prefix 允许空串（逻辑根），但不接受显示用 `/`；显示根必须在
+ * 调用侧转换，否则 `/apps` 会被当成合法的绝对对象路径。
+ */
+function parseStorageBrowseData(value: unknown): CoordinatorStorageBrowseData {
+  const data = expectRecord(value, "storage browse data");
+  const type = enumValue(data.type, STORAGE_BROWSE_DATA_TYPES, "storage browse data.type");
+  const browseSessionId = text(data.browseSessionId, "storage browse data.browseSessionId", 256);
+  if (type === "browse.list") {
+    // 空串是逻辑根，必须原样放行：optionalText 会经 text() 拒绝空串，那样
+    // 浏览根目录这一唯一一次必然请求就会在客户端校验阶段失败，用户看到的
+    // 只会是「加载中」和一个不指向根因的 storage_unavailable。
+    const prefix = optionalFilePathPrefix(data.prefix, "storage browse data.browse.list.prefix", 4_096) ?? "";
+    const cursor = optionalText(data.cursor, "storage browse data.browse.list.cursor", 8_192);
+    const limit = optionalBoundedNumber(data.limit, "storage browse data.browse.list.limit", 1, 1_000);
+    return { type, browseSessionId, prefix, ...(cursor === undefined ? {} : { cursor }), ...(limit === undefined ? {} : { limit }) };
+  }
+  const path = text(data.path, "storage browse data.browse.preview.path", 4_096);
+  const ifRevision = optionalText(data.ifRevision, "storage browse data.browse.preview.ifRevision", 512);
+  return { type, browseSessionId, path, ...(ifRevision === undefined ? {} : { ifRevision }) };
+}
+
+function parseStorageBrowseEntry(value: unknown, field: string): StorageBrowseEntry {
+  const entry = expectRecord(value, field);
+  const contentType = optionalText(entry.contentType, field + ".contentType", 256);
+  return {
+    path: text(entry.path, field + ".path", 4_096),
+    size: integer(entry.size, field + ".size"),
+    lastModified: text(entry.lastModified, field + ".lastModified", 128),
+    revision: text(entry.revision, field + ".revision", 512),
+    ...(contentType === undefined ? {} : { contentType }),
+  };
+}
+
+function parseStorageBrowsePage(value: unknown, field: string): StorageBrowsePage {
+  const page = expectRecord(value, field);
+  if (!Array.isArray(page.entries) || page.entries.length > 1_000) {
+    throw new TypeError(`Coordinator ${field}.entries is invalid`);
+  }
+  const nextCursor = optionalText(page.nextCursor, field + ".nextCursor", 8_192);
+  return {
+    entries: page.entries.map((entry, index) => parseStorageBrowseEntry(entry, `${field}.entries[${index}]`)),
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  };
+}
+
+function parseStorageBrowseKvPayload(value: unknown, field: string): StorageBrowseKvPayload {
+  const payload = expectRecord(value, field);
+  const json = payload.json;
+  if (typeof json !== "boolean") throw new TypeError(`Coordinator ${field}.json is invalid`);
+  const jsonText = optionalText(payload.jsonText, field + ".jsonText", STORAGE_BROWSE_PREVIEW_MAX_BYTES);
+  if (jsonText !== undefined && !json) throw new TypeError(`Coordinator ${field}.jsonText is invalid`);
+  return {
+    valueId: text(payload.valueId, field + ".valueId", 256),
+    partition: text(payload.partition, field + ".partition", 256),
+    payloadFingerprint: text(payload.payloadFingerprint, field + ".payloadFingerprint", 256),
+    json,
+    ...(jsonText === undefined ? {} : { jsonText }),
+  };
+}
+
+function parseStorageBrowsePreview(value: unknown, field: string): StorageBrowsePreview {
+  const preview = expectRecord(value, field);
+  const format = enumValue(preview.format, STORAGE_PREVIEW_FORMATS, field + ".format");
+  const contentType = optionalText(preview.contentType, field + ".contentType", 256);
+  const kvPayload = preview.kvPayload === undefined ? undefined : parseStorageBrowseKvPayload(preview.kvPayload, field + ".kvPayload");
+  const kvError = preview.kvError === undefined
+    ? undefined
+    : enumValue(preview.kvError, STORAGE_BROWSE_KV_ERRORS, field + ".kvError");
+  return {
+    path: text(preview.path, field + ".path", 4_096),
+    format,
+    bytes: uint8ArrayValue(preview.bytes, field + ".bytes"),
+    totalSize: integer(preview.totalSize, field + ".totalSize"),
+    returnedSize: integer(preview.returnedSize, field + ".returnedSize"),
+    truncated: preview.truncated === true,
+    revision: text(preview.revision, field + ".revision", 512),
+    lastModified: text(preview.lastModified, field + ".lastModified", 128),
+    ...(contentType === undefined ? {} : { contentType }),
+    ...(kvPayload === undefined ? {} : { kvPayload }),
+    ...(kvError === undefined ? {} : { kvError }),
+  };
+}
+
+function parseStorageBrowseSession(value: unknown, field: string): StorageBrowseSession {
+  const session = expectRecord(value, field);
+  return {
+    browseSessionId: text(session.browseSessionId, field + ".browseSessionId", 256),
+    walletGeneration: text(session.walletGeneration, field + ".walletGeneration", 256),
+    sessionEpoch: text(session.sessionEpoch, field + ".sessionEpoch", 256),
+    runGeneration: text(session.runGeneration, field + ".runGeneration", 256),
+  };
 }
 
 type ParsedInternalStorageData =
@@ -1485,6 +1611,9 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "storage.data": return { kind, data: parseStorageData(request.data), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.cancel": return { kind, targetRequestId: target() };
     case "storage.session.abort": return { kind, connectSessionId: text(request.connectSessionId, "storage.session.abort.connectSessionId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "storage.browse.open": return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "storage.browse.data": return { kind, data: parseStorageBrowseData(request.data), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "storage.browse.close": return { kind, browseSessionId: text(request.browseSessionId, "storage.browse.close.browseSessionId", 256) };
     case "storage.owner.bind":
       return { kind, pluginId: text(request.pluginId, kind + ".pluginId", 256), declaration: parseStorageDeclaration(request.declaration, kind + ".declaration"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.platform.bind":
@@ -2997,6 +3126,8 @@ function parseCoordinatorResultForRequest(request: CoordinatorRpcRequest, value:
     case "vault.operation": return parseCoordinatorVaultOperationResultFor(request.operation, value, field);
     case "storage.control": return parseStorageControlResultFor(request.control, value, field);
     case "storage.data": return parseStorageDataResultFor(request.data, value, field);
+    case "storage.browse.open": return parseStorageBrowseSession(value, field);
+    case "storage.browse.data": return request.data.type === "browse.list" ? parseStorageBrowsePage(value, field) : parseStorageBrowsePreview(value, field);
     case "storage.owner.data": return parseOwnerStorageResultFor(request.data, value, field);
     case "storage.platform.data": return parseOwnerStorageResultFor(request.data, value, field);
     case "storage.grant":
@@ -3048,6 +3179,7 @@ function isVoidCoordinatorRequest(request: CoordinatorRpcRequest): boolean {
     case "autolock.settings.update":
     case "storage.cancel":
     case "storage.session.abort":
+    case "storage.browse.close":
     case "msfile.cancel":
     case "msfile.session.abort":
     case "window-p2p.executor.release":

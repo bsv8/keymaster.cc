@@ -21,6 +21,8 @@ export type FinalIoAuditOperation =
   | "storage.module.files"
   | "storage.owner.files"
   | "storage.connect.data"
+  /** 只读存储浏览（设置 → 存储）的最终 I/O 边界。 */
+  | "storage.browse"
   | "msfile.data"
   | "msfile.control"
   | "sat.address.derive"

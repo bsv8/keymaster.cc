@@ -241,7 +241,23 @@ export type CoordinatorClientRequestWithStorage =
   | { kind: "storage.data"; clientId: string; requestId: string; data: CoordinatorStorageData; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "disconnect"; clientId: string; requestId: string }
-  | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
+  | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch }
+  /**
+   * 打开只读浏览会话；返回绑定三种世代的不透明句柄。
+   *
+   * 请求里没有 unitId 之类的身份字段：调用方所属的运行单元由 Coordinator 从已验证
+   * 的 peer/端口上下文判定，自报任何字符串都不构成授权。
+   */
+  | { kind: "storage.browse.open"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
+  /** 浏览数据面：列举元数据或请求预览；句柄绑定端口与浏览会话。 */
+  | { kind: "storage.browse.data"; clientId: string; requestId: string; data: CoordinatorStorageBrowseData; expectedSessionEpoch: SessionEpoch }
+  /** 关闭浏览会话并释放它的全部游标。 */
+  | { kind: "storage.browse.close"; clientId: string; requestId: string; browseSessionId: string };
+
+/** 只读浏览的数据面；写操作不在此类型里。 */
+export type CoordinatorStorageBrowseData =
+  | { type: "browse.list"; browseSessionId: string; prefix: string; cursor?: string; limit?: number }
+  | { type: "browse.preview"; browseSessionId: string; path: string; ifRevision?: string };
 
 /** Host/Coordinator 内部存储请求，不属于插件可见的 SessionCoordinatorClient。 */
 export type CoordinatorClientRequestWithInternalStorage =
@@ -815,6 +831,16 @@ export interface SessionCoordinatorClient {
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
+  /**
+   * 打开只读存储浏览会话；只发给受信任的平台运行单元。
+   *
+   * 没有任何身份参数：Coordinator 从已验证的 peer 上下文判定归属。
+   */
+  storageBrowseOpen(): Promise<CoordinatorValueResult<import("./storage/browse.js").StorageBrowseSession>>;
+  /** 浏览数据面：列举元数据或请求预览。 */
+  storageBrowseData(data: CoordinatorStorageBrowseData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
+  /** 关闭浏览会话并释放它的全部游标。 */
+  storageBrowseClose(browseSessionId: string): Promise<CoordinatorCommandResult>;
   msfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorValueResult<unknown>>;
   msfileGrant(context: MsFileConnectAppContext): Promise<CoordinatorValueResult<string>>;
   msfileData(data: CoordinatorMsFileData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
@@ -858,6 +884,11 @@ export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
 /** Storage 插件 Coordinator 面。 */
 export type StorageCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort"
+>;
+
+/** 存储浏览页面的 Coordinator 面；只有只读浏览，没有写操作。 */
+export type StorageBrowseCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "storageBrowseOpen" | "storageBrowseData" | "storageBrowseClose"
 >;
 
 /**
@@ -937,6 +968,15 @@ export const SESSION_COORDINATOR_CLIENT_CAPABILITY = defineCapability<SessionCoo
 export const COORDINATOR_ACTIVITY_CAPABILITY = defineCapability<Pick<SessionCoordinatorClient, "getIsConnected" | "sendActivity">>({ kind: "local", id: "session-coordinator.activity", version: "1" });
 export const SESSION_COORDINATOR_SNAPSHOT_CAPABILITY = defineCapability<{ snapshot(): CoordinatorBootstrapSnapshot }>({ kind: "local", id: "session-coordinator.snapshot", version: "1" });
 export const STORAGE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<StorageCoordinatorControl>({ kind: "local", id: "storage.coordinator-control", version: "1" });
+/**
+ * 存储浏览专用的窄 Coordinator 面。
+ *
+ * 它与 {@link StorageCoordinatorControl} 分开声明：Connect grant、owner 绑定与
+ * 平台 K-V 都不在这里，因此误把浏览面发给普通插件也不会连带发放写能力。
+ * Coordinator 侧不读取任何调用方自报的主体：浏览授权由它自己在已验证的 peer
+ * 上下文里签发，并与该 peer 绑定。
+ */
+export const STORAGE_BROWSE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<StorageBrowseCoordinatorControl>({ kind: "local", id: "storage.browse-coordinator-control", version: "1" });
 export const VAULT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<VaultCoordinatorControl>({ kind: "local", id: "vault.coordinator-control", version: "1" });
 export const BACKGROUND_COORDINATOR_CONTROL_CAPABILITY = defineCapability<BackgroundCoordinatorControl>({ kind: "local", id: "background.coordinator-control", version: "1" });
 export const P2PKH_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "p2pkh.coordinator-control", version: "1" });

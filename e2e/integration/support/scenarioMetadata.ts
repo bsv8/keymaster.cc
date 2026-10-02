@@ -233,6 +233,30 @@ export const STORAGE_BROWSER_GATE = {
   resourceProfile: "local-browser",
 } as const satisfies IntegrationScenarioMetadata;
 
+/**
+ * 只读存储浏览 Journey：走真实 SharedWorker 与真实 IndexedDB 打开 /settings/storage。
+ *
+ * 单元测试用假浏览服务，能证明目录状态机与竞态，却证明不了「页面 → Coordinator
+ * → Worker → 钱包」这条真实链路。该页曾因组件的挂载标记在 StrictMode 下恒假而
+ * 永久停在「加载中」，全部单元测试依然通过；这条 Journey 是拦住同类回归的闸门。
+ */
+export const STORAGE_BROWSE_SCENARIO = {
+  id: "J-LOCAL-STORAGE-BROWSE",
+  level: "local-integration",
+  requirementIds: ["KM-TECH-001", "KM-STORAGE-BROWSE-001"],
+  startingState: "全新 Chromium context 已完成本地钱包创建，钱包已解锁；未注入任何存储或 Worker 替身。",
+  successCriteria: [
+    "/settings/storage 经真实 Worker 列出根目录，不停留在加载态。",
+    "页面 reload 与页内刷新都能重新加载，不出现永久卡死。",
+    "加载失败时呈现可诊断错误，而不是空目录或无限加载。",
+    "选中真实 JSON 对象后给出 JSON 树，原文切换双向可用且与文件文本逐字一致；属性面板给出完整路径与元数据。",
+    "列表与文件树的渲染行数不超过一个展示页，与已加载总量无关；已加载的每一项都可达。",
+    "锁定后树与预览一起清空，新开的 Tab 拿不到浏览授权；重新解锁后浏览恢复。",
+    "窄屏下文件树收为侧栏但入口保留，目录列表与详情仍可用；目录行与展开箭头可聚焦并用键盘激活。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
 /** 配置安全 Gate：验证仓库外路径、权限和 SecretString 的读取边界。 */
 export const CONFIG_SAFETY_GATE = {
   id: "G-CONFIG-SAFETY",

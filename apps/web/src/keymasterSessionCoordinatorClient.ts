@@ -29,6 +29,7 @@ import type {
   SessionCoordinatorClient,
   CoordinatorStorageControl,
   CoordinatorStorageData,
+  CoordinatorStorageBrowseData,
   CoordinatorSatOperation,
   CoordinatorChannelOperation,
   ContactPresenceMap,
@@ -865,6 +866,37 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   async storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "storage.cancel", clientId: this.clientId, requestId: this.generateRequestId(), targetRequestId });
+  }
+
+  async storageBrowseOpen(): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").StorageBrowseSession>> {
+    // 不带任何身份字段：请求所属运行单元由 Coordinator 从已验证的 peer 上下文判定。
+    const request = { kind: "storage.browse.open" as const, clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind) as import("@keymaster/contracts").StorageBrowseSession, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async storageBrowseData(data: CoordinatorStorageBrowseData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "storage.browse.data" as const, clientId: this.clientId, requestId: this.generateRequestId(), data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    let onAbort: (() => void) | undefined;
+    try {
+      if (signal?.aborted) return { status: "transport-error", message: "Storage browse request cancelled", retryable: false };
+      // 取消复用 storage.cancel：它按 targetRequestId 中止 Worker 侧在途读取，
+      // 浏览不需要第二套取消语义。
+      onAbort = () => { void this.storageCancel(request.requestId); };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const response = await this.sendRequest(request);
+      if (signal?.aborted) return { status: "transport-error", message: "Storage browse request cancelled", retryable: false };
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+    finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  }
+
+  async storageBrowseClose(browseSessionId: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "storage.browse.close", clientId: this.clientId, requestId: this.generateRequestId(), browseSessionId });
   }
 
   async storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult> {

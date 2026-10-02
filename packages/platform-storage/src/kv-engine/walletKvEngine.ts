@@ -30,29 +30,30 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import type { WalletStore } from "../local/indexedDbWalletStore.js";
 import { StorageRuntimeError, storageErrorCode } from "../runtime/storageError.js";
 
-const JSON_PREFIX = new TextEncoder().encode("keymaster-kv-v1:json\n");
-const BINARY_PREFIX = new TextEncoder().encode("keymaster-kv-v1:binary\n");
-const VALUE_OBJECT_HEADER_PREFIX = new TextEncoder().encode("keymaster-kv-value-v1:");
-const VALUE_OBJECT_FORMAT = "keymaster.kv-value";
-const VALUE_OBJECT_VERSION = 1;
-const VALUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const DEFAULT_PARTITION = "default";
-const MAX_KEY_LENGTH = 1024;
-const MAX_PARTITION_LENGTH = 128;
+// head、value object、载荷前缀与信封解析只有 kvValueCodec.ts 一份实现：写路径
+// 与存储浏览器因此不会各自解释同一批字节。
+import {
+  KV_VALUE_ID_PATTERN,
+  kvDecodeValueObject,
+  kvDecodeValue,
+  kvEncodeValue,
+  kvEncodeValueObject,
+  kvJsonBytes,
+  kvParseHead,
+  kvParseValueObject,
+  kvValidateKey,
+  kvValidatePartition,
+  kvValidateValueId,
+  type KvEncodedValue,
+  type KvHeadRecord,
+  type KvValueObjectRecord,
+} from "./kvValueCodec.js";
 const MAX_AUTOMATIC_COMMIT_RETRIES = 8;
 /** 垃圾回收一次扫描的元数据分页大小；分页扫描，不全量解码字节。 */
 const GARBAGE_SCAN_PAGE_LIMIT = 256;
 /** 单次回收默认删除上限：留出余量，避免一次长事务占住 IndexedDB 连接。 */
 const DEFAULT_GARBAGE_MAX_DELETES = 64;
 
-interface HeadRecord {
-  format: "keymaster.kv-head";
-  version: 2;
-  partition: string;
-  revision: number;
-  committedAt: number;
-  entries: Array<{ key: string; valueId: string; valueHash: string; updatedAt: number }>;
-}
 
 interface CursorRecord {
   version: 1;
@@ -60,16 +61,6 @@ interface CursorRecord {
   revision: number;
   offset: number;
   prefix: string;
-}
-
-interface ValueObjectRecord {
-  format: "keymaster.kv-value";
-  version: 1;
-  valueId: string;
-  partition: string;
-  valueHash: string;
-  createdAt: number;
-  payload: Uint8Array;
 }
 
 export interface KeyValueStoreOptions {
@@ -82,11 +73,6 @@ export interface KeyValueStoreOptions {
   now?: () => number;
   generateId?: () => string;
   generateValueId?: () => string;
-}
-
-interface EncodedValue {
-  bytes: Uint8Array;
-  valueHash: string;
 }
 
 interface InternalCommitResult extends KeyValueCommitResult {
@@ -104,183 +90,6 @@ function asStorageError(error: unknown): StorageRuntimeError {
   return fail("storage_provider_error", "K-V storage operation failed");
 }
 
-function hex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const result = new Uint8Array(a.byteLength + b.byteLength);
-  result.set(a, 0);
-  result.set(b, a.byteLength);
-  return result;
-}
-
-function startsWithBytes(value: Uint8Array, prefix: Uint8Array): boolean {
-  return value.byteLength >= prefix.byteLength && prefix.every((byte, index) => value[index] === byte);
-}
-
-function jsonBytes(value: unknown): Uint8Array {
-  try {
-    return new TextEncoder().encode(JSON.stringify(value));
-  } catch {
-    throw fail("storage_provider_error", "K-V head is not serializable");
-  }
-}
-
-function parseJson<T>(bytes: Uint8Array, message: string): T {
-  try {
-    return JSON.parse(new TextDecoder().decode(bytes)) as T;
-  } catch {
-    throw fail("storage_provider_error", message);
-  }
-}
-
-function exactKeys(value: object, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const sortedExpected = [...expected].sort();
-  return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
-}
-
-function encodeValue(value: unknown): EncodedValue {
-  let bytes: Uint8Array;
-  if (value instanceof Uint8Array) {
-    bytes = concatBytes(BINARY_PREFIX, value);
-  } else {
-    try {
-      bytes = concatBytes(JSON_PREFIX, new TextEncoder().encode(JSON.stringify(value)));
-    } catch {
-      throw fail("storage_provider_error", "K-V value is not serializable");
-    }
-  }
-  return { bytes, valueHash: hex(sha256(bytes)) };
-}
-
-function decodeValue(bytes: Uint8Array): KeyValueValue {
-  if (startsWithBytes(bytes, BINARY_PREFIX)) return new Uint8Array(bytes.slice(BINARY_PREFIX.byteLength));
-  if (!startsWithBytes(bytes, JSON_PREFIX)) throw fail("storage_provider_error", "K-V value envelope is invalid");
-  try {
-    return JSON.parse(new TextDecoder().decode(bytes.slice(JSON_PREFIX.byteLength))) as KeyValueJson;
-  } catch {
-    throw fail("storage_provider_error", "K-V JSON value is invalid");
-  }
-}
-
-function encodeValueObject(valueId: string, partition: string, encoded: EncodedValue, createdAt: number): Uint8Array {
-  validateValueId(valueId);
-  validatePartition(partition);
-  if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw fail("storage_provider_error", "K-V value object timestamp is invalid");
-  const header = new TextEncoder().encode(
-    new TextDecoder().decode(VALUE_OBJECT_HEADER_PREFIX)
-    + JSON.stringify({ format: VALUE_OBJECT_FORMAT, version: VALUE_OBJECT_VERSION, valueId, partition, valueHash: encoded.valueHash, createdAt })
-    + "\n"
-  );
-  return concatBytes(header, encoded.bytes);
-}
-
-function parseValueObjectEnvelope(bytes: Uint8Array): ValueObjectRecord {
-  if (!startsWithBytes(bytes, VALUE_OBJECT_HEADER_PREFIX)) throw fail("storage_provider_error", "K-V value object envelope is invalid");
-  let separator = -1;
-  for (let index = VALUE_OBJECT_HEADER_PREFIX.byteLength; index < bytes.byteLength; index += 1) {
-    if (bytes[index] === 0x0a) { separator = index; break; }
-  }
-  if (separator < 0) throw fail("storage_provider_error", "K-V value object envelope is invalid");
-  const header = parseJson<unknown>(bytes.slice(VALUE_OBJECT_HEADER_PREFIX.byteLength, separator), "K-V value object envelope is invalid");
-  if (!header || typeof header !== "object" || Array.isArray(header)
-    || !exactKeys(header, ["format", "version", "valueId", "partition", "valueHash", "createdAt"])) {
-    throw fail("storage_provider_error", "K-V value object envelope is invalid");
-  }
-  const candidate = header as Partial<ValueObjectRecord>;
-  if (candidate.format !== VALUE_OBJECT_FORMAT || candidate.version !== VALUE_OBJECT_VERSION
-    || typeof candidate.valueId !== "string" || typeof candidate.partition !== "string" || typeof candidate.valueHash !== "string"
-    || !VALUE_ID_PATTERN.test(candidate.valueId)
-    || !/^[0-9a-f]{64}$/u.test(candidate.valueHash)
-    || !Number.isSafeInteger(candidate.createdAt) || (candidate.createdAt as number) < 0) {
-    throw fail("storage_provider_error", "K-V value object envelope is invalid");
-  }
-  try { validatePartition(candidate.partition); } catch { throw fail("storage_provider_error", "K-V value object envelope is invalid"); }
-  const payload = bytes.slice(separator + 1);
-  if (hex(sha256(payload)) !== candidate.valueHash) throw fail("storage_provider_error", "K-V value hash mismatch");
-  return {
-    format: VALUE_OBJECT_FORMAT,
-    version: VALUE_OBJECT_VERSION,
-    valueId: candidate.valueId,
-    partition: candidate.partition,
-    valueHash: candidate.valueHash,
-    createdAt: candidate.createdAt as number,
-    payload,
-  };
-}
-
-function parseValueObject(bytes: Uint8Array, expectedValueId: string, expectedPartition: string, expectedValueHash: string): ValueObjectRecord {
-  if (!VALUE_ID_PATTERN.test(expectedValueId) || !/^[0-9a-f]{64}$/u.test(expectedValueHash)) {
-    throw fail("storage_provider_error", "K-V value reference is invalid");
-  }
-  const record = parseValueObjectEnvelope(bytes);
-  if (record.valueId !== expectedValueId || record.partition !== expectedPartition || record.valueHash !== expectedValueHash) {
-    throw fail("storage_provider_error", "K-V value object reference mismatch");
-  }
-  return record;
-}
-
-function parseHead(bytes: Uint8Array, partition: string): HeadRecord {
-  const value = parseJson<unknown>(bytes, "K-V partition head is invalid");
-  if (!value || typeof value !== "object" || Array.isArray(value)
-    || !exactKeys(value, ["format", "version", "partition", "revision", "committedAt", "entries"])) {
-    throw fail("storage_provider_error", "K-V partition head is invalid");
-  }
-  const candidate = value as Partial<HeadRecord>;
-  if (candidate.format !== "keymaster.kv-head" || candidate.version !== 2 || candidate.partition !== partition
-    || !Number.isSafeInteger(candidate.revision) || (candidate.revision as number) < 1
-    || !Number.isSafeInteger(candidate.committedAt) || (candidate.committedAt as number) < 0
-    || !Array.isArray(candidate.entries)) throw fail("storage_provider_error", "K-V partition head is invalid");
-  const entries: HeadRecord["entries"] = [];
-  const seen = new Set<string>();
-  for (const item of candidate.entries) {
-    if (!item || typeof item !== "object" || Array.isArray(item)
-      || !exactKeys(item, ["key", "valueId", "valueHash", "updatedAt"])) throw fail("storage_provider_error", "K-V partition head entry is invalid");
-    const entry = item as { key?: unknown; valueId?: unknown; valueHash?: unknown; updatedAt?: unknown };
-    if (typeof entry.key !== "string" || seen.has(entry.key)) throw fail("storage_provider_error", "K-V partition head entry is invalid");
-    validateKey(entry.key);
-    if (typeof entry.valueId !== "string" || !VALUE_ID_PATTERN.test(entry.valueId)) throw fail("storage_provider_error", "K-V value object ID is invalid");
-    if (typeof entry.valueHash !== "string" || !/^[0-9a-f]{64}$/u.test(entry.valueHash)) throw fail("storage_provider_error", "K-V value reference is invalid");
-    if (!Number.isSafeInteger(entry.updatedAt) || (entry.updatedAt as number) < 0) throw fail("storage_provider_error", "K-V partition head timestamp is invalid");
-    seen.add(entry.key);
-    entries.push({ key: entry.key, valueId: entry.valueId, valueHash: entry.valueHash, updatedAt: entry.updatedAt as number });
-  }
-  return { format: "keymaster.kv-head", version: 2, partition, revision: candidate.revision as number, committedAt: candidate.committedAt as number, entries };
-}
-
-function validateKey(key: string): string {
-  if (
-    typeof key !== "string"
-    || key.length === 0
-    || key.length > MAX_KEY_LENGTH
-    || key.startsWith("/")
-    || key.includes("\\")
-    || key.includes("\u0000")
-    || key.split("/").some((segment) => !segment || segment === "." || segment === ".." || segment === ".keymaster")
-  ) throw fail("storage_invalid_path", "K-V key is invalid");
-  return key;
-}
-
-function validatePartition(partition: string | undefined): string {
-  const value = partition ?? DEFAULT_PARTITION;
-  if (
-    typeof value !== "string"
-    || value.length === 0
-    || value.length > MAX_PARTITION_LENGTH
-    || value.startsWith(".")
-    || value.includes("/")
-    || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value)
-  ) throw fail("storage_invalid_path", "K-V partition is invalid");
-  return value;
-}
-
-function validateValueId(valueId: string): string {
-  if (typeof valueId !== "string" || !VALUE_ID_PATTERN.test(valueId)) throw fail("storage_provider_error", "K-V value object ID is invalid");
-  return valueId;
-}
-
 function encodeCursor(cursor: CursorRecord): string {
   const bytes = new TextEncoder().encode(JSON.stringify(cursor));
   let binary = "";
@@ -296,7 +105,7 @@ function decodeCursor(value: string | undefined): CursorRecord | undefined {
     if (!cursor || cursor.version !== 1 || typeof cursor.partition !== "string" || typeof cursor.prefix !== "string"
       || !Number.isSafeInteger(cursor.revision) || cursor.revision < 0
       || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0) throw new Error();
-    validatePartition(cursor.partition);
+    kvValidatePartition(cursor.partition);
     return cursor;
   } catch {
     throw fail("storage_invalid_path", "K-V cursor is invalid");
@@ -332,15 +141,15 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     if (closed || options.isCurrent?.() === false) throw fail("storage_unavailable", "Storage handle is stale");
   }
 
-  const headPath = (partition: string): string => `${root}.keymaster/heads/${validatePartition(partition)}`;
-  const valuePath = (valueId: string): string => `${root}.keymaster/values/${validateValueId(valueId)}`;
+  const headPath = (partition: string): string => `${root}.keymaster/heads/${kvValidatePartition(partition)}`;
+  const valuePath = (valueId: string): string => `${root}.keymaster/values/${kvValidateValueId(valueId)}`;
 
-  async function readHead(partition: string): Promise<{ head?: HeadRecord; revision: number; entries: Map<string, { valueId: string; valueHash: string; updatedAt: number }> }> {
+  async function readHead(partition: string): Promise<{ head?: KvHeadRecord; revision: number; entries: Map<string, { valueId: string; valueHash: string; updatedAt: number }> }> {
     assertOpen();
     const object = await options.store.get(headPath(partition));
     assertOpen();
     if (!object) return { revision: 0, entries: new Map() };
-    const head = parseHead(object.bytes, partition);
+    const head = kvParseHead(object.bytes, partition);
     const entries = new Map<string, { valueId: string; valueHash: string; updatedAt: number }>();
     for (const entry of head.entries) entries.set(entry.key, { valueId: entry.valueId, valueHash: entry.valueHash, updatedAt: entry.updatedAt });
     return { head, revision: head.revision, entries };
@@ -351,7 +160,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     const object = await options.store.get(valuePath(valueId));
     assertOpen();
     if (!object) throw fail("storage_provider_error", "K-V value is missing");
-    return decodeValue(parseValueObject(object.bytes, valueId, partition, valueHash).payload);
+    return kvDecodeValue(kvParseValueObject(object.bytes, valueId, partition, valueHash).payload);
   }
 
   /**
@@ -407,13 +216,10 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
         if (referenced.has(valueId)) continue;
         const object = await options.store.get(valuePath(valueId));
         if (!object) continue;
-        let createdAt: number;
-        try {
-          createdAt = parseValueObjectEnvelope(object.bytes).createdAt;
-        } catch {
-          // 无法解析的对象不是本引擎写的 value：宁可保留，也不猜测删除。
-          continue;
-        }
+        // 无法解析的对象不是本引擎写的 value：宁可保留，也不猜测删除。
+        const decoded = kvDecodeValueObject(object.bytes);
+        if (!decoded.ok) continue;
+        const createdAt = decoded.record.createdAt;
         if (createdAt > cutoff) continue;
         candidates += 1;
         if (deleted + failed >= maxDeletes) continue;
@@ -430,32 +236,32 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
   }
 
   async function readSnapshot(partitionInput?: string) {
-    const partition = validatePartition(partitionInput);
+    const partition = kvValidatePartition(partitionInput);
     const state = await readHead(partition);
     return { partition, revision: state.revision, entries: state.entries };
   }
 
   async function commitUnlocked(input: KeyValueCommitInput): Promise<InternalCommitResult> {
     assertOpen();
-    const partition = validatePartition(input.partition);
+    const partition = kvValidatePartition(input.partition);
     if (!Array.isArray(input.operations) || input.operations.length > 10_000) throw fail("storage_limit_exceeded", "K-V commit contains too many operations");
     const state = await readHead(partition);
     const currentRevision = state.revision;
     if (input.ifRevision !== undefined && input.ifRevision !== currentRevision) throw fail("storage_conflict", "K-V partition revision changed");
     const next = new Map(state.entries);
-    const encodedByHash = new Map<string, EncodedValue>();
+    const encodedByHash = new Map<string, KvEncodedValue>();
     const referencesByHash = new Map<string, { valueId: string; valueHash: string; updatedAt: number }>();
     for (const reference of state.entries.values()) {
       if (!referencesByHash.has(reference.valueHash)) referencesByHash.set(reference.valueHash, reference);
     }
     const committedAt = now();
-    const allocateReference = (encoded: EncodedValue): { valueId: string; valueHash: string; updatedAt: number } => {
+    const allocateReference = (encoded: KvEncodedValue): { valueId: string; valueHash: string; updatedAt: number } => {
       const existing = referencesByHash.get(encoded.valueHash);
       if (existing) return existing;
       let valueId = "";
       for (let attempt = 0; attempt < 8; attempt += 1) {
         const candidate = generateValueId();
-        if (VALUE_ID_PATTERN.test(candidate) && !allocatedValueIds.has(candidate)) { valueId = candidate; break; }
+        if (KV_VALUE_ID_PATTERN.test(candidate) && !allocatedValueIds.has(candidate)) { valueId = candidate; break; }
       }
       if (!valueId) throw fail("storage_provider_error", "K-V value object ID generator produced a duplicate or invalid ID");
       allocatedValueIds.add(valueId);
@@ -466,10 +272,10 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     };
     for (const operation of input.operations) {
       if (!operation || typeof operation !== "object") throw fail("storage_provider_error", "K-V operation is invalid");
-      validateKey(operation.key);
+      kvValidateKey(operation.key);
       if (operation.type === "delete") { next.delete(operation.key); continue; }
       if (operation.type !== "put") throw fail("storage_provider_error", "K-V operation is invalid");
-      const encoded = encodeValue(operation.value);
+      const encoded = kvEncodeValue(operation.value);
       const previous = next.get(operation.key);
       if (!previous || previous.valueHash !== encoded.valueHash) next.set(operation.key, { ...allocateReference(encoded), updatedAt: committedAt });
     }
@@ -484,9 +290,9 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
       if (currentValueIds.has(reference.valueId)) continue;
       const encoded = encodedByHash.get(reference.valueHash);
       if (!encoded) throw fail("storage_provider_error", "K-V final value is missing from the commit");
-      operations.push({ type: "put", path: valuePath(reference.valueId), bytes: encodeValueObject(reference.valueId, partition, encoded, committedAt) });
+      operations.push({ type: "put", path: valuePath(reference.valueId), bytes: kvEncodeValueObject(reference.valueId, partition, encoded, committedAt) });
     }
-    const head: HeadRecord = {
+    const head: KvHeadRecord = {
       format: "keymaster.kv-head",
       version: 2,
       partition,
@@ -497,7 +303,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
         .map(([key, reference]) => ({ key, valueId: reference.valueId, valueHash: reference.valueHash, updatedAt: reference.updatedAt })),
     };
     const headRecordPath = headPath(partition);
-    operations.push({ type: "put", path: headRecordPath, bytes: jsonBytes(head) });
+    operations.push({ type: "put", path: headRecordPath, bytes: kvJsonBytes(head) });
     assertOpen();
     try {
       // head 的条件替换与所有新 value object 在同一事务:条件不成立时整体 abort。
@@ -542,7 +348,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     schemaVersion: declaration.schemaVersion,
     async get<T = KeyValueValue>(key: string, input: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> {
       assertOpen();
-      validateKey(key);
+      kvValidateKey(key);
       const state = await readSnapshot(input.partition);
       const reference = state.entries.get(key);
       if (!reference) return undefined;
@@ -552,10 +358,10 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     },
     async list(input: KeyValueListInput = {}): Promise<KeyValueListResult> {
       assertOpen();
-      const partition = validatePartition(input.partition);
+      const partition = kvValidatePartition(input.partition);
       const state = await readSnapshot(partition);
       const prefix = input.prefix ?? "";
-      if (prefix) validateKey(prefix.endsWith("/") ? prefix.slice(0, -1) : prefix);
+      if (prefix) kvValidateKey(prefix.endsWith("/") ? prefix.slice(0, -1) : prefix);
       const cursor = decodeCursor(input.cursor);
       if (cursor && (cursor.partition !== partition || cursor.revision !== state.revision || cursor.prefix !== prefix)) {
         throw fail("storage_conflict", "K-V cursor does not match this prefix snapshot");
@@ -580,13 +386,13 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
       };
     },
     async put<T = KeyValueValue>(key: string, value: T, condition: KeyValueWriteCondition = {}): Promise<KeyValueEntryMeta> {
-      const result = await commitInternal({ partition: validatePartition(condition.partition), ...(condition.ifRevision === undefined ? {} : { ifRevision: condition.ifRevision }), operations: [{ type: "put", key, value }] });
+      const result = await commitInternal({ partition: kvValidatePartition(condition.partition), ...(condition.ifRevision === undefined ? {} : { ifRevision: condition.ifRevision }), operations: [{ type: "put", key, value }] });
       const updatedAt = result.entries.get(key)?.updatedAt;
       if (updatedAt === undefined) throw fail("storage_provider_error", "K-V put did not produce an entry");
       return { key, revision: result.revision, updatedAt };
     },
     async delete(key: string, condition: KeyValueWriteCondition = {}): Promise<void> {
-      await commitInternal({ partition: validatePartition(condition.partition), ...(condition.ifRevision === undefined ? {} : { ifRevision: condition.ifRevision }), operations: [{ type: "delete", key }] });
+      await commitInternal({ partition: kvValidatePartition(condition.partition), ...(condition.ifRevision === undefined ? {} : { ifRevision: condition.ifRevision }), operations: [{ type: "delete", key }] });
     },
     async commit(input: KeyValueCommitInput): Promise<KeyValueCommitResult> {
       const { revision, commitId, committedAt } = await commitInternal(input);

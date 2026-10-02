@@ -113,10 +113,14 @@ export function defineRuntimeUnitProvidedContracts(
 }
 
 /**
- * 插件分类：
- *   - core：宿主必备，禁止 disable（如 vault / settings / home）。
- *   - platform：平台层能力，可 disable 但 UI 默认提示风险。
- *   - business：业务插件，可随时 disable（如 poker / p2pkh）。
+ * Keymaster 产品分类：
+ *   - core：系统产品分组（如 vault / settings / home）。
+ *   - platform：平台与共享服务分组（如 storage / woc）。
+ *   - business：领域功能与可选集成分组（如 poker / p2pkh）。
+ *
+ * 分类不进入 WebLoom 通用生命周期或权限判断；启动与启停策略由 startup /
+ * defaultEnabled / canDisable 显式声明，Worker 另校验不可停用产品目录。
+ * 基础 API 及其管理 UI 也可以按插件产品装配，不能仅从包装方式推导职责。
  */
 export type PluginKind = "core" | "platform" | "business";
 

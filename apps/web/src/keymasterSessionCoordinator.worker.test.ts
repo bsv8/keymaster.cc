@@ -58,6 +58,8 @@ import {
   __testDispatchStorageData,
   __testDispatchStorageControl,
   __testDispatchStorageCancel,
+  __testDispatchStorageBrowseOpen,
+  __testHasStorageBrowseAuthorization,
   __testDispatchStorageAbort,
   __testResolveStorageGrant,
   __testSeedStorageRequest,
@@ -2459,6 +2461,57 @@ describe("Sat 入站 handler 资源闭环（施工单 2026-09-02/002）", () => 
     for (const release of releases) release();
     await Promise.all(tasks.slice(0, 64).map((task) => task.completion));
     expect(__testSatInboundHandlerSnapshot().active).toBe(0);
+  });
+});
+
+describe("只读存储浏览授权（施工单 存储浏览器 A01）", () => {
+  beforeEach(async () => {
+    await __testResetWalletStore();
+    await bootstrapReadyWallet("browse-authorization");
+  });
+
+  afterEach(async () => {
+    await __testResetWalletStore();
+  });
+
+  /** 一个已经完成 session.open 的页面 peer。 */
+  function installPagePeer(peerId: string): CoordinatorSessionBinding {
+    const harness = makeCoordinatorTestPeer(peerId);
+    const binding: CoordinatorSessionBinding = {
+      peerGeneration: 1,
+      sessionEpoch: __testGetSnapshot().sessionEpoch,
+      leaseId: `lease-${peerId}`,
+    };
+    __testInstallCoordinatorBridgePeer(harness.peer, binding);
+    return binding;
+  }
+
+  it("A01: 只有已建立页面连接的 peer 能打开浏览会话", async () => {
+    installPagePeer("peer-browse");
+    const response = await __testDispatchStorageBrowseOpen("peer-browse");
+    expect(response.ack.status).toBe("ok");
+    expect(__testHasStorageBrowseAuthorization("peer-browse")).toBe(true);
+    expect((response.operationResult as { browseSessionId?: string }).browseSessionId).toBeTruthy();
+  });
+
+  it("A01: 没有 committed session 的 peer 调用同一 RPC 一律被拒", async () => {
+    installPagePeer("peer-browse");
+    // Connect/普通插件/伪造主体都不在 coordinatorPeers 里，也没有绑定；即使它们
+    // 知道受信任单元的固定 id，也换不到任何授权：请求体里根本没有身份字段可填。
+    for (const peerId of ["peer-evil", "port-connect-app", "peer-no-session"]) {
+      const response = await __testDispatchStorageBrowseOpen(peerId);
+      expect(response.ack, peerId).toMatchObject({ status: "error", code: "storage_forbidden" });
+      expect(__testHasStorageBrowseAuthorization(peerId), peerId).toBe(false);
+    }
+  });
+
+  it("L02: peer 脱离 committed session 后它的浏览授权当场作废", async () => {
+    const binding = installPagePeer("peer-browse");
+    expect((await __testDispatchStorageBrowseOpen("peer-browse")).ack.status).toBe("ok");
+    expect(__testHasStorageBrowseAuthorization("peer-browse")).toBe(true);
+    // 页面关闭/锁定/换绑都会走这条 fence。
+    await __testCloseCoordinatorBridgePeer("peer-browse", binding);
+    expect(__testHasStorageBrowseAuthorization("peer-browse")).toBe(false);
   });
 });
 

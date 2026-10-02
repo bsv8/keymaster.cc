@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./coordinator": "./src/coordinator/index.ts",
-    "./coordinator/authority": "./src/coordinator/authority.ts"
+    "./coordinator/authority": "./src/coordinator/authority.ts",
+    "./styles.css": "./src/styles.css"
   },
   "types": "./src/index.ts",
   "dependencies": {

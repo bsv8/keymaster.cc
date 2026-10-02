@@ -190,6 +190,7 @@ import type {
 } from "@keymaster/contracts";
 import {
   createStorageRuntimeController,
+  createStorageBrowseService,
   createPlatformRootStore,
   createWalletLifecycleService,
   createIndexedDbWalletStore,
@@ -197,6 +198,7 @@ import {
   StorageRuntimeError,
 } from "@keymaster/platform-storage/coordinator";
 import type { WalletKeyRepository, WalletStore } from "@keymaster/platform-storage/coordinator";
+import type { StorageBrowseAuthorization, StorageBrowseRuntime } from "@keymaster/platform-storage/coordinator";
 import { WALLET_LIST_MAX_LIMIT } from "@keymaster/platform-storage/coordinator";
 import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
 import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
@@ -889,9 +891,165 @@ function disposeCurrentPlatformStorageBinding(binding: CurrentPlatformStorageBin
   closeCoordinatorProtocolStorageStores(binding.protocol);
 }
 
+// ============================================================
+// 9.5 Storage Browse (read-only)
+// ============================================================
+
+/**
+ * 只读存储浏览服务的运行态句柄。
+ *
+ * 它刻意不放进 StorageController 和 grant 表：浏览看的是整个钱包，与 Connect
+ * App 的命名空间授权无关，因此也没有任何 App 能借它扩大可见范围。
+ */
+let storageBrowseRuntime: StorageBrowseRuntime | undefined;
+let storageBrowseRootToken: object | undefined;
+
+/**
+ * 受信任的平台浏览运行单元。
+ *
+ * 浏览页由 platform-storage 的 window-main 单元贡献；这个常量是 Coordinator 侧
+ * 唯一的身份事实来源，请求里不存在可以自报的同名字段。
+ */
+const STORAGE_BROWSE_TRUSTED_UNIT_ID = "storage.window";
+
+/**
+ * Coordinator 签发的浏览授权，按 peer 绑定。
+ *
+ * 这张表是「哪个 peer 处于受信任的浏览运行单元」的权威记录：只有本文件能写它，
+ * 浏览服务和页面都读不到。授权不是调用方递上来的字符串，而是 Coordinator 在已验证
+ * 的 peer 上下文里生成的不透明 id，因此「把 unitId 填对」不再能换取浏览会话。
+ */
+interface StorageBrowseAuthorizationRecord {
+  /** 授权绑定的 peer/端口；与请求的实际 clientId 不一致时一律拒绝。 */
+  peerId: string;
+  unitId: string;
+  walletGeneration: string;
+  sessionEpoch: string;
+  runGeneration: string;
+}
+
+const storageBrowseAuthorizations = new Map<string, StorageBrowseAuthorizationRecord>();
+
+/** 撤销某个 peer 名下的全部浏览授权；端口断开、会话关闭或换绑时调用。 */
+function revokeStorageBrowseAuthorizations(peerId: string): void {
+  for (const [authorizationId, record] of [...storageBrowseAuthorizations]) {
+    if (record.peerId === peerId) storageBrowseAuthorizations.delete(authorizationId);
+  }
+}
+
+function revokeAllStorageBrowseAuthorizations(): void {
+  storageBrowseAuthorizations.clear();
+}
+
+/**
+ * 校验请求方确实是一个「已建立页面连接」的 peer，并就地签发浏览授权。
+ *
+ * 允许发放浏览会话的 peer 必须同时满足，全部由 Coordinator 自己判断，不含任何请求
+ * 字段：
+ *   1. 它是本 Worker 注册过的 active peer，且没有被撤销；
+ *   2. 它完成过 `session.open` 并持有 committed binding（`sessionOpen` + binding +
+ *      openCommitOrder），也就是一个真实的页面连接，而不是一个随便连上来的端口；
+ *   3. 钱包已解锁且存储根就绪。
+ *
+ * 这里**不能**要求 binding 里的 sessionEpoch 等于当前世代：应用在锁定态启动，
+ * `session.open` 发生在解锁之前，而解锁会换一代 session epoch。世代一致性由授权
+ * 本身承担：授权记录当次的钱包/会话/运行世代，浏览服务每次调用都重新核对，所以
+ * 换 Key、锁定、Worker 重启之后旧授权立即失效。
+ *
+ * Connect App、第三方与普通插件没有 Coordinator peer 上下文，因此第 2 条就是它们的
+ * 拒绝点：它们连这一步都走不到，谈不上自报任何 unitId。返回 undefined 表示不是受信任
+ * 单元；调用方不区分「peer 不存在」与「binding 过期」，避免把内部状态泄露出去。
+ */
+function issueStorageBrowseAuthorization(peerId: string): string | undefined {
+  const state = coordinatorPeerState(peerId);
+  if (!state
+    || !state.sessionOpen
+    || state.status !== "open"
+    || state.peer.scope.state !== "active"
+    || revokedCoordinatorPeerIds.has(peerId)
+    || state.sessionBinding === undefined
+    || state.openCommitOrder === undefined) {
+    return undefined;
+  }
+  if (coordinatorState.vaultStatus !== "unlocked" || !platformRootStore || !platformStorageReady) {
+    throw storageUnavailableError("Storage browse requires a ready storage root");
+  }
+  // 每次打开换一张授权：同一 peer 的旧授权立即失效，避免旧句柄跟着新授权活下来。
+  revokeStorageBrowseAuthorizations(peerId);
+  const authorizationId = crypto.randomUUID();
+  storageBrowseAuthorizations.set(authorizationId, {
+    peerId,
+    unitId: STORAGE_BROWSE_TRUSTED_UNIT_ID,
+    walletGeneration: coordinatorState.walletGeneration,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    runGeneration: coordinatorState.runGeneration,
+  });
+  return authorizationId;
+}
+
+/** 浏览服务用这张表核对授权；查不到就等于不是受信任单元。 */
+function resolveStorageBrowseAuthorization(peerId: string, authorizationId: unknown): StorageBrowseAuthorization | undefined {
+  if (typeof authorizationId !== "string" || authorizationId.length === 0) return undefined;
+  const record = storageBrowseAuthorizations.get(authorizationId);
+  if (!record || record.peerId !== peerId) return undefined;
+  return {
+    unitId: record.unitId,
+    clientId: record.peerId,
+    walletGeneration: record.walletGeneration,
+    sessionEpoch: record.sessionEpoch,
+    runGeneration: record.runGeneration,
+  };
+}
+
+function revokeAllStorageBrowseSessions(): void {
+  revokeAllStorageBrowseAuthorizations();
+  storageBrowseRuntime?.revokeAll();
+}
+
+/**
+ * 取当前浏览服务；未装配时按需装配。
+ *
+ * 装配失败不缓存：存储根还没准备好时页面会重试，而不是把一次失败固化成
+ * 「浏览不可用」。
+ */
+async function ensureStorageBrowseRuntime(): Promise<StorageBrowseRuntime> {
+  const root = platformRootStore;
+  const rootToken = platformRootToken;
+  if (!root || !rootToken || !platformStorageReady) {
+    throw storageUnavailableError("Storage browse requires a ready storage root");
+  }
+  if (storageBrowseRuntime && storageBrowseRootToken === rootToken) return storageBrowseRuntime;
+  storageBrowseRuntime?.revokeAll();
+  const wallet = await root.openBrowseStore();
+  if (platformRootStore !== root || platformRootToken !== rootToken) {
+    throw storageUnavailableError("Storage browse root was replaced while opening");
+  }
+  const runtime = createStorageBrowseService({
+    wallet,
+    walletGeneration: () => coordinatorState.walletGeneration,
+    sessionEpoch: () => coordinatorState.sessionEpoch,
+    runGeneration: () => coordinatorState.runGeneration,
+    trustedAuthorization: resolveStorageBrowseAuthorization,
+    isUnlocked: () => coordinatorState.vaultStatus === "unlocked",
+    // 浏览只读：与其它读取共用一把 final I/O lease 和它的最终 I/O 审计。
+    withReadLease: (task) => withCoordinatorFinalIoLease("read", undefined, task, { auditOperation: "storage.browse" }),
+  });
+  storageBrowseRuntime = runtime;
+  storageBrowseRootToken = rootToken;
+  return runtime;
+}
+
+function dropStorageBrowseBinding(): void {
+  revokeAllStorageBrowseAuthorizations();
+  storageBrowseRuntime?.revokeAll();
+  storageBrowseRuntime = undefined;
+  storageBrowseRootToken = undefined;
+}
+
 /** 撤销当前存储根：所有已发放句柄与迟到结果立即失效。 */
 function discardCurrentPlatformStorageBinding(): void {
   stopCoordinatorKeyValueMaintenance();
+  dropStorageBrowseBinding();
   const binding = captureCurrentPlatformStorageBinding();
   for (const store of workerOwnerStores) store.invalidateBinding();
   disposeCurrentPlatformStorageBinding(binding);
@@ -6452,6 +6610,10 @@ function abortCoordinatorPeerInflight(peerId: string): void {
   for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === peerId) ownerStorageGrants.delete(grantId);
   for (const [grantId, grant] of platformStorageGrants) if (grant.clientId === peerId) platformStorageGrants.delete(grantId);
   for (const [grantId, grant] of msfileGrants) if (grant.clientId === peerId) msfileGrants.delete(grantId);
+  // 浏览授权是专属授权：peer 一旦脱离 committed session，它名下签发的授权当场作废，
+  // 随后任何 browse 调用都只能得到「不可用」。
+  revokeStorageBrowseAuthorizations(peerId);
+  storageBrowseRuntime?.revokeClient(peerId);
   const callers = channelCallersByClient.get(peerId);
   channelCallersByClient.delete(peerId);
   if (callers && channelSubscriptionMux) {
@@ -8147,7 +8309,7 @@ function handleActivity(): void {
 let coordinatorRequestTail: Promise<void> = Promise.resolve();
 
 function isStorageRequest(request: CoordinatorClientRequest): boolean {
-  return request.kind === "storage.grant" || request.kind === "storage.control" || request.kind === "storage.data" || request.kind === "storage.cancel" || request.kind === "storage.session.abort" || request.kind === "storage.owner.bind" || request.kind === "storage.platform.bind" || request.kind === "storage.owner.data" || request.kind === "storage.platform.data" || request.kind === "storage.clear.root";
+  return request.kind === "storage.grant" || request.kind === "storage.control" || request.kind === "storage.data" || request.kind === "storage.cancel" || request.kind === "storage.session.abort" || request.kind === "storage.browse.open" || request.kind === "storage.browse.data" || request.kind === "storage.browse.close" || request.kind === "storage.owner.bind" || request.kind === "storage.platform.bind" || request.kind === "storage.owner.data" || request.kind === "storage.platform.data" || request.kind === "storage.clear.root";
 }
 
 function storageErrorResponse(requestId: string, error: unknown): CoordinatorResponse {
@@ -8608,7 +8770,7 @@ async function abortStorageSession(connectSessionId: string, peerId: string): Pr
   await service.abortSession(connectSessionId);
 }
 
-async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string): Promise<CoordinatorResponse> {
+async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string): Promise<CoordinatorResponse> {
   if (request.kind === "storage.grant") {
     const session = await readProtocolConnectSession(request.connectSessionId);
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
@@ -8642,6 +8804,42 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
       sessionEpoch: coordinatorState.sessionEpoch,
     });
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
+  }
+  if (request.kind === "storage.browse.open" || request.kind === "storage.browse.data" || request.kind === "storage.browse.close") {
+    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
+    if (coordinatorState.vaultStatus !== "unlocked") {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage browse requires an unlocked wallet", code: "storage_identity_required" } };
+    }
+    if (request.kind === "storage.browse.open") {
+      // 授权由 Coordinator 从已验证的 peer 上下文签发：请求里没有身份字段，
+      // 自报任何 unitId 都不会被读取，因此也没有任何自报内容能换取浏览会话。
+      // 核验刻意排在装配浏览服务之前：未受信任的调用方连 WalletStore 都不该碰到。
+      const authorizationId = issueStorageBrowseAuthorization(actualClientId);
+      if (authorizationId === undefined) {
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage browse caller is not a trusted platform runtime unit", code: "storage_forbidden" } };
+      }
+      const openingRuntime = await ensureStorageBrowseRuntime();
+      const session = await openingRuntime.openSession(actualClientId, { authorizationId });
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: session };
+    }
+    const runtime = await ensureStorageBrowseRuntime();
+    if (request.kind === "storage.browse.close") {
+      await runtime.closeSession(actualClientId, request.browseSessionId);
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
+    }
+    // 浏览数据面也登记可取消控制器：快速切换时 storage.cancel 能中止在途读取。
+    const controller = new AbortController();
+    const requestKey = storageRequestKey(actualClientId, request.requestId);
+    storageRequests.set(requestKey, { controller, clientId: actualClientId });
+    try {
+      const value = request.data.type === "browse.list"
+        ? await runtime.list(actualClientId, request.data, { signal: controller.signal })
+        : await runtime.preview(actualClientId, request.data, { signal: controller.signal });
+      if (revokedCoordinatorPeerIds.has(actualClientId) || controller.signal.aborted) return disconnectedClientResponse(request.requestId);
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+    } finally {
+      if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
+    }
   }
   if (request.kind === "storage.cancel") {
     const target = storageRequests.get(storageRequestKey(actualClientId, request.targetRequestId));
@@ -12366,6 +12564,9 @@ async function performGlobalLock(reason: string): Promise<void> {
   cancelSmartSyncIdleTimer();
   // 先撤销会话、grant 与任务权限；迟到的写入在数据层检查之前就已经被拒。
   revokeWalletGrants("lock");
+  // 浏览句柄绑定 session epoch，随 epoch 推进整体作废；这里显式撤销，让
+  // 页面上已经拿到的句柄立刻失效，而不是等到下一次请求再失败。
+  revokeAllStorageBrowseSessions();
   const previousActive = coordinatorState.activePublicKeyHex?.toLowerCase();
   if (previousActive) void cancelTaskRuntimesByKey(previousActive).catch(() => undefined);
 
@@ -14480,6 +14681,8 @@ export async function __testGetCoordinatorUpgradePartition(): Promise<{ revision
 export function __testResetState(): void {
   stopCoordinatorKeyValueMaintenance();
   coordinatorKeyValueMaintenanceStores.clear();
+  revokeAllStorageBrowseAuthorizations();
+  dropStorageBrowseBinding();
   // Drop domain-owned resources before resetting the compatibility table. The
   // real WebLoom Host must then observe the booting/locked state and tear down
   // its old owner scopes before the next test unlocks a new owner.
@@ -15195,6 +15398,27 @@ export async function __testDispatchStorageControl(control: CoordinatorStorageCo
   }
 }
 
+/**
+ * 测试：走真实 browse.open 分发入口。
+ *
+ * `actualPortId` 决定 Coordinator 从哪个 peer 上下文核验调用方；请求体本身没有任何
+ * 身份字段，因此测试要证明的正是「换一个 peer 就换掉授权结论」。
+ */
+export async function __testDispatchStorageBrowseOpen(actualPortId: string): Promise<CoordinatorResponse> {
+  const request = { kind: "storage.browse.open" as const, clientId: actualPortId, requestId: crypto.randomUUID(), expectedSessionEpoch: coordinatorState.sessionEpoch };
+  try {
+    return await executeStorageRequest(request, actualPortId);
+  } finally {
+    clearStorageRequestSecrets(request);
+  }
+}
+
+/** 测试：已发放浏览授权是否仍被 Coordinator 认作受信任端口的授权。 */
+export function __testHasStorageBrowseAuthorization(peerId: string): boolean {
+  for (const record of storageBrowseAuthorizations.values()) if (record.peerId === peerId) return true;
+  return false;
+}
+
 export function __testSeedStorageRequest(requestId: string, actualPortId: string, connectSessionId?: string): AbortSignal {
   const controller = new AbortController();
   storageRequests.set(storageRequestKey(actualPortId, requestId), { controller, clientId: actualPortId, connectSessionId });
@@ -15362,6 +15586,8 @@ export async function __testDispatchStorageMessage(clientId: string, request: Co
     for (const pending of windowP2pExecutorIdentityRequests.values()) if (pending.clientId === clientId) pending.controller.abort();
     for (const [grantId, grant] of storageGrants) if (grant.clientId === clientId) storageGrants.delete(grantId);
     for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === clientId) ownerStorageGrants.delete(grantId);
+    // 浏览句柄绑定端口：断开即作废，不能留给重连后的页面继续用。
+    storageBrowseRuntime?.revokeClient(clientId);
     for (const [grantId, grant] of platformStorageGrants) if (grant.clientId === clientId) platformStorageGrants.delete(grantId);
     for (const [grantId, grant] of msfileGrants) if (grant.clientId === clientId) msfileGrants.delete(grantId);
     coordinatorTestEventSinks.delete(clientId);
