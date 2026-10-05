@@ -429,6 +429,20 @@ describe("Coordinator runtime contract parsers", () => {
     expect(grant.operationResult).toMatchObject({ moduleId: "p2p", purposeId: "", model: "files" });
   });
 
+  it("accepts the empty Connect App root prefix through Coordinator RPC", () => {
+    const request = toCoordinatorRpcRequest({
+      kind: "storage.data", data: { type: "list", grantId: "app-grant", input: { prefix: "" } },
+      expectedSessionEpoch: "epoch-1",
+    } as never) as Extract<CoordinatorRpcRequest, { kind: "storage.data" }>;
+    expect(request.data).toEqual({ type: "list", grantId: "app-grant", input: { prefix: "" } });
+    const response = parseCoordinatorResponseFor(request, { sessionEpoch: "epoch-1", ack: { status: "ok" }, operationResult: { prefix: "", parentPrefix: "", directories: [], files: [] } });
+    expect(response.operationResult).toEqual({ prefix: "", parentPrefix: "", directories: [], files: [] });
+    expect(() => toCoordinatorRpcRequest({
+      kind: "storage.data", data: { type: "list", grantId: "app-grant", input: { prefix: 1 } },
+      expectedSessionEpoch: "epoch-1",
+    } as never)).toThrow();
+  });
+
   it("accepts an empty owner file-list prefix and parses owner file results", () => {
     const request = toCoordinatorRpcRequest({
       kind: "storage.owner.data",
@@ -463,44 +477,10 @@ describe("Coordinator runtime contract parsers", () => {
     )).toThrow(/bytes is invalid/);
   });
 
-  it("accepts an empty browse.list prefix so the logical root can be listed", () => {
-    // 空串就是浏览的逻辑根。这里若走 optionalText 会被 text() 的非空约束拒绝，
-    // 于是页面唯一一次必然的根目录请求在发往 Worker 之前就失败，表现为
-    // 永久「加载中」加一个不指向根因的 storage_unavailable。
-    const request = toCoordinatorRpcRequest({
-      kind: "storage.browse.data",
-      clientId: "client-1",
-      requestId: "request-1",
-      data: { type: "browse.list", browseSessionId: "browse-1", prefix: "", limit: 200 },
-      expectedSessionEpoch: "epoch-1",
-    } as never) as Extract<CoordinatorRpcRequest, { kind: "storage.browse.data" }>;
-    expect(request.data).toEqual({ type: "browse.list", browseSessionId: "browse-1", prefix: "", limit: 200 });
-
-    // 缺省 prefix 也必须收敛成同一个逻辑根，而不是被当成非法值。
-    const omitted = toCoordinatorRpcRequest({
-      kind: "storage.browse.data",
-      clientId: "client-1",
-      requestId: "request-2",
-      data: { type: "browse.list", browseSessionId: "browse-1" },
-      expectedSessionEpoch: "epoch-1",
-    } as never) as Extract<CoordinatorRpcRequest, { kind: "storage.browse.data" }>;
-    expect(omitted.data).toEqual({ type: "browse.list", browseSessionId: "browse-1", prefix: "" });
-
-    const listed = parseCoordinatorResponseFor(request, {
-      sessionEpoch: "epoch-1",
-      ack: { status: "ok" },
-      operationResult: { entries: [{ path: "apps/demo.json", size: 3, revision: "7", lastModified: "2026-01-01T00:00:00.000Z" }] },
-    });
-    expect(listed.operationResult).toEqual({ entries: [{ path: "apps/demo.json", size: 3, revision: "7", lastModified: "2026-01-01T00:00:00.000Z" }] });
-
-    // 非字符串的 prefix 仍然必须失败：放行空串不是放行任意类型。
-    expect(() => toCoordinatorRpcRequest({
-      kind: "storage.browse.data",
-      clientId: "client-1",
-      requestId: "request-3",
-      data: { type: "browse.list", browseSessionId: "browse-1", prefix: 1 },
-      expectedSessionEpoch: "epoch-1",
-    } as never)).toThrow(/browse\.list\.prefix is invalid/);
+  it("rejects private Storage browse commands on the public transport", () => {
+    for (const kind of ["storage.browse.open", "storage.browse.data", "storage.browse.close"]) {
+      expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ kind, expectedSessionEpoch: "epoch-1" })).toThrow();
+    }
   });
 
   it("enforces request-aware result presence, void responses, and failure fencing", () => {

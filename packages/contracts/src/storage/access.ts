@@ -208,13 +208,6 @@ export interface OwnerAppStore extends KeyValueStore {}
 export interface PlatformRootStore {
   /** 当前钱包身份世代。 */
   readonly walletGeneration: string;
-  /**
-   * 平台只读元数据/字节视图；仅供 Coordinator 自带的存储浏览器使用。
-   *
-   * 它返回完整逻辑路径而不是命名空间受限路径，因此不能经由任何插件可见的
-   * capability 暴露：普通模块与 Connect App 的栅栏仍然只经由上面三个 open*。
-   */
-  openBrowseStore(): Promise<import("./browse.js").StorageBrowseWallet>;
   /** 打开 Host 已预绑定的模块 K-V。 */
   openKeyValueStore(input: { declaration: PluginStorageDeclaration }): Promise<OwnerAppStore>;
   /** 打开 Host 已预绑定的文件根(model: "files")。 */

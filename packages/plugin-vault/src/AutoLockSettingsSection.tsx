@@ -1,8 +1,9 @@
+import { useVaultResources } from "./VaultResourceContext.js";
 import { useEffect, useRef, useState } from "react";
 import { Check, Clock3, Infinity as InfinityIcon, SlidersHorizontal, Timer } from "lucide-react";
 import { Button, Modal, PageHeader } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import {
   AUTO_LOCK_MAX_CUSTOM_MINUTES,
   AUTO_LOCK_NEVER_TIMEOUT_MS,
@@ -61,7 +62,7 @@ function customInputError(raw: string, t: I18nT): string | null {
 }
 
 export function AutoLockSettingsPage() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   return (
     <div className="autolock-settings-page">
       <PageHeader
@@ -76,7 +77,7 @@ export function AutoLockSettingsPage() {
 }
 
 export function AutoLockSettingsSection() {
-  const service = useOptionalCapability(AUTOLOCK_SERVICE_CAPABILITY);
+  const service = useOptionalPluginCapability(AUTOLOCK_SERVICE_CAPABILITY);
   if (!service) {
     return <div className="autolock-settings" role="status">自动锁服务正在切换，请稍候。</div>;
   }
@@ -84,9 +85,9 @@ export function AutoLockSettingsSection() {
 }
 
 function AvailableAutoLockSettingsSection({ service }: { service: AutoLockService }) {
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const store = host.resourceStore;
+  const resources = useVaultResources();
+  const { t } = usePluginI18n();
+  const store = resources;
   const settings = useOptionalResourceSelector<AutoLockSettings, AutoLockSettings>(
     store,
     "vault.autoLockSettings",

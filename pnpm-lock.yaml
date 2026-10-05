@@ -97,8 +97,8 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.13.3)(jsdom@25.0.1)(terser@5.51.2)
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   apps/connect-docs:
     devDependencies:
@@ -129,6 +129,9 @@ importers:
       '@keymaster/plugin-apps':
         specifier: '*'
         version: link:../../packages/plugin-apps
+      '@keymaster/plugin-assets':
+        specifier: workspace:*
+        version: link:../../packages/plugin-assets
       '@keymaster/plugin-background':
         specifier: '*'
         version: link:../../packages/plugin-background
@@ -138,24 +141,12 @@ importers:
       '@keymaster/plugin-collectible-1satordinals':
         specifier: '*'
         version: link:../../packages/plugin-collectible-1satordinals
+      '@keymaster/plugin-collectibles':
+        specifier: workspace:*
+        version: link:../../packages/plugin-collectibles
       '@keymaster/plugin-contacts':
         specifier: '*'
         version: link:../../packages/plugin-contacts
-      '@keymaster/plugin-home':
-        specifier: '*'
-        version: link:../../packages/plugin-home
-      '@keymaster/plugin-importer-hex':
-        specifier: '*'
-        version: link:../../packages/plugin-importer-hex
-      '@keymaster/plugin-importer-json-file':
-        specifier: '*'
-        version: link:../../packages/plugin-importer-json-file
-      '@keymaster/plugin-importer-wif':
-        specifier: '*'
-        version: link:../../packages/plugin-importer-wif
-      '@keymaster/plugin-key-import':
-        specifier: '*'
-        version: link:../../packages/plugin-key-import
       '@keymaster/plugin-message':
         specifier: '*'
         version: link:../../packages/plugin-message
@@ -165,18 +156,18 @@ importers:
       '@keymaster/plugin-p2pkh':
         specifier: '*'
         version: link:../../packages/plugin-p2pkh
-      '@keymaster/plugin-poker':
+      '@keymaster/plugin-page':
         specifier: '*'
-        version: link:../../packages/plugin-poker
+        version: link:../../packages/plugin-page
       '@keymaster/plugin-protocol':
         specifier: '*'
         version: link:../../packages/plugin-protocol
       '@keymaster/plugin-sat-subscription':
         specifier: '*'
         version: link:../../packages/plugin-sat-subscription
-      '@keymaster/plugin-settings':
-        specifier: '*'
-        version: link:../../packages/plugin-settings
+      '@keymaster/plugin-scan':
+        specifier: workspace:*
+        version: link:../../packages/plugin-scan
       '@keymaster/plugin-token-bsv21':
         specifier: '*'
         version: link:../../packages/plugin-token-bsv21
@@ -232,8 +223,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/connect:
     devDependencies:
@@ -249,12 +240,15 @@ importers:
       '@noble/hashes':
         specifier: ^2.0.1
         version: 2.2.0
+      bitcoin-libp2p:
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       cborg:
         specifier: ^5.1.6
         version: 5.1.6
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/msfile-media:
     dependencies:
@@ -270,12 +264,6 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
-      '@keymaster/plugin-key-import':
-        specifier: '*'
-        version: link:../plugin-key-import
-      '@keymaster/plugin-vault':
-        specifier: '*'
-        version: link:../plugin-vault
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
@@ -291,15 +279,12 @@ importers:
       '@noble/secp256k1':
         specifier: ^2.2.0
         version: 2.3.0
-      keyhold:
-        specifier: 2.1.0
-        version: 2.1.0
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-apps:
     dependencies:
@@ -322,8 +307,26 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
+
+  packages/plugin-assets:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      webloom-framework:
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-background:
     dependencies:
@@ -340,8 +343,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-bsv-price:
     dependencies:
@@ -358,8 +361,8 @@ importers:
         specifier: 0.6.0
         version: 0.6.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-collectible-1satordinals:
     dependencies:
@@ -376,8 +379,26 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
+
+  packages/plugin-collectibles:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      webloom-framework:
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-contacts:
     dependencies:
@@ -397,101 +418,14 @@ importers:
         specifier: 0.6.0
         version: 0.6.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
-
-  packages/plugin-home:
-    dependencies:
-      '@bsv/sdk':
-        specifier: ^2.1.7
-        version: 2.1.7
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      '@zxing/browser':
-        specifier: ^0.2.1
-        version: 0.2.1(@zxing/library@0.23.0)
-      qrcode.react:
-        specifier: ^4.2.0
-        version: 4.2.0(react@18.3.1)
-      webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
-
-  packages/plugin-importer-hex:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-
-  packages/plugin-importer-json-file:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@noble/ciphers':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^1.8.0
-        version: 1.8.0
-      '@noble/secp256k1':
-        specifier: ^2.2.0
-        version: 2.3.0
-      keyhold:
-        specifier: 2.1.0
-        version: 2.1.0
-
-  packages/plugin-importer-wif:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-
-  packages/plugin-key-import:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      keyhold:
-        specifier: 2.1.0
-        version: 2.1.0
-      lucide-react:
-        specifier: ^0.468.0
-        version: 0.468.0(react@18.3.1)
-      webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-message:
     dependencies:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
-      '@keymaster/plugin-webrtc':
-        specifier: '*'
-        version: link:../plugin-webrtc
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
@@ -502,8 +436,8 @@ importers:
         specifier: 1.8.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-msfile:
     dependencies:
@@ -513,9 +447,6 @@ importers:
       '@keymaster/msfile-media':
         specifier: '*'
         version: link:../msfile-media
-      '@keymaster/plugin-window-p2p':
-        specifier: '*'
-        version: link:../plugin-window-p2p
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
@@ -544,11 +475,14 @@ importers:
         specifier: 1.1.0
         version: 1.1.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-p2pkh:
     dependencies:
+      '@bsv/sdk':
+        specifier: ^2.1.7
+        version: 2.1.7
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
@@ -564,15 +498,18 @@ importers:
       '@noble/secp256k1':
         specifier: ^2.1.0
         version: 2.3.0
+      lucide-react:
+        specifier: ^0.468.0
+        version: 0.468.0(react@18.3.1)
+      qrcode.react:
+        specifier: ^4.2.0
+        version: 4.2.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
-  packages/plugin-poker:
+  packages/plugin-page:
     dependencies:
-      '@bsv/sdk':
-        specifier: ^2.1.4
-        version: 2.1.6
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
@@ -582,18 +519,22 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
-      '@noble/curves':
-        specifier: ^1.7.0
-        version: 1.9.7
-      '@noble/hashes':
-        specifier: ^1.8.0
-        version: 1.8.0
-      '@noble/secp256k1':
-        specifier: ^2.2.0
-        version: 2.3.0
+      lucide-react:
+        specifier: ^0.468.0
+        version: 0.468.0(react@18.3.1)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
+    devDependencies:
+      '@keymaster/plugin-webrtc':
+        specifier: '*'
+        version: link:../plugin-webrtc
+      bsv8-channel-protocol:
+        specifier: 0.6.0
+        version: 0.6.0
 
   packages/plugin-protocol:
     dependencies:
@@ -622,8 +563,8 @@ importers:
         specifier: 1.5.0
         version: 1.5.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-sat-subscription:
     dependencies:
@@ -658,10 +599,10 @@ importers:
         specifier: 0.1.0
         version: 0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
-  packages/plugin-settings:
+  packages/plugin-scan:
     dependencies:
       '@keymaster/contracts':
         specifier: '*'
@@ -672,9 +613,18 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@zxing/browser':
+        specifier: ^0.2.1
+        version: 0.2.1(@zxing/library@0.23.0)
+      lucide-react:
+        specifier: ^0.468.0
+        version: 0.468.0(react@18.3.1)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-token-bsv21:
     dependencies:
@@ -691,8 +641,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
     devDependencies:
       '@noble/secp256k1':
         specifier: ^2.2.0
@@ -707,8 +657,8 @@ importers:
         specifier: '*'
         version: link:../runtime
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-vault:
     dependencies:
@@ -730,6 +680,9 @@ importers:
       '@noble/secp256k1':
         specifier: ^2.2.0
         version: 2.3.0
+      bsv8-channel-protocol:
+        specifier: 0.6.0
+        version: 0.6.0
       keyhold:
         specifier: 2.1.0
         version: 2.1.0
@@ -737,8 +690,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-webrtc:
     dependencies:
@@ -755,8 +708,8 @@ importers:
         specifier: 0.6.0
         version: 0.6.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/plugin-window-p2p:
     dependencies:
@@ -791,8 +744,8 @@ importers:
         specifier: ^1.4.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
 
   packages/runtime:
     dependencies:
@@ -800,8 +753,12 @@ importers:
         specifier: '*'
         version: link:../contracts
       webloom-framework:
-        specifier: 0.5.0
-        version: 0.5.0(react@18.3.1)
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
+    devDependencies:
+      '@keymaster/platform-storage':
+        specifier: workspace:*
+        version: link:../platform-storage
 
   packages/ui:
     dependencies:
@@ -1012,9 +969,6 @@ packages:
 
   '@bsv/sdk@2.0.5':
     resolution: {integrity: sha512-OPXcjE0dmCbPtf3oYKn1a33b2Cy4vrBQUkWjVMaxPtXtR+Y5YKbO7SJtsQZmfYqPFu2nHvMW49GgkJiJP8wCSw==}
-
-  '@bsv/sdk@2.1.6':
-    resolution: {integrity: sha512-Szm1KM9BbA0Yc091gCW5NkFu9lhcykaDK9yXab/B/6f18h05uys3HWKaxHO05pKl0fYIpvwFrSScOefy0RT3GQ==}
 
   '@bsv/sdk@2.1.7':
     resolution: {integrity: sha512-wPoKLD5d7bkHMp8e+vqyCYXMsyBawZvK7mp87UMaopzyjGIOfEh+7g8FxyGlOov07kNl14jF8F/vSLID10zBuw==}
@@ -4027,8 +3981,8 @@ packages:
     resolution: {integrity: sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==}
     engines: {node: '>=12'}
 
-  webloom-framework@0.5.0:
-    resolution: {integrity: sha512-DPcTEmpmOdLxBjugd7pHWHTdtH38hw8DAk3ULQ0Ofs4rrN7pLFy48Q8RNT7qQojnAsJVDix4y+f0YlLZfesmQg==}
+  webloom-framework@0.6.0:
+    resolution: {integrity: sha512-45wDFhWL6p69wXh3KZJBkl5J06J0TeWoU/4PLy5G1Rd6M4fGvmeTzPYqVkwrv7orKAocVj9JwqpQpkrdd0I5yw==}
     engines: {node: '>=18'}
     peerDependencies:
       react: '>=18'
@@ -4407,8 +4361,6 @@ snapshots:
   '@bsv/sdk@1.10.4': {}
 
   '@bsv/sdk@2.0.5': {}
-
-  '@bsv/sdk@2.1.6': {}
 
   '@bsv/sdk@2.1.7': {}
 
@@ -7912,7 +7864,7 @@ snapshots:
 
   webidl-conversions@7.0.0: {}
 
-  webloom-framework@0.5.0(react@18.3.1):
+  webloom-framework@0.6.0(react@18.3.1):
     optionalDependencies:
       react: 18.3.1
 

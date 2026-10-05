@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-token-bsv21/src/bsv21TokenProvider.test.ts
 // BSV-21 TokenProvider 测试：
 //   1. 多地址同 origin 的余额应合并
@@ -6,14 +7,14 @@
 //   4. 后台通知触发 onChange
 
 import { describe, expect, it, vi } from "vitest";
-import type { KeyspaceService, AssetDataNotifier } from "@keymaster/contracts";
+import type { VaultWalletState, AssetDataNotifier } from "@keymaster/contracts";
 import { createBsv21TokenProvider } from "./bsv21TokenProvider.js";
 import type { Bsv21StateRepository, Bsv21TokenSnapshot } from "./storage/bsv21StateRepository.js";
 
 const ACTIVE_PK = "pk-active";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
-  return { active: () => ({ activePublicKeyHex }) } as unknown as KeyspaceService;
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
+  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))()) } as unknown as VaultWalletState;
 }
 
 function makeSnapshot(overrides: Partial<Bsv21TokenSnapshot> & { origin: string }): Bsv21TokenSnapshot {
@@ -49,7 +50,7 @@ describe("bsv21TokenProvider", () => {
       ];
       const provider = createBsv21TokenProvider({
         stateRepository: fakeRepository(snapshots),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
 
       const tokens = await provider.listTokens();
@@ -70,7 +71,7 @@ describe("bsv21TokenProvider", () => {
     it("无 active key 时返回空", async () => {
       const provider = createBsv21TokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(undefined),
+        walletState: fakeWalletState(undefined),
       });
       expect(await provider.listTokens()).toEqual([]);
     });
@@ -84,7 +85,7 @@ describe("bsv21TokenProvider", () => {
       ];
       const provider = createBsv21TokenProvider({
         stateRepository: fakeRepository(snapshots),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
 
       const detail = await provider.getToken("tok1");
@@ -101,7 +102,7 @@ describe("bsv21TokenProvider", () => {
     it("不存在的 token 返回 undefined", async () => {
       const provider = createBsv21TokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
       expect(await provider.getToken("nonexistent")).toBeUndefined();
     });
@@ -109,7 +110,7 @@ describe("bsv21TokenProvider", () => {
     it("无 active key 时返回 undefined", async () => {
       const provider = createBsv21TokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(undefined),
+        walletState: fakeWalletState(undefined),
       });
       expect(await provider.getToken("tok1")).toBeUndefined();
     });
@@ -129,7 +130,7 @@ describe("bsv21TokenProvider", () => {
       const handler = vi.fn();
       const provider = createBsv21TokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
         assetDataNotifier: notifier as unknown as AssetDataNotifier,
       });
 

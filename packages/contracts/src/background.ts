@@ -112,7 +112,7 @@ export interface BackgroundSyncSettings {
  * 设计缘由：删除 paused/failed 作为用户可操作的稳态。
  * - failed 不再是稳态：失败后保留错误信息，自动回到 idle 等待下一周期
  * - paused 完全删除：用户不应管理轮询开关
- * - blocked 新增：任务被门禁阻塞（Vault 锁定、keyspace 初始化中、无 active key）
+ * - blocked 新增：任务被门禁阻塞（Vault 锁定、walletState 初始化中、无 active key）
  */
 export type BackgroundTaskState =
   | "idle"
@@ -138,7 +138,7 @@ export type BackgroundCommandResult =
 
 /**
  * 任务归属的 key namespace（硬切换 007 / 008 / 001 收口）。
- * 设计缘由：删除 key 时由 keyspace 取消该 key 下所有 task；active key
+ * 设计缘由：删除 key 时由 walletState 取消该 key 下所有 task；active key
  * 切换不影响其他 key 的后台收尾。background 平台不应理解业务字段。
  *
  * 硬切换 001 收口：平台身份根字段统一为 publicKeyHex；`publicKeyHash`
@@ -199,7 +199,7 @@ export interface BackgroundTaskDefinition {
   schedule?: BackgroundTaskSchedule;
   /**
    * 任务归属的 key namespace（硬切换 007 / 008）。
-   * 设计缘由：删除 key 时由 keyspace 取消该 key 下所有 task；active key
+   * 设计缘由：删除 key 时由 walletState 取消该 key 下所有 task；active key
    * 切换不影响其他 key 的后台收尾。background 平台不应理解业务字段。
    *
    * 008：允许传函数以延迟求值。注册时只存函数引用；snapshot / cancelByKey
@@ -308,7 +308,7 @@ export interface BackgroundService {
 
   /**
    * 取消指定 key namespace 下所有 task（硬切换 007 / 001 收口）。
-   * 设计缘由：keyspace.deleteKey 通知 background 停止该 key 的所有收尾,
+   * 设计缘由：walletState.deleteKey 通知 background 停止该 key 的所有收尾,
    * 防止迟到写入重建被删 namespace。返回的 Promise resolve 时表示
    * 所有目标 task 旧实例均已退出。
    *

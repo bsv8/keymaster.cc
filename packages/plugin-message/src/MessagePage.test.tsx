@@ -1,16 +1,17 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-message/src/MessagePage.test.tsx
 // 消息首页契约测试。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
-  ActiveKeyState,
+  VaultLifecycleSnapshot,
   MessageRecord,
   Contact,
   I18nService,
   I18nText,
   I18nValues,
-  KeyspaceService,
+  VaultWalletState,
   LanguageMode,
   SupportedLanguage,
   SupportedLanguageDescriptor
@@ -18,13 +19,29 @@ import type {
 import {
   CONTACTS_EDITOR_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   MESSAGE_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
-import { bindWebLoomHost, PluginHostProvider } from "@keymaster/runtime";
+import { bindWebLoomHost, PluginHostProvider } from "@keymaster/runtime/assembly";
 import type { PluginHost } from "@keymaster/runtime";
 import { createFakePluginHost } from "webloom-framework/testing";
 import type { MessageService } from "./messageService.js";
+
+// Component behavior fixtures retain their local fake stores; production ownership is
+// exercised separately through the real Page/Message setup integration.
+vi.mock("webloom-framework/react", async importOriginal => {
+  const original = await importOriginal<typeof import("webloom-framework/react")>();
+  return { ...original, usePluginCapability: original.useCapability, useOptionalPluginCapability: original.useOptionalCapability };
+});
+vi.mock("@keymaster/runtime", async importOriginal => {
+  const original = await importOriginal<typeof import("@keymaster/runtime")>();
+  const hooks = await import("webloom-framework/react");
+  return { ...original, useWalletState: () => hooks.useCapability(VAULT_WALLET_STATE_CAPABILITY) };
+});
+vi.mock("./MessageResourceContext.js", async () => {
+  const runtime = await import("@keymaster/runtime/assembly");
+  return { useMessageResources: () => runtime.usePluginHost().resourceStore };
+});
 
 const OWNER = "02bbbb".padEnd(66, "b");
 type MessageFixture = MessageRecord & {
@@ -51,23 +68,23 @@ function makeFakeI18n(): I18nService {
   };
 }
 
-function makeFakeKeyspace(): KeyspaceService {
-  const listeners = new Set<(state: ActiveKeyState) => void>();
-  let active: ActiveKeyState = { activePublicKeyHex: OWNER };
+function makeFakeWalletState(): VaultWalletState {
+  const listeners = new Set<(state: VaultLifecycleSnapshot) => void>();
+  let active: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: OWNER });
   return {
-    active: () => active,
-    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" }),
-    onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
+    snapshot: () => walletStateFixtureSnapshot((() => active)(), () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" })),
+
+    subscribe: (handler: (state: VaultLifecycleSnapshot) => void) => {
       listeners.add(handler);
       return () => {
         listeners.delete(handler);
       };
     },
     setActive: async (publicKeyHex: string) => {
-      active = { activePublicKeyHex: publicKeyHex };
+      active = walletStateFixtureSnapshot({ activePublicKeyHex: publicKeyHex });
       for (const listener of listeners) listener(active);
     }
-  } as unknown as KeyspaceService;
+  } as unknown as VaultWalletState;
 }
 
 function makeFakeService(opts?: { messages?: MessageFixture[] }): MessageService {
@@ -92,7 +109,7 @@ function makeFakeHost(
 ) {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY.id]: makeFakeI18n(),
-    [KEYSPACE_SERVICE_CAPABILITY.id]: makeFakeKeyspace()
+    [VAULT_WALLET_STATE_CAPABILITY.id]: makeFakeWalletState()
   };
   if (service) {
     providers[MESSAGE_SERVICE_CAPABILITY.id] = service;
@@ -111,7 +128,7 @@ function makeFakeHost(
   };
 
   // 注册 message.conversations 资源定义
-  const keyspace = providers[KEYSPACE_SERVICE_CAPABILITY.id] as KeyspaceService;
+  const walletState = providers[VAULT_WALLET_STATE_CAPABILITY.id] as VaultWalletState;
   resourceRegistry.register({
     id: "message.conversations",
     scope: "active-key",
@@ -139,7 +156,7 @@ function makeFakeHost(
     ensure: <T,>(definitionId: string, args: readonly string[]) => {
       const def = resourceDefinitions.get(definitionId);
       if (!def) throw new Error(`Resource definition "${definitionId}" not found`);
-      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const context = { activePublicKeyHex: walletState.snapshot().activePublicKeyHex };
       const key = def.key(args, context);
       const rk = `${definitionId}::${key.join("::")}`;
       let record = records.get(rk);
@@ -167,7 +184,7 @@ function makeFakeHost(
     subscribe: (definitionId: string, args: readonly string[], callback: () => void) => {
       const def = resourceDefinitions.get(definitionId);
       if (!def) return () => {};
-      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const context = { activePublicKeyHex: walletState.snapshot().activePublicKeyHex };
       const key = def.key(args, context);
       const rk = `${definitionId}::${key.join("::")}`;
       let record = records.get(rk);
@@ -185,7 +202,7 @@ function makeFakeHost(
     read: <T,>(definitionId: string, args: readonly string[]) => {
       const def = resourceDefinitions.get(definitionId);
       if (!def) return undefined;
-      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const context = { activePublicKeyHex: walletState.snapshot().activePublicKeyHex };
       const key = def.key(args, context);
       const rk = `${definitionId}::${key.join("::")}`;
       return records.get(rk)?.snapshot as T | undefined;
@@ -193,7 +210,7 @@ function makeFakeHost(
     invalidate: (definitionId: string, args: readonly string[]) => {
       const def = resourceDefinitions.get(definitionId);
       if (!def) return;
-      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const context = { activePublicKeyHex: walletState.snapshot().activePublicKeyHex };
       const key = def.key(args, context);
       const rk = `${definitionId}::${key.join("::")}`;
       const record = records.get(rk);
@@ -291,7 +308,7 @@ function makeFakeHost(
   // 必须显式使用 WebLoom testing fake，不能依赖生产兼容桥接。
   const capabilityProviders = new Map<import("webloom-framework").LocalCapability<unknown>, unknown>();
   capabilityProviders.set(I18N_SERVICE_CAPABILITY, providers[I18N_SERVICE_CAPABILITY.id]);
-  capabilityProviders.set(KEYSPACE_SERVICE_CAPABILITY, providers[KEYSPACE_SERVICE_CAPABILITY.id]);
+  capabilityProviders.set(VAULT_WALLET_STATE_CAPABILITY, providers[VAULT_WALLET_STATE_CAPABILITY.id]);
   if (service) capabilityProviders.set(MESSAGE_SERVICE_CAPABILITY, service);
   if (opts?.withContactsEditor) capabilityProviders.set(CONTACTS_EDITOR_CAPABILITY, providers[CONTACTS_EDITOR_CAPABILITY.id]);
   bindWebLoomHost(keymasterHost, createFakePluginHost({ capabilities: capabilityProviders }));

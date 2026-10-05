@@ -13,12 +13,13 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // 可配置的 stateRepository.list 返回值
 let mockDbListResult: unknown[] = [];
+let mockPendingList: Promise<unknown[]> | undefined;
 
 vi.mock("./storage/stasRepository.js", () => ({
   createStasRepository: vi.fn(() => ({
     put: vi.fn(),
     replaceAll: vi.fn(),
-    list: vi.fn(() => Promise.resolve(mockDbListResult)),
+    list: vi.fn(() => mockPendingList ?? Promise.resolve(mockDbListResult)),
     close: vi.fn(),
   })),
 }));
@@ -37,7 +38,7 @@ vi.mock("./stasSync.js", () => ({
     label: { key: "stas.task.sync", fallback: "STAS 同步" },
     description: { key: "stas.task.sync.description", fallback: "" },
     schedule: { group: "asset-holdings", defaultIntervalMs: 900_000, minIntervalMs: 300_000 },
-    defaultEnabled: true,
+
     keyScope: () => undefined,
     canRun: () => false,
     run: vi.fn(),
@@ -98,9 +99,10 @@ function createMockCtx() {
   const onGlobalSettingsChange = vi.fn().mockReturnValue(() => {});
 
   const capabilities = new Map<string, unknown>([
+    ["storage.kv-clients", { bind: () => ({}) }],
     ["p2pkh.service", { onGlobalSettingsChange }],
     ["woc.stas.service", {}],
-    ["keyspace.service", { onActiveKeyChanged: onActiveChange, active: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openOwnerAppStore: vi.fn() }],
+    ["vault.wallet-state", { bind: () => ({ subscribe: onActiveChange, snapshot: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openOwnerAppStore: vi.fn() }) }],
     ["token.registry", { register: tokenRegister }],
     ["background.registry", { register }],
     ["runtime.messageBus", mockMessageBus],
@@ -110,9 +112,10 @@ function createMockCtx() {
   ]);
 
   const ctx = {
+    scope: { state: "active" },
+    consumer: { status: "active" },
     // manifest 的 owner/App K-V 句柄注入由 Host 负责；本测试只验证事件绑定，
     // 因此使用不会被 mock Repository 实际访问的最小占位值。
-    storageFor: () => ({}) as never,
     capability: vi.fn((capability: { id: string }) => capabilities.get(capability.id)),
     has: vi.fn(() => true),
   };
@@ -128,6 +131,7 @@ describe("stasTokenPlugin manifest", () => {
     messageBusHandlers.clear();
     dataNotifierListeners.length = 0;
     mockDbListResult = [];
+    mockPendingList = undefined;
   });
 
   it("vault.unlocked 不直接触发 token-stas.sync", async () => {
@@ -188,6 +192,21 @@ describe("stasTokenPlugin manifest", () => {
     await vi.waitFor(() => {
       expect(trigger).not.toHaveBeenCalled();
     });
+  });
+
+  it.each(["resolve", "reject"])("ignores a late %s after Scope enters stopping", async mode => {
+    let finish!: () => void;
+    mockPendingList = new Promise<unknown[]>((resolve, reject) => {
+      finish = () => mode === "resolve" ? resolve([]) : reject(new Error("owner revoked"));
+    });
+    const { ctx, trigger } = createMockCtx();
+    stasTokenSetup(ctx as never);
+    dataNotifierListeners.forEach(handler => handler({ providerId: "p2pkh", kinds: ["resource"], publicKeyHex: "pk1" }));
+    ctx.scope.state = "stopping";
+    finish();
+    await mockPendingList.catch(() => {});
+    await Promise.resolve();
+    expect(trigger).not.toHaveBeenCalled();
   });
 
   it("dispose 后事件不再触发", () => {

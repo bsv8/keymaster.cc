@@ -126,7 +126,7 @@ export {
   type MsFileSeedSource,
 } from "./storage/msfileSeedStore.js";
 export { createWindowP2pMsFileTransport, type MsFileP2pLaneOperation } from "./executorTransport.js";
-export type { WindowP2pExecutorBridge, WindowP2pExecutorOperation } from "@keymaster/plugin-window-p2p/executor-transport";
+export type { WindowP2pExecutorBridge, WindowP2pExecutorOperation } from "@keymaster/contracts/window-p2p";
 // 注意：supplierConfig（multiaddr/libp2p 依赖）不在此静态导出，
 // 保持 Worker 初始模块图轻量；页面设置组件直接 import "./supplierConfig.js"。
 export { validateSeedContent, validateBlockContent, expectedSeedLength } from "./contentValidation.js";
@@ -187,3 +187,12 @@ export async function startMsFileRuntime(options: {
   };
   return createMsFileService(deps);
 }
+
+export { createMsfileDataQueue } from "./msfileDataQueue.js";
+export { createMsfileDataExecutor } from "./msfileDataExecutor.js";
+export { createMsFileWorkerService } from "./msfileWorkerService.js";
+
+export { createWorkerFundingRuntime } from "./bitfs/workerFundingRuntime.js";
+export { createBitfsWorkerRuntime } from "./bitfs/workerRuntime.js";
+
+export { createPublicMsFileService } from "./publicMsFileService.js";

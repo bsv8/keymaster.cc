@@ -1,3 +1,5 @@
+import { sameWalletSession } from "@keymaster/contracts";
+import { useMsFileResources } from "./MsFileResourceContext.js";
 // packages/plugin-msfile/src/MsFileHomeFileWidget.tsx
 // 首页「通过 Seed 获取文件」模块。
 //
@@ -24,12 +26,11 @@ import {
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
-import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
+import { useOptionalPluginCapability } from "webloom-framework/react";
 import {
   AppLink,
-  useI18n,
-  usePluginHost,
-  useRuntimeStatus,
+  usePluginI18n,
+  useResourceViewSelector,
 } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import { MsFileMediaPlayer } from "./MsFileMediaPlayer.js";
@@ -85,10 +86,7 @@ interface HomeStatusResource {
   globalStatConcurrency: number;
 }
 
-interface HomeLifecycleResource {
-  activePublicKeyHex?: string;
-  generation?: number;
-}
+type HomeLifecycleResource = import("@keymaster/contracts").VaultLifecycleSnapshot;
 
 interface HomeError {
   code: string;
@@ -147,7 +145,7 @@ interface FetchTask {
   id: number;
   hash: string;
   activeKey: string;
-  activeKeyGeneration?: number;
+  walletSessionToken?: string;
   supplierGeneration: number;
   controller: AbortController;
   stats: SupplierStatView[];
@@ -368,13 +366,11 @@ function messageForPreviewReason(
   return undefined;
 }
 
-export function MsFileHomeFileWidget() {
-  const { t } = useI18n();
-  const host = usePluginHost();
-  const service = useOptionalCapability(MSFILE_SERVICE_CAPABILITY);
-  const hasStatusResource = host.resourceRegistry?.get(HOME_STATUS_RESOURCE_ID) !== undefined;
-  const hasLifecycleResource = host.resourceRegistry?.get(HOME_LIFECYCLE_RESOURCE_ID) !== undefined;
-  if (!service || !hasStatusResource || !hasLifecycleResource) {
+export function MsFileHomeFileWidget({ initialSeedHash = "" }: { initialSeedHash?: string } = {}) {
+  const { t } = usePluginI18n();
+  const reader = useMsFileResources();
+  const service = useOptionalPluginCapability(MSFILE_SERVICE_CAPABILITY);
+  if (!service) {
     return (
       <section className="msfile-home-file msfile-home-file--unavailable" data-msfile-home-widget="unavailable">
         <h3>{t("msfile.home.title", { defaultValue: "通过 Seed 获取文件" })}</h3>
@@ -384,18 +380,18 @@ export function MsFileHomeFileWidget() {
       </section>
     );
   }
-  return <MsFileHomeFileWidgetContent service={service} />;
+  return <MsFileHomeFileWidgetContent service={service} initialSeedHash={initialSeedHash} />;
 }
 
-function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
-  const { t } = useI18n();
-  const host = usePluginHost();
-  const { vault } = useRuntimeStatus();
+function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: MsFileService; initialSeedHash: string }) {
+  const { t } = usePluginI18n();
+  const reader = useMsFileResources();
+  const vault = useResourceViewSelector<import("@keymaster/contracts").VaultStatus, import("@keymaster/contracts").VaultStatus>(reader, "msfile.ui.vault-status", [], snapshot => snapshot.data ?? "locked");
   const widgetInstanceId = useId();
 
-  // 状态和配置通过 Resource Store 感知，避免组件直接订阅 service / keyspace。
-  const statusResource = useResourceSelector<HomeStatusResource, HomeStatusResource>(
-    host.resourceStore,
+  // 状态和配置通过 Resource Store 感知，避免组件直接订阅 service / walletState。
+  const statusResource = useResourceViewSelector<HomeStatusResource, HomeStatusResource>(
+    reader,
     HOME_STATUS_RESOURCE_ID,
     [],
     (snapshot) => snapshot.data ?? {
@@ -411,15 +407,15 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
       a.globalBlockReadConcurrency === b.globalBlockReadConcurrency &&
       a.globalStatConcurrency === b.globalStatConcurrency,
   );
-  const lifecycle = useResourceSelector<HomeLifecycleResource, HomeLifecycleResource>(
-    host.resourceStore,
+  const lifecycle = useResourceViewSelector<HomeLifecycleResource, HomeLifecycleResource>(
+    reader,
     HOME_LIFECYCLE_RESOURCE_ID,
     [],
-    (snapshot) => snapshot.data ?? {},
-    (a, b) => a.activePublicKeyHex === b.activePublicKeyHex && a.generation === b.generation,
+    (snapshot) => snapshot.data ?? { status: "booting", sessionEpoch: "boot", runGeneration: "boot", vaultLifecycleRevision: 0 },
+    (a, b) => sameWalletSession(a, b),
   );
 
-  const [seedHashDraft, setSeedHashDraft] = useState("");
+  const [seedHashDraft, setSeedHashDraft] = useState(initialSeedHash);
   const [settingsSnapshot, setSettingsSnapshot] = useState<MsFileSettingsSnapshot | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState(false);
@@ -447,7 +443,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
   const taskRef = useRef<FetchTask | null>(null);
   const taskSequenceRef = useRef(0);
   const activeKeyRef = useRef<string | undefined>(lifecycle.activePublicKeyHex);
-  const activeKeyGenerationRef = useRef<number | undefined>(lifecycle.generation);
+  const walletSessionTokenRef = useRef<string | undefined>(JSON.stringify([lifecycle.sessionEpoch, lifecycle.runGeneration, lifecycle.walletGeneration]));
   // settings snapshot 是本次读取使用的配置真值；刷新期间切回 status
   // resource 的当前世代，避免 SharedWorker 会话重建后世代归零时被
   // `Math.max` 错误地保留为旧世代。
@@ -457,7 +453,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
   const supplierGenerationRef = useRef(supplierGeneration);
   const vaultRef = useRef(vault);
   activeKeyRef.current = lifecycle.activePublicKeyHex;
-  activeKeyGenerationRef.current = lifecycle.generation;
+  walletSessionTokenRef.current = JSON.stringify([lifecycle.sessionEpoch, lifecycle.runGeneration, lifecycle.walletGeneration]);
   supplierGenerationRef.current = supplierGeneration;
   vaultRef.current = vault;
 
@@ -500,7 +496,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
     return taskRef.current === task &&
       !task.controller.signal.aborted &&
       task.activeKey === activeKeyRef.current &&
-      task.activeKeyGeneration === activeKeyGenerationRef.current &&
+      task.walletSessionToken === walletSessionTokenRef.current &&
       task.supplierGeneration === supplierGenerationRef.current &&
       vaultRef.current === "unlocked";
   }, []);
@@ -548,14 +544,14 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
     const invalid = vault !== "unlocked" ||
       !lifecycle.activePublicKeyHex ||
       task.activeKey !== lifecycle.activePublicKeyHex ||
-      task.activeKeyGeneration !== lifecycle.generation ||
+      task.walletSessionToken !== JSON.stringify([lifecycle.sessionEpoch, lifecycle.runGeneration, lifecycle.walletGeneration]) ||
       task.supplierGeneration !== supplierGeneration ||
       statusResource.status === "unavailable";
     if (!invalid) return;
     const hash = task.hash;
     abandonTask();
     setState({ phase: "cancelled", hash, stats: [] });
-  }, [abandonTask, lifecycle.activePublicKeyHex, lifecycle.generation, statusResource.status, supplierGeneration, vault]);
+  }, [abandonTask, lifecycle.activePublicKeyHex, JSON.stringify([lifecycle.sessionEpoch, lifecycle.runGeneration, lifecycle.walletGeneration]), statusResource.status, supplierGeneration, vault]);
 
   useEffect(() => () => abandonTask(), [abandonTask]);
 
@@ -847,7 +843,7 @@ function MsFileHomeFileWidgetContent({ service }: { service: MsFileService }) {
       id: ++taskSequenceRef.current,
       hash,
       activeKey,
-      activeKeyGeneration: activeKeyGenerationRef.current,
+      walletSessionToken: walletSessionTokenRef.current,
       supplierGeneration: supplierGenerationRef.current,
       controller: new AbortController(),
       stats: [],

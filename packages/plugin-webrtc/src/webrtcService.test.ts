@@ -1,7 +1,8 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // WebRTC service 的 Channel 私信接线测试。
 
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelRuntime, KeyspaceService, NoticeRecord, NoticeRegistry } from "@keymaster/contracts";
+import type { ChannelRuntime, VaultWalletState, NoticeRecord, NoticeRegistry } from "@keymaster/contracts";
 import { newMessageID, newSessionID } from "bsv8-channel-protocol";
 import { newOffer, parseBodyValue } from "bsv8-channel-protocol/webrtc-signal";
 import { createMemoryWebrtcConfigStore } from "./webrtcConfig.js";
@@ -19,23 +20,23 @@ const TARGET = "03" + "b".repeat(64);
 
 const OTHER = "02" + "c".repeat(64);
 
-function makeKeyspace(ownerPublicKeyHex = OWNER): KeyspaceService {
-  return { active: () => ({ activePublicKeyHex: ownerPublicKeyHex }) } as unknown as KeyspaceService;
+function makeWalletState(ownerPublicKeyHex = OWNER): VaultWalletState {
+  return { snapshot: () => walletStateFixtureSnapshot({ activePublicKeyHex: ownerPublicKeyHex }), subscribe: () => () => {} } as unknown as VaultWalletState;
 }
 
-function makeMutableKeyspace(initialOwner = OWNER): { keyspace: KeyspaceService; setOwner(ownerPublicKeyHex: string): void } {
-  type ActiveKeyChangedState = Parameters<KeyspaceService["onActiveKeyChanged"]>[0];
+function makeMutableWalletState(initialOwner = OWNER): { walletState: VaultWalletState; setOwner(ownerPublicKeyHex: string): void } {
+  type ActiveKeyChangedState = Parameters<VaultWalletState["subscribe"]>[0];
   let ownerPublicKeyHex = initialOwner;
   const listeners = new Set<(state: ActiveKeyChangedState) => void>();
-  const keyspace = {
-    active: () => ({ activePublicKeyHex: ownerPublicKeyHex }),
-    onActiveKeyChanged: (handler: (state: ActiveKeyChangedState) => void) => {
+  const walletState = {
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: ownerPublicKeyHex }))()),
+    subscribe: (handler: (state: ActiveKeyChangedState) => void) => {
       listeners.add(handler);
       return () => listeners.delete(handler);
     }
-  } as unknown as KeyspaceService;
+  } as unknown as VaultWalletState;
   return {
-    keyspace,
+    walletState,
     setOwner(nextOwnerPublicKeyHex) {
       ownerPublicKeyHex = nextOwnerPublicKeyHex;
       for (const listener of listeners) {
@@ -279,11 +280,7 @@ function makeNoticeRegistry(): { registry: NoticeRegistry; records: Map<string, 
     dismiss: vi.fn((id) => { records.delete(id); }),
     list: vi.fn(() => [...records.values()]),
     subscribe: vi.fn(() => () => undefined),
-    removeBySourcePluginId: vi.fn((sourcePluginId) => {
-      for (const [id, record] of records) {
-        if (record.sourcePluginId === sourcePluginId) records.delete(id);
-      }
-    })
+
   };
   return { registry, records };
 }
@@ -293,7 +290,7 @@ describe("createWebrtcService", () => {
     const channel = makeChannel(true);
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore()
     });
     expect(service.isReady()).toBe(true);
@@ -303,7 +300,7 @@ describe("createWebrtcService", () => {
   it("reports not ready while Channel is unavailable", () => {
     const service = createWebrtcService({
       channel: makeChannel(false),
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore()
     });
     expect(service.isReady()).toBe(false);
@@ -316,7 +313,7 @@ describe("createWebrtcService", () => {
     const environment = makeEnvironment(peers);
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       getPeerPresence: () => "offline"
@@ -335,7 +332,7 @@ describe("createWebrtcService", () => {
     const environment = makeEnvironment(peers);
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       getPeerPresence: () => "online"
@@ -356,7 +353,7 @@ describe("createWebrtcService", () => {
     const environment = makeEnvironment(peers);
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment
     });
@@ -376,7 +373,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -412,7 +409,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -461,7 +458,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -486,7 +483,7 @@ describe("createWebrtcService", () => {
     const channel = makeChannel();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: makeEnvironment([]),
       getPeerPresence: () => "offline"
@@ -507,7 +504,7 @@ describe("createWebrtcService", () => {
     const environment = makeEnvironment(peers);
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       getPeerPresence: () => presenceGate
@@ -526,7 +523,7 @@ describe("createWebrtcService", () => {
   });
 
   it("aborts a dial when the owner changes during async setup", async () => {
-    const mutable = makeMutableKeyspace(OWNER);
+    const mutable = makeMutableWalletState(OWNER);
     const channel = makeChannel(true, OWNER);
     const peers: TestPeer[] = [];
     let releasePresence!: (state: "online") => void;
@@ -536,7 +533,7 @@ describe("createWebrtcService", () => {
     const environment = makeEnvironment(peers);
     const service = createWebrtcService({
       channel,
-      keyspace: mutable.keyspace,
+      walletState: mutable.walletState,
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       getPeerPresence: () => presenceGate
@@ -562,7 +559,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -595,7 +592,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -636,7 +633,7 @@ describe("createWebrtcService", () => {
     const environment = makeEnvironment(peers);
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       getPeerPresence: () => presenceGate
@@ -666,7 +663,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -728,7 +725,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -791,7 +788,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -850,7 +847,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -897,7 +894,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -955,7 +952,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: environment,
       noticeRegistry: notices.registry,
@@ -1000,7 +997,7 @@ describe("createWebrtcService", () => {
     const notices = makeNoticeRegistry();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: makeEnvironment(peers),
       noticeRegistry: notices.registry,
@@ -1046,7 +1043,7 @@ describe("createWebrtcService", () => {
   it.each(["success", "failure"] as const)(
     "旧 owner 的 Hash %s 结果不得清除新 owner 的同 session 请求或接受占位",
     async (outcome) => {
-      const mutable = makeMutableKeyspace(OWNER);
+      const mutable = makeMutableWalletState(OWNER);
       const channel = makeChannel(true, OWNER);
       const notices = makeNoticeRegistry();
       const hashResults: Array<{
@@ -1061,7 +1058,7 @@ describe("createWebrtcService", () => {
       });
       const service = createWebrtcService({
         channel,
-        keyspace: mutable.keyspace,
+        walletState: mutable.walletState,
         configStore: createMemoryWebrtcConfigStore(),
         env: makeEnvironment([]),
         noticeRegistry: notices.registry,
@@ -1148,7 +1145,7 @@ describe("createWebrtcService", () => {
     };
     const serviceA = createWebrtcService({
       channel: channelA,
-      keyspace: makeKeyspace(OWNER),
+      walletState: makeWalletState(OWNER),
       configStore: createMemoryWebrtcConfigStore(),
       env: makeEnvironment(peersA, { peerFactory: makeTransferPeer, delay: noNegotiationTimeout }),
       isTransferSenderAllowed: () => true
@@ -1156,7 +1153,7 @@ describe("createWebrtcService", () => {
     const noticesB = makeNoticeRegistry();
     const serviceB = createWebrtcService({
       channel: channelB,
-      keyspace: makeKeyspace(TARGET),
+      walletState: makeWalletState(TARGET),
       configStore: createMemoryWebrtcConfigStore(),
       env: makeEnvironment(peersB, { peerFactory: makeTransferPeer }),
       noticeRegistry: noticesB.registry,
@@ -1240,7 +1237,7 @@ describe("createWebrtcService", () => {
     const channel = makeChannel();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       env: makeEnvironment(peers, {
         hashSha256: async () => {
@@ -1264,11 +1261,11 @@ describe("createWebrtcService", () => {
     let resolveHash!: (value: string) => void;
     const hashGate = new Promise<string>((resolve) => { resolveHash = resolve; });
     let hashCalls = 0;
-    const mutable = makeMutableKeyspace();
+    const mutable = makeMutableWalletState();
     const channel = makeChannel();
     const service = createWebrtcService({
       channel,
-      keyspace: mutable.keyspace,
+      walletState: mutable.walletState,
       configStore: createMemoryWebrtcConfigStore(),
       env: makeEnvironment([], {
         hashSha256: async () => {
@@ -1295,7 +1292,7 @@ describe("createWebrtcService", () => {
     const channel = makeChannel();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       noticeRegistry: notices.registry,
       isTransferSenderAllowed: async (_publicKeyHex, signal) => {
@@ -1326,12 +1323,12 @@ describe("createWebrtcService", () => {
     let admissionCalls = 0;
     let admissionSignal: AbortSignal | undefined;
     const admissionGate = new Promise<boolean>((resolve) => { resolveAdmission = resolve; });
-    const mutable = makeMutableKeyspace();
+    const mutable = makeMutableWalletState();
     const notices = makeNoticeRegistry();
     const channel = makeChannel();
     const service = createWebrtcService({
       channel,
-      keyspace: mutable.keyspace,
+      walletState: mutable.walletState,
       configStore: createMemoryWebrtcConfigStore(),
       noticeRegistry: notices.registry,
       isTransferSenderAllowed: async (_publicKeyHex, signal) => {
@@ -1365,7 +1362,7 @@ describe("createWebrtcService", () => {
     const channel = makeChannel();
     const service = createWebrtcService({
       channel,
-      keyspace: makeKeyspace(),
+      walletState: makeWalletState(),
       configStore: createMemoryWebrtcConfigStore(),
       noticeRegistry: notices.registry,
       isTransferSenderAllowed: (publicKeyHex) => {

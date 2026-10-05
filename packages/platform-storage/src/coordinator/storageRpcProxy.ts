@@ -4,10 +4,6 @@
 // Coordinator RPC。这里只做三件事：把 Worker 结果解包成领域错误、维护跨 Tab
 // 状态订阅、缓存当前 Connect 会话的目录授权。
 //
-// 相对旧实现的变化：没有桶、没有条件写能力探测、没有远程健康状态、没有
-// multipart 上传。生命周期入口直接对应单钱包的创建/导入/解锁/锁定/改密/
-// 改名/导出 KeyHold/重置。
-
 import type {
   CoordinatorStorageControl,
   CoordinatorStorageData,
@@ -22,10 +18,6 @@ import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
   StorageRuntimeSummary,
-  WalletColdStartSnapshot,
-  WalletInitializePlan,
-  WalletInitializeResult,
-  WalletUnlockResult,
 } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageError.js";
 
@@ -34,6 +26,7 @@ type StateEvent = {
   sessionEpoch: string;
   status: StorageRuntimeControllerStatus;
   summary?: StorageRuntimeSummary | null;
+  activity?: { reads: number; writes: number };
 };
 
 /** 把 Coordinator 的结果信封解包；失败一律成为可区分的 StorageRuntimeError。 */
@@ -74,6 +67,8 @@ export class StorageRpcProxy implements StorageRuntimeController {
     });
   }
 
+  activity(): { reads: number; writes: number } { return this.current.activity ?? { reads: 0, writes: 0 }; }
+
   status(): StorageRuntimeControllerStatus {
     return this.current.status;
   }
@@ -91,45 +86,6 @@ export class StorageRpcProxy implements StorageRuntimeController {
 
   summary(): Promise<StorageRuntimeSummary> {
     return this.control<StorageRuntimeSummary>({ type: "summary" });
-  }
-
-  coldStart(): Promise<WalletColdStartSnapshot> {
-    return this.control<WalletColdStartSnapshot>({ type: "cold-start" });
-  }
-
-  initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
-    return this.control<WalletInitializeResult>({ type: "initialize", plan });
-  }
-
-  unlock(password: string): Promise<WalletUnlockResult> {
-    return this.control<WalletUnlockResult>({ type: "unlock", password });
-  }
-
-  lock(): Promise<void> {
-    return this.control<void>({ type: "lock" });
-  }
-
-  changeKeyPassword(input: { oldPassword: string; newPassword: string }): Promise<void> {
-    return this.control<void>({ type: "change-key-password", oldPassword: input.oldPassword, newPassword: input.newPassword });
-  }
-
-  renameKey(label: string): Promise<void> {
-    return this.control<void>({ type: "rename-key", label });
-  }
-
-  exportKeyHold(): Promise<Uint8Array> {
-    return this.control<unknown>({ type: "export-key-hold" }).then((value) => {
-      if (value instanceof Uint8Array) return value;
-      if (value instanceof ArrayBuffer) return new Uint8Array(value);
-      throw new StorageRuntimeError("storage_provider_error", "KeyHold export returned invalid bytes");
-    });
-  }
-
-  resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }> {
-    return this.control<{ walletGeneration: string; clearedAt: string }>({
-      type: "reset-wallet",
-      confirmationLabel: input.confirmationLabel,
-    });
   }
 
   abortSession(connectSessionId: string): Promise<void> {

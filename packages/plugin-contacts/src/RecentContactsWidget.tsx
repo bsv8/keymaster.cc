@@ -1,3 +1,4 @@
+import { useContactsResources } from "./ContactsResourceContext.js";
 // packages/plugin-contacts/src/RecentContactsWidget.tsx
 // 最近联系人 widget。
 //
@@ -7,17 +8,15 @@
 //   - 作为首页侧栏只提供快速识别，不承载编辑逻辑。
 
 import { EmptyState } from "@keymaster/ui";
-import { countRender, useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { countRender, useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, useResourceViewSelector } from "@keymaster/runtime";
 import { CONTACTS_SERVICE_CAPABILITY, formatShortPublicKey, type Contact } from "@keymaster/contracts";
 
 export function RecentContactsWidget() {
   countRender("plugin-contacts/RecentContactsWidget");
-  const host = usePluginHost();
-  const { t, language } = useI18n();
-  const service = useOptionalCapability(CONTACTS_SERVICE_CAPABILITY);
-  const hasResource = host.resourceRegistry?.get("contacts.list") !== undefined;
-  if (!service || !hasResource) {
+  const { t, language } = usePluginI18n();
+  const service = useOptionalPluginCapability(CONTACTS_SERVICE_CAPABILITY);
+  if (!service) {
     // contacts namespace 随 owner 实例回收；不可用空态使用本地双语文本，
     // 避免在资源已经注销后调用 t() 触发开发期 warning。
     const unavailableText = language() === "zh-CN"
@@ -38,10 +37,9 @@ export function RecentContactsWidget() {
 }
 
 function RecentContactsWidgetContent() {
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const rows = useResourceSelector<Contact[], Contact[]>(
-    host.resourceStore, "contacts.list", [],
+  const { t } = usePluginI18n();
+  const rows = useResourceViewSelector<Contact[], Contact[]>(
+    useContactsResources(), "contacts.list", [],
     (snapshot) => [...(snapshot.data ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5),
     (a, b) => a === b
   );

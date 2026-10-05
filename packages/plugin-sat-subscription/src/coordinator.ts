@@ -17,3 +17,15 @@ export type { SatSubscriptionProviderConfig, SatSubscriptionTransport, SatSuppli
 export { SatSubscriptionHandle } from "./satProvider.js";
 export { createSatSpiService, SatSpiService, mapSpiBsvNetwork } from "./satSpi.js";
 export type { SatSpiServiceConfig, SatP2pkhService } from "./satSpi.js";
+export { createSatWorkerServices } from "./satWorkerServices.js";
+export { createContactsPresenceChannel } from "./contactsPresenceChannel.js";
+export { createChannelProtocolRelations } from "./channelProtocolRelations.js";
+export { ChannelSubscriptionMux, validateExactChannel } from "./channelSubscriptionMux.js";
+export { createChannelCallerPolicy, isPingRequestBody, privateProtocol, privateBodyForPublish, privateHistoryContent, validatePrivateProtocolCaller } from "./channelProtocolPolicy.js";
+export type { ChannelPrivateProtocol, ChannelCaller, ChannelOperationCaller } from "./channelProtocolPolicy.js";
+export { executeSatOperation } from "./satOperationExecutor.js";
+export { createOwnerChannelMux } from "./ownerChannelMux.js";
+export { createChannelPublications, publicMessageTimes } from "./channelPublications.js";
+export { createChannelOperationExecutor } from "./channelOperationExecutor.js";
+export { createChannelInbound, isUnknownChannelPublishFailure } from "./channelInbound.js";
+export { createSatWorkerTransport } from "./workerTransport.js";

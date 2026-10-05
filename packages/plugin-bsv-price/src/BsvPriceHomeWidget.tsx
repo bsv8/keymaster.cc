@@ -1,3 +1,4 @@
+import { usePriceResources } from "./PriceResourceContext.js";
 // packages/plugin-bsv-price/src/BsvPriceHomeWidget.tsx
 // 首页 BSV 价格 widget。
 //
@@ -7,21 +8,19 @@
 //   - 被动消费 `bsv-price.service` 的实时快照，不维护第二份行情状态。
 
 import React from "react";
-import { countRender, useOptionalCapability, useResource } from "webloom-framework/react";
-import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { countRender, useOptionalPluginCapability } from "webloom-framework/react";
+import { useResourceView, usePluginI18n, usePluginLocale } from "@keymaster/runtime";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 import { BSV_PRICE_SERVICE_CAPABILITY } from "./manifest.js";
 
 export function BsvPriceHomeWidget(): React.ReactElement {
   countRender("plugin-bsv-price/BsvPriceHomeWidget");
-  const { t, language } = useI18n();
-  const host = usePluginHost();
+  const { t, language } = usePluginI18n();
   // owner/session 切换先同步撤销 capability，再异步收尾。首页 widget 是
   // 被动消费者，必须把这个短暂的 unavailable 状态当作合法空态，而不是
   // 用 useCapability() 抛异常把整个 App 卸载。
-  const service = useOptionalCapability(BSV_PRICE_SERVICE_CAPABILITY);
-  const hasResource = host.resourceRegistry?.get("bsv-price.snapshot") !== undefined;
-  if (!service || !hasResource) {
+  const service = useOptionalPluginCapability(BSV_PRICE_SERVICE_CAPABILITY);
+  if (!service) {
     const unavailableText = language() === "zh-CN"
       ? { title: "BSV 价格", message: "当前会话暂时无法提供行情。" }
       : { title: "BSV Price", message: "Price service is temporarily unavailable for this session." };
@@ -43,10 +42,10 @@ export function BsvPriceHomeWidget(): React.ReactElement {
 }
 
 function BsvPriceHomeWidgetContent({ service }: { service: BsvPriceService }): React.ReactElement {
-  const { t } = useI18n();
-  const locale = useLocale();
-  const host = usePluginHost();
-  const resource = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
+  const { t } = usePluginI18n();
+  const locale = usePluginLocale();
+  const resources = usePriceResources();
+  const resource = useResourceView<BsvPriceServiceSnapshot>(resources, "bsv-price.snapshot", []);
   const snapshot = resource.data ?? service.snapshot();
   const statusText = t(`bsv-price.home.status.${snapshot.status}`, { defaultValue: snapshot.status });
   const emptyMessage = (() => {

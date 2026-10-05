@@ -20,7 +20,10 @@ async function listFiles(directory) {
 }
 
 try {
-  const files = (await listFiles(distDirectory)).filter((path) => /\.(?:html|js|mjs|css)$/u.test(path));
+  const allFiles = await listFiles(distDirectory);
+  const sourceAssets = allFiles.filter(path => /\.(?:ts|tsx)$/u.test(path));
+  if (sourceAssets.length) throw new Error(`生产产物包含未编译 TypeScript：${sourceAssets.map(path => relative(distDirectory, path)).join(", ")}`);
+  const files = allFiles.filter((path) => /\.(?:html|js|mjs|css)$/u.test(path));
   const matches = [];
   for (const path of files) {
     const content = await fs.readFile(path, "utf8");

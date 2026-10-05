@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityDescriptor, CENTRAL_STORAGE_DECLARATIONS, CHANNEL_RUNTIME_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { capabilityDescriptor, CENTRAL_STORAGE_DECLARATIONS, CHANNEL_RUNTIME_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY } from "@keymaster/contracts";
 import { messagePlatformPlugin } from "./manifest.js";
 
 describe("messagePlatformPlugin", () => {
@@ -12,7 +12,7 @@ describe("messagePlatformPlugin", () => {
     expect(dependencies.map((dependency) => dependency.capability)).toEqual(
       expect.arrayContaining([
         capabilityDescriptor(CHANNEL_RUNTIME_CAPABILITY),
-        capabilityDescriptor(KEYSPACE_SERVICE_CAPABILITY),
+        capabilityDescriptor(VAULT_WALLET_STATE_CAPABILITY),
       ])
     );
   });

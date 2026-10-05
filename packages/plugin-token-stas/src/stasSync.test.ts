@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-token-stas/src/stasSync.test.ts
 // STAS 后台同步任务取消语义测试：
 //   - 正常流程：replaceAll + emit data-changed。
@@ -11,12 +12,12 @@ import { describe, expect, it, vi } from "vitest";
 import { createStasSyncTask } from "./stasSync.js";
 import type { StasRepository } from "./storage/stasRepository.js";
 import type { StasServiceHandle } from "./stasService.js";
-import type { AssetDataNotifier, KeyspaceService, VaultService } from "@keymaster/contracts";
+import type { AssetDataNotifier, VaultWalletState, VaultService } from "@keymaster/contracts";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
   return {
-    active: () => ({ activePublicKeyHex })
-  } as unknown as KeyspaceService;
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))())
+  } as unknown as VaultWalletState;
 }
 
 function fakeVault(): VaultService {
@@ -59,7 +60,7 @@ describe("createStasSyncTask", () => {
     const task = createStasSyncTask({
       stateRepository: stateRepository as unknown as StasRepository,
       service: fakeService(SAMPLE_TOKENS),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -78,7 +79,7 @@ describe("createStasSyncTask", () => {
     const task = createStasSyncTask({
       stateRepository: stateRepository as unknown as StasRepository,
       service: fakeService(SAMPLE_TOKENS),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -99,7 +100,7 @@ describe("createStasSyncTask", () => {
     const task = createStasSyncTask({
       stateRepository: stateRepository as unknown as StasRepository,
       service: svc,
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -118,7 +119,7 @@ describe("createStasSyncTask", () => {
     const task = createStasSyncTask({
       stateRepository: stateRepository as unknown as StasRepository,
       service: fakeService(SAMPLE_TOKENS),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -132,15 +133,15 @@ describe("createStasSyncTask", () => {
     const notifier = fakeNotifier();
     let currentKey = "pk-old";
     const ks = {
-      active: () => ({ activePublicKeyHex: currentKey })
-    } as unknown as KeyspaceService;
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: currentKey }))())
+    } as unknown as VaultWalletState;
     (stateRepository.replaceAll as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       currentKey = "pk-new";
     });
     const task = createStasSyncTask({
       stateRepository: stateRepository as unknown as StasRepository,
       service: fakeService(SAMPLE_TOKENS),
-      keyspace: ks,
+      walletState: ks,
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -161,7 +162,7 @@ describe("createStasSyncTask", () => {
     const task = createStasSyncTask({
       stateRepository: stateRepository as unknown as StasRepository,
       service: fakeService(tokens),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -180,7 +181,7 @@ describe("createStasSyncTask", () => {
     const task = createStasSyncTask({
       stateRepository: stateRepository as unknown as StasRepository,
       service: svc,
-      keyspace: fakeKeyspace(undefined),
+      walletState: fakeWalletState(undefined),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -190,4 +191,17 @@ describe("createStasSyncTask", () => {
     expect(stateRepository.replaceAll).not.toHaveBeenCalled();
     expect(notifier.emit).not.toHaveBeenCalled();
   });
+});
+
+it.each(["epoch", "run", "wallet"])("does not persist late STAS results when the same key has a different %s", async generation => {
+  let session = walletStateFixtureSnapshot({ activePublicKeyHex: "pk1" });
+  let finish!: (value: typeof SAMPLE_TOKENS) => void;
+  const repository = fakeRepository(); const notifier = fakeNotifier();
+  const task = createStasSyncTask({ stateRepository: repository, assetDataNotifier: notifier, vault: fakeVault(),
+    walletState: { snapshot: () => session, subscribe: () => () => {} },
+    service: { listActiveKeyTokens: () => new Promise(resolve => { finish = resolve; }) } as never });
+  const pending = task.run({ signal: new AbortController().signal, reason: "test", reportProgress() {} });
+  session = { ...session, ...(generation === "epoch" ? { sessionEpoch: "new-epoch" } : generation === "run" ? { runGeneration: "new-run" } : { walletGeneration: "new-wallet" }) };
+  finish(SAMPLE_TOKENS); await pending;
+  expect(repository.replaceAll).not.toHaveBeenCalled(); expect(notifier.emit).not.toHaveBeenCalled();
 });

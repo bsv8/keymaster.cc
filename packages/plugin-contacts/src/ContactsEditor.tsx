@@ -1,3 +1,5 @@
+import { sameWalletSession, type VaultLifecycleSnapshot } from "@keymaster/contracts";
+import { useWalletState } from "@keymaster/runtime";
 // packages/plugin-contacts/src/ContactsEditor.tsx
 // 联系人编辑器：新建 / 编辑共用的唯一表单实现。
 //
@@ -6,11 +8,11 @@
 //   - 其它插件只通过 capability 打开，不复制联系人表单；
 //   - create / edit 两种模式共享一套字段，避免消息页再长出第二套联系人 modal。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
-import { CONTACTS_SERVICE_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, type Contact, type ContactInput } from "@keymaster/contracts";
+import { usePluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
+import { CONTACTS_SERVICE_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, type Contact, type ContactInput } from "@keymaster/contracts";
 import { ContactsDuplicateError } from "./contactsService.js";
 
 export interface ContactsEditorProps {
@@ -31,14 +33,22 @@ const EMPTY_DRAFT: DraftState = {
 };
 
 export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
-  const service = useCapability(CONTACTS_SERVICE_CAPABILITY);
-  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
-  const { t } = useI18n();
+  const service = usePluginCapability(CONTACTS_SERVICE_CAPABILITY);
+  const walletState = useWalletState();
+  const { t } = usePluginI18n();
+  const generation = useRef(0);
   const [draft, setDraft] = useState<DraftState>(EMPTY_DRAFT);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [current, setCurrent] = useState<Contact | null>(null);
+  const boundSession = useRef<Readonly<VaultLifecycleSnapshot> | undefined>(undefined);
   const [boundActivePublicKeyHex, setBoundActivePublicKeyHex] = useState<string | null>(null);
+
+  // A closed, replaced or revoked editor must ignore a pending save completion.
+  useEffect(() => {
+    generation.current += 1;
+    return () => { generation.current += 1; };
+  }, [props.open, props.mode, props.publicKeyHex, service, walletState]);
 
   // @resource-boundary allow: active-key-editor-safety
   useEffect(() => {
@@ -50,14 +60,16 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
       return;
     }
     let cancelled = false;
-    const openedFor = keyspace.active().activePublicKeyHex ?? null;
+    const openedSession = walletState.snapshot();
+    boundSession.current = openedSession;
+    const openedFor = openedSession.activePublicKeyHex ?? null;
     setBoundActivePublicKeyHex(openedFor);
     setError(null);
     setLoading(true);
     void service
       .listContacts()
       .then((list) => {
-        if (cancelled) return;
+        if (cancelled || !sameWalletSession(openedSession, walletState.snapshot())) return;
         const next = props.publicKeyHex ? list.find((c) => c.publicKeyHex === props.publicKeyHex) : undefined;
         setCurrent(next ?? null);
         if (props.mode === "edit") {
@@ -87,7 +99,7 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
         }
       })
       .catch(() => {
-        if (!cancelled) {
+        if (!cancelled && sameWalletSession(openedSession, walletState.snapshot())) {
           setCurrent(null);
           setDraft({
             publicKeyHex: props.publicKeyHex ?? "",
@@ -99,21 +111,22 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
         }
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && sameWalletSession(openedSession, walletState.snapshot())) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [keyspace, props.mode, props.open, props.publicKeyHex, service, t]);
+  }, [walletState, props.mode, props.open, props.publicKeyHex, service, t]);
 
   useEffect(() => {
     if (!props.open) {
       return;
     }
-    return keyspace.onActiveKeyChanged((state) => {
-      const nextActivePublicKeyHex = state.activePublicKeyHex ?? null;
-      if (boundActivePublicKeyHex && nextActivePublicKeyHex !== boundActivePublicKeyHex) {
+    return walletState.subscribe((state) => {
+      if (boundSession.current && !sameWalletSession(boundSession.current, state)) {
         // active key 变化后，编辑器必须立即收口，不能继续暴露旧草稿。
+        generation.current += 1;
+        boundSession.current = undefined;
         setDraft(EMPTY_DRAFT);
         setError(null);
         setCurrent(null);
@@ -122,13 +135,15 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
         props.onClose();
       }
     });
-  }, [boundActivePublicKeyHex, keyspace, props.onClose, props.open]);
+  }, [boundActivePublicKeyHex, walletState, props.onClose, props.open]);
 
   async function save() {
+    const savingGeneration = generation.current;
+    const savingSession = boundSession.current;
     setError(null);
     try {
-      const currentActivePublicKeyHex = keyspace.active().activePublicKeyHex ?? null;
-      if (!boundActivePublicKeyHex || currentActivePublicKeyHex !== boundActivePublicKeyHex) {
+      const currentActivePublicKeyHex = walletState.snapshot().activePublicKeyHex ?? null;
+      if (!savingSession || !sameWalletSession(savingSession, walletState.snapshot()) || !boundActivePublicKeyHex || currentActivePublicKeyHex !== boundActivePublicKeyHex) {
         setError(
           t("contacts.editor.err.keyChanged", { defaultValue: "Active key changed. Please reopen the editor." })
         );
@@ -156,8 +171,10 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
         props.mode === "edit"
           ? await service.updateContact(current!.publicKeyHex, input)
           : await service.addContact(input);
+      if (generation.current !== savingGeneration || !savingSession || !sameWalletSession(savingSession, walletState.snapshot())) return;
       props.onSaved(saved);
     } catch (err) {
+      if (generation.current !== savingGeneration) return;
       if (err instanceof ContactsDuplicateError) {
         setError(
           t("contacts.editor.err.duplicate", { defaultValue: "Contact already exists: " }) +

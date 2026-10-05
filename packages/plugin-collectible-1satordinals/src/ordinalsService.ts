@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-collectible-1satordinals/src/ordinalsService.ts
 // 1Sat Ordinals service：plugin-collectible-1satordinals 内部封装，组合
 // p2pkh.service（取当前 active key 的未花费 UTXO 集合）与
@@ -23,7 +24,7 @@
 import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
-  KeyspaceService,
+  VaultWalletState,
   Woc1SatOrdinalsContent,
   Woc1SatOrdinalsInscription,
   Woc1SatOrdinalsService
@@ -92,16 +93,16 @@ export interface OrdinalsServiceHandle {
 }
 
 export interface CreateOrdinalsServiceOptions {
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   p2pkh: P2pkhServiceFor1Sat;
   wocOneSat: Woc1SatOrdinalsService;
 }
 
 export function createOrdinalsService(options: CreateOrdinalsServiceOptions): OrdinalsServiceHandle {
-  if (!options || !options.keyspace || !options.p2pkh || !options.wocOneSat) {
-    throw new Error("createOrdinalsService: keyspace / p2pkh / wocOneSat are required");
+  if (!options || !options.walletState || !options.p2pkh || !options.wocOneSat) {
+    throw new Error("createOrdinalsService: walletState / p2pkh / wocOneSat are required");
   }
-  const keyspace = options.keyspace;
+  const walletState = options.walletState;
   const p2pkh = options.p2pkh;
   const wocOneSat = options.wocOneSat;
   const unsubs: Array<() => void> = [];
@@ -134,7 +135,8 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
   }
 
   async function listActiveKeyCollectibles(signal?: AbortSignal): Promise<OrdinalsOutpointHit[]> {
-    const startedKeyHex = keyspace.active().activePublicKeyHex;
+    const startedState = walletState.snapshot();
+    const startedKeyHex = startedState.activePublicKeyHex;
     if (!startedKeyHex) return [];
     const includeTest = includeTestnet();
     const networks: Array<{ assetId: "bsv" | "bsvtest"; network: BsvNetwork }> = includeTest
@@ -145,15 +147,16 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
       : [{ assetId: "bsv", network: "main" }];
     const out: OrdinalsOutpointHit[] = [];
     for (const { assetId, network } of networks) {
-      if (signal?.aborted) return out;
+      if (signal?.aborted || !sameWalletSession(startedState, walletState.snapshot())) return [];
       const utxos = await activeKeyUtxos(assetId, startedKeyHex);
       for (const u of utxos) {
-        if (signal?.aborted) return out;
+        if (signal?.aborted || !sameWalletSession(startedState, walletState.snapshot())) return [];
         // 用户可见 collectibleId 用 "txid:vout"（更可读）；
         // 1Sat endpoint 期望的 outpoint 字符串是 "txid_vout"（下划线）。
         const displayOutpoint = `${u.txid}:${u.vout}`;
         const wocOutpoint = toWocOutpoint(u.txid, u.vout);
         const inscription = await wocOneSat.getOutpointInscription(network, wocOutpoint, { signal });
+        if (!sameWalletSession(startedState, walletState.snapshot())) return [];
         if (!inscription) continue;
         out.push({
           outpoint: displayOutpoint,
@@ -165,7 +168,7 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
         });
       }
     }
-    return out;
+    return sameWalletSession(startedState, walletState.snapshot()) ? out : [];
   }
 
   async function getOutpoint(outpoint: string, signal?: AbortSignal): Promise<OrdinalsOutpointHit | null> {
@@ -243,11 +246,12 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
   }
 
   async function sync(signal?: AbortSignal): Promise<void> {
-    const startedKeyHex = keyspace.active().activePublicKeyHex;
+    const startedState = walletState.snapshot();
+    const startedKeyHex = startedState.activePublicKeyHex;
     if (!startedKeyHex) return;
     await listActiveKeyCollectibles(signal);
     if (signal?.aborted) return;
-    if (keyspace.active().activePublicKeyHex !== startedKeyHex) return;
+    if (!sameWalletSession(startedState, walletState.snapshot())) return;
     notify();
   }
 

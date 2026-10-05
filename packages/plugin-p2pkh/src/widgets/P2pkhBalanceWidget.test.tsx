@@ -1,3 +1,5 @@
+import { walletStateFixtureSnapshot, walletStateFixtureAccess } from "@keymaster/runtime/test-support";
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
 // packages/plugin-p2pkh/src/widgets/P2pkhBalanceWidget.test.tsx
 // P2PKH 余额 widget 测试：
 //   1. onDataChanged 后重新读取余额
@@ -8,11 +10,12 @@
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { BSV_PRICE_READER_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
-import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
+import { BSV_PRICE_READER_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY, I18N_SERVICE_CAPABILITY, defineRuntimeUnitDependencies, type ResourceRegistry } from "@keymaster/contracts";
+import type { VaultLifecycleSnapshot, VaultWalletState } from "@keymaster/contracts";
 import { P2PKH_CAPABILITY, type P2pkhBalance, type P2pkhService } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";
+import { bindP2pkhUi } from "../P2pkhResourceContext.js";
 import { P2pkhBalanceWidget } from "./P2pkhBalanceWidget.js";
 
 const ACTIVE_PK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -65,28 +68,27 @@ function makeFakeService(overrides?: {
   };
 }
 
-function makeFakeKeyspace(activePublicKeyHex?: string) {
-  const activeListeners = new Set<(s: ActiveKeyState) => void>();
+function makeFakeWalletState(activePublicKeyHex?: string) {
+  const activeListeners = new Set<(s: VaultLifecycleSnapshot) => void>();
   return {
-    keyspace: {
-      active: () => ({ activePublicKeyHex: activePublicKeyHex ?? ACTIVE_PK }),
-      onActiveKeyChanged: (h: (s: ActiveKeyState) => void) => {
+    walletState: {
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: activePublicKeyHex ?? ACTIVE_PK }))()),
+      subscribe: (h: (s: VaultLifecycleSnapshot) => void) => {
         activeListeners.add(h);
         return () => activeListeners.delete(h);
       },
       isInitializing: () => false,
       onInitializationChange: () => () => {},
-    } as unknown as KeyspaceService,
+    } as unknown as VaultWalletState,
     setActiveKey(pk: string) {
       activePublicKeyHex = pk;
-      for (const l of activeListeners) l({ activePublicKeyHex: pk });
+      for (const l of activeListeners) l(walletStateFixtureSnapshot({ activePublicKeyHex: pk }));
     },
   };
 }
 
 /** 在 host 上注册 p2pkh 资源定义。 */
-function registerP2pkhResources(host: ReturnType<typeof createPluginHost>, service: P2pkhService) {
-  const resourceRegistry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
+function registerDefinitions(resourceRegistry: ResourceRegistry, service: P2pkhService) {
 
   // p2pkh.balance
   resourceRegistry.register({
@@ -154,23 +156,49 @@ function registerP2pkhResources(host: ReturnType<typeof createPluginHost>, servi
   });
 }
 
+const hosts: ReturnType<typeof createPluginHost>[] = [];
+const widgets = new WeakMap<ReturnType<typeof createPluginHost>, ReturnType<typeof bindP2pkhUi>>();
+function createWidgetHost() {
+  const host = createPluginHost({ initialI18nResources: [p2pkhResources], runtimeUnitImplementationRegistry: {
+    get: () => ctx => {
+      registerDefinitions(ctx.capability(RESOURCE_REGISTRY_CAPABILITY), ctx.capability(P2PKH_CAPABILITY));
+      widgets.set(host, bindP2pkhUi(ctx, P2pkhBalanceWidget));
+    },
+  } });
+  hosts.push(host); return host;
+}
+async function registerP2pkhResources(host: ReturnType<typeof createPluginHost>, _service: P2pkhService) {
+  await host.register({ id: "p2pkh-widget-fixture", name: "P2PKH widget fixture", units: [{
+    id: "p2pkh-widget-fixture.window", runtime: "window-main", scopeKind: "root",
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: RESOURCE_REGISTRY_CAPABILITY }, { capability: OWNED_RESOURCE_ACCESS_CAPABILITY },
+      { capability: I18N_SERVICE_CAPABILITY }, { capability: P2PKH_CAPABILITY },
+      { capability: BSV_PRICE_READER_CAPABILITY, optional: true },
+    ]),
+  }] });
+}
+function FixtureWidget({ host }: { host: ReturnType<typeof createPluginHost> }) {
+  const Widget = widgets.get(host)!; return <Widget />;
+}
+
 describe("P2pkhBalanceWidget", () => {
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
     vi.restoreAllMocks();
+    await Promise.all(hosts.splice(0).map(host => host.dispose()));
   });
 
   it("onDataChanged 后重新读取余额", async () => {
     const fake = makeFakeService();
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
-    registerP2pkhResources(host, fake.service);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
+    await registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 
@@ -204,15 +232,15 @@ describe("P2pkhBalanceWidget", () => {
         return Promise.resolve({ total: 9999 });
       },
     });
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
-    registerP2pkhResources(host, fake.service);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
+    await registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 
@@ -223,7 +251,9 @@ describe("P2pkhBalanceWidget", () => {
 
     // 切换账户 → 触发第二次调用
     await act(async () => {
-      keyspace.setActiveKey("new-public-key-hex-abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567");
+      const owner = "new-public-key-hex-abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+      walletState.setActiveKey(owner);
+      await host.transitionRuntimeIdentity({ vaultStatus: "unlocked", ownerPublicKeyHex: owner, sessionEpoch: "new-epoch", runGeneration: "run", walletGeneration: "wallet" });
       await new Promise((r) => setTimeout(r, 50));
     });
 
@@ -245,15 +275,15 @@ describe("P2pkhBalanceWidget", () => {
 
   it("卸载后不再更新", async () => {
     const fake = makeFakeService();
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
-    registerP2pkhResources(host, fake.service);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
+    await registerP2pkhResources(host, fake.service);
 
     const { unmount } = render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 
@@ -273,19 +303,19 @@ describe("P2pkhBalanceWidget", () => {
 
   it("shows the sats / price display when the price reader is available", async () => {
     const fake = makeFakeService({ getAssetBalance: async () => ({ total: 100_000_000 }) });
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
     host.provide(BSV_PRICE_READER_CAPABILITY, {
       get: () => ({ amount: "45.12", unit: "USDT", updatedAtMs: 1 }),
       subscribe: () => () => undefined
     });
-    registerP2pkhResources(host, fake.service);
+    await registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 
@@ -296,15 +326,15 @@ describe("P2pkhBalanceWidget", () => {
 
   it("shows — when the balance is unavailable", async () => {
     const fake = makeFakeService({ getAssetBalance: async () => ({ total: 0, available: false }) });
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
-    registerP2pkhResources(host, fake.service);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
+    await registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 
@@ -322,15 +352,15 @@ describe("P2pkhBalanceWidget", () => {
         breakdown: { confirmed: 1000, unconfirmed: 200, spendable: 1200 },
       }),
     });
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
-    registerP2pkhResources(host, fake.service);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
+    await registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 
@@ -345,15 +375,15 @@ describe("P2pkhBalanceWidget", () => {
 
   it("hides the testnet row when testnet is disabled", async () => {
     const fake = makeFakeService({ includeTestnet: false });
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
-    registerP2pkhResources(host, fake.service);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
+    await registerP2pkhResources(host, fake.service);
 
     const { unmount } = render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 
@@ -372,15 +402,15 @@ describe("P2pkhBalanceWidget", () => {
         available: true,
       }),
     });
-    const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+    const walletState = makeFakeWalletState();
+    const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
-    host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace.keyspace);
-    registerP2pkhResources(host, fake.service);
+    host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState.walletState));
+    await registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
-        <P2pkhBalanceWidget />
+        <FixtureWidget host={host} />
       </PluginHostProvider>
     );
 

@@ -1,6 +1,6 @@
 {
   "name": "@keymaster/plugin-woc",
-  "exports": { ".": "./src/index.ts", "./coordinator": "./src/coordinator.ts", "./settings-page": "./src/pages/WocSettingsPage.tsx" },
+  "exports": { ".": "./src/index.ts", "./coordinator": "./src/coordinator.ts" },
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -10,6 +10,6 @@
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",
-    "webloom-framework": "0.5.0"
+    "webloom-framework": "0.6.0"
   }
 }

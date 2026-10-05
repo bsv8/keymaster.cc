@@ -1,10 +1,13 @@
+import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-webrtc/src/manifest.ts
 // WebRTC 业务插件 manifest（施工单 2026-07-04 002 硬切换）。
 //
 // 设计缘由：
 //   - plugin-webrtc 是极薄业务插件，只通过 Coordinator Channel 私信收发信令；
 //   - STUN 设置作为模块挂到「设置 → 广播网关」；
-//   - 模块注册走 `system-status.registry` 单一真值。
+//   - 模块注册走 `page.ui.registry` 单一真值。
 //   - i18n namespace：`webrtc`。
 
 import type {
@@ -18,10 +21,10 @@ import {
   CHANNEL_RUNTIME_CAPABILITY,
   CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
   CONTACTS_SERVICE_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   NOTICE_REGISTRY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SYSTEM_STATUS_REGISTRY_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import {
@@ -29,7 +32,7 @@ import {
   WEBRTC_SERVICE_CAPABILITY,
   WEBRTC_SETTINGS_PATH
 } from "./constants.js";
-import { WebrtcSettingsPage } from "./WebrtcSettingsPage.js";
+import { WebrtcStatusBlock } from "./WebrtcSettingsPage.js";
 import type { WebrtcService, WebrtcSessionSnapshot } from "./webrtcService.js";
 import type { WebrtcHistoryItem } from "./webrtcHistoryService.js";
 import {
@@ -223,12 +226,7 @@ const webrtcPluginDefinition = {
   name: "WebRTC",
   description:
     "Keymaster WebRTC business plugin: audio/video calls and file transfer over ChannelProtocol (Hash rendezvous + webrtc-signal + APP control), gated by contacts presence.",
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [{
     id: "webrtc.window",
     runtime: "window-main",
@@ -236,19 +234,22 @@ const webrtcPluginDefinition = {
     provides: [WEBRTC_SERVICE_CAPABILITY],
     storages: [CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel 私信" },
-      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "打开 key-scoped 历史库" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "打开 key-scoped 历史库" },
       { capability: CONTACTS_SERVICE_CAPABILITY, reason: "只允许当前 owner 通讯录中的发送者进入确认" },
       { capability: CONTACTS_COORDINATOR_CONTROL_CAPABILITY, reason: "读取 Coordinator 通讯录在线快照做拨号门禁", optional: true },
       { capability: NOTICE_REGISTRY_CAPABILITY, reason: "投递全局紧急 notice" },
-      { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, reason: "注册 WebRTC 广播网关模块" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 WebRTC 广播网关模块" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 WebRTC session resources" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册 WebRTC 设置面包屑" },
     ]),
   }],
   i18n: webrtcResources,
   async setup(ctx) {
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const contacts: ContactsService = ctx.capability(CONTACTS_SERVICE_CAPABILITY);
     const optionalCapability = (ctx as unknown as {
       optionalCapability?: (capability: unknown) => unknown;
@@ -258,12 +259,12 @@ const webrtcPluginDefinition = {
       | undefined;
     const noticeRegistry = ctx.capability(NOTICE_REGISTRY_CAPABILITY);
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
-    const configStore = createFileWebrtcConfigStore(ctx.filesFor(""));
+    const configStore = createFileWebrtcConfigStore(ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""));
     await configStore.ready();
-    const historyStorage = ctx.storageFor("history");
+    const historyStorage = ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "history");
     const historyService = createWebrtcHistoryService({
-      keyspace,
-      ownerPublicKeyHex: () => keyspace.active().activePublicKeyHex ?? null,
+      walletState,
+      ownerPublicKeyHex: () => walletState.snapshot().activePublicKeyHex ?? null,
       storage: historyStorage
     });
     const isContactAllowed = async (publicKeyHex: string, signal?: AbortSignal) => {
@@ -273,7 +274,7 @@ const webrtcPluginDefinition = {
     };
     const service = createWebrtcService({
       channel,
-      keyspace,
+      walletState,
       historyService,
       noticeRegistry,
       configStore,
@@ -311,8 +312,8 @@ const webrtcPluginDefinition = {
       id: "webrtc.session",
       scope: "global",
       key: () => ["webrtc.session"],
-      load: async (_args, context) => context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)!.snapshot(),
-      subscribe: (_args, context, invalidate) => context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
+      load: async (_args, context) => context.optionalCapability(WEBRTC_SERVICE_CAPABILITY)!.snapshot(),
+      subscribe: (_args, context, invalidate) => context.optionalCapability(WEBRTC_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
       equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
       invalidation: "immediate"
     });
@@ -323,9 +324,9 @@ const webrtcPluginDefinition = {
       load: async (args, context) => {
         const peer = args[0] ?? "";
         if (!peer) return [];
-        return context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)?.listHistoryForPeer(peer) ?? [];
+        return context.optionalCapability(WEBRTC_SERVICE_CAPABILITY)?.listHistoryForPeer(peer) ?? [];
       },
-      subscribe: (_args, context, invalidate) => context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
+      subscribe: (_args, context, invalidate) => context.optionalCapability(WEBRTC_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
       invalidation: "immediate"
     });
 
@@ -339,22 +340,18 @@ const webrtcPluginDefinition = {
       ]
     });
 
-    const systemStatus = ctx.capability(SYSTEM_STATUS_REGISTRY_CAPABILITY);
+    const systemStatus = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const statusId = "webrtc.system-status";
-    systemStatus.register({
+    systemStatus.view.register({
       id: statusId,
       path: "/settings/system-status",
       label: { key: "webrtc.menu", fallback: "WebRTC" },
-      description: {
-        key: "webrtc.page.settings.desc",
-        fallback: "STUN-only config; no TURN."
-      },
-      component: WebrtcSettingsPage,
+      kind: "settings-block",
+      render: () => createElement(WebrtcStatusBlock),
       order: 50
     });
 
     return async () => {
-      systemStatus.unregister(statusId);
       await service.dispose();
     };
   }

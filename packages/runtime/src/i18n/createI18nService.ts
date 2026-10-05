@@ -33,7 +33,7 @@ import {
 /**
  * Common 公共 namespace：放跨插件复用的基础动作文案，例如
  * common.action.save / common.action.cancel / settings.language.* 等。
- * runtime 在创建 service 时先注册空对象；具体 key 由 plugin-settings 等模块在 i18n 资源中覆盖。
+ * runtime 在创建 service 时先注册空对象；具体 key 由 Page 等模块在 i18n 资源中覆盖。
  */
 const COMMON_NS = "common";
 
@@ -61,8 +61,6 @@ const PLATFORM_RESOURCES: I18nPluginResources = {
       "common.menu.close": "Close menu",
       // 单元可用性原因。key 带完整前缀落在 common namespace，因此不依赖
       // `coordinator` namespace 是否被注册。
-      "coordinator.unitUnavailable.pluginDisabled": "Plugin disabled: {{product}}",
-      "coordinator.unitUnavailable.dependencyDisabled": "Required plugin disabled: {{product}}",
       "coordinator.unitUnavailable.dependencyNotReady": "Required runtime unit is not ready: {{unit}}",
       "coordinator.unitUnavailable.storageRootUnavailable": "Storage root is not ready",
       "coordinator.unitUnavailable.ownerSessionUnavailable": "Vault is not unlocked",
@@ -87,8 +85,6 @@ const PLATFORM_RESOURCES: I18nPluginResources = {
       "common.locale.en": "English",
       "common.locale.zh-CN": "简体中文",
       "common.menu.close": "关闭菜单",
-      "coordinator.unitUnavailable.pluginDisabled": "插件已停用：{{product}}",
-      "coordinator.unitUnavailable.dependencyDisabled": "依赖的插件已停用：{{product}}",
       "coordinator.unitUnavailable.dependencyNotReady": "依赖的运行单元尚未就绪：{{unit}}",
       "coordinator.unitUnavailable.storageRootUnavailable": "中央存储尚未就绪",
       "coordinator.unitUnavailable.ownerSessionUnavailable": "保险库尚未解锁",

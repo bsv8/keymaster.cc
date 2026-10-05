@@ -1,3 +1,40 @@
+import { createPublicMsFileService } from "@keymaster/plugin-msfile/coordinator";
+import { createVaultBootstrapStorage } from "@keymaster/platform-storage/assembly";
+import { executeWorkerUnlock } from "@keymaster/plugin-vault/coordinator";
+import { executeWorkerP2pkhSnapshot, readWorkerP2pkhResource } from "@keymaster/plugin-p2pkh/coordinator";
+import { createSatWorkerTransport } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createWorkerPresenceProjection } from "@keymaster/plugin-contacts/coordinator";
+import { createWorkerAutoLock } from "@keymaster/plugin-vault/coordinator";
+import { createWorkerBackgroundRuntime, type TaskRuntime } from "@keymaster/plugin-background/coordinator";
+import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, type P2pkhWorkerTransfer, type VaultWorkerCrypto } from "@keymaster/contracts";
+import { createWorkerTransferRuntime } from "@keymaster/plugin-p2pkh/coordinator";
+import { WOC_WORKER_BROADCAST_CAPABILITY, type WocWorkerBroadcastService, type WocServiceHandle } from "@keymaster/contracts";
+import { createWorkerWocViews } from "@keymaster/plugin-woc/coordinator";
+import { createChannelInbound, isUnknownChannelPublishFailure } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createChannelOperationExecutor } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createChannelPublications, publicMessageTimes } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createWorkerP2pkhSettings } from "@keymaster/plugin-p2pkh/coordinator";
+import { createBitfsWorkerRuntime } from "@keymaster/plugin-msfile/coordinator";
+import { createWorkerFundingRuntime } from "@keymaster/plugin-msfile/coordinator";
+import { executeWorkerP2pkhBroadcast } from "@keymaster/plugin-p2pkh/coordinator";
+import { executeWalletControl } from "@keymaster/plugin-vault/coordinator";
+import { createWorkerBridgeBudget } from "@keymaster/plugin-window-p2p/coordinator";
+import { ensureWorkerP2pkhResources as ensureOwnedP2pkhResources, refreshWorkerP2pkhResources } from "@keymaster/plugin-p2pkh/coordinator";
+import { createOwnerChannelMux } from "@keymaster/plugin-sat-subscription/coordinator";
+import { executeSatOperation } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createChannelCallerPolicy, privateProtocol, privateBodyForPublish, validatePrivateProtocolCaller, type ChannelPrivateProtocol } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createKeyValueMaintenance } from "@keymaster/platform-storage/coordinator";
+import { CONTACTS_PRESENCE_CHANNEL_CAPABILITY, type ContactsPresenceChannel } from "@keymaster/contracts";
+import { createContactsPresenceChannel } from "@keymaster/plugin-sat-subscription/coordinator";
+import { MSFILE_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { createMsFileWorkerService } from "@keymaster/plugin-msfile/coordinator";
+import { createSatWorkerServices } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createChainHeightTask } from "@keymaster/plugin-woc/coordinator";
+import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, WOC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY } from "@keymaster/contracts";
+import { BUILTIN_PLUGIN_DEFINITIONS } from "@keymaster/contracts";
+import { createWorkerCryptoRpc, createWorkerActiveKeyCryptoFactory, createWorkerIdentityProjection, createWalletStateAccess, createWalletStateSource, createWorkerKeySession, signPrivateMessageForFixture } from "@keymaster/plugin-vault/coordinator";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY, parseStorageBrowsePrivateResponse, removeRetiredPluginIntent, StorageBrowseCoordinator, type StorageBrowsePrivateCommand } from "@keymaster/platform-storage/assembly";
+import { storagePrivateCapabilities } from "./assembly/storagePrivateCapabilities.js";
 // apps/web/src/keymasterSessionCoordinator.worker.ts
 // Keymaster Session Coordinator SharedWorker
 //
@@ -20,92 +57,16 @@ import type {
   StorageOwnerGrant,
   StoragePlatformGrant,
 } from "@keymaster/contracts/storage-internal";
-import type {
-  SessionEpoch,
-  CoordinatorVaultStatus,
-  CoordinatorClientRequest,
-  CoordinatorResponse,
-  CoordinatorTopicEvent,
-  CoordinatorBootstrapSnapshot,
-  CoordinatorTopic,
-  CoordinatorCommandAck,
-  CoordinatorCryptoOperation,
-  CoordinatorCryptoResult,
-  CoordinatorBackgroundSyncSettings,
-  CoordinatorTaskSnapshot,
-  CoordinatorVaultOperation,
-  CoordinatorSubscribeTopicsResult,
-  CoordinatorTopicBaseline,
-  CoordinatorValueResult,
-  P2pkhBroadcastSubmission,
-  AssetDataInvalidationEvent,
-  SessionStateEvent,
-  VaultSealedSecret,
-  P2pkhProviderConfig,
-  P2pkhProviderRegistry,
-  P2pkhTransactionBroadcastProvider,
-  P2pkhUtxoSnapshotResult,
-  ProtocolSpendPreview,
-  ProtocolSpendService,
-  WindowP2pExecutorLease,
-  WindowP2pNoiseSignRequest,
-  WindowP2pPeerRecordSignRequest,
-  WindowP2pIdentitySignResult,
-  MsFileReadConcurrencySettings,
-  CoordinatorSatOperation,
-  CoordinatorSatStateEvent,
-  CoordinatorChannelOperation,
-  CoordinatorChannelStateEvent,
-  ChannelSubscriptionStatus,
-  CoordinatorContactsPresenceEvent,
-  CoordinatorWorkerUnitStateEvent,
-  CoordinatorWorkerUnitPublicSnapshot,
-  CoordinatorWorkerUnitSnapshot,
-  ChannelPrivateMessageEvent,
-  ChannelRuntime,
-  ContactsService,
-  SatWindowLaneOperation,
-  SatWindowLaneSspRequestEvent,
-  SatSubscriptionAdminService,
-  SatSubscriptionService,
-  SatSubscriptionSpiService,
-  SatSubscriptionSettingsSnapshot,
-  SatIncomingPublish,
-  ContactPresenceMap,
-  WindowP2pExecutorError,
-  KeyValueListInput,
-  KeyValueValue,
-  KeyValueCommitInput,
-  ActiveKeyCrypto,
-  PluginIntentStateEvent,
-  CoordinatorAuthorityRecovery,
-  CoordinatorRpcRequest,
-  CoordinatorRpcResponse,
-  CoordinatorRpcCommandRequest,
-  CoordinatorSessionOpenRequest,
-  CoordinatorSessionCloseRequest,
-  CoordinatorSessionBinding,
-  CoordinatorTopicSubscription,
-  CoordinatorOwnerStorageResult,
-  CoordinatorPlatformStorageResult,
-  SnapshotStore,
-  StorageSnapshotJsonCompatible,
-  PluginStorageDeclaration,
-} from "@keymaster/contracts";
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, deriveAppStorageName, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor, BACKGROUND_MANAGED_SYNC_TASK_IDS, backgroundSyncDefaultIntervalMs, BACKGROUND_SYNC_DEFAULT_INTERVAL_MS, isValidBackgroundSyncIntervalMs, CHAIN_HEIGHT_SYNC_TASK_ID, emptyChainHeightSnapshot, BACKGROUND_TRIGGER_REASON, isDefinitelyNotDispatchedBroadcastError, AUTO_LOCK_DEFAULT_TIMEOUT_MS, AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
-import {
-  BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET,
-  BUILTIN_PLUGIN_PRODUCT_ID_SET,
-} from "@keymaster/contracts";
+import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as PublicCoordinatorClientRequest, CoordinatorResponse, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorTopic, CoordinatorCryptoOperation, CoordinatorBackgroundSyncSettings, CoordinatorTaskSnapshot, CoordinatorVaultOperation, CoordinatorSubscribeTopicsResult, CoordinatorTopicBaseline, AssetDataInvalidationEvent, SessionStateEvent, VaultSealedSecret, P2pkhProviderConfig, P2pkhProviderRegistry, P2pkhTransactionBroadcastProvider, P2pkhUtxoSnapshotResult, WindowP2pExecutorLease, WindowP2pIdentitySignResult, MsFileReadConcurrencySettings, CoordinatorSatStateEvent, CoordinatorChannelOperation, ChannelSubscriptionStatus, CoordinatorContactsPresenceEvent, CoordinatorWorkerUnitStateEvent, CoordinatorWorkerUnitPublicSnapshot, ChannelPrivateMessageEvent, ContactsService, SatWindowLaneOperation, SatWindowLaneSspRequestEvent, SatSubscriptionAdminService, SatSubscriptionService, SatSubscriptionSpiService, WindowP2pExecutorError, CoordinatorAuthorityRecovery, CoordinatorRpcRequest, CoordinatorRpcResponse, CoordinatorRpcCommandRequest, CoordinatorSessionOpenRequest, CoordinatorSessionCloseRequest, CoordinatorSessionBinding, CoordinatorTopicSubscription, SnapshotStore, StorageSnapshotJsonCompatible, PluginStorageDeclaration } from "@keymaster/contracts";
+/** 可信 Worker 入口内的命令联合；私有浏览不进入公共 transport parser。 */
+type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
+
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, deriveAppStorageName, deriveThirdPartyStorageModuleId, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor, isValidBackgroundSyncIntervalMs, emptyChainHeightSnapshot, BACKGROUND_TRIGGER_REASON, AUTO_LOCK_DEFAULT_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
+import { BUILTIN_PLUGIN_PRODUCT_ID_SET } from "@keymaster/contracts";
 import {
   buildWalletStorageRoot,
 } from "@keymaster/contracts";
-import {
-  COORDINATOR_CRYPTO_SERVICE,
-  COORDINATOR_OWNER_STORAGE_SERVICE,
-  COORDINATOR_SERVICE_CONTRACT_VERSION,
-  COORDINATOR_SERVICE_PROTOCOL_VERSION,
-} from "@keymaster/contracts";
+import { COORDINATOR_SERVICE_CONTRACT_VERSION, COORDINATOR_SERVICE_PROTOCOL_VERSION } from "@keymaster/contracts";
 import {
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
@@ -113,43 +74,18 @@ import {
   COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
 } from "@keymaster/contracts";
-import {
-  MSFILE_MAX_BLOCK_BYTES,
-  MSFILE_MAX_SEED_BYTES,
-  MSFILE_READ_CONCURRENCY_RECOMMENDED,
-  MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
-  MSFILE_SELLER_SETTINGS_DEFAULT,
-  isValidMsFileHashHex,
-  normalizeMsFileSatoshiAmount,
-  normalizeMsFileReadConcurrencySettings,
-  SAT_SUBSCRIPTION_RESOURCE_LIMITS,
-} from "@keymaster/contracts";
-import { installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, generatePrivateKeyHex as generateValidPrivateKeyHex } from "@keymaster/plugin-vault/coordinator";
+import { MSFILE_MAX_BLOCK_BYTES, MSFILE_MAX_SEED_BYTES, MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT, normalizeMsFileReadConcurrencySettings, SAT_SUBSCRIPTION_RESOURCE_LIMITS } from "@keymaster/contracts";
+import { bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, executeVaultOperation as executeOwnedVaultOperation, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
-import {
-  createMessageBus,
-  definePlugin,
-  startSharedWorkerApp,
-  type PluginIntentController,
-  type PluginIntentSnapshot,
-  type UpgradeGate,
-  type UpgradeIoLease,
-  type UpgradeSession,
-  type HandlerCallContext,
-  type PeerController,
-} from "webloom-framework";
-import {
-  createPluginIntentController,
-  createUpgradeGate,
-} from "webloom-framework/advanced";
-import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import { createMessageBus, definePlugin, startSharedWorkerApp, type UpgradeGate, type UpgradeIoLease, type UpgradeSession, type HandlerCallContext, type PeerController } from "webloom-framework";
+import { createUpgradeGate } from "webloom-framework/advanced";
+
 import { createFinalIoAudit, type FinalIoAuditOperation } from "./coordinator/finalIoAudit.js";
 import { acquireCoordinatorAuthorityLock, type CoordinatorAuthorityLock } from "./coordinator/coordinatorAuthorityLock.js";
 import {
   assertCoordinatorWorkerUnitCatalog,
   COORDINATOR_WORKER_UNIT_CATALOG,
-  getCoordinatorWorkerProductDependenciesForTask,
   getCoordinatorWorkerUnitForTask,
 } from "./coordinator/workerUnitCatalog.js";
 import { createCoordinatorWorkerUnitRegistry } from "./coordinator/workerUnitRuntime.js";
@@ -164,43 +100,29 @@ import {
   type CoordinatorUnitAvailabilityContext,
 } from "./coordinator/workerUnitAvailability.js";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
-import { createCentralBroadcastService, createP2pkhProviderRegistry, createP2pkhService, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotResource, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
-import { createP2pkhCoordinatorTasks, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
+import { createP2pkhProviderRegistry, createP2pkhUtxoSnapshotStore, p2pkhAddressToScriptHex, type P2pkhService, type P2pkhUtxoSnapshotResource, type P2pkhUtxoSnapshotStore } from "@keymaster/plugin-p2pkh/coordinator";
+import { createP2pkhWorkerAssetReader, createP2pkhWorkerTaskDefinitions, createP2pkhFileRepository, openP2pkhStateRepository, createP2pkhStateRepository, disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { BorrowedModuleFileStore, KeyspaceService, KeyValueStore, ModuleFileListEntry, ModuleFileStore, PlatformRootStore, VaultService, WocService, WocServiceHandle, WocQueueSnapshot, BsvNetwork, ChainHeightSnapshot } from "@keymaster/contracts";
-import type { ActiveKeyState, KeyIdentity, WalletColdStartSnapshot, WalletInitializePlan, WalletInitializeResult, WalletLifecycleEvent, WalletLifecycleService } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, VaultWalletState, KeyValueStore, PlatformRootStore, VaultService, WocService, WocQueueSnapshot, BsvNetwork, ChainHeightSnapshot } from "@keymaster/contracts";
+import type { KeyIdentity, WalletColdStartSnapshot, WalletInitializePlan, WalletInitializeResult, WalletLifecycleEvent, WalletLifecycleService } from "@keymaster/contracts";
 import type { StorageNamespaceBinding } from "@keymaster/contracts";
 import { WALLET_KEYHOLD_PATH, WALLET_META_PATH } from "@keymaster/contracts";
-import type {
-  StorageRuntimeController,
-  StorageRuntimeControllerStatus,
-  CoordinatorStorageControl,
-  CoordinatorStorageData,
-  CoordinatorStorageStateEvent,
-  CoordinatorMsFileControl,
-  CoordinatorMsFileData,
-  CoordinatorMsFileStateEvent,
-  MsFileConnectAppContext,
-  MsFileErrorCode,
-  AssetDataChangedEvent,
-  WocUtxoResponse,
-} from "@keymaster/contracts";
+import type { StorageRuntimeController, StorageRuntimeControllerStatus, CoordinatorStorageControl, CoordinatorStorageStateEvent, CoordinatorMsFileControl, CoordinatorMsFileData, CoordinatorMsFileStateEvent, MsFileConnectAppContext, MsFileErrorCode, AssetDataChangedEvent, WocUtxoResponse } from "@keymaster/contracts";
 import {
+  createScopedStorageClients, createStorageGrantAuthority, createStorageRpcHandlers, createWorkerStorageClients, createStorageDataExecutor,
   createStorageRuntimeController,
-  createStorageBrowseService,
   createPlatformRootStore,
-  createWalletLifecycleService,
-  createIndexedDbWalletStore,
-  createWalletKeyRepository,
+  createIndexedDbWalletStore, createWalletStoreActivity, createStorageDataQueue, STORAGE_DATA_CONCURRENCY, STORAGE_DATA_MAX_QUEUE,
   StorageRuntimeError,
 } from "@keymaster/platform-storage/coordinator";
-import type { WalletKeyRepository, WalletStore } from "@keymaster/platform-storage/coordinator";
-import type { StorageBrowseAuthorization, StorageBrowseRuntime } from "@keymaster/platform-storage/coordinator";
+import type { WalletStore } from "@keymaster/contracts/storage-internal";
+import { createWalletLifecycleService, createWalletKeyRepository, type WalletKeyRepository } from "@keymaster/plugin-vault/coordinator";
+import type { StoragePrivateRootStore } from "@keymaster/platform-storage/coordinator";
 import { WALLET_LIST_MAX_LIMIT } from "@keymaster/platform-storage/coordinator";
-import { buildDiagnosticText } from "./diagnostics/sanitizeDiagnostic.js";
+
 import { installSharedWorkerRetirement } from "./coordinator/sharedWorkerRetirement.js";
 // SharedWorker 的模块状态（包括 session epoch）会在下面初始化；先安装
 // HTTP fallback，避免 insecure host 上的首个随机 ID 读取到缺失的 randomUUID。
@@ -219,53 +141,7 @@ function randomIdentifierSuffix(): string {
 }
 
 // MSFile runtime 真值在 Coordinator SharedWorker；transport 由 Window executor 注入。
-import {
-  BitfsSeedIndex,
-  BitfsSellerRuntime,
-  BitfsSellerProtocol,
-  BitfsSellerSessionManager,
-  createBitfsBuyerTask,
-  createBitfsBuyerDownloadPlan,
-  BitfsBuyerProtocol,
-  createBitfsLocalSellerContentResolver,
-  BitfsTransactionBroadcaster,
-  createBitfsJournal,
-  createBitfsSessionJournal,
-  createBitfsTransactionJournal,
-  createBitfsFundingLedger,
-  createBitfsVaultSigner,
-  createBitfsWocChainPort,
-  createMsFileLocalContentSource,
-  recoverBitfsBuyerContentCommit,
-  readBitfsBuyerLocalPaymentState,
-  assertBitfsBuyerCloseBinding,
-  parseBitfsBuyerCloseBinding,
-  createMsFileService,
-  createUnavailableBitfsSellerContentResolver,
-  openMsFileRepository,
-  reconcileBitfsTransactions,
-  reconcileBitfsSessionTransactions,
-  readBitfsPoolSpendChain,
-  prepareBitfsFundingSplit,
-  prepareBitfsFunding,
-  recoverBitfsFundingSplits,
-  storeMsFileSeed,
-  type BitfsSellerMatch,
-  type BitfsBuyerQuoteView,
-  type BitfsBuyerTask,
-  type BitfsSellerProtocolPort,
-  type BitfsSellerStreamTransport,
-  type BitfsFundingLedger,
-  type BitfsFundingPrepareDeps,
-  type BitfsFundingSplitPrepareDeps,
-  type BitfsFundingTransactionView,
-  type PreparedBitfsFundingSplit,
-  type BitfsTransactionJournal,
-  type BitfsStreamEvent,
-  type BitfsWebRtcStreamEvent,
-  type MsFileServiceImpl,
-  type MsFileServiceEventState,
-} from "@keymaster/plugin-msfile/coordinator";
+import { createMsfileDataExecutor, createMsfileDataQueue, storeMsFileSeed, type BitfsSellerProtocolPort, type BitfsSellerStreamTransport, type MsFileServiceImpl } from "@keymaster/plugin-msfile/coordinator";
 import {
   buildWindowP2pConcurrencyConfig,
   createWindowP2pMsFileTransport,
@@ -273,7 +149,7 @@ import {
 import type {
   WindowP2pExecutorConcurrencyConfig,
   WindowP2pExecutorOperation,
-} from "@keymaster/plugin-window-p2p/executor-transport";
+} from "@keymaster/contracts/window-p2p";
 // 施工单 2026-08-26/001：identity/signing 的 payload 与 Peer Record 编码必须来自
 // bitcoin-libp2p；Worker 只持有 active private key 并做标准 DER 签名。
 import {
@@ -286,49 +162,20 @@ import {
 } from "bitcoin-libp2p/identity";
 // Channel 密码学和固定 inbox 路由只在 SharedWorker 调用；Window executor
 // 只看 SSP wire，不会收到私钥或明文。
-import {
-  inboxChannel,
-  newMessageID,
-  newSessionID,
-  parseInboxChannel,
-  parseMessageID,
-  parsePrivateKey,
-  parsePublicKey,
-  parseSessionID,
-  parseSHA256Hash,
-  publicKeyFromPrivate,
-} from "bsv8-channel-protocol";
-import { marshalEnvelope, marshalPrivateMessage, signPrivateMessage, sealSigned, verifySignedPrivateMessage, open as openPrivateMessage, validatePongRelation, validateWebRTCRelation, reviewOfferForHashRequest, dedupKey as privateDedupKey, privateMessageMaxLifetimeMs, PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/inbox";
-import { APP_MESSAGE_PROTOCOL, newAck, newDeliver } from "bsv8-channel-protocol/app-message";
-import { PING_PROTOCOL, parseBodyValue as parsePingBodyValue, newPong } from "bsv8-channel-protocol/ping";
-import { WEBRTC_SIGNAL_PROTOCOL, newAnswer, newOffer, newICECandidate as newIceSignal, newEndOfCandidates as newEndOfCandidatesSignal, parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
-import type { WebRTCInterconnectEnvelope } from "bitcoin-libp2p/webrtc-interconnect";
-import { sign as signPublicMessage, marshal as marshalPublicMessage, parseAndVerify as parsePublicMessage, dedupKey as publicDedupKey, PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
-import { HASH_REQUEST_CHANNEL, newWebRTCSDPLocator, parseAndVerify as parseHashRequest, sign as signHashRequest, marshal as marshalHashRequest } from "bsv8-channel-protocol/hash-request";
-import { ChannelSubscriptionMux, validateExactChannel } from "./channelSubscriptionMux.js";
-import { PendingPingRegistry } from "./channelPendingPingRegistry.js";
+import { inboxChannel, newMessageID, parsePublicKey } from "bsv8-channel-protocol";
+import { PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/inbox";
+
+
+
+
+
+import { HASH_REQUEST_CHANNEL } from "bsv8-channel-protocol/hash-request";
+import { ChannelSubscriptionMux, validateExactChannel } from "@keymaster/plugin-sat-subscription/coordinator";
+import { createChannelProtocolRelations } from "@keymaster/plugin-sat-subscription/coordinator";
 import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
-import {
-  completeBuyerOpening,
-  parsePaymentState,
-  verifyBuyerCompletedClose,
-} from "go-bitfs";
+
 import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
-import {
-  applyDefaultSatSupplier,
-  createSatSubscriptionProvider,
-  createSatSubscriptionRepository,
-  createSatSubscriptionState,
-  createSatSpiService,
-  type SatSubscriptionProvider,
-  type SatSubscriptionStateStore,
-  type SatSubscriptionRepository,
-  type SatSubscriptionTransport,
-  type SatDefaultNetwork,
-  type SatSupplierConnection,
-  SatSubscriptionHandle,
-  type SatP2pkhService,
-} from "@keymaster/plugin-sat-subscription/coordinator";
+import { type SatSubscriptionProvider, type SatSubscriptionStateStore, type SatSubscriptionRepository, type SatDefaultNetwork, type SatSupplierConnection, SatSubscriptionHandle } from "@keymaster/plugin-sat-subscription/coordinator";
 
 
 function decodePersisted(value: string): Uint8Array {
@@ -385,25 +232,11 @@ function parsePersistedAutoLockTimeoutMs(value: unknown): number {
   return value as number;
 }
 
-function validatePluginIntentSnapshot(value: unknown): PluginIntentSnapshot {
-  const record = snapshotRecord(value, "Plugin intent");
-  const intentRevision = record.revision;
-  if (Object.keys(record).length !== 3 || !Number.isSafeInteger(intentRevision) || (intentRevision as number) < 0) {
-    throw new StorageRuntimeError("storage_provider_error", "Plugin intent snapshot value is invalid");
-  }
-  const desiredEnabled = snapshotRecord(record.desiredEnabled, "Plugin intent desiredEnabled");
-  const desiredRevision = snapshotRecord(record.desiredRevision, "Plugin intent desiredRevision");
-  for (const [key, flag] of Object.entries(desiredEnabled)) if (typeof key !== "string" || typeof flag !== "boolean") throw new StorageRuntimeError("storage_provider_error", "Plugin intent desiredEnabled is invalid");
-  for (const [key, revision] of Object.entries(desiredRevision)) if (typeof key !== "string" || !Number.isSafeInteger(revision) || (revision as number) < 0) throw new StorageRuntimeError("storage_provider_error", "Plugin intent desiredRevision is invalid");
-  return { revision: intentRevision as number, desiredEnabled: { ...desiredEnabled } as Record<string, boolean>, desiredRevision: { ...desiredRevision } as Record<string, number> };
-}
-
 interface CoordinatorRuntimeSettings {
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockTimeoutMs: number;
   p2pkhProviderConfigs: Record<string, Record<string, unknown>>;
   p2pkhSettings: { includeTestnet: boolean };
-  pluginIntent: PluginIntentSnapshot;
 }
 /** 桶级 Coordinator snapshot 持久化同步管理 + 自动锁；P2PKH 偏好归 owner 的 setting.json。 */
 type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings" | "autoLockTimeoutMs">;
@@ -413,7 +246,6 @@ function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
     autoLockTimeoutMs: AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhProviderConfigs: {},
     p2pkhSettings: { includeTestnet: false },
-    pluginIntent: emptyPluginIntentSnapshot(),
   };
 }
 const coordinatorMeta: CoordinatorRuntimeSettings = defaultCoordinatorRuntimeSettings();
@@ -490,11 +322,13 @@ let coordinatorSharedReadLease: CoordinatorSharedReadLease | undefined;
 let coordinatorSharedReadLeaseTail: Promise<void> = Promise.resolve();
 let coordinatorUpgradeGate: UpgradeGate | undefined;
 let coordinatorUpgradeSession: UpgradeSession | undefined;
-let pluginIntentController: PluginIntentController | undefined;
-let pluginIntentControllerOff: (() => void) | undefined;
 let keyDeletionTail: Promise<void> = Promise.resolve();
 let p2pkhRegistry: P2pkhProviderRegistry | undefined;
-let p2pkhWocService: WocServiceHandle | undefined;
+let p2pkhWocService: ReturnType<typeof createWocService> | undefined;
+let p2pkhWorkerWocQuery: WocService | undefined;
+let p2pkhWorkerPorts: { storage: BorrowedModuleFileStore; walletState: VaultWalletState; crypto: VaultWorkerCrypto; assertActive(): void } | undefined;
+let satWorkerP2pkhAccess: (() => Promise<P2pkhWorkerTransfer | null>) | undefined;
+let coordinatorDomainMessageBus: ReturnType<typeof createMessageBus> | undefined;
 let p2pkhUtxoSnapshots: P2pkhUtxoSnapshotStore | undefined;
 /**
  * Worker 内唯一链高度读数（2026-09-26）。
@@ -529,17 +363,21 @@ function snapshotWriteMetrics(operation: FinalIoAuditOperation): { revision: num
 // ============================================================
 
 /** 唯一正式本地介质；生产路径只有这一个 IndexedDB 句柄。 */
+const storageActivity = createWalletStoreActivity(() => {
+  if (!lastStorageState) return;
+  const state = { ...lastStorageState, storageRevision: ++storageRevision, activity: storageActivity.snapshot() };
+  lastStorageState = state; publishTopicEvent("storage.state", state);
+});
 let walletStore: WalletStore | undefined;
 /** 固定 `key.json` 的唯一仓储；没有 list/readAll/delete，也没有切换。 */
 let walletKeys: WalletKeyRepository | undefined;
 /** 单钱包生命周期：冷启动、创建/导入、解锁、锁定、改密、改名、导出与重置。 */
 let walletLifecycle: WalletLifecycleService | undefined;
 /** 当前已装配的平台存储根；重置或 Worker 重启后重建。 */
-let platformRootStore: PlatformRootStore | undefined;
+let platformRootStore: StoragePrivateRootStore | undefined;
 /** Root 安装令牌；不能用 walletGeneration 代替，因为重置后可能复用世代值。 */
 let platformRootToken: object | undefined;
 let coordinatorSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
-let coordinatorPluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
 /** Protocol 的三个 platform-only purpose K-V。 */
 interface CoordinatorProtocolStorageStores {
   durablePolicy: KeyValueStore;
@@ -554,28 +392,6 @@ let storageColdStartState: WalletColdStartSnapshot | undefined;
 let coordinatorInitializationInProgress = false;
 /** 仅供 Worker 测试 seam 使用；生产路径没有 active-key 密码缓存。 */
 let testHarnessActivationSecret: string | undefined;
-
-type CoordinatorKeyValueMaintenanceStore = KeyValueStore & {
-  collectGarbage(input?: { minAgeMs?: number; maxDeletes?: number }): Promise<{ scanned: number; candidates: number; deleted: number; failed: number }>;
-};
-const coordinatorKeyValueMaintenanceStores = new Set<CoordinatorKeyValueMaintenanceStore>();
-const COORDINATOR_KV_GC_INTERVAL_MS = 15 * 60 * 1000;
-const COORDINATOR_KV_GC_MIN_AGE_MS = 10 * 60 * 1000;
-const COORDINATOR_KV_GC_MAX_DELETES = 64;
-let coordinatorKvGcTimer: ReturnType<typeof setTimeout> | undefined;
-let coordinatorKvGcGeneration = 0;
-let coordinatorKvGcRunning: Promise<void> | undefined;
-type WorkerOwnerStoreBinding = { close(): void; invalidateBinding(): void; collectGarbage?(): Promise<{ scanned: number; candidates: number; deleted: number; failed: number }> };
-const workerOwnerStores = new Set<WorkerOwnerStoreBinding>();
-
-function registerCoordinatorKeyValueMaintenanceStore(store: KeyValueStore): void {
-  const maintenance = store as CoordinatorKeyValueMaintenanceStore;
-  if (typeof maintenance.collectGarbage === "function") coordinatorKeyValueMaintenanceStores.add(maintenance);
-}
-
-function unregisterCoordinatorKeyValueMaintenanceStore(store: KeyValueStore | undefined): void {
-  if (store) coordinatorKeyValueMaintenanceStores.delete(store as CoordinatorKeyValueMaintenanceStore);
-}
 
 function registerCoordinatorProtocolMaintenanceStores(stores: CoordinatorProtocolStorageStores | undefined): void {
   if (!stores) return;
@@ -598,131 +414,14 @@ function closeCoordinatorProtocolStorageStores(stores: CoordinatorProtocolStorag
   stores.commandHistory.close();
 }
 
-function stopCoordinatorKeyValueMaintenance(): void {
-  coordinatorKvGcGeneration += 1;
-  if (coordinatorKvGcTimer !== undefined) {
-    clearTimeout(coordinatorKvGcTimer);
-    coordinatorKvGcTimer = undefined;
-  }
-}
-
-function declarationMaintenanceKey(
-  declaration: Pick<PluginStorageDeclaration, "moduleId" | "purposeId" | "authority" | "model" | "schemaVersion">,
-): string {
-  return [declaration.moduleId, declaration.purposeId, declaration.authority, declaration.model, declaration.schemaVersion].join(":");
-}
-
-/** 需要参与本地 K-V 垃圾回收的中央声明坐标。 */
-function coordinatorKeyValueMaintenanceDeclarations(): PluginStorageDeclaration[] {
-  const declarations = new Map<string, PluginStorageDeclaration>();
-  for (const declaration of [
-    ...Object.values(CENTRAL_STORAGE_DECLARATIONS),
-    ...Object.values(SYSTEM_STORAGE_DECLARATIONS).flat(),
-  ]) {
-    if (declaration.model !== "kv") continue;
-    declarations.set(declarationMaintenanceKey(declaration), { ...declaration });
-  }
-  // Host-bound built-in namespaces are normally already in SYSTEM_STORAGE_DECLARATIONS.
-  // Include live grants too so a future centrally authorized dynamic namespace is not
-  // stranded merely because it has no long-lived Worker handle.
-  for (const grant of ownerStorageGrants.values()) {
-    if (grant.model !== "kv") continue;
-    const declaration: PluginStorageDeclaration = {
-      moduleId: grant.moduleId,
-      purposeId: grant.purposeId,
-      authority: grant.authority,
-      model: grant.model,
-      schemaVersion: grant.schemaVersion,
-    };
-    declarations.set(declarationMaintenanceKey(declaration), declaration);
-  }
-  return [...declarations.values()];
-}
-
-function maintenanceStoreMatches(
-  store: KeyValueStore,
-  root: PlatformRootStore,
-  target: PluginStorageDeclaration,
-): boolean {
-  return store.walletGeneration === root.walletGeneration
-    && store.moduleId === target.moduleId
-    && store.purposeId === target.purposeId
-    && store.authority === target.authority
-    && store.model === target.model
-    && store.schemaVersion === target.schemaVersion;
-}
-
-async function collectCoordinatorKeyValueGarbage(input: { minAgeMs: number; maxDeletes: number }, swallowErrors: boolean): Promise<void> {
-  const root = platformRootStore;
-  const rootToken = platformRootToken;
-  if (!root || !rootToken || !platformStorageReady) return;
-  const visited = new Set<string>();
-  const collect = async (store: KeyValueStore, targetKey: string): Promise<void> => {
-    if (visited.has(targetKey)) return;
-    visited.add(targetKey);
-    const maintenance = store as CoordinatorKeyValueMaintenanceStore;
-    if (typeof maintenance.collectGarbage !== "function") return;
-    try {
-      await maintenance.collectGarbage(input);
-    } catch (error) {
-      if (!swallowErrors) throw error;
-      console.warn("[storage] coordinator K-V garbage collection failed", error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  for (const store of [...coordinatorKeyValueMaintenanceStores]) {
-    if (store.walletGeneration !== root.walletGeneration) continue;
-    await collect(store, declarationMaintenanceKey({
-      moduleId: store.moduleId,
-      purposeId: store.purposeId,
-      authority: store.authority,
-      model: store.model,
-      schemaVersion: store.schemaVersion,
-    }));
-  }
-
-  for (const declaration of coordinatorKeyValueMaintenanceDeclarations()) {
-    const targetKey = declarationMaintenanceKey(declaration);
-    if (visited.has(targetKey)) continue;
-    let store: KeyValueStore | undefined;
-    try {
-      store = declaration.authority === "platform-only"
-        ? await root.openPlatformStore({ declaration })
-        : await root.openKeyValueStore({ declaration });
-      if (!maintenanceStoreMatches(store, root, declaration)) throw new Error("Coordinator K-V maintenance binding mismatch");
-      await collect(store, targetKey);
-    } catch (error) {
-      if (!swallowErrors) throw error;
-      console.warn("[storage] coordinator K-V namespace maintenance failed", error instanceof Error ? error.message : String(error));
-    } finally {
-      store?.close();
-    }
-    if (platformRootStore !== root || platformRootToken !== rootToken) return;
-  }
-}
-
-function scheduleCoordinatorKeyValueMaintenance(): void {
-  if (!platformStorageReady || coordinatorKvGcTimer !== undefined) return;
-  const generation = coordinatorKvGcGeneration;
-  coordinatorKvGcTimer = setTimeout(() => {
-    coordinatorKvGcTimer = undefined;
-    if (generation !== coordinatorKvGcGeneration) return;
-    let run: Promise<void>;
-    run = collectCoordinatorKeyValueGarbage({ minAgeMs: COORDINATOR_KV_GC_MIN_AGE_MS, maxDeletes: COORDINATOR_KV_GC_MAX_DELETES }, true).finally(() => {
-      if (coordinatorKvGcRunning === run) coordinatorKvGcRunning = undefined;
-      if (generation === coordinatorKvGcGeneration) scheduleCoordinatorKeyValueMaintenance();
-    });
-    coordinatorKvGcRunning = run;
-  }, COORDINATOR_KV_GC_INTERVAL_MS);
-}
+const storageKeyValueMaintenance = createKeyValueMaintenance({ root: () => platformRootStore, rootToken: () => platformRootToken, isReady: () => platformStorageReady, ownerGrants: () => ownerStorageGrants.values() });
+const registerCoordinatorKeyValueMaintenanceStore = storageKeyValueMaintenance.register;
+const unregisterCoordinatorKeyValueMaintenanceStore = storageKeyValueMaintenance.unregister;
+const stopCoordinatorKeyValueMaintenance = storageKeyValueMaintenance.stop;
+const scheduleCoordinatorKeyValueMaintenance = storageKeyValueMaintenance.schedule;
 
 /** 测试专用：执行一次与定时任务相同的受控最终清扫。 */
-export async function __testCollectCoordinatorKeyValueGarbage(): Promise<void> {
-  stopCoordinatorKeyValueMaintenance();
-  await coordinatorKvGcRunning?.catch(() => undefined);
-  await collectCoordinatorKeyValueGarbage({ minAgeMs: 0, maxDeletes: COORDINATOR_KV_GC_MAX_DELETES }, false);
-  scheduleCoordinatorKeyValueMaintenance();
-}
+export async function __testCollectCoordinatorKeyValueGarbage(): Promise<void> { await storageKeyValueMaintenance.collectNow(); }
 
 /** 测试专用：在测试本地介质的一个 K-V 句柄里制造可回收孤儿。 */
 export async function __testSeedCoordinatorKeyValueGarbage(): Promise<string> {
@@ -797,10 +496,13 @@ async function installPlatformStorage(): Promise<void> {
   const rootToken = {};
   let candidatePublished = false;
   let candidateSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
-  let candidatePluginIntentSnapshot: SnapshotStore<PluginIntentSnapshot> | undefined;
   let candidateProtocol: CoordinatorProtocolStorageStores | undefined;
   try {
     if (!walletStore) throw new StorageRuntimeError("storage_unavailable", "Wallet storage is not available");
+    const storage = walletStore;
+    await withCoordinatorFinalIoLease("write", undefined, () => removeRetiredPluginIntent(storage), {
+      allowLocalLock: true, auditOperation: "storage.retired-plugin-intent.cleanup",
+    });
     const root = createPlatformRootStore({
       store: walletStore,
       generations: () => ({
@@ -812,26 +514,18 @@ async function installPlatformStorage(): Promise<void> {
     });
     const settingsSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validate: validateCoordinatorSettingsSnapshot });
     candidateSettingsSnapshot = settingsSnapshot;
-    const pluginIntentSnapshot = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorPluginIntent, validate: validatePluginIntentSnapshot });
-    candidatePluginIntentSnapshot = pluginIntentSnapshot;
     const protocol = await openCoordinatorProtocolStorageStores(root);
     candidateProtocol = protocol;
 
     // 到这里为止只使用候选 Root；Hold、Vault 和后续恢复仍未能看到半成品。
     // 提交前才切换全局句柄，并释放上一代平台句柄。
     coordinatorSettingsSnapshot?.close();
-    coordinatorPluginIntentSnapshot?.close();
     platformRootToken = rootToken;
     candidatePublished = true;
     configureProtocolStorageRepository(protocol);
     platformRootStore = root;
     registerCoordinatorProtocolMaintenanceStores(protocol);
     coordinatorSettingsSnapshot = settingsSnapshot;
-    coordinatorPluginIntentSnapshot = pluginIntentSnapshot;
-    // 新 Root 提交后先撤销旧意图控制器；loadCoordinatorMeta 会从本次固定对象
-    // 恢复并重建，期间任何惰性读取都只能看到空的默认意图。
-    coordinatorMeta.pluginIntent = emptyPluginIntentSnapshot();
-    disposePluginIntentController();
     coordinatorProtocolStores = protocol;
     platformStorageReady = true;
     scheduleCoordinatorKeyValueMaintenance();
@@ -839,7 +533,6 @@ async function installPlatformStorage(): Promise<void> {
     if (!candidatePublished) {
       closeCoordinatorProtocolStorageStores(candidateProtocol);
       candidateSettingsSnapshot?.close();
-      candidatePluginIntentSnapshot?.close();
       if (platformRootToken === rootToken) platformRootToken = previousRootToken;
     }
     throw error;
@@ -847,10 +540,9 @@ async function installPlatformStorage(): Promise<void> {
 }
 
 interface CurrentPlatformStorageBinding {
-  root?: PlatformRootStore;
+  root?: StoragePrivateRootStore;
   rootToken?: object;
   settingsSnapshot?: SnapshotStore<CoordinatorSettingsSnapshot>;
-  pluginIntentSnapshot?: SnapshotStore<PluginIntentSnapshot>;
   protocol?: CoordinatorProtocolStorageStores;
   runtime?: StorageRuntimeController & { dispose?: () => void };
 }
@@ -860,7 +552,6 @@ function captureCurrentPlatformStorageBinding(): CurrentPlatformStorageBinding {
     root: platformRootStore,
     rootToken: platformRootToken,
     settingsSnapshot: coordinatorSettingsSnapshot,
-    pluginIntentSnapshot: coordinatorPluginIntentSnapshot,
     protocol: coordinatorProtocolStores,
     runtime: storageController as (StorageRuntimeController & { dispose?: () => void }) | undefined,
   };
@@ -879,15 +570,12 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
   );
   coordinatorMeta.p2pkhSettings ??= { includeTestnet: false };
   coordinatorMeta.p2pkhProviderConfigs ??= {};
-  coordinatorMeta.pluginIntent ??= emptyPluginIntentSnapshot();
-  replacePluginIntentController();
 }
 
 function disposeCurrentPlatformStorageBinding(binding: CurrentPlatformStorageBinding): void {
   unregisterCoordinatorProtocolMaintenanceStores(binding.protocol);
   try { binding.runtime?.dispose?.(); } catch { /* best effort */ }
   binding.settingsSnapshot?.close();
-  binding.pluginIntentSnapshot?.close();
   closeCoordinatorProtocolStorageStores(binding.protocol);
 }
 
@@ -895,186 +583,46 @@ function disposeCurrentPlatformStorageBinding(binding: CurrentPlatformStorageBin
 // 9.5 Storage Browse (read-only)
 // ============================================================
 
-/**
- * 只读存储浏览服务的运行态句柄。
- *
- * 它刻意不放进 StorageController 和 grant 表：浏览看的是整个钱包，与 Connect
- * App 的命名空间授权无关，因此也没有任何 App 能借它扩大可见范围。
- */
-let storageBrowseRuntime: StorageBrowseRuntime | undefined;
-let storageBrowseRootToken: object | undefined;
-
-/**
- * 受信任的平台浏览运行单元。
- *
- * 浏览页由 platform-storage 的 window-main 单元贡献；这个常量是 Coordinator 侧
- * 唯一的身份事实来源，请求里不存在可以自报的同名字段。
- */
-const STORAGE_BROWSE_TRUSTED_UNIT_ID = "storage.window";
-
-/**
- * Coordinator 签发的浏览授权，按 peer 绑定。
- *
- * 这张表是「哪个 peer 处于受信任的浏览运行单元」的权威记录：只有本文件能写它，
- * 浏览服务和页面都读不到。授权不是调用方递上来的字符串，而是 Coordinator 在已验证
- * 的 peer 上下文里生成的不透明 id，因此「把 unitId 填对」不再能换取浏览会话。
- */
-interface StorageBrowseAuthorizationRecord {
-  /** 授权绑定的 peer/端口；与请求的实际 clientId 不一致时一律拒绝。 */
-  peerId: string;
-  unitId: string;
-  walletGeneration: string;
-  sessionEpoch: string;
-  runGeneration: string;
-}
-
-const storageBrowseAuthorizations = new Map<string, StorageBrowseAuthorizationRecord>();
-
-/** 撤销某个 peer 名下的全部浏览授权；端口断开、会话关闭或换绑时调用。 */
-function revokeStorageBrowseAuthorizations(peerId: string): void {
-  for (const [authorizationId, record] of [...storageBrowseAuthorizations]) {
-    if (record.peerId === peerId) storageBrowseAuthorizations.delete(authorizationId);
-  }
-}
-
-function revokeAllStorageBrowseAuthorizations(): void {
-  storageBrowseAuthorizations.clear();
-}
-
-/**
- * 校验请求方确实是一个「已建立页面连接」的 peer，并就地签发浏览授权。
- *
- * 允许发放浏览会话的 peer 必须同时满足，全部由 Coordinator 自己判断，不含任何请求
- * 字段：
- *   1. 它是本 Worker 注册过的 active peer，且没有被撤销；
- *   2. 它完成过 `session.open` 并持有 committed binding（`sessionOpen` + binding +
- *      openCommitOrder），也就是一个真实的页面连接，而不是一个随便连上来的端口；
- *   3. 钱包已解锁且存储根就绪。
- *
- * 这里**不能**要求 binding 里的 sessionEpoch 等于当前世代：应用在锁定态启动，
- * `session.open` 发生在解锁之前，而解锁会换一代 session epoch。世代一致性由授权
- * 本身承担：授权记录当次的钱包/会话/运行世代，浏览服务每次调用都重新核对，所以
- * 换 Key、锁定、Worker 重启之后旧授权立即失效。
- *
- * Connect App、第三方与普通插件没有 Coordinator peer 上下文，因此第 2 条就是它们的
- * 拒绝点：它们连这一步都走不到，谈不上自报任何 unitId。返回 undefined 表示不是受信任
- * 单元；调用方不区分「peer 不存在」与「binding 过期」，避免把内部状态泄露出去。
- */
-function issueStorageBrowseAuthorization(peerId: string): string | undefined {
-  const state = coordinatorPeerState(peerId);
-  if (!state
-    || !state.sessionOpen
-    || state.status !== "open"
-    || state.peer.scope.state !== "active"
-    || revokedCoordinatorPeerIds.has(peerId)
-    || state.sessionBinding === undefined
-    || state.openCommitOrder === undefined) {
-    return undefined;
-  }
-  if (coordinatorState.vaultStatus !== "unlocked" || !platformRootStore || !platformStorageReady) {
-    throw storageUnavailableError("Storage browse requires a ready storage root");
-  }
-  // 每次打开换一张授权：同一 peer 的旧授权立即失效，避免旧句柄跟着新授权活下来。
-  revokeStorageBrowseAuthorizations(peerId);
-  const authorizationId = crypto.randomUUID();
-  storageBrowseAuthorizations.set(authorizationId, {
-    peerId,
-    unitId: STORAGE_BROWSE_TRUSTED_UNIT_ID,
-    walletGeneration: coordinatorState.walletGeneration,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    runGeneration: coordinatorState.runGeneration,
-  });
-  return authorizationId;
-}
-
-/** 浏览服务用这张表核对授权；查不到就等于不是受信任单元。 */
-function resolveStorageBrowseAuthorization(peerId: string, authorizationId: unknown): StorageBrowseAuthorization | undefined {
-  if (typeof authorizationId !== "string" || authorizationId.length === 0) return undefined;
-  const record = storageBrowseAuthorizations.get(authorizationId);
-  if (!record || record.peerId !== peerId) return undefined;
-  return {
-    unitId: record.unitId,
-    clientId: record.peerId,
-    walletGeneration: record.walletGeneration,
-    sessionEpoch: record.sessionEpoch,
-    runGeneration: record.runGeneration,
-  };
-}
-
-function revokeAllStorageBrowseSessions(): void {
-  revokeAllStorageBrowseAuthorizations();
-  storageBrowseRuntime?.revokeAll();
-}
-
-/**
- * 取当前浏览服务；未装配时按需装配。
- *
- * 装配失败不缓存：存储根还没准备好时页面会重试，而不是把一次失败固化成
- * 「浏览不可用」。
- */
-async function ensureStorageBrowseRuntime(): Promise<StorageBrowseRuntime> {
-  const root = platformRootStore;
-  const rootToken = platformRootToken;
-  if (!root || !rootToken || !platformStorageReady) {
-    throw storageUnavailableError("Storage browse requires a ready storage root");
-  }
-  if (storageBrowseRuntime && storageBrowseRootToken === rootToken) return storageBrowseRuntime;
-  storageBrowseRuntime?.revokeAll();
-  const wallet = await root.openBrowseStore();
-  if (platformRootStore !== root || platformRootToken !== rootToken) {
-    throw storageUnavailableError("Storage browse root was replaced while opening");
-  }
-  const runtime = createStorageBrowseService({
-    wallet,
-    walletGeneration: () => coordinatorState.walletGeneration,
-    sessionEpoch: () => coordinatorState.sessionEpoch,
-    runGeneration: () => coordinatorState.runGeneration,
-    trustedAuthorization: resolveStorageBrowseAuthorization,
-    isUnlocked: () => coordinatorState.vaultStatus === "unlocked",
-    // 浏览只读：与其它读取共用一把 final I/O lease 和它的最终 I/O 审计。
-    withReadLease: (task) => withCoordinatorFinalIoLease("read", undefined, task, { auditOperation: "storage.browse" }),
-  });
-  storageBrowseRuntime = runtime;
-  storageBrowseRootToken = rootToken;
-  return runtime;
-}
-
-function dropStorageBrowseBinding(): void {
-  revokeAllStorageBrowseAuthorizations();
-  storageBrowseRuntime?.revokeAll();
-  storageBrowseRuntime = undefined;
-  storageBrowseRootToken = undefined;
-}
+/** Storage 持有浏览实现/授权/句柄；Coordinator 只提供真实会话和最终 I/O 边界。 */
+const storageBrowseCoordinator = new StorageBrowseCoordinator({
+  root: () => platformRootStore && platformRootToken && platformStorageReady
+    ? { store: platformRootStore, token: platformRootToken } : undefined,
+  generations: () => ({ walletGeneration: coordinatorState.walletGeneration,
+    sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration }),
+  isUnlocked: () => coordinatorState.vaultStatus === "unlocked",
+  isPeerOpen: peerId => {
+    const state = coordinatorPeerState(peerId);
+    return Boolean(state?.sessionOpen && state.status === "open" && state.peer.scope.state === "active"
+      && state.sessionBinding && state.openCommitOrder !== undefined);
+  },
+  isPeerRevoked: peerId => revokedCoordinatorPeerIds.has(peerId),
+  withReadLease: task => withCoordinatorFinalIoLease("read", undefined, task, { auditOperation: "storage.browse" }),
+});
 
 /** 撤销当前存储根：所有已发放句柄与迟到结果立即失效。 */
 function discardCurrentPlatformStorageBinding(): void {
   stopCoordinatorKeyValueMaintenance();
-  dropStorageBrowseBinding();
+  storageBrowseCoordinator.dropBinding();
   const binding = captureCurrentPlatformStorageBinding();
-  for (const store of workerOwnerStores) store.invalidateBinding();
+  workerStorageClients.invalidateAll();
   disposeCurrentPlatformStorageBinding(binding);
   platformRootStore = undefined;
   platformRootToken = undefined;
   coordinatorSettingsSnapshot = undefined;
-  coordinatorPluginIntentSnapshot = undefined;
   coordinatorProtocolStores = undefined;
   storageController = undefined;
   platformStorageReady = false;
-  coordinatorMeta.pluginIntent = emptyPluginIntentSnapshot();
-  disposePluginIntentController();
 }
 
 async function loadCoordinatorMeta(): Promise<void> {
-  const [settings, pluginIntent] = await Promise.all([
+  const [settings] = await Promise.all([
     coordinatorSettingsSnapshot?.read(),
-    coordinatorPluginIntentSnapshot?.read(),
   ]);
   // 冷启动不再恢复 selected Key：正常启动一律进入锁定状态。
   const defaults = defaultCoordinatorRuntimeSettings();
   replaceCoordinatorMeta({
     ...defaults,
     ...(settings?.value ?? {}),
-    pluginIntent: pluginIntent?.value ?? defaults.pluginIntent,
   });
   coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings;
   coordinatorState.autoLockTimeoutMs = coordinatorMeta.autoLockTimeoutMs;
@@ -1107,10 +655,6 @@ async function persistCoordinatorSettings(settings: CoordinatorSettingsSnapshot 
   autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs,
 }): Promise<void> {
   await writeCoordinatorSnapshot(coordinatorSettingsSnapshot, structuredClone(settings), "coordinator.settings.persist");
-}
-
-async function persistCoordinatorPluginIntent(snapshot: PluginIntentSnapshot = coordinatorMeta.pluginIntent): Promise<void> {
-  await writeCoordinatorSnapshot(coordinatorPluginIntentSnapshot, structuredClone(snapshot), "coordinator.plugin-intent.persist");
 }
 
 function coordinatorUpgradeError(code: string, message: string): Error & { code: string } {
@@ -1451,51 +995,6 @@ function closeCoordinatorUpgradeSession(reason: string): void {
   coordinatorUpgradeSession = undefined;
 }
 
-function emptyPluginIntentSnapshot(): PluginIntentSnapshot {
-  return { revision: 0, desiredEnabled: {}, desiredRevision: {} };
-}
-
-function disposePluginIntentController(): void {
-  pluginIntentControllerOff?.();
-  pluginIntentControllerOff = undefined;
-  pluginIntentController = undefined;
-}
-
-function replacePluginIntentController(): void {
-  disposePluginIntentController();
-  ensurePluginIntentController();
-}
-
-/** 创建本次 Worker 唯一的插件意图控制面，并把持久化成功作为发布前置条件。 */
-function ensurePluginIntentController(): PluginIntentController {
-  if (pluginIntentController) return pluginIntentController;
-  const controller = createPluginIntentController({
-    authorityInstanceId: coordinatorAuthorityInstanceId,
-    initial: coordinatorMeta.pluginIntent ?? emptyPluginIntentSnapshot(),
-    persist: async (snapshot) => {
-      // 仅发布 plugin-intent 固定对象；任务 reconcile 订阅发生在持久化
-      // 成功之后，失败时内存意图和运行中任务都保持原值。
-      await persistCoordinatorPluginIntent(snapshot);
-      coordinatorMeta.pluginIntent = structuredClone(snapshot);
-    },
-  });
-  pluginIntentController = controller;
-  pluginIntentControllerOff = controller.subscribe((snapshot) => {
-    coordinatorMeta.pluginIntent = snapshot;
-    // Controller 的 accepted 事件表示意图已经落盘；从这里开始 Worker
-    // 必须立即撤掉旧任务入口，不能等 Window Host 的异步 reconcile。
-    reconcileCoordinatorTaskIntent(snapshot);
-    reconcileCoordinatorRuntime();
-    publishTopicEvent("plugin.intent", {
-      type: "plugin.intent.changed",
-      authorityInstanceId: coordinatorAuthorityInstanceId,
-      pluginIntentRevision: snapshot.revision,
-      snapshot,
-    } satisfies Omit<PluginIntentStateEvent, "topic" | "sessionEpoch">);
-  });
-  return controller;
-}
-
 let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined;
 
 function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"] {
@@ -1547,35 +1046,6 @@ async function readProtocolConnectSession(sessionId: string): Promise<{ sessionI
     : null;
 }
 
-function localSecretAad(scope: string): string {
-  return `keymaster:local-secret:v3|${scope}`;
-}
-
-/**
- * 从当前 active key 临时派生插件本地秘密的用途密钥。
- *
- * 密码只用于一次 Vault/桶认证；本地秘密不再依赖也不再缓存密码派生
- * CryptoKey。每次 seal/open 以当前私钥 + public key + scope 重新做 HKDF，
- * 得到的 AES key 只存在当前 await 链中。
- */
-async function deriveVaultLocalSecretKey(scope: string): Promise<CryptoKey> {
-  const privateKeyBytes = coordinatorState.activePrivateKeyBytes;
-  const publicKeyHex = coordinatorState.activePublicKeyHex;
-  if (!privateKeyBytes || !publicKeyHex) throw new Error("Vault is locked");
-  const baseKey = await crypto.subtle.importKey("raw", privateKeyBytes as BufferSource, "HKDF", false, ["deriveBits"]);
-  const rawBits = new Uint8Array(await crypto.subtle.deriveBits({
-    name: "HKDF",
-    hash: "SHA-256",
-    salt: new TextEncoder().encode("keymaster.vault.local-secret.v3"),
-    info: new TextEncoder().encode(`${publicKeyHex.toLowerCase()}\0${scope}`)
-  }, baseKey, 256));
-  try {
-    return await crypto.subtle.importKey("raw", rawBits as BufferSource, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-  } finally {
-    rawBits.fill(0);
-  }
-}
-
 function normalizedCoordinatorOwner(): string | null {
   return coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex
     ? coordinatorState.activePublicKeyHex.trim().toLowerCase()
@@ -1583,33 +1053,7 @@ function normalizedCoordinatorOwner(): string | null {
 }
 
 /** 将 Worker 内唯一 Contacts 在线真值投影为页面可订阅的快照事件。 */
-function publishCoordinatorContactsPresence(): void {
-  const service = coordinatorContactsService;
-  const ownerPublicKeyHex = normalizedCoordinatorOwner();
-  const sessionEpoch = coordinatorState.sessionEpoch;
-  const run = contactsPresencePublishTail.then(async () => {
-    let presence: ContactPresenceMap = {};
-    if (service && ownerPublicKeyHex) {
-      try {
-        presence = await service.getPresenceSnapshot?.() ?? {};
-      } catch {
-        // 本地联系人 K-V 暂不可读时，安全降级为空快照（全部 offline）。
-        presence = {};
-      }
-    }
-    // 快照查询可能跨越 lock/key switch/service teardown；迟到结果不得污染新世代。
-    if (service !== coordinatorContactsService
-      || sessionEpoch !== coordinatorState.sessionEpoch
-      || ownerPublicKeyHex !== normalizedCoordinatorOwner()) return;
-    const event = publishTopicEvent("contacts.presence", {
-      type: "contacts.presence.changed",
-      activePublicKeyHex: ownerPublicKeyHex,
-      presence,
-    }) as CoordinatorContactsPresenceEvent;
-    lastContactsPresenceState = event;
-  }, () => undefined);
-  contactsPresencePublishTail = run.then(() => undefined, () => undefined);
-}
+function publishCoordinatorContactsPresence(): void { contactsPresenceProjection.publish(); }
 
 function publishSessionState(cause: SessionStateEvent["cause"]): void {
   // 服务目录与 owner/session 可见性共享同一状态提交点。锁定、解锁、换
@@ -1624,12 +1068,14 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
+    ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: coordinatorActiveKeySummary() } : {}),
     runGeneration: coordinatorState.runGeneration,
     ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
     autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
   };
   publishTopicEvent("session.state", state);
+  workerWalletState.publish();
   publishCoordinatorContactsPresence();
 }
 
@@ -1645,7 +1091,6 @@ interface CoordinatorState {
   runGeneration: string;
   vaultStatus: CoordinatorVaultStatus;
   activePublicKeyHex?: string;
-  activePrivateKeyBytes?: Uint8Array;
   taskRuntimes: Map<string, TaskRuntime>;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockTimeoutMs: number;
@@ -1672,25 +1117,21 @@ let storageStateTail: Promise<void> = Promise.resolve();
 const storageRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
 const storageRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 const storagePortCounts = new Map<string, number>();
-const storageGrants = new Map<string, { context: import("@keymaster/contracts").OwnerAppStorageGrant; clientId: string; sessionEpoch: SessionEpoch }>();
-const ownerStorageGrants = new Map<string, StorageOwnerGrant & { clientId: string }>();
-const platformStorageGrants = new Map<string, StoragePlatformGrant & { clientId: string }>();
+const storageGrantAuthority = createStorageGrantAuthority({
+  session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, walletGeneration: coordinatorState.walletGeneration, runGeneration: coordinatorState.runGeneration, unlocked: coordinatorState.vaultStatus === "unlocked", rootAvailable: platformRootStore !== undefined }),
+  appSession: readProtocolConnectSession,
+});
+const storageGrants = storageGrantAuthority.apps;
+const ownerStorageGrants = storageGrantAuthority.owners;
+const platformStorageGrants = storageGrantAuthority.platforms;
+const resolvePlatformStorageGrant = storageGrantAuthority.resolvePlatform;
+const resolveOwnerStorageGrant = storageGrantAuthority.resolveOwner;
+const resolveStorageGrant = storageGrantAuthority.resolveApp;
+
 let storageMutationTail: Promise<void> = Promise.resolve();
-let storageDataActive = 0;
-type StorageDataWaiter = {
-  resolve: () => void;
-  reject: (error: Error) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-  active: boolean;
-  clientId: string;
-};
-const storageDataWaiters: StorageDataWaiter[] = [];
-const STORAGE_DATA_CONCURRENCY = 4;
-const STORAGE_DATA_MAX_QUEUE = 64;
 const STORAGE_DATA_MAX_PER_PORT = 16;
-const STORAGE_DATA_MAX_ACTIVE_PER_PORT = STORAGE_DATA_CONCURRENCY - 1;
-const storageDataActiveByPort = new Map<string, number>();
+const storageDataQueue = createStorageDataQueue();
+const withStorageDataSlot = storageDataQueue.run;
 
 /**
  * Worker 侧的存储绑定。
@@ -1868,6 +1309,7 @@ async function revokeStorageBindingAndDrain(reason: string): Promise<void> {
 
 /* ---------- MSFile runtime state（施工单 KMMF-005/006） ---------- */
 let msfileRuntime: MsFileServiceImpl | undefined;
+let msfileWorkerChainAccess: (() => WocServiceHandle | undefined) | undefined;
 /** 仅测试替身；生产请求永远只读取 Host-owned msfileRuntime。 */
 let testMsfileRuntimeOverride: MsFileServiceImpl | undefined;
 /** MSFile 首次装配 single-flight；首页资源与设置命令可能同时触发启动。 */
@@ -1882,3243 +1324,99 @@ type MsFileRuntimeStores = {
 /** MSFile 的 owner 文件句柄与 App publisher 枚举；句柄由 worker 缓存与失效。 */
 let msfileRuntimeStores: MsFileRuntimeStores | undefined;
 let lastMsFileState: CoordinatorMsFileStateEvent | undefined;
-/** 当前 owner 的 BitFS 卖方派生索引；锁定、切 Key 或关闭卖方时立即丢弃。 */
-let msfileSellerIndex: BitfsSeedIndex | undefined;
-/** 索引重建取消句柄，防止旧 owner 的迟到结果重新发布。 */
-let msfileSellerIndexController: AbortController | undefined;
-/** 当前 owner 唯一的卖方匹配运行单元。 */
-let msfileSellerRuntime: BitfsSellerRuntime | undefined;
-/** 当前 owner 唯一的卖方协议端口；未就绪时不得对外报价。 */
-let msfileSellerProtocolPort: BitfsSellerProtocolPort | undefined;
-/** 当前 owner 唯一的卖方会话管理器；多 Tab 只共享这一份。 */
-let msfileSellerSessionManager: BitfsSellerSessionManager | undefined;
-const msfilePendingSellerHashRequests = new Map<string, import("bsv8-channel-protocol/hash-request").VerifiedHashRequest>();
-let msfilePendingSellerHashRequestDrain: Promise<void> | undefined;
-/** 当前 owner 的 BitFS 交易 outbox；与普通 P2PKH 业务记录隔离。 */
-let msfileBitfsTransactionJournal: BitfsTransactionJournal | undefined;
-/** 当前 owner 的 BitFS 专款账本；普通 P2PKH 读取和广播都用它检查受保护输出。 */
-let msfileBitfsFundingLedger: BitfsFundingLedger | undefined;
-let msfileBitfsFundingLedgerOwnerHex: string | undefined;
-/** 只通过 Worker 内 WoC 句柄广播/对账的 BitFS 交易器。 */
-let msfileBitfsBroadcaster: BitfsTransactionBroadcaster | undefined;
-/** 卖方会话 generation；锁定、切 Key、关闭卖方或重建 runtime 时推进。 */
-let msfileSellerSessionEpoch = 0;
-/** ChannelProtocol WebRTC session_id 到 Worker 卖方会话的短期映射。 */
-const msfileBitfsWebRtcSellerLinks = new Map<string, {
-  /** Worker 内 BitFS 卖方会话编号。 */
-  sessionId: string;
-  /** 已验证 Hash 请求的真实 message_id。 */
-  requestMessageId: string;
-  /** Inbox 对端公钥；答复必须来自此公钥。 */
-  peerPublicKeyHex: string;
-  /** 建立链接时的 owner session epoch。 */
-  ownerSessionEpoch: SessionEpoch;
-}>();
-/** 等待卖方报价的 Hash 请求；只在当前 owner 和请求有效期内保留。 */
-const msfileBitfsBuyerRequests = new Map<string, {
-  /** 买方 Worker 编排任务。 */
-  task: BitfsBuyerTask;
-  /** 当前买方 Key。 */
-  ownerPublicKeyHex: string;
-  /** 本次请求的 Seed Hash。 */
-  seedHashHex: string;
-  /** 发送需求时的 owner 会话世代。 */
-  ownerSessionEpoch: SessionEpoch;
-  /** 请求有效截止毫秒。 */
-  expiresAtMs: number;
-}>();
-/** 当前 Owner + Seed 的买方任务；多个页面复用同一任务和需求编号。 */
-const msfileBitfsBuyerTasks = new Map<string, {
-  /** 当前买方 Key。 */
-  ownerPublicKeyHex: string;
-  /** 任务对应的 Seed Hash。 */
-  seedHashHex: string;
-  /** 创建任务时的 owner 会话世代。 */
-  ownerSessionEpoch: SessionEpoch;
-  /** 买方任务创建过程；并发页面共享同一个初始化过程。 */
-  taskPromise: Promise<BitfsBuyerTask>;
-  /** 当前有效 Hash 需求编号。 */
-  requestMessageId?: string;
-  /** 当前需求过期时间，Unix 毫秒。 */
-  expiresAtMs: number;
-  /** 买方当前购买的安全进度摘要。 */
-  purchase?: import("@keymaster/contracts").MsFileBitfsPurchaseSnapshot;
-  /** 是否已从当前 Owner 的买方 journal 读取过上次购买摘要。 */
-  purchaseHydrated: boolean;
-}>();
-/** 每个 Seed 的购买准入串行尾，避免两个同时到达的合格报价重复开池。 */
-const msfileBitfsBuyerPurchaseTails = new Map<string, Promise<void>>();
-/** 买方恢复任务所绑定的当前 Key 和 Worker 世代。 */
-interface MsFileBitfsBuyerRecoveryScope {
-  /** 当前已解锁 Key 的公钥。 */
-  ownerPublicKeyHex: string;
-  /** 当前 Worker 会话世代。 */
-  sessionEpoch: SessionEpoch;
-  /** 当前 Worker 运行世代。 */
-  runGeneration: string;
-}
-/** 最近速度样本对应卖家的速度视图。 */
-interface MsFileBitfsRecentSellerSpeed {
-  /** 样本写入时的 UTC Unix 毫秒。 */
-  recordedAtMs: number;
-  /** 最近一次已付款 Block 的整数字节/秒。 */
-  bytesPerSecond: string;
-}
-/** 解锁期间正在执行的全量买方恢复；新购买必须等扫描完成。 */
-let msfileBitfsBuyerRecoveryInFlight: {
-  /** 当前已解锁 Key 的公钥。 */
-  ownerPublicKeyHex: string;
-  /** 当前 Worker 会话世代。 */
-  sessionEpoch: SessionEpoch;
-  /** 当前 Worker 运行世代。 */
-  runGeneration: string;
-  /** 当前 Key 买方会话的全量恢复任务。 */
-  promise: Promise<void>;
-} | undefined;
-/** 最近一次完成全量恢复的 owner 与会话世代。 */
-let msfileBitfsBuyerRecoveryReady: MsFileBitfsBuyerRecoveryScope | undefined;
-/** 单个需求最多允许建立的卖家 WebRTC 会话数，防止报价洪泛。 */
-const msfileBitfsBuyerOfferCounts = new Map<string, number>();
-const MSFILE_BITFS_MAX_OFFERS_PER_DEMAND = 32;
-const MSFILE_BITFS_MAX_ACTIVE_BUYER_LINKS = 128;
-
-/** 已付款且通过 Kind 5/6 验证的速度记录；速度不作为付款或资金状态依据。 */
-interface MsFileBitfsSellerSpeedSample {
-  /** 已验收的文件 Block 总字节数，不包含 Seed。 */
-  effectiveBlockBytes: number;
-  /** 从发送 Kind 5 到验收 Kind 6 的耗时毫秒数。 */
-  elapsedMs: number;
-  /** 样本写入时的 UTC Unix 毫秒。 */
-  recordedAtMs: number;
-}
-/** 收到 offer 后的买方 WebRTC DataChannel；报价需要继续逐条验签。 */
-const msfileBitfsWebRtcBuyerLinks = new Map<string, {
-  /** Window lane 内的 WebRTC 会话编号。 */
-  transportSessionId: string;
-  /** 已验证 Hash 请求的 message_id。 */
-  requestMessageId: string;
-  /** 已验签 offer 发送者公钥。 */
-  peerPublicKeyHex: string;
-  /** 当前买方 Key。 */
-  ownerPublicKeyHex: string;
-  /** 当前已验签 Hash 请求对应的 Seed Hash。 */
-  seedHashHex: string;
-  /** 买方会话编排任务。 */
-  task: BitfsBuyerTask;
-  /** 建立链接时的 owner 会话世代。 */
-  ownerSessionEpoch: SessionEpoch;
-  /** 首条 Kind 1 已持久化后的买方会话编号；重复报价不创建第二份记录。 */
-  quoteSessionId?: string;
-  /** 首条 Kind 1 的持久化与验签过程；后续 Artifact 必须等待它完成。 */
-  quoteAccepted?: Promise<void>;
-  /** 用户选择报价后绑定此 WebRTC stream 的买方协议端口。 */
-  protocol?: BitfsBuyerProtocol;
-  /** 新连接复用了这条已经开池的买方日志会话时设置。 */
-  resumedPurchaseSessionId?: string;
-}>();
-/** 测试注入的卖方 bridge；生产为 undefined，使用 Window lane + 未就绪端口。 */
-let testMsfileSellerBridge: { transport: BitfsSellerStreamTransport; protocol: BitfsSellerProtocolPort } | undefined;
-
-function sellerKeepsVaultUnlocked(): boolean {
-  return coordinatorState.vaultStatus === "unlocked"
-    && msfileRuntime?.describeState().sellerSettings.sellerEnabled === true;
-}
-
-function msfileBitfsBuyerTaskKey(ownerPublicKeyHex: string, seedHashHex: string): string {
-  return `${ownerPublicKeyHex.toLowerCase()}|${seedHashHex.toLowerCase()}`;
-}
-
-function msfileBitfsPurchasePhaseFromJournal(phase: string): import("@keymaster/contracts").MsFileBitfsPurchasePhase | undefined {
-  if (phase === "quote-selected") return "opening";
-  if (phase === "cancel-opening") return "cancelling-opening";
-  if (phase === "opening-presign") return "opening";
-  if (phase === "funding-prepared") return "funding";
-  if (phase === "funding-unknown") return "funding-unknown";
-  if (phase === "funded") return "requesting-seed";
-  if (phase === "request-prepared" || phase === "delivery-verified") return "requesting-blocks";
-  if (phase === "payment-unknown") return "payment-unknown";
-  if (phase === "content-committing") return "content-committing";
-  if (phase === "close-required") return "closing-pool";
-  if (phase === "close-requested") return "closing-pool";
-  if (phase === "close-unknown") return "close-unknown";
-  if (phase === "cancel-closing-pool") return "cancelling-pool";
-  if (phase === "cancel-close-unknown") return "cancel-unknown";
-  if (phase === "cancelled") return "cancelled";
-  if (phase === "refund-ready") return "refund-ready";
-  if (phase === "refund-unknown") return "refund-unknown";
-  if (phase === "refunded") return "refunded";
-  if (phase === "completed" || phase === "failed") return phase;
-  return undefined;
-}
-
-/**
- * Worker 重建买方任务时按旧 txid 对账、恢复付款后的幂等入库并读取摘要；
- * 只有双方完整 Kind 13 已持久化的关池交易会按原字节继续提交，不重新签名或恢复 DataChannel。
- */
-async function restoreMsfileBitfsBuyerPurchaseSummary(input: {
-  ownerPublicKeyHex: string;
-  seedHashHex: string;
-  /** 指定只恢复此会话；省略时取该 Seed 最近更新的一条资金会话。 */
-  sessionId?: string;
-  task?: BitfsBuyerTask;
-}): Promise<import("@keymaster/contracts").MsFileBitfsPurchaseSnapshot | undefined> {
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const records = await sessions.list();
-  const candidate = records
-    .filter((record) => record.role === "buyer"
-      && record.ownerPublicKeyHex === input.ownerPublicKeyHex
-      && record.seedHashHex === input.seedHashHex
-      && (input.sessionId === undefined || record.sessionId === input.sessionId)
-      && (record.evidence.includes("kind2-opening-request")
-        || record.evidence.includes("opening-configuration")
-        || record.evidence.includes("funding-transaction")
-        || record.phase === "cancel-opening"))
-    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
-    .at(-1);
-  if (!candidate) return undefined;
-  let recoveryErrorMessage: string | undefined;
-  if (candidate.phase === "cancel-opening" && input.task) {
-    try {
-      await input.task.cancelUnfundedOpening(candidate.sessionId);
-    } catch (error) {
-      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "未开池资金占用恢复暂不可用";
-    }
-  }
-  let fundingReconciled = false;
-  let fundingReconcileFailed = false;
-  if (candidate.phase === "funding-unknown" && input.task) {
-    try {
-      const result = await input.task.reconcileFunding(candidate.sessionId);
-      fundingReconciled = result?.outcome.status === "confirmed";
-      fundingReconcileFailed = result?.outcome.status === "failed";
-    } catch (error) {
-      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "开池交易对账暂不可用";
-    }
-  }
-  let closeReconciled = false;
-  if (input.task && await sessions.getEvidence(candidate.sessionId, "kind13-close-response")) {
-    try {
-      const result = await input.task.resumePoolRecovery(candidate.sessionId);
-      closeReconciled = result?.closed === true;
-    } catch (error) {
-      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "关池交易对账暂不可用";
-    }
-  }
-  let refundReconciled = false;
-  let refundUnknown = false;
-  let refundRecoveryMessage: string | undefined;
-  const openingWasPrepared = candidate.evidence.includes("kind3-opening-response")
-    && candidate.evidence.includes("funding-transaction");
-  if (input.task && openingWasPrepared && !(await sessions.getEvidence(candidate.sessionId, "kind13-close-response"))) {
-    try {
-      const result = await input.task.recoverMaturedRefund(candidate.sessionId);
-      refundReconciled = result?.refunded === true;
-      refundUnknown = result !== undefined && !result.refunded;
-    } catch (error) {
-      // 链查询暂不可用时不阻塞任务摘要；账本和池内 UTXO 仍保持保护。
-      refundRecoveryMessage = error instanceof Error ? error.message.slice(0, 180) : "链上退款对账暂不可用";
-    }
-  }
-  if ((closeReconciled || refundReconciled) && candidate.evidence.includes("download-plan")) {
-    try {
-      await markMsfileBitfsDownloadPlanPoolClosed({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
-        seedHashHex: input.seedHashHex,
-        sessionId: candidate.sessionId,
-      });
-    } catch (error) {
-      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "下载计划关池记录暂不可用";
-    }
-  }
-  let restoredContentCommit = false;
-  if (candidate.phase === "content-committing") {
-    const contentStore = createWorkerModuleFileStore("msfile", "");
-    try {
-      restoredContentCommit = await recoverBitfsBuyerContentCommit({
-        sessions,
-        contentStore,
-        sessionId: candidate.sessionId,
-        nowMs: Date.now(),
-        async onContentCommitted(seedHashHex) {
-          if (coordinatorState.vaultStatus !== "unlocked"
-            || coordinatorState.activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex) {
-            throw new Error("BitFS 入库恢复期间当前 Key 已变化");
-          }
-          const index = msfileSellerIndex;
-          if (!index) return;
-          const indexGeneration = index.currentGeneration();
-          index.invalidate(seedHashHex);
-          await index.refresh(contentStore, seedHashHex, indexGeneration);
-        },
-      });
-    } catch (error) {
-      recoveryErrorMessage = error instanceof Error ? error.message.slice(0, 180) : "付款后的本地文件恢复暂不可用";
-    }
-  }
-  const latestCandidate = await sessions.get(candidate.sessionId);
-  if (!latestCandidate) throw new Error("BitFS 买方恢复期间会话记录消失");
-  const phase = msfileBitfsPurchasePhaseFromJournal(latestCandidate.phase);
-  if (!phase) return undefined;
-
-  const maxBlockPriceBytes = await sessions.getEvidence(latestCandidate.sessionId, "file-price-limit");
-  let currentMaxFullBlockPriceSatoshis: string | null = null;
-  if (maxBlockPriceBytes) {
-    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(maxBlockPriceBytes);
-    const normalized = normalizeMsFileSatoshiAmount(decoded);
-    if (normalized === undefined) throw new Error("BitFS 买方本文件最高价证据损坏");
-    currentMaxFullBlockPriceSatoshis = normalized;
-  }
-
-  let openingAmountSatoshis: string | null = null;
-  const openingConfiguration = await sessions.getEvidence(latestCandidate.sessionId, "opening-configuration");
-  if (openingConfiguration) {
-    try {
-      const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(openingConfiguration)) as { openingAmountSatoshis?: unknown };
-      if (typeof parsed.openingAmountSatoshis === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.openingAmountSatoshis)) {
-        openingAmountSatoshis = parsed.openingAmountSatoshis;
-      }
-    } catch {
-      throw new Error("BitFS 买方开池摘要损坏；为安全起见停止恢复购买页面");
-    }
-  }
-
-  let verifiedBlockCount = 0;
-  const prefix = `bitfs-staging/${latestCandidate.sessionId}/blocks/`;
-  const contentStore = createWorkerModuleFileStore("msfile", "");
-  let cursor: string | undefined;
-  do {
-    const page = await contentStore.list({ prefix, limit: 1000, ...(cursor === undefined ? {} : { cursor }) });
-    verifiedBlockCount += page.files.filter((file) => /^bitfs-staging\/[0-9a-z][0-9a-z._-]{0,127}\/blocks\/[0-9a-f]{64}\.bin$/u.test(file.path)).length;
-    cursor = page.nextCursor;
-  } while (cursor !== undefined);
-
-  let wholeFileCancellationPending = false;
-  if (latestCandidate.evidence.includes("download-plan")) {
-    try {
-      const downloadPlan = await openMsfileBitfsBuyerDownloadPlan(input.ownerPublicKeyHex, input.seedHashHex);
-      const snapshot = await downloadPlan.snapshot();
-      wholeFileCancellationPending = snapshot.stopRequested && snapshot.pools.some((pool) => !pool.closed);
-    } catch {
-      // 计划损坏时不覆盖原会话恢复摘要；后续买卖入口仍会因读取失败而拒绝继续付款。
-    }
-  }
-  const message = wholeFileCancellationPending
-    ? "整文件取消已保存；所有池已停止领取新内容，正在等待费用池逐一关闭或退款确认。"
-    : restoredContentCommit
-    ? "已从本地会话日志恢复付款后的入库步骤，文件已重新校验并完成保存。"
-    : closeReconciled
-      ? "已按原关池交易完成链上对账，费用池余款已回到当前 Key 的专款余额。"
-    : refundReconciled
-      ? "退款锁已到期；买方预签退款已被节点观察，余款已回到当前 Key 的专款余额。"
-    : refundUnknown
-      ? "退款锁已到期；原退款交易结果尚未确定，费用池资金继续受保护。"
-    : refundRecoveryMessage
-      ? `到期退款对账暂未完成，专款继续受保护：${refundRecoveryMessage}`
-    : recoveryErrorMessage
-      ? `本轮恢复暂未完成；专款仍受保护：${recoveryErrorMessage}`
-    : fundingReconciled
-      ? "已按原 txid 对账确认开池交易，并保存 Kind 4；卖家重新连接前不会自动恢复内容传输。"
-    : fundingReconcileFailed
-      ? "开池交易对账信息不完整；原资金占用仍保留，未创建新交易。"
-    : phase === "completed"
-      ? "已从本地会话日志读取到已完成的购买记录。"
-    : phase === "cancelled"
-      ? latestCandidate.evidence.includes("kind3-opening-response")
-        ? "购买已取消；链上已确认关池，费用池余款已回收到当前 Key。"
-        : "购买已取消；卖方尚未完成开池预签，未广播资金交易，资金占用已释放。"
-    : phase === "content-committing"
-      ? "链上付款已核对，但这条旧会话缺少入库恢复清单；本地暂存已保留，尚未标记文件完成。"
-    : latestCandidate.phase === "close-required"
-      ? "文件已保存，关池请求尚未准备完成；费用池继续受专款账本保护。"
-    : latestCandidate.phase === "close-requested"
-      ? "文件已保存，已发送 Kind 12；等待卖方返回 Kind 13 后广播关池交易。"
-    : phase === "close-unknown"
-      ? "关池交易结果尚未确定；费用池和预期找回输出仍受专款账本保护。"
-    : phase === "cancel-unknown"
-      ? "取消关池结果尚未确定；原交易和费用池资金仍受专款账本保护。"
-    : phase === "cancelling-pool"
-      ? "已保存取消意图；正在通过卖方连接协商关池并回收余款。"
-    : phase === "failed"
-      ? "已从本地会话日志读取到失败记录；相关资金状态仍需按 journal/outbox 核对。"
-      : "已从本地会话日志恢复购买摘要；资金和签名证据仍保留，可在购买任务页重新连接卖家续接。";
-  return {
-    sessionId: latestCandidate.sessionId,
-    phase: wholeFileCancellationPending ? "cancelling-pool" : phase,
-    openingAmountSatoshis,
-    currentMaxFullBlockPriceSatoshis,
-    verifiedBlockCount,
-    totalBlockCount: null,
-    message,
-  };
-}
-
-/** 费用池关池或退款已链上确认后，释放同 Seed 计划中的 Block 认领和并发名额。 */
-async function markMsfileBitfsDownloadPlanPoolClosed(input: {
-  ownerPublicKeyHex: string;
-  seedHashHex: string;
-  sessionId: string;
-}): Promise<void> {
-  const plan = await openMsfileBitfsBuyerDownloadPlan(input.ownerPublicKeyHex, input.seedHashHex);
-  await plan.closePool(input.sessionId);
-}
-
-/** 从买方专用日志恢复同 Seed 的共享下载计划。 */
-async function openMsfileBitfsBuyerDownloadPlan(ownerPublicKeyHex: string, seedHashHex: string) {
-  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
-  const object = await store.get(`download-plans/${seedHashHex.toLowerCase()}.json`);
-  if (!object) throw new Error("已确认关池，但同 Seed 的下载计划记录缺失");
-  let value: unknown;
-  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(object.bytes)); }
-  catch { throw new Error("BitFS 同 Seed 下载计划记录损坏"); }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("同 Seed 下载计划格式无效");
-  const row = value as Record<string, unknown>;
-  if (typeof row.fileSizeBytes !== "string" || typeof row.recommendedFilename !== "string") {
-    throw new Error("同 Seed 下载计划缺少文件身份信息");
-  }
-  return createBitfsBuyerDownloadPlan({
-    ownerPublicKeyHex,
-    seedHashHex,
-    fileSizeBytes: row.fileSizeBytes,
-    recommendedFilename: row.recommendedFilename,
-    store,
-  });
-}
-
-/** 解锁后扫描当前 Key 的全部买方会话，先对账已保存交易，再允许新购买。 */
-async function recoverAllMsfileBitfsBuyerSessions(ownerPublicKeyHex: string): Promise<void> {
-  const owner = ownerPublicKeyHex.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) return;
-  const sessionEpoch = coordinatorState.sessionEpoch;
-  const runGeneration = coordinatorState.runGeneration;
-  const assertCurrentOwner = (): void => {
-    if (coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
-      || coordinatorState.sessionEpoch !== sessionEpoch
-      || coordinatorState.runGeneration !== runGeneration) {
-      throw new Error("BitFS 全量恢复期间当前 Key 或存储世代已变化");
-    }
-  };
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const records = (await sessions.list())
-    .filter((record) => record.role === "buyer"
-      && record.ownerPublicKeyHex === owner
-      && (record.evidence.includes("kind2-opening-request")
-        || record.evidence.includes("opening-configuration")
-        || record.evidence.includes("funding-transaction")
-        || record.phase === "cancel-opening")
-      && !["completed", "cancelled", "refunded"].includes(record.phase))
-    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
-  const tasksBySeed = new Map<string, BitfsBuyerTask>();
-  const failures: string[] = [];
-  for (const record of records) {
-    try {
-      assertCurrentOwner();
-      let task = tasksBySeed.get(record.seedHashHex);
-      if (!task) {
-        task = await createMsfileBitfsBuyerTask({
-          ownerPublicKeyHex: owner,
-          seedHashHex: record.seedHashHex,
-          network: bitfsNetwork(),
-        });
-        tasksBySeed.set(record.seedHashHex, task);
-      }
-      // 指定精确 session ID，确保同一 Seed 下较旧但仍有资金责任的会话也会恢复。
-      const summary = await restoreMsfileBitfsBuyerPurchaseSummary({
-        ownerPublicKeyHex: owner,
-        seedHashHex: record.seedHashHex,
-        sessionId: record.sessionId,
-        task,
-      });
-      if (summary?.message?.startsWith("本轮恢复暂未完成；")
-        || summary?.message?.startsWith("到期退款对账暂未完成，")) {
-        failures.push(record.sessionId);
-      }
-    } catch (error) {
-      // 单条记录恢复失败时保留原账本和 exact bytes，继续处理其它池；后续任务页仍可重试。
-      if (!failures.includes(record.sessionId)) failures.push(record.sessionId);
-      console.warn("[msfile] BitFS buyer session recovery deferred", {
-        sessionId: record.sessionId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  if (failures.length > 0) {
-    throw new Error(`有 ${failures.length} 条买方会话未完成链上或本地恢复；会话仍保留资金保护`);
-  }
-}
-
-/** 等待当前 owner 的解锁恢复完成；恢复失败会阻止创建新的买方资金会话。 */
-async function ensureMsfileBitfsBuyerRecovery(ownerPublicKeyHex: string): Promise<void> {
-  const owner = ownerPublicKeyHex.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
-    throw new Error("BitFS 全量恢复需要当前已解锁 Key");
-  }
-  const sessionEpoch = coordinatorState.sessionEpoch;
-  const runGeneration = coordinatorState.runGeneration;
-  const tokenMatches = (token: MsFileBitfsBuyerRecoveryScope | undefined): boolean =>
-    token?.ownerPublicKeyHex === owner && token.sessionEpoch === sessionEpoch && token.runGeneration === runGeneration;
-  if (tokenMatches(msfileBitfsBuyerRecoveryReady)) return;
-  let recovery = msfileBitfsBuyerRecoveryInFlight;
-  if (!tokenMatches(recovery)) {
-    const promise = recoverAllMsfileBitfsBuyerSessions(owner);
-    recovery = { ownerPublicKeyHex: owner, sessionEpoch, runGeneration, promise };
-    msfileBitfsBuyerRecoveryInFlight = recovery;
-  }
-  if (!recovery) throw new Error("BitFS 全量恢复任务没有成功启动");
-  try {
-    await recovery.promise;
-    if (coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
-      || coordinatorState.sessionEpoch !== sessionEpoch
-      || coordinatorState.runGeneration !== runGeneration) {
-      throw new Error("BitFS 全量恢复期间当前 Key 或存储世代已变化");
-    }
-    msfileBitfsBuyerRecoveryReady = { ownerPublicKeyHex: owner, sessionEpoch, runGeneration };
-  } catch (error) {
-    throw new Error(`BitFS 买方会话恢复未完成，已阻止新购买：${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    if (msfileBitfsBuyerRecoveryInFlight === recovery) msfileBitfsBuyerRecoveryInFlight = undefined;
-  }
-}
-
-/** 从本地会话日志读取有效速度样本；损坏样本按“未知速度”处理。 */
-function parseMsFileBitfsSellerSpeedSample(bytes: Uint8Array): MsFileBitfsSellerSpeedSample | undefined {
-  let value: unknown;
-  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
-  catch { return undefined; }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const row = value as Record<string, unknown>;
-  if (typeof row.effectiveBlockBytes !== "number" || !Number.isSafeInteger(row.effectiveBlockBytes) || row.effectiveBlockBytes <= 0
-    || typeof row.elapsedMs !== "number" || !Number.isSafeInteger(row.elapsedMs) || row.elapsedMs <= 0
-    || typeof row.recordedAtMs !== "number" || !Number.isSafeInteger(row.recordedAtMs) || row.recordedAtMs < 0) return undefined;
-  return {
-    effectiveBlockBytes: row.effectiveBlockBytes as number,
-    elapsedMs: row.elapsedMs as number,
-    recordedAtMs: row.recordedAtMs as number,
-  };
-}
-
-/** 保存与已验收交付和已观察付款绑定的卖家速度样本。 */
-async function persistMsfileBitfsSellerSpeedSample(input: {
-  /** 当前买方会话编号。 */
-  sessionId: string;
-  /** 已验收 Kind 5 对应的付款授权编号。 */
-  authorizationIdHex: string;
-  /** 本次已验收文件 Block 的有效字节数，不含 Seed。 */
-  effectiveBlockBytes: number;
-  /** 从发出 Kind 5 到验收 Kind 6 的耗时毫秒数。 */
-  elapsedMs: number;
-}): Promise<void> {
-  if (!/^[0-9a-f]{64}$/u.test(input.authorizationIdHex)
-    || !Number.isSafeInteger(input.effectiveBlockBytes) || input.effectiveBlockBytes <= 0
-    || !Number.isSafeInteger(input.elapsedMs) || input.elapsedMs <= 0) return;
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const session = await sessions.get(input.sessionId);
-  const requestName = `kind5-content-request-${input.authorizationIdHex}`;
-  const deliveryName = `kind6-content-delivery-${input.authorizationIdHex}`;
-  const paymentName = `kind7-payment-update-${input.authorizationIdHex}`;
-  if (!session || session.role !== "buyer"
-    || !session.evidence.includes(requestName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
-    || !session.evidence.includes(deliveryName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)
-    || !session.evidence.includes(paymentName as import("@keymaster/plugin-msfile/coordinator").BitfsEvidenceName)) {
-    throw new Error("BitFS 速度样本缺少已验收交付或买方付款证据");
-  }
-  const evidenceName = `seller-speed-sample-${input.authorizationIdHex}` as const;
-  if (await sessions.getEvidence(session.sessionId, evidenceName)) return;
-  const sample: MsFileBitfsSellerSpeedSample = {
-    effectiveBlockBytes: input.effectiveBlockBytes,
-    elapsedMs: input.elapsedMs,
-    recordedAtMs: Date.now(),
-  };
-  await sessions.putEvidence(session.sessionId, session.revision, evidenceName, new TextEncoder().encode(JSON.stringify(sample)), Date.now());
-}
-
-/** 给有效报价附上同一 Key + Seed + 卖家的最近一次已付款传输速度。 */
-async function addMsfileBitfsRecentSellerSpeeds(
-  ownerPublicKeyHex: string,
-  seedHashHex: string,
-  quotes: readonly BitfsBuyerQuoteView[],
-): Promise<import("@keymaster/contracts").MsFileBitfsQuoteView[]> {
-  if (quotes.length === 0) return [];
-  const owner = ownerPublicKeyHex.toLowerCase();
-  const seed = seedHashHex.toLowerCase();
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const records = await sessions.list();
-  const latestBySeller = new Map<string, MsFileBitfsRecentSellerSpeed>();
-  for (const record of records) {
-    if (record.role !== "buyer" || record.ownerPublicKeyHex !== owner || record.seedHashHex !== seed) continue;
-    for (const name of record.evidence.filter((item) => item.startsWith("seller-speed-sample-"))) {
-      const bytes = await sessions.getEvidence(record.sessionId, name);
-      if (!bytes) continue;
-      const sample = parseMsFileBitfsSellerSpeedSample(bytes);
-      if (!sample) continue;
-      const prior = latestBySeller.get(record.counterpartyPublicKeyHex);
-      if (prior && prior.recordedAtMs >= sample.recordedAtMs) continue;
-      latestBySeller.set(record.counterpartyPublicKeyHex, {
-        recordedAtMs: sample.recordedAtMs,
-        bytesPerSecond: (BigInt(sample.effectiveBlockBytes) * 1_000n / BigInt(sample.elapsedMs)).toString(10),
-      });
-    }
-  }
-  return quotes.map((quote) => ({
-    ...quote,
-    recentBytesPerSecond: latestBySeller.get(quote.sellerPublicKeyHex)?.bytesPerSecond ?? null,
-  }));
-}
-
-/** 从持久 journal 与专款账本重建 `/msfile/storage` 的未完成购买任务列表。 */
-async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/contracts").MsFileBitfsTaskSnapshot[]> {
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault 已锁定，不能读取 BitFS 购买任务");
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const runtime = await ensureMsfileRuntime();
-  const buyerSettings = runtime.getBitfsBuyerSettings
-    ? await runtime.getBitfsBuyerSettings()
-    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
-  const records = (await sessions.list()).filter((record) => record.role === "buyer"
-    && record.ownerPublicKeyHex === owner
-    && (record.evidence.includes("kind2-opening-request")
-      || record.evidence.includes("opening-configuration")
-      || record.evidence.includes("funding-transaction")
-      || record.phase === "cancel-opening")
-    && record.phase !== "completed" && record.phase !== "cancelled" && record.phase !== "refunded");
-  const ledger = currentMsfileBitfsFundingLedger();
-  const contentStore = createWorkerModuleFileStore("msfile", "");
-  const snapshots: import("@keymaster/contracts").MsFileBitfsTaskSnapshot[] = [];
-  for (const record of records) {
-    let session = await sessions.get(record.sessionId);
-    if (!session) continue;
-    if (session.phase === "cancel-opening") {
-      const { task } = await ensureMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: session.seedHashHex });
-      await task.cancelUnfundedOpening(session.sessionId);
-      session = await sessions.get(session.sessionId);
-      if (!session) continue;
-    }
-    const phase = msfileBitfsPurchasePhaseFromJournal(session.phase);
-    if (!phase) continue;
-    let quote: {
-      recommendedFilename: string | null;
-      fileSizeBytes: string | null;
-      fullBlockPriceSatoshis: string | null;
-    } = { recommendedFilename: null, fileSizeBytes: null, fullBlockPriceSatoshis: null };
-    const quoteBytes = await sessions.getEvidence(session.sessionId, "quote-summary");
-    if (quoteBytes) {
-      try {
-        const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(quoteBytes)) as Record<string, unknown>;
-        if (typeof parsed.recommendedFilename === "string"
-          && typeof parsed.fileSizeBytes === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.fileSizeBytes)
-          && typeof parsed.fullBlockPriceSatoshis === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.fullBlockPriceSatoshis)) {
-          quote = {
-            recommendedFilename: parsed.recommendedFilename.slice(0, 512),
-            fileSizeBytes: parsed.fileSizeBytes,
-            fullBlockPriceSatoshis: parsed.fullBlockPriceSatoshis,
-          };
-        }
-      } catch {
-        throw new Error("BitFS 任务报价摘要损坏；为安全起见停止展示其价格");
-      }
-    }
-    let openingAmountSatoshis: string | null = null;
-    const configuration = await sessions.getEvidence(session.sessionId, "opening-configuration");
-    if (configuration) {
-      try {
-        const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(configuration)) as { openingAmountSatoshis?: unknown };
-        if (typeof parsed.openingAmountSatoshis === "string" && /^(0|[1-9][0-9]*)$/u.test(parsed.openingAmountSatoshis)) {
-          openingAmountSatoshis = parsed.openingAmountSatoshis;
-        }
-      } catch {
-        throw new Error("BitFS 任务开池金额摘要损坏");
-      }
-    }
-    const maxBlockPriceBytes = await sessions.getEvidence(session.sessionId, "file-price-limit");
-    const evidencePriceLimit = maxBlockPriceBytes
-      ? normalizeMsFileSatoshiAmount(new TextDecoder("utf-8", { fatal: true }).decode(maxBlockPriceBytes))
-      : null;
-    if (maxBlockPriceBytes && evidencePriceLimit === undefined) {
-      throw new Error("BitFS 任务本文件最高价证据损坏");
-    }
-    const currentMaxFullBlockPriceSatoshis = evidencePriceLimit ?? buyerSettings.filePriceLimitsBySeedHash?.[session.seedHashHex] ?? null;
-
-    let verifiedBlockCount = 0;
-    let verifiedBlockBytes = 0n;
-    let verifiedBlockBytesKnown = true;
-    const stagingPrefix = `bitfs-staging/${session.sessionId}/blocks/`;
-    let cursor: string | undefined;
-    do {
-      const page = await contentStore.list({ prefix: stagingPrefix, limit: 1_000, ...(cursor === undefined ? {} : { cursor }) });
-      for (const file of page.files) {
-        if (!/^bitfs-staging\/[0-9a-z][0-9a-z._-]{0,127}\/blocks\/[0-9a-f]{64}\.bin$/u.test(file.path)) continue;
-        verifiedBlockCount += 1;
-        if (Number.isSafeInteger(file.size) && (file.size ?? -1) >= 0) {
-          verifiedBlockBytes += BigInt(file.size!);
-        } else {
-          const object = await contentStore.get(file.path);
-          if (object) verifiedBlockBytes += BigInt(object.bytes.byteLength);
-          else verifiedBlockBytesKnown = false;
-        }
-      }
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
-
-    const account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: session.seedHashHex, network: bitfsNetwork(), nowMs: Date.now() });
-    const pool = account.pools.find((item) => item.poolId === session.sessionId);
-    const dedicatedByOutpoint = new Map(account.utxos.map((utxo) => [`${utxo.txid}:${utxo.vout}`, utxo]));
-    let lockedSatoshis = 0n;
-    let pendingReturnSatoshis = 0n;
-    if (pool && pool.state !== "closed") {
-      const opening = dedicatedByOutpoint.get(pool.openingOutpoint);
-      if (opening && (opening.state === "pool-occupied" || opening.state === "recovery-pending")) {
-        lockedSatoshis = BigInt(opening.valueSatoshis);
-      }
-    }
-    if (pool?.state === "recovery-pending" && pool.recoveryTxid) {
-      pendingReturnSatoshis = account.utxos
-        .filter((utxo) => utxo.poolId === session.sessionId && utxo.spendingTxid === pool.recoveryTxid
-          && utxo.state === "recovery-pending" && `${utxo.txid}:${utxo.vout}` !== pool.openingOutpoint)
-        .reduce((sum, utxo) => sum + BigInt(utxo.valueSatoshis), 0n);
-    }
-
-    let paidSatoshis = 0n;
-    let poolStateFeeSatoshis = 0n;
-    const openingRawKind2 = await sessions.getEvidence(session.sessionId, "kind2-opening-request");
-    const openingRawKind3 = await sessions.getEvidence(session.sessionId, "kind3-opening-response");
-    const fundingRaw = await sessions.getEvidence(session.sessionId, "funding-transaction");
-    if (openingRawKind2 && openingRawKind3 && fundingRaw) {
-      const completedOpening = await completeBuyerOpening({ rawKind2: openingRawKind2, rawKind3: new Uint8Array(), fundingTransactionRaw: fundingRaw }, openingRawKind3);
-      const localState = await readBitfsBuyerLocalPaymentState({
-        sessions,
-        session,
-        completedOpening: completedOpening.pool,
-        includeLegacyPaymentEvidence: true,
-      });
-      const closeRaw = await sessions.getEvidence(session.sessionId, "close-transaction");
-      const bindingRaw = await sessions.getEvidence(session.sessionId, "kind12-close-binding");
-      if (bindingRaw) {
-        const binding = parseBitfsBuyerCloseBinding(bindingRaw);
-        if (binding.paymentSequence !== localState.paymentSequence
-          || binding.sellerAmountSatoshis !== localState.sellerAmountSatoshis.toString(10)
-          || binding.authorizationIdHex !== (localState.authorizationIdHex ?? null)) {
-          throw new Error("BitFS 任务关池绑定与当前付款状态不一致");
-        }
-      }
-      if (closeRaw) {
-        await verifyBuyerCompletedClose({ pool: localState.pool, closeRaw });
-        if (bindingRaw) {
-          const binding = parseBitfsBuyerCloseBinding(bindingRaw);
-          await assertBitfsBuyerCloseBinding({
-            pool: localState.pool,
-            closeTransactionRaw: closeRaw,
-            paymentSequence: binding.paymentSequence,
-            sellerAmountSatoshis: BigInt(binding.sellerAmountSatoshis),
-          });
-        }
-        const state = await parsePaymentState(closeRaw, completedOpening.pool.opening);
-        paidSatoshis = state.sellerAmountSatoshis;
-        const distributed = state.buyerAmountSatoshis + state.sellerAmountSatoshis + state.arbiterAmountSatoshis;
-        poolStateFeeSatoshis = state.poolOutputSatoshis > distributed ? state.poolOutputSatoshis - distributed : 0n;
-      } else if (localState.source !== "initial") {
-        paidSatoshis = localState.sellerAmountSatoshis;
-      }
-    }
-
-    let fundingFeeSatoshis = 0n;
-    const fundingPlan = account.transactions.find((item) => item.purpose === "opening" && item.poolId === session.sessionId);
-    if (fundingPlan) {
-      const inputValue = fundingPlan.inputOutpoints.reduce((sum, outpoint) => sum + BigInt(dedicatedByOutpoint.get(outpoint)?.valueSatoshis ?? "0"), 0n);
-      const outputValue = fundingPlan.expectedOutputs.reduce((sum, output) => sum + BigInt(output.valueSatoshis), 0n);
-      if (inputValue >= outputValue) fundingFeeSatoshis = inputValue - outputValue;
-    }
-    const totalBlockCount = quote.fileSizeBytes === null
-      ? null
-      : Number((BigInt(quote.fileSizeBytes) + 262_143n) / 262_144n);
-    const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, session.seedHashHex));
-    let availableQuotes: import("@keymaster/contracts").MsFileBitfsQuoteView[] = [];
-    if (taskEntry?.ownerSessionEpoch === coordinatorState.sessionEpoch && taskEntry.requestMessageId
-      && taskEntry.expiresAtMs > Date.now()) {
-      availableQuotes = await addMsfileBitfsRecentSellerSpeeds(
-        owner,
-        session.seedHashHex,
-        await (await taskEntry.taskPromise).listDiscoveredQuotes(),
-      );
-    }
-    const activeLink = [...msfileBitfsWebRtcBuyerLinks.values()].some((link) =>
-      link.ownerPublicKeyHex.toLowerCase() === owner
-        && link.ownerSessionEpoch === coordinatorState.sessionEpoch
-        && (link.quoteSessionId === session.sessionId
-          || link.resumedPurchaseSessionId === session.sessionId
-          || (link.seedHashHex === session.seedHashHex
-            && link.peerPublicKeyHex === session.counterpartyPublicKeyHex
-            && link.requestMessageId === taskEntry?.requestMessageId)));
-    const canReconnect = session.evidence.includes("kind2-opening-request")
-      && !activeLink
-      && ["opening-presign", "funding-prepared", "funding-unknown", "funded", "request-prepared", "delivery-verified",
-        "payment-unknown", "content-committing", "close-required", "close-requested", "close-unknown",
-        "cancel-closing-pool", "cancel-close-unknown"].includes(session.phase);
-    const pendingPaymentSignature = session.pendingAuthorizationId
-      ? Boolean(await sessions.getEvidence(session.sessionId, `kind7-payment-signature-${session.pendingAuthorizationId}`)
-        || await sessions.getEvidence(session.sessionId, `kind7-payment-sign-digest-${session.pendingAuthorizationId}`))
-      : false;
-    const cancelBeforePool = (session.phase === "quote-selected" || session.phase === "opening-presign" || session.phase === "funding-prepared" || session.phase === "cancel-opening")
-      && !session.evidence.includes("kind3-opening-response")
-      && !session.evidence.includes("kind4-funding-delivery");
-    const cancelPool = (session.phase === "funded" || session.phase === "request-prepared"
-      || session.phase === "cancel-closing-pool" || session.phase === "cancel-close-unknown")
-      && activeLink && !pendingPaymentSignature;
-    const statusMessage = session.phase === "refund-ready" || session.phase === "refund-unknown"
-      ? "退款锁已到期，买方资金仍在按原交易对账。"
-      : session.phase === "cancel-closing-pool" || session.phase === "cancel-close-unknown"
-        ? "正在通过已保存的关池证据回收费用池余款。"
-        : session.phase.startsWith("close-")
-          ? "文件已入库；关池交易尚未确认，池内资金仍受保护。"
-          : session.phase === "failed"
-            ? "购买流程已失败；资金仍按专款账本保护。"
-            : "购买任务已从本地日志恢复；刷新或关闭页面不会删除资金恢复记录。";
-    snapshots.push({
-      sessionId: session.sessionId,
-      seedHashHex: session.seedHashHex,
-      phase,
-      sellerPublicKeyHex: session.counterpartyPublicKeyHex,
-      recommendedFilename: quote.recommendedFilename,
-      fileSizeBytes: quote.fileSizeBytes,
-      fullBlockPriceSatoshis: quote.fullBlockPriceSatoshis,
-      openingAmountSatoshis,
-      currentMaxFullBlockPriceSatoshis,
-      verifiedBlockCount,
-      verifiedBytes: verifiedBlockBytesKnown ? verifiedBlockBytes.toString(10) : null,
-      totalBlockCount,
-      paidSatoshis: paidSatoshis.toString(10),
-      minerFeeSatoshis: (fundingFeeSatoshis + poolStateFeeSatoshis).toString(10),
-      lockedSatoshis: lockedSatoshis.toString(10),
-      pendingReturnSatoshis: pendingReturnSatoshis.toString(10),
-      discoveryOnly: false,
-      availableQuotes,
-      canCancel: cancelBeforePool || cancelPool,
-      canReconnect,
-      message: canReconnect
-        ? "卖家连接已断开；原费用池仍受保护，可重新发布需求续接该会话。"
-        : statusMessage,
-    });
-  }
-
-  const purchaseSeeds = new Set(snapshots.map((item) => item.seedHashHex));
-  for (const [taskKey, entry] of msfileBitfsBuyerTasks) {
-    if (entry.ownerPublicKeyHex !== owner || entry.ownerSessionEpoch !== coordinatorState.sessionEpoch
-      || !entry.requestMessageId || entry.expiresAtMs <= Date.now() || purchaseSeeds.has(entry.seedHashHex)) continue;
-    const task = await entry.taskPromise;
-    const availableQuotes = await addMsfileBitfsRecentSellerSpeeds(
-      owner,
-      entry.seedHashHex,
-      await task.listDiscoveredQuotes(),
-    );
-    const purchase = entry.purchase;
-    const selectedQuote = purchase
-      ? availableQuotes.find((item) => item.sessionId === purchase.sessionId)
-      : undefined;
-    const quote = selectedQuote ?? availableQuotes[0];
-    const taskId = purchase?.sessionId ?? quote?.sessionId ?? `demand-${entry.seedHashHex}`;
-    const activePurchase = purchase && !["completed", "cancelled", "refunded", "failed", "connection-closed"].includes(purchase.phase);
-    const purchaseSession = activePurchase && purchase ? await sessions.get(purchase.sessionId) : undefined;
-    const purchaseLinkActive = activePurchase && purchase
-      ? [...msfileBitfsWebRtcBuyerLinks.values()].some((link) => link.quoteSessionId === purchase.sessionId
-        && link.ownerPublicKeyHex.toLowerCase() === owner
-        && link.ownerSessionEpoch === coordinatorState.sessionEpoch)
-      : false;
-    const cancellableBeforeFunding = Boolean(purchaseSession
-      && ["quote-selected", "opening-presign", "funding-prepared", "cancel-opening"].includes(purchaseSession.phase)
-      && !purchaseSession.evidence.includes("kind3-opening-response")
-      && !purchaseSession.evidence.includes("kind4-funding-delivery"));
-    snapshots.push({
-      sessionId: taskId,
-      seedHashHex: entry.seedHashHex,
-      phase: activePurchase && purchase ? purchase.phase : "discovering",
-      openingAmountSatoshis: activePurchase && purchase ? purchase.openingAmountSatoshis : null,
-      currentMaxFullBlockPriceSatoshis: activePurchase && purchase
-        ? purchase.currentMaxFullBlockPriceSatoshis ?? buyerSettings.filePriceLimitsBySeedHash?.[entry.seedHashHex] ?? null
-        : buyerSettings.filePriceLimitsBySeedHash?.[entry.seedHashHex] ?? null,
-      verifiedBlockCount: activePurchase && purchase ? purchase.verifiedBlockCount : 0,
-      verifiedBytes: activePurchase && purchase ? purchase.verifiedBytes ?? "0" : "0",
-      totalBlockCount: activePurchase && purchase ? purchase.totalBlockCount : null,
-      sellerPublicKeyHex: quote?.sellerPublicKeyHex ?? null,
-      recommendedFilename: quote?.recommendedFilename ?? null,
-      fileSizeBytes: quote?.fileSizeBytes ?? null,
-      fullBlockPriceSatoshis: quote?.fullBlockPriceSatoshis ?? null,
-      paidSatoshis: "0",
-      minerFeeSatoshis: "0",
-      lockedSatoshis: "0",
-      pendingReturnSatoshis: "0",
-      discoveryOnly: !activePurchase,
-      availableQuotes,
-      canCancel: activePurchase ? cancellableBeforeFunding : true,
-      message: activePurchase && purchase
-        ? purchase.message
-        : availableQuotes.length === 0
-          ? "正在等待卖家报价；发布需求不会拆分或广播资金。"
-          : "已收到已验签报价；设置本文件最高单块价后可选择卖家开始下载。",
-    });
-    purchaseSeeds.add(entry.seedHashHex);
-  }
-  return snapshots.sort((left, right) => left.seedHashHex.localeCompare(right.seedHashHex));
-}
-
-/** 获取或创建当前 Owner + Seed 唯一买方任务。 */
-async function ensureMsfileBitfsBuyerTask(input: {
-  ownerPublicKeyHex: string;
-  seedHashHex: string;
-}): Promise<{
-  task: BitfsBuyerTask;
-  entry: NonNullable<ReturnType<typeof msfileBitfsBuyerTasks.get>>;
-}> {
-  const owner = input.ownerPublicKeyHex.toLowerCase();
-  const seed = input.seedHashHex.toLowerCase();
-  const key = msfileBitfsBuyerTaskKey(owner, seed);
-  const sessionEpoch = coordinatorState.sessionEpoch;
-  const runGeneration = coordinatorState.runGeneration;
-  const existing = msfileBitfsBuyerTasks.get(key);
-  if (existing && existing.ownerSessionEpoch === sessionEpoch) {
-    try {
-      const task = await existing.taskPromise;
-      if (!existing.purchaseHydrated) {
-        const restored = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: seed, task });
-        existing.purchase = restored ?? existing.purchase;
-        existing.purchaseHydrated = true;
-      }
-      if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.runGeneration !== runGeneration
-        || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
-        throw new Error("BitFS 买方恢复摘要期间 Key 或会话世代已变化");
-      }
-      return { task, entry: existing };
-    } catch (error) {
-      if (msfileBitfsBuyerTasks.get(key) === existing) msfileBitfsBuyerTasks.delete(key);
-      throw error;
-    }
-  }
-  const entry: NonNullable<ReturnType<typeof msfileBitfsBuyerTasks.get>> = {
-    ownerPublicKeyHex: owner,
-    seedHashHex: seed,
-    ownerSessionEpoch: sessionEpoch,
-    taskPromise: Promise.resolve(undefined as unknown as BitfsBuyerTask),
-    expiresAtMs: 0,
-    purchaseHydrated: false,
-  };
-  entry.taskPromise = createMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: seed, network: bitfsNetwork() });
-  msfileBitfsBuyerTasks.set(key, entry);
-  while (msfileBitfsBuyerTasks.size > 256) {
-    const oldestKey = msfileBitfsBuyerTasks.keys().next().value as string | undefined;
-    if (oldestKey === undefined || oldestKey === key) break;
-    msfileBitfsBuyerTasks.delete(oldestKey);
-  }
-  try {
-    const task = await entry.taskPromise;
-    if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.runGeneration !== runGeneration
-      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
-      throw new Error("BitFS 需求任务的 Key 或会话世代已变化");
-    }
-    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: seed, task }) ?? entry.purchase;
-    entry.purchaseHydrated = true;
-    if (coordinatorState.sessionEpoch !== sessionEpoch || coordinatorState.runGeneration !== runGeneration
-      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner || coordinatorState.vaultStatus !== "unlocked") {
-      throw new Error("BitFS 买方恢复摘要期间 Key 或会话世代已变化");
-    }
-    return { task, entry };
-  } catch (error) {
-    if (msfileBitfsBuyerTasks.get(key) === entry) msfileBitfsBuyerTasks.delete(key);
-    throw error;
-  }
-}
-
-/** 返回不会暴露 wire、私钥或交易证据的需求与报价视图。 */
-async function msfileBitfsBuyerDemandSnapshot(
-  seedHashHex: string,
-  entry?: NonNullable<ReturnType<typeof msfileBitfsBuyerTasks.get>>,
-  task?: BitfsBuyerTask,
-): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
-  const normalizedSeed = seedHashHex.toLowerCase();
-  const runtime = await ensureMsfileRuntime();
-  const buyerSettings = runtime.getBitfsBuyerSettings
-    ? await runtime.getBitfsBuyerSettings()
-    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
-  const savedPriceLimit = buyerSettings.filePriceLimitsBySeedHash?.[normalizedSeed] ?? null;
-  if (!entry || !task) {
-    return { seedHashHex: normalizedSeed, requestMessageId: null, expiresAtMs: null, quotes: [], currentMaxFullBlockPriceSatoshis: savedPriceLimit };
-  }
-  return {
-    seedHashHex: normalizedSeed,
-    requestMessageId: entry.requestMessageId ?? null,
-    expiresAtMs: entry.expiresAtMs > 0 ? entry.expiresAtMs : null,
-    quotes: await addMsfileBitfsRecentSellerSpeeds(
-      entry.ownerPublicKeyHex,
-      normalizedSeed,
-      await task.listDiscoveredQuotes(),
-    ),
-    purchase: entry.purchase ?? null,
-    currentMaxFullBlockPriceSatoshis: savedPriceLimit,
-  };
-}
-
-/** 为已经验签报价的 DataChannel 装配买方 SDK 协议端口。 */
-async function ensureMsfileBitfsBuyerProtocol(
-  webrtcSessionId: string,
-  link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>,
-): Promise<BitfsBuyerProtocol> {
-  if (link.protocol) return link.protocol;
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked" || link.ownerSessionEpoch !== coordinatorState.sessionEpoch) {
-    throw new Error("BitFS 买方 Key 已锁定或会话已切换");
-  }
-  const woc = p2pkhWocService;
-  if (!woc) throw new Error("BitFS 买方需要可用的 WoC 链上事实服务");
-  const sessionEpoch = coordinatorState.sessionEpoch;
-  const runGeneration = coordinatorState.runGeneration;
-  const assertCurrentContext = (): void => {
-    if (coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
-      || coordinatorState.sessionEpoch !== sessionEpoch
-      || coordinatorState.runGeneration !== runGeneration
-      || msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) {
-      throw new Error("BitFS 买方购买期间 Key、存储或 DataChannel 已变化");
-    }
-  };
-  const settings = await p2pkhSettingRepository().readSetting();
-  const feeRate = settings.feeRateSatoshisPerKb.medium;
-  if (!Number.isSafeInteger(feeRate) || feeRate < 1) throw new Error("BitFS 池内手续费率配置无效");
-  const cryptoPort = await createWorkerActiveKeyCrypto(owner);
-  assertCurrentContext();
-  const journalStore = createWorkerModuleFileStore("msfile", "bitfs-journal");
-  const contentStore = createWorkerModuleFileStore("msfile", "");
-  const quoteSessionId = link.quoteSessionId;
-  if (!quoteSessionId) throw new Error("BitFS 下载计划需要先持久化已验签报价");
-  const quoteViews = (await link.task.listDiscoveredQuotes()).sort((left, right) => left.sessionId.localeCompare(right.sessionId));
-  const quoteView = quoteViews.find((item) => item.sessionId === quoteSessionId);
-  const canonicalQuote = quoteViews[0];
-  if (!quoteView || !canonicalQuote || quoteViews.some((item) => item.fileSizeBytes !== canonicalQuote.fileSizeBytes)) {
-    throw new Error("BitFS 同 Seed 报价缺少统一文件大小，不能创建共享下载计划");
-  }
-  const runtime = await ensureMsfileRuntime();
-  const buyerSettings = runtime.getBitfsBuyerSettings
-    ? await runtime.getBitfsBuyerSettings()
-    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
-  const downloadPlan = createBitfsBuyerDownloadPlan({
-    ownerPublicKeyHex: owner,
-    seedHashHex: link.seedHashHex,
-    fileSizeBytes: canonicalQuote.fileSizeBytes,
-    recommendedFilename: canonicalQuote.recommendedFilename,
-    store: journalStore,
-  });
-  const vaultSigner = createBitfsVaultSigner(cryptoPort);
-  const signer = {
-    publicKey: () => vaultSigner.publicKey(),
-    async sign(request: Parameters<typeof vaultSigner.sign>[0], signal?: AbortSignal): Promise<Uint8Array> {
-      try {
-        return await vaultSigner.sign(request, signal);
-      } catch (error) {
-        await writeBitfsE2eDiagnostic("buyer-signer-error.json", {
-          message: error instanceof Error ? error.message : String(error),
-          name: error instanceof Error ? error.name : typeof error,
-        });
-        throw error;
-      }
-    },
-  };
-  const protocol = new BitfsBuyerProtocol({
-    task: link.task,
-    sessions: createBitfsSessionJournal(journalStore),
-    signer,
-    contentStore,
-    downloadPlan,
-    selectionPriority: buyerSettings.sellerSelectionPriority,
-    blocksPerBatch: buyerSettings.blocksPerBatch,
-    onDownloadPlanChanged() {
-      setTimeout(() => {
-        for (const [candidateSessionId, candidateLink] of msfileBitfsWebRtcBuyerLinks) {
-          if (candidateLink.ownerPublicKeyHex.toLowerCase() !== owner
-            || candidateLink.seedHashHex.toLowerCase() !== link.seedHashHex.toLowerCase()
-            || candidateLink.ownerSessionEpoch !== sessionEpoch
-            || !candidateLink.protocol || !candidateLink.quoteSessionId) continue;
-          void candidateLink.protocol.continueSharedDownload({
-            sessionId: candidateLink.quoteSessionId,
-            stream: createMsfileBitfsBuyerStream(candidateSessionId, candidateLink),
-          }).catch(() => undefined);
-        }
-        void maybeStartMsfileBitfsNextSeller({ ownerPublicKeyHex: owner, seedHashHex: link.seedHashHex, task: link.task }).catch(() => undefined);
-      }, 0);
-    },
-    blockHeight: () => readCoordinatorBitfsBlockHeight(bitfsNetwork()),
-    nowMs: () => Date.now(),
-     minerFeeRateSatoshisPerKilobyte: BigInt(feeRate),
-     assertCurrentContext,
-     onSignerError: (error) => writeBitfsE2eDiagnostic("buyer-signer-error.json", {
-       message: error instanceof Error ? error.message : String(error),
-       name: error instanceof Error ? error.name : typeof error,
-       stack: error instanceof Error ? error.stack : undefined,
-     }),
-    async onContentCommitted(seedHashHex) {
-      const index = msfileSellerIndex;
-      if (!index) return;
-      const indexGeneration = index.currentGeneration();
-      index.invalidate(seedHashHex);
-      await index.refresh(contentStore, seedHashHex, indexGeneration);
-    },
-    onVerifiedDelivery: persistMsfileBitfsSellerSpeedSample,
-    onProgress(progress) {
-      void writeBitfsE2eDiagnostic("buyer-purchase-progress.json", progress);
-      const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, link.seedHashHex));
-      if (!taskEntry || taskEntry.ownerSessionEpoch !== sessionEpoch) return;
-      taskEntry.purchase = {
-        sessionId: progress.sessionId,
-        phase: progress.phase,
-        openingAmountSatoshis: progress.openingAmountSatoshis,
-        ...(taskEntry.purchase?.sessionId === progress.sessionId && taskEntry.purchase.currentMaxFullBlockPriceSatoshis !== undefined
-          ? { currentMaxFullBlockPriceSatoshis: taskEntry.purchase.currentMaxFullBlockPriceSatoshis }
-          : {}),
-        verifiedBlockCount: progress.verifiedBlockCount,
-        totalBlockCount: progress.totalBlockCount,
-        message: progress.message,
-      };
-    },
-  });
-  link.protocol = protocol;
-  return protocol;
-}
-
-/** 同一 Seed 的手动/自动购买共用准入锁；双击或同时到达报价只会进入一次开池。 */
-async function startMsfileBitfsBuyerPurchase(input: {
-  seedHashHex: string;
-  sessionId: string;
-  maxFullBlockPriceSatoshis?: string;
-  /** 只由用户手动购买入口设置；自动补池不得解除整文件取消标记。 */
-  resumeCancelledPlan?: boolean;
-}): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再购买 BitFS 文件");
-  const lockKey = msfileBitfsBuyerTaskKey(owner, input.seedHashHex);
-  const previous = msfileBitfsBuyerPurchaseTails.get(lockKey) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => { release = resolve; });
-  msfileBitfsBuyerPurchaseTails.set(lockKey, current);
-  await previous;
-  try {
-    const result = await startMsfileBitfsBuyerPurchaseNow(input);
-    await writeBitfsE2eDiagnostic("buyer-purchase-return.json", {
-      seedHashHex: input.seedHashHex,
-      sessionId: input.sessionId,
-      purchase: result.purchase
-    });
-    return result;
-  } catch (error) {
-    const owner = coordinatorState.activePublicKeyHex?.toLowerCase();
-    const sessions = owner
-      ? await createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal")).list().catch(() => [])
-      : [];
-    await writeBitfsE2eDiagnostic("buyer-purchase-error.json", {
-       seedHashHex: input.seedHashHex,
-       sessionId: input.sessionId,
-       message: error instanceof Error ? error.message : String(error),
-       stack: error instanceof Error ? error.stack : undefined,
-       sessions: sessions.filter((session) => session.ownerPublicKeyHex === owner)
-        .map((session) => ({ sessionId: session.sessionId, phase: session.phase, evidence: session.evidence, pendingTxid: session.pendingTxid, pendingAuthorizationId: session.pendingAuthorizationId }))
-    });
-    throw error;
-  } finally {
-    release();
-    if (msfileBitfsBuyerPurchaseTails.get(lockKey) === current) msfileBitfsBuyerPurchaseTails.delete(lockKey);
-  }
-}
-
-/** 用户选择报价或自动规则命中后，为有界批次内的卖家按 Block 数分配独立费用池。 */
-async function startMsfileBitfsBuyerPurchaseNow(input: {
-  seedHashHex: string;
-  sessionId: string;
-  maxFullBlockPriceSatoshis?: string;
-  /** 仅显式手动重启时允许在全部旧池关闭后清除停止标记。 */
-  resumeCancelledPlan?: boolean;
-}): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再购买 BitFS 文件");
-  await ensureMsfileBitfsBuyerRecovery(owner);
-  if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
-  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
-  const { task, entry } = await ensureMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex });
-  const quotes = await addMsfileBitfsRecentSellerSpeeds(owner, input.seedHashHex, await task.listDiscoveredQuotes());
-  const selectedQuote = quotes.find((item) => item.sessionId === input.sessionId);
-  if (!selectedQuote) throw new Error("所选报价不属于当前 Seed 的已验签报价列表");
-  const maximumBlockPrice = normalizeMsFileSatoshiAmount(input.maxFullBlockPriceSatoshis ?? selectedQuote.fullBlockPriceSatoshis);
-  if (maximumBlockPrice === undefined || BigInt(selectedQuote.fullBlockPriceSatoshis) > BigInt(maximumBlockPrice)) {
-    throw new Error("所选报价的完整 Block 单价高于本文件已选择的最高价");
-  }
-  const runtime = await ensureMsfileRuntime();
-  const settings = runtime.getBitfsBuyerSettings
-    ? await runtime.getBitfsBuyerSettings()
-    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const allSessions = await sessions.list();
-  const sameSeedSessions = allSessions.filter((record) => record.role === "buyer"
-    && record.ownerPublicKeyHex === owner && record.seedHashHex === input.seedHashHex.toLowerCase());
-  const hasPlan = (record: (typeof sameSeedSessions)[number]): boolean => record.evidence.includes("download-plan");
-  const hasFunding = (record: (typeof sameSeedSessions)[number]): boolean => record.evidence.includes("kind2-opening-request")
-    || record.evidence.includes("opening-configuration") || record.evidence.includes("funding-transaction")
-    || record.pendingTxid !== undefined;
-  const terminal = new Set(["completed", "cancelled", "refunded"]);
-  const otherActiveSeeds = new Set(allSessions.filter((record) => record.role === "buyer"
-    && record.ownerPublicKeyHex === owner
-    && (record.evidence.includes("kind2-opening-request") || record.evidence.includes("opening-configuration")
-      || record.evidence.includes("funding-transaction"))
-    && !terminal.has(record.phase) && record.seedHashHex !== input.seedHashHex.toLowerCase())
-    .map((record) => record.seedHashHex));
-  if (otherActiveSeeds.size >= settings.maxConcurrentDownloads) {
-    throw new Error(`当前有 ${otherActiveSeeds.size} 个 BitFS 文件任务仍在购买或恢复；并发上限为 ${settings.maxConcurrentDownloads}`);
-  }
-  if (sameSeedSessions.some((record) => !hasPlan(record) && !terminal.has(record.phase) && hasFunding(record))) {
-    throw new Error("当前 Seed 有尚未完成的旧版单卖家费用池；请先恢复或回收后再建立共享下载计划");
-  }
-  if (entry.purchase?.phase === "completed") throw new Error("当前 Seed 已完成购买，无需再次付款");
-
-  const canonicalQuote = quotes.slice().sort((left, right) => left.sessionId.localeCompare(right.sessionId))[0];
-  if (!canonicalQuote || quotes.some((item) => item.fileSizeBytes !== canonicalQuote.fileSizeBytes)) {
-    throw new Error("同 Seed 报价的签名文件大小不一致，不能安全建立共享下载计划");
-  }
-  const totalBlocksBig = (BigInt(canonicalQuote.fileSizeBytes) + 262_143n) / 262_144n;
-  if (totalBlocksBig <= 0n || totalBlocksBig > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("BitFS 文件 Block 数量超出当前安全范围");
-  const totalBlocks = Number(totalBlocksBig);
-  const downloadPlan = createBitfsBuyerDownloadPlan({
-    ownerPublicKeyHex: owner,
-    seedHashHex: input.seedHashHex,
-    fileSizeBytes: canonicalQuote.fileSizeBytes,
-    recommendedFilename: canonicalQuote.recommendedFilename,
-    store: createWorkerModuleFileStore("msfile", "bitfs-journal"),
-  });
-  let plan = await downloadPlan.snapshot();
-  // 尚未准备 FundingTx 的失败池没有资金责任，可释放其预留 Block；其他失败仍保留占用。
-  for (const pool of plan.pools) {
-    const record = sameSeedSessions.find((item) => item.sessionId === pool.sessionId);
-    if (!pool.closed && record?.phase === "failed" && !hasFunding(record)) await downloadPlan.closePool(pool.sessionId);
-  }
-  plan = await downloadPlan.snapshot();
-  if (plan.stopRequested) {
-    if (!input.resumeCancelledPlan) throw new Error("整文件已取消；请先完成费用池回收，再由用户重新开始下载");
-    if (plan.pools.some((pool) => !pool.closed)) {
-      throw new Error("整文件取消仍在等待费用池关闭；确认所有池关闭后才能重新开始下载");
-    }
-    await downloadPlan.resumeAfterCancellation();
-    plan = await downloadPlan.snapshot();
-  }
-  if (plan.totalBlockCount !== null && plan.completedBlockCount === plan.totalBlockCount) {
-    throw new Error("当前 Seed 的所有唯一 Block 已付款；正在执行文件提交或关池恢复");
-  }
-  const existingPools = plan.pools.filter((pool) => !pool.closed);
-  const sellerSlots = Math.max(0, settings.maxConcurrentSellerSessions - existingPools.length);
-  const inFlight = existingPools.filter((pool) => pool.inFlightBlockHashHex !== undefined).length;
-  const blockCount = plan.totalBlockCount ?? totalBlocks;
-  const unassignedByPlan = Math.max(0, blockCount - plan.completedBlockCount - inFlight);
-  const alreadyBudgeted = existingPools.reduce((sum, pool) => {
-    const balance = BigInt(pool.blockBudgetSatoshis) - BigInt(pool.blockCommittedSatoshis);
-    const capacity = balance > 0n ? balance / BigInt(pool.fullBlockPriceSatoshis) : 0n;
-    const bounded = Number(capacity > BigInt(blockCount) ? BigInt(blockCount) : capacity);
-    return Math.min(blockCount, sum + bounded - (pool.inFlightBlockHashHex ? 1 : 0));
-  }, 0);
-  const newBlockSlots = Math.max(0, unassignedByPlan - Math.max(0, alreadyBudgeted));
-
-  const links = new Map<string, { webrtcSessionId: string; link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>> }>();
-  for (const [webrtcSessionId, link] of msfileBitfsWebRtcBuyerLinks) {
-    if (link.quoteSessionId && link.ownerPublicKeyHex.toLowerCase() === owner
-      && link.seedHashHex.toLowerCase() === input.seedHashHex.toLowerCase()
-      && link.ownerSessionEpoch === coordinatorState.sessionEpoch) {
-      links.set(link.quoteSessionId, { webrtcSessionId, link });
-    }
-  }
-  const selectedLink = links.get(input.sessionId);
-  if (!selectedLink) throw new Error("所选卖家 DataChannel 已关闭；请重新发布需求并连接新的报价");
-  const selectedRecord = sameSeedSessions.find((record) => record.sessionId === input.sessionId);
-  const selectedAlreadyStarted = selectedRecord?.evidence.includes("download-plan") === true;
-  if (selectedAlreadyStarted && (sellerSlots === 0 || newBlockSlots === 0)) {
-    return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
-  }
-  const availableQuotes = quotes.filter((item) => BigInt(item.fullBlockPriceSatoshis) <= BigInt(maximumBlockPrice)
-    && links.has(item.sessionId))
-    .sort((left, right) => compareMsfileBitfsBuyerQuotes(left, right, settings.sellerSelectionPriority))
-    .filter((item) => {
-      const saved = sameSeedSessions.find((record) => record.sessionId === item.sessionId);
-      return !saved?.evidence.includes("download-plan") && !saved?.evidence.includes("kind2-opening-request");
-    });
-  // 手动选中的报价必须纳入本批；其他名额沿用持久化计划的卖家优先规则。
-  const orderedQuotes = [
-    ...availableQuotes.filter((item) => item.sessionId === input.sessionId),
-    ...availableQuotes.filter((item) => item.sessionId !== input.sessionId),
-  ];
-  const batchCount = Math.min(sellerSlots, newBlockSlots, orderedQuotes.length);
-  if (batchCount <= 0) {
-    if (selectedRecord?.evidence.includes("download-plan")) return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
-    throw new Error("可用卖家池已达到并发上限，或文件 Block 预算已全部分配");
-  }
-  const batch = orderedQuotes.slice(0, batchCount);
-  if (!selectedAlreadyStarted && !batch.some((item) => item.sessionId === input.sessionId)) {
-    throw new Error("当前并发名额已被其他报价占用；请重新选择可用报价");
-  }
-  const appSettings = await p2pkhSettingRepository().readSetting();
-  const feeRate = BigInt(appSettings.feeRateSatoshisPerKb.medium);
-  if (feeRate <= 0n) throw new Error("BitFS 池内手续费率配置无效");
-  const feeReserve = feeRate * 2n;
-  let started = 0;
-  let blockSlotsRemaining = newBlockSlots;
-  let candidatesRemaining = batch.length;
-  const failures: string[] = [];
-  for (let index = 0; index < batch.length; index += 1) {
-    const candidate = batch[index]!;
-    const assignedCount = Math.floor(blockSlotsRemaining / candidatesRemaining)
-      + (blockSlotsRemaining % candidatesRemaining > 0 ? 1 : 0);
-    candidatesRemaining -= 1;
-    const target = links.get(candidate.sessionId);
-    if (!target) continue;
-    const saved = sameSeedSessions.find((record) => record.sessionId === candidate.sessionId);
-    if (saved?.evidence.includes("download-plan") || saved?.evidence.includes("kind2-opening-request")) continue;
-    if (assignedCount <= 0) continue;
-    const assignedBlockCount = BigInt(assignedCount);
-    const blockBudget = assignedBlockCount * BigInt(candidate.fullBlockPriceSatoshis);
-    // 允许每个候选池作为唯一 Seed 买家接替失败卖家；Seed 只会由计划认领一次。
-    const seedBudget = plan.seedCompleted ? 0n : BigInt(candidate.seedPriceSatoshis);
-    const contentBudget = blockBudget + seedBudget;
-    const openingAmount = contentBudget + feeReserve;
-    if (openingAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
-      failures.push(`${candidate.sessionId}: 开池金额超过安全上限`);
-      continue;
-    }
-    await target.link.quoteAccepted;
-    const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link);
-    const savedSession = await sessions.get(candidate.sessionId);
-    if (!savedSession || savedSession.role !== "buyer" || savedSession.ownerPublicKeyHex !== owner
-      || savedSession.seedHashHex !== input.seedHashHex.toLowerCase()) {
-      failures.push(`${candidate.sessionId}: 买方报价会话身份不匹配`);
-      continue;
-    }
-    const limitEvidence = new TextEncoder().encode(maximumBlockPrice);
-    const priorLimit = await sessions.getEvidence(candidate.sessionId, "file-price-limit");
-    if (priorLimit && bytesToHex(priorLimit) !== bytesToHex(limitEvidence)) {
-      failures.push(`${candidate.sessionId}: 已固定不同的本文件最高价`);
-      continue;
-    }
-    if (!priorLimit) await sessions.putEvidence(candidate.sessionId, savedSession.revision, "file-price-limit", limitEvidence, Date.now());
-    try {
-      const progress = await protocol.startPurchase({
-        sessionId: candidate.sessionId,
-        stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link),
-        openingAmountSatoshis: openingAmount.toString(10),
-        contentBudgetSatoshis: contentBudget.toString(10),
-        seedBudgetSatoshis: seedBudget.toString(10),
-        seedBudgetReserved: !plan.seedCompleted,
-        blockBudgetSatoshis: blockBudget.toString(10),
-        recentBytesPerSecond: candidate.recentBytesPerSecond ?? null,
-      });
-      started += 1;
-      blockSlotsRemaining -= assignedCount;
-      if (candidate.sessionId === input.sessionId || !entry.purchase) {
-        entry.purchase = {
-          sessionId: progress.sessionId,
-          phase: progress.phase,
-          openingAmountSatoshis: progress.openingAmountSatoshis,
-          currentMaxFullBlockPriceSatoshis: maximumBlockPrice,
-          verifiedBlockCount: progress.verifiedBlockCount,
-          totalBlockCount: progress.totalBlockCount,
-          message: progress.message,
-        };
-      }
-     } catch (cause) {
-       const message = cause instanceof Error ? cause.message : "BitFS 卖家池开池准备失败";
-       await writeBitfsE2eDiagnostic("buyer-purchase-candidate-error.json", {
-         seedHashHex: input.seedHashHex,
-         sessionId: candidate.sessionId,
-         message,
-         stack: cause instanceof Error ? cause.stack : undefined
-       });
-       failures.push(`${candidate.sessionId}: ${message.slice(0, 160)}`);
-      const latest = await sessions.get(candidate.sessionId);
-      if (latest && !hasFunding(latest)) {
-        await downloadPlan.closePool(candidate.sessionId).catch(() => undefined);
-        const afterClose = await downloadPlan.snapshot();
-        const pool = afterClose.pools.find((item) => item.sessionId === candidate.sessionId);
-        if (pool && !pool.closed) blockSlotsRemaining -= assignedCount;
-      } else if (latest) {
-        blockSlotsRemaining -= assignedCount;
-      }
-      if (candidate.sessionId === input.sessionId && !entry.purchase) {
-        entry.purchase = {
-          sessionId: candidate.sessionId,
-          phase: "failed",
-          openingAmountSatoshis: openingAmount.toString(10),
-          currentMaxFullBlockPriceSatoshis: maximumBlockPrice,
-          verifiedBlockCount: 0,
-          totalBlockCount: totalBlocks,
-          message: message.slice(0, 240),
-        };
-      }
-    }
-  }
-  if (started === 0) throw new Error(failures[0] ?? "没有卖家费用池可以启动");
-  return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
-}
-
-/** 按持久化下载计划采用相同的价格/速度优先规则排列已验签报价。 */
-function compareMsfileBitfsBuyerQuotes(
-  left: import("@keymaster/contracts").MsFileBitfsQuoteView,
-  right: import("@keymaster/contracts").MsFileBitfsQuoteView,
-  priority: "price" | "recent-speed",
-): number {
-  const leftSpeed = left.recentBytesPerSecond == null ? undefined : BigInt(left.recentBytesPerSecond);
-  const rightSpeed = right.recentBytesPerSecond == null ? undefined : BigInt(right.recentBytesPerSecond);
-  if (priority === "recent-speed") {
-    if (leftSpeed !== undefined && rightSpeed === undefined) return -1;
-    if (leftSpeed === undefined && rightSpeed !== undefined) return 1;
-    if (leftSpeed !== undefined && rightSpeed !== undefined && leftSpeed !== rightSpeed) return leftSpeed > rightSpeed ? -1 : 1;
-  }
-  const leftPrice = BigInt(left.fullBlockPriceSatoshis);
-  const rightPrice = BigInt(right.fullBlockPriceSatoshis);
-  if (leftPrice !== rightPrice) return leftPrice < rightPrice ? -1 : 1;
-  if (leftSpeed !== undefined && rightSpeed !== undefined && leftSpeed !== rightSpeed) return leftSpeed > rightSpeed ? -1 : 1;
-  return left.sessionId.localeCompare(right.sessionId);
-}
-
-/** 已付款池关闭并释放并发名额后，继续加入符合本文件价格上限的已连接卖家。 */
-async function maybeStartMsfileBitfsNextSeller(input: {
-  ownerPublicKeyHex: string;
-  seedHashHex: string;
-  task: BitfsBuyerTask;
-}): Promise<void> {
-  const owner = input.ownerPublicKeyHex.toLowerCase();
-  const seed = input.seedHashHex.toLowerCase();
-  const entry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, seed));
-  const maximum = entry?.purchase?.currentMaxFullBlockPriceSatoshis;
-  if (!entry || entry.ownerSessionEpoch !== coordinatorState.sessionEpoch || !maximum || entry.purchase?.phase === "completed") return;
-  const plan = await openMsfileBitfsBuyerDownloadPlan(owner, seed).catch(() => undefined);
-  if (plan && (await plan.snapshot()).stopRequested) return;
-  const runtime = await ensureMsfileRuntime();
-  const settings = runtime.getBitfsBuyerSettings
-    ? await runtime.getBitfsBuyerSettings()
-    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
-  const quotes = await addMsfileBitfsRecentSellerSpeeds(owner, seed, await input.task.listDiscoveredQuotes());
-  const sessions = await createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal")).list();
-  const linkedSessionIds = new Set([...msfileBitfsWebRtcBuyerLinks.values()]
-    .filter((candidate) => candidate.ownerPublicKeyHex.toLowerCase() === owner
-      && candidate.seedHashHex.toLowerCase() === seed
-      && candidate.ownerSessionEpoch === coordinatorState.sessionEpoch
-      && candidate.quoteSessionId)
-    .map((candidate) => candidate.quoteSessionId!));
-  const next = quotes.filter((quote) => BigInt(quote.fullBlockPriceSatoshis) <= BigInt(maximum)
-    && linkedSessionIds.has(quote.sessionId)
-    && !sessions.some((record) => record.role === "buyer" && record.sessionId === quote.sessionId
-      && (record.evidence.includes("download-plan") || record.evidence.includes("kind2-opening-request"))))
-    .sort((left, right) => compareMsfileBitfsBuyerQuotes(left, right, settings.sellerSelectionPriority))[0];
-  if (!next) return;
-  await startMsfileBitfsBuyerPurchase({ seedHashHex: seed, sessionId: next.sessionId, maxFullBlockPriceSatoshis: maximum })
-    .catch(() => undefined);
-}
-
-/** 有效报价短暂收敛后，启动当前可用且符合价格上限的卖家批次。 */
-async function maybeAutoStartMsfileBitfsBuyerPurchase(input: {
-  ownerPublicKeyHex: string;
-  seedHashHex: string;
-  task: BitfsBuyerTask;
-}): Promise<void> {
-  const owner = input.ownerPublicKeyHex.toLowerCase();
-  const seed = input.seedHashHex.toLowerCase();
-  const runtime = await ensureMsfileRuntime();
-  const settings = runtime.getBitfsBuyerSettings
-    ? await runtime.getBitfsBuyerSettings()
-    : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
-  if (!settings.buyerAutoPurchaseEnabled) return;
-
-  // 让同一轮已验签报价短暂收敛，再按上限和并发设置启动一个批次。
-  await new Promise<void>((resolve) => setTimeout(resolve, 750));
-  if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) return;
-  const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, seed));
-  if (!taskEntry || taskEntry.ownerSessionEpoch !== coordinatorState.sessionEpoch) return;
-  if (taskEntry.purchase?.phase === "completed") return;
-  const planObject = await createWorkerModuleFileStore("msfile", "bitfs-journal").get(`download-plans/${seed}.json`);
-  if (planObject) {
-    const downloadPlan = await openMsfileBitfsBuyerDownloadPlan(owner, seed);
-    if ((await downloadPlan.snapshot()).stopRequested) return;
-  }
-
-  const priceLimit = BigInt(settings.maxFullBlockPriceSatoshis);
-  const candidates = (await addMsfileBitfsRecentSellerSpeeds(owner, seed, await input.task.listDiscoveredQuotes()))
-    .filter((quote) => BigInt(quote.fullBlockPriceSatoshis) <= priceLimit)
-    .sort((left, right) => {
-      const leftBlock = BigInt(left.fullBlockPriceSatoshis);
-      const rightBlock = BigInt(right.fullBlockPriceSatoshis);
-      if (settings.sellerSelectionPriority === "recent-speed") {
-        const leftSpeed = left.recentBytesPerSecond === null || left.recentBytesPerSecond === undefined
-          ? undefined
-          : BigInt(left.recentBytesPerSecond);
-        const rightSpeed = right.recentBytesPerSecond === null || right.recentBytesPerSecond === undefined
-          ? undefined
-          : BigInt(right.recentBytesPerSecond);
-        if (leftSpeed !== undefined && rightSpeed === undefined) return -1;
-        if (leftSpeed === undefined && rightSpeed !== undefined) return 1;
-        if (leftSpeed !== undefined && rightSpeed !== undefined && leftSpeed !== rightSpeed) return leftSpeed > rightSpeed ? -1 : 1;
-      }
-      if (leftBlock !== rightBlock) return leftBlock < rightBlock ? -1 : 1;
-      const leftSeed = BigInt(left.seedPriceSatoshis);
-      const rightSeed = BigInt(right.seedPriceSatoshis);
-      return leftSeed === rightSeed ? left.sessionId.localeCompare(right.sessionId) : leftSeed < rightSeed ? -1 : 1;
-    });
-  const selected = candidates[0];
-  if (!selected) return;
-  try {
-    await startMsfileBitfsBuyerPurchase({ seedHashHex: seed, sessionId: selected.sessionId, maxFullBlockPriceSatoshis: settings.maxFullBlockPriceSatoshis });
-  } catch (error) {
-    console.warn("[msfile] BitFS automatic purchase was not started", error instanceof Error ? error.message : String(error));
-  }
-}
-
-/** 整文件取消先立持久停止栅栏，再逐池复用原连接协商 Kind 12/13 回收。 */
-async function cancelMsfileBitfsBuyerPurchase(input: { seedHashHex: string; sessionId: string }): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再取消 BitFS 购买");
-  if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
-  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
-  const { task, entry } = await ensureMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex });
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const selected = await sessions.get(input.sessionId);
-  if (!selected || selected.role !== "buyer" || selected.ownerPublicKeyHex !== owner
-    || selected.seedHashHex !== input.seedHashHex.toLowerCase()) {
-    throw new Error("找不到当前 Key 和 Seed 对应的买方购买会话");
-  }
-  if (!selected.evidence.includes("download-plan")) {
-    return cancelOneMsfileBitfsBuyerPurchase({ ...input, ownerPublicKeyHex: owner, task, entry });
-  }
-
-  const plan = await openMsfileBitfsBuyerDownloadPlan(owner, input.seedHashHex);
-  await plan.requestStop();
-  const before = await plan.snapshot();
-  const failures: string[] = [];
-  for (const pool of before.pools.filter((item) => !item.closed)) {
-    try {
-      await cancelOneMsfileBitfsBuyerPurchase({
-        seedHashHex: input.seedHashHex,
-        sessionId: pool.sessionId,
-        ownerPublicKeyHex: owner,
-        task,
-        entry,
-      });
-    } catch (error) {
-      failures.push(`${pool.sessionId}: ${error instanceof Error ? error.message : "费用池取消失败"}`);
-    }
-  }
-  const after = await plan.snapshot();
-  const pending = after.pools.filter((item) => !item.closed);
-  if (pending.length > 0) {
-    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }) ?? entry.purchase;
-    if (entry.purchase) {
-      const detail = failures[0] ? ` 首个未完成原因：${failures[0].slice(0, 140)}` : "";
-      entry.purchase = {
-        ...entry.purchase,
-        message: `整文件已暂停新内容请求；${pending.length} 个费用池仍待卖家响应或链上确认。${detail}`,
-      };
-    }
-  }
-  return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
-}
-
-/** 单个费用池取消：没有连接时只释放未广播的开池预留；已开池必须恢复连接回收。 */
-async function cancelOneMsfileBitfsBuyerPurchase(input: {
-  seedHashHex: string;
-  sessionId: string;
-  ownerPublicKeyHex: string;
-  task: BitfsBuyerTask;
-  entry: NonNullable<ReturnType<typeof msfileBitfsBuyerTasks.get>>;
-}): Promise<import("@keymaster/contracts").MsFileBitfsDemandSnapshot> {
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (!owner || coordinatorState.vaultStatus !== "unlocked") throw new Error("请先解锁当前 Key 再取消 BitFS 购买");
-  if (owner !== input.ownerPublicKeyHex) throw new Error("BitFS 当前 Key 已切换，不能继续取消原下载计划");
-  if (!isValidMsFileHashHex(input.seedHashHex)) throw new TypeError("BitFS Seed Hash 必须是 64 位小写十六进制字符");
-  if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(input.sessionId)) throw new TypeError("BitFS 报价会话编号无效");
-  const { task, entry } = input;
-  const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-  const saved = await sessions.get(input.sessionId);
-  if (!saved || saved.role !== "buyer" || saved.ownerPublicKeyHex !== owner || saved.seedHashHex !== input.seedHashHex.toLowerCase()) {
-    throw new Error("找不到当前 Key 和 Seed 对应的买方购买会话");
-  }
-  if (saved.evidence.includes("kind13-close-response")) {
-    await task.resumePoolRecovery(input.sessionId);
-    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task });
-    return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
-  }
-  const canCancelBeforeFunding = ["quote-selected", "opening-presign", "funding-prepared", "cancel-opening"].includes(saved.phase)
-    && !saved.evidence.includes("kind3-opening-response")
-    && !saved.evidence.includes("kind4-funding-delivery");
-  const linkEntry = [...msfileBitfsWebRtcBuyerLinks.entries()].find(([, link]) =>
-    link.quoteSessionId === input.sessionId
-      && link.ownerSessionEpoch === coordinatorState.sessionEpoch
-      && link.ownerPublicKeyHex.toLowerCase() === owner
-      && link.seedHashHex === input.seedHashHex.toLowerCase());
-  if (!linkEntry) {
-    if (canCancelBeforeFunding) {
-      const openingMayHaveReservedFunding = saved.evidence.includes("opening-configuration")
-        || saved.evidence.includes("funding-transaction");
-      if (saved.phase === "quote-selected" && !openingMayHaveReservedFunding) {
-        await sessions.update(saved.sessionId, saved.revision, { phase: "cancelled" }, Date.now());
-      } else {
-        if (saved.phase !== "cancel-opening") await sessions.update(saved.sessionId, saved.revision, { phase: "cancel-opening" }, Date.now());
-        await task.cancelUnfundedOpening(saved.sessionId);
-      }
-      if (saved.evidence.includes("download-plan")) {
-        await markMsfileBitfsDownloadPlanPoolClosed({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, sessionId: saved.sessionId });
-        void maybeStartMsfileBitfsNextSeller({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }).catch(() => undefined);
-      }
-      entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }) ?? {
-        sessionId: saved.sessionId,
-        phase: "cancelled",
-        openingAmountSatoshis: null,
-        verifiedBlockCount: 0,
-        totalBlockCount: null,
-        message: "购买已取消；开池资金未广播。",
-      };
-      return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
-    }
-    entry.purchase = await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: input.seedHashHex, task }) ?? entry.purchase;
-    throw new Error("卖方 DataChannel 已关闭；费用池仍受保护，需恢复卖方连接后继续关池回收");
-  }
-  const [webrtcSessionId, link] = linkEntry;
-  await link.quoteAccepted;
-  const protocol = await ensureMsfileBitfsBuyerProtocol(webrtcSessionId, link);
-  await protocol.cancelPurchase({ sessionId: input.sessionId, stream: createMsfileBitfsBuyerStream(webrtcSessionId, link) });
-  return await msfileBitfsBuyerDemandSnapshot(input.seedHashHex, entry, task);
-}
-
-function createMsfileBitfsBuyerStream(
-  webrtcSessionId: string,
-  link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>,
-) {
-  return {
-    async send(frame: Uint8Array) {
-      if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) throw new Error("BitFS 买方 DataChannel 已关闭");
-      try {
-        await requestWindowP2pExecutorOperation({
-          type: "lane",
-          laneId: "msfile",
-          operation: { type: "bitfs-seller-send", sessionId: link.transportSessionId, frame },
-        });
-      } catch (error) {
-        await writeBitfsE2eDiagnostic("buyer-stream-send-error.json", {
-          webrtcSessionId,
-          transportSessionId: link.transportSessionId,
-          frameBytes: frame.byteLength,
-          message: error instanceof Error ? error.message : String(error),
-          name: error instanceof Error ? error.name : typeof error,
-        });
-        throw error;
-      }
-    },
-  };
-}
-
-/** 买方传输或协议失败后关闭该会话并保留可见恢复状态。 */
-function msfileBitfsBuyerWebRtcFailure(link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>, webrtcSessionId: string, transportSessionId: string, reason: string): void {
-  void writeBitfsE2eDiagnostic("buyer-webrtc-failure.json", {
-    requestMessageId: link.requestMessageId,
-    webrtcSessionId,
-    transportSessionId,
-    reason
-  });
-  if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) return;
-  msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
-  msfileBitfsBuyerOfferCounts.set(link.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(link.requestMessageId) ?? 1) - 1));
-  const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(link.ownerPublicKeyHex, link.seedHashHex));
-  if (taskEntry?.purchase && taskEntry.purchase.phase !== "completed" && taskEntry.purchase.phase !== "cancelled") {
-    const cancelling = taskEntry.purchase.phase === "cancelling-pool" || taskEntry.purchase.phase === "cancel-unknown";
-    taskEntry.purchase = {
-      ...taskEntry.purchase,
-      phase: cancelling ? "cancel-unknown" : reason === "buyer_protocol_error" ? "failed" : "connection-closed",
-      message: cancelling
-        ? "卖方 DataChannel 已关闭；取消关池结果待核对，费用池仍受保护。"
-        : reason === "buyer_protocol_error"
-        ? "BitFS 买方协议处理失败；本地会话证据已保留。"
-        : "BitFS DataChannel 已关闭；本地会话证据已保留，可在购买任务页重新连接卖家续接。",
-    };
-    taskEntry.purchaseHydrated = false;
-  }
-  void requestWindowP2pExecutorOperation({
-    type: "lane",
-    laneId: "msfile",
-    operation: { type: "bitfs-seller-close", sessionId: transportSessionId, reason },
-  }).catch(() => undefined);
-}
-
-/** 比较 exact BitFS 报文字节；不把视图对象或哈希摘要当作会话身份。 */
-function equalMsfileBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
-}
-
-function stopMsfileSellerRuntime(): void {
-  msfileSellerSessionEpoch += 1;
-  msfileSellerIndexController?.abort();
-  msfileSellerIndexController = undefined;
-  msfileSellerRuntime?.clear();
-  msfileSellerRuntime = undefined;
-  const manager = msfileSellerSessionManager;
-  msfileSellerSessionManager = undefined;
-  msfileSellerProtocolPort = undefined;
-  msfileBitfsTransactionJournal = undefined;
-  msfileBitfsBroadcaster = undefined;
-  manager?.clear();
-  msfileBitfsWebRtcSellerLinks.clear();
-  msfilePendingSellerHashRequests.clear();
-  msfileSellerIndex?.clear();
-  msfileSellerIndex = undefined;
-  offMsfileSellerDependencyWatch();
-}
-
-/**
- * 卖方「等待依赖」的进程内订阅。
- *
- * 依赖就绪与否只由唯一判定实现回答，变化靠进程内订阅推过来：没有轮询、没有
- * 等待休眠、没有超时猜测。双向都处理——依赖掉线如实报不可用，依赖回来自动
- * 重跑装配，用户不需要手动再切一次开关。重判是幂等的：只有依赖可用性真的翻转
- * 才动作，其它单元的抖动只做一次同态重判。
- */
-let msfileSellerDependencyUnsubscribe: (() => void) | undefined;
-/** 上一次观察到的依赖可用性；`undefined` 表示当前没有在观察。 */
-let msfileSellerDependencyReady: boolean | undefined;
-/** 「依赖就绪后自动重跑」的在途装配；只用于测试 await 与诊断，不参与判定。 */
-let msfileSellerDependencyResume: Promise<void> | undefined;
-
-function offMsfileSellerDependencyWatch(): void {
-  const off = msfileSellerDependencyUnsubscribe;
-  msfileSellerDependencyUnsubscribe = undefined;
-  msfileSellerDependencyReady = undefined;
-  off?.();
-}
-
-/** 卖方等待依赖时订阅的依赖单元；与目录声明保持一致，不在调用点另写副本。 */
-const MSFILE_SELLER_DEPENDENCY_UNIT_ID = "sat-subscription.coordinator-worker";
-
-/**
- * 订阅依赖可用性。
- *
- * - 依赖不可用：如实报「等待依赖」，**不拆解**已建好的部分、**不要求用户重切**。
- * - 依赖可用：重跑一次装配（幂等），把状态推进到就绪。
- */
-function watchMsfileSellerDependency(
-  service: MsFileServiceImpl,
-  ownerPublicKeyHex: string,
-): void {
-  offMsfileSellerDependencyWatch();
-  const serviceRef = service;
-  msfileSellerDependencyReady = coordinatorUnitAvailability(MSFILE_SELLER_DEPENDENCY_UNIT_ID).state === "ready";
-  msfileSellerDependencyUnsubscribe = coordinatorWorkerUnitRegistry.onChange(() => {
-    // 订阅已被同一次变化里的清理动作取消（开关关闭 / 锁定）时直接退出。
-    if (msfileSellerDependencyUnsubscribe === undefined) return;
-    if (msfileRuntime !== serviceRef) return;
-    if (coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) return;
-    const settings = serviceRef.describeState().sellerSettings;
-    if (!settings.sellerEnabled) return;
-    const ready = coordinatorUnitAvailability(MSFILE_SELLER_DEPENDENCY_UNIT_ID).state === "ready";
-    if (ready === msfileSellerDependencyReady) return;
-    msfileSellerDependencyReady = ready;
-    if (!ready) {
-      serviceRef.setSellerRuntimeStatus("waiting-dependency");
-      return;
-    }
-    offMsfileSellerDependencyWatch();
-    msfileSellerDependencyResume = configureMsfileSellerRuntime(serviceRef, ownerPublicKeyHex, settings)
-      .then((status) => { serviceRef.setSellerRuntimeStatus(status); })
-      .catch((error) => console.warn("[msfile] seller runtime resume failed", error instanceof Error ? error.message : String(error)));
-  });
-}
-
-/** 返回绑定当前 owner 的唯一 BitFS 专款账本；不在锁定状态打开明文存储。 */
-function currentMsfileBitfsFundingLedger(): BitfsFundingLedger {
-  const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-  if (coordinatorState.vaultStatus !== "unlocked" || !owner) throw new Error("Vault 已锁定，BitFS 专款视图不可用");
-  if (!msfileBitfsFundingLedger || msfileBitfsFundingLedgerOwnerHex !== owner) {
-    msfileBitfsFundingLedger = createBitfsFundingLedger(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-    msfileBitfsFundingLedgerOwnerHex = owner;
-  }
-  return msfileBitfsFundingLedger;
-}
-
-/** 普通 P2PKH 只能看见未被 BitFS 专款账本保护的输入；读取失败时拒绝返回快照。 */
-async function filterP2pkhSnapshotByBitfsFunds(
-  ownerPublicKeyHex: string,
-  network: "main" | "test",
-  snapshot: P2pkhUtxoSnapshotResult,
-): Promise<P2pkhUtxoSnapshotResult> {
-  if (coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
-    throw new Error("P2PKH UTXO snapshot owner changed while applying BitFS funding protection");
-  }
-  if (!snapshot.available) return snapshot;
-  const protectedOutpoints = await currentMsfileBitfsFundingLedger().listProtectedOutpoints({ ownerPublicKeyHex, network });
-  if (coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
-    throw new Error("P2PKH UTXO snapshot owner changed while reading BitFS funding protection");
-  }
-  if (protectedOutpoints.length === 0) return snapshot;
-  const protectedKeys = new Set(protectedOutpoints.map((item) => `${item.txid}:${item.vout}`));
-  return { ...snapshot, items: snapshot.items.filter((item) => !protectedKeys.has(`${item.txid}:${item.vout}`)) };
-}
-
-/** 新鲜 P2PKH 快照确认某笔已观察交易的原输入不再可花后，才解除旧输入保护。 */
-async function reconcileMsfileBitfsFundingInputs(
-  ownerPublicKeyHex: string,
-  network: "main" | "test",
-  snapshot: P2pkhUtxoSnapshotResult,
-): Promise<void> {
-  if (!snapshot.available || snapshot.state !== "fresh") return;
-  if (coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) return;
-  await currentMsfileBitfsFundingLedger().reconcileObservedTransactionInputs({
-    ownerPublicKeyHex,
-    network,
-    unspentOutpoints: snapshot.items
-      .filter((item) => !item.isSpentInMempoolTx)
-      .map((item) => `${item.txid}:${item.vout}`),
-    nowMs: Date.now(),
-  });
-}
-
-/** 普通 P2PKH 当前 Key 找零输出的网络尘额门槛，单位聪。 */
-const BITFS_FUNDING_MIN_OUTPUT_SATOSHIS = 546;
-
-/**
- * 构造只供 BitFS 专款流程使用的 P2PKH 受控签名适配器。
- *
- * 中文说明：Worker 可以请求 Window lane 预签并释放未广播交易；`submit`
- * 永远报错，BitFS exact outbox + broadcaster 是唯一允许的派发路径。
- */
-function createMsfileBitfsProtocolSpend(): ProtocolSpendService {
-  return {
-    async prepare(input) {
-      return await requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-funding-prepare", input },
-      }) as ProtocolSpendPreview;
-    },
-    async submit() {
-      throw new Error("BitFS 专款交易只能由持久化后的 BitFS outbox 广播");
-    },
-    async releasePrepared(preview) {
-      await requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-funding-release", preview },
-      });
-    },
-  };
-}
-
-/** 按持久化提交编号释放明确未派发的 P2PKH 预签 claim。 */
-function releaseMsfileBitfsPreparedSubmission(input: {
-  /** 当前 Key。 */
-  ownerPublicKeyHex: string;
-  /** 交易所属网络。 */
-  network: "main" | "test";
-  /** canonical txid。 */
-  txid: string;
-  /** P2PKH 持久化提交编号。 */
-  submissionId: string;
-}): Promise<void> {
-  return requestWindowP2pExecutorOperation({
-    type: "lane",
-    laneId: "msfile",
-    operation: { type: "bitfs-funding-release-submission", ...input },
-  }).then(() => undefined);
-}
-
-async function waitForMsfileFundingSnapshot(input: {
-  ownerPublicKeyHex: string;
-  seedHashHex: string;
-  network: "main" | "test";
-  ledger: BitfsFundingLedger;
-}): Promise<P2pkhUtxoSnapshotResult> {
-  const resources = await ensureWorkerP2pkhResources(input.ownerPublicKeyHex, input.network === "test");
-  const resource = resources.find((item) => item.network === input.network);
-  if (!resource || !p2pkhUtxoSnapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
-  const account = await input.ledger.getAccount({ ownerPublicKeyHex: input.ownerPublicKeyHex, seedHashHex: input.seedHashHex, network: input.network, nowMs: Date.now() });
-  const expected = account.utxos.filter((utxo) => utxo.state === "available").map((utxo) => `${utxo.txid}:${utxo.vout}`);
-  const deadline = Date.now() + 30_000;
-  let latest: P2pkhUtxoSnapshotResult = { available: false, state: "unavailable", items: [] };
-  while (Date.now() < deadline) {
-    await p2pkhUtxoSnapshots.reconcileConsumed(resource, { thresholdMs: 0 });
-    latest = await p2pkhUtxoSnapshots.refresh(resource);
-    await reconcileMsfileBitfsFundingInputs(input.ownerPublicKeyHex, input.network, latest);
-    const available = new Set(latest.items.filter((item) => !item.isSpentInMempoolTx).map((item) => `${item.txid}:${item.vout}`));
-    if (latest.available && latest.state === "fresh" && expected.every((key) => available.has(key))) return latest;
-    await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-  }
-  throw new Error(`BitFS FundingTx 新鲜快照未包含专款输出：${latest.items.map((item) => `${item.txid}:${item.vout}`).join(",")}`);
-}
-
-/** 为指定 Seed 创建专款拆分准备端口；本函数不提交交易。 */
-function createMsfileBitfsFundingSplitDeps(input: {
-  /** 当前已解锁 Key 的压缩公钥。 */
-  ownerPublicKeyHex: string;
-  /** 采购文件的 Seed Hash。 */
-  seedHashHex: string;
-  /** 专款使用的公链网络。 */
-  network: "main" | "test";
-  /** 当前买方任务 generation。 */
-  generation: number;
-  /** 当前 Key + Seed + 网络的账本。 */
-  ledger: BitfsFundingLedger;
-  /** BitFS exact 交易 outbox。 */
-  transactions: BitfsTransactionJournal;
-}): BitfsFundingSplitPrepareDeps {
-  const owner = input.ownerPublicKeyHex.toLowerCase();
-  const sessionEpoch = coordinatorState.sessionEpoch;
-  let snapshotResource: P2pkhUtxoSnapshotResource | undefined;
-  const assertContext = (context: { ownerPublicKeyHex: string; network: "main" | "test"; generation: number }): void => {
-    if (context.ownerPublicKeyHex.toLowerCase() !== owner
-      || context.network !== input.network
-      || context.generation !== input.generation
-      || coordinatorState.sessionEpoch !== sessionEpoch
-      || coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
-      throw new Error("BitFS 专款任务的 Key、网络或会话世代已变化");
-    }
-  };
-  return {
-    protocolSpend: createMsfileBitfsProtocolSpend(),
-    async getAvailableSnapshot() {
-      assertContext({ ownerPublicKeyHex: owner, network: input.network, generation: input.generation });
-      const settings = await p2pkhSettingRepository().readSetting();
-      if (input.network === "test" && !settings.includeTestnet) {
-        throw new Error("请先在 P2PKH 设置中启用测试网余额");
-      }
-      const resources = await ensureWorkerP2pkhResources(owner, settings.includeTestnet);
-      snapshotResource = resources.find((resource) => resource.network === input.network);
-      if (!snapshotResource || !p2pkhUtxoSnapshots) {
-        return { available: false, state: "unavailable", items: [] };
-      }
-      await p2pkhUtxoSnapshots.reconcileConsumed(snapshotResource);
-      const fresh = await p2pkhUtxoSnapshots.refresh(snapshotResource);
-      await reconcileMsfileBitfsFundingInputs(owner, input.network, fresh);
-      return filterP2pkhSnapshotByBitfsFunds(owner, input.network, fresh);
-    },
-    async resolveOwnerAddress() {
-      assertContext({ ownerPublicKeyHex: owner, network: input.network, generation: input.generation });
-      const address = deriveP2pkhAddress(owner, input.network);
-      return { address, scriptHex: p2pkhAddressToScriptHex(address, input.network) };
-    },
-    reserveP2pkhInputs({ preview, inputOutpoints }) {
-      assertContext({ ownerPublicKeyHex: owner, network: input.network, generation: input.generation });
-      const resource = snapshotResource;
-      const binding = preview.utxoBinding;
-      if (!resource || !p2pkhUtxoSnapshots || !binding) throw new Error("BitFS 专款拆分缺少可消费的 P2PKH 快照绑定");
-      const consumed = p2pkhUtxoSnapshots.consume(resource, {
-        binding,
-        inputOutpointKeys: inputOutpoints,
-        txid: preview.txid,
-      });
-      if (consumed.status !== "consumed") throw new Error(`BitFS 专款输入占用被拒绝：${consumed.status === "rejected" ? consumed.reason : "snapshot-missing"}`);
-      return { rollback: () => { p2pkhUtxoSnapshots?.rollbackConsume(resource, binding); } };
-    },
-    parseTransaction(rawTransactionHex, expectedTxid): BitfsFundingTransactionView {
-      const parsed = parseP2pkhTransaction(rawTransactionHex, expectedTxid);
-      return {
-        canonicalTxid: parsed.canonicalTxid,
-        inputs: parsed.inputs.map((item) => item.outpointKey),
-        outputs: parsed.outputs.map((item) => ({ vout: item.vout, valueSatoshis: item.value, scriptHex: item.scriptHex })),
-      };
-    },
-    transactions: input.transactions,
-    ledger: input.ledger,
-    assertCurrentContext: assertContext,
-    async releasePrepared(preview) {
-      await createMsfileBitfsProtocolSpend().releasePrepared?.(preview);
-    },
-    nowMs: () => Date.now(),
-  };
-}
-
-/**
- * 为买方任务准备当前 Key 的普通余额拆分。
- *
- * 中文说明：拆分原文先受账本与 outbox 保护，返回后仍须由专款恢复/广播流程
- * 按 txid 对账；这里绝不直接广播。
- */
-export async function prepareMsfileBitfsFundingSplit(input: {
-  /** 当前已解锁 Key 的压缩公钥。 */
-  ownerPublicKeyHex: string;
-  /** 采购文件的 Seed Hash。 */
-  seedHashHex: string;
-  /** 专款使用的公链网络。 */
-  network: "main" | "test";
-  /** 当前买方任务 generation。 */
-  generation: number;
-  /** 下一段预计采购金额，十进制聪字符串。 */
-  requiredSatoshis: string;
-}): Promise<PreparedBitfsFundingSplit> {
-  const owner = input.ownerPublicKeyHex.trim().toLowerCase();
-  if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
-    throw new Error("BitFS 专款拆分只允许当前已解锁 Key");
-  }
-  const ledger = currentMsfileBitfsFundingLedger();
-  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
-  const transactions = createBitfsTransactionJournal(store);
-  const settings = await p2pkhSettingRepository().readSetting();
-  return prepareBitfsFundingSplit({
-    ...input,
-    ownerPublicKeyHex: owner,
-    feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb.medium,
-    maxFeeSatoshis: bitfsFundingMaxFeeSatoshis(),
-    minimumOutputSatoshis: String(BITFS_FUNDING_MIN_OUTPUT_SATOSHIS),
-  }, createMsfileBitfsFundingSplitDeps({ ...input, ownerPublicKeyHex: owner, ledger, transactions }));
-}
-
-/** 针对当前 Seed 恢复拆分交易，只核对原 txid 与 exact outbox，不重签或广播。 */
-export async function recoverMsfileBitfsFundingSplit(input: {
-  /** 当前已解锁 Key 的压缩公钥。 */
-  ownerPublicKeyHex: string;
-  /** 采购文件的 Seed Hash。 */
-  seedHashHex: string;
-  /** 专款所属的公链网络。 */
-  network: "main" | "test";
-}): Promise<void> {
-  const owner = input.ownerPublicKeyHex.trim().toLowerCase();
-  if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
-    throw new Error("BitFS 专款恢复只允许当前已解锁 Key");
-  }
-  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
-  await recoverBitfsFundingSplits(input, {
-    ledger: currentMsfileBitfsFundingLedger(),
-    transactions: createBitfsTransactionJournal(store),
-    releasePreparedSubmission: releaseMsfileBitfsPreparedSubmission,
-    parseTransaction(rawTransactionHex, expectedTxid): BitfsFundingTransactionView {
-      const parsed = parseP2pkhTransaction(rawTransactionHex, expectedTxid);
-      return {
-        canonicalTxid: parsed.canonicalTxid,
-        inputs: parsed.inputs.map((item) => item.outpointKey),
-        outputs: parsed.outputs.map((item) => ({ vout: item.vout, valueSatoshis: item.value, scriptHex: item.scriptHex })),
-      };
-    },
-    nowMs: () => Date.now(),
-  });
-}
-
-/** 广播或只按 txid 对账一笔已持久化的专款拆分交易。 */
-async function settleMsfileBitfsFundingSplit(input: {
-  /** 当前已解锁 Key 的压缩公钥。 */
-  ownerPublicKeyHex: string;
-  /** 本次采购文件的 Seed Hash。 */
-  seedHashHex: string;
-  /** 专款所属公链网络。 */
-  network: "main" | "test";
-  /** 已持久化拆分交易的 canonical txid。 */
-  txid: string;
-  /** 当前 Key + Seed 的专款账本。 */
-  ledger: BitfsFundingLedger;
-  /** 专款交易 exact outbox。 */
-  transactions: BitfsTransactionJournal;
-  /** Worker 唯一交易广播器。 */
-  broadcaster: BitfsTransactionBroadcaster;
-  /** 明确未派发时释放 P2PKH 的持久预签 claim。 */
-  releasePreparedSubmission(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; submissionId: string }): Promise<void>;
-  /** 当前 Worker generation 检查。 */
-  assertCurrentContext(): void;
-}): Promise<import("@keymaster/plugin-msfile/coordinator").BitfsBroadcastOutcome> {
-  input.assertCurrentContext();
-  let account = await input.ledger.getAccount({
-    ownerPublicKeyHex: input.ownerPublicKeyHex,
-    seedHashHex: input.seedHashHex,
-    network: input.network,
-    nowMs: Date.now(),
-  });
-  const plan = account.transactions.find((item) => item.txid === input.txid && item.purpose === "split");
-  if (!plan) throw new Error("BitFS 专款拆分账本找不到对应交易计划");
-  const rawTransaction = await input.transactions.getTransaction(input.txid);
-  const record = await input.transactions.getTransactionRecord(input.txid);
-  if (!rawTransaction || !record) throw new Error("BitFS 专款拆分交易缺少 exact outbox，输入继续受保护");
-
-  let outcome: import("@keymaster/plugin-msfile/coordinator").BitfsBroadcastOutcome;
-  if (record.state === "confirmed") {
-    outcome = { status: "confirmed", txid: input.txid, attempts: record.attempts };
-  } else if (record.state === "failed") {
-    outcome = { status: "failed", txid: input.txid, attempts: record.attempts, reason: record.lastError ?? "not-dispatched" };
-  } else if (record.state === "result-unknown") {
-    input.assertCurrentContext();
-    outcome = await input.broadcaster.reconcile(input.txid);
-  } else {
-    input.assertCurrentContext();
-    outcome = await input.broadcaster.submit(rawTransaction);
-  }
-
-  input.assertCurrentContext();
-  if (outcome.status === "result-unknown") {
-    if (plan.state === "prepared") {
-      await input.ledger.markTransactionUnknown({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
-        seedHashHex: input.seedHashHex,
-        network: input.network,
-        txid: input.txid,
-        nowMs: Date.now(),
-      });
-    }
-    const observationDeadline = Date.now() + 60_000;
-    while (outcome.status === "result-unknown" && Date.now() < observationDeadline) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
-      input.assertCurrentContext();
-      outcome = await input.broadcaster.reconcile(input.txid);
-    }
-  }
-  if (outcome.status === "result-unknown") return outcome;
-  if (outcome.status === "failed") {
-    if (plan.state !== "failed" && plan.state !== "observed") {
-      if (!plan.p2pkhSubmissionId) throw new Error("拆分交易缺少 P2PKH 提交编号，保留输入占用等待人工恢复");
-      await input.releasePreparedSubmission({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
-        network: input.network,
-        txid: input.txid,
-        submissionId: plan.p2pkhSubmissionId,
-      });
-      await input.ledger.releaseDefinitelyUndispatchedTransaction({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
-        seedHashHex: input.seedHashHex,
-        network: input.network,
-        expectedRevision: account.revision,
-        txid: input.txid,
-        nowMs: Date.now(),
-      });
-    }
-    return outcome;
-  }
-
-  const rawTransactionHex = Array.from(rawTransaction, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const parsed = parseP2pkhTransaction(rawTransactionHex, input.txid);
-  const actualInputs = parsed.inputs.map((item) => item.outpointKey).sort();
-  const actualOutputs = parsed.outputs.map((item) => ({
-    txid: input.txid,
-    vout: item.vout,
-    valueSatoshis: String(item.value),
-    scriptHex: item.scriptHex.toLowerCase(),
-  }));
-  if (parsed.canonicalTxid !== input.txid
-    || actualInputs.length !== plan.inputOutpoints.length
-    || actualInputs.some((value, index) => value !== plan.inputOutpoints[index])
-    || actualOutputs.length !== plan.expectedOutputs.length
-    || actualOutputs.some((value, index) => {
-      const expected = plan.expectedOutputs[index];
-      return !expected || value.txid !== expected.txid || value.vout !== expected.vout
-        || value.valueSatoshis !== expected.valueSatoshis || value.scriptHex !== expected.scriptHex;
-    })) {
-    throw new Error("BitFS 拆分交易原文与专款账本计划不一致，输入继续受保护");
-  }
-  await input.ledger.observeSplit({
-    ownerPublicKeyHex: input.ownerPublicKeyHex,
-    seedHashHex: input.seedHashHex,
-    network: input.network,
-    txid: input.txid,
-    actualOutputs,
-    nowMs: Date.now(),
-  });
-  return outcome;
-}
-
-/** 为固定报价创建当前 Worker 内的买方开池任务；页面不接触账本或签名端口。 */
-/** 单调递增的买方任务协议世代；只在 Worker 运行期有效，重启后重新开始。 */
-let msfileBuyerTaskGeneration = 0;
-function nextMsfileBuyerTaskGeneration(): number {
-  msfileBuyerTaskGeneration += 1;
-  return msfileBuyerTaskGeneration;
-}
-
-export async function createMsfileBitfsBuyerTask(input: {
-  /** 当前已解锁 Key 的压缩公钥。 */
-  ownerPublicKeyHex: string;
-  /** 本次采购文件的 Seed Hash。 */
-  seedHashHex: string;
-  /** 资金所属公链网络。 */
-  network: "main" | "test";
-}): Promise<BitfsBuyerTask> {
-  const owner = input.ownerPublicKeyHex.trim().toLowerCase();
-  const seed = input.seedHashHex.trim().toLowerCase();
-  if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner) {
-    throw new Error("BitFS 买方任务只允许当前已解锁 Key");
-  }
-  const runGeneration = coordinatorState.runGeneration;
-  const sessionEpoch = coordinatorState.sessionEpoch;
-  // BitFS 买方任务的协议端口仍使用一个**数字** generation 做迟到结果撤销。
-  // 单 Key 模型下不再有随切 Key 自增的 keyspaceGeneration，这里改用已存在的
-  // `msfileSellerSessionEpoch` 同族计数：每次创建新任务都会取当前计数 + 1，
-  // 因此同一 Worker 内后创建的任务一定大于先创建的任务，重启后计数重新
-  // 开始即可（旧任务句柄本来就随 Worker 重启消失）。
-  const generation = nextMsfileBuyerTaskGeneration();
-  const assertCurrentContext = (): void => {
-    if (coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex?.toLowerCase() !== owner
-      || coordinatorState.runGeneration !== runGeneration
-      || coordinatorState.sessionEpoch !== sessionEpoch) {
-      throw new Error("BitFS 买方任务的 Key、存储或会话世代已变化");
-    }
-  };
-  const store = createWorkerModuleFileStore("msfile", "bitfs-journal");
-  const sessions = createBitfsSessionJournal(store);
-  const transactions = createBitfsTransactionJournal(store);
-  const ledger = currentMsfileBitfsFundingLedger();
-  await recoverBitfsFundingSplits({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network }, {
-    ledger,
-    transactions,
-    releasePreparedSubmission: releaseMsfileBitfsPreparedSubmission,
-    parseTransaction(rawTransactionHex, expectedTxid) {
-      const parsed = parseP2pkhTransaction(rawTransactionHex, expectedTxid);
-      return {
-        canonicalTxid: parsed.canonicalTxid,
-        inputs: parsed.inputs.map((item) => item.outpointKey),
-        outputs: parsed.outputs.map((item) => ({ vout: item.vout, valueSatoshis: item.value, scriptHex: item.scriptHex })),
-      };
-    },
-    nowMs: () => Date.now(),
-  });
-  let fundingAccount = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, nowMs: Date.now() });
-  for (const plan of fundingAccount.transactions.filter((item) => item.purpose === "opening" && item.state === "prepared")) {
-    if (!plan.poolId) throw new Error("BitFS FundingTx 恢复计划缺少会话编号，专款输入继续受保护");
-    const evidence = await sessions.getEvidence(plan.poolId, "funding-transaction");
-    const outboxRecord = await transactions.getTransactionRecord(plan.txid);
-    // FundingTx 只有在 Kind 3 验证后才会广播；没有会话 evidence 且 outbox
-    // 仍未派发时，可以安全释放崩溃前的孤立预签占用。
-    if (evidence || (outboxRecord !== undefined && outboxRecord.state !== "prepared" && outboxRecord.state !== "failed")) continue;
-    if (!plan.p2pkhSubmissionId) throw new Error("孤立 FundingTx 缺少 P2PKH 提交编号，输入继续受保护");
-    await releaseMsfileBitfsPreparedSubmission({
-      ownerPublicKeyHex: owner,
-      network: input.network,
-      txid: plan.txid,
-      submissionId: plan.p2pkhSubmissionId,
-    });
-    fundingAccount = await ledger.releaseDefinitelyUndispatchedTransaction({
-      ownerPublicKeyHex: owner,
-      seedHashHex: seed,
-      network: input.network,
-      expectedRevision: fundingAccount.revision,
-      txid: plan.txid,
-      nowMs: Date.now(),
-    });
-    // exact raw may remain in the outbox, but no request path may dispatch it
-    // without the missing Kind 2/3 session evidence.
-  }
-  assertCurrentContext();
-
-  const protocolSpend = createMsfileBitfsProtocolSpend();
-  let fundingSnapshotResource: P2pkhUtxoSnapshotResource | undefined;
-  const fundingDeps: BitfsFundingPrepareDeps = {
-    protocolSpend,
-    async resolveOwnerAddress() {
-      assertCurrentContext();
-      const address = deriveP2pkhAddress(owner, input.network);
-      return { address, scriptHex: p2pkhAddressToScriptHex(address, input.network) };
-    },
-    reserveP2pkhInputs({ preview, inputOutpoints }) {
-      assertCurrentContext();
-      const resource = fundingSnapshotResource;
-      const binding = preview.utxoBinding;
-      if (!resource || !p2pkhUtxoSnapshots || !binding) {
-        throw new Error("BitFS FundingTx 缺少可消费的 P2PKH 快照绑定");
-      }
-      const snapshot = p2pkhUtxoSnapshots.get(resource);
-      const inputKeys = new Set(inputOutpoints);
-      if (!snapshot.available || snapshot.state !== "fresh" || snapshot.seq !== binding.seq
-        || preview.inputs.length !== inputKeys.size
-        || preview.inputs.some((item) => {
-          const key = `${item.txid}:${item.vout}`;
-          const current = snapshot.items.find((utxo) => `${utxo.txid}:${utxo.vout}` === key);
-          return !inputKeys.has(key) || !current || current.isSpentInMempoolTx || current.value !== item.value;
-        })) {
-        throw new Error("BitFS FundingTx 有输入未出现在当前新鲜快照中或已被花费");
-      }
-      const consumed = p2pkhUtxoSnapshots.consume(resource, {
-        binding,
-        inputOutpointKeys: inputOutpoints,
-        txid: preview.txid,
-      });
-      if (consumed.status !== "consumed") {
-        throw new Error(`BitFS FundingTx 输入占用被拒绝：${consumed.status === "rejected" ? consumed.reason : "snapshot-missing"}`);
-      }
-      return { rollback: () => { p2pkhUtxoSnapshots?.rollbackConsume(resource, binding); } };
-    },
-    parseTransaction(rawTransactionHex, expectedTxid) {
-      const parsed = parseP2pkhTransaction(rawTransactionHex, expectedTxid);
-      return {
-        canonicalTxid: parsed.canonicalTxid,
-        inputs: parsed.inputs.map((item) => item.outpointKey),
-        outputs: parsed.outputs.map((item) => ({ vout: item.vout, valueSatoshis: item.value, scriptHex: item.scriptHex })),
-      };
-    },
-    transactions,
-    sessions,
-    ledger,
-    assertCurrentContext(context) {
-      assertCurrentContext();
-      if (context.ownerPublicKeyHex.toLowerCase() !== owner
-        || context.network !== input.network
-        || context.generation !== generation) {
-        throw new Error("BitFS FundingTx 的身份、网络或 generation 不匹配");
-      }
-    },
-    async releasePrepared(preview) {
-      await protocolSpend.releasePrepared?.(preview);
-    },
-    nowMs: () => Date.now(),
-  };
-
-  const woc = p2pkhWocService;
-  const chain = woc ? createBitfsWocChainPort(woc, input.network) : {
-    async broadcast(): Promise<never> { throw new Error("BitFS Worker 内 WoC 服务未就绪"); },
-    async lookupTransaction(): Promise<"unknown"> { return "unknown"; },
-  };
-  const broadcaster = new BitfsTransactionBroadcaster({ journal: transactions, chain, nowMs: () => Date.now() });
-  const cryptoPort = await createWorkerActiveKeyCrypto(owner);
-  assertCurrentContext();
-  const signer = createBitfsVaultSigner(cryptoPort);
-
-  const ensureDedicatedFunding = async (openingAmountSatoshis: string): Promise<void> => {
-    let account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, nowMs: Date.now() });
-    const pendingSplits = account.transactions.filter((item) => item.purpose === "split" && item.state !== "observed" && item.state !== "failed");
-    for (const split of pendingSplits) {
-      const outcome = await settleMsfileBitfsFundingSplit({
-        ownerPublicKeyHex: owner,
-        seedHashHex: seed,
-        network: input.network,
-        txid: split.txid,
-        ledger,
-        transactions,
-        broadcaster,
-        releasePreparedSubmission: releaseMsfileBitfsPreparedSubmission,
-        assertCurrentContext,
-      });
-      if (outcome.status !== "confirmed") throw new Error("BitFS 专款拆分尚未被节点观察；请按原 txid 对账后继续");
-    }
-    account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, nowMs: Date.now() });
-    const availableSatoshis = account.utxos
-      .filter((utxo) => utxo.state === "available")
-      .reduce((total, utxo) => total + BigInt(utxo.valueSatoshis), 0n);
-    const minimumFundingSatoshis = BigInt(openingAmountSatoshis) + BigInt(bitfsFundingMaxFeeSatoshis());
-    if (availableSatoshis >= minimumFundingSatoshis) return;
-
-    const split = await prepareMsfileBitfsFundingSplit({
-      ownerPublicKeyHex: owner,
-      seedHashHex: seed,
-      network: input.network,
-      generation,
-      requiredSatoshis: minimumFundingSatoshis.toString(10),
-    });
-    const outcome = await settleMsfileBitfsFundingSplit({
-      ownerPublicKeyHex: owner,
-      seedHashHex: seed,
-      network: input.network,
-      txid: split.txid,
-      ledger,
-      transactions,
-      broadcaster,
-      releasePreparedSubmission: releaseMsfileBitfsPreparedSubmission,
-      assertCurrentContext,
-    });
-    if (outcome.status !== "confirmed") throw new Error("BitFS 专款拆分尚未被节点观察；资金输入保持保护");
-    account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, nowMs: Date.now() });
-    const refreshedAvailable = account.utxos
-      .filter((utxo) => utxo.state === "available")
-      .reduce((total, utxo) => total + BigInt(utxo.valueSatoshis), 0n);
-    if (refreshedAvailable < minimumFundingSatoshis) throw new Error("BitFS 专款拆分已观察，但可用输出仍不足以开池");
-  };
-
-  let buyerTask: BitfsBuyerTask;
-  buyerTask = createBitfsBuyerTask({
-    sessions,
-    ledger,
-    transactions,
-    broadcaster,
-    signer,
-    ownerPublicKeyHex: owner,
-    ownerP2pkhScriptHex: p2pkhAddressToScriptHex(deriveP2pkhAddress(owner, input.network), input.network).toLowerCase(),
-    seedHashHex: seed,
-    network: input.network,
-    generation,
-    parseTransaction(rawTransactionHex, expectedTxid) {
-      const parsed = parseP2pkhTransaction(rawTransactionHex, expectedTxid);
-      return {
-        canonicalTxid: parsed.canonicalTxid,
-        inputs: parsed.inputs.map((item) => item.outpointKey),
-        outputs: parsed.outputs.map((item) => ({ vout: item.vout, valueSatoshis: item.value, scriptHex: item.scriptHex })),
-      };
-    },
-    assertCurrentContext,
-    releasePreparedSubmission: releaseMsfileBitfsPreparedSubmission,
-    nowMs: () => Date.now(),
-    blockHeight: () => readCoordinatorBitfsBlockHeight(input.network),
-    readPoolSpendChain: (fundingTxid) => {
-      if (!woc) throw new Error("BitFS 到期退款需要可用的 WoC 池状态查询服务");
-      return readBitfsPoolSpendChain({ woc, network: input.network, fundingTxid });
-    },
-    async publishHashRequest(onPrepared, onDefinitelyFailed) {
-      assertCurrentContext();
-      const runtime = await ensureSatRuntime();
-      assertCurrentContext();
-      await ensureMsfileBitfsBuyerSubscriptions(runtime);
-      assertCurrentContext();
-      let preparedMessageId = "";
-      try {
-        return await publishChannelHashRequest(runtime, { hash: seed, locator: "webrtc-sdp" }, runtime.signal, (messageId) => {
-          preparedMessageId = messageId;
-          onPrepared(messageId);
-          const now = Date.now();
-          const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, seed));
-          if (taskEntry && taskEntry.ownerSessionEpoch === sessionEpoch) {
-            taskEntry.requestMessageId = messageId;
-            taskEntry.expiresAtMs = now + 10 * 60 * 1_000;
-          }
-          for (const [requestId, entry] of msfileBitfsBuyerRequests) {
-            if (entry.expiresAtMs <= now || entry.ownerSessionEpoch !== coordinatorState.sessionEpoch) {
-              msfileBitfsBuyerRequests.delete(requestId);
-              msfileBitfsBuyerOfferCounts.delete(requestId);
-            }
-          }
-          msfileBitfsBuyerRequests.set(messageId, {
-            task: buyerTask,
-            ownerPublicKeyHex: owner,
-            seedHashHex: seed,
-            ownerSessionEpoch: sessionEpoch,
-            expiresAtMs: now + 10 * 60 * 1_000,
-          });
-          while (msfileBitfsBuyerRequests.size > 256) {
-            const first = msfileBitfsBuyerRequests.keys().next().value as string | undefined;
-            if (first === undefined) break;
-            msfileBitfsBuyerRequests.delete(first);
-          }
-        });
-      } catch (error) {
-        if (!isUnknownChannelPublishFailure(error) && preparedMessageId) {
-          onDefinitelyFailed(preparedMessageId);
-          msfileBitfsBuyerRequests.delete(preparedMessageId);
-          const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, seed));
-          if (taskEntry?.ownerSessionEpoch === sessionEpoch && taskEntry.requestMessageId === preparedMessageId) {
-            taskEntry.requestMessageId = undefined;
-            taskEntry.expiresAtMs = 0;
-          }
-        }
-        throw error;
-      }
-    },
-    async prepareFunding(fundingInput) {
-      assertCurrentContext();
-      await ensureDedicatedFunding(fundingInput.openingOutput.valueSatoshis);
-      assertCurrentContext();
-      const settings = await p2pkhSettingRepository().readSetting();
-      if (input.network === "test" && !settings.includeTestnet) {
-        throw new Error("请先在 P2PKH 设置中启用测试网余额");
-      }
-      const resources = await ensureWorkerP2pkhResources(owner, settings.includeTestnet);
-      fundingSnapshotResource = resources.find((resource) => resource.network === input.network);
-      if (!fundingSnapshotResource || !p2pkhUtxoSnapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
-      for (let attempt = 0; ; attempt += 1) {
-        await waitForMsfileFundingSnapshot({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, ledger });
-        assertCurrentContext();
-        try {
-          return await prepareBitfsFunding({
-            sessionId: fundingInput.sessionId,
-            ownerPublicKeyHex: owner,
-            seedHashHex: seed,
-            network: input.network,
-            generation,
-            openingOutput: fundingInput.openingOutput,
-            feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb.medium,
-            maxFeeSatoshis: bitfsFundingMaxFeeSatoshis(),
-          }, fundingDeps);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (attempt >= 2 || !/新鲜快照|输入占用被拒绝：snapshot-(stale|consumed)/u.test(message)) throw error;
-          await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-        }
-      }
-    },
-  });
-  return buyerTask;
-}
-
-/**
- * Worker → Window lane 的 BitFS stream 端口。
- *
- * 中文说明：帧字节由协议端口负责先落盘再交给这里；本适配器只做受限
- * lane operation 转发，Window 侧仍会再次严格解析并做身份 pin。
- */
-function createMsfileSellerStreamTransport(): BitfsSellerStreamTransport {
-  return {
-    async open(input) {
-      const operation = {
-        type: "lane",
-        laneId: "msfile",
-        operation: {
-          type: "bitfs-seller-open",
-          sessionId: input.sessionId,
-          transport: input.transport,
-          addresses: input.addresses,
-          requestMessageId: input.requestMessageId,
-          webrtcSessionId: input.webrtcSessionId,
-          publicKeyHex: input.publicKeyHex,
-          expectedPeerId: input.expectedPeerId,
-          firstFrame: input.firstFrame,
-        },
-      } satisfies WindowP2pExecutorOperation;
-      if (input.transport === "multiaddr") {
-        await requestWindowP2pExecutorOperation(operation, input.signal);
-        return;
-      }
-      const runtime = satRuntime;
-      if (!runtime || runtime.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
-        throw new Error("Channel runtime is not ready to start the BitFS WebRTC transport");
-      }
-      const link = {
-        sessionId: input.sessionId,
-        requestMessageId: input.requestMessageId,
-        peerPublicKeyHex: input.publicKeyHex.toLowerCase(),
-        ownerSessionEpoch: coordinatorState.sessionEpoch,
-      };
-      msfileBitfsWebRtcSellerLinks.set(input.webrtcSessionId, link);
-      try {
-        await requestWindowP2pExecutorOperation(operation, input.signal);
-      } catch (error) {
-        if (msfileBitfsWebRtcSellerLinks.get(input.webrtcSessionId) === link) {
-          msfileBitfsWebRtcSellerLinks.delete(input.webrtcSessionId);
-        }
-        await requestWindowP2pExecutorOperation({
-          type: "lane",
-          laneId: "msfile",
-          operation: { type: "bitfs-seller-close", sessionId: input.sessionId, reason: "offer_publish_failed" },
-        }).catch(() => undefined);
-        throw error;
-      }
-    },
-    async send(sessionId, frame) {
-      try {
-        await requestWindowP2pExecutorOperation({
-          type: "lane",
-          laneId: "msfile",
-          operation: { type: "bitfs-seller-send", sessionId, frame },
-        });
-      } catch (error) {
-        await writeBitfsE2eDiagnostic("seller-stream-send-error.json", {
-          sessionId,
-          frameBytes: frame.byteLength,
-          message: error instanceof Error ? error.message : String(error),
-          name: error instanceof Error ? error.name : typeof error,
-        });
-        throw error;
-      }
-    },
-    async close(sessionId, reason) {
-      await requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-seller-close", sessionId, reason },
-      }).catch(() => undefined);
-    },
-  };
-}
-
-/** 当前是否存在可用的 BitFS 卖方 stream 通道。 */
-function msfileSellerTransportAvailable(): boolean {
-  if (testMsfileSellerBridge) return true;
-  return windowP2pExecutorLease?.transportReady === true
-    && windowP2pExecutorLease.sessionEpoch === coordinatorState.sessionEpoch;
-}
-
-async function configureMsfileSellerRuntime(
-  service: MsFileServiceImpl,
-  ownerPublicKeyHex: string,
-  settings: import("@keymaster/contracts").MsFileSellerSettings,
-): Promise<import("@keymaster/contracts").MsFileSellerRuntimeStatus> {
-  stopMsfileSellerRuntime();
-  // 用户开关与实际可接单状态是两个正交维度：开关关 → 短路，不评估可用性，
-  // 不残留索引与运行时。
-  if (!settings.sellerEnabled) {
-    // 关闭后从当前时刻重新计算自动锁定，而不是沿用暂停前的旧 deadline。
-    resetAutoLockTimer();
-    return "disabled";
-  }
-  // 卖方需要持续接单；启用期间只暂停自动锁，手动锁定仍走全局释放路径。
-  if (autoLockTimer) clearTimeout(autoLockTimer);
-  autoLockTimer = undefined;
-  coordinatorState.autoLockDeadline = undefined;
-  if (settings.supportedArbiterPublicKeys.length === 0) return "configuration-error";
-  // 依赖先判、且只判一次；同时订阅双向变化——依赖掉线如实报不可用，依赖回来
-  // 自动重跑。收款运行时还在预热时这不是永久配置错误：不拆索引、不要求用户
-  // 再切一次开关。
-  watchMsfileSellerDependency(service, ownerPublicKeyHex);
-  if (msfileSellerDependencyReady !== true) return "waiting-dependency";
-  service.setSellerRuntimeStatus("indexing");
-  const controller = new AbortController();
-  msfileSellerIndexController = controller;
-  const index = new BitfsSeedIndex();
-  msfileSellerIndex = index;
-  try {
-    const contentStore = createWorkerModuleFileStore("msfile", "");
-    await index.build(contentStore, controller.signal);
-    if (controller.signal.aborted || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) {
-      return "waiting-unlock";
-    }
-    const cryptoPort = await createWorkerActiveKeyCrypto(ownerPublicKeyHex);
-    const signer = createBitfsVaultSigner(cryptoPort);
-    const journalStore = createWorkerModuleFileStore("msfile", "bitfs-journal");
-    const journal = createBitfsJournal(journalStore);
-    const transactionJournal = createBitfsTransactionJournal(journalStore);
-    const woc = p2pkhWocService;
-    // WoC 未装配时仍允许派生索引和 fail-closed 协议端口启动；
-    // 任何真实交易广播/高度查询都会明确失败，不会伪造链上事实。
-    const chain = woc ? createBitfsWocChainPort(woc, bitfsNetwork()) : {
-      async broadcast(): Promise<never> { throw new Error("BitFS Worker 内 WoC 服务未就绪"); },
-      async lookupTransaction(): Promise<"unknown"> { return "unknown"; },
-    };
-    const broadcaster = new BitfsTransactionBroadcaster({
-      journal: transactionJournal,
-      chain,
-      nowMs: () => Date.now(),
-    });
-    const sessions = createBitfsSessionJournal(journalStore);
-    const persistedSellerGenerations = (await sessions.list())
-      .filter((record) => record.role === "seller" && record.ownerPublicKeyHex === ownerPublicKeyHex)
-      .map((record) => record.generation);
-    msfileSellerSessionEpoch = Math.max(msfileSellerSessionEpoch, ...persistedSellerGenerations.map((value) => value + 1), 1);
-    const runtimeInstanceId = crypto.randomUUID();
-    // 恢复阶段只查询已持久化的 txid，不自动重播不可逆交易。
-    const outcomes = await reconcileBitfsTransactions({ journal: transactionJournal, broadcaster, signal: controller.signal });
-    await reconcileBitfsSessionTransactions({ sessions, outcomes, nowMs: Date.now() });
-    if (controller.signal.aborted || msfileSellerIndexController !== controller
-      || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) return "waiting-unlock";
-    msfileBitfsTransactionJournal = transactionJournal;
-    msfileBitfsBroadcaster = broadcaster;
-    msfileSellerRuntime = new BitfsSellerRuntime({
-      signer,
-      index,
-      journal,
-      sessions,
-      settings: () => service.describeState().sellerSettings,
-      nowMs: () => Date.now(),
-      allowLoopbackWs: bitfsAllowsLoopbackWebsocket(),
-    });
-    const sellerContent = woc
-      ? createBitfsLocalSellerContentResolver({
-        content: createMsFileLocalContentSource(contentStore, { onReadFailure: (seedHashHex) => index.invalidate(seedHashHex) }),
-        nowMs: () => Date.now(),
-        blockHeight: () => readCoordinatorBitfsBlockHeight(bitfsNetwork()),
-      })
-      : createUnavailableBitfsSellerContentResolver();
-    const protocolPort = testMsfileSellerBridge?.protocol ?? new BitfsSellerProtocol({
-      signer,
-      sessions,
-      content: sellerContent,
-      broadcaster,
-       ownerPublicKeyHex,
-       generation: () => msfileSellerSessionEpoch,
-       runtimeInstanceId: () => runtimeInstanceId,
-       nowMs: () => Date.now(),
-      blockHeight: () => readCoordinatorBitfsBlockHeight(bitfsNetwork()),
-      onPaymentTransaction: async ({ txid, rawTxHex }) => {
-        const wocConfig = p2pkhWocService?.getConfig();
-        await writeBitfsE2eDiagnostic("seller-payment-transaction.json", {
-          txid,
-          rawTxHex,
-          network: bitfsNetwork(),
-          wocBaseUrl: wocConfig?.baseUrl,
-        });
-      },
-    });
-    const transport = testMsfileSellerBridge?.transport ?? createMsfileSellerStreamTransport();
-    const manager: BitfsSellerSessionManager = new BitfsSellerSessionManager({
-      transport,
-      protocol: protocolPort,
-      nowMs: () => Date.now(),
-      // 报价期限是最短会话空闲时间；给对端留出付款与交付窗口。
-      idleTimeoutMs: () => Math.max(30_000, service.describeState().sellerSettings.quoteLifetimeSeconds * 1_000),
-      maxSessions: () => service.describeState().sellerSettings.maxConcurrentSales,
-      onActiveSessionsChanged: (activeCount) => {
-        if (msfileSellerSessionManager !== manager) return;
-        if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) return;
-        service.setSellerRuntimeStatus(activeCount > 0
-          ? "selling"
-          : (protocolPort.ready && msfileSellerTransportAvailable() ? "ready" : "degraded"));
-      },
-      isCurrent: () => msfileSellerSessionManager === manager
-        && !controller.signal.aborted
-        && coordinatorState.activePublicKeyHex === ownerPublicKeyHex
-        && msfileRuntime === service,
-      onProtocolError: async ({ sessionId, message, stack }) => {
-        await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", { sessionId, message, stack });
-      },
-      onSessionClosed: async ({ sessionId, reason, atMs }) => {
-        await writeBitfsE2eDiagnostic("seller-session-close.json", { sessionId, reason, atMs });
-      },
-    });
-    const sat = await ensureSatRuntime();
-    if (sat.ownerPublicKeyHex !== ownerPublicKeyHex) return "waiting-unlock";
-    if (controller.signal.aborted || msfileSellerIndexController !== controller
-      || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) return "waiting-unlock";
-    await ensureMsfileBitfsSellerSubscriptions(sat);
-    if (controller.signal.aborted || msfileSellerIndexController !== controller
-      || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || msfileRuntime !== service) return "waiting-unlock";
-    msfileSellerProtocolPort = protocolPort;
-    msfileSellerSessionManager = manager;
-    void drainMsfilePendingSellerHashRequests();
-    // 协议端口未就绪时只能保持 degraded：不报价、不暴露库存。
-    return protocolPort.ready ? "ready" : "degraded";
-  } catch (error) {
-    if (controller.signal.aborted) return "waiting-unlock";
-    // 依赖在装配途中变得不可用：这仍然是「还没好」，不是配置坏了。不拆解、
-    // 不报永久错误；订阅就绪后自动重跑，用户不需要手动再切一次开关。
-    if (isCoordinatorUnitUnavailableError(error)) {
-      controller.abort();
-      watchMsfileSellerDependency(service, ownerPublicKeyHex);
-      return "waiting-dependency";
-    }
-    console.warn("[msfile] seller runtime configuration failed", error instanceof Error ? error.message : String(error));
-    stopMsfileSellerRuntime();
-    return "configuration-error";
-  }
-}
-
-/**
- * 消费一条已验证 Hash 请求：命中完整 Seed 且 locator 兼容时建立销售会话。
- *
- * 中文说明：只处理 ChannelProtocol 已验签的 VerifiedHashRequest；未命中保持
- * 静默。报价只在协议端口就绪时产生，且报价字节由 journal 先落盘。
- */
-async function writeBitfsE2eDiagnostic(path: string, value: unknown): Promise<void> {
-  if (import.meta.env.VITE_BITFS_E2E !== "true") return;
-  try {
-    const store = createWorkerModuleFileStore("msfile", "");
-    await store.put(`bitfs-e2e-diagnostics/${path}`, new TextEncoder().encode(JSON.stringify(value)));
-  } catch (error) {
-    console.warn("[msfile] BitFS E2E diagnostic write failed", error instanceof Error ? error.message : String(error));
-  }
-}
-
-async function drainMsfilePendingSellerHashRequests(): Promise<void> {
-  if (msfilePendingSellerHashRequestDrain) return;
-  msfilePendingSellerHashRequestDrain = (async () => {
-    while (msfileSellerRuntime && msfileSellerSessionManager && msfileSellerProtocolPort && msfileRuntime && msfileSellerTransportAvailable()) {
-      const next = msfilePendingSellerHashRequests.entries().next().value as [string, import("bsv8-channel-protocol/hash-request").VerifiedHashRequest] | undefined;
-      if (!next) return;
-      const [key, request] = next;
-      msfilePendingSellerHashRequests.delete(key);
-      if (request.expires_at_ms <= Date.now()) continue;
-      await handleMsfileSellerHashRequest(request);
-    }
-  })().finally(() => {
-    msfilePendingSellerHashRequestDrain = undefined;
-  });
-  await msfilePendingSellerHashRequestDrain;
-}
-
-async function handleMsfileSellerHashRequest(
-  request: import("bsv8-channel-protocol/hash-request").VerifiedHashRequest,
-): Promise<void> {
-  const runtime = msfileSellerRuntime;
-  const manager = msfileSellerSessionManager;
-  const protocolPort = msfileSellerProtocolPort;
-  const service = msfileRuntime;
-  await writeBitfsE2eDiagnostic("seller-hash-request-entry.json", {
-    hash: request.body.hash,
-    from: request.from_public_key,
-    expiresAtMs: request.expires_at_ms,
-    hasRuntime: runtime !== undefined,
-    hasManager: manager !== undefined,
-    hasProtocol: protocolPort !== undefined,
-    protocolReady: protocolPort?.ready === true,
-    hasService: service !== undefined,
-    activeCount: manager?.activeCount(),
-    maxSales: service?.describeState().sellerSettings.maxConcurrentSales,
-    quoteLifetimeSeconds: service?.describeState().sellerSettings.quoteLifetimeSeconds,
-    observedAtMs: Date.now(),
-    owner: coordinatorState.activePublicKeyHex,
-    sessionEpoch: coordinatorState.sessionEpoch
-  });
-  if (!runtime || !manager || !protocolPort || !service || !msfileSellerTransportAvailable()) {
-    if (request.expires_at_ms > Date.now()) {
-      msfilePendingSellerHashRequests.set(`${request.from_public_key}:${request.message_id}`, request);
-    }
-    return;
-  }
-  if (!protocolPort.ready) {
-    if (request.expires_at_ms > Date.now()) {
-      msfilePendingSellerHashRequests.set(`${request.from_public_key}:${request.message_id}`, request);
-    }
-    return;
-  }
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
-  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
-  const epoch = msfileSellerSessionEpoch;
-  if (manager.activeCount() >= service.describeState().sellerSettings.maxConcurrentSales) return;
-  const index = msfileSellerIndex;
-  let indexedSeed = index?.get(request.body.hash);
-  if (index && (!indexedSeed || indexedSeed.availability !== "available")) {
-    try {
-      const contentStore = createWorkerModuleFileStore("msfile", "");
-      const indexGeneration = index.currentGeneration();
-      index.invalidate(request.body.hash);
-      await index.refresh(contentStore, request.body.hash, indexGeneration);
-      indexedSeed = index.get(request.body.hash);
-    } catch (error) {
-      console.warn("[msfile] seller hash request index refresh failed", error instanceof Error ? error.message : String(error));
-    }
-  }
-  console.warn("[msfile] seller hash request", request.body.hash, indexedSeed?.availability ?? "missing");
-  const indexDiagnosticStore = createWorkerModuleFileStore("msfile", "");
-  const indexMeta = await indexDiagnosticStore.get(`meta/${request.body.hash}.json`).catch(() => undefined);
-  const indexSeed = await indexDiagnosticStore.get(`seeds/${request.body.hash}.ms`).catch(() => undefined);
-  let indexBlocks: Awaited<ReturnType<typeof indexDiagnosticStore.list>> | undefined;
-  let indexListError: string | undefined;
-  try {
-    indexBlocks = await indexDiagnosticStore.list({ prefix: `storage/${request.body.hash}/`, limit: 200 });
-  } catch (error) {
-    indexListError = error instanceof Error ? error.message : String(error);
-  }
-  await writeBitfsE2eDiagnostic("seller-hash-request-index.json", {
-    hash: request.body.hash,
-    availability: indexedSeed?.availability ?? "missing",
-    fileName: indexedSeed?.fileName,
-    fileSizeBytes: indexedSeed?.fileSizeBytes,
-    blockCount: indexedSeed?.blockCount,
-    metaBytes: indexMeta?.bytes.byteLength ?? null,
-    seedBytes: indexSeed?.bytes.byteLength ?? null,
-    listedBlocks: indexBlocks?.files.length ?? null,
-    nextCursor: indexBlocks?.nextCursor ?? null,
-    listError: indexListError ?? null
-  });
-  let match: BitfsSellerMatch | null;
-  try {
-    match = await runtime.match(request);
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") return;
-    console.warn("[msfile] seller hash request match failed", error instanceof Error ? error.message : String(error));
-    await writeBitfsE2eDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, error: error instanceof Error ? error.message : String(error) });
-    return;
-  }
-  await writeBitfsE2eDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, matched: match !== null });
-  if (!match) {
-    console.warn("[msfile] seller hash request did not match", request.body.hash);
-    return;
-  }
-  // match 期间可能发生锁定、切 Key、关闭卖方或 runtime 重建；迟到结果不得建会话。
-  if (epoch !== msfileSellerSessionEpoch
-    || msfileSellerRuntime !== runtime
-    || msfileSellerSessionManager !== manager
-    || coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) return;
-  try {
-    const publicKeyHex = request.from_public_key;
-    const sessionId = match.resumeSessionId ?? crypto.randomUUID();
-    const webrtcSessionId = newSessionID();
-    await manager.start({
-      sessionId,
-      transport: match.transport,
-      requestMessageId: match.requestMessageId,
-      addresses: match.addresses,
-      webrtcSessionId,
-      publicKeyHex,
-      // 只从已验证公钥派生 PeerId；不使用请求者自报的 locator PeerId。
-      expectedPeerId: peerIdFromPublicKeyBytes(cryptoHexToBytes(publicKeyHex)).toString(),
-      quoteBytes: match.quoteBytes,
-      seedHashHex: match.seedHashHex,
-    });
-    await writeBitfsE2eDiagnostic("seller-session-start.json", { sessionId, webrtcSessionId, matched: true });
-  } catch (error) {
-    await writeBitfsE2eDiagnostic("seller-session-start.json", { matched: true, error: error instanceof Error ? error.message : String(error) });
-    console.warn("[msfile] seller session start failed", error instanceof Error ? error.message : String(error));
-  }
-}
-
-/** 买方只接受引用自己有效 Hash 请求的已验签 offer，并用 ChannelProtocol answer 回答。 */
-async function acceptMsfileBitfsWebRtcOffer(input: {
-  requestMessageId: string;
-  webrtcSessionId: string;
-  peerPublicKeyHex: string;
-  seedHashHex: string;
-  offerSdp: string;
-}): Promise<void> {
-  const request = msfileBitfsBuyerRequests.get(input.requestMessageId);
-  await writeBitfsE2eDiagnostic("buyer-webrtc-offer.json", {
-    requestMessageId: input.requestMessageId,
-    webrtcSessionId: input.webrtcSessionId,
-    peerPublicKeyHex: input.peerPublicKeyHex,
-    seedHashHex: input.seedHashHex,
-    hasRequest: request !== undefined,
-    requestMatches: request?.ownerPublicKeyHex === coordinatorState.activePublicKeyHex
-      && request?.ownerSessionEpoch === coordinatorState.sessionEpoch
-      && request?.seedHashHex === input.seedHashHex,
-    requestExpired: request !== undefined && request.expiresAtMs <= Date.now(),
-    hasRuntime: satRuntime !== undefined,
-    existingLink: msfileBitfsWebRtcBuyerLinks.has(input.webrtcSessionId)
-  });
-  if (!request || request.expiresAtMs <= Date.now()
-    || request.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex
-    || request.ownerSessionEpoch !== coordinatorState.sessionEpoch
-    || request.seedHashHex !== input.seedHashHex) return;
-  if (msfileBitfsWebRtcBuyerLinks.has(input.webrtcSessionId)) return;
-  const runtime = satRuntime;
-  if (!runtime || runtime.ownerPublicKeyHex !== request.ownerPublicKeyHex) return;
-  const existingPeerLink = [...msfileBitfsWebRtcBuyerLinks.values()].some((link) =>
-    link.requestMessageId === input.requestMessageId
-      && link.peerPublicKeyHex === input.peerPublicKeyHex.toLowerCase()
-      && link.ownerSessionEpoch === request.ownerSessionEpoch);
-  if (existingPeerLink || msfileBitfsWebRtcBuyerLinks.size >= MSFILE_BITFS_MAX_ACTIVE_BUYER_LINKS) return;
-  const offerCount = msfileBitfsBuyerOfferCounts.get(input.requestMessageId) ?? 0;
-  if (offerCount >= MSFILE_BITFS_MAX_OFFERS_PER_DEMAND) return;
-  msfileBitfsBuyerOfferCounts.set(input.requestMessageId, offerCount + 1);
-  const transportSessionId = crypto.randomUUID();
-  const link = {
-    transportSessionId,
-    requestMessageId: input.requestMessageId,
-    peerPublicKeyHex: input.peerPublicKeyHex.toLowerCase(),
-    ownerPublicKeyHex: request.ownerPublicKeyHex,
-    seedHashHex: request.seedHashHex,
-    task: request.task,
-    ownerSessionEpoch: request.ownerSessionEpoch,
-  };
-  // 在创建 PeerConnection 和发布 answer 前登记，容纳 DataChannel 立即回传的 Kind 1。
-  msfileBitfsWebRtcBuyerLinks.set(input.webrtcSessionId, link);
-  try {
-    await requestWindowP2pExecutorOperation({
-      type: "lane",
-      laneId: "msfile",
-      operation: {
-        type: "bitfs-webrtc-buyer-offer",
-        sessionId: transportSessionId,
-        requestMessageId: input.requestMessageId,
-        webrtcSessionId: input.webrtcSessionId,
-        publicKeyHex: input.peerPublicKeyHex,
-        offerSdp: input.offerSdp,
-      },
-    }, runtime.signal);
-    if (link.ownerSessionEpoch !== coordinatorState.sessionEpoch
-      || coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex !== request.ownerPublicKeyHex) {
-      throw new Error("BitFS buyer owner changed while accepting an offer");
-    }
-    await writeBitfsE2eDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: true });
-  } catch (error) {
-    await writeBitfsE2eDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: false, error: error instanceof Error ? error.message : String(error) });
-    if (msfileBitfsWebRtcBuyerLinks.get(input.webrtcSessionId) === link) {
-      msfileBitfsWebRtcBuyerLinks.delete(input.webrtcSessionId);
-    }
-    msfileBitfsBuyerOfferCounts.set(input.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(input.requestMessageId) ?? 1) - 1));
-    await requestWindowP2pExecutorOperation({
-      type: "lane",
-      laneId: "msfile",
-      operation: { type: "bitfs-seller-close", sessionId: transportSessionId, reason: "answer_failed" },
-    }).catch(() => undefined);
-    throw error;
-  }
-}
-
-function bitfsWebRtcEnvelopeBody(requestMessageId: string, webrtcSessionId: string, envelope: WebRTCInterconnectEnvelope): ReturnType<typeof newOffer> | undefined {
-  const requestId = parseMessageID(requestMessageId);
-  const sessionId = parseSessionID(webrtcSessionId);
-  if (envelope.signal.type === "offer") return newOffer(requestId, sessionId, envelope.signal.sdp);
-  if (envelope.signal.type === "answer") return newAnswer(requestId, sessionId, envelope.signal.sdp);
-  if (envelope.signal.type === "end-of-candidates") return newEndOfCandidatesSignal(requestId, sessionId);
-  if (envelope.signal.type === "ice-candidate") {
-    if (envelope.signal.candidate == null) return newEndOfCandidatesSignal(requestId, sessionId);
-    return newIceSignal(requestId, sessionId, {
-      candidate: envelope.signal.candidate.candidate,
-      sdp_mid: envelope.signal.candidate.sdpMid ?? null,
-      sdp_m_line_index: envelope.signal.candidate.sdpMLineIndex ?? null
-    });
-  }
-  return undefined;
-}
-
-/** Window lane 的 BitFS 事件只允许路由到当前唯一卖方会话管理器。 */
-function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: WindowP2pExecutorLeaseState): void {
-  if (!rawEvent || typeof rawEvent !== "object") return;
-  const event = rawEvent as {
-    /** Window lane 事件类型。 */
-    type?: unknown;
-    /** Worker 侧 BitFS 会话编号。 */
-    sessionId?: unknown;
-    /** 创建连接时的 owner 会话世代。 */
-    ownerSessionEpoch?: unknown;
-    /** ChannelProtocol WebRTC 会话编号。 */
-    webrtcSessionId?: unknown;
-    /** 已通过接收侧校验的原始 Artifact。 */
-    frame?: unknown;
-     /** 稳定关闭原因。 */
-       reason?: unknown;
-       errorCode?: unknown;
-       errorMessage?: unknown;
-       errorName?: unknown;
-       /** WebRTC runtime 错误方向。 */
-     direction?: unknown;
-     /** WebRTC runtime 错误消息。 */
-     message?: unknown;
-      /** WebRTC runtime 错误名称。 */
-      name?: unknown;
-      requestMessageId?: unknown;
-      publicKeyHex?: unknown;
-      envelope?: unknown;
-   };
-  const manager = msfileSellerSessionManager;
-  if (typeof event.sessionId !== "string" || event.sessionId.length === 0) return;
-  // 旧 lease/旧 owner 的迟到事件不得进入新会话。
-  if (event.ownerSessionEpoch !== lease.sessionEpoch) return;
-  void writeBitfsE2eDiagnostic("webrtc-stream-event.json", {
-    type: event.type,
-    sessionId: event.sessionId,
-    webrtcSessionId: event.webrtcSessionId,
-    reason: event.reason,
-    errorCode: event.errorCode,
-    errorMessage: event.errorMessage,
-    errorName: event.errorName,
-    frameBytes: event.frame instanceof Uint8Array ? event.frame.byteLength : null,
-    observedAtMs: Date.now(),
-    leaseSessionEpoch: lease.sessionEpoch
-  });
-  if (event.type === "bitfs-webrtc-signal-outbound") {
-    if (typeof event.webrtcSessionId !== "string" || typeof event.requestMessageId !== "string"
-      || typeof event.publicKeyHex !== "string" || event.envelope == null || typeof event.envelope !== "object") return;
-    const sellerLink = msfileBitfsWebRtcSellerLinks.get(event.webrtcSessionId);
-    const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
-    const link = sellerLink ?? buyerLink;
-    if (!link || link.requestMessageId !== event.requestMessageId
-      || link.peerPublicKeyHex !== event.publicKeyHex.toLowerCase()
-      || link.ownerSessionEpoch !== coordinatorState.sessionEpoch) return;
-    const envelope = event.envelope as WebRTCInterconnectEnvelope;
-    if (envelope.signal.type === "close") {
-      if (sellerLink) msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId);
-      else msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
-      void requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-seller-close", sessionId: event.sessionId, reason: "transport_closed" },
-      }).catch(() => undefined);
-      return;
-    }
-    let body;
-    try {
-      body = bitfsWebRtcEnvelopeBody(event.requestMessageId, event.webrtcSessionId, envelope);
-    } catch {
-      return;
-    }
-    if (body == null) return;
-    const runtime = satRuntime;
-    if (!runtime || runtime.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) return;
-    void publishPrivateEnvelope({
-      runtime,
-      recipientPublicKeyHex: event.publicKeyHex,
-      protocol: WEBRTC_SIGNAL_PROTOCOL,
-      body,
-      signal: runtime.signal
-    }).catch(async error => {
-      if (sellerLink) msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId as string);
-      else msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId as string);
-      await requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-seller-close", sessionId: event.sessionId as string, reason: "signal_publish_failed" },
-      }).catch(() => undefined);
-      await writeBitfsE2eDiagnostic("webrtc-signal-publish-error.json", {
-        webrtcSessionId: event.webrtcSessionId,
-        sessionId: event.sessionId,
-        message: error instanceof Error ? error.message : String(error)
-      });
-    });
-    return;
-  }
-  if (event.type === "bitfs-webrtc-runtime-error") {
-    void writeBitfsE2eDiagnostic("webrtc-runtime-error.json", {
-      sessionId: event.sessionId,
-      webrtcSessionId: event.webrtcSessionId,
-      direction: event.direction,
-      message: event.message,
-      name: event.name,
-      leaseSessionEpoch: lease.sessionEpoch,
-    });
-    return;
-  }
-  if (event.type === "bitfs-webrtc-session-closed") {
-    void writeBitfsE2eDiagnostic("webrtc-session-close.json", {
-      sessionId: event.sessionId,
-      webrtcSessionId: event.webrtcSessionId,
-      reason: event.reason,
-      errorCode: event.errorCode,
-      errorMessage: event.errorMessage,
-      errorName: event.errorName,
-      observedAtMs: Date.now(),
-    });
-    if (typeof event.webrtcSessionId === "string") msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId);
-    if (typeof event.webrtcSessionId === "string") {
-      const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
-      if (buyerLink) msfileBitfsBuyerWebRtcFailure(
-        buyerLink,
-        event.webrtcSessionId,
-        event.sessionId,
-        typeof event.reason === "string" ? event.reason : "stream_error",
-      );
-      else msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
-    }
-    void manager?.close(event.sessionId, typeof event.reason === "string" ? event.reason : "stream_error").catch(() => undefined);
-    return;
-  }
-  if (event.type === "bitfs-webrtc-frame") {
-    if (!(event.frame instanceof Uint8Array) || typeof event.webrtcSessionId !== "string") return;
-    const sellerLink = msfileBitfsWebRtcSellerLinks.get(event.webrtcSessionId);
-    if (sellerLink && sellerLink.sessionId === event.sessionId
-      && sellerLink.ownerSessionEpoch === coordinatorState.sessionEpoch) {
-       void manager?.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
-         const message = error instanceof Error ? error.message : String(error);
-         await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", {
-           sessionId: event.sessionId,
-           webrtcSessionId: event.webrtcSessionId,
-           message,
-           stack: error instanceof Error ? error.stack : undefined
-         });
-       });
-       return;
-    }
-    const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
-    if (!buyerLink || buyerLink.transportSessionId !== event.sessionId
-      || buyerLink.ownerSessionEpoch !== coordinatorState.sessionEpoch) return;
-    if (buyerLink.quoteSessionId) {
-      // 公开需求只负责发现卖家。报价已验签后，后续开池、交付和付款在同一条
-      // 已关联的 DataChannel 上继续，即使公开 Hash 请求到期也不切断购买会话。
-      void (async () => {
-        await buyerLink.quoteAccepted;
-        const protocol = await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink);
-        await protocol.onFrame({
-          sessionId: buyerLink.quoteSessionId!,
-          rawArtifact: (event.frame as Uint8Array).slice(),
-          stream: {
-            send: async (frame) => {
-              if (msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId as string) !== buyerLink) throw new Error("BitFS 买方 DataChannel 已关闭");
-              await requestWindowP2pExecutorOperation({
-                type: "lane",
-                laneId: "msfile",
-                operation: { type: "bitfs-seller-send", sessionId: buyerLink.transportSessionId, frame },
-              });
-            },
-          },
-        });
-       })().catch(async (error) => {
-         const message = error instanceof Error ? error.message : String(error);
-         console.warn("[msfile] BitFS buyer protocol frame failed", message);
-         await writeBitfsE2eDiagnostic("buyer-protocol-frame-error.json", {
-           webrtcSessionId: event.webrtcSessionId,
-           sessionId: event.sessionId,
-           message,
-           stack: error instanceof Error ? error.stack : undefined
-         });
-         await writeBitfsE2eDiagnostic(`buyer-protocol-${Date.now()}-error.json`, {
-           webrtcSessionId: event.webrtcSessionId,
-           sessionId: event.sessionId,
-           message,
-           stack: error instanceof Error ? error.stack : undefined
-         });
-         msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
-       });
-      return;
-    }
-    const activeRequest = msfileBitfsBuyerRequests.get(buyerLink.requestMessageId);
-    if (!activeRequest || activeRequest.expiresAtMs <= Date.now()) {
-      msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
-      msfileBitfsBuyerOfferCounts.set(buyerLink.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(buyerLink.requestMessageId) ?? 1) - 1));
-      void requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-seller-close", sessionId: event.sessionId, reason: "demand_expired" },
-      }).catch(() => undefined);
-      return;
-    }
-    const freshQuoteSessionId = `quote-${crypto.randomUUID()}`;
-    buyerLink.quoteSessionId = freshQuoteSessionId;
-    buyerLink.quoteAccepted = (async () => {
-      const sessions = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-      const resumablePhases = new Set([
-        "opening-presign", "funding-prepared", "funding-unknown", "funded", "request-prepared",
-        "delivery-verified", "payment-unknown", "content-committing", "close-required", "close-requested",
-        "close-unknown", "cancel-closing-pool", "cancel-close-unknown",
-      ]);
-      const matches: string[] = [];
-      for (const saved of await sessions.list()) {
-        if (saved.role !== "buyer" || saved.ownerPublicKeyHex !== buyerLink.ownerPublicKeyHex.toLowerCase()
-          || saved.counterpartyPublicKeyHex !== buyerLink.peerPublicKeyHex.toLowerCase()
-          || saved.seedHashHex !== buyerLink.seedHashHex.toLowerCase()
-          || !resumablePhases.has(saved.phase)
-          || !saved.evidence.includes("kind2-opening-request")) continue;
-        const savedQuote = await sessions.getEvidence(saved.sessionId, "kind1-quote");
-        if (savedQuote && equalMsfileBytes(savedQuote, event.frame as Uint8Array)) matches.push(saved.sessionId);
-      }
-      if (matches.length === 1) {
-        const resumedSessionId = matches[0]!;
-        buyerLink.quoteSessionId = resumedSessionId;
-        buyerLink.resumedPurchaseSessionId = resumedSessionId;
-        await buyerLink.task.acceptQuote({
-          sessionId: resumedSessionId,
-          counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
-          rawKind1: event.frame as Uint8Array,
-        });
-      } else {
-        await buyerLink.task.acceptDiscoveredQuote({
-          sessionId: freshQuoteSessionId,
-          requestMessageId: buyerLink.requestMessageId,
-          counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
-          rawKind1: event.frame as Uint8Array,
-        });
-      }
-     })().then(() => undefined).catch(async (error) => {
-       void writeBitfsE2eDiagnostic("buyer-webrtc-quote-error.json", {
-         requestMessageId: buyerLink.requestMessageId,
-         webrtcSessionId: event.webrtcSessionId,
-         message: error instanceof Error ? error.message : String(error)
-       });
-       if (msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId as string) === buyerLink) {
-        msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId as string);
-      }
-      msfileBitfsBuyerOfferCounts.set(buyerLink.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(buyerLink.requestMessageId) ?? 1) - 1));
-      await requestWindowP2pExecutorOperation({
-        type: "lane",
-        laneId: "msfile",
-        operation: { type: "bitfs-seller-close", sessionId: event.sessionId as string, reason: "invalid_quote" },
-      }).catch(() => undefined);
-      throw error;
-    });
-    void buyerLink.quoteAccepted.then(async () => {
-      if (buyerLink.resumedPurchaseSessionId) {
-        const protocol = await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink);
-        await protocol.resumePurchase({
-          sessionId: buyerLink.resumedPurchaseSessionId,
-          stream: createMsfileBitfsBuyerStream(event.webrtcSessionId as string, buyerLink),
-        });
-        return;
-      }
-      await maybeAutoStartMsfileBitfsBuyerPurchase({
-        ownerPublicKeyHex: buyerLink.ownerPublicKeyHex,
-        seedHashHex: buyerLink.seedHashHex,
-        task: buyerLink.task,
-      });
-     }).catch(async (error) => {
-       const message = error instanceof Error ? error.message : String(error);
-       console.warn("[msfile] BitFS automatic purchase check failed", message);
-        await writeBitfsE2eDiagnostic("buyer-protocol-auto-error.json", {
-          webrtcSessionId: event.webrtcSessionId,
-          sessionId: event.sessionId,
-          message,
-          stack: error instanceof Error ? error.stack : undefined
-        });
-       msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
-     });
-    return;
-  }
-  if (!manager) return;
-  if (event.type === "bitfs-seller-session-closed") {
-    void manager.close(event.sessionId, typeof event.reason === "string" ? event.reason : "stream_error").catch(() => undefined);
-    return;
-  }
-  if (event.type !== "bitfs-seller-frame" || !(event.frame instanceof Uint8Array)) return;
-  void manager.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", {
-      sessionId: event.sessionId,
-      webrtcSessionId: event.webrtcSessionId,
-      message,
-      stack: error instanceof Error ? error.stack : undefined
-    });
-  });
-}
+const msfileFundingRuntime = createWorkerFundingRuntime({
+  session: () => ({ vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch }),
+  journalStore: () => createWorkerModuleFileStore("msfile", "bitfs-journal"),
+  executor: requestWindowP2pExecutorOperation,
+  ensureResources: ensureWorkerP2pkhResources,
+  snapshots: () => p2pkhUtxoSnapshots,
+  readP2pkhSettings: () => p2pkhSettingRepository().readSetting(),
+  maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
+  deriveAddress: deriveP2pkhAddress,
+  addressScript: p2pkhAddressToScriptHex,
+  parseTransaction: parseP2pkhTransaction,
+});
+const msfileBitfsRuntime = createBitfsWorkerRuntime({
+  session: () => ({ vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration }),
+  service: () => msfileRuntime,
+  ensureService: () => ensureMsfileRuntime(),
+  files: (purpose) => createWorkerModuleFileStore("msfile", purpose),
+  woc: () => testDomainUnitReadiness ? p2pkhWocService : msfileWorkerChainAccess?.(),
+  p2pkhSettings: () => p2pkhSettingRepository().readSetting(),
+  crypto: (owner) => createWorkerActiveKeyCrypto(owner),
+  blockHeight: readCoordinatorBitfsBlockHeight,
+  executor: requestWindowP2pExecutorOperation,
+  network: bitfsNetwork,
+  availability: coordinatorUnitAvailability,
+  subscribeAvailability: subscribeCoordinatorUnitAvailability,
+  ensureResources: ensureWorkerP2pkhResources,
+  snapshots: () => p2pkhUtxoSnapshots,
+  ensureChannel: () => ensureSatRuntime(),
+  channel: () => satRuntime,
+  buyerSubscriptions: async (runtime) => {
+    const current = await ensureSatRuntime();
+    if (current !== runtime) throw new Error("BitFS channel runtime changed");
+    await ensureMsfileBitfsBuyerSubscriptions(current);
+  },
+  sellerSubscriptions: async (runtime) => {
+    const current = await ensureSatRuntime();
+    if (current !== runtime) throw new Error("BitFS channel runtime changed");
+    await ensureMsfileBitfsSellerSubscriptions(current);
+  },
+  publishHashRequest: async (runtime, input, signal, prepared) => {
+    const current = await ensureSatRuntime();
+    if (current !== runtime) throw new Error("BitFS channel runtime changed");
+    return publishChannelHashRequest(current, input, signal, prepared);
+  },
+  unknownPublishFailure: isUnknownChannelPublishFailure,
+  executorLease: () => windowP2pExecutorLease,
+  resetAutoLock: resetAutoLockTimer,
+  pauseAutoLock: () => {
+    vaultAutoLock.pause();
+    coordinatorState.autoLockDeadline = undefined;
+  },
+  allowLoopback: bitfsAllowsLoopbackWebsocket,
+  isUnavailable: isCoordinatorUnitUnavailableError,
+  publishPrivate: async (input) => {
+    const current = await ensureSatRuntime();
+    if (current !== input.runtime) throw new Error("BitFS channel runtime changed");
+    return publishPrivateEnvelope({ ...input, runtime: current });
+  },
+  funding: msfileFundingRuntime,
+  parseTransaction: parseP2pkhTransaction,
+  deriveAddress: deriveP2pkhAddress,
+  addressScript: p2pkhAddressToScriptHex,
+  maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
+  diagnosticsEnabled: () => import.meta.env.VITE_BITFS_E2E === "true",
+  bytesToHex,
+  hexToBytes: cryptoHexToBytes,
+});
+export const createMsfileBitfsBuyerTask = msfileBitfsRuntime.createMsfileBitfsBuyerTask;
+const msfileBitfsBuyerRequests = msfileBitfsRuntime.msfileBitfsBuyerRequests;
+const msfileBitfsBuyerOfferCounts = msfileBitfsRuntime.msfileBitfsBuyerOfferCounts;
+const configureMsfileSellerRuntime = msfileBitfsRuntime.configureMsfileSellerRuntime;
+const msfileBitfsBuyerTasks = msfileBitfsRuntime.msfileBitfsBuyerTasks;
+const msfileBitfsBuyerPurchaseTails = msfileBitfsRuntime.msfileBitfsBuyerPurchaseTails;
+const msfileBitfsWebRtcBuyerLinks = msfileBitfsRuntime.msfileBitfsWebRtcBuyerLinks;
+const msfileBitfsWebRtcSellerLinks = msfileBitfsRuntime.msfileBitfsWebRtcSellerLinks;
+const stopMsfileSellerRuntime = msfileBitfsRuntime.stopMsfileSellerRuntime;
+const filterP2pkhSnapshotByBitfsFunds = msfileBitfsRuntime.filterP2pkhSnapshotByBitfsFunds;
+const reconcileMsfileBitfsFundingInputs = msfileBitfsRuntime.reconcileMsfileBitfsFundingInputs;
+const acceptMsfileBitfsWebRtcOffer = msfileBitfsRuntime.acceptMsfileBitfsWebRtcOffer;
+const handleMsfileSellerHashRequest = msfileBitfsRuntime.handleMsfileSellerHashRequest;
+const drainMsfilePendingSellerHashRequests = msfileBitfsRuntime.drainMsfilePendingSellerHashRequests;
+const handleBitfsSellerStreamEvent = msfileBitfsRuntime.handleBitfsSellerStreamEvent;
+const ensureMsfileBitfsBuyerRecovery = msfileBitfsRuntime.ensureMsfileBitfsBuyerRecovery;
+const ensureMsfileBitfsBuyerTask = msfileBitfsRuntime.ensureMsfileBitfsBuyerTask;
+const msfileBitfsBuyerDemandSnapshot = msfileBitfsRuntime.msfileBitfsBuyerDemandSnapshot;
+const msfileBitfsBuyerTaskKey = msfileBitfsRuntime.msfileBitfsBuyerTaskKey;
+const startMsfileBitfsBuyerPurchase = msfileBitfsRuntime.startMsfileBitfsBuyerPurchase;
+const cancelMsfileBitfsBuyerPurchase = msfileBitfsRuntime.cancelMsfileBitfsBuyerPurchase;
+const listMsfileBitfsBuyerTaskSnapshots = msfileBitfsRuntime.listMsfileBitfsBuyerTaskSnapshots;
+const currentMsfileBitfsFundingLedger = msfileBitfsRuntime.currentMsfileBitfsFundingLedger;
+const sellerKeepsVaultUnlocked = msfileBitfsRuntime.sellerKeepsVaultUnlocked;
+export const prepareMsfileBitfsFundingSplit = msfileFundingRuntime.prepareSplit;
+export const recoverMsfileBitfsFundingSplit = msfileFundingRuntime.recoverSplit;
 
 /* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
 const SAT_WINDOW_LANE_ID = "sat-subscription";
@@ -5205,133 +1503,39 @@ const channelPublicSubscribers = new Set<(event: { channel: string; publisherPub
 const channelPrivateSubscribers = new Set<(event: ChannelPrivateMessageEvent) => void>();
 let coordinatorContactsService: ContactsService | undefined;
 let coordinatorContactsPresenceOff: (() => void) | undefined;
-interface PendingChannelPing {
-  /** 创建 Ping 时绑定的 owner session epoch。 */
-  ownerSessionEpoch: SessionEpoch;
-  /** 创建 Ping 时绑定的 owner 公钥。 */
-  ownerPublicKeyHex: string;
-  /** Ping 的目标联系人公钥。 */
-  contactPublicKeyHex: string;
-  /** Ping 的 ChannelProtocol message_id。 */
-  messageId: string;
-  /** 本地单调时钟起点，仅用于 RTT 诊断。 */
-  startedAtMonotonicMs: number;
-  /** Ping 的本地过期时间。 */
-  expiresAtMs: number;
-  /** 本地已签名并验证的 Ping，用于 ChannelProtocol 关系校验。 */
-  pingMessage: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage;
-}
-const CHANNEL_PENDING_PING_TTL_MS = PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS;
-const CHANNEL_PENDING_PING_MAX = 256;
-const channelPendingPings = new PendingPingRegistry<PendingChannelPing>(CHANNEL_PENDING_PING_MAX);
-let channelPendingPingCleanupTimer: ReturnType<typeof setTimeout> | undefined;
-const channelAutoPongBySender = new Map<string, { windowStartedAtMs: number; count: number }>();
-let channelAutoPongWindowStartedAtMs = 0;
-let channelAutoPongCount = 0;
-const CHANNEL_AUTO_PONG_WINDOW_MS = 60_000;
-const CHANNEL_AUTO_PONG_MAX_PER_SENDER = 8;
-const CHANNEL_AUTO_PONG_MAX_GLOBAL = 64;
-/** 入站消息去重只保留有限数量；锁屏、切换 key、重启都会清空。 */
-const channelSeenMessages = new Set<string>();
-const CHANNEL_SEEN_LIMIT = 4096;
-/** 已验签的公开 Hash 请求；只作为 WebRTC offer 关系审查证据。 */
-const channelHashRequests = new Map<string, import("bsv8-channel-protocol/hash-request").VerifiedHashRequest>();
-const CHANNEL_HASH_REQUEST_LIMIT = 1024;
-/** 已验签的 WebRTC offer；后续 answer/ICE 必须引用同一会话。 */
-const channelWebrtcOffers = new Map<string, import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage>();
-const CHANNEL_WEBRTC_OFFER_LIMIT = 512;
-
-function pruneChannelProtocolRelations(now = Date.now()): void {
+const channelProtocolRelations = createChannelProtocolRelations({
+  sessionEpoch: () => coordinatorState.sessionEpoch,
+  ownerPublicKeyHex: () => coordinatorState.activePublicKeyHex,
+  pruneRelated(now) {
   for (const [messageId, request] of msfileBitfsBuyerRequests) {
     if (request.expiresAtMs <= now || request.ownerSessionEpoch !== coordinatorState.sessionEpoch) {
       msfileBitfsBuyerRequests.delete(messageId);
       msfileBitfsBuyerOfferCounts.delete(messageId);
     }
   }
-  for (const [key, request] of channelHashRequests) {
-    if (request.expires_at_ms <= now) channelHashRequests.delete(key);
-  }
-  for (const [key, offer] of channelWebrtcOffers) {
-    if (offer.expires_at_ms <= now) channelWebrtcOffers.delete(key);
-  }
-  while (channelHashRequests.size > CHANNEL_HASH_REQUEST_LIMIT) {
-    const first = channelHashRequests.keys().next().value as string | undefined;
-    if (first === undefined) break;
-    channelHashRequests.delete(first);
-  }
-  while (channelWebrtcOffers.size > CHANNEL_WEBRTC_OFFER_LIMIT) {
-    const first = channelWebrtcOffers.keys().next().value as string | undefined;
-    if (first === undefined) break;
-    channelWebrtcOffers.delete(first);
-  }
-}
-
-function channelHashRequestKey(messageId: string, publisherPublicKeyHex: string): string {
-  return `${publisherPublicKeyHex.trim().toLowerCase()}\u0000${messageId}`;
-}
-
-function channelHashRequestByMessageId(
-  messageId: string,
-  publisherPublicKeyHex: string
-): import("bsv8-channel-protocol/hash-request").VerifiedHashRequest | undefined {
-  pruneChannelProtocolRelations();
-  return channelHashRequests.get(channelHashRequestKey(messageId, publisherPublicKeyHex));
-}
-
-function channelWebrtcOfferKey(requestMessageId: string, offererPublicKeyHex: string, sessionId: string): string {
-  return `${requestMessageId}\u0000${offererPublicKeyHex}\u0000${sessionId}`;
-}
-
-function findChannelWebrtcOffer(
-  body: import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body,
-  message: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage
-): import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage | undefined {
-  pruneChannelProtocolRelations();
-  // answer 的 offerer 必须是 answer 的接收者；ICE 双向都可能发送，
-  // 但只能在双方公钥对应的完整三元组中找到唯一一条 offer。
-  const candidates = body.signal.type === "answer"
-    ? [message.to_public_key]
-    : [message.from_public_key, message.to_public_key];
-  const matches = new Map<string, import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage>();
-  for (const offerer of candidates) {
-    const key = channelWebrtcOfferKey(body.request_message_id, offerer, body.session_id);
-    const offer = channelWebrtcOffers.get(key);
-    if (offer) matches.set(key, offer);
-  }
-  return matches.size === 1 ? matches.values().next().value : undefined;
-}
-
-function pruneChannelPendingPings(now = Date.now()): void {
-  channelPendingPings.prune((pending) =>
-    pending.ownerSessionEpoch === coordinatorState.sessionEpoch
-      && pending.ownerPublicKeyHex === coordinatorState.activePublicKeyHex, now);
-}
-
-function scheduleChannelPendingPingCleanup(): void {
-  if (channelPendingPingCleanupTimer !== undefined) return;
-  channelPendingPingCleanupTimer = setTimeout(() => {
-    channelPendingPingCleanupTimer = undefined;
-    pruneChannelPendingPings();
-    if (channelPendingPings.size > 0) scheduleChannelPendingPingCleanup();
-  }, Math.min(CHANNEL_PENDING_PING_TTL_MS, 5_000));
-}
+  },
+});
+const channelPendingPings = channelProtocolRelations.pendingPings;
+const channelHashRequests = channelProtocolRelations.hashRequests;
+const channelWebrtcOffers = channelProtocolRelations.webrtcOffers;
+const pruneChannelProtocolRelations = channelProtocolRelations.prune;
+const channelHashRequestKey = channelProtocolRelations.hashRequestKey;
+const channelHashRequestByMessageId = channelProtocolRelations.hashRequestByMessageId;
+const channelWebrtcOfferKey = channelProtocolRelations.webrtcOfferKey;
+const findChannelWebrtcOffer = channelProtocolRelations.findWebrtcOffer;
+const pruneChannelPendingPings = channelProtocolRelations.prunePendingPings;
+const scheduleChannelPendingPingCleanup = channelProtocolRelations.schedulePendingPingCleanup;
+const allowAutomaticPong = channelProtocolRelations.allowAutomaticPong;
+const rememberChannelMessage = channelProtocolRelations.rememberMessage;
+const CHANNEL_PENDING_PING_TTL_MS = PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS;
 /** 以 connectionId 隔离入站 handler；supplierId 不是连接实例键。 */
-const satIncomingHandlers = new Map<string, { supplierId: string; ownerSessionEpoch: string; supplierGeneration: number; handler: (wire: Uint8Array) => Promise<Uint8Array> }>();
-/** Window lane 的连接状态事件；按 connectionId 和完整 fence 路由到当前 owner。 */
-const satConnectionStateHandlers = new Map<string, {
-  supplierId: string;
-  ownerSessionEpoch: string;
-  supplierGeneration: number;
-  handler: (state: "online" | "degraded" | "closed") => void;
-}>();
-/** Sat 充值复用 Worker 内的 P2PKH service；只创建一次，不在页面/每个 Tab 创建。 */
-let satP2pkhService: P2pkhService | undefined;
-let satP2pkhServiceStarting: Promise<P2pkhService> | undefined;
-let satP2pkhServiceOwnerPublicKeyHex: string | undefined;
-let satP2pkhServiceStartToken = 0;
-let satP2pkhServiceStartingToken: number | undefined;
-let satP2pkhServiceStartingOwnerPublicKeyHex: string | undefined;
 
+/** Window lane 的连接状态事件；按 connectionId 和完整 fence 路由到当前 owner。 */
+
+const { transport: satSubscriptionTransport, incomingHandlers: satIncomingHandlers, stateHandlers: satConnectionStateHandlers } = createSatWorkerTransport({
+  operation: (operation, signal) => satWindowLaneOperation(operation, signal),
+  cancelInbound: (connectionId, reason) => cancelSatInboundHandlersForConnection(connectionId, reason),
+});
 interface SatWorkerConnection extends SatSupplierConnection {
   readonly state: "online" | "degraded" | "closed";
 }
@@ -5342,27 +1546,6 @@ const windowP2pExecutorIdentityRequests = new Map<string, { controller: AbortCon
 const windowP2pExecutorIdentityRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 const msfileGrants = new Map<string, { context: MsFileConnectAppContext; clientId: string; sessionEpoch: SessionEpoch }>();
 /** 数据面队列有界，但具体并发由设置快照决定。 */
-const MSFILE_DATA_MAX_QUEUE = 256;
-type MsFileDataClass = "stat" | "seed" | "block";
-interface MsFileDataWaiter {
-  clientId: string;
-  dataClass: MsFileDataClass;
-  signal: AbortSignal;
-  run: () => Promise<CoordinatorResponse>;
-  resolve: (response: CoordinatorResponse) => void;
-  reject: (error: Error) => void;
-  active: boolean;
-  onAbort: () => void;
-}
-const msfileDataWaiters: MsFileDataWaiter[] = [];
-const msfileDataActiveByClient = new Map<string, number>();
-/** 每个 client 最近一次获得槽位的顺序；用于真正的轮转公平，而不是只靠 FIFO。 */
-const msfileDataClientLastServed = new Map<string, number>();
-let msfileDataDispatchSequence = 0;
-let msfileDataActive = 0;
-let msfileStatActive = 0;
-let msfileSeedDataActive = 0;
-let msfileBlockDataActive = 0;
 let msfileReadConcurrencySettings: MsFileReadConcurrencySettings = { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
 let windowP2pExecutorConfigVersion = 0;
 let windowP2pExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
@@ -5404,123 +1587,12 @@ function emitMsFileState(): void {
   publishTopicEvent("msfile.state", event);
 }
 
-function msfileDataClass(data: CoordinatorMsFileData): MsFileDataClass {
-  switch (data.type) {
-    case "stat": return "stat";
-    case "read-seed": return "seed";
-    case "read-block": return "block";
-  }
-}
+const msfileDataQueue = createMsfileDataQueue(() => msfileReadConcurrencySettings, message => msfileError("msfile_unavailable", message));
+const pumpMsfileDataWaiters = msfileDataQueue.pump;
+const withMsfileDataSlot = msfileDataQueue.run;
+const rejectMsfileDataWaiters = msfileDataQueue.rejectQueued;
 
-function msfileDataClassHasCapacity(dataClass: MsFileDataClass): boolean {
-  switch (dataClass) {
-    case "stat": return msfileStatActive < msfileReadConcurrencySettings.globalStatConcurrency;
-    case "seed": return msfileSeedDataActive < msfileReadConcurrencySettings.globalSeedReadConcurrency;
-    case "block": return msfileBlockDataActive < msfileReadConcurrencySettings.globalBlockReadConcurrency;
-  }
-}
-
-function msfileDataClientActive(clientId: string): number {
-  return msfileDataActiveByClient.get(clientId) ?? 0;
-}
-
-function pumpMsfileDataWaiters(): void {
-  while (true) {
-    let selectedIndex = -1;
-    let selectedClientLastServed = Number.POSITIVE_INFINITY;
-    for (let index = 0; index < msfileDataWaiters.length; index += 1) {
-      const waiter = msfileDataWaiters[index]!;
-      if (!waiter.active) continue;
-      if (waiter.signal.aborted) {
-        msfileDataWaiters.splice(index, 1);
-        index -= 1;
-        waiter.active = false;
-        waiter.signal.removeEventListener("abort", waiter.onAbort);
-        waiter.reject(msfileError("msfile_unavailable", "MSFile request was cancelled while waiting"));
-        continue;
-      }
-      if (!msfileDataClassHasCapacity(waiter.dataClass)) continue;
-      // 同一类资源满时跳过；有可用槽位时按 client 的最近服务顺序轮转。
-      // 仅按当前 active 数 + FIFO 会让持续入队的 player 永远压在后来
-      // 的 Connect App 前面，因此这里把“最近服务时间”作为主排序键。
-      const clientLastServed = msfileDataClientLastServed.get(waiter.clientId) ?? 0;
-      if (clientLastServed < selectedClientLastServed) {
-        selectedIndex = index;
-        selectedClientLastServed = clientLastServed;
-      }
-    }
-    if (selectedIndex < 0) break;
-    const waiter = msfileDataWaiters.splice(selectedIndex, 1)[0]!;
-    if (!waiter.active) continue;
-    waiter.active = false;
-    waiter.signal.removeEventListener("abort", waiter.onAbort);
-    msfileDataActive += 1;
-    if (waiter.dataClass === "stat") msfileStatActive += 1;
-    if (waiter.dataClass === "seed") msfileSeedDataActive += 1;
-    if (waiter.dataClass === "block") msfileBlockDataActive += 1;
-    msfileDataActiveByClient.set(waiter.clientId, msfileDataClientActive(waiter.clientId) + 1);
-    msfileDataDispatchSequence += 1;
-    msfileDataClientLastServed.set(waiter.clientId, msfileDataDispatchSequence);
-    void waiter.run().then(waiter.resolve, waiter.reject).finally(() => {
-      msfileDataActive = Math.max(0, msfileDataActive - 1);
-      if (waiter.dataClass === "stat") msfileStatActive = Math.max(0, msfileStatActive - 1);
-      if (waiter.dataClass === "seed") msfileSeedDataActive = Math.max(0, msfileSeedDataActive - 1);
-      if (waiter.dataClass === "block") msfileBlockDataActive = Math.max(0, msfileBlockDataActive - 1);
-      const nextClientActive = Math.max(0, msfileDataClientActive(waiter.clientId) - 1);
-      if (nextClientActive === 0) msfileDataActiveByClient.delete(waiter.clientId);
-      else msfileDataActiveByClient.set(waiter.clientId, nextClientActive);
-      if (nextClientActive === 0 && !msfileDataWaiters.some((pending) => pending.active && pending.clientId === waiter.clientId)) {
-        msfileDataClientLastServed.delete(waiter.clientId);
-      }
-      pumpMsfileDataWaiters();
-    });
-  }
-}
-
-function withMsfileDataSlot(
-  clientId: string,
-  data: CoordinatorMsFileData,
-  run: () => Promise<CoordinatorResponse>,
-  signal: AbortSignal,
-): Promise<CoordinatorResponse> {
-  if (signal.aborted) return Promise.reject(msfileError("msfile_unavailable", "MSFile request was cancelled"));
-  if (msfileDataWaiters.length >= MSFILE_DATA_MAX_QUEUE) {
-    return Promise.reject(msfileError("msfile_unavailable", "MSFile request queue is full"));
-  }
-  const dataClass = msfileDataClass(data);
-  return new Promise<CoordinatorResponse>((resolve, reject) => {
-    const waiter: MsFileDataWaiter = {
-      clientId,
-      dataClass,
-      signal,
-      run,
-      resolve,
-      reject,
-      active: true,
-      onAbort: () => {
-        const index = msfileDataWaiters.indexOf(waiter);
-        if (index < 0 || !waiter.active) return;
-        msfileDataWaiters.splice(index, 1);
-        waiter.active = false;
-        reject(msfileError("msfile_unavailable", "MSFile request was cancelled while waiting"));
-      },
-    };
-    signal.addEventListener("abort", waiter.onAbort, { once: true });
-    msfileDataWaiters.push(waiter);
-    pumpMsfileDataWaiters();
-  });
-}
-
-function rejectMsfileDataWaiters(error = msfileError("msfile_unavailable", "MSFile request queue was cancelled")): void {
-  for (const waiter of msfileDataWaiters.splice(0)) {
-    if (!waiter.active) continue;
-    waiter.active = false;
-    waiter.signal.removeEventListener("abort", waiter.onAbort);
-    waiter.reject(error);
-  }
-}
-
-async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileServiceImpl> {
+async function ensureMsfileRuntime(expectedInstanceId?: string, boundStores?: MsFileRuntimeStores, assertScopeActive: () => void = () => undefined): Promise<MsFileServiceImpl> {
   // 唯一可用性判定：插件开? 解锁? 作用域就绪? 一次求值给出全部原因，不再手写
   // 同一串检查，也不再 reconcile 一下祈祷它已就绪。锁定 / 未初始化 / fatal 状态
   // 因此同样由这一条路径表达。
@@ -5561,29 +1633,24 @@ async function ensureMsfileRuntime(expectedInstanceId?: string): Promise<MsFileS
       // 设置与供应商是 msfiles 模块根；App 覆盖额度是平台管理的
       // `.keymaster/system/app/app-settings/`。句柄由 worker 统一缓存、按
       // 四维绑定失效，因此这里不 close，也不持有文件生命周期。
-      stores = {
-        ownerPublicKeyHex,
-        settings: createWorkerModuleFileStore("msfile", ""),
-        appSettings: createWorkerModuleFileStore("msfile", "app-settings"),
-      };
-      const repository = await openMsFileRepository(stores);
-      service = createMsFileService({
-        repository: repository,
-        transport: windowP2pExecutorTransport,
-        localSource: createMsFileLocalContentSource(createWorkerModuleFileStore("msfile", "")),
-        onSellerSettingsChanged: (settings) => configureMsfileSellerRuntime(service!, ownerPublicKeyHex, settings),
-        notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
+      if (!testDomainUnitReadiness && !boundStores) throw msfileError("msfile_unavailable", "MSFile must be started by its Worker unit");
+      stores = boundStores ?? { ownerPublicKeyHex, settings: createWorkerModuleFileStore("msfile", ""), appSettings: createWorkerModuleFileStore("msfile", "app-settings") };
+      if (stores.ownerPublicKeyHex !== ownerPublicKeyHex) throw msfileError("msfile_unavailable", "MSFile storage owner changed");
+      service = await createMsFileWorkerService({
+        stores, transport: windowP2pExecutorTransport,
+        assertFresh: () => {
+          assertScopeActive();
+          if (startToken !== msfileRuntimeStartToken || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.trim().toLowerCase() !== ownerPublicKeyHex) throw msfileError("msfile_unavailable", "MSFile runtime startup was superseded");
+        },
+        onSellerSettingsChanged: settings => configureMsfileSellerRuntime(service!, ownerPublicKeyHex, settings),
+        notifyStateChange: () => emitMsFileState(),
       });
-      // 服务构造会异步读取 owner 文件；必须等首轮读取完成后再发布实例。
-      // 初始化失败的候选实例在这里释放，下一次 control/recovery 可以重试，
-      // 不把一次 Storage 竞态变成永久 unavailable。
-      await service.waitUntilInitialized();
       assertStorageDataAvailable();
       if (
         startToken !== msfileRuntimeStartToken
         || coordinatorState.vaultStatus !== "unlocked"
         || coordinatorState.activePublicKeyHex?.trim().toLowerCase() !== ownerPublicKeyHex
-        || !isCoordinatorProductEnabled("msfile")
+        || !isCoordinatorProductRegistered("msfile")
       ) {
         throw msfileError("msfile_unavailable", "MSFile runtime startup was superseded");
       }
@@ -5622,7 +1689,7 @@ function emitSatState(event: import("@keymaster/contracts").CoordinatorSatEvent)
   publishTopicEvent("sat.events", next);
 }
 
-async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerRuntimeState> {
+async function ensureSatRuntime(expectedInstanceId?: string, storage?: BorrowedModuleFileStore, assertScopeActive: () => void = () => undefined): Promise<SatWorkerRuntimeState> {
   // 同一把尺子：插件开? 解锁? 作用域就绪?（自身就绪正是本函数要做的事）
   assertCoordinatorUnitConstructible("sat-subscription.coordinator-worker");
   // owner 切换/锁定的退订和连接关闭必须完成后，才能把任何请求交给
@@ -5654,9 +1721,10 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
   }
   // 上面的断言已覆盖「解锁 + 有 active key」；这里把判定结果落到局部变量，
   // 不再重复判一次。
+  if (!testDomainUnitReadiness && !storage) throw new Error("SatSubscription must be started by its Worker unit");
   const ownerPublicKeyHex = coordinatorState.activePublicKeyHex!;
   // SPI 的 ownerGeneration 是「插件运行代次」的单调计数，不是钱包身份世代：
-  // 旧实现借用了 keyspaceGeneration（换 Key 时自增），单 Key 模型下已没有
+  // 旧实现借用了 旧身份计数器（换 Key 时自增），单 Key 模型下已没有
   // 该世代，这里改用已存在的 satRuntimeStartToken —— 它同样在每次运行代次
   // 变化时单调递增，能让重启前后的 SPI 结果互相失效。
   const ownerGeneration = Math.max(1, satRuntimeStartToken + 1);
@@ -5666,71 +1734,36 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
   const startAbortController = new AbortController();
   satRuntimeStartAbortController = startAbortController;
   const start = (async (): Promise<SatWorkerRuntimeState> => {
-    // SatSubscription 只打开 `<owner>/sat-subscription/` 文件根；旧的
-    // `.keymaster/.../subscription-state` K-V 不再读取、迁移或删除。
-    const store = createWorkerModuleFileStore("sat-subscription", "");
-    const repository = createSatSubscriptionRepository(store, ownerPublicKeyHex);
-    let provider: ReturnType<typeof createSatSubscriptionProvider> | undefined;
-    let handle: SatSubscriptionHandle | undefined;
-    try {
-      const loaded = await repository.load();
-      // 缺省供应商：dev 用 testnet 网关，正式构建用 mainnet 网关。
-      // 已有供应商时保持用户配置；只在供应商为空时补默认出口/入口。
-      const initial = applyDefaultSatSupplier(loaded, satDefaultNetwork());
-      const state = createSatSubscriptionState({ ownerPublicKeyHex, initial, persistence: repository });
-      provider = createSatSubscriptionProvider({
-        stateForOwner: async (requestedOwner) => {
-          if (requestedOwner !== coordinatorState.activePublicKeyHex || requestedOwner !== ownerPublicKeyHex) throw new Error("SatSubscription owner changed");
-          return state;
-        },
-        transport: satSubscriptionTransport,
-        signal: startAbortController.signal,
-        ownerGeneration,
-        ownerSessionEpoch: expectedSessionEpoch,
-        logger: { warn: (event, data) => console.warn("[sat-subscription]", event, data) },
-      });
-      const privateKeyForSigner = (): Uint8Array => {
-        if (coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || !coordinatorState.activePrivateKeyBytes) throw new Error("Sat owner signer is unavailable");
-        return coordinatorState.activePrivateKeyBytes;
-      };
-      handle = await provider.bind({ ownerPublicKeyHex });
-      const boundProvider = provider;
-      const assertFresh = (): void => {
-        if (startToken !== satRuntimeStartToken
-          || !isCoordinatorProductEnabled("sat-subscription")
-          || coordinatorState.vaultStatus !== "unlocked"
-          || coordinatorState.sessionEpoch !== expectedSessionEpoch
-          || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
-          throw new Error("SatSubscription runtime became stale while starting");
-        }
-      };
-      assertFresh();
-      const service = boundProvider.service();
-      const admin = boundProvider.adminService();
-      const spi = createSatSpiService({
-        getRuntime: () => boundProvider.spiRuntime(),
-        getOwnerPublicKeyHex: () => coordinatorState.activePublicKeyHex ?? null,
-        getOwnerGeneration: () => coordinatorState.activePublicKeyHex === ownerPublicKeyHex ? Math.max(1, satRuntimeStartToken + 1) : null,
-        stateForOwner: async (requestedOwner) => {
-          if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed");
-          return state;
-        },
-        // P2PKH 只服务 SPI 充值；不能因为充值插件启动/初始化失败而阻断
-        // 消息、通讯录、在线状态和 WebRTC。真正准备/提交充值时才懒加载。
-        getP2pkh: () => ensureSatP2pkhService(),
-        deriveP2pkhAddress: async (requestedOwner, network) => {
+    const assertFresh = (): void => {
+      assertScopeActive();
+      if (startToken !== satRuntimeStartToken || !isCoordinatorProductRegistered("sat-subscription") || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== expectedSessionEpoch || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SatSubscription runtime became stale while starting");
+    };
+    const owned = await createSatWorkerServices({
+      storage: storage ?? createWorkerModuleFileStore("sat-subscription", ""),
+      ownerPublicKeyHex, ownerGeneration, ownerSessionEpoch: expectedSessionEpoch,
+      signal: startAbortController.signal, network: satDefaultNetwork(), transport: satSubscriptionTransport,
+      assertFresh,
+      getOwnerPublicKeyHex: () => coordinatorState.activePublicKeyHex ?? null,
+      getOwnerGeneration: () => coordinatorState.activePublicKeyHex === ownerPublicKeyHex ? Math.max(1, satRuntimeStartToken + 1) : null,
+      getP2pkh: () => testDomainUnitReadiness ? ensureSatP2pkhService() : satWorkerP2pkhAccess?.() ?? null,
+      deriveP2pkhAddress: async (requestedOwner, network) => {
           if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed before address derivation");
           const result = await withCoordinatorFinalIoLease(
             "write",
             undefined,
-            () => executeCryptoOperation({ type: "deriveP2pkhAddress", network }, privateKeyForSigner()),
+            () => { vaultKeySession.assert(ownerPublicKeyHex, expectedSessionEpoch); return vaultKeySession.execute({ type: "deriveP2pkhAddress", network }); },
             { auditOperation: "sat.address.derive" },
           );
           if (result.type !== "deriveP2pkhAddress") throw new Error("Failed to derive the owner payment address");
           return result.address;
         },
-      });
-      if (!service || !admin) throw new Error("SatSubscription provider did not expose its trusted services");
+    }).catch(error => {
+      coordinatorWorkerUnitRegistry.fail(workerUnit.unitId, workerUnit.instanceId, error);
+      stopCoordinatorWorkerUnit(workerUnit.unitId, workerUnit.instanceId);
+      throw error;
+    });
+    const { repository, state, provider: boundProvider, handle, service, admin, spi } = owned;
+    try {
       const runtime: SatWorkerRuntimeState = {
         ownerPublicKeyHex,
         ownerGeneration,
@@ -5752,7 +1785,7 @@ async function ensureSatRuntime(expectedInstanceId?: string): Promise<SatWorkerR
       coordinatorWorkerUnitRegistry.fail(workerUnit.unitId, workerUnit.instanceId, error);
       stopCoordinatorWorkerUnit(workerUnit.unitId, workerUnit.instanceId);
       try { handle?.close(); } catch { /* stale start cleanup */ }
-      await provider?.shutdown().catch(() => undefined);
+      await boundProvider.shutdown().catch(() => undefined);
       repository.close();
       throw error;
     }
@@ -5787,13 +1820,7 @@ async function releaseSatRuntime(
   // 防止永不结束的旧 handler 在新 owner 中制造未受控并发。
   cancelSatInboundHandlers(undefined, `Sat runtime was released: ${reason}`);
   satIncomingHandlers.clear();
-  satP2pkhServiceStartToken += 1;
-  const p2pkh = satP2pkhService;
-  const p2pkhStarting = satP2pkhServiceStarting;
-  satP2pkhService = undefined;
-  satP2pkhServiceOwnerPublicKeyHex = undefined;
-  try { p2pkh?.onVaultLocked(); } catch { /* locked cleanup is best effort */ }
-  try { p2pkh?.dispose?.(); } catch { /* locked cleanup is best effort */ }
+  const { starting: p2pkhStarting } = workerTransferRuntime.release();
   resetP2pkhSettingsRuntime();
   const runtime = satRuntime;
   const runtimeStarting = satRuntimeStarting;
@@ -5814,25 +1841,8 @@ async function releaseSatRuntime(
   channelSubscriptionMuxStarting = undefined;
   channelSubscriptionMuxStartOwner = undefined;
   channelCallersByClient.clear();
-  channelSeenMessages.clear();
-  channelHashRequests.clear();
-  channelWebrtcOffers.clear();
-  msfileBitfsBuyerRequests.clear();
-  msfileBitfsBuyerTasks.clear();
-  msfileBitfsBuyerPurchaseTails.clear();
-  msfileBitfsBuyerRecoveryInFlight = undefined;
-  msfileBitfsBuyerRecoveryReady = undefined;
-  msfileBitfsBuyerOfferCounts.clear();
-  msfileBitfsWebRtcBuyerLinks.clear();
-  msfileBitfsWebRtcSellerLinks.clear();
-  channelPendingPings.clear();
-  if (channelPendingPingCleanupTimer !== undefined) {
-    clearTimeout(channelPendingPingCleanupTimer);
-    channelPendingPingCleanupTimer = undefined;
-  }
-  channelAutoPongBySender.clear();
-  channelAutoPongWindowStartedAtMs = 0;
-  channelAutoPongCount = 0;
+  channelProtocolRelations.clear();
+  msfileBitfsRuntime.clearBuyerState();
   coordinatorContactsService?.resetPresence?.();
 
   const cleanup = previousRelease.then(async () => {
@@ -5886,8 +1896,7 @@ function releaseMsfileRuntime(_reason: string): void {
   (msfileRuntime as unknown as { dispose?: () => void } | undefined)?.dispose?.();
   msfileRuntime = undefined;
   msfileRuntimeStores = undefined;
-  msfileBitfsFundingLedger = undefined;
-  msfileBitfsFundingLedgerOwnerHex = undefined;
+  msfileBitfsRuntime.revoke();
   lastMsFileState = undefined;
   if (workerUnit) stopCoordinatorWorkerUnit(workerUnit.unitId, workerUnit.instanceId);
 }
@@ -5921,7 +1930,7 @@ function emitStorageState(): void {
     const state: CoordinatorStorageStateEvent = {
       topic: "storage.state",
       type: "storage.state.changed",
-      storageRevision: revision,
+      storageRevision: revision, activity: storageActivity.snapshot(),
       sessionEpoch: coordinatorState.sessionEpoch,
       status,
       ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
@@ -5949,7 +1958,7 @@ async function runStorageRecoveryOrchestrator(peerId?: string): Promise<void> {
     } else {
       // 恢复只替换当前底层绑定；任务 runtime 仍持有 wrapper，不能把
       // wrapper 永久 close，否则恢复后的下一次调度必然失败。
-      for (const store of workerOwnerStores) store.invalidateBinding();
+      workerStorageClients.invalidateAll();
       ownerStorageGrants.clear();
       platformStorageGrants.clear();
     }
@@ -6030,110 +2039,6 @@ function assertStorageDataAvailable(): void {
   }
 }
 
-function pumpStorageDataWaiters(): void {
-  while (storageDataActive < STORAGE_DATA_CONCURRENCY && storageDataWaiters.length) {
-    let index = storageDataWaiters.findIndex((waiter) => (storageDataActiveByPort.get(waiter.clientId) ?? 0) < STORAGE_DATA_MAX_ACTIVE_PER_PORT);
-    if (index < 0) index = 0; // no competing port: do not strand a single client
-    const waiter = storageDataWaiters.splice(index, 1)[0]!;
-    if (!waiter.active) {
-      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-      continue;
-    }
-    if (waiter.signal?.aborted) {
-      waiter.active = false;
-      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-      waiter.reject(storageCoordinatorError("storage_unavailable", "Storage request cancelled"));
-      continue;
-    }
-    waiter.active = false;
-    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-    storageDataActive += 1;
-    storageDataActiveByPort.set(waiter.clientId, (storageDataActiveByPort.get(waiter.clientId) ?? 0) + 1);
-    waiter.resolve();
-  }
-}
-
-interface StorageDataSlotLifecycle {
-  /** 物理 Provider Promise 已真正开始执行。 */
-  onPhysicalStart?: () => void;
-  /** 物理 Provider Promise 已 settle；此时才允许释放并发槽。 */
-  onPhysicalSettled?: () => void;
-}
-
-/**
- * 取得 Storage physical slot。
- *
- * cancel 只结束调用方等待的 RPC，不结束 Provider 自己的 Promise。槽位和
- * 每端口 physical 计数必须等真实 Promise settle 后才释放，否则忽略
- * AbortSignal 的 Provider 可以被反复 cancel 绕过全局并发上限。
- */
-async function withStorageDataSlot<T>(
-  clientId: string,
-  run: () => Promise<T>,
-  signal?: AbortSignal,
-  lifecycle?: StorageDataSlotLifecycle
-): Promise<T> {
-  let slotHeld = false;
-  const releasePhysicalSlot = (): void => {
-    if (!slotHeld) return;
-    slotHeld = false;
-    storageDataActive = Math.max(0, storageDataActive - 1);
-    const nextPort = Math.max(0, (storageDataActiveByPort.get(clientId) ?? 1) - 1);
-    if (nextPort) storageDataActiveByPort.set(clientId, nextPort); else storageDataActiveByPort.delete(clientId);
-    pumpStorageDataWaiters();
-    lifecycle?.onPhysicalSettled?.();
-  };
-
-  if (signal?.aborted) throw storageCoordinatorError("storage_unavailable", "Storage request cancelled");
-  if (storageDataActive >= STORAGE_DATA_CONCURRENCY || (storageDataActiveByPort.get(clientId) ?? 0) >= STORAGE_DATA_MAX_ACTIVE_PER_PORT) {
-    if (storageDataWaiters.length >= STORAGE_DATA_MAX_QUEUE) throw storageCoordinatorError("storage_limit_exceeded");
-    await new Promise<void>((resolve, reject) => {
-      const waiter: StorageDataWaiter = { resolve, reject, signal, active: true, clientId };
-      const abort = () => {
-        if (!waiter.active) return;
-        waiter.active = false;
-        const index = storageDataWaiters.indexOf(waiter);
-        if (index >= 0) storageDataWaiters.splice(index, 1);
-        signal?.removeEventListener("abort", abort);
-        reject(storageCoordinatorError("storage_unavailable", "Storage request cancelled"));
-      };
-      waiter.onAbort = abort;
-      if (signal?.aborted) { abort(); return; }
-      signal?.addEventListener("abort", abort, { once: true });
-      storageDataWaiters.push(waiter);
-    });
-    // pumpStorageDataWaiters() 在 resolve waiter 后到这里之间可能发生
-    // abort；这时已占用的 slot 不能泄漏，但也不能启动 Provider。
-    slotHeld = true;
-    if (signal?.aborted) {
-      releasePhysicalSlot();
-      throw storageCoordinatorError("storage_unavailable", "Storage request cancelled");
-    }
-  } else {
-    storageDataActive += 1;
-    storageDataActiveByPort.set(clientId, (storageDataActiveByPort.get(clientId) ?? 0) + 1);
-    slotHeld = true;
-  }
-
-  lifecycle?.onPhysicalStart?.();
-  const operation = Promise.resolve().then(run);
-  // 这里是唯一的 physical slot release 点。不能放到下面 RPC race 的
-  // finally，否则 cancel 会在 Provider 仍运行时把槽位重新交给新请求。
-  void operation.then(releasePhysicalSlot, releasePhysicalSlot);
-  let onAbort: (() => void) | undefined;
-  try {
-    if (!signal) return await operation;
-    const cancelled = new Promise<never>((_, reject) => {
-      onAbort = () => reject(storageCoordinatorError("storage_unavailable", "Storage request cancelled"));
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    });
-    return await Promise.race([operation, cancelled]);
-  } finally {
-    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-  }
-}
-
 async function ensureStorageRuntime(peerId?: string): Promise<StorageRuntimeController> {
   if (storageController) return storageController;
   if (testStorageRuntimeOverride) {
@@ -6166,30 +2071,22 @@ async function ensureStorageRuntime(peerId?: string): Promise<StorageRuntimeCont
       emitStorageState();
     }
     if (typeof code === "string" && code.startsWith("storage_")) throw error;
-    throw storageCoordinatorError("storage_unavailable");
+    throw storageCoordinatorError("storage_unavailable", error instanceof Error ? error.message : "Storage startup failed");
   };
   try {
     if (!walletLifecycle || !platformRootStore) throw new Error("Wallet storage root is unavailable");
   } catch (error) { startupError(error); }
   let runtime: StorageRuntimeController;
   try {
-    const lifecycle = walletLifecycle!;
     const root = platformRootStore!;
     runtime = await createStorageRuntimeController({
-      coldStart: () => lifecycle.coldStart(),
-      initialize: (plan) => lifecycle.initialize(plan),
-      unlock: (password) => lifecycle.unlock(password),
-      lock: () => lifecycle.lock(),
-      changeKeyPassword: (input) => lifecycle.changePassword(input),
-      renameKey: (label) => lifecycle.rename(label),
-      exportKeyHold: () => lifecycle.exportKeyHold(),
-      resetWallet: (input) => lifecycle.resetWallet(input),
       summary: async () => {
-        const meta = storageColdStartState?.meta;
+        // 冷启动缓存会在初始化/解锁事件后失效；摘要身份必须取当前权威世代。
+        const walletGeneration = coordinatorState.walletGeneration;
         return {
           ...(coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : {}),
-          ...(meta ? { label: walletKeys ? await readWalletKeyLabel(walletKeys) : undefined } : {}),
-          ...(meta ? { walletGeneration: meta.walletGeneration } : {}),
+          ...(walletGeneration ? { label: walletKeys ? await readWalletKeyLabel(walletKeys) : undefined } : {}),
+          ...(walletGeneration ? { walletGeneration } : {}),
         };
       },
       openAppFileStore: async (ctx) => root.openModuleFileStore({
@@ -6207,7 +2104,7 @@ async function ensureStorageRuntime(peerId?: string): Promise<StorageRuntimeCont
           appId: ctx.appIdentity.appId,
         },
       }),
-      abortSession: async (connectSessionId) => { abortStorageSession(connectSessionId, ""); },
+      abortSession: async (connectSessionId) => { revokeStorageSessionRequests(connectSessionId); },
       // 配额探测只能由钱包存储引擎访问:Worker 不直接碰 navigator.storage。
       persistence: async () => await walletStore?.persistence() ?? { persisted: false },
       status: () => coordinatorStorageStatus(),
@@ -6310,38 +2207,6 @@ async function awaitSatCleanup<T>(operation: Promise<T>, label: string): Promise
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
-}
-
-interface TaskRuntime {
-  id: string;
-  pluginId: string;
-  /** 稳定运行单元身份；与用户可启停的产品 id 分开。 */
-  unitId: string;
-  /** 本次 Worker 装配的运行实例；任务重建后必须变化。 */
-  instanceId: string;
-  state: "idle" | "queued" | "running" | "blocked";
-  controller?: AbortController;
-  lastStartedAt?: string;
-  lastCompletedAt?: string;
-  lastAttemptAt?: string;
-  nextRunAt?: string;
-  error?: string;
-  blockedReason?: string;
-  timer?: ReturnType<typeof setTimeout>;
-  keyScope?: { publicKeyHex: string; label?: string } | (() => { publicKeyHex: string; label?: string } | undefined);
-  intervalMs?: number;
-  /**
-   * 同步策略（2026-09-20 智能调度）：
-   *   - "managed"：间隔由同步管理设置决定（30 秒 / 1 分钟 / 5 分钟 / 关闭）。
-   *   - "smart"：由 WoC 空闲 2 秒的智能调度驱动，没有固定周期。
-   *   - "fixed"/缺省：平台固定周期或测试任务，不读取同步管理设置。
-   */
-  syncPolicy?: "managed" | "smart" | "fixed";
-  run?: (context: { signal: AbortSignal; reason: string; reportProgress(progress: unknown): void; assertSessionFresh(): void }) => Promise<void>;
-  startedEpoch?: SessionEpoch;
-  startedRunGeneration?: string;
-  startedPublicKeyHex?: string;
-  completion?: Promise<void>;
 }
 
 type CoordinatorTaskRuntimeInput = Omit<TaskRuntime, "state" | "unitId" | "instanceId"> & {
@@ -6612,8 +2477,7 @@ function abortCoordinatorPeerInflight(peerId: string): void {
   for (const [grantId, grant] of msfileGrants) if (grant.clientId === peerId) msfileGrants.delete(grantId);
   // 浏览授权是专属授权：peer 一旦脱离 committed session，它名下签发的授权当场作废，
   // 随后任何 browse 调用都只能得到「不可用」。
-  revokeStorageBrowseAuthorizations(peerId);
-  storageBrowseRuntime?.revokeClient(peerId);
+  storageBrowseCoordinator.revokeClient(peerId);
   const callers = channelCallersByClient.get(peerId);
   channelCallersByClient.delete(peerId);
   if (callers && channelSubscriptionMux) {
@@ -6723,6 +2587,9 @@ coordinatorWorkerUnitRegistry.onChange(() => {
 
 let coordinatorRuntimeApp: ReturnType<typeof startSharedWorkerApp> | undefined;
 let coordinatorRuntimeUnitSnapshotRevision = 0;
+const workerConsumers = new WeakMap<import("webloom-framework").PluginConsumer, import("webloom-framework").LifecycleScope>();
+/** Domain fixtures explicitly drive registry readiness; browser production uses Host instances. */
+let testDomainUnitReadiness = false;
 type CoordinatorPeerHandoffNotifier = (peerId: string, handoffRevision?: number) => boolean;
 let testCoordinatorPeerHandoffNotifier: CoordinatorPeerHandoffNotifier | undefined;
 
@@ -6738,34 +2605,26 @@ let testCoordinatorPeerHandoffNotifier: CoordinatorPeerHandoffNotifier | undefin
  */
 function coordinatorUnitAvailabilityContext(): CoordinatorUnitAvailabilityContext {
   return {
-    isProductEnabled: (productId) => isCoordinatorProductEnabled(productId),
     isUnitReady: (unitId) => coordinatorRuntimeUnitReady(unitId),
     isStorageReady: () => platformStorageReady,
     isOwnerSessionAvailable: () => coordinatorState.vaultStatus === "unlocked" && Boolean(coordinatorState.activePublicKeyHex),
   };
 }
 
-/**
- * 单元自身是否已就绪。**只读运行态注册表这一个来源。**
- *
- * 收敛到单一来源是必要的：`activate` / `ready` / `fail` / `stop` 四条边沿都会
- * `touch()` 并推 `onChange`，卖方订阅与框架门重判都挂在这条边上，因此只读注册表
- * 既不缺边沿，也不需要第二把尺子。
- *
- * 去掉 Host `enabled` 那一侧不会丢信息，因为顺序是单向的：
- * `coordinatorRuntimePlugins` 的 setup 钩子对全部领域单元都先 activate 再 ready，
- * 而 Host 只在 setup resolve 之后才把单元置 enabled。注册表 ready 严格早于 Host
- * enabled，Host 分支永远不可能带来注册表没有的信息。
- *
- * 反过来，Host 状态没有订阅边沿：判定里读它就必须同时订阅它，否则「某单元经 Host
- * 路径变成 enabled 而注册表没动」会翻成 ready 却没有任何回调触发重判——卖方就此
- * 永久停在 `waiting-dependency`，无报错、无日志，只能手动重切开关。Host 自身的
- * 健康度不由这里把关：`coordinatorRuntimeUnitSnapshots()` 在 app failed/disposed 时
- * 直接返回空快照，`reconcileCoordinatorRuntime()` 无 app 时空转，两处各自已经
- * fail closed。
+/** Production readiness comes from the actual framework instance. The local
+ * registry is only the domain fixture source when there is no Worker Host.
  */
 function coordinatorRuntimeUnitReady(unitId: string): boolean {
-  return coordinatorWorkerUnitRegistry.get(unitId)?.state === "ready";
+  if (!coordinatorRuntimeApp || testDomainUnitReadiness) return coordinatorWorkerUnitRegistry.get(unitId)?.state === "ready";
+  const state = coordinatorRuntimeApp.state();
+  if (state.state === "failed" || state.state === "disposed") return false;
+  return state.units.some(unit => unit.unitId === unitId && unit.state === "enabled" && Boolean(unit.instanceId));
+}
+
+function subscribeCoordinatorUnitAvailability(handler: () => void): () => void {
+  const offDomain = coordinatorWorkerUnitRegistry.onChange(handler);
+  const offRuntime = coordinatorRuntimeApp?.subscribe(handler);
+  return () => { offDomain(); offRuntime?.(); };
 }
 
 /**
@@ -6782,9 +2641,9 @@ function coordinatorUnitAvailability(unitId: string) {
  * 不再手写「插件开? 解锁?」那一串检查，也不再 reconcile 一下祈祷它已就绪；不可用
  * 就如实报不可用。
  *
- * 断言的是**构造前置条件**（插件开 + 作用域就绪）。声明的依赖不参与：依赖是使用
+ * 断言的是**构造前置条件**（作用域就绪）。声明的依赖不参与：依赖是使用
  * 前置条件（卖方要收款运行时），不是 MSFile 运行对象的构造前置条件——依赖掉线时
- * 仍然必须能把用户开关关掉。依赖由框架门（启动前置条件）与各能力自己的依赖门
+ * 仍需处理业务设置与诊断。依赖由框架门（启动前置条件）与各能力自己的依赖门
  * （完整可用性）分别把关，三者共用 `workerUnitAvailability.ts` 同一份规则。
  */
 function assertCoordinatorUnitConstructible(unitId: string): void {
@@ -6831,16 +2690,8 @@ function coordinatorRuntimeUnitSnapshots(): CoordinatorWorkerUnitPublicSnapshot[
     const descriptor = COORDINATOR_WORKER_UNIT_CATALOG.find((candidate) => candidate.unitId === runtimeUnit.unitId);
     if (!descriptor || runtimeUnit.runtime !== "shared-worker") continue;
     if (runtimeUnit.state !== "enabled" && runtimeUnit.state !== "starting"
-      && runtimeUnit.state !== "error-disabled" && runtimeUnit.state !== "blocked") continue;
+      && runtimeUnit.state !== "failed" && runtimeUnit.state !== "blocked") continue;
     const availability = coordinatorUnitAvailability(descriptor.unitId);
-    // 用户主动关掉本单元自己的产品时不进名单：那是用户的选择，不是故障。只因
-    // 依赖不就绪而被挡住的单元必须出现，否则监控页会把它读成「不存在」，而实际
-    // 上它只是现在不能用——两者对排查的含义完全不同。
-    //
-    // 只看「本单元自己的产品」这一条，不能要求 reasons 全是 plugin-disabled：
-    // 目录里单元把自己的产品也写进了 dependsOn（例如 p2pkh 依赖 background 与
-    // p2pkh），关掉产品会同时产生 dependency-disabled 那一条。
-    if (availability.reasons.some((item) => item.code === "plugin-disabled" && item.dependencyId === descriptor.productId)) continue;
     snapshots.push({
       productId: descriptor.productId,
       unitId: descriptor.unitId,
@@ -6898,13 +2749,18 @@ function reconcileCoordinatorRuntime(): Promise<void> {
  * 在整段 reconcile 期间保持为真，因此不可能自激。这是去重，不是等待、休眠或定时器。
  */
 let coordinatorRuntimeReconcileScheduled = false;
+let coordinatorRuntimeReconcileRequested = false;
 
 function scheduleCoordinatorRuntimeReconcile(): void {
+  coordinatorRuntimeReconcileRequested = true;
   if (coordinatorRuntimeReconcileScheduled) return;
   coordinatorRuntimeReconcileScheduled = true;
   void Promise.resolve().then(async () => {
     try {
-      await reconcileCoordinatorRuntime();
+      do {
+        coordinatorRuntimeReconcileRequested = false;
+        await reconcileCoordinatorRuntime();
+      } while (coordinatorRuntimeReconcileRequested);
     } finally {
       coordinatorRuntimeReconcileScheduled = false;
     }
@@ -6948,8 +2804,13 @@ function activateCoordinatorOwnerWorkerUnit(
   instanceId?: string,
 ): ReturnType<typeof coordinatorWorkerUnitRegistry.activate> {
   const descriptor = COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === unitId);
-  if (descriptor && !isCoordinatorProductEnabled(descriptor.productId)) {
-    throw new Error(`Plugin disabled: ${descriptor.productId}`);
+  if (descriptor && !isCoordinatorProductRegistered(descriptor.productId)) {
+    throw new Error(`Plugin unavailable: ${descriptor.productId}`);
+  }
+  if (instanceId === undefined && coordinatorRuntimeApp && !testDomainUnitReadiness) {
+    const actual = coordinatorRuntimeApp.state().units.find(unit => unit.unitId === unitId && unit.state === "enabled");
+    if (!actual?.instanceId) throw new Error(`Coordinator Worker unit is unavailable: ${unitId}`);
+    instanceId = actual.instanceId;
   }
   const identity = currentOwnerWorkerUnitIdentity();
   const existing = coordinatorWorkerUnitRegistry.get(unitId);
@@ -6990,12 +2851,13 @@ function stopCoordinatorWorkerUnit(unitId: string, instanceId?: string): void {
 }
 
 /** 任务注册在 locked 阶段也会发生；真正进入 owner-session 时再绑定 unit instance。 */
-function bindCoordinatorTaskUnitsToOwner(snapshot = currentPluginIntentSnapshot()): void {
+function bindCoordinatorTaskUnitsToOwner(): void {
+  if (coordinatorRuntimeApp && !testDomainUnitReadiness) { synchronizeCoordinatorTaskUnitInstances(); return; }
   if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
   const identity = currentOwnerWorkerUnitIdentity();
   const activated = new Map<string, ReturnType<typeof coordinatorWorkerUnitRegistry.activate>>();
   for (const runtime of coordinatorState.taskRuntimes.values()) {
-    // disable → enable 可能发生在旧任务仍等待 Provider 返回期间。旧
+    // 会话恢复可能发生在旧任务仍等待 Provider 返回期间。旧
     // completion 尚未结束时不能先发布一个新的 ready unit；否则快照会同时
     // 代表两个物理世代，下一次调度也可能与旧 I/O 重叠。旧 completion 的
     // finally 会在收尾后重新进入 scheduleRuntime，届时由 executeTask 懒加载
@@ -7003,7 +2865,7 @@ function bindCoordinatorTaskUnitsToOwner(snapshot = currentPluginIntentSnapshot(
     if (runtime.completion) continue;
     const unit = getCoordinatorWorkerUnitForTask(runtime.id);
     if (!unit) continue;
-    if (!isCoordinatorProductEnabled(unit.productId, snapshot) || coordinatorTaskBlockedReason(runtime, snapshot)) continue;
+    if (!isCoordinatorProductRegistered(unit.productId) || coordinatorTaskBlockedReason(runtime)) continue;
     let unitSnapshot = activated.get(unit.unitId);
     if (!unitSnapshot) {
       unitSnapshot = activateOwnerSessionUnit(unit.unitId, identity);
@@ -7018,7 +2880,7 @@ function bindCoordinatorTaskUnitsToOwner(snapshot = currentPluginIntentSnapshot(
     const serviceUnit = p2pkhWocService;
     if (!serviceUnit) continue;
     const productId = "woc";
-    if (!isCoordinatorProductEnabled(productId, snapshot)) continue;
+    if (!isCoordinatorProductRegistered(productId)) continue;
     let unitSnapshot = activated.get(unitId);
     if (!unitSnapshot) {
       unitSnapshot = activateOwnerSessionUnit(unitId, identity);
@@ -7035,8 +2897,9 @@ function stopCoordinatorOwnerWorkerUnits(): void {
   }
 }
 
-/** Vault 的私钥/Keyspace 管理外壳属于 Worker root，随 Worker 重启而重建。 */
+/** Vault 的私钥/WalletState 管理外壳属于 Worker root，随 Worker 重启而重建。 */
 function activateCoordinatorRootWorkerUnits(): void {
+  if (coordinatorRuntimeApp && !testDomainUnitReadiness) return;
   const vaultUnit = coordinatorWorkerUnitRegistry.activate("vault.coordinator-worker");
   if (vaultUnit.state !== "ready") {
     coordinatorWorkerUnitRegistry.ready(vaultUnit.unitId, vaultUnit.instanceId);
@@ -7063,17 +2926,13 @@ const finalIoAudit = createFinalIoAudit();
 /** Worker 与 Host 共用的内置插件 -> 存储声明表。 */
 const WORKER_SYSTEM_STORAGE_DECLARATIONS = SYSTEM_STORAGE_DECLARATIONS;
 
-/** Transfer ownership of the worker's active private-key buffer. */
-function replaceActivePrivateKey(next: Uint8Array | undefined): void {
-  const previous = coordinatorState.activePrivateKeyBytes;
-  if (previous && previous !== next) previous.fill(0);
-  coordinatorState.activePrivateKeyBytes = next;
-}
-
-/** Drop the worker-owned active private-key buffer. */
-function dropActivePrivateKey(): void {
-  replaceActivePrivateKey(undefined);
-}
+const vaultKeySession = createWorkerKeySession(() => ({
+  unlocked: coordinatorState.vaultStatus === "unlocked",
+  publicKeyHex: coordinatorState.activePublicKeyHex,
+  sessionEpoch: coordinatorState.sessionEpoch,
+}));
+function replaceActivePrivateKey(next: Uint8Array | undefined): void { vaultKeySession.replace(next); }
+function dropActivePrivateKey(): void { vaultKeySession.clear(); }
 
 /**
  * Peer scope revoke 是生产连接的唯一断开/准入栅栏。
@@ -7108,46 +2967,52 @@ let chainHeightRevision = 0;
 let assetDataRevision = 0;
 let contactsPresenceRevision = 0;
 /** 统一主会话只保留一个自动锁定计时器；旧计时器不能跨解锁世代存活。 */
-let autoLockTimer: ReturnType<typeof setTimeout> | undefined;
-let lastContactsPresenceState: CoordinatorContactsPresenceEvent | undefined;
-let contactsPresencePublishTail: Promise<void> = Promise.resolve();
-function resolveKeyScope(runtime: TaskRuntime): { publicKeyHex: string; label?: string } | undefined { return typeof runtime.keyScope === "function" ? runtime.keyScope() : runtime.keyScope; }
+const vaultAutoLock = createWorkerAutoLock({
+  session: () => coordinatorState,
+  timeout: () => coordinatorMeta.autoLockTimeoutMs ?? coordinatorState.autoLockTimeoutMs,
+  commitTimeout: timeout => { coordinatorMeta.autoLockTimeoutMs = timeout; coordinatorState.autoLockTimeoutMs = timeout; },
+  deadline: () => coordinatorState.autoLockDeadline,
+  commitDeadline: deadline => { coordinatorState.autoLockDeadline = deadline; },
+  keepUnlocked: sellerKeepsVaultUnlocked,
+  persistTimeout: autoLockTimeoutMs => persistCoordinatorSettings({ scheduleSettings: coordinatorMeta.scheduleSettings, autoLockTimeoutMs }),
+  publishSettings: () => publishSessionState("autolock-settings"),
+  lock: () => performGlobalLock("auto-lock-timeout"),
+});
+function resetAutoLockTimer(): void { vaultAutoLock.reset(); }
+const handleAutolockSettingsUpdate = vaultAutoLock.update;
+const contactsPresenceProjection = createWorkerPresenceProjection({
+  service: () => coordinatorContactsService,
+  session: () => ({ owner: normalizedCoordinatorOwner(), epoch: coordinatorState.sessionEpoch }),
+  publish: event => publishTopicEvent("contacts.presence", event) as CoordinatorContactsPresenceEvent,
+});
+
 
 /** Coordinator 真实任务的最终 I/O 审计入口；测试任务不进入生产台账。 */
 const COORDINATOR_TASK_FINAL_IO_AUDIT: Readonly<Record<string, FinalIoAuditOperation>> = Object.fromEntries(
   COORDINATOR_WORKER_UNIT_CATALOG.flatMap((unit) => unit.finalIoAuditEntries.map((entry) => [entry.taskId, entry.operation] as const)),
 );
 
-function currentPluginIntentSnapshot(): PluginIntentSnapshot {
-  return pluginIntentController?.snapshot() ?? coordinatorMeta.pluginIntent ?? emptyPluginIntentSnapshot();
-}
-
-/** Worker 侧产品启用判定；未知产品默认拒绝，测试任务使用显式 test 例外。 */
-function isCoordinatorProductEnabled(pluginId: string, snapshot = currentPluginIntentSnapshot()): boolean {
+/** 静态产品身份登记；不表示实例就绪，也不读取用户启停配置。 */
+function isCoordinatorProductRegistered(pluginId: string): boolean {
   if (pluginId === "test") return true;
-  if (BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET.has(pluginId)) return true;
   if (!BUILTIN_PLUGIN_PRODUCT_ID_SET.has(pluginId)) return false;
-  return snapshot.desiredEnabled[pluginId] !== false;
+  return true;
 }
 
-function coordinatorTaskBlockedReason(runtime: TaskRuntime, snapshot = currentPluginIntentSnapshot()): string | undefined {
-  const dependencies = [
-    ...getCoordinatorWorkerProductDependenciesForTask(runtime.id),
-  ];
-  if (dependencies.length === 0) {
-    dependencies.push("background", runtime.pluginId);
-  }
-  // P2PKH 链上数据（历史 + UTXO 快照）只有 WoC 一个来源；WOC 被停用时，
-  // 相关任务必须在入口处阻断，而不是先启动一次再等 provider-unavailable。
-  if (runtime.id === "p2pkh.transactions-sync" || runtime.id === "p2pkh.utxo-snapshot" || runtime.id === "token-bsv21.sync" || runtime.id === "token-stas.sync" || runtime.id === "collectible-1satordinals.sync") {
-    if (!dependencies.includes("woc")) dependencies.push("woc");
-  }
-  const disabled = dependencies.find((pluginId) => !isCoordinatorProductEnabled(pluginId, snapshot));
-  return disabled ? `Plugin disabled: ${disabled}` : undefined;
+function coordinatorTaskBlockedReason(runtime: TaskRuntime): string | undefined {
+  const unit = getCoordinatorWorkerUnitForTask(runtime.id);
+  if (!unit) return undefined;
+  // 调度/懒构造之前只检查真实依赖与作用域，不能要求自身已经 ready。
+  const unavailable = describeUnitUnavailableForFramework(
+    coordinatorRuntimeApp && !testDomainUnitReadiness
+      ? evaluateCoordinatorUnitAvailability(unit.unitId, coordinatorUnitAvailabilityContext())
+      : evaluateCoordinatorUnitStartupPreconditions(unit.unitId, coordinatorUnitAvailabilityContext()),
+  );
+  return unavailable ? `Runtime unavailable: ${unavailable}` : undefined;
 }
 
-function isPluginIntentBlockedReason(reason: string | undefined): boolean {
-  return typeof reason === "string" && reason.startsWith("Plugin disabled: ");
+function isRuntimeAvailabilityBlockedReason(reason: string | undefined): boolean {
+  return typeof reason === "string" && reason.startsWith("Runtime unavailable: ");
 }
 
 /** Provider 重建后允许重新排程的可恢复阻塞；不是未知写入结果。 */
@@ -7161,62 +3026,10 @@ function coordinatorProductBlockedResponse(requestId: string, pluginId: string):
     sessionEpoch: coordinatorState.sessionEpoch,
     ack: {
       status: "blocked",
-      reason: { key: "plugin.blocked.disabled", fallback: `Plugin disabled: ${pluginId}` },
+      reason: { key: "plugin.blocked.unavailable", fallback: `Plugin unavailable: ${pluginId}` },
     },
   };
 }
-
-/** Provider 产品的启停也必须投影到真实 registry，不能只改变 Window UI。 */
-function reconcileCoordinatorProviderIntent(snapshot: PluginIntentSnapshot): boolean {
-  if (!p2pkhRegistry) return false;
-  let changed = false;
-  const wocEnabled = isCoordinatorProductEnabled("woc", snapshot);
-  const hasWocBroadcast = Boolean(p2pkhRegistry.getBroadcastProvider("woc", "main"));
-  if (!wocEnabled) {
-    if (hasWocBroadcast) {
-      p2pkhRegistry.unregisterBroadcastProvider?.("woc");
-      changed = true;
-    }
-  } else if (p2pkhWocService && !hasWocBroadcast) {
-    registerWocP2pkhProviders({ registry: p2pkhRegistry, woc: p2pkhWocService });
-    changed = true;
-  }
-  if (changed) {
-    // Provider 被撤权后，取消当前同步 run；恢复时由同一 task 重新开始。
-    void cancelP2pkhSyncForProviderChange().catch(() => undefined);
-  }
-  return changed;
-}
-
-/** 把产品级意图同步投影到真实 Worker 单元实例；停止不只撤 Provider。 */
-function reconcileCoordinatorWorkerUnitIntent(snapshot: PluginIntentSnapshot): boolean {
-  let changed = false;
-  for (const unit of coordinatorWorkerUnitRegistry.snapshots()) {
-    if (unit.scopeKind !== "root" && !isCoordinatorProductEnabled(unit.productId, snapshot)) {
-      changed = coordinatorWorkerUnitRegistry.stop(unit.unitId, unit.instanceId) || changed;
-    }
-  }
-
-  // 这两个服务拥有独立的异步/远端资源，先同步撤掉 unit，再让领域清理
-  // 复用原有恢复仓库和物理退订流程；清理结果不会重新激活旧 instance。
-  if (!isCoordinatorProductEnabled("msfile", snapshot) && (msfileRuntime || msfileRuntimeStarting)) {
-    releaseMsfileRuntime("plugin intent disabled");
-    changed = true;
-  }
-  if (!isCoordinatorProductEnabled("sat-subscription", snapshot)
-    && (satRuntime || satRuntimeStarting || coordinatorWorkerUnitRegistry.get("sat-subscription.coordinator-worker"))) {
-    void releaseSatRuntime("plugin intent disabled").catch(() => undefined);
-    changed = true;
-  }
-
-  if (coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) {
-    // 启用后只重建当前仍满足依赖的实际 task/service 单元；不为静态声明
-    // 伪造 ready 快照，未使用的服务继续保持懒加载。
-    bindCoordinatorTaskUnitsToOwner(snapshot);
-  }
-  return changed;
-}
-
 
 // ============================================================
 // 智能调度（2026-09-20）
@@ -7231,299 +3044,86 @@ function reconcileCoordinatorWorkerUnitIntent(snapshot: PluginIntentSnapshot): b
 //   - 解锁 / 初始化完成后立即同步一次。
 
 /** 智能调度：WoC 队列空闲满 2 秒后刷新余额快照。 */
-const WOC_IDLE_SYNC_DEBOUNCE_MS = 2_000;
-
-let smartSyncIdleTimer: ReturnType<typeof setTimeout> | undefined;
-let smartSyncDebounceMs = WOC_IDLE_SYNC_DEBOUNCE_MS;
+const backgroundWorkerRuntime = createWorkerBackgroundRuntime({
+  state: () => coordinatorState,
+  blockedReason: coordinatorTaskBlockedReason,
+  isAvailabilityBlocked: isRuntimeAvailabilityBlockedReason,
+  snapshots: getTaskSnapshots,
+  publish: event => { publishTopicEvent("background.snapshot", event); },
+  queueSnapshot: () => (testDomainUnitReadiness ? p2pkhWocService : p2pkhWorkerWocQuery)?.getQueueSnapshot(),
+  activate: taskId => {
+    const unit = getCoordinatorWorkerUnitForTask(taskId);
+    if (!unit) return undefined;
+    const instance = activateCoordinatorOwnerWorkerUnit(unit.unitId);
+    return coordinatorWorkerUnitRegistry.ready(instance.unitId, instance.instanceId).instanceId;
+  },
+  runAudited: async (taskId, signal, run) => {
+    const auditOperation = COORDINATOR_TASK_FINAL_IO_AUDIT[taskId];
+    if (auditOperation) await withCoordinatorFinalIoLease("write", signal, run, { auditOperation });
+    else await run(signal);
+  },
+  persistSettings: scheduleSettings => persistCoordinatorSettings({ scheduleSettings, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }),
+  commitSettings: settings => { coordinatorMeta.scheduleSettings = settings; coordinatorState.scheduleSettings = settings; },
+});
+const { managedIntervalFor, cancelSmartSyncIdleTimer, isWocQueueIdle, canArmSmartSync, armSmartSyncIdleTimer, onWocQueueChanged, armSmartSyncIfIdle, triggerSmartSync, triggerImmediateSync, scheduleRuntime, assertTaskFresh, resolveKeyScope, handleBackgroundRunNow, handleBackgroundTrigger, handleBackgroundCancelByKey, cancelTaskRuntimesByKey, handleBackgroundCancel, handleBackgroundSettingsUpdate, executeTask } = backgroundWorkerRuntime;
 
 /** managed 任务的当前间隔；未配置时使用该任务自己的缺省值。 */
-function managedIntervalFor(taskId: string): number {
-  const configured = coordinatorState.scheduleSettings.taskIntervals[taskId];
-  return typeof configured === "number" ? configured : backgroundSyncDefaultIntervalMs(taskId);
-}
+
 
 /** 归一化同步管理设置：只保留已登记任务与合法间隔，非法值直接丢弃。 */
-function normalizeBackgroundSyncSettings(settings: CoordinatorBackgroundSyncSettings | undefined): CoordinatorBackgroundSyncSettings {
-  const taskIntervals: Record<string, number> = {};
-  for (const taskId of BACKGROUND_MANAGED_SYNC_TASK_IDS) {
-    const raw = settings?.taskIntervals?.[taskId];
-    if (isValidBackgroundSyncIntervalMs(raw)) taskIntervals[taskId] = raw;
-  }
-  return { taskIntervals };
-}
-
-function cancelSmartSyncIdleTimer(): void {
-  if (smartSyncIdleTimer !== undefined) {
-    clearTimeout(smartSyncIdleTimer);
-    smartSyncIdleTimer = undefined;
-  }
-}
-
-function isWocQueueIdle(snapshot: WocQueueSnapshot): boolean {
-  return snapshot.queued === 0 && snapshot.inFlight === 0;
-}
 
 /** 智能调度只在可运行会话里计时：锁定 / 无 active key 时不挂计时器。 */
-function canArmSmartSync(): boolean {
-  return coordinatorState.vaultStatus === "unlocked" && Boolean(coordinatorState.activePublicKeyHex);
-}
+
 
 /**
  * 启动 2 秒计时。
  * 设计缘由：计时是「任务完成后」计时——WoC 队列变忙会取消计时，变空
  * 后再重新计时；429 backoff 期间自动把计时推迟到 backoff 解除。
  */
-function armSmartSyncIdleTimer(snapshot: WocQueueSnapshot = p2pkhWocService?.getQueueSnapshot() ?? { queued: 0, inFlight: 0, coordinated: false }): void {
-  if (smartSyncIdleTimer !== undefined) return;
-  const now = Date.now();
-  const backoffDelay = snapshot.backoffUntil && snapshot.backoffUntil > now ? snapshot.backoffUntil - now : 0;
-  smartSyncIdleTimer = setTimeout(() => {
-    smartSyncIdleTimer = undefined;
-    // 计时期间发生锁定 / 切 owner 时不得触发同步。
-    if (!canArmSmartSync()) return;
-    triggerSmartSync(BACKGROUND_TRIGGER_REASON.IDLE_SYNC);
-  }, Math.max(smartSyncDebounceMs, backoffDelay));
-}
+
 
 /** WoC 队列事件：忙则取消计时；空闲且会话可运行时从这一刻开始重新计时 2 秒。 */
-function onWocQueueChanged(snapshot: WocQueueSnapshot): void {
-  if (!isWocQueueIdle(snapshot)) {
-    cancelSmartSyncIdleTimer();
-    return;
-  }
-  if (canArmSmartSync()) armSmartSyncIdleTimer(snapshot);
-}
+
 
 /** 若会话可运行且 WoC 当前空闲（或测试环境没有 WoC 服务），重新开始 2 秒计时。 */
-function armSmartSyncIfIdle(): void {
-  if (!canArmSmartSync()) return;
-  const snapshot = p2pkhWocService?.getQueueSnapshot();
-  if (!snapshot || isWocQueueIdle(snapshot)) armSmartSyncIdleTimer(snapshot);
-}
+
 
 /** 触发所有 smart 任务（余额快照）；正在运行的任务由 executeTask 自身去重。 */
-function triggerSmartSync(reason: string): void {
-  for (const runtime of coordinatorState.taskRuntimes.values()) {
-    if (runtime.syncPolicy !== "smart") continue;
-    void executeTask(runtime.id, reason).catch(() => undefined);
-  }
-}
+
 
 /**
  * 解锁 / 初始化后立即同步一次。
  * smart 任务立即刷新余额；managed 任务只有未关闭（间隔 > 0）时才跑。
  */
-function triggerImmediateSync(reason: string): void {
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
-  for (const runtime of coordinatorState.taskRuntimes.values()) {
-    if (runtime.syncPolicy === "smart") {
-      void executeTask(runtime.id, reason).catch(() => undefined);
-      continue;
-    }
-    if (runtime.syncPolicy === "managed" && (runtime.intervalMs ?? 0) > 0) {
-      void executeTask(runtime.id, reason).catch(() => undefined);
-    }
-  }
-}
 
-/**
- * 链高度同步任务体（2026-09-26）。
- *
- * 设计缘由：
- *   - 只向节点读一次 `/chain/info`，不做任何本地推算或高度锁判断。
- *   - 读数成功后写内存并广播 `chain.height`；`ChainHeightReader` 的订阅者
- *     因此不需要各自轮询节点。
- *   - 失败时抛错保留旧读数（available 仍为 true），让任务快照展示错误，
- *     而不是把高度写回 0 让消费者误判「链回退了」。
- */
-async function refreshCoordinatorChainHeight(signal: AbortSignal): Promise<void> {
-  const woc = p2pkhWocService;
-  if (!woc) throw new Error("Chain height sync requires the WOC provider");
-  const network: BsvNetwork = bitfsNetwork();
-  const height = testChainHeightProvider
-    ? await testChainHeightProvider(network)
-    : await woc.getChainHeight(network, { priority: "background", signal });
-  if (!Number.isSafeInteger(height) || height < 0) {
-    throw new Error(`Chain height provider returned an invalid height: ${String(height)}`);
-  }
-  // 读数相同也推进来源时间：它证明本轮同步确实完成过，UI 的「上次更新」
-  // 不能因为高度没变而停在旧值上。revision 只在高度或可用性变化时递增。
-  const available = true;
-  const changed = height !== coordinatorChainHeight.height
-    || available !== coordinatorChainHeight.available
-    || coordinatorChainHeight.network !== network;
-  coordinatorChainHeight = {
-    height,
-    network,
-    available,
-    updatedAtMs: Date.now(),
-    revision: changed ? coordinatorChainHeight.revision + 1 : coordinatorChainHeight.revision,
-  };
-  publishTopicEvent("chain.height", {
-    type: "chain.height.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    chainHeight: { ...coordinatorChainHeight },
+
+function createCoordinatorChainHeightTask(woc: WocService) {
+  return createChainHeightTask({
+    network: bitfsNetwork,
+    readHeight: (network, signal) => testChainHeightProvider ? testChainHeightProvider(network) : woc.getChainHeight(network, { priority: "background", signal }),
+    snapshot: () => coordinatorChainHeight,
+    publish: snapshot => {
+      coordinatorChainHeight = snapshot;
+      publishTopicEvent("chain.height", { type: "chain.height.changed", sessionEpoch: coordinatorState.sessionEpoch, chainHeight: { ...snapshot } });
+    },
   });
 }
 
-/** 让定时器本身也服从产品意图，避免 disable 后留下隐藏的 Worker 入口。 */
-function scheduleRuntime(runtime: TaskRuntime): void {
-  const intentBlockedReason = coordinatorTaskBlockedReason(runtime);
-  if (intentBlockedReason) {
-    if (runtime.timer) clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-    runtime.nextRunAt = undefined;
-    if (runtime.state !== "running") {
-      runtime.state = "blocked";
-      runtime.blockedReason = intentBlockedReason;
-    }
-    return;
-  }
-  // smart 任务没有固定周期：由 WoC 空闲 2 秒的智能调度驱动。
-  if (runtime.syncPolicy === "smart") {
-    if (runtime.timer) clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-    runtime.nextRunAt = undefined;
-    return;
-  }
-  // 间隔为 0 / 缺省表示关闭自动同步：清除定时器与 nextRunAt，手动仍可触发。
-  if (!runtime.intervalMs) {
-    if (runtime.timer) clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-    runtime.nextRunAt = undefined;
-    return;
-  }
-  if (runtime.timer) clearTimeout(runtime.timer);
-  runtime.nextRunAt = new Date(Date.now() + runtime.intervalMs).toISOString();
-  runtime.timer = setTimeout(() => { runtime.timer = undefined; void executeTask(runtime.id, "interval"); }, runtime.intervalMs);
-}
+/** 依赖与作用域失效时撤下任务定时器。 */
 
-/**
- * 意图持久化成功后立即撤掉 Worker 任务入口；重新启用只恢复 idle/定时器，
- * 不会把旧 completion 当成新实例。真正的 async 资源清理仍由任务自己的
- * AbortSignal / finally 完成。
- */
-function reconcileCoordinatorTaskIntent(snapshot: PluginIntentSnapshot): void {
-  // 先投影 Provider，再重算任务状态。启用 WOC 时，旧的
-  // provider-unavailable 阻塞必须能在同一轮恢复；禁用时则由下面的产品
-  // 依赖检查先挡住任务入口。
-  let changed = reconcileCoordinatorProviderIntent(snapshot);
-  changed = reconcileCoordinatorWorkerUnitIntent(snapshot) || changed;
-  for (const runtime of coordinatorState.taskRuntimes.values()) {
-    const blockedReason = coordinatorTaskBlockedReason(runtime, snapshot);
-    if (blockedReason) {
-      if (runtime.timer) clearTimeout(runtime.timer);
-      runtime.timer = undefined;
-      runtime.nextRunAt = undefined;
-      runtime.controller?.abort(new Error(blockedReason));
-      if (runtime.state !== "blocked" || runtime.blockedReason !== blockedReason) {
-        runtime.state = "blocked";
-        runtime.blockedReason = blockedReason;
-        runtime.error = undefined;
-        changed = true;
-      }
-      continue;
-    }
-    // 运行中的旧 completion 可能还在收尾；先保留 blocked，等它的 finally
-    // 观察到新意图后再恢复调度，防止同一任务出现两个物理实例。
-    if (runtime.state === "blocked"
-      && (isPluginIntentBlockedReason(runtime.blockedReason) || isProviderAvailabilityBlockedReason(runtime.blockedReason))
-      && !runtime.completion) {
-      runtime.state = "idle";
-      runtime.blockedReason = undefined;
-      runtime.error = undefined;
-      if (coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) scheduleRuntime(runtime);
-      // 智能任务没有固定周期：从产品恢复这一刻重新开始 2 秒计时。
-      if (runtime.syncPolicy === "smart") armSmartSyncIfIdle();
-      changed = true;
-    }
-  }
-  if (changed) {
-    publishTopicEvent("background.snapshot", {
-      type: "background.snapshot.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      snapshots: getTaskSnapshots(),
-    });
-  }
-}
-
-function assertTaskFresh(taskId: string): void {
-  const runtime = coordinatorState.taskRuntimes.get(taskId);
-  if (!runtime || runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedRunGeneration !== coordinatorState.runGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) {
-    throw new Error("stale task session epoch");
-  }
-}
-
-function createWorkerKeyspace(): KeyspaceService {
-  // 单 Key 模型下 keyspace 只是「当前唯一 Key 是谁」的只读投影：没有列表、
-  // 没有选择、没有切换，也没有删除第二把 Key 的入口。
-  const subscribers = new Set<(state: ActiveKeyState) => void>();
-  workerKeyspaceSubscribers = subscribers;
-  return {
-    active: workerActiveKeyState,
-    requireActiveKey: () => {
-      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
-        throw new Error("No active key");
-      }
-      return {
-        publicKeyHex: coordinatorState.activePublicKeyHex,
-        label: coordinatorActiveKeySummary()?.label ?? "",
-        capabilities: ["p2pkh"],
-        createdAt: coordinatorActiveKeySummary()?.createdAt ?? "",
-      };
-    },
-    onActiveKeyChanged: (handler) => {
-      subscribers.add(handler);
-      return () => { subscribers.delete(handler); };
-    },
-  };
-}
-
-/** 当前 Worker Keyspace 投影的订阅者；锁、改密、重置都会通知它们。 */
-let workerKeyspaceSubscribers: Set<(state: ActiveKeyState) => void> | undefined;
-
-/** 身份投影修订号；每次广播递增，页面据此丢弃乱序或重复投影。 */
-let workerKeyspaceRevision = 0;
-
-/** 唯一 Key 的公开摘要缓存；只由解锁/锁定路径刷新，不单独持久化。 */
-let coordinatorActiveKeySummaryCache: KeyIdentity | undefined;
-
-function coordinatorActiveKeySummary(): KeyIdentity | undefined {
-  return coordinatorActiveKeySummaryCache;
-}
-
-/** 更新唯一 Key 的公开摘要投影。 */
-function setCoordinatorActiveKeySummary(summary: KeyIdentity | undefined): void {
-  coordinatorActiveKeySummaryCache = summary;
-}
-
-/** 读取当前身份投影；未解锁时 activePublicKeyHex 缺省。 */
-function workerActiveKeyState(): ActiveKeyState {
-  return {
+const workerIdentityProjection = createWorkerIdentityProjection();
+const coordinatorActiveKeySummary = workerIdentityProjection.summary;
+const setCoordinatorActiveKeySummary = workerIdentityProjection.setSummary;
+function workerWalletSnapshot(): import("@keymaster/contracts").VaultLifecycleSnapshot {
+  return { status: coordinatorState.vaultStatus === "fatal" ? "locked" : coordinatorState.vaultStatus,
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex : undefined,
-    generation: workerKeyspaceRevision,
-  };
+    activeKeyIdentity: coordinatorState.vaultStatus === "unlocked" ? coordinatorActiveKeySummary() : undefined,
+    sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration,
+    walletGeneration: coordinatorState.walletGeneration, vaultLifecycleRevision: sessionRevision };
 }
-
-/** 通知已发放的 Keyspace 投影订阅者当前身份已变化。 */
-function publishWorkerActiveKeyChanged(): void {
-  const subscribers = workerKeyspaceSubscribers;
-  if (!subscribers || subscribers.size === 0) return;
-  workerKeyspaceRevision += 1;
-  const state = workerActiveKeyState();
-  for (const handler of subscribers) {
-    try {
-      handler(state);
-    } catch (error) {
-      console.warn("[keyspace] active key subscriber failed", error instanceof Error ? error.message : String(error));
-    }
-  }
-}
-
-function disposeWorkerKeyspace(): void {
-  workerKeyspaceSubscribers?.clear();
-  workerKeyspaceSubscribers = undefined;
-}
+const workerWalletState = createWalletStateSource(workerWalletSnapshot);
+// Only trusted Worker assembly and fixture tasks hold this private source.
+const createWorkerWalletState = () => workerWalletState;
 
 /** Worker 任务在 locked 首屏也要先注册；真实 owner 存储延迟到解锁后绑定。 */
 /**
@@ -7533,184 +3133,50 @@ function disposeWorkerKeyspace(): void {
  * 句柄按四维绑定惰性重建：锁定、改密、重置、Worker 重启和 Root 换绑都会让
  * 旧绑定失效，并在下一次调用时重新打开。
  */
-const workerModuleFileHandles = new Map<string, BorrowedModuleFileStore>();
+const workerStorageClients = createWorkerStorageClients({
+  root: () => platformRootStore,
+  binding: currentCoordinatorStorageBinding,
+  sameBinding: storageBindingsEqual,
+  assertAvailable: assertStorageDataAvailable,
+  assertLive: assertStorageBindingLive,
+  beginRequest: beginStorageBindingRequest,
+  declaration(moduleId, purposeId, model) {
+    const declaration = SYSTEM_STORAGE_DECLARATIONS[moduleId]?.find(candidate => candidate.model === model && candidate.purposeId === purposeId);
+    if (!declaration) throw new Error(`Unknown module storage declaration: ${moduleId}/${purposeId}/${model}`);
+    return declaration;
+  },
+  unavailable: storageUnavailableError,
+  withIoLease(operation, model, execute) {
+    return model === "files"
+      ? withCoordinatorFinalIoLease(operation, undefined, execute, { auditOperation: "storage.module.files", durableLease: operation === "write" })
+      : withCoordinatorFinalIoLease(operation, undefined, execute, { auditOperation: "storage.owner.data", durableLease: operation === "write" });
+  },
+  onFailure: markStorageIoFailure,
+  onInvalidate(moduleId) { if (moduleId === "p2pkh") disposeP2pkhStateRepository(); },
+  registerMaintenance: storageKeyValueMaintenance.register,
+  unregisterMaintenance: storageKeyValueMaintenance.unregister,
+});
+const createWorkerModuleFileStore = workerStorageClients.moduleFiles;
+const createWorkerKeyValueStore = workerStorageClients.keyValue;
 
-function createWorkerModuleFileStore(
-  pluginId: string,
-  purposeId: string,
-  appStorageName?: string,
-): BorrowedModuleFileStore {
-  const handleKey = `${pluginId}\u0000${purposeId}\u0000${appStorageName ?? "*"}`;
-  const cachedHandle = workerModuleFileHandles.get(handleKey);
-  if (cachedHandle) return cachedHandle;
-  const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId]?.find((candidate) => candidate.model === "files" && candidate.purposeId === purposeId);
-  if (!declaration) throw new Error(`Unknown module file storage declaration: ${pluginId}/${purposeId}`);
-  let closed = false;
-  let current: ModuleFileStore | undefined;
-  let binding: CoordinatorStorageBinding | undefined;
-  const invalidateBinding = (): void => {
-    current = undefined;
-    binding = undefined;
-  };
-  const resolve = async (): Promise<ModuleFileStore> => {
-    if (closed) throw new Error("Worker module file storage handle is closed");
-    assertStorageDataAvailable();
-    const expected = currentCoordinatorStorageBinding();
-    if (!expected) throw new Error("Module file storage requires an unlocked wallet");
-    if (!current || !binding || !storageBindingsEqual(binding, expected)) {
-      invalidateBinding();
-      if (!platformRootStore) throw new Error("Module file storage is not ready");
-      const root = platformRootStore;
-      const opened = await root.openModuleFileStore(
-        appStorageName === undefined ? { declaration } : { declaration, appStorageName },
-      );
-      // 打开是异步的：期间可能已经发生锁定或 Root 换绑，必须重新校验。
-      if (closed || platformRootStore !== root || !currentCoordinatorStorageBinding()
-        || !storageBindingsEqual(currentCoordinatorStorageBinding()!, expected)) {
-        opened.close();
-        throw storageUnavailableError("Module file storage binding became stale while opening");
-      }
-      current = opened;
-      binding = expected;
-    }
-    return current;
-  };
-  const run = async <T>(
-    operation: "read" | "write",
-    execute: (store: ModuleFileStore) => Promise<T>,
-  ): Promise<T> => withCoordinatorFinalIoLease(operation, undefined, async () => {
-    try {
-      const store = await resolve();
-      const bound = binding;
-      if (!bound) throw storageUnavailableError("Module file storage binding is unavailable");
-      const release = beginStorageBindingRequest();
-      try {
-        const value = await execute(store);
-        assertStorageBindingLive(bound);
-        return value;
-      } finally {
-        release();
-      }
-    } catch (error) {
-      markStorageIoFailure(error);
-      throw error;
-    }
-  }, {
-    auditOperation: "storage.module.files",
-    durableLease: operation === "write",
-  });
-  const handle: BorrowedModuleFileStore = {
-    get walletGeneration() { return binding?.walletGeneration ?? ""; },
-    get sessionEpoch() { return binding?.sessionEpoch ?? ""; },
-    get runGeneration() { return binding?.runGeneration ?? ""; },
-    list: (input) => run("read", (store) => store.list(input)),
-    get: (path, options) => run("read", (store) => store.get(path, options)),
-    getRange: (path, range, options) => run("read", (store) => store.getRange(path, range, options)),
-    put: (path, bytes, options) => run("write", (store) => store.put(path, bytes, options)),
-    delete: (path, options) => run("write", (store) => store.delete(path, options)),
-    batch: (input, options) => run("write", (store) => store.batch(input, options)),
-  };
-  const storeBinding: WorkerOwnerStoreBinding = {
-    close: () => {
-      if (closed) return;
-      closed = true;
-      current?.close();
-      invalidateBinding();
-      workerOwnerStores.delete(storeBinding);
-      workerModuleFileHandles.delete(handleKey);
-      // 文件句柄关闭后该模块的内存本地态不可再被读取。
-      if (pluginId === "p2pkh") disposeP2pkhStateRepository();
-    },
-    invalidateBinding: () => {
-      if (closed) return;
-      current?.close();
-      invalidateBinding();
-      // 换绑后旧模块的内存行不可见；链上真值会从文件重建。
-      if (pluginId === "p2pkh") disposeP2pkhStateRepository();
-    },
-  };
-  workerOwnerStores.add(storeBinding);
-  workerModuleFileHandles.set(handleKey, handle);
-  return handle;
-}
-
-function createWorkerKeyValueStore(pluginId: string, purposeId: string): KeyValueStore {
-  const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId]?.find((candidate) => candidate.model === "kv" && candidate.purposeId === purposeId);
-  if (!declaration) throw new Error(`Unknown module key-value storage declaration: ${pluginId}/${purposeId}`);
-  let closed = false;
-  let current: KeyValueStore | undefined;
-  let binding: CoordinatorStorageBinding | undefined;
-  const invalidateBinding = (): void => {
-    current?.close();
-    current = undefined;
-    binding = undefined;
-  };
-  const resolve = async (): Promise<KeyValueStore> => {
-    if (closed) throw new Error("Worker key-value storage handle is closed");
-    assertStorageDataAvailable();
-    const expected = currentCoordinatorStorageBinding();
-    if (!expected) throw new Error("Key-value storage requires an unlocked wallet");
-    if (!current || !binding || !storageBindingsEqual(binding, expected)) {
-      invalidateBinding();
-      if (!platformRootStore) throw new Error("Key-value storage is not ready");
-      const root = platformRootStore;
-      const opened = await root.openKeyValueStore({ declaration });
-      // 打开是异步的：期间可能已经发生锁定或 Root 换绑，必须重新校验。
-      if (closed || platformRootStore !== root || !currentCoordinatorStorageBinding()
-        || !storageBindingsEqual(currentCoordinatorStorageBinding()!, expected)) {
-        opened.close();
-        throw storageUnavailableError("Key-value storage binding became stale while opening");
-      }
-      current = opened;
-      binding = expected;
-    }
-    return current;
-  };
-  const run = async <T>(
-    operation: "read" | "write",
-    execute: (store: KeyValueStore) => Promise<T>,
-  ): Promise<T> => withCoordinatorFinalIoLease(operation, undefined, async () => {
-    try {
-      const store = await resolve();
-      const bound = binding;
-      if (!bound) throw storageUnavailableError("Key-value storage binding is unavailable");
-      const release = beginStorageBindingRequest();
-      try {
-        const value = await execute(store);
-        assertStorageBindingLive(bound);
-        return value;
-      } finally {
-        release();
-      }
-    } catch (error) {
-      markStorageIoFailure(error);
-      throw error;
-    }
-  }, {
-    auditOperation: "storage.owner.data",
-    // Worker-owned owner K-V 的 get/list 是纯本地只读，不会产生外部
-    // 副作用；仍保留当前运行世代的前后校验，但不把页面卸载时的
-    // 读 Promise 留成业务 K-V 中的恢复阻断。
-    durableLease: operation === "write",
-  });
-  const handle = {
-    get: async <T = KeyValueValue>(key: string, options?: { partition?: string }) => run("read", (store) => store.get<T>(key, options)),
-    list: async (input: KeyValueListInput = {}) => run("read", (store) => store.list(input)),
-    put: async <T = KeyValueValue>(key: string, value: T, condition?: { ifRevision?: number; partition?: string }) => run("write", (store) => store.put<T>(key, value, condition)),
-    delete: async (key: string, condition?: { ifRevision?: number; partition?: string }) => { await run("write", (store) => store.delete(key, condition)); },
-    commit: async (input: KeyValueCommitInput) => run("write", (store) => store.commit(input)),
-    collectGarbage: async (input: { minAgeMs?: number; maxDeletes?: number } = {}) => run("write", (store) => {
-      const maintenance = store as KeyValueStore & { collectGarbage?: (options?: { minAgeMs?: number; maxDeletes?: number }) => Promise<{ scanned: number; candidates: number; deleted: number; failed: number }> };
-      if (!maintenance.collectGarbage) throw new Error("K-V garbage collection is unavailable");
-      return maintenance.collectGarbage(input);
-    }),
-    close: () => { if (closed) return; closed = true; invalidateBinding(); workerOwnerStores.delete(handle); coordinatorKeyValueMaintenanceStores.delete(handle as unknown as CoordinatorKeyValueMaintenanceStore); },
-    invalidateBinding: () => { if (!closed) invalidateBinding(); }
-  } as KeyValueStore & WorkerOwnerStoreBinding & CoordinatorKeyValueMaintenanceStore;
-  workerOwnerStores.add(handle);
-  coordinatorKeyValueMaintenanceStores.add(handle as unknown as CoordinatorKeyValueMaintenanceStore);
-  return handle;
-}
+const workerStorageClientCapabilities = createScopedStorageClients({
+  getActivePublicKeyHex: () => coordinatorState.activePublicKeyHex,
+  getWalletGeneration: () => coordinatorState.walletGeneration,
+  async openOwnerFileStore({ pluginId, declaration }) {
+    const binding = currentCoordinatorStorageBinding();
+    if (!binding) throw storageUnavailableError("Worker file binding is unavailable");
+    const files = createWorkerModuleFileStore(pluginId, declaration.purposeId);
+    return { ...files, ...declaration, model: "files" as const, ...binding, close: () => {} };
+  },
+  async openOwnerAppStore({ pluginId, declaration }) {
+    const binding = currentCoordinatorStorageBinding();
+    if (!binding) throw storageUnavailableError("Worker K-V binding is unavailable");
+    const store = createWorkerKeyValueStore(pluginId, declaration.purposeId);
+    return { ...store, ...binding };
+  },
+  async openPlatformStore() { throw storageUnavailableError("Worker public clients do not expose platform purposes"); },
+  async clearStorageRoot() { throw storageUnavailableError("Worker public clients do not clear roots"); },
+}, pluginId => BUILTIN_PLUGIN_DEFINITIONS.find(plugin => plugin.id === pluginId), (consumer, scope) => workerConsumers.get(consumer) === scope);
 
 /**
  * 为 P2PKH service 提供 Worker 内的 active-key capability。
@@ -7719,228 +3185,55 @@ function createWorkerKeyValueStore(pluginId: string, purposeId: string): KeyValu
  * Coordinator 当前的私钥缓冲，并且每次签名/派生前重新校验 owner 与
  * session。这样 Sat top-up 复用 P2PKH 交易编排时仍然满足私钥不出 Worker。
  */
-async function createWorkerActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto> {
-  // 单 Key 模型：公钥必须就是当前已解锁的唯一 Key，没有多 Key 目录可查。
-  const summary = coordinatorActiveKeySummaryCache;
-  if (!summary || summary.publicKeyHex.toLowerCase() !== publicKeyHex.toLowerCase()) {
-    throw new Error(`Unknown key ${publicKeyHex}`);
-  }
-  const requirePrivateKey = (): Uint8Array => {
-    if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== publicKeyHex || !coordinatorState.activePrivateKeyBytes) {
-      throw new Error("Vault is locked or active key changed");
-    }
-    return coordinatorState.activePrivateKeyBytes;
-  };
-  const identity = {
-    publicKeyHex: summary.publicKeyHex,
-    label: summary.label,
-    capabilities: [...summary.capabilities],
-    createdAt: summary.createdAt,
-    sessionId: coordinatorState.sessionEpoch,
-  };
-  return {
-    getIdentity: () => ({ ...identity, capabilities: [...identity.capabilities] }),
-    async signDigest(input) {
-      if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
-      if (!(input.digest instanceof ArrayBuffer) || input.digest.byteLength !== 32) throw new Error("Digest must be exactly 32 bytes");
-      const signature = await withCoordinatorFinalIoLease("write", undefined, () => signEcdsaDigest({
-          privateKeyBytes: requirePrivateKey(),
-          digest: new Uint8Array(input.digest),
-          format: input.format,
-        }), { auditOperation: "vault.digest.sign" });
-      return { publicKeyHex, format: input.format, signature: signature.slice().buffer as ArrayBuffer };
-    },
-    async deriveP2pkhAddress(input) {
-      if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
-      return withCoordinatorFinalIoLease("write", undefined, async () => {
-        requirePrivateKey();
-        return { publicKeyHex, address: deriveP2pkhAddress(publicKeyHex, input.network) };
-      }, { auditOperation: "vault.address.derive" });
-    },
-    exportEncryptedKeyBackup: async () => { throw new Error("P2PKH Worker capability does not expose key export"); },
-    dispose: () => undefined,
-  };
+let vaultCryptoProviderScope: import("webloom-framework").LifecycleScope | undefined;
+const workerSessionCryptoFactory = createWorkerActiveKeyCryptoFactory({
+  summary: coordinatorActiveKeySummary,
+  sessionEpoch: () => coordinatorState.sessionEpoch,
+  keySession: vaultKeySession,
+  withIoLease(operation, execute) {
+    return operation === "sign"
+      ? withCoordinatorFinalIoLease("write", undefined, execute, { auditOperation: "vault.digest.sign" })
+      : withCoordinatorFinalIoLease("write", undefined, execute, { auditOperation: "vault.address.derive" });
+  },
+});
+
+function createWorkerActiveKeyCrypto(owner: string, providerScope = vaultCryptoProviderScope) {
+  if (!providerScope && !testDomainUnitReadiness) throw new Error("Vault crypto provider is unavailable");
+  return workerSessionCryptoFactory(owner, providerScope);
 }
 
 /**
  * P2PKH service 仍由现有 Coordinator broadcast pipeline 负责广播；Sat
  * 充值只注入一个内部 Coordinator facade，避免从 SharedWorker 再绕回页面。
  */
-async function ensureSatP2pkhService(): Promise<P2pkhService> {
-  // 同一把尺子：插件开? 解锁? 作用域就绪?
-  assertCoordinatorUnitConstructible("p2pkh.coordinator-worker");
-  // 上面的断言已覆盖「解锁 + 有 active key」；这里把判定结果落到局部变量，
-  // 不再重复判一次。
-  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex!;
-  const ownerSessionEpoch = coordinatorState.sessionEpoch;
-  await loadP2pkhSettingForOwner(ownerPublicKeyHex);
-  const existingService = satP2pkhService;
-  if (existingService && satP2pkhServiceOwnerPublicKeyHex === ownerPublicKeyHex) {
-    await existingService.onVaultUnlocked();
-    if (!isCoordinatorProductEnabled("p2pkh")
-      || coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex
-      || coordinatorState.sessionEpoch !== ownerSessionEpoch
-      || satP2pkhService !== existingService) {
-      throw new Error("P2PKH service became stale while rebinding");
-    }
-    return existingService;
-  }
-  if (satP2pkhService) {
-    // 防御异常的旧 owner 残留；正常 key switch 已由 releaseSatRuntime
-    // 清理，但这里仍不能把旧 owner 的 service 交给新 owner。
-    const stale = satP2pkhService;
-    satP2pkhService = undefined;
-    satP2pkhServiceOwnerPublicKeyHex = undefined;
-    try { stale.onVaultLocked(); } catch { /* best effort */ }
-    try { stale.dispose?.(); } catch { /* best effort */ }
-  }
-  if (satP2pkhServiceStarting) {
-    const pending = satP2pkhServiceStarting;
-    if (satP2pkhServiceStartingToken === satP2pkhServiceStartToken && satP2pkhServiceStartingOwnerPublicKeyHex === ownerPublicKeyHex) return pending;
-    // 等待旧 owner 的启动完成并完成自身清理，再开始新 owner 世代，
-    // 避免两个 P2PKH service 同时持有 K-V/消息总线订阅。
-    await pending.catch(() => undefined);
-    if (satP2pkhService && satP2pkhServiceOwnerPublicKeyHex === ownerPublicKeyHex) return satP2pkhService;
-  }
-  const startToken = satP2pkhServiceStartToken;
-  const start = (async (): Promise<P2pkhService> => {
-    const keyspace = createWorkerKeyspace();
-    const messageBus = createMessageBus();
-    const vault = {
-      status: () => coordinatorState.vaultStatus,
-      createActiveKeyCrypto: (requestedOwner: string) => createWorkerActiveKeyCrypto(requestedOwner),
-    } as unknown as VaultService;
-    const internalCoordinator = {
-      // createP2pkhService 构造时读取 p2pkhSettings；Worker 内部 facade
-      // 只需要投影设置，不暴露其它 bootstrap 字段。
-      getBootstrapSnapshot: () => ({ p2pkhSettings: coordinatorMeta.p2pkhSettings }),
-      p2pkhUtxosGet: async (input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>> => {
-        if (!isCoordinatorProductEnabled("p2pkh")) {
-          return {
-            status: "blocked",
-            reason: { key: "plugin.blocked.disabled", fallback: "Plugin disabled: p2pkh" },
-          };
-        }
-        const resource = await p2pkhResourceForOwner(input.ownerPublicKeyHex, input.network);
-        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, state: "unavailable" as const, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
-        return {
-          status: "ok",
-          value: await filterP2pkhSnapshotByBitfsFunds(input.ownerPublicKeyHex, input.network, p2pkhUtxoSnapshots.get(resource)),
-          sessionEpoch: coordinatorState.sessionEpoch,
-        };
-      },
-      p2pkhUtxosRefresh: async (input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>> => {
-        if (!isCoordinatorProductEnabled("p2pkh")) {
-          return {
-            status: "blocked",
-            reason: { key: "plugin.blocked.disabled", fallback: "Plugin disabled: p2pkh" },
-          };
-        }
-        const resource = await p2pkhResourceForOwner(input.ownerPublicKeyHex, input.network);
-        if (!resource || !p2pkhUtxoSnapshots) return { status: "ok", value: { available: false, state: "unavailable" as const, items: [] }, sessionEpoch: coordinatorState.sessionEpoch };
-        try {
-          const refreshed = await p2pkhUtxoSnapshots.refresh(resource);
-          await reconcileMsfileBitfsFundingInputs(input.ownerPublicKeyHex, input.network, refreshed);
-          return { status: "ok", value: await filterP2pkhSnapshotByBitfsFunds(input.ownerPublicKeyHex, input.network, refreshed), sessionEpoch: coordinatorState.sessionEpoch };
-        } catch (error) {
-          return { status: "error", message: error instanceof Error ? error.message : String(error) };
-        }
-      },
-      p2pkhBroadcast: async (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }): Promise<CoordinatorValueResult<unknown>> => {
-        if (!isCoordinatorProductEnabled("p2pkh")) {
-          return {
-            status: "blocked",
-            reason: { key: "plugin.blocked.disabled", fallback: "Plugin disabled: p2pkh" },
-          };
-        }
-        if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== ownerSessionEpoch || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
-          // 与页面 client 同语义：会话/owner 失效是终态，中心服务会映射成 cancelled，
-          // 不能被当成可重试的传输失败空转到预算耗尽。
-          return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: coordinatorState.sessionEpoch };
-        }
-        const request = {
-          kind: "p2pkh.broadcast" as const,
-          clientId: "sat-subscription",
-          requestId: generateRequestId(),
-          ...input,
-          expectedSessionEpoch: coordinatorState.sessionEpoch,
-        };
-        const response = await handleP2pkhBroadcast(request.requestId, request);
-        if (response.ack.status === "stale-epoch") {
-          return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: response.sessionEpoch };
-        }
-        if (response.ack.status !== "ok") return response.ack;
-        if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
-          return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: coordinatorState.sessionEpoch };
-        }
-        return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
-      },
-    } as unknown as import("@keymaster/contracts").SessionCoordinatorClient;
-    // Worker 内的中心广播服务：与页面共用同一套重试/唤醒语义，但依赖
-    // 全部在 SharedWorker 进程内解析（不新增 capability，也不跨 realm）。
-    // 中文：SatSubscription 的自动充值由此获得"等新序号→重新组合→再提交"。
-    const centralBroadcastService = createCentralBroadcastService({
-      coordinator: { p2pkhBroadcast: (input) => internalCoordinator.p2pkhBroadcast(input) },
-      subscribeTopic: (listener) => subscribeWorkerUtxoSeq((event) => {
-        if (event.ownerPublicKeyHex.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) return;
-        listener({ utxoSeqs: event.network === "main" ? { main: event.seq } : { test: event.seq } } as AssetDataChangedEvent);
-      }),
-      getSnapshot: async (network) => {
-        const result = await internalCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex, network });
-        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
-      },
-      refreshSnapshot: async (network) => {
-        const result = await internalCoordinator.p2pkhUtxosRefresh({ ownerPublicKeyHex, network });
-        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
-      },
-      ...(testSatBroadcastRetryOverrides ?? {}),
-    });
-    const service = createP2pkhService({
-      vault,
-      coordinator: internalCoordinator,
-      centralBroadcastService,
-      broadcastWithCoordinator: (input) => internalCoordinator.p2pkhBroadcast(input),
-      messageBus,
-      keyspace,
-      storage: createWorkerModuleFileStore("p2pkh", ""),
-    });
-    try {
-      // 充值首次进入时确保 owner 的 main P2PKH resource 已存在；该调用只
-      // 在 Worker 中读取私钥并派生地址，不会把私钥/crypto capability发给页面。
-      await service.onVaultUnlocked();
-      if (!isCoordinatorProductEnabled("p2pkh")
-        || coordinatorState.vaultStatus !== "unlocked"
-        || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
-        throw new Error("P2PKH service became stale while starting");
-      }
-      if (startToken !== satP2pkhServiceStartToken
-        || !isCoordinatorProductEnabled("p2pkh")
-        || coordinatorState.sessionEpoch !== ownerSessionEpoch) {
-        throw new Error("P2PKH service start was superseded");
-      }
-      satP2pkhService = service;
-      satP2pkhServiceOwnerPublicKeyHex = ownerPublicKeyHex;
-      return service;
-    } catch (error) {
-      try { service.onVaultLocked(); } catch { /* best effort */ }
-      try { service.dispose?.(); } catch { /* best effort */ }
-      throw error;
-    }
-  })();
-  satP2pkhServiceStarting = start;
-  satP2pkhServiceStartingToken = startToken;
-  satP2pkhServiceStartingOwnerPublicKeyHex = ownerPublicKeyHex;
-  try {
-    return await start;
-  } finally {
-    if (satP2pkhServiceStarting === start) satP2pkhServiceStarting = undefined;
-    if (satP2pkhServiceStarting === undefined) {
-      satP2pkhServiceStartingToken = undefined;
-      satP2pkhServiceStartingOwnerPublicKeyHex = undefined;
-    }
-  }
-}
+const workerTransferRuntime = createWorkerTransferRuntime({
+  assertActive: () => {
+    assertCoordinatorUnitConstructible("p2pkh.coordinator-worker");
+    if (!testDomainUnitReadiness) { if (!p2pkhWorkerPorts) throw new Error("P2PKH Worker instance is unavailable"); p2pkhWorkerPorts.assertActive(); }
+  },
+  session: () => ({ owner: coordinatorState.activePublicKeyHex, epoch: coordinatorState.sessionEpoch, unlocked: coordinatorState.vaultStatus === "unlocked" }),
+  loadSettings: (owner) => loadP2pkhSettingForOwner(owner),
+  settings: () => coordinatorMeta.p2pkhSettings,
+  walletState: () => testDomainUnitReadiness ? createWorkerWalletState() : p2pkhWorkerPorts!.walletState,
+  storage: () => testDomainUnitReadiness ? createWorkerModuleFileStore("p2pkh", "") : p2pkhWorkerPorts!.storage,
+  crypto: (owner) => testDomainUnitReadiness ? createWorkerActiveKeyCrypto(owner) : p2pkhWorkerPorts!.crypto.createActiveKeyCrypto(owner),
+  vaultStatus: () => coordinatorState.vaultStatus === "fatal" ? "locked" : coordinatorState.vaultStatus,
+  snapshot: async (input, refresh) => {
+    const request = { ...input, expectedSessionEpoch: coordinatorState.sessionEpoch, clientId: "sat-subscription", requestId: generateRequestId() };
+    const response = refresh
+      ? await handleP2pkhUtxosRefresh(request.requestId, { ...request, kind: "p2pkh.utxos.refresh" })
+      : await handleP2pkhUtxosGet(request.requestId, { ...request, kind: "p2pkh.utxos.get" });
+    return response.ack.status === "ok" ? { status: "ok", value: response.operationResult as P2pkhUtxoSnapshotResult, sessionEpoch: response.sessionEpoch } : response.ack;
+  },
+  broadcast: async (input) => {
+    const request = { ...input, expectedSessionEpoch: coordinatorState.sessionEpoch, clientId: "sat-subscription", requestId: generateRequestId(), kind: "p2pkh.broadcast" as const };
+    const response = await handleP2pkhBroadcast(request.requestId, request);
+    return response.ack.status === "ok" ? { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch } : response.ack;
+  },
+  subscribeUtxo: subscribeWorkerUtxoSeq,
+  retryOptions: () => testSatBroadcastRetryOverrides,
+});
+const ensureSatP2pkhService = workerTransferRuntime.ensure;
 
 /**
  * 快照 store 的 WoC 数据源包装。
@@ -7948,7 +3241,7 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
  * 生产路径原样委托给真实 WoC；测试可用 `__testSetP2pkhUnspentAllProvider`
  * 替换 `unspent/all`，让 Worker 侧的消费/重试链路不出网。
  */
-function createP2pkhSnapshotWocSource(woc: WocServiceHandle): WocService {
+function createP2pkhSnapshotWocSource(woc: WocService): WocService {
   return {
     getAddressUnspentAll: (network: "main" | "test", address: string, options?: import("@keymaster/contracts").WocRequestOptions) =>
       testP2pkhUnspentAllProvider
@@ -7958,17 +3251,75 @@ function createP2pkhSnapshotWocSource(woc: WocServiceHandle): WocService {
   } as unknown as WocService;
 }
 
-async function registerCoordinatorTasks(): Promise<void> {
-  const keyspace = createWorkerKeyspace();
-  const messageBus = createMessageBus();
+async function installP2pkhCoordinatorTasks(walletState: VaultWalletState, woc: WocService, assertActive: () => void = () => {}, storage: BorrowedModuleFileStore = createWorkerModuleFileStore("p2pkh", "")): Promise<() => void> {
+  const epoch = coordinatorState.sessionEpoch;
+  for (const id of ["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"]) {
+    await coordinatorState.taskRuntimes.get(id)?.completion?.catch(() => undefined);
+  }
+  assertActive();
+  if (coordinatorState.sessionEpoch !== epoch) throw new Error("P2PKH task installation became stale");
+  const definitions = createP2pkhWorkerTaskDefinitions({
+    walletState, woc, storage,
+    isNetworkEnabled: network => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true,
+    loadSettings: loadP2pkhSettingForOwner,
+    refreshUtxos: signal => refreshP2pkhUtxoSnapshots(signal, storage, assertActive),
+    emitDataChanged: (kinds, utxoSeqs) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds, ...(utxoSeqs === undefined ? {} : { utxoSeqs }) }),
+  });
+  for (const definition of definitions) {
+    coordinatorState.taskRuntimes.set(definition.id, createCoordinatorTaskRuntime({
+      id: definition.id, pluginId: definition.pluginId, unitId: definition.unitId,
+      syncPolicy: definition.syncPolicy,
+      ...(definition.syncPolicy === "managed" ? { intervalMs: managedIntervalFor(definition.id) } : {}),
+      keyScope: definition.keyScope,
+      run: async context => { await definition.run({ ...context, reportProgress: () => undefined }); },
+    }));
+  }
+  const tasks = ["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"].map(id => coordinatorState.taskRuntimes.get(id)!);
+  for (const task of tasks) scheduleRuntime(task);
+  return () => {
+    for (const task of tasks) {
+      task.controller?.abort();
+      if (task.timer) clearTimeout(task.timer);
+      const remove = () => { if (coordinatorState.taskRuntimes.get(task.id) === task) coordinatorState.taskRuntimes.delete(task.id); };
+      if (task.completion) void task.completion.then(remove, remove);
+      else remove();
+    }
+  };
+}
+
+async function installCoordinatorDomainTask(task: import("@keymaster/contracts").BackgroundTaskDefinition & { unitId: string }, pluginId: string, assertActive: () => void): Promise<() => void> {
+  const epoch = coordinatorState.sessionEpoch;
+  await coordinatorState.taskRuntimes.get(task.id)?.completion?.catch(() => undefined);
+  assertActive();
+  if (epoch !== coordinatorState.sessionEpoch) throw new Error("Domain task installation became stale");
+  const runtime = createCoordinatorTaskRuntime({
+    id: task.id, pluginId, unitId: task.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(task.id), keyScope: task.keyScope,
+    run: async context => {
+      const gate = await task.canRun?.();
+      if (gate?.ready === false) throw new Error(typeof gate.reason === "string" ? gate.reason : gate.reason?.fallback ?? "Domain task is unavailable");
+      await task.run({ ...context, reportProgress: () => undefined });
+    },
+  });
+  coordinatorState.taskRuntimes.set(task.id, runtime);
+  scheduleRuntime(runtime);
+  return () => {
+    runtime.controller?.abort();
+    if (runtime.timer) clearTimeout(runtime.timer);
+    const remove = () => { if (coordinatorState.taskRuntimes.get(task.id) === runtime) coordinatorState.taskRuntimes.delete(task.id); };
+    if (runtime.completion) void runtime.completion.then(remove, remove);
+    else remove();
+  };
+}
+
+async function installContactsCoordinatorService(walletState: VaultWalletState, storage: BorrowedModuleFileStore, vault: { status(): string }, assertActive: () => void, ownCleanup: (cleanup: () => void) => void = () => {}, channel: ContactsPresenceChannel = createCoordinatorChannelRuntime()): Promise<() => void> {
   coordinatorContactsPresenceOff?.();
   coordinatorContactsPresenceOff = undefined;
   coordinatorContactsService?.dispose?.();
   const contactsService = createContactsService({
-    keyspace,
-    messageBus,
-    storage: createWorkerModuleFileStore("contacts", "address-book"),
-    channel: createCoordinatorChannelRuntime()
+    walletState,
+    messageBus: coordinatorDomainMessageBus,
+    storage,
+    channel
   });
   coordinatorContactsService = contactsService;
   const offContactsChange = contactsService.onChange(() => publishCoordinatorContactsPresence());
@@ -7978,29 +3329,32 @@ async function registerCoordinatorTasks(): Promise<void> {
     offContactsPresence?.();
   };
   publishCoordinatorContactsPresence();
-  const contactsPresenceTask = createContactsPresenceTask({
-    service: contactsService,
-    keyspace,
-    vault: { status: () => coordinatorState.vaultStatus }
-  });
-  coordinatorState.taskRuntimes.set(contactsPresenceTask.id, createCoordinatorTaskRuntime({
-    id: contactsPresenceTask.id,
-    // BackgroundTaskDefinition 的历史 pluginId 仍带 package 前缀；Worker
-    // 状态必须使用用户可操作的产品 id，才能和 PluginIntent 对齐。
-    pluginId: "contacts",
-    syncPolicy: "managed",
-    intervalMs: managedIntervalFor(contactsPresenceTask.id),
-    keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined,
-    unitId: contactsPresenceTask.unitId,
-    run: async ({ signal, reason, assertSessionFresh }) => {
-      const gate = await contactsPresenceTask.canRun?.();
-      if (gate?.ready === false) {
-        throw new Error(typeof gate.reason === "string" ? gate.reason : gate.reason?.fallback ?? "联系人在线探测暂不可运行");
-      }
-      await contactsPresenceTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh });
+  const contactsPresenceTask = createContactsPresenceTask({ service: contactsService, walletState, vault });
+  let disposeTask: (() => void) | undefined;
+  const cleanup = () => {
+    disposeTask?.();
+    offContactsChange();
+    offContactsPresence?.();
+    contactsService.dispose?.();
+    if (coordinatorContactsService === contactsService) {
+      coordinatorContactsService = undefined;
+      coordinatorContactsPresenceOff = undefined;
     }
-  }));
-  const woc = createWocService({ messageBus });
+  };
+  ownCleanup(cleanup);
+  try {
+    disposeTask = await installCoordinatorDomainTask(contactsPresenceTask, "contacts", assertActive);
+    assertActive();
+    return cleanup;
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+function initializeCoordinatorWocService(): ReturnType<typeof createWocService> {
+  if (!coordinatorDomainMessageBus) throw new Error("Worker message bus is unavailable");
+  const woc = createWocService({ messageBus: coordinatorDomainMessageBus });
   p2pkhWocService = woc;
   // 智能调度订阅 WoC 队列：队列变空 2 秒后刷新余额快照；变忙则重新计时。
   woc.onQueueChange(onWocQueueChanged);
@@ -8011,92 +3365,35 @@ async function registerCoordinatorTasks(): Promise<void> {
     if (typeof persistedWocConfig.requestsPerSecond === "number") next.requestsPerSecond = persistedWocConfig.requestsPerSecond;
     if (Object.keys(next).length) woc.updateConfig(next);
   }
-  const emitDataChanged = (providerId: string, kinds: AssetDataInvalidationEvent["kinds"], utxoSeqs?: { main?: number; test?: number }) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds, ...(utxoSeqs === undefined ? {} : { utxoSeqs }) });
+  return woc;
+}
+
+function initializeCoordinatorP2pkhProviders(woc: WocService, broadcast: WocWorkerBroadcastService): void {
   p2pkhRegistry = createP2pkhProviderRegistry();
-  registerWocP2pkhProviders({ registry: p2pkhRegistry, woc });
+  registerWocP2pkhProviders({ registry: p2pkhRegistry, woc: broadcast });
   p2pkhUtxoSnapshots = createP2pkhUtxoSnapshotStore({ woc: createP2pkhSnapshotWocSource(woc) });
-  // 链高度同步：按同步管理间隔（缺省 2 分钟）读一次节点高度并广播。
-  // 它不归属任何 key，因此没有 keyScope；锁定期不运行，锁定前的读数保留。
-  coordinatorState.taskRuntimes.set(CHAIN_HEIGHT_SYNC_TASK_ID, createCoordinatorTaskRuntime({
-    id: CHAIN_HEIGHT_SYNC_TASK_ID,
-    pluginId: "woc",
-    syncPolicy: "managed",
-    intervalMs: managedIntervalFor(CHAIN_HEIGHT_SYNC_TASK_ID),
-    run: async ({ signal, assertSessionFresh }) => {
-      await refreshCoordinatorChainHeight(signal);
-      assertSessionFresh();
-    }
-  }));
-  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerModuleFileStore("p2pkh", ""), woc, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
-  // P2PKH 拆成两个任务：
-  //   - p2pkh.transactions-sync：链上历史元数据，按同步管理间隔运行；
-  //   - p2pkh.utxo-snapshot：BSV 余额来源（内存 UTXO 快照），由智能调度
-  //     在 WoC 空闲 2 秒后刷新，永远保持最新。
-  coordinatorState.taskRuntimes.set("p2pkh.transactions-sync", createCoordinatorTaskRuntime({ id: "p2pkh.transactions-sync", pluginId: "p2pkh", unitId: p2pkh.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor("p2pkh.transactions-sync"), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
-    await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex);
-    const result = await p2pkh.transactionsSync(signal);
-    assertSessionFresh();
-    if (result.cancelled) return;
-    // 历史同步与 UTXO 快照互不依赖：快照刷新由 smart 任务独立负责。
-    emitDataChanged("p2pkh", ["resource", "history", "submission", "balance"]);
-  } }));
-  coordinatorState.taskRuntimes.set("p2pkh.utxo-snapshot", createCoordinatorTaskRuntime({ id: "p2pkh.utxo-snapshot", pluginId: "p2pkh", unitId: p2pkh.unitId, syncPolicy: "smart", keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => {
-    await loadP2pkhSettingForOwner(coordinatorState.activePublicKeyHex);
-    // 单个资源失败只保留旧快照；失败不写 0，也不影响其它资源。
-    const utxoSeqs = await refreshP2pkhUtxoSnapshots(signal);
-    assertSessionFresh();
-    emitDataChanged("p2pkh", ["utxo", "balance"], utxoSeqs);
-  } }));
-  const p2pkhProvider = {
-    listResources: async (assetId: "bsv" | "bsvtest") => {
-      if (!coordinatorState.activePublicKeyHex) return [];
-      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
-      return (await repository.listResourcesByKey()).filter((resource) => assetId === (resource.network === "main" ? "bsv" : "bsvtest"));
-    },
-    listUtxos: async (filter?: { assetId?: "bsv" | "bsvtest"; ownerPublicKeyHex?: string }) => {
-      const ownerPublicKeyHex = filter?.ownerPublicKeyHex ?? coordinatorState.activePublicKeyHex;
-      if (!ownerPublicKeyHex) return [];
-      if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
-      const rows: Array<{ id: string; resourceId: string; publicKeyHex: string; network: "main" | "test"; address: string; txid: string; vout: number; value: number; height: number; script: string; status: "confirmed" | "unconfirmed"; isSpentInMempoolTx: boolean; syncedAt: string }> = [];
-      for (const resource of await repository.listResourcesByKey()) {
-        if (filter?.assetId && resource.network !== (filter.assetId === "bsv" ? "main" : "test")) continue;
-        const snapshot = p2pkhUtxoSnapshots?.get(resource);
-        if (!snapshot?.available) continue;
-        for (const item of snapshot.items) {
-          if (item.isSpentInMempoolTx) continue;
-          rows.push({
-            id: `utxo:${resource.resourceId}:${item.txid}:${item.vout}`,
-            resourceId: resource.resourceId,
-            publicKeyHex: resource.publicKeyHex,
-            network: resource.network,
-            address: resource.address,
-            txid: item.txid,
-            vout: item.vout,
-            value: item.value,
-            height: item.height,
-            script: p2pkhAddressToScriptHex(resource.address, resource.network),
-            status: item.status,
-            isSpentInMempoolTx: item.isSpentInMempoolTx,
-            syncedAt: snapshot.syncedAt ?? new Date().toISOString()
-          });
-        }
-      }
-      return rows;
-    },
-    getGlobalSettings: () => ({ includeTestnet: coordinatorMeta.p2pkhSettings?.includeTestnet === true })
-  };
+}
+
+async function registerCoordinatorTasks(): Promise<void> {
+  const walletState = createWorkerWalletState();
+  const messageBus = createMessageBus();
+  coordinatorDomainMessageBus = messageBus;
+  if (testDomainUnitReadiness) await installContactsCoordinatorService(walletState, createWorkerModuleFileStore("contacts", "address-book"), { status: () => coordinatorState.vaultStatus }, () => {});
+  const woc = testDomainUnitReadiness ? initializeCoordinatorWocService() : undefined;
+  if (woc) initializeCoordinatorP2pkhProviders(woc, woc);
+  if (testDomainUnitReadiness && woc) await installCoordinatorDomainTask(createCoordinatorChainHeightTask(woc), "woc", () => {});
+  if (testDomainUnitReadiness && woc) await installP2pkhCoordinatorTasks(walletState, woc);
+  const p2pkhProvider = createP2pkhWorkerAssetReader({ walletState, storage: createWorkerModuleFileStore("p2pkh", ""), snapshots: () => p2pkhUtxoSnapshots, includeTestnet: () => coordinatorMeta.p2pkhSettings?.includeTestnet === true });
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
-  const bsv21Task = createBsv21CoordinatorTask({ keyspace, stateStore: createWorkerKeyValueStore("token-bsv21", "token-state"), p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
-  const stasTask = createStasCoordinatorTask({ keyspace, stateStore: createWorkerKeyValueStore("token-stas", "token-state"), p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
-  const oneSatTask = createOrdinalsCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  if (testDomainUnitReadiness && woc) {
+  const bsv21Task = createBsv21CoordinatorTask({ walletState, stateStore: createWorkerKeyValueStore("token-bsv21", "token-state"), p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const stasTask = createStasCoordinatorTask({ walletState, stateStore: createWorkerKeyValueStore("token-stas", "token-state"), p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const oneSatTask = createOrdinalsCoordinatorTask({ walletState, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   coordinatorState.taskRuntimes.set(bsv21Task.id, createCoordinatorTaskRuntime({ id: bsv21Task.id, pluginId: "token-bsv21", unitId: bsv21Task.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(bsv21Task.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
   coordinatorState.taskRuntimes.set(stasTask.id, createCoordinatorTaskRuntime({ id: stasTask.id, pluginId: "token-stas", unitId: stasTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(stasTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
   coordinatorState.taskRuntimes.set(oneSatTask.id, createCoordinatorTaskRuntime({ id: oneSatTask.id, pluginId: "collectible-1satordinals", unitId: oneSatTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(oneSatTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
+  }
   bindCoordinatorTaskUnitsToOwner();
-  // Provider 初始注册必须再经过产品意图投影；否则 Worker 重启时若持久
-  // 快照已禁用 WOC，短窗口内仍会把旧 Provider 暴露给任务。
-  reconcileCoordinatorProviderIntent(currentPluginIntentSnapshot());
   for (const runtime of coordinatorState.taskRuntimes.values()) scheduleRuntime(runtime);
   publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
   // 任务在「已解锁」状态下补齐注册（首次接入存储等）时，第一时间同步一次。
@@ -8136,8 +3433,8 @@ async function abortNotDispatchedP2pkhSubmission(
   reason: string
 ): Promise<void> {
   try {
-    const keyspace = createWorkerKeyspace();
-    if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+    const walletState = createWorkerWalletState();
+    if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
     const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
     await repository.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason });
     publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "balance"] });
@@ -8229,10 +3526,11 @@ async function buildTopicBaselines(
     }
     if (topic === "contacts.presence") {
       const activePublicKeyHex = normalizedCoordinatorOwner();
-      const cached = lastContactsPresenceState
-        && lastContactsPresenceState.sessionEpoch === coordinatorState.sessionEpoch
-        && lastContactsPresenceState.activePublicKeyHex === activePublicKeyHex
-        ? lastContactsPresenceState
+      const projection = contactsPresenceProjection.current();
+      const cached = projection
+        && projection.sessionEpoch === coordinatorState.sessionEpoch
+        && projection.activePublicKeyHex === activePublicKeyHex
+        ? projection
         : {
             topic: "contacts.presence" as const,
             type: "contacts.presence.changed" as const,
@@ -8248,23 +3546,7 @@ async function buildTopicBaselines(
         snapshot: cached
       }];
     }
-    if (topic === "plugin.intent") {
-      const snapshot = pluginIntentController?.snapshot() ?? emptyPluginIntentSnapshot();
-      const baseline = snapshot.revision;
-      return [{
-        topic,
-        baselineRevision: baseline,
-        sessionEpoch: coordinatorState.sessionEpoch,
-        snapshot: {
-          topic: "plugin.intent" as const,
-          type: "plugin.intent.changed" as const,
-          authorityInstanceId: coordinatorAuthorityInstanceId,
-          pluginIntentRevision: baseline,
-          sessionEpoch: coordinatorState.sessionEpoch,
-          snapshot,
-        },
-      }];
-    }
+
     if (topic === "worker.units") {
       const baselineRevision = coordinatorRuntimeUnitRevision();
       return [{
@@ -8283,7 +3565,8 @@ async function buildTopicBaselines(
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
-      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, runGeneration: coordinatorState.runGeneration, ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}), autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }
+      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
+    ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: coordinatorActiveKeySummary() } : {}), runGeneration: coordinatorState.runGeneration, ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}), autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }
         : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings, p2pkhSettings: coordinatorMeta.p2pkhSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
@@ -8400,9 +3683,7 @@ async function executeStorageControl(
     // 冷启动是纯只读的真值查询：它必须在没有平台根时也能回答，否则 uninitialized
     // 与 corrupt/unsupported 状态无法与「Root 装不上」区分开。
     const lifecycle = walletLifecycle ?? requireWalletLifecycle();
-    // uninitialized 时没有可写 Root，不能为了回答只读查询去安装 runtime。
-    const service = platformRootStore ? await ensureStorageRuntime(peerId).catch(() => undefined) : undefined;
-    const snapshot = await (service?.coldStart?.() ?? lifecycle.coldStart());
+    const snapshot = await lifecycle.coldStart();
     return ok(snapshot);
   }
 
@@ -8424,56 +3705,26 @@ async function executeStorageControl(
     return ok(await initializeWallet(control.plan));
   }
 
-  // 生命周期写操作与冷启动读取共享同一条队列：Worker 是事务与授权的权威，
-  // 页面不能观察到「Key 已落盘但运行绑定还没换好」的中间态。
-  const service = await ensureStorageRuntime(peerId);
-  switch (control.type) {
-    case "unlock": {
-      if (!service.unlock) throw storageUnavailableError("Wallet unlock is unavailable");
-      const result = await service.unlock(control.password);
-      // 解锁的真正状态写入由 lifecycle 的 adoptUnlockedKey 回调完成；这里
-      // 只回传 Storage 层确立的世代，避免页面自行推导会话。
+  await ensureStorageRuntime(peerId);
+  const result = await executeWalletControl(control, {
+    lifecycle: requireWalletLifecycle(),
+    beforeRevoke: revokeStorageBindingAndDrain,
+    unlocked(result) {
       coordinatorState.sessionEpoch = result.sessionEpoch;
       emitStorageState();
       publishSessionState("unlock");
-      return ok(result);
-    }
-    case "lock": {
-      await revokeStorageBindingAndDrain("storage.control.lock");
-      if (!service.lock) throw storageUnavailableError("Wallet lock is unavailable");
-      await service.lock();
+    },
+    locked() {
       coordinatorState.vaultStatus = "locked";
       setCoordinatorActiveKeySummary(undefined);
       emitStorageState();
       publishSessionState("lock");
-      return ok();
-    }
-    case "change-key-password": {
-      if (!service.changeKeyPassword) throw storageUnavailableError("Password change is unavailable");
-      // 改密会改变 Key 密码，必须先撤销会话让所有旧句柄与迟到结果失效，
-      // 再在同一最终边界内改密并重新建立运行绑定。
-      await revokeStorageBindingAndDrain("storage.control.change-key-password");
-      await service.changeKeyPassword({ oldPassword: control.oldPassword, newPassword: control.newPassword });
+    },
+    passwordChanged() {
       emitStorageState();
       publishSessionState("change-password");
-      return ok();
-    }
-    case "rename-key": {
-      if (!service.renameKey) throw storageUnavailableError("Rename is unavailable");
-      await service.renameKey(control.label);
-      return ok({ label: control.label });
-    }
-    case "export-key-hold": {
-      if (!service.exportKeyHold) throw storageUnavailableError("KeyHold export is unavailable");
-      const bytes = await service.exportKeyHold();
-      // KeyHold 原样导出；这不是完整钱包备份，页面不得这样描述它。
-      return ok({ bytes, keyHoldFormat: "keyhold" as const });
-    }
-    case "reset-wallet": {
-      if (!service.resetWallet) throw storageUnavailableError("Wallet reset is unavailable");
-      const result = await service.resetWallet({ confirmationLabel: control.confirmationLabel });
-      // 清空完成后本地不再有 Root：丢弃全部句柄，让任何迟到写入在数据层检查
-      // 之前就被拒绝。页面会回到 uninitialized，等待创建或导入。
+    },
+    reset() {
       discardCurrentPlatformStorageBinding();
       coordinatorState.vaultStatus = "uninitialized";
       coordinatorState.walletGeneration = "";
@@ -8482,11 +3733,10 @@ async function executeStorageControl(
       setCoordinatorActiveKeySummary(undefined);
       dropActivePrivateKey();
       emitStorageState();
-      publishWorkerActiveKeyChanged();
-      publishSessionState("reset-wallet");
-      return ok(result);
-    }
-  }
+          publishSessionState("reset-wallet");
+    },
+  });
+  return ok(result);
 }
 
 /**
@@ -8533,53 +3783,20 @@ async function executeStorageControlAtFinalBoundary(
   );
 }
 
-async function resolvePlatformStorageGrant(grantId: string, actualClientId: string): Promise<StoragePlatformGrant & { clientId: string }> {
-  const grant = platformStorageGrants.get(grantId);
-  if (!grant || grant.clientId !== actualClientId) throw new Error("Platform storage grant is invalid");
-  // 授权绑定四件事：钱包身份世代、会话世代、Worker 运行世代和平台根身份。
-  // 任何一项变化都让已发放的 grant 立即失效，不存在第二个可选存储空间。
-  if (grant.sessionEpoch !== coordinatorState.sessionEpoch) throw new Error("Platform storage session changed");
-  if (grant.walletGeneration !== coordinatorState.walletGeneration) throw new Error("Platform storage wallet generation changed");
-  if (grant.runGeneration !== coordinatorState.runGeneration) throw new Error("Platform storage run generation changed");
-  if (!platformRootStore) throw new Error("Platform storage root is unavailable");
-  return grant;
-}
-
-async function executePlatformStorageDataUnsafe(
-  data: CoordinatorPlatformStorageData,
-  actualClientId: string,
-  signal?: AbortSignal,
-): Promise<unknown> {
-  if (signal?.aborted) throw storageUnavailableError("Platform storage request was cancelled");
-  assertStorageDataAvailable();
-  const root = platformRootStore;
-  const rootToken = platformRootToken;
-  if (!root || !rootToken) throw new Error("Platform storage has not been bootstrapped");
-  const grant = await resolvePlatformStorageGrant(data.platformGrantId, actualClientId);
-  const store = await root.openPlatformStore({ declaration: {
-    moduleId: grant.moduleId,
-    purposeId: grant.purposeId,
-    authority: grant.authority,
-    model: grant.model,
-    schemaVersion: grant.schemaVersion,
-  } });
-  try {
-    if (signal?.aborted) throw storageUnavailableError("Platform storage request was cancelled");
-    let value: unknown;
-    switch (data.type) {
-      case "platform.get": value = await store.get(data.key, { partition: data.partition }); break;
-      case "platform.list": value = await store.list(data.input); break;
-      case "platform.put": value = await store.put(data.key, data.value, data.condition); break;
-      case "platform.delete": await store.delete(data.key, data.condition); value = undefined; break;
-      case "platform.commit": value = await store.commit({ partition: data.partition, ifRevision: data.ifRevision, operations: data.operations }); break;
-    }
-    if (platformRootStore !== root || platformRootToken !== rootToken) throw storageUnavailableError("Platform storage binding became stale");
-    assertStorageDataAvailable();
-    return value;
-  } finally {
-    store.close();
-  }
-}
+const { executePlatformStorageDataUnsafe, executeOwnerStorageDataUnsafe, executeStorageDataUnsafe } = createStorageDataExecutor({
+  root: () => platformRootStore,
+  rootToken: () => platformRootToken,
+  sessionEpoch: () => coordinatorState.sessionEpoch,
+  assertStorageDataAvailable,
+  storageUnavailableError,
+  resolvePlatformStorageGrant,
+  resolveOwnerStorageGrant,
+  resolveStorageGrant,
+  ensureStorageRuntime,
+  beginStorageBindingRequest,
+  currentCoordinatorStorageBinding,
+  assertStorageBindingLive,
+});
 
 async function executePlatformStorageData(
   data: CoordinatorPlatformStorageData,
@@ -8593,93 +3810,6 @@ async function executePlatformStorageData(
     // 但不把页面导航中尚未返回的只读 Promise 写成持久运行锁。
     durableLease: operation === "write",
   });
-}
-
-async function resolveOwnerStorageGrant(grantId: string, actualClientId: string): Promise<StorageOwnerGrant> {
-  const grant = ownerStorageGrants.get(grantId);
-  if (!grant || grant.clientId !== actualClientId) throw new Error("Owner storage grant is invalid");
-  if (grant.sessionEpoch !== coordinatorState.sessionEpoch) throw new Error("Owner storage session changed");
-  if (grant.walletGeneration !== coordinatorState.walletGeneration) throw new Error("Owner storage wallet generation changed");
-  if (grant.runGeneration !== coordinatorState.runGeneration) throw new Error("Owner storage run generation changed");
-  if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Owner storage requires an unlocked wallet");
-  if (!platformRootStore) throw new Error("Owner storage root is unavailable");
-  return grant;
-}
-
-async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, actualClientId: string, signal?: AbortSignal): Promise<unknown> {
-  if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-  assertStorageDataAvailable();
-  const grant = await resolveOwnerStorageGrant(data.storageGrantId, actualClientId);
-  const release = beginStorageBindingRequest();
-  const expectedBinding = currentCoordinatorStorageBinding();
-  if (!expectedBinding) throw storageUnavailableError("Owner storage binding is unavailable");
-  const root = platformRootStore;
-  if (!root) throw storageUnavailableError("Platform storage has not been bootstrapped");
-  let store: KeyValueStore | undefined;
-  try {
-    if (grant.model === "files") {
-      const files = await root.openModuleFileStore({
-        declaration: {
-          moduleId: grant.moduleId,
-          purposeId: grant.purposeId,
-          authority: grant.authority,
-          model: grant.model,
-          schemaVersion: grant.schemaVersion,
-        },
-      });
-      let fileValue: unknown;
-      switch (data.type) {
-        case "owner.file-list": fileValue = await files.list(data.input); break;
-        case "owner.file-get": fileValue = await files.get(data.path); break;
-        case "owner.file-range": fileValue = await files.getRange(data.path, data.range); break;
-        case "owner.file-put": fileValue = await files.put(data.path, data.bytes, {
-          ...(data.ifNoneMatch === undefined ? {} : { ifNoneMatch: true as const }),
-          ...(data.ifRevision === undefined ? {} : { ifRevision: data.ifRevision }),
-        }); break;
-        case "owner.file-delete": await files.delete(data.path, data.ifRevision === undefined ? {} : { ifRevision: data.ifRevision }); fileValue = undefined; break;
-        case "owner.file-batch": fileValue = await files.batch({
-          operations: data.operations,
-          ...(data.conditions
-            ? {
-                conditions: data.conditions.map((condition) => ({
-                  path: condition.path,
-                  ...(condition.ifRevision === undefined ? {} : { ifRevision: condition.ifRevision }),
-                  ...(condition.ifNoneMatch === undefined ? {} : { ifNoneMatch: true as const }),
-                })),
-              }
-            : {}),
-        }); break;
-        default: throw new Error("Owner file storage request is invalid");
-      }
-      if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-      assertStorageBindingLive(expectedBinding);
-      return fileValue;
-    }
-    store = await root.openKeyValueStore({
-      declaration: {
-        moduleId: grant.moduleId,
-        purposeId: grant.purposeId,
-        authority: grant.authority,
-        model: grant.model,
-        schemaVersion: grant.schemaVersion,
-      },
-    });
-    if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-    let value: unknown;
-    switch (data.type) {
-      case "owner.get": value = await store.get(data.key, { partition: data.partition }); break;
-      case "owner.list": value = await store.list(data.input); break;
-      case "owner.put": value = await store.put(data.key, data.value, data.condition); break;
-      case "owner.delete": await store.delete(data.key, data.condition); value = undefined; break;
-      case "owner.commit": value = await store.commit({ partition: data.partition, ifRevision: data.ifRevision, operations: data.operations }); break;
-    }
-    if (signal?.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-    assertStorageBindingLive(expectedBinding);
-    return value;
-  } finally {
-    store?.close();
-    release();
-  }
 }
 
 async function executeOwnerStorageData(
@@ -8696,81 +3826,27 @@ async function executeOwnerStorageData(
   });
 }
 
-async function executeStorageDataUnsafe(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
-  assertStorageDataAvailable();
-  const capturedSessionEpoch = coordinatorState.sessionEpoch;
-  const service = await ensureStorageRuntime(actualClientId);
-  if (!("grantId" in request.data)) throw new Error("Storage grant is required for file operations");
-  const data = request.data;
-  const resolvedGrant = await resolveStorageGrant(data.grantId, actualClientId);
-  const ctx = resolvedGrant.context;
-  const root = platformRootStore;
-  if (!root) throw storageUnavailableError("Platform storage root is unavailable");
-  const expectedBinding = currentCoordinatorStorageBinding();
-  if (!expectedBinding) throw storageUnavailableError("Storage binding is unavailable");
-  const releaseBindingRequest = beginStorageBindingRequest();
-  try {
-    const signal = controller.signal;
-    let value: unknown;
-    switch (data.type) {
-      case "list": value = await service.list(ctx, { ...data.input, signal }); break;
-      case "create-directory": value = await service.createDirectory(ctx, { ...data.input, signal }); break;
-      case "delete-directory": value = await service.deleteDirectory(ctx, { ...data.input, signal }); break;
-      case "put": value = await service.put(ctx, { ...data.input, signal }); break;
-      case "get-range": value = await service.getRange(ctx, { ...data.input, signal }); break;
-      case "delete": value = await service.delete(ctx, { ...data.input, signal }); break;
-    }
-    // 本地 IndexedDB 事务可能忽略 AbortSignal 并在锁定/换绑之后才 resolve。
-    // 结果跨过会话或绑定栅栏时一律丢弃，不提交也不返回给页面。
-    if (controller.signal.aborted || capturedSessionEpoch !== coordinatorState.sessionEpoch) {
-      const error = new Error("Storage request became stale during owner transition") as Error & { code?: string };
-      error.code = "storage_unavailable";
-      throw error;
-    }
-    assertStorageBindingLive(expectedBinding);
-    await resolveStorageGrant(data.grantId, actualClientId);
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
-  } finally {
-    releaseBindingRequest();
-  }
-}
 
 async function executeStorageData(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
   const operation = request.data.type === "list" || request.data.type === "get-range" ? "read" : "write";
   return withCoordinatorFinalIoLease(operation, controller.signal, () => executeStorageDataUnsafe(request, controller, actualClientId), { auditOperation: "storage.connect.data" });
 }
 
-async function resolveStorageGrant(grantId: string, actualClientId: string): Promise<{ context: import("@keymaster/contracts").OwnerAppStorageGrant; connectSessionId: string }> {
-  const grant = storageGrants.get(grantId);
-  if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch) {
-    const error = new Error("Storage grant is invalid") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
-  }
-  const authoritative = await readProtocolConnectSession(grant.context.connectSessionId);
-  // 授权同时绑定 Connect 会话事实、钱包身份世代与 Worker 运行世代。任一项
-  // 不匹配都说明 App 已经失去访问权：App 不能靠旧 grant 继续读写。
-  if (!authoritative
-    || authoritative.origin !== grant.context.transportOrigin
-    || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity)
-    || grant.context.sessionEpoch !== coordinatorState.sessionEpoch
-    || grant.context.walletGeneration !== coordinatorState.walletGeneration
-    || grant.context.runGeneration !== coordinatorState.runGeneration
-    || !platformRootStore
-    || coordinatorState.vaultStatus !== "unlocked") {
-    const error = new Error("Storage session is invalid or revoked") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
-  }
-  return { context: grant.context, connectSessionId: grant.context.connectSessionId };
-}
-
-async function abortStorageSession(connectSessionId: string, peerId: string): Promise<void> {
+/** 只撤销当前 App 的数据请求和 grant，不能反调 controller.abortSession 形成递归。 */
+function revokeStorageSessionRequests(connectSessionId: string): void {
   for (const [requestId, pending] of storageRequests) {
     if (pending.connectSessionId === connectSessionId) { pending.controller.abort(); storageRequests.delete(requestId); }
   }
   for (const [grantId, grant] of storageGrants) if (grant.context.connectSessionId === connectSessionId) storageGrants.delete(grantId);
+}
+
+async function abortStorageSession(connectSessionId: string, peerId: string): Promise<void> {
+  revokeStorageSessionRequests(connectSessionId);
   const service = await ensureStorageRuntime(peerId);
   await service.abortSession(connectSessionId);
 }
 
-async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string): Promise<CoordinatorResponse> {
+async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
   if (request.kind === "storage.grant") {
     const session = await readProtocolConnectSession(request.connectSessionId);
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
@@ -8806,40 +3882,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
   }
   if (request.kind === "storage.browse.open" || request.kind === "storage.browse.data" || request.kind === "storage.browse.close") {
-    if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
-    if (coordinatorState.vaultStatus !== "unlocked") {
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage browse requires an unlocked wallet", code: "storage_identity_required" } };
-    }
-    if (request.kind === "storage.browse.open") {
-      // 授权由 Coordinator 从已验证的 peer 上下文签发：请求里没有身份字段，
-      // 自报任何 unitId 都不会被读取，因此也没有任何自报内容能换取浏览会话。
-      // 核验刻意排在装配浏览服务之前：未受信任的调用方连 WalletStore 都不该碰到。
-      const authorizationId = issueStorageBrowseAuthorization(actualClientId);
-      if (authorizationId === undefined) {
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage browse caller is not a trusted platform runtime unit", code: "storage_forbidden" } };
-      }
-      const openingRuntime = await ensureStorageBrowseRuntime();
-      const session = await openingRuntime.openSession(actualClientId, { authorizationId });
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: session };
-    }
-    const runtime = await ensureStorageBrowseRuntime();
-    if (request.kind === "storage.browse.close") {
-      await runtime.closeSession(actualClientId, request.browseSessionId);
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
-    }
-    // 浏览数据面也登记可取消控制器：快速切换时 storage.cancel 能中止在途读取。
-    const controller = new AbortController();
-    const requestKey = storageRequestKey(actualClientId, request.requestId);
-    storageRequests.set(requestKey, { controller, clientId: actualClientId });
-    try {
-      const value = request.data.type === "browse.list"
-        ? await runtime.list(actualClientId, request.data, { signal: controller.signal })
-        : await runtime.preview(actualClientId, request.data, { signal: controller.signal });
-      if (revokedCoordinatorPeerIds.has(actualClientId) || controller.signal.aborted) return disconnectedClientResponse(request.requestId);
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
-    } finally {
-      if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
-    }
+    return storageBrowseCoordinator.execute(request, actualClientId, requestSignal);
   }
   if (request.kind === "storage.cancel") {
     const target = storageRequests.get(storageRequestKey(actualClientId, request.targetRequestId));
@@ -9078,25 +4121,7 @@ async function executeSatRequestUnsafe(
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
   }
   const runtime = await ensureSatRuntime();
-  const operation: CoordinatorSatOperation = request.operation;
-  let value: unknown;
-  switch (operation.type) {
-    case "ensure":
-      value = null;
-      break;
-    case "admin.getSettings":
-      value = await runtime.admin.getSettingsSnapshot();
-      break;
-    case "admin.upsertSupplier":
-      await runtime.admin.upsertSupplier(operation.config);
-      value = null;
-      break;
-    case "admin.deleteSupplier":
-      await runtime.admin.deleteSupplier(operation.supplierId);
-      value = null;
-      break;
-    case "admin.setOwnerSettings":
-      await runtime.admin.setOwnerSettings(operation.settings);
+  const value = await executeSatOperation(request.operation, runtime, async () => {
       try {
         const mux = await ensureChannelSubscriptionMux(runtime);
         await mux.set(channelCallerId({ kind: "system", systemId: "owner-inbox" }), [inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex))]);
@@ -9105,22 +4130,7 @@ async function executeSatRequestUnsafe(
         // 的意图，下一次设置/Channel 操作会再次尝试物理订阅。
         console.warn("[channel] owner inbox rebind unavailable", error instanceof Error ? error.message : String(error));
       }
-      value = null;
-      break;
-    case "admin.refreshSubscriptions":
-      value = await runtime.handle.refreshSubscriptions(operation.input);
-      break;
-    case "admin.getBilling":
-      value = await runtime.admin.getBilling(operation.input);
-      break;
-    case "service.publish": value = await runtime.service.publish(operation.input); break;
-    case "spi.getInformation": value = await runtime.spi.getInformation(operation.input); break;
-    case "spi.prepareTopUp": value = await runtime.spi.prepareTopUp(operation.input); break;
-    case "spi.submitTopUp": value = await runtime.spi.submitTopUp(operation.preview); break;
-    case "spi.collectNew": value = await runtime.spi.collectNew(operation.input); break;
-    case "spi.retryCollect": value = await runtime.spi.retryCollect(operation.input); break;
-    case "spi.collect": value = await runtime.spi.collect(operation.input); break;
-  }
+  });
   return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
 }
 
@@ -9128,31 +4138,24 @@ async function executeSatRequestUnsafe(
 // Channel runtime / owner inbox
 // ============================================================
 
-const CHANNEL_MAX_SUBSCRIPTIONS_PER_CALLER = 64;
-const CHANNEL_PROTOCOLS = new Set([APP_MESSAGE_PROTOCOL, WEBRTC_SIGNAL_PROTOCOL, PING_PROTOCOL]);
-type ChannelPrivateProtocol = typeof APP_MESSAGE_PROTOCOL | typeof WEBRTC_SIGNAL_PROTOCOL | typeof PING_PROTOCOL;
-type ChannelCaller = Extract<CoordinatorChannelOperation, { type: "subscription-set" }>['caller'];
-type ChannelOperationCaller = Extract<CoordinatorChannelOperation, { type: "private-publish" }>['caller'];
+const channelCallerPolicy = createChannelCallerPolicy({ sessionEpoch: () => coordinatorState.sessionEpoch, ownerPublicKeyHex: () => coordinatorState.activePublicKeyHex });
+const channelCallerId = channelCallerPolicy.callerId;
+const isAllowedOwnerInboxSubscription = channelCallerPolicy.allowsOwnerInboxSubscription;
 
 /** 生成公开消息时间对；同一次签名必须只读取一次系统时钟。 */
-function channelPublicMessageTimes(now: () => number = Date.now): { issuedAtMs: number; expiresAtMs: number } {
-  const issuedAtMs = now();
-  return { issuedAtMs, expiresAtMs: issuedAtMs + PUBLIC_MESSAGE_MAX_LIFETIME_MS };
-}
+const channelPublications = createChannelPublications({
+  session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex, vaultStatus: coordinatorState.vaultStatus }),
+  signer: vaultKeySession,
+  relations: channelProtocolRelations,
+  unknownPublishFailure: isUnknownChannelPublishFailure,
+});
+const channelPublicMessageTimes = publicMessageTimes;
 
 /** 测试公开消息时间边界；字段含义：issuedAtMs=签发时间，expiresAtMs=过期时间。 */
 export function __testBuildChannelPublicMessageTimes(now: () => number = Date.now): { issuedAtMs: number; expiresAtMs: number } {
   return channelPublicMessageTimes(now);
 }
 
-function currentOwnerPrivateKey(): ReturnType<typeof parsePrivateKey> {
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes || !coordinatorState.activePublicKeyHex) {
-    throw new Error("Channel runtime requires an unlocked active key");
-  }
-  const privateKey = parsePrivateKey(coordinatorState.activePrivateKeyBytes);
-  if (publicKeyFromPrivate(privateKey) !== coordinatorState.activePublicKeyHex) throw new Error("Active Channel owner key mismatch");
-  return privateKey;
-}
 
 function channelMonotonicNow(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function"
@@ -9160,29 +4163,9 @@ function channelMonotonicNow(): number {
     : Date.now();
 }
 
-function allowAutomaticPong(senderPublicKeyHex: string): boolean {
-  const now = Date.now();
-  if (channelAutoPongWindowStartedAtMs === 0 || now - channelAutoPongWindowStartedAtMs >= CHANNEL_AUTO_PONG_WINDOW_MS) {
-    channelAutoPongWindowStartedAtMs = now;
-    channelAutoPongCount = 0;
-    channelAutoPongBySender.clear();
-  }
-  if (channelAutoPongCount >= CHANNEL_AUTO_PONG_MAX_GLOBAL) return false;
-  const sender = channelAutoPongBySender.get(senderPublicKeyHex);
-  if (sender && now - sender.windowStartedAtMs < CHANNEL_AUTO_PONG_WINDOW_MS && sender.count >= CHANNEL_AUTO_PONG_MAX_PER_SENDER) return false;
-  if (!sender || now - sender.windowStartedAtMs >= CHANNEL_AUTO_PONG_WINDOW_MS) {
-    channelAutoPongBySender.set(senderPublicKeyHex, { windowStartedAtMs: now, count: 1 });
-  } else {
-    sender.count += 1;
-  }
-  channelAutoPongCount += 1;
-  return true;
-}
-
 // Coordinator 不接受任意 RPC 自报 caller；普通插件还会在 Host context 层被
 // 绑定 manifest.id，这里是 Worker 边界的第二道 fail-closed 校验。
-const TRUSTED_CHANNEL_PLUGIN_IDS = new Set(["bsv-price", "message", "webrtc", "msfile"]);
-const TRUSTED_CHANNEL_SYSTEM_IDS = new Set(["owner-inbox", "contacts-presence"]);
+
 
 /** 为 BitFS 买方订阅 Hash 需求与自己的 Inbox，继续复用唯一 Channel Mux。 */
 async function ensureMsfileBitfsBuyerSubscriptions(runtime: SatWorkerRuntimeState): Promise<void> {
@@ -9199,27 +4182,6 @@ async function ensureMsfileBitfsSellerSubscriptions(runtime: SatWorkerRuntimeSta
   await mux.set(callerId, [HASH_REQUEST_CHANNEL, ownerInbox], runtime.signal);
 }
 
-function channelCallerId(caller: ChannelCaller, clientId?: string): string {
-  const epoch = coordinatorState.sessionEpoch;
-  // Window Host 是独立运行实例；把 Coordinator 生成的端口身份加入
-  // caller key，避免一个页面卸载时释放另一个页面仍在使用的订阅。
-  const instanceSuffix = clientId ? `:${clientId}` : "";
-  if (caller.kind === "plugin") {
-    if (!caller.pluginId || caller.pluginId.length > 128 || !TRUSTED_CHANNEL_PLUGIN_IDS.has(caller.pluginId)) {
-      throw new Error("Channel plugin caller id is not trusted");
-    }
-    return `${epoch}:plugin:${caller.pluginId}${instanceSuffix}`;
-  }
-  if (caller.kind === "system") {
-    if (!caller.systemId || caller.systemId.length > 128 || !TRUSTED_CHANNEL_SYSTEM_IDS.has(caller.systemId)) {
-      throw new Error("Channel system caller id is not trusted");
-    }
-    return `${epoch}:system:${caller.systemId}${instanceSuffix}`;
-  }
-  if (!caller.connectSessionId || !caller.origin) throw new Error("Channel Connect caller is incomplete");
-  return `${epoch}:connect:${caller.connectSessionId}:${caller.origin}${instanceSuffix}`;
-}
-
 async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Promise<ChannelSubscriptionMux> {
   if (channelSubscriptionMux && channelMuxOwnerPublicKeyHex === runtime.ownerPublicKeyHex) return channelSubscriptionMux;
   const existingStart = channelSubscriptionMuxStarting;
@@ -9227,14 +4189,9 @@ async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Pro
   if (existingStart) await existingStart.catch(() => undefined);
 
   const startGeneration = channelSubscriptionMuxGeneration;
-  const start = (async (): Promise<ChannelSubscriptionMux> => {
-    if (startGeneration !== channelSubscriptionMuxGeneration
-      || coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
-      throw new Error("Channel subscription mux became stale before startup");
-    }
-    const mux = new ChannelSubscriptionMux({
-      driver: {
+  const start = createOwnerChannelMux({
+    ownerPublicKeyHex: runtime.ownerPublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch, signal: runtime.signal,
+    driver: {
         // 订阅是可撤销的网络副作用，但仍必须绑定当前 Coordinator
         // authority。这样初始 owner inbox、请求中的 set/release 以及退避
         // 重试都不会在旧 Worker 接管后继续使用旧连接身份。
@@ -9253,38 +4210,25 @@ async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Pro
           (leaseSignal) => runtime.handle.unsubscribePhysical(channel, leaseSignal),
           { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.unsubscribe" },
         )
-      }
-    });
-    channelSubscriptionMux = mux;
-    channelMuxOwnerPublicKeyHex = runtime.ownerPublicKeyHex;
-    channelSubscriptionMuxStatusOff?.();
-    channelSubscriptionMuxStatusOff = mux.subscribeSubscriptionStatus((status) => {
-      emitChannelSubscriptionStatus(status, runtime.ownerPublicKeyHex);
-    });
-    const ownerInbox = inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex));
-    try {
-      await mux.set(`${coordinatorState.sessionEpoch}:system:owner-inbox`, [ownerInbox], runtime.signal);
-    } catch (error) {
-      // 未配置 receive Supplier 时只保留 caller 意图；后续设置或重连会重试。
-      console.warn("[channel] owner inbox subscription unavailable", error instanceof Error ? error.message : String(error));
-    }
-    if (startGeneration !== channelSubscriptionMuxGeneration
-      || coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex
-      || channelSubscriptionMux !== mux) {
-      try {
-        await mux.clear().catch(() => undefined);
-      } finally {
-        mux.dispose();
-      }
+      },
+    assertFresh(mux) {
+      if (startGeneration !== channelSubscriptionMuxGeneration || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex || (mux !== undefined && channelSubscriptionMux !== mux)) throw new Error("Channel subscription mux became stale during startup");
+    },
+    created(mux, offStatus) {
+      channelSubscriptionMuxStatusOff?.();
+      channelSubscriptionMux = mux;
+      channelMuxOwnerPublicKeyHex = runtime.ownerPublicKeyHex;
+      channelSubscriptionMuxStatusOff = offStatus;
+    },
+    released(mux) {
       if (channelSubscriptionMux === mux) {
         channelSubscriptionMux = undefined;
         channelMuxOwnerPublicKeyHex = undefined;
+        channelSubscriptionMuxStatusOff = undefined;
       }
-      throw new Error("Channel subscription mux became stale during startup");
-    }
-    return mux;
-  })();
+    },
+    status: status => emitChannelSubscriptionStatus(status, runtime.ownerPublicKeyHex),
+  });
   channelSubscriptionMuxStarting = start;
   channelSubscriptionMuxStartOwner = runtime.ownerPublicKeyHex;
   try {
@@ -9297,16 +4241,6 @@ async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Pro
   }
 }
 
-function rememberChannelMessage(key: string): boolean {
-  if (channelSeenMessages.has(key)) return false;
-  channelSeenMessages.add(key);
-  while (channelSeenMessages.size > CHANNEL_SEEN_LIMIT) {
-    const first = channelSeenMessages.values().next().value as string | undefined;
-    if (first === undefined) break;
-    channelSeenMessages.delete(first);
-  }
-  return true;
-}
 
 type ChannelSeenMessageKind = "private" | "public" | "hash-request";
 
@@ -9346,52 +4280,7 @@ async function publishChannelHashRequest(
   );
 }
 
-async function publishChannelHashRequestUnsafe(
-  runtime: SatWorkerRuntimeState,
-  input: { hash: string; locator: "webrtc-sdp" },
-  signal?: AbortSignal,
-  onPrepared?: (messageId: string) => void,
-): Promise<{ messageId: string }> {
-  const hash = parseSHA256Hash(input.hash);
-  const ownerSessionEpoch = coordinatorState.sessionEpoch;
-  const privateKey = currentOwnerPrivateKey();
-  const issuedAtMs = Date.now();
-  const signed = signHashRequest({
-    from_public_key: publicKeyFromPrivate(privateKey),
-    message_id: newMessageID(),
-    issued_at_ms: issuedAtMs,
-    expires_at_ms: issuedAtMs + 10 * 60 * 1000,
-    body: { hash, locators: [newWebRTCSDPLocator()] }
-  }, privateKey);
-  const contentJson = marshalHashRequest(signed);
-  // Supplier 通常不会把本 owner 的 Publish 回送给自己；本地仍必须保存
-  // 这条 SDK 生成的 VerifiedHashRequest，才能审查远端随后发来的 offer。
-  const verified = parseHashRequest(HASH_REQUEST_CHANNEL, contentJson);
-  const relationKey = channelHashRequestKey(verified.message_id, verified.from_public_key);
-  channelHashRequests.set(relationKey, verified);
-  pruneChannelProtocolRelations();
-  // BitFS 买方先在本地注册 request_id，再将 exact Hash request 发到网络；
-  // 极快的卖方答复也不会落在注册空窗内。
-  onPrepared?.(verified.message_id);
-  try {
-    await runtime.service.publish({ channel: HASH_REQUEST_CHANNEL, contentJson }, signal);
-  } catch (error) {
-    const stillFresh = coordinatorState.vaultStatus === "unlocked"
-      && coordinatorState.sessionEpoch === ownerSessionEpoch
-      && coordinatorState.activePublicKeyHex === runtime.ownerPublicKeyHex;
-    // unknown_result 表示消息可能已经到达远端，保留关系等待过期；明确
-    // 失败或 owner 已切换时不能留下本地伪 Hash 请求证据。
-    if (!stillFresh || !isUnknownChannelPublishFailure(error)) channelHashRequests.delete(relationKey);
-    throw error;
-  }
-  if (coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.sessionEpoch !== ownerSessionEpoch
-    || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
-    channelHashRequests.delete(relationKey);
-    throw new Error("Channel owner changed while publishing Hash request");
-  }
-  return { messageId: signed.message_id };
-}
+const publishChannelHashRequestUnsafe = channelPublications.hash;
 
 /** Worker 内公共 Channel 消息的签名 + Publish 最终边界。 */
 async function publishChannelPublicMessage(
@@ -9404,44 +4293,24 @@ async function publishChannelPublicMessage(
   if (channel.startsWith("bsv8.inbox.")) throw new Error("bsv8.inbox.* is a reserved private channel");
   if (channel === HASH_REQUEST_CHANNEL) throw new Error("bsv8.hash.request.v1 is reserved for the trusted WebRTC Hash request publisher");
   return withCoordinatorFinalIoLease("write", signal, async (leaseSignal) => {
-    const ownerSessionEpoch = coordinatorState.sessionEpoch;
-    const privateKey = currentOwnerPrivateKey();
-    const { issuedAtMs, expiresAtMs } = channelPublicMessageTimes();
-    const signed = signPublicMessage({
-      channel,
-      from_public_key: publicKeyFromPrivate(privateKey),
-      message_id: newMessageID(),
-      issued_at_ms: issuedAtMs,
-      expires_at_ms: expiresAtMs,
-      body: content,
-    }, privateKey);
-    await runtime.service.publish({ channel, contentJson: marshalPublicMessage(signed) }, leaseSignal);
-    if (coordinatorState.vaultStatus !== "unlocked"
-      || coordinatorState.sessionEpoch !== ownerSessionEpoch
-      || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
-      throw new Error("Channel owner changed while publishing");
-    }
-    return { messageId: signed.message_id };
+    return channelPublications.public(runtime, channel, content, leaseSignal);
   }, { auditOperation: "channel.public-publish" });
 }
 
 /** 在 Coordinator 内给固定业务服务使用的 Channel facade。 */
-function createCoordinatorChannelRuntime(): ChannelRuntime {
+function createCoordinatorChannelRuntime(assertActive: () => void = () => undefined): ContactsPresenceChannel {
   const contactsCaller = { kind: "system" as const, systemId: "contacts-presence" };
   const assertContactsEnabled = (): void => {
-    if (!isCoordinatorProductEnabled("contacts")) {
-      throw new Error("Plugin disabled: contacts");
+    if (!isCoordinatorProductRegistered("contacts")) {
+      throw new Error("Plugin unavailable: contacts");
     }
   };
-  return {
-    isReady: () => isCoordinatorProductEnabled("contacts")
+  return createContactsPresenceChannel({
+    assertActive,
+    owner: () => coordinatorState.activePublicKeyHex,
+    isReady: () => isCoordinatorProductRegistered("contacts")
       && coordinatorState.vaultStatus === "unlocked"
       && Boolean(coordinatorState.activePublicKeyHex),
-    async publish(input, signal) {
-      assertContactsEnabled();
-      const runtime = await ensureSatRuntime();
-      return publishChannelPublicMessage(runtime, input.channel, input.content, signal ?? runtime.signal);
-    },
     async publishPrivate(input, signal) {
       assertContactsEnabled();
       const runtime = await ensureSatRuntime();
@@ -9475,30 +4344,7 @@ function createCoordinatorChannelRuntime(): ChannelRuntime {
         statuses: result.map((channel) => mux.subscriptionStatus(channel)),
       };
     },
-    subscriptionStatus(channel) {
-      validateExactChannel(channel);
-      const mux = channelSubscriptionMux;
-      if (!mux || channelMuxOwnerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
-        return idleChannelSubscriptionStatus(channel);
-      }
-      return mux.subscriptionStatus(channel);
-    },
-    subscribeSubscriptionStatus(handler) {
-      assertContactsEnabled();
-      const subscriber = { sessionEpoch: coordinatorState.sessionEpoch, handler };
-      channelSubscriptionStatusSubscribers.add(subscriber);
-      return () => channelSubscriptionStatusSubscribers.delete(subscriber);
-    },
-    subscribe(handler) {
-      const subscriber = (event: { channel: string; publisherPublicKeyHex: string; messageId: string; content: import("@keymaster/contracts").JSONValue }) => handler(event);
-      channelPublicSubscribers.add(subscriber);
-      return () => channelPublicSubscribers.delete(subscriber);
-    },
-    subscribePrivate(handler) {
-      channelPrivateSubscribers.add(handler);
-      return () => channelPrivateSubscribers.delete(handler);
-    }
-  };
+  });
 }
 
 function idleChannelSubscriptionStatus(channel: string): ChannelSubscriptionStatus {
@@ -9561,424 +4407,44 @@ async function publishPrivateEnvelope(input: {
   );
 }
 
-async function publishPrivateEnvelopeUnsafe(input: {
-  runtime: SatWorkerRuntimeState;
-  recipientPublicKeyHex: string;
-  protocol: ChannelPrivateProtocol;
-  body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"];
-  signal?: AbortSignal;
-}): Promise<{ messageId: string; signedMessage: Uint8Array }> {
-  if (!CHANNEL_PROTOCOLS.has(input.protocol)) throw new Error("Unsupported private Channel protocol");
-  const recipient = parsePublicKey(input.recipientPublicKeyHex);
-  const channel = inboxChannel(recipient);
-  const ownerSessionEpoch = coordinatorState.sessionEpoch;
-  if (input.runtime.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
-    throw new Error("Channel owner changed before private publish");
-  }
-  const privateKey = currentOwnerPrivateKey();
-  const messageId = newMessageID();
-  const now = Date.now();
-  const startedAtMonotonicMs = input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)
-    ? channelMonotonicNow()
-    : undefined;
-  // 过期时间必须由 ChannelProtocol 的子协议上限决定：Ping 60 秒，
-  // WebRTC 120 秒，其它私密消息最多 24 小时。签名构造集中在同一个
-  // helper，测试可以直接走与 Coordinator 相同的真实签名入口。
-  const signed = signChannelPrivateMessage({
-    recipientPublicKeyHex: recipient,
-    protocol: input.protocol,
-    body: input.body,
-    messageId,
-    nowMs: now,
-    privateKey
-  });
-  let verifiedWebrtc: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage | undefined;
-  if (input.protocol === WEBRTC_SIGNAL_PROTOCOL) {
-    verifiedWebrtc = verifySignedPrivateMessage(signed);
-    const webrtcBody = verifiedWebrtc.body as import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body;
-    if (webrtcBody.signal.type === "offer") {
-      const hashRequest = channelHashRequestByMessageId(webrtcBody.request_message_id, recipient);
-      if (!hashRequest) throw new Error("WebRTC offer must reference a live public Hash request");
-      reviewOfferForHashRequest(hashRequest, verifiedWebrtc);
-    } else {
-      const offer = findChannelWebrtcOffer(webrtcBody, verifiedWebrtc);
-      if (!offer) throw new Error("WebRTC signal has no verified offer relation");
-      validateWebRTCRelation(offer, verifiedWebrtc);
-    }
-  }
-  const pingMessage = input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)
-    ? verifySignedPrivateMessage(signed)
-    : undefined;
-  const verifiedWebrtcBody = verifiedWebrtc?.body as import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body | undefined;
-  const webrtcOfferKey = verifiedWebrtc && verifiedWebrtcBody?.signal.type === "offer"
-    ? channelWebrtcOfferKey(
-      verifiedWebrtcBody.request_message_id,
-      verifiedWebrtc.from_public_key,
-      verifiedWebrtcBody.session_id
-    )
-    : undefined;
-  if (verifiedWebrtc && webrtcOfferKey) {
-    // Offer 关系必须在发送边界前登记。Publish 返回 unknown_result 时，
-    // 远端可能已经收到 offer 并立即回 answer；提前登记才能通过后续关系
-    // 审查。明确失败时下面会删除这条本地证据。
-    channelWebrtcOffers.set(webrtcOfferKey, verifiedWebrtc);
-    pruneChannelProtocolRelations();
-  }
-  let envelope: Awaited<ReturnType<typeof sealSigned>>;
-  try {
-    envelope = await sealSigned(signed, privateKey);
-  } catch (error) {
-    if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
-    throw error;
-  }
-  if (input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)) {
-    pruneChannelPendingPings(now);
-    // 必须在网络 Publish 前登记；Pong 可能在 publish Promise settle 前
-    // 经另一个入站 handler 到达。unknown_result 时保留到 TTL，禁止重复发送。
-    channelPendingPings.set({
-      messageId,
-      ownerSessionEpoch,
-      ownerPublicKeyHex: input.runtime.ownerPublicKeyHex,
-      contactPublicKeyHex: recipient,
-      startedAtMonotonicMs: startedAtMonotonicMs!,
-      expiresAtMs: now + CHANNEL_PENDING_PING_TTL_MS,
-      pingMessage: pingMessage!
-    });
-    scheduleChannelPendingPingCleanup();
-  }
-  try {
-    await input.runtime.service.publish({ channel, contentJson: marshalEnvelope(envelope) }, input.signal);
-  } catch (error) {
-    const stillFresh = coordinatorState.vaultStatus === "unlocked"
-      && coordinatorState.sessionEpoch === ownerSessionEpoch
-      && coordinatorState.activePublicKeyHex === input.runtime.ownerPublicKeyHex;
-    if (!isUnknownChannelPublishFailure(error) || !stillFresh) {
-      channelPendingPings.delete(messageId);
-      if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
-    }
-    throw error;
-  }
-  if (coordinatorState.vaultStatus !== "unlocked"
-    || coordinatorState.sessionEpoch !== ownerSessionEpoch
-    || coordinatorState.activePublicKeyHex !== input.runtime.ownerPublicKeyHex) {
-    channelPendingPings.delete(messageId);
-    if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
-    throw new Error("Channel owner changed while publishing");
-  }
-  // 出站签名明文由调用方作为本地证据原样保存；不重新序列化，不包含密文。
-  return { messageId, signedMessage: marshalPrivateMessage(signed) };
-}
+const publishPrivateEnvelopeUnsafe = channelPublications.private;
 
-function signChannelPrivateMessage(input: {
-  recipientPublicKeyHex: string;
-  protocol: ChannelPrivateProtocol;
-  body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"];
-  messageId: string;
-  nowMs: number;
-  privateKey: Uint8Array;
-}): import("bsv8-channel-protocol/inbox").SignedPrivateMessage {
-  const recipient = parsePublicKey(input.recipientPublicKeyHex);
-  const issuedAtMs = input.nowMs;
-  const message = {
-    channel: inboxChannel(recipient),
-    from_public_key: publicKeyFromPrivate(input.privateKey),
-    message_id: parseMessageID(input.messageId),
-    issued_at_ms: issuedAtMs,
-    expires_at_ms: issuedAtMs + privateMessageMaxLifetimeMs(input.protocol),
-    protocol: input.protocol,
-    body: input.body
-  } as import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage;
-  return signPrivateMessage(message, input.privateKey);
-}
+const handleIncomingChannelPublish = createChannelInbound<SatWorkerRuntimeState>({
+  session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex, vaultStatus: coordinatorState.vaultStatus }),
+  runtime: () => satRuntime,
+  relations: channelProtocolRelations,
+  openPrivate: (event, owner, epoch) => withCoordinatorFinalIoLease(
+    "read", undefined,
+    () => {
+      if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== epoch || coordinatorState.activePublicKeyHex !== owner) throw new Error("Channel owner changed before private message decrypt");
+      return vaultKeySession.open(event.channel, event.contentJson);
+    },
+    { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.incoming-decrypt" },
+  ),
+  publishPrivate: publishPrivateEnvelope,
+  recordPong: (input) => { coordinatorContactsService?.recordVerifiedPong?.(input); },
+  emitPrivate: emitChannelPrivateMessage,
+  emitPublic: emitChannelPublicMessage,
+  routeSignal: (body, opened, seedHashHex) => msfileBitfsRuntime.handleInboxWebRtc(body, opened, seedHashHex),
+  hashRequestSeen: handleMsfileSellerHashRequest,
+});
 
-function isPingRequestBody(
-  body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"]
-): body is import("bsv8-channel-protocol/ping").PingBody {
-  return body !== null
-    && typeof body === "object"
-    && !Array.isArray(body)
-    && "type" in body
-    && body.type === "ping";
-}
-
-function privateProtocol(protocol: string): ChannelPrivateProtocol {
-  if (CHANNEL_PROTOCOLS.has(protocol as ChannelPrivateProtocol)) return protocol as ChannelPrivateProtocol;
-  throw new Error("Unsupported private Channel protocol");
-}
-
-function validatePrivateProtocolCaller(caller: ChannelOperationCaller, protocol: ChannelPrivateProtocol): void {
-  if (caller.kind === "connect") throw new Error("Connect caller cannot publish private inbox messages");
-  if (caller.kind === "plugin") {
-    if (caller.pluginId === "message" && protocol === APP_MESSAGE_PROTOCOL) return;
-    // WebRTC 通话控制仍走 app-message；BitFS 文件需求走公开 Hash channel；
-    // SDP/ICE 统一走 WEBRTC_SIGNAL_PROTOCOL。
-    if (caller.pluginId === "webrtc" && (protocol === WEBRTC_SIGNAL_PROTOCOL || protocol === APP_MESSAGE_PROTOCOL)) return;
-    if (caller.pluginId === "msfile" && protocol === WEBRTC_SIGNAL_PROTOCOL) return;
-    throw new Error("Channel plugin is not allowed to publish this private protocol");
-  }
-  if (caller.systemId === "contacts-presence" && protocol === PING_PROTOCOL) return;
-  throw new Error("Channel system is not allowed to publish this private protocol");
-}
-
-/** 把已验证历史信封转换成给消息插件的业务 JSON；不投递、不产生副作用。 */
-function privateHistoryContent(opened: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage): import("@keymaster/contracts").JSONValue {
-  if (opened.protocol === APP_MESSAGE_PROTOCOL) {
-    const body = opened.body as import("bsv8-channel-protocol/app-message").MessageV1Body;
-    return body.type === "deliver"
-      ? body.content as import("@keymaster/contracts").JSONValue
-      : { type: "ack", acknowledged_message_id: body.acknowledged_message_id };
-  }
-  if (opened.protocol === PING_PROTOCOL) {
-    return parsePingBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue) as unknown as import("@keymaster/contracts").JSONValue;
-  }
-  if (opened.protocol === WEBRTC_SIGNAL_PROTOCOL) {
-    return parseWebrtcBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue) as unknown as import("@keymaster/contracts").JSONValue;
-  }
-  throw new Error("UNSUPPORTED_PROTOCOL");
-}
-
-function isActiveOwnerInboxChannel(channel: string): boolean {
-  const owner = coordinatorState.activePublicKeyHex;
-  if (!owner) return false;
-  try {
-    return channel === inboxChannel(parsePublicKey(owner));
-  } catch {
-    return false;
-  }
-}
-
-function isAllowedOwnerInboxSubscription(caller: ChannelCaller, channel: string): boolean {
-  if (!isActiveOwnerInboxChannel(channel)) return false;
-  // owner-inbox / contacts-presence 是 Coordinator 内部系统路由；message /
-  // webrtc 是 Host 绑定身份的内部插件路由。Connect 和其他插件不能订阅
-  // 任意 bsv8.inbox.*，避免把私有收件箱暴露成公共事件流。
-  if (caller.kind === "system") {
-    return caller.systemId === "owner-inbox" || caller.systemId === "contacts-presence";
-  }
-  return caller.kind === "plugin" && (caller.pluginId === "message" || caller.pluginId === "webrtc" || caller.pluginId === "msfile");
-}
-
-function privateBodyForPublish(protocol: string, content: import("@keymaster/contracts").JSONValue): import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"] {
-  const supportedProtocol = privateProtocol(protocol);
-  if (supportedProtocol === APP_MESSAGE_PROTOCOL) {
-    if (content !== null && typeof content === "object" && !Array.isArray(content) && content.type === "ack") {
-      const acknowledged = content.acknowledged_message_id;
-      if (typeof acknowledged !== "string") throw new Error("Message ACK must contain acknowledged_message_id");
-      return newAck(parseMessageID(acknowledged));
-    }
-    return newDeliver(content as import("bsv8-channel-protocol").JSONValue);
-  }
-  if (supportedProtocol === WEBRTC_SIGNAL_PROTOCOL) return parseWebrtcBodyValue(content as import("bsv8-channel-protocol").JSONValue);
-  if (supportedProtocol === PING_PROTOCOL) return parsePingBodyValue(content as import("bsv8-channel-protocol").JSONValue);
-  throw new Error("Unsupported private Channel protocol");
-}
-
-async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<void> {
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
-  pruneChannelPendingPings();
-  pruneChannelProtocolRelations();
-  try {
-    const owner = coordinatorState.activePublicKeyHex;
-    const ownerSessionEpoch = coordinatorState.sessionEpoch;
-    const ownerInbox = inboxChannel(parsePublicKey(owner));
-    if (event.channel === ownerInbox) {
-      const opened = await withCoordinatorFinalIoLease(
-        "read",
-        undefined,
-        () => {
-          // 私信解密也必须在最终权限边界内重新取得当前 owner 私钥；
-          // 不能使用 await 之前捕获的旧 key 穿过锁定/接管窗口。
-          if (coordinatorState.vaultStatus !== "unlocked"
-            || coordinatorState.sessionEpoch !== ownerSessionEpoch
-            || coordinatorState.activePublicKeyHex !== owner) {
-            throw new Error("Channel owner changed before private message decrypt");
-          }
-          return openPrivateMessage(event.channel, event.contentJson, currentOwnerPrivateKey());
-        },
-        { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.incoming-decrypt" },
-      );
-      // 解密本身可能让出事件循环；锁定、切换 owner 或重建 session 后，
-      // 旧事件不得进入新 owner 的业务处理器。
-      if (coordinatorState.vaultStatus !== "unlocked"
-        || coordinatorState.sessionEpoch !== ownerSessionEpoch
-        || coordinatorState.activePublicKeyHex !== owner) {
-        return;
-      }
-      const dedup = privateDedupKey(opened);
-      const key = channelSeenMessageKey("private", dedup.protocol, dedup.from_public_key, dedup.message_id);
-      if (!rememberChannelMessage(key)) return;
-      switch (opened.protocol) {
-        case PING_PROTOCOL: {
-          const pingBody = parsePingBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue);
-          if (pingBody.type === "ping") {
-            const runtime = satRuntime;
-            if (runtime && runtime.ownerPublicKeyHex === owner && allowAutomaticPong(opened.from_public_key)) {
-              try {
-                await publishPrivateEnvelope({ runtime, recipientPublicKeyHex: opened.from_public_key, protocol: PING_PROTOCOL, body: newPong(opened.message_id) });
-              } catch (error) {
-                console.warn("[channel] automatic Pong failed", error instanceof Error ? error.message : String(error));
-              }
-            }
-            return;
-          }
-          const pending = channelPendingPings.get(pingBody.ping_message_id);
-          if (!pending
-            || pending.ownerSessionEpoch !== coordinatorState.sessionEpoch
-            || pending.ownerPublicKeyHex !== owner
-            || pending.contactPublicKeyHex !== opened.from_public_key
-            || pending.expiresAtMs <= Date.now()) {
-            return;
-          }
-          try {
-            validatePongRelation(pending.pingMessage, opened);
-          } catch {
-            return;
-          }
-          channelPendingPings.delete(pingBody.ping_message_id);
-          // RTT 仅作为诊断值，不进入 Contact 实体或公开资源。
-          void Math.max(0, channelMonotonicNow() - pending.startedAtMonotonicMs);
-          coordinatorContactsService?.recordVerifiedPong?.({
-            contactPublicKeyHex: opened.from_public_key,
-            receivedAtMs: Date.now()
-          });
-          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: pingBody as unknown as import("@keymaster/contracts").JSONValue, rawEnvelope: event.contentJson.slice() });
-          return;
-        }
-        case APP_MESSAGE_PROTOCOL: {
-          const appBody = opened.body as import("bsv8-channel-protocol/app-message").MessageV1Body;
-          const content: import("@keymaster/contracts").JSONValue = appBody.type === "deliver"
-            ? appBody.content as import("@keymaster/contracts").JSONValue
-            : { type: "ack", acknowledged_message_id: appBody.acknowledged_message_id };
-          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content, rawEnvelope: event.contentJson.slice() });
-          return;
-        }
-        case WEBRTC_SIGNAL_PROTOCOL: {
-          const webrtcBody = parseWebrtcBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue);
-          if (webrtcBody.signal.type === "offer") {
-            const hashRequest = channelHashRequestByMessageId(webrtcBody.request_message_id, owner);
-            if (!hashRequest) throw new Error("WebRTC offer references an unknown or expired Hash request");
-            const relation = reviewOfferForHashRequest(hashRequest, opened);
-            channelWebrtcOffers.set(relation.key, opened);
-            pruneChannelProtocolRelations();
-            if (msfileBitfsBuyerRequests.has(webrtcBody.request_message_id)) {
-              await acceptMsfileBitfsWebRtcOffer({
-                requestMessageId: webrtcBody.request_message_id,
-                webrtcSessionId: webrtcBody.session_id,
-                peerPublicKeyHex: opened.from_public_key,
-                seedHashHex: hashRequest.body.hash,
-                offerSdp: webrtcBody.signal.sdp,
-              });
-            }
-          } else {
-            const offer = findChannelWebrtcOffer(webrtcBody, opened);
-            if (!offer) throw new Error("WebRTC signal has no verified offer relation");
-            validateWebRTCRelation(offer, opened);
-            // 仅把同一 request/session 和预期信令身份的 answer/ICE 送回 DataChannel。
-            const sellerLink = msfileBitfsWebRtcSellerLinks.get(webrtcBody.session_id);
-            const buyerLink = msfileBitfsWebRtcBuyerLinks.get(webrtcBody.session_id);
-            const link = sellerLink
-              ? { sessionId: sellerLink.sessionId, requestMessageId: sellerLink.requestMessageId, peerPublicKeyHex: sellerLink.peerPublicKeyHex, ownerSessionEpoch: sellerLink.ownerSessionEpoch }
-              : buyerLink
-                ? { sessionId: buyerLink.transportSessionId, requestMessageId: buyerLink.requestMessageId, peerPublicKeyHex: buyerLink.peerPublicKeyHex, ownerSessionEpoch: buyerLink.ownerSessionEpoch }
-                : undefined;
-            if (link) {
-              if (link.ownerSessionEpoch !== coordinatorState.sessionEpoch
-                || link.requestMessageId !== webrtcBody.request_message_id
-                || link.peerPublicKeyHex !== opened.from_public_key.toLowerCase()) {
-                throw new Error("BitFS WebRTC signal owner or peer relation mismatch");
-              }
-              try {
-                await requestWindowP2pExecutorOperation({
-                  type: "lane",
-                  laneId: "msfile",
-                  operation: {
-                    type: "bitfs-webrtc-signal",
-                    sessionId: link.sessionId,
-                    requestMessageId: link.requestMessageId,
-                    webrtcSessionId: webrtcBody.session_id,
-                    publicKeyHex: link.peerPublicKeyHex,
-                    signal: webrtcBody.signal as unknown as Record<string, unknown>,
-                  },
-                });
-              } catch (error) {
-                msfileBitfsWebRtcSellerLinks.delete(webrtcBody.session_id);
-                msfileBitfsWebRtcBuyerLinks.delete(webrtcBody.session_id);
-                if (sellerLink) await msfileSellerSessionManager?.close(link.sessionId, "transport_error").catch(() => undefined);
-                else await requestWindowP2pExecutorOperation({
-                  type: "lane",
-                  laneId: "msfile",
-                  operation: { type: "bitfs-seller-close", sessionId: link.sessionId, reason: "transport_error" },
-                }).catch(() => undefined);
-                throw error;
-              }
-            }
-          }
-          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: webrtcBody as unknown as import("@keymaster/contracts").JSONValue, rawEnvelope: event.contentJson.slice() });
-          return;
-        }
-        default:
-          throw new Error("UNSUPPORTED_PROTOCOL");
-      }
-    }
-    // bsv8.inbox.* is a private namespace. A message arriving at another
-    // owner's inbox is never reinterpreted as a public application message.
-    if (event.channel.startsWith("bsv8.inbox.")) {
-      try { parseInboxChannel(event.channel); } catch { /* malformed private namespace is rejected below */ }
-      return;
-    }
-    if (event.channel === HASH_REQUEST_CHANNEL) {
-      const hashRequest = parseHashRequest(event.channel, event.contentJson);
-      const relationKey = channelHashRequestKey(hashRequest.message_id, hashRequest.from_public_key);
-      const seenKey = channelSeenMessageKey("hash-request", relationKey);
-      if (!rememberChannelMessage(seenKey)) return;
-      channelHashRequests.set(relationKey, hashRequest);
-      pruneChannelProtocolRelations();
-      emitChannelPublicMessage({
-        channel: event.channel,
-        publisherPublicKeyHex: hashRequest.from_public_key,
-        messageId: hashRequest.message_id,
-        content: {
-          hash: hashRequest.body.hash,
-          locators: hashRequest.body.locators.map((locator) => locator.kind === "multiaddr"
-            ? { kind: locator.kind, address: locator.address }
-            : { kind: locator.kind })
-        } as unknown as import("@keymaster/contracts").JSONValue
-      });
-      // BitFS 卖方匹配：命中完整 Seed 且 locator 兼容时才建立销售会话；
-      // 未命中或端口未就绪时保持静默，不泄露库存。
-      void handleMsfileSellerHashRequest(hashRequest);
-      return;
-    }
-    const publicMessage = parsePublicMessage(event.channel, event.contentJson);
-    const publicDedup = publicDedupKey(publicMessage);
-    const key = channelSeenMessageKey("public", publicDedup.channel, publicDedup.from_public_key, publicDedup.message_id);
-    if (!rememberChannelMessage(key)) return;
-    emitChannelPublicMessage({ channel: publicMessage.channel, publisherPublicKeyHex: publicMessage.from_public_key, messageId: publicMessage.message_id, content: publicMessage.body });
-  } catch (error) {
-    // 无效、过期、未知协议或非 owner inbox 的私密消息全部丢弃；不向 SSP
-    // 暴露本地 crypto 错误，也不猜测业务协议。
-    console.warn("[channel] inbound message rejected", error instanceof Error ? error.message : String(error));
-    if (channelErrorCode(error) === "UNSUPPORTED_PROTOCOL") {
-      const rejection = new Error("UNSUPPORTED_PROTOCOL") as Error & { domain?: string; code?: string };
-      rejection.domain = "channel-inbound";
-      rejection.code = "UNSUPPORTED_PROTOCOL";
-      throw rejection;
-    }
-  }
-}
-
-function channelErrorCode(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") return error instanceof Error && error.message === "UNSUPPORTED_PROTOCOL" ? error.message : undefined;
-  const code = (error as { code?: unknown }).code;
-  if (typeof code === "string") return code;
-  return error instanceof Error && error.message === "UNSUPPORTED_PROTOCOL" ? error.message : undefined;
-}
-
-function isUnknownChannelPublishFailure(error: unknown): boolean {
-  const code = channelErrorCode(error);
-  if (code === "unknown_result") return true;
-  return error instanceof Error && /unknown[_ ]result/i.test(error.message);
-}
+const executeOwnedChannelOperation = createChannelOperationExecutor<SatWorkerRuntimeState>({
+  session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex, vaultStatus: coordinatorState.vaultStatus }),
+  publishHash: publishChannelHashRequest,
+  publishPublic: publishChannelPublicMessage,
+  publishPrivate: publishPrivateEnvelope,
+  openPrivate: (owner, envelope, signal) => withCoordinatorFinalIoLease(
+    "read", signal,
+    () => vaultKeySession.open(inboxChannel(parsePublicKey(owner)), envelope),
+    { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.history-open" },
+  ),
+  connectSession: getAuthoritativeConnectSession,
+  disconnected: clientId => revokedCoordinatorPeerIds.has(clientId),
+  disconnectedResponse: disconnectedClientResponse,
+  allowedInbox: isAllowedOwnerInboxSubscription,
+  callers: channelCallersByClient,
+});
 
 async function executeChannelRequest(
   request: Extract<CoordinatorClientRequest, { kind: "channel.operation" }>,
@@ -10000,10 +4466,10 @@ async function executeChannelRequest(
     : operation.caller.kind === "system"
       ? operation.caller.systemId === "contacts-presence" ? "contacts" : "sat-subscription"
       : undefined;
-  // 旧页面/旧插件即使还持有 Coordinator facade，也不能绕过产品意图重建
-  // Channel 入口。Connect caller 属于 protocol 的独立授权链，不在此处
+  // 拒绝不在发行版目录中的产品身份。登记不授予调用权限：Channel 还要
+  // 复核会话、owner 与 caller。Connect caller 属于独立授权链，不在此处
   // 伪造成某个插件；它仍由 Connect session 校验保护。
-  if (callerProductId && !isCoordinatorProductEnabled(callerProductId)) {
+  if (callerProductId && !isCoordinatorProductRegistered(callerProductId)) {
     return coordinatorProductBlockedResponse(request.requestId, callerProductId);
   }
   if (operation.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
@@ -10027,222 +4493,16 @@ async function executeChannelRequest(
     if (requestSignal?.aborted || revokedCoordinatorPeerIds.has(actualClientId)) {
       return disconnectedClientResponse(request.requestId);
     }
-    switch (operation.type) {
-      case "hash-request-publish": {
-        if (operation.caller.kind !== "plugin" || (operation.caller.pluginId !== "webrtc" && operation.caller.pluginId !== "msfile")) {
-          throw new Error("Only trusted WebRTC and MSFile plugins may publish Hash requests");
-        }
-        if (operation.locator !== "webrtc-sdp") throw new Error("Unsupported Hash request locator");
-        const published = await publishChannelHashRequest(runtime, operation, requestSignal);
-        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
-          || coordinatorState.vaultStatus !== "unlocked"
-          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
-          throw new Error("Hash request publish became stale after network completion");
-        }
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: published };
-      }
-      case "publish": {
-        const published = await publishChannelPublicMessage(runtime, operation.channel, operation.content, requestSignal);
-        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
-          || coordinatorState.vaultStatus !== "unlocked"
-          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
-          throw new Error("Channel publish became stale after network completion");
-        }
-        if (operation.caller.kind === "connect") {
-          const session = await getAuthoritativeConnectSession(operation.caller.connectSessionId);
-          if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
-            throw new Error("Channel Connect session was revoked during publish");
-          }
-        }
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: published };
-      }
-      case "private-publish": {
-        const protocol = privateProtocol(operation.protocol);
-        validatePrivateProtocolCaller(operation.caller, protocol);
-        const published = await publishPrivateEnvelope({ runtime, recipientPublicKeyHex: operation.recipientPublicKeyHex, protocol, body: privateBodyForPublish(protocol, operation.content), signal: requestSignal });
-        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
-          || coordinatorState.vaultStatus !== "unlocked"
-          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
-          throw new Error("Private Channel publish became stale after network completion");
-        }
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { messageId: published.messageId, signedMessage: published.signedMessage } };
-      }
-      case "open-private-envelope": {
-        // 只有受信任消息插件能按需解密历史信封；Connect App 和公共频道不可用。
-        if (operation.caller.kind !== "plugin" || operation.caller.pluginId !== "message") {
-          throw new Error("Only the trusted message plugin may open private envelopes");
-        }
-        if (coordinatorState.vaultStatus !== "unlocked"
-          || !coordinatorState.activePublicKeyHex
-          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
-          throw new Error("Private envelope history open requires the current unlocked owner");
-        }
-        const expectedEpoch = coordinatorState.sessionEpoch;
-        const opened = await withCoordinatorFinalIoLease(
-          "read",
-          requestSignal,
-          () => openPrivateMessage(inboxChannel(parsePublicKey(operation.ownerPublicKeyHex)), operation.envelope, currentOwnerPrivateKey()),
-          { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.history-open" },
-        );
-        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
-          || coordinatorState.vaultStatus !== "unlocked"
-          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex
-          || expectedEpoch !== coordinatorState.sessionEpoch) {
-          throw new Error("Private Channel history open became stale after decrypt");
-        }
-        return {
-          requestId: request.requestId,
-          sessionEpoch: coordinatorState.sessionEpoch,
-          ack: { status: "ok" },
-          operationResult: {
-            channel: opened.channel,
-            protocol: opened.protocol,
-            messageId: opened.message_id,
-            publisherPublicKeyHex: opened.from_public_key,
-            issuedAtMs: opened.issued_at_ms,
-            expiresAtMs: opened.expires_at_ms,
-            content: privateHistoryContent(opened)
-          }
-        };
-      }
-      case "subscription-set": {
-        if (operation.channels.length > CHANNEL_MAX_SUBSCRIPTIONS_PER_CALLER) throw new Error("Too many Channel subscriptions");
-        for (const channel of operation.channels) {
-          validateExactChannel(channel);
-          if (channel.startsWith("bsv8.inbox.")) {
-            if (!isAllowedOwnerInboxSubscription(operation.caller, channel)) {
-              throw new Error("bsv8.inbox.* is reserved for the current owner inbox router");
-            }
-          }
-        }
-        const channels = await mux.set(callerId, operation.channels, requestSignal);
-        if (requestSignal?.aborted || revokedCoordinatorPeerIds.has(actualClientId)) {
-          return disconnectedClientResponse(request.requestId);
-        }
-        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
-          || coordinatorState.vaultStatus !== "unlocked"
-          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
-          throw new Error("Channel subscription became stale after reconciliation");
-        }
-        if (operation.caller.kind === "connect") {
-          const session = await getAuthoritativeConnectSession(operation.caller.connectSessionId);
-          if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
-            throw new Error("Channel Connect session was revoked during subscription reconciliation");
-          }
-        }
-        return {
-          requestId: request.requestId,
-          sessionEpoch: coordinatorState.sessionEpoch,
-          ack: { status: "ok" },
-          operationResult: {
-            channels,
-            // Return the authoritative state observed by this Mux after the
-            // logical set. This also covers a caller joining an already
-            // physically subscribed channel.
-            statuses: channels.map((channel) => mux.subscriptionStatus(channel)),
-          }
-        };
-      }
-      case "release":
-        await mux.release(callerId, requestSignal);
-        channelCallersByClient.get(actualClientId)?.delete(callerId);
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: null };
-    }
+    return await executeOwnedChannelOperation(request, actualClientId, runtime, mux, callerId, requestSignal);
   } catch (error) {
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: error instanceof Error ? error.message : String(error) } };
   }
 }
 
 /** 页面资源只读 Coordinator 的联系人在线快照，不拥有探测或传输能力。 */
-async function executeContactsPresenceSnapshot(
-  request: Extract<CoordinatorClientRequest, { kind: "contacts.presence.snapshot" }>
-): Promise<CoordinatorResponse> {
-  if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
-  }
-  if (!isCoordinatorProductEnabled("contacts")) return coordinatorProductBlockedResponse(request.requestId, "contacts");
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: {} };
-  }
-  try {
-    const presence = await coordinatorContactsService?.getPresenceSnapshot?.() ?? {};
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: presence };
-  } catch (error) {
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: error instanceof Error ? error.message : String(error) } };
-  }
-}
-
-/** 读取 Worker 唯一的插件产品启停意图。 */
-async function executePluginIntentSnapshot(
-  request: Extract<CoordinatorClientRequest, { kind: "plugin.intent.snapshot" }>
-): Promise<CoordinatorResponse> {
-  const controller = pluginIntentController ?? ensurePluginIntentController();
-  return {
-    requestId: request.requestId,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "ok" },
-    operationResult: controller.snapshot(),
-  };
-}
-
-/** 提交启停意图；结果本身区分持久化接受、修订冲突和持久化失败。 */
-async function executePluginIntentSubmit(
-  request: Extract<CoordinatorClientRequest, { kind: "plugin.intent.submit" }>
-): Promise<CoordinatorResponse> {
-  const command = request.command;
-  // 产品意图是 Coordinator 的唯一写入口；不能让调用方把任意字符串
-  // 写入持久快照，否则 Window Host 会收到一条无法装配、也无法审计的意图。
-  if (
-    !command
-    || typeof command !== "object"
-    || typeof command.pluginId !== "string"
-    || !BUILTIN_PLUGIN_PRODUCT_ID_SET.has(command.pluginId)
-  ) {
-    return {
-      requestId: request.requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "ok" },
-      operationResult: {
-        status: "command-conflict",
-        commandId: typeof command?.commandId === "string" ? command.commandId : "unknown",
-        message: "插件产品未在 Coordinator 内置清单注册",
-      },
-    };
-  }
-  if (!command.desiredEnabled && BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET.has(command.pluginId)) {
-    return {
-      requestId: request.requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "ok" },
-      operationResult: {
-        status: "command-conflict",
-        commandId: command.commandId,
-        message: "该插件产品属于系统必需组件，不能关闭",
-      },
-    };
-  }
-  try {
-    const controller = pluginIntentController ?? ensurePluginIntentController();
-    const result = await controller.submit(command);
-    // Coordinator 意图提交成功后，必须在响应前完成同一 Worker Host 的
-    // unit reconcile；否则页面可能先收到 accepted，却在下一条快照里仍看见
-    // 旧 instance，或在重新启用时读到尚未装配的 unit。
-    await reconcileCoordinatorRuntime();
-    return {
-      requestId: request.requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "ok" },
-      operationResult: result,
-    };
-  } catch (error) {
-    // 正常的业务拒绝由 controller 结构化返回；这里只保护未预期的
-    // Worker 内部异常，避免 MessagePort 请求永远等不到响应。
-    return {
-      requestId: request.requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "error", message: error instanceof Error ? error.message : String(error) },
-    };
-  }
+async function executeContactsPresenceSnapshot(request: Extract<CoordinatorClientRequest, { kind: "contacts.presence.snapshot" }>): Promise<CoordinatorResponse> {
+  if (!isCoordinatorProductRegistered("contacts")) return coordinatorProductBlockedResponse(request.requestId, "contacts");
+  return contactsPresenceProjection.snapshot(request.requestId, request.expectedSessionEpoch);
 }
 
 function isMsfileRequest(request: CoordinatorClientRequest): boolean {
@@ -10263,7 +4523,6 @@ function isMsfileRequest(request: CoordinatorClientRequest): boolean {
 // 审查修复：控制面 mutation 必须串行。SharedWorker 的 onmessage 不等待前一个
 // 请求结束，多端口可并发进入 executeMsfileControl；不串行化时同世代检查与
 // “读取旧策略—合并—写回”都会互相覆盖。
-let msfileMutationTail: Promise<void> = Promise.resolve();
 
 /* ---------- Window P2P executor lease（施工单 001 §3.2） ----------
  * Coordinator 内存真值：同一 epoch+owner 同时最多一个 Window executor。
@@ -10291,8 +4550,6 @@ interface WindowP2pExecutorBridgePending {
   reservedItems: number;
 }
 const windowP2pExecutorBridgePending = new Map<string, WindowP2pExecutorBridgePending>();
-let windowP2pExecutorBridgeInFlightBytes = 0;
-let windowP2pExecutorBridgeInFlightItems = 0;
 interface WindowP2pExecutorInboundBridgePending {
   leaseId: string;
   supplierId: string;
@@ -10332,16 +4589,6 @@ interface ActiveSatInboundHandler {
 const activeSatInboundHandlers = new Map<string, ActiveSatInboundHandler>();
 /** 测试接缝：验证迟到/取消结果不会调用 Window 回写，不参与生产状态。 */
 let testSatInboundResponseDispatcher: ((operation: SatWindowLaneOperation, signal: AbortSignal) => Promise<unknown>) | undefined;
-interface WindowP2pExecutorBridgeBudgetWaiter {
-  reservedBytes: number;
-  reservedItems: number;
-  signal?: AbortSignal;
-  resolve: () => void;
-  reject: (error: Error) => void;
-  onAbort: () => void;
-}
-const windowP2pExecutorBridgeBudgetWaiters: WindowP2pExecutorBridgeBudgetWaiter[] = [];
-
 const WINDOW_P2P_EXECUTOR_LEASE_TTL_MS = 5 * 60 * 1000;
 // Spike RPC 的有界 pre-sign cancellation window：验证构建把窗口放大，给
 // Chromium 的跨页消息派发留出确定的 lifecycle 竞态窗口；
@@ -10361,84 +4608,22 @@ let windowP2pExecutorTransferPendingBytes = 0;
 let windowP2pExecutorTransferPeakBytes = 0;
 
 function rejectWindowP2pExecutorBridgePending(error: Error): void {
+  windowP2pBridgeBudget.reset(error);
   for (const [requestId, pending] of windowP2pExecutorBridgePending) {
     windowP2pExecutorBridgePending.delete(requestId);
-    windowP2pExecutorBridgeInFlightBytes = Math.max(0, windowP2pExecutorBridgeInFlightBytes - pending.reservedBytes);
-    windowP2pExecutorBridgeInFlightItems = Math.max(0, windowP2pExecutorBridgeInFlightItems - pending.reservedItems);
+    windowP2pBridgeBudget.drop(pending.reservedBytes, pending.reservedItems);
     pending.cleanup?.();
     pending.reject(error);
   }
   cancelSatInboundHandlers(undefined, error.message);
   windowP2pExecutorInboundBridgePending.clear();
-  windowP2pExecutorBridgeInFlightBytes = 0;
-  windowP2pExecutorBridgeInFlightItems = 0;
-  for (const waiter of windowP2pExecutorBridgeBudgetWaiters.splice(0)) {
-    waiter.signal?.removeEventListener("abort", waiter.onAbort);
-    waiter.reject(error);
-  }
+
 }
 
-function pumpWindowP2pExecutorBridgeBudget(): void {
-  const maxBytes = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxInFlightBytes, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes);
-  const maxItems = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxPendingItems, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems);
-  while (windowP2pExecutorBridgeBudgetWaiters.length > 0) {
-    const waiter = windowP2pExecutorBridgeBudgetWaiters[0]!;
-    if (waiter.signal?.aborted) {
-      windowP2pExecutorBridgeBudgetWaiters.shift();
-      waiter.signal.removeEventListener("abort", waiter.onAbort);
-      waiter.reject(new DOMException("The operation was aborted", "AbortError"));
-      continue;
-    }
-    if (windowP2pExecutorBridgeInFlightBytes + waiter.reservedBytes > maxBytes) break;
-    if (windowP2pExecutorBridgeInFlightItems + waiter.reservedItems > maxItems) break;
-    windowP2pExecutorBridgeBudgetWaiters.shift();
-    waiter.signal?.removeEventListener("abort", waiter.onAbort);
-    windowP2pExecutorBridgeInFlightBytes += waiter.reservedBytes;
-    windowP2pExecutorBridgeInFlightItems += waiter.reservedItems;
-    waiter.resolve();
-  }
-}
-
-function reserveWindowP2pExecutorBridgeBytes(reservedBytes: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
-  const maxBytes = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxInFlightBytes, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes);
-  const maxItems = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxPendingItems, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems);
-  if (!Number.isSafeInteger(reservedBytes) || reservedBytes < 0 || reservedBytes > maxBytes) {
-    return Promise.reject(windowP2pError("ERR_BRIDGE_BYTES_LIMIT", "Window P2P bridge byte limit cannot admit this operation"));
-  }
-  // inFlightItems 已包含 pending、入站 reservation 以及已经从 waiter
-  // 队列中准入但尚未落入 pending map 的项；再加上 waiter 才是完整在途数。
-  // 不能只看两个 Map，否则同一轮同步 burst 会在 continuation 执行前超额
-  // 接受一倍以上的请求。
-  if (windowP2pExecutorBridgeInFlightItems + windowP2pExecutorBridgeBudgetWaiters.length >= maxItems) {
-    return Promise.reject(windowP2pError("ERR_BRIDGE_PENDING_LIMIT", "Window P2P bridge pending item limit reached"));
-  }
-  return new Promise<void>((resolve, reject) => {
-    const waiter: WindowP2pExecutorBridgeBudgetWaiter = {
-      reservedBytes,
-      reservedItems: 1,
-      signal,
-      resolve,
-      reject,
-      onAbort: () => {
-        const index = windowP2pExecutorBridgeBudgetWaiters.indexOf(waiter);
-        if (index < 0) return;
-        windowP2pExecutorBridgeBudgetWaiters.splice(index, 1);
-        reject(new DOMException("The operation was aborted", "AbortError"));
-        pumpWindowP2pExecutorBridgeBudget();
-      },
-    };
-    signal?.addEventListener("abort", waiter.onAbort, { once: true });
-    windowP2pExecutorBridgeBudgetWaiters.push(waiter);
-    pumpWindowP2pExecutorBridgeBudget();
-  });
-}
-
-function releaseWindowP2pExecutorBridgeBytes(reservedBytes: number, reservedItems = 1): void {
-  windowP2pExecutorBridgeInFlightBytes = Math.max(0, windowP2pExecutorBridgeInFlightBytes - reservedBytes);
-  windowP2pExecutorBridgeInFlightItems = Math.max(0, windowP2pExecutorBridgeInFlightItems - reservedItems);
-  pumpWindowP2pExecutorBridgeBudget();
-}
+const windowP2pBridgeBudget = createWorkerBridgeBudget({ configuration: () => windowP2pExecutorConcurrencyConfig, error: windowP2pError });
+const pumpWindowP2pExecutorBridgeBudget = windowP2pBridgeBudget.pump;
+const reserveWindowP2pExecutorBridgeBytes = windowP2pBridgeBudget.reserve;
+const releaseWindowP2pExecutorBridgeBytes = windowP2pBridgeBudget.release;
 
 function inboundBridgeEventKey(connectionId: string, eventId: string): string {
   return connectionId + "\u0000" + eventId;
@@ -10450,8 +4635,7 @@ function reserveWindowP2pExecutorInboundEvent(event: SatWindowLaneSspRequestEven
   const maxItems = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxPendingItems, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems);
   const key = inboundBridgeEventKey(event.connectionId, event.eventId);
   if (reservedBytes < 1 || reservedBytes > maxBytes || windowP2pExecutorInboundBridgePending.has(key)) return false;
-  if (windowP2pExecutorBridgeInFlightBytes + reservedBytes > maxBytes
-    || windowP2pExecutorBridgeInFlightItems + 1 > maxItems) return false;
+  if (!windowP2pBridgeBudget.reserveInbound(reservedBytes)) return false;
   windowP2pExecutorInboundBridgePending.set(key, {
     leaseId: lease.leaseId,
     supplierId: event.supplierId,
@@ -10462,8 +4646,6 @@ function reserveWindowP2pExecutorInboundEvent(event: SatWindowLaneSspRequestEven
     reservedBytes,
     reservedItems: 1,
   });
-  windowP2pExecutorBridgeInFlightBytes += reservedBytes;
-  windowP2pExecutorBridgeInFlightItems += 1;
   return true;
 }
 
@@ -10577,8 +4759,8 @@ function handleWindowP2pExecutorPortMessage(event: MessageEvent): void {
       clearWindowP2pExecutorLeaseLocked();
     } else {
       // 新 Host 就绪后卖方 stream 通道恢复；若卖方仍启用则回到 ready/selling。
-      if (msfileSellerProtocolPort?.ready && coordinatorState.vaultStatus === "unlocked" && msfileRuntime) {
-        msfileRuntime.setSellerRuntimeStatus((msfileSellerSessionManager?.activeCount() ?? 0) > 0 ? "selling" : "ready");
+      if (msfileBitfsRuntime.msfileSellerProtocolPort?.ready && coordinatorState.vaultStatus === "unlocked" && msfileRuntime) {
+        msfileRuntime.setSellerRuntimeStatus((msfileBitfsRuntime.msfileSellerSessionManager?.activeCount() ?? 0) > 0 ? "selling" : "ready");
         void drainMsfilePendingSellerHashRequests();
       }
       void syncWindowP2pExecutorConfig().catch(() => {
@@ -10985,111 +5167,7 @@ async function handleSatWindowEvent(
   }
 }
 
-const satSubscriptionTransport: SatSubscriptionTransport = {
-  async connect(input): Promise<SatSupplierConnection> {
-    const connectionId = `sat-connection-${crypto.randomUUID()}`;
-    const fence = { supplierId: input.supplier.supplierId, connectionId, ownerSessionEpoch: input.ownerSessionEpoch, supplierGeneration: input.supplierGeneration } as const;
-    // 先把业务 handler 放入 connectionId 索引，再发起 Window connect；这样
-    // lane/adapter 在 connect 返回前收到的首条 Publish 也能回到当前 owner。
-    if (input.onSspRequest) {
-      satIncomingHandlers.set(connectionId, {
-        supplierId: fence.supplierId,
-        ownerSessionEpoch: fence.ownerSessionEpoch,
-        supplierGeneration: fence.supplierGeneration,
-        handler: input.onSspRequest,
-      });
-    }
-    let result: unknown;
-    try {
-      result = await satWindowLaneOperation({
-        type: "connect",
-        ...fence,
-        supplierPublicKeyHex: input.supplier.supplierPublicKeyHex,
-        multiaddrs: [...input.supplier.multiaddrs]
-      }, input.signal);
-    } catch (error) {
-      cancelSatInboundHandlersForConnection(connectionId, "Sat connection setup failed");
-      satIncomingHandlers.delete(connectionId);
-      throw error;
-    }
-    if (!result || typeof result !== "object" || typeof (result as { authenticatedPublicKeyHex?: unknown }).authenticatedPublicKeyHex !== "string"
-      || (result as Partial<typeof fence>).supplierId !== fence.supplierId
-      || (result as Partial<typeof fence>).connectionId !== fence.connectionId
-      || (result as Partial<typeof fence>).ownerSessionEpoch !== fence.ownerSessionEpoch
-      || (result as Partial<typeof fence>).supplierGeneration !== fence.supplierGeneration) {
-      cancelSatInboundHandlersForConnection(connectionId, "Sat connection returned an invalid fence");
-      satIncomingHandlers.delete(connectionId);
-      throw new Error("Sat Window lane returned an invalid authenticated connection");
-    }
-    let connectionState: "online" | "degraded" | "closed" = "online";
-    const stateListeners = new Set<(state: "online" | "degraded" | "closed") => void>();
-    const setConnectionState = (next: "online" | "degraded" | "closed"): void => {
-      if (connectionState === next) return;
-      connectionState = next;
-      for (const listener of stateListeners) {
-        try { listener(next); } catch { /* 单个状态监听器不能打断连接。 */ }
-      }
-    };
-    const connection: SatSupplierConnection = {
-      ...fence,
-      authenticatedPublicKeyHex: (result as { authenticatedPublicKeyHex: string }).authenticatedPublicKeyHex,
-      get state() { return connectionState; },
-      onStateChange: (handler) => {
-        stateListeners.add(handler);
-        handler(connectionState);
-        satConnectionStateHandlers.set(connectionId, {
-          supplierId: fence.supplierId,
-          ownerSessionEpoch: fence.ownerSessionEpoch,
-          supplierGeneration: fence.supplierGeneration,
-          handler
-        });
-        return () => {
-          stateListeners.delete(handler);
-          if (satConnectionStateHandlers.get(connectionId)?.handler === handler) satConnectionStateHandlers.delete(connectionId);
-        };
-      },
-      requestSsp: async (wire, signal) => {
-        if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
-        try {
-          const response = asSatWire(await satWindowLaneOperation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal), "requestSsp");
-          setConnectionState("online");
-          return response;
-        } catch (error) {
-          setConnectionState("degraded");
-          throw error;
-        }
-      },
-      requestSpi: async (wire, signal) => {
-        if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
-        try {
-          const response = asSatWire(await satWindowLaneOperation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal), "requestSpi");
-          setConnectionState("online");
-          return response;
-        } catch (error) {
-          setConnectionState("degraded");
-          throw error;
-        }
-      },
-      subscribeSspRequests: (handler) => {
-        satIncomingHandlers.set(connectionId, { supplierId: input.supplier.supplierId, ownerSessionEpoch: input.ownerSessionEpoch, supplierGeneration: input.supplierGeneration, handler });
-        return () => {
-          if (satIncomingHandlers.get(connectionId)?.handler === handler) {
-            cancelSatInboundHandlersForConnection(connectionId, "Sat SSP handler was unsubscribed");
-            satIncomingHandlers.delete(connectionId);
-          }
-        };
-      },
-      close: () => {
-        setConnectionState("closed");
-        cancelSatInboundHandlersForConnection(connectionId, "Sat connection was closed");
-        satIncomingHandlers.delete(connectionId);
-        satConnectionStateHandlers.delete(connectionId);
-        void satWindowLaneOperation({ type: "close", ...fence }).catch(() => undefined);
-      },
-    };
-    return connection;
-  },
-};
+
 
 const windowP2pExecutorTransport = createWindowP2pMsFileTransport({
   get available() {
@@ -11145,10 +5223,10 @@ function clearWindowP2pExecutorLeaseLocked(): void {
   windowP2pExecutorLease = undefined;
   // 唯一 Window Host 消失后所有 BitFS 销售连接已不可用：立即清空会话并
   // 回到 degraded，不能停留在 selling。
-  const sellerManager = msfileSellerSessionManager;
+  const sellerManager = msfileBitfsRuntime.msfileSellerSessionManager;
   if (sellerManager) {
     sellerManager.clear();
-    if (coordinatorState.vaultStatus === "unlocked" && msfileRuntime && msfileSellerProtocolPort?.ready) {
+    if (coordinatorState.vaultStatus === "unlocked" && msfileRuntime && msfileBitfsRuntime.msfileSellerProtocolPort?.ready) {
       msfileRuntime.setSellerRuntimeStatus("degraded");
     }
   }
@@ -11204,8 +5282,8 @@ function parseUint64Decimal(value: string): bigint {
 }
 
 function currentExecutorPublicKey(): Uint8Array {
-  if (!coordinatorState.activePublicKeyHex || !coordinatorState.activePrivateKeyBytes) throw new Error("Window P2P executor active key is unavailable");
-  verifySessionKeyPair({ publicKeyHex: coordinatorState.activePublicKeyHex, privateKeyBytes: coordinatorState.activePrivateKeyBytes });
+  if (!coordinatorState.activePublicKeyHex || !vaultKeySession.hasKey()) throw new Error("Window P2P executor active key is unavailable");
+  vaultKeySession.assert(coordinatorState.activePublicKeyHex);
   return validatePublicKey(cryptoHexToBytes(coordinatorState.activePublicKeyHex));
 }
 
@@ -11278,7 +5356,7 @@ async function executeWindowP2pExecutorIdentitySign(
   const signature = await withCoordinatorFinalIoLease(
     "write",
     signal,
-    () => signEcdsaDigest({ privateKeyBytes: coordinatorState.activePrivateKeyBytes!, digest, format: "der" }),
+    () => vaultKeySession.signDigest(digest, "der", publicKeyHex),
     {
       auditOperation: "window-p2p.identity.sign",
       // Window P2P 身份签名只用于建立当前 executor 的本地握手，不会把
@@ -11316,302 +5394,8 @@ function enqueueWindowP2pExecutorIdentitySign(
   return run;
 }
 
-const MSFILE_MUTATION_CONTROLS = new Set<CoordinatorMsFileControl["type"]>([
-  "settings.global.update",
-  "settings.seller.update",
-  "settings.bitfsBuyer.update",
-  "bitfs.buyerPriceLimit.update",
-  "settings.readConcurrency.update",
-  "settings.readConcurrency.reset",
-  "settings.mediaBlockReadConcurrency.update",
-  "bitfs.demand.publish",
-  "bitfs.demand.cancel",
-  "bitfs.purchase.start",
-  "bitfs.purchase.cancel",
-  "supplier.upsert",
-  "supplier.delete",
-  "app-policy.update",
-  "app-policy.clear",
-  "approval.resolve"
-]);
-
-function isMsfileMutationControl(control: CoordinatorMsFileControl): boolean {
-  return MSFILE_MUTATION_CONTROLS.has(control.type);
-}
-
-async function executeMsfileControl(
-  request: Extract<CoordinatorClientRequest, { kind: "msfile.control" }>,
-  signal?: AbortSignal,
-): Promise<CoordinatorResponse> {
-  if (!isMsfileMutationControl(request.control)) {
-    return executeMsfileControlNow(request, signal);
-  }
-  // mutation 进串行尾；前一个失败不阻塞后续。
-  const run = msfileMutationTail.then(() => executeMsfileControlNow(request, signal), () => executeMsfileControlNow(request, signal));
-  msfileMutationTail = run.then(() => undefined, () => undefined);
-  return run;
-}
-
-/**
- * 桶内文件块写入的 Worker 侧并发上限。
- *
- * 页面 storage 数据面每个端口只允许 3 个并发请求；批量上传如果逐块走
- * 那条通道，远端一次 PUT 的延迟就是瓶颈。桶块由 Coordinator 直接写
- * OwnerFileStore，这里给出一个有界并发，既提高吞吐又不放大内存。
- */
-const MSFILE_BUCKET_BLOCK_WRITE_MAX_CONCURRENCY = 16;
-let msfileBucketBlockWritesActive = 0;
-const msfileBucketBlockWriteWaiters: Array<() => void> = [];
-
-async function withMsfileBucketBlockWriteSlot<T>(run: () => Promise<T>): Promise<T> {
-  while (msfileBucketBlockWritesActive >= MSFILE_BUCKET_BLOCK_WRITE_MAX_CONCURRENCY) {
-    await new Promise<void>((resolve) => { msfileBucketBlockWriteWaiters.push(resolve); });
-  }
-  msfileBucketBlockWritesActive += 1;
-  try {
-    return await run();
-  } finally {
-    msfileBucketBlockWritesActive = Math.max(0, msfileBucketBlockWritesActive - 1);
-    msfileBucketBlockWriteWaiters.shift()?.();
-  }
-}
-
-async function executeMsfileControlNow(
-  request: Extract<CoordinatorClientRequest, { kind: "msfile.control" }>,
-  signal?: AbortSignal,
-): Promise<CoordinatorResponse> {
-  // 审查修复：排队中的请求必须携带其入队时的 epoch；任务开始时与当前 epoch
-  // 比较——入队后发生 lock/unlock/key switch 都会推进 epoch，从而在此被拒。
-  const requestEpoch = request.expectedSessionEpoch;
-  if (signal?.aborted) throw msfileError("msfile_unavailable", "MSFile control request was cancelled");
-  if (coordinatorState.vaultStatus !== "unlocked") {
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
-  }
-  if (requestEpoch !== coordinatorState.sessionEpoch) {
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
-  }
-  const service = await ensureMsfileRuntime();
-  if (signal?.aborted) throw msfileError("msfile_unavailable", "MSFile control request was cancelled");
-  const runtimeAtStart = service;
-  const control: CoordinatorMsFileControl = request.control;
-  // 同世代检查在串行任务内部执行，天然免受并发窗口影响。
-  const supplierGenerationNow = (): number => msfileRuntime === runtimeAtStart ? service.describeState().supplierGeneration : -1;
-  let value: unknown;
-  switch (control.type) {
-    case "settings.get": value = await service.getSettingsSnapshot(); break;
-    case "settings.readConcurrency.get": value = await service.getReadConcurrencySettings(); break;
-    case "settings.readConcurrency.update": await service.updateReadConcurrencySettings(control.input); value = null; break;
-    case "settings.readConcurrency.reset": await service.resetReadConcurrencySettings(); value = null; break;
-    case "settings.mediaBlockReadConcurrency.get": value = await service.getMediaBlockReadConcurrency(); break;
-    case "settings.mediaBlockReadConcurrency.update": await service.updateMediaBlockReadConcurrency(control.mediaBlockReadConcurrency); value = null; break;
-    case "settings.global.update": await service.updateGlobalPriceSettings(control.input); value = null; break;
-    case "settings.seller.update": await service.updateSellerSettings(control.input); value = null; break;
-    case "settings.bitfsBuyer.get": {
-      if (!service.getBitfsBuyerSettings) throw new Error("当前 MSFile 运行单元不支持 BitFS 买方设置");
-      value = await service.getBitfsBuyerSettings();
-      break;
-    }
-    case "settings.bitfsBuyer.update": {
-      if (!service.updateBitfsBuyerSettings) throw new Error("当前 MSFile 运行单元不支持 BitFS 买方设置");
-      await service.updateBitfsBuyerSettings(control.input);
-      value = null;
-      break;
-    }
-    case "bitfs.buyerPriceLimit.update": {
-      if (!service.getBitfsBuyerSettings || !service.updateBitfsBuyerSettings) {
-        throw new Error("当前 MSFile 运行单元不支持 BitFS 单文件价格上限");
-      }
-      const settings = await service.getBitfsBuyerSettings();
-      const filePriceLimitsBySeedHash = { ...(settings.filePriceLimitsBySeedHash ?? {}) };
-      filePriceLimitsBySeedHash[control.seedHashHex] = control.maxFullBlockPriceSatoshis;
-      await service.updateBitfsBuyerSettings({ ...settings, filePriceLimitsBySeedHash });
-      value = null;
-      break;
-    }
-    case "bitfs.demand.publish": {
-      if (!isValidMsFileHashHex(control.seedHashHex)) {
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "BitFS Seed Hash 必须是 64 位小写十六进制字符" } };
-      }
-      const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
-      if (!owner) throw new Error("请先解锁当前 Key 再发布 BitFS 需求");
-      await ensureMsfileBitfsBuyerRecovery(owner);
-      const { task, entry } = await ensureMsfileBitfsBuyerTask({
-        ownerPublicKeyHex: owner,
-        seedHashHex: control.seedHashHex,
-      });
-      const sessionJournal = createBitfsSessionJournal(createWorkerModuleFileStore("msfile", "bitfs-journal"));
-      const resumable = (await sessionJournal.list()).filter((saved) => saved.role === "buyer"
-        && saved.ownerPublicKeyHex === owner
-        && saved.seedHashHex === control.seedHashHex.toLowerCase()
-        && saved.evidence.includes("kind2-opening-request")
-        && !["completed", "cancelled", "refunded", "failed"].includes(saved.phase));
-      const resumeTarget = entry.purchase?.sessionId
-        ? resumable.find((saved) => saved.sessionId === entry.purchase?.sessionId)
-        : resumable.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-      const resumeLinkAlive = resumeTarget && [...msfileBitfsWebRtcBuyerLinks.values()].some((link) =>
-        link.ownerSessionEpoch === coordinatorState.sessionEpoch
-        && link.ownerPublicKeyHex.toLowerCase() === owner
-        && (link.quoteSessionId === resumeTarget.sessionId
-          || link.resumedPurchaseSessionId === resumeTarget.sessionId
-          || (link.seedHashHex === resumeTarget.seedHashHex
-            && link.peerPublicKeyHex === resumeTarget.counterpartyPublicKeyHex
-            && link.requestMessageId === entry.requestMessageId)));
-      if (entry.purchase?.phase === "connection-closed" || (resumeTarget && !resumeLinkAlive)) {
-        // 旧公开 Hash 请求仍可能收到迟到 offer，但已断开的 DataChannel
-        // 无法续用。为恢复同一卖方日志会话发布新的 Hash 请求编号。
-        const oldRequestIds = new Set<string>();
-        for (const [messageId, buyerRequest] of msfileBitfsBuyerRequests) {
-          if (buyerRequest.ownerSessionEpoch === coordinatorState.sessionEpoch
-            && buyerRequest.ownerPublicKeyHex.toLowerCase() === owner
-            && buyerRequest.seedHashHex === control.seedHashHex.toLowerCase()) {
-            oldRequestIds.add(messageId);
-            msfileBitfsBuyerRequests.delete(messageId);
-            msfileBitfsBuyerOfferCounts.delete(messageId);
-          }
-        }
-        for (const [webrtcSessionId, buyerLink] of msfileBitfsWebRtcBuyerLinks) {
-          if (buyerLink.ownerSessionEpoch !== coordinatorState.sessionEpoch
-            || buyerLink.ownerPublicKeyHex.toLowerCase() !== owner
-            || buyerLink.seedHashHex !== control.seedHashHex.toLowerCase()
-            || !oldRequestIds.has(buyerLink.requestMessageId)) continue;
-          msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
-          await requestWindowP2pExecutorOperation({
-            type: "lane",
-            laneId: "msfile",
-            operation: { type: "bitfs-seller-close", sessionId: buyerLink.transportSessionId, reason: "buyer_reconnect" },
-          }).catch(() => undefined);
-        }
-        await task.cancelDemand();
-        entry.requestMessageId = undefined;
-        entry.expiresAtMs = 0;
-      }
-      const requestMessageId = await task.publishDemand();
-      entry.requestMessageId = requestMessageId;
-      if (entry.expiresAtMs <= Date.now()) entry.expiresAtMs = Date.now() + 10 * 60 * 1_000;
-      value = await msfileBitfsBuyerDemandSnapshot(control.seedHashHex, entry, task);
-      break;
-    }
-    case "bitfs.demand.snapshot": {
-      if (!isValidMsFileHashHex(control.seedHashHex)) {
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "BitFS Seed Hash 必须是 64 位小写十六进制字符" } };
-      }
-      const owner = coordinatorState.activePublicKeyHex?.toLowerCase();
-      const entry = owner ? msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, control.seedHashHex)) : undefined;
-      const task = entry?.ownerSessionEpoch === coordinatorState.sessionEpoch ? await entry.taskPromise : undefined;
-      value = await msfileBitfsBuyerDemandSnapshot(control.seedHashHex, entry, task);
-      break;
-    }
-    case "bitfs.purchase.start": {
-      value = await startMsfileBitfsBuyerPurchase({
-        seedHashHex: control.seedHashHex,
-        sessionId: control.sessionId,
-        resumeCancelledPlan: true,
-        ...(control.maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis: control.maxFullBlockPriceSatoshis }),
-      });
-      break;
-    }
-    case "bitfs.purchase.cancel": {
-      value = await cancelMsfileBitfsBuyerPurchase({ seedHashHex: control.seedHashHex, sessionId: control.sessionId });
-      break;
-    }
-    case "bitfs.purchase.tasks.list": {
-      value = await listMsfileBitfsBuyerTaskSnapshots();
-      break;
-    }
-    case "bitfs.demand.cancel": {
-      if (!isValidMsFileHashHex(control.seedHashHex)) {
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "BitFS Seed Hash 必须是 64 位小写十六进制字符" } };
-      }
-      const owner = coordinatorState.activePublicKeyHex?.toLowerCase();
-      const taskEntry = owner ? msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, control.seedHashHex)) : undefined;
-      if (taskEntry?.ownerSessionEpoch === coordinatorState.sessionEpoch) {
-        const activeRequestId = taskEntry.requestMessageId;
-        const task = await taskEntry.taskPromise;
-        await task.cancelDemand();
-        taskEntry.requestMessageId = undefined;
-        taskEntry.expiresAtMs = 0;
-        const cancelledRequestIds = new Set<string>();
-        if (activeRequestId) cancelledRequestIds.add(activeRequestId);
-        for (const [messageId, buyerRequest] of msfileBitfsBuyerRequests) {
-          if (buyerRequest.ownerSessionEpoch === coordinatorState.sessionEpoch
-            && buyerRequest.ownerPublicKeyHex.toLowerCase() === owner
-            && buyerRequest.seedHashHex === control.seedHashHex.toLowerCase()) {
-            cancelledRequestIds.add(messageId);
-            msfileBitfsBuyerRequests.delete(messageId);
-            msfileBitfsBuyerOfferCounts.delete(messageId);
-          }
-        }
-        for (const [webrtcSessionId, buyerLink] of msfileBitfsWebRtcBuyerLinks) {
-          if (buyerLink.ownerSessionEpoch !== coordinatorState.sessionEpoch
-            || !cancelledRequestIds.has(buyerLink.requestMessageId)) continue;
-          // 停止需求只应关闭闲置报价连接；仍在买卖中的通道需要继续接收交付、Kind 13 或取消关池响应。
-          const activePurchase = taskEntry.purchase
-            && taskEntry.purchase.sessionId === buyerLink.quoteSessionId
-            && taskEntry.purchase.phase !== "completed"
-            && taskEntry.purchase.phase !== "cancelled"
-            && taskEntry.purchase.phase !== "failed"
-            && taskEntry.purchase.phase !== "connection-closed";
-          if (activePurchase) continue;
-          msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
-          await requestWindowP2pExecutorOperation({
-            type: "lane",
-            laneId: "msfile",
-            operation: { type: "bitfs-seller-close", sessionId: buyerLink.transportSessionId, reason: "buyer_cancelled" },
-          }).catch(() => undefined);
-        }
-      }
-      value = null;
-      break;
-    }
-    case "supplier.upsert":
-      if (control.expectedGeneration !== null && control.expectedGeneration !== supplierGenerationNow()) {
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "MSFile supplier generation changed" } };
-      }
-      await service.upsertSupplier(control.supplier); value = null; break;
-    case "supplier.delete":
-      if (control.expectedGeneration !== null && control.expectedGeneration !== supplierGenerationNow()) {
-        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "MSFile supplier generation changed" } };
-      }
-      await service.deleteSupplier(control.supplierPublicKeyHex); value = null; break;
-    case "supplier.probe": value = await service.probeSupplier(control.supplierPublicKeyHex); break;
-    case "app-policy.update": await service.updateAppPriceOverride(control.input); value = null; break;
-    case "app-policy.clear": await service.clearAppPriceOverride(control.key); value = null; break;
-    case "app-authorizations.list": value = await service.listAppAuthorizations(); break;
-    case "approvals.pending": value = service.listPendingApprovals(); break;
-    case "approval.resolve": await service.resolveApproval(control.approvalId, control.decision); value = null; break;
-    case "bucket.put-block": {
-      // 直接写 owner 文件根，不经过页面 storage 数据面的每端口并发上限；
-      // 路径由 Worker 拼接，页面只给 hash 和字节。
-      const files = createWorkerModuleFileStore("msfile", "");
-      await withMsfileBucketBlockWriteSlot(() => files.put(
-        `storage/${control.seedHashHex}/${control.blockHashHex}`,
-        new Uint8Array(control.bytes),
-      ));
-      value = null;
-      break;
-    }
-    case "bucket.get-block": {
-      const files = createWorkerModuleFileStore("msfile", "");
-      const object = await files.get(`storage/${control.seedHashHex}/${control.blockHashHex}`);
-      if (!object) throw msfileError("msfile_content_not_found", "MSFile bucket block is missing");
-      // 响应同样走 ArrayBuffer，避免 TypedArray 的逐元素 DTO 校验开销。
-      value = object.bytes.slice().buffer;
-      break;
-    }
-    default: return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown MSFile control" } };
-  }
-  if (signal?.aborted) throw msfileError("msfile_unavailable", "MSFile control request was cancelled");
-  // K-V commit 后复核：请求 epoch、Vault、runtime 身份任一变化都报告为
-  // stale-epoch（写入已提交、不可撤销，与 Storage 数据面语义一致）。
-  if (
-    requestEpoch !== coordinatorState.sessionEpoch ||
-    coordinatorState.vaultStatus !== "unlocked" ||
-    msfileRuntime !== runtimeAtStart
-  ) {
-    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
-  }
-  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
-}
+const executeMsfileControl = msfileBitfsRuntime.executeMsfileControl;
+const isMsfileMutationControl = msfileBitfsRuntime.isMsfileMutationControl;
 
 async function resolveMsfileGrant(
   grantId: string,
@@ -11667,45 +5451,12 @@ async function executeMsfileData(request: Extract<CoordinatorClientRequest, { ki
   }, signal);
 }
 
-async function executeMsfileDataUnsafe(
-  request: Extract<CoordinatorClientRequest, { kind: "msfile.data" }>,
-  controller: AbortController,
-  actualClientId: string,
-): Promise<CoordinatorResponse> {
-  // 审查修复：以请求自身的 epoch 为栅栏（执行时现取会得到恒真比较）。
-  const requestEpoch = request.expectedSessionEpoch;
-  const service = await ensureMsfileRuntime();
-  const data: CoordinatorMsFileData = request.data;
-  const signal = controller.signal;
-  // 真正调用 service 前的执行栅栏：排队 / 授权解析期间的取消与世代切换。
-  if (requestEpoch !== coordinatorState.sessionEpoch || signal.aborted) {
-    throw msfileError("msfile_unavailable", "MSFile request was cancelled");
-  }
-  let value: unknown;
-  if (data.grantId === undefined) {
-    // 受信任内部插件路径：只使用全局额度；gateway 不参与。
-    switch (data.type) {
-      case "stat": value = await service.stat({ seedHashHex: data.seedHashHex, signal }); break;
-      case "read-seed": value = await service.readSeed({ sourceId: data.sourceId, seedHashHex: data.seedHashHex, signal }); break;
-      case "read-block": value = await service.readBlock({ sourceId: data.sourceId, seedHashHex: data.seedHashHex, blockHashHex: data.blockHashHex, signal }); break;
-    }
-  } else {
-    const { context } = await resolveMsfileGrant(data.grantId, actualClientId, requestEpoch);
-    // grant 解析是异步的：返回后再次确认未跨越会话栅栏。
-    if (requestEpoch !== coordinatorState.sessionEpoch || signal.aborted) {
-      throw msfileError("msfile_unavailable", "MSFile request was cancelled");
-    }
-    switch (data.type) {
-      case "stat": value = await service.connect.stat(context, { seedHashHex: data.seedHashHex, signal }); break;
-      case "read-seed": value = await service.connect.readSeed(context, { sourceId: data.sourceId, seedHashHex: data.seedHashHex, signal }); break;
-      case "read-block": value = await service.connect.readBlock(context, { sourceId: data.sourceId, seedHashHex: data.seedHashHex, blockHashHex: data.blockHashHex, signal }); break;
-    }
-  }
-  if (controller.signal.aborted || requestEpoch !== coordinatorState.sessionEpoch) {
-    throw msfileError("msfile_unavailable", "MSFile request was cancelled");
-  }
-  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
-}
+const executeMsfileDataUnsafe = createMsfileDataExecutor({
+  runtime: () => ensureMsfileRuntime(),
+  sessionEpoch: () => coordinatorState.sessionEpoch,
+  resolveGrant: resolveMsfileGrant,
+  unavailable: message => msfileError("msfile_unavailable", message),
+});
 
 type WindowP2pExecutorRequest = Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.acquire" | "window-p2p.executor.release" | "window-p2p.executor.spike.transfer" | "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>;
 
@@ -11786,7 +5537,7 @@ async function executeMsfileRequest(
   if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
   if (request.kind !== "msfile.cancel"
     && request.kind !== "msfile.session.abort"
-    && !isCoordinatorProductEnabled("msfile")) {
+    && !isCoordinatorProductRegistered("msfile")) {
     return coordinatorProductBlockedResponse(request.requestId, "msfile");
   }
   // cancel/session.abort 是纯本地清理，不能因为旧 authority 失效而被
@@ -11886,7 +5637,7 @@ async function executeMsfileRequestUnsafe(
     }
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
-  if (!isCoordinatorProductEnabled("msfile")) {
+  if (!isCoordinatorProductRegistered("msfile")) {
     return coordinatorProductBlockedResponse(request.requestId, "msfile");
   }
   // grant/control/data 都要求 Vault unlocked + active key runtime 可用。
@@ -12045,10 +5796,6 @@ async function executeProcessRequest(
         return await executeChannelRequest(request, actualClientId, requestSignal);
       case "contacts.presence.snapshot":
         return await executeContactsPresenceSnapshot(request);
-      case "plugin.intent.snapshot":
-        return await executePluginIntentSnapshot(request);
-      case "plugin.intent.submit":
-        return await executePluginIntentSubmit(request);
       default:
         return {
           requestId,
@@ -12116,7 +5863,7 @@ async function processRequestCore(
     // Storage 分支有多个异步边界（Provider、K-V、Connect session）。
     // 无论哪一层抛错都必须回到 RPC 响应，并先由同一个入口分类健康状态；
     // 不能让 MessagePort 等待到超时。
-    return executeStorageRequest(request as never, actualClientId).catch((error) => {
+    return executeStorageRequest(request as never, actualClientId, requestSignal).catch((error) => {
       markStorageIoFailure(error);
       return storageErrorResponse("requestId" in request ? request.requestId : generateRequestId(), error);
     }).finally(() => clearStorageRequestSecrets(request));
@@ -12130,6 +5877,10 @@ async function processRequestCore(
   // lock 是最高优先级的本地安全动作，不能排在普通 Coordinator FIFO
   // 后面；否则前面的长任务会阻止它及时撤销密钥、lease 和代理。
   if (request.kind === "lock") return executeProcessRequest(request, actualClientId);
+  // Vault identity is a committed in-memory projection. Shell reads must not
+  // queue behind an unrelated network operation; their epoch and final read
+  // lease checks still run in executeProcessRequest/handleVaultOperation.
+  if (request.kind === "vault.operation" && request.operation.type === "getCurrentKey") return executeProcessRequest(request, actualClientId);
   return enqueueCoordinatorRequest(request, actualClientId, requestSignal);
 }
 
@@ -12190,105 +5941,16 @@ async function handleUnlock(
   }
 }
 
-async function handleUnlockUnsafe(
-  requestId: string,
-  request: { kind: "unlock"; password: string; expectedSessionEpoch: SessionEpoch }
-): Promise<CoordinatorResponse> {
-  if (coordinatorState.vaultStatus === "unlocked") {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "already-unlocked" },
-    };
-  }
-
-  if (coordinatorState.vaultStatus === "booting" || coordinatorState.vaultStatus === "fatal") {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "not-ready" },
-    };
-  }
-
-  if (coordinatorState.vaultStatus === "uninitialized") {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "validation-error", message: "Vault not initialized" },
-    };
-  }
-
-  try {
-    // 冷启动只读固定 KeyHold：没有它说明尚未初始化，不能靠密码“解锁”。
-    const coldStart = storageColdStartState ?? await walletLifecycle?.coldStart();
-    if (!coldStart || coldStart.state !== "ready") {
-      return {
-        requestId,
-        sessionEpoch: coordinatorState.sessionEpoch,
-        ack: {
-          status: coldStart?.state === "corrupt" || coldStart?.state === "unsupported"
-            ? "error"
-            : "validation-error",
-          message: coldStart?.state === "corrupt"
-            ? "Local wallet data is incomplete or damaged"
-            : coldStart?.state === "unsupported"
-              ? "Local wallet schema is newer than this build"
-              : "Wallet is not initialized",
-          ...(coldStart?.state === "corrupt"
-            ? { code: "storage_wallet_corrupt" as const }
-            : coldStart?.state === "unsupported"
-              ? { code: "storage_wallet_unsupported" as const }
-              : {}),
-        },
-      };
-    }
-    if (!walletLifecycle) throw storageUnavailableError("Wallet lifecycle is unavailable");
-    // 唯一 Key：密码由 `key.json` 自身的 KeyHold 文档验证，没有可选对象，
-    // 也不需要任何跨浏览器租约锁。
-    try {
-      await walletLifecycle.unlock(request.password);
-      // `adoptUnlockedKey` 已在私钥清零前写入会话状态与 KeyIdentity 摘要；
-      // 只有运行绑定和业务运行单元也重新打开之后，页面才被允许进入业务。
-      await completeUnlockedBinding();
-      return {
-        requestId,
-        sessionEpoch: coordinatorState.sessionEpoch,
-        ack: { status: "accepted" },
-      };
-    } catch (error) {
-      const code = error && typeof error === "object" && "code" in error
-        ? (error as { code?: unknown }).code
-        : undefined;
-      // 只有 KeyHold 密码本身验证失败才是 validation-error；存储不可用、
-      // 数据损坏等情况必须保留原错误码，不能伪装成“密码错误”。
-      // `storage_identity_required` 就是 key.json 解密 / 认证失败，即密码错误；
-      // 其余 storage_* 必须保留原错误码，不能伪装成“密码错误”。
-      if (code === "storage_identity_required") {
-        return {
-          requestId,
-          sessionEpoch: coordinatorState.sessionEpoch,
-          ack: { status: "validation-error", message: "Invalid password" },
-        };
-      }
-      return {
-        requestId,
-        sessionEpoch: coordinatorState.sessionEpoch,
-        ack: {
-          status: "error",
-          message: error instanceof Error ? error.message : String(error),
-          code: code as never,
-        },
-      };
-    }
-  } catch (err) {
-    markStorageIoFailure(err);
-    // unlock 失败，回到 locked
-    coordinatorState.vaultStatus = "locked";
-    coordinatorState.activePublicKeyHex = undefined;
-    dropActivePrivateKey();
-
-    return storageErrorResponse(requestId, err);
-  }
+async function handleUnlockUnsafe(requestId: string, request: { kind: "unlock"; password: string; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
+  return executeWorkerUnlock(requestId, request, {
+    session: () => coordinatorState,
+    coldStart: async () => storageColdStartState ?? await walletLifecycle?.coldStart(),
+    lifecycle: requireWalletLifecycle,
+    completeBinding: completeUnlockedBinding,
+    storageFailed: markStorageIoFailure,
+    clearFailedSession: () => { coordinatorState.vaultStatus = "locked"; coordinatorState.activePublicKeyHex = undefined; dropActivePrivateKey(); },
+    storageError: storageErrorResponse,
+  });
 }
 
 /**
@@ -12315,7 +5977,6 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
     throw error;
   }
   emitStorageState();
-  publishWorkerActiveKeyChanged();
 
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     if (runtime.state === "blocked" && runtime.blockedReason === "Vault is locked") {
@@ -12403,6 +6064,7 @@ function currentKeySummary(): KeyIdentity | undefined {
  * 会话状态写入与运行绑定，Coordinator 才会认为解锁已经成立。
  */
 function adoptUnlockedKey(input: {
+  identity: import("@keymaster/contracts").KeyIdentity;
   privateKeyBytes: Uint8Array;
   publicKeyHex: string;
   walletGeneration: string;
@@ -12417,12 +6079,9 @@ function adoptUnlockedKey(input: {
   coordinatorState.vaultStatus = "unlocked";
   coordinatorState.activePublicKeyHex = input.publicKeyHex;
   replaceActivePrivateKey(input.privateKeyBytes);
-  setCoordinatorActiveKeySummary({
-    publicKeyHex: input.publicKeyHex,
-    label: input.publicKeyHex,
-    capabilities: ["p2pkh"],
-    createdAt: new Date().toISOString(),
-  });
+  setCoordinatorActiveKeySummary(input.identity);
+  // The authenticated session is committed before owner-unit construction reads it.
+  workerWalletState.publish();
   testHarnessActivationSecret = undefined;
 }
 
@@ -12452,89 +6111,25 @@ function establishWalletSession(input: {
 }
 
 async function executeVaultOperation(operation: CoordinatorVaultOperation): Promise<unknown> {
-  switch (operation.type) {
-    case "getCurrentKey": {
-      const summary = currentKeySummary();
-      if (!summary) return undefined;
-      return {
-        publicKeyHex: summary.publicKeyHex,
-        label: summary.label,
-        capabilities: summary.capabilities,
-        createdAt: summary.createdAt,
-        // `KeyRef.format` 是公开摘要的必填字段：response parser 会拒绝缺少
-        // 它的结果，抛出的 TypeError 会被 transport 收成 handler_failed，
-        // 让整个壳层守卫退化成「读不到钱包 Key」。KeyHold 文档只保存
-        // label/publicKeyHex/密文，私钥来源格式不是持久真值，因此这里投影为
-        // 固定的 KeyHold 标识，而不是猜一个 generated/wif 值。
-        format: "keyhold",
-      };
-    }
-    case "verifyPassword": {
-      // 校验语义与解锁一致，但不解锁：只有 KeyHold 密码本身通过验证。
-      await requireWalletLifecycle().verifyPassword(operation.password);
-      return true;
-    }
-    case "changePassword": {
-      const lifecycle = requireWalletLifecycle();
-      // 改密会更换会话 epoch：先撤销并排空旧绑定，让旧句柄和迟到结果失效。
-      await revokeStorageBindingAndDrain("vault.changePassword");
-      await lifecycle.changePassword({ oldPassword: operation.oldPassword, newPassword: operation.newPassword });
-      publishWorkerActiveKeyChanged();
-      emitStorageState();
+  const epoch = coordinatorState.sessionEpoch;
+  const owner = coordinatorState.activePublicKeyHex;
+  return executeOwnedVaultOperation(operation, {
+    lifecycle: requireWalletLifecycle,
+    currentKey: currentKeySummary,
+    beforePasswordChange: () => revokeStorageBindingAndDrain("vault.changePassword"),
+    passwordChanged: () => {
+          emitStorageState();
       publishSessionState("change-password");
-      return true;
-    }
-    case "renameKey": {
-      await requireWalletLifecycle().rename(operation.label);
-      const summary = coordinatorActiveKeySummaryCache;
-      if (summary) setCoordinatorActiveKeySummary({ ...summary, label: operation.label });
-      publishWorkerActiveKeyChanged();
-      return true;
-    }
-    case "exportKeyHold": {
-      // 原样导出加密 KeyHold；这不是完整钱包备份。
-      return await requireWalletLifecycle().exportKeyHold();
-    }
-    case "sealLocalSecret": {
-      if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
-      assertVaultLocalSecretScope(operation.scope);
-      const localSecretKey = await deriveVaultLocalSecretKey(operation.scope);
-      try {
-        const blob = await encryptBytesWithSaltBoundAad(localSecretKey, operation.plaintext, localSecretAad(operation.scope));
-        return {
-          version: 3,
-          keySource: "active-key-hkdf-v1",
-          saltHex: bytesToHex(blob.salt),
-          nonceHex: bytesToHex(blob.iv),
-          ciphertextHex: bytesToHex(blob.ciphertext),
-        };
-      } finally {
-        operation.plaintext.fill(0);
-      }
-    }
-    case "openLocalSecret": {
-      if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
-      assertVaultLocalSecretScope(operation.scope);
-      const sealed = operation.sealed;
-      if (sealed.version !== 3 || sealed.keySource !== "active-key-hkdf-v1") {
-        throw new Error("Legacy local secret requires explicit re-sealing with the current active key");
-      }
-      const blob = {
-        salt: cryptoHexToBytes(sealed.saltHex),
-        iv: cryptoHexToBytes(sealed.nonceHex),
-        ciphertext: cryptoHexToBytes(sealed.ciphertextHex),
-      };
-      const localSecretKey = await deriveVaultLocalSecretKey(operation.scope);
-      return decryptBytesWithSaltBoundAad(localSecretKey, blob, localSecretAad(operation.scope));
-    }
-    default: throw new Error(`Unsupported vault operation: ${(operation as { type: string }).type}`);
-  }
-}
-
-function assertVaultLocalSecretScope(scope: string): void {
-  if (!scope || scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(scope)) {
-    throw new Error("Invalid secret scope");
-  }
+    },
+    renamed: (label) => {
+      const summary = coordinatorActiveKeySummary();
+      if (summary) setCoordinatorActiveKeySummary({ ...summary, label });
+        },
+    assertSecretSession: () => {
+      if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== epoch || coordinatorState.activePublicKeyHex !== owner) throw new Error("Vault secret session is unavailable");
+    },
+    deriveLocalSecretKey: (scope) => vaultKeySession.deriveLocalSecretKey(scope),
+  });
 }
 
 function requireWalletLifecycle(): WalletLifecycleService {
@@ -12566,7 +6161,7 @@ async function performGlobalLock(reason: string): Promise<void> {
   revokeWalletGrants("lock");
   // 浏览句柄绑定 session epoch，随 epoch 推进整体作废；这里显式撤销，让
   // 页面上已经拿到的句柄立刻失效，而不是等到下一次请求再失败。
-  revokeAllStorageBrowseSessions();
+  storageBrowseCoordinator.revokeAll();
   const previousActive = coordinatorState.activePublicKeyHex?.toLowerCase();
   if (previousActive) void cancelTaskRuntimesByKey(previousActive).catch(() => undefined);
 
@@ -12584,11 +6179,10 @@ async function performGlobalLock(reason: string): Promise<void> {
   coordinatorState.activePublicKeyHex = undefined;
   dropActivePrivateKey();
   setCoordinatorActiveKeySummary(undefined);
-  for (const store of workerOwnerStores) store.invalidateBinding();
+  workerStorageClients.invalidateAll();
   testHarnessActivationSecret = undefined;
   coordinatorState.autoLockDeadline = undefined;
-  if (autoLockTimer) clearTimeout(autoLockTimer);
-  autoLockTimer = undefined;
+  vaultAutoLock.pause();
   stopCoordinatorOwnerWorkerUnits();
   reconcileCoordinatorRuntime();
 
@@ -12597,7 +6191,6 @@ async function performGlobalLock(reason: string): Promise<void> {
     console.warn("[wallet] lifecycle lock failed", error instanceof Error ? error.message : String(error));
   });
 
-  publishWorkerActiveKeyChanged();
   emitMsFileState();
   emitStorageState();
   publishTopicEvent("background.snapshot", {
@@ -12635,7 +6228,7 @@ async function handleCrypto(
     };
   }
 
-  if (!coordinatorState.activePrivateKeyBytes) {
+  if (!vaultKeySession.hasKey()) {
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
@@ -12647,7 +6240,7 @@ async function handleCrypto(
     const result = await withCoordinatorFinalIoLease(
       "write",
       undefined,
-      () => executeCryptoOperation(request.operation, coordinatorState.activePrivateKeyBytes!),
+      () => vaultKeySession.execute(request.operation),
       {
         auditOperation: "service.crypto.sign",
         // 签名只在 Worker 内计算；结果必须经过下方 epoch 检查以及
@@ -12659,7 +6252,7 @@ async function handleCrypto(
       },
     );
 
-    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes) {
+    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked" || !vaultKeySession.hasKey()) {
       return {
         requestId,
         sessionEpoch: coordinatorState.sessionEpoch,
@@ -12682,258 +6275,15 @@ async function handleCrypto(
   }
 }
 
-async function executeCryptoOperation(
-  operation: CoordinatorCryptoOperation,
-  privateKeyBytes: Uint8Array
-): Promise<CoordinatorCryptoResult> {
-  switch (operation.type) {
-    case "signDigest": {
-      const sig = await signEcdsaDigest({
-        privateKeyBytes,
-        digest: cryptoHexToBytes(operation.digestHex),
-        format: operation.format
-      });
-      return { type: "signDigest", signatureHex: bytesToHex(sig), format: operation.format };
-    }
-    case "deriveP2pkhAddress": return { type: "deriveP2pkhAddress", address: deriveP2pkhAddress(coordinatorState.activePublicKeyHex!, operation.network) };
-    default: throw new Error("Unsupported coordinator crypto operation");
-  }
-}
-
 // ============================================================
 // 9. Background Operations
 // ============================================================
-
-async function handleBackgroundRunNow(
-  requestId: string,
-  request: { kind: "background.run-now"; taskId: string; expectedSessionEpoch: SessionEpoch },
-  reason = "manual"
-): Promise<CoordinatorResponse> {
-  if (coordinatorState.vaultStatus !== "unlocked") {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: { key: "background.blocked.unlock", fallback: "Vault is locked" } },
-    };
-  }
-
-  const runtime = coordinatorState.taskRuntimes.get(request.taskId);
-  if (!runtime) {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "validation-error", message: `Task not found: ${request.taskId}` },
-    };
-  }
-
-  // 意图更新与手动触发可能在同一事件循环内交错；不能只依赖上一轮
-  // reconcile 已经把 runtime 标成 blocked。入口再次读取当前意图，避免
-  // 一个刚被禁用的产品被旧 UI 命令重新拉起。
-  const intentBlockedReason = coordinatorTaskBlockedReason(runtime);
-  if (intentBlockedReason) {
-    if (runtime.timer) clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-    runtime.nextRunAt = undefined;
-    runtime.state = "blocked";
-    runtime.blockedReason = intentBlockedReason;
-    runtime.error = undefined;
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: { key: "background.blocked.task", fallback: intentBlockedReason } },
-    };
-  }
-
-  if (runtime.state === "running") {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "already-running" },
-    };
-  }
-
-  if (runtime.state === "blocked") {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: { key: "background.blocked.task", fallback: runtime.blockedReason ?? "Task blocked" } },
-    };
-  }
-
-  void executeTask(request.taskId, reason);
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
-}
-
-async function handleBackgroundTrigger(requestId: string, request: { kind: "background.trigger"; taskId: string; reason: string; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
-  return handleBackgroundRunNow(requestId, { kind: "background.run-now", taskId: request.taskId, expectedSessionEpoch: request.expectedSessionEpoch }, request.reason);
-}
-
-async function handleBackgroundCancelByKey(requestId: string, request: { kind: "background.cancel-by-key"; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
-  const cancelled = await cancelTaskRuntimesByKey(request.publicKeyHex);
-  publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: cancelled ? { status: "accepted" } : { status: "ok" } };
-}
-
-async function cancelTaskRuntimesByKey(publicKeyHex: string): Promise<boolean> {
-  let cancelled = false;
-  const completions: Promise<void>[] = [];
-  for (const runtime of coordinatorState.taskRuntimes.values()) {
-    // keyScope 可能是随当前 active owner 动态变化的函数；owner 切换后，
-    // 运行中的旧任务不能被误认为属于新 owner。以任务启动时捕获的 owner
-    // 为准，确保旧 Contacts/P2PKH 任务及时 abort 并等待 completion。
-    const taskOwnerPublicKeyHex = runtime.state === "running" && runtime.startedPublicKeyHex
-      ? runtime.startedPublicKeyHex
-      : resolveKeyScope(runtime)?.publicKeyHex;
-    if (taskOwnerPublicKeyHex !== publicKeyHex) continue;
-    runtime.controller?.abort();
-    if (runtime.timer) clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-    runtime.state = "idle";
-    if (runtime.completion) completions.push(runtime.completion);
-    cancelled = true;
-  }
-  await Promise.allSettled(completions);
-  return cancelled;
-}
-
-async function handleBackgroundCancel(
-  requestId: string,
-  request: { kind: "background.cancel"; taskId: string; expectedSessionEpoch: SessionEpoch }
-): Promise<CoordinatorResponse> {
-  const runtime = coordinatorState.taskRuntimes.get(request.taskId);
-  if (!runtime) {
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "validation-error", message: `Task not found: ${request.taskId}` },
-    };
-  }
-
-  if (runtime.state === "running" && runtime.controller) {
-    runtime.controller.abort();
-    const completion = runtime.completion;
-    runtime.state = "idle";
-    if (completion) await completion;
-    runtime.controller = undefined;
-
-    publishTopicEvent("background.snapshot", {
-      type: "background.snapshot.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      snapshots: getTaskSnapshots(),
-    });
-
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "accepted" },
-    };
-  }
-
-  return {
-    requestId,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "ok" },
-  };
-}
-
-async function handleBackgroundSettingsUpdate(
-  requestId: string,
-  request: { kind: "background.settings.update"; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
-): Promise<CoordinatorResponse> {
-  if (
-    request.expectedSessionEpoch !== coordinatorState.sessionEpoch
-    && request.expectedSessionEpoch !== "boot"
-    && request.expectedSessionEpoch !== "locked"
-  ) {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
-  }
-  const rawIntervals = request.settings?.taskIntervals;
-  if (!rawIntervals || typeof rawIntervals !== "object" || Array.isArray(rawIntervals)) {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid sync settings" } };
-  }
-  for (const [taskId, interval] of Object.entries(rawIntervals)) {
-    if (!(BACKGROUND_MANAGED_SYNC_TASK_IDS as readonly string[]).includes(taskId)
-      || !isValidBackgroundSyncIntervalMs(interval)) {
-      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Invalid sync interval for ${taskId}` } };
-    }
-  }
-  const nextSettings = normalizeBackgroundSyncSettings(request.settings);
-  const nextSnapshot: CoordinatorSettingsSnapshot = {
-    scheduleSettings: nextSettings,
-    autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
-  };
-  // 持久化成功才发布新的内存状态；保存失败不能制造“设置已生效”
-  // 的假象，也不能让后续调度使用未落盘的值。
-  await persistCoordinatorSettings(nextSnapshot);
-  coordinatorMeta.scheduleSettings = nextSettings;
-  coordinatorState.scheduleSettings = nextSettings;
-  for (const runtime of coordinatorState.taskRuntimes.values()) {
-    if (runtime.syncPolicy !== "managed") continue;
-    runtime.intervalMs = nextSettings.taskIntervals[runtime.id] ?? backgroundSyncDefaultIntervalMs(runtime.id);
-    scheduleRuntime(runtime);
-  }
-
-  publishTopicEvent("background.snapshot", {
-    type: "background.snapshot.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    snapshots: getTaskSnapshots(),
-  });
-
-  return {
-    requestId,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "accepted" },
-  };
-}
-
-async function handleAutolockSettingsUpdate(
-  requestId: string,
-  request: { kind: "autolock.settings.update"; settings: { timeoutMs: number }; expectedSessionEpoch: SessionEpoch }
-): Promise<CoordinatorResponse> {
-  if (
-    request.expectedSessionEpoch !== coordinatorState.sessionEpoch
-    && request.expectedSessionEpoch !== "boot"
-    && request.expectedSessionEpoch !== "locked"
-  ) {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
-  }
-  const timeoutMs = request.settings?.timeoutMs;
-  if (!isValidAutoLockTimeoutMs(timeoutMs)) {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid auto-lock timeout" } };
-  }
-  const nextSnapshot: CoordinatorSettingsSnapshot = {
-    scheduleSettings: coordinatorMeta.scheduleSettings,
-    autoLockTimeoutMs: timeoutMs,
-  };
-  // 持久化成功才发布内存状态；保存失败不能制造“已生效”假象。
-  await persistCoordinatorSettings(nextSnapshot);
-  coordinatorMeta.autoLockTimeoutMs = timeoutMs;
-  coordinatorState.autoLockTimeoutMs = timeoutMs;
-  // 立即按新超时重算 deadline：解锁态下从当前时刻重新计时；
-  // 永不锁定则清除 timer；锁定态下只记设置，下次解锁生效。
-  if (coordinatorState.vaultStatus === "unlocked") {
-    resetAutoLockTimer();
-  } else {
-    if (autoLockTimer) clearTimeout(autoLockTimer);
-    autoLockTimer = undefined;
-    coordinatorState.autoLockDeadline = undefined;
-  }
-
-  publishSessionState("autolock-settings");
-
-  return {
-    requestId,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "accepted" },
-  };
-}
 
 // ============================================================
 // 10. Ordinary P2PKH data-source selection and transaction broadcast RPC
 // ============================================================
 
 /** 当前 owner 的 p2pkh setting.json 是否已载入运行时镜像。 */
-let p2pkhSettingOwner: string | undefined;
 
 let testFailNextP2pkhSettingWrite = false;
 
@@ -12946,112 +6296,41 @@ function p2pkhSettingRepository(): ReturnType<typeof createP2pkhFileRepository> 
   return createP2pkhFileRepository(createWorkerModuleFileStore("p2pkh", ""));
 }
 
-/** 从 setting.json 载入运行时镜像；同 owner 只载入一次。 */
-async function loadP2pkhSettingForOwner(ownerPublicKeyHex: string | undefined): Promise<void> {
-  const owner = ownerPublicKeyHex?.trim().toLowerCase();
-  if (!owner) {
-    p2pkhSettingOwner = undefined;
-    return;
-  }
-  if (p2pkhSettingOwner === owner) return;
-  try {
-    const setting = await p2pkhSettingRepository().readSetting();
-    coordinatorMeta.p2pkhSettings = { includeTestnet: setting.includeTestnet };
-    // 旧 providerConfigs 中的 junglebus 等配置已由解析器丢弃。
-    coordinatorMeta.p2pkhProviderConfigs = structuredClone(setting.providerConfigs);
-    p2pkhSettingOwner = owner;
-  } catch (error) {
-    // 读取失败不能把用户设置清成默认；保持当前镜像并允许后续重试。
-    console.warn("[p2pkh] load setting.json failed", error instanceof Error ? error.message : String(error));
-  }
+const p2pkhWorkerSettings = createWorkerP2pkhSettings({
+  storage: () => createWorkerModuleFileStore("p2pkh", ""),
+  session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
+  projection: coordinatorMeta,
+  beforeWrite: () => {
+    if (testFailNextP2pkhSettingWrite) {
+      testFailNextP2pkhSettingWrite = false;
+      throw new StorageRuntimeError("storage_provider_error", "injected P2PKH setting write failure");
+    }
+  },
+  clearSnapshots: () => p2pkhUtxoSnapshots?.clearAll(),
+  reschedule: cancelP2pkhSyncForProviderChange,
+  taskSnapshots: getTaskSnapshots,
+  publishSnapshot: (event) => { publishTopicEvent("background.snapshot", event); },
+  woc: () => testDomainUnitReadiness ? p2pkhWocService : p2pkhWorkerWocQuery,
+});
+const loadP2pkhSettingForOwner = p2pkhWorkerSettings.load;
+const resetP2pkhSettingsRuntime = p2pkhWorkerSettings.reset;
+
+function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
+  return ensureOwnedP2pkhResources(createWorkerModuleFileStore("p2pkh", ""), ownerPublicKeyHex, includeTestnet);
 }
 
-/** 锁屏 / 切 owner：运行时不保留上一个 owner 的偏好与内存快照。 */
-function resetP2pkhSettingsRuntime(): void {
-  p2pkhSettingOwner = undefined;
-  coordinatorMeta.p2pkhProviderConfigs = {};
-  coordinatorMeta.p2pkhSettings = { includeTestnet: false };
-  p2pkhUtxoSnapshots?.clearAll();
-}
-
-/** 读-改-写 setting.json；failure 时调用方不得更新内存镜像。 */
-async function writeP2pkhSettingFile(patch: {
-  includeTestnet?: boolean;
-  feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>>;
-  providerConfigs?: Record<string, Record<string, unknown>>;
-}): Promise<void> {
-  if (testFailNextP2pkhSettingWrite) {
-    testFailNextP2pkhSettingWrite = false;
-    throw new StorageRuntimeError("storage_provider_error", "injected P2PKH setting write failure");
-  }
-  const repository = p2pkhSettingRepository();
-  const current = await repository.readSetting();
-  await repository.writeSetting({
-    includeTestnet: patch.includeTestnet ?? current.includeTestnet,
-    feeRateSatoshisPerKb: {
-      ...current.feeRateSatoshisPerKb,
-      ...(patch.feeRateSatoshisPerKb ?? {})
-    },
-    providerConfigs: patch.providerConfigs ?? current.providerConfigs,
-  });
-}
-
-/**
- * 为当前 owner 在 Worker 侧材料化启用的 P2PKH 资源。
- *
- * 资源表是每个 JS realm 各自的内存态（见 p2pkhStateRepository）：页面窗口
- * 创建的资源对 Worker 不可见，Worker 的余额快照任务必须按同一套确定性规则
- * （owner 公钥 + 网络 → P2PKH 地址）自己补齐资源，否则快照刷新找不到任何
- * 地址，余额永远停在“未知”。
- */
-async function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
-  const existing = await repository.listResourcesByKey();
-  const networks: Array<"main" | "test"> = includeTestnet ? ["main", "test"] : ["main"];
-  const createdAt = new Date().toISOString();
-  for (const network of networks) {
-    const resourceId = `p2pkh:${network}`;
-    if (existing.some((resource) => resource.resourceId === resourceId)) continue;
-    const address = deriveP2pkhAddress(ownerPublicKeyHex, network);
-    const resource = {
-      resourceId,
-      publicKeyHex: ownerPublicKeyHex,
-      label: "",
-      address,
-      network,
-      createdAt,
-      generation: 0,
-    };
-    await repository.putAddress(resource);
-    existing.push(resource);
-  }
-  return existing;
-}
-
-/**
- * 刷新当前 owner 全部启用网络的内存 UTXO 快照。
- * 单个资源失败只保留其旧快照，不影响其它资源；错误向上抛给调用方决定。
- */
-async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal): Promise<{ main?: number; test?: number }> {
+async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal, storage: BorrowedModuleFileStore = createWorkerModuleFileStore("p2pkh", ""), assertActive: () => void = () => undefined): Promise<{ main?: number; test?: number }> {
   const owner = coordinatorState.activePublicKeyHex;
-  if (!owner || !p2pkhUtxoSnapshots) return {};
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== owner.toLowerCase()) return {};
-  const includeTestnet = coordinatorMeta.p2pkhSettings?.includeTestnet === true;
-  const resources = await ensureWorkerP2pkhResources(owner, includeTestnet);
-  const utxoSeqs: { main?: number; test?: number } = {};
-  for (const resource of resources) {
-    if (resource.network === "test" && !includeTestnet) continue;
-    if (signal?.aborted) return utxoSeqs;
-    // consumed 快照不能仅凭“下一次 unspent 内容暂时没变”解封。
-    // 先做一次交易级只读观察：只有消费交易超过阈值且 confirmed /
-    // unconfirmed 都不存在时，才复用原序号恢复 fresh。
-    await p2pkhUtxoSnapshots.reconcileConsumed(resource).catch(() => false);
-    const result = await p2pkhUtxoSnapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);
-    if (result) await reconcileMsfileBitfsFundingInputs(owner, resource.network, result);
-    if (result?.seq !== undefined) utxoSeqs[resource.network] = result.seq;
-  }
-  return utxoSeqs;
+  const snapshots = p2pkhUtxoSnapshots;
+  const epoch = coordinatorState.sessionEpoch;
+  if (!owner || !snapshots) return {};
+  if (createWorkerWalletState().snapshot().activePublicKeyHex?.toLowerCase() !== owner.toLowerCase()) return {};
+  return refreshWorkerP2pkhResources({
+    storage, ownerPublicKeyHex: owner,
+    includeTestnet: coordinatorMeta.p2pkhSettings?.includeTestnet === true, snapshots,
+    assertFresh: () => { assertActive(); if (coordinatorState.sessionEpoch !== epoch || coordinatorState.activePublicKeyHex !== owner || p2pkhUtxoSnapshots !== snapshots) throw new Error("P2PKH snapshot refresh became stale"); },
+    afterRefresh: (network, result) => reconcileMsfileBitfsFundingInputs(owner, network, result),
+  }, signal);
 }
 
 async function cancelP2pkhSyncForProviderChange(): Promise<void> {
@@ -13072,106 +6351,45 @@ async function cancelP2pkhSyncForProviderChange(): Promise<void> {
   }
 }
 
-async function handleP2pkhSettingsUpdate(
-  requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.settings.update" }>
-): Promise<CoordinatorResponse> {
-  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
-  if (typeof request.settings.includeTestnet !== "boolean") {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid P2PKH network settings" } };
-  }
-  if (request.settings.feeRateSatoshisPerKb !== undefined) {
-    for (const value of Object.values(request.settings.feeRateSatoshisPerKb)) {
-      if (!Number.isSafeInteger(value) || value < 1) {
-        return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid P2PKH fee settings" } };
-      }
-    }
-  }
-  // 先写 owner 的 setting.json,成功后才更新内存镜像。
-  await writeP2pkhSettingFile({
-    includeTestnet: request.settings.includeTestnet,
-    ...(request.settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: request.settings.feeRateSatoshisPerKb })
-  });
-  coordinatorMeta.p2pkhSettings = { includeTestnet: request.settings.includeTestnet };
-  await cancelP2pkhSyncForProviderChange();
-  publishTopicEvent("background.snapshot", {
-    type: "background.snapshot.changed",
-    snapshots: getTaskSnapshots(),
-    // 设置写入成功后随同快照广播，窗口无需再发起 RPC 才能收敛 testnet 开关。
-    p2pkhSettings: coordinatorMeta.p2pkhSettings,
-  });
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
+async function handleP2pkhSettingsUpdate(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.settings.update" }>): Promise<CoordinatorResponse> {
+  if (!isCoordinatorProductRegistered("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
+  return p2pkhWorkerSettings.update(requestId, request);
 }
-
-async function handleP2pkhProviderConfigGet(
-  requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.get" }>
-): Promise<CoordinatorResponse> {
-  // 只剩 WoC 一个 Provider；未知 provider id 直接拒绝。
-  if (request.providerId !== "woc") {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Unknown P2PKH provider: ${request.providerId}` } };
-  }
-  if (!isCoordinatorProductEnabled("woc")) return coordinatorProductBlockedResponse(requestId, "woc");
-  const persisted = coordinatorMeta.p2pkhProviderConfigs?.woc;
-  if (persisted) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...persisted } };
-  if (p2pkhWocService) {
-    const config = p2pkhWocService.getConfig();
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { endpoint: config.baseUrl, requestsPerSecond: config.requestsPerSecond } };
-  }
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: {} };
+async function handleP2pkhProviderConfigGet(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.get" }>): Promise<CoordinatorResponse> {
+  if (!isCoordinatorProductRegistered("woc")) return coordinatorProductBlockedResponse(requestId, "woc");
+  return p2pkhWorkerSettings.getProviderConfig(requestId, request);
 }
-
-async function handleP2pkhProviderConfigUpdate(
-  requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.update" }>
-): Promise<CoordinatorResponse> {
-  if (request.providerId !== "woc") {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Unknown P2PKH provider: ${request.providerId}` } };
-  }
-  if (!isCoordinatorProductEnabled("woc")) return coordinatorProductBlockedResponse(requestId, "woc");
-  const previousConfigs = coordinatorMeta.p2pkhProviderConfigs;
-  const previousConfig = previousConfigs?.woc;
-  const nextConfig = { ...(previousConfig ?? {}), ...request.config };
-  const nextProviderConfigs = { ...(previousConfigs ?? {}), woc: nextConfig };
-  const previousWocConfig = p2pkhWocService?.getConfig?.();
-  try {
-    // Persist the candidate before changing the running service. A failed
-    // write must leave the running session untouched.
-    await writeP2pkhSettingFile({ providerConfigs: nextProviderConfigs });
-    if (p2pkhWocService) {
-      const update: Partial<import("@keymaster/contracts").WocConfig> = {};
-      if (typeof request.config.endpoint === "string" && request.config.endpoint.trim()) update.baseUrl = request.config.endpoint.trim();
-      if (typeof request.config.requestsPerSecond === "number") update.requestsPerSecond = request.config.requestsPerSecond;
-      if (Object.keys(update).length) p2pkhWocService.updateConfig(update);
-    }
-  } catch (error) {
-    if (previousWocConfig) p2pkhWocService?.updateConfig?.(previousWocConfig);
-    throw error;
-  }
-  coordinatorMeta.p2pkhProviderConfigs = nextProviderConfigs;
-  await cancelP2pkhSyncForProviderChange();
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
+async function handleP2pkhProviderConfigUpdate(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.update" }>): Promise<CoordinatorResponse> {
+  if (!isCoordinatorProductRegistered("woc")) return coordinatorProductBlockedResponse(requestId, "woc");
+  return p2pkhWorkerSettings.updateProviderConfig(requestId, request);
 }
 
 /** 读取 owner + network 对应的 P2PKH resource（不存在返回 undefined）。 */
 async function p2pkhResourceForOwner(ownerPublicKeyHex: string, network: "main" | "test") {
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
-  return repository.getResource(`p2pkh:${network}`);
+  if (createWorkerWalletState().snapshot().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  return readWorkerP2pkhResource(createWorkerModuleFileStore("p2pkh", ""), { ownerPublicKeyHex, network });
 }
+async function executeP2pkhSnapshot(requestId: string, request: { ownerPublicKeyHex: string; network: "main" | "test" }, refresh: boolean): Promise<CoordinatorResponse> {
+  if (!isCoordinatorProductRegistered("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
+  const epoch = coordinatorState.sessionEpoch;
+  const snapshots = p2pkhUtxoSnapshots;
+  return executeWorkerP2pkhSnapshot(requestId, request, refresh, {
+    storage: createWorkerModuleFileStore("p2pkh", ""), snapshots,
+    epoch: () => coordinatorState.sessionEpoch,
+    assertFresh: () => {
+      if (coordinatorState.sessionEpoch !== epoch || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase() || p2pkhUtxoSnapshots !== snapshots) throw new Error("P2PKH snapshot session became stale");
+      if (!testDomainUnitReadiness) p2pkhWorkerPorts?.assertActive();
+    },
+    reconcile: (input, snapshot) => reconcileMsfileBitfsFundingInputs(input.ownerPublicKeyHex, input.network, snapshot),
+    filter: (input, snapshot) => filterP2pkhSnapshotByBitfsFunds(input.ownerPublicKeyHex, input.network, snapshot),
+    publish: event => { publishTopicEvent("asset.data-changed", event); },
+  });
+}
+const handleP2pkhUtxosGet = (requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.utxos.get" }>) => executeP2pkhSnapshot(requestId, request, false);
+const handleP2pkhUtxosRefresh = (requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.utxos.refresh" }>) => executeP2pkhSnapshot(requestId, request, true);
 
 /** 读取内存 UTXO 快照；没有 resource 或没有快照时 available=false。 */
-async function handleP2pkhUtxosGet(
-  requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.utxos.get" }>
-): Promise<CoordinatorResponse> {
-  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
-  const resource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
-  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, state: "unavailable", items: [] } satisfies P2pkhUtxoSnapshotResult };
-  const snapshot = await filterP2pkhSnapshotByBitfsFunds(request.ownerPublicKeyHex, request.network, p2pkhUtxoSnapshots.get(resource));
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: snapshot };
-}
+
 
 /**
  * 刷新内存 UTXO 快照。
@@ -13179,39 +6397,13 @@ async function handleP2pkhUtxosGet(
  * 刷新失败时旧快照原样保留（绝不清空/置零），RPC 以 error 返回失败，
  * 让调用方（转账 prepare/submit）明确拒绝继续，而不是使用过期快照。
  */
-async function handleP2pkhUtxosRefresh(
-  requestId: string,
-  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.utxos.refresh" }>
-): Promise<CoordinatorResponse> {
-  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
-  const resource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
-  if (!resource || !p2pkhUtxoSnapshots) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { available: false, state: "unavailable", items: [] } satisfies P2pkhUtxoSnapshotResult };
-  try {
-    await p2pkhUtxoSnapshots.reconcileConsumed(resource);
-    const rawSnapshot = await p2pkhUtxoSnapshots.refresh(resource);
-    await reconcileMsfileBitfsFundingInputs(request.ownerPublicKeyHex, request.network, rawSnapshot);
-    const result = await filterP2pkhSnapshotByBitfsFunds(request.ownerPublicKeyHex, request.network, rawSnapshot);
-    // 主动刷新成功后通知页面重读余额/币列表。
-    publishTopicEvent("asset.data-changed", {
-      type: "asset.data-changed",
-      providerId: "p2pkh",
-      publicKeyHex: request.ownerPublicKeyHex,
-      kinds: ["utxo", "balance"],
-      ...(result.seq === undefined ? {} : { utxoSeqs: { [request.network]: result.seq } }),
-    });
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
-  } catch (error) {
-    // 旧快照保留；把失败原因返回给调用方。
-    const message = error instanceof Error ? error.message : String(error);
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `P2PKH UTXO snapshot refresh failed: ${message}` } };
-  }
-}
+
 
 async function handleP2pkhBroadcast(
   requestId: string,
   request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" }>
 ): Promise<CoordinatorResponse> {
-  if (!isCoordinatorProductEnabled("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
+  if (!isCoordinatorProductRegistered("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
   // 广播可能已经被远端接受但尚未回写本地提交记录；必须把 Provider
   // 调用和 submission audit 放在同一个持久 write lease 内。若期间发生
   // 本地 lock，下面的 lease 复核会把结果报告为 error/unknown，不能伪报
@@ -13237,362 +6429,28 @@ async function handleP2pkhBroadcastUnsafe(
   requestId: string,
   request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" }>
 ): Promise<CoordinatorResponse> {
-  const provider = testP2pkhBroadcastProvider ?? p2pkhRegistry?.getBroadcastProvider("woc", request.network);
-  if (!provider) {
-    await abortNotDispatchedP2pkhSubmission(request, "broadcast-provider-unavailable");
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "broadcast-provider-unavailable" } };
-  }
-
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
-  let consumed = false;
-  let snapshotResource: P2pkhUtxoSnapshotResource | undefined;
-  const consumedBinding = request.submission?.utxoBinding;
-  let local = (await repository.listLocalTransactions()).find((row) => row.id === request.submissionId && row.network === request.network);
-  if (!local) {
-    // 页面 service 与 Worker 是两个 JS realm，页面内存中的本地提交这里读不到。
-    // 页面必须在广播请求里带上待广播的 canonical 交易；Worker 先用生产解析器
-    // 复核 txid 与原始交易一致，再写自己的审计存储（write-ahead），最后广播。
-    if (!request.submission) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Local P2PKH submission not found" } };
-    let parsed;
-    try {
-      parsed = parseP2pkhTransaction(request.submission.rawTxHex, request.submission.txid);
-    } catch {
-      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast payload txid does not match the raw transaction" } };
-    }
-    if (parsed.canonicalTxid !== request.submission.txid) {
-      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast payload txid does not match the raw transaction" } };
-    }
-    const now = new Date().toISOString();
-    local = {
-      id: request.submissionId,
-      resourceId: request.submission.resourceId,
-      publicKeyHex: request.ownerPublicKeyHex,
-      network: request.network,
-      txid: request.submission.txid,
-      rawTxHex: request.submission.rawTxHex,
-      localState: "submitting",
-      chainResolution: "unresolved",
-      inputOutpointKeys: parsed.inputs.map((input) => input.outpointKey),
-      ownOutputs: [],
-      createdAt: now,
-      updatedAt: now,
-      attempts: [],
-    };
-    try {
-      await repository.prepareLocalSubmission({ submission: local, claims: [] });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `P2PKH broadcast payload write-ahead failed: ${message}` } };
-    }
-  } else if (request.submission && local.txid.toLowerCase() !== request.submission.txid) {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast payload does not match the stored submission" } };
-  }
-  if (local.localState !== "submitting" || local.chainResolution !== "unresolved") {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
-  }
-
-  // 中文：无论 Worker 是否已有本地 write-ahead 记录，都必须从本次原始
-  // 交易解析输入 outpoint；不能信任页面或旧记录中的 inputOutpointKeys。
-  const rawTxHexForValidation = request.submission?.rawTxHex ?? local.rawTxHex;
-  const txidForValidation = request.submission?.txid ?? local.txid;
-  let parsedInputOutpointKeys: string[];
-  try {
-    const parsed = parseP2pkhTransaction(rawTxHexForValidation, txidForValidation);
-    if (parsed.canonicalTxid !== local.txid.toLowerCase()) throw new Error("txid mismatch");
-    parsedInputOutpointKeys = parsed.inputs.map((input) => input.outpointKey);
-  } catch {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH broadcast raw transaction is invalid" } };
-  }
-
-  // 普通 P2PKH 广播再次检查专款账本，避免调用方绕过被过滤的余额快照，
-  // 直接提交花费专款 outpoint 的原始交易。
-  const protectedBitfsInputs = await currentMsfileBitfsFundingLedger().listProtectedOutpoints({
-    ownerPublicKeyHex: request.ownerPublicKeyHex,
-    network: request.network,
+  const epoch = coordinatorState.sessionEpoch;
+  const snapshots = p2pkhUtxoSnapshots;
+  return executeWorkerP2pkhBroadcast(requestId, request, {
+    assertFresh: () => {
+      if (coordinatorState.sessionEpoch !== epoch || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase() || p2pkhUtxoSnapshots !== snapshots) throw new Error("P2PKH broadcast session is unavailable");
+    },
+    provider: testP2pkhBroadcastProvider ?? p2pkhRegistry?.getBroadcastProvider("woc", request.network),
+    walletState: createWorkerWalletState(),
+    storage: () => createWorkerModuleFileStore("p2pkh", ""),
+    sessionEpoch: () => coordinatorState.sessionEpoch,
+    snapshots,
+    resource: p2pkhResourceForOwner,
+    listProtectedOutpoints: (input) => currentMsfileBitfsFundingLedger().listProtectedOutpoints(input),
+    abortNotDispatched: abortNotDispatchedP2pkhSubmission,
+    refresh: refreshP2pkhUtxoSnapshots,
+    publishChanged: (event) => { publishTopicEvent("asset.data-changed", event); },
   });
-  const protectedInputKeys = new Set(protectedBitfsInputs.map((item) => `${item.txid}:${item.vout}`));
-  const protectedInput = parsedInputOutpointKeys.find((key) => protectedInputKeys.has(key));
-  if (protectedInput) {
-    await abortNotDispatchedP2pkhSubmission(request, "bitfs-funds-protected");
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "ok" },
-      operationResult: { status: "not-dispatched", reason: "bitfs-funds-protected", outpoint: protectedInput },
-    };
-  }
-
-  // 唯一的 Worker 门禁：在同一无 await 的同步块内完成绑定核对、输入归属
-  // 校验和消费。纯代币输入没有命中钱包快照时保持 untouched，不要求序号。
-  snapshotResource = await p2pkhResourceForOwner(request.ownerPublicKeyHex, request.network);
-  const consumeResult = snapshotResource && p2pkhUtxoSnapshots
-    ? p2pkhUtxoSnapshots.consume(snapshotResource, {
-        binding: consumedBinding,
-        inputOutpointKeys: parsedInputOutpointKeys,
-        txid: local.txid,
-      })
-    // 没有该 owner/network 资源时无法证明输入属于钱包快照，按纯协议输入
-    // 路径继续；正常 P2PKH 资源由 ensureWorkerP2pkhResources 预先材料化。
-    : { status: "untouched" as const };
-  if (consumeResult.status === "rejected") {
-    await abortNotDispatchedP2pkhSubmission(request, consumeResult.reason);
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "ok" },
-      operationResult: {
-        status: "not-dispatched",
-        reason: consumeResult.reason,
-        ...(consumeResult.currentSeq === undefined ? {} : { currentSeq: consumeResult.currentSeq }),
-      },
-    };
-  }
-  consumed = consumeResult.status === "consumed";
-
-  const startedAt = new Date().toISOString();
-  try {
-    const result = await provider.broadcast({ network: request.network, canonicalTxid: local.txid, rawTxHex: local.rawTxHex });
-    if (result.canonicalTxid !== local.txid) {
-      // 中文：Provider 已返回，但 txid 与本地原始交易不一致。它不是“未派发”，
-      // 不能回滚消费；同时把回执完整透传，让协议层进入 provider-inconsistent。
-      const message = "Broadcast provider returned a different transaction id";
-      const finishedAt = new Date().toISOString();
-      await repository.finishLocalSubmission({
-        submissionId: local.id,
-        localState: "isolated",
-        reason: message,
-        attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated", providerMessage: message },
-      });
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
-      return {
-        requestId,
-        sessionEpoch: coordinatorState.sessionEpoch,
-        ack: { status: "ok" },
-        operationResult: {
-          status: "isolated",
-          txid: local.txid,
-          reason: message,
-          canonicalTxid: local.txid,
-          providerReturnedTxidRaw: result.canonicalTxid,
-          providerReturnedTxidNormalized: result.canonicalTxid.toLowerCase(),
-          txidIntegrity: "mismatch",
-          providerId: provider.descriptor.id,
-        },
-      };
-    }
-    const finishedAt = new Date().toISOString();
-    await repository.finishLocalSubmission({ submissionId: local.id, localState: "local-confirmed", attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
-    // 广播后立即触发一次后台刷新；普通 P2PKH 不维护本地输入占用，
-    // 下一组可花 UTXO 由 WoC 快照内容变化和新 seq 决定。
-    void refreshP2pkhUtxoSnapshots().then((utxoSeqs) => {
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "balance"], ...(Object.keys(utxoSeqs).length === 0 ? {} : { utxoSeqs }) });
-    }).catch(() => {
-      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
-    });
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "ok" },
-      operationResult: {
-        status: result.status === "already-known" ? "already-known" : "local-confirmed",
-        txid: local.txid,
-        canonicalTxid: result.canonicalTxid,
-        providerReturnedTxidRaw: result.providerReturnedTxidRaw ?? result.canonicalTxid,
-        providerReturnedTxidNormalized: result.providerReturnedTxidNormalized ?? result.canonicalTxid.toLowerCase(),
-        txidIntegrity: result.txidIntegrity ?? "exact",
-        providerId: provider.descriptor.id,
-        ...(result.providerReference === undefined ? {} : { providerReference: result.providerReference }),
-        ...(result.providerCode === undefined ? {} : { providerCode: result.providerCode }),
-        ...(result.providerMessage === undefined ? {} : { providerMessage: result.providerMessage }),
-      }
-    };
-  } catch (error) {
-    // reason 必须是非空、有上界的字符串：它要跨 RPC parser 和 UI，空 message
-    // 的 Error 会让响应校验失败，把“已隔离”伪装成框架层 handler 异常。
-    const rawMessage = error instanceof Error ? error.message : String(error);
-    const message = (rawMessage.trim() || (error instanceof Error ? error.name || "broadcast-isolated" : "broadcast-isolated")).slice(0, 2_048);
-    const finishedAt = new Date().toISOString();
-    const attempt = { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
-    // 只有结构化标记（code=definitive-not-dispatched）或节点明确拒绝交易本体
-    // 的错误才允许回滚消费；HTTP 4xx / 超时 / 网络错误可能是"已存在"，保持 isolated。
-    if (isDefinitelyNotDispatchedBroadcastError(error)) {
-      if (consumed && snapshotResource && consumedBinding) p2pkhUtxoSnapshots?.rollbackConsume(snapshotResource, consumedBinding);
-      await abortNotDispatchedP2pkhSubmission(request, message);
-      return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "coordinator-not-dispatched" } };
-    }
-    await repository.finishLocalSubmission({ submissionId: local.id, localState: "isolated", reason: message, attempt });
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid: local.txid, reason: message, providerId: provider.descriptor.id } };
-  }
 }
 
 // ============================================================
 // 11. Task Execution
 // ============================================================
-
-async function executeTask(taskId: string, reason: string): Promise<void> {
-  const runtime = coordinatorState.taskRuntimes.get(taskId);
-  if (!runtime) {
-    throw new Error(`Task not found: ${taskId}`);
-  }
-  const intentBlockedReason = coordinatorTaskBlockedReason(runtime);
-  if (intentBlockedReason) {
-    if (runtime.timer) clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-    runtime.nextRunAt = undefined;
-    runtime.state = "blocked";
-    runtime.blockedReason = intentBlockedReason;
-    runtime.error = undefined;
-    publishTopicEvent("background.snapshot", {
-      type: "background.snapshot.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      snapshots: getTaskSnapshots(),
-    });
-    return;
-  }
-  // 「同步管理」关闭（间隔 0）表示不自动同步：定时器 / 领域事件 / 解锁
-  // 首次同步都不再拉起任务；托盘的手动「立即同步一次」仍然有效。
-  if (runtime.syncPolicy === "managed" && (runtime.intervalMs ?? 0) <= 0 && reason !== BACKGROUND_TRIGGER_REASON.MANUAL) {
-    return;
-  }
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
-    runtime.state = "blocked";
-    runtime.blockedReason = "Vault is locked";
-    scheduleRuntime(runtime);
-    return;
-  }
-
-  // 旧 completion 未结束时，re-enable 只能等待它在 finally 中恢复调度；
-  // 不能由手动/定时入口再开第二个同任务实例。
-  if (runtime.completion) return;
-  const taskUnit = getCoordinatorWorkerUnitForTask(taskId);
-  if (taskUnit) {
-    const workerUnit = activateCoordinatorOwnerWorkerUnit(taskUnit.unitId);
-    const readyUnit = coordinatorWorkerUnitRegistry.ready(workerUnit.unitId, workerUnit.instanceId);
-    runtime.instanceId = readyUnit.instanceId;
-  }
-
-  const controller = new AbortController();
-  runtime.controller = controller;
-  runtime.startedEpoch = coordinatorState.sessionEpoch;
-  runtime.startedRunGeneration = coordinatorState.runGeneration;
-  runtime.startedPublicKeyHex = coordinatorState.activePublicKeyHex;
-  runtime.blockedReason = undefined;
-  runtime.error = undefined;
-  runtime.state = "running";
-  runtime.lastStartedAt = new Date().toISOString();
-  runtime.lastAttemptAt = runtime.lastStartedAt;
-
-  publishTopicEvent("background.snapshot", {
-    type: "background.snapshot.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    snapshots: getTaskSnapshots(),
-  });
-
-  let execution!: Promise<void>;
-  execution = (async () => {
-   try {
-    if (runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedRunGeneration !== coordinatorState.runGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) throw new Error("stale task epoch");
-    if (!runtime.run) throw new Error(`Task ${taskId} has no Coordinator handler`);
-    const run = (signal: AbortSignal) => runtime.run!({
-      signal,
-      reason,
-      reportProgress: () => undefined,
-      assertSessionFresh: () => assertTaskFresh(taskId),
-    });
-    const auditOperation = COORDINATOR_TASK_FINAL_IO_AUDIT[taskId];
-    if (auditOperation) {
-      // 任务里的 Provider 网络读取与 checkpoint / projection 写入是一个
-      // 真实业务实例；必须一起占用最终 lease，不能只保护 RPC 外壳。
-      await withCoordinatorFinalIoLease("write", controller.signal, run, { auditOperation });
-    } else {
-      // 仅测试任务或无外部 I/O 的内核任务走普通取消路径；生产任务都
-      // 必须在上面的显式审计表中登记，否则发布审计脚本会拒绝通过。
-      await run(controller.signal);
-    }
-    if (runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedRunGeneration !== coordinatorState.runGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) throw new Error("stale task result");
-    runtime.state = "idle";
-    runtime.lastCompletedAt = new Date().toISOString();
-    runtime.error = undefined;
-   } catch (err) {
-    const currentIntentBlockedReason = coordinatorTaskBlockedReason(runtime);
-    if (currentIntentBlockedReason) {
-      runtime.state = "blocked";
-      runtime.blockedReason = currentIntentBlockedReason;
-      runtime.error = undefined;
-    } else if (controller.signal.aborted && isPluginIntentBlockedReason(runtime.blockedReason)) {
-      // disable 后又在旧 completion 结束前 enable：保持“等旧实例退出”
-      // 的中间状态，finally 会在同一 completion 上恢复新的定时器。
-      runtime.state = "blocked";
-      runtime.error = undefined;
-    } else if (controller.signal.aborted) {
-      runtime.state = "idle";
-      runtime.error = "Cancelled";
-    } else if (taskId === "p2pkh.transactions-sync" && typeof err === "object" && err !== null && "code" in err && (err as { code?: unknown }).code === "provider-unavailable") {
-      runtime.state = "blocked";
-      runtime.blockedReason = err instanceof Error ? err.message : "Confirmed provider unavailable";
-      runtime.error = runtime.blockedReason;
-    } else {
-      runtime.state = "idle";
-      runtime.error = err instanceof Error ? err.message : String(err);
-    }
-   } finally {
-    // 同一 Task 在旧 owner completion 尚未结束时可能已经被新 owner
-    // 重新启动；旧 completion 不能覆盖新 execution 的 controller/state。
-    if (runtime.completion !== execution) return;
-    runtime.controller = undefined;
-
-    const finalIntentBlockedReason = coordinatorTaskBlockedReason(runtime);
-    // 若产品意图已关闭，保留 disabled blocked，不得被旧 completion 重写为 idle。
-    if (finalIntentBlockedReason) {
-      runtime.state = "blocked";
-      runtime.blockedReason = finalIntentBlockedReason;
-      runtime.error = undefined;
-    // 若当前 Vault 已锁定或 epoch 已变化，保留 blocked，不得把任务重写为 idle
-    } else if (coordinatorState.vaultStatus !== "unlocked" ||
-        runtime.startedEpoch !== coordinatorState.sessionEpoch ||
-        runtime.startedRunGeneration !== coordinatorState.runGeneration ||
-        runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) {
-      runtime.state = "blocked";
-      runtime.blockedReason = "Vault is locked";
-    } else if (isPluginIntentBlockedReason(runtime.blockedReason)) {
-      // 旧任务在 disable -> enable 窗口内退出；此时才允许重新排程。
-      runtime.state = "idle";
-      runtime.blockedReason = undefined;
-      runtime.error = undefined;
-      scheduleRuntime(runtime);
-    } else if (!controller.signal.aborted && runtime.state !== "blocked") {
-      // 仅当任务所属 session 仍有效且未 abort 时才恢复 idle/排程
-      scheduleRuntime(runtime);
-    }
-
-    // 智能调度：smart 任务完成后，若 WoC 队列已空闲，从「任务完成」
-    // 这一刻重新计时 2 秒；任务运行期间的队列事件已把计时取消。
-    // 门禁：锁定 / 无 active key / 任务所属 session 已失效时不得重新计时，
-    // 否则锁定时被 abort 的任务会在 finally 里把计时器重新挂起来。
-    if (runtime.syncPolicy === "smart"
-      && runtime.state !== "blocked"
-      && coordinatorState.vaultStatus === "unlocked"
-      && coordinatorState.activePublicKeyHex
-      && runtime.startedEpoch === coordinatorState.sessionEpoch
-      && runtime.startedRunGeneration === coordinatorState.runGeneration
-      && runtime.startedPublicKeyHex === coordinatorState.activePublicKeyHex) {
-      armSmartSyncIfIdle();
-    }
-
-    publishTopicEvent("background.snapshot", {
-      type: "background.snapshot.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      snapshots: getTaskSnapshots(),
-    });
-   }
-  })();
-  runtime.completion = execution;
-  await execution;
-  runtime.completion = undefined;
-}
 
 // ============================================================
 // 11. Snapshot & Broadcasting
@@ -13624,7 +6482,8 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     buildId: COORDINATOR_BUILD_ID,
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
-    activePublicKeyHex: coordinatorState.activePublicKeyHex,
+    activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex : undefined,
+    ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: coordinatorActiveKeySummary() } : {}),
     // 钱包身份世代：单 Key 模型下没有 selectedPublicKeyHex（没有可切换的
     // Key），页面只用它判断重置/重新初始化后旧授权是否已经失效。
     walletGeneration: coordinatorState.walletGeneration || undefined,
@@ -13636,10 +6495,19 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhSettings: coordinatorMeta.p2pkhSettings,
     ...(storageIoOwnerPeer ? { storageIoOwnerPeer } : {}),
-    // Worker 重启后 controller 可能尚未惰性创建，但持久化快照已经是
-    // 当前产品意图真值；首个页面不能拿 revision=0 覆盖它。
-    pluginIntent: pluginIntentController?.snapshot() ?? coordinatorMeta.pluginIntent,
   };
+}
+
+/** Display projection must not re-enter an owner capability after its Scope stops.
+ * In-flight tasks remain registered until settlement to fence the next installation.
+ */
+function taskSnapshotKeyScope(runtime: TaskRuntime): { publicKeyHex: string; label?: string } | undefined {
+  if (coordinatorState.vaultStatus !== "unlocked") return undefined;
+  try { return resolveKeyScope(runtime); }
+  catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "lifecycle.scope_revoked") return undefined;
+    throw error;
+  }
 }
 
 function getTaskSnapshots(): CoordinatorTaskSnapshot[] {
@@ -13659,7 +6527,7 @@ function getTaskSnapshots(): CoordinatorTaskSnapshot[] {
       nextRunAt: runtime.nextRunAt,
       error: runtime.error,
       blockedReason: runtime.blockedReason ? { key: "background.blocked.task", fallback: runtime.blockedReason } : undefined,
-      keyScope: resolveKeyScope(runtime),
+      keyScope: taskSnapshotKeyScope(runtime),
     });
   }
 
@@ -13703,7 +6571,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "plugin.intent" ? { pluginIntentRevision: event.pluginIntentRevision ?? event.snapshot?.revision ?? 0 } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot"
       ? {
@@ -13746,94 +6614,25 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
 // 12. Auto-lock Timer
 // ============================================================
 
-function resetAutoLockTimer(): void {
-  if (autoLockTimer) clearTimeout(autoLockTimer);
-  if (sellerKeepsVaultUnlocked()) {
-    autoLockTimer = undefined;
-    coordinatorState.autoLockDeadline = undefined;
-    return;
-  }
-  const timeoutMs = normalizeAutoLockTimeoutMs(
-    coordinatorMeta.autoLockTimeoutMs ?? coordinatorState.autoLockTimeoutMs
-  );
-  coordinatorState.autoLockTimeoutMs = timeoutMs;
-  coordinatorMeta.autoLockTimeoutMs = timeoutMs;
-  // 永不锁定：不清 deadline，直接不设 timer。
-  if (timeoutMs === AUTO_LOCK_NEVER_TIMEOUT_MS) {
-    autoLockTimer = undefined;
-    coordinatorState.autoLockDeadline = undefined;
-    return;
-  }
-  coordinatorState.autoLockDeadline = Date.now() + timeoutMs;
-
-  autoLockTimer = setTimeout(() => {
-    autoLockTimer = undefined;
-    if (
-      coordinatorState.autoLockDeadline &&
-      Date.now() >= coordinatorState.autoLockDeadline &&
-      coordinatorState.vaultStatus === "unlocked"
-    ) {
-      void performGlobalLock("auto-lock-timeout");
-    }
-  }, timeoutMs);
-}
-
 // ============================================================
 // 13. Worker Entry Point
 // ============================================================
 
-async function handleCoordinatorOwnerStorageRpc(
-  request: CoordinatorOwnerStorageData,
-  call: HandlerCallContext,
-): Promise<CoordinatorOwnerStorageResult> {
-  const state = requireCoordinatorSessionPeer(call);
-  if (call.signal.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-  const value = await executeOwnerStorageData(request, state.peer.peerId, call.signal);
-  if (call.signal.aborted) throw storageUnavailableError("Owner storage request was cancelled");
-  return value as CoordinatorOwnerStorageResult;
-}
-
-async function handleCoordinatorPlatformStorageRpc(
-  request: CoordinatorPlatformStorageData,
-  call: HandlerCallContext,
-): Promise<CoordinatorPlatformStorageResult> {
-  const state = requireCoordinatorSessionPeer(call);
-  if (call.signal.aborted) throw storageUnavailableError("Platform storage request was cancelled");
-  const value = await executePlatformStorageData(request, state.peer.peerId, call.signal);
-  if (call.signal.aborted) throw storageUnavailableError("Platform storage request was cancelled");
-  return value as CoordinatorPlatformStorageResult;
-}
-
-async function handleCoordinatorCryptoRpc(
-  request: CoordinatorCryptoOperation,
-  call: HandlerCallContext,
-): Promise<CoordinatorCryptoResult> {
-  requireCoordinatorSessionPeer(call);
-  if (call.signal.aborted) throw new Error("Coordinator crypto request was cancelled");
-  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes) {
-    throw Object.assign(new Error("Coordinator crypto is unavailable"), { code: "service_unavailable" });
-  }
-  const capturedEpoch = coordinatorState.sessionEpoch;
-  const result = await withCoordinatorFinalIoLease(
-    "write",
-    call.signal,
-    () => executeCryptoOperation(request, coordinatorState.activePrivateKeyBytes!),
-    {
-      auditOperation: "service.crypto.sign",
-      // 纯本地签名没有外部 I/O 或持久化副作用；返回前仍受 authority lock、
-      // UpgradeGate、AbortSignal 和 session epoch 的多重后置栅栏保护。
-      // 纯本地签名不需要额外的内存 I/O 计数；authority lock 负责 Worker
-      // 唯一性。
-      durableLease: false,
-    },
-  );
-  // The final visibility check is deliberately after the crypto promise and
-  // lease boundary: a lock/key switch must turn an old result into a failure.
-  if (call.signal.aborted || capturedEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked") {
-    throw Object.assign(new Error("Coordinator crypto session became stale"), { code: "service_reference_stale" });
-  }
-  return result;
-}
+const { owner: handleCoordinatorOwnerStorageRpc, platform: handleCoordinatorPlatformStorageRpc } = createStorageRpcHandlers({
+  authorize: call => requireCoordinatorSessionPeer(call).peer.peerId,
+  unavailable: storageUnavailableError,
+  owner: executeOwnerStorageData,
+  platform: executePlatformStorageData,
+});
+const handleCoordinatorCryptoRpc = createWorkerCryptoRpc({
+  authorize: call => { requireCoordinatorSessionPeer(call); },
+  identity: () => ({ unlocked: coordinatorState.vaultStatus === "unlocked", publicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch }),
+  keySession: vaultKeySession,
+  withIoLease: (signal, execute) => withCoordinatorFinalIoLease("write", signal, execute, {
+    auditOperation: "service.crypto.sign",
+    durableLease: false,
+  }),
+});
 
 /** 将领域响应收窄为 typed RPC 的 response DTO；transport requestId 只由框架 callId 承担。 */
 function coordinatorRpcResponse(request: CoordinatorRpcRequest, response: CoordinatorResponse | CoordinatorRpcResponse): CoordinatorRpcResponse {
@@ -13864,6 +6663,7 @@ function coordinatorSessionClosed(peerId: string, binding: CoordinatorSessionBin
 }
 
 const COORDINATOR_SESSION_EXPOSURES = [
+  STORAGE_PRIVATE_BROWSE_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
@@ -13872,7 +6672,7 @@ const COORDINATOR_SESSION_EXPOSURES = [
 /** 当前 owner/session 世代中可向 Window 暴露的 Coordinator 服务。 */
 function coordinatorSessionServicesReady(): boolean {
   return coordinatorState.vaultStatus === "unlocked"
-    && Boolean(coordinatorState.activePublicKeyHex && coordinatorState.activePrivateKeyBytes)
+    && Boolean(coordinatorState.activePublicKeyHex && vaultKeySession.hasKey())
     && Boolean(platformRootStore && platformRootToken)
     && platformStorageReady
     && !storageStartupFailure;
@@ -13900,7 +6700,7 @@ function coordinatorSessionGrantId(state: CoordinatorPeerState, capabilityId: st
  * 暴露 reference 的 serviceInstanceId/grantId 由 WebLoom 生成并绑定到
  * 当前 group；owner 锁定、换 Key、Storage Root 重绑时先撤销旧 group，
  * 下一次 ready 才建立新 group。这样旧 proxy 即使仍在页面中也不能跨越
- * session epoch 或 keyspace generation。
+ * session epoch 或 walletState generation。
  */
 function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void {
   const ready = state.sessionOpen
@@ -13918,7 +6718,9 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
   try {
     state.serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
       capability,
-      options: { grantId: coordinatorSessionGrantId(state, capability.id) },
+      options: capability === STORAGE_PRIVATE_BROWSE_CAPABILITY
+        ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
+        : { grantId: coordinatorSessionGrantId(state, capability.id) },
     })));
     state.serviceExposureIdentity = identity;
   } catch (error) {
@@ -14018,7 +6820,9 @@ async function openCoordinatorSession(
       const serviceExposure = coordinatorSessionServicesReady()
         ? state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
             capability,
-            options: { grantId: coordinatorSessionGrantId(state, capability.id) },
+            options: capability === STORAGE_PRIVATE_BROWSE_CAPABILITY
+        ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
+        : { grantId: coordinatorSessionGrantId(state, capability.id) },
           })))
         : undefined;
       state.serviceExposure = serviceExposure;
@@ -14157,19 +6961,10 @@ const coordinatorTransportPlugin = definePlugin({
   provides: [
     COORDINATOR_RPC_CAPABILITY,
     COORDINATOR_TOPIC_STREAM_CAPABILITY,
-    COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
-    COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
-    COORDINATOR_CRYPTO_RPC_CAPABILITY,
   ] as const,
-  startup: "required",
-  defaultEnabled: true,
-  canDisable: false,
   setup(context) {
     context.handle(COORDINATOR_RPC_CAPABILITY, (request, call) => handleCoordinatorRpc(request, call));
     context.handle(COORDINATOR_TOPIC_STREAM_CAPABILITY, (request, call) => coordinatorTopicStream(request, call));
-    context.handle(COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, (request, call) => handleCoordinatorOwnerStorageRpc(request, call));
-    context.handle(COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, (request, call) => handleCoordinatorPlatformStorageRpc(request, call));
-    context.handle(COORDINATOR_CRYPTO_RPC_CAPABILITY, (request, call) => handleCoordinatorCryptoRpc(request, call));
   },
 });
 
@@ -14181,21 +6976,55 @@ const coordinatorTransportPlugin = definePlugin({
  * 仍需的领域句柄；它不再是第二个对外生命周期 Host。
  */
 const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => {
+  const product = BUILTIN_PLUGIN_DEFINITIONS.find(candidate => candidate.id === unit.productId);
+  const declaration = product?.units.find(candidate => candidate.id === unit.unitId);
+  if (!product || !declaration || declaration.runtime !== "shared-worker") throw new Error(`Missing materialized Worker definition: ${unit.unitId}`);
   return definePlugin({
-    id: `keymaster.coordinator.${unit.productId}`,
-    name: `Keymaster ${unit.productId} Coordinator`,
+    id: unit.productId,
+    name: product.name,
     unitId: unit.unitId,
     runtime: "shared-worker",
-    startup: unit.unitId === "vault.coordinator-worker" ? "required" : "optional",
-    defaultEnabled: true,
-    canDisable: unit.unitId !== "vault.coordinator-worker",
+    provides: declaration.provides.map(capability => {
+      const implementation = [VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY, CONTACTS_PRESENCE_CHANNEL_CAPABILITY, MSFILE_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, COORDINATOR_CRYPTO_RPC_CAPABILITY, WOC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY]
+        .find(candidate => candidate.kind === capability.kind && candidate.id === capability.id && candidate.version === capability.version);
+      if (!implementation) throw new Error(`Worker capability implementation missing: ${capability.id}`);
+      return implementation;
+    }),
+    privateProvides: declaration.privateProvides.map(capability => {
+      if (capability.id === STORAGE_PRIVATE_BROWSE_CAPABILITY.id && capability.kind === STORAGE_PRIVATE_BROWSE_CAPABILITY.kind && capability.version === STORAGE_PRIVATE_BROWSE_CAPABILITY.version) return STORAGE_PRIVATE_BROWSE_CAPABILITY;
+      throw new Error(`Worker private capability implementation missing: ${capability.id}`);
+    }),
+    dependencies: declaration.dependencies,
+    permissions: declaration.permissions,
     async setup(context) {
+      workerConsumers.set(context.consumer, context.scope);
+      context.scope.onRevoke(() => workerConsumers.delete(context.consumer));
       let ready: ReturnType<typeof coordinatorWorkerUnitRegistry.ready>;
       if (unit.unitId === "msfile.coordinator-worker") {
-        await ensureMsfileRuntime(context.instanceId);
+        context.capability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
+        const chainAccess = () => {
+          const query = context.optionalCapability(WOC_CAPABILITY);
+          const broadcast = context.optionalCapability(WOC_WORKER_BROADCAST_CAPABILITY);
+          return query && broadcast ? { ...query, broadcast: broadcast.broadcast.bind(broadcast) } : undefined;
+        };
+        msfileWorkerChainAccess = chainAccess;
+        context.scope.onRevoke(() => { if (msfileWorkerChainAccess === chainAccess) msfileWorkerChainAccess = undefined; });
+        const files = context.capability(STORAGE_FILE_CLIENTS_CAPABILITY);
+        const ownerPublicKeyHex = context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope).snapshot().activePublicKeyHex;
+        if (!ownerPublicKeyHex) throw msfileError("msfile_unavailable", "MSFile requires an active owner");
+        const ownedRuntime = await ensureMsfileRuntime(context.instanceId, { ownerPublicKeyHex, settings: files.bind(context.consumer, context.scope, ""), appSettings: files.bind(context.consumer, context.scope, "app-settings") }, () => context.scope.assertActive());
+        context.scope.onRevoke(() => { if (msfileRuntime === ownedRuntime) releaseMsfileRuntime("unit-revoked"); });
+        context.provide(MSFILE_SERVICE_CAPABILITY, createPublicMsFileService(ownedRuntime, () => context.scope.assertActive()));
         ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, context.instanceId);
       } else if (unit.unitId === "sat-subscription.coordinator-worker") {
-        await ensureSatRuntime(context.instanceId);
+        const p2pkhAccess = async () => {
+          const binding = context.optionalCapability(P2PKH_WORKER_TRANSFER_CAPABILITY);
+          return binding ? binding.getService() : null;
+        };
+        satWorkerP2pkhAccess = p2pkhAccess;
+        context.scope.onRevoke(() => { if (satWorkerP2pkhAccess === p2pkhAccess) satWorkerP2pkhAccess = undefined; });
+        const ownedRuntime = await ensureSatRuntime(context.instanceId, context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""), () => context.scope.assertActive());
+        context.scope.onRevoke(() => { if (satRuntime === ownedRuntime) void releaseSatRuntime("unit-revoked"); });
         ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, context.instanceId);
       } else {
         const activated = activateCoordinatorWorkerUnitForRuntime(unit.unitId, context.instanceId);
@@ -14207,26 +7036,151 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
       if (ready.instanceId !== context.instanceId) {
         throw new Error(`Coordinator Worker unit ready instance mismatch: ${unit.unitId}`);
       }
+      if (unit.productId === "window-p2p") {
+        const owner = context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope).snapshot().activePublicKeyHex;
+        const epoch = coordinatorState.sessionEpoch;
+        if (!owner || context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope).snapshot().status !== "unlocked") throw new Error("Window P2P requires an unlocked owner");
+        context.scope.onRevoke(() => {
+          if (coordinatorWorkerUnitRegistry.get(unit.unitId)?.instanceId === context.instanceId && windowP2pExecutorLease?.sessionEpoch === epoch && windowP2pExecutorLease.ownerPublicKeyHex === owner) clearWindowP2pExecutorLeaseLocked();
+        });
+      }
+      if (unit.productId === "sat-subscription") {
+        if (!satRuntime) throw new Error("SatSubscription Worker service is unavailable");
+        context.provide(SAT_SUBSCRIPTION_SERVICE_CAPABILITY, satRuntime.admin);
+        context.provide(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, satRuntime.spi);
+        context.provide(CONTACTS_PRESENCE_CHANNEL_CAPABILITY, createCoordinatorChannelRuntime(() => context.scope.assertActive()));
+      }
+      if (unit.productId === "vault") {
+        vaultCryptoProviderScope = context.scope;
+        context.scope.onRevoke(() => { if (vaultCryptoProviderScope === context.scope) vaultCryptoProviderScope = undefined; });
+        context.handle(COORDINATOR_CRYPTO_RPC_CAPABILITY, handleCoordinatorCryptoRpc);
+        context.provide(VAULT_WALLET_STATE_CAPABILITY, createWalletStateAccess(
+          workerWalletState, context.scope,
+          (consumer, scope) => workerConsumers.get(consumer) === scope,
+        ));
+        context.provide(VAULT_WORKER_CRYPTO_CAPABILITY, Object.freeze({
+          async createActiveKeyCrypto(owner: string) { context.scope.assertActive(); const crypto = await createWorkerActiveKeyCrypto(owner, context.scope); context.scope.assertActive(); return crypto; },
+        }));
+      }
+      if (unit.productId === "woc") {
+        const ownedWoc = testDomainUnitReadiness ? p2pkhWocService : initializeCoordinatorWocService();
+        if (!ownedWoc) throw new Error("WOC Worker service has not been initialized");
+        if (!testDomainUnitReadiness) context.scope.onRevoke(() => { ownedWoc.dispose(); if (p2pkhWocService === ownedWoc) p2pkhWocService = undefined; });
+        const views = createWorkerWocViews(ownedWoc, () => context.scope.assertActive());
+        context.scope.onRevoke(views.dispose);
+        context.provide(WOC_CAPABILITY, views.query);
+        context.provide(WOC_WORKER_BROADCAST_CAPABILITY, views.broadcast);
+        if (!coordinatorDomainMessageBus) throw new Error("Worker message bus has not been initialized");
+        context.provide(WOC_BSV21_CAPABILITY, createWocBsv21Service({ messageBus: coordinatorDomainMessageBus }));
+        context.provide(WOC_STAS_CAPABILITY, createWocStasService({ messageBus: coordinatorDomainMessageBus }));
+        context.provide(WOC_1SAT_ORDINALS_CAPABILITY, createWoc1SatOrdinalsService({ messageBus: coordinatorDomainMessageBus }));
+        if (!testDomainUnitReadiness) {
+          const cleanup = await installCoordinatorDomainTask(createCoordinatorChainHeightTask(ownedWoc), "woc", () => context.scope.assertActive());
+          context.scope.onRevoke(cleanup);
+        }
+      }
+      if (unit.productId === "p2pkh") {
+        if (!testDomainUnitReadiness) {
+          const ports = {
+            storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""),
+            walletState: context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope),
+            crypto: context.capability(VAULT_WORKER_CRYPTO_CAPABILITY),
+            assertActive: () => context.scope.assertActive(),
+          };
+          p2pkhWorkerPorts = ports;
+          context.scope.onRevoke(() => { if (p2pkhWorkerPorts === ports) { p2pkhWorkerPorts = undefined; workerTransferRuntime.release(); } });
+          for (const id of ["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"]) await coordinatorState.taskRuntimes.get(id)?.completion?.catch(() => undefined);
+          context.scope.assertActive();
+          const query = context.capability(WOC_CAPABILITY);
+          p2pkhWorkerWocQuery = query;
+          initializeCoordinatorP2pkhProviders(query, context.capability(WOC_WORKER_BROADCAST_CAPABILITY));
+          const registry = p2pkhRegistry;
+          const snapshots = p2pkhUtxoSnapshots;
+          context.scope.onRevoke(() => {
+            if (p2pkhRegistry === registry) p2pkhRegistry = undefined;
+            if (p2pkhUtxoSnapshots === snapshots) { snapshots?.clearAll(); p2pkhUtxoSnapshots = undefined; }
+            if (p2pkhWorkerWocQuery === query) { p2pkhWorkerWocQuery = undefined; p2pkhWorkerSettings.reset(); }
+          });
+        }
+        context.provide(P2PKH_WORKER_TRANSFER_CAPABILITY, Object.freeze({
+          async getService() {
+            context.scope.assertActive();
+            const service = await workerTransferRuntime.ensure();
+            context.scope.assertActive();
+            return Object.freeze({
+              getGlobalSettings: () => { context.scope.assertActive(); return structuredClone(service.getGlobalSettings()); },
+              async prepareTransfer(input: Parameters<P2pkhService["prepareTransfer"]>[0]) { context.scope.assertActive(); const preview = await service.prepareTransfer(input); context.scope.assertActive(); return preview; },
+              async submitTransfer(preview: unknown) { context.scope.assertActive(); const result = await service.submitTransfer(preview as Parameters<P2pkhService["submitTransfer"]>[0]); context.scope.assertActive(); return result; },
+            });
+          },
+        }));
+        context.provide(P2PKH_ASSET_READER_CAPABILITY, createP2pkhWorkerAssetReader({ walletState: context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope), storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""), snapshots: () => p2pkhUtxoSnapshots, includeTestnet: () => coordinatorMeta.p2pkhSettings?.includeTestnet === true }));
+      }
+      if (unit.productId === "p2pkh" && !testDomainUnitReadiness) {
+        const cleanup = await installP2pkhCoordinatorTasks(context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope), context.capability(WOC_CAPABILITY), () => context.scope.assertActive(), context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""));
+        context.scope.onRevoke(cleanup);
+      }
+      if (unit.productId === "contacts" && !testDomainUnitReadiness) {
+        await installContactsCoordinatorService(context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope), context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, "address-book"), { status: () => context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope).snapshot().status }, () => context.scope.assertActive(), cleanup => context.scope.onRevoke(cleanup), context.capability(CONTACTS_PRESENCE_CHANNEL_CAPABILITY));
+      }
+      if (!testDomainUnitReadiness && ["token-bsv21", "token-stas", "collectible-1satordinals"].includes(unit.productId)) {
+        const walletState = context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope);
+        const p2pkh = context.capability(P2PKH_ASSET_READER_CAPABILITY);
+        const vault = { status: () => walletState.snapshot().status };
+        const notifier = { emit: (event: AssetDataInvalidationEvent) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined };
+        const task = unit.productId === "token-bsv21"
+          ? createBsv21CoordinatorTask({ walletState, p2pkh, vault, stateStore: context.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, "token-state"), woc: context.capability(WOC_BSV21_CAPABILITY), wocService: context.capability(WOC_CAPABILITY), notifier })
+          : unit.productId === "token-stas"
+          ? createStasCoordinatorTask({ walletState, p2pkh, vault, stateStore: context.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, "token-state"), woc: context.capability(WOC_STAS_CAPABILITY), notifier })
+          : createOrdinalsCoordinatorTask({ walletState, p2pkh, vault, woc: context.capability(WOC_1SAT_ORDINALS_CAPABILITY), wocService: context.capability(WOC_CAPABILITY), notifier });
+        const cleanup = await installCoordinatorDomainTask(task, unit.productId, () => context.scope.assertActive());
+        context.scope.onRevoke(cleanup);
+      }
+      if (unit.productId === "storage") {
+        context.provide(STORAGE_FILE_CLIENTS_CAPABILITY, workerStorageClientCapabilities[0].value);
+        context.provide(STORAGE_KV_CLIENTS_CAPABILITY, workerStorageClientCapabilities[1].value);
+        context.handle(COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, handleCoordinatorOwnerStorageRpc);
+        context.handle(COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, handleCoordinatorPlatformStorageRpc);
+        context.scope.onRevoke(() => storageBrowseCoordinator.revokeAll());
+        context.handlePrivate(STORAGE_PRIVATE_BROWSE_CAPABILITY, async (request, call) => {
+          const state = requireCoordinatorSessionPeer(call);
+          const full: StorageBrowsePrivateCommand = {
+            ...request, clientId: state.peer.peerId, requestId: call.operationId ?? generateRequestId(),
+          };
+          const response = await processRequest(full, state.peer.peerId, call.signal);
+          const { requestId: _requestId, ...result } = response;
+          return parseStorageBrowsePrivateResponse(request, result);
+        });
+      }
       return () => stopCoordinatorWorkerUnit(ready.unitId, ready.instanceId);
     },
   });
 });
 
+/** Tests use these production setup definitions through the native Worker Host. */
+export function __testCoordinatorRuntimePlugin(pluginId: string) {
+  const plugin = coordinatorRuntimePlugins.find(plugin => plugin.manifest.id === pluginId);
+  if (!plugin) throw new Error(`Worker plugin not found: ${pluginId}`);
+  return plugin;
+}
+
 // Unit tests import this module in a normal Node realm. The installer above is
 // a no-op when native WebCrypto exists and never enables a fallback unless the
 // realm explicitly reports an insecure context.
 if ((globalThis as unknown as { onconnect?: unknown }).onconnect !== undefined) {
-// WebLoom 0.5.0 在这里创建 SharedWorker Host；它不负责跨 Worker 运行时
+// WebLoom 0.6.0 在这里创建 SharedWorker Host；它不负责跨 Worker 运行时
 // 互斥。Keymaster 在初始化和最终 I/O 前使用自己的 origin 级 authority
 // Web Lock；peer/session/lease/epoch/generation 继续负责页面会话与迟到结果。
 coordinatorRuntimeApp = startSharedWorkerApp({
   id: "keymaster-coordinator",
   plugins: [coordinatorTransportPlugin, ...coordinatorRuntimePlugins],
+  privateCapabilities: storagePrivateCapabilities(),
   expose: [
     COORDINATOR_RPC_CAPABILITY,
     COORDINATOR_TOPIC_STREAM_CAPABILITY,
   ],
   peerExposureAllowlist: [
+    STORAGE_PRIVATE_BROWSE_CAPABILITY,
     COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
     COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
     COORDINATOR_CRYPTO_RPC_CAPABILITY,
@@ -14252,6 +7206,28 @@ coordinatorRuntimeApp = startSharedWorkerApp({
       ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
     };
   },
+});
+let lastFrameworkReadyInstances = "";
+coordinatorRuntimeApp.subscribe(state => {
+  const readyInstances = state.units.filter(unit => unit.state === "enabled")
+    .map(unit => `${unit.unitId}:${unit.instanceId}`).sort().join("|");
+  if (readyInstances === lastFrameworkReadyInstances) return;
+  lastFrameworkReadyInstances = readyInstances;
+  synchronizeCoordinatorTaskUnitInstances();
+  publishCoordinatorWorkerUnitSnapshot();
+  scheduleCoordinatorRuntimeReconcile();
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    const resumes = !testDomainUnitReadiness && runtime.state === "blocked"
+      && isRuntimeAvailabilityBlockedReason(runtime.blockedReason) && !coordinatorTaskBlockedReason(runtime);
+    scheduleRuntime(runtime);
+    if (resumes) {
+      runtime.state = "idle";
+      runtime.blockedReason = undefined;
+      if (runtime.syncPolicy === "smart" || runtime.syncPolicy === "managed" && (runtime.intervalMs ?? 0) > 0) {
+        void executeTask(runtime.id, BACKGROUND_TRIGGER_REASON.INIT).catch(() => undefined);
+      }
+    }
+  }
 });
 installSharedWorkerRetirement(
   coordinatorRuntimeApp,
@@ -14419,8 +7395,7 @@ function publishWalletLifecycleEvent(event: WalletLifecycleEvent): void {
       storageColdStartState = undefined;
       break;
     case "renamed":
-      publishWorkerActiveKeyChanged();
-      break;
+          break;
     case "password-changed":
     case "app-revoked":
       break;
@@ -14436,13 +7411,14 @@ function publishWalletLifecycleEvent(event: WalletLifecycleEvent): void {
  */
 async function bootstrapWalletStorage(): Promise<void> {
   if (!walletStore) {
-    walletStore = createIndexedDbWalletStore();
+    walletStore = storageActivity.wrap(createIndexedDbWalletStore());
   }
+  const vaultStorage = createVaultBootstrapStorage(walletStore);
   if (!walletKeys) {
-    walletKeys = createWalletKeyRepository(walletStore);
+    walletKeys = createWalletKeyRepository(vaultStorage.keys);
   }
   walletLifecycle = createWalletLifecycleService({
-    store: walletStore,
+    store: vaultStorage.lifecycle,
     keys: walletKeys,
     generateWalletGeneration: () => crypto.randomUUID(),
     generateSessionEpoch: () => generateEpoch(),
@@ -14566,13 +7542,13 @@ export function __testSignChannelPrivateMessage(input: {
   privateKeyHex: string;
 }): import("bsv8-channel-protocol/inbox").SignedPrivateMessage {
   const protocol = privateProtocol(input.protocol);
-  return signChannelPrivateMessage({
+  return signPrivateMessageForFixture({
     recipientPublicKeyHex: input.recipientPublicKeyHex,
     protocol,
     body: privateBodyForPublish(protocol, input.content),
     messageId: input.messageId ?? newMessageID(),
     nowMs: input.nowMs,
-    privateKey: parsePrivateKey(cryptoHexToBytes(input.privateKeyHex))
+    privateKeyHex: input.privateKeyHex
   });
 }
 
@@ -14591,8 +7567,8 @@ export function __testGetMsfileSellerLifecycle(): {
 } {
   return {
     ...(coordinatorState.autoLockDeadline === undefined ? {} : { autoLockDeadline: coordinatorState.autoLockDeadline }),
-    indexActive: msfileSellerIndex !== undefined,
-    runtimeActive: msfileSellerRuntime !== undefined,
+    indexActive: msfileBitfsRuntime.msfileSellerIndex !== undefined,
+    runtimeActive: msfileBitfsRuntime.msfileSellerRuntime !== undefined,
   };
 }
 
@@ -14600,7 +7576,7 @@ export function __testGetMsfileSellerLifecycle(): {
 export function __testSetMsfileSellerBridge(
   bridge: { transport: BitfsSellerStreamTransport; protocol: BitfsSellerProtocolPort } | undefined,
 ): void {
-  testMsfileSellerBridge = bridge;
+  msfileBitfsRuntime.testMsfileSellerBridge = bridge;
 }
 
 /** 测试专用：直接投递一条已验证 Hash 请求，验证 Worker 的卖方匹配接线。 */
@@ -14612,7 +7588,7 @@ export async function __testDispatchMsfileSellerHashRequest(
 
 /** 测试专用：观察当前唯一卖方会话数。 */
 export function __testMsfileSellerSessionCount(): number {
-  return msfileSellerSessionManager?.activeCount() ?? 0;
+  return msfileBitfsRuntime.msfileSellerSessionManager?.activeCount() ?? 0;
 }
 
 /** 测试专用：向当前 owner 的 `msfiles/` 根写入一个完整 Seed。 */
@@ -14679,10 +7655,11 @@ export async function __testGetCoordinatorUpgradePartition(): Promise<{ revision
 }
 
 export function __testResetState(): void {
+  testDomainUnitReadiness = true;
   stopCoordinatorKeyValueMaintenance();
-  coordinatorKeyValueMaintenanceStores.clear();
-  revokeAllStorageBrowseAuthorizations();
-  dropStorageBrowseBinding();
+  storageKeyValueMaintenance.clear();
+  storageBrowseCoordinator.revokeAll();
+  storageBrowseCoordinator.dropBinding();
   // Drop domain-owned resources before resetting the compatibility table. The
   // real WebLoom Host must then observe the booting/locked state and tear down
   // its old owner scopes before the next test unlocks a new owner.
@@ -14695,9 +7672,6 @@ export function __testResetState(): void {
   }
   // 测试夹具模拟 Worker 重启：旧意图控制器和 authority 不能继续冒充新实例。
   closeCoordinatorUpgradeSession("Coordinator test Worker reset");
-  pluginIntentControllerOff?.();
-  pluginIntentControllerOff = undefined;
-  pluginIntentController = undefined;
   const previousAuthorityLock = coordinatorAuthorityLock;
   coordinatorAuthorityLock = undefined;
   void previousAuthorityLock?.release().catch((error) => {
@@ -14728,7 +7702,7 @@ export function __testResetState(): void {
   coordinatorChainHeight = emptyChainHeightSnapshot();
   chainHeightRevision = 0;
   cancelSmartSyncIdleTimer();
-  smartSyncDebounceMs = WOC_IDLE_SYNC_DEBOUNCE_MS;
+  backgroundWorkerRuntime.resetDebounce();
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     runtime.controller?.abort();
     if (runtime.timer) clearTimeout(runtime.timer);
@@ -14740,8 +7714,7 @@ export function __testResetState(): void {
   testHarnessActivationSecret = undefined;
   coordinatorState.taskRuntimes.clear();
   coordinatorState.autoLockDeadline = undefined;
-  if (autoLockTimer) clearTimeout(autoLockTimer);
-  autoLockTimer = undefined;
+  vaultAutoLock.pause();
   coordinatorState.lastActivityAt = Date.now();
   for (const state of coordinatorPeers.values()) {
     if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream);
@@ -14762,26 +7735,16 @@ export function __testResetState(): void {
   storageGrants.clear();
   ownerStorageGrants.clear();
   platformStorageGrants.clear();
-  for (const store of workerOwnerStores) store.invalidateBinding();
+  workerStorageClients.invalidateAll();
   storagePortCounts.clear();
-  storageDataActive = 0;
-  storageDataActiveByPort.clear();
-  storageDataWaiters.length = 0;
+  storageDataQueue.resetForTests();
   msfileRequests.clear();
   msfileGrants.clear();
-  rejectMsfileDataWaiters();
-  msfileDataActiveByClient.clear();
-  msfileDataClientLastServed.clear();
-  msfileDataDispatchSequence = 0;
-  msfileDataActive = 0;
-  msfileStatActive = 0;
-  msfileSeedDataActive = 0;
-  msfileBlockDataActive = 0;
+  msfileDataQueue.resetForTests();
   rejectWindowP2pExecutorBridgePending(windowP2pError("ERR_WORKER_RESTARTED", "Window P2P Coordinator runtime restarted"));
   // 测试接缝模拟整个 Worker 被销毁；真实 Worker 重启不会保留旧 Promise。
   activeSatInboundHandlers.clear();
-  windowP2pExecutorBridgeInFlightBytes = 0;
-  windowP2pExecutorBridgeInFlightItems = 0;
+  windowP2pBridgeBudget.reset(new Error("Worker fixture restarted"));
   msfileReadConcurrencySettings = { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
   windowP2pExecutorConfigVersion = 0;
   windowP2pExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
@@ -14792,26 +7755,9 @@ export function __testResetState(): void {
   msfileRuntimeStores = undefined;
   lastMsFileState = undefined;
   satIncomingHandlers.clear();
-  channelSeenMessages.clear();
-  channelHashRequests.clear();
-  channelWebrtcOffers.clear();
-  msfileBitfsBuyerRequests.clear();
-  msfileBitfsBuyerTasks.clear();
-  msfileBitfsBuyerPurchaseTails.clear();
-  msfileBitfsBuyerRecoveryInFlight = undefined;
-  msfileBitfsBuyerRecoveryReady = undefined;
-  msfileBitfsBuyerOfferCounts.clear();
-  msfileBitfsWebRtcBuyerLinks.clear();
-  msfileBitfsWebRtcSellerLinks.clear();
+  channelProtocolRelations.clear();
+  msfileBitfsRuntime.clearBuyerState();
   channelRevision = 0;
-  channelPendingPings.clear();
-  if (channelPendingPingCleanupTimer !== undefined) {
-    clearTimeout(channelPendingPingCleanupTimer);
-    channelPendingPingCleanupTimer = undefined;
-  }
-  channelAutoPongBySender.clear();
-  channelAutoPongWindowStartedAtMs = 0;
-  channelAutoPongCount = 0;
   coordinatorContactsPresenceOff?.();
   coordinatorContactsPresenceOff = undefined;
   coordinatorContactsService?.dispose?.();
@@ -14822,8 +7768,7 @@ export function __testResetState(): void {
   p2pkhRegistry = undefined;
   p2pkhWocService = undefined;
   contactsPresenceRevision = 0;
-  lastContactsPresenceState = undefined;
-  contactsPresencePublishTail = Promise.resolve();
+  contactsPresenceProjection.reset();
   channelPublicSubscribers.clear();
   channelPrivateSubscribers.clear();
   channelSubscriptionStatusSubscribers.clear();
@@ -14832,21 +7777,23 @@ export function __testResetState(): void {
   testSatInboundResponseDispatcher = undefined;
   satRevision = 0;
   lastSatState = undefined;
-  msfileMutationTail = Promise.resolve();
+  msfileBitfsRuntime.resetControlQueue();
   clearWindowP2pExecutorLeaseLocked();
   windowP2pExecutorIdentityTail = Promise.resolve();
-  msfileMutationTail = Promise.resolve();
+  msfileBitfsRuntime.resetControlQueue();
   storageStateTail = Promise.resolve();
   storageMutationTail = Promise.resolve();
   storageController = testStorageRuntimeOverride;
   coordinatorRequestTail = Promise.resolve();
   testP2pkhBroadcastProvider = undefined;
   p2pkhUtxoSnapshots?.clearAll();
+  workerWalletState.publish();
 }
 
 export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePublicKeyHex?: string): void {
   coordinatorState.vaultStatus = status;
   coordinatorState.activePublicKeyHex = activePublicKeyHex;
+  workerWalletState.publish();
 }
 
 export function __testSetP2pkhBroadcastProvider(provider: P2pkhTransactionBroadcastProvider | undefined): void {
@@ -14923,8 +7870,8 @@ export async function __testReleaseSatRuntime(): Promise<void> {
  * 收敛本身由订阅推式触发；这里只把在途的 Promise 交给测试 await，不引入轮询。
  */
 export async function __testAwaitMsfileSellerDependencyResume(): Promise<void> {
-  await msfileSellerDependencyResume?.catch(() => undefined);
-  msfileSellerDependencyResume = undefined;
+  await msfileBitfsRuntime.msfileSellerDependencyResume?.catch(() => undefined);
+  msfileBitfsRuntime.msfileSellerDependencyResume = undefined;
 }
 
 export function __testFailNextCoordinatorSnapshotPersist(): void {
@@ -14963,24 +7910,24 @@ export async function __testP2pkhProviderConfigGet(providerId: string): Promise<
 }
 
 export async function __testSeedP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submission: unknown; claims?: unknown[] }): Promise<void> {
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const walletState = createWorkerWalletState();
+  if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   await repository.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never });
 }
 
 export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submissionId: string; localState: "local-confirmed" | "isolated" }): Promise<void> {
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const walletState = createWorkerWalletState();
+  if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   await repository.finishLocalSubmission({ submissionId: input.submissionId, localState: input.localState });
 }
 
 export async function __testSetP2pkhChainResolution(input: { ownerPublicKeyHex: string; submissionId: string; chainResolution: "unresolved" | "chain-confirmed" }): Promise<void> {
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const walletState = createWorkerWalletState();
+  if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   const row = (await repository.listLocalTransactions()).find((candidate) => candidate.id === input.submissionId);
@@ -14990,16 +7937,16 @@ export async function __testSetP2pkhChainResolution(input: { ownerPublicKeyHex: 
 }
 
 export async function __testListP2pkhLocalTransactions(ownerPublicKeyHex: string): Promise<unknown[]> {
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const walletState = createWorkerWalletState();
+  if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   return repository.listLocalTransactions();
 }
 
 export async function __testListP2pkhLocalInputClaims(ownerPublicKeyHex: string): Promise<unknown[]> {
-  const keyspace = createWorkerKeyspace();
-  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const walletState = createWorkerWalletState();
+  if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   await satRuntimeRelease.catch(() => undefined);
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerModuleFileStore("p2pkh", "")));
   return repository.listLocalInputClaims();
@@ -15167,8 +8114,8 @@ export function __testWindowP2pInboundBridgePressure(input: { attempts?: number;
       acceptedEventIds.push(eventId);
     }
   }
-  const peakBytes = windowP2pExecutorBridgeInFlightBytes;
-  const peakItems = windowP2pExecutorBridgeInFlightItems;
+  const peakBytes = windowP2pBridgeBudget.snapshot().bytes;
+  const peakItems = windowP2pBridgeBudget.snapshot().items;
   for (const eventId of acceptedEventIds) {
     releaseWindowP2pExecutorInboundEvent({ connectionId: "test-connection", eventId }, lease.leaseId);
   }
@@ -15178,8 +8125,8 @@ export function __testWindowP2pInboundBridgePressure(input: { attempts?: number;
     rejected: attempts - accepted,
     peakBytes,
     peakItems,
-    releasedBytes: windowP2pExecutorBridgeInFlightBytes,
-    releasedItems: windowP2pExecutorBridgeInFlightItems,
+    releasedBytes: windowP2pBridgeBudget.snapshot().bytes,
+    releasedItems: windowP2pBridgeBudget.snapshot().items,
   };
 }
 
@@ -15215,9 +8162,9 @@ export async function __testWindowP2pResponseBridgePressure(input: { attempts?: 
   const controllers = Array.from({ length: attempts }, () => new AbortController());
   const reservations = controllers.map((controller) => reserveWindowP2pExecutorBridgeBytes(reservedBytes, controller.signal).then(() => undefined, () => undefined));
   await Promise.resolve();
-  const accepted = windowP2pExecutorBridgeInFlightItems;
-  const queued = windowP2pExecutorBridgeBudgetWaiters.length;
-  const peakBytes = windowP2pExecutorBridgeInFlightBytes;
+  const accepted = windowP2pBridgeBudget.snapshot().items;
+  const queued = windowP2pBridgeBudget.snapshot().queued;
+  const peakBytes = windowP2pBridgeBudget.snapshot().bytes;
   const peakItems = accepted + queued;
   // 取消尚未准入的 waiter，再释放已经准入的操作，避免测试 helper 留下
   // 全局 bridge 状态或未处理 rejection 影响后续测试。
@@ -15231,8 +8178,8 @@ export async function __testWindowP2pResponseBridgePressure(input: { attempts?: 
     queued,
     peakBytes,
     peakItems,
-    releasedBytes: windowP2pExecutorBridgeInFlightBytes,
-    releasedItems: windowP2pExecutorBridgeInFlightItems,
+    releasedBytes: windowP2pBridgeBudget.snapshot().bytes,
+    releasedItems: windowP2pBridgeBudget.snapshot().items,
   };
 }
 
@@ -15347,8 +8294,8 @@ export function __testSatInboundHandlerSnapshot(): {
   return {
     active: activeSatInboundHandlers.size,
     canceled: [...activeSatInboundHandlers.values()].filter((task) => task.canceled).length,
-    bridgeBytes: windowP2pExecutorBridgeInFlightBytes,
-    bridgeItems: windowP2pExecutorBridgeInFlightItems,
+    bridgeBytes: windowP2pBridgeBudget.snapshot().bytes,
+    bridgeItems: windowP2pBridgeBudget.snapshot().items,
     maxActive: SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxActiveWorkerInboundHandlers,
   };
 }
@@ -15415,8 +8362,7 @@ export async function __testDispatchStorageBrowseOpen(actualPortId: string): Pro
 
 /** 测试：已发放浏览授权是否仍被 Coordinator 认作受信任端口的授权。 */
 export function __testHasStorageBrowseAuthorization(peerId: string): boolean {
-  for (const record of storageBrowseAuthorizations.values()) if (record.peerId === peerId) return true;
-  return false;
+  return storageBrowseCoordinator.hasClientAuthorization(peerId);
 }
 
 export function __testSeedStorageRequest(requestId: string, actualPortId: string, connectSessionId?: string): AbortSignal {
@@ -15559,6 +8505,15 @@ export async function __testCloseCoordinatorBridgePeer(
   await state.drainPromise;
 }
 
+/** Domain fixture: hold a normal request without starting network I/O. */
+export function __testHoldCoordinatorFifo(): () => void {
+  const previous = coordinatorRequestTail;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  coordinatorRequestTail = previous.then(() => held);
+  return release;
+}
+
 export async function __testDispatchStorageMessage(clientId: string, request: CoordinatorClientRequest): Promise<void> {
   const sink = coordinatorTestEventSinks.get(clientId);
   if (!sink) return;
@@ -15587,7 +8542,7 @@ export async function __testDispatchStorageMessage(clientId: string, request: Co
     for (const [grantId, grant] of storageGrants) if (grant.clientId === clientId) storageGrants.delete(grantId);
     for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === clientId) ownerStorageGrants.delete(grantId);
     // 浏览句柄绑定端口：断开即作废，不能留给重连后的页面继续用。
-    storageBrowseRuntime?.revokeClient(clientId);
+    storageBrowseCoordinator.revokeClient(clientId);
     for (const [grantId, grant] of platformStorageGrants) if (grant.clientId === clientId) platformStorageGrants.delete(grantId);
     for (const [grantId, grant] of msfileGrants) if (grant.clientId === clientId) msfileGrants.delete(grantId);
     coordinatorTestEventSinks.delete(clientId);
@@ -15598,7 +8553,7 @@ export async function __testDispatchStorageMessage(clientId: string, request: Co
 }
 
 export function __testStorageQueueSnapshot(): { globalActive: number; queued: number; perPort: Record<string, number> } {
-  return { globalActive: storageDataActive, queued: storageDataWaiters.length, perPort: Object.fromEntries(storagePortCounts) };
+  return { globalActive: storageDataQueue.snapshot().active, queued: storageDataQueue.snapshot().queued, perPort: Object.fromEntries(storagePortCounts) };
 }
 
 /** Deterministically exercise queue-full and both cancellation paths. */
@@ -15672,6 +8627,15 @@ export async function __testStorageCancelKeepsPhysicalSlots(): Promise<{
   };
 }
 
+/** 调度单测显式装配依赖单元；不会替代生产服务装配或框架边界验收。 */
+export function __testReadyWorkerUnit(unitId: string): void {
+  const descriptor = COORDINATOR_WORKER_UNIT_CATALOG.find(candidate => candidate.unitId === unitId);
+  const unit = descriptor?.scopeKind === "root" || descriptor?.scopeKind === "storage"
+    ? coordinatorWorkerUnitRegistry.activate(unitId)
+    : activateCoordinatorOwnerWorkerUnit(unitId);
+  coordinatorWorkerUnitRegistry.ready(unitId, unit.instanceId);
+}
+
 export function __testRegisterTask(input: {
   id: string;
   /** 测试任务所属产品；已登记的真实任务省略时从 Worker 单元目录推导。 */
@@ -15708,7 +8672,7 @@ export async function __testCancelByKey(publicKeyHex: string): Promise<boolean> 
 
 export function __testInvalidateSession(): void {
   coordinatorState.sessionEpoch = generateEpoch();
-  workerKeyspaceRevision++;
+  workerWalletState.publish();
 }
 
 /**
@@ -15721,7 +8685,7 @@ export function __testInvalidateSession(): void {
  */
 export function __testAdvanceWalletGeneration(): void {
   coordinatorState.walletGeneration = `test-wallet-generation-${crypto.randomUUID()}`;
-  workerKeyspaceRevision++;
+  workerWalletState.publish();
 }
 
 export async function __testBackgroundRunNow(taskId: string): Promise<CoordinatorResponse> {
@@ -15742,7 +8706,7 @@ export function __testGetAutolockTimeoutMs(): number {
 
 /** 测试专用：调整智能调度 2 秒计时，避免测试等待真实时长。 */
 export function __testSetSmartSyncDebounceMs(ms: number): void {
-  smartSyncDebounceMs = Math.max(0, Math.floor(ms));
+  backgroundWorkerRuntime.setDebounce(ms);
 }
 
 /** 测试专用：模拟 WoC 队列事件，驱动智能调度计时。 */
@@ -15752,7 +8716,7 @@ export function __testNotifyWocQueueChange(snapshot: WocQueueSnapshot): void {
 
 /** 测试专用：读取智能调度计时状态。 */
 export function __testSmartSyncState(): { pending: boolean; debounceMs: number } {
-  return { pending: smartSyncIdleTimer !== undefined, debounceMs: smartSyncDebounceMs };
+  return backgroundWorkerRuntime.smartState();
 }
 
 /** 测试专用：模拟解锁 / 初始化后的立即同步。 */
@@ -15770,10 +8734,9 @@ export async function __testSeedCoordinatorSettingsSnapshot(settings: unknown): 
   await persistCoordinatorSettings(structuredClone(settings) as CoordinatorSettingsSnapshot);
 }
 
-export function __testCoordinatorSnapshotMetrics(): Record<"settings" | "pluginIntent", { revision: number; writes: number }> {
+export function __testCoordinatorSnapshotMetrics(): Record<"settings", { revision: number; writes: number }> {
   return {
     settings: snapshotWriteMetrics("coordinator.settings.persist"),
-    pluginIntent: snapshotWriteMetrics("coordinator.plugin-intent.persist"),
   };
 }
 

@@ -1,3 +1,4 @@
+import { useProtocolResources } from "./ProtocolResourceContext.js";
 // packages/plugin-protocol/src/ProtocolPopupPage.tsx
 // 对外协议 popup 页面。
 //
@@ -24,8 +25,9 @@
 //   - 文案中文；错误 message 原样显示英文。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCapability, useHasCapability, useResource, useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { usePluginCapability, useHasPluginCapability } from "webloom-framework/react";
+import { useResourceView, useResourceViewSelector } from "@keymaster/runtime";
+import { usePluginI18n } from "@keymaster/runtime";
 import {
   MSFILE_SERVICE_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
@@ -65,14 +67,14 @@ function openWalletHomepage(): void {
 }
 
 export function ProtocolPopupPage() {
-  const service = useCapability(PROTOCOL_SERVICE_CAPABILITY);
-  const host = usePluginHost();
-  const { t } = useI18n();
+  const service = usePluginCapability(PROTOCOL_SERVICE_CAPABILITY);
+  const resources = useProtocolResources();
+  const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
-  const protocolState = useResource<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }>(host.resourceStore, "protocol.state", []);
+  const protocolState = useResourceView<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }>(resources, "protocol.state", []);
   const snap = protocolState.data?.snapshot ?? service.snapshot();
   const feed = protocolState.data?.feed ?? service.feedSnapshot();
-  const vaultStatus = useResourceSelector<string, string>(host.resourceStore, "protocol.vault-status", [], (s) => s.data ?? "locked");
+  const vaultStatus = useResourceViewSelector<string, string>(resources, "protocol.vault-status", [], (s) => s.data ?? "locked");
   const [originSettingsOpen, setOriginSettingsOpen] = useState(false);
   const [now, setNow] = useState<number>(() => Date.now());
   const feedTopRef = useRef<HTMLDivElement | null>(null);
@@ -333,7 +335,7 @@ type MsFileApprovalServiceLike = {
 };
 
 function useVaultUnlocked(): boolean {
-  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
+  const vault = usePluginCapability(VAULT_SERVICE_CAPABILITY);
   try {
     return vault.status() === "unlocked";
   } catch {
@@ -342,19 +344,19 @@ function useVaultUnlocked(): boolean {
 }
 
 function MsFileApprovalSection({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
-  const hasMsfile = useHasCapability(MSFILE_SERVICE_CAPABILITY);
+  const hasMsfile = useHasPluginCapability(MSFILE_SERVICE_CAPABILITY);
   if (!hasMsfile) return null;
   return <MsFileApprovalSectionInner t={t} />;
 }
 
 function MsFileApprovalSectionInner({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
   // 仅在 has("msfile.service") 为真时挂载，hook 顺序稳定。
-  const service = useCapability(MSFILE_SERVICE_CAPABILITY);
-  const host = usePluginHost();
+  const service = usePluginCapability(MSFILE_SERVICE_CAPABILITY);
+  const resources = useProtocolResources();
   // 审批列表订阅走 Resource Store（plugin-msfile 注册的 msfile.status 资源）。
-  const statusResource = useResourceSelector<{ approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }, { approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }>(
-    host.resourceStore,
-    "msfile.status",
+  const statusResource = useResourceViewSelector<{ approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }, { approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }>(
+    resources,
+    "protocol.msfile-approvals",
     [],
     (snapshot) => snapshot.data ?? { approvals: service.listPendingApprovals() },
     (a, b) => JSON.stringify(a.approvals) === JSON.stringify(b.approvals)
@@ -470,7 +472,7 @@ function LockScreenPage({
   summary: ProtocolLockSummary | null;
   now: number;
 }) {
-  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
+  const vault = usePluginCapability(VAULT_SERVICE_CAPABILITY);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -622,11 +624,11 @@ function AppViewBootstrapDonePage({
   appId: string;
 }) {
   const [openError, setOpenError] = useState<string | null>(null);
-  const host = usePluginHost();
+  const resources = useProtocolResources();
   // 订阅 service 快照：等待态 / 软超时态 / childReady 变化时重渲染。
   // `childReady` 一旦翻 true，整个组件树在父级切回主 popup，本组件被卸。
   // 这里订阅主要服务于"等待态 + 软超时态"两件事。
-  const bootstrapState = useResource<{ waiting: boolean; timedOut: boolean }>(host.resourceStore, "protocol.app-bootstrap", []);
+  const bootstrapState = useResourceView<{ waiting: boolean; timedOut: boolean }>(resources, "protocol.app-bootstrap", []);
   const waitingForChildReady = bootstrapState.data?.waiting ?? service.appClientWaitingForReady();
   const connectTimedOut = bootstrapState.data?.timedOut ?? service.appClientConnectTimedOut();
 

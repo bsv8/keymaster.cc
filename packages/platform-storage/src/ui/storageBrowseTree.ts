@@ -8,7 +8,7 @@
 //      只返回 objects，页面不再做第二次去重。
 //   2. 折叠出的目录不代表它已被扫描完成。跨页时同一个子目录会在多页重复出现，
 //      所以节点身份是完整路径，合并后仍要靠 nextCursor 判断是否还有后续页。
-import type { StorageBrowseEntry } from "@keymaster/contracts";
+import type { StorageBrowseEntry } from "../runtime/storageBrowseTypes.js";
 
 /** 目录标记对象的内容类型；只有它才让一个对象成为目录。 */
 export const BROWSE_DIRECTORY_CONTENT_TYPE = "application/x-directory";

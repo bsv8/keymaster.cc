@@ -26,7 +26,7 @@ export interface ApplicationBootstrapSnapshot {
    * degraded 都必须 fail closed，不能折算成本字段为 true。
    */
   storageReady: boolean;
-  /** Vault 和 Keyspace capability 是否都已注册。 */
+  /** Vault 和 WalletState capability 是否都已注册。 */
   vaultCapabilityReady: boolean;
   /** 是否已经存在 unlocked active key；owner apps 的前置条件。 */
   hasUnlockedActiveKey: boolean;
@@ -36,8 +36,8 @@ export interface ApplicationBootstrapSnapshot {
   ownerAppsReady: boolean;
   /** Connect apps 是否已经完成装配。 */
   connectAppsReady: boolean;
-  /** Asset Workspace 是否已经完成注册。 */
-  assetWorkspaceReady: boolean;
+  /** 资产与藏品目录插件是否已经就绪。 */
+  assetCatalogsReady: boolean;
   /** 装配失败时的脱敏错误信息。 */
   error?: string;
 }

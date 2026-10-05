@@ -1,69 +1,24 @@
+import { createScopedStorageClients } from "@keymaster/platform-storage/assembly";
+import { coordinatorClientBindings } from "./assembly/coordinatorClientBindings.js";
 // apps/web/src/bootstrapPlugins.ts
-// 装配插件：按 manifest 声明的四阶段门禁注册。
-// 设计缘由：apps/web 是装配层，只 import manifest，不 import 内部服务。
-// 插件注册阶段顺序：storage-onboarding -> vault-selection -> owner-apps-ready
-// -> connect-apps-ready。每个阶段内部仍按 catalog 的依赖顺序执行。
-//
-// 硬切换 003：把 shell 自身 i18n 资源（apps/web 装配层）通过 initialI18nResources
-// 注入；plugin 注册前可被 t() 命中。
-//
-// 硬切换 001：bootstrap 不再等价于"ordered = 全部一定装载"。
-//   - registerAll 把每个 manifest 加入 host 已知集合；
-//   - host 内部根据平台 settings K-V + manifest.meta.defaultEnabled
-//     决定每个 plugin 初始是否 enable。
-//   - 因此每个阶段仍由 host 根据全局配置决定 optional 插件是否启用；
-//     required/immutable 插件始终由 host 保证可用。
+// 全部插件由依赖图登记和启动；阶段只描述页面可观察的启动状态。
 
-import {
-  ASSET_DATA_NOTIFIER_CAPABILITY,
-  APPLICATION_BOOTSTRAP_READY_CAPABILITY,
-  COORDINATOR_ACTIVITY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
-  RESOURCE_REGISTRY_CAPABILITY,
-  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
-  type KeyValueCommitInput,
-  type KeyValueCommitResult,
-  type KeyValueEntry,
-  type KeyValueEntryMeta,
-  type KeyValueListInput,
-  type KeyValueListResult,
-  type KeyValueStore,
-  type KeyValueValue,
-  type PluginBootstrapStage,
-  type PluginManifest,
-  type AssetDataNotifier,
-  type SessionCoordinatorClient,
-  type StorageCoordinatorControl,
-  type StorageBrowseCoordinatorControl,
-  type VaultCoordinatorControl,
-  type BackgroundCoordinatorControl,
-  type P2pkhCoordinatorControl,
-  type MsFileCoordinatorControl,
-  type SatCoordinatorControl,
-  type WindowP2pCoordinatorControl,
-  type ProtocolCoordinatorControl,
-  type ContactsCoordinatorControl,
-  type PluginPermission,
-  type RuntimeIdentityTransition,
-  CENTRAL_STORAGE_DECLARATIONS,
-  type PluginStorageDeclaration,
-} from "@keymaster/contracts";
+import { storagePrivateCapabilities, storagePrivateSlotBindings } from "./assembly/storagePrivateCapabilities.js";
+import { ASSET_DATA_NOTIFIER_CAPABILITY, APPLICATION_BOOTSTRAP_READY_CAPABILITY, COORDINATOR_ACTIVITY_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, type KeyValueCommitInput, type KeyValueCommitResult, type KeyValueEntry, type KeyValueEntryMeta, type KeyValueListInput, type KeyValueListResult, type KeyValueStore, type KeyValueValue, type PluginManifest, type AssetDataNotifier, type SessionCoordinatorClient, type StorageCoordinatorControl, type VaultCoordinatorControl, type BackgroundCoordinatorControl, type P2pkhCoordinatorControl, type MsFileCoordinatorControl, type SatCoordinatorControl, type WindowP2pCoordinatorControl, type ProtocolCoordinatorControl, type ContactsCoordinatorControl, type PluginPermission, type RuntimeIdentityTransition, CENTRAL_STORAGE_DECLARATIONS, type PluginStorageDeclaration } from "@keymaster/contracts";
 import {
   type WindowApp,
 } from "webloom-framework";
-import type { PluginIntentCoordinator, PluginIntentSnapshot } from "webloom-framework";
 import { createWindowAppFromHost } from "webloom-framework/advanced";
 import type { ApplicationBootstrapPhase, ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
 import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
-import { attachKeymasterRemoteRuntime, createKeymasterPluginHost as createPluginHost, getWebLoomHost, type PluginHost } from "@keymaster/runtime";
+import { type PluginHost } from "@keymaster/runtime";
+import { attachKeymasterRemoteRuntime, createKeymasterPluginHost as createPluginHost, getWebLoomHost } from "@keymaster/runtime/assembly";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
 import { bsvPriceConfig } from "./pluginConfigs.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
 import { createWebRuntimeUnitImplementationRegistry } from "./runtimeUnitImplementations.js";
 import { SHELL_RESOURCES } from "./i18n/resources.js";
-import { registerShellResources } from "./shell/shellResources.js";
-import { registerAssetWorkspace } from "./system/registerAssetWorkspace.js";
+import { registerApplicationBootstrapResource } from "./bootstrapResource.js";
 import { formatStartupErrorSummary } from "./startupErrorSummary.js";
 import {
   attachBootstrapErrorContext,
@@ -138,14 +93,9 @@ export class CoordinatorStartupError extends Error {
 
 export const WEB_STARTUP_REQUIRED_CAPABILITIES = [
   VAULT_SERVICE_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
 ] as const;
 
-const EMPTY_PLUGIN_INTENT_SNAPSHOT: PluginIntentSnapshot = {
-  revision: 0,
-  desiredEnabled: {},
-  desiredRevision: {},
-};
 
 /**
  * 计算身份切换时仍可公开的最早应用装配阶段。
@@ -172,7 +122,7 @@ export function applicationBootstrapPhaseForStorageReadiness(
  *
  * 单 Key 本地存储之后没有远程连接与桶选择：`ready` 与 `locked` 都是
  * 正常的启动状态，差别只是钱包是否已解密。两者都必须放行到
- * vault-selection——否则 locked 冷启动永远拿不到 Vault/Keyspace 能力，
+ * vault-selection——否则 locked 冷启动永远拿不到 Vault/WalletState 能力，
  * 也就没有解锁入口。
  *
  * `uninitialized` 是尚未创建 Key，需要先走初始化入口；`corrupt` /
@@ -197,6 +147,7 @@ function runtimeIdentityFromSnapshot(
     vaultStatus: snapshot.vaultStatus,
     ownerPublicKeyHex: snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined,
     sessionEpoch: snapshot.sessionEpoch,
+    runGeneration: snapshot.runGeneration,
     ...(snapshot.walletGeneration ? { walletGeneration: snapshot.walletGeneration } : {}),
   };
 }
@@ -243,32 +194,11 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
   ]);
 }
 
-/**
- * Storage 插件专用 facade：页面侧 StorageRuntimeController 与只读浏览代理所需 RPC。
- *
- * 浏览的三条 RPC 合并在这里而不是另开一个 plugin id：Worker 侧只认
- * `storage.window` 这一个受信任运行单元，而该单元正是 storage 产品的 window
- * 单元。拆成另一个插件会凭空多出一个带根浏览权限的产品级 id，与「不向普通
- * 插件发放根浏览权限」相冲突。
- */
-export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl & StorageBrowseCoordinatorControl {
-  return bindCoordinatorMethods<StorageCoordinatorControl & StorageBrowseCoordinatorControl>(client, [
+/** Storage 的公开控制面；根浏览只经 Storage 包内私有 capability。 */
+export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl {
+  return bindCoordinatorMethods<StorageCoordinatorControl>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
-    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
-    "storageBrowseOpen", "storageBrowseData", "storageBrowseClose"
-  ]);
-}
-
-/**
- * 存储浏览专用的窄 Coordinator 面。
- *
- * 它与 createStorageCoordinatorClient 分开：后者带 Connect grant 与 owner 绑定，
- * 而浏览只需要只读的三条 RPC。误把其中一份发出去也不会连带放大可见范围。
- */
-export function createStorageBrowseCoordinatorClient(client: SessionCoordinatorClient): StorageBrowseCoordinatorControl {
-  return bindCoordinatorMethods<StorageBrowseCoordinatorControl>(client, [
-    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
-    "storageBrowseOpen", "storageBrowseData", "storageBrowseClose"
+    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort"
   ]);
 }
 
@@ -276,14 +206,14 @@ export function createStorageBrowseCoordinatorClient(client: SessionCoordinatorC
 export function createVaultCoordinatorClient(client: SessionCoordinatorClient): VaultCoordinatorControl {
   const facade = bindCoordinatorMethods<VaultCoordinatorControl>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic",
-    "unlock", "lock", "vaultOperation", "crypto", "storageControl", "autolockSettingsUpdate"
+    "unlock", "lock", "vaultOperation", "crypto", "storageControl", "autolockSettingsUpdate", "sendActivity"
   ]);
   return facade;
 }
 
 /**
  * 按 manifest.id 生成插件专属 Coordinator 面。这个映射只在 Host 装配时
- * 执行一次；插件 setup 通过 `ctx.coordinator` 取得已经绑定身份的对象，
+ * 执行一次；插件 setup 通过声明的 client-binding 能力核对真实实例后取得对象，
  * 不再通过字符串 capability 取得其它插件的 RPC。
  */
 export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, pluginId: string): unknown {
@@ -499,7 +429,7 @@ export async function registerPluginWithTimeout(
   host: PluginHost,
   plugin: PluginManifest,
   timeoutMs = BOOTSTRAP_PLUGIN_TIMEOUT_MS,
-  stage: PluginBootstrapStage | undefined = plugin.bootstrapStage
+  stage: BootstrapErrorStage = "bootstrap"
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -595,7 +525,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
     // 仍在后台尽力执行，不能反过来阻塞新 Worker 的接管判定。
     coordinatorClient.shutdown();
-    const cleanup = pageWindowApp?.dispose("pagehide") ?? pageHost?.dispose("pagehide");
+    const cleanup = pageHost?.dispose("pagehide");
     if (cleanup) {
       void cleanup.catch(() => undefined);
     }
@@ -620,32 +550,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     window.addEventListener("pagehide", onPageHide);
   }
   try {
-    // 插件启停命令的唯一写入面是 SharedWorker。页面 Host 只缓存并投影
-    // Worker 快照；命令本身由 UI 通过 host.submitIntent() 发送到这里。
-    const pluginIntentCoordinator: PluginIntentCoordinator = {
-      get authorityInstanceId() {
-        return coordinatorClient.getBootstrapSnapshot().authorityInstanceId;
-      },
-      snapshot() {
-        const snapshot = coordinatorClient.getBootstrapSnapshot().pluginIntent;
-        return snapshot
-          ? {
-              revision: snapshot.revision,
-              desiredEnabled: { ...snapshot.desiredEnabled },
-              desiredRevision: { ...snapshot.desiredRevision },
-            }
-          : { ...EMPTY_PLUGIN_INTENT_SNAPSHOT };
-      },
-      submit(command) {
-        return coordinatorClient.pluginIntentSubmit(command);
-      },
-      subscribe(listener) {
-        return coordinatorClient.subscribeTopic("plugin.intent", (event) => {
-          if (event.type === "plugin.intent.changed") listener(event.snapshot);
-        });
-      },
-    };
-
     const runtimeUnitImplementationRegistry = runWithBootstrapErrorContext({
       stage: "bootstrap",
       operation: "create-runtime-unit-registry"
@@ -654,15 +558,16 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       stage: "coordinator",
       operation: "read-initial-runtime-identity"
     }, () => runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot()));
-  const host = runWithBootstrapErrorContext({
+  const host: PluginHost = runWithBootstrapErrorContext({
     stage: "bootstrap",
     operation: "create-plugin-host"
   }, () => createPluginHost({
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd,
-    storageBindingAuthority: createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }),
-    coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId),
-    pluginIntentCoordinator,
+    privateCapabilities: storagePrivateCapabilities(),
+    runtimeSlotBindings: storagePrivateSlotBindings("default"),
+    capabilities: [...coordinatorClientBindings(pluginId => createPluginCoordinatorFacade(coordinatorClient, pluginId)),
+      ...createScopedStorageClients(createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }), id => host.getManifest(id))],
     // 真实 RuntimeHandle 在 WindowApp 建立后再 attach；Host 创建阶段不读取
     // Worker、不会把尚未完成的远端目录当成本地 capability。
     // 生产 Window Host 只从当前环境实现注册表取得 setup；静态 manifest
@@ -693,6 +598,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       const snapshot = coordinatorClient.getBootstrapSnapshot();
       return {
         sessionEpoch: snapshot.sessionEpoch,
+    runGeneration: snapshot.runGeneration,
         ownerPublicKeyHex: snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined,
         walletGeneration: snapshot.walletGeneration,
       };
@@ -772,7 +678,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     vaultSelectionReady: false,
     ownerAppsReady: false,
     connectAppsReady: false,
-    assetWorkspaceReady: false
+    assetCatalogsReady: false
   }));
   runWithBootstrapErrorContext({
     stage: "storage-status",
@@ -781,50 +687,21 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   runWithBootstrapErrorContext({
     stage: "storage-status",
     operation: "register-shell-resources"
-  }, () => registerShellResources(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY), bootstrapStatus.service));
+  }, () => registerApplicationBootstrapResource(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY), bootstrapStatus.service));
 
   // 硬切换 003：直接转发 Coordinator event 给 runtime notifier
   // 装配层只负责转发，合并语义由 runtime notifier 实现
-  const dataNotifier = runWithBootstrapErrorContext({
-    stage: "transport",
-    operation: "get-asset-data-notifier"
-  }, () => host.capabilities.get(ASSET_DATA_NOTIFIER_CAPABILITY));
   runWithBootstrapErrorContext({
     stage: "transport",
     operation: "subscribe-asset-data-changes"
   }, () => coordinatorClient.subscribeTopic("asset.data-changed", (event) => {
     if (event.type === "asset.data-changed") {
-      dataNotifier.emit(event);
+      host.capabilities.get(ASSET_DATA_NOTIFIER_CAPABILITY)?.emit(event);
     }
   }));
 
-  // 硬切换 004：启动清单按 manifest.meta.bootstrapStage 分成四道门禁。
-  // 阶段字段是唯一真值；这里不能根据 pluginId、kind 或 storage scope 猜测。
   const bitfsE2e = import.meta.env.VITE_BITFS_E2E === "true";
   const fullCatalog = [...WEB_PLUGIN_CATALOG].filter((plugin) => !(bitfsE2e && plugin.id === "bsv-price"));
-  const bootstrapStages: readonly PluginBootstrapStage[] = [
-    "storage-onboarding",
-    "vault-selection",
-    "owner-apps-ready",
-    "connect-apps-ready"
-  ];
-  const missingBootstrapStage = fullCatalog.filter((plugin) => !plugin.bootstrapStage);
-  if (missingBootstrapStage.length > 0) {
-    throw attachBootstrapErrorContext(
-      new Error(`Web plugin catalog has no bootstrapStage: ${missingBootstrapStage.map((plugin) => plugin.id).join(", ")}`),
-      { stage: "bootstrap", operation: "validate-bootstrap-stages" }
-    );
-  }
-  const catalogForStage = (catalog: readonly PluginManifest[], stage: PluginBootstrapStage): PluginManifest[] =>
-    catalog.filter((plugin) => plugin.bootstrapStage === stage);
-  const phaseOneCatalog = catalogForStage(fullCatalog, "storage-onboarding");
-  if (phaseOneCatalog.length === 0) {
-    throw attachBootstrapErrorContext(
-      new Error("Web plugin catalog must contain a storage-onboarding plugin"),
-      { stage: "storage-onboarding", operation: "validate-bootstrap-catalog" }
-    );
-  }
-
   // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 的 Window
   // runtime unit 显式注入 `pricePublisherPublicKeyHex` seed；它只在本地配置缺失时作为首次
   // 默认值，运行时真值由 BSV Price owner/App K-V 接管。
@@ -849,15 +726,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     }
     return p;
   });
-  const phaseOneCatalogWithConfig = catalogForStage(fullCatalogWithConfig, "storage-onboarding");
 
   let vaultSelectionPromise: Promise<void> | undefined;
   let ownerAppsPromise: Promise<void> | undefined;
   let vaultSelectionReady = false;
   let ownerAppsReady = false;
   let connectAppsReady = false;
-  let assetWorkspaceReady = false;
-  let assetWorkspaceDisposer: (() => void) | undefined;
+  let assetCatalogsReady = false;
   let storageReadyForBootstrap = storageReady;
   let sessionStateOff: (() => void) | undefined;
   let ownerAssemblyGeneration = 0;
@@ -868,17 +743,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   let observedRuntimeIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
   let observedRuntimeIdentityKey = runtimeIdentityKeyFor(observedRuntimeIdentity);
 
-  // 页面销毁时也要回收不是由某个业务 manifest 直接拥有的资产工作区。
-  runWithBootstrapErrorContext({
-    stage: "bootstrap",
-    operation: "register-asset-workspace-cleanup"
-  }, () => host.rootScope.onDispose(() => {
-    assetWorkspaceDisposer?.();
-    assetWorkspaceDisposer = undefined;
-  }, "asset-workspace-lifecycle"));
-
   function runtimeIdentityKeyFor(identity: RuntimeIdentityTransition): string {
-    return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.walletGeneration ?? "unknown"}`;
+    return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.walletGeneration ?? "unknown"}|${identity.runGeneration ?? "unknown"}`;
   }
 
   /**
@@ -926,35 +792,17 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     });
   };
 
-  const registerStage = async (stage: PluginBootstrapStage, retryFailed = false): Promise<void> =>
-    withBootstrapErrorContext({ stage, operation: "register-stage" }, async () => {
-      const plugins = catalogForStage(fullCatalogWithConfig, stage);
-      host.configStore.setRequiredPluginIds(
-        fullCatalogWithConfig.filter((plugin) => plugin.startup === "required").map((plugin) => plugin.id)
-      );
-      const enabledByConfig = new Set(
-        host.configStore.resolveEnabled(plugins.map((plugin) => plugin.id), (pluginId) =>
-          plugins.find((plugin) => plugin.id === pluginId)?.defaultEnabled ?? false
-        ).enabled
-      );
-      for (const plugin of plugins) {
-        const existing = host.getManifest(plugin.id);
-        if (!existing) {
-          await registerPluginWithTimeout(host, plugin, BOOTSTRAP_PLUGIN_TIMEOUT_MS, stage);
-          continue;
-        }
-        // register() 负责 required/immutable 插件的失败重放；显式的应用
-        // 装配重试还会按持久化启停配置重试已开启的 optional 插件。
-        await registerPluginWithTimeout(host, plugin, BOOTSTRAP_PLUGIN_TIMEOUT_MS, stage);
-        const state = host.state(plugin.id);
-        const shouldRetry = retryFailed
-          && (plugin.startup === "required" || plugin.canDisable === false || enabledByConfig.has(plugin.id))
-          && (state.kind === "error-disabled" || state.kind === "blocked");
-        if (shouldRetry) {
+  // Phases below are UI projections; registration and startup belong to the dependency graph.
+  const refreshRuntime = async (stage: BootstrapErrorStage, retryFailed = false): Promise<void> => {
+    if (retryFailed) {
+      for (const plugin of fullCatalogWithConfig) {
+        if (host.state(plugin.id).kind === "failed") {
           await withBootstrapErrorContext({ stage, pluginId: plugin.id, operation: "retry-plugin" }, () => host.retry(plugin.id));
         }
       }
-    });
+    }
+    await getWebLoomHost(host).reconcile();
+  };
 
   const runOwnerAndConnectStages = async (retryFailed = false): Promise<void> => {
     await synchronizeRuntimeIdentityBeforeOwnerStage();
@@ -967,28 +815,14 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     const stagePromise = (async () => {
       updateBootstrapStatus({ phase: "vault-selection", hasUnlockedActiveKey: true }, "owner-apps-ready");
       if (!isCurrentOwnerGeneration()) return;
-      await registerStage("owner-apps-ready", retryFailed);
+      await refreshRuntime("owner-apps-ready", retryFailed);
       if (!isCurrentOwnerGeneration()) return;
       ownerAppsReady = true;
       updateBootstrapStatus({ phase: "owner-apps-ready", hasUnlockedActiveKey: true, ownerAppsReady: true }, "owner-apps-ready");
-      if (!assetWorkspaceReady) {
-        const disposeWorkspace = await withBootstrapErrorContext({
-          stage: "owner-apps-ready",
-          operation: "register-asset-workspace"
-        }, () => registerAssetWorkspace(host));
-        if (!isCurrentOwnerGeneration()) {
-          runWithBootstrapErrorContext({
-            stage: "owner-apps-ready",
-            operation: "dispose-stale-asset-workspace"
-          }, () => disposeWorkspace());
-          return;
-        }
-        assetWorkspaceDisposer = disposeWorkspace;
-        assetWorkspaceReady = true;
-      }
-      if (!isCurrentOwnerGeneration()) return;
-      updateBootstrapStatus({ assetWorkspaceReady: true }, "owner-apps-ready");
-      await registerStage("connect-apps-ready", retryFailed);
+      // 聚合 UI 由真实插件 setup 和 Scope 持有，宿主只投影就绪状态。
+      assetCatalogsReady = host.state("assets").kind === "enabled" && host.state("collectibles").kind === "enabled";
+      updateBootstrapStatus({ assetCatalogsReady }, "owner-apps-ready");
+      await refreshRuntime("connect-apps-ready", retryFailed);
       if (!isCurrentOwnerGeneration()) return;
       connectAppsReady = true;
       runWithBootstrapErrorContext({
@@ -1000,7 +834,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         hasUnlockedActiveKey: true,
         ownerAppsReady,
         connectAppsReady,
-        assetWorkspaceReady: true
+        assetCatalogsReady
       }, "connect-apps-ready");
     })();
     ownerAppsPromise = stagePromise;
@@ -1012,12 +846,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         updateBootstrapStatus({
           phase: "error",
           storageReady: true,
-          vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY),
+          vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(VAULT_WALLET_STATE_CAPABILITY),
           hasUnlockedActiveKey: currentActiveKey("owner-apps-ready").unlocked,
           vaultSelectionReady,
           ownerAppsReady,
           connectAppsReady,
-          assetWorkspaceReady,
+          assetCatalogsReady,
           error: formatStartupErrorSummary(error)
         }, "owner-apps-ready");
       }
@@ -1030,15 +864,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     if (vaultSelectionPromise) return vaultSelectionPromise;
     vaultSelectionPromise = (async () => {
       updateBootstrapStatus({ phase: "vault-selection", storageReady: true }, "vault-selection");
-      await withBootstrapErrorContext({
-        stage: "vault-selection",
-        operation: "hydrate-plugin-config"
-      }, () => host.configStore.hydrate());
+
       runWithBootstrapErrorContext({
         stage: "vault-selection",
         operation: "validate-plugin-catalog"
       }, () => host.validateManifestSet(fullCatalogWithConfig));
-      await registerStage("vault-selection", retryFailed);
+      await refreshRuntime("vault-selection", retryFailed);
       runWithBootstrapErrorContext({
         stage: "vault-selection",
         operation: "assert-vault-capabilities"
@@ -1061,12 +892,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       updateBootstrapStatus({
         phase: "error",
         storageReady: true,
-        vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY),
+        vaultCapabilityReady: host.capabilities.has(VAULT_SERVICE_CAPABILITY) && host.capabilities.has(VAULT_WALLET_STATE_CAPABILITY),
         hasUnlockedActiveKey: currentActiveKey("vault-selection").unlocked,
         vaultSelectionReady,
         ownerAppsReady,
         connectAppsReady,
-        assetWorkspaceReady,
+        assetCatalogsReady,
         error: formatStartupErrorSummary(error)
       }, "vault-selection");
       throw error;
@@ -1083,26 +914,23 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     operation: "publish-bootstrap-retry"
   }, () => bootstrapStatus.setRetry(retryApplicationBootstrap));
 
-  const phaseOneRequiredCatalog = phaseOneCatalogWithConfig;
 
   runWithBootstrapErrorContext({
     stage: "storage-onboarding",
     operation: "validate-plugin-catalog"
   }, () => host.validateManifestSet(fullCatalogWithConfig));
-  runWithBootstrapErrorContext({
-    stage: "storage-onboarding",
-    operation: "configure-required-plugins"
-  }, () => host.configStore.setRequiredPluginIds(
-    phaseOneRequiredCatalog.filter((plugin) => plugin.startup === "required").map((plugin) => plugin.id)
-  ));
-  for (const plugin of phaseOneCatalogWithConfig) {
-    await registerPluginWithTimeout(host, plugin, BOOTSTRAP_PLUGIN_TIMEOUT_MS, "storage-onboarding");
-  }
+  await withBootstrapErrorContext({ stage: "bootstrap", operation: "register-all-plugins" },
+    () => host.registerAll(fullCatalogWithConfig));
   if (!storageReady) {
     const storageService = runWithBootstrapErrorContext({
       stage: "storage-onboarding",
       operation: "get-storage-runtime-controller"
-    }, () => host.capabilities.get(STORAGE_RUNTIME_CONTROLLER_CAPABILITY));
+    }, () => {
+      if (!host.capabilities.has(STORAGE_RUNTIME_CONTROLLER_CAPABILITY)) {
+        throw new Error(`Storage controller unavailable: ${JSON.stringify(["page", "storage"].map(id => ({ id, state: host.state(id) })))}`);
+      }
+      return host.capabilities.get(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
+    });
     // 本地钱包装好可写 Root 的条件：ready（已解锁）或 locked（已有钱包、
     // 等待 Key 密码）。uninitialized 需要先走创建/导入；corrupt、
     // unsupported 与 degraded 必须停在恢复门禁，不能折算成「可以继续」。
@@ -1167,7 +995,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     const identityChanged = nextKey !== observedRuntimeIdentityKey;
     const ownerIdentityChanged = observedRuntimeIdentity.vaultStatus !== nextIdentity.vaultStatus
       || (observedRuntimeIdentity.ownerPublicKeyHex ?? "") !== (nextIdentity.ownerPublicKeyHex ?? "")
-      || observedRuntimeIdentity.sessionEpoch !== nextIdentity.sessionEpoch;
+      || observedRuntimeIdentity.sessionEpoch !== nextIdentity.sessionEpoch
+      || observedRuntimeIdentity.runGeneration !== nextIdentity.runGeneration;
 
     // Worker 运行单元属于 session 世代；Coordinator client 在世代切换时
     // 会先清空旧后台快照，Host 必须立即重新投影，不能等下一条 unit 事件。
@@ -1195,17 +1024,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       ownerAppsPromise = undefined;
       ownerAppsReady = false;
       connectAppsReady = false;
-      runWithBootstrapErrorContext({
-        stage: "owner-apps-ready",
-        operation: "dispose-owner-asset-workspace"
-      }, () => assetWorkspaceDisposer?.());
-      assetWorkspaceDisposer = undefined;
-      assetWorkspaceReady = false;
+      assetCatalogsReady = false;
         updateBootstrapStatus({
           hasUnlockedActiveKey: nextIdentity.vaultStatus === "unlocked",
           ownerAppsReady: false,
           connectAppsReady: false,
-          assetWorkspaceReady: false,
+          assetCatalogsReady: false,
           phase: applicationBootstrapPhaseForStorageReadiness(storageReadyForBootstrap)
         }, "coordinator");
     }

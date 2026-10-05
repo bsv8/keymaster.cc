@@ -36,12 +36,14 @@ const hostState: {
 };
 const activeService: { service: BackgroundService | undefined } = { service: undefined };
 
+vi.mock("@keymaster/runtime/assembly", () => ({ usePluginHost: () => ({ resourceStore: {} }), }));
+
 vi.mock("@keymaster/runtime", async () => {
   const actual = await vi.importActual<typeof import("@keymaster/runtime")>("@keymaster/runtime");
   return {
     ...actual,
-    usePluginHost: () => ({ resourceStore: {} }),
-    useI18n: () => ({
+
+    usePluginI18n: () => ({
       t: (key: string, opts?: { defaultValue?: string; [key: string]: unknown }) =>
         I18N[key] ?? String(opts?.defaultValue ?? key).replace(/{{(\w+)}}/g, (_m, name: string) => String(opts?.[name] ?? "")),
       text: (input: unknown) => (typeof input === "string" ? input : (input as { fallback?: string })?.fallback ?? ""),
@@ -58,14 +60,14 @@ vi.mock("@keymaster/runtime", async () => {
       selector: (snapshot: { data: unknown }) => unknown,
       fallback: unknown
     ): unknown => {
-      if (id === "chain.height") return selector({ data: hostState.chainHeight }) ?? fallback;
+      if (id === "background.chain-height") return selector({ data: hostState.chainHeight }) ?? fallback;
       return selector({ data: hostState.settings }) ?? fallback;
     }
   };
 });
 
 vi.mock("webloom-framework/react", () => ({
-  useOptionalCapability: <T,>(): T | undefined => activeService.service as unknown as T
+  useOptionalPluginCapability: <T,>(): T | undefined => activeService.service as unknown as T
 }));
 
 interface FakeService {
@@ -393,4 +395,9 @@ describe("BackgroundSettingsPage 同步管理", () => {
     fireEvent.click(optionButton(CHAIN_HEIGHT_SYNC_TASK_ID, "自定义"));
     expect(customSecondsInput().value).toBe("120");
   });
+});
+
+vi.mock("./BackgroundResourceContext.js", async () => {
+  const runtime = await import("@keymaster/runtime/assembly");
+  return { useBackgroundResources: () => runtime.usePluginHost().resourceStore };
 });

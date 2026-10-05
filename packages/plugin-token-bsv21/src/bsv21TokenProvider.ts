@@ -10,7 +10,7 @@
 
 import type {
   AssetDataNotifier,
-  KeyspaceService,
+  VaultWalletState,
   TokenActivity,
   TokenDetail,
   TokenProvider,
@@ -20,15 +20,15 @@ import type { Bsv21StateRepository, Bsv21TokenSnapshot } from "./storage/bsv21St
 
 export interface Bsv21TokenProviderOptions {
   stateRepository: Bsv21StateRepository;
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   assetDataNotifier?: AssetDataNotifier;
 }
 
 export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): TokenProvider {
-  if (!options || !options.stateRepository || !options.keyspace) {
-    throw new Error("createBsv21TokenProvider: stateRepository and keyspace are required");
+  if (!options || !options.stateRepository || !options.walletState) {
+    throw new Error("createBsv21TokenProvider: stateRepository and walletState are required");
   }
-  const { stateRepository, keyspace, assetDataNotifier } = options;
+  const { stateRepository, walletState, assetDataNotifier } = options;
   const listeners = new Set<() => void>();
   let offNotifier: (() => void) | undefined;
 
@@ -79,7 +79,7 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
 
     async listTokens(): Promise<TokenSummary[]> {
       // 无 active key 时返回空（不抛错）
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!state.activePublicKeyHex) return [];
 
       // K-V 操作隐式使用当前 active key 的 namespace
@@ -113,7 +113,7 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
 
     async getToken(tokenId): Promise<TokenDetail | undefined> {
       // 无 active key 时返回 undefined
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!state.activePublicKeyHex) return undefined;
 
       // K-V 操作隐式使用当前 active key 的 namespace

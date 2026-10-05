@@ -1,12 +1,5 @@
-// Worker 侧 Storage 运行时控制器。
-//
-// 相对旧实现，这个控制器只保留本地介质真正需要的东西：
-//   - 一个固定 Key 的冷启动、初始化、解锁、锁定、改密、改名、导出与重置；
-//   - 第三方 App 的受限文件数据面（列举、建目录、写、区间读、删、批量）；
-//   - 浏览器持久化授权与配额的只读视图。
-//
-// 删除：桶目录、切桶、条件写能力探测、远程健康状态、multipart 上传和
-// S3 初始化恢复。Connect 的游标是 Worker 内存态，App 断开即失效，不写盘。
+// Worker 侧 Storage 控制器：本地介质状态、配额与 Connect 文件数据面。
+// 钱包与密钥生命周期由 Vault 管理；目录游标只保存在当前 Worker 内存中。
 
 import type {
   OwnerAppStorageGrant,
@@ -19,10 +12,6 @@ import type {
   StorageRuntimeController as StorageRuntimeControllerContract,
   StorageRuntimeControllerStatus,
   StorageRuntimeSummary,
-  WalletColdStartSnapshot,
-  WalletInitializePlan,
-  WalletInitializeResult,
-  WalletUnlockResult,
 } from "@keymaster/contracts";
 import {
   STORAGE_CURSOR_TTL_MS,
@@ -54,15 +43,6 @@ const DEFAULT_CONNECT_LIST_LIMIT = STORAGE_DEFAULT_LIST_LIMIT;
 const MAX_CONNECT_LIST_LIMIT = STORAGE_MAX_LIST_LIMIT;
 
 export interface StorageRuntimeControllerDeps {
-  /** 冷启动与钱包生命周期。 */
-  coldStart(): Promise<WalletColdStartSnapshot>;
-  initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult>;
-  unlock(password: string): Promise<WalletUnlockResult>;
-  lock(): Promise<void>;
-  changeKeyPassword(input: { oldPassword: string; newPassword: string }): Promise<void>;
-  renameKey(label: string): Promise<void>;
-  exportKeyHold(): Promise<Uint8Array>;
-  resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }>;
   /** 当前钱包摘要（公钥、标签、世代）。 */
   summary(): Promise<Omit<StorageRuntimeSummary, "status" | "medium" | "persistence">>;
   /** 为一个已验证 Connect App 打开它的独立目录句柄。 */
@@ -146,38 +126,6 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
   async summary(): Promise<StorageRuntimeSummary> {
     const [base, persistence] = await Promise.all([this.deps.summary(), this.deps.persistence()]);
     return { ...base, status: this.deps.status(), medium: "indexeddb", persistence };
-  }
-
-  coldStart(): Promise<WalletColdStartSnapshot> {
-    return this.deps.coldStart();
-  }
-
-  initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
-    return this.deps.initialize(plan);
-  }
-
-  unlock(password: string): Promise<WalletUnlockResult> {
-    return this.deps.unlock(password);
-  }
-
-  lock(): Promise<void> {
-    return this.deps.lock();
-  }
-
-  changeKeyPassword(input: { oldPassword: string; newPassword: string }): Promise<void> {
-    return this.deps.changeKeyPassword(input);
-  }
-
-  renameKey(label: string): Promise<void> {
-    return this.deps.renameKey(label);
-  }
-
-  exportKeyHold(): Promise<Uint8Array> {
-    return this.deps.exportKeyHold();
-  }
-
-  resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }> {
-    return this.deps.resetWallet(input);
   }
 
   async abortSession(connectSessionId: string): Promise<void> {

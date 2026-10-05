@@ -36,7 +36,7 @@ import { P2PKH_MSG } from "./p2pkhMessages.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 export interface P2pkhTransferServiceDeps {
-  vault: VaultService;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
   messageBus: MessageBus;
   /** 资产数据变更通知器：转账成功后立即通知页面重读。 */
   assetDataNotifier?: AssetDataNotifier;
@@ -406,23 +406,8 @@ function validateFinalTransferPreview(
   }
 }
 
-async function resolveActiveKeyCrypto(vault: VaultService, publicKeyHex: string) {
-  const anyVault = vault as VaultService & {
-    createActiveKeyCrypto?: (hex: string) => Promise<{
-      deriveP2pkhAddress: (input: { publicKeyHex: string; network: "main" | "test" }) => Promise<{
-        publicKeyHex: string;
-        address: string;
-      }>;
-      signDigest: (input: { publicKeyHex: string; digest: ArrayBuffer }) => Promise<{
-        publicKeyHex: string;
-        signature: ArrayBuffer;
-      }>;
-    }>;
-  };
-  if (typeof anyVault.createActiveKeyCrypto === "function") {
-    return await anyVault.createActiveKeyCrypto(publicKeyHex);
-  }
-  throw new Error("Vault does not provide createActiveKeyCrypto");
+async function resolveActiveKeyCrypto(vault: Pick<VaultService, "status" | "createActiveKeyCrypto">, publicKeyHex: string) {
+  return vault.createActiveKeyCrypto(publicKeyHex);
 }
 
 /**

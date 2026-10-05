@@ -47,7 +47,6 @@ export interface ProtectedOutpointRegistry {
     inputs: Array<{ txid: string; vout: number }>;
   }): Promise<{ claimIds: string[] }>;
   releaseClaims(claimIds: string[]): Promise<void>;
-  unregisterByOwner(ownerPluginId: string): void;
   _ids(): string[];
 }
 

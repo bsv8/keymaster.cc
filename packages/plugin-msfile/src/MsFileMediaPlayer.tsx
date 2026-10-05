@@ -1,3 +1,4 @@
+import { useMsFileResources } from "./MsFileResourceContext.js";
 // 首页媒体播放器适配器。
 // 组件只负责绑定原生媒体元素和展示快照；Range、Block 完整性和
 // Service Worker 桥接都由 @keymaster/msfile-media 管理。
@@ -8,8 +9,7 @@ import { MSFILE_READ_CONCURRENCY_RECOMMENDED } from "@keymaster/contracts";
 import {
   type MsFileMediaSnapshot,
 } from "@keymaster/msfile-media/browser";
-import { useResourceSelector } from "webloom-framework/react";
-import { usePluginHost } from "@keymaster/runtime";
+import { useResourceViewSelector } from "@keymaster/runtime";
 import {
   disposeMsFileMediaSession,
   getMsFileMediaSession,
@@ -97,7 +97,7 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
     globalBlockReadConcurrency,
     globalStatConcurrency,
   } = props;
-  const host = usePluginHost();
+  const reader = useMsFileResources();
   const elementRef = useRef<HTMLAudioElement | HTMLVideoElement>(null);
   const debugRef = useRef<HTMLPreElement>(null);
   const mediaArgs = msFileMediaResourceArgs({
@@ -111,8 +111,8 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
     globalBlockReadConcurrency,
     globalStatConcurrency,
   });
-  const resourceSnapshot = useResourceSelector<MsFileMediaSnapshot, MsFileMediaSnapshot | undefined>(
-    host.resourceStore,
+  const resourceSnapshot = useResourceViewSelector<MsFileMediaSnapshot, MsFileMediaSnapshot | undefined>(
+    reader,
     MSFILE_MEDIA_RESOURCE_ID,
     mediaArgs,
     (resource) => resource.data,

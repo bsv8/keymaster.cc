@@ -9,6 +9,9 @@ export const GATE_METADATA = COORDINATOR_RUNTIME_LIFECYCLE_GATE;
  * WindowApp → SharedWorker → WebLoom MessagePort → Coordinator 链路。
  */
 interface LifecycleHooks {
+  walletStateSnapshot(): Readonly<import("@keymaster/contracts").VaultLifecycleSnapshot>;
+  cacheWalletCrypto(): Promise<void>;
+  cachedWalletCryptoFresh(): Promise<boolean>;
   bootstrap(): Promise<{
     ownerPublicKeyHex: string;
     sessionEpoch: string;

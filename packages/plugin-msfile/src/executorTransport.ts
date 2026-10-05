@@ -28,7 +28,7 @@ import type {
   WindowP2pExecutorBridge,
   WindowP2pExecutorConcurrencyConfig as WindowP2pBaseConcurrencyConfig,
   WindowP2pExecutorOperation
-} from "@keymaster/plugin-window-p2p/executor-transport";
+} from "@keymaster/contracts/window-p2p";
 
 /** MSFile lane 的受限操作；顶层公共 executor 只接受 lane operation。 */
 export type MsFileP2pLaneOperation =

@@ -1,3 +1,4 @@
+import { useP2pkhResources } from "../P2pkhResourceContext.js";
 // packages/plugin-p2pkh/src/pages/P2pkhSettingsPage.tsx
 // P2PKH 设置：
 //   - includeTestnet：是否把 testnet 资产纳入运行范围；
@@ -6,8 +7,8 @@
 
 import { useEffect, useState } from "react";
 import { Select, TextInput } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import { P2PKH_COORDINATOR_CONTROL_CAPABILITY } from "@keymaster/contracts";
 import { resolveP2pkhFeeRateSatoshisPerKb, type P2pkhFeeRateTier, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
@@ -15,15 +16,15 @@ import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
 
 export function P2pkhSettingsPage() {
-  const host = usePluginHost();
+  const reader = useP2pkhResources();
   // owner 作用域 capability 会在锁定时被撤销；设置区可能正好挂载在 BSV 链
   // 页面上，这里必须按"暂不可用"渲染，而不是让 useCapability 抛异常。
-  const service = useOptionalCapability(P2PKH_CAPABILITY);
-  const coordinator = useOptionalCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
-  const { t } = useI18n();
+  const service = useOptionalPluginCapability(P2PKH_CAPABILITY);
+  const coordinator = useOptionalPluginCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
+  const { t } = usePluginI18n();
   // 锁定时资源定义会被注销；可选选择器降级到默认值而不是抛错。
   const resourceSettings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    host.resourceStore,
+    reader,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? DEFAULT_SETTINGS,
@@ -124,4 +125,11 @@ export function P2pkhSettingsPage() {
       {error ? <p className="p2pkh-settings__error">{error}</p> : null}
     </div>
   );
+}
+
+export function P2pkhSettingsBlock() {
+  return <section className="bsv-chain-page__section" id="p2pkh" aria-labelledby="bsv-chain-p2pkh-title">
+    <header className="bsv-chain-page__section-header"><h2 id="bsv-chain-p2pkh-title">P2PKH</h2></header>
+    <P2pkhSettingsPage />
+  </section>;
 }

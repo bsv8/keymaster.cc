@@ -7,20 +7,18 @@
     ".": "./src/index.ts",
     "./coordinator": "./src/coordinator/index.ts",
     "./coordinator/authority": "./src/coordinator/authority.ts",
-    "./styles.css": "./src/styles.css"
+    "./styles.css": "./src/styles.css",
+    "./assembly": "./src/assembly.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
     "@keymaster/contracts": "*",
-    "@keymaster/plugin-key-import": "*",
-    "@keymaster/plugin-vault": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^2.0.1",
     "@noble/secp256k1": "^2.2.0",
-    "keyhold": "2.1.0",
     "lucide-react": "^0.468.0",
-    "webloom-framework": "0.5.0"
+    "webloom-framework": "0.6.0"
   }
 }

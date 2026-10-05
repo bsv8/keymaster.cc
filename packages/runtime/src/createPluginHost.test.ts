@@ -1,32 +1,24 @@
-// packages/runtime/src/createPluginHost.test.ts
-// 硬切换 001 + 2026-07-04 001：runtime 生命周期核心测试。
-//   - register / enable / disable / unregister
-//   - owner 回收（route / menu / capability / settings page）
-//   - 禁用提供者级联停止消费者并保留用户意图
-//   - canDisable=false 阻止 disable
-//   - version + subscribe
-//   - graph / state
-//   - bootstrap 路径：config store override + defaultEnabled 决定初始 enabled
-//   - Channel caller 由 Coordinator/Session Window 负责，runtime 不注入传输层
-//     client，也不维护消息传输状态。
+import { walletStateFixtureSnapshot, walletStateFixtureAccess } from "@keymaster/runtime/test-support";
+import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+// 产品适配生命周期、依赖清理和实例注册回收测试。
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { createTestPluginHost as createPluginHost } from "./testing/createTestPluginHost.js";
-import type { PluginHost } from "./pluginHostContract.js";
-import type { LocalCapability, PluginIntentCoordinator } from "webloom-framework";
+import type { FixtureHost as PluginHost } from "./testSupport/createFixtureHost.js";
+import type { LocalCapability } from "webloom-framework";
 import { defineCapability } from "webloom-framework";
 import { CHANNEL_RUNTIME_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS, type ChannelRuntime, type ChannelRuntimeFactory, type KeyValueStore, type PluginContext } from "@keymaster/contracts";
 import type { TestPluginManifest } from "./testing/createTestPluginHost.js";
 type PluginManifest = TestPluginManifest;
-import type { RouteRegistry } from "./registries/routeRegistry.js";
-import type { SettingsRegistry } from "./registries/settingsRegistry.js";
+import type { RouteRegistry } from "./testSupport/registries/routeRegistry.js";
+import type { SettingsRegistry } from "./testSupport/registries/settingsRegistry.js";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 import { createInMemoryKeyValueStore } from "./storage/inMemoryKeyValueStore.js";
 import { withTestStorageBinding } from "./storage/inMemoryKeyValueStore.js";
 import { createInMemoryModuleFileStore } from "./storage/inMemoryModuleFileStore.js";
-import { createPluginIntentController, createRuntimeUnitImplementationRegistry, StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
+import { createRuntimeUnitImplementationRegistry, StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
 import {
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   ROUTE_REGISTRY_CAPABILITY,
   SETTINGS_REGISTRY_CAPABILITY,
@@ -40,8 +32,8 @@ interface RegistryViews {
 
 function view(host: PluginHost): RegistryViews {
   return {
-    routes: { ids: host.routes._ids() },
-    settingsRoutes: { ids: host.settings._ids() },
+    routes: { ids: host.routes.list().map(route => route.id) },
+    settingsRoutes: { ids: host.settings.list().map(route => route.id) },
     capabilities: { keys: host.capabilities.descriptors().map((capability) => capability.id) }
   };
 }
@@ -72,7 +64,7 @@ function makeA(): PluginManifest {
     id: "a",
     name: "A",
     description: "plugin A",
-    meta: { kind: "platform", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_A] },
+    meta: {     providesCapabilities: [CAP_A] },
     setup(ctx: PluginContext) {
       const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
       r.register({
@@ -91,7 +83,7 @@ function makeB(dependsOn: readonly LocalCapability<unknown>[] = [CAP_A]): Plugin
     id: "b",
     name: "B",
     description: "plugin B",
-    meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_B] },
+    meta: {     providesCapabilities: [CAP_B] },
     dependencies: dependsOn.map((c) => ({ capability: c })),
     setup(ctx: PluginContext) {
       const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
@@ -119,7 +111,7 @@ function makeC(dependsOn: readonly LocalCapability<unknown>[] = []): PluginManif
     id: "c",
     name: "C",
     description: "plugin C - core",
-    meta: { kind: "core", startup: "required", defaultEnabled: true, canDisable: false, providesCapabilities: [CAP_C] },
+    meta: {     providesCapabilities: [CAP_C] },
     dependencies: dependsOn.map((c) => ({ capability: c })),
     setup(ctx: PluginContext) {
       const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
@@ -148,54 +140,39 @@ describe("createPluginHost - runtime resource binding", () => {
       openPlatformStore: async () => createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings)),
       clearStorageRoot: async () => undefined,
     };
-    const host = createPluginHost({ disableConfigPersistence: true, storageBindingAuthority: authority });
+    const host = createPluginHost({  storageBindingAuthority: authority });
     const plugin: PluginManifest = {
       id: "bsv-price",
       name: "Late owner store",
       storage: storageDeclaration,
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      dependencies: [{ capability: STORAGE_KV_CLIENTS_CAPABILITY }],
+      meta: {     },
       async setup(ctx) {
         // 首次 K-V 操作会触发延迟 owner binding；在 binding 等待期间撤权。
-        await ctx.storage!.get("during-start");
+        await ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "settings")!.get("during-start");
       },
     };
     const registering = host.register(plugin);
     await Promise.resolve();
     expect(host.state(plugin.id).kind).toBe("starting");
-    const disabling = host.disable(plugin.id);
+    const disabling = host.revoke(plugin.id, "test revocation");
     const rawStore = createInMemoryKeyValueStore(withTestStorageBinding(storageDeclaration));
     let closed = false;
     const store: KeyValueStore = { ...rawStore, close: () => { closed = true; rawStore.close(); } };
     resolveOpen(store);
     await registering;
     await disabling;
-    expect(host.state(plugin.id).kind).toBe("disabled");
+    expect(host.state(plugin.id).kind).toBe("blocked");
     expect(closed).toBe(true);
   });
 
-  it("refreshes Resource Store when a plugin provides keyspace", async () => {
-    const activeListeners = new Set<() => void>();
-    const keyspace = {
-      active: () => ({ activePublicKeyHex: "pk1" }),
-      onActiveKeyChanged: (handler: () => void) => {
-        activeListeners.add(handler);
-        return () => activeListeners.delete(handler);
-      }
-    } as unknown as import("@keymaster/contracts").KeyspaceService;
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register({
-      id: "late-keyspace",
-      name: "Late keyspace",
-      description: "test",
-      provides: [KEYSPACE_SERVICE_CAPABILITY],
-      meta: { kind: "platform", startup: "optional", defaultEnabled: true, canDisable: true },
-      setup(ctx) {
-        ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
-      }
-    });
-    expect(activeListeners.size).toBe(1);
-    await host.disable("late-keyspace");
-    expect(activeListeners.size).toBe(0);
+  it("refreshes resources through explicit committed runtime identity transitions", async () => {
+    const host = createPluginHost({});
+    const refresh = vi.spyOn(host.resourceStore, "refreshRuntimeBindings");
+    await host.transitionRuntimeIdentity({ vaultStatus: "unlocked", ownerPublicKeyHex: "pk1", sessionEpoch: "epoch-1", runGeneration: "run-1", walletGeneration: "wallet-1" });
+    await host.transitionRuntimeIdentity({ vaultStatus: "unlocked", ownerPublicKeyHex: "pk1", sessionEpoch: "epoch-2", runGeneration: "run-1", walletGeneration: "wallet-1" });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    await host.dispose();
   });
 
   it("binds Channel plugin identity to the manifest and rejects system callers", async () => {
@@ -204,7 +181,7 @@ describe("createPluginHost - runtime resource binding", () => {
       forPlugin: vi.fn(() => runtime),
       forSystem: vi.fn(() => runtime)
     };
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     host.provide(CHANNEL_RUNTIME_CAPABILITY, rawFactory);
 
     let contextPluginId: string | undefined;
@@ -213,7 +190,7 @@ describe("createPluginHost - runtime resource binding", () => {
       id: "bound-channel-plugin",
       name: "Bound Channel plugin",
       description: "test",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx) {
         contextPluginId = ctx.pluginId;
         factory = ctx.capability(CHANNEL_RUNTIME_CAPABILITY);
@@ -239,47 +216,19 @@ beforeEach(() => {
 });
 
 describe("createPluginHost - lifecycle", () => {
-  it("registers business declarations independently and rolls them back", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register({
-      id: "business-surface",
-      name: "Business surface",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      business: {
-        domains: [{
-          id: "business-surface.domain",
-          label: { key: "test.business.domain", fallback: "Business" },
-          order: 10,
-          features: [{
-            id: "business-surface.feature",
-            label: { key: "test.business.page", fallback: "Business page" },
-            order: 12,
-            entry: { path: "/business-surface", component: () => null },
-            home: [{
-              id: "business-surface.projection",
-              space: { id: "business-surface.summary", label: { key: "test.business.space", fallback: "Summary" }, order: 10 },
-              order: 3,
-              component: () => null
-            }]
-          }]
-        }]
-      },
-      setup() {}
-    });
-
-    expect(host.routes.byId("business-surface.feature")?.path).toBe("/business-surface");
-    expect(host.home.list()).toEqual([]);
-    expect(host.business.listDomains().map((domain) => domain.id)).toEqual(["business-surface.domain"]);
-    expect(host.business.listHomeProjections().map((projection) => projection.id)).toEqual(["business-surface.projection"]);
-
-    await host.disable("business-surface");
-    expect(host.routes.byId("business-surface.feature")).toBeUndefined();
+  it("does not turn legacy static business metadata into executable contributions", async () => {
+    const host = createPluginHost({});
+    await host.register({ id: "metadata-only", name: "Metadata only", business: { domains: [{
+      id: "metadata.domain", label: "Metadata", order: 1, features: [{ id: "metadata.page", label: "Page", order: 1,
+        entry: { path: "/metadata", routeId: "metadata.route" } }],
+    }] }, setup() {} });
+    expect(host.routes.byPath("/metadata")).toBeUndefined();
     expect(host.business.listDomains()).toEqual([]);
-    expect(host.business.listHomeProjections()).toEqual([]);
+    await host.dispose();
   });
 
   it("registers plugins and reads graph", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([makeA(), makeB([CAP_A]), makeC()]);
     expect(host.manifests()).toEqual(expect.arrayContaining(["a", "b", "c"]));
     const g = host.graph();
@@ -293,7 +242,7 @@ describe("createPluginHost - lifecycle", () => {
     let seenUnitId: string | undefined;
     let seenConfig: Record<string, unknown> | undefined;
     const host = createPluginHost({
-      disableConfigPersistence: true,
+
       initialRuntimeIdentity: TEST_RUNTIME_IDENTITY,
       runtimeUnitImplementationRegistry: createRuntimeUnitImplementationRegistry([{
         pluginId: "unit-entry",
@@ -309,10 +258,10 @@ describe("createPluginHost - lifecycle", () => {
       id: "unit-entry",
       name: "Unit entry",
       meta: {
-        kind: "business",
-        startup: "optional",
-        defaultEnabled: true,
-        canDisable: true,
+
+
+
+
       },
       provides: ["unit-entry.service"],
       units: [{
@@ -334,14 +283,14 @@ describe("createPluginHost - lifecycle", () => {
     const product: PluginManifest = {
       id: "multi-unit-product",
       name: "Multi-unit product",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       units: [
         { id: "multi-unit.worker", runtime: "shared-worker", scopeKind: "root", provides: ["multi.worker"] },
         { id: "multi-unit.window", runtime: "window-main", scopeKind: "owner-session", provides: ["multi.window"] },
       ],
     };
 
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await expect(host.register(product)).rejects.toThrow(/execution must be explicit/i);
     expect(host.capabilities.has(testCapability("multi.worker"))).toBe(false);
     expect(host.capabilities.has(testCapability("multi.window"))).toBe(false);
@@ -364,7 +313,7 @@ describe("createPluginHost - lifecycle", () => {
     const product: PluginManifest = {
       id: "split-runtime-product",
       name: "Split runtime product",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       provides: ["split.worker", "split.window"],
       units: [
         {
@@ -382,8 +331,8 @@ describe("createPluginHost - lifecycle", () => {
       ],
     };
 
-    const workerHost = createPluginHost({ disableConfigPersistence: true, runtime: "shared-worker", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
-    const windowHost = createPluginHost({ disableConfigPersistence: true, runtime: "window-main", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
+    const workerHost = createPluginHost({  runtime: "shared-worker", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
+    const windowHost = createPluginHost({  runtime: "window-main", initialRuntimeIdentity: TEST_RUNTIME_IDENTITY, runtimeUnitImplementationRegistry: implementations });
     await workerHost.register(product);
     await windowHost.register(product);
 
@@ -403,38 +352,17 @@ describe("createPluginHost - lifecycle", () => {
   });
 
   it("does not require provider-before-consumer manifest order and restores desired consumers", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([makeB([CAP_A]), makeA()]);
 
-    expect(host.state("a").kind).toBe("enabled");
+    expect(host.state("a").error).toBeUndefined();
+    expect(host.state("a")).toMatchObject({ kind: "enabled" });
     expect(host.state("b").kind).toBe("enabled");
-    await host.disable("a");
-    expect(host.state("b")).toMatchObject({ kind: "blocked", desiredEnabled: true });
+    await host.revoke("a", "test revocation");
+    expect(host.state("b")).toMatchObject({ kind: "blocked" });
 
-    await host.enable("a");
-    expect(host.state("b")).toMatchObject({ kind: "enabled", desiredEnabled: true });
-  });
-
-  it("restores a dependency chain in provider order without changing consumer intent", async () => {
-    const b = makeB([CAP_A]);
-    const c: PluginManifest = {
-      id: "chain-c",
-      name: "Chain C",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: ["chain.c"] },
-      provides: ["chain.c"],
-      dependencies: [{ capability: CAP_B }],
-      setup(ctx) { ctx.provide(testCapability("chain.c"), { ok: true }); },
-    };
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.registerAll([c, b, makeA()]);
-    await host.disable("a");
-    expect(host.state("b").lifecycleState).toBe("waiting");
-    expect(host.state("chain-c").lifecycleState).toBe("waiting");
-    expect(host.configStore.read()).toMatchObject({ a: false, b: true, "chain-c": true });
-
-    await host.enable("a");
-    expect(host.state("b").lifecycleState).toBe("running");
-    expect(host.state("chain-c").lifecycleState).toBe("running");
+    await host.retry("a");
+    expect(host.state("b")).toMatchObject({ kind: "enabled" });
   });
 
   it("cascades a starting consumer into waiting without restarting the revoked instance", async () => {
@@ -444,7 +372,7 @@ describe("createPluginHost - lifecycle", () => {
     const consumer: PluginManifest = {
       id: "starting-consumer",
       name: "Starting consumer",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_B] },
+      meta: {     providesCapabilities: [CAP_B] },
       provides: [CAP_B],
       dependencies: [{ capability: CAP_A }],
       async setup(ctx) {
@@ -454,14 +382,14 @@ describe("createPluginHost - lifecycle", () => {
         ctx.provide(CAP_B, { instance: consumerStarts });
       },
     };
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.register(makeA());
 
     const registering = host.register(consumer);
     await Promise.resolve();
     expect(host.state(consumer.id).kind).toBe("starting");
 
-    const disabling = host.disable("a");
+    const disabling = host.revoke("a", "test revocation");
     releaseSetup();
     await registering;
     await disabling;
@@ -470,199 +398,20 @@ describe("createPluginHost - lifecycle", () => {
     expect(host.state(consumer.id)).toMatchObject({
       kind: "blocked",
       lifecycleState: "waiting",
-      desiredEnabled: true,
       blockedBy: [`missing:${CAP_A.kind}:${CAP_A.id}@${CAP_A.version}`],
     });
     expect(host.capabilities.has(CAP_B)).toBe(false);
 
-    await host.enable("a");
+    await host.retry("a");
     expect(consumerStarts).toBe(2);
     expect(host.state(consumer.id).lifecycleState).toBe("running");
     expect(host.capabilities.has(CAP_B)).toBe(true);
   });
 
-  it("defaultEnabled drives initial enabled set", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const a = makeA();
-    const off: PluginManifest = {
-      ...makeB([CAP_A]),
-      meta: { kind: "business", startup: "optional", defaultEnabled: false, canDisable: true, providesCapabilities: [CAP_B] }
-    };
-    await host.registerAll([a, off]);
-    expect(host.installed()).toEqual(expect.arrayContaining(["a"]));
-    expect(host.installed()).not.toContain("b");
-  });
-
-  it("submits an absolute intent to the Coordinator before starting the Window instance", async () => {
-    const controller = createPluginIntentController({
-      authorityInstanceId: "authority:test",
-      initial: { revision: 0, desiredEnabled: { "intent-product": false }, desiredRevision: { "intent-product": 1 } },
-    });
-    const commands: Array<{ commandId: string; authorityInstanceId: string; expectedRevision: number; pluginId: string; desiredEnabled: boolean }> = [];
-    const coordinator: PluginIntentCoordinator = {
-      authorityInstanceId: controller.authorityInstanceId,
-      snapshot: controller.snapshot,
-      subscribe: controller.subscribe,
-      submit(command) {
-        commands.push(command);
-        return controller.submit(command);
-      },
-    };
-    const host = createPluginHost({
-      disableConfigPersistence: true,
-      pluginIntentCoordinator: coordinator,
-      runtime: "window-main",
-      initialRuntimeIdentity: TEST_RUNTIME_IDENTITY,
-      runtimeUnitImplementationRegistry: createRuntimeUnitImplementationRegistry([{
-        pluginId: "intent-product",
-        unitId: "intent-product.window",
-        setup(ctx) { ctx.provide(testCapability("intent.product"), { ready: true }); },
-      }]),
-    });
-    await host.register({
-      id: "intent-product",
-      name: "Intent product",
-      meta: { kind: "business", startup: "optional", defaultEnabled: false, canDisable: true },
-      provides: ["intent.product"],
-      units: [{
-        id: "intent-product.window",
-        runtime: "window-main",
-        scopeKind: "owner-session",
-        provides: ["intent.product"],
-      }],
-    });
-    expect(host.state("intent-product")).toMatchObject({ kind: "registered", lifecycleState: "disabled", desiredEnabled: false });
-
-    const result = await host.submitIntent("intent-product", true);
-
-    expect(result).toMatchObject({ status: "accepted", persisted: true });
-    expect(commands).toHaveLength(1);
-    expect(commands[0]).toMatchObject({
-      authorityInstanceId: "authority:test",
-      expectedRevision: 0,
-      pluginId: "intent-product",
-      desiredEnabled: true,
-    });
-    expect(commands[0]!.commandId).toMatch(/^plugin-intent:intent-product:/);
-    expect(controller.snapshot()).toMatchObject({ revision: 1, desiredEnabled: { "intent-product": true } });
-    expect(host.state("intent-product")).toMatchObject({ kind: "enabled", desiredEnabled: true, unitId: "intent-product.window" });
-  });
-
-  it("keeps the persisted intent when local instance startup fails", async () => {
-    const controller = createPluginIntentController({
-      authorityInstanceId: "authority:failure",
-      initial: { revision: 0, desiredEnabled: { "failing-intent": false }, desiredRevision: {} },
-    });
-    const host = createPluginHost({
-      disableConfigPersistence: true,
-      pluginIntentCoordinator: controller,
-      runtime: "window-main",
-      initialRuntimeIdentity: TEST_RUNTIME_IDENTITY,
-      runtimeUnitImplementationRegistry: createRuntimeUnitImplementationRegistry([{
-        pluginId: "failing-intent",
-        unitId: "failing-intent.window",
-        setup() { throw new Error("window startup failed"); },
-      }]),
-    });
-    await host.register({
-      id: "failing-intent",
-      name: "Failing intent",
-      meta: { kind: "business", startup: "optional", defaultEnabled: false, canDisable: true },
-      units: [{
-        id: "failing-intent.window",
-        runtime: "window-main",
-        scopeKind: "owner-session",
-        provides: ["failing.intent"],
-      }],
-    });
-
-    const result = await host.submitIntent("failing-intent", true);
-
-    expect(result.status).toBe("accepted");
-    expect(controller.snapshot().desiredEnabled["failing-intent"]).toBe(true);
-    expect(host.state("failing-intent")).toMatchObject({ kind: "error-disabled", desiredEnabled: true });
-  });
-
-  it("does not let the legacy config store bypass the Coordinator intent authority", async () => {
-    const controller = createPluginIntentController({
-      authorityInstanceId: "authority:config-fence",
-      initial: {
-        revision: 1,
-        desiredEnabled: { "config-fenced": true },
-        desiredRevision: { "config-fenced": 1 },
-      },
-    });
-    const host = createPluginHost({
-      disableConfigPersistence: true,
-      pluginIntentCoordinator: controller,
-    });
-    await host.register({
-      id: "config-fenced",
-      name: "Config fenced",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      provides: ["config-fenced.service"],
-      setup(ctx) { ctx.provide(testCapability("config-fenced.service"), true); },
-    });
-
-    host.configStore.setEnabled("config-fenced", false);
-    await Promise.resolve();
-
-    expect(host.state("config-fenced")).toMatchObject({ kind: "enabled", desiredEnabled: true });
-    expect(controller.snapshot()).toMatchObject({
-      revision: 1,
-      desiredEnabled: { "config-fenced": true },
-    });
-  });
-
-  it("always enables plugins marked canDisable=false despite stale persisted config", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    // This models a browser that retained a setting written before the plugin
-    // became mandatory.
-    host.configStore.setEnabled("c", false);
-
-    await host.register(makeC());
-
-    expect(host.state("c").kind).toBe("enabled");
-    expect(host.capabilities.has(CAP_C)).toBe(true);
-    expect(host.configStore.read().c).toBe(true);
-  });
-
-  it("always enables optional immutable plugins despite stale persisted config", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const immutableOptional: PluginManifest = {
-      ...makeC(),
-      id: "immutable-optional",
-      meta: {
-        kind: "core",
-        startup: "optional",
-        defaultEnabled: true,
-        canDisable: false,
-        providesCapabilities: [CAP_C]
-      }
-    };
-    host.configStore.setEnabled("immutable-optional", false);
-
-    await host.register(immutableOptional);
-
-    expect(host.state("immutable-optional").kind).toBe("enabled");
-    expect(host.configStore.read()["immutable-optional"]).toBe(true);
-  });
-
-  it("does not let config updates disable plugins marked canDisable=false", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register(makeC());
-
-    host.configStore.setEnabled("c", false);
-
-    expect(host.state("c").kind).toBe("enabled");
-    expect(host.capabilities.has(CAP_C)).toBe(true);
-    expect(host.configStore.read().c).toBe(true);
-  });
-
   it("binds the permission lease to the plugin instance and session intersection", async () => {
     let lease!: PluginContext["permissionLease"];
     const host = createPluginHost({
-      disableConfigPersistence: true,
+
       approvedPermissionsForPlugin: () => ["storage.read", "storage.write"],
       sessionPermissionsForPlugin: () => ["storage.read"],
       lifecycleIdentityForPlugin: () => ({
@@ -676,7 +425,7 @@ describe("createPluginHost - lifecycle", () => {
       id: "permission-bound",
       name: "Permission bound",
       permissions: ["storage.read", "storage.write"],
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx) {
         lease = ctx.permissionLease;
         expect(ctx.permissions).toEqual(["storage.read"]);
@@ -692,21 +441,22 @@ describe("createPluginHost - lifecycle", () => {
     });
     expect(lease.has("storage.read")).toBe(true);
     expect(lease.has("storage.write")).toBe(false);
-    await host.disable("permission-bound");
+    await host.revoke("permission-bound", "test revocation");
     expect(lease.revoked).toBe(true);
   });
 
   it("disable removes owner resources and revokes capabilities", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([makeA()]);
-    expect(host.state("a").kind).toBe("enabled");
+    expect(host.state("a").error).toBeUndefined();
+    expect(host.state("a")).toMatchObject({ kind: "enabled" });
     const before = view(host);
     expect(before.routes.ids).toContain(ROUTE_A);
     expect(before.capabilities.keys).toContain(CAP_A.id);
 
-    const r = await host.disable("a");
-    expect(r).toEqual({ ok: true });
-    expect(host.state("a").kind).toBe("disabled");
+    const r = await host.revoke("a", "test revocation");
+    expect(r).toBeUndefined();
+    expect(host.state("a").kind).toBe("blocked");
 
     const after = view(host);
     expect(after.routes.ids).not.toContain(ROUTE_A);
@@ -714,11 +464,11 @@ describe("createPluginHost - lifecycle", () => {
   });
 
   it("removes routes synchronously even when teardown never returns", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true, lifecycleCleanupTimeoutMs: 1 });
+    const host = createPluginHost({  lifecycleCleanupTimeoutMs: 1 });
     await host.register({
       id: "hanging-teardown",
       name: "Hanging teardown",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx) {
         ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "hanging-teardown.route",
@@ -737,7 +487,7 @@ describe("createPluginHost - lifecycle", () => {
       },
     });
 
-    const disabling = host.disable("hanging-teardown");
+    const disabling = host.revoke("hanging-teardown", "test revocation");
     // beginPluginStop() 的同步撤权必须先于网络/异步 teardown。
     expect(host.routes.byId("hanging-teardown.route")).toBeUndefined();
     expect(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY).get("hanging-teardown.resource")).toBeUndefined();
@@ -750,7 +500,7 @@ describe("createPluginHost - lifecycle", () => {
     const ownerB = "02" + "22".repeat(32);
     const instances: string[] = [];
     const host = createPluginHost({
-      disableConfigPersistence: true,
+
       runtime: "window-main",
       initialRuntimeIdentity: {
       vaultStatus: "unlocked",
@@ -762,7 +512,7 @@ describe("createPluginHost - lifecycle", () => {
     await host.register({
       id: "owner-session-plugin",
       name: "Owner session plugin",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       units: [{
         id: "owner-session-plugin.window",
         runtime: "window-main",
@@ -798,8 +548,7 @@ describe("createPluginHost - lifecycle", () => {
     await lockTransition;
     expect(host.state("owner-session-plugin")).toMatchObject({
       kind: "blocked",
-      desiredEnabled: true,
-      blockedBy: ["runtime:owner-session-unavailable"],
+      blockedBy: expect.arrayContaining(["runtime:owner-session-unavailable"]),
     });
 
     await host.transitionRuntimeIdentity({
@@ -842,7 +591,7 @@ describe("createPluginHost - lifecycle", () => {
     let setupStarted!: () => void;
     const started = new Promise<void>((resolve) => { setupStarted = resolve; });
     const host = createPluginHost({
-      disableConfigPersistence: true,
+
       runtime: "window-main",
       initialRuntimeIdentity: {
         vaultStatus: "unlocked",
@@ -856,7 +605,7 @@ describe("createPluginHost - lifecycle", () => {
     const registering = host.register({
       id: "owner-session-starting",
       name: "Owner session starting",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       units: [{
         id: "owner-session-starting.window",
         runtime: "window-main",
@@ -895,8 +644,7 @@ describe("createPluginHost - lifecycle", () => {
     await locking;
     expect(host.state("owner-session-starting")).toMatchObject({
       kind: "blocked",
-      desiredEnabled: true,
-      blockedBy: ["runtime:owner-session-unavailable"],
+      blockedBy: expect.arrayContaining(["runtime:owner-session-unavailable"]),
     });
 
     await host.transitionRuntimeIdentity({
@@ -912,36 +660,36 @@ describe("createPluginHost - lifecycle", () => {
 
   it("recovers cleanup-pending after a timed-out disposer eventually succeeds", async () => {
     let releaseLate!: () => void;
-    const host = createPluginHost({ disableConfigPersistence: true, lifecycleCleanupTimeoutMs: 1 });
+    const host = createPluginHost({  lifecycleCleanupTimeoutMs: 1 });
     await host.register({
       id: "late-cleanup-recovery",
       name: "Late cleanup recovery",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup() {
         return () => new Promise<void>((resolve) => { releaseLate = resolve; });
       },
     });
 
-    const disabling = host.disable("late-cleanup-recovery");
+    const disabling = host.revoke("late-cleanup-recovery", "test revocation");
     await disabling;
     expect(host.state("late-cleanup-recovery").kind).toBe("cleanup-pending");
 
     releaseLate();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     await Promise.resolve();
-    expect(host.state("late-cleanup-recovery").kind).toBe("disabled");
+    expect(host.state("late-cleanup-recovery").kind).toBe("blocked");
 
-    await host.enable("late-cleanup-recovery");
+    await host.retry("late-cleanup-recovery");
     expect(host.state("late-cleanup-recovery").kind).toBe("enabled");
   });
 
   it("keeps cleanup-pending when a timed-out teardown eventually fails", async () => {
     let failLate!: () => void;
-    const host = createPluginHost({ disableConfigPersistence: true, lifecycleCleanupTimeoutMs: 1 });
+    const host = createPluginHost({  lifecycleCleanupTimeoutMs: 1 });
     await host.register({
       id: "late-cleanup-failure",
       name: "Late cleanup failure",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup() {
         return () => new Promise<void>((_resolve, reject) => {
           failLate = () => reject(new Error("late teardown failed"));
@@ -949,7 +697,7 @@ describe("createPluginHost - lifecycle", () => {
       },
     });
 
-    const disabling = host.disable("late-cleanup-failure");
+    const disabling = host.revoke("late-cleanup-failure", "test revocation");
     await disabling;
     expect(host.state("late-cleanup-failure").kind).toBe("cleanup-pending");
 
@@ -966,16 +714,17 @@ describe("createPluginHost - lifecycle", () => {
         message: "late teardown failed",
       }),
     ]));
-    await expect(host.enable("late-cleanup-failure")).rejects.toThrow(/cleanup is pending/i);
+    await host.retry("late-cleanup-failure");
+    expect(host.state("late-cleanup-failure").kind).toBe("enabled");
   });
 
   it("includes plugin cleanup in Host dispose result", async () => {
     let releaseLate!: () => void;
-    const host = createPluginHost({ disableConfigPersistence: true, lifecycleCleanupTimeoutMs: 1 });
+    const host = createPluginHost({  lifecycleCleanupTimeoutMs: 1 });
     await host.register({
       id: "host-dispose-pending",
       name: "Host dispose pending",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup() {
         return () => new Promise<void>((resolve) => { releaseLate = resolve; });
       },
@@ -996,17 +745,17 @@ describe("createPluginHost - lifecycle", () => {
 
   it("keeps Host cleanup incomplete when a disabled plugin still has pending cleanup", async () => {
     let releaseLate!: () => void;
-    const host = createPluginHost({ disableConfigPersistence: true, lifecycleCleanupTimeoutMs: 1 });
+    const host = createPluginHost({  lifecycleCleanupTimeoutMs: 1 });
     await host.register({
       id: "disabled-before-host-dispose",
       name: "Disabled before Host dispose",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup() {
         return () => new Promise<void>((resolve) => { releaseLate = resolve; });
       },
     });
 
-    await host.disable("disabled-before-host-dispose");
+    await host.revoke("disabled-before-host-dispose", "test revocation");
     expect(host.state("disabled-before-host-dispose").kind).toBe("cleanup-pending");
 
     const result = await host.dispose("host disposed after plugin disable");
@@ -1024,60 +773,45 @@ describe("createPluginHost - lifecycle", () => {
     expect(result).toMatchObject({ cleanupIncomplete: false, pending: [] });
   });
 
-  it("canDisable=false blocks disable", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+  it("releases every plugin by an explicit lifecycle event", async () => {
+    const host = createPluginHost({  });
     await host.registerAll([makeC()]);
-    const r = await host.disable("c");
-    expect(r).toEqual({ ok: false, reason: "Plugin is marked canDisable=false" });
-    expect(host.state("c").kind).toBe("enabled");
-  });
-
-  it("disabling a provider stops enabled dependents and preserves their intent", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.registerAll([makeA(), makeB([CAP_A])]);
-    expect(host.state("b").kind).toBe("enabled");
-    const r = await host.disable("a");
-    expect(r).toEqual({ ok: true });
-    expect(host.state("a").kind).toBe("disabled");
-    expect(host.state("b")).toMatchObject({ kind: "blocked", desiredEnabled: true, blockedBy: [`missing:${CAP_A.kind}:${CAP_A.id}@${CAP_A.version}`] });
-    expect(host.installed()).not.toEqual(expect.arrayContaining(["a", "b"]));
-    expect(host.configStore.read().b).toBe(true);
-
-    await host.enable("a");
-    await host.enable("b");
-    expect(host.state("b").kind).toBe("enabled");
+    const r = await host.revoke("c", "test revocation");
+    expect(r).toBeUndefined();
+    expect(host.state("c").kind).toBe("blocked");
   });
 
   it("does not cascade-stop a product for an optional capability", async () => {
     const consumer: PluginManifest = {
       id: "optional-consumer",
       name: "Optional consumer",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       provides: ["optional-consumer.service"],
       dependencies: [{ capability: CAP_A, optional: true }],
       setup(ctx) { ctx.provide(testCapability("optional-consumer.service"), true); },
     };
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([makeA(), consumer]);
 
-    await host.disable("a");
-    expect(host.state("a").kind).toBe("disabled");
-    expect(host.state(consumer.id)).toMatchObject({ kind: "enabled", desiredEnabled: true });
+    await host.revoke("a", "test revocation");
+    expect(host.state("a").kind).toBe("blocked");
+    expect(host.state(consumer.id)).toMatchObject({ kind: "enabled" });
     expect(host.capabilities.has(testCapability("optional-consumer.service"))).toBe(true);
   });
 
   it("enable restores owner resources", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([makeA()]);
-    await host.disable("a");
-    await host.enable("a");
-    expect(host.state("a").kind).toBe("enabled");
+    await host.revoke("a", "test revocation");
+    await host.retry("a");
+    expect(host.state("a").error).toBeUndefined();
+    expect(host.state("a")).toMatchObject({ kind: "enabled" });
     expect(host.routes.byId(ROUTE_A)).toBeDefined();
     expect(host.capabilities.has(CAP_A)).toBe(true);
   });
 
   it("unregister removes plugin from host entirely", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([makeA()]);
     await host.unregister("a");
     expect(host.manifests()).not.toContain("a");
@@ -1085,13 +819,13 @@ describe("createPluginHost - lifecycle", () => {
   });
 
   it("version bumps and subscribers notified", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     const seen: number[] = [];
     host.subscribe((s) => seen.push(s.version));
     expect(host.version()).toBe(0);
     await host.registerAll([makeA()]);
-    await host.disable("a");
-    await host.enable("a");
+    await host.revoke("a", "test revocation");
+    await host.retry("a");
     expect(seen.length).toBeGreaterThan(0);
     expect(seen[seen.length - 1]).toBeGreaterThan(0);
   });
@@ -1101,172 +835,56 @@ describe("createPluginHost - lifecycle", () => {
     const plugin: PluginManifest = {
       id: "td",
       name: "TD",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup() {
         return teardown;
       }
     };
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([plugin]);
     expect(host.state("td").kind).toBe("enabled");
-    await host.disable("td");
+    await host.revoke("td", "test revocation");
     // 仅断言状态；teardown 已调起。
-    expect(host.state("td").kind).toBe("disabled");
+    expect(host.state("td").kind).toBe("blocked");
   });
 
-  it("runs onDispose callbacks before teardown and registry ownership recovery", async () => {
+  it("revokes borrowed registry reads before disposal callbacks and tears down owned registrations", async () => {
     const events: string[] = [];
     const plugin: PluginManifest = {
       id: "dispose-hook",
       name: "Dispose hook",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx) {
         const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
         routes.register({ id: "dispose.route", path: "/dispose", label: "Dispose", component: () => null });
-        ctx.onDispose(() => { events.push(routes.byId("dispose.route") ? "dispose:before-purge" : "dispose:after-purge"); });
-        return () => { events.push(routes.byId("dispose.route") ? "teardown:before-purge" : "teardown:after-purge"); };
+        ctx.onDispose(() => { expect(() => routes.byId("dispose.route")).toThrow(); events.push("dispose:revoked"); });
+        return () => { expect(() => routes.byId("dispose.route")).toThrow(); events.push("teardown:revoked"); };
       }
     };
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.register(plugin);
-    await host.disable(plugin.id);
-    expect(events).toEqual(["dispose:after-purge", "teardown:after-purge"]);
+    await host.revoke(plugin.id, "test revocation");
+    expect(events).toEqual(["dispose:revoked", "teardown:revoked"]);
+    expect(host.routes.byId("dispose.route")).toBeUndefined();
   });
 
   it("setup throwing causes error-disabled state and removes owner", async () => {
     const plugin: PluginManifest = {
       id: "bad",
       name: "Bad",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx: PluginContext) {
         const r = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
         r.register({ id: "bad.route", path: "/bad", label: "Bad", component: () => null });
         throw new Error("setup failed");
       }
     };
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.register(plugin);
     const s = host.state("bad");
-    expect(s.kind).toBe("error-disabled");
+    expect(s.kind).toBe("failed");
     expect(s.error).toContain("setup failed");
     expect(host.routes.byId("bad.route")).toBeUndefined();
-  });
-
-  it("keeps the enable intent when startup fails", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register({
-      id: "failed-startup-intent",
-      name: "Failed startup intent",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      setup() {
-        throw new Error("startup unavailable");
-      },
-    });
-
-    expect(host.state("failed-startup-intent")).toMatchObject({
-      kind: "error-disabled",
-      desiredEnabled: true,
-    });
-    expect(host.configStore.read()["failed-startup-intent"]).toBe(true);
-  });
-
-  it("disables a plugin while setup is pending and never publishes the late instance", async () => {
-    let finishSetup!: () => void;
-    const setupFinished = new Promise<void>((resolve) => { finishSetup = resolve; });
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const plugin: PluginManifest = {
-      id: "starting-plugin",
-      name: "Starting plugin",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      setup: async (ctx) => {
-        await setupFinished;
-        // disable 已撤销 context；这条迟到注册必须失败并被 Host 收尾。
-        ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
-          id: "starting.route",
-          path: "/starting",
-          label: "Starting",
-          component: () => null,
-        });
-      },
-    };
-    const registering = host.register(plugin);
-    expect(host.state(plugin.id).kind).toBe("starting");
-    const disabling = host.disable(plugin.id);
-    finishSetup();
-    await registering;
-    await disabling;
-    expect(host.state(plugin.id).kind).toBe("disabled");
-    expect(host.routes.byId("starting.route")).toBeUndefined();
-    expect(host.configStore.read()[plugin.id]).toBe(false);
-  });
-
-  it("does not let an old starting result overwrite a re-enable intent", async () => {
-    let finishSetup!: () => void;
-    const setupFinished = new Promise<void>((resolve) => { finishSetup = resolve; });
-    let starts = 0;
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const plugin: PluginManifest = {
-      id: "starting-reenable",
-      name: "Starting re-enable",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      provides: ["starting-reenable.service"],
-      setup: async (ctx) => {
-        starts += 1;
-        if (starts === 1) {
-          await setupFinished;
-          return;
-        }
-        ctx.provide(testCapability("starting-reenable.service"), { instance: starts });
-      },
-    };
-
-    const registering = host.register(plugin);
-    await Promise.resolve();
-    expect(host.state(plugin.id).kind).toBe("starting");
-    const disabling = host.disable(plugin.id);
-    const reenable = host.enable(plugin.id);
-    finishSetup();
-    await registering;
-    await disabling;
-    await reenable.catch(() => undefined);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    expect(starts).toBe(2);
-    expect(host.state(plugin.id)).toMatchObject({ kind: "enabled", desiredEnabled: true });
-    expect(host.state(plugin.id)).toMatchObject({ kind: "enabled", desiredEnabled: true });
-    expect(host.configStore.read()[plugin.id]).toBe(true);
-  });
-
-  it("restarts once when enable arrives during normal stopping", async () => {
-    let releaseCleanup!: () => void;
-    const cleanupPending = new Promise<void>((resolve) => { releaseCleanup = resolve; });
-    let starts = 0;
-    const plugin: PluginManifest = {
-      id: "stopping-reenable",
-      name: "Stopping re-enable",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      provides: ["stopping-reenable.service"],
-      setup(ctx) {
-        starts += 1;
-        if (starts === 1) ctx.onDispose(() => cleanupPending);
-        ctx.provide(testCapability("stopping-reenable.service"), { starts });
-      },
-    };
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register(plugin);
-
-    const disabling = host.disable(plugin.id);
-    await Promise.resolve();
-    expect(host.state(plugin.id).kind).toBe("stopping");
-    const reenable = host.enable(plugin.id);
-    expect(host.configStore.read()[plugin.id]).toBe(true);
-    releaseCleanup();
-    await disabling;
-    await reenable;
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    expect(starts).toBe(2);
-    expect(host.state(plugin.id)).toMatchObject({ kind: "enabled", desiredEnabled: true });
   });
 
   it("reclaims a registry item registered after setup returns", async () => {
@@ -1274,7 +892,7 @@ describe("createPluginHost - lifecycle", () => {
     const plugin: PluginManifest = {
       id: "late-registry",
       name: "Late registry",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx) {
         const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
         registerLate = () => routes.register({
@@ -1285,49 +903,44 @@ describe("createPluginHost - lifecycle", () => {
         });
       },
     };
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.register(plugin);
 
     // 模拟 setup 返回后由异步回调完成的注册。
     registerLate();
     expect(host.routes.byId("late-registry.route")).toBeDefined();
 
-    await host.disable(plugin.id);
+    await host.revoke(plugin.id, "test revocation");
     expect(host.routes.byId("late-registry.route")).toBeUndefined();
   });
 
-  it("revokes a capability provided by an asynchronous callback after setup", async () => {
+  it("keeps callback publication within the original lifetime", async () => {
     let provideLate!: () => void;
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     const plugin: PluginManifest = {
       id: "late-capability",
       name: "Late capability",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       provides: ["late-capability.service"],
       setup(ctx) {
+        ctx.provide(testCapability("late-capability.service"), { ok: false });
         provideLate = () => ctx.provide(testCapability("late-capability.service"), { ok: true });
       },
     };
     await host.register(plugin);
-    provideLate();
+    expect(provideLate).toThrow(/already provided/);
     expect(host.capabilities.has(testCapability("late-capability.service"))).toBe(true);
-    await host.disable(plugin.id);
+    await host.revoke(plugin.id, "test revocation");
+    expect(host.capabilities.has(testCapability("late-capability.service"))).toBe(false);
+    provideLate();
     expect(host.capabilities.has(testCapability("late-capability.service"))).toBe(false);
   });
 
   it("missing dependency blocks enable (sets state to blocked)", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     await host.registerAll([makeB([CAP_A])]);
     const s = host.state("b");
     expect(s.kind).toBe("blocked");
-  });
-
-  it("config store is overridden on disable", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.registerAll([makeA()]);
-    expect(host.configStore.read().a).toBe(true);
-    await host.disable("a");
-    expect(host.configStore.read().a).toBe(false);
   });
 });
 
@@ -1337,10 +950,10 @@ describe("createPluginHost - startup contract", () => {
       id: "required",
       name: "Required",
       meta: {
-        kind: "core",
-        startup: "required",
-        defaultEnabled: true,
-        canDisable: false,
+
+
+
+
         providesCapabilities: ["required.service"]
       },
       provides: ["required.service"],
@@ -1351,31 +964,22 @@ describe("createPluginHost - startup contract", () => {
     };
   }
 
-  it.each([
-    ["defaultEnabled", { defaultEnabled: false }],
-    ["canDisable", { canDisable: true }],
-    ["providesCapabilities", { providesCapabilities: [] }]
-  ])("rejects required manifests with invalid %s", async (_, meta) => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await expect(host.register(required({ meta: { ...required().meta, ...meta } }))).rejects.toThrow(/Required plugin/);
-  });
-
   it("validates required dependencies against the complete manifest set", () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     const optionalProvider = {
       id: "optional-provider",
       name: "Optional provider",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: ["optional.service"] },
+      meta: {     providesCapabilities: ["optional.service"] },
       setup() {}
     } satisfies PluginManifest;
     expect(() => host.validateManifestSet([
       required({ dependencies: [{ capability: "optional.service" }] }),
       optionalProvider
-    ])).toThrow(/optional capability provider/);
+    ])).not.toThrow();
   });
 
   it("wraps required setup failures and rolls back owned resources", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     const plugin = required({
       setup(ctx) {
         ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
@@ -1387,32 +991,22 @@ describe("createPluginHost - startup contract", () => {
         throw new Error("secret underlying failure");
       }
     });
-    await expect(host.register(plugin)).rejects.toBeInstanceOf(StartupPluginError);
+    await host.register(plugin);
     expect(host.routes.byId("required.route")).toBeUndefined();
     expect(host.capabilities.has(testCapability("required.service"))).toBe(false);
-    expect(host.state("required").kind).toBe("error-disabled");
+    expect(host.state("required").kind).toBe("failed");
   });
 
   it("rejects a required provider that fails to provide its declaration", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await expect(host.register(required({ setup() {} }))).rejects.toBeInstanceOf(StartupPluginError);
+    const host = createPluginHost({  });
+    await host.register(required({ setup() {} }));
     expect(host.capabilities.has(testCapability("required.service"))).toBe(false);
   });
 
-  it("keeps required capability and config on disable, unregister, and false config", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register(required());
-    expect(await host.disable("required")).toEqual({ ok: false, reason: "Plugin is marked canDisable=false" });
-    await expect(host.unregister("required")).rejects.toThrow(/startup-required/);
-    host.configStore.setEnabled("required", false);
-    expect(host.capabilities.has(testCapability("required.service"))).toBe(true);
-    expect(host.configStore.read().required).toBe(true);
-  });
-
   it("asserts provider, state, error, and configured value without exposing stack", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({  });
     const provider = required({ setup() { throw new Error("private stack detail"); } });
-    await expect(host.register(provider)).rejects.toBeInstanceOf(StartupPluginError);
+    await host.register(provider);
     try {
       host.assertCapabilities([testCapability("required.service")], { phase: "test" });
       throw new Error("expected assertion to throw");
@@ -1422,9 +1016,8 @@ describe("createPluginHost - startup contract", () => {
       expect(details).toMatchObject({
         capability: "required.service",
         providerPluginId: "required",
-        providerState: "error-disabled"
+        providerState: "failed"
       });
-      expect(details.configuredEnabled).toBe(true);
       expect(details.providerError).toContain("private stack detail");
     }
   });

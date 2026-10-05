@@ -2,9 +2,11 @@ import react from "@vitejs/plugin-react";
 import appPackage from "../../package.json";
 import { defineConfig, type Plugin } from "vite";
 import { readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const appVersion = appPackage.version;
+const storagePrivateGrant = randomBytes(32).toString("hex");
 const MSFILE_E2E_VIRTUAL_ID = "virtual:keymaster-msfile-e2e-hooks";
 const MSFILE_E2E_RESOLVED_ID = `\0${MSFILE_E2E_VIRTUAL_ID}`;
 const MSFILE_SPIKE_VIRTUAL_ID = "virtual:keymaster-msfile-spike-hooks";
@@ -120,6 +122,7 @@ function injectAppVersionMeta(): { name: string; transformIndexHtml: (html: stri
 
 export default defineConfig({
   define: {
+    __KEYMASTER_STORAGE_PRIVATE_GRANT__: JSON.stringify(storagePrivateGrant),
     // 旧 spike 仅由 Playwright 的 VITE_MSFILE_SPIKE=1 隔离构建启用；普通
     // 生产包把该全局固定为 false，连同查询参数分支一起由构建器删除。
     __KEYMASTER_MSFILE_SPIKE__: JSON.stringify(process.env.VITE_MSFILE_SPIKE === "1"),

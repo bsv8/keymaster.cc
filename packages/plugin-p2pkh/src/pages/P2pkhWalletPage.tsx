@@ -1,7 +1,8 @@
+import { useP2pkhResources } from "../P2pkhResourceContext.js";
 import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPrice, type DataTableColumn } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { router, useBsvPrice, useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { router, usePluginBsvPrice, usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhUtxo } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
@@ -47,11 +48,11 @@ const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
 const EMPTY_BALANCE_SNAPSHOT = emptyGlobalBalanceSnapshot();
 
 export function P2pkhWalletPage(props: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
   // 一次渲染，必须按"暂不可用"降级而不是抛错。
-  const coordinator = useOptionalCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
-  const service = useOptionalCapability(P2PKH_CAPABILITY);
+  const coordinator = useOptionalPluginCapability(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
+  const service = useOptionalPluginCapability(P2PKH_CAPABILITY);
   if (!service || !coordinator) {
     return (
       <div className="p2pkh-wallet">
@@ -74,15 +75,15 @@ function P2pkhWalletPageInner({
   network?: P2pkhNetwork;
   service: P2pkhService;
 }) {
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const locale = useLocale();
-  const price = useBsvPrice();
+  const resources = useP2pkhResources();
+  const { t } = usePluginI18n();
+  const locale = usePluginLocale();
+  const price = usePluginBsvPrice();
   const [page, setPage] = useState(() => readPage());
   const [actionError, setActionError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const wallet = useOptionalResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string }>(
-    host.resourceStore,
+    resources,
     "p2pkh.wallet",
     [],
     (snapshot) => snapshot.data
@@ -96,7 +97,7 @@ function P2pkhWalletPageInner({
     EMPTY_WALLET_SNAPSHOT
   );
   const balanceSnapshot = useOptionalResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
-    host.resourceStore,
+    resources,
     "p2pkh.balance",
     [],
     (snapshot) => snapshot.data ?? EMPTY_BALANCE_SNAPSHOT,
@@ -109,7 +110,7 @@ function P2pkhWalletPageInner({
   const [loadingMore, setLoadingMore] = useState<"history" | "locals" | null>(null);
 
   const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    host.resourceStore,
+    resources,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? { includeTestnet: false },
@@ -297,7 +298,7 @@ function P2pkhWalletPageInner({
 }
 
 function BalanceBreakdown({ breakdown }: { breakdown?: P2pkhBalanceBreakdown }) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   if (!breakdown) return null;
   return <dl className="p2pkh-wallet__balance-breakdown">
     <dt>{t("p2pkh.balance.confirmed", { defaultValue: "已确认" })}</dt><dd>{formatSats(breakdown.confirmed)}</dd>

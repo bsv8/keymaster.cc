@@ -1,3 +1,14 @@
+import { setupContactUriActions } from "./setupUriActions.js";
+import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { CONTACTS_PRESENCE_CHANNEL_CAPABILITY } from "@keymaster/contracts";
+import { createInstanceRegistryService } from "@keymaster/runtime";
+import { createContactPublicKeyActionRegistry } from "./registries/contactPublicKeyActionRegistry.js";
+import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { CONTACTS_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindContactsUi } from "./ContactsResourceContext.js";
+import { OWNED_RESOURCE_ACCESS_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-contacts/src/manifest.ts
 // 联系人插件：注册 contacts.service + 页面 + 菜单 + 首页 widget。
 // 硬切换：联系人按 owner/App K-V namespace 隔离。
@@ -10,22 +21,23 @@ import type {
   BreadcrumbRegistry,
   ContactPresence,
   ContactPresenceMap,
+  ContactsPresenceReader,
   ContactsService,
   I18nPluginResources,
-  KeyspaceService,
+  VaultWalletState,
   SessionCoordinatorClient,
   PluginManifest,
   PluginSetup,
   ResourceRegistry,
-  RouteRegistry,
   Contact
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import {
   CONTACTS_SERVICE_CAPABILITY,
+  CONTACTS_PRESENCE_READER_CAPABILITY,
   CONTACTS_PICKER_CAPABILITY,
   CONTACTS_EDITOR_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
@@ -35,7 +47,7 @@ import {
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import {
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
   type ContactsCoordinatorControl,
 } from "@keymaster/contracts";
@@ -56,6 +68,7 @@ export const contactsResources: I18nPluginResources = {
   namespace: "contacts",
   resources: {
     en: {
+      "contacts.uri.action": "View or save contact", "contacts.uri.loading": "Loading contact…", "contacts.uri.loadError": "Unable to load contact.", "contacts.uri.notSaved": "This contact is not saved yet.", "contacts.uri.edit": "Edit contact", "contacts.uri.save": "Save contact", "contacts.uri.done": "Done",
       "contacts.route.list": "Contacts",
       "contacts.route.detail": "Contact detail",
       "contacts.menu.list": "Contacts",
@@ -127,6 +140,7 @@ export const contactsResources: I18nPluginResources = {
       ,"contacts.task.presence.description": "Update contact online state with the fixed Ping/Pong protocol."
     },
     "zh-CN": {
+      "contacts.uri.action": "查看或保存联系人", "contacts.uri.loading": "正在查询联系人…", "contacts.uri.loadError": "无法读取联系人。", "contacts.uri.notSaved": "该联系人尚未保存。", "contacts.uri.edit": "编辑联系人", "contacts.uri.save": "保存联系人", "contacts.uri.done": "完成",
       "contacts.route.list": "联系人",
       "contacts.route.detail": "联系人详情",
       "contacts.menu.list": "联系人",
@@ -204,29 +218,32 @@ const contactsPluginDefinition = {
   id: "contacts",
   name: "Contacts",
   description: "联系人管理（按 key namespace 隔离，身份字段为 publicKeyHex）。",
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [
     {
       id: "contacts.window",
       runtime: "window-main",
       scopeKind: "owner-session",
-      provides: [
+      provides: [CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
         capabilityDescriptor(CONTACTS_CAPABILITY),
         capabilityDescriptor(CONTACTS_PICKER),
         capabilityDescriptor(CONTACTS_EDITOR),
+        capabilityDescriptor(CONTACTS_PRESENCE_READER_CAPABILITY),
         capabilityDescriptor(CONTACTS_COORDINATOR_CONTROL_CAPABILITY),
       ],
       storage: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
       dependencies: defineRuntimeUnitDependencies([
-        { capability: KEYSPACE_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "联系人按 key namespace 隔离" },
-        { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册联系人页面" },
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: CONTACTS_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取所属实例资源" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: URI_ACTION_REGISTRY_CAPABILITY, optional: true, reason: "注册公钥 URI 内部业务 UI" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "window-main", reason: "联系人按 key namespace 隔离" },
+        { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册联系人页面" },
         { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "接入首页业务导航" },
-        { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "显示联系人公钥操作" },
       ]),
     },
     {
@@ -234,18 +251,26 @@ const contactsPluginDefinition = {
       runtime: "shared-worker",
       scopeKind: "owner-session",
       storage: CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook,
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: CONTACTS_PRESENCE_CHANNEL_CAPABILITY, sourceRuntime: "shared-worker", reason: "固定 Ping/Pong 在线探测 Channel" },
+        { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "联系人地址簿的受限文件客户端" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "联系人所属钱包身份" },
+        ]),
     },
   ],
   i18n: contactsResources,
   setup(ctx) {
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+  ctx.provide(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, createInstanceRegistryService(createContactPublicKeyActionRegistry(), CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, undefined, ctx.scope));
+
+    const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
-    const coordinator = ctx.coordinator as ContactsCoordinatorControl | undefined;
+    const coordinator = ctx.capability(CONTACTS_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as ContactsCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Contacts Coordinator control is unavailable");
     ctx.provide(CONTACTS_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     // 页面侧只保留联系人 CRUD；Ping/Pong 与唯一后台任务均归 Coordinator Worker。
-    const service = createContactsService({ keyspace, messageBus, storage: ctx.filesFor("address-book") });
+    const service = createContactsService({ walletState, messageBus, storage: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "address-book") });
     ctx.provide(CONTACTS_CAPABILITY, service);
+    setupContactUriActions(ctx);
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<Contact[], readonly string[]>({
       id: "contacts.list",
@@ -254,7 +279,7 @@ const contactsPluginDefinition = {
       load: async () => service.listContacts(),
       subscribe: (_args, _context, invalidate) => {
         const offChange = service.onChange(invalidate);
-        const offActive = keyspace.onActiveKeyChanged(invalidate);
+        const offActive = walletState.subscribe(invalidate);
         return () => { offChange(); offActive(); };
       },
       invalidation: "immediate"
@@ -266,20 +291,18 @@ const contactsPluginDefinition = {
       load: async (args) => (await service.listContacts()).find((contact) => contact.publicKeyHex === args[0]),
       subscribe: (_args, _context, invalidate) => {
         const offChange = service.onChange(invalidate);
-        const offActive = keyspace.onActiveKeyChanged(invalidate);
+        const offActive = walletState.subscribe(invalidate);
         return () => { offChange(); offActive(); };
       },
       invalidation: "immediate"
     });
-    resources.register<ContactPresenceMap, readonly string[]>({
-      id: "contacts.presence",
-      scope: "active-key",
-      key: (_args, context) => ["contacts.presence", context.activePublicKeyHex ?? "none"],
-      load: async (_args, context) => {
-        if (!context.activePublicKeyHex) return {};
+    const presenceReader: ContactsPresenceReader = {
+      async snapshot() {
+        ctx.scope.assertActive();
         const contacts = await service.listContacts();
-        const snapshotResult = await coordinator.contactsPresenceSnapshot();
-        const snapshot = snapshotResult.status === "ok" ? snapshotResult.value : {};
+        const result = await coordinator.contactsPresenceSnapshot();
+        ctx.scope.assertActive();
+        const snapshot = result.status === "ok" ? result.value : {};
         const presence: Record<string, ContactPresence> = {};
         for (const contact of contacts) {
           const publicKeyHex = contact.publicKeyHex.trim().toLowerCase();
@@ -287,13 +310,29 @@ const contactsPluginDefinition = {
         }
         return presence;
       },
-      subscribe: (_args, _context, invalidate) => {
+      subscribe(invalidate) {
+        ctx.scope.assertActive();
         const offChange = service.onChange(invalidate);
-        const offActive = keyspace.onActiveKeyChanged(invalidate);
-        const offCoordinatorPresence = coordinator.subscribeTopic("contacts.presence", invalidate);
+        const offActive = walletState.subscribe(invalidate);
+        const offPresence = coordinator.subscribeTopic("contacts.presence", invalidate);
         const offSession = coordinator.subscribeTopic("session.state", invalidate);
-        return () => { offChange(); offActive(); offCoordinatorPresence(); offSession(); };
+        let disposed = false;
+        let removeRevoke = () => {};
+        const dispose = () => {
+          if (disposed) return;
+          disposed = true;
+          offChange(); offActive(); offPresence(); offSession(); removeRevoke();
+        };
+        removeRevoke = ctx.scope.onRevoke(dispose);
+        return dispose;
       },
+    };
+    ctx.provide(CONTACTS_PRESENCE_READER_CAPABILITY, presenceReader);
+    resources.register<ContactPresenceMap, readonly string[]>({
+      id: "contacts.presence", scope: "active-key",
+      key: (_args, context) => ["contacts.presence", context.activePublicKeyHex ?? "none"],
+      load: async (_args, context) => context.activePublicKeyHex ? presenceReader.snapshot() : {},
+      subscribe: (_args, _context, invalidate) => presenceReader.subscribe(invalidate),
       equals: (previous, next) => {
         if (previous === next) return true;
         const previousKeys = Object.keys(previous ?? {});
@@ -309,23 +348,27 @@ const contactsPluginDefinition = {
       },
       invalidation: "immediate"
     });
-    ctx.provide(CONTACTS_PICKER, ContactPicker);
-    ctx.provide(CONTACTS_EDITOR, ContactsEditor);
+    ctx.provide(CONTACTS_PICKER, bindContactsUi(ctx, ContactPicker));
+    ctx.provide(CONTACTS_EDITOR, bindContactsUi(ctx, ContactsEditor));
 
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
-    routes.register({
-      id: "contacts.list",
-      path: "/contacts",
-      label: { key: "contacts.route.list", fallback: "Contacts" },
-      component: ContactsPage
+    const actions = ctx.capability(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
+    resources.register({
+      id: "contacts.public-key-actions",
+      scope: "active-key",
+      key: (_args, context) => ["contacts.public-key-actions", context.activePublicKeyHex ?? "none"],
+      load: async () => actions.list(),
+      subscribe: (_args, _context, invalidate) => actions.subscribe(invalidate),
+      invalidation: "immediate",
     });
-    routes.register({
-      id: "contacts.detail",
-      path: "/contacts/:id",
-      label: { key: "contacts.route.detail", fallback: "Contact detail" },
-      component: ContactDetailPage
-    });
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    const List = bindContactsUi(ctx, ContactsPage);
+    const Detail = bindContactsUi(ctx, ContactDetailPage);
+    pages.view.register({ kind: "page", id: "contacts.list", path: "/contacts",
+      label: { key: "contacts.route.list", fallback: "Contacts" }, render: () => createElement(List) });
+    pages.view.register({ kind: "page", id: "contacts.detail", path: "/contacts/:id",
+      label: { key: "contacts.route.detail", fallback: "Contact detail" }, render: location => createElement(Detail, { location }) });
 
+    pages.view.register({ kind: "home", slot: "main", id: "contacts.recent", label: "contacts", space: { id: "contacts.shortcuts", label: { key: "contacts.domain.label", fallback: "Contacts" }, order: 500 }, order: 30, render: () => createElement(bindContactsUi(ctx, RecentContactsWidget)) });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("contacts", "home", {
       id: "home.contacts",
@@ -338,7 +381,6 @@ const contactsPluginDefinition = {
         visibleWhen: ({ unlocked }) => unlocked,
         activeWhen: (path) => path.startsWith("/contacts/")
       },
-      home: [{ id: "contacts.recent", space: { id: "contacts.shortcuts", label: { key: "contacts.domain.label", fallback: "Contacts" }, order: 500 }, order: 30, component: RecentContactsWidget }]
     });
 
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);

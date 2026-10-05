@@ -1,3 +1,17 @@
+import { createPublicVaultService } from "./publicVaultService.js";
+import { createVaultImporters } from "./VaultInternalContext.js";
+import { keyImportResources, hexResources, wifResources, jsonFileResources } from "./import/resources.js";
+import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY } from "@keymaster/contracts";
+import { COORDINATOR_CRYPTO_RPC_CAPABILITY } from "@keymaster/contracts";
+import { evaluateShellGuard, areShellGuardStatesEqual } from "./walletGuard.js";
+import { VAULT_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { VaultWalletGuard, type WalletGuard } from "./VaultWalletGuard.js";
+import { VaultLockButton } from "./VaultLockButton.js";
+import { VaultWalletEntry } from "./VaultWalletEntry.js";
+import { PAGE_UI_RENDERER_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindVaultUi } from "./VaultResourceContext.js";
+import { OWNED_RESOURCE_ACCESS_CAPABILITY, I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-vault/src/manifest.ts
 // vault 插件清单。
 // 设计缘由：vault 是平台依赖，必须最先注册；它不依赖任何其他 plugin capability。
@@ -17,7 +31,7 @@ import type {
   BusinessFeatureRegistry,
   CommandRegistry,
   I18nPluginResources,
-  KeyspaceService,
+  VaultWalletState,
   PluginManifest,
   PluginSetup,
   ResourceRegistry,
@@ -30,11 +44,9 @@ import {
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   COMMAND_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
-  SETTINGS_REGISTRY_CAPABILITY,
-  VAULT_COORDINATOR_CONTROL_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   VAULT_LOCAL_SECRET_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
   type VaultCoordinatorControl,
@@ -44,13 +56,14 @@ import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
 import { VaultUnlockPage } from "./VaultUnlockPage.js";
 import { AutoLockSettingsPage } from "./AutoLockSettingsSection.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
-import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
+import { createWalletStateAccess } from "./walletStateAccess.js";
 import { createAutoLockServiceCoordinator } from "./autoLockServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
 import { createVaultLocalSecretService } from "./localSecretService.js";
 
 /** 唯一 Key 的只读资源投影。 */
 export interface VaultKeyResourceState {
+  status: import("@keymaster/contracts").VaultStatus;
   /** 唯一钱包 Key 的公钥；未初始化或锁定时缺省。 */
   activePublicKeyHex?: string;
   /** Worker 运行世代；Worker 重启后变化。 */
@@ -272,48 +285,50 @@ const vaultPluginDefinition = {
   id: "vault",
   name: "Vault",
   description: "单 Key 本地钱包：管理唯一钱包 Key 的加密存储、内存解密与生命周期。",
-  kind: "core",
-  startup: "required",
+
+
   // Vault 必须最早可用：未初始化时它是「创建 / 导入钱包 Key」的唯一入口，
   // locked 时是解锁页的唯一入口。这两种状态都发生在本地钱包 Root 就绪
   // 之前或之后的冷启动路径上，晚于第一阶段就拿不到 vault.service。
-  bootstrapStage: "storage-onboarding",
-  defaultEnabled: true,
-  canDisable: false,
-  displayGroup: "core",
+
   units: [{
     id: "vault.window",
     runtime: "window-main",
+    connect: { providerMethods: ["identity.get", "intent.sign", "cipher.encrypt", "cipher.decrypt"] },
     scopeKind: "root",
-    provides: [VAULT_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, AUTOLOCK_SERVICE_CAPABILITY],
+    provides: [VAULT_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, AUTOLOCK_SERVICE_CAPABILITY],
     dependencies: [
+      { capability: VAULT_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: PAGE_UI_RENDERER_CAPABILITY, sourceRuntime: "window-main", reason: "Page onboarding 布局" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault key resource" },
-      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault routes" },
-      { capability: SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault routes" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, sourceRuntime: "window-main", reason: "Vault 私有 UI 资源" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "Vault UI 文案" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault settings navigation" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault breadcrumbs" },
-      { capability: COMMAND_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "vault lock command" },
     ],
   }, {
     id: "vault.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "root",
+    provides: [COORDINATOR_CRYPTO_RPC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY],
   }],
-  i18n: vaultResources,
+  i18n: { namespace: "vault", resources: Object.fromEntries((["en", "zh-CN"] as const).map(language => [language, Object.assign({}, vaultResources.resources[language], ...[keyImportResources, hexResources, wifResources, jsonFileResources].map(resource => resource.resources[language]))])) },
   setup(ctx) {
     // 两个 facade 都只从同一个已提交的 session 镜像派生：vault 管生命周期，
-    // keyspace 只投影当前唯一 Key 的公钥身份。
-    const coordinatorClient = ctx.coordinator as VaultCoordinatorControl | undefined;
+    // walletState 只投影当前唯一 Key 的公钥身份。
+    const coordinatorClient = ctx.capability(VAULT_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as VaultCoordinatorControl | undefined;
     if (!coordinatorClient) throw new Error("Session Coordinator is unavailable");
-    if (coordinatorClient.getIsConnected()) ctx.provide(VAULT_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     if (!coordinatorClient.getIsConnected()) throw new Error("Session Coordinator is unavailable");
 
     const sessionStateMirror = new SessionStateMirror(coordinatorClient);
     const service = createVaultServiceCoordinator({ coordinatorClient, sessionStateMirror });
-    const keyspaceHandle = createKeyspaceServiceCoordinator(sessionStateMirror);
+    ctx.scope.onRevoke(() => service.dispose?.());
+    const importers = createVaultImporters();
+    const walletStateAccess = createWalletStateAccess({ snapshot: () => service.walletSnapshot(), subscribe: handler => service.subscribeWalletState(handler) }, ctx.scope);
 
-    ctx.provide(VAULT_CAPABILITY, service);
-    ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
+    ctx.provide(VAULT_CAPABILITY, createPublicVaultService(service));
+    ctx.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateAccess);
     ctx.provide(VAULT_LOCAL_SECRET_CAPABILITY, createVaultLocalSecretService(coordinatorClient));
 
     // 自动锁 facade：真值在 Coordinator，页面经 session.state 收敛多 tab。
@@ -343,20 +358,22 @@ const vaultPluginDefinition = {
         return ["vault.key-state", state ?? "no-wallet-key"];
       },
       load: async () => {
-        const snapshot = service.getLifecycleSnapshot();
+        const snapshot = service.walletSnapshot();
         return {
           // 锁定时不投影公钥：页面不应在未解锁时继续持有身份。
           ...(snapshot.status === "unlocked" && snapshot.activePublicKeyHex
             ? { activePublicKeyHex: snapshot.activePublicKeyHex }
             : {}),
+          status: snapshot.status,
           runGeneration: snapshot.runGeneration,
           ...(snapshot.walletGeneration === undefined ? {} : { walletGeneration: snapshot.walletGeneration }),
           revision: snapshot.vaultLifecycleRevision,
         };
       },
-      subscribe: (_args, _ctx, invalidate) => service.onLifecycleChange(invalidate),
+      subscribe: (_args, _ctx, invalidate) => service.subscribeWalletState(invalidate),
       equals: (a, b) => (a !== undefined && b !== undefined && (
-        a.activePublicKeyHex === b.activePublicKeyHex
+        a.status === b.status
+        && a.activePublicKeyHex === b.activePublicKeyHex
         && a.runGeneration === b.runGeneration
         && a.walletGeneration === b.walletGeneration
         && a.revision === b.revision
@@ -364,44 +381,28 @@ const vaultPluginDefinition = {
       invalidation: "immediate"
     });
 
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
-    routes.register({
-      id: "vault.unlock",
-      path: "/vault/unlock",
-      label: { key: "vault.route.unlock", fallback: "Unlock wallet" },
-      component: VaultUnlockPage
-    });
-    routes.register({
-      id: "vault.create",
-      path: "/vault/create",
-      label: { key: "vault.route.create", fallback: "New wallet" },
-      component: VaultCreatePage
-    });
+    resources.register<WalletGuard, readonly string[]>({ id: "vault.wallet-guard", scope: "active-key", key: (_args, context) => ["vault.wallet-guard", context.activePublicKeyHex ?? "none"],
+      load: () => evaluateShellGuard({ vaultStatus: service.status(), getCurrentKey: () => service.getCurrentKey(), projectedPublicKeyHex: service.walletSnapshot().activePublicKeyHex }),
+      equals: areShellGuardStatesEqual, subscribe: (_args, _context, invalidate) => service.subscribeWalletState(invalidate), invalidation: "immediate" });
 
-    // /settings/* 走 settings.registry 作为页面路由真值，同时作为一个 feature
-    // 挂入「设置」业务域。vault 在 settings 之前启动，因此 registry 支持先
-    // 注册入口、等待 settings 域出现后再投影到业务导航。
-    const settings = ctx.capability(SETTINGS_REGISTRY_CAPABILITY);
-    settings.register({
-      id: "vault.current-key",
-      path: "/settings/current-key",
-      label: { key: "vault.route.currentKey", fallback: "Wallet key" },
-      description: { key: "vault.currentKey.description", fallback: "Manage the single wallet key kept in this browser." },
-      component: CurrentKeySettingsPage,
-      order: 0,
-      icon: "ShieldCheck",
-      visibleWhen: ({ unlocked }) => unlocked
-    });
-    settings.register({
-      id: "vault.auto-lock",
-      path: "/settings/auto-lock",
-      label: { key: "vault.route.autoLock", fallback: "Auto lock" },
-      description: { key: "vault.autolock.page.description", fallback: "Lock the wallet automatically after inactivity." },
-      component: AutoLockSettingsPage,
-      order: 1,
-      icon: "LockKeyhole",
-      visibleWhen: ({ unlocked }) => unlocked
-    });
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
+    const Guard = bindVaultUi(ctx, VaultWalletGuard, service, importers);
+    const Lock = bindVaultUi(ctx, VaultLockButton, service, importers);
+    const sendActivity = () => coordinatorClient.sendActivity();
+    pages.register({ kind: "frame", slot: "wallet-guard", id: "vault.wallet-guard", label: "Wallet", render: location => createElement(Guard, { children: location.children, sendActivity }) });
+    pages.register({ kind: "header", slot: "topbar", id: "vault.lock-button", order: 1000, label: "Lock", render: () => createElement(Lock) });
+    const WalletEntry = bindVaultUi(ctx, VaultWalletEntry, service, importers);
+    pages.register({ kind: "frame", slot: "wallet-entry", id: "vault.wallet-entry", label: "Wallet", render: () => createElement(WalletEntry) });
+    const Unlock = bindVaultUi(ctx, VaultUnlockPage, service, importers);
+    const Create = bindVaultUi(ctx, VaultCreatePage, service, importers);
+    const CurrentKey = bindVaultUi(ctx, CurrentKeySettingsPage, service, importers);
+    const AutoLock = bindVaultUi(ctx, AutoLockSettingsPage, service, importers);
+    for (const [id, path, label, Component] of [
+      ["vault.unlock", "/vault/unlock", { key: "vault.route.unlock", fallback: "Unlock wallet" }, Unlock],
+      ["vault.create", "/vault/create", { key: "vault.route.create", fallback: "New wallet" }, Create],
+      ["vault.current-key", "/settings/current-key", { key: "vault.route.currentKey", fallback: "Wallet key" }, CurrentKey],
+      ["vault.auto-lock", "/settings/auto-lock", { key: "vault.route.autoLock", fallback: "Auto lock" }, AutoLock],
+    ] as const) pages.register({ kind: "page", id, path, label, render: () => createElement(Component) });
 
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("vault", "settings", {
@@ -410,7 +411,7 @@ const vaultPluginDefinition = {
       description: { key: "vault.currentKey.description", fallback: "Manage the single wallet key kept in this browser." },
       order: 12,
       icon: "ShieldCheck",
-      entry: { path: "/settings/current-key", component: CurrentKeySettingsPage }
+      entry: { path: "/settings/current-key", routeId: "vault.current-key" }
     });
     business.registerFeature("vault", "settings", {
       id: "settings.auto-lock",
@@ -418,7 +419,7 @@ const vaultPluginDefinition = {
       description: { key: "vault.autolock.page.description", fallback: "Lock the wallet automatically after inactivity." },
       order: 13,
       icon: "LockKeyhole",
-      entry: { path: "/settings/auto-lock", component: AutoLockSettingsPage }
+      entry: { path: "/settings/auto-lock", routeId: "vault.auto-lock" }
     });
 
     // 面包屑第一段固定为不可点击的「设置」分类节点。
@@ -442,22 +443,8 @@ const vaultPluginDefinition = {
       ]
     });
 
-    const commands = ctx.capability(COMMAND_REGISTRY_CAPABILITY);
-    commands.register({
-      id: "vault.lock",
-      label: { key: "vault.command.lock", fallback: "Lock wallet" },
-      run: async () => {
-        const result = await service.lock();
-        // 锁定事件本身会把所有页面收敛到最新 lifecycle 快照。若另一页面
-        // 恰好先完成了同一轮锁定，stale-epoch 是可恢复的竞态结果，不能抛到
-        // global.unhandledrejection 并把整个应用判为致命错误。
-        if (result.status !== "accepted" && result.status !== "ok" && result.status !== "stale-epoch") {
-          throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
-        }
-      }
-    });
 
-    // vault 是 core 插件，不会被 disable。这里只释放内存句柄引用；service.lock()
+    // 实例释放时收回本实例服务；service.lock()
     // 等动作由 vault 命令触发，不属于 ownership 回收范围。
     return () => {
       service.dispose?.();
@@ -468,4 +455,4 @@ const vaultPluginDefinition = {
 
 const { setup: vaultSetup, ...vaultPlugin } = vaultPluginDefinition;
 export { vaultSetup, vaultPlugin };
-export type { KeyspaceService, VaultService };
+export type { VaultWalletState, VaultService };

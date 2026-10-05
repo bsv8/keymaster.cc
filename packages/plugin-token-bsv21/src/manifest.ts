@@ -1,3 +1,8 @@
+import { P2PKH_ASSET_READER_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { bindBsv21Ui } from "./Bsv21UiContext.js";
+import { createElement } from "react";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-token-bsv21/src/manifest.ts
 // plugin-token-bsv21 清单：注册 BSV-21 TokenProvider + 后台同步任务。
 //
@@ -21,7 +26,7 @@ import type {
   BackgroundService,
   BusinessFeatureRegistry,
   I18nPluginResources,
-  KeyspaceService,
+  VaultWalletState,
   PluginManifest,
   PluginSetup,
   ProtectedOutpointRegistry,
@@ -37,10 +42,9 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   BACKGROUND_TRIGGER_REASON,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   TOKEN_REGISTRY_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   TRANSFER_REGISTRY_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
@@ -182,12 +186,7 @@ const bsv21TokenPluginDefinition = {
   id: "token-bsv21",
   name: "BSV-21 tokens",
   description: "BSV-21 fungible token provider：通过 snapshot K-V 读取当前 active key 的 BSV-21 持仓，注入 token.registry。",
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [
     {
       id: "token-bsv21.window",
@@ -196,19 +195,20 @@ const bsv21TokenPluginDefinition = {
       provides: [BSV21_MINT_SERVICE_CAPABILITY, BSV21_TRANSFER_SERVICE_CAPABILITY],
       storages: [CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, CENTRAL_STORAGE_DECLARATIONS.tokenBsv21MintHistory],
       dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 地址" },
         { capability: WOC_BSV21_CAPABILITY, reason: "BSV-21 WOC 查询入口" },
         { capability: WOC_CAPABILITY, reason: "读取交易与费率等通用 WOC 数据" },
-        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
         { capability: TOKEN_REGISTRY_CAPABILITY, reason: "注册 BSV-21 TokenProvider" },
         { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
         { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
-        { capability: VAULT_SERVICE_CAPABILITY, reason: "sync task canRun 门禁" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
         { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" },
         { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "注册 BSV-21 受保护 outpoint" },
         { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, reason: "签名 BSV-21 mint / transfer 交易" },
-        { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 BSV-21 创建页" },
+        { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 BSV-21 创建页" },
         { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册 BSV-21 业务入口" },
         { capability: TRANSFER_REGISTRY_CAPABILITY, reason: "注册 BSV-21 transfer provider" },
       ]),
@@ -217,6 +217,10 @@ const bsv21TokenPluginDefinition = {
       id: "token-bsv21.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: STORAGE_KV_CLIENTS_CAPABILITY, reason: "使用本 Worker 单元声明的 Storage purpose" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY }, { capability: P2PKH_ASSET_READER_CAPABILITY }, { capability: WOC_BSV21_CAPABILITY }, { capability: WOC_CAPABILITY },
+      ], "shared-worker"),
       storage: CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State,
     },
   ],
@@ -224,7 +228,7 @@ const bsv21TokenPluginDefinition = {
   setup(ctx) {
     const p2pkh = ctx.capability(P2PKH_CAPABILITY);
     const wocBsv21 = ctx.capability(WOC_BSV21_CAPABILITY);
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const tokenRegistry = ctx.capability(TOKEN_REGISTRY_CAPABILITY);
     const backgroundRegistry = ctx.capability(BACKGROUND_REGISTRY_CAPABILITY);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
@@ -232,49 +236,51 @@ const bsv21TokenPluginDefinition = {
     const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
     const woc = ctx.capability(WOC_CAPABILITY);
     const protocolSpend = ctx.capability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    const OwnedBsv21TransferPage = bindBsv21Ui(ctx, Bsv21TransferPage);
+    const OwnedBsv21MintPage = bindBsv21Ui(ctx, Bsv21MintPage);
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     const transferRegistry = ctx.capability(TRANSFER_REGISTRY_CAPABILITY);
-    const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const vault = { status: () => walletState.snapshot().status };
     const backgroundService = ctx.capability(BACKGROUND_SERVICE_CAPABILITY);
 
     // Host 已完成声明校验并按 purpose 注入 owner/App K-V 句柄；Repository
-    // 不再接收 Keyspace，也不把 state 与 mint history 混入同一 bucket。
-    const stateRepository = createBsv21StateRepository(ctx.storageFor("token-state"));
-    const historyRepository = createBsv21MintHistoryRepository(ctx.storageFor("mint-history"));
+    // 不再接收 WalletState，也不把 state 与 mint history 混入同一 bucket。
+    const stateRepository = createBsv21StateRepository(ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "token-state"));
+    const historyRepository = createBsv21MintHistoryRepository(ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "mint-history"));
 
     // 创建 service（保留 WOC 能力，供 sync task 使用）
-    const service = createBsv21Service({ keyspace, p2pkh, wocBsv21 });
+    const service = createBsv21Service({ walletState, p2pkh, wocBsv21 });
 
     // 创建 provider（只读 K-V）
-    const provider = createBsv21TokenProvider({ stateRepository, keyspace, assetDataNotifier });
-    const spendProtection = createBsv21SpendProtectionProvider({ stateRepository, keyspace, assetDataNotifier });
+    const provider = createBsv21TokenProvider({ stateRepository, walletState, assetDataNotifier });
+    const spendProtection = createBsv21SpendProtectionProvider({ stateRepository, walletState, assetDataNotifier });
     const mintService = createBsv21MintService({ stateRepository, historyRepository, p2pkh, protocolSpend });
     const transferService = createBsv21TransferService({ service, p2pkh, protocolSpend });
     const transferProvider = createBsv21TransferProvider({ tokenRegistry, p2pkh });
 
     // 注册后台同步任务
-    const syncTask = createBsv21SyncTask({ stateRepository, service, woc, historyRepository, keyspace, vault, assetDataNotifier });
+    const syncTask = createBsv21SyncTask({ stateRepository, service, woc, historyRepository, walletState, vault, assetDataNotifier });
     backgroundRegistry.register(syncTask);
 
     tokenRegistry.register(provider);
     protectedOutpoints.register(spendProtection);
-    transferRegistry.register(transferProvider);
+    transferRegistry.register({ ...transferProvider, component: bindBsv21Ui(ctx, transferProvider.component) });
     ctx.provide(BSV21_MINT_SERVICE_CAPABILITY, mintService);
     ctx.provide(BSV21_TRANSFER_SERVICE_CAPABILITY, transferService);
 
-    routes.register({
+    pages.register({ kind: "page",
       id: "bsv21.mint",
       path: "/assets/bsv21/create",
       label: { key: "bsv21.route.mint", fallback: "Create BSV-21" },
-      component: Bsv21MintPage
+      render: () => createElement(OwnedBsv21MintPage)
     });
 
-    routes.register({
+    pages.register({ kind: "page",
       id: "bsv21.transfer",
       path: "/assets/bsv21/transfer",
       label: { key: "bsv21.route.transfer", fallback: "Transfer BSV-21" },
-      component: Bsv21TransferPage
+      render: () => createElement(OwnedBsv21TransferPage)
     });
 
     business.registerFeature("token-bsv21", "assets", {
@@ -289,7 +295,7 @@ const bsv21TokenPluginDefinition = {
       }
     });
 
-    business.registerFeature("token-bsv21-transfer", "assets", {
+    business.registerFeature(ctx.pluginId, "assets", {
       id: "assets.bsv21.transfer",
       label: { key: "bsv21.menu.transfer", fallback: "Transfer BSV-21" },
       order: 26,
@@ -302,11 +308,13 @@ const bsv21TokenPluginDefinition = {
     });
 
     function triggerSync(reason: string) {
+      // A state query may finish after lock has withdrawn this owner's client.
+      if (ctx.scope.state !== "active" || ctx.consumer.status !== "active") return;
       backgroundService.trigger("token-bsv21.sync", reason);
     }
 
     // 监听 active key 变化（保留订阅用于状态管理，不触发网络任务）
-    const offActiveChange = keyspace.onActiveKeyChanged(() => {
+    const offActiveChange = walletState.subscribe(() => {
       // 不触发 sync：由 P2PKH resource-ready 统一驱动。
     });
 
@@ -325,7 +333,7 @@ const bsv21TokenPluginDefinition = {
       if (event.providerId !== "p2pkh") return;
       if (!event.kinds.includes("resource")) return;
       // 仅当事件属于当前 active key 时触发
-      const activeHex = keyspace.active().activePublicKeyHex;
+      const activeHex = walletState.snapshot().activePublicKeyHex;
       if (!activeHex || event.publicKeyHex !== activeHex) return;
       // 异步检查 snapshot 以决定 reason
       void (async () => {
@@ -353,7 +361,6 @@ const bsv21TokenPluginDefinition = {
       offP2pkhResource();
       offSettingsChange?.();
       stateRepository.close();
-      protectedOutpoints.unregisterByOwner("token-bsv21");
       void service;
       provider.dispose?.();
       spendProtection.dispose?.();

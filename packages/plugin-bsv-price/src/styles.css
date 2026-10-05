@@ -131,7 +131,7 @@
 /* ---------- 设置页 ---------- */
 
 /* 应用设置页由 shell 提供内容区 padding；这里只负责列间距与最大宽度，
- * 与其它应用设置页（如 poker）保持一致。 */
+ * 与其它应用设置页（如 example）保持一致。 */
 .km-bsv-price-settings-page {
   display: flex;
   flex-direction: column;

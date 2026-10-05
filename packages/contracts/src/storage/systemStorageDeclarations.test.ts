@@ -9,10 +9,6 @@ import {
 
 describe("central storage declarations", () => {
   it("requires a named purpose for modules with multiple scopes or purposes", () => {
-    expect(systemStorageDeclarationFor("poker")).toBeUndefined();
-    expect(systemStorageDeclarationForPurpose("poker", "settings")).toEqual(CENTRAL_STORAGE_DECLARATIONS.pokerSettings);
-    expect(systemStorageDeclarationForPurpose("poker", "session-history")).toEqual(CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory);
-    expect(systemStorageDeclarationForPurpose("poker", "missing")).toBeUndefined();
     expect(SYSTEM_STORAGE_DECLARATIONS.webrtc).toHaveLength(2);
     expect(systemStorageDeclarationFor("webrtc")).toBeUndefined();
   });

@@ -1,3 +1,7 @@
+import { WOC_CAPABILITY } from "@keymaster/contracts";
+import { P2PKH_ASSET_READER_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-token-stas/src/manifest.ts
 // plugin-token-stas 清单：注册 STAS TokenProvider + 后台同步任务。
 //
@@ -9,7 +13,7 @@ import type {
   BackgroundRegistry,
   BackgroundService,
   I18nPluginResources,
-  KeyspaceService,
+  VaultWalletState,
   PluginManifest,
   PluginSetup,
   TokenRegistry,
@@ -21,9 +25,8 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   BACKGROUND_TRIGGER_REASON,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   TOKEN_REGISTRY_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   WOC_STAS_CAPABILITY,
   defineRuntimeUnitDependencies,
@@ -58,12 +61,7 @@ const stasTokenPluginDefinition = {
   id: "token-stas",
   name: "STAS tokens",
   description: "STAS fungible token provider：通过 snapshot K-V 读取当前 active key 主网地址的 STAS 持仓，注入 token.registry。",
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [
     {
       id: "token-stas.window",
@@ -71,13 +69,14 @@ const stasTokenPluginDefinition = {
       scopeKind: "owner-session",
       storage: CENTRAL_STORAGE_DECLARATIONS.tokenStasState,
       dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 主网地址" },
         { capability: WOC_STAS_CAPABILITY, reason: "STAS WOC 查询入口" },
-        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
         { capability: TOKEN_REGISTRY_CAPABILITY, reason: "注册 STAS TokenProvider" },
         { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
         { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
-        { capability: VAULT_SERVICE_CAPABILITY, reason: "sync task canRun 门禁" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
         { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" },
       ]),
@@ -86,6 +85,10 @@ const stasTokenPluginDefinition = {
       id: "token-stas.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: STORAGE_KV_CLIENTS_CAPABILITY, reason: "使用本 Worker 单元声明的 Storage purpose" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY }, { capability: P2PKH_ASSET_READER_CAPABILITY }, { capability: WOC_STAS_CAPABILITY }, { capability: WOC_CAPABILITY },
+      ], "shared-worker"),
       storage: CENTRAL_STORAGE_DECLARATIONS.tokenStasState,
     },
   ],
@@ -93,35 +96,37 @@ const stasTokenPluginDefinition = {
   setup(ctx) {
     const p2pkh = ctx.capability(P2PKH_CAPABILITY);
     const wocStas = ctx.capability(WOC_STAS_CAPABILITY);
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const tokenRegistry = ctx.capability(TOKEN_REGISTRY_CAPABILITY);
     const backgroundRegistry = ctx.capability(BACKGROUND_REGISTRY_CAPABILITY);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const assetDataNotifier = ctx.capability(ASSET_DATA_NOTIFIER_CAPABILITY);
-    const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const vault = { status: () => walletState.snapshot().status };
     const backgroundService = ctx.capability(BACKGROUND_SERVICE_CAPABILITY);
 
-    // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 Keyspace。
-    const stateRepository = createStasRepository(ctx.storageFor("token-state"));
+    // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 WalletState。
+    const stateRepository = createStasRepository(ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "token-state"));
 
     // 创建 service（保留 WOC 能力，供 sync task 使用）
-    const service = createStasService({ keyspace, p2pkh, wocStas });
+    const service = createStasService({ walletState, p2pkh, wocStas });
 
     // 创建 provider（只读 K-V）
-    const provider = createStasTokenProvider({ stateRepository, keyspace, assetDataNotifier });
+    const provider = createStasTokenProvider({ stateRepository, walletState, assetDataNotifier });
 
     // 注册后台同步任务
-    const syncTask = createStasSyncTask({ stateRepository, service, keyspace, vault, assetDataNotifier });
+    const syncTask = createStasSyncTask({ stateRepository, service, walletState, vault, assetDataNotifier });
     backgroundRegistry.register(syncTask);
 
     tokenRegistry.register(provider);
 
     function triggerSync(reason: string) {
+      // A state query may finish after lock has withdrawn this owner's client.
+      if (ctx.scope.state !== "active" || ctx.consumer.status !== "active") return;
       backgroundService.trigger("token-stas.sync", reason);
     }
 
     // 监听 active key 变化（保留订阅用于状态管理，不触发网络任务）
-    const offActiveChange = keyspace.onActiveKeyChanged(() => {
+    const offActiveChange = walletState.subscribe(() => {
       // 不触发 sync：由 P2PKH resource-ready 统一驱动。
     });
 
@@ -140,7 +145,7 @@ const stasTokenPluginDefinition = {
       if (event.providerId !== "p2pkh") return;
       if (!event.kinds.includes("resource")) return;
       // 仅当事件属于当前 active key 时触发
-      const activeHex = keyspace.active().activePublicKeyHex;
+      const activeHex = walletState.snapshot().activePublicKeyHex;
       if (!activeHex || event.publicKeyHex !== activeHex) return;
       // 异步检查 snapshot 以决定 reason
       void (async () => {

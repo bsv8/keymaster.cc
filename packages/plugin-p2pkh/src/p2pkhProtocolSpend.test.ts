@@ -1,6 +1,7 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import type { KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
+import type { VaultWalletState, ProtectedOutpointRegistry } from "@keymaster/contracts";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { calculateP2pkhBalanceBreakdown } from "./p2pkhService.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, resourceIdFor } from "./storage/p2pkhStateRepository.js";
@@ -159,16 +160,16 @@ function openIntegrationStore(publicKeyHex: string): import("./storage/testSuppo
     return store;
 }
 
-function makeIntegrationKeyspace(publicKeyHex: string): KeyspaceService {
+function makeIntegrationWalletState(publicKeyHex: string): VaultWalletState {
   return {
-    active: () => ({ activePublicKeyHex: publicKeyHex }),
-    requireActiveKey: () => ({
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: publicKeyHex }))(), () => ({
       publicKeyHex,
       label: "integration",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z"
-    }),
-    onActiveKeyChanged: () => () => undefined
+    })),
+
+    subscribe: () => () => undefined
   };
 }
 
@@ -411,7 +412,6 @@ describe("createP2pkhProtocolSpendService", () => {
       onChange: vi.fn(() => () => {}),
       claimProtectedInputs: vi.fn(async () => ({ claimIds: ["protected-claim-1"] })),
       releaseClaims,
-      unregisterByOwner: vi.fn(),
       _ids: vi.fn(() => ["token-bsv21"]),
     } as unknown as ProtectedOutpointRegistry;
     const { service, owner, claimStore } = makeService({
@@ -483,7 +483,6 @@ describe("createP2pkhProtocolSpendService", () => {
       onChange: vi.fn(() => () => {}),
       claimProtectedInputs,
       releaseClaims,
-      unregisterByOwner: vi.fn(),
       _ids: vi.fn(() => ["token-bsv21"])
     };
     const { service, owner, claimStore } = makeService({ protectedOutpoints });

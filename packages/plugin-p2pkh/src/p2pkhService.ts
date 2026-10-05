@@ -1,3 +1,5 @@
+import { sameWalletSession } from "@keymaster/contracts";
+import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 // packages/plugin-p2pkh/src/p2pkhService.ts
 // P2PKH 服务实现（2026-09-20 UTXO / 历史解耦后）。
 //
@@ -17,8 +19,9 @@ import type {
   BalanceBroadcaster,
   CentralBroadcastService,
   CoordinatorValueResult,
+  CoordinatorBootstrapSnapshot,
   GlobalBalanceSnapshot,
-  KeyspaceService,
+  VaultWalletState,
   BorrowedOwnerFileStore,
   VaultService,
   WocService,
@@ -158,10 +161,14 @@ export function calculateP2pkhBalanceBreakdown(input: {
 }
 
 export interface P2pkhServiceDeps {
-  vault: VaultService;
-  coordinator?: P2pkhCoordinatorControl;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
+  coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh">
+    & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhSettingsUpdate">>
+    & { getBootstrapSnapshot(): Pick<CoordinatorBootstrapSnapshot, "p2pkhSettings"> };
   messageBus: MessageBus;
-  keyspace: KeyspaceService;
+  /** Issuing runtime instance; fences publications before asynchronous cleanup. */
+  signal?: AbortSignal;
+  walletState: VaultWalletState;
   /** Host 已按 manifest 声明绑定的当前 owner K-V 句柄。 */
   storage: BorrowedOwnerFileStore;
   /** 详情页懒加载 raw transaction 的唯一来源。 */
@@ -175,6 +182,11 @@ export interface P2pkhServiceDeps {
 
 export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { balanceBroadcaster: BalanceBroadcaster } {
   if (!deps.storage) throw new Error("P2PKH central storage binding is required");
+  let disposed = false;
+  const isCurrentInstance = () => !disposed && !deps.signal?.aborted;
+  function publish<T>(type: string, payload: T): void {
+    if (isCurrentInstance()) deps.messageBus.publish(type, payload);
+  }
   let activeIdentity: ReadyKeyIdentity | undefined;
   let cachedSettings: P2pkhGlobalSettings = {
     includeTestnet: deps.coordinator?.getBootstrapSnapshot().p2pkhSettings?.includeTestnet === true
@@ -187,9 +199,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
 
   const balanceBroadcaster: BalanceBroadcaster = {
     getSnapshot() {
-      // 读取方可能在 keyspace/session 事件落地前先拿到资源重载；不允许
+      // 读取方可能在 walletState/session 事件落地前先拿到资源重载；不允许
       // 把上一个 owner 的快照短暂暴露给新 owner。
-      const active = deps.keyspace.active().activePublicKeyHex?.trim().toLowerCase() ?? "";
+      const active = deps.walletState.snapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
       if (deps.vault.status() !== "unlocked" || !active || balanceSnapshot.publicKeyHex !== active) {
         return emptyGlobalBalanceSnapshot();
       }
@@ -202,6 +214,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   };
 
   function publishBalanceSnapshot(next: Omit<GlobalBalanceSnapshot, "revision">): void {
+    if (!isCurrentInstance()) return;
     const candidate: GlobalBalanceSnapshot = { ...next, revision: balanceSnapshot.revision };
     if (sameGlobalBalanceContent(balanceSnapshot, candidate)) return;
     balanceSnapshot = {
@@ -212,7 +225,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       ) as GlobalBalanceSnapshot["balances"],
     };
     const published = cloneGlobalBalanceSnapshot(balanceSnapshot);
-    deps.messageBus.publish(P2PKH_MSG.BALANCE_CHANGED, published);
+    publish(P2PKH_MSG.BALANCE_CHANGED, published);
     for (const listener of [...balanceListeners]) {
       try {
         listener(cloneGlobalBalanceSnapshot(published));
@@ -244,7 +257,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     if (sameGlobalSettings(cachedSettings, next)) return;
     const includeTestnetChanged = cachedSettings.includeTestnet !== next.includeTestnet;
     cachedSettings = next;
-    deps.messageBus.publish(P2PKH_MSG.SETTINGS_CHANGED, next);
+    publish(P2PKH_MSG.SETTINGS_CHANGED, next);
     for (const l of [...settingsListeners]) l(next);
     if (includeTestnetChanged) void refreshBalanceSnapshot();
   }
@@ -310,7 +323,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
 
   /** 聚合读路径：按 filter 解析 owner/network，再从快照取可花费集合。 */
   async function collectUtxos(filter: P2pkhUtxoFilter | undefined): Promise<P2pkhUtxo[]> {
-    const ownerHex = filter?.ownerPublicKeyHex ?? getActiveKeyState().activePublicKeyHex;
+    const ownerHex = filter?.ownerPublicKeyHex ?? getVaultLifecycleSnapshot().activePublicKeyHex;
     if (!ownerHex) return [];
     const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
     const networks = network ? [network] : (getCurrentSettings().includeTestnet ? ["main", "test"] as const : ["main"] as const);
@@ -375,7 +388,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     },
     getUtxoBinding: async ({ ownerPublicKeyHex, resource }) => getUtxoBinding({ ownerPublicKeyHex, network: resource.network }),
     getActiveKey: () => {
-      const state = getActiveKeyState();
+      const state = getVaultLifecycleSnapshot();
       if (!state.activePublicKeyHex) {
         throw new Error("Active key is required");
       }
@@ -391,11 +404,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       // 单 Key 本地钱包（docs/存储.md）：只有一把 Key，业务对象里的
       // ownerPublicKeyHex 仍然要与当前身份比对，但不是目录前缀，也不能用来
       // 列举或选择第二把 Key。
-      const active = deps.keyspace.active().activePublicKeyHex;
+      const active = deps.walletState.snapshot().activePublicKeyHex;
       if (!active || active.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
         throw new Error(`P2PKH owner key not found: ${ownerPublicKeyHex}`);
       }
-      const key = deps.keyspace.requireActiveKey();
+      const key = requireUnlockedWalletIdentity(deps.walletState.snapshot());
       return {
         publicKeyHex: key.publicKeyHex,
         label: key.label,
@@ -415,9 +428,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   let status: P2pkhSyncStatus = "idle";
 
   function setStatus(next: P2pkhSyncStatus) {
+    if (!isCurrentInstance()) return;
     status = next;
     for (const l of statusListeners) l(next);
-    deps.messageBus.publish(P2PKH_MSG.SYNC, { status: next });
+    publish(P2PKH_MSG.SYNC, { status: next });
   }
 
   function getCurrentSettings(): P2pkhGlobalSettings {
@@ -432,12 +446,12 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     return all.filter((r) => r.network === "main");
   }
 
-  function getActiveKeyState() {
-    return deps.keyspace.active();
+  function getVaultLifecycleSnapshot() {
+    return deps.walletState.snapshot();
   }
 
   function requireActiveKeyIdentity(): ReadyKeyIdentity {
-    const state = getActiveKeyState();
+    const state = getVaultLifecycleSnapshot();
     if (!state.activePublicKeyHex) {
       throw new Error("Active key is required");
     }
@@ -448,14 +462,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   async function ensureRepositoryForOwner(publicKeyHex: string): Promise<P2pkhStateRepositoryHandle> {
-    const active = deps.keyspace.active().activePublicKeyHex?.toLowerCase();
+    const active = deps.walletState.snapshot().activePublicKeyHex?.toLowerCase();
     if (active !== publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
     const bundle: P2pkhStateRepositoryBundle = await openP2pkhStateRepository(deps.storage);
     return createP2pkhStateRepository(bundle);
   }
 
   async function ensureRepository(): Promise<P2pkhStateRepositoryHandle> {
-    const state = getActiveKeyState();
+    const state = getVaultLifecycleSnapshot();
     if (!state.activePublicKeyHex) {
       throw new Error("Key storage is not ready");
     }
@@ -463,7 +477,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   async function calculateBalanceBreakdown(network: "main" | "test"): Promise<{ breakdown: P2pkhBalanceBreakdown; available: boolean }> {
-    const active = getActiveKeyState().activePublicKeyHex;
+    const active = getVaultLifecycleSnapshot().activePublicKeyHex;
     if (!active) return { breakdown: { confirmed: 0, unconfirmed: 0, spendable: 0 }, available: false };
     let snapshot: P2pkhUtxoSnapshotResult;
     try {
@@ -482,8 +496,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
    * 所有 WoC 网络访问仍由 Worker 的单点刷新任务负责。
    */
   async function refreshBalanceSnapshotImpl(): Promise<void> {
+    if (!isCurrentInstance()) return;
+    const session = deps.walletState.snapshot();
     const generation = ++balanceRefreshGeneration;
-    const active = getActiveKeyState().activePublicKeyHex?.trim().toLowerCase() ?? "";
+    const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
     const includeTestnet = getCurrentSettings().includeTestnet;
     if (!active || deps.vault.status() !== "unlocked") {
       clearBalanceSnapshot();
@@ -519,8 +535,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     }));
 
     // 异步读取期间可能发生 owner/settings 切换；旧结果不能覆盖新 owner。
-    if (generation !== balanceRefreshGeneration) return;
-    const currentOwner = getActiveKeyState().activePublicKeyHex?.trim().toLowerCase() ?? "";
+    if (!isCurrentInstance() || generation !== balanceRefreshGeneration || !sameWalletSession(session, deps.walletState.snapshot())) return;
+    const currentOwner = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
     if (!currentOwner || currentOwner !== active || getCurrentSettings().includeTestnet !== includeTestnet || deps.vault.status() !== "unlocked") {
       return;
     }
@@ -546,7 +562,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   async function ensureBalanceSnapshotReady(): Promise<void> {
-    const active = getActiveKeyState().activePublicKeyHex?.trim().toLowerCase() ?? "";
+    const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
     if (!active) return;
     const includeTestnet = getCurrentSettings().includeTestnet;
     const hasMainnet = Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, "mainnet");
@@ -563,38 +579,43 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   async function rebindActiveKey() {
-    const state = getActiveKeyState();
+    const state = getVaultLifecycleSnapshot();
     if (!state.activePublicKeyHex) {
       activeIdentity = undefined;
       return;
     }
-    // keyspace 只投影「当前唯一 Key 是谁」；锁定/未初始化时 active() 缺省，
-    // requireActiveKey() 抛错由调用方收敛到锁定态。
-    activeIdentity = requireReadyKey(deps.keyspace.requireActiveKey());
+    // walletState 只投影「当前唯一 Key 是谁」；锁定/未初始化时 active() 缺省，
+    // requireUnlockedWalletIdentity() 抛错由调用方收敛到锁定态。
+    activeIdentity = requireReadyKey(requireUnlockedWalletIdentity(deps.walletState.snapshot()));
   }
 
-  const keyspaceUnsubs: Array<() => void> = [];
-  function trackKeyspaceSubscribe(handler: () => void) {
-    const off = deps.keyspace.onActiveKeyChanged(handler);
-    keyspaceUnsubs.push(off);
+  const walletStateUnsubs: Array<() => void> = [];
+  function trackWalletStateSubscribe(handler: () => void) {
+    const off = deps.walletState.subscribe(handler);
+    walletStateUnsubs.push(off);
     return off;
   }
-  trackKeyspaceSubscribe(() => {
+  let observedWalletSession = deps.walletState.snapshot();
+  trackWalletStateSubscribe(() => {
+    const nextSession = deps.walletState.snapshot();
+    const sessionChanged = !sameWalletSession(observedWalletSession, nextSession);
+    observedWalletSession = nextSession;
     abortTransferRetries();
-    const nextOwner = getActiveKeyState().activePublicKeyHex?.trim().toLowerCase() ?? "";
-    if (balanceSnapshot.publicKeyHex !== nextOwner) {
+    const nextOwner = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
+    if (sessionChanged || balanceSnapshot.publicKeyHex !== nextOwner) {
       activeIdentity = undefined;
       clearBalanceSnapshot();
     }
     void (async () => {
       try {
-        const state = getActiveKeyState();
+        const state = getVaultLifecycleSnapshot();
         await rebindActiveKey();
+        if (!isCurrentInstance() || !sameWalletSession(state, deps.walletState.snapshot())) return;
         await rehydrateResources();
+        if (!isCurrentInstance() || !sameWalletSession(state, deps.walletState.snapshot())) return;
         await refreshBalanceSnapshot();
-        void state;
       } catch {
-        await refreshBalanceSnapshot();
+        // A revoked instance cannot reload resources or publish a fallback.
       }
     })();
   });
@@ -642,7 +663,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       generation: 0
     };
     await stateRepository.putAddress(resource);
-    deps.messageBus.publish(P2PKH_MSG.ADDRESS_DERIVED, {
+    publish(P2PKH_MSG.ADDRESS_DERIVED, {
       publicKeyHex: key.publicKeyHex,
       network,
       address,
@@ -674,7 +695,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       await refreshBalanceSnapshot();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
+      publish(P2PKH_MSG.REHYDRATE_ERROR, {
         error: msg
       });
     }
@@ -682,7 +703,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
 
   async function rehydrateResources(): Promise<void> {
     if (deps.vault.status() !== "unlocked") return;
-    const state = getActiveKeyState();
+    const state = getVaultLifecycleSnapshot();
     if (!state.activePublicKeyHex) return;
     if (!activeIdentity) return;
     const includeTestnet = getCurrentSettings().includeTestnet;
@@ -697,12 +718,12 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     }
     if (rehydrateError) {
       const msg = rehydrateError instanceof Error ? rehydrateError.message : String(rehydrateError);
-      deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
+      publish(P2PKH_MSG.REHYDRATE_ERROR, {
         error: msg
       });
       return;
     }
-    if (deps.assetDataNotifier) {
+    if (isCurrentInstance() && deps.assetDataNotifier) {
       deps.assetDataNotifier.emit({
         providerId: "p2pkh",
         publicKeyHex: state.activePublicKeyHex,
@@ -734,7 +755,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     const includeTestnet = event.p2pkhSettings.includeTestnet === true;
     setCachedSettingsAndEmit({ ...cachedSettings, includeTestnet });
   });
-  // session.state 先于 keyspace 异步回调到达时，也要立即清掉旧 owner 的余额。
+  // session.state 先于 walletState 异步回调到达时，也要立即清掉旧 owner 的余额。
   trackCoordinatorSubscribe("session.state", (event) => {
     if (event?.type !== "session.state.changed") return;
     const owner = event.vaultStatus === "unlocked" && typeof event.activePublicKeyHex === "string"
@@ -744,16 +765,16 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       activeIdentity = owner ? activeIdentity : undefined;
       clearBalanceSnapshot();
     }
-    // 不在这里直接重算：session.state 可能先于 keyspace 的本地 owner 状态到达，
-    // 此时读取 keyspace 会拿到旧 owner，反而可能把刚清空的旧余额重新发布。
-    // keyspace 变化回调会在 owner 真正切换后负责重算。
+    // 不在这里直接重算：session.state 可能先于 walletState 的本地 owner 状态到达，
+    // 此时读取 walletState 会拿到旧 owner，反而可能把刚清空的旧余额重新发布。
+    // walletState 变化回调会在 owner 真正切换后负责重算。
   });
 
   if (deps.assetDataNotifier) {
     messageBusUnsubs.push(
       deps.assetDataNotifier.subscribe((event) => {
         if (event.providerId === "p2pkh") {
-          const active = getActiveKeyState().activePublicKeyHex?.trim().toLowerCase() ?? "";
+          const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
           const eventOwner = event.publicKeyHex?.trim().toLowerCase() ?? "";
           if (event.kinds.includes("balance") && active && eventOwner === active) {
             void refreshBalanceSnapshot();
@@ -818,7 +839,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     },
 
     async getUtxosStatus(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex ?? getActiveKeyState().activePublicKeyHex;
+      const ownerHex = filter?.ownerPublicKeyHex ?? getVaultLifecycleSnapshot().activePublicKeyHex;
       if (!ownerHex) return { available: false, state: "unavailable", utxos: [] };
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : "main";
       const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network }, "get");
@@ -829,7 +850,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     },
 
     async refreshUtxos(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex ?? getActiveKeyState().activePublicKeyHex;
+      const ownerHex = filter?.ownerPublicKeyHex ?? getVaultLifecycleSnapshot().activePublicKeyHex;
       if (!ownerHex) throw new Error("Active key is required");
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : "main";
       const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network }, "refresh");
@@ -893,7 +914,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         });
       }
       const network = assetIdToNetwork(request.assetId);
-      const ownerHex = getActiveKeyState().activePublicKeyHex;
+      const ownerHex = getVaultLifecycleSnapshot().activePublicKeyHex;
       if (!ownerHex) {
         throw new P2pkhAllocationError({ required: request.amountSatoshis, available: 0, feeReserve: request.feeReserveSatoshis ?? 0, reason: "no-utxos" });
       }
@@ -947,7 +968,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     },
     async applyGlobalSettings(settings) {
       const prev = cachedSettings;
-      if (deps.coordinator) {
+      if (deps.coordinator?.p2pkhSettingsUpdate) {
         const result = await deps.coordinator.p2pkhSettingsUpdate({
           includeTestnet: settings.includeTestnet,
           ...(settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb })
@@ -959,7 +980,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         try {
           await rehydrateResources();
         } catch (err) {
-          deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
+          publish(P2PKH_MSG.REHYDRATE_ERROR, {
             error: err instanceof Error ? err.message : String(err)
           });
         }
@@ -992,6 +1013,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       return loadTransactionDetail(input);
     },
     dispose() {
+      if (disposed) return;
+      disposed = true;
+      balanceRefreshGeneration += 1;
       abortTransferRetries();
       for (const off of messageBusUnsubs) {
         try {
@@ -1001,14 +1025,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         }
       }
       messageBusUnsubs.length = 0;
-      for (const off of keyspaceUnsubs) {
+      for (const off of walletStateUnsubs) {
         try {
           off();
         } catch {
           // swallow
         }
       }
-      keyspaceUnsubs.length = 0;
+      walletStateUnsubs.length = 0;
       for (const off of coordinatorUnsubs) {
         try {
           off();
@@ -1029,19 +1053,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   };
 }
 
-async function resolveActiveKeyCrypto(vault: VaultService, publicKeyHex: string) {
-  const anyVault = vault as VaultService & {
-    createActiveKeyCrypto?: (hex: string) => Promise<{
-      deriveP2pkhAddress: (input: { publicKeyHex: string; network: "main" | "test" }) => Promise<{
-        publicKeyHex: string;
-        address: string;
-      }>;
-    }>;
-  };
-  if (typeof anyVault.createActiveKeyCrypto === "function") {
-    return await anyVault.createActiveKeyCrypto(publicKeyHex);
-  }
-  throw new Error("Vault does not provide createActiveKeyCrypto");
+async function resolveActiveKeyCrypto(vault: Pick<VaultService, "status" | "createActiveKeyCrypto">, publicKeyHex: string) {
+  return vault.createActiveKeyCrypto(publicKeyHex);
 }
 
 function filterUtxos<T extends { network: "main" | "test"; publicKeyHex: string; resourceId: string }>(

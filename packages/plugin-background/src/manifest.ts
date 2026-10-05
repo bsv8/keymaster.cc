@@ -1,3 +1,7 @@
+import { BACKGROUND_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindBackgroundUi } from "./BackgroundResourceContext.js";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-background/src/manifest.ts
 // 后台任务平台清单：注册 background.registry + background.service + Topbar 托盘。
 
@@ -19,10 +23,11 @@ import {
   BACKGROUND_COORDINATOR_CONTROL_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SETTINGS_REGISTRY_CAPABILITY,
-  TOPBAR_REGISTRY_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
+  OWNED_RESOURCE_ACCESS_CAPABILITY,
+  CHAIN_HEIGHT_READER_CAPABILITY,
+  emptyChainHeightSnapshot,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
@@ -167,12 +172,7 @@ const backgroundPluginDefinition = {
   id: "background",
   name: "Background",
   description: "通用后台任务平台：注册、调度、去重、Topbar 托盘。",
-  kind: "platform",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "platform",
+
   units: [{
     id: "background.window",
     runtime: "window-main",
@@ -183,10 +183,14 @@ const backgroundPluginDefinition = {
       capabilityDescriptor(BACKGROUND_COORDINATOR_CONTROL_CAPABILITY),
     ],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: TOPBAR_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "需要向 Topbar 注册任务托盘" },
+      { capability: BACKGROUND_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "读取本实例资源" },
+      { capability: CHAIN_HEIGHT_READER_CAPABILITY, optional: true, reason: "只读链高度投影" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置入口" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置面包屑" },
-      { capability: SETTINGS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置路由" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置路由" },
     ]),
   }],
   i18n: backgroundResources,
@@ -195,7 +199,7 @@ const backgroundPluginDefinition = {
     let registry: BackgroundRegistry;
     let service: BackgroundService;
 
-    const coordinatorClient = ctx.coordinator as BackgroundCoordinatorControl | undefined;
+    const coordinatorClient = ctx.capability(BACKGROUND_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as BackgroundCoordinatorControl | undefined;
     if (!coordinatorClient) throw new Error("Background Coordinator control is unavailable");
     ctx.provide(BACKGROUND_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     if (coordinatorClient.getIsConnected()) {
@@ -247,32 +251,26 @@ const backgroundPluginDefinition = {
       invalidation: "immediate"
     });
 
-    const ks = ctx.optionalCapability(KEYSPACE_SERVICE_CAPABILITY) as {
-      attachBackgroundService?(s: BackgroundService): void;
-    } | undefined;
-    if (ks) {
-      ks.attachBackgroundService?.(service);
-    }
-
-    const topbar = ctx.capability(TOPBAR_REGISTRY_CAPABILITY);
-    topbar.register({
-      id: "background.tray",
-      label: { key: "background.topbar.label", fallback: "Background tasks" },
-      component: BackgroundTray,
-      order: 100
-    });
-
-    const settings = ctx.capability(SETTINGS_REGISTRY_CAPABILITY);
-    settings.register({
-      id: "background.smart-scheduling",
-      path: "/settings/smart-scheduling",
-      label: { key: "background.settings.title", fallback: "Smart scheduling" },
-      description: { key: "background.settings.description", fallback: "Smart scheduling and per-task sync intervals." },
-      component: BackgroundSettingsPage,
-      order: 10,
-      icon: "Activity",
-      visibleWhen: ({ unlocked }) => unlocked
-    });
+    resources.register({ id: "background.chain-height", scope: "global", key: () => ["background.chain-height"],
+      load: async () => ctx.optionalCapability(CHAIN_HEIGHT_READER_CAPABILITY)?.get() ?? emptyChainHeightSnapshot(),
+      subscribe: (_args, _context, invalidate) => {
+        let current = ctx.optionalCapability(CHAIN_HEIGHT_READER_CAPABILITY);
+        let off = current?.subscribe(invalidate) ?? (() => {});
+        const offConsumer = ctx.consumer.subscribe(() => {
+          if (ctx.consumer.status !== "active") return;
+          const next = ctx.optionalCapability(CHAIN_HEIGHT_READER_CAPABILITY);
+          if (next === current) return;
+          off(); current = next; off = next?.subscribe(invalidate) ?? (() => {}); invalidate();
+        });
+        return () => { offConsumer(); off(); };
+      }, invalidation: "immediate" });
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
+    const Tray = bindBackgroundUi(ctx, BackgroundTray);
+    const Settings = bindBackgroundUi(ctx, BackgroundSettingsPage);
+    pages.register({ kind: "header", slot: "topbar", id: "background.tray", order: 100,
+      label: { key: "background.topbar.label", fallback: "Background tasks" }, render: () => createElement(Tray) });
+    pages.register({ kind: "page", path: "/settings/smart-scheduling", id: "background.smart-scheduling", order: 10,
+      label: { key: "background.settings.title", fallback: "Smart scheduling" }, render: () => createElement(Settings) });
 
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("background", "settings", {
@@ -283,7 +281,7 @@ const backgroundPluginDefinition = {
       icon: "Activity",
       entry: {
         path: "/settings/smart-scheduling",
-        component: BackgroundSettingsPage,
+        routeId: "background.smart-scheduling",
         visibleWhen: ({ unlocked }) => unlocked
       }
     });

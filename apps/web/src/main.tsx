@@ -22,14 +22,8 @@
 
 import { StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import {
-  PluginHostProvider,
-  applyInitialLanguage,
-  getFatalError,
-  reportFatalError,
-  subscribeFatalError,
-  type FatalErrorSnapshot
-} from "@keymaster/runtime";
+import { applyInitialLanguage, getFatalError, reportFatalError, subscribeFatalError, type FatalErrorSnapshot } from "@keymaster/runtime";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
 import { App } from "./App.js";
 import { AppCrashBoundary } from "./AppCrashBoundary.js";
 import { bootstrapPhaseForContext, bootstrapPlugins, getBootstrapErrorContext } from "./bootstrapPlugins.js";
@@ -38,7 +32,7 @@ import { formatStartupErrorSummary } from "./startupErrorSummary.js";
 import { installGlobalFatalHandlers } from "./installGlobalFatalHandlers.js";
 import { prepareMsFileMediaServiceWorker } from "./msfileMediaServiceWorkerClient.js";
 import { normalizeLegacyHashRoute } from "./shell/legacyHashRoute.js";
-import { applyInitialTheme } from "./theme/themeStore.js";
+import { applyInitialTheme } from "@keymaster/plugin-page";
 import { installInsecureContextCryptoFallback } from "@keymaster/plugin-vault";
 import "./shims/buffer.js";
 import "./styles/global.css";

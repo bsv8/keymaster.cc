@@ -1,3 +1,4 @@
+import type { StorageBrowseWallet } from "./storageBrowsePrivate.js";
 // Worker 侧只读存储浏览服务。
 //
 // 这是浏览能力的唯一实现：它在 Coordinator 信任的进程里读 WalletStore，只做
@@ -9,22 +10,9 @@
 //   2. 每个会话绑定钱包世代、会话世代、Worker 运行世代和发起端口；任一变化立即失效。
 //   3. 游标绑定目录和会话，跨目录、跨会话或过期重放一律失败。
 
-import type {
-  StorageBrowseEntry,
-  StorageBrowsePage,
-  StorageBrowsePreview,
-  StorageBrowseSession,
-  StorageBrowseWallet,
-  StorageErrorCode,
-} from "@keymaster/contracts";
-import {
-  STORAGE_BROWSE_CURSOR_TTL_MS,
-  STORAGE_BROWSE_DEFAULT_LIMIT,
-  STORAGE_BROWSE_MAX_CURSORS_PER_SESSION,
-  STORAGE_BROWSE_MAX_LIMIT,
-  STORAGE_BROWSE_PREVIEW_CONCURRENCY,
-  STORAGE_BROWSE_PREVIEW_MAX_BYTES,
-} from "@keymaster/contracts";
+import type { StorageErrorCode } from "@keymaster/contracts";
+import type { StorageBrowseEntry, StorageBrowsePage, StorageBrowsePreview, StorageBrowseSession } from "./storageBrowseTypes.js";
+import { STORAGE_BROWSE_CURSOR_TTL_MS, STORAGE_BROWSE_DEFAULT_LIMIT, STORAGE_BROWSE_MAX_CURSORS_PER_SESSION, STORAGE_BROWSE_MAX_LIMIT, STORAGE_BROWSE_PREVIEW_CONCURRENCY, STORAGE_BROWSE_PREVIEW_MAX_BYTES } from "./storageBrowseTypes.js";
 import type { WalletObjectMeta } from "../local/indexedDbWalletStore.js";
 import {
   BrowsePathError,
@@ -130,14 +118,20 @@ class ReadGate {
   constructor(private readonly limit: number) {}
 
   async run<T>(task: () => Promise<T>, admit?: () => void): Promise<T> {
-    if (this.active >= this.limit) await new Promise<void>((resolve) => this.queue.push(resolve));
-    admit?.();
-    this.active += 1;
+    if (this.active >= this.limit) {
+      // 唤醒时名额直接交接，不能先释放再争抢，否则新请求会与排队项超额并行。
+      await new Promise<void>((resolve) => this.queue.push(resolve));
+    } else {
+      this.active += 1;
+    }
     try {
+      // 入场复核失败也必须交还名额并唤醒下一请求，否则取消的排队项会堵住队列。
+      admit?.();
       return await task();
     } finally {
-      this.active -= 1;
-      this.queue.shift()?.();
+      const next = this.queue.shift();
+      if (next) next();
+      else this.active -= 1;
     }
   }
 }

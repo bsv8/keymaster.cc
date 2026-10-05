@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-token-stas/src/stasService.ts
 // STAS service：plugin-token-stas 内部封装，组合 woc.stas.service 与
 // p2pkh.service（取当前 active key 的 BSV 地址）。
@@ -14,7 +15,7 @@
 import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
-  KeyspaceService,
+  VaultWalletState,
   WocStasService,
   WocStasTokenEntry
 } from "@keymaster/contracts";
@@ -52,21 +53,21 @@ export interface StasServiceHandle {
 }
 
 export interface CreateStasServiceOptions {
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   p2pkh: P2pkhServiceForStas;
   wocStas: WocStasService;
 }
 
 export function createStasService(options: CreateStasServiceOptions): StasServiceHandle {
-  if (!options || !options.keyspace || !options.p2pkh || !options.wocStas) {
-    throw new Error("createStasService: keyspace / p2pkh / wocStas are required");
+  if (!options || !options.walletState || !options.p2pkh || !options.wocStas) {
+    throw new Error("createStasService: walletState / p2pkh / wocStas are required");
   }
-  const keyspace = options.keyspace;
+  const walletState = options.walletState;
   const p2pkh = options.p2pkh;
   const wocStas = options.wocStas;
 
   async function activeKeyMainAddresses(): Promise<string[]> {
-    const state = keyspace.active();
+    const state = walletState.snapshot();
     if (!state.activePublicKeyHex) return [];
     const list = await p2pkh.listResources("bsv");
     return list
@@ -76,6 +77,7 @@ export function createStasService(options: CreateStasServiceOptions): StasServic
 
   return {
     async listActiveKeyTokens(signal?: AbortSignal) {
+      const session = walletState.snapshot();
       const addresses = await activeKeyMainAddresses();
       const out: StasTokenWithEntry[] = [];
       for (const address of addresses) {
@@ -85,7 +87,7 @@ export function createStasService(options: CreateStasServiceOptions): StasServic
           out.push({ entry, address, network: STAS_NETWORK });
         }
       }
-      return out;
+      return sameWalletSession(session, walletState.snapshot()) ? out : [];
     }
   };
 }

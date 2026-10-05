@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ConnectSessionRecord,
@@ -8,7 +9,7 @@ import type {
   StorageRuntimeController,
   VaultService
 } from "@keymaster/contracts";
-import { PROTOCOL_VERSION } from "@keymaster/contracts";
+import { deriveAppStorageName, deriveThirdPartyStorageModuleId, PROTOCOL_VERSION } from "@keymaster/contracts";
 import { ProtocolServiceImpl } from "./protocolService.js";
 
 const ORIGIN = "https://storage-app.example";
@@ -45,8 +46,8 @@ function makeRepository(session: ConnectSessionRecord | null): ProtocolStorageRe
 function makeVault(): VaultService {
   return {
     status: () => "unlocked",
-    onLifecycleChange: () => () => undefined,
-    getLifecycleSnapshot: () => ({ status: "unlocked", activePublicKeyHex: OWNER_PUBLIC_KEY_HEX, sessionEpoch: "epoch", runGeneration: "run", vaultLifecycleRevision: 1 }),
+    subscribeWalletState: () => () => undefined,
+    walletSnapshot: () => ({ status: "unlocked", activePublicKeyHex: OWNER_PUBLIC_KEY_HEX, sessionEpoch: "epoch", runGeneration: "run", vaultLifecycleRevision: 1 }),
     lock: vi.fn(async () => ({ status: "accepted" as const })),
     unlock: vi.fn(async () => ({ status: "accepted" as const })),
     verifyPassword: vi.fn(async () => undefined)
@@ -87,15 +88,20 @@ function makeHarness(storageController: StorageRuntimeController, session: Conne
 }, getStorageController: () => StorageRuntimeController | undefined = () => storageController) {
   const opener = { closed: false } as Window;
   const results: ProtocolResultMessage[] = [];
-  const keyspace = {
-    active: () => ({ activePublicKeyHex: OWNER_PUBLIC_KEY_HEX }),
-    requireActiveKey: () => ({ publicKeyHex: OWNER_PUBLIC_KEY_HEX, label: "Owner", capabilities: [], createdAt: "now" })
+  const walletState = {
+    snapshot: () => walletStateFixtureSnapshot({ activePublicKeyHex: OWNER_PUBLIC_KEY_HEX }, () => ({ publicKeyHex: OWNER_PUBLIC_KEY_HEX, label: "Owner", capabilities: [], createdAt: "now" })),
+    subscribe: () => () => {},
   };
   const service = new ProtocolServiceImpl({
     vault: makeVault(),
-    keyspace: keyspace as never,
+    walletState: walletState as never,
     storageRepository: makeRepository(session),
     storageController,
+    bindAppStorage: binding => {
+      const context: OwnerAppStorageGrant = { ...binding, appStorageName: deriveAppStorageName(binding.appIdentity), moduleId: deriveThirdPartyStorageModuleId(binding.appIdentity.publisherPublicKeyHex, binding.appIdentity.appId), purposeId: "files" };
+      const current = getStorageController()!;
+      return { list: input => current.list(context, input), createDirectory: input => current.createDirectory(context, input), deleteDirectory: input => current.deleteDirectory(context, input), put: input => current.put(context, input), getRange: input => current.getRange(context, input), delete: input => current.delete(context, input) };
+    },
     getStorageController,
     resolveOpener: () => opener,
     postReady: () => undefined,

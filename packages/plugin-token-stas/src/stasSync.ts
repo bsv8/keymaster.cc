@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-token-stas/src/stasSync.ts
 // STAS 后台同步任务。
 //
@@ -13,7 +14,7 @@ import type {
   BackgroundRunEligibility,
   BackgroundTaskContext,
   BackgroundTaskDefinition,
-  KeyspaceService,
+  VaultWalletState,
   VaultService
 } from "@keymaster/contracts";
 import type { StasRepository } from "./storage/stasRepository.js";
@@ -22,8 +23,8 @@ import type { StasServiceHandle } from "./stasService.js";
 export interface CreateStasSyncTaskOptions {
   stateRepository: StasRepository;
   service: StasServiceHandle;
-  keyspace: KeyspaceService;
-  vault: VaultService;
+  walletState: VaultWalletState;
+  vault: Pick<VaultService, "status">;
   assetDataNotifier?: AssetDataNotifier;
 }
 
@@ -37,7 +38,7 @@ export interface CreateStasSyncTaskOptions {
  *   - 取消后不提交 K-V、不发 data-changed。
  */
 export function createStasSyncTask(options: CreateStasSyncTaskOptions): BackgroundTaskDefinition {
-  const { stateRepository, service, keyspace, vault, assetDataNotifier } = options;
+  const { stateRepository, service, walletState, vault, assetDataNotifier } = options;
 
   return {
     id: "token-stas.sync",
@@ -51,7 +52,7 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
     },
     // 施工单 001：删除 defaultEnabled，所有任务默认持续启用
     keyScope: () => {
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       return state.activePublicKeyHex ? { publicKeyHex: state.activePublicKeyHex } : undefined;
     },
     // 施工单 001：canRun 返回结构化 BackgroundRunEligibility
@@ -59,14 +60,14 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
       if (vault.status() !== "unlocked") {
         return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
       }
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!Boolean(state.activePublicKeyHex)) {
         return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
       }
       return { ready: true };
     },
     async run(ctx: BackgroundTaskContext) {
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!state.activePublicKeyHex) return;
       // 保存本轮开始时的 active key，提交/通知前确认未变化；
       // 否则旧 key 的任务可能向新 key 的页面发通知。
@@ -95,13 +96,14 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
 
       // 原子替换：在同一事务中删除旧数据并写入新数据
       // K-V 操作隐式使用当前 active key 的 namespace
+      if (!sameWalletSession(state, walletState.snapshot()) || ctx.signal.aborted) return;
       await stateRepository.replaceAll(snapshots);
       ctx.assertSessionFresh?.();
 
       // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；
       // 同时确认 active key 未变化——旧 key 的任务不应向新 key 发通知。
       if (ctx.signal.aborted) return;
-      const currentKeyHex = keyspace.active().activePublicKeyHex;
+      const currentKeyHex = walletState.snapshot().activePublicKeyHex;
       if (currentKeyHex !== startedKeyHex) return;
 
       // 发布 data-changed

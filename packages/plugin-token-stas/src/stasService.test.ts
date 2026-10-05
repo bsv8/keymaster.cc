@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-token-stas/src/stasService.test.ts
 // stasService 回归测试：覆盖 phase 1 的关键约束——
 //   1. 强制走 main network，testnet 资源不进入列表；
@@ -5,7 +6,7 @@
 //   3. STAS entry 自带 balance，service 直接透传。
 
 import { describe, expect, it } from "vitest";
-import type { KeyspaceService, WocStasService } from "@keymaster/contracts";
+import type { VaultWalletState, WocStasService } from "@keymaster/contracts";
 import {
   createStasService,
   type P2pkhKeyResourceForStas,
@@ -14,8 +15,8 @@ import {
 
 const ACTIVE_PK = "pk-active";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
-  return { active: () => ({ activePublicKeyHex }) } as unknown as KeyspaceService;
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
+  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))()) } as unknown as VaultWalletState;
 }
 
 function fakeP2pkh(resources: P2pkhKeyResourceForStas[]): P2pkhServiceForStas {
@@ -37,7 +38,7 @@ describe("createStasService", () => {
 
   it("无 active key 时返回空列表", async () => {
     const svc = createStasService({
-      keyspace: fakeKeyspace(undefined),
+      walletState: fakeWalletState(undefined),
       p2pkh: fakeP2pkh([]),
       wocStas: fakeWoc()
     });
@@ -46,7 +47,7 @@ describe("createStasService", () => {
 
   it("只取 active key 的 main 地址，过滤 testnet 与其它 key", async () => {
     const svc = createStasService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([
         { publicKeyHex: ACTIVE_PK, address: "addr-main", network: "main" },
         { publicKeyHex: ACTIVE_PK, address: "addr-test", network: "test" },
@@ -61,7 +62,7 @@ describe("createStasService", () => {
 
   it("透传 WOC entry 的 balance", async () => {
     const svc = createStasService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([{ publicKeyHex: ACTIVE_PK, address: "addr-main", network: "main" }]),
       wocStas: fakeWoc()
     });

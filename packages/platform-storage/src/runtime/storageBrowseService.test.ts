@@ -1,3 +1,4 @@
+import type { StorageBrowseWallet } from "./storageBrowsePrivate.js";
 // Worker 只读浏览服务的验收测试。
 //
 // 覆盖施工单验收矩阵里最关键、也最容易在重构中悄悄退化的几类行为：
@@ -7,14 +8,8 @@
 //   L01/L02 版本条件读取、删除、锁定与世代变化后的失效
 //   P06 预览 1 MiB 上限由 Worker 强制，截断内容不做结构化解析
 
-import { describe, expect, it } from "vitest";
-import {
-  STORAGE_BROWSE_CURSOR_TTL_MS,
-  STORAGE_BROWSE_MAX_LIMIT,
-  STORAGE_BROWSE_PREVIEW_CONCURRENCY,
-  STORAGE_BROWSE_PREVIEW_MAX_BYTES,
-  type StorageBrowseWallet,
-} from "@keymaster/contracts";
+import { describe, expect, it, vi } from "vitest";
+import { STORAGE_BROWSE_CURSOR_TTL_MS, STORAGE_BROWSE_MAX_LIMIT, STORAGE_BROWSE_PREVIEW_CONCURRENCY, STORAGE_BROWSE_PREVIEW_MAX_BYTES } from "./storageBrowseTypes.js";
 import { createStorageBrowseService, type StorageBrowseRuntime } from "./storageBrowseService.js";
 
 const TRUSTED_UNIT = "storage.window";
@@ -649,6 +644,41 @@ describe("storage browse preview (P01/P02/P05/P06/L01)", () => {
     await expect(queued).rejects.toMatchObject({ code: "storage_unavailable" });
     // 第三个请求从未真正开始过读取。
     expect(readPaths).not.toContain("queued.json");
+  });
+
+  it("a cancelled queued preview releases admission to the next live request", async () => {
+    const releases: Array<() => void> = [];
+    const paths: string[] = [];
+    const harness = createHarness({ wallet: {
+      async list() { return { objects: [] }; },
+      async get(path) {
+        paths.push(path);
+        if (path === "first.txt" || path === "second.txt") {
+          await new Promise<void>(resolve => releases.push(resolve));
+        }
+        return { path, bytes: ENCODER.encode("hi"), size: 2, revision: 1, lastModified: "2026-10-03T00:00:00Z" };
+      },
+    } });
+    const browseSessionId = await openSession(harness);
+    const preview = (path: string, signal?: AbortSignal) =>
+      harness.runtime.preview(PAGE_CLIENT, { browseSessionId, path }, signal ? { signal } : undefined);
+    const occupied = [preview("first.txt"), preview("second.txt")];
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    const controller = new AbortController();
+    const cancelled = preview("cancelled.txt", controller.signal).catch(error => error);
+    const live = preview("live.txt");
+    controller.abort();
+    try {
+      releases[0]!();
+      expect(await cancelled).toMatchObject({ code: "storage_unavailable" });
+      // 第二个物理读取还未返回，第一名额须穿过已取消项交给仍有效的请求。
+      await vi.waitFor(() => expect(paths).toContain("live.txt"));
+      expect(paths).not.toContain("cancelled.txt");
+      await expect(live).resolves.toMatchObject({ path: "live.txt" });
+    } finally {
+      releases.forEach(release => release());
+      await Promise.allSettled([...occupied, live, cancelled]);
+    }
   });
 
   it("closing a foreign handle is a no-op, not a cross-port action", async () => {

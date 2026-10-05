@@ -48,7 +48,7 @@ describe("Coordinator Worker unit runtime registry", () => {
       sessionEpoch: "epoch-a",
     });
     // 事故现场那条隐式依赖现在有声明位置。
-    expect(unit.dependsOn).toEqual(["sat-subscription.coordinator-worker"]);
+    expect(unit.dependsOn).toEqual(["storage.coordinator-worker", "vault.coordinator-worker", "sat-subscription.coordinator-worker"]);
     registry.fail(unit.unitId, unit.instanceId, new Error("transient"));
     expect(registry.get(unit.unitId)?.state).toBe("failed");
     // failed 不是终态：依赖变化后必须能自己变回 ready，不要求用户再操作一次。

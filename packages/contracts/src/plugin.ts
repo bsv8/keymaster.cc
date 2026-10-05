@@ -1,7 +1,8 @@
+import type { ProtocolMethod } from "./protocol.js";
 // packages/contracts/src/plugin.ts
 // 插件契约：描述 PluginManifest、PluginContext、PluginDependency。
 // 这是 plugin host 装载插件的唯一入口；plugin 通过 setup(ctx) 暴露能力，
-// 并在 disable / unregister 时由 host 调用 teardown 释放资源。
+// 并在 revoke / unregister 时由 host 调用 teardown 释放资源。
 
 import type {
   Capability,
@@ -46,14 +47,6 @@ import type { PluginPermission } from "./keymasterLifecycle.js";
  * 同一批领域字段也同时位于 `ctx.extension`，供新代码逐步迁移。
  */
 export interface PluginContext extends KeymasterWebLoomContext {
-  /** Host 预绑定的领域 Storage 句柄。 */
-  readonly storage?: BorrowedKeyValueStore;
-  /** Resolve a named declaration from the current unit. */
-  readonly storageFor: (purposeId: string) => BorrowedKeyValueStore;
-  /** Resolve a named file declaration（model: "files"）from the current unit. */
-  readonly filesFor: (purposeId: string) => BorrowedOwnerFileStore;
-  /** 按 pluginId 收窄后的 Coordinator facade。 */
-  readonly coordinator?: unknown;
 }
 
 /** 产品插件依赖；唯一身份来自 capability descriptor。 */
@@ -112,40 +105,11 @@ export function defineRuntimeUnitProvidedContracts(
   throw new Error("providedContracts was removed; put capability objects in unit.provides");
 }
 
-/**
- * Keymaster 产品分类：
- *   - core：系统产品分组（如 vault / settings / home）。
- *   - platform：平台与共享服务分组（如 storage / woc）。
- *   - business：领域功能与可选集成分组（如 poker / p2pkh）。
- *
- * 分类不进入 WebLoom 通用生命周期或权限判断；启动与启停策略由 startup /
- * defaultEnabled / canDisable 显式声明，Worker 另校验不可停用产品目录。
- * 基础 API 及其管理 UI 也可以按插件产品装配，不能仅从包装方式推导职责。
- */
-export type PluginKind = "core" | "platform" | "business";
-
-/** 首屏是否允许在该插件缺失时挂载 entrypoint。 */
-export type PluginStartupMode = "required" | "optional";
-
-/**
- * 插件进入应用启动流水线的明确阶段。
- *
- * 装配层只能按这个字段分阶段注册，不能从 pluginId、storage scope
- * 或插件分类反推阶段。通用 runtime 测试夹具可以省略该字段；应用实际
- * catalog 必须为每个 manifest 显式填写。
- */
-export type PluginBootstrapStage =
-  | "storage-onboarding"
-  | "vault-selection"
-  | "owner-apps-ready"
-  | "connect-apps-ready";
-
 export interface StartupCapabilityErrorDetails {
   capability: string;
   providerPluginId?: string;
   providerState?: PluginStateKind;
   providerError?: string;
-  configuredEnabled?: boolean;
 }
 
 export interface StartupPluginErrorDetails {
@@ -155,14 +119,6 @@ export interface StartupPluginErrorDetails {
   error?: string;
 }
 
-/** 插件展示分组（仅 UI 用）。 */
-export type PluginDisplayGroup = "core" | "platform" | "business" | "import" | "experimental";
-
-/**
- * 插件元数据（硬切换 001）：
- *   - 插件分类、默认启用、是否允许禁用、UI 分组。
- *   - 启停字段是产品意图真值；运行单元 capability / 依赖真值位于 units。
- */
 /** 插件 setup 钩子可返回的清理函数。 */
 export type PluginTeardown = () => void | Promise<void>;
 
@@ -206,6 +162,8 @@ export interface RuntimeUnitDescriptor extends Omit<
   readonly storage?: PluginStorageDeclaration;
   /** 同一单元需要多个 purpose/scope 时使用的命名声明。 */
   readonly storages?: readonly PluginStorageDeclaration[];
+  /** Explicit external Connect V1 methods; internal capabilities are never published implicitly. */
+  readonly connect?: { readonly providerMethods: readonly ProtocolMethod[] };
   /** 单元专属配置契约 / 部署默认值。 */
   readonly config?: KeymasterPluginConfig;
 }
@@ -216,18 +174,9 @@ export interface RuntimeUnitDescriptor extends Omit<
  */
 export interface PluginManifest extends Omit<
   KeymasterWebLoomManifest,
-  "contribution" | "units" | "startup" | "defaultEnabled" | "canDisable"
+  "contribution" | "units"
 > {
-  /** Keymaster 产品分类；不进入 WebLoom 通用生命周期语义。 */
-  readonly kind: PluginKind;
-  /** v4 唯一启停策略。 */
-  readonly startup: PluginStartupMode;
-  readonly defaultEnabled: boolean;
-  readonly canDisable: boolean;
-  /** 应用启动门禁阶段。 */
-  readonly bootstrapStage: PluginBootstrapStage;
-  /** UI 展示分组。 */
-  readonly displayGroup: PluginDisplayGroup;
+
   /**
    * 中央存储 V1 声明。内置模块可按 purpose 使用 owner 或 bucket 作用域；
    * bucket 作用域只能由平台或已发布的内置模块绑定；
@@ -268,41 +217,26 @@ export interface PluginManifest extends Omit<
   i18n?: I18nPluginResources;
 }
 
-/**
- * 插件启停运行时状态。
- *   - `registered` 仅表示已知；不代表 enabled。
- *   - `enabled` 当前正在运行，可被 UI 访问。
- *   - `disabled` 已被显式禁用；host 内已卸载。
- *   - `blocked` 当前无法 enable（依赖未满足）。
- *   - `error-disabled` teardown 出错但已被卸载。
- */
+/** 框架运行状态。 */
 export type PluginStateKind =
   | "registered"
   | "starting"
   | "stopping"
   | "enabled"
-  | "disabled"
+  | "failed"
   | "blocked"
-  | "error-disabled"
   | "cleanup-pending"
   /** 远程运行单元没有可用快照；未知不能伪装成 blocked。 */
   | "unknown";
-
-/** 对外稳定的产品运行语义；kind 保留旧 API 兼容，业务新代码使用此字段。 */
-export type PluginLifecycleState = "disabled" | "waiting" | "starting" | "running" | "stopping" | "failed";
 
 /** host.state(pluginId) 返回的状态对象。 */
 export interface PluginState {
   id: string;
   kind: PluginStateKind;
   /** 设计 6.1 的稳定状态；不把用户意图和运行状态混为一个布尔值。 */
-  lifecycleState?: PluginLifecycleState;
+  lifecycleState?: WebLoomPluginState["lifecycleState"];
   /** teardown 抛错时填入的最近错误信息。 */
   error?: string;
-  /** 用户持久化的启用意图；依赖阻塞时仍保持 true。 */
-  desiredEnabled?: boolean;
-  /** 当前产品意图修订；旧实例结果不得覆盖更高修订。 */
-  desiredRevision?: number;
   /** 当前运行实例标识；disabled/blocked 时为空。 */
   instanceId?: string;
   /** 当前运行单元标识；历史单元缺省时等于插件 id。 */
@@ -325,8 +259,6 @@ export interface PluginUnitState {
   runtime: RuntimeKind;
   /** 当前运行实例；未运行时为空。 */
   instanceId?: string;
-  /** 当前产品意图修订；用于丢弃旧单元异步结果。 */
-  desiredRevision?: number;
   /** 单元自身生命周期状态。 */
   kind: PluginStateKind;
   /** 单元的阻塞或失败原因。 */
@@ -340,7 +272,7 @@ export interface PluginReverseDep {
   /** 反向依赖者 id。 */
   pluginId: string;
   /** 反向依赖者当前是否 enabled。 */
-  enabled: boolean;
+  running: boolean;
   /** 触发依赖的 capability 列表（被本插件 provides 的子集）。 */
   capabilities: string[];
 }

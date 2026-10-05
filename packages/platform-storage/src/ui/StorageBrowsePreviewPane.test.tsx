@@ -5,7 +5,7 @@
 //   剩余成员可继续生成。
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { StorageBrowsePreview } from "@keymaster/contracts";
+import type { StorageBrowsePreview } from "../runtime/storageBrowseTypes.js";
 import { PreviewPane, type BrowsePreviewState, type BrowseTranslate } from "./StorageBrowsePreviewPane.js";
 import { JSON_MAX_CHILDREN } from "./storageBrowseJson.js";
 

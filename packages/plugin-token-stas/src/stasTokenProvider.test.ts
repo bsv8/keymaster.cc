@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-token-stas/src/stasTokenProvider.test.ts
 // STAS TokenProvider 测试：
 //   1. 同 symbol、不同 issuer 必须显示为两项
@@ -6,14 +7,14 @@
 //   4. onChange 通知机制
 
 import { describe, expect, it, vi } from "vitest";
-import type { KeyspaceService, AssetDataNotifier } from "@keymaster/contracts";
+import type { VaultWalletState, AssetDataNotifier } from "@keymaster/contracts";
 import { createStasTokenProvider, makeStasTokenId, parseStasTokenId } from "./stasTokenProvider.js";
 import type { StasRepository, StasTokenSnapshot } from "./storage/stasRepository.js";
 
 const ACTIVE_PK = "pk-active";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
-  return { active: () => ({ activePublicKeyHex }) } as unknown as KeyspaceService;
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
+  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))()) } as unknown as VaultWalletState;
 }
 
 function makeSnapshot(overrides: Partial<StasTokenSnapshot> & { symbol: string }): StasTokenSnapshot {
@@ -63,7 +64,7 @@ describe("stasTokenProvider", () => {
       ];
       const provider = createStasTokenProvider({
         stateRepository: fakeRepository(snapshots),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
 
       const tokens = await provider.listTokens();
@@ -83,7 +84,7 @@ describe("stasTokenProvider", () => {
       ];
       const provider = createStasTokenProvider({
         stateRepository: fakeRepository(snapshots),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
 
       const tokens = await provider.listTokens();
@@ -96,7 +97,7 @@ describe("stasTokenProvider", () => {
     it("无 active key 时返回空", async () => {
       const provider = createStasTokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(undefined),
+        walletState: fakeWalletState(undefined),
       });
       expect(await provider.listTokens()).toEqual([]);
     });
@@ -111,7 +112,7 @@ describe("stasTokenProvider", () => {
       ];
       const provider = createStasTokenProvider({
         stateRepository: fakeRepository(snapshots),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
 
       const tokenId = makeStasTokenId("iss", "TOK");
@@ -125,7 +126,7 @@ describe("stasTokenProvider", () => {
     it("不存在的 token 返回 undefined", async () => {
       const provider = createStasTokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
       expect(await provider.getToken("stas:unknown:NOPE")).toBeUndefined();
     });
@@ -133,7 +134,7 @@ describe("stasTokenProvider", () => {
     it("无效 tokenId 返回 undefined", async () => {
       const provider = createStasTokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
       });
       expect(await provider.getToken("invalid")).toBeUndefined();
     });
@@ -153,7 +154,7 @@ describe("stasTokenProvider", () => {
       const handler = vi.fn();
       const provider = createStasTokenProvider({
         stateRepository: fakeRepository([]),
-        keyspace: fakeKeyspace(ACTIVE_PK),
+        walletState: fakeWalletState(ACTIVE_PK),
         assetDataNotifier: notifier as unknown as AssetDataNotifier,
       });
 

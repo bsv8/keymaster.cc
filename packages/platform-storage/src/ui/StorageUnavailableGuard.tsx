@@ -7,16 +7,16 @@
 // 这些状态都不允许静默创建空钱包覆盖原数据，所以守卫直接呈现明确的
 // 恢复提示，而不是把子树降级成「暂无数据」。
 import type { ReactNode } from "react";
-import { useI18n } from "@keymaster/runtime";
-import { useOptionalCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
 import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 
 /** 需要阻断业务界面的本地存储状态。 */
 const BLOCKING_STATUSES = new Set(["corrupt", "unsupported", "degraded"]);
 
 export function StorageUnavailableGuard({ children }: { children: ReactNode }) {
-  const { t } = useI18n();
-  const controller = useOptionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
+  const { t } = usePluginI18n();
+  const controller = useOptionalPluginCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
 
   let status: string | undefined;
   try {

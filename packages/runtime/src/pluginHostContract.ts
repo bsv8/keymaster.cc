@@ -7,19 +7,12 @@
 import type {
   AssetDataInvalidationEvent,
   AssetDataNotifier,
-  AssetRegistry,
-  BreadcrumbRegistry,
-  BusinessFeatureRegistry,
   ChannelRuntime,
   ChannelRuntimeFactory,
-  CommandRegistry,
-  ContactPublicKeyActionRegistry,
   CoordinatorWorkerUnitSnapshot,
   HostListener,
   I18nPluginResources,
   I18nService,
-  ImporterRegistry,
-  NoticeRegistry,
   PluginContext,
   PluginGraph,
   PluginManifest,
@@ -29,12 +22,6 @@ import type {
   ResourceRegistry,
   RuntimeIdentityTransition,
   RuntimeUnitImplementationRegistry,
-  SettingsRegistry,
-  SystemSettingsRegistry,
-  SystemStatusRegistry,
-  TopbarRegistry,
-  TransferRegistry,
-  VaultSettingsRegistry,
   KeymasterScopeAttributes,
 } from "@keymaster/contracts";
 import type {
@@ -47,20 +34,8 @@ import type {
   PluginHost as WebLoomPluginHost,
   ResourceStoreApi,
 } from "webloom-framework/advanced";
-import type {
-  LifecycleDisposeResult,
-  LifecycleScope,
-  MessageBus,
-  PermissionLeaseBinding,
-  RuntimeKind,
-  PluginIntentCoordinator,
-  PluginIntentSubmissionResult,
-  RuntimeHandle,
-  RuntimeUnitImplementationRegistry as WebLoomRuntimeUnitImplementationRegistry,
-  ScopedTaskScheduler,
-} from "webloom-framework";
-import type { PluginConfigStore } from "./pluginConfigStoreContract.js";
-import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
+import type { LifecycleDisposeResult, LifecycleScope, MessageBus, PermissionLeaseBinding, RuntimeKind, RuntimeHandle, RuntimeUnitImplementationRegistry as WebLoomRuntimeUnitImplementationRegistry, ScopedTaskScheduler } from "webloom-framework";
+import type {} from "@keymaster/contracts/storage-internal";
 
 export { StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
 
@@ -71,30 +46,7 @@ export interface PluginHost {
   capabilities: CapabilityRegistry;
   /** Keymaster 兼容的 MessageBus 视图。 */
   messageBus: MessageBus;
-  routes: import("./registries/routeRegistry.js").RouteRegistry;
-  breadcrumbs: import("./registries/breadcrumbRegistry.js").BreadcrumbRegistry;
-  settings: import("./registries/settingsRegistry.js").SettingsRegistry;
-  systemSettings: SystemSettingsRegistry;
-  systemStatus: SystemStatusRegistry;
-  vaultSettings: VaultSettingsRegistry;
-  home: import("./registries/homeRegistry.js").HomeRegistry;
-  business: BusinessFeatureRegistry;
-  commands: CommandRegistry;
-  importers: ImporterRegistry;
-  transfers: TransferRegistry;
-  contactPublicKeyActions: ContactPublicKeyActionRegistry;
-  assets: AssetRegistry;
-  tokens: import("./registries/tokenRegistry.js").TokenRegistry;
-  collectibles: import("./registries/collectibleRegistry.js").CollectibleRegistry;
-  collectibleTransfer: import("./registries/collectibleTransferRegistry.js").CollectibleTransferRegistry;
-  protectedOutpoints: import("./registries/protectedOutpointRegistry.js").ProtectedOutpointRegistry;
-  topbar: TopbarRegistry;
-  notice: NoticeRegistry;
   i18n: I18nService;
-  /** 插件启停意图的 Keymaster 持久化视图。 */
-  configStore: PluginConfigStore;
-  /** 多页面唯一启停意图控制面。 */
-  readonly pluginIntent?: PluginIntentCoordinator;
   /** WebLoom Resource Store 的领域兼容视图。 */
   resourceStore: ResourceStoreApi;
   installed(): string[];
@@ -115,10 +67,8 @@ export interface PluginHost {
   registerAll(plugins: PluginManifest[]): Promise<void>;
   validateManifestSet(plugins: readonly PluginManifest[]): void;
   provide<C extends LocalCapability<unknown>>(key: C, value: LocalServiceOf<C>): void;
-  enable(pluginId: string): Promise<void>;
   retry(pluginId: string): Promise<void>;
-  submitIntent(pluginId: string, desiredEnabled: boolean): Promise<PluginIntentSubmissionResult>;
-  disable(pluginId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  revoke(pluginId: string, reason: string): Promise<void>;
   unregister(pluginId: string): Promise<void>;
   dispose(reason?: string): Promise<LifecycleDisposeResult>;
   assertCapabilities(capabilities: readonly CapabilityDescriptor[], options?: { phase?: string }): void;
@@ -139,27 +89,16 @@ export function getWebLoomHost(host: PluginHost): WebLoomPluginHost {
 }
 
 export interface CreatePluginHostOptions {
+  /** Explicit trusted assembly capabilities; domain registries are provided by plugins. */
+  capabilities?: import("webloom-framework/advanced").HostCapabilityRegistration[];
+  /** 只由可信装配登记的私有能力授权。 */
+  privateCapabilities?: NonNullable<Parameters<typeof import("webloom-framework/advanced").createPluginHost>[0]>["privateCapabilities"];
+  /** 可信装配维护的运行单元/能力来源槽位。 */
+  runtimeSlotBindings?: NonNullable<Parameters<typeof import("webloom-framework/advanced").createPluginHost>[0]>["runtimeSlotBindings"];
   /** 页面初始 i18n 资源。 */
   initialI18nResources?: I18nPluginResources[];
   /** 是否启用 i18n 调试日志。 */
   i18nDebug?: boolean;
-  /** 测试时关闭启停配置持久化。 */
-  disableConfigPersistence?: boolean;
-  /** 测试或服务端渲染时使用的初始内存投影。 */
-  initialPluginConfig?: Record<string, boolean>;
-  /** Keymaster Storage binding authority；只在 Adapter 内使用。 */
-  storageBindingAuthority?: StorageBindingAuthority;
-  /** 多页面唯一启停意图控制面。 */
-  pluginIntentCoordinator?: PluginIntentCoordinator;
-  /** 按 pluginId 注入的 Coordinator 窄接口。 */
-  coordinatorForPlugin?: (pluginId: string) => unknown;
-  /** 当前实例的远程服务桥。 */
-  /**
-   * 迁移中的运行时注入点；最终由 typed CapabilityBridge 取代。
-   * 当前保留 unknown 仅用于让旧测试在编译阶段暴露迁移点，不能进入 v4
-   * 适配器的生产调用路径。
-   */
-  serviceBridgeForPlugin?: (pluginId: string, instanceId: string) => unknown;
   /** 可信装配批准的权限。 */
   approvedPermissionsForPlugin?: (
     pluginId: string,
@@ -180,6 +119,8 @@ export interface CreatePluginHostOptions {
   runtime?: RuntimeKind;
   /** 页面已连接的 WebLoom SharedWorker Runtime；由 Window App 投影其快照。 */
   remoteRuntime?: RuntimeHandle;
+  /** 可信装配登记的多个物理 Worker 槽位；来源由 runtimeSlotBindings 明确指定。 */
+  remoteRuntimes?: Readonly<Record<string, RuntimeHandle>>;
   /** Host 的初始 Vault/owner/session 身份。 */
   initialRuntimeIdentity?: RuntimeIdentityTransition;
   /** 新实例的领域身份扩展；最终变为 WebLoom Scope.attributes。 */
@@ -195,8 +136,6 @@ export interface CreatePluginHostOptions {
   runtimeUnitImplementationRegistry?:
     | RuntimeUnitImplementationRegistry
     | WebLoomRuntimeUnitImplementationRegistry;
-  /** 插件禁用后的安全导航路径。 */
-  safePath?: string;
 }
 
 /** 兼容旧模块对未使用类型导入的稳定导出。 */

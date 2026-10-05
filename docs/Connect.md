@@ -54,3 +54,13 @@ Channel 成功只表示 Keymaster 接受本地发布，不表示远端已经收�
 - SDK 使用手册：`apps/connect-docs/site/`
 
 Markdown 不再复制完整类型，避免协议文档和可执行契约漂移。
+
+## 提供方与网关
+
+各提供方在运行单元的 `connect.providerMethods` 中明确发布方法。Protocol 从统一物化的发行目录建立分派表，拒绝重复、缺失和未知方法，不遍历内部或私有服务。V1 仍保持原 25 个方法及确认、取消和错误语义。
+
+Storage 的 App 客户端接受经过验证的会话事实，由 Storage 推导目录和 module；Protocol 不能指定物理路径或 purpose。Worker 每次操作复核 session、origin、Owner 和代际。公共 Storage 状态能力只提供状态、摘要与会话取消，不暴露浏览、文件读写或钱包管理方法。
+
+## WebLoom 0.6 本地收口
+
+本地外部验证使用相邻 KeymasterConnectDemo 与真实钱包的两个生产 origin；Demo 覆盖 23 个 SDK 公开方法及 Channel/价格事件，内部 feepool 两个方法不放入 SDK。MSFile 以 sources/sourceId 区分 local-bitfs 与远程来源；Storage 不提供已删除的 multipart API。本地流程验证登录、身份/内容验签、加解密、App 文件读写、价格、恢复和完整注销，不需要资金钱包。

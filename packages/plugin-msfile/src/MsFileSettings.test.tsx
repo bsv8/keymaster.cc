@@ -24,7 +24,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({
+  usePluginI18n: () => ({
     t: (key: string, options?: { defaultValue?: string; [key: string]: unknown }) =>
       (options?.defaultValue ?? key).replace(/\{\{(\w+)\}\}/gu, (match, name: string) => String(options?.[name] ?? match))
   }),
@@ -48,9 +48,11 @@ vi.mock("@keymaster/runtime", () => ({
   }
 }));
 
+vi.mock("./MsFileResourceContext.js", () => ({ useMsFileResources: () => ({}) }));
+
 vi.mock("webloom-framework/react", () => ({
   useCapability: <T,>(_key: string): T => state.service as unknown as T,
-  useOptionalCapability: <T,>(_key: string): T => state.service as unknown as T,
+  useOptionalPluginCapability: <T,>(_key: string): T => state.service as unknown as T,
   // 模拟真实 useResourceSelector 的 equality 语义：内容不变返回同一引用，
   // 否则组件的 effect 会因对象身份变化而无限重跑。
   useResourceSelector: <T,>(_store: unknown, _id: string, _args: readonly string[], selector: (snapshot: { data?: unknown }) => T): T => {

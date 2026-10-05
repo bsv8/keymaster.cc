@@ -29,6 +29,9 @@
 
 提案不是当前行为；完成后应把稳定结论合并回对应主题文档，并由 Git 历史保留施工过程。
 
+- [单 Key 钱包状态收口施工单](./proposals/webloom-0.6/单Key钱包状态收口施工单.md)：待实施。将 Keyspace 身份读取/变化通知收进 Vault 只读状态能力，迁移消费者后删除旧 API，保留会话与钱包世代失效规则。
+
 - [BitFS 本地 MSFile 与卖方模式需求](./proposals/msfile/BitFS本地代理与卖方模式需求.md)
 - [BitFS 本地 MSFile 与卖方模式施工单](./proposals/msfile/BitFS本地代理与卖方模式施工单.md)
 - [存储浏览器施工单](./proposals/storage/存储浏览器施工单.md)：代码已实施，真实浏览器验收已覆盖 JSON 预览、渲染量上界、锁定清空与窄屏键盘；Markdown/TXT 渲染与超大目录翻页仍未验证。
+- [Keymaster 扁平插件迁移需求（WebLoom 0.6.0）](./proposals/webloom-0.6/Keymaster扁平插件迁移需求.md)与[施工单](./proposals/webloom-0.6/Keymaster扁平插件迁移施工单.md)：待实施。统一插件、显式能力依赖、page 挂载、Storage/Vault 多运行单元与 Connect 边界；按本次明确要求建立迁移提案，不代表现行代码已升级。

@@ -1,3 +1,4 @@
+import { useContactsResources } from "./ContactsResourceContext.js";
 // packages/plugin-contacts/src/ContactsPage.tsx
 // 联系人列表页。
 //
@@ -8,17 +9,17 @@
 
 import { useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { AppLink, useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { AppLink, usePluginI18n, useResourceViewSelector } from "@keymaster/runtime";
 import { CONTACTS_SERVICE_CAPABILITY, formatShortPublicKey, type Contact, type ContactPresenceMap, type ContactsService } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
 export function ContactsPage() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
   // 一次渲染，必须按"暂不可用"降级而不是抛错。
-  const service = useOptionalCapability(CONTACTS_SERVICE_CAPABILITY);
+  const service = useOptionalPluginCapability(CONTACTS_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <EmptyState
@@ -31,18 +32,18 @@ export function ContactsPage() {
 }
 
 function ContactsPageInner({ service }: { service: ContactsService }) {
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const listState = useOptionalResourceSelector<Contact[], { rows: Contact[]; active: boolean; error?: string }>(
-    host.resourceStore, "contacts.list", [],
+  const reader = useContactsResources();
+  const { t } = usePluginI18n();
+  const listState = useResourceViewSelector<Contact[], { rows: Contact[]; active: boolean; error?: string }>(
+    reader, "contacts.list", [],
     (snapshot) => ({ rows: snapshot.data ?? [], active: snapshot.key[2] !== "none", error: snapshot.error?.message }),
-    { rows: [], active: false }
+    (a, b) => a.rows === b.rows && a.active === b.active && a.error === b.error
   );
   const { rows, active } = listState;
-  const presenceByPublicKey = useOptionalResourceSelector<ContactPresenceMap, ContactPresenceMap>(
-    host.resourceStore, "contacts.presence", [],
+  const presenceByPublicKey = useResourceViewSelector<ContactPresenceMap, ContactPresenceMap>(
+    reader, "contacts.presence", [],
     (snapshot) => snapshot.data ?? {},
-    {}
+    (a, b) => a === b
   );
   const [editing, setEditing] = useState<Contact | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -133,7 +134,7 @@ function ContactsPageInner({ service }: { service: ContactsService }) {
         description={t("contacts.page.desc", { defaultValue: "Manage contacts by publicKeyHex." })}
         actions={<Button onClick={startNew}>{t("contacts.page.action.new", { defaultValue: "New" })}</Button>}
       />
-      {error ? <p className="contacts-page__error">{error}</p> : null}
+      {error || listState.error ? <p role="alert" className="contacts-page__error">{error ?? listState.error}</p> : null}
       {rows.length === 0 ? (
         <EmptyState
           title={t("contacts.page.empty.title", { defaultValue: "No contacts yet" })}

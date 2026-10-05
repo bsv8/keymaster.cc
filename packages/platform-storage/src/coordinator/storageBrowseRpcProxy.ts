@@ -1,3 +1,6 @@
+import type { CapabilityClient } from "webloom-framework";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY, parseStorageBrowsePrivateResponse, type StorageBrowsePrivateData, type StorageBrowsePrivateRequest } from "./storageBrowsePrivateCapability.js";
+import type { StorageBrowseService } from "../runtime/storageBrowsePrivate.js";
 // 页面侧只读存储浏览代理。
 //
 // 它把 StorageBrowseService 的方法翻译成 Coordinator 的三条 RPC，并把浏览会话
@@ -9,16 +12,8 @@
 //
 // 打开会话的请求里没有身份字段：浏览授权由 Coordinator 在它自己已验证的 peer
 // 上下文里签发。页面这一侧能做的只是「请求一次会话」，声明自己是谁不构成授权。
-import type {
-  CoordinatorValueResult,
-  StorageBrowseCoordinatorControl,
-  StorageBrowseListRequest,
-  StorageBrowsePage,
-  StorageBrowsePreview,
-  StorageBrowsePreviewRequest,
-  StorageBrowseService,
-  StorageBrowseSession,
-} from "@keymaster/contracts";
+import type { CoordinatorValueResult } from "@keymaster/contracts";
+import type { StorageBrowseListRequest, StorageBrowsePage, StorageBrowsePreview, StorageBrowsePreviewRequest, StorageBrowseSession } from "../runtime/storageBrowseTypes.js";
 import { StorageRuntimeError } from "../runtime/storageError.js";
 
 /** 打开会话的失败。已取消不算错误：快速切换时它只是提前退出。 */
@@ -44,18 +39,31 @@ function unwrap<T>(result: CoordinatorValueResult<unknown>): T {
 }
 
 export interface StorageBrowseRpcProxyOptions {
-  coordinator: StorageBrowseCoordinatorControl;
+  client: () => CapabilityClient<typeof STORAGE_PRIVATE_BROWSE_CAPABILITY>;
+  sessionEpoch: () => string;
 }
 
 export class StorageBrowseRpcProxy implements StorageBrowseService {
-  private readonly coordinator: StorageBrowseCoordinatorControl;
+  private readonly client: StorageBrowseRpcProxyOptions["client"];
+  private readonly sessionEpoch: () => string;
   /** 进行中的打开请求；dispose 或世代变化时用来避免留下孤儿句柄。 */
   private opening: Promise<StorageBrowseSession> | undefined;
   private session: StorageBrowseSession | undefined;
   private disposed = false;
 
   constructor(options: StorageBrowseRpcProxyOptions) {
-    this.coordinator = options.coordinator;
+    this.client = options.client;
+    this.sessionEpoch = options.sessionEpoch;
+  }
+
+  private async rpc(request: StorageBrowsePrivateRequest, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>> {
+    const response = parseStorageBrowsePrivateResponse(request, await this.client().call(request, { ...(signal ? { signal } : {}) }));
+    if (response.ack.status !== "ok") return response.ack;
+    return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+  }
+
+  private closeRpc(browseSessionId: string): Promise<CoordinatorValueResult<unknown>> {
+    return this.rpc({ kind: "storage.browse.close", browseSessionId });
   }
 
   /** 当前句柄的三种世代；没有会话时返回 undefined。 */
@@ -70,12 +78,12 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
     // 并发调用共享同一次打开：两个句柄意味着两倍的游标预算和两条要清理的路径。
     const pending = this.opening;
     if (pending) return pending;
-    const opening = this.coordinator.storageBrowseOpen()
+    const opening = this.rpc({ kind: "storage.browse.open", expectedSessionEpoch: this.sessionEpoch() })
       .then((result) => {
         const session = unwrap<StorageBrowseSession>(result);
         // 打开期间可能已经 dispose 或切了世代：这份句柄不能再用。
         if (this.disposed) {
-          void this.coordinator.storageBrowseClose(session.browseSessionId);
+          void this.closeRpc(session.browseSessionId).catch(() => undefined);
           throw new StorageRuntimeError("storage_unavailable", "Storage browse proxy is disposed");
         }
         if (this.opening === opening) {
@@ -104,10 +112,10 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
    * 这里丢掉本地句柄，让下一次调用重新打开，而不是把这个错误直接抛给页面——
    * 页面正在浏览时锁定属于正常操作，不该表现成一次浏览失败。
    */
-  private async request<T>(build: (session: StorageBrowseSession) => Parameters<StorageBrowseCoordinatorControl["storageBrowseData"]>[0], signal?: AbortSignal): Promise<T> {
+  private async request<T>(build: (session: StorageBrowseSession) => StorageBrowsePrivateData, signal?: AbortSignal): Promise<T> {
     if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage browse proxy is disposed");
     const session = await this.openSession();
-    const result = await this.coordinator.storageBrowseData(build(session), [], signal);
+    const result = await this.rpc({ kind: "storage.browse.data", data: build(session), expectedSessionEpoch: this.sessionEpoch() }, signal);
     if (result.status === "error" && result.code === "storage_unavailable") this.forgetSession();
     return unwrap<T>(result);
   }
@@ -131,7 +139,7 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
     // 只关自己手上的那一份：外来 id 在 Worker 侧也是空操作，这里不再转发。
     if (!current || current.browseSessionId !== browseSessionId) return;
     this.session = undefined;
-    await this.coordinator.storageBrowseClose(browseSessionId).catch(() => undefined);
+    await this.closeRpc(browseSessionId).catch(() => undefined);
   }
 
   dispose(): void {
@@ -140,6 +148,6 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
     const current = this.session;
     this.session = undefined;
     this.opening = undefined;
-    if (current) void this.coordinator.storageBrowseClose(current.browseSessionId).catch(() => undefined);
+    if (current) void this.closeRpc(current.browseSessionId).catch(() => undefined);
   }
 }

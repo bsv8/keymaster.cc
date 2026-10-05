@@ -1,3 +1,4 @@
+import { useWocResources } from "../WocResourceContext.js";
 // packages/plugin-woc/src/pages/WocSettingsPage.tsx
 // WOC 设置页面：URL、频率、队列快照。
 // 设计缘由：WOC 配置是 WOC 服务配置，必须独立于 P2PKH 设置页。
@@ -5,17 +6,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n, useLocale } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, usePluginLocale, useResourceViewSelector } from "@keymaster/runtime";
 import { WOC_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
 import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond } from "../wocSettings.js";
 
 export function WocSettingsPage() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在 BSV 链
   // 页面上，必须按"暂不可用"渲染而不是抛错。
-  const service = useOptionalCapability(WOC_CAPABILITY);
-  const coordinator = useOptionalCapability(WOC_COORDINATOR_CONTROL_CAPABILITY);
+  const service = useOptionalPluginCapability(WOC_CAPABILITY);
+  const coordinator = useOptionalPluginCapability(WOC_COORDINATOR_CONTROL_CAPABILITY);
   if (!service || !coordinator) {
     return (
       <p className="woc-settings__unavailable">
@@ -33,19 +34,21 @@ function WocSettingsPageInner({
   service: WocService;
   coordinator: P2pkhCoordinatorControl;
 }) {
-  const { t } = useI18n();
-  const locale = useLocale();
+  const { t } = usePluginI18n();
+  const locale = usePluginLocale();
   const timeFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { timeStyle: "medium" }),
     [locale]
   );
   const [draft, setDraft] = useState<WocConfig>({ ...service.getConfig(), baseUrl: DEFAULT_WOC_CONFIG.baseUrl });
   const [error, setError] = useState<string | null>(null);
-  const [snapshot, setSnapshot] = useState<WocQueueSnapshot>(service.getQueueSnapshot());
+  const reader = useWocResources();
+  const config = useResourceViewSelector<WocConfig, WocConfig>(reader, "woc.ui.config", [], snapshot => snapshot.data ?? service.getConfig());
+  const snapshot = useResourceViewSelector<WocQueueSnapshot, WocQueueSnapshot>(reader, "woc.ui.queue", [], snapshot => snapshot.data ?? service.getQueueSnapshot());
 
   useEffect(() => {
-    setDraft({ ...service.getConfig(), baseUrl: DEFAULT_WOC_CONFIG.baseUrl });
-  }, [service]);
+    setDraft({ ...config, baseUrl: DEFAULT_WOC_CONFIG.baseUrl });
+  }, [config]);
 
   useEffect(() => {
     let alive = true;
@@ -56,14 +59,6 @@ function WocSettingsPageInner({
     });
     return () => { alive = false; };
   }, [coordinator, service]);
-
-  useEffect(() => {
-    return service.onConfigChange((c) => setDraft({ ...c, baseUrl: DEFAULT_WOC_CONFIG.baseUrl }));
-  }, [service]);
-
-  useEffect(() => {
-    return service.onQueueChange((s) => setSnapshot(s));
-  }, [service]);
 
   async function apply(next: WocConfig) {
     const previous = { ...service.getConfig(), baseUrl: DEFAULT_WOC_CONFIG.baseUrl };
@@ -108,7 +103,7 @@ function WocSettingsPageInner({
         description={t("woc.field.rpsDesc", { defaultValue: "公共 API 建议默认 2；自定义代理可提高。" })}
         type="number"
         value={String(draft.requestsPerSecond)}
-        onChange={(e) => setDraft((current) => ({ ...current, requestsPerSecond: Number(e.currentTarget.value) }))}
+        onChange={(e) => { const requestsPerSecond = Number(e.currentTarget.value); setDraft((current) => ({ ...current, requestsPerSecond })); }}
         onBlur={() => void apply(draft)}
       />
       {error ? <p className="woc-settings__error">{error}</p> : null}
@@ -142,4 +137,11 @@ function WocSettingsPageInner({
       </section>
     </div>
   );
+}
+
+export function WocSettingsBlock() {
+  return <section className="bsv-chain-page__section" id="woc" aria-labelledby="bsv-chain-woc-title">
+    <header className="bsv-chain-page__section-header"><h2 id="bsv-chain-woc-title">WOC</h2></header>
+    <WocSettingsPage />
+  </section>;
 }

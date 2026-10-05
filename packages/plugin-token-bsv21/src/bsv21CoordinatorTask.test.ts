@@ -5,7 +5,7 @@ import { createInMemoryKeyValueStore, withTestStorageBinding } from "@keymaster/
 
 describe("BSV-21 Coordinator task", () => {
   it("creates a named task definition", () => {
-    const task = createBsv21CoordinatorTask({ keyspace: {} as never, stateStore: createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State)), p2pkh: {} as never, woc: {} as never, wocService: {} as never, vault: {} as never });
+    const task = createBsv21CoordinatorTask({ walletState: {} as never, stateStore: createInMemoryKeyValueStore(withTestStorageBinding(CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State)), p2pkh: {} as never, woc: {} as never, wocService: {} as never, vault: {} as never });
     expect(task.id).toBe("token-bsv21.sync"); expect(task.run).toBeTypeOf("function");
   });
 });

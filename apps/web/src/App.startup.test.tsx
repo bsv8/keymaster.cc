@@ -24,7 +24,7 @@ const testState = vi.hoisted(() => ({
   storageStatusResourceDefined: true,
   hasStorageController: true,
   hasVaultService: true,
-  hasKeyspaceService: true,
+  hasVaultWalletState: true,
   vaultStatus: "locked" as VaultStatus,
   runtimeVault: "locked" as VaultStatus,
   runtimeReady: true,
@@ -45,7 +45,7 @@ function bootstrapSnapshot(overrides: Partial<ApplicationBootstrapSnapshot> = {}
     vaultSelectionReady: true,
     ownerAppsReady: false,
     connectAppsReady: false,
-    assetWorkspaceReady: false,
+    assetCatalogsReady: false,
     ...overrides
   };
 }
@@ -70,7 +70,7 @@ function resetState(): void {
   testState.storageStatusResourceDefined = true;
   testState.hasStorageController = true;
   testState.hasVaultService = true;
-  testState.hasKeyspaceService = true;
+  testState.hasVaultWalletState = true;
   testState.vaultStatus = "locked";
   testState.runtimeVault = "locked";
   testState.runtimeReady = true;
@@ -95,9 +95,13 @@ const host = {
   }
 };
 
-vi.mock("@keymaster/runtime", () => ({
+vi.mock("@keymaster/runtime/assembly", () => ({
+  useRuntimeStatus: () => ({ vault: testState.runtimeVault, ready: testState.runtimeReady }),
   usePluginHost: () => host,
   useHostVersion: () => 1,
+}));
+
+vi.mock("@keymaster/runtime", () => ({
   useCurrentPath: () => {
     const [path, setPathState] = useState(window.location.pathname);
     useEffect(() => {
@@ -107,7 +111,6 @@ vi.mock("@keymaster/runtime", () => ({
     }, []);
     return path;
   },
-  useRuntimeStatus: () => ({ vault: testState.runtimeVault, ready: testState.runtimeReady }),
   useI18n: () => ({
     t: (_key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? "正在准备存储…",
     language: () => "zh-CN"
@@ -118,12 +121,27 @@ vi.mock("webloom-framework/react", () => ({
   useHasCapability: (capability: { id: string }) => {
     if (capability.id === "storage.runtime-controller") return testState.hasStorageController;
     if (capability.id === "vault.service") return testState.hasVaultService;
-    if (capability.id === "keyspace.service") return testState.hasKeyspaceService;
+    if (capability.id === "vault.wallet-state") return testState.hasVaultWalletState;
     return true;
   },
   useOptionalCapability: (capability: { id: string }) => {
+    if (capability.id === "page.ui.renderer") return {
+      subscribe: () => () => {}, revision: () => 0,
+      renderFrame: (slot: string, children?: ReactNode) => {
+        if (slot === "storage-guard") return children;
+        if (slot === "protocol-popup") return <div data-testid="protocol-popup">protocol</div>;
+        if (slot === "unlocked-shell") return <div data-testid="unlocked-shell">unlocked</div>;
+        if (slot === "wallet-entry") {
+        if (testState.resource?.data?.phase === "storage-onboarding" || testState.vaultStatus === "uninitialized") { testState.setupMounts += 1; testState.setupRecoveryReads += 1; return <div data-testid="initial-setup">setup</div>; }
+        return <div data-testid="locked-shell">locked</div>;
+      }
+        return null;
+      }
+    };
+
     if (capability.id === "vault.service" && testState.hasVaultService) {
-      return { status: () => testState.vaultStatus };
+      return {
+status: () => testState.vaultStatus };
     }
     if (capability.id === "application-bootstrap.ready") {
       return { retry: async () => { testState.retryCalls += 1; } };
@@ -142,23 +160,8 @@ vi.mock("@keymaster/platform-storage", () => ({
   StorageUnavailableGuard: ({ children }: { children: ReactNode }) => children
 }));
 
-vi.mock("./shell/InitialSetupPage.js", () => ({
-  InitialSetupPage: () => {
-    testState.setupMounts += 1;
-    // 这个 mock 把真实页面 mount 时的 recovery queue 读取建模出来，
-    // 便于证明 pending 首帧没有触发初始化恢复读取。
-    testState.setupRecoveryReads += 1;
-    return <div data-testid="initial-setup">setup</div>;
-  }
-}));
 
-vi.mock("./shell/LockedShell.js", () => ({
-  LockedShell: () => <div data-testid="locked-shell">locked</div>
-}));
 
-vi.mock("./shell/UnlockedShell.js", () => ({
-  UnlockedShell: () => <div data-testid="unlocked-shell">unlocked</div>
-}));
 
 vi.mock("@keymaster/plugin-protocol", () => ({
   ProtocolPopupPage: () => <div data-testid="protocol-popup">protocol</div>
@@ -258,7 +261,7 @@ describe("App startup gate", () => {
       hasUnlockedActiveKey: true,
       ownerAppsReady: true,
       connectAppsReady: true,
-      assetWorkspaceReady: true
+      assetCatalogsReady: true
     }));
 
     render(<App />);
@@ -281,7 +284,7 @@ describe("App startup gate", () => {
 
   it("keeps the startup placeholder while vault capabilities are not ready", () => {
     testState.hasVaultService = false;
-    testState.hasKeyspaceService = false;
+    testState.hasVaultWalletState = false;
     setResource("ready", bootstrapSnapshot({ vaultCapabilityReady: false, vaultSelectionReady: false }));
 
     render(<App />);

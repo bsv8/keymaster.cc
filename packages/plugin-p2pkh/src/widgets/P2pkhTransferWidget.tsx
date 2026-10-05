@@ -1,3 +1,4 @@
+import { useP2pkhResources } from "../P2pkhResourceContext.js";
 // packages/plugin-p2pkh/src/widgets/P2pkhTransferWidget.tsx
 // P2PKH 完整转移 Widget（硬切换 007）。
 // 设计缘由：
@@ -5,15 +6,15 @@
 //   - 不再有"来源 key"选择：active key 由平台决定，
 //     签名由 transfer service 按 owner publicKeyHex 借私钥完成；Widget 不直接持有 key 身份。
 //   - 不再有来源 key 选择；缺 activePublicKeyHex 时只保留 guard。
-//   - active key 切换时清空 preview（activeKey.changed 事件）。
+//   - active key 切换时清空 preview（Vault 钱包状态订阅 事件）。
 //   - 成功后保留 widget 实例展示结果；用户关闭后才 onCompleted。
 //
 // 硬切换 003：所有展示文案走 i18n。
 //
 import { useEffect, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n, useLocale, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot, type KeyIdentity, type TransferCompletion, type TransferOffer, type TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhFeeRateTier, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY, assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
@@ -24,11 +25,11 @@ interface FormState {
   feeTier: P2pkhFeeRateTier;
 }
 
-export function P2pkhTransferWidget(props: TransferWidgetProps) {
-  const { t } = useI18n();
+export function P2pkhTransferWidget(props: TransferWidgetProps & { initialAmountSatoshis?: string }) {
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由/首页组件在锁定瞬间仍可能
   // 完成一次渲染，必须按"暂不可用"降级而不是抛错。
-  const service = useOptionalCapability(P2PKH_CAPABILITY);
+  const service = useOptionalPluginCapability(P2PKH_CAPABILITY);
   if (!service) {
     return (
       <p className="p2pkh-transfer-widget__unavailable">
@@ -44,18 +45,19 @@ function P2pkhTransferWidgetInner({
   onCompleted,
   recipientAddress,
   recipientPublicKeyHex,
+  initialAmountSatoshis,
   service
-}: TransferWidgetProps & { service: P2pkhService }) {
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const locale = useLocale();
+}: TransferWidgetProps & { service: P2pkhService; initialAmountSatoshis?: string }) {
+  const reader = useP2pkhResources();
+  const { t } = usePluginI18n();
+  const locale = usePluginLocale();
   const formatNumber = (value: number) => new Intl.NumberFormat(locale).format(value);
 
   const assetId: P2pkhAssetId = offer.assetId as P2pkhAssetId;
   const network = assetIdToNetwork(assetId);
 
   const context = useOptionalResourceSelector<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, { activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }>(
-    host.resourceStore,
+    reader,
     "p2pkh.transfer-context",
     [assetId],
     (s) => s.data ?? {},
@@ -65,14 +67,14 @@ function P2pkhTransferWidgetInner({
   const activeIdentity = context.identity;
   const resource = context.resource;
   const globalSettings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    host.resourceStore,
+    reader,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? { includeTestnet: false },
     { includeTestnet: false }
   );
   const balanceSnapshot = useOptionalResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
-    host.resourceStore,
+    reader,
     "p2pkh.balance",
     [],
     (snapshot) => snapshot.data ?? emptyGlobalBalanceSnapshot(),
@@ -88,7 +90,7 @@ function P2pkhTransferWidgetInner({
   const [form, setForm] = useState<FormState>(() => {
     return {
       recipient: recipientAddress ?? "",
-      amount: "0",
+      amount: initialAmountSatoshis ?? "0",
       feeTier: "medium"
     };
   });

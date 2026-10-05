@@ -8,12 +8,14 @@ import type { AutoLockService, AutoLockSettings } from "@keymaster/contracts";
 const hostState: { settings: AutoLockSettings } = { settings: { timeoutMs: 5 * 60 * 1000 } };
 const activeService: { service: AutoLockService | undefined } = { service: undefined };
 
+vi.mock("@keymaster/runtime/assembly", () => ({ usePluginHost: () => ({ resourceStore: {} }), }));
+
 vi.mock("@keymaster/runtime", async () => {
   const actual = await vi.importActual<typeof import("@keymaster/runtime")>("@keymaster/runtime");
   return {
     ...actual,
-    usePluginHost: () => ({ resourceStore: {} }),
-    useI18n: () => ({
+
+    usePluginI18n: () => ({
       t: (key: string, opts?: { defaultValue?: string; minutes?: number; hours?: number }) => {
         let fallback = opts?.defaultValue ?? key;
         if (typeof opts?.minutes === "number") fallback = fallback.replace("{{minutes}}", String(opts.minutes));
@@ -37,7 +39,7 @@ vi.mock("@keymaster/runtime", async () => {
 });
 
 vi.mock("webloom-framework/react", () => ({
-  useOptionalCapability: <T,>(): T | undefined => activeService.service as unknown as T,
+  useOptionalPluginCapability: <T,>(): T | undefined => activeService.service as unknown as T,
 }));
 
 function makeFakeService(initialMs = 5 * 60 * 1000) {
@@ -222,4 +224,9 @@ describe("AutoLockSettingsSection", () => {
     fireEvent.click(screen.getByRole("button", { name: "15 分钟" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("boom"));
   });
+});
+
+vi.mock("./VaultResourceContext.js", async () => {
+  const runtime = await import("@keymaster/runtime/assembly");
+  return { useVaultResources: () => runtime.usePluginHost().resourceStore };
 });

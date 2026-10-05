@@ -4,13 +4,13 @@
 
 import { useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
+import { usePluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
 import { VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 export function VaultUnlockPage() {
-  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
-  const { t } = useI18n();
+  const vault = usePluginCapability(VAULT_SERVICE_CAPABILITY);
+  const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);

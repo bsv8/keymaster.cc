@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-protocol/src/protocolService.test.ts
 // 协议 service 关键行为单测：
 //   - ready -> request -> result 正常流程；
@@ -16,7 +17,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
-  type KeyspaceService,
+  type VaultWalletState,
   type VaultService,
   type ConnectSessionRecord,
   type ProtocolClosingMessage,
@@ -71,7 +72,7 @@ function makeFakeOpener(): FakeWindow {
   };
 }
 
-function makeVaultStub(publicKeyHex: string): VaultService {
+function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletState(handler: (snapshot: { status: "locked" | "unlocked" }) => void): () => void } {
   // 施工单 2026-06-30 003：vault 内部 state 驱动 status() 返回；lock() /
   // unlock() 翻转后调用方（popup page vault.onStatusChange）会再调
   // `service.setVaultLockState(...)`，让 service 端的 `computeLockState()`
@@ -81,8 +82,8 @@ function makeVaultStub(publicKeyHex: string): VaultService {
   const lifecycleListeners = new Set<(snapshot: { status: "locked" | "unlocked" }) => void>();
   return {
     status: () => (state.locked ? "locked" : "unlocked"),
-    getLifecycleSnapshot: () => ({ status: state.locked ? "locked" as const : "unlocked" as const, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 }),
-    onLifecycleChange: (h: (snapshot: { status: "locked" | "unlocked" }) => void) => {
+    walletSnapshot: () => ({ status: state.locked ? "locked" as const : "unlocked" as const, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 }),
+    subscribeWalletState: (h: (snapshot: { status: "locked" | "unlocked" }) => void) => {
       lifecycleListeners.add(h);
       return () => lifecycleListeners.delete(h);
     },
@@ -110,8 +111,7 @@ function makeVaultStub(publicKeyHex: string): VaultService {
       }),
       deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
       sealSendInput: () => ({ error: "not used" }),
-      openSealed: () => null,
-      exportEncryptedKeyBackup: async () => ({ publicKeyHex: TEST_PUB_HEX, backup: new Uint8Array(0).buffer })
+      openSealed: () => null
     }),
     unlockKeymasterSession: async () => ({
       getIdentity: () => ({
@@ -130,8 +130,7 @@ function makeVaultStub(publicKeyHex: string): VaultService {
       }),
       deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
       sealSendInput: () => ({ error: "not used" }),
-      openSealed: () => null,
-      exportEncryptedKeyBackup: async () => ({ publicKeyHex: TEST_PUB_HEX, backup: new Uint8Array(0).buffer })
+      openSealed: () => null
     }),
     createAppViewSession: async () => ({
       getIdentity: () => ({
@@ -150,8 +149,7 @@ function makeVaultStub(publicKeyHex: string): VaultService {
       }),
       deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
       sealSendInput: () => ({ error: "not used" }),
-      openSealed: () => null,
-      exportEncryptedKeyBackup: async () => ({ publicKeyHex: TEST_PUB_HEX, backup: new Uint8Array(0).buffer })
+      openSealed: () => null
     }),
     disposeAppViewSession: () => undefined,
     disposeAllAppViewSessions: () => undefined,
@@ -200,12 +198,12 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     // （2026-06-29/003 已删除，002 沿用）。launcher 端改用现有
     // `vault.createActiveKeyCrypto(publicKeyHex)` 取 capability 拼
     // `OwnerRuntimeBootstrap`。launchAppView 测试不再需要旧导出 runtime 假实现。
-  } as unknown as VaultService;
+  } as unknown as ReturnType<typeof makeVaultStub>;
 }
 
-// KeyspaceService stub：与 makeVaultStub 配套使用，cipher.* / connect.* 测试
+// VaultWalletState stub：与 makeVaultStub 配套使用，cipher.* / connect.* 测试
 // 默认返回"单 key ready"，让 ownerPublicKeyHex 查 key 路径可以跑通。
-function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
+function makeWalletStateStub(publicKeyHex: string): VaultWalletState {
   const identity = {
     publicKeyHex,
     label: "Key A",
@@ -213,12 +211,12 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
     createdAt: new Date().toISOString()
   };
   return {
-    // 单 Key 本地钱包（docs/存储.md）：keyspace 只投影「当前唯一 Key 是谁」。
+    // 单 Key 本地钱包（docs/存储.md）：walletState 只投影「当前唯一 Key 是谁」。
     // cipher.* / connect.* 按 session.ownerPublicKeyHex 核对这个身份是否就是
     // 当前 Key，没有 listKeys / getKey / setActive。
-    active: () => ({ activePublicKeyHex: publicKeyHex }),
-    requireActiveKey: () => ({ ...identity }),
-    onActiveKeyChanged: () => () => undefined
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: publicKeyHex }))(), () => ({ ...identity })),
+
+    subscribe: () => () => undefined
   };
 }
 
@@ -403,7 +401,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
   const posted: ServiceHarness["posted"] = { ready: 0, result: [], closing: [] };
   const deps: ProtocolServiceDeps = {
     vault: makeVaultStub(publicKeyHex),
-    keyspace: makeKeyspaceStub(publicKeyHex),
+    walletState: makeWalletStateStub(publicKeyHex),
     resolveOpener: () => opener as unknown as Window,
     postReady: () => {
       posted.ready++;
@@ -792,12 +790,9 @@ describe("ProtocolServiceImpl", () => {
 
   it("rejects request when active key is not available", async () => {
     const { service, opener, deps, getResult } = makeService();
-    const ks = makeKeyspaceStub("00".repeat(33));
-    ks.active = () => ({});
-    ks.requireActiveKey = () => {
-      throw new Error("No active key");
-    };
-    const s2 = new ProtocolServiceImpl({ ...deps, keyspace: ks });
+    const ks = makeWalletStateStub("00".repeat(33));
+    ks.snapshot = () => walletStateFixtureSnapshot({});
+    const s2 = new ProtocolServiceImpl({ ...deps, walletState: ks });
     s2.startSession();
     await s2.handleMessage(
       makeEvent(
@@ -1541,28 +1536,28 @@ describe("ProtocolServiceImpl", () => {
     // 关键修复（施工单 2026-06-27 002 反馈 + 施工单 2026-06-28 002 硬切换）：
     // contract 注释明确 `ownerPublicKeyHex` 是"record 在创建时快照的
     // owner public key hex"。旧实现里 writeFeedCommandFor 每次都读
-    // keyspace.active()——用户在 popup 会话里切换 active key 会让旧卡片
+    // walletState.snapshot()——用户在 popup 会话里切换 active key 会让旧卡片
     // 的元数据被污染。
     // 新实现：rec.ownerPublicKeyHex 在 acceptRequest 创建 record 时从
     // connectSession.ownerPublicKeyHex 快照；后续 writeFeedCommandFor /
-    // loadHistoryForOrigin 合并都从 rec 读，不再读 keyspace.active()。
+    // loadHistoryForOrigin 合并都从 rec 读，不再读 walletState.snapshot()。
     //
-    // 用一个能动态切换 active key 的 keyspace stub + 预 seed 的
+    // 用一个能动态切换 active key 的 walletState stub + 预 seed 的
     // connect session 来模拟。
     const initialOwner = "02" + "aa".repeat(32);
     let currentActiveKey = initialOwner;
-    const dynamicKeyspace = {
-      ...makeKeyspaceStub(initialOwner),
-      active: () => ({ activePublicKeyHex: currentActiveKey }),
-      requireActiveKey: () => ({
+    const dynamicWalletState = {
+      ...makeWalletStateStub(initialOwner),
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: currentActiveKey }))(), () => ({
         publicKeyHex: "k1",
         label: "Key A",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
-      })
+      })),
+
     };
     const { service, opener, storageRepository, deps } = makeService(initialOwner, undefined, {
-      keyspace: dynamicKeyspace as unknown as KeyspaceService
+      walletState: dynamicWalletState as unknown as VaultWalletState
     });
     // 预 seed 一条 connect session，owner 锁定为创建时的 initialOwner。
     await seedConnectSession(storageRepository, "sess-owner-snap", initialOwner, ORIGIN);
@@ -1589,7 +1584,7 @@ describe("ProtocolServiceImpl", () => {
     const feed1 = service.feedSnapshot();
     const card1 = feed1.commands.find((c) => c.requestId === "req-key1");
     expect(card1?.ownerPublicKeyHex).toBe(initialOwner);
-    // 用户切换 active key:dynamicKeyspace.active() 改成新 key。
+    // 用户切换 active key:dynamicWalletState.snapshot() 改成新 key。
     currentActiveKey = "02" + "bb".repeat(32);
     // 推进旧卡 phase 触发 writeFeedCommandFor(queued 后写一次)。
     await service.confirmByUser();
@@ -2473,7 +2468,7 @@ describe("ProtocolServiceImpl", () => {
     });
     const service = new reloaded.ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
-      keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+      walletState: makeWalletStateStub(TEST_PUB_HEX),
       storageRepository: fakeStorage,
       p2pkhService: p2pkh as never,
       resolveOpener: () => opener as unknown as Window,
@@ -3737,7 +3732,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     let currentStatus: VaultStatus = "locked";
     vaultLocked.status = () => currentStatus;
     const unlockListeners: Array<(s: any) => void> = [];
-    vaultLocked.onLifecycleChange = (h: (s: any) => void) => {
+    (vaultLocked as ReturnType<typeof makeVaultStub>).subscribeWalletState = (h: (s: any) => void) => {
       unlockListeners.push(h);
       return () => undefined;
     };
@@ -4311,7 +4306,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 2026-06-30 003 后 setVaultLockState 通过 computeLockState() 重算，
     // 需要 vault.status() 反映真实状态——这里走 fake vault 自带的 lock()
     // + onStatusChange 通路。
-    deps.vault.onLifecycleChange((snapshot) => {
+    (deps.vault as ReturnType<typeof makeVaultStub>).subscribeWalletState((snapshot) => {
       if (snapshot.status === "locked") {
         lockCalls++;
         service.setVaultLockState(true);
@@ -4632,7 +4627,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       )
     );
     // 用户已经过 confirming；中途"切换 active key"（fake：通过 setActive 模拟）。
-    // 这里**不**真去切 active；keyspace.active() 在 fake 中继续返回 TEST_PUB_HEX。
+    // 这里**不**真去切 active；walletState.snapshot() 在 fake 中继续返回 TEST_PUB_HEX。
     // 真正的硬切换由 contract 保护：cipher 走 session.ownerPublicKeyHex，不读 active key。
     await service.confirmByUser();
     await new Promise((r) => setTimeout(r, 30));
@@ -5871,20 +5866,20 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       submitTransfer
     };
     const otherActive = "02" + "cc".repeat(32);
-    const otherKeyspace: KeyspaceService = {
-      ...makeKeyspaceStub(otherActive),
-      active: () => ({ activePublicKeyHex: otherActive }),
-      // session owner（TEST_PUB_HEX）不是当前唯一 Key，active 指向另一把。
-      requireActiveKey: () => ({
+    const otherWalletState: VaultWalletState = {
+      ...makeWalletStateStub(otherActive),
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: otherActive }))(), () => ({
         publicKeyHex: otherActive,
         label: "C",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
-      })
+      })),
+      // session owner（TEST_PUB_HEX）不是当前唯一 Key，active 指向另一把。
+
     };
     const { service, opener, storageRepository } = makeService(otherActive, undefined, {
       p2pkhService: p2pkh as never,
-      keyspace: otherKeyspace
+      walletState: otherWalletState
     });
     await storageRepository.putConnectSession({
       sessionId: "sess-mismatch",
@@ -5933,22 +5928,22 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     // 取 value。session.owner != active 时，protocol 层必须提前
     // 拒绝，**不**让硬门禁在底层冒泡「Key storage is not ready」。
     const otherActive = "02" + "dd".repeat(32);
-    const otherKeyspace: KeyspaceService = {
-      ...makeKeyspaceStub(otherActive),
-      active: () => ({ activePublicKeyHex: otherActive }),
-      requireActiveKey: () => ({
+    const otherWalletState: VaultWalletState = {
+      ...makeWalletStateStub(otherActive),
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: otherActive }))(), () => ({
         publicKeyHex: otherActive,
         label: "D",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
-      })
+      })),
+
     };
     const p2pkh = {
       listUtxos: vi.fn(async () => [{ txid: "00".repeat(32), vout: 0, value: 100000 }])
     };
     const { service, opener, storageRepository } = makeService(otherActive, undefined, {
       p2pkhService: p2pkh as never,
-      keyspace: otherKeyspace
+      walletState: otherWalletState
     });
     await storageRepository.putConnectSession({
       sessionId: "sess-fp-mismatch",
@@ -6559,11 +6554,11 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     const env = setupWindow();
     try {
       const storageRepository = makeFakeMultipartUploadRepository();
-      const service = new ProtocolServiceImpl({ vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository });
+      const service = new ProtocolServiceImpl({ vault: makeVaultStub(TEST_PUB_HEX), walletState: makeWalletStateStub(TEST_PUB_HEX), storageRepository });
       await expect(service.launchAppView(JUSTNOTE)).rejects.toMatchObject({ code: "invalid_app_config" });
       expect(env.openCalls).toHaveLength(0);
       const blocked = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository,
+        vault: makeVaultStub(TEST_PUB_HEX), walletState: makeWalletStateStub(TEST_PUB_HEX), storageRepository,
         appCatalogResolver: { resolve: () => ({ kind: "known-invalid", reason: "placeholder publisher key" }) }
       });
       await expect(blocked.launchAppView(JUSTNOTE)).rejects.toMatchObject({ code: "invalid_app_config" });
@@ -6576,7 +6571,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     try {
       const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository,
+        vault: makeVaultStub(TEST_PUB_HEX), walletState: makeWalletStateStub(TEST_PUB_HEX), storageRepository,
         appCatalogResolver: { resolve: () => ({ kind: "known-valid", proof: VALID_PROOF }) },
         generateId: (() => { let n = 0; return () => `metadata-${++n}`; })()
       });
@@ -6590,7 +6585,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     const env = setupWindow();
     try {
       const service = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository: makeFakeMultipartUploadRepository(),
+        vault: makeVaultStub(TEST_PUB_HEX), walletState: makeWalletStateStub(TEST_PUB_HEX), storageRepository: makeFakeMultipartUploadRepository(),
         appCatalogResolver: { resolve: () => ({ kind: "known-valid", proof: STORAGE_PROOF }) }
       });
       await expect(service.launchAppView({ ...JUSTNOTE, appIdentity: STORAGE_PROOF })).rejects.toMatchObject({ code: "requirement_unavailable" });
@@ -6604,7 +6599,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         generateId: (() => {
           let n = 0;
@@ -6671,7 +6666,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
@@ -6698,7 +6693,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const vault = makeVaultStub(TEST_PUB_HEX);
       // 强制 status 返回 locked。
       (vault as unknown as { status: () => string }).status = () => "locked";
-      const service = new ProtocolServiceImpl({ vault, keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository, appCatalogResolver: TEST_CATALOG_RESOLVER });
+      const service = new ProtocolServiceImpl({ vault, walletState: makeWalletStateStub(TEST_PUB_HEX), storageRepository, appCatalogResolver: TEST_CATALOG_RESOLVER });
       let caught: unknown = null;
       try {
         await service.launchAppView(JUSTNOTE);
@@ -6722,7 +6717,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
@@ -6753,7 +6748,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
@@ -6784,7 +6779,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
@@ -6808,7 +6803,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         appCatalogResolver: TEST_CATALOG_RESOLVER
         // 故意不传 storageRepository
       });
@@ -6835,7 +6830,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       };
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER,
       });
@@ -6854,14 +6849,14 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     const env = setupWindow();
     try {
       const storageRepository = makeFakeMultipartUploadRepository();
-      const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
+      const walletState = makeWalletStateStub(TEST_PUB_HEX);
       // 单 Key 本地钱包："owner key 找不到" 表现为当前没有可用 Key——
-      // active() 缺省且 requireActiveKey() 抛错，launchAppView 必须抛
+      // active() 缺省且 requireUnlockedWalletIdentity() 抛错，launchAppView 必须抛
       // LaunchAppViewError("no_active_key")。
-      (keyspace as { active: () => unknown }).active = () => ({});
+      (walletState as { snapshot: () => unknown }).snapshot = () => ({});
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace,
+        walletState,
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
@@ -6890,7 +6885,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       };
       const service = new ProtocolServiceImpl({
         vault,
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
@@ -6914,7 +6909,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
@@ -7088,7 +7083,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
@@ -7150,7 +7145,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
@@ -7193,7 +7188,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
@@ -7242,7 +7237,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
@@ -7294,7 +7289,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
@@ -7339,7 +7334,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
@@ -7392,7 +7387,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository()
       });
       service.startSession();
@@ -7643,7 +7638,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       const disposeReasons: string[] = [];
       const service = new ProtocolServiceImpl({
         vault,
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         bootMode: "appView"
       });
@@ -7702,10 +7697,6 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
             }),
             sealSendInput: () => ({ error: "not used" }),
             openSealed: () => null,
-            exportEncryptedKeyBackup: async () => ({
-              publicKeyHex: TEST_PUB_HEX,
-              backup: new Uint8Array(0).buffer
-            }),
             dispose: (reason?: string) => {
               disposeReasons.push(reason ?? "dispose");
             }
@@ -7749,10 +7740,6 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
             }),
             sealSendInput: () => ({ error: "not used" }),
             openSealed: () => null,
-            exportEncryptedKeyBackup: async () => ({
-              publicKeyHex: TEST_PUB_HEX,
-              backup: new Uint8Array(0).buffer
-            }),
             dispose: (reason?: string) => {
               replaceReasons.push(reason ?? "dispose");
             }
@@ -7789,7 +7776,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       const disposeReasons: string[] = [];
       const service = new ProtocolServiceImpl({
         vault,
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         resolveOpener: () => opener as unknown as Window,
         postReady: () => undefined,
@@ -7846,10 +7833,6 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
             }),
             sealSendInput: () => ({ error: "not used" }),
             openSealed: () => null,
-            exportEncryptedKeyBackup: async () => ({
-              publicKeyHex: TEST_PUB_HEX,
-              backup: new Uint8Array(0).buffer
-            }),
             dispose: (reason?: string) => {
               disposeReasons.push(reason ?? "dispose");
             }
@@ -7874,7 +7857,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
     // 默认 vault unlocked
     expect(service.lockState()).toBe("unlocked");
     // vault lock：listener 路径走 setVaultLockState(true)
-    deps.vault.onLifecycleChange((snapshot) => {
+    (deps.vault as ReturnType<typeof makeVaultStub>).subscribeWalletState((snapshot) => {
       if (snapshot.status === "locked") service.setVaultLockState(true);
       else service.setVaultLockState(false);
     });
@@ -7904,7 +7887,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       revokedAt: null
     });
     // vault listener：模拟真实链路翻转 service 端 lockState。
-    deps.vault.onLifecycleChange((snapshot) => {
+    (deps.vault as ReturnType<typeof makeVaultStub>).subscribeWalletState((snapshot) => {
       if (snapshot.status === "locked") service.setVaultLockState(true);
       else service.setVaultLockState(false);
     });
@@ -7933,7 +7916,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       (vault as unknown as { status: () => string }).status = () => "unlocked";
       const service = new ProtocolServiceImpl({
         vault,
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
@@ -8117,7 +8100,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       (vault as unknown as { status: () => string }).status = () => "locked";
       const service = new ProtocolServiceImpl({
         vault,
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        walletState: makeWalletStateStub(TEST_PUB_HEX),
         storageRepository,
         bootMode: "appView"
       });
@@ -8202,7 +8185,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
   it("resolveOwnerRuntime：vault unlocked + 同 owner 在 vault 可读 → 切到 vault_runtime 来源", async () => {
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
-      keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+      walletState: makeWalletStateStub(TEST_PUB_HEX)
     });
     const internals = service as unknown as {
       resolveOwnerRuntime: (s: ConnectSessionRecord) => Promise<{
@@ -8229,7 +8212,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
   it("resolveOwnerRuntime：bootstrap_runtime 已就绪 → 切到 bootstrap_runtime 来源（不走 vault）", async () => {
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
-      keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+      walletState: makeWalletStateStub(TEST_PUB_HEX)
     });
     const internals = service as unknown as {
       ownerRuntimesBySessionId: Map<string, unknown>;
@@ -8271,7 +8254,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     };
     const service = new ProtocolServiceImpl({
       vault,
-      keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+      walletState: makeWalletStateStub(TEST_PUB_HEX)
     });
     (service as unknown as { bootModeValue: "connect" | "appView" }).bootModeValue = "appView";
     const internals = service as unknown as {
@@ -8301,7 +8284,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     const storageRepository = makeFakeMultipartUploadRepository();
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
-      keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+      walletState: makeWalletStateStub(TEST_PUB_HEX),
       storageRepository
     });
     service.startSession();
@@ -8317,8 +8300,8 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       revokedAt: null
     });
     // 当前唯一 Key 已经是另一把：钱包被重置并重新初始化为不同私钥。
-    const keyspace = makeKeyspaceStub("02" + "ff".repeat(32));
-    (service as unknown as { deps: { keyspace: typeof keyspace } }).deps.keyspace = keyspace;
+    const walletState = makeWalletStateStub("02" + "ff".repeat(32));
+    (service as unknown as { deps: { walletState: typeof walletState } }).deps.walletState = walletState;
     // 强制 service 仍处于 locked 态。
     (service as unknown as { lockStateValue: "locked" | "unlocked" }).lockStateValue = "locked";
 
@@ -8352,13 +8335,13 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     expect(decision.kind).toBe("fail");
   });
 
-  it("probeExecutionCondition：locked + keyspace 找到 owner key ready → 推 waiting_unlock（仍允许解锁路径）", async () => {
-    // 现有 fakeKeyspaceStub 默认返回 ready key——验证 locked 但 key ready
+  it("probeExecutionCondition：locked + walletState 找到 owner key ready → 推 waiting_unlock（仍允许解锁路径）", async () => {
+    // 现有 fakeWalletStateStub 默认返回 ready key——验证 locked 但 key ready
     // 的合法请求仍走 waiting_unlock_manual，不被错误短路由掉。
     const storageRepository = makeFakeMultipartUploadRepository();
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
-      keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+      walletState: makeWalletStateStub(TEST_PUB_HEX),
       storageRepository
     });
     service.startSession();

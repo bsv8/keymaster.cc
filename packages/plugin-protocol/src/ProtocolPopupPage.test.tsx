@@ -37,9 +37,15 @@ function renderTemplate(template: string, values?: Record<string, unknown>): str
   });
 }
 
-vi.mock("@keymaster/runtime", () => ({
-  usePluginHost: () => ({ resourceStore: { invalidate: () => undefined } }),
-  useI18n: () => ({
+vi.mock("@keymaster/runtime/assembly", () => ({ usePluginHost: () => ({ resourceStore: { invalidate: () => undefined } }), }));
+
+vi.mock("@keymaster/runtime", async () => {
+  const framework = await import("webloom-framework/react");
+  return ({
+  useResourceView: framework.useResource,
+  useResourceViewSelector: framework.useResourceSelector,
+
+  usePluginI18n: () => ({
     t: (key: string, values?: { defaultValue?: string; seconds?: number }) => {
       const tmpl = values?.defaultValue ?? key;
       // 用模板占位符替换模拟 i18n 资源行为：让"已挂资源但缺占位符"
@@ -48,10 +54,10 @@ vi.mock("@keymaster/runtime", () => ({
     },
     language: () => "en"
   })
-}));
+}); });
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: (key: { id?: string }) => {
+  usePluginCapability: (key: { id?: string }) => {
     if (key.id === PROTOCOL_SERVICE_CAPABILITY.id) return currentService;
     if (key.id === VAULT_SERVICE_CAPABILITY.id) {
       return {
@@ -65,7 +71,7 @@ vi.mock("webloom-framework/react", () => ({
     }
     return undefined;
   },
-  useHasCapability: (key: { id?: string }) => key.id !== MSFILE_SERVICE_CAPABILITY.id,
+  useHasPluginCapability: (key: { id?: string }) => key.id !== MSFILE_SERVICE_CAPABILITY.id,
   useResource: (_store: unknown, definitionId: string) => {
     const revision = useRef(0);
     const cached = useRef<{ revision: number; value: { data: unknown } } | undefined>(undefined);
@@ -1510,4 +1516,11 @@ describe("ProtocolPopupPage topbar wallet entry", () => {
       openSpy.mockRestore();
     }
   });
+});
+
+
+
+vi.mock("./ProtocolResourceContext.js", async () => {
+  const runtime = await import("@keymaster/runtime/assembly");
+  return { useProtocolResources: () => runtime.usePluginHost().resourceStore };
 });

@@ -492,7 +492,7 @@ export interface P2pkhService {
   /**
    * 通知 P2PKH 对应 publicKeyHex 的 key 已删除。service 应清理该 hex 的
    * 派生 cache / 取消 background 任务；但不要触碰 namespace K-V——该工作
-   * 已经由 keyspace.deleteKey 在前面完成。
+   * 已经由 walletState.deleteKey 在前面完成。
    */
   onKeyRemoved(publicKeyHex: string): Promise<void>;
   /** Vault 锁定时调用：取消当前所有 P2PKH 后台运行。 */

@@ -17,3 +17,5 @@ export {
   type InMemoryModuleFileStore,
   type InMemoryModuleFileStoreOptions,
 } from "./inMemoryModuleFileStore.js";
+
+export { isIssuedKeymasterConsumer } from "../consumerAuthority.js";

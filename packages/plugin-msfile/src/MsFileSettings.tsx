@@ -1,3 +1,4 @@
+import { useMsFileResources } from "./MsFileResourceContext.js";
 // packages/plugin-msfile/src/MsFileSettings.tsx
 // /settings/local-files 的本地文件页：价格限制 / 供应商配置 / Connect App 授权。
 // 页面只在 Vault unlocked 时通过设置菜单进入。
@@ -16,8 +17,8 @@ import type {
   MsFileSettingsSnapshot,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import { Button, Modal, PageHeader } from "@keymaster/ui";
 import { MSFILE_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import {
@@ -90,8 +91,8 @@ function toDraft(value: MsFileSatoshiAmount | undefined): AmountDraft {
 }
 
 export function MsFileSettings() {
-  const { t } = useI18n();
-  const service = useOptionalCapability(MSFILE_SERVICE_CAPABILITY);
+  const { t } = usePluginI18n();
+  const service = useOptionalPluginCapability(MSFILE_SERVICE_CAPABILITY);
   return (
     <div className="msfile-settings-page">
       <PageHeader
@@ -110,8 +111,8 @@ export function MsFileSettings() {
 }
 
 function MsFileSettingsInner({ service }: { service: MsFileService }) {
-  const { t } = useI18n();
-  const host = usePluginHost();
+  const { t } = usePluginI18n();
+  const reader = useMsFileResources();
   // 订阅一律走 Resource Store（react 资源边界门禁）；manifest 已注册 msfile.status。
   // 锁定时资源定义会被注销，选择器必须能降级为本地推荐值。
   const statusFallback: MsFileStatusResourceSnapshot = {
@@ -121,7 +122,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     approvals: [],
   };
   const statusResource = useOptionalResourceSelector<MsFileStatusResourceSnapshot, MsFileStatusResourceSnapshot>(
-    host.resourceStore,
+    reader,
     "msfile.status",
     [],
     (snapshot) => snapshot.data ?? statusFallback,
@@ -993,7 +994,7 @@ function AppAuthorizationRow(props: {
   onClear: () => void;
   onRestore: (kind: "seed" | "block") => void;
 }) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const formId = useId();
   const { view, globalSettings } = props;
   const [editing, setEditing] = useState(false);

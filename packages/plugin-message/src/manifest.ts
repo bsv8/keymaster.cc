@@ -1,3 +1,10 @@
+import { setupMessageUriActions } from "./setupUriActions.js";
+import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindMessageUi } from "./MessageResourceContext.js";
+import { subscribeOptionalMessageService } from "./subscribeOptionalMessageService.js";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-message/src/manifest.ts
 // 消息业务插件 manifest（施工单 2026-09-02/003）。
 //
@@ -18,6 +25,9 @@
 
 import type {
   Contact,
+  ContactPresenceMap,
+  WebrtcHistoryItem,
+  WebrtcSessionSnapshot,
   ContactsService,
   I18nPluginResources,
   MessageRecord,
@@ -30,11 +40,14 @@ import {
   BUSINESS_REGISTRY_CAPABILITY,
   CHANNEL_RUNTIME_CAPABILITY,
   CONTACTS_SERVICE_CAPABILITY,
+  CONTACTS_EDITOR_CAPABILITY,
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   MESSAGE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
+  OWNED_RESOURCE_ACCESS_CAPABILITY,
+  CONTACTS_PRESENCE_READER_CAPABILITY,
   WEBRTC_SERVICE_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
@@ -312,12 +325,7 @@ const messagePlatformPluginDefinition = {
   id: MESSAGE_PLUGIN_ID,
   name: "Messages",
   description: "keymaster.message business page: send / list / view scoped messages.",
-  kind: "core",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: false,
-  displayGroup: "platform",
+
   units: [{
     id: "message.window",
     runtime: "window-main",
@@ -325,29 +333,39 @@ const messagePlatformPluginDefinition = {
     provides: [MESSAGE_SERVICE_CAPABILITY],
     storages: [CENTRAL_STORAGE_DECLARATIONS.messagesFiles],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取本实例消息及服务投影资源" },
+      { capability: CONTACTS_PRESENCE_READER_CAPABILITY, optional: true, reason: "通过只读 Worker 在线投影控制拨号门禁" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
-      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "读取 active key 并跟随会话聚合刷新" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "读取 active key 并跟随会话聚合刷新" },
+      { capability: CONTACTS_SERVICE_CAPABILITY, optional: true, reason: "会话资源加载与订阅联系人名称" },
+      { capability: CONTACTS_EDITOR_CAPABILITY, optional: true, reason: "打开 Contacts 自有编辑器" },
       { capability: WEBRTC_SERVICE_CAPABILITY, optional: true, reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
-      { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 /message 与 /messages 详情路由" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 /message 与 /messages 详情路由" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入首页业务导航" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为 /message 与 /messages 详情路由提供面包屑" },
-      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, reason: "注册联系人发消息操作" },
+      { capability: URI_ACTION_REGISTRY_CAPABILITY, optional: true, reason: "注册公钥 URI 消息入口" },
+      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, optional: true, reason: "注册联系人发消息操作" },
     ]),
   }],
   i18n: messageResources,
   setup(ctx) {
-    const contactActions = ctx.capability(CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY);
-    contactActions.register({
-      id: "message.to-contact",
-      label: { key: "message.action.toContact", fallback: "发消息" },
-      icon: "MessageCircle",
-      order: 20,
-      run: ({ publicKeyHex }) => router.push(`/message/${encodeURIComponent(publicKeyHex)}`)
-    });
+    const offContactAction = subscribeOptionalMessageService(ctx, CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, (contactActions) => {
+      contactActions.register({
+        id: "message.to-contact", label: { key: "message.action.toContact", fallback: "发消息" },
+        icon: "MessageCircle", order: 20,
+        run: ({ publicKeyHex }) => router.push(`/message/${encodeURIComponent(publicKeyHex)}`),
+      });
+      return () => { try { contactActions.unregister("message.to-contact"); } catch { /* The provider may already have revoked its registry. */ } };
+    }, () => {});
+    ctx.scope.onRevoke(offContactAction);
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
-    const service = createMessageService({ channel, keyspace, files: ctx.filesFor("") });
+    const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    const service = createMessageService({ channel, walletState, files: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "") });
     ctx.provide(MESSAGE_SERVICE_CAPABILITY, service);
+    setupMessageUriActions(ctx);
 
     // 注册资源定义（硬切换 003）
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
@@ -362,9 +380,9 @@ const messagePlatformPluginDefinition = {
         const messages = await service.listConversationMessages();
         // contacts 是可选插件，可能晚于 message 完成 setup；不能在 setup
         // 阶段把缺失状态永久缓存为 null，必须在每次资源加载时动态解析。
-        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
+        const contacts = context.optionalCapability(CONTACTS_SERVICE_CAPABILITY);
         // 从消息中提取 peer publicKeyHex 列表
-        const ownerHex = keyspace.active().activePublicKeyHex?.trim().toLowerCase();
+        const ownerHex = walletState.snapshot().activePublicKeyHex?.trim().toLowerCase();
         const peerSet = new Set<string>();
         for (const msg of messages) {
           const senderHex = msg.senderPublicKeyHex.trim().toLowerCase();
@@ -390,9 +408,8 @@ const messagePlatformPluginDefinition = {
         return { messages, contactsByPeer };
       },
       subscribe: (_args, context, invalidate) => {
-        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
         const offMessages = service.subscribeChanges(invalidate);
-        const offContacts = contacts?.onChange(invalidate) ?? (() => {});
+        const offContacts = subscribeOptionalMessageService(ctx, CONTACTS_SERVICE_CAPABILITY, (contacts, changed) => contacts.onChange(changed), invalidate);
         return () => { offMessages(); offContacts(); };
       },
       equals: (prev, next) => {
@@ -411,7 +428,7 @@ const messagePlatformPluginDefinition = {
       load: async (args, context, _signal) => {
         const peerHex = args[0];
         const messages = await service.listMessages({ peerPublicKeyHex: peerHex, limit: 10_000 });
-        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
+        const contacts = context.optionalCapability(CONTACTS_SERVICE_CAPABILITY);
         let contact: Contact | null = null;
         if (contacts && peerHex) {
           try {
@@ -423,9 +440,8 @@ const messagePlatformPluginDefinition = {
         return { messages, contact };
       },
       subscribe: (args, context, invalidate) => {
-        const contacts = context.getCapability<ContactsService>(CONTACTS_SERVICE_CAPABILITY.id);
         const offMessages = service.subscribeChanges(invalidate);
-        const offContacts = contacts?.onChange(invalidate) ?? (() => {});
+        const offContacts = subscribeOptionalMessageService(ctx, CONTACTS_SERVICE_CAPABILITY, (contacts, changed) => contacts.onChange(changed), invalidate);
         return () => { offMessages(); offContacts(); };
       },
       equals: (prev, next) => {
@@ -436,27 +452,40 @@ const messagePlatformPluginDefinition = {
       invalidation: "microtask"
     });
 
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    resources.register<ContactPresenceMap, readonly string[]>({
+      id: "message.contacts-presence", scope: "active-key",
+      key: (_args, context) => ["message.contacts-presence", context.activePublicKeyHex ?? "none"],
+      load: async () => ctx.optionalCapability(CONTACTS_PRESENCE_READER_CAPABILITY)?.snapshot() ?? {},
+      subscribe: (_args, _context, invalidate) => subscribeOptionalMessageService(ctx, CONTACTS_PRESENCE_READER_CAPABILITY,
+        (reader, changed) => reader.subscribe(changed), invalidate),
+      invalidation: "immediate",
+    });
+    resources.register<WebrtcSessionSnapshot | null, readonly string[]>({
+      id: "message.webrtc-session", scope: "active-key",
+      key: (_args, context) => ["message.webrtc-session", context.activePublicKeyHex ?? "none"],
+      load: async () => ctx.optionalCapability(WEBRTC_SERVICE_CAPABILITY)?.snapshot() ?? null,
+      subscribe: (_args, _context, invalidate) => subscribeOptionalMessageService(ctx, WEBRTC_SERVICE_CAPABILITY,
+        (webrtc, changed) => webrtc.subscribe(changed), invalidate),
+      equals: (a, b) => JSON.stringify(a) === JSON.stringify(b), invalidation: "immediate",
+    });
+    resources.register<WebrtcHistoryItem[], readonly string[]>({
+      id: "message.webrtc-history", scope: "active-key",
+      key: (args, context) => ["message.webrtc-history", context.activePublicKeyHex ?? "none", args[0] ?? ""],
+      load: async args => args[0] ? ctx.optionalCapability(WEBRTC_SERVICE_CAPABILITY)?.listHistoryForPeer(args[0]) ?? [] : [],
+      subscribe: (_args, _context, invalidate) => subscribeOptionalMessageService(ctx, WEBRTC_SERVICE_CAPABILITY,
+        (webrtc, changed) => webrtc.subscribe(changed), invalidate),
+      invalidation: "immediate",
+    });
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    const List = bindMessageUi(ctx, MessagePage);
+    const Detail = bindMessageUi(ctx, MessageDetailPage);
+    pages.view.register({ kind: "page", id: "message.page", path: "/messages",
+      label: { key: "message.page.title", fallback: "Messages" }, render: () => createElement(List) });
+    pages.view.register({ kind: "page", id: "message.detail", path: "/message/:publicKeyHex",
+      label: { key: "message.page.detail.title", fallback: "Conversation" }, render: location => createElement(Detail, { location }) });
+    pages.view.register({ kind: "page", id: "message.detail.alias", path: "/messages/:publicKeyHex",
+      label: { key: "message.page.detail.title", fallback: "Conversation" }, render: location => createElement(Detail, { location }) });
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
-
-    routes.register({
-      id: "message.page",
-      path: "/messages",
-      label: { key: "message.page.title", fallback: "Messages" },
-      component: MessagePage
-    });
-    routes.register({
-      id: "message.detail",
-      path: "/message/:publicKeyHex",
-      label: { key: "message.page.detail.title", fallback: "Conversation" },
-      component: MessageDetailPage
-    });
-    routes.register({
-      id: "message.detail.alias",
-      path: "/messages/:publicKeyHex",
-      label: { key: "message.page.detail.title", fallback: "Conversation" },
-      component: MessageDetailPage
-    });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MESSAGE_PLUGIN_ID, "home", {
       id: "home.messages",

@@ -52,7 +52,6 @@ export const NOTICE_REGISTRY_CAPABILITY = defineCapability<{
   dismiss(id: string): void;
   list(): NoticeRecord[];
   subscribe(handler: (records: NoticeRecord[]) => void): () => void;
-  removeBySourcePluginId(sourcePluginId: string): void;
 }>({
   kind: "local",
   id: "notice.registry",

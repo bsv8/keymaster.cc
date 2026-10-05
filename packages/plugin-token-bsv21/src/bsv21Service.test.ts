@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-token-bsv21/src/bsv21Service.test.ts
 // bsv21Service 回归测试：覆盖 service 的核心组合逻辑——
 //   1. 按 active key 的 publicKeyHex 过滤 P2PKH 资源；
@@ -7,7 +8,7 @@
 // 这些是"key -> address -> WOC token"流程最易回归的点。
 
 import { describe, expect, it } from "vitest";
-import type { KeyspaceService, WocBsv21Service } from "@keymaster/contracts";
+import type { VaultWalletState, WocBsv21Service } from "@keymaster/contracts";
 import {
   createBsv21Service,
   type P2pkhKeyResourceForBsv21,
@@ -16,9 +17,9 @@ import {
 
 const ACTIVE_PK = "pk-active";
 
-/** 只实现 service 实际调用的 keyspace.active()。 */
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
-  return { active: () => ({ activePublicKeyHex }) } as unknown as KeyspaceService;
+/** 只实现 service 实际调用的 walletState.snapshot()。 */
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
+  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))()) } as unknown as VaultWalletState;
 }
 
 function res(assetId: "bsv" | "bsvtest", publicKeyHex: string, address: string): P2pkhKeyResourceForBsv21 {
@@ -69,7 +70,7 @@ describe("createBsv21Service", () => {
 
   it("无 active key 时返回空列表", async () => {
     const svc = createBsv21Service({
-      keyspace: fakeKeyspace(undefined),
+      walletState: fakeWalletState(undefined),
       p2pkh: fakeP2pkh({}, false),
       wocBsv21: fakeWoc({})
     });
@@ -78,7 +79,7 @@ describe("createBsv21Service", () => {
 
   it("只取 active publicKeyHex 的地址，逐 origin 查余额", async () => {
     const svc = createBsv21Service({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh(
         { bsv: [res("bsv", ACTIVE_PK, "addr-A"), res("bsv", "pk-other", "addr-B")] },
         false
@@ -98,7 +99,7 @@ describe("createBsv21Service", () => {
   it("includeTestnet=false 时不查询 bsvtest", async () => {
     const calls: string[] = [];
     const svc = createBsv21Service({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh({ bsv: [res("bsv", ACTIVE_PK, "addr-A")] }, false, calls),
       wocBsv21: fakeWoc({ "addr-A": ["tok1"] })
     });
@@ -109,7 +110,7 @@ describe("createBsv21Service", () => {
   it("includeTestnet=true 时纳入 bsvtest 资源", async () => {
     const calls: string[] = [];
     const svc = createBsv21Service({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh(
         { bsv: [res("bsv", ACTIVE_PK, "addr-A")], bsvtest: [res("bsvtest", ACTIVE_PK, "addr-T")] },
         true,
@@ -125,7 +126,7 @@ describe("createBsv21Service", () => {
   it("includeTestnet 选项覆盖 p2pkh 全局设置", async () => {
     const calls: string[] = [];
     const svc = createBsv21Service({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh({ bsv: [res("bsv", ACTIVE_PK, "addr-A")] }, true, calls),
       wocBsv21: fakeWoc({ "addr-A": ["tok1"] }),
       includeTestnet: () => false
@@ -136,7 +137,7 @@ describe("createBsv21Service", () => {
 
   it("getToken 命中 origin 返回 meta+balance，落空返回 null", async () => {
     const svc = createBsv21Service({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh({ bsv: [res("bsv", ACTIVE_PK, "addr-A")] }, false),
       wocBsv21: fakeWoc({ "addr-A": ["tok1"] })
     });

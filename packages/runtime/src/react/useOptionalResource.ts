@@ -8,11 +8,12 @@
 //   - 这里把"定义缺失"降级为 null/fallback，让组件渲染失活占位；定义恢复
 //     （解锁后重新注册）时由上层身份变化触发重挂载即可。
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import type { ResourceSnapshot } from "webloom-framework";
 
 /** `useOptionalResource` 需要的最小资源存储面。 */
 export interface OptionalResourceStore {
+  isActive?(): boolean;
   ensure<T = unknown>(definitionId: string, args: readonly string[]): ResourceSnapshot<T>;
   subscribe(definitionId: string, args: readonly string[], callback: () => void): () => void;
 }
@@ -55,4 +56,21 @@ export function useOptionalResourceSelector<T, S>(
 ): S {
   const snapshot = useOptionalResource<T>(store, definitionId, args);
   return snapshot === null ? fallback : selector(snapshot);
+}
+
+/** 对受限资源视图使用严格读取；保留框架快照和订阅，不授予 Store 管理方法。 */
+export function useResourceView<T>(store: OptionalResourceStore, definitionId: string, args: readonly string[]): ResourceSnapshot<T> {
+  const inactive = useRef<ResourceSnapshot<T>>({ key: [definitionId, ...args], status: "blocked", revision: 0, data: undefined });
+  const getSnapshot = useCallback(() => store.isActive?.() === false ? inactive.current : store.ensure<T>(definitionId, args), [store, definitionId, ...args]);
+  const subscribe = useCallback((callback: () => void) => store.isActive?.() === false ? () => undefined : store.subscribe(definitionId, args, callback), [store, definitionId, ...args]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** 受限视图的选择器只需要快照/订阅，不要求取得 Store 管理面。 */
+export function useResourceViewSelector<T, S>(store: OptionalResourceStore, definitionId: string, args: readonly string[], selector: (snapshot: ResourceSnapshot<T>) => S, equality: (left: S, right: S) => boolean = Object.is): S {
+  const snapshot = useResourceView<T>(store, definitionId, args);
+  const previous = useRef<{ value: S }>();
+  const value = selector(snapshot);
+  previous.current = { value: previous.current && equality(previous.current.value, value) ? previous.current.value : value };
+  return previous.current.value;
 }

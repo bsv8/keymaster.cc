@@ -1,6 +1,9 @@
+import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
+import { createProviderDispatch } from "./providerDispatch.js";
+import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // packages/plugin-protocol/src/protocolService.ts
 // 协议 service：transport + 校验 + 解锁/确认调度 + 全局串行执行 +
-// 调用 vault / keyspace + 构造 envelope + 签名/加解密 + 命令流历史 +
+// 调用 vault / walletState + 构造 envelope + 签名/加解密 + 命令流历史 +
 // p2pkh.transfer / feepool.prepare / feepool.commit 执行。
 //
 // 设计缘由（施工单 2026-06-27 001 硬切换 + 施工单 2026-06-28 002 硬切换 +
@@ -32,7 +35,7 @@
 //       - 不进 waiting_unlock / confirming / 解锁 UI。
 //   - **owner 唯一真值 = `ownerPublicKeyHex`**：`ownerKeyId` **不**出现
 //     在 record / result payload / 内部 pendingOp 字段里。执行时按
-//     `session.ownerPublicKeyHex` 查 keyspace.getKey() 拿当前 vault 内
+//     `session.ownerPublicKeyHex` 查 walletState.getKey() 拿当前 vault 内
 //   - record 在创建时立即绑定 `connectSessionId` + `ownerPublicKeyHex`；
 //     record 生命周期内**不**可漂移。执行阶段再次校验 session 仍有效
 //     （logout 后同 session 下旧 request 后续执行必须失败）。
@@ -105,7 +108,7 @@ import {
   type IntentSignParams,
   type IntentSignResult,
   type KeyIdentity,
-  type KeyspaceService,
+  type VaultWalletState,
   type LaunchAppViewInput,
   type LaunchAppViewResult,
   type LauncherBootstrapRegistry,
@@ -137,7 +140,7 @@ import {
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
   type ProtocolStorageRepository,
-  type StorageRuntimeController,
+  type StorageRuntimeStatusService,
   type OwnerAppStorageGrant,
   type BsvPriceReader,
   type PriceGetParams,
@@ -280,7 +283,7 @@ function normalizeOriginSettings(
 /** ProtocolService 构造依赖。 */
 export interface ProtocolServiceDeps {
   vault: VaultService;
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   /**
    * 协议存储 K-V（command-history / durable-policy / sessions）。生产 manifest
    * 必须注入；测试可传内存 fake。独立构造时缺失绑定只允许读路径安全降级，
@@ -297,9 +300,11 @@ export interface ProtocolServiceDeps {
   /** Session Window 使用的已验证 Connect Channel facade。 */
   connectChannelRuntime?: ConnectChannelRuntime;
   /** Optional Storage platform capability; absence only disables storage.*. */
-  storageController?: StorageRuntimeController;
+  storageController?: StorageRuntimeStatusService;
+  /** Explicit Storage provider; the gateway supplies verified session facts, never a namespace. */
+  bindAppStorage?: (binding: AppStorageBinding) => AppStorageClient;
   /** Resolve the current Storage capability at request/lifecycle time. */
-  getStorageController?: () => StorageRuntimeController | undefined;
+  getStorageController?: () => StorageRuntimeStatusService | undefined;
   /**
    * Optional MSFile platform capability（可选 MSFile 平台能力）。
    * 缺失时只让 `msfile.*` fail closed；不得影响其他方法族。
@@ -387,12 +392,12 @@ interface RequestRecord {
    * 预校验 session 真值时同步落到 record）。
    * `connect.login`：取自用户在 UI 选定的 key（`connectLoginSelected`）。
    *
-   * 后续写卡**不**再读 keyspace.active() / 钱包全局 active key；
+   * 后续写卡**不**再读 walletState.snapshot() / 钱包全局 active key；
    * 旧卡片的 `ownerPublicKeyHex` 字段保持 record 创建时的快照值，不被
    * 污染——即使用户在 popup 会话里切换 active key 也不影响。
    *
    * `ownerKeyId` **不**作为 owner 身份出现在 record / result / 分支
-   * 判断里；vault 内部借用句柄按需从 keyspace.getKey() 解析。
+   * 判断里；vault 内部借用句柄按需从 walletState.getKey() 解析。
    */
   ownerPublicKeyHex: string;
   /** 创建时间，unix milliseconds。 */
@@ -412,7 +417,7 @@ interface RequestRecord {
   failureReason?: ProtocolFailureReason;
   /* ============== 施工单 2026-06-28 001：connect.* 字段 ============== */
   /**
-   * `connect.login` 当前候选 key 列表（来自 `keyspace.listKeys` 过滤掉
+   * `connect.login` 当前候选 key 列表（来自 `walletState.listKeys` 过滤掉
    * 非 ready 的）。只在 `method === "connect.login"` 时有值。
    */
   connectLoginCandidates?: Array<{ publicKeyHex: string; label: string }>;
@@ -800,7 +805,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /** Resolve the current Storage capability after an independent plugin restart. */
-  private currentStorageController(): StorageRuntimeController | undefined {
+  private currentStorageController(): StorageRuntimeStatusService | undefined {
     if (this.deps.getStorageController) {
       try {
         return this.deps.getStorageController();
@@ -1869,7 +1874,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *       - `window.open("/protocol/v1/popup?...")`
    *   - 完整 launcher 流程在 service 内部一次性收口：
    *       1. 校验 vault 已解锁（否则 throw "vault_locked"）；
-   *       2. 校验当前 keyspace active key ready（否则 throw "no_active_key"）；
+   *       2. 校验当前 walletState active key ready（否则 throw "no_active_key"）；
    *       3. 校验 app 配置合法（`appOrigin` 是合法 origin；
    *          `new URL(appUrl).origin === appOrigin`；否则 throw "invalid_app_config"）；
    *       4. 解析 claims 快照（按 input.claims 走 builtin claim 解析，与
@@ -2021,7 +2026,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const catalog = this.resolveAppCatalog(input.appOrigin, input.appIdentity, input.appId);
     // storage/catalog 门禁必须在 window.open 前完成。private-key 只需先确认
-    // caller 已提供非空公钥；实际 keyspace ready 查询放到预开 popup 后，
+    // caller 已提供非空公钥；实际 walletState ready 查询放到预开 popup 后，
     // 以保留浏览器 user-activation，失败会在 finally 关闭空白窗口。
     this.assertAppRequirements(catalog.proof, true);
     if (typeof window === "undefined") {
@@ -2592,7 +2597,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *          材料，appView mode 下 `applyLauncherBootstrap` 注册到
    *          `ownerRuntimesBySessionId` 后即对当前窗口持续有效。
  *       2. `vault_runtime`：仅 connect mode 下，本窗口用户后续解锁 +
- *          keyspace 中 owner key 可读时由 `resolveOwnerRuntime` 切换到
+ *          walletState 中 owner key 可读时由 `resolveOwnerRuntime` 切换到
  *          vault_runtime 来源。
  *   - connect mode 下任一来源可用 → `unlocked`；二者皆不可用 → `locked`。
  *   - appView mode 只认 bootstrap runtime，bootstrap 缺失必须 fail-closed。
@@ -2684,7 +2689,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       autoApproved: false,
       // 关键（施工单 2026-06-28 002 硬切换）：`connectSessionId` +
       // `ownerPublicKeyHex` 在 record 创建时立即绑定一次。后续写卡
-      // **不**再读 keyspace.active()——即使 popup 会话里用户切换 active
+      // **不**再读 walletState.snapshot()——即使 popup 会话里用户切换 active
       // key，这条 record 的 owner / session 归属也不会被污染。
       // 业务方法在下方 method 分支里**先**做 session 预校验，再回填
       // 这两个字段；`connect.login` 在 bootstrapConnectLoginRecord
@@ -2705,7 +2710,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //
     // connect.* 三方法（施工单 2026-06-28 001 硬切换）：
     //   - login：locked → waiting_unlock_manual；unlocked → confirming
-    //     （UI 渲染"选 key + 确认"视图）。需要拉 keyspace.ready keys
+    //     （UI 渲染"选 key + 确认"视图）。需要拉 walletState.ready keys
     //     候选列表，落到 rec.connectLoginCandidates。session 预校验
     //     不适用——login 阶段还没有 session。
     //   - resume：locked → waiting_unlock_manual；unlocked → 直接 queued
@@ -2962,7 +2967,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (session.origin !== origin) {
       return { code: "invalid_origin", reason: "internal_error" };
     }
-    const active = this.deps.keyspace.active().activePublicKeyHex;
+    const active = this.deps.walletState.snapshot().activePublicKeyHex;
     if (active && active.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase()) {
       // 单 Key 本地钱包下这是唯一的「owner 不匹配」形态：session 绑定的
       // 公钥不是当前唯一 Key。给出精确 reason，执行阶段的
@@ -3028,7 +3033,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - session 真值无效（不存在 / 已 revoke / origin 不匹配 / owner key
    *     不 ready）时**必须直接失败**：不让用户走任何"解锁" / "确认" UI。
    *   - 无效 session 失败路径**不依赖** vault unlock：replyErrorToRec 只
-   *     走 postMessage，不读 vault / keyspace 状态。
+   *     走 postMessage，不读 vault / walletState 状态。
    *   - 因此 locked 与 unlocked 一视同仁——fail-fast 在两种状态下都直接
    *     收口为 phase=failed，对外回 result(ok=false)。**不**进入
    *     waiting_unlock_manual。
@@ -3114,14 +3119,14 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 准备 `connect.login` record：拉取 ready key 列表作为选 key 候选。
-   * 任何 K-V / keyspace 异常都**不**当场拒掉 request——service 仍按 manual
+   * 任何 K-V / walletState 异常都**不**当场拒掉 request——service 仍按 manual
    * 路径推进；执行阶段会再次校验，失败时回 `user_rejected` + 本地 reason。
    */
   private async bootstrapConnectLoginRecord(rec: RequestRecord, _params: ConnectLoginParams): Promise<void> {
     try {
       // 单 Key 本地钱包：候选列表最多只有一个元素——当前唯一 Key。
       // connect.login 不再让用户在多把 Key 之间选择。
-      const current = this.requireCurrentOwnerKey(this.deps.keyspace.active().activePublicKeyHex ?? "");
+      const current = this.requireCurrentOwnerKey(this.deps.walletState.snapshot().activePublicKeyHex ?? "");
       rec.connectLoginCandidates = current
         ? [{ publicKeyHex: current.publicKeyHex, label: current.label }]
         : [];
@@ -3749,7 +3754,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 3. 当前窗口 locked。
     //   - 先**预判**"解锁后能不能拿到 owner runtime"——这一步只读
-    //     keyspace 元数据，**不**要求 vault 解锁：
+    //     walletState 元数据，**不**要求 vault 解锁：
     //       - session 绑定的 owner 公钥不是当前唯一 Key（钱包已重置并
     //         重新初始化为另一把 Key）→ 解锁了也拿不到 → 直接 fail-fast，
     //         让用户明确知道 "session 绑定的 Key 已不是本钱包的 Key"。
@@ -3761,7 +3766,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 关键：这里**不能**用 requireCurrentOwnerKey()——它在锁定态必然返回
     // undefined，会把"owner 就是这把 Key、只是还没解锁"误判成 fail-fast。
     // 判定只需要比对公钥身份，那是纯投影读取。
-    const active = this.deps.keyspace.active().activePublicKeyHex;
+    const active = this.deps.walletState.snapshot().activePublicKeyHex;
     if (active && active.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase()) {
       return { kind: "fail" };
     }
@@ -3824,65 +3829,37 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
+  private readonly providerDispatch = createProviderDispatch<RequestRecord, MethodResult | null>({
+    "identity.get": rec => this.executeIdentityGet(rec),
+    "intent.sign": rec => this.executeIntentSign(rec),
+    "cipher.encrypt": rec => this.executeCipherEncrypt(rec),
+    "cipher.decrypt": rec => this.executeCipherDecrypt(rec),
+    "p2pkh.transfer": async rec => { await this.executeP2pkhTransferAndFinalize(rec); return null; },
+    "feepool.prepare": async rec => { await this.executeFeepoolPrepareAndFinalize(rec); return null; },
+    "feepool.commit": async rec => { await this.executeFeepoolCommitAndFinalize(rec); return null; },
+    "connect.login": rec => this.executeConnectLogin(rec),
+    "connect.resume": rec => this.executeConnectResume(rec),
+    "connect.logout": rec => this.executeConnectLogout(rec),
+    "connect.launch": rec => this.executeConnectLaunch(rec),
+    "channel.publish": rec => this.executeChannelPublish(rec),
+    "channel.subscription_set": rec => this.executeChannelSubscriptionSet(rec),
+    "price.get": rec => this.executePriceGet(rec),
+    "price.subscribe": rec => this.executePriceSubscribe(rec),
+    "price.unsubscribe": rec => this.executePriceUnsubscribe(rec),
+    "storage.list": rec => this.executeStorageList(rec),
+    "storage.directory.create": rec => this.executeStorageDirectoryCreate(rec),
+    "storage.directory.delete": rec => this.executeStorageDirectoryDelete(rec),
+    "storage.put": rec => this.executeStoragePut(rec),
+    "storage.get": rec => this.executeStorageGet(rec),
+    "storage.delete": rec => this.executeStorageDelete(rec),
+    "msfile.stat": rec => this.executeMsfileStat(rec),
+    "msfile.seed.read": rec => this.executeMsfileSeedRead(rec),
+    "msfile.block.read": rec => this.executeMsfileBlockRead(rec),
+  });
+
   private async dispatch(rec: RequestRecord): Promise<MethodResult | null> {
     try {
-      switch (rec.method) {
-        case "identity.get":
-          return await this.executeIdentityGet(rec);
-        case "intent.sign":
-          return await this.executeIntentSign(rec);
-        case "cipher.encrypt":
-          return await this.executeCipherEncrypt(rec);
-        case "cipher.decrypt":
-          return await this.executeCipherDecrypt(rec);
-        case "p2pkh.transfer":
-          await this.executeP2pkhTransferAndFinalize(rec);
-          return null;
-        case "feepool.prepare":
-          await this.executeFeepoolPrepareAndFinalize(rec);
-          return null;
-        case "feepool.commit":
-          await this.executeFeepoolCommitAndFinalize(rec);
-          return null;
-        case "connect.login":
-          return await this.executeConnectLogin(rec);
-        case "connect.resume":
-          return await this.executeConnectResume(rec);
-        case "connect.logout":
-          return await this.executeConnectLogout(rec);
-        case "connect.launch":
-          return await this.executeConnectLaunch(rec);
-        case "channel.publish":
-          return await this.executeChannelPublish(rec);
-        case "channel.subscription_set":
-          return await this.executeChannelSubscriptionSet(rec);
-        case "price.get":
-          return await this.executePriceGet(rec);
-        case "price.subscribe":
-          return await this.executePriceSubscribe(rec);
-        case "price.unsubscribe":
-          return await this.executePriceUnsubscribe(rec);
-        case "storage.list":
-          return await this.executeStorageList(rec);
-        case "storage.directory.create":
-          return await this.executeStorageDirectoryCreate(rec);
-        case "storage.directory.delete":
-          return await this.executeStorageDirectoryDelete(rec);
-        case "storage.put":
-          return await this.executeStoragePut(rec);
-        case "storage.get":
-          return await this.executeStorageGet(rec);
-        case "storage.delete":
-          return await this.executeStorageDelete(rec);
-      // MSFile 走 Connect gateway；
-      // App context 只由持久 session snapshot 与 MessageEvent.origin 构造。
-      case "msfile.stat":
-        return await this.executeMsfileStat(rec);
-      case "msfile.seed.read":
-        return await this.executeMsfileSeedRead(rec);
-      case "msfile.block.read":
-        return await this.executeMsfileBlockRead(rec);
-      }
+      return await this.providerDispatch.get(rec.method)!(rec);
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
       // feepool 已经内部 catch 处理过）；这里只是兜底。
@@ -3918,72 +3895,56 @@ export class ProtocolServiceImpl implements ProtocolService {
     return null;
   }
 
-  private async requireStorageContext(rec: RequestRecord, connectSessionId: string): Promise<{ service: StorageRuntimeController; context: OwnerAppStorageGrant }> {
+  private async requireStorageContext(rec: RequestRecord, connectSessionId: string): Promise<AppStorageClient> {
     const service = this.currentStorageController();
-    if (!service) throw protocolError("storage_unavailable", "Storage service is unavailable");
+    if (!service || !this.deps.bindAppStorage) throw protocolError("storage_unavailable", "Storage service is unavailable");
     const session = await this.requireConnectSession(rec, connectSessionId);
     if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity proof snapshot");
     if (!session.ownerPublicKeyHex) throw protocolError("storage_identity_required", "Storage requires an active owner");
     const summary = await service.summary();
     if (!summary.walletGeneration) throw protocolError("storage_unavailable", "Storage requires an initialized wallet");
-    const lifecycle = this.deps.vault.getLifecycleSnapshot();
-    const moduleId = deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
-    return {
-      service,
-      context: {
-        connectSessionId: session.sessionId,
-        transportOrigin: rec.origin,
-        appIdentity: session.appIdentity,
-        // 目录由验证身份派生的稳定 name 决定；重置后 walletGeneration 改变，
-        // 重置前的 Connect 运行绑定无法再写进新钱包。
-        appStorageName: deriveAppStorageName({
-          publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex,
-          appId: session.appIdentity.appId,
-        }),
-        moduleId,
-        purposeId: "files",
-        sessionEpoch: lifecycle.sessionEpoch,
-        walletGeneration: summary.walletGeneration,
-        runGeneration: lifecycle.runGeneration,
-      }
-    };
+    const lifecycle = this.deps.walletState.snapshot();
+    return this.deps.bindAppStorage({ connectSessionId: session.sessionId, transportOrigin: rec.origin,
+      appIdentity: session.appIdentity, sessionEpoch: lifecycle.sessionEpoch,
+      walletGeneration: summary.walletGeneration, runGeneration: lifecycle.runGeneration,
+    });
   }
 
   private async executeStorageList(rec: RequestRecord): Promise<StorageListResult> {
     const params = rec.params as import("@keymaster/contracts").StorageListParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.list(context, { prefix: params.prefix, cursor: params.cursor, limit: params.limit, signal: rec.abortController?.signal });
+    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    return client.list( { prefix: params.prefix, cursor: params.cursor, limit: params.limit, signal: rec.abortController?.signal });
   }
 
   private async executeStorageDirectoryCreate(rec: RequestRecord): Promise<StorageDirectoryResult> {
     const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.createDirectory(context, { path: params.path, overwrite: params.overwrite, signal: rec.abortController?.signal });
+    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    return client.createDirectory( { path: params.path, overwrite: params.overwrite, signal: rec.abortController?.signal });
   }
 
   private async executeStorageDirectoryDelete(rec: RequestRecord): Promise<StorageDirectoryResult> {
     const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.deleteDirectory(context, { path: params.path, signal: rec.abortController?.signal });
+    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    return client.deleteDirectory( { path: params.path, signal: rec.abortController?.signal });
   }
 
   private async executeStoragePut(rec: RequestRecord): Promise<StoragePutResult> {
     const params = rec.params as import("@keymaster/contracts").StoragePutParams;
     rec.payloadSize = params.content.bytes.byteLength;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.put(context, { path: params.path, content: params.content, contentType: params.contentType, overwrite: params.overwrite, signal: rec.abortController?.signal });
+    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    return client.put( { path: params.path, content: params.content, contentType: params.contentType, overwrite: params.overwrite, signal: rec.abortController?.signal });
   }
 
   private async executeStorageGet(rec: RequestRecord): Promise<StorageGetResult> {
     const params = rec.params as import("@keymaster/contracts").StorageGetParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.getRange(context, { path: params.path, offset: params.offset, length: params.length, ifMatch: params.ifMatch, signal: rec.abortController?.signal });
+    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    return client.getRange( { path: params.path, offset: params.offset, length: params.length, ifMatch: params.ifMatch, signal: rec.abortController?.signal });
   }
 
   private async executeStorageDelete(rec: RequestRecord): Promise<StorageDeleteResult> {
     const params = rec.params as import("@keymaster/contracts").StorageDeleteParams;
-    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
-    return service.delete(context, { path: params.path, signal: rec.abortController?.signal });
+    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    return client.delete( { path: params.path, signal: rec.abortController?.signal });
   }
 
   /* ============== MSFile 执行 ============== */
@@ -4234,7 +4195,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
-   * active key。硬门禁（`keyspace.openOwnerAppStore` 要求
+   * active key。硬门禁（`walletState.openOwnerAppStore` 要求
    * `active === input.publicKeyHex`）会在底层挡掉，但「Key storage
    * is not ready」是偶发底层错误，**不**适合作为协议失败语义。
    * 提前在协议层以 `user_rejected / session_owner_mismatch` 显式
@@ -4248,7 +4209,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     走这个断言。
    */
   private assertSessionOwnerIsActive(session: ConnectSessionRecord): void {
-    const active = this.deps.keyspace.active().activePublicKeyHex;
+    const active = this.deps.walletState.snapshot().activePublicKeyHex;
     if (!active) {
       throw localFailure(
         "session_owner_mismatch",
@@ -4266,7 +4227,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    *
    * 设计缘由（施工单 2026-06-28 002 硬切换）：`ownerKeyId` **不**允许
-   * 落 session 持久化；执行时按 `ownerPublicKeyHex` → keyspace.getKey() →
+   * 落 session 持久化；执行时按 `ownerPublicKeyHex` → walletState.getKey() →
    *
    * 施工单 2026-06-30 002 硬切换：本方法仅在 `resolveOwnerRuntime`
    * 走 `vault_runtime` 来源时调用；`bootstrap_runtime` 来源直接拿
@@ -4283,7 +4244,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 单 Key 本地钱包下的 owner 身份解析（docs/存储.md）。
    *
-   * 系统里只有一把 Key，所以 `keyspace` 不再提供 `getKey(hex)`：这里的
+   * 系统里只有一把 Key，所以 `walletState` 不再提供 `getKey(hex)`：这里的
    * 「按公钥查 Key」退化为「这个公钥就是当前唯一 Key 吗」。业务对象与 Connect
    * session 里的 `ownerPublicKeyHex` 仍然是证据与身份核对字段，必须与当前
    * 身份严格比对，但它们不能用来列举或切换第二把 Key。
@@ -4291,12 +4252,12 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 返回 undefined 表示：当前没有已解锁的 Key，或者该公钥不是当前唯一 Key。
    */
   private requireCurrentOwnerKey(ownerPublicKeyHex: string): KeyIdentity | undefined {
-    const active = this.deps.keyspace.active().activePublicKeyHex;
+    const active = this.deps.walletState.snapshot().activePublicKeyHex;
     if (!active || active.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) return undefined;
     try {
-      return this.deps.keyspace.requireActiveKey();
+      return requireUnlockedWalletIdentity(this.deps.walletState.snapshot());
     } catch {
-      // active() 已投影但 requireActiveKey() 失败 = 锁定过渡态：同样 fail closed。
+      // active() 已投影但 requireUnlockedWalletIdentity() 失败 = 锁定过渡态：同样 fail closed。
       return undefined;
     }
   }
@@ -4308,13 +4269,13 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 业务方法（`identity.*` / `intent.sign` / `cipher.*` / `p2pkh.transfer` /
    *     `feepool.*`）**统一**走这一个入口解析 owner 执行
    *     材料；**不**再各自手写：
-   *       - `keyspace.getKey(...)`
+   *       - `walletState.getKey(...)`
    *       - `vault.createActiveKeyCrypto(...)`
-   *       - 直接读 `keyspace.active()` 的 active key
+   *       - 直接读 `walletState.snapshot()` 的 active key
    *   - 解析顺序固定为：
    *       1. **`bootstrap_runtime`**：当前 Session Window 内存里已
    *          bootstrap 注入的 owner runtime；命中后直接拿私钥 hex，
-   *          **不**再读 keyspace / vault。这是 launcher 启动早期
+   *          **不**再读 walletState / vault。这是 launcher 启动早期
    *          与 `vault.locked` 态下的主要来源。
    *       2. `connect` mode 下，若 bootstrap 不存在，才允许走
    *          `vault_runtime`：当前窗口 vault 已 unlocked 且
@@ -4464,7 +4425,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - ownerPublicKeyHex 必须是用户在 UI 上选定的那把 key 公钥 hex
    *     （来自 rec.connectLoginSelected；用户在 confirmConnectLogin 时写入）；
    *   - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**落
-   *   - owner key 必须在 keyspace 内可查，且 identityStatus === "ready"；
+   *   - owner key 必须在 walletState 内可查，且 identityStatus === "ready"；
    *   - K-V 不可用时直接拒掉（fail-closed）。
    */
   private async executeConnectLogin(rec: RequestRecord): Promise<ConnectLoginResult> {
@@ -4630,7 +4591,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
     // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
     // 任意一步失败即视为 logout 不完整；fire-and-forget 会让 caller 在
-    // vault.lock 抛出（例如 keyspace.onVaultLocked 失败 / 业务订阅者抛
+    // vault.lock 抛出（例如 walletState.onVaultLocked 失败 / 业务订阅者抛
     // 错）时仍收到 ok=true，导致"session 已吊销但 unlock runtime 还在"
     // 的状态错位。
     //
@@ -5067,7 +5028,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const session = await this.requireConnectSession(rec, params.connectSessionId);
       const ownerPublicKeyHex = session.ownerPublicKeyHex;
       // 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
-      // active key。硬门禁（`keyspace.openOwnerAppStore` 要求
+      // active key。硬门禁（`walletState.openOwnerAppStore` 要求
       // `active === input.publicKeyHex`）会在底层挡掉，但「Key
       // storage is not ready」是偶发底层错误，**不**适合作为协议
       // 失败语义。提前在协议层以「session is no longer bound to
@@ -5934,7 +5895,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 关键（施工单 2026-06-27 002 反馈修复 + 施工单 2026-06-28 002 硬切换）：
    *   - `connectSessionId` + `ownerPublicKeyHex` 从 `rec` 字段读取——即 record
-   *     创建时快照下来的值，**不**再读 `keyspace.active()` / 钱包全局
+   *     创建时快照下来的值，**不**再读 `walletState.snapshot()` / 钱包全局
    *     active key。这样符合 contract `ProtocolCommandRecord.ownerPublicKeyHex`
    *     注释："record 在创建时快照的 owner public key hex"。
    *   - 后续即便用户在 popup 会话里切换 active key，旧卡片的元数据

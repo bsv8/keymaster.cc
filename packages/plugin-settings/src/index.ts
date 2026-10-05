@@ -1,7 +1,0 @@
-// packages/plugin-settings/src/index.ts
-export { settingsPlugin, settingsSetup } from "./manifest.js";
-export { PluginManagerPage } from "./PluginManagerPage.js";
-export { PluginDependencyPanel } from "./PluginDependencyPanel.js";
-export { LanguageSettingsPage } from "./LanguageSettingsPage.js";
-export { LanguageSection } from "./LanguageSection.js";
-export { SystemStatusPage } from "./SystemStatusPage.js";

@@ -1,7 +1,9 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY, type CoordinatorTopicEvent, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, type CoordinatorTopicEvent, type SessionCoordinatorClient } from "@keymaster/contracts";
 import { vaultPlugin, vaultSetup, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
-import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
+
 import { createCoordinatorClient as createRawCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
 import { createWindowApp, definePlugin, WebLoomError, type WindowApp } from "webloom-framework";
 import { startSharedWorkerAppForTesting, type SharedWorkerScopeLike } from "webloom-framework/testing";
@@ -58,7 +60,7 @@ class Hub {
       id: "keymaster-test-coordinator",
       runtime: "shared-worker",
       provides: [COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY] as const,
-      startup: "required" as const,
+
       setup: (ctx) => {
         ctx.handle(COORDINATOR_RPC_CAPABILITY, (request) => ({
           sessionEpoch: "shared-epoch",
@@ -326,21 +328,24 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client: SessionCoordinatorClient = createCoordinatorClient({ clientId: "vault-assembly" });
       await client.connect();
 
+      const { pagePlugin, pageSetup } = await import("@keymaster/plugin-page");
       const host = createPluginHost({
+        fixtureExcludedCapabilities: ["breadcrumb.registry", "business.registry", "notice.registry"],
         runtime: "window-main",
-        disableConfigPersistence: true,
+
         coordinatorForPlugin: () => client,
         runtimeUnitImplementationRegistry: {
           get: (pluginId, unitId) => pluginId === vaultPlugin.id && unitId === vaultPlugin.units?.[0]?.id
             ? vaultSetup
-            : undefined,
+            : pluginId === "page" ? pageSetup : undefined,
         },
       });
-      await host.register(vaultPlugin);
+      await host.registerAll([vaultPlugin, pagePlugin]);
 
-      expect(host.state("vault").kind).toBe("enabled");
+      expect(host.state("vault").error).toBeUndefined();
+    expect(host.state("vault")).toMatchObject({ kind: "enabled" });
       expect(host.capabilities.has(VAULT_CAPABILITY)).toBe(true);
-      expect(host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY)).toBe(true);
+      expect(host.capabilities.has(VAULT_WALLET_STATE_CAPABILITY)).toBe(true);
     } finally {
       globalThis.SharedWorker = original;
     }
@@ -730,98 +735,6 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client = createCoordinatorClient();
       await client.connect();
       expect(client.getBootstrapSnapshot()).toMatchObject({ vaultStatus: "unlocked", activePublicKeyHex: "b".repeat(64), sessionEpoch: "baseline-epoch" });
-    } finally { globalThis.SharedWorker = original; }
-  });
-
-  it("binds plugin intent events to the current Worker authority and revision", async () => {
-    const authority = "authority:client-test";
-    const port = createTestMessagePort();
-    port.postMessage.mockImplementation((message: unknown) => {
-      const request = message as { requestId: string; kind: string; command?: unknown };
-      let operationResult: unknown;
-      if (request.kind === "hello") {
-        operationResult = {
-          authorityInstanceId: authority,
-          sessionEpoch: "e",
-          vaultStatus: "locked",
-          runGeneration: "run-0",
-          taskSnapshots: [],
-          scheduleSettings: { taskIntervals: {} },
-          pluginIntent: { revision: 1, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 1 } },
-        };
-      } else if (request.kind === "subscribe") {
-        operationResult = {
-          topics: ["plugin.intent"],
-          baselines: [{
-            topic: "plugin.intent",
-            baselineRevision: 1,
-            sessionEpoch: "e",
-            snapshot: {
-              topic: "plugin.intent",
-              type: "plugin.intent.changed",
-              authorityInstanceId: authority,
-              pluginIntentRevision: 1,
-              sessionEpoch: "e",
-              snapshot: { revision: 1, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 1 } },
-            },
-          }],
-        };
-      } else if (request.kind === "plugin.intent.snapshot") {
-        operationResult = { revision: 2, desiredEnabled: { alpha: true }, desiredRevision: { alpha: 2 } };
-      } else if (request.kind === "plugin.intent.submit") {
-        operationResult = {
-          status: "accepted",
-          commandId: (request.command as { commandId: string }).commandId,
-          persisted: true,
-          snapshot: { revision: 3, desiredEnabled: { alpha: true }, desiredRevision: { alpha: 3 } },
-        };
-      } else {
-        operationResult = {};
-      }
-      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
-    });
-    const original = globalThis.SharedWorker;
-    globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
-    try {
-      const client = createCoordinatorClient({ clientId: "intent-client" });
-      await client.connect();
-      expect(client.getBootstrapSnapshot()).toMatchObject({
-        authorityInstanceId: authority,
-        pluginIntent: { revision: 1, desiredEnabled: { alpha: false } },
-      });
-
-      const events: unknown[] = [];
-      client.subscribeTopic("plugin.intent", (event) => events.push(event));
-      port.onmessage?.({ data: {
-        topic: "plugin.intent",
-        type: "plugin.intent.changed",
-        authorityInstanceId: authority,
-        pluginIntentRevision: 2,
-        sessionEpoch: "e",
-        snapshot: { revision: 2, desiredEnabled: { alpha: true }, desiredRevision: { alpha: 2 } },
-      } } as MessageEvent);
-      port.onmessage?.({ data: {
-        topic: "plugin.intent",
-        type: "plugin.intent.changed",
-        authorityInstanceId: "authority:old",
-        pluginIntentRevision: 99,
-        sessionEpoch: "e",
-        snapshot: { revision: 99, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 99 } },
-      } } as MessageEvent);
-      await nextMacrotask();
-      await nextMacrotask();
-      expect(events).toHaveLength(1);
-      expect(client.getBootstrapSnapshot().pluginIntent?.revision).toBe(2);
-
-      const result = await client.pluginIntentSubmit({
-        commandId: "intent-command:1",
-        authorityInstanceId: authority,
-        expectedRevision: 2,
-        pluginId: "alpha",
-        desiredEnabled: true,
-      });
-      expect(result).toMatchObject({ status: "accepted", commandId: "intent-command:1" });
-      expect(client.getBootstrapSnapshot().pluginIntent?.revision).toBe(3);
     } finally { globalThis.SharedWorker = original; }
   });
 

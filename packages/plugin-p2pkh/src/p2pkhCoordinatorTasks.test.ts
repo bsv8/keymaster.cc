@@ -22,7 +22,7 @@ describe("P2PKH Coordinator tasks", () => {
   it("exposes the transactions-sync task identity", () => {
     const storage = createMemoryOwnerFileStore();
     const woc = { listAddressConfirmedHistory: vi.fn(async () => ({ items: [] })) } as never;
-    const tasks = createP2pkhCoordinatorTasks({ keyspace: {} as never, storage: storage as never, woc, messageBus: {} as never });
+    const tasks = createP2pkhCoordinatorTasks({ walletState: {} as never, storage: storage as never, woc, messageBus: {} as never });
     expect(tasks.id).toBe("p2pkh.transactions-sync");
     expect(tasks.unitId).toBe("p2pkh.coordinator-worker");
     expect(tasks.transactionsSync).toBeTypeOf("function");
@@ -38,7 +38,7 @@ describe("P2PKH Coordinator tasks", () => {
     const woc = {
       listAddressConfirmedHistory: vi.fn(async () => ({ items: [{ txid, height: 10 }] })),
     };
-    const tasks = createP2pkhCoordinatorTasks({ keyspace: {} as never, storage: storage as never, woc: woc as never });
+    const tasks = createP2pkhCoordinatorTasks({ walletState: {} as never, storage: storage as never, woc: woc as never });
     const result = await tasks.run(new AbortController().signal);
     expect(result.resources).toBe(1);
     expect(result.transactions).toBe(1);
@@ -60,7 +60,7 @@ describe("P2PKH Coordinator tasks", () => {
     await repository.putAddress({ ...resource, resourceId: "p2pkh:test", network: "test" as const, address: "1test" });
     const woc = { listAddressConfirmedHistory: vi.fn(async () => ({ items: [] })) };
     const tasks = createP2pkhCoordinatorTasks({
-      keyspace: {} as never,
+      walletState: {} as never,
       storage: storage as never,
       woc: woc as never,
       isNetworkEnabled: (network) => network === "main",

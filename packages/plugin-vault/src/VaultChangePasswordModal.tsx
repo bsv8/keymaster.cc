@@ -1,3 +1,4 @@
+import type { InternalVaultService } from "./internalVaultService.js";
 // packages/plugin-vault/src/VaultChangePasswordModal.tsx
 // Vault 锁屏密码修改 modal：收集旧密码、新密码与确认新密码，
 // 调用 vault.changePassword 执行原子轮换。
@@ -11,12 +12,12 @@
 
 import { useEffect, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import { useI18n } from "@keymaster/runtime";
-import type { VaultService } from "@keymaster/contracts";
+import { usePluginI18n } from "@keymaster/runtime";
+
 
 export interface VaultChangePasswordModalProps {
   open: boolean;
-  vault: VaultService;
+  vault: InternalVaultService;
   onClose(): void;
 }
 
@@ -25,7 +26,7 @@ export function VaultChangePasswordModal({
   vault,
   onClose
 }: VaultChangePasswordModalProps) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");

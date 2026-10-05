@@ -1,3 +1,6 @@
+import { VAULT_WALLET_STATE_CAPABILITY, defineRuntimeUnitDependencies } from "@keymaster/contracts";
+import { createInstanceRegistryService } from "@keymaster/runtime";
+import { WINDOW_P2P_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import type { PluginManifest, PluginSetup, PluginContext } from "@keymaster/contracts";
 import { WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY, capabilityDescriptor, type WindowP2pCoordinatorControl } from "@keymaster/contracts";
 import { createWindowP2pLaneRegistry } from "./laneRegistry.js";
@@ -8,16 +11,12 @@ const windowP2pPluginDefinition = {
   id: "window-p2p",
   name: "Window P2P",
   description: "唯一的 bitcoin-libp2p Host、executor lease 和受限网络 lane。",
-  kind: "platform",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: false,
-  displayGroup: "platform",
+
   units: [{
     id: "window-p2p.window",
     runtime: "window-main",
     scopeKind: "root",
+    dependencies: [{ capability: WINDOW_P2P_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "Window P2P Coordinator 连接" }],
     provides: [
       capabilityDescriptor(WINDOW_P2P_EXECUTOR_CAPABILITY),
       capabilityDescriptor(WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY),
@@ -26,13 +25,20 @@ const windowP2pPluginDefinition = {
     id: "window-p2p.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "executor 租约所属钱包身份" },
+      ]),
   }],
   setup(ctx: PluginContext) {
-    const coordinator = ctx.coordinator as WindowP2pCoordinatorControl | undefined;
+    const coordinator = ctx.capability(WINDOW_P2P_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as WindowP2pCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Window P2P Coordinator control is unavailable");
     ctx.provide(WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const registry = createWindowP2pLaneRegistry();
-    ctx.provide(WINDOW_P2P_EXECUTOR_CAPABILITY, registry);
+    ctx.provide(WINDOW_P2P_EXECUTOR_CAPABILITY, createInstanceRegistryService({ register: registry.register.bind(registry) }, WINDOW_P2P_EXECUTOR_CAPABILITY, { name: WINDOW_P2P_EXECUTOR_CAPABILITY.id, registrations: [{ method: "register" }], cleanupMethods: ["stop"], projectRegistration: input => {
+      const lane = input as import("@keymaster/contracts").WindowP2pExecutorLane;
+      return { id: lane.laneId, laneId: lane.laneId, start: lane.start.bind(lane), stop: lane.stop.bind(lane), handle: lane.handle.bind(lane),
+        ...(lane.rejectEvent ? { rejectEvent: lane.rejectEvent.bind(lane) } : {}), ...(lane.configure ? { configure: lane.configure.bind(lane) } : {}) };
+    } }, ctx.scope));
     // 施工单 001 的旧 executor spike 自己驱动同一条真实 Worker lease；
     // 只有明确进入 ?msfileSpike 的隔离页面时才停用正式 executor。验证构建
     // 同时承载正式 MSFile runtime 页面，不能因为构建级标志而误停正式装配。

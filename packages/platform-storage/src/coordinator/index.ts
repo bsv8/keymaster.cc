@@ -12,15 +12,11 @@ export {
   WALLET_SCHEMA_VERSION,
 } from "../local/indexedDbWalletStore.js";
 export type { WalletStore } from "../local/indexedDbWalletStore.js";
-export { createWalletKeyRepository, WALLET_KEYHOLD_FILE_PATH } from "../keys/walletKeyRepository.js";
-export type { UnlockedWalletKey, WalletKeyFile, WalletKeyRepository } from "../keys/walletKeyRepository.js";
-export { createWalletLifecycleService } from "../wallet/walletLifecycleService.js";
-export type { WalletLifecycleDeps } from "../wallet/walletLifecycleService.js";
 export { createKeyValueStore } from "../kv-engine/walletKvEngine.js";
 export { createModuleFileStore } from "../storage-access/wallet/moduleFileStore.js";
 export { createFixedCasSnapshotStore } from "../snapshot/fixedCasSnapshotStore.js";
 export { createPlatformRootStore } from "../storage-access/platform-root/platformRootStore.js";
-export type { PlatformRootStoreOptions } from "../storage-access/platform-root/platformRootStore.js";
+export type { PlatformRootStoreOptions, StoragePrivateRootStore } from "../storage-access/platform-root/platformRootStore.js";
 export { createStorageRuntimeController, StorageRuntimeControllerImpl } from "../runtime/storageController.js";
 export type { StorageRuntimeControllerDeps } from "../runtime/storageController.js";
 export { StorageRuntimeError, storageErrorCode } from "../runtime/storageError.js";
@@ -30,3 +26,13 @@ export { createStorageBrowseService } from "../runtime/storageBrowseService.js";
 export type { StorageBrowseAuthorization, StorageBrowseRuntime, StorageBrowseServiceOptions } from "../runtime/storageBrowseService.js";
 export { detectBrowsePreview } from "../runtime/storageBrowsePreview.js";
 export { DIRECTORY_CONTENT_TYPE, DIRECTORY_MARKER_NAME } from "../runtime/storageBrowsePaths.js";
+
+export { createWalletStoreActivity } from "./walletStoreActivity.js";
+export { createStorageDataQueue, STORAGE_DATA_CONCURRENCY, STORAGE_DATA_MAX_QUEUE } from "./storageDataQueue.js";
+
+export { createStorageDataExecutor } from "./storageDataExecutor.js";
+export { createWorkerStorageClients } from "./workerStorageClients.js";
+export { createStorageRpcHandlers } from "./storageRpcHandlers.js";
+export { createStorageGrantAuthority } from "./storageGrantAuthority.js";
+export { createScopedStorageClients } from "./scopedStorageClients.js";
+export { createKeyValueMaintenance } from "./keyValueMaintenance.js";

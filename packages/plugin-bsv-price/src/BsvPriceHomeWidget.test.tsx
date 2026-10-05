@@ -18,8 +18,9 @@ vi.mock("@keymaster/runtime", () => ({
     resourceRegistry: { get: () => ({}) },
     resourceStore: {}
   }),
-  useLocale: () => "en",
-  useI18n: () => ({
+  usePluginLocale: () => "en",
+  useResourceView: () => ({ data: useSyncExternalStore(activeTestService.service.subscribe, activeTestService.service.snapshot, activeTestService.service.snapshot) }),
+  usePluginI18n: () => ({
     t: (key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? key,
     language: () => "en"
   })
@@ -27,7 +28,7 @@ vi.mock("@keymaster/runtime", () => ({
 
 vi.mock("webloom-framework/react", () => ({
   countRender: vi.fn(),
-  useOptionalCapability: <T,>(): T => activeTestService.service as unknown as T,
+  useOptionalPluginCapability: <T,>(): T => activeTestService.service as unknown as T,
   useResource: () => {
     const service = activeTestService.service;
     const snapshot = useSyncExternalStore(service.subscribe, service.snapshot, service.snapshot);
@@ -97,3 +98,5 @@ describe("BsvPriceHomeWidget", () => {
     expect(document.querySelector("[data-bsv-price-home-widget='missing-service']")).not.toBeNull();
   });
 });
+
+vi.mock("./PriceResourceContext.js", () => ({ usePriceResources: () => ({}) }));

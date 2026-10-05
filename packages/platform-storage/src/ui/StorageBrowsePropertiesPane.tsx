@@ -2,7 +2,7 @@
 //
 // 这里只呈现 Worker 返回的元数据与页面已知的目录标记对象路径。完整路径、完整
 // 哈希、完整公钥都必须原样出现：树里为了排版做的缩写只属于树。
-import type { StorageBrowsePreview } from "@keymaster/contracts";
+import type { StorageBrowsePreview } from "../runtime/storageBrowseTypes.js";
 import type { BrowseChildNode, BrowseDirectoryMarker } from "./storageBrowseTree.js";
 import { formatBytes, formatTimestamp } from "./storageBrowseText.js";
 import type { BrowseTranslate } from "./StorageBrowsePreviewPane.js";

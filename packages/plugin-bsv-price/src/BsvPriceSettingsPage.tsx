@@ -1,3 +1,4 @@
+import { usePriceResources } from "./PriceResourceContext.js";
 // packages/plugin-bsv-price/src/BsvPriceSettingsPage.tsx
 // BSV Price 设置详情页。
 //
@@ -11,9 +12,9 @@
 
 import { useEffect, useState, type ReactElement } from "react";
 import { Button, PageHeader, Select, TextInput } from "@keymaster/ui";
-import { useOptionalCapability, useResource } from "webloom-framework/react";
+import { useOptionalPluginCapability } from "webloom-framework/react";
 import type { I18nValues } from "@keymaster/contracts";
-import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { useResourceView, usePluginI18n, usePluginLocale } from "@keymaster/runtime";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 import { deriveUnitFromPair } from "./bsvPriceSettings.js";
 import { DEFAULT_PRICE_PUBLISHER_PUBLIC_KEY_HEX } from "./constants.js";
@@ -26,7 +27,7 @@ import { BSV_PRICE_SERVICE_CAPABILITY } from "./manifest.js";
  * 设计缘由：capability 不存在时仍要给出可读空态，避免 host 外调用直接炸。
  */
 export function BsvPriceSettingsPage(): ReactElement {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const service = useBsvPriceServiceOrNull();
   if (!service) {
     return (
@@ -48,14 +49,14 @@ export function BsvPriceSettingsPage(): ReactElement {
 
 /** capability 不存在时返回 null，避免页面直接抛错。 */
 function useBsvPriceServiceOrNull(): BsvPriceService | null {
-  return useOptionalCapability(BSV_PRICE_SERVICE_CAPABILITY) ?? null;
+  return useOptionalPluginCapability(BSV_PRICE_SERVICE_CAPABILITY) ?? null;
 }
 
 function BsvPriceSettingsPageInner({ service }: { service: BsvPriceService }): ReactElement {
-  const { t } = useI18n();
-  const locale = useLocale();
-  const host = usePluginHost();
-  const snapshot = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
+  const { t } = usePluginI18n();
+  const locale = usePluginLocale();
+  const resources = usePriceResources();
+  const snapshot = useResourceView<BsvPriceServiceSnapshot>(resources, "bsv-price.snapshot", []);
   const snap = snapshot.data ?? service.snapshot();
 
   const [serverDraft, setServerDraft] = useState(snap.active.publisherPublicKeyHex);

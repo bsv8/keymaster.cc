@@ -1,5 +1,6 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AssetDataInvalidationEvent, AssetDataNotifier, KeyspaceService, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
+import type { AssetDataInvalidationEvent, AssetDataNotifier, VaultWalletState, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
 import { createMemoryOwnerFileStore } from "./storage/testSupport/memoryOwnerFileStore.js";
 import { createP2pkhService } from "./p2pkhService.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
@@ -9,12 +10,12 @@ const OWNER = "02" + "11".repeat(32);
 const ADDRESS = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
 const resource: P2pkhKeyResource = { resourceId: "p2pkh:main", publicKeyHex: OWNER, label: "test", address: ADDRESS, network: "main", createdAt: new Date(0).toISOString(), generation: 0 };
 
-function keyspace(): KeyspaceService {
+function walletState(): VaultWalletState {
   return {
-    active: () => ({ activePublicKeyHex: OWNER }),
-    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: ["p2pkh"], createdAt: new Date(0).toISOString() }),
-    onActiveKeyChanged: () => () => undefined,
-  } as unknown as KeyspaceService;
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: OWNER }))(), () => ({ publicKeyHex: OWNER, label: "test", capabilities: ["p2pkh"], createdAt: new Date(0).toISOString() })),
+
+    subscribe: () => () => undefined,
+  } as unknown as VaultWalletState;
 }
 
 const vault = {
@@ -78,7 +79,7 @@ describe("P2PKH service (snapshot + history)", () => {
     await repository.putAddress(resource);
     const txid = "aa".repeat(32);
     await repository.replaceHistory(resource, [{ txid, height: 10 }]);
-    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinatorWithSnapshot([]) as never });
+    const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinatorWithSnapshot([]) as never });
     await service.rehydrate();
     expect((await service.listResources()).map((row) => row.resourceId)).toContain("p2pkh:main");
     expect((await service.listHistory?.({}))?.map((row) => row.txid)).toContain(txid);
@@ -106,7 +107,7 @@ describe("P2PKH service (snapshot + history)", () => {
       },
       claims: [{ id: `${resource.resourceId}:${txA}:0`, submissionId: "sub-1", resourceId: resource.resourceId, publicKeyHex: OWNER, network: "main", txid: txA, vout: 0, outpointKey: `${txA}:0`, value: 1000, state: "active", createdAt: now, updatedAt: now }],
     });
-    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never });
+    const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinator as never });
     const breakdown = await service.getBalanceBreakdown?.("main");
     expect(breakdown).toMatchObject({ confirmed: 1000, unconfirmed: 500, spendable: 1500 });
     const balance = await service.getResourceBalance(resource.resourceId);
@@ -125,7 +126,7 @@ describe("P2PKH service (snapshot + history)", () => {
     ]);
     const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage as never));
     await repository.putAddress(resource);
-    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never });
+    const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinator as never });
     const allocation = await service.allocateUtxos({ assetId: "bsv", amountSatoshis: 100 });
     expect(allocation.selected).toHaveLength(1);
     expect(allocation.selected[0]).toMatchObject({ txid, value: 5000 });
@@ -146,7 +147,7 @@ describe("P2PKH service (snapshot + history)", () => {
       },
       claims: [{ id: `${resource.resourceId}:${"11".repeat(32)}:0`, submissionId: "sub-page", resourceId: resource.resourceId, publicKeyHex: OWNER, network: "main", txid: "11".repeat(32), vout: 0, value: 10, state: "active", createdAt: now, updatedAt: now }],
     });
-    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinatorWithSnapshot([]) as never });
+    const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinatorWithSnapshot([]) as never });
     expect((await service.listLocalTransactions?.({}))?.map((row) => row.id)).toContain("sub-page");
     expect((await service.listLocalTransactionsPage?.({ resourceId: resource.resourceId }))?.items.map((row) => row.id)).toContain("sub-page");
     service.dispose?.();
@@ -159,7 +160,7 @@ describe("P2PKH service (snapshot + history)", () => {
     });
     const coordinator = coordinatorWithSnapshot([]);
     coordinator.p2pkhUtxosGet.mockImplementation(async () => pending);
-    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never });
+    const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinator as never });
 
     const cold = service.balanceBroadcaster.getSnapshot();
     expect(Object.keys(cold.balances)).toEqual(["mainnet"]);
@@ -173,7 +174,7 @@ describe("P2PKH service (snapshot + history)", () => {
 
     const testnetService = createP2pkhService({
       vault,
-      keyspace: keyspace(),
+      walletState: walletState(),
       messageBus,
       storage: createMemoryOwnerFileStore() as never,
       coordinator: coordinatorWithSnapshot([{ txid: "02".repeat(32), vout: 0, value: 300, height: 0, status: "unconfirmed", isSpentInMempoolTx: false }], true) as never,
@@ -188,7 +189,7 @@ describe("P2PKH service (snapshot + history)", () => {
   it("T04：切换全局 testnet 设置时立即增删 testnet map 键", async () => {
     const storage = createMemoryOwnerFileStore();
     const coordinator = coordinatorWithSnapshot([{ txid: "03".repeat(32), vout: 0, value: 700, height: 10, status: "confirmed", isSpentInMempoolTx: false }]);
-    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never });
+    const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinator as never });
 
     await service.getResourceBalance(resource.resourceId);
     expect(Object.keys(service.balanceBroadcaster.getSnapshot().balances)).toEqual(["mainnet"]);
@@ -213,7 +214,7 @@ describe("P2PKH service (snapshot + history)", () => {
     const storage = createMemoryOwnerFileStore();
     const coordinator = coordinatorWithSnapshot([{ txid: "04".repeat(32), vout: 0, value: 1000, height: 10, status: "confirmed", isSpentInMempoolTx: false }]);
     const notifier = createTestNotifier();
-    const service = createP2pkhService({ vault, keyspace: keyspace(), messageBus, storage: storage as never, coordinator: coordinator as never, assetDataNotifier: notifier });
+    const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinator as never, assetDataNotifier: notifier });
     const onDataChanged = vi.fn();
     service.onDataChanged(onDataChanged);
 
@@ -240,7 +241,7 @@ describe("P2PKH service (snapshot + history)", () => {
     let vaultStatus: "unlocked" | "locked" = "unlocked";
     const service = createP2pkhService({
       vault: Object.assign({}, vault as unknown as object, { status: () => vaultStatus }) as never,
-      keyspace: { ...keyspace(), active: () => ({ activePublicKeyHex: activeOwner }) } as never,
+      walletState: { ...walletState(), snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: activeOwner }))()) } as never,
       messageBus,
       storage: storage as never,
       coordinator: coordinator as never,
@@ -262,5 +263,35 @@ describe("P2PKH service (snapshot + history)", () => {
     vaultStatus = "locked";
     expect(service.balanceBroadcaster.getSnapshot()).toMatchObject({ publicKeyHex: "", balances: {} });
     service.dispose?.();
+  });
+});
+
+
+describe("runtime instance revocation", () => {
+  it("drops a balance result that finishes after its issuing scope is revoked", async () => {
+    let resolveSnapshot!: (value: { status: "ok"; value: P2pkhUtxoSnapshotResult }) => void;
+    const pending = new Promise<{ status: "ok"; value: P2pkhUtxoSnapshotResult }>(resolve => { resolveSnapshot = resolve; });
+    const coordinator = coordinatorWithSnapshot([]);
+    coordinator.p2pkhUtxosGet.mockImplementation(() => pending);
+    const controller = new AbortController();
+    const publish = vi.fn(() => {
+      if (controller.signal.aborted) throw new Error("revoked message bus");
+    });
+    const service = createP2pkhService({ vault, walletState: walletState(),
+      messageBus: { publish, subscribe: () => () => undefined } as never,
+      storage: createMemoryOwnerFileStore() as never, coordinator: coordinator as never,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(coordinator.p2pkhUtxosGet).toHaveBeenCalled());
+    const before = service.balanceBroadcaster.getSnapshot();
+    publish.mockClear();
+    controller.abort();
+    resolveSnapshot({ status: "ok", value: snapshot([{ txid: "ff".repeat(32), vout: 0,
+      value: 1234, height: 1, status: "confirmed", isSpentInMempoolTx: false }]) });
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    expect(publish).not.toHaveBeenCalled();
+    expect(service.balanceBroadcaster.getSnapshot()).toEqual(before);
+    service.dispose?.();
+    expect(publish).not.toHaveBeenCalled();
   });
 });

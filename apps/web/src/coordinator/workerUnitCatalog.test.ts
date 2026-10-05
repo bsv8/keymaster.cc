@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   COORDINATOR_WORKER_UNIT_CATALOG,
   getCoordinatorWorkerAuditOperationForTask,
-  getCoordinatorWorkerProductDependenciesForTask,
   getCoordinatorWorkerUnitForTask,
   validateCoordinatorWorkerUnitCatalog,
 } from "./workerUnitCatalog.js";
@@ -44,7 +43,6 @@ describe("Coordinator Worker unit catalog", () => {
       "重复 unitId: contacts.coordinator-worker",
       "Worker 单元引用未授权存储声明: contacts.coordinator-worker/address-book",
       "重复 taskId: contacts.presence-probe",
-      "任务单元依赖必须包含自身产品: contacts.coordinator-worker",
       "重复 serviceId: contacts.service",
     ]);
   });
@@ -68,12 +66,11 @@ describe("Coordinator Worker unit catalog", () => {
     ]);
   });
 
-  it("把产品依赖与单元依赖合并为一份清单，并保持任务产品依赖可单独取出", () => {
-    const msfile = COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === "msfile.coordinator-worker")!;
-    // 事故现场那条依赖过去只藏在调用代码的一行 await 里，现在有声明位置。
-    expect(msfile.dependsOn).toEqual(["sat-subscription.coordinator-worker"]);
-    // 单元依赖不参与任务的产品意图判定。
-    expect(getCoordinatorWorkerProductDependenciesForTask("p2pkh.transactions-sync")).toEqual(["background", "p2pkh"]);
-    expect(getCoordinatorWorkerProductDependenciesForTask("msfile-none")).toEqual([]);
+  it("产品 id 不能充当真实单元依赖", () => {
+    const msfile = COORDINATOR_WORKER_UNIT_CATALOG.find(unit => unit.productId === "msfile")!;
+    expect(msfile.dependsOn).toEqual(["storage.coordinator-worker", "vault.coordinator-worker", "sat-subscription.coordinator-worker"]);
+    expect(validateCoordinatorWorkerUnitCatalog(COORDINATOR_WORKER_UNIT_CATALOG.map(unit =>
+      unit === msfile ? { ...unit, dependsOn: ["sat-subscription"] } : unit)))
+      .toContain("单元引用未知依赖: msfile.coordinator-worker -> sat-subscription");
   });
 });

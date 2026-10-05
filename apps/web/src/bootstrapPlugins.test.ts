@@ -1,3 +1,5 @@
+import { walletStateFixtureAccess } from "@keymaster/runtime/test-support";
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
 // apps/web/src/bootstrapPlugins.test.ts
 // 启动装配层的挂死探测测试。
 //
@@ -9,14 +11,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CENTRAL_STORAGE_DECLARATIONS,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
   type PluginManifest,
   type PluginSetup,
   type SessionCoordinatorClient,
 } from "@keymaster/contracts";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
-import { createKeymasterPluginHost as createPluginHost, type PluginHost } from "@keymaster/runtime";
+import { type PluginHost } from "@keymaster/runtime";
 import { StartupCapabilityError, StartupPluginError } from "webloom-framework/advanced";
 import {
   createInMemoryKeyValueStore,
@@ -133,7 +135,7 @@ describe("bootstrapPlugins hang detection", () => {
   it("preserves structured plugin diagnostics while adding stage context", async () => {
     const original = Object.assign(new Error("private setup detail"), {
       name: "StartupPluginError",
-      details: { pluginId: "vault", capabilities: ["vault.service"], state: "error-disabled" }
+      details: { pluginId: "vault", capabilities: ["vault.service"], state: "failed" }
     });
     const host = makeHost(() => Promise.reject(original));
 
@@ -146,7 +148,7 @@ describe("bootstrapPlugins hang detection", () => {
     });
     expect(original.name).toBe("StartupPluginError");
     expect(original.details).toEqual({
-      pluginId: "vault", capabilities: ["vault.service"], state: "error-disabled"
+      pluginId: "vault", capabilities: ["vault.service"], state: "failed"
     });
   });
 
@@ -382,7 +384,7 @@ describe("web startup capability contract", () => {
       p2pkhSettingsUpdate: async () => ({ status: "ok" })
     } as unknown as SessionCoordinatorClient;
     const host = trackHost(createPluginHost({
-      disableConfigPersistence: true,
+      fixtureExcludedCapabilities: WEB_PLUGIN_CATALOG.flatMap(plugin => (plugin.units ?? []).flatMap(unit => (unit.provides ?? []).map(cap => cap.id))),
       storageBindingAuthority: makeStorageBindingAuthority(),
       coordinatorForPlugin: () => coordinatorClient,
       runtime: "window-main",
@@ -394,34 +396,34 @@ describe("web startup capability contract", () => {
         walletGeneration: "wallet-1",
       }
     }));
-    const stage = (name: string) => WEB_PLUGIN_CATALOG.filter((plugin) => plugin.bootstrapStage === name);
     host.validateManifestSet([...WEB_PLUGIN_CATALOG]);
 
     // 按真实装配顺序推进四道门禁。
     //
-    // 单 Key 之后第一阶段同时装 Storage、Vault 和 key-import：locked 冷启动
+    // 单 Key 之后第一阶段同时装 Storage 和 Vault（导入 UI 属于 Vault）：locked 冷启动
     // 必须在这一阶段就拿到 Vault capability，否则根本没有解锁入口。因此这条
     // 断言改的是「能力先后顺序」，不再是「Vault 要等第二个阶段」。
-    await host.registerAll(stage("storage-onboarding"));
+    await host.registerAll([...WEB_PLUGIN_CATALOG]);
     expect(host.capabilities.has(VAULT_SERVICE_CAPABILITY)).toBe(true);
-    expect(host.capabilities.has(KEYSPACE_SERVICE_CAPABILITY)).toBe(true);
-    expect(host.getManifest("key-import")).toBeDefined();
-    expect(host.getManifest("p2pkh")).toBeUndefined();
+    expect(host.capabilities.has(VAULT_WALLET_STATE_CAPABILITY)).toBe(true);
+    for (const id of ["key-import", "importer-wif", "importer-hex", "importer-json-file"]) expect(host.getManifest(id)).toBeUndefined();
+    const vault = host.capabilities.get(VAULT_SERVICE_CAPABILITY);
+    for (const method of ["initialize", "exportKeyHold", "resetWallet", "renameKey", "changePassword", "coordinatorClient"]) expect(method in vault).toBe(false);
+    expect(host.getManifest("p2pkh")).toBeDefined();
 
-    await host.registerAll(stage("vault-selection"));
     expect(host.getManifest("protocol")).toBeDefined();
-    expect(host.getManifest("settings")).toBeDefined();
-    expect(host.getManifest("p2pkh")).toBeUndefined();
+    expect(host.getManifest("settings")).toBeUndefined();
+    expect(host.getManifest("home")).toBeUndefined();
+    expect(host.getManifest("workspace")).toBeUndefined();
+    expect(host.getManifest("p2pkh")).toBeDefined();
 
-    await host.registerAll(stage("owner-apps-ready"));
-    expect(host.state("p2pkh").kind).toBe("enabled");
+    expect(host.state("p2pkh").kind, JSON.stringify(host.state("p2pkh"))).toBe("enabled");
     expect(host.capabilities.has((await import("@keymaster/plugin-p2pkh")).P2PKH_CAPABILITY)).toBe(true);
     // WOC 装配后必须已经提供链高度读取器（get / 订阅 / 退订），
     // 否则「智能调度」页读不到当前链高度。
     const { CHAIN_HEIGHT_READER_CAPABILITY } = await import("@keymaster/contracts");
     expect(host.capabilities.has(CHAIN_HEIGHT_READER_CAPABILITY)).toBe(true);
 
-    await host.registerAll(stage("connect-apps-ready"));
     expect(host.state("message").kind).toBe("enabled");
     expect(host.contactPublicKeyActions.get("message.to-contact")).toBeDefined();
     if (host.state("message").kind !== "enabled") {
@@ -431,23 +433,18 @@ describe("web startup capability contract", () => {
 
   function vaultFixture(setup: PluginSetup = (ctx) => {
     ctx.provide(VAULT_SERVICE_CAPABILITY, {} as never);
-    ctx.provide(KEYSPACE_SERVICE_CAPABILITY, {} as never);
+    ctx.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess({} as never));
   }): { manifest: PluginManifest; setup: PluginSetup } {
     return {
       manifest: {
         id: "vault",
         name: "Vault",
-        kind: "core",
-        startup: "required",
-        defaultEnabled: true,
-        canDisable: false,
-        bootstrapStage: "vault-selection",
-        displayGroup: "platform",
+
         units: [{
           id: "vault.window",
           runtime: "window-main",
           scopeKind: "root",
-          provides: [VAULT_SERVICE_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY],
+          provides: [VAULT_SERVICE_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY],
         }],
       },
       setup
@@ -456,7 +453,7 @@ describe("web startup capability contract", () => {
 
   function createFixtureHost(setups: Record<string, PluginSetup> = {}): PluginHost {
     return trackHost(createPluginHost({
-      disableConfigPersistence: true,
+
       runtime: "window-main",
       runtimeUnitImplementationRegistry: {
         get: (pluginId) => setups[pluginId],
@@ -464,21 +461,10 @@ describe("web startup capability contract", () => {
     }));
   }
 
-  it("keeps required Vault enabled with an in-memory runtime projection", async () => {
-    const fixture = vaultFixture();
-    const host = createFixtureHost({ vault: fixture.setup });
-    await host.register(fixture.manifest);
-    assertWebStartupContract(host);
-    expect(host.capabilities.has(VAULT_SERVICE_CAPABILITY)).toBe(true);
-    expect(host.configStore.read().vault).toBe(true);
-    expect(localStorage.length).toBe(0);
-  });
-
   it("rejects required setup failures before startup preflight", async () => {
     const fixture = vaultFixture(() => { throw new Error("sensitive setup detail"); });
     const host = createFixtureHost({ vault: fixture.setup });
-    await expect(host.register(fixture.manifest))
-      .rejects.toBeInstanceOf(StartupPluginError);
+    await host.register(fixture.manifest);
     expect(() => assertWebStartupContract(host)).toThrow(StartupCapabilityError);
   });
 
@@ -488,21 +474,21 @@ describe("web startup capability contract", () => {
       attempts += 1;
       if (attempts === 1) throw new Error("transient Vault setup failure");
       ctx.provide(VAULT_SERVICE_CAPABILITY, {} as never);
-      ctx.provide(KEYSPACE_SERVICE_CAPABILITY, {} as never);
+      ctx.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess({} as never));
     });
     const host = createFixtureHost({ vault: fixture.setup });
 
-    await expect(host.register(fixture.manifest)).rejects.toBeInstanceOf(StartupPluginError);
+    await host.register(fixture.manifest);
     expect(host.manifests()).toContain("vault");
-    expect(host.state("vault").kind).toBe("error-disabled");
-    await expect(host.register(fixture.manifest)).resolves.toBeUndefined();
+    expect(host.state("vault").kind).toBe("failed");
+    await expect(host.retry(fixture.manifest.id)).resolves.toBeUndefined();
     expect(attempts).toBe(2);
     expect(host.state("vault").kind).toBe("enabled");
     assertWebStartupContract(host);
   });
 
   it("reports missing provider/capability and does not enter React", () => {
-    const host = trackHost(createPluginHost({ disableConfigPersistence: true }));
+    const host = trackHost(createPluginHost({  }));
     expect(() => assertWebStartupContract(host)).toThrow(/vault\.service/);
     try {
       assertWebStartupContract(host);
@@ -514,7 +500,7 @@ describe("web startup capability contract", () => {
         providerState: undefined
       });
     }
-    expect(WEB_STARTUP_REQUIRED_CAPABILITIES).toEqual([VAULT_SERVICE_CAPABILITY, KEYSPACE_SERVICE_CAPABILITY]);
+    expect(WEB_STARTUP_REQUIRED_CAPABILITIES).toEqual([VAULT_SERVICE_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY]);
   });
 
   it("keeps optional failures isolated while required preflight succeeds", async () => {
@@ -524,11 +510,10 @@ describe("web startup capability contract", () => {
     await host.register({
       id: "optional",
       name: "Optional",
-      kind: "business", startup: "optional", defaultEnabled: true, canDisable: true,
-      bootstrapStage: "connect-apps-ready", displayGroup: "business",
+
     });
     await host.register(vault.manifest);
     assertWebStartupContract(host);
-    expect(host.state("optional").kind).toBe("error-disabled");
+    expect(host.state("optional").kind).toBe("failed");
   });
 });

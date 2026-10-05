@@ -10,7 +10,7 @@
 
 import { useState } from "react";
 import { Button, Modal } from "@keymaster/ui";
-import { useI18n } from "@keymaster/runtime";
+import { usePluginI18n } from "@keymaster/runtime";
 
 export interface VaultKeyHoldExportModalProps {
   open: boolean;
@@ -48,7 +48,7 @@ export function VaultKeyHoldExportModal({
   onExport,
   onClose
 }: VaultKeyHoldExportModalProps) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

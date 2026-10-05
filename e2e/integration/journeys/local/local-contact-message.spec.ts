@@ -53,6 +53,7 @@ test(JOURNEY_ID + "：保存联系人并打开会话入口", async ({ page, cont
       await expect(page.locator("[data-message-detail=\"ok\"]")).toBeVisible();
       await expect(page).toHaveURL(new RegExp(`/message/${peerPublicKeyHex}`));
     });
+    expect(browserErrors.pageErrors).toEqual([]);
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password]);
     await attachVisibleDiagnostic(page, testInfo);

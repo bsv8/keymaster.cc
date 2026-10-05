@@ -17,7 +17,7 @@ function makeStateEvent(sessionEpoch: string, supplierGeneration: number) {
     globalBlockReadConcurrency: 1,
     globalStatConcurrency: 1,
     sellerSettings: { sellerEnabled: false, seedPriceSatoshis: "0", fullBlockPriceSatoshis: "0", quoteLifetimeSeconds: 300, maxConcurrentSales: 1, supportedArbiterPublicKeys: [] },
-    sellerRuntimeStatus: "disabled" as const,
+    sellerRuntimeStatus: "registered" as const,
     pendingApprovals: [],
   };
 }
@@ -99,7 +99,7 @@ describe("MsFileServiceProxy Stat cache（页面侧元数据短缓存）", () =>
       suppliers: [{ name: "builtin", supplierPublicKeyHex: "02" + "11".repeat(32), addresses: [], enabled: true }],
       supplierGeneration: 1,
       sellerSettings: { sellerEnabled: false, seedPriceSatoshis: "0", fullBlockPriceSatoshis: "0", quoteLifetimeSeconds: 300, maxConcurrentSales: 1, supportedArbiterPublicKeys: [] },
-      sellerRuntimeStatus: "disabled" as const,
+      sellerRuntimeStatus: "registered" as const,
     };
     const msfileControl = vi.fn(async (control: { type: string }) => {
       if (control.type !== "settings.get") return { status: "ok" as const, value: null, sessionEpoch: "epoch-1" };

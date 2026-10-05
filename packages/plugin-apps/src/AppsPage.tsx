@@ -15,8 +15,8 @@
 //     `LaunchAppViewErrorCode` 类型 + 错误文案维护。
 
 import { useState } from "react";
-import { useCapability } from "webloom-framework/react";
-import { useI18n, navigateTo } from "@keymaster/runtime";
+import { usePluginCapability } from "webloom-framework/react";
+import { usePluginI18n, navigateTo } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
 import {
   LaunchAppViewError,
@@ -84,8 +84,8 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
 }
 
 export function AppsPage() {
-  const protocol = useCapability(PROTOCOL_SERVICE_CAPABILITY);
-  const { t } = useI18n();
+  const protocol = usePluginCapability(PROTOCOL_SERVICE_CAPABILITY);
+  const { t } = usePluginI18n();
   const validation = loadCatalog();
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchEntry, setLaunchEntry] = useState<AppCatalogEntry | null>(null);

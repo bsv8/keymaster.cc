@@ -13,8 +13,8 @@
 //     `LaunchAppViewErrorCode` 类型 + 错误文案维护。
 
 import { useState } from "react";
-import { countRender, useOptionalCapability } from "webloom-framework/react";
-import { useI18n, navigateTo } from "@keymaster/runtime";
+import { countRender, useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, navigateTo } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import {
   LaunchAppViewError,
@@ -68,8 +68,8 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
 
 export function AppsHomeWidget() {
   countRender("plugin-apps/AppsHomeWidget");
-  const protocol = useOptionalCapability(PROTOCOL_SERVICE_CAPABILITY);
-  const { t, language } = useI18n();
+  const protocol = useOptionalPluginCapability(PROTOCOL_SERVICE_CAPABILITY);
+  const { t, language } = usePluginI18n();
   if (!protocol) {
     // apps namespace 可能已随 owner/session 插件注销；不可用空态不再
     // 读取已经不存在的翻译资源，保持生命周期降级无噪声。
@@ -91,7 +91,7 @@ export function AppsHomeWidget() {
 }
 
 function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const validation = loadCatalog();
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchEntry, setLaunchEntry] = useState<AppCatalogEntry | null>(null);

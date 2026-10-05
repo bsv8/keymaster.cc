@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-token-bsv21/src/bsv21Sync.ts
 // BSV-21 后台同步任务。
 //
@@ -13,7 +14,7 @@ import type {
   BackgroundRunEligibility,
   BackgroundTaskContext,
   BackgroundTaskDefinition,
-  KeyspaceService,
+  VaultWalletState,
   WocService,
   VaultService
 } from "@keymaster/contracts";
@@ -26,8 +27,8 @@ export interface CreateBsv21SyncTaskOptions {
   service: Bsv21ServiceHandle;
   woc: WocService;
   historyRepository?: Bsv21MintHistoryRepository;
-  keyspace: KeyspaceService;
-  vault: VaultService;
+  walletState: VaultWalletState;
+  vault: Pick<VaultService, "status">;
   assetDataNotifier?: AssetDataNotifier;
 }
 
@@ -41,7 +42,7 @@ export interface CreateBsv21SyncTaskOptions {
  *   - 取消后不提交 K-V、不发 data-changed。
  */
 export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): BackgroundTaskDefinition {
-  const { stateRepository, service, woc, historyRepository, keyspace, vault, assetDataNotifier } = options;
+  const { stateRepository, service, woc, historyRepository, walletState, vault, assetDataNotifier } = options;
 
   return {
     id: "token-bsv21.sync",
@@ -55,7 +56,7 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
     },
     // 施工单 001：删除 defaultEnabled，所有任务默认持续启用
     keyScope: () => {
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       return state.activePublicKeyHex ? { publicKeyHex: state.activePublicKeyHex } : undefined;
     },
     // 施工单 001：canRun 返回结构化 BackgroundRunEligibility
@@ -63,14 +64,14 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
       if (vault.status() !== "unlocked") {
         return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
       }
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!Boolean(state.activePublicKeyHex)) {
         return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
       }
       return { ready: true };
     },
     async run(ctx: BackgroundTaskContext) {
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!state.activePublicKeyHex) return;
       // 保存本轮开始时的 active key，提交/通知前确认未变化；
       // 否则旧 key 的任务可能向新 key 的页面发通知。
@@ -121,14 +122,16 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
 
       // 原子替换：在同一事务中删除旧数据并写入新数据
       // K-V 操作隐式使用当前 active key 的 namespace
+      if (!sameWalletSession(state, walletState.snapshot()) || ctx.signal.aborted) return;
       await stateRepository.replaceAll(snapshots);
-      await reconcileHistory(historyRepository, woc);
+      if (!sameWalletSession(state, walletState.snapshot()) || ctx.signal.aborted) return;
+      await reconcileHistory(historyRepository, woc, () => !ctx.signal.aborted && sameWalletSession(state, walletState.snapshot()));
       ctx.assertSessionFresh?.();
 
       // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；
       // 同时确认 active key 未变化——旧 key 的任务不应向新 key 发通知。
       if (ctx.signal.aborted) return;
-      const currentKeyHex = keyspace.active().activePublicKeyHex;
+      const currentKeyHex = walletState.snapshot().activePublicKeyHex;
       if (currentKeyHex !== startedKeyHex) return;
 
       // 发布 data-changed
@@ -142,7 +145,7 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
   };
 }
 
-async function reconcileHistory(historyRepository: Bsv21MintHistoryRepository | undefined, woc: WocService): Promise<void> {
+async function reconcileHistory(historyRepository: Bsv21MintHistoryRepository | undefined, woc: WocService, isCurrent: () => boolean): Promise<void> {
   if (!historyRepository) return;
   const current = await historyRepository.list().catch(() => []);
   if (current.length === 0) return;
@@ -154,6 +157,7 @@ async function reconcileHistory(historyRepository: Bsv21MintHistoryRepository | 
     if (observation) {
       const nextStatus = observationToStatus(observation);
       if (record.status === nextStatus && record.submit?.spend.observation === observation) continue;
+      if (!isCurrent()) return;
       await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),
@@ -171,6 +175,7 @@ async function reconcileHistory(historyRepository: Bsv21MintHistoryRepository | 
     }
     const wasObservedUnconfirmed = record.status === "woc-observed-unconfirmed" || record.submit?.spend.observation === "unconfirmed";
     if (wasObservedUnconfirmed) {
+      if (!isCurrent()) return;
       await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),

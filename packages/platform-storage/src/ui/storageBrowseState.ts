@@ -3,7 +3,7 @@
 // 页面组件里最容易写错的是「一页折叠后没有新增子项，但仍然有游标」这种状态：
 // 只要把「本页新增数」当成「是否还有后续」，深目录就会在还剩文件时被判定为
 // 扫完。完成与否只看游标，新增数只用来告诉用户这一页带来了什么。
-import type { StorageBrowseEntry } from "@keymaster/contracts";
+import type { StorageBrowseEntry } from "../runtime/storageBrowseTypes.js";
 import {
   foldDirectoryEntries,
   mergeDirectoryChildren,

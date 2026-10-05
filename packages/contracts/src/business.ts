@@ -1,24 +1,11 @@
-import type { ComponentType } from "react";
 import type { I18nText } from "./i18n.js";
 
-/** Business declarations are owned by a plugin; runtime must not know their vocabulary. */
-export type FeatureEntry =
-  | { path: string; component: ComponentType; routeId?: never; visibleWhen?: (ctx: { unlocked: boolean }) => boolean; activeWhen?: (path: string) => boolean }
-  | { path: string; routeId: string; component?: never; visibleWhen?: (ctx: { unlocked: boolean }) => boolean; activeWhen?: (path: string) => boolean };
-export interface FeatureView {
-  id: string;
+/** Navigation metadata; executable content is registered separately with Page. */
+export interface FeatureEntry {
   path: string;
-  label: I18nText;
-  description?: I18nText;
-  breadcrumb?: readonly I18nText[];
-  component: ComponentType;
-}
-export interface FeatureHomeProjection {
-  id: string;
-  space: { id: `${string}.${string}`; label: I18nText; order: number };
-  order: number;
-  component: ComponentType;
+  routeId: string;
   visibleWhen?: (ctx: { unlocked: boolean }) => boolean;
+  activeWhen?: (path: string) => boolean;
 }
 export interface BusinessFeature {
   id: string;
@@ -27,8 +14,6 @@ export interface BusinessFeature {
   order: number;
   icon?: string;
   entry: FeatureEntry;
-  views?: readonly FeatureView[];
-  home?: readonly FeatureHomeProjection[];
 }
 export interface BusinessDomain {
   id: string;

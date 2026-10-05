@@ -5,18 +5,18 @@
 //   - 当前 snapshot K-V 还没有完整 outpoint 真值时，provider 会返回空；
 //   - 一旦 snapshot 里回填 outpoint，这里会自动开始保护对应输入。
 
-import type { AssetDataNotifier, KeyspaceService, ProtectedOutpointProvider } from "@keymaster/contracts";
+import type { AssetDataNotifier, VaultWalletState, ProtectedOutpointProvider } from "@keymaster/contracts";
 import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
 
 export interface Bsv21SpendProtectionOptions {
   stateRepository: Bsv21StateRepository;
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   assetDataNotifier?: AssetDataNotifier;
 }
 
 export function createBsv21SpendProtectionProvider(options: Bsv21SpendProtectionOptions): ProtectedOutpointProvider {
-  if (!options || !options.stateRepository || !options.keyspace) {
-    throw new Error("createBsv21SpendProtectionProvider: stateRepository and keyspace are required");
+  if (!options || !options.stateRepository || !options.walletState) {
+    throw new Error("createBsv21SpendProtectionProvider: stateRepository and walletState are required");
   }
   const listeners = new Set<() => void>();
   let offNotifier: (() => void) | undefined;
@@ -32,7 +32,7 @@ export function createBsv21SpendProtectionProvider(options: Bsv21SpendProtection
     id: "bsv21",
     ownerPluginId: "token-bsv21",
     async listProtectedOutpoints() {
-      const state = options.keyspace.active();
+      const state = options.walletState.snapshot();
       if (!state.activePublicKeyHex) return [];
       const snapshots = await options.stateRepository.list();
       return snapshots

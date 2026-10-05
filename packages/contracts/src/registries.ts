@@ -6,7 +6,7 @@ import { PROTECTED_OUTPOINT_REGISTRY_CAPABILITY } from "./spendProtection.js";
 // 设计缘由：plugin 通过 capability 拿到这些 registry；类型契约放在 contracts，
 // 实现放在 runtime。这避免 plugin 直接依赖 runtime 内部模块。
 
-import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, SettingsRoute, SystemSettingsItem, SystemStatusModule, TransferRegistry as ITransferRegistry, VaultSettingsSection } from "./index.js";
+import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, SettingsRoute, TransferRegistry as ITransferRegistry, VaultSettingsSection } from "./index.js";
 import type { TokenRegistry } from "./tokens.js";
 import type { CollectibleRegistry } from "./collectibles.js";
 import type { CollectibleTransferRegistry } from "./collectibleTransfer.js";
@@ -14,19 +14,16 @@ import type { TopbarRegistry as ITopbarRegistry } from "./topbar.js";
 import type { BackgroundRegistry as IBackgroundRegistry, BackgroundService as IBackgroundService } from "./background.js";
 import type { NoticeRecord } from "./notice.js";
 import type { I18nText } from "./i18n.js";
-import type { BusinessDomain, BusinessFeature, FeatureHomeProjection } from "./business.js";
+import type { BusinessDomain, BusinessFeature } from "./business.js";
 
 /** Typed platform registry capabilities. */
 export const ROUTE_REGISTRY_CAPABILITY = defineCapability<RouteRegistry>({ kind: "local", id: "route.registry", version: "1" });
 export const BREADCRUMB_REGISTRY_CAPABILITY = defineCapability<BreadcrumbRegistry>({ kind: "local", id: "breadcrumb.registry", version: "1" });
 export const SETTINGS_REGISTRY_CAPABILITY = defineCapability<SettingsRegistry>({ kind: "local", id: "settings.registry", version: "1" });
-export const SYSTEM_SETTINGS_REGISTRY_CAPABILITY = defineCapability<SystemSettingsRegistry>({ kind: "local", id: "system-settings.registry", version: "1" });
-export const SYSTEM_STATUS_REGISTRY_CAPABILITY = defineCapability<SystemStatusRegistry>({ kind: "local", id: "system-status.registry", version: "1" });
 export const VAULT_SETTINGS_REGISTRY_CAPABILITY = defineCapability<VaultSettingsRegistry>({ kind: "local", id: "vault-settings.registry", version: "1" });
 export const HOME_REGISTRY_CAPABILITY = defineCapability<HomeRegistry>({ kind: "local", id: "home.registry", version: "1" });
 export const BUSINESS_REGISTRY_CAPABILITY = defineCapability<BusinessFeatureRegistry>({ kind: "local", id: "business.registry", version: "1" });
 export const COMMAND_REGISTRY_CAPABILITY = defineCapability<CommandRegistry>({ kind: "local", id: "command.registry", version: "1" });
-export const IMPORTER_REGISTRY_CAPABILITY = defineCapability<IImporterRegistry>({ kind: "local", id: "importer.registry", version: "1" });
 export const TRANSFER_REGISTRY_CAPABILITY = defineCapability<ITransferRegistry>({ kind: "local", id: "transfer.registry", version: "1" });
 export const ASSET_REGISTRY_CAPABILITY = defineCapability<IAssetRegistry>({ kind: "local", id: "asset.registry", version: "1" });
 export const TOKEN_REGISTRY_CAPABILITY = defineCapability<TokenRegistry>({ kind: "local", id: "token.registry", version: "1" });
@@ -71,27 +68,6 @@ export interface SettingsRegistry {
   byPath(path: string): SettingsRoute | undefined;
 }
 
-/**
- * `/settings/system` 的设置钩子注册表。
- *
- * 每个插件项目携带自己的 group 和 order；registry 保证 id 唯一以及同一
- * group 的定义一致。页面读取 list() 后按 group/order 渲染即可。
- */
-export interface SystemSettingsRegistry {
-  register(item: SystemSettingsItem): void;
-  unregister(id: string): void;
-  list(): SystemSettingsItem[];
-  _ids(): string[];
-}
-
-/** 常驻系统模块向「设置 → 广播网关」注入实时状态视图。 */
-export interface SystemStatusRegistry {
-  register(module: SystemStatusModule): void;
-  unregister(id: string): void;
-  list(): SystemStatusModule[];
-  _ids(): string[];
-}
-
 /** 可选插件向「设置 → Key 管理」注入内嵌工作区。 */
 export interface VaultSettingsRegistry {
   register(section: VaultSettingsSection): void;
@@ -112,6 +88,7 @@ export interface HomeRegistry {
   /** 注销已注册 widget；插件卸载时释放自己的首页挂载。 */
   unregister(id: string): void;
   list(): HomeWidget[];
+  subscribe(listener: () => void): () => void;
 }
 
 export interface BusinessFeatureRegistry {
@@ -122,10 +99,9 @@ export interface BusinessFeatureRegistry {
   unregisterDomain(domainId: string): void;
   listDomains(): BusinessDomain[];
   listFeatures(): Array<BusinessFeature & { domainId: string; ownerPluginId: string }>;
-  listHomeProjections(): Array<FeatureHomeProjection & { featureId: string; ownerPluginId: string }>;
   byOwnerPluginId(pluginId: string): BusinessDomain[];
   subscribe(handler: () => void): () => void;
-  _ids(): { domains: string[]; features: string[]; projections: string[] };
+
 }
 
 export interface CommandDescriptor {
@@ -147,7 +123,6 @@ export interface CommandRegistry {
 
 // 复用 keyImport/transfer/assets/topbar/background 的注册表接口，避免重复声明。
 export type {
-  IImporterRegistry as ImporterRegistryContract,
   ITransferRegistry as TransferRegistryContract,
   IAssetRegistry as AssetRegistryContract,
   ITopbarRegistry as TopbarRegistryContract
@@ -161,5 +136,4 @@ export interface NoticeRegistry {
   list(): NoticeRecord[];
   subscribe(handler: (records: NoticeRecord[]) => void): () => void;
   /** 清理某个插件投递的全部 notice。 */
-  removeBySourcePluginId(sourcePluginId: string): void;
 }

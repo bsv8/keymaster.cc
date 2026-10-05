@@ -21,7 +21,7 @@ const CATALOG: readonly CoordinatorWorkerUnitDescriptor[] = [
     scopeKind: "owner-session",
     taskIds: ["p2pkh.transactions-sync"],
     // 两个依赖同时不满足时必须逐条列出，不允许只报第一个。
-    dependsOn: ["woc", "background", "token-stas.coordinator-worker"],
+    dependsOn: ["woc.coordinator-worker", "token-stas.coordinator-worker"],
     serviceIds: ["p2pkh.provider-registry"],
     storageDeclarations: [],
     storagePurposeIds: [],
@@ -33,7 +33,7 @@ const CATALOG: readonly CoordinatorWorkerUnitDescriptor[] = [
     runtime: "shared-worker",
     scopeKind: "root",
     taskIds: ["chain.chain-height-sync"],
-    dependsOn: ["background", "woc"],
+    dependsOn: [],
     serviceIds: ["woc.service"],
     storageDeclarations: [],
     storagePurposeIds: [],
@@ -46,7 +46,7 @@ const CATALOG: readonly CoordinatorWorkerUnitDescriptor[] = [
     scopeKind: "root",
     taskIds: ["token-stas.sync"],
     // 依赖链：token-stas 自己也要 woc，于是「依赖的依赖」可以逐层展开。
-    dependsOn: ["woc", "token-stas"],
+    dependsOn: ["woc.coordinator-worker"],
     serviceIds: ["token-stas.service"],
     storageDeclarations: [],
     storagePurposeIds: [],
@@ -70,7 +70,7 @@ const CATALOG: readonly CoordinatorWorkerUnitDescriptor[] = [
     runtime: "shared-worker",
     scopeKind: "owner-session",
     taskIds: [],
-    // 无依赖的单元：恒可用（只看插件开关），不需要额外规则。
+    // 无服务依赖仍需 owner 会话与自身就绪。
     dependsOn: [],
     serviceIds: ["sat-subscription.service"],
     storageDeclarations: [],
@@ -93,7 +93,6 @@ const CATALOG: readonly CoordinatorWorkerUnitDescriptor[] = [
 
 function context(overrides: Partial<CoordinatorUnitAvailabilityContext> = {}): CoordinatorUnitAvailabilityContext {
   return {
-    isProductEnabled: () => true,
     isUnitReady: () => true,
     isStorageReady: () => true,
     isOwnerSessionAvailable: () => true,
@@ -102,206 +101,96 @@ function context(overrides: Partial<CoordinatorUnitAvailabilityContext> = {}): C
   };
 }
 
+const reasons = (unitId: string, overrides: Partial<CoordinatorUnitAvailabilityContext> = {}) =>
+  evaluateCoordinatorUnitAvailability(unitId, context(overrides)).reasons.map(({ code, dependencyId }) => [code, dependencyId]);
+
 describe("单元可用性统一判定", () => {
-  it("插件开 + 单元就绪 → ready，reasons 为空", () => {
-    const result = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context());
-    expect(result).toMatchObject({ state: "ready", reasons: [] });
-    expect(result.dependsOn).toEqual(["woc", "background", "token-stas.coordinator-worker"]);
+  it("实际依赖、作用域及自身就绪时可用", () => {
+    expect(evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context())).toMatchObject({
+      state: "ready", reasons: [], dependsOn: ["woc.coordinator-worker", "token-stas.coordinator-worker"],
+    });
   });
-
-  it("插件开 + 单元未就绪 → failed，含 unit-not-ready 及对应 dependencyId", () => {
-    const result = evaluateCoordinatorUnitAvailability(
-      "p2pkh.coordinator-worker",
-      context({ isUnitReady: (unitId) => unitId !== "p2pkh.coordinator-worker" }),
-    );
-    expect(result.state).toBe("failed");
-    expect(result.reasons).toEqual([
-      expect.objectContaining({ code: "unit-not-ready", dependencyId: "p2pkh.coordinator-worker" }),
-    ]);
+  it("自身未就绪只列自身原因", () => {
+    expect(reasons("p2pkh.coordinator-worker", { isUnitReady: id => id !== "p2pkh.coordinator-worker" }))
+      .toEqual([["unit-not-ready", "p2pkh.coordinator-worker"]]);
   });
-
-  it("插件关 → failed，含 plugin-disabled", () => {
-    const result = evaluateCoordinatorUnitAvailability(
-      "p2pkh.coordinator-worker",
-      context({ isProductEnabled: (productId) => productId !== "p2pkh" }),
-    );
-    expect(result.state).toBe("failed");
-    expect(result.reasons).toEqual([
-      expect.objectContaining({ code: "plugin-disabled", dependencyId: "p2pkh" }),
-    ]);
-  });
-
-  it("多依赖部分不满足 → reasons 逐条列出全部不满足项", () => {
-    const result = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({
-      isProductEnabled: (productId) => productId !== "woc" && productId !== "background",
-      isUnitReady: (unitId) => unitId !== "p2pkh.coordinator-worker",
-    }));
-    expect(result.state).toBe("failed");
-    expect(result.reasons.map((item) => [item.code, item.dependencyId])).toEqual([
-      ["dependency-disabled", "woc"],
-      ["dependency-disabled", "background"],
-      ["unit-not-ready", "p2pkh.coordinator-worker"],
-    ]);
-  });
-
-  it("依赖链下钻：依赖的依赖不满足也逐层展开", () => {
-    // p2pkh → token-stas(单元) → woc(产品)；woc 被停用时整条链都要能看到。
-    const result = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({
-      isProductEnabled: (productId) => productId !== "woc",
-      isUnitReady: () => false,
-    }));
-    expect(result.reasons.map((item) => [item.code, item.dependencyId])).toEqual([
-      ["dependency-disabled", "woc"],
+  it("多个实际依赖未就绪时全部列出，并展开依赖链", () => {
+    expect(reasons("p2pkh.coordinator-worker", { isUnitReady: () => false })).toEqual([
+      ["unit-not-ready", "woc.coordinator-worker"],
       ["dependency-not-ready", "token-stas.coordinator-worker"],
-      ["dependency-disabled", "woc"],
+      ["unit-not-ready", "woc.coordinator-worker"],
       ["unit-not-ready", "token-stas.coordinator-worker"],
       ["unit-not-ready", "p2pkh.coordinator-worker"],
     ]);
   });
-
-  it("同一依赖不被列两次：子原因只有「自己还没起来」时不重复列依赖关系", () => {
-    // p2pkh → token-stas(单元) → woc(产品)，但 woc 这次是好的。
-    // token-stas 的解释只有「我自己还没起来」，与「依赖 token-stas 不可用」是同一件事，
-    // 因此同一个依赖只出现一次。
-    const result = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({
-      isProductEnabled: () => true,
-      isUnitReady: () => false,
-    }));
-    expect(result.reasons.map((item) => [item.code, item.dependencyId])).toEqual([
-      ["unit-not-ready", "token-stas.coordinator-worker"],
-      ["unit-not-ready", "p2pkh.coordinator-worker"],
-    ]);
+  it("子单元只有自身未就绪时不重复列依赖关系", () => {
+    expect(reasons("p2pkh.coordinator-worker", { isUnitReady: id => id !== "token-stas.coordinator-worker" }))
+      .toEqual([["unit-not-ready", "token-stas.coordinator-worker"]]);
   });
-
-  it("子依赖有自己的原因时，依赖关系与子原因都要列出", () => {
-    // 与上一条相反：token-stas 不可用是因为 woc 被停用，这是「依赖 token-stas
-    // 不可用」之外的新信息，必须一起呈现。p2pkh 自身已就绪，因此不列它自己的
-    // unit-not-ready。
-    const result = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({
-      isProductEnabled: (productId) => productId !== "woc",
-      isUnitReady: (unitId) => unitId !== "token-stas.coordinator-worker",
-    }));
-    expect(result.reasons.map((item) => [item.code, item.dependencyId])).toEqual([
-      ["dependency-disabled", "woc"],
-      ["dependency-not-ready", "token-stas.coordinator-worker"],
-      ["dependency-disabled", "woc"],
-      ["unit-not-ready", "token-stas.coordinator-worker"],
-    ]);
+  it("不存在的依赖声明即使运行态声称 ready 也不放行", () => {
+    const catalog = CATALOG.map(unit => unit.unitId === "p2pkh.coordinator-worker"
+      ? { ...unit, dependsOn: ["woc"] } : unit);
+    expect(reasons("p2pkh.coordinator-worker", { catalog }))
+      .toEqual([["unit-unknown", "woc"]]);
   });
-
-  it("无依赖的单元：插件开就恒可用（不需要特判）", () => {
-    const result = evaluateCoordinatorUnitAvailability("sat-subscription.coordinator-worker", context());
-    expect(result).toMatchObject({ state: "ready", dependsOn: [], reasons: [] });
+  it("作用域分别核对 Storage 根和 owner 会话", () => {
+    expect(reasons("storage.coordinator-worker", { isStorageReady: () => false }))
+      .toEqual([["storage-root-unavailable", undefined]]);
+    expect(reasons("sat-subscription.coordinator-worker", { isOwnerSessionAvailable: () => false }))
+      .toEqual([["owner-session-unavailable", undefined]]);
   });
-
-  it("无单元的产品：只看插件开关，不产生依赖原因", () => {
-    const result = evaluateCoordinatorUnitAvailability("woc.coordinator-worker", context({
-      isUnitReady: () => true,
-    }));
-    expect(result.state).toBe("ready");
-    // 产品 id 依赖只判插件开关；woc 自身产品开着即通过。
-    expect(result.reasons).toEqual([]);
+  it("无服务依赖的单元仍要求自身就绪", () => {
+    expect(reasons("sat-subscription.coordinator-worker", { isUnitReady: () => false }))
+      .toEqual([["unit-not-ready", "sat-subscription.coordinator-worker"]]);
   });
-
-  it("scopeKind 前置条件：storage 根与 owner 会话各自独立成一条原因", () => {
-    expect(evaluateCoordinatorUnitAvailability("storage.coordinator-worker", context({ isStorageReady: () => false })))
-      .toMatchObject({ state: "failed", reasons: [expect.objectContaining({ code: "storage-root-unavailable" })] });
-    expect(evaluateCoordinatorUnitAvailability("sat-subscription.coordinator-worker", context({ isOwnerSessionAvailable: () => false })))
-      .toMatchObject({ state: "failed", reasons: [expect.objectContaining({ code: "owner-session-unavailable" })] });
+  it("未知单元不静默放行", () => {
+    expect(reasons("unknown")).toEqual([["unit-unknown", "unknown"]]);
+    expect(isCoordinatorUnitAvailable("unknown", context())).toBe(false);
   });
-
-  it("未登记的单元 → unit-unknown，不静默放行", () => {
-    expect(evaluateCoordinatorUnitAvailability("nope.coordinator-worker", context())).toMatchObject({
-      state: "failed",
-      reasons: [expect.objectContaining({ code: "unit-unknown", dependencyId: "nope.coordinator-worker" })],
-    });
-    expect(isCoordinatorUnitAvailable("nope.coordinator-worker", context())).toBe(false);
+  it("传输层基础设施不受钱包作用域影响", () => {
+    expect(evaluateCoordinatorUnitStartupPreconditions(COORDINATOR_TRANSPORT_UNIT_ID,
+      context({ isStorageReady: () => false, isOwnerSessionAvailable: () => false }))).toMatchObject({ state: "ready" });
   });
-
-  it("传输层单元恒可用：它是 Host 的基础设施底座，不在领域目录里", () => {
-    expect(evaluateCoordinatorUnitAvailability(COORDINATOR_TRANSPORT_UNIT_ID, context())).toMatchObject({
-      state: "ready",
-      reasons: [],
-    });
-    expect(evaluateCoordinatorUnitStartupPreconditions(COORDINATOR_TRANSPORT_UNIT_ID, context())).toMatchObject({
-      state: "ready",
-    });
+  it("启动门不要求自身 ready，避免启动死锁", () => {
+    expect(evaluateCoordinatorUnitStartupPreconditions("p2pkh.coordinator-worker",
+      context({ isUnitReady: id => id !== "p2pkh.coordinator-worker" }))).toMatchObject({ state: "ready" });
   });
-
-  it("启动前置条件不含「自身已就绪」，避免必须先就绪才能启动的死锁", () => {
-    const ready = (unitId: string) => unitId !== "p2pkh.coordinator-worker";
-    const full = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({ isUnitReady: ready }));
-    const preconditions = evaluateCoordinatorUnitStartupPreconditions("p2pkh.coordinator-worker", context({ isUnitReady: ready }));
-    expect(full.reasons.map((item) => item.code)).toEqual(["unit-not-ready"]);
-    expect(preconditions).toMatchObject({ state: "ready", reasons: [] });
-  });
-
-  it("构造前置条件不含声明依赖：依赖掉线时运行对象仍可建起来，否则开关都关不掉", () => {
-    const down = context({
-      isProductEnabled: (productId) => productId !== "woc",
-      isUnitReady: (unitId) => unitId !== "p2pkh.coordinator-worker",
-    });
-    // 框架门（启动）：依赖不满足 → 单元被阻塞，不启动。
-    expect(evaluateCoordinatorUnitStartupPreconditions("p2pkh.coordinator-worker", down).reasons.map((item) => item.code))
-      .toEqual(["dependency-disabled"]);
-    // 构造：依赖不参与，插件与作用域满足就能建。
+  it("启动门要求实际依赖，构造门保留依赖不可用时的诊断与业务设置路径", () => {
+    const down = context({ isUnitReady: () => false });
+    expect(evaluateCoordinatorUnitStartupPreconditions("p2pkh.coordinator-worker", down).state).toBe("failed");
     expect(evaluateCoordinatorUnitConstructionPreconditions("p2pkh.coordinator-worker", down))
       .toMatchObject({ state: "ready", reasons: [] });
-    // 完整可用性：依赖与自身就绪都算进去。
-    expect(evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", down).reasons.map((item) => item.code))
-      .toEqual(["dependency-disabled", "unit-not-ready"]);
+    expect(evaluateCoordinatorUnitConstructionPreconditions("p2pkh.coordinator-worker",
+      context({ isOwnerSessionAvailable: () => false })).state).toBe("failed");
   });
-
-  it("构造前置条件仍然挡住插件关闭与作用域未就绪", () => {
-    expect(evaluateCoordinatorUnitConstructionPreconditions("p2pkh.coordinator-worker", context({
-      isProductEnabled: (productId) => productId !== "p2pkh",
-    })).reasons.map((item) => item.code)).toEqual(["plugin-disabled"]);
-    expect(evaluateCoordinatorUnitConstructionPreconditions("p2pkh.coordinator-worker", context({
-      isOwnerSessionAvailable: () => false,
-    })).reasons.map((item) => item.code)).toEqual(["owner-session-unavailable"]);
+  it("坏目录的循环依赖不导致无限递归", () => {
+    const catalog = CATALOG.map(unit => unit.unitId === "woc.coordinator-worker"
+      ? { ...unit, dependsOn: ["p2pkh.coordinator-worker"] } : unit);
+    expect(reasons("p2pkh.coordinator-worker", { catalog, isUnitReady: () => false }))
+      .toContainEqual(["dependency-not-ready", "p2pkh.coordinator-worker"]);
   });
-
-  it("原因文案：fallback 一律英文，key 与 values 稳定可断言", () => {
-    const [pluginOff] = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({
-      isProductEnabled: (productId) => productId !== "p2pkh",
-    })).reasons;
-    expect(pluginOff!.text).toEqual({
-      key: "coordinator.unitUnavailable.pluginDisabled",
-      fallback: "Plugin disabled: p2pkh",
-      values: { product: "p2pkh" },
-    });
-    const [dependency] = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({
-      isProductEnabled: (productId) => productId !== "woc",
-    })).reasons;
-    expect(dependency!.text).toEqual({
-      key: "coordinator.unitUnavailable.dependencyDisabled",
-      fallback: "Required plugin disabled: woc",
-      values: { product: "woc" },
-    });
-    const [notReady] = evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({
-      isUnitReady: (unitId) => unitId !== "p2pkh.coordinator-worker",
-    })).reasons;
-    expect(notReady!.text).toEqual({
+  it("原因文案使用稳定 i18n key 与真实 unitId", () => {
+    expect(evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker",
+      context({ isUnitReady: id => id !== "p2pkh.coordinator-worker" })).reasons[0]?.text).toEqual({
       key: "coordinator.unitUnavailable.unitNotReady",
-      fallback: "Runtime unit has not finished starting",
-      values: { unit: "p2pkh.coordinator-worker" },
+      fallback: "Runtime unit has not finished starting", values: { unit: "p2pkh.coordinator-worker" },
     });
   });
-
-  it("框架门翻译集中在判定实现：单条保持 <code>[:<dependencyId>]，多条逐条列出", () => {
-    expect(describeUnitUnavailableForFramework(
-      evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({ isProductEnabled: (id) => id !== "p2pkh" })),
-    )).toBe("plugin-disabled:p2pkh");
-    expect(describeUnitUnavailableForFramework(
-      evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context({ isUnitReady: () => false })),
-    )).toBe("unit-not-ready:token-stas.coordinator-worker+unit-not-ready:p2pkh.coordinator-worker");
-    expect(describeUnitUnavailableForFramework(
-      evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context()),
-    )).toBeUndefined();
+  it("框架门保留逐条原因，可用时返回 undefined", () => {
+    expect(describeUnitUnavailableForFramework(evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker",
+      context({ isUnitReady: id => id !== "p2pkh.coordinator-worker" }))))
+      .toBe("unit-not-ready:p2pkh.coordinator-worker");
+    expect(describeUnitUnavailableForFramework(evaluateCoordinatorUnitAvailability("p2pkh.coordinator-worker", context())))
+      .toBeUndefined();
   });
-
-  it("内置目录：msfile 对 sat-subscription 的隐式依赖已补录", () => {
-    expect(COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === "msfile.coordinator-worker")?.dependsOn)
-      .toEqual(["sat-subscription.coordinator-worker"]);
+  it("内置目录仅含真实单元依赖且无产品/自身依赖", () => {
+    const ids = new Set(COORDINATOR_WORKER_UNIT_CATALOG.map(unit => unit.unitId));
+    for (const unit of COORDINATOR_WORKER_UNIT_CATALOG) {
+      expect(unit.dependsOn).not.toContain(unit.productId);
+      expect(unit.dependsOn).not.toContain(unit.unitId);
+      for (const dependency of unit.dependsOn) expect(ids.has(dependency)).toBe(true);
+    }
+    expect(COORDINATOR_WORKER_UNIT_CATALOG.find(unit => unit.productId === "p2pkh")?.dependsOn)
+      .toEqual(["storage.coordinator-worker", "woc.coordinator-worker", "vault.coordinator-worker"]);
   });
 });

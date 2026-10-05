@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { getBuiltinPluginRuntimeUnits, validateBuiltinPluginRuntimeUnitCatalog } from "@keymaster/contracts";
+import { BUILTIN_PLUGIN_PRODUCT_IDS, getBuiltinPluginRuntimeUnits, validateBuiltinPluginRuntimeUnitCatalog } from "@keymaster/contracts";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
 
 describe("Web plugin catalog runtime units", () => {
-  it("静态产品运行单元目录覆盖全部 24 个产品", () => {
+  it("静态产品运行单元目录覆盖全部发行版产品", () => {
     expect(validateBuiltinPluginRuntimeUnitCatalog()).toEqual([]);
   });
 
   it("为全部产品提供静态声明的运行单元，并保留真实 Worker 单元", () => {
-    expect(WEB_PLUGIN_CATALOG).toHaveLength(24);
+    expect(WEB_PLUGIN_CATALOG.map(manifest => manifest.id).sort()).toEqual([...BUILTIN_PLUGIN_PRODUCT_IDS].sort());
     for (const manifest of WEB_PLUGIN_CATALOG) {
       const expected = getBuiltinPluginRuntimeUnits(manifest.id);
       expect(manifest.units).toHaveLength(expected.length);

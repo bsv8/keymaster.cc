@@ -1,9 +1,11 @@
+import { walletStateFixtureSnapshot, walletStateFixtureAccess } from "@keymaster/runtime/test-support";
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { sha256 } from "@noble/hashes/sha256";
-import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { KEYSPACE_SERVICE_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type GlobalBalanceSnapshot, type KeyspaceService, type P2pkhCoordinatorControl, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
+import { VAULT_WALLET_STATE_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type GlobalBalanceSnapshot, type VaultWalletState, type P2pkhCoordinatorControl, type SessionCoordinatorClient } from "@keymaster/contracts";
 import { P2PKH_CAPABILITY, type P2pkhBalanceBreakdown, type P2pkhGlobalSettings, type P2pkhHistoryRecord, type P2pkhLocalTransaction, type P2pkhService } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";
 import { P2pkhWalletPage, type WalletSnapshot } from "./P2pkhWalletPage.js";
@@ -70,7 +72,7 @@ function makeLocal(id: string, overrides: Partial<P2pkhLocalTransaction> = {}): 
 }
 
 function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] = [historyRecord], serviceOverrides: Partial<P2pkhService> = {}, walletOverrides: Partial<WalletSnapshot> = {}, coordinatorOverrides: Partial<SessionCoordinatorClient> = {}, balanceOverrides: Partial<GlobalBalanceSnapshot> = {}) {
-  const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
+  const host = createPluginHost({  initialI18nResources: [p2pkhResources] });
   const registry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
   const testResource = { resourceId: "p2pkh:test", publicKeyHex: owner, label: "test", address: "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn", network: "test" as const, createdAt: "now", generation: 0 };
   const defaultBalances: GlobalBalanceSnapshot["balances"] = {
@@ -112,7 +114,7 @@ function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] =
     subscribe: () => () => undefined,
     invalidation: "immediate",
   } as unknown as Parameters<typeof registry.register>[0]);
-  host.provide(KEYSPACE_SERVICE_CAPABILITY, { active: () => ({ activePublicKeyHex: owner }), onActiveKeyChanged: () => () => undefined } as unknown as KeyspaceService);
+  host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess({ snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: owner }))()), subscribe: () => () => undefined } as unknown as VaultWalletState));
   host.provide(P2PKH_COORDINATOR_CONTROL_CAPABILITY, coordinatorOverrides as unknown as P2pkhCoordinatorControl);
   host.provide(P2PKH_CAPABILITY, serviceOverrides as P2pkhService);
   return host;
@@ -266,4 +268,19 @@ describe("P2pkhWalletPage", () => {
     expect(screen.getByText("123")).toBeTruthy();
     expect(screen.queryByText("txid:vout")).toBeNull();
   });
+});
+
+vi.mock("webloom-framework/react", async importOriginal => {
+  const hooks = await importOriginal<typeof import("webloom-framework/react")>();
+  return { ...hooks, usePluginCapability: hooks.useCapability, useOptionalPluginCapability: hooks.useOptionalCapability, useHasPluginCapability: hooks.useHasCapability };
+});
+
+vi.mock("@keymaster/runtime", async importOriginal => {
+  const runtime = await importOriginal<typeof import("@keymaster/runtime")>();
+  return { ...runtime, usePluginI18n: runtime.useI18n, usePluginLocale: runtime.useLocale, usePluginBsvPrice: runtime.useBsvPrice };
+});
+
+vi.mock("../P2pkhResourceContext.js", async () => {
+  const runtime = await import("@keymaster/runtime/assembly");
+  return { useP2pkhResources: () => runtime.usePluginHost().resourceStore };
 });

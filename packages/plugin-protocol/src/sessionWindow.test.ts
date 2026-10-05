@@ -30,7 +30,6 @@ function makeFakeOwnerCrypto(publicKeyHex: string) {
     deriveP2pkhAddress: async () => ({ publicKeyHex, address: "mock" }),
     sealSendInput: () => ({ error: "not used" }),
     openSealed: async () => null,
-    exportEncryptedKeyBackup: async () => ({ publicKeyHex, backup: new Uint8Array().buffer }),
     dispose: () => undefined
   } as const;
 }
@@ -211,8 +210,8 @@ import type { ProtocolServiceImpl } from "./protocolService.js";
 function makeFakeVaultService(): VaultService {
   return {
     status: () => "locked",
-    onLifecycleChange: () => () => undefined,
-    getLifecycleSnapshot: () => ({ status: "locked", sessionEpoch: "test", vaultLifecycleRevision: 0 }),
+    subscribeWalletState: () => () => undefined,
+    walletSnapshot: () => ({ status: "locked", sessionEpoch: "test", vaultLifecycleRevision: 0 }),
     getInitialActivationNotice: () => null,
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
@@ -248,7 +247,6 @@ function makeFakeVaultService(): VaultService {
       }),
       sealSendInput: () => ({ error: "not used" }),
       openSealed: async () => null,
-      exportEncryptedKeyBackup: async () => ({ publicKeyHex: "02".padEnd(66, "a"), backup: new Uint8Array().buffer }),
       dispose: () => undefined
     }),
     disposeAppViewSession: () => undefined,
@@ -287,33 +285,13 @@ function makeFakeVaultService(): VaultService {
       }),
       sealSendInput: () => ({ error: "not used" }),
       openSealed: async () => null,
-      exportEncryptedKeyBackup: async () => ({
-        publicKeyHex: "02".padEnd(66, "a"),
-        backup: new Uint8Array(0).buffer
-      }),
       dispose: () => undefined
     }),
   } as unknown as VaultService;
 }
 
-function makeFakeKeyspace(): ConstructorParameters<typeof ProtocolServiceImpl>[0]["keyspace"] {
-  return {
-    listKeys: async () => [],
-    getKey: async () => undefined,
-    active: () => ({}),
-    setActive: async () => undefined,
-    requireActiveKey: () => {
-      throw new Error("not used");
-    },
-    onActiveChange: () => () => undefined,
-    openOwnerAppStore: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
-    registerStorageDeclaration: () => undefined,
-    listOwnerStorageDeclarations: () => [],
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
-  } as unknown as ConstructorParameters<typeof ProtocolServiceImpl>[0]["keyspace"];
+function makeFakeWalletState(): ConstructorParameters<typeof ProtocolServiceImpl>[0]["walletState"] {
+  return { snapshot: () => ({ status: "locked", sessionEpoch: "fixture", runGeneration: "fixture", vaultLifecycleRevision: 0 }), subscribe: () => () => {} };
 }
 
 describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
@@ -322,7 +300,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
     const vault = makeFakeVaultService();
     const svc = new ProtocolServiceImpl({
       vault,
-      keyspace: makeFakeKeyspace(),
+      walletState: makeFakeWalletState(),
       bootMode: "appView"
     });
     type PrivProto = {
@@ -358,7 +336,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
     const vault = makeFakeVaultService();
     const svc = new ProtocolServiceImpl({
       vault,
-      keyspace: makeFakeKeyspace(),
+      walletState: makeFakeWalletState(),
       bootMode: "appView"
     });
     type PrivProto = {
@@ -386,7 +364,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
     const vault = makeFakeVaultService();
     const svc = new ProtocolServiceImpl({
       vault,
-      keyspace: makeFakeKeyspace(),
+      walletState: makeFakeWalletState(),
       bootMode: "appView"
     });
     const postedMessages: Array<{ type: string }> = [];
@@ -716,8 +694,8 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
   ): VaultService {
     return {
       status: () => "locked",
-      onLifecycleChange: () => () => undefined,
-      getLifecycleSnapshot: () => ({ status: "locked", sessionEpoch: "test", vaultLifecycleRevision: 0 }),
+      subscribeWalletState: () => () => undefined,
+      walletSnapshot: () => ({ status: "locked", sessionEpoch: "test", vaultLifecycleRevision: 0 }),
       getInitialActivationNotice: () => null,
       clearInitialActivationNotice: () => undefined,
       onInitialActivationNoticeChange: () => () => undefined,
@@ -753,10 +731,6 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
         }),
         sealSendInput: () => ({ error: "not used" }),
         openSealed: async () => null,
-        exportEncryptedKeyBackup: async () => ({
-          publicKeyHex: "02".padEnd(66, "a"),
-          backup: new Uint8Array().buffer
-        }),
         dispose: () => undefined
       }),
       disposeAppViewSession: () => undefined,
@@ -795,10 +769,6 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       }),
       sealSendInput: () => ({ error: "not used" }),
       openSealed: async () => null,
-      exportEncryptedKeyBackup: async () => ({
-        publicKeyHex: "02".padEnd(66, "a"),
-        backup: new Uint8Array(0).buffer
-      }),
       dispose: () => undefined
     })
   } as unknown as VaultService;
@@ -820,7 +790,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       const { ProtocolServiceImpl } = await import("./protocolService.js");
       const svc = new ProtocolServiceImpl({
         vault: makeFakeVaultService(),
-        keyspace: makeFakeKeyspace(),
+        walletState: makeFakeWalletState(),
         bootMode: "appView"
       });
       // 起点：等待 bootstrap。
@@ -861,7 +831,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       const { ProtocolServiceImpl } = await import("./protocolService.js");
       const svc = new ProtocolServiceImpl({
         vault: makeFakeVaultService(),
-        keyspace: makeFakeKeyspace(),
+        walletState: makeFakeWalletState(),
         bootMode: "appView"
       });
       svc.awaitLauncherBootstrap();
@@ -887,7 +857,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       const { ProtocolServiceImpl } = await import("./protocolService.js");
       const svc = new ProtocolServiceImpl({
         vault: makeFakeVaultService(),
-        keyspace: makeFakeKeyspace(),
+        walletState: makeFakeWalletState(),
         bootMode: "appView"
       });
       svc.awaitLauncherBootstrap();
@@ -909,7 +879,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       const { ProtocolServiceImpl } = await import("./protocolService.js");
       const svc = new ProtocolServiceImpl({
         vault: makeFakeVaultService(),
-        keyspace: makeFakeKeyspace(),
+        walletState: makeFakeWalletState(),
         bootMode: "appView"
       });
       svc.awaitLauncherBootstrap();
@@ -934,7 +904,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       const { ProtocolServiceImpl } = await import("./protocolService.js");
       const svc = new ProtocolServiceImpl({
         vault: makeFakeVaultService(),
-        keyspace: makeFakeKeyspace(),
+        walletState: makeFakeWalletState(),
         bootMode: "appView"
       });
       svc.awaitLauncherBootstrap();
@@ -962,7 +932,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       const { ProtocolServiceImpl } = await import("./protocolService.js");
       const svc = new ProtocolServiceImpl({
         vault: makeFakeVaultService(),
-        keyspace: makeFakeKeyspace(),
+        walletState: makeFakeWalletState(),
         bootMode: "connect"
       });
       svc.awaitLauncherBootstrap();

@@ -1,0 +1,23 @@
+{
+  "name": "@keymaster/plugin-page",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "react": "^18.3.1",
+    "webloom-framework": "0.6.0",
+    "@keymaster/ui": "*",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "@keymaster/plugin-webrtc": "*",
+    "bsv8-channel-protocol": "0.6.0"
+  }
+}

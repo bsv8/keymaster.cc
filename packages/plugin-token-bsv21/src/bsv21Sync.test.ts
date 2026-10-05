@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-token-bsv21/src/bsv21Sync.test.ts
 // BSV-21 后台同步任务取消语义测试：
 //   - 正常流程：replaceAll + emit data-changed。
@@ -11,14 +12,14 @@ import { createBsv21SyncTask } from "./bsv21Sync.js";
 import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
 import type { Bsv21MintHistoryRepository, Bsv21MintHistoryRecord } from "./storage/bsv21MintHistoryRepository.js";
 import type { Bsv21ServiceHandle } from "./bsv21Service.js";
-import type { AssetDataNotifier, KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
+import type { AssetDataNotifier, VaultWalletState, VaultService, WocService } from "@keymaster/contracts";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
   let current = activePublicKeyHex;
   return {
-    active: () => ({ activePublicKeyHex: current }),
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: current }))()),
     setActive(hex: string | undefined) { current = hex; }
-  } as unknown as KeyspaceService & { setActive(h: string | undefined): void };
+  } as unknown as VaultWalletState & { setActive(h: string | undefined): void };
 }
 
 function fakeVault(): VaultService {
@@ -110,12 +111,12 @@ describe("createBsv21SyncTask", () => {
   it("正常流程：replaceAll + emit data-changed", async () => {
     const stateRepository = fakeRepository();
     const notifier = fakeNotifier();
-    const ks = fakeKeyspace("pk1");
+    const ks = fakeWalletState("pk1");
     const task = createBsv21SyncTask({
       stateRepository: stateRepository as unknown as Bsv21StateRepository,
       service: fakeService(SAMPLE_TOKENS),
       woc: fakeWoc({ tok1: "unconfirmed" }),
-      keyspace: ks,
+      walletState: ks,
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -189,7 +190,7 @@ describe("createBsv21SyncTask", () => {
         }
       ]),
       woc: fakeWoc({ tok1: "unconfirmed" }),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -257,7 +258,7 @@ describe("createBsv21SyncTask", () => {
         }
       ]),
       woc: fakeWoc({ tok1: "confirmed" }),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -316,7 +317,7 @@ describe("createBsv21SyncTask", () => {
       historyRepository,
       service: fakeService([]),
       woc: fakeWoc({}),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -375,7 +376,7 @@ describe("createBsv21SyncTask", () => {
       historyRepository,
       service: fakeService([]),
       woc: fakeWoc({}),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -444,7 +445,7 @@ describe("createBsv21SyncTask", () => {
         }
       ]),
       woc: fakeWoc({ "tok-restore": "confirmed" }),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -463,7 +464,7 @@ describe("createBsv21SyncTask", () => {
       stateRepository: stateRepository as unknown as Bsv21StateRepository,
       service: fakeService(SAMPLE_TOKENS),
       woc: fakeWoc(),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -485,7 +486,7 @@ describe("createBsv21SyncTask", () => {
       stateRepository: stateRepository as unknown as Bsv21StateRepository,
       service: svc,
       woc: fakeWoc(),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -505,7 +506,7 @@ describe("createBsv21SyncTask", () => {
       stateRepository: stateRepository as unknown as Bsv21StateRepository,
       service: fakeService(SAMPLE_TOKENS),
       woc: fakeWoc(),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -519,8 +520,8 @@ describe("createBsv21SyncTask", () => {
     const notifier = fakeNotifier();
     let currentKey = "pk-old";
     const ks = {
-      active: () => ({ activePublicKeyHex: currentKey })
-    } as unknown as KeyspaceService;
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: currentKey }))())
+    } as unknown as VaultWalletState;
     (stateRepository.replaceAll as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       // replaceAll 完成后 active key 切换
       currentKey = "pk-new";
@@ -529,7 +530,7 @@ describe("createBsv21SyncTask", () => {
       stateRepository: stateRepository as unknown as Bsv21StateRepository,
       service: fakeService(SAMPLE_TOKENS),
       woc: fakeWoc(),
-      keyspace: ks,
+      walletState: ks,
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -547,7 +548,7 @@ describe("createBsv21SyncTask", () => {
       stateRepository: stateRepository as unknown as Bsv21StateRepository,
       service: svc,
       woc: fakeWoc(),
-      keyspace: fakeKeyspace(undefined),
+      walletState: fakeWalletState(undefined),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });

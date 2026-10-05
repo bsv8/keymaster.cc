@@ -1,88 +1,39 @@
-// packages/runtime/src/react/usePluginRuntime.ts
-// 插件运行时操作 hook。
-// 设计缘由（硬切换 001）：
-//   - UI 层（plugin manager）需要 enable / disable 插件。
-//   - 业务组件可能需要查 graph / state。
-//   - 把这些操作收拢到 hook，调用方拿到的是一个稳定 API 对象。
-
 import { useMemo } from "react";
 import type { PluginGraph, PluginState, PluginReverseDep } from "@keymaster/contracts";
-import type { PluginIntentSubmissionResult } from "webloom-framework";
 import type { PluginHost } from "../pluginHostContract.js";
 import { usePluginHost, useHostVersion } from "./PluginHostProvider.js";
 
+/** Trusted diagnostics view. Recovery never persists an enable/disable preference. */
 export interface UsePluginRuntime {
   state(id: string): PluginState;
   graph(): PluginGraph;
   reverseDeps(id: string): PluginReverseDep[];
-  enable(id: string): Promise<void>;
-  disable(id: string): Promise<{ ok: true } | { ok: false; reason: string }>;
-  /** 提交产品级绝对启停意图；accepted 只表示意图已持久化。 */
-  submitIntent(id: string, desiredEnabled: boolean): Promise<PluginIntentSubmissionResult>;
-  unregister(id: string): Promise<void>;
+  retry(id: string): Promise<void>;
   version(): number;
   manifests(): string[];
   installed(): string[];
-  isEnabled(id: string): boolean;
-  /** 拿单条 plugin 的 manifest。id 未知时返回 undefined。 */
+  isRunning(id: string): boolean;
   getManifest(id: string): import("@keymaster/contracts").PluginManifest | undefined;
-  /**
-   * 探测 capability 是否存在。供 UI 判断"依赖的 capability 是否满足"，
-   * 依赖列表里写的是 capability key（如 "route.registry"），不是 plugin id。
-   */
   hasCapability(key: string): boolean;
 }
 
 export function usePluginRuntime(): UsePluginRuntime {
   const host = usePluginHost();
   const version = useHostVersion();
-  return useMemo<UsePluginRuntime>(() => {
-    const api: UsePluginRuntime = {
-      state(id) {
-        return host.state(id);
-      },
-      graph() {
-        return host.graph();
-      },
-      reverseDeps(id) {
-        return host.reverseDeps(id);
-      },
-      enable(id) {
-        return host.enable(id);
-      },
-      disable(id) {
-        return host.disable(id);
-      },
-      submitIntent(id, desiredEnabled) {
-        return host.submitIntent(id, desiredEnabled);
-      },
-      unregister(id) {
-        return host.unregister(id);
-      },
-      version() {
-        return host.version();
-      },
-      manifests() {
-        return host.manifests();
-      },
-      installed() {
-        return host.installed();
-      },
-      isEnabled(id) {
-        return host.state(id).kind === "enabled";
-      },
-      getManifest(id) {
-        return host.getManifest(id);
-      },
-      hasCapability(key) {
-        return host.capabilities.descriptors().some((capability) => capability.id === key);
-      }
-    };
-    return api;
-  }, [host, version]);
+  return useMemo(() => ({
+    state: host.state,
+    graph: host.graph,
+    reverseDeps: host.reverseDeps,
+    retry: host.retry,
+    version: host.version,
+    manifests: host.manifests,
+    installed: host.installed,
+    isRunning: (id: string) => host.state(id).kind === "enabled",
+    getManifest: host.getManifest,
+    hasCapability: (key: string) => host.capabilities.descriptors().some(c => c.id === key),
+  }), [host, version]);
 }
 
-/** 旧调用方兼容：单纯拿 host 引用。 */
 export function useHost(): PluginHost {
   return usePluginHost();
 }

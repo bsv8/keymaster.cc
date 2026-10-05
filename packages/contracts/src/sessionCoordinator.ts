@@ -59,11 +59,6 @@ import type {
 import type { CoordinatorSatOperation, CoordinatorSatStateEvent } from "./satSubscription.js";
 import type { SatErrorCode } from "./satSubscription.js";
 import type { WindowP2pExecutorError } from "./windowP2pExecutor.js";
-import type {
-  PluginIntentCommand,
-  PluginIntentSnapshot,
-  PluginIntentSubmissionResult,
-} from "webloom-framework";
 import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
 
 // ============================================================
@@ -111,9 +106,7 @@ export interface CoordinatorAuthorityRecovery {
  */
 export type CoordinatorUnitUnavailableCode =
   /** 本单元所属产品的插件开关关闭。 */
-  | "plugin-disabled"
   /** 依赖的产品插件开关关闭。 */
-  | "dependency-disabled"
   /** 依赖的单元当前不可用（尚未就绪或自身依赖不满足）。 */
   | "dependency-not-ready"
   /** 作用域前置条件不满足：Storage 根未就绪。 */
@@ -241,23 +234,7 @@ export type CoordinatorClientRequestWithStorage =
   | { kind: "storage.data"; clientId: string; requestId: string; data: CoordinatorStorageData; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "disconnect"; clientId: string; requestId: string }
-  | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch }
-  /**
-   * 打开只读浏览会话；返回绑定三种世代的不透明句柄。
-   *
-   * 请求里没有 unitId 之类的身份字段：调用方所属的运行单元由 Coordinator 从已验证
-   * 的 peer/端口上下文判定，自报任何字符串都不构成授权。
-   */
-  | { kind: "storage.browse.open"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
-  /** 浏览数据面：列举元数据或请求预览；句柄绑定端口与浏览会话。 */
-  | { kind: "storage.browse.data"; clientId: string; requestId: string; data: CoordinatorStorageBrowseData; expectedSessionEpoch: SessionEpoch }
-  /** 关闭浏览会话并释放它的全部游标。 */
-  | { kind: "storage.browse.close"; clientId: string; requestId: string; browseSessionId: string };
-
-/** 只读浏览的数据面；写操作不在此类型里。 */
-export type CoordinatorStorageBrowseData =
-  | { type: "browse.list"; browseSessionId: string; prefix: string; cursor?: string; limit?: number }
-  | { type: "browse.preview"; browseSessionId: string; path: string; ifRevision?: string };
+  | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
 
 /** Host/Coordinator 内部存储请求，不属于插件可见的 SessionCoordinatorClient。 */
 export type CoordinatorClientRequestWithInternalStorage =
@@ -404,8 +381,6 @@ export type CoordinatorClientRequest =
   /** 取消当前端口发起的 Channel 请求；服务端按真实端口身份定位目标。 */
   | { kind: "channel.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "contacts.presence.snapshot"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "plugin.intent.snapshot"; clientId: string; requestId: string }
-  | { kind: "plugin.intent.submit"; clientId: string; requestId: string; command: PluginIntentCommand }
   | ({ kind: "hello"; clientId: string; requestId: string; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; expectedSessionEpoch: SessionEpoch }
@@ -427,7 +402,7 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "chain.height" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "plugin.intent" | "worker.units";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "chain.height" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "worker.units";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -548,20 +523,7 @@ export type CoordinatorTopicEvent =
   | CoordinatorSatStateEvent
   | CoordinatorChannelStateEvent
   | CoordinatorContactsPresenceEvent
-  | PluginIntentStateEvent
   | CoordinatorWorkerUnitStateEvent;
-
-/** SharedWorker 唯一插件启停意图快照。配置持久化成功与实例启动状态分离。 */
-export interface PluginIntentStateEvent {
-  topic: "plugin.intent";
-  type: "plugin.intent.changed";
-  /** 产生该快照的 SharedWorker 启动身份；旧 Worker 事件不得覆盖新 Worker。 */
-  authorityInstanceId: string;
-  /** 与 PluginIntentSnapshot.revision 相同的单调修订。 */
-  pluginIntentRevision: number;
-  sessionEpoch: SessionEpoch;
-  snapshot: PluginIntentSnapshot;
-}
 
 /** Coordinator 已验签并完成固定 inbox 分派的 Channel 事件。 */
 export interface CoordinatorChannelStateEvent {
@@ -614,6 +576,8 @@ export interface CoordinatorStorageStateEvent {
   topic: "storage.state";
   type: "storage.state.changed";
   storageRevision: number;
+  /** Aggregate pending I/O only; no paths, contents or activity history. */
+  activity?: { reads: number; writes: number };
   sessionEpoch: SessionEpoch;
   status: StorageRuntimeControllerStatus;
   /** 当前钱包身份世代；重置后变化，各 Tab 据此使旧授权失效。 */
@@ -625,6 +589,7 @@ export interface CoordinatorStorageStateEvent {
 
 /** The complete public session snapshot. This is the sole cross-tab session event. */
 export interface SessionStateEvent {
+  activeKeyIdentity?: import("./vault.js").KeyIdentity;
   topic: "session.state";
   type: "session.state.changed";
   sessionRevision: number;
@@ -696,8 +661,8 @@ export interface AssetDataChangedEvent {
 export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | CoordinatorChainHeightEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | CoordinatorWorkerUnitStateEvent;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | CoordinatorChainHeightEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | PluginIntentStateEvent | CoordinatorWorkerUnitStateEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -711,6 +676,7 @@ export interface CoordinatorSubscribeTopicsResult {
 
 /** Coordinator 公开状态快照。 */
 export interface CoordinatorBootstrapSnapshot {
+  activeKeyIdentity?: import("./vault.js").KeyIdentity;
   /** SharedWorker 启动身份；意图命令必须绑定此值。 */
   authorityInstanceId: string;
   /**
@@ -742,7 +708,6 @@ export interface CoordinatorBootstrapSnapshot {
   /** 当前钱包身份世代；重置后变化，各 Tab 据此使旧授权失效。 */
   walletGeneration?: string;
   /** 插件产品启用意图；不代表运行单元已经启动。 */
-  pluginIntent?: PluginIntentSnapshot;
   /**
    * 当前 Coordinator 选择的 storage-I/O peer 脱敏投影；只含框架
    * endpoint binding 和 handoff 修订，不含 lease、owner 或存储配置。
@@ -831,16 +796,6 @@ export interface SessionCoordinatorClient {
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
-  /**
-   * 打开只读存储浏览会话；只发给受信任的平台运行单元。
-   *
-   * 没有任何身份参数：Coordinator 从已验证的 peer 上下文判定归属。
-   */
-  storageBrowseOpen(): Promise<CoordinatorValueResult<import("./storage/browse.js").StorageBrowseSession>>;
-  /** 浏览数据面：列举元数据或请求预览。 */
-  storageBrowseData(data: CoordinatorStorageBrowseData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
-  /** 关闭浏览会话并释放它的全部游标。 */
-  storageBrowseClose(browseSessionId: string): Promise<CoordinatorCommandResult>;
   msfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorValueResult<unknown>>;
   msfileGrant(context: MsFileConnectAppContext): Promise<CoordinatorValueResult<string>>;
   msfileData(data: CoordinatorMsFileData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
@@ -858,9 +813,7 @@ export interface SessionCoordinatorClient {
   /** 读取 Coordinator 内唯一联系人在线状态快照；不会触发新的网络探测。 */
   contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
   /** 读取 SharedWorker 唯一插件意图快照。 */
-  pluginIntentSnapshot(): Promise<CoordinatorValueResult<PluginIntentSnapshot>>;
   /** 提交绝对启停意图；accepted 只表示 Worker 已持久化。 */
-  pluginIntentSubmit(command: PluginIntentCommand): Promise<PluginIntentSubmissionResult>;
   p2pkhSettingsUpdate(settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult>;
   p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
   p2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorCommandResult>;
@@ -884,11 +837,6 @@ export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
 /** Storage 插件 Coordinator 面。 */
 export type StorageCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort"
->;
-
-/** 存储浏览页面的 Coordinator 面；只有只读浏览，没有写操作。 */
-export type StorageBrowseCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "storageBrowseOpen" | "storageBrowseData" | "storageBrowseClose"
 >;
 
 /**
@@ -976,8 +924,6 @@ export const STORAGE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<StorageCo
  * Coordinator 侧不读取任何调用方自报的主体：浏览授权由它自己在已验证的 peer
  * 上下文里签发，并与该 peer 绑定。
  */
-export const STORAGE_BROWSE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<StorageBrowseCoordinatorControl>({ kind: "local", id: "storage.browse-coordinator-control", version: "1" });
-export const VAULT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<VaultCoordinatorControl>({ kind: "local", id: "vault.coordinator-control", version: "1" });
 export const BACKGROUND_COORDINATOR_CONTROL_CAPABILITY = defineCapability<BackgroundCoordinatorControl>({ kind: "local", id: "background.coordinator-control", version: "1" });
 export const P2PKH_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "p2pkh.coordinator-control", version: "1" });
 export const WOC_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "woc.coordinator-control", version: "1" });

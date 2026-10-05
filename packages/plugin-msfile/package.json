@@ -14,9 +14,8 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/msfile-media": "*",
-    "@keymaster/plugin-window-p2p": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.5.0",
+    "webloom-framework": "0.6.0",
     "@keymaster/ui": "*",
     "masterseed": "1.1.0",
     "@libp2p/webrtc": "6.0.30",

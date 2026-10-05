@@ -9,7 +9,7 @@
 //   - 所有 signDigest 调用必须显式指定 format（"der" 或 "compact"）
 //   - 没有默认格式；缺少或未知格式一律失败
 
-import type { KeyIdentity } from "./keyspace.js";
+import type { KeyIdentity } from "./vault.js";
 
 /**
  * ECDSA 签名编码格式枚举。
@@ -68,14 +68,7 @@ export interface ActiveKeyCryptoDeriveP2pkhAddressResult {
   address: string;
 }
 
-export interface ActiveKeyCryptoExportBackupInput {
-  publicKeyHex: string;
-}
 
-export interface ActiveKeyCryptoExportBackupResult {
-  publicKeyHex: string;
-  backup: ArrayBuffer;
-}
 
 export interface ActiveKeyCrypto {
   getIdentity(): ActiveKeyCryptoIdentity;
@@ -83,8 +76,5 @@ export interface ActiveKeyCrypto {
   deriveP2pkhAddress(
     input: ActiveKeyCryptoDeriveP2pkhAddressInput
   ): Promise<ActiveKeyCryptoDeriveP2pkhAddressResult>;
-  exportEncryptedKeyBackup(
-    input: ActiveKeyCryptoExportBackupInput
-  ): Promise<ActiveKeyCryptoExportBackupResult>;
   dispose(reason?: string): void;
 }

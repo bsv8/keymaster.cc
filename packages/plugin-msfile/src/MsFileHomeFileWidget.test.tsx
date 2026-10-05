@@ -30,23 +30,21 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({
+  usePluginI18n: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       let value = String(options?.defaultValue ?? key);
       return value.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, name: string) => String(options?.[name] ?? ""));
     },
   }),
   usePluginHost: () => ({ resourceStore: {}, resourceRegistry: { get: () => ({}) } }),
-  useRuntimeStatus: () => ({ vault: state.vault }),
+  useResourceViewSelector: (_reader: unknown, id: string) => id === "msfile.ui.vault-status" ? state.vault : id === "msfile.status" ? state.status : state.lifecycle,
   AppLink: ({ children }: { children?: unknown }) => children,
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: <T,>(_key: string): T => state.service as unknown as T,
-  useOptionalCapability: <T,>(_key: string): T | undefined => state.service as unknown as T,
-  useResourceSelector: <T,>(_store: unknown, id: string, _args: readonly string[], _selector: unknown): T =>
-    (id === "msfile.status" ? state.status : state.lifecycle) as unknown as T
+  useOptionalPluginCapability: <T,>(_key: unknown): T | undefined => state.service as unknown as T,
 }));
+vi.mock("./MsFileResourceContext.js", () => ({ useMsFileResources: () => ({}) }));
 
 function bytesFromHex(hex: string): Uint8Array {
   return Uint8Array.from(hex.match(/../g)!.map((pair) => Number.parseInt(pair, 16)));

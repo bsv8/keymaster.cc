@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-webrtc/src/webrtcService.ts
 // WebRTC 业务 service（施工单 2026-07-04 002 硬切换 + 通话恢复）。
 //
@@ -26,7 +27,7 @@ import type {
   ChannelRuntime,
   JSONValue
 } from "@keymaster/contracts";
-import type { KeyspaceService, NoticeRegistry } from "@keymaster/contracts";
+import type { VaultWalletState, NoticeRegistry, NoticeRecord } from "@keymaster/contracts";
 import { WEBRTC_SIGNAL_PROTOCOL } from "./constants.js";
 import type { WebrtcBlockReason as ContractWebrtcBlockReason } from "@keymaster/contracts";
 import { APP_MESSAGE_PROTOCOL } from "bsv8-channel-protocol/app-message";
@@ -630,7 +631,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 export function createWebrtcService(input: {
   channel: ChannelRuntime;
-  keyspace?: KeyspaceService;
+  walletState?: VaultWalletState;
   historyService?: WebrtcHistoryService;
   noticeRegistry?: NoticeRegistry;
   configStore: WebrtcConfigStore;
@@ -651,7 +652,8 @@ export function createWebrtcService(input: {
   const channel = input.channel;
   const store = input.configStore;
   const env = input.env ?? createBrowserWebrtcEnvironment();
-  const keyspace = input.keyspace ?? ({ active: () => ({}) } as KeyspaceService);
+  const walletState = input.walletState;
+  if (!walletState) throw new Error("WebRTC requires Vault wallet state");
   const historyService =
     input.historyService ??
     ({
@@ -667,7 +669,6 @@ export function createWebrtcService(input: {
       dismiss: () => undefined,
       list: () => [],
       subscribe: () => () => undefined,
-      removeBySourcePluginId: () => undefined
     } as NoticeRegistry);
 
   async function calculateSha256(bytes: Uint8Array): Promise<string> {
@@ -1166,8 +1167,8 @@ export function createWebrtcService(input: {
   let remoteNotice: WebrtcRemoteNotice | null = null;
   let lastError: WebrtcBlockReason | null = null;
   const subscribers = new Set<WebrtcSubscriber>();
-  const owner = () => keyspace.active().activePublicKeyHex?.trim().toLowerCase() ?? null;
-  let observedOwnerPublicKeyHex = owner();
+  const owner = () => walletState.snapshot().activePublicKeyHex?.trim().toLowerCase() ?? null;
+  let observedWalletSession = walletState.snapshot();
 
   function currentOwnerPublicKeyHex(): string | null {
     return owner();
@@ -1280,7 +1281,11 @@ export function createWebrtcService(input: {
   }
 
   function dismissAllNotices(): void {
-    noticeRegistry.removeBySourcePluginId("webrtc");
+    let notices: NoticeRecord[];
+    try { notices = noticeRegistry.list(); } catch { return; }
+    for (const notice of notices) {
+      if (notice.sourcePluginId === "webrtc") noticeRegistry.dismiss(notice.id);
+    }
   }
 
   function upsertIncomingNotice(session: ActiveSession): void {
@@ -3293,12 +3298,11 @@ export function createWebrtcService(input: {
     if (!ownerPublicKeyHex) return;
     void channel.subscriptionSet([`bsv8.inbox.${ownerPublicKeyHex}`, HASH_REQUEST_CHANNEL]).catch(() => undefined);
   };
-  subscribeOwnerInbox();
-  const offOwnerChanged = typeof keyspace.onActiveKeyChanged === "function"
-    ? keyspace.onActiveKeyChanged((state) => {
+  const offOwnerChanged = walletState.subscribe((state) => {
       const nextOwner = state.activePublicKeyHex?.trim().toLowerCase() ?? null;
-      if (nextOwner !== observedOwnerPublicKeyHex) {
-        observedOwnerPublicKeyHex = nextOwner;
+      const sessionChanged = !sameWalletSession(observedWalletSession, state);
+      observedWalletSession = state;
+      if (sessionChanged) {
         ownerGeneration += 1;
       }
       cancelTransferAdmissions();
@@ -3308,12 +3312,12 @@ export function createWebrtcService(input: {
         dialReservation = null;
         emit();
       }
-      if (active && active.ownerPublicKeyHex !== nextOwner) {
+      if (active && (sessionChanged || active.ownerPublicKeyHex !== nextOwner)) {
         const stale = active;
         clearActive({ showEndedPhase: true });
         void recordCallEnd(stale, "failed").catch(() => undefined);
       }
-      if (activeTransfer && activeTransfer.ownerPublicKeyHex !== nextOwner) {
+      if (activeTransfer && (sessionChanged || activeTransfer.ownerPublicKeyHex !== nextOwner)) {
         finalizeTransferWithFailure(activeTransfer, new Error("transfer_owner_changed"));
       }
       for (const sessionId of pendingTransferRequests.keys()) removePendingTransferRequest(sessionId);
@@ -3321,8 +3325,7 @@ export function createWebrtcService(input: {
       transferRequestRates.clear();
       transferAcceptanceInFlight = null;
       subscribeOwnerInbox();
-    })
-    : undefined;
+    });
 
   async function dispose(): Promise<void> {
     if (disposed) return;

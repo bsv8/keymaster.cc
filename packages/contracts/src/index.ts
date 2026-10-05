@@ -9,10 +9,10 @@
 export * from "./plugin.js";
 export { capabilityDescriptor } from "webloom-framework";
 export * from "./vault.js";
-export * from "./keyspace.js";
 export * from "./keyImport.js";
 export * from "./transfer.js";
 export * from "./p2pkhAddress.js";
+export * from "./p2pkhSettings.js";
 export * from "./navigation.js";
 export * from "./business.js";
 export * from "./settings.js";
@@ -38,7 +38,6 @@ export * from "./spendProtection.js";
 export * from "./protocolSpend.js";
 export * from "./i18n.js";
 export * from "./keyDisplay.js";
-export * from "./poker.js";
 export * from "./protocol.js";
 export * from "./satSubscription.js";
 export * from "./appIdentity.js";
@@ -62,3 +61,17 @@ export * from "./applicationBootstrap.js";
 export * from "./keymasterLifecycle.js";
 export * from "./pluginProducts.js";
 export * from "./webloom.js";
+
+export * from "./page.js";
+export * from "./runtimeDiagnostics.js";
+
+export * from "./scopedClients.js";
+
+export { BUILTIN_PLUGIN_DEFINITIONS } from "./generated/pluginDefinitions.js";
+
+export * from "./appStorageBinding.js";
+
+export * from "./p2pkhAssetReader.js";
+export * from "./workerTransfer.js";
+export * from "./uriAction.js";
+export * from "./publicKeyUri.js";

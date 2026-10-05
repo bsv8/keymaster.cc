@@ -1,3 +1,6 @@
+import { openSettingsPage } from "../../drivers/settingsDriver.js";
+import { readFile } from "node:fs/promises";
+import { readRawWalletObjects } from "../../support/walletStorageFormats.js";
 import { expect, test } from "@playwright/test";
 import { readWalletPublicKey } from "../../drivers/appDriver.js";
 import { initializeLocalUserWithImportedHexKey } from "../../drivers/initialSetupDriver.js";
@@ -31,6 +34,18 @@ test(JOURNEY_ID + "：首次初始化导入 Hex Key 后进入首页", async ({ p
     // 初始化完成后落在首页；身份真值由 key.json 确认。
     expect(new URL(page.url()).pathname).toBe("/");
     await expect(readWalletPublicKey(page)).resolves.toBe(ready.publicKeyHex);
+    // 合并后导出由 Vault 自己的设置 UI 使用内部服务；字节必须与加密原件一致。
+    const original = (await readRawWalletObjects(page, "^key\\.json$")).find(entry => entry.path === "key.json")?.text;
+    expect(original).toBeDefined();
+    await openSettingsPage(page, { label: /^(Wallet key|钱包 Key)$/u, path: /\/settings\/current-key$/u, heading: /^(Wallet key|钱包 Key)$/u });
+    await page.getByRole("button", { name: /^(Export KeyHold|导出 KeyHold)$/u }).click();
+    const downloaded = page.waitForEvent("download");
+    await page.getByRole("dialog").getByRole("button", { name: /^(Export|导出)$/u }).click();
+    const download = await downloaded;
+    expect(download.suggestedFilename()).toMatch(/^keymaster-keyhold-.*\.json$/u);
+    const exported = await readFile((await download.path())!, "utf8");
+    expect(exported).toBe(original);
+    expect(exported).not.toContain(privateKeyHex);
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password, privateKeyHex]);
     await attachVisibleDiagnostic(page, testInfo);

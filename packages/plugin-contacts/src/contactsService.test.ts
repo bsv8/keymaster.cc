@@ -1,17 +1,17 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { describe, expect, it } from "vitest";
-import type { ActiveKeyState, ModuleFileStore } from "@keymaster/contracts";
+import type { VaultLifecycleSnapshot, ModuleFileStore } from "@keymaster/contracts";
 import { createContactsService } from "./contactsService.js";
 
 const OWNER = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ALICE = "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BOB = "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
-function keyspace() {
-  const state: ActiveKeyState = { activePublicKeyHex: OWNER };
+function walletState() {
+  const state: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: OWNER });
   return {
-    active: () => state,
-    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" }),
-    onActiveKeyChanged: () => () => undefined,
+    snapshot: () => state,
+    subscribe: () => () => undefined,
   };
 }
 
@@ -58,7 +58,7 @@ function memoryFileStore(): ModuleFileStore & { puts: Array<{ path: string; text
 describe("ContactsService 文件写入", () => {
   it("省略空的可选备注字段", async () => {
     const storage = memoryFileStore();
-    const service = createContactsService({ keyspace: keyspace(), storage });
+    const service = createContactsService({ walletState: walletState(), storage });
     await service.addContact({ publicKeyHex: ALICE, name: "Alice" });
 
     expect(storage.puts).toHaveLength(1);
@@ -71,7 +71,7 @@ describe("ContactsService 文件写入", () => {
 
   it("重复公钥被拒绝,改名时移动文件", async () => {
     const storage = memoryFileStore();
-    const service = createContactsService({ keyspace: keyspace(), storage });
+    const service = createContactsService({ walletState: walletState(), storage });
     await service.addContact({ publicKeyHex: ALICE, name: "Alice" });
     await expect(service.addContact({ publicKeyHex: ALICE, name: "Alice 2" })).rejects.toThrow();
     expect(storage.puts).toHaveLength(1);
@@ -85,5 +85,19 @@ describe("ContactsService 文件写入", () => {
     await service.removeContact(BOB);
     await expect(service.listContacts()).resolves.toEqual([]);
     service.dispose?.();
+  });
+});
+
+
+describe("Contacts presence teardown", () => {
+  it("clears presence without reading an already revoked wallet view", () => {
+    let revoked = false;
+    const state = walletState();
+    const service = createContactsService({ storage: memoryFileStore(), walletState: {
+      ...state, snapshot: () => { if (revoked) throw new Error("wallet Scope revoked"); return state.snapshot(); },
+    } });
+    revoked = true;
+    expect(() => service.resetPresence?.()).not.toThrow();
+    expect(() => service.dispose?.()).not.toThrow();
   });
 });

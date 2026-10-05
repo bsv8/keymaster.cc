@@ -22,14 +22,14 @@ import {
 let currentService: ProtocolService | null = null;
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({
+  usePluginI18n: () => ({
     t: (key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? key,
     language: () => "en"
   })
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useCapability: (key: unknown) =>
+  usePluginCapability: (key: unknown) =>
     key === PROTOCOL_SERVICE_CAPABILITY ? currentService : undefined
 }));
 
@@ -811,4 +811,11 @@ describe("OriginSettingsTray — confirmTimeoutSeconds (003)", () => {
     expect(service.setOriginSettingsCalls[0]!.confirmTimeoutSeconds).toBe(30);
     expect(input.value).toBe("30");
   });
+});
+
+
+
+vi.mock("./ProtocolResourceContext.js", async () => {
+  const runtime = await import("@keymaster/runtime/assembly");
+  return { useProtocolResources: () => runtime.usePluginHost().resourceStore };
 });

@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from "react";
-import { useOptionalCapability } from "webloom-framework/react";
+import { useOptionalPluginCapability } from "webloom-framework/react";
 import { Button, Modal } from "@keymaster/ui";
-import { useI18n } from "@keymaster/runtime";
+import { usePluginI18n } from "@keymaster/runtime";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
 import { validateStunUrl, type WebrtcConfig } from "./webrtcConfig.js";
 import type { StunDiagnosticResult, WebrtcService } from "./webrtcService.js";
 
 export function WebrtcSettingsPage(): React.ReactElement {
-  const { t } = useI18n();
-  const service = useOptionalCapability(WEBRTC_SERVICE_CAPABILITY);
+  const { t } = usePluginI18n();
+  const service = useOptionalPluginCapability(WEBRTC_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <section className="km-webrtc-page" data-webrtc-settings="missing-service">
@@ -24,7 +24,7 @@ interface WebrtcSettingsInnerProps {
 }
 
 function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.ReactElement {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const [saved, setSaved] = useState<WebrtcConfig>(() => ({
     stunServers: [...service.getStunServers()]
   }));
@@ -268,4 +268,16 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
       </Modal>
     </section>
   );
+}
+
+
+export function WebrtcStatusBlock() {
+  const { t } = usePluginI18n();
+  return <section className="system-status-page__module" aria-labelledby="system-status-webrtc.system-status-title" data-system-status-module="webrtc.system-status">
+    <header className="system-status-page__module-header">
+      <h2 id="system-status-webrtc.system-status-title">{t("webrtc.menu", { defaultValue: "WebRTC" })}</h2>
+      <p>{t("webrtc.page.settings.desc", { defaultValue: "STUN-only config; no TURN." })}</p>
+    </header>
+    <WebrtcSettingsPage />
+  </section>;
 }

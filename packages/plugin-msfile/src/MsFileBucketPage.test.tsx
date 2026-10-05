@@ -31,16 +31,16 @@ const mocks = vi.hoisted(() => ({
 const state = mocks.state;
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({ t: mocks.t }),
+  usePluginI18n: () => ({ t: mocks.t }),
   usePluginHost: () => mocks.host,
-  useRuntimeStatus: () => ({ vault: mocks.state.vault }),
+  useResourceViewSelector: (_reader: unknown, id: string) => id === "msfile.ui.vault-status" ? mocks.state.vault : state.lifecycle,
   AppLink: ({ children }: { children?: unknown }) => children,
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useOptionalCapability: <T,>(_key: unknown): T | undefined => state.service as unknown as T,
-  useResourceSelector: () => state.lifecycle,
+  useOptionalPluginCapability: <T,>(_key: unknown): T | undefined => state.service as unknown as T,
 }));
+vi.mock("./MsFileResourceContext.js", () => ({ useMsFileResources: () => ({}) }));
 
 function entryWithMeta(): MsFileSeedEntry {
   return {

@@ -3,16 +3,16 @@
 // 设计缘由：plugin-host 通过 capability/registry 协作；直接 import 互相依赖的包
 // 会让边界立刻失效（也是这次硬切换的核心动机）。
 //
-// 重要：本脚本必须是"可失败"的硬规则，不只是备注说明。所有 plugin-poker
+// 重要：本脚本必须是"可失败"的硬规则，不只是备注说明。所有插件
 // 硬切换文档（001）里要求的边界都在这里写成 process.exit(1) 路径，避免
 // 实施时被"先放着，后面再补"绕过。
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 const root = process.cwd();
 const packagesDir = join(root, "packages");
-const pluginNames = readdirSync(packagesDir).filter((name) => name.startsWith("plugin-"));
+const pluginNames = readdirSync(packagesDir).filter((name) => name.startsWith("plugin-") || name === "platform-storage");
 const violations = [];
 
 /** 递归收集目录下所有 ts/tsx 源文件。 */
@@ -32,26 +32,30 @@ function recordViolation(file, detail) {
   violations.push(`${relative(root, file)} ${detail}`);
 }
 
-/** 检查 plugin-* 包之间互相 import。 */
-// P2P 网络基础插件是 MSFile/SatSubscription 的唯一公共宿主依赖；这条
-// 单向依赖正是返工单要求的边界，不能被通用的“插件互不 import”规则误报。
-const ALLOWED_PLUGIN_DEPENDENCIES = new Map([
-  ["plugin-msfile", new Set(["plugin-window-p2p"])],
-  ["plugin-sat-subscription", new Set(["plugin-window-p2p"])],
+// These integration fixtures exercise public package entry points together.
+// Private subpaths and all production imports remain forbidden.
+const publicIntegrationImports = new Map([
+  ["packages/plugin-page/src/shell/AppShell.notice.test.tsx", new Set(["@keymaster/plugin-webrtc"])],
 ]);
+/** 所有插件（包括 Storage）通过契约协作，禁止实现互导与私有装配入口。 */
 for (const plugin of pluginNames) {
   const src = join(packagesDir, plugin, "src");
-  // 已删除但残留 node_modules 的包（如历史遗留目录）没有 src，直接跳过。
   if (!existsSync(src)) continue;
   for (const file of walk(src)) {
     const text = readFileSync(file, "utf8");
-    for (const other of pluginNames) {
-      if (other === plugin) continue;
-      if (ALLOWED_PLUGIN_DEPENDENCIES.get(plugin)?.has(other)) continue;
-      const pkg = `@keymaster/${other}`;
-      const re = new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`);
-      if (re.test(text)) {
-        recordViolation(file, `imports ${pkg}`);
+    const imports = [...text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']([^"']+)["']/gu)].map((match) => match[1]);
+    for (const specifier of imports) {
+      for (const other of pluginNames) {
+        if (other === plugin) continue;
+        const pkg = `@keymaster/${other}`;
+        const target = specifier.startsWith(".") ? resolve(file, "..", specifier) : undefined;
+        const otherRoot = join(packagesDir, other) + sep;
+        if (specifier === pkg || specifier.startsWith(pkg + "/") || target?.startsWith(otherRoot)) {
+          if (!publicIntegrationImports.get(relative(root, file))?.has(specifier)) recordViolation(file, `imports another plugin implementation: ${specifier}`);
+        }
+      }
+      if (/^@keymaster\/platform-storage\/(?:assembly|coordinator)(?:\/|$)/u.test(specifier) && plugin !== "platform-storage") {
+        recordViolation(file, `imports Storage private assembly: ${specifier}`);
       }
     }
   }
@@ -148,7 +152,7 @@ for (const file of walk(runtimeSrc)) {
   for (const p of pluginNames) {
     const pkg = `@keymaster/${p}`;
     if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
-      recordViolation(file, `runtime must not import ${pkg}`);
+      if (!(relative(root, file).split(sep).join("/") === "packages/runtime/src/testSupport/createFixtureHost.ts" && p === "platform-storage")) recordViolation(file, `runtime must not import ${pkg}`);
     }
   }
 }
@@ -225,6 +229,45 @@ for (const consumerRoot of webLoomConsumerRoots) {
   }
   for (const file of walk(source)) {
     const text = readFileSync(file, "utf8");
+    const pagePrivateImports = [...text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']([^"']+)["']/gu)]
+      .map(match => match[1]).some(specifier =>
+        specifier.startsWith("@keymaster/plugin-page/")
+        || (specifier.startsWith(".") && resolve(file, "..", specifier).startsWith(join(packagesDir, "plugin-page/src") + sep)));
+    if (pagePrivateImports && !file.startsWith(join(packagesDir, "plugin-page/src") + sep)) {
+      recordViolation(file, "page implementation is private; consume its typed UI services");
+    }
+    const consumerIssuerReferences = [...text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']([^"']+)["']/gu)]
+      .map(match => match[1]).filter(specifier =>
+        /^@keymaster\/runtime\/(?:src\/)?consumerAuthority(?:\.|$)/u.test(specifier)
+        || (specifier.startsWith(".") && resolve(file, "..", specifier).replace(/\.js$/u, ".ts") === join(packagesDir, "runtime/src/consumerAuthority.ts")));
+    if (consumerIssuerReferences.length && ![join(packagesDir, "runtime/src/keymasterHostAdapter.ts"), join(packagesDir, "runtime/src/index.ts"), join(packagesDir, "runtime/src/storage/index.ts"), join(packagesDir, "runtime/src/instanceRegistry.ts"), join(packagesDir, "runtime/src/scopedClientBinding.ts")].includes(file)) {
+      const readOnlyIssuerUsers = new Map([
+        [join(packagesDir, "runtime/src/react/useWalletState.ts"), new Set(["issuedConsumerScope"])],
+        [join(packagesDir, "runtime/src/assembly.ts"), new Set(["issuedConsumerForScope"])],
+      ]);
+      const allowedNames = readOnlyIssuerUsers.get(file);
+      const imports = [...text.matchAll(/(?:import|export)\s*\{([^}]+)\}\s*from\s*["'][^"']*consumerAuthority\.js["']/gu)];
+      const names = imports.flatMap(match => match[1].split(",").map(name => name.trim().split(/\s+as\s+/u)[0]));
+      if (!allowedNames || consumerIssuerReferences.length !== 1 || imports.length !== 1 || names.some(name => !allowedNames.has(name))) recordViolation(file, "consumer issuer is private to the production runtime adapter");
+    }
+    const storagePrivateImports = [...text.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']([^"']+)["']/gu)]
+      .map(match => match[1]).filter(specifier => {
+        if (/^@keymaster\/platform-storage\/(?:assembly|coordinator)(?:$|\/)/u.test(specifier)) return true;
+        if (!specifier.startsWith(".")) return false;
+        const target = resolve(file, "..", specifier);
+        return target.startsWith(join(packagesDir, "platform-storage", "src") + sep);
+      });
+    if (storagePrivateImports.length > 0) {
+      const sourcePath = relative(root, file).split(sep).join("/");
+      const trustedStorageAssembly = sourcePath === "apps/web/src/keymasterSessionCoordinator.worker.ts"
+        || sourcePath.startsWith("apps/web/src/assembly/")
+        || sourcePath === "apps/web/src/coordinator/walletKeyRepository.test.ts"
+        || sourcePath === "packages/runtime/src/testSupport/createFixtureHost.ts"
+        || sourcePath.startsWith("packages/platform-storage/src/")
+        || ((sourcePath === "apps/web/src/bootstrapPlugins.ts" || sourcePath === "apps/web/src/lifecycleE2E/windowHooks.ts")
+          && storagePrivateImports.every(specifier => specifier === "@keymaster/platform-storage/coordinator/authority" || (sourcePath === "apps/web/src/bootstrapPlugins.ts" && specifier === "@keymaster/platform-storage/assembly")));
+      if (!trustedStorageAssembly) recordViolation(file, "Storage private assembly is only available to trusted Window/Worker assembly");
+    }
     if (legacyWebLoomImport.test(text)) {
       recordViolation(file, "must not import the legacy webloom package; use webloom-framework");
     }
@@ -276,81 +319,6 @@ for (const file of pluginNames.flatMap((plugin) => {
   const text = readFileSync(file, "utf8");
   if (/keymaster\.plugins\.runtime|pluginConfigStore|PluginConfigStore/.test(text)) {
     recordViolation(file, "manifest setup must not access plugin config storage directly");
-  }
-}
-
-/**
- * plugin-poker 硬边界（硬切换 001 修订版的"可失败"规则）。
- *
- * 设计缘由：修订版施工单 666 行明确要求脚本层把约束落成"可失败"的检查，
- * 不再接受纯文档约束。以下规则全部走 process.exit(1)：
- *
- *   1. 不 import 任何其它 plugin-*（vault / p2pkh / transfer / assets /
- *      woc / background / home / settings / contacts / contracts 例外）。
- *   2. 不 import apps/web shell 路径。
- *   3. 不直接出现 fetch("ws://...") / new WebSocket("ws://...") 字面
- *      量——proxy endpoint 必须来自 service settings。
- *   4. engine / tsstack 目录不允许 import @keymaster/runtime / @keymaster/ui
- *      （UI/runtime 只能通过 contracts capability 间接进入；engine 是
- *      纯协议真值层）。
- *   5. tsstack 目录只允许 import @bsv/sdk + 标准库；不允许 import 任何
- *      @keymaster/plugin-*（保证它是"真值底座包装"，不是业务散件）。
- */
-const pokerSrc = join(packagesDir, "plugin-poker", "src");
-const POKER_FORBIDDEN_PLUGINS = [
-  "plugin-vault", "plugin-p2pkh", "plugin-transfer", "plugin-assets",
-  "plugin-woc", "plugin-background", "plugin-home", "plugin-settings",
-  "plugin-contacts", "plugin-key-import", "plugin-importer-hex",
-  "plugin-importer-wif", "plugin-importer-json-file"
-];
-for (const file of walk(pokerSrc)) {
-  const text = readFileSync(file, "utf8");
-  const rel = relative(root, file);
-
-  // 1) 不 import 其它业务插件
-  for (const forbidden of POKER_FORBIDDEN_PLUGINS) {
-    const pkg = `@keymaster/${forbidden}`;
-    if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
-      recordViolation(file, `plugin-poker must not import ${pkg}`);
-    }
-  }
-
-  // 2) 不 import apps/web shell
-  if (/from\s+['"][^'"]*apps\/web/.test(text) || /from\s+['"]@keymaster\/web/.test(text)) {
-    recordViolation(file, "plugin-poker must not import apps/web shell");
-  }
-
-  // 3) 不允许在源码里硬编码 WebSocket / wss endpoint
-  //    (合法路径：从 service.settings.proxyEndpoint 读取后再 new WebSocket(url))
-  //    例外：当前文件就是 pokerService.ts 本身，它 new WebSocket(this.settings.proxyEndpoint)。
-  if (!/pokerService\.ts$/.test(rel)) {
-    if (/new\s+WebSocket\s*\(\s*["'`]wss?:\/\//.test(text)) {
-      recordViolation(file, "plugin-poker must not hardcode WebSocket URLs (use service settings)");
-    }
-    if (/fetch\s*\(\s*["'`]wss?:\/\//.test(text)) {
-      recordViolation(file, "plugin-poker must not hardcode fetch() to wss endpoints");
-    }
-  }
-
-  // 4) engine/ 与 tsstack/ 是协议真值层，不允许接 runtime / ui
-  if (/\/(engine|tsstack|conformance)\//.test(rel)) {
-    for (const forbidden of ["@keymaster/runtime", "@keymaster/ui"]) {
-      const re = new RegExp(`(from\\s+['"]${forbidden}|require\\(['"]${forbidden})`);
-      if (re.test(text)) {
-        recordViolation(file, `plugin-poker ${rel.includes("/engine/") ? "engine" : rel.includes("/tsstack/") ? "tsstack" : "conformance"} must not import ${forbidden}`);
-      }
-    }
-  }
-
-  // 5) tsstack/ 只接 @bsv/sdk + 标准库 + 自家 contracts；不接其它插件
-  if (/\/tsstack\//.test(rel)) {
-    for (const p of pluginNames) {
-      if (p === "plugin-poker") continue;
-      const pkg = `@keymaster/${p}`;
-      if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
-        recordViolation(file, `plugin-poker tsstack/ must not import ${pkg}`);
-      }
-    }
   }
 }
 

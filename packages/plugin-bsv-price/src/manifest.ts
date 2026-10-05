@@ -1,3 +1,5 @@
+import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-bsv-price/src/manifest.ts
 // BSV 价格业务插件 manifest。
 //
@@ -10,6 +12,9 @@
 //   - 设置里可以登记多个发布服务器，但只订阅当前激活服务器的频道；
 //   - **不**接触 provider handle / wire。
 
+import { createElement, useSyncExternalStore } from "react";
+import { ScopedPluginConsumerProvider as PluginConsumerProvider } from "@keymaster/runtime";
+import { PriceResourceProvider } from "./PriceResourceContext.js";
 import { defineCapability } from "webloom-framework";
 import type {
   ChannelRuntimeFactory,
@@ -21,12 +26,12 @@ import type {
 import {
   BSV_PRICE_READER_CAPABILITY,
   CHANNEL_RUNTIME_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
-  HOME_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
+  OWNED_RESOURCE_ACCESS_CAPABILITY,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
@@ -359,15 +364,11 @@ const bsvPricePluginDefinition = {
   description:
     "BSV 价格业务插件：消费 Coordinator Channel，订阅 PriceCast 发布服务器频道，展示金额 + 单位形式的参考价格。",
   i18n: bsvPriceResources,
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [{
     id: "bsv-price.window",
     runtime: "window-main",
+    connect: { providerMethods: ["price.get", "price.subscribe", "price.unsubscribe"] },
     scopeKind: "owner-session",
     provides: [
       capabilityDescriptor(BSV_PRICE_SERVICE_CAPABILITY),
@@ -379,21 +380,23 @@ const bsvPricePluginDefinition = {
       pricePublisherPublicKeyHex: ""
     },
     dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       {
         capability: CHANNEL_RUNTIME_CAPABILITY, sourceRuntime: "window-main",
         reason: "通过 Coordinator Channel runtime 订阅精确价格频道"
       },
-      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册行情页与设置详情页" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册行情页与设置详情页" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "为行情页与设置详情页提供面包屑" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将行情页挂入首页业务域、设置页挂入设置域" },
-      { capability: HOME_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "将 BSV 价格显示在首页右侧栏" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 仅读取本实例注册的行情资源" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册 BSV Price 状态资源" },
     ]),
   }],
   async setup(ctx) {
     /**
      * 关键约束：
-     *   - 不从 keyspace / vault 推断；
+     *   - 不从 walletState / vault 推断；
      *   - `pricePublisherPublicKeyHex` 只作为首次 seed；缺省使用内置生产
      *     PriceCast 发布器，设置里可以登记更多服务器；
      *   - 运行时真值由 Host 注入的 BSV Price owner/App K-V 承担。
@@ -408,7 +411,7 @@ const bsvPricePluginDefinition = {
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(BSV_PRICE_PLUGIN_ID);
     const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: publisherHex,
-      storage: ctx.storageFor("settings")
+      storage: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "settings")
     });
     await service.ready();
     ctx.provide(BSV_PRICE_SERVICE_CAPABILITY, service);
@@ -425,23 +428,30 @@ const bsvPricePluginDefinition = {
       invalidation: "immediate"
     });
 
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    const reader = ctx.capability(OWNED_RESOURCE_ACCESS_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    const contents = (component: typeof BsvPricePage) => createElement(PriceResourceProvider, { reader, children: createElement(component) });
+    const PriceHome = () => {
+      const status = useSyncExternalStore(ctx.consumer.subscribe, () => ctx.consumer.status, () => ctx.consumer.status);
+      return status === "active" ? createElement(PluginConsumerProvider, { consumer: ctx.consumer, children: contents(BsvPriceHomeWidget) }) : null;
+    };
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
-    const home = ctx.capability(HOME_REGISTRY_CAPABILITY);
 
-    routes.register({
+    pages.view.register({
       id: "bsv-price.page",
       path: "/bsv-price",
       label: { key: "bsv-price.menu", fallback: "BSV Price" },
-      component: BsvPricePage
+      kind: "page",
+      render: () => contents(BsvPricePage)
     });
 
-    routes.register({
+    pages.view.register({
       id: "bsv-price.settings",
       path: BSV_PRICE_SETTINGS_PATH,
       label: { key: "bsv-price.settings.title", fallback: "BSV Price settings" },
-      component: BsvPriceSettingsPage
+      kind: "page",
+      render: () => contents(BsvPriceSettingsPage)
     });
 
     business.registerFeature(BSV_PRICE_PLUGIN_ID, "home", {
@@ -465,13 +475,13 @@ const bsvPricePluginDefinition = {
       entry: { path: BSV_PRICE_SETTINGS_PATH, routeId: "bsv-price.settings" }
     });
 
-    home.register({
+    ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view.register({
+      kind: "home",
       id: "bsv-price.snapshot",
-      title: { key: "bsv-price.home.title", fallback: "BSV Price" },
-      component: BsvPriceHomeWidget,
+      label: { key: "bsv-price.home.title", fallback: "BSV Price" },
+      render: () => createElement(PriceHome),
       order: 40,
       slot: "aside",
-      refreshHint: "realtime"
     });
 
     breadcrumbs.register({

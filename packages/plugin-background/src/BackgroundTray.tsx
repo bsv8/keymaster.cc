@@ -1,3 +1,4 @@
+import { useBackgroundResources } from "./BackgroundResourceContext.js";
 // packages/plugin-background/src/BackgroundTray.tsx
 // Topbar 后台任务托盘。
 // 设计缘由：托盘只显示通用任务信息，不出现 P2PKH 专属字段。
@@ -9,8 +10,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Square, X, Zap } from "lucide-react";
-import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { useResourceViewSelector } from "@keymaster/runtime";
+import { usePluginI18n, usePluginLocale } from "@keymaster/runtime";
 import { BACKGROUND_SERVICE_CAPABILITY, type BackgroundService, type BackgroundTaskSnapshot, type BackgroundTaskState } from "@keymaster/contracts";
 
 const EMPTY_SNAPSHOTS: BackgroundTaskSnapshot[] = [];
@@ -19,18 +21,18 @@ export function BackgroundTray() {
   // 锁定是一个跨 Host 的身份切换：Background 的 owner-session capability
   // 会先被同步撤销，而旧 Topbar registry 快照可能还会在同一轮 React
   // 更新中短暂渲染本组件。这里必须把“能力暂不可用”视为正常过渡，不能
-  // 用 useCapability 抛错把锁屏升级成全局 fatal。
-  const service = useOptionalCapability(BACKGROUND_SERVICE_CAPABILITY);
+  // 用 usePluginCapability 抛错把锁屏升级成全局 fatal。
+  const service = useOptionalPluginCapability(BACKGROUND_SERVICE_CAPABILITY);
   if (!service) return null;
   return <AvailableBackgroundTray service={service} />;
 }
 
 /** capability 存在时才挂载 resource hook，避免资源定义已撤销时调用 ensure。 */
 function AvailableBackgroundTray({ service }: { service: BackgroundService }) {
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const locale = useLocale();
-  const store = host.resourceStore;
+  const resources = useBackgroundResources();
+  const { t } = usePluginI18n();
+  const locale = usePluginLocale();
+  const store = resources;
   const timeFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { timeStyle: "medium" }),
     [locale]
@@ -38,7 +40,7 @@ function AvailableBackgroundTray({ service }: { service: BackgroundService }) {
   const [open, setOpen] = useState(false);
 
   // 使用 Resource Store 读取任务快照（跨标签同步由 resource subscribe 处理）
-  const snapshots = useResourceSelector<BackgroundTaskSnapshot[], BackgroundTaskSnapshot[]>(
+  const snapshots = useResourceViewSelector<BackgroundTaskSnapshot[], BackgroundTaskSnapshot[]>(
     store,
     "background.taskSnapshots",
     [],

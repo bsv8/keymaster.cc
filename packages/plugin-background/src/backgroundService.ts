@@ -7,7 +7,7 @@
 //   - 同 task id 不并发：使用独立 runPromise 锁；cancel 必须等旧实例真正退出。
 //   - cancel 仅 abort 当前轮；不影响未来定时调度。
 //   - 失败不是稳态：保留错误信息后自动回到 idle 等待下一周期。
-//   - blocked 是门禁阻塞状态：Vault 锁定、keyspace 初始化中、无 active key。
+//   - blocked 是门禁阻塞状态：Vault 锁定、walletState 初始化中、无 active key。
 //   - 页面 visibility 变化与定时器节流恢复时只合并为一次 run。
 //   - 施工单 002：删除 leader lock、BroadcastChannel 选举、follower 转发等逻辑。
 //     所有 tab 共享 Coordinator，不再需要跨 tab 协调。

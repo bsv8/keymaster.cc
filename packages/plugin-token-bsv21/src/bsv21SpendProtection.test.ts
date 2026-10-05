@@ -1,14 +1,15 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { describe, expect, it, vi } from "vitest";
 import { createBsv21SpendProtectionProvider } from "./bsv21SpendProtection.js";
-import type { AssetDataNotifier, KeyspaceService } from "@keymaster/contracts";
+import type { AssetDataNotifier, VaultWalletState } from "@keymaster/contracts";
 import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
   let current = activePublicKeyHex;
   return {
-    active: () => ({ activePublicKeyHex: current }),
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: current }))()),
     setActive(hex: string | undefined) { current = hex; }
-  } as unknown as KeyspaceService & { setActive(hex: string | undefined): void };
+  } as unknown as VaultWalletState & { setActive(hex: string | undefined): void };
 }
 
 function fakeRepository(records: Array<{ origin: string; outpoint?: string; network: "main" | "test" }>): Bsv21StateRepository {
@@ -51,10 +52,10 @@ function fakeNotifier(): AssetDataNotifier & {
 
 describe("createBsv21SpendProtectionProvider", () => {
   it("refreshes protected outpoints when bsv21 asset data changes", async () => {
-    const keyspace = fakeKeyspace("pk1");
+    const walletState = fakeWalletState("pk1");
     const stateRepository = fakeRepository([{ origin: "tok1", outpoint: "tx1_0", network: "main" }]);
     const notifier = fakeNotifier();
-    const provider = createBsv21SpendProtectionProvider({ stateRepository, keyspace, assetDataNotifier: notifier });
+    const provider = createBsv21SpendProtectionProvider({ stateRepository, walletState, assetDataNotifier: notifier });
     const handler = vi.fn();
     if (!provider.onChange) {
       throw new Error("provider.onChange is required for refresh propagation");

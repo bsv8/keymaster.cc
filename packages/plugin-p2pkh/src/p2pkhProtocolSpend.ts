@@ -41,7 +41,7 @@ export interface P2pkhProtocolSpendSubmissionStore {
 }
 
 export interface P2pkhProtocolSpendDeps {
-  vault: VaultService;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
   /** 生产广播入口；协议 spend 不直接依赖 WOC 或其它 Provider。 */
   centralBroadcastService?: CentralBroadcastService;
   /** 从当前快照取得协议输入对应的序号绑定。 */

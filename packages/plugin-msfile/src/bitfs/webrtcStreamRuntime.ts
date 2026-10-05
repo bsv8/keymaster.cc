@@ -7,7 +7,7 @@ import type {
   WebRTCInterconnectEnvelope,
   WebRTCInterconnectSignal
 } from "bitcoin-libp2p/webrtc-interconnect";
-import type { WindowWebRtcInterconnectContext } from "@keymaster/plugin-window-p2p/webrtc-interconnect";
+import type { WindowWebRtcInterconnectContext } from "@keymaster/contracts/window-p2p";
 
 const MAX_QUEUED_SEND_BYTES = 2 * (MAX_WIRE_FRAME_BYTES + 10);
 const MAX_PENDING_INBOUND_STREAMS = 8;

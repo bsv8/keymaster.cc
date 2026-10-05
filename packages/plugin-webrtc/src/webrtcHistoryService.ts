@@ -5,7 +5,7 @@
 //   - 不管理通话状态机；
 //   - 不持久化临时协商态，只记录终态。
 
-import type { BorrowedKeyValueStore, KeyspaceService } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, VaultWalletState } from "@keymaster/contracts";
 import {
   CALL_PARTITION,
   TRANSFER_PARTITION,
@@ -30,7 +30,7 @@ export type WebrtcHistoryItem =
   | (WebrtcTransferHistoryRow & { kind: "image" | "file"; itemType: "transfer" });
 
 export function createWebrtcHistoryService(input: {
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   ownerPublicKeyHex: () => string | null;
   storage: BorrowedKeyValueStore;
 }): WebrtcHistoryService {

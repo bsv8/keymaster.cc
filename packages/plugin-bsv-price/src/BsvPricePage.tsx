@@ -1,3 +1,4 @@
+import { usePriceResources } from "./PriceResourceContext.js";
 // packages/plugin-bsv-price/src/BsvPricePage.tsx
 // BSV 价格业务页。
 //
@@ -9,8 +10,8 @@
 //   - **不**展示历史 / 图表 / 告警。
 
 import React from "react";
-import { useOptionalCapability, useResource } from "webloom-framework/react";
-import { useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { useResourceView, usePluginI18n, usePluginLocale } from "@keymaster/runtime";
 import type {
   BsvPriceService,
   BsvPriceServiceSnapshot
@@ -19,7 +20,7 @@ import type {
 import { BSV_PRICE_SERVICE_CAPABILITY } from "./manifest.js";
 
 export function BsvPricePage(): React.ReactElement {
-  const i18n = useI18n();
+  const i18n = usePluginI18n();
   const service = useBsvPriceServiceOrNull();
 
   if (!service) {
@@ -42,14 +43,14 @@ export function BsvPricePage(): React.ReactElement {
  * 兼容版 `useCapability`：capability 不存在时返回 null（**不**抛错）。
  */
 function useBsvPriceServiceOrNull(): BsvPriceService | null {
-  return useOptionalCapability(BSV_PRICE_SERVICE_CAPABILITY) ?? null;
+  return useOptionalPluginCapability(BSV_PRICE_SERVICE_CAPABILITY) ?? null;
 }
 
 function BsvPricePageInner({ service }: { service: BsvPriceService }): React.ReactElement {
-  const i18n = useI18n();
-  const host = usePluginHost();
-  const locale = useLocale();
-  const snapshot = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
+  const i18n = usePluginI18n();
+  const resources = usePriceResources();
+  const locale = usePluginLocale();
+  const snapshot = useResourceView<BsvPriceServiceSnapshot>(resources, "bsv-price.snapshot", []);
   const snap = snapshot.data ?? service.snapshot();
   const activeServer = snap.servers.find(
     (server) => server.publisherPublicKeyHex === snap.active.publisherPublicKeyHex

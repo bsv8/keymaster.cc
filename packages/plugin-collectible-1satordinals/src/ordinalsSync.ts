@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-collectible-1satordinals/src/ordinalsSync.ts
 // 1Sat Ordinals 后台同步任务。
 //
@@ -6,14 +7,14 @@
 //   - 由后台定时复扫当前 active key 的 1Sat outpoint；
 //   - 复扫完成后发布 collectible 变更通知，驱动 provider / 页面刷新；
 //   - 取消后不向外发通知；
-//   - 只在钱包解锁、keyspace ready、存在 active key 时运行。
+//   - 只在钱包解锁、walletState ready、存在 active key 时运行。
 
 import type {
   AssetDataNotifier,
   BackgroundRunEligibility,
   BackgroundTaskContext,
   BackgroundTaskDefinition,
-  KeyspaceService,
+  VaultWalletState,
   WocService,
   VaultService
 } from "@keymaster/contracts";
@@ -24,13 +25,13 @@ export interface CreateOrdinalsSyncTaskOptions {
   service: OrdinalsServiceHandle;
   woc: WocService;
   historyRepository?: OrdinalMintHistoryRepository;
-  keyspace: KeyspaceService;
-  vault: VaultService;
+  walletState: VaultWalletState;
+  vault: Pick<VaultService, "status">;
   assetDataNotifier?: AssetDataNotifier;
 }
 
 export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): BackgroundTaskDefinition {
-  const { service, woc, historyRepository, keyspace, vault, assetDataNotifier } = options;
+  const { service, woc, historyRepository, walletState, vault, assetDataNotifier } = options;
 
   return {
     id: "collectible-1satordinals.sync",
@@ -43,30 +44,31 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
       minIntervalMs: 300_000
     },
     keyScope: () => {
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       return state.activePublicKeyHex ? { publicKeyHex: state.activePublicKeyHex } : undefined;
     },
     canRun: (): BackgroundRunEligibility => {
       if (vault.status() !== "unlocked") {
         return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
       }
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!Boolean(state.activePublicKeyHex)) {
         return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
       }
       return { ready: true };
     },
     async run(ctx: BackgroundTaskContext) {
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!state.activePublicKeyHex) return;
       const startedKeyHex = state.activePublicKeyHex;
 
       await service.sync(ctx.signal);
-      await reconcileHistory(historyRepository, woc);
+      if (!sameWalletSession(state, walletState.snapshot()) || ctx.signal.aborted) return;
+      await reconcileHistory(historyRepository, woc, () => !ctx.signal.aborted && sameWalletSession(state, walletState.snapshot()));
       if (ctx.signal.aborted) return;
       ctx.assertSessionFresh?.();
 
-      if (keyspace.active().activePublicKeyHex !== startedKeyHex) return;
+      if (!sameWalletSession(state, walletState.snapshot())) return;
 
       assetDataNotifier?.emit({
         providerId: "1satordinals",
@@ -78,7 +80,7 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
   };
 }
 
-async function reconcileHistory(historyRepository: OrdinalMintHistoryRepository | undefined, woc: WocService): Promise<void> {
+async function reconcileHistory(historyRepository: OrdinalMintHistoryRepository | undefined, woc: WocService, isCurrent: () => boolean): Promise<void> {
   if (!historyRepository) return;
   const current = await historyRepository.list().catch(() => []);
   if (current.length === 0) return;
@@ -90,6 +92,7 @@ async function reconcileHistory(historyRepository: OrdinalMintHistoryRepository 
     if (observation) {
       const nextStatus = observationToStatus(observation);
       if (record.status === nextStatus && record.submit?.spend.observation === observation) continue;
+      if (!isCurrent()) return;
       await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),
@@ -107,6 +110,7 @@ async function reconcileHistory(historyRepository: OrdinalMintHistoryRepository 
     }
     const wasObservedUnconfirmed = record.status === "woc-observed-unconfirmed" || record.submit?.spend.observation === "unconfirmed";
     if (wasObservedUnconfirmed) {
+      if (!isCurrent()) return;
       await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),

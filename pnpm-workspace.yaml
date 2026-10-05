@@ -14,10 +14,10 @@ minimumReleaseAgeExclude:
   - bitcoin-libp2p@0.3.1
   - bsv8-channel-protocol@0.5.0 || 0.6.0
   - keymaster-hold@0.1.0
-  - webloom-framework@0.5.0
   - keyhold@2.1.0
   - sat-subscription-protocol@0.3.0
   - go-bitfs@0.3.2
+  - webloom-framework@0.6.0
 
 patchedDependencies:
   go-bitfs@0.3.2: patches/go-bitfs@0.3.2.patch

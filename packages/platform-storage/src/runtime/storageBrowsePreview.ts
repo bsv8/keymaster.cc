@@ -4,7 +4,7 @@
 // 在任何一处都会得到同样的 format。截断内容一律降级成 truncated，不做结构化解析：
 // 截掉的 JSON、K-V 信封或 Markdown 都无法给出可信结果。
 
-import type { StoragePreviewFormat } from "@keymaster/contracts";
+import type { StoragePreviewFormat } from "./storageBrowseTypes.js";
 import {
   kvDecodePayloadShape,
   kvDecodeValueObject,

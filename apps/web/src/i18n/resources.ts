@@ -112,7 +112,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.onboarding.theme.lightHint": "Light theme",
       "shell.onboarding.theme.dark": "Dark",
       "shell.onboarding.theme.darkHint": "Dark theme",
-      "shell.onboarding.theme.autoActive": "Auto (currently {theme})",
+      "shell.onboarding.theme.autoActive": "Auto (currently {{theme}})",
       // 硬切换 011：step progress 文案（四步向导）。
       "shell.onboarding.step.pickImporter": "Pick a format",
       "shell.onboarding.step.input": "Provide material",
@@ -207,7 +207,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.onboarding.theme.lightHint": "浅色主题",
       "shell.onboarding.theme.dark": "深色",
       "shell.onboarding.theme.darkHint": "深色主题",
-      "shell.onboarding.theme.autoActive": "跟随系统 (当前 {theme})",
+      "shell.onboarding.theme.autoActive": "跟随系统 (当前 {{theme}})",
       "shell.onboarding.step.pickImporter": "选择方式",
       "shell.onboarding.step.input": "输入材料",
       "shell.onboarding.step.confirmKey": "确认结果",

@@ -35,13 +35,13 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({
+  usePluginI18n: () => ({
     t: (_key: string, values?: { defaultValue?: string; [key: string]: unknown }) => {
       const template = values?.defaultValue ?? _key;
       return template.replace(/\{\{(\w+)\}\}/g, (_match: string, key: string) => String(values?.[key] ?? ""));
     }
   }),
-  useLocale: () => "en-US",
+  usePluginLocale: () => "en-US",
   usePluginHost: () => ({ resourceStore: {} }),
   useOptionalResourceSelector: (_store: unknown, resourceId: string, _args: readonly string[], _selector: unknown, fallback: unknown) => {
     if (resourceId === "p2pkh.transfer-context") return mocks.context;
@@ -52,7 +52,7 @@ vi.mock("@keymaster/runtime", () => ({
 }));
 
 vi.mock("webloom-framework/react", () => ({
-  useOptionalCapability: (capability: string | { id: string }) => {
+  useOptionalPluginCapability: (capability: string | { id: string }) => {
     const id = typeof capability === "string" ? capability : capability.id;
     return id === "p2pkh.service" && mocks.serviceAvailable ? mocks.service : undefined;
   },
@@ -201,3 +201,5 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
     expect(screen.getByText("钱包已锁定；解锁后可继续转账。")).toBeTruthy();
   });
 });
+
+vi.mock("../P2pkhResourceContext.js", () => ({ useP2pkhResources: () => ({}) }));

@@ -30,10 +30,18 @@ export async function changeLanguage(page: Page, language: "en" | "zh-CN"): Prom
 }
 
 /**
- * 读取设置工作区中可见的插件卡片数量。
+ * 读取依赖图中的插件节点数量。
  * data-plugin-id 是插件的业务身份，不是布局选择器；它只在 Driver 内
- * 使用，Journey 只接收“存在可管理插件”的业务结果。
+ * 使用，Journey 只接收“发行目录完整可见”的业务结果。
  */
 export async function countManagedPlugins(page: Page): Promise<number> {
   return page.locator("[data-plugin-id]").count();
+}
+
+/** 用户用键盘打开插件节点的函数明细。 */
+export async function openPluginFunctionDependencies(page: Page, pluginId: string) {
+  await page.locator(`[data-plugin-id="${pluginId}"]`).press("Enter");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  return dialog;
 }

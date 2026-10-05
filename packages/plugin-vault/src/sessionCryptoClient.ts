@@ -106,10 +106,8 @@ async function createWorkerBackedEngine(
   input: SessionCryptoBootstrapInput,
   workerFactory?: () => Worker,
 ): Promise<SessionCryptoEngine> {
-  const WorkerConstructor = (globalThis as { Worker?: typeof Worker }).Worker ?? Worker;
-  // 包源码默认路径适用于直接由包构建器编译的宿主；Vite workspace 应通过
-  // workerFactory 注入应用内 Worker 入口，避免把源码 .ts 当作静态资源发送。
-  const worker = workerFactory?.() ?? new WorkerConstructor(new URL("./sessionCryptoWorker.ts", import.meta.url), { type: "module" });
+  // 保留静态 Worker 构造表达式，让构建器编译默认入口；应用可注入专用入口。
+  const worker = workerFactory?.() ?? new Worker(new URL("./sessionCryptoWorker.ts", import.meta.url), { type: "module" });
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>();
   // revoked 表示对调用方立即失效；cleanedUp 表示底层 Worker 已经终止。
   // 两者不能共用一个状态，否则 dispose 先标记后会跳过真正的资源清理。

@@ -1,3 +1,4 @@
+import { useSatResources } from "./SatResourceContext.js";
 // SatSubscription 广播网关页。
 //
 // 本页只操作 trusted admin service；不读取私钥、Channel 明文或完整 Wire。
@@ -16,8 +17,8 @@ import type {
   SatSpiCurrencyBalance
 } from "@keymaster/contracts";
 import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import { Button, Modal } from "@keymaster/ui";
 import { SAT_DEFAULT_SUPPLIER_ID } from "./defaults.js";
 
@@ -99,11 +100,11 @@ const BILLING_PAGE_SIZE_OPTIONS = [2, 5, 10, 20] as const;
 const DEFAULT_BILLING_LIMIT = 5;
 
 export function SatSubscriptionSettings() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；设置区可能正好挂载在系统设置
   // 页面上，必须按"暂不可用"渲染而不是抛错。
-  const service = useOptionalCapability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
-  const spi = useOptionalCapability(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY);
+  const service = useOptionalPluginCapability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
+  const spi = useOptionalPluginCapability(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY);
   if (!service || !spi) {
     return (
       <p className="sat-subscription-settings__unavailable">
@@ -121,15 +122,15 @@ function SatSubscriptionSettingsInner({
   service: SatSubscriptionAdminService;
   spi: SatSubscriptionSpiService;
 }) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const tr = (key: string, fallback: string) => t(key, { defaultValue: fallback });
-  const host = usePluginHost();
+  const resources = useSatResources();
   // 锁定时资源定义会被注销，选择器必须能降级为 null 而不是抛错。
   const snapshot = useOptionalResourceSelector<
     SatSubscriptionSettingsSnapshot,
     SatSubscriptionSettingsSnapshot | null
   >(
-    host.resourceStore,
+    resources,
     "sat-subscription.settings",
     [],
     (resource) => resource.data ?? null,
@@ -154,8 +155,8 @@ function SatSubscriptionSettingsInner({
   const [topUpPreview, setTopUpPreview] = useState<SatTopUpPreview | null>(null);
 
   const reload = useCallback(() => {
-    host.resourceStore.invalidate("sat-subscription.settings", []);
-  }, [host.resourceStore]);
+    resources.invalidate("sat-subscription.settings", []);
+  }, [resources]);
 
   const openSupplierEditor = () => {
     if (busy) return;
@@ -558,4 +559,17 @@ function SatSubscriptionSettingsInner({
       <ul data-testid="ss-billing-summary">{Object.values(billing).flatMap((page) => page.records.map((item) => ({ item, currency: page.currency }))).slice(-20).reverse().map(({ item, currency }) => <li key={item.chargeId}>供应商编号:{item.supplierId}｜动作:{item.action}｜频道:{item.channel}｜扣费金额:{item.chargedAmount} {currency}｜账单编号:{item.chargeId}</li>)}</ul>
     </section>
   );
+}
+
+
+/** 网关块的标题与业务 UI 都在 Sat 的 consumer 内执行。 */
+export function SatSubscriptionStatusBlock() {
+  const { t } = usePluginI18n();
+  return <section className="system-status-page__module" aria-labelledby="system-status-sat-subscription.system-status-title" data-system-status-module="sat-subscription.system-status">
+    <header className="system-status-page__module-header">
+      <h2 id="system-status-sat-subscription.system-status-title">{t("sat.settings.title", { defaultValue: "SatSubscription" })}</h2>
+      <p>{t("sat.settings.description", { defaultValue: "SSP / Channel / SPI" })}</p>
+    </header>
+    <SatSubscriptionSettings />
+  </section>;
 }

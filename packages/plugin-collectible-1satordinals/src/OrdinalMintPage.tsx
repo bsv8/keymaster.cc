@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
 import type { BsvNetwork } from "@keymaster/contracts";
 import type { OrdinalEnvelopeEntry } from "./ordinalScript.js";
 import type { OrdinalMintPreview, OrdinalMintService } from "./ordinalMintService.js";
@@ -45,10 +45,10 @@ function statusLabel(status: string, t: (key: string, values?: { defaultValue?: 
 }
 
 export function OrdinalMintPage() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
   // 一次渲染，必须按"暂不可用"降级而不是抛错。
-  const service = useOptionalCapability(ORDINAL_MINT_SERVICE_CAPABILITY);
+  const service = useOptionalPluginCapability(ORDINAL_MINT_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <PageHeader
@@ -61,7 +61,7 @@ export function OrdinalMintPage() {
 }
 
 function OrdinalMintPageInner({ service }: { service: OrdinalMintService }) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const [network, setNetwork] = useState<BsvNetwork>("main");
   const [contentType, setContentType] = useState("image/png");
   const [name, setName] = useState("");

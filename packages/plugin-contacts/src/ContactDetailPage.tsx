@@ -6,34 +6,41 @@
 //   - 详情页保留给 contacts 域内部查看与 breadcrumb 解析；
 //   - 联系人身份以 publicKeyHex 为准。
 
-import { useResourceSelector } from "webloom-framework/react";
-import { useI18n, usePluginHost } from "@keymaster/runtime";
+import { useContactsResources } from "./ContactsResourceContext.js";
+import { usePluginI18n, useResourceViewSelector } from "@keymaster/runtime";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import type { Contact, ContactPresenceMap } from "@keymaster/contracts";
+import type { Contact, ContactPresenceMap, PageUiLocation } from "@keymaster/contracts";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
-// 不引入 react-router；直接用 location.pathname 解析。
+// 动态参数由 Page 提供，保留同一路由的查询与刷新行为。
 // 路径形态：/contacts/:id
 
-export function ContactDetailPage() {
-  const path = typeof window !== "undefined" ? window.location.pathname : "";
-  const id = path.split("/").filter(Boolean).pop() ?? "";
-  const host = usePluginHost();
-  const i18n = useI18n();
+export function ContactDetailPage({ location }: { location: PageUiLocation }) {
+  const id = location.params.id ?? "";
+  const reader = useContactsResources();
+  const i18n = usePluginI18n();
   const { t } = i18n;
-  const state = useResourceSelector<Contact | undefined, { contact?: Contact; active: boolean }>(
-    host.resourceStore, "contacts.detail", [id],
-    (snapshot) => ({ contact: snapshot.data, active: snapshot.key[2] !== "none" }),
-    (a, b) => a.contact === b.contact && a.active === b.active
+  const state = useResourceViewSelector<Contact | undefined, { contact?: Contact; active: boolean; pending: boolean; error?: string }>(
+    reader, "contacts.detail", [id],
+    (snapshot) => ({ contact: snapshot.data, active: snapshot.key[2] !== "none", pending: snapshot.status === "pending", error: snapshot.error?.message }),
+    (a, b) => a.contact === b.contact && a.active === b.active && a.pending === b.pending && a.error === b.error
   );
   const contact = state.contact;
   const noActiveKey = !state.active;
-  const presenceByPublicKey = useResourceSelector<ContactPresenceMap, ContactPresenceMap>(
-    host.resourceStore, "contacts.presence", [],
+  const presenceByPublicKey = useResourceViewSelector<ContactPresenceMap, ContactPresenceMap>(
+    reader, "contacts.presence", [],
     (snapshot) => snapshot.data ?? {},
     (a, b) => a === b
   );
 
+  if (!contact && (state.pending || state.error)) {
+    return <div className="contact-detail">
+      <PageHeader title={t("contacts.detail.title", { defaultValue: "Contacts" })} />
+      {state.error
+        ? <p role="alert">{t("contacts.editor.err.load", { defaultValue: "Failed to load contact" })}</p>
+        : <p role="status">{t("common.status.loading", { defaultValue: "Loading…" })}</p>}
+    </div>;
+  }
   if (!contact) {
     return (
       <div className="contact-detail">

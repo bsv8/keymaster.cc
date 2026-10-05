@@ -9,20 +9,20 @@ describe("formatStartupErrorSummary", () => {
       details: {
         pluginId: "vault",
         capabilities: ["vault.service"],
-        state: "error-disabled",
+        state: "failed",
         error: "private raw message"
       }
     });
     const summary = formatStartupErrorSummary(error);
     expect(summary).toContain("vault.service");
-    expect(summary).toContain("error-disabled");
+    expect(summary).toContain("failed");
     expect(summary).not.toContain("private raw message");
   });
 
   it("adds structured stage and plugin context without changing the original diagnostic", () => {
     const error = Object.assign(new Error("private raw message"), {
       name: "StartupPluginError",
-      details: { pluginId: "vault", capabilities: ["vault.service"], state: "error-disabled" }
+      details: { pluginId: "vault", capabilities: ["vault.service"], state: "failed" }
     });
     attachBootstrapErrorContext(error, {
       stage: "vault-selection",

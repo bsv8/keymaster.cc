@@ -7,12 +7,14 @@
     ".": "./src/index.ts",
     "./connect-public": "./src/connectPublic.ts",
     "./storage": "./src/storage/index.ts",
-    "./storage-internal": "./src/storage/internal.ts"
+    "./storage-internal": "./src/storage/internal.ts",
+    "./window-p2p": "./src/windowP2pContracts.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
     "@noble/hashes": "^2.0.1",
     "cborg": "^5.1.6",
-    "webloom-framework": "0.5.0"
+    "webloom-framework": "0.6.0",
+    "bitcoin-libp2p": "0.3.1"
   }
 }

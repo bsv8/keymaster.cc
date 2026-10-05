@@ -1,5 +1,5 @@
 import { defineCapability } from "webloom-framework";
-import type { CapabilityDescriptor } from "webloom-framework";
+import type { Capability, CapabilityClient } from "webloom-framework";
 
 /**
  * Runtime Resource Store 契约
@@ -26,7 +26,8 @@ export interface ResourceSnapshot<T> {
 /** 资源上下文：由 runtime 创建，包含稳定的只读 capability reader、当前 active-key 快照等 */
 export interface ResourceContext {
   /** 获取 capability */
-  getCapability<T>(capability: string | CapabilityDescriptor): T | undefined;
+  capability<C extends Capability>(capability: C): CapabilityClient<C>;
+  optionalCapability<C extends Capability>(capability: C): CapabilityClient<C> | undefined;
   /** 当前 active public key hex（可能为 undefined） */
   readonly activePublicKeyHex: string | undefined;
   /** 插件 owner ID（由 runtime 在注册时绑定，插件代码不可写入） */
@@ -75,3 +76,17 @@ export const RESOURCE_REGISTRY_CAPABILITY = defineCapability<ResourceRegistry>({
   id: "resource.registry",
   version: "1",
 });
+
+/** 实例只能读取自己注册的资源；不暴露 Store 管理与 owner 清理操作。 */
+export interface OwnedResourceReader {
+  /** 可在撤销后查询；供 UI 收尾渲染判断，不读取资源数据。 */
+  isActive(): boolean;
+  ensure<T>(id: string, args: readonly string[]): import("webloom-framework").ResourceSnapshot<T>;
+  read<T>(id: string, args: readonly string[]): import("webloom-framework").ResourceSnapshot<T> | undefined;
+  subscribe(id: string, args: readonly string[], listener: () => void): () => void;
+  invalidate(id: string, args: readonly string[]): void;
+}
+export interface OwnedResourceAccess {
+  bind(consumer: import("webloom-framework").PluginConsumer, scope: import("webloom-framework").LifecycleScope): OwnedResourceReader;
+}
+export const OWNED_RESOURCE_ACCESS_CAPABILITY = defineCapability<OwnedResourceAccess>({ kind: "local", id: "resource.owned-access", version: "1" });

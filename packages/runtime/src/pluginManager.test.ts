@@ -4,18 +4,15 @@
 // runtime 包不能 import plugin-*（边界规则）；本测试在 runtime 包内构造
 // 最小可验证的 fake plugin manifest，覆盖三个关键 bug：
 //   1. UI 应当按 capability key 检查"依赖是否满足"，**不能**用
-//      getManifest(pluginId) 误判。否则 poker / p2pkh 等依赖 builtin capability
+//      getManifest(pluginId) 误判。否则 example / p2pkh 等依赖 builtin capability
 //      的插件会被永久置灰。
 //   2. plugin manifest 必须把"setup 内实际使用的 capability"全部声明到
 //      dependencies，否则依赖图真值缺失。
-//   3. plugin service / provider 必须在 disable 时取消 keyspace.onActiveChange /
+//   3. plugin service / provider 必须在 disable 时取消 walletState.onActiveChange /
 //      vault.onStatusChange 等句柄，否则旧 service 仍被外部持续回调，
 //      破坏热卸载语义。
 //
-// 硬切换 003：plugin-settings 不再注册 /settings 聚合页；它通过
-// settings.registry 注册 /settings/plugins 等独立详情页；系统设置项目走
-// system-settings.registry。
-// 详情页；侧栏仅消费 business.registry 的新设置入口。
+// 正式页面与侧栏现在由 Page 注册；此处仍使用隔离的 runtime 测试夹具。
 
 import { describe, expect, it } from "vitest";
 import { createTestPluginHost as createPluginHost, type TestPluginHost } from "./testing/createTestPluginHost.js";
@@ -49,7 +46,7 @@ function makeBadSettings(): PluginManifest {
   return {
     id: "settings",
     name: "Settings",
-    meta: { kind: "core", startup: "optional", defaultEnabled: true, canDisable: false },
+    meta: {     },
     // 注意：故意漏掉 route / settings registry —— 这就是"测试空白"被
     // 制造出来的版本。下面的 `makeGoodSettings` 才是"真值正确"的版本。
     dependencies: [{ capability: "settings.registry" }],
@@ -75,7 +72,7 @@ function makeGoodSettings(): PluginManifest {
   return {
     id: "settings",
     name: "Settings",
-    meta: { kind: "core", startup: "optional", defaultEnabled: true, canDisable: false },
+    meta: {     },
     dependencies: [
       { capability: "settings.registry" },
       { capability: "route.registry" }
@@ -98,12 +95,12 @@ function makeGoodSettings(): PluginManifest {
   };
 }
 
-/** 一个依赖 builtin capability 的"业务"插件，模拟 poker / p2pkh 的形态。 */
+/** 一个依赖 builtin capability 的"业务"插件，模拟 example / p2pkh 的形态。 */
 function makeBiz(): PluginManifest {
   return {
     id: "biz",
     name: "Biz",
-    meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_BIZ] },
+    meta: {     providesCapabilities: [CAP_BIZ] },
     dependencies: [
       { capability: "settings.registry" },
       { capability: "route.registry" }
@@ -120,8 +117,8 @@ function makeBiz(): PluginManifest {
   };
 }
 
-function newHost(options: { safePath?: string } = {}): TestPluginHost {
-  return createPluginHost({ disableConfigPersistence: true, ...options });
+function newHost(options: import("./pluginHostContract.js").CreatePluginHostOptions = {}): TestPluginHost {
+  return createPluginHost({  ...options });
 }
 
 
@@ -206,7 +203,7 @@ describe("plugin teardown 句柄必须被 host 记录", () => {
     const plugin: PluginManifest = {
       id: "td",
       name: "TD",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup() {
         return () => {
           teardownCount += 1;
@@ -215,28 +212,11 @@ describe("plugin teardown 句柄必须被 host 记录", () => {
     };
     await host.registerAll([plugin]);
     expect(teardownCount).toBe(0);
-    await host.disable("td");
+    await host.revoke("td", "test revocation");
     expect(teardownCount).toBe(1);
     // 幂等：再 disable 一次不应该再调 teardown（因为已 disabled）
-    await host.disable("td");
+    await host.revoke("td", "test revocation");
     expect(teardownCount).toBe(1);
-  });
-
-  it("host 必须保留 manifest meta 信息供 UI 查询", async () => {
-    const host = newHost();
-    const plugin: PluginManifest = {
-      id: "meta",
-      name: "M",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: false, providesCapabilities: [CAP_X] },
-      setup(ctx: PluginContext) {
-        // Match the declared capability so the test exercises metadata on a healthy plugin.
-        ctx.provide(CAP_X, {});
-      }
-    };
-    await host.registerAll([plugin]);
-    const m = host.getManifest("meta");
-    expect(m?.canDisable).toBe(false);
-    expect(m?.units?.[0]?.provides).toEqual([{ kind: "local", id: CAP_X.id, version: CAP_X.version }]);
   });
 });
 
@@ -246,7 +226,7 @@ describe("settings registry 与 owner 回收", () => {
     const plugin: PluginManifest = {
       id: "p",
       name: "P",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx: PluginContext) {
         ctx.capability(SETTINGS_REGISTRY_CAPABILITY).register({
           id: "p.settings",
@@ -260,7 +240,7 @@ describe("settings registry 与 owner 回收", () => {
     await host.registerAll([plugin]);
     expect(host.settings.byId("p.settings")).toBeDefined();
     expect(host.settings.byPath("/settings/p")).toBeDefined();
-    await host.disable("p");
+    await host.revoke("p", "test revocation");
     expect(host.settings.byId("p.settings")).toBeUndefined();
     expect(host.settings.byPath("/settings/p")).toBeUndefined();
   });
@@ -274,7 +254,7 @@ describe("settings registry 与 owner 回收", () => {
     const plugin: PluginManifest = {
       id: "p",
       name: "P",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      meta: {     },
       setup(ctx: PluginContext) {
         ctx.capability(ROUTE_REGISTRY_CAPABILITY).register({
           id: "p.route",
@@ -293,84 +273,11 @@ describe("settings registry 与 owner 回收", () => {
     };
     await host.register(plugin);
     const s = host.state("p");
-    expect(s.kind).toBe("error-disabled");
+    expect(s.kind).toBe("failed");
     expect(s.error ?? "").toMatch(/collides with an existing route\.registry/);
     // settings 详情页注册被拒。
     expect(host.settings.byId("p.settings")).toBeUndefined();
   });
 
-  it("用户在 /settings/<plugin> 时禁用该 plugin，宿主必须先调用 history.pushState 跳到 safePath", async () => {
-    // 硬切换 003：currentRoutePlugin 必须识别 settings 详情页属于哪个插件，
-    // 否则 safeNavigateAway 会失效、卸载后留下渲染崩溃的页面。
-    //
-    // 测试方法：装一个最小 window shim，记录 pushState 调用；verify safePath 被
-    // 推入 history；restore 后不影响其它测试。
-    const safePath = "/__safe__";
-    const originalWindow = (globalThis as Record<string, unknown>).window;
-    const originalPopStateEvent = (globalThis as Record<string, unknown>).PopStateEvent;
-    const host = newHost({ safePath });
-    const pushCalls: string[] = [];
-    (globalThis as Record<string, unknown>).window = {
-      location: {
-        pathname: "/settings/p",
-        hash: "",
-        href: "http://localhost/settings/p",
-        origin: "http://localhost",
-        host: "localhost",
-        hostname: "localhost",
-        port: "",
-        protocol: "http:",
-        search: "",
-        assign: () => undefined,
-        replace: () => undefined,
-        reload: () => undefined
-      } as unknown as Location,
-      history: {
-        pushState: (_state: unknown, _title: string, url?: string | URL | null) => {
-          pushCalls.push(String(url ?? ""));
-        },
-        replaceState: () => undefined,
-        go: () => undefined,
-        back: () => undefined,
-        forward: () => undefined,
-        length: 0,
-        scrollRestoration: "auto" as const,
-        state: null
-      } as unknown as History,
-      dispatchEvent: () => true
-    } as unknown as Window & typeof globalThis;
-    try {
-      // node 没有原生 PopStateEvent；safeNavigateAway 会 `new PopStateEvent(...)`，
-      // 这里装一个 no-op class 让该行不抛 ReferenceError。
-      (globalThis as Record<string, unknown>).PopStateEvent = class {
-        type = "popstate";
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        constructor(_type: string, _init?: EventInit) {}
-      };
-      const plugin: PluginManifest = {
-        id: "p",
-        name: "P",
-        meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-        setup(ctx: PluginContext) {
-          ctx.capability(SETTINGS_REGISTRY_CAPABILITY).register({
-            id: "p.settings",
-            path: "/settings/p",
-            label: "P",
-            order: 100,
-            component: () => null
-          });
-        }
-      };
-      await host.registerAll([plugin]);
-      const r = await host.disable("p");
-      expect(r).toEqual({ ok: true });
-      // 验证：safeNavigateAway 调用了 history.pushState，把路径换到 safePath。
-      expect(pushCalls).toContain(safePath);
-    } finally {
-      if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
-      else (globalThis as Record<string, unknown>).window = originalWindow;
-      if (originalPopStateEvent === undefined) delete (globalThis as { PopStateEvent?: unknown }).PopStateEvent;
-      else (globalThis as Record<string, unknown>).PopStateEvent = originalPopStateEvent;
-    }
-  });
+
 });

@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-token-bsv21/src/bsv21Service.ts
 // BSV-21 service：plugin-token-bsv21 内部封装，组合 woc.bsv21.service 与
 // p2pkh.service（取当前 active key 的 BSV 地址）。
@@ -19,7 +20,7 @@
 import { defineCapability } from "webloom-framework";
 import type {
   BsvNetwork,
-  KeyspaceService,
+  VaultWalletState,
   WocBsv21Service,
   WocBsv21TokenDetail,
   WocBsv21UnspentToken,
@@ -91,7 +92,7 @@ export interface TokenWithMeta {
 }
 
 export interface CreateBsv21ServiceOptions {
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   p2pkh: P2pkhServiceForBsv21;
   wocBsv21: WocBsv21Service;
   /** 是否纳入 testnet；缺省跟随 p2pkh 全局设置。 */
@@ -99,11 +100,11 @@ export interface CreateBsv21ServiceOptions {
 }
 
 export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21ServiceHandle {
-  if (!options || !options.keyspace || !options.p2pkh || !options.wocBsv21) {
+  if (!options || !options.walletState || !options.p2pkh || !options.wocBsv21) {
     // 防御性：缺关键依赖时立即抛错，避免 listTokens 时再爆。
-    throw new Error("createBsv21Service: keyspace / p2pkh / wocBsv21 are required");
+    throw new Error("createBsv21Service: walletState / p2pkh / wocBsv21 are required");
   }
-  const keyspace = options.keyspace;
+  const walletState = options.walletState;
   const p2pkh = options.p2pkh;
   const wocBsv21 = options.wocBsv21;
 
@@ -118,7 +119,7 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
 
   /** 列出当前 active key 持有的全部 BSV P2PKH 资源（main + 可选 test）。 */
   async function activeKeyResources(): Promise<P2pkhKeyResourceForBsv21[]> {
-    const state = keyspace.active();
+    const state = walletState.snapshot();
     if (!state.activePublicKeyHex) return [];
     const main = await p2pkh.listResources("bsv");
     const list: P2pkhKeyResourceForBsv21[] = main.filter((r) => r.publicKeyHex === state.activePublicKeyHex);
@@ -133,6 +134,7 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
   }
 
   async function activeKeyUnspentTokens(signal?: AbortSignal): Promise<WocBsv21UnspentToken[]> {
+    const session = walletState.snapshot();
     const resources = await activeKeyResources();
     const out: WocBsv21UnspentToken[] = [];
     for (const r of resources) {
@@ -140,7 +142,7 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
       const items = await wocBsv21.listAddressUnspentTokens(r.network, r.address, { signal });
       out.push(...items);
     }
-    return out;
+    return sameWalletSession(session, walletState.snapshot()) ? out : [];
   }
 
   function observationOf(items: WocBsv21UnspentToken[]): "unconfirmed" | "confirmed" | undefined {
@@ -154,6 +156,7 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
       return activeKeyUnspentTokens(signal);
     },
     async listActiveKeyTokens(signal?: AbortSignal) {
+      const session = walletState.snapshot();
       const unspent = await activeKeyUnspentTokens(signal);
       const grouped = new Map<string, {
         entry: WocBsv21UnspentToken[];
@@ -191,6 +194,7 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
           network: first.network
         });
       }
+      if (!sameWalletSession(session, walletState.snapshot())) return [];
       out.sort((a, b) => a.meta.origin.localeCompare(b.meta.origin));
       return out;
     },

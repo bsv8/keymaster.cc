@@ -1,3 +1,4 @@
+import { useRuntimeStatus } from "@keymaster/runtime/assembly";
 // apps/web/src/App.tsx
 // 根组件：根据当前 path 决定渲染协议 popup / LockedShell / UnlockedShell。
 // 设计缘由：Booting/Locked/Unlocked 三态由 runtime 决定，App 只负责调度。
@@ -20,17 +21,15 @@ import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, VaultSer
 import {
   APPLICATION_BOOTSTRAP_READY_CAPABILITY,
   APPLICATION_BOOTSTRAP_RESOURCE_ID,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResource } from "webloom-framework/react";
-import { useCurrentPath, useHostVersion, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
-import { StorageUnavailableGuard } from "@keymaster/platform-storage";
-import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
-import { LockedShell } from "./shell/LockedShell.js";
-import { UnlockedShell } from "./shell/UnlockedShell.js";
-import { InitialSetupPage } from "./shell/InitialSetupPage.js";
+import { useCurrentPath, useI18n } from "@keymaster/runtime";
+import { useHostVersion, usePluginHost } from "@keymaster/runtime/assembly";
+import { PAGE_UI_RENDERER_CAPABILITY, type PageUiRenderer, type PageFrameSlot } from "@keymaster/contracts";
+import { useSyncExternalStore, useCallback, createContext, useContext, type ReactNode } from "react";
 import { StartupError, StartupPlaceholder } from "./shell/StartupPlaceholder.js";
 
 /** 协议 popup 单一路由。 */
@@ -42,9 +41,11 @@ function isProtocolPopupPath(path: string): boolean {
   return path === PROTOCOL_POPUP_PATH;
 }
 
+const ApplicationPages = createContext<PageUiRenderer | undefined>(undefined);
 export function App() {
   const path = useCurrentPath();
-  return <ApplicationBootstrapApp path={path} />;
+  const pages = useOptionalCapability(PAGE_UI_RENDERER_CAPABILITY);
+  return <ApplicationPages.Provider value={pages}><ApplicationBootstrapApp path={path} /></ApplicationPages.Provider>;
 }
 
 interface ApplicationBootstrapAppProps {
@@ -112,7 +113,7 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
 
   const hasStorageController = useHasCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
   const hasVaultService = useHasCapability(VAULT_SERVICE_CAPABILITY);
-  const hasKeyspaceService = useHasCapability(KEYSPACE_SERVICE_CAPABILITY);
+  const hasVaultWalletState = useHasCapability(VAULT_WALLET_STATE_CAPABILITY);
   const vaultService = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
   const hasStorageStatusResource = host.resourceRegistry?.get("storage.status") !== undefined;
   if (hasStorageStatusResource) hadStorageStatusResource.current = true;
@@ -183,7 +184,7 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   // 退回创建入口——那会用空钱包覆盖仍可能可恢复的本地数据。
   if (bootstrapSnapshot.phase === "storage-onboarding") {
     if (hasStorageController && hasVaultService) {
-      return <StorageUnavailableGuard><InitialSetupPage /></StorageUnavailableGuard>;
+      return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
     }
     return <StartupPlaceholder />;
   }
@@ -213,21 +214,21 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   // 协议 popup 是独立入口；在启动门禁已完成后继续交给 ProtocolPopupPage，
   // 包括它需要自己处理的 uninitialized/locked/unlocked 状态。
   if (vaultStatus === "uninitialized" && isProtocolPopupPath(path)) {
-    return <StorageUnavailableGuard><RuntimeApp /></StorageUnavailableGuard>;
+    return <RuntimeApp />;
   }
 
-  // Vault 与 Keyspace 是读取钱包真值和提供创建/解锁入口的前置条件。
+  // Vault 与 WalletState 是读取钱包真值和提供创建/解锁入口的前置条件。
   // 缺能力时只能停在占位页：不能把「capability 还没注册」误判成空钱包而
   // 渲染创建入口，那会诱导用户在错误的判断上覆盖数据。
-  if (!bootstrapSnapshot.vaultCapabilityReady || !hasVaultService || !hasKeyspaceService) {
+  if (!bootstrapSnapshot.vaultCapabilityReady || !hasVaultService || !hasVaultWalletState) {
     return <StartupPlaceholder />;
   }
   // locked 不需要等 vault-selection 之后的业务插件装配：解锁页与创建/导入
   // 入口都只依赖第一阶段就已经注册的 Vault 能力。
   if (vaultStatus === "locked") {
-    return <StorageUnavailableGuard><RuntimeApp initialVaultStatus="locked" /></StorageUnavailableGuard>;
+    return <RuntimeApp initialVaultStatus="locked" />;
   }
-  if (vaultStatus === "uninitialized") return <InitialSetupPage />;
+  if (vaultStatus === "uninitialized") return <ApplicationFrame slot="wallet-entry" />;
 
   if (!bootstrapSnapshot.vaultSelectionReady) return <StartupPlaceholder />;
 
@@ -237,11 +238,11 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
     && bootstrapSnapshot.hasUnlockedActiveKey
     && bootstrapSnapshot.ownerAppsReady
     && bootstrapSnapshot.connectAppsReady
-    && bootstrapSnapshot.assetWorkspaceReady
+    && bootstrapSnapshot.assetCatalogsReady
     && hasVaultService
-    && hasKeyspaceService;
+    && hasVaultWalletState;
   if (!applicationReady) return <StartupPlaceholder message="正在准备应用…" />;
-  return <StorageUnavailableGuard><RuntimeApp initialVaultStatus="unlocked" /></StorageUnavailableGuard>;
+  return <RuntimeApp initialVaultStatus="unlocked" />;
 }
 
 function readVaultStatus(vaultService: VaultService | undefined): VaultStatus | undefined {
@@ -279,12 +280,21 @@ function RuntimeApp({ initialVaultStatus }: RuntimeAppProps = {}) {
   // 钱包 locked / uninitialized / unlocked 都直接走协议页，
   // 协议 service 内部会自己处理 unlock / confirm 状态机。
   if (isProtocolPopupPath(path)) {
-    return <ProtocolPopupPage />;
+    return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="protocol-popup" /></ApplicationFrame>;
   }
 
   if (effectiveVault === "uninitialized" || effectiveVault === "locked") {
-    return <LockedShell />;
+    return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
   }
 
-  return <UnlockedShell />;
+  return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="unlocked-shell" /></ApplicationFrame>;
+}
+
+/** Trusted app selects a registered entry; Page retains every executable closure. */
+function ApplicationFrame({ slot, children }: { slot: PageFrameSlot; children?: ReactNode }) {
+  const pages = useContext(ApplicationPages);
+  const subscribe = useCallback((listener: () => void) => pages?.subscribe(listener) ?? (() => {}), [pages]);
+  const snapshot = useCallback(() => pages?.revision() ?? 0, [pages]);
+  useSyncExternalStore(subscribe, snapshot, snapshot);
+  return pages ? <>{pages.renderFrame(slot, children)}</> : <StartupPlaceholder />;
 }

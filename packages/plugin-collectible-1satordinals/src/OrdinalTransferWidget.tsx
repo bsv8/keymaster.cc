@@ -1,6 +1,6 @@
 import type { CollectibleTransferHandler, CollectibleTransferWidgetProps } from "@keymaster/contracts";
-import { useOptionalCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
 import { Button, TextInput } from "@keymaster/ui";
 import { useEffect, useMemo, useState } from "react";
 import { ORDINAL_TRANSFER_SERVICE_CAPABILITY, type OrdinalTransferService, type OrdinalTransferPreview } from "./ordinalTransferService.js";
@@ -23,10 +23,10 @@ export function createOrdinalTransferHandler(): CollectibleTransferHandler {
 }
 
 export function OrdinalTransferWidget(props: CollectibleTransferWidgetProps) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由/弹窗组件在锁定瞬间仍可能
   // 完成一次渲染，必须按"暂不可用"降级而不是抛错。
-  const service = useOptionalCapability(ORDINAL_TRANSFER_SERVICE_CAPABILITY);
+  const service = useOptionalPluginCapability(ORDINAL_TRANSFER_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <p className="one-sat-transfer-widget__unavailable">
@@ -44,7 +44,7 @@ function OrdinalTransferWidgetInner({
   onCompleted,
   service
 }: CollectibleTransferWidgetProps & { service: OrdinalTransferService }) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const [recipientAddress, setRecipientAddress] = useState("");
   const [feeRate, setFeeRate] = useState("1000");
   const [busy, setBusy] = useState(false);

@@ -1,3 +1,6 @@
+import { createElement, useSyncExternalStore } from "react";
+import { ScopedPluginConsumerProvider as PluginConsumerProvider } from "@keymaster/runtime";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-apps/src/manifest.ts
 // plugin-apps 插件：Keymaster 内部 app launcher。
 //
@@ -7,9 +10,8 @@
 //   - 插件自身**不**直接 import `protocolStorageRepository` /
 //     `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` /
 //     `window.open` popup URL——这些细节全部收口在 service 内部。
-//   - 依赖 `route.registry` / `business.registry` / `protocol.service`。
-//   - plugin-apps 是面向用户的 launcher 入口，**不**是 core 平台能力；
-//     缺省启用、可被禁用。
+//   - 依赖 `page.ui.registry` / `business.registry` / `protocol.service`。
+//   - plugin-apps 拥有 launcher 入口，寿命由依赖与作用域决定。
 //   - 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）；
 //     当前激活错误码 `export_owner_runtime_failed` 表示 launcher 端
 //     生成 appView owner runtime capability 失败。
@@ -24,7 +26,8 @@ import type {
 import {
   APP_CATALOG_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
@@ -124,20 +127,17 @@ const appsPluginDefinition = {
   id: "apps",
   name: "Apps",
   description: "Keymaster 内部 app launcher：从本地 JSON 清单展示 app，并在当前 Keymaster 窗口作为 launcher 启动 appView。",
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "connect-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [{
     id: "apps.window",
     runtime: "window-main",
     scopeKind: "root",
     provides: [capabilityDescriptor(APP_CATALOG_CAPABILITY)],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "应用授权弹窗读取唯一钱包 Key 元数据" },
       { capability: PROTOCOL_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "调用 launchAppView 启动 appView" },
-      { capability: ROUTE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册应用列表页面" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册应用列表页面" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "接入首页业务导航" },
     ]),
   }],
@@ -145,14 +145,20 @@ const appsPluginDefinition = {
   setup(ctx) {
     // 暴露只读本地 resolver；协议层通过依赖注入消费，绝不反向 import 本插件。
     ctx.provide(APP_CATALOG_CAPABILITY, createCatalogResolver());
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
-    routes.register({
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    pages.view.register({
       id: "apps.launcher",
       path: "/apps",
       label: { key: "apps.route.label", fallback: "Apps" },
-      component: AppsPage
+      kind: "page",
+      render: () => createElement(AppsPage)
     });
 
+    const AppHome = () => {
+      const status = useSyncExternalStore(ctx.consumer.subscribe, () => ctx.consumer.status, () => ctx.consumer.status);
+      return status === "active" ? createElement(PluginConsumerProvider, { consumer: ctx.consumer, children: createElement(AppsHomeWidget) }) : null;
+    };
+    pages.view.register({ kind: "home", slot: "main", id: "apps.home", label: "apps", space: { id: "apps.applications", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400 }, order: 60, render: () => createElement(AppHome) });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature("apps", "home", {
       id: "home.apps",
@@ -160,7 +166,6 @@ const appsPluginDefinition = {
       order: 50,
       icon: "Apps",
       entry: { path: "/apps", routeId: "apps.launcher" },
-      home: [{ id: "apps.home", space: { id: "apps.applications", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400 }, order: 60, component: AppsHomeWidget }]
     });
   }
 } satisfies PluginManifest & { setup: PluginSetup };

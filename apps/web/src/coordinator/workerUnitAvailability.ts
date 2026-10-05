@@ -2,9 +2,8 @@
 //
 // 现行设计：docs/插件生命周期.md 的「单元可用性」一节。
 //
-// 判定规则：可用 = 插件开着 且 单元已就绪。读一个单元的「已就绪」就等于把
-// 该单元这条 AND 整条求过值了：已就绪的含义即「我插件开着 + 我依赖的全可用 +
-// 我已就绪」。递归通过依赖图自然完成，调用方不自己递归。
+// 判定依据是实际单元依赖、Storage 根、owner 会话与单元就绪事实。
+// 不读取产品开关，也不把产品登记当作服务就绪。依赖按稳定 unitId 递归求值。
 //
 // 状态与诊断分离：状态字段只回答「能不能用」（二值 ready/failed），为什么不能
 // 由 `reasons` 逐条承担。瞬时与永久在代码上没有区别——「还没好」和「永远不会
@@ -34,8 +33,6 @@ export const COORDINATOR_TRANSPORT_UNIT_ID = "keymaster.coordinator.transport";
  * 状态。变化由调用方订阅后重新求值。
  */
 export interface CoordinatorUnitAvailabilityContext {
-  /** 产品插件开关；未知产品必须返回 false。 */
-  isProductEnabled(productId: string): boolean;
   /** 单元自身是否已就绪（WebLoom Host / 运行态注册表的当前状态）。 */
   isUnitReady(unitId: string): boolean;
   /** 中央 Storage 根是否已就绪。 */
@@ -64,10 +61,6 @@ type UnitUnavailableText = Exclude<CoordinatorUnitUnavailableReason["text"], str
 export function describeUnitUnavailableReason(reason: CoordinatorUnitUnavailableReason): UnitUnavailableText {
   const dependency = reason.dependencyId ?? "";
   switch (reason.code) {
-    case "plugin-disabled":
-      return { key: "coordinator.unitUnavailable.pluginDisabled", fallback: `Plugin disabled: ${dependency}`, values: { product: dependency } };
-    case "dependency-disabled":
-      return { key: "coordinator.unitUnavailable.dependencyDisabled", fallback: `Required plugin disabled: ${dependency}`, values: { product: dependency } };
     case "dependency-not-ready":
       return { key: "coordinator.unitUnavailable.dependencyNotReady", fallback: `Required runtime unit is not ready: ${dependency}`, values: { unit: dependency } };
     case "storage-root-unavailable":
@@ -94,10 +87,10 @@ interface EvaluationOptions {
    * 求值到哪一层。
    *
    * 三层共用同一次实现，区别只在「求到哪」：
-   * - `startup`：调度器问的「现在能不能起这个单元」——插件 + 作用域 + 声明依赖。
-   * - `construction`：构造函数问的「现在能不能把运行对象建出来」——插件 + 作用域。
+   * - `startup`：调度器问的「现在能不能起这个单元」——作用域 + 声明依赖。
+   * - `construction`：构造函数问的「现在能不能把运行对象建出来」——作用域。
    *   依赖不参与：依赖是**使用**前置条件（例如卖方要收款运行时），不是**构造**
-   *   前置条件。否则依赖一掉线，连「把用户开关关掉」都做不到。
+   *   前置条件。依赖掉线时仍需构造运行对象以处理业务设置与诊断。
    * - `availability`：`selfReady` 参与，得到「现在能不能用」。
    */
   layer: "startup" | "construction" | "availability";
@@ -118,9 +111,6 @@ function evaluate(
     return { unitId, state: "failed", dependsOn: [], reasons: [reason("unit-unknown", unitId)] };
   }
   const reasons: CoordinatorUnitUnavailableReason[] = [];
-  if (!context.isProductEnabled(unit.productId)) {
-    reasons.push(reason("plugin-disabled", unit.productId));
-  }
   if (unit.scopeKind === "storage" && !context.isStorageReady()) {
     reasons.push(reason("storage-root-unavailable"));
   }
@@ -131,8 +121,8 @@ function evaluate(
   for (const dependency of options.layer === "construction" ? [] : unit.dependsOn) {
     const dependencyUnit = descriptorOf(dependency, catalog);
     if (!dependencyUnit) {
-      // 产品 id：只有插件开关这一个条件。没有依赖要等就是永远可用。
-      if (!context.isProductEnabled(dependency)) reasons.push(reason("dependency-disabled", dependency));
+      // 缺失的单元声明不能由同名产品登记或已有运行句柄代替。
+      reasons.push(reason("unit-unknown", dependency));
       continue;
     }
     // 依赖链下钻。目录已静态校验无环，这里的守卫只是不让一个坏目录变成死循环。
@@ -142,7 +132,7 @@ function evaluate(
     }
     if (context.isUnitReady(dependency)) continue;
     // 下钻拿依赖自己的原因。若它给出的解释只有「我自己还没起来」这一条，那和
-    // 「依赖 X 不可用」是同一句话，不重复列出同一个依赖两次；插件被停用、它
+    // 「依赖 X 不可用」是同一句话，不重复列出同一个依赖两次；作用域未就绪、它
     // 自己的依赖不满足这类解释才值得和依赖关系一起呈现。
     const childReasons = evaluate(dependency, context, { layer: "availability" }, new Set([...visiting, dependency])).reasons;
     const explainsOnlyItself = childReasons.length === 1 && childReasons[0]?.code === "unit-not-ready";
@@ -160,7 +150,7 @@ function evaluate(
  *
  * `ensure*Runtime()` 用它。依赖是使用前置条件而不是构造前置条件：依赖暂时不可
  * 用时，运行对象仍然可以建起来（随后由能力自己如实报不可用并订阅变化），否则
- * 依赖一掉线，连「把用户开关关掉」这种必须永远可用的操作都做不到。
+ * 依赖一掉线，业务设置和诊断也无法访问。
  */
 export function evaluateCoordinatorUnitConstructionPreconditions(
   unitId: string,

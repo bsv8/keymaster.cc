@@ -1,4 +1,3 @@
-import type { PluginBootstrapStage } from "@keymaster/contracts";
 
 /** Bootstrap 中发生错误时的结构化上下文。字符串只描述操作，不用于错误分类。 */
 export interface BootstrapErrorContext {
@@ -9,7 +8,10 @@ export interface BootstrapErrorContext {
 }
 
 export type BootstrapErrorStage =
-  | PluginBootstrapStage
+  | "storage-onboarding"
+  | "vault-selection"
+  | "owner-apps-ready"
+  | "connect-apps-ready"
   | "coordinator"
   | "window-app"
   | "transport"

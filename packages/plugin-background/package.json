@@ -5,13 +5,14 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./styles.css": "./src/styles.css"
+    "./styles.css": "./src/styles.css",
+    "./coordinator": "./src/coordinator.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.5.0",
+    "webloom-framework": "0.6.0",
     "@keymaster/ui": "*",
     "lucide-react": "^0.468.0"
   }

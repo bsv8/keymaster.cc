@@ -7,7 +7,7 @@
 //
 // 用法：
 //   const routes = useRegistry(h => h.routes.list());
-//   const route = useRegistry(h => h.routes.byPath('/poker'));
+//   const route = useRegistry(h => h.routes.byPath('/example'));
 // 不再假定"host 挂载后不变"。
 
 import { useMemo } from "react";

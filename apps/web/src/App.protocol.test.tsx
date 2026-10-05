@@ -25,13 +25,17 @@ const runtimeState = vi.hoisted(() => ({
     vaultSelectionReady: true,
     ownerAppsReady: true,
     connectAppsReady: true,
-    assetWorkspaceReady: true
+    assetCatalogsReady: true
   }
 }));
 
-vi.mock("@keymaster/runtime", () => ({
+vi.mock("@keymaster/runtime/assembly", () => ({
+  useRuntimeStatus: () => ({ vault: runtimeState.vault, ready: runtimeState.ready }),
   usePluginHost: () => ({ resourceStore: {}, resourceRegistry: { get: () => ({}) } }),
   useHostVersion: () => 1,
+}));
+
+vi.mock("@keymaster/runtime", () => ({
   useCurrentPath: () => {
     const [path, setPathState] = useState(window.location.pathname);
     useEffect(() => {
@@ -41,8 +45,19 @@ vi.mock("@keymaster/runtime", () => ({
     }, []);
     return path;
   },
-  useRuntimeStatus: () => ({ vault: runtimeState.vault, ready: runtimeState.ready }),
+
   useOptionalCapability: (capability: { id: string }) => {
+    if (capability.id === "page.ui.renderer") return {
+      subscribe: () => () => {}, revision: () => 0,
+      renderFrame: (slot: string, children?: ReactNode) => {
+        if (slot === "storage-guard") return children;
+        if (slot === "protocol-popup") return <div data-testid="protocol-popup">protocol</div>;
+        if (slot === "unlocked-shell") return <div data-testid="unlocked-shell">unlocked</div>;
+        if (slot === "wallet-entry") return <div data-testid="locked-shell">locked</div>;
+        return null;
+      }
+    };
+
     if (capability.id === "vault.service") return { status: () => runtimeState.vault };
     if (capability.id === "application-bootstrap.ready") return { retry: vi.fn(async () => undefined) };
     return undefined;
@@ -56,6 +71,17 @@ vi.mock("@keymaster/runtime", () => ({
 vi.mock("webloom-framework/react", () => ({
   useHasCapability: () => true,
   useOptionalCapability: (capability: { id: string }) => {
+    if (capability.id === "page.ui.renderer") return {
+      subscribe: () => () => {}, revision: () => 0,
+      renderFrame: (slot: string, children?: ReactNode) => {
+        if (slot === "storage-guard") return children;
+        if (slot === "protocol-popup") return <div data-testid="protocol-popup">protocol</div>;
+        if (slot === "unlocked-shell") return <div data-testid="unlocked-shell">unlocked</div>;
+        if (slot === "wallet-entry") return <div data-testid="locked-shell">locked</div>;
+        return null;
+      }
+    };
+
     if (capability.id === "vault.service") return { status: () => runtimeState.vault };
     if (capability.id === "application-bootstrap.ready") return { retry: vi.fn(async () => undefined) };
     return undefined;
@@ -74,21 +100,12 @@ vi.mock("@keymaster/platform-storage", () => ({
   StorageUnavailableGuard: ({ children }: { children: ReactNode }) => children
 }));
 
-vi.mock("./shell/InitialSetupPage.js", () => ({
-  InitialSetupPage: () => <div data-testid="initial-setup">setup</div>
-}));
 
 vi.mock("@keymaster/plugin-protocol", () => ({
   ProtocolPopupPage: () => <div data-testid="protocol-popup">protocol</div>
 }));
 
-vi.mock("./shell/LockedShell.js", () => ({
-  LockedShell: () => <div data-testid="locked-shell">locked</div>
-}));
 
-vi.mock("./shell/UnlockedShell.js", () => ({
-  UnlockedShell: () => <div data-testid="unlocked-shell">unlocked</div>
-}));
 
 function setPath(path: string) {
   window.history.replaceState(null, "", path);

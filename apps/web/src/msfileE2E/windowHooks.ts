@@ -14,7 +14,6 @@ import type {
   VaultCoordinatorControl,
 } from "@keymaster/contracts";
 import {
-  VAULT_COORDINATOR_CONTROL_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
   PROTOCOL_STORAGE_REPOSITORY_CAPABILITY,
 } from "@keymaster/contracts";
@@ -195,9 +194,7 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
   // 首个页面返回 host 时，Vault/MSFile 可能仍在 storage-onboarding 或
   // owner-apps-ready 异步门禁中。安装测试钩子不能把这个正常竞态升级成
   // fatal；先保留 Coordinator 窄面，真正调用时再取得已装配的 service。
-  const coordinator = host.capabilities.has(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    ? host.capabilities.get(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    : client;
+  const coordinator = client;
   let service: MsFileService | undefined;
   let protocolRepository: ProtocolStorageRepository | undefined;
   let readBlockDelayMs = 0;

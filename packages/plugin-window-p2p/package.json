@@ -5,11 +5,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator.ts",
     "./lane-registry": "./src/laneRegistry.ts",
     "./window-executor": "./src/windowExecutor.ts",
     "./webrtc-interconnect": "./src/webrtcInterconnect.ts",
-    "./identity-signer": "./src/identitySigner.ts",
-    "./executor-transport": "./src/executorTransport.ts"
+    "./identity-signer": "./src/identitySigner.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

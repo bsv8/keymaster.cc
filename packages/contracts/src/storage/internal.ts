@@ -9,7 +9,7 @@ import type { AppIdentitySnapshot } from "../appIdentity.js";
 /**
  * Host/Coordinator 内部的存储绑定权威。
  *
- * 该接口不放进公开 KeyspaceService：业务插件只能拿到 Host 已绑定的
+ * 该接口不放进公开 VaultWalletState：业务插件只能拿到 Host 已绑定的
  * ctx.storage，不能通过 moduleId/purposeId 自己选择其它 namespace。
  */
 export interface StorageBindingAuthority {
@@ -125,3 +125,8 @@ export interface ThirdPartyAppStorageGrant {
 
 /** `storage.owner.bind` 的结果：内置模块授权或第三方 App 目录授权。 */
 export type StorageBindingGrant = StorageOwnerGrant | ThirdPartyAppStorageGrant;
+
+export type { WalletStore, WalletObject, WalletObjectMeta, WalletWriteCondition, WalletPutResult, WalletBatchOperation, WalletBatchCondition, WalletBatchInput, WalletBatchResult } from "./walletStoreInternal.js";
+export { StorageRuntimeError, storageErrorCode, type StorageDiagnostic } from "./runtimeError.js";
+
+export { WALLET_INITIALIZATION_PATH, type WalletVaultKeyStore, type WalletVaultLifecycleStore } from "./walletStoreInternal.js";

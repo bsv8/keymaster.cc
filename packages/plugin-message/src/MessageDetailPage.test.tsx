@@ -1,15 +1,16 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-message/src/MessageDetailPage.test.tsx
 // 会话详情页契约测试。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
-  ActiveKeyState,
+  VaultLifecycleSnapshot,
   MessageRecord,
   I18nService,
   I18nText,
   I18nValues,
-  KeyspaceService,
+  VaultWalletState,
   LanguageMode,
   SupportedLanguage,
   SupportedLanguageDescriptor,
@@ -19,15 +20,36 @@ import type {
 } from "@keymaster/contracts";
 import {
   I18N_SERVICE_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   MESSAGE_SERVICE_CAPABILITY,
   WEBRTC_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
-import { bindWebLoomHost, PluginHostProvider } from "@keymaster/runtime";
+import { bindWebLoomHost, PluginHostProvider } from "@keymaster/runtime/assembly";
 import type { PluginHost } from "@keymaster/runtime";
 import { createFakePluginHost } from "webloom-framework/testing";
 import type { MessageService } from "./messageService.js";
 
+// Component behavior fixtures retain their local fake stores; production ownership is
+// exercised separately through the real Page/Message setup integration.
+vi.mock("webloom-framework/react", async importOriginal => {
+  const original = await importOriginal<typeof import("webloom-framework/react")>();
+  return { ...original, usePluginCapability: original.useCapability, useOptionalPluginCapability: original.useOptionalCapability };
+});
+vi.mock("@keymaster/runtime", async importOriginal => {
+  const original = await importOriginal<typeof import("@keymaster/runtime")>();
+  const hooks = await import("webloom-framework/react");
+  return { ...original, useWalletState: () => hooks.useCapability(VAULT_WALLET_STATE_CAPABILITY) };
+});
+vi.mock("./MessageResourceContext.js", async () => {
+  const runtime = await import("@keymaster/runtime/assembly");
+  return { useMessageResources: () => runtime.usePluginHost().resourceStore };
+});
+
+function detailLocation() {
+  const path = window.location.pathname;
+  const parts = path.split("/").filter(Boolean);
+  return { path, params: { publicKeyHex: parts.length === 2 && ["message", "messages"].includes(parts[0]!) ? parts[1]! : "" } };
+}
 const OWNER = "02bbbb".padEnd(66, "b");
 type MessageFixture = MessageRecord & {
   readonly senderAppId?: string;
@@ -53,13 +75,13 @@ function makeFakeI18n(): I18nService {
   };
 }
 
-function makeFakeKeyspace(): KeyspaceService {
-  const listeners = new Set<(state: ActiveKeyState) => void>();
-  let active: ActiveKeyState = { activePublicKeyHex: OWNER };
+function makeFakeWalletState(): VaultWalletState {
+  const listeners = new Set<(state: VaultLifecycleSnapshot) => void>();
+  let active: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: OWNER });
   return {
-    active: () => active,
-    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" }),
-    onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
+    snapshot: () => walletStateFixtureSnapshot((() => active)(), () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" })),
+
+    subscribe: (handler: (state: VaultLifecycleSnapshot) => void) => {
       listeners.add(handler);
       return () => {
         listeners.delete(handler);
@@ -67,10 +89,10 @@ function makeFakeKeyspace(): KeyspaceService {
     },
     // 单 Key 钱包没有切换入口；仅用于测试投影变化通知。
     setActive: async (publicKeyHex: string) => {
-      active = { activePublicKeyHex: publicKeyHex };
+      active = walletStateFixtureSnapshot({ activePublicKeyHex: publicKeyHex });
       for (const listener of listeners) listener(active);
     }
-  } as unknown as KeyspaceService;
+  } as unknown as VaultWalletState;
 }
 
 function makeFakeService(opts?: {
@@ -151,7 +173,7 @@ function makeFakeHost(
 ): PluginHost {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY.id]: makeFakeI18n(),
-    [KEYSPACE_SERVICE_CAPABILITY.id]: makeFakeKeyspace()
+    [VAULT_WALLET_STATE_CAPABILITY.id]: makeFakeWalletState()
   };
   if (service) {
     providers[MESSAGE_SERVICE_CAPABILITY.id] = service;
@@ -170,7 +192,7 @@ function makeFakeHost(
   };
 
   // 注册 message.detail 资源定义
-  const keyspace = providers[KEYSPACE_SERVICE_CAPABILITY.id] as KeyspaceService;
+  const walletState = providers[VAULT_WALLET_STATE_CAPABILITY.id] as VaultWalletState;
   resourceRegistry.register({
     id: "message.detail",
     scope: "active-key",
@@ -192,17 +214,17 @@ function makeFakeHost(
     invalidation: "microtask"
   });
   resourceRegistry.register({
-    id: "webrtc.peer-history",
+    id: "message.webrtc-history",
     scope: "global",
-    key: (args: readonly string[]) => ["webrtc.peer-history", args[0] ?? ""],
+    key: (args: readonly string[]) => ["message.webrtc-history", args[0] ?? ""],
     load: async (args: readonly string[]) => webrtcService ? await webrtcService.listHistoryForPeer(args[0] ?? "") : [],
     subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => webrtcService?.subscribe(() => invalidate()) ?? (() => {}),
     invalidation: "immediate"
   });
   resourceRegistry.register({
-    id: "webrtc.session",
+    id: "message.webrtc-session",
     scope: "global",
-    key: () => ["webrtc.session"],
+    key: () => ["message.webrtc-session"],
     load: async () => webrtcService?.snapshot() ?? { phase: "idle", remotePublicKeyHex: null },
     subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => webrtcService?.subscribe(() => invalidate()) ?? (() => {}),
     invalidation: "immediate"
@@ -218,10 +240,10 @@ function makeFakeHost(
     }
   }) as Record<string, { publicKeyHex: string; state: "online" | "offline"; lastPongAtMs?: number }>;
   resourceRegistry.register({
-    id: "contacts.presence",
+    id: "message.contacts-presence",
     scope: "active-key",
     key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
-      ["contacts.presence", context.activePublicKeyHex ?? "none"],
+      ["message.contacts-presence", context.activePublicKeyHex ?? "none"],
     load: async () => defaultPresence,
     subscribe: () => () => {},
     invalidation: "immediate"
@@ -233,7 +255,7 @@ function makeFakeHost(
     ensure: <T,>(definitionId: string, args: readonly string[]) => {
       const def = resourceDefinitions.get(definitionId);
       if (!def) throw new Error(`Resource definition "${definitionId}" not found`);
-      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const context = { activePublicKeyHex: walletState.snapshot().activePublicKeyHex };
       const key = def.key(args, context);
       const rk = `${definitionId}::${key.join("::")}`;
       let record = records.get(rk);
@@ -261,7 +283,7 @@ function makeFakeHost(
     subscribe: (definitionId: string, args: readonly string[], callback: () => void) => {
       const def = resourceDefinitions.get(definitionId);
       if (!def) return () => {};
-      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const context = { activePublicKeyHex: walletState.snapshot().activePublicKeyHex };
       const key = def.key(args, context);
       const rk = `${definitionId}::${key.join("::")}`;
       let record = records.get(rk);
@@ -286,7 +308,7 @@ function makeFakeHost(
     read: <T,>(definitionId: string, args: readonly string[]) => {
       const def = resourceDefinitions.get(definitionId);
       if (!def) return undefined;
-      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const context = { activePublicKeyHex: walletState.snapshot().activePublicKeyHex };
       const key = def.key(args, context);
       const rk = `${definitionId}::${key.join("::")}`;
       return records.get(rk)?.snapshot as T | undefined;
@@ -357,7 +379,7 @@ function makeFakeHost(
   // 必须显式使用 WebLoom testing fake，不能依赖生产兼容桥接。
   const capabilityProviders = new Map<import("webloom-framework").LocalCapability<unknown>, unknown>();
   capabilityProviders.set(I18N_SERVICE_CAPABILITY, providers[I18N_SERVICE_CAPABILITY.id]);
-  capabilityProviders.set(KEYSPACE_SERVICE_CAPABILITY, providers[KEYSPACE_SERVICE_CAPABILITY.id]);
+  capabilityProviders.set(VAULT_WALLET_STATE_CAPABILITY, providers[VAULT_WALLET_STATE_CAPABILITY.id]);
   if (service) capabilityProviders.set(MESSAGE_SERVICE_CAPABILITY, service);
   if (webrtcService) capabilityProviders.set(WEBRTC_SERVICE_CAPABILITY, webrtcService);
   bindWebLoomHost(keymasterHost, createFakePluginHost({ capabilities: capabilityProviders }));
@@ -390,7 +412,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -415,7 +437,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/message/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -455,7 +477,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/message/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -491,7 +513,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/message/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -535,7 +557,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/message/${routedPeer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -570,7 +592,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -604,7 +626,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/message/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -648,7 +670,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -711,7 +733,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -775,7 +797,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -829,7 +851,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
 
@@ -866,7 +888,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -897,7 +919,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -941,7 +963,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -974,7 +996,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -996,7 +1018,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -1030,7 +1052,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", `/messages/${peer}`);
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -1045,7 +1067,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", "/messages/any");
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {
@@ -1060,7 +1082,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     window.history.pushState({}, "", "/messages/x");
     render(
       <PluginHostProvider host={host}>
-        <MessageDetailPage />
+        <MessageDetailPage location={detailLocation()} />
       </PluginHostProvider>
     );
     await waitFor(() => {

@@ -16,9 +16,10 @@ import {
   validateWindowP2pExecutorConcurrencyConfig,
   type WindowP2pExecutorConcurrencyConfig,
   type WindowP2pExecutorOperation,
-} from "./executorTransport.js";
+} from "@keymaster/contracts/window-p2p";
 import { KeymasterWindowP2pIdentitySigner } from "./identitySigner.js";
-import { createWindowWebRtcInterconnect, type WindowWebRtcInterconnectContext } from "./webrtcInterconnect.js";
+import { createWindowWebRtcInterconnect } from "./webrtcInterconnect.js";
+import type { WindowWebRtcInterconnectContext } from "@keymaster/contracts/window-p2p";
 
 type Host = Awaited<ReturnType<typeof createHost>>;
 
@@ -313,9 +314,11 @@ export class WindowP2pExecutor {
     // 会立即拒绝在途 bridge；本地资源随后继续做尽力清理。
     const lease = this.lease;
     this.lease = undefined;
-    const releaseLease = lease
-      ? this.coordinator.windowP2pExecutorRelease(lease.leaseId).catch(() => undefined)
-      : Promise.resolve();
+    let releaseLease: Promise<unknown> = Promise.resolve();
+    if (lease) {
+      try { releaseLease = this.coordinator.windowP2pExecutorRelease(lease.leaseId).catch(() => undefined); }
+      catch { /* The revoked Coordinator binding cannot release; local cleanup must still complete. */ }
+    }
 
     await this.laneRegistry?.detach().catch(() => undefined);
     const host = this.host;
@@ -568,9 +571,9 @@ export function installWindowP2pExecutor(coordinator: WindowP2pCoordinatorContro
   };
   installedUnsubscribe = coordinator.subscribeTopic("session.state", (event: { vaultStatus?: string }) => {
     if (event.vaultStatus === "unlocked") attempt(event as import("@keymaster/contracts").CoordinatorBootstrapSnapshot);
-    else if (event.vaultStatus === "locked" || event.vaultStatus === "fatal") void executor.stop();
+    else if (event.vaultStatus === "locked" || event.vaultStatus === "fatal") void executor.stop().catch(() => undefined);
   });
-  const pagehideHandler = () => { void executor.dispose(); };
+  const pagehideHandler = () => { void executor.dispose().catch(() => undefined); };
   if (typeof window !== "undefined") {
     window.addEventListener("pagehide", pagehideHandler, { once: true });
   }

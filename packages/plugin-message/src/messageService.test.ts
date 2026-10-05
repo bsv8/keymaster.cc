@@ -1,13 +1,14 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // 消息 service 单测：Channel 私信 + 新 files 证据存储（sent/received/timeindex）。
 
 import { describe, expect, it, vi } from "vitest";
 import { MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
 import type {
-  ActiveKeyState,
+  VaultLifecycleSnapshot,
   BorrowedOwnerFileStore,
   ChannelPrivateMessageEvent,
   ChannelRuntime,
-  KeyspaceService,
+  VaultWalletState,
   OpenedPrivateEnvelope
 } from "@keymaster/contracts";
 import { masterSeedHashHex } from "./storage/masterSeed.js";
@@ -48,14 +49,14 @@ function memoryFiles(): { files: BorrowedOwnerFileStore; map: Map<string, Uint8A
   return { files, map };
 }
 
-function keyspace(): { keyspace: KeyspaceService; state: ActiveKeyState } {
-  const state: ActiveKeyState = { activePublicKeyHex: OWNER };
-  const service: KeyspaceService = {
-    active: () => state,
-    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" }),
-    onActiveKeyChanged: () => () => undefined
+function walletState(): { walletState: VaultWalletState; state: VaultLifecycleSnapshot } {
+  const state: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: OWNER });
+  const service: VaultWalletState = {
+    snapshot: () => walletStateFixtureSnapshot((() => state)(), () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" })),
+
+    subscribe: () => () => undefined
   };
-  return { keyspace: service, state };
+  return { walletState: service, state };
 }
 
 function signedPlaintextBytes(input: {
@@ -168,8 +169,8 @@ describe("messageService evidence storage", () => {
   it("发送后保存签名明文 raw 与时间索引，并可按会话读回", async () => {
     const { files, map } = memoryFiles();
     const c = channel();
-    const k = keyspace();
-    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    const k = walletState();
+    const service = createMessageService({ channel: c.runtime, walletState: k.walletState, files });
 
     await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "你好", clientMessageId: "c-1" });
     expect(c.published).toHaveLength(1);
@@ -194,8 +195,8 @@ describe("messageService evidence storage", () => {
   it("收到私信后保存加密信封 raw 与时间索引，并通过 Coordinator 解码", async () => {
     const { files, map } = memoryFiles();
     const c = channel();
-    const k = keyspace();
-    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    const k = walletState();
+    const service = createMessageService({ channel: c.runtime, walletState: k.walletState, files });
 
     const envelope = new TextEncoder().encode(JSON.stringify({ envelope_version: 1, ciphertext: "x" }));
     await c.runtime.publishPrivate({ recipientPublicKeyHex: OWNER, protocol: MESSAGE_PRIVATE_PROTOCOL, content: { type: "text", contentType: "text/plain", body: "自己", clientMessageId: "self", createdAtMs: 1 } });
@@ -220,8 +221,8 @@ describe("messageService evidence storage", () => {
   it("raw 缺失时索引保留并标记缺失，不伪造正文", async () => {
     const { files, map } = memoryFiles();
     const c = channel();
-    const k = keyspace();
-    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    const k = walletState();
+    const service = createMessageService({ channel: c.runtime, walletState: k.walletState, files });
     await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "会被删", clientMessageId: "c-3" });
 
     // 通过句柄删除，确保底层 store 真的丢掉 raw（索引仍保留）。
@@ -234,8 +235,8 @@ describe("messageService evidence storage", () => {
   it("重复投递同一消息只展示一条，并保留最早观察时间", async () => {
     const { files, map } = memoryFiles();
     const c = channel();
-    const k = keyspace();
-    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    const k = walletState();
+    const service = createMessageService({ channel: c.runtime, walletState: k.walletState, files });
     const publishResult = await c.runtime.publishPrivate({ recipientPublicKeyHex: OWNER, protocol: MESSAGE_PRIVATE_PROTOCOL, content: { type: "text", contentType: "text/plain", body: "重复", clientMessageId: "c-4", createdAtMs: 7 } });
     const rawEnvelope = publishResult.signedMessage!;
     const event = receivedEvent({ messageId: publishResult.messageId, body: "重复", clientMessageId: "c-4", createdAtMs: 7, rawEnvelope });
@@ -253,10 +254,23 @@ describe("messageService evidence storage", () => {
   it("发送前的参数错误不会写任何证据", async () => {
     const { files, map } = memoryFiles();
     const c = channel();
-    const k = keyspace();
-    const service = createMessageService({ channel: c.runtime, keyspace: k.keyspace, files });
+    const k = walletState();
+    const service = createMessageService({ channel: c.runtime, walletState: k.walletState, files });
     await expect(service.sendTextMessage({ recipientPublicKeyHex: "bad", body: "x" })).rejects.toThrow(/invalid_target/);
     await expect(service.sendTextMessage({ recipientPublicKeyHex: OTHER, body: "" })).rejects.toThrow(/empty_message/);
     expect(map.size).toBe(0);
   });
+});
+
+it("discards a delayed message publish after the same public key is unlocked in a new epoch", async () => {
+  const { files, map } = memoryFiles(); const c = channel(); const k = walletState();
+  const original = c.runtime.publishPrivate.bind(c.runtime);
+  let finish!: () => void;
+  c.runtime.publishPrivate = async input => { await new Promise<void>(resolve => { finish = resolve; }); return original(input); };
+  const service = createMessageService({ channel: c.runtime, walletState: k.walletState, files });
+  const pending = service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "old session", clientMessageId: "old-epoch" });
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  k.state.sessionEpoch = "same-key-new-epoch";
+  finish(); await expect(pending).rejects.toThrow();
+  expect(map.size).toBe(0); service.dispose?.();
 });

@@ -1,3 +1,4 @@
+import { useP2pkhResources } from "../P2pkhResourceContext.js";
 // packages/plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx
 // P2PKH 余额 widget：
 //   - 金额来源改为 `{ total }`；不再分 confirmed / unconfirmed。
@@ -8,8 +9,8 @@
 // 跨标签同步、请求去重、失效批处理由 resource 处理。
 
 import { formatSats, formatSatsWithPrice } from "@keymaster/ui";
-import { countRender, useResourceSelector } from "webloom-framework/react";
-import { useBsvPrice, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { countRender } from "webloom-framework/react";
+import { usePluginBsvPrice, usePluginI18n, usePluginLocale, useResourceViewSelector } from "@keymaster/runtime";
 import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot } from "@keymaster/contracts";
 import type { P2pkhBalance, P2pkhSyncStatus } from "../p2pkhContracts.js";
 
@@ -19,21 +20,20 @@ type ReadinessState = "initializing" | "no-active-key" | "ready";
 
 export function P2pkhBalanceWidget() {
   countRender("plugin-p2pkh/P2pkhBalanceWidget");
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const locale = useLocale();
-  const price = useBsvPrice();
-  const store = host.resourceStore;
+  const { t } = usePluginI18n();
+  const locale = usePluginLocale();
+  const price = usePluginBsvPrice();
+  const store = useP2pkhResources();
 
-  const readiness = useResourceSelector<ReadinessState, ReadinessState>(
+  const readiness = useResourceViewSelector<ReadinessState, ReadinessState>(
     store, "p2pkh.readiness", [], (snapshot) => snapshot.data ?? "initializing"
   );
-  const status = useResourceSelector<P2pkhSyncStatus, P2pkhSyncStatus>(
+  const status = useResourceViewSelector<P2pkhSyncStatus, P2pkhSyncStatus>(
     store, "p2pkh.sync-status", [], (snapshot) => snapshot.data ?? "idle"
   );
 
   // 使用 Resource Store 读取统一的全局余额快照。
-  const balances = useResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
+  const balances = useResourceViewSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
     store,
     "p2pkh.balance",
     [],

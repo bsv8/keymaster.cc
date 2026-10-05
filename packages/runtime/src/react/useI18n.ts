@@ -8,7 +8,7 @@
 //   - useLocale() 返回当前语言；formatSats / Intl 调用方使用。
 
 import { useCallback, useMemo, useSyncExternalStore } from "react";
-import { useCapability } from "webloom-framework/react";
+import { useCapability, usePluginCapability } from "webloom-framework/react";
 import type {
   I18nService,
   I18nText,
@@ -42,7 +42,15 @@ export interface UseI18nResult {
  * exceeded"。这里把整个 result 用 useMemo 锁在 service 引用上。
  */
 export function useI18n(): UseI18nResult {
-  const service = useI18nService();
+  return useI18nWithService(useI18nService());
+}
+
+/** 插件 UI 必须在真实 PluginConsumerProvider 中解析已声明的语言能力。 */
+export function usePluginI18n(): UseI18nResult {
+  return useI18nWithService(usePluginCapability(I18N_SERVICE_CAPABILITY));
+}
+
+function useI18nWithService(service: I18nService): UseI18nResult {
   const subscribe = useCallback(
     (onChange: () => void) => service.onChange(onChange),
     [service]
@@ -74,7 +82,14 @@ export function useI18nText(input: I18nText | undefined): string {
 
 /** 当前语言：用于 Intl.NumberFormat / DateTimeFormat。 */
 export function useLocale(): SupportedLanguage {
-  const service = useI18nService();
+  return useLocaleWithService(useI18nService());
+}
+
+export function usePluginLocale(): SupportedLanguage {
+  return useLocaleWithService(usePluginCapability(I18N_SERVICE_CAPABILITY));
+}
+
+function useLocaleWithService(service: I18nService): SupportedLanguage {
   const subscribe = useCallback(
     (onChange: () => void) => service.onChange(onChange),
     [service]

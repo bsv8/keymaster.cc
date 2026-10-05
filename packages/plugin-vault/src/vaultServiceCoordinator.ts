@@ -1,3 +1,5 @@
+import { sameWalletSession } from "@keymaster/contracts";
+import type { InternalVaultService } from "./internalVaultService.js";
 // packages/plugin-vault/src/vaultServiceCoordinator.ts
 // VaultService Coordinator Facade —— 单 Key 钱包的唯一页面侧入口。
 //
@@ -29,6 +31,7 @@ import type {
   WalletKeySummary,
 } from "@keymaster/contracts";
 import type { CoordinatorStorageControl, CoordinatorStorageControlResultFor } from "@keymaster/contracts";
+import { createWalletStateSource } from "./walletStateAccess.js";
 import type { SessionStateMirror, SessionStateSnapshot } from "./sessionStateMirror.js";
 
 /** Vault facade 所需的 Coordinator contract 子集。 */
@@ -92,11 +95,11 @@ function hexToArrayBuffer(hex: string): ArrayBuffer {
 // 2. VaultService Coordinator Facade
 // ============================================================
 
-export class VaultServiceCoordinator implements VaultService {
+export class VaultServiceCoordinator implements InternalVaultService {
+  private disposed = false;
   private readonly coordinatorClient: CoordinatorClientLike;
   private readonly mirror: SessionStateMirror;
   private readonly appViewRevocations = new Map<string, () => void>();
-  private readonly lifecycleChangeHandlers = new Set<(snapshot: VaultLifecycleSnapshot) => void>();
   private lifecycleSnapshot: VaultLifecycleSnapshot = Object.freeze({
     status: "booting",
     sessionEpoch: "boot",
@@ -104,11 +107,13 @@ export class VaultServiceCoordinator implements VaultService {
     vaultLifecycleRevision: 0,
   });
 
+  private readonly walletState = createWalletStateSource(() => this.lifecycleSnapshot);
+
   constructor(deps: VaultServiceCoordinatorDeps) {
     this.coordinatorClient = deps.coordinatorClient;
     this.mirror = deps.sessionStateMirror;
     this.mirror.subscribe((snapshot) => {
-      if (this.applyCoordinatorState(snapshot)) this.emitLifecycleChanged();
+      if (this.applyCoordinatorState(snapshot)) this.walletState.publish();
     });
   }
 
@@ -123,12 +128,14 @@ export class VaultServiceCoordinator implements VaultService {
       || previous.sessionEpoch !== snapshot.sessionEpoch
       || previous.runGeneration !== snapshot.runGeneration
       || previous.walletGeneration !== snapshot.walletGeneration
-      || previous.vaultLifecycleRevision !== snapshot.sessionRevision;
+      || previous.vaultLifecycleRevision !== snapshot.sessionRevision
+      || JSON.stringify(previous.activeKeyIdentity) !== JSON.stringify(snapshot.activeKeyIdentity);
     if (!changed) return false;
 
     this.lifecycleSnapshot = Object.freeze({
       status: nextStatus,
       ...(nextPublicKeyHex === undefined ? {} : { activePublicKeyHex: nextPublicKeyHex }),
+      ...(snapshot.activeKeyIdentity && nextPublicKeyHex ? { activeKeyIdentity: snapshot.activeKeyIdentity } : {}),
       sessionEpoch: snapshot.sessionEpoch,
       runGeneration: snapshot.runGeneration,
       vaultLifecycleRevision: snapshot.sessionRevision,
@@ -145,14 +152,12 @@ export class VaultServiceCoordinator implements VaultService {
     return this.lifecycleSnapshot.status;
   }
 
-  onLifecycleChange(handler: (snapshot: VaultLifecycleSnapshot) => void): () => void {
-    this.lifecycleChangeHandlers.add(handler);
-    handler({ ...this.lifecycleSnapshot });
-    return () => { this.lifecycleChangeHandlers.delete(handler); };
+  subscribeWalletState(handler: (snapshot: VaultLifecycleSnapshot) => void): () => void {
+    return this.walletState.subscribe(handler);
   }
 
-  getLifecycleSnapshot(): VaultLifecycleSnapshot {
-    return { ...this.lifecycleSnapshot };
+  walletSnapshot(): VaultLifecycleSnapshot {
+    return this.walletState.snapshot();
   }
 
   /** 本 Origin 是否已有钱包 Key（无论锁定与否）。 */
@@ -269,8 +274,10 @@ export class VaultServiceCoordinator implements VaultService {
   }
 
   dispose?(): void {
+    this.disposed = true;
     this.disposeAllAppViewSessions("vault service disposed");
-    this.lifecycleChangeHandlers.clear();
+    this.walletState.dispose();
+    this.mirror.dispose();
   }
 
   // ============================================================
@@ -299,15 +306,17 @@ export class VaultServiceCoordinator implements VaultService {
     const client = this.coordinatorClient;
     if (!client.getIsConnected()) throw new Error("Coordinator crypto RPC unavailable");
     let revoked = false;
+    const issuedSession = this.walletSnapshot();
+    if (issuedSession.status !== "unlocked" || issuedSession.activePublicKeyHex !== publicKeyHex) throw new Error("Active key session has been revoked");
     // 会话状态、身份与运行世代任一变化，本地句柄立刻失效：锁定、钱包重置
     // 或 Worker 重启后，任何仍在飞行中的旧 capability 都不得再使用。
     const guard = () => {
-      if (revoked) throw new Error("Active key session has been revoked");
+      if (revoked || this.disposed) throw new Error("Active key session has been revoked");
       const snapshot = this.lifecycleSnapshot;
       if (snapshot.status !== "unlocked" || snapshot.activePublicKeyHex !== publicKeyHex) {
         throw new Error("Active key session has been revoked");
       }
-      if (snapshot.runGeneration !== this.mirror.getSnapshot().runGeneration) {
+      if (!sameWalletSession(issuedSession, snapshot)) {
         throw new Error("Active key session has been revoked");
       }
     };
@@ -316,6 +325,7 @@ export class VaultServiceCoordinator implements VaultService {
       async signDigest(input) {
         guard();
         const r = await client.crypto!({ type: "signDigest", digestHex: bytesToHex(input.digest), format: input.format });
+        guard();
         if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Sign failed"));
         const result = r.result as { signatureHex: string; format: string };
         if (result.format !== "der" && result.format !== "compact") {
@@ -329,18 +339,9 @@ export class VaultServiceCoordinator implements VaultService {
       async deriveP2pkhAddress(input) {
         guard();
         const r = await client.crypto!({ type: "deriveP2pkhAddress", network: input.network });
+        guard();
         if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Derive failed"));
         return { publicKeyHex, address: (r.result as { address: string }).address };
-      },
-      exportEncryptedKeyBackup: async (input) => {
-        guard();
-        if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
-        // 业务 capability 只暴露加密 KeyHold 文档；它不提供联系人、消息或
-        // 设置等本地业务数据的导出，也不暴露明文私钥。
-        const hold = await this.exportKeyHold();
-        const buffer = new Uint8Array(hold.byteLength);
-        buffer.set(hold);
-        return { publicKeyHex, backup: buffer.buffer };
       },
       dispose: () => {
         if (revoked) return;
@@ -350,17 +351,13 @@ export class VaultServiceCoordinator implements VaultService {
     };
   }
 
-  private emitLifecycleChanged(): void {
-    for (const handler of this.lifecycleChangeHandlers) {
-      try { handler({ ...this.lifecycleSnapshot }); } catch { /* noop */ }
-    }
-  }
+
 }
 
 // ============================================================
 // 7. Factory Function
 // ============================================================
 
-export function createVaultServiceCoordinator(deps: VaultServiceCoordinatorDeps): VaultService {
+export function createVaultServiceCoordinator(deps: VaultServiceCoordinatorDeps): InternalVaultService {
   return new VaultServiceCoordinator(deps);
 }

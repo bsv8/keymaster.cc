@@ -1,8 +1,30 @@
+import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
+import { setupP2pkhUriActions } from "./setupUriActions.js";
+import { IdentityHomeButton } from "./IdentityHomeButton.js";
+import { identityResources } from "./identityResources.js";
+import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { createTransferRegistry } from "./registries/transferRegistry.js";
+import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY } from "@keymaster/contracts";
+import { WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
+import { P2PKH_ASSET_READER_CAPABILITY } from "@keymaster/contracts";
+import { createInstanceRegistryService } from "@keymaster/runtime";
+import { createProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";
+import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { P2PKH_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { transferResources } from "./transferResources.js";
+import { registerP2pkhTransferUi } from "./pages/registerP2pkhTransferUi.js";
+import { P2pkhTransferWidget } from "./widgets/P2pkhTransferWidget.js";
+import { CONTACTS_PICKER_CAPABILITY, CONTACTS_SERVICE_CAPABILITY, CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { P2pkhSettingsBlock } from "./pages/P2pkhSettingsPage.js";
+import { bindP2pkhUi } from "./P2pkhResourceContext.js";
+import { OWNED_RESOURCE_ACCESS_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-p2pkh/src/manifest.ts
 // P2PKH 业务包（硬切换后）：
 //   - 注入 woc.service / background.registry / background.service。
 //   - 注册 P2PKH AssetProvider、TransferProvider（Offer/Widget）。
-//   - 注册页面：链上交易、本地交易；设置由 Web 装配层的 BSV 链页面承载。
+//   - 注册页面：链上交易、本地交易；设置通过 Page 贡献给 Workspace 的 BSV 链页面。
 //   - 不再自己创建 interval；不再自己向 Topbar 写组件。
 //   - 监听 vault 事件自动同步。
 //
@@ -18,7 +40,7 @@ import type {
   BreadcrumbProvider,
   BreadcrumbRegistry,
   I18nPluginResources,
-  KeyspaceService,
+  VaultWalletState,
   KeyIdentity,
   PluginManifest,
   PluginSetup,
@@ -37,11 +59,9 @@ import {
   ASSET_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   BREADCRUMB_REGISTRY_CAPABILITY,
-  HOME_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   TRANSFER_REGISTRY_CAPABILITY,
@@ -49,6 +69,8 @@ import {
   WOC_CAPABILITY,
   P2PKH_COORDINATOR_CONTROL_CAPABILITY,
   P2PKH_ADDRESS_CODEC_CAPABILITY,
+  P2PKH_SETTINGS_READER_CAPABILITY,
+  BSV_PRICE_READER_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
@@ -606,31 +628,33 @@ const p2pkhPluginDefinition = {
   id: "p2pkh",
   name: "P2PKH",
   description: "BSV P2PKH 资产实现：由 Coordinator 统一调度快照、门禁与中心广播。",
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [
     {
       id: "p2pkh.window",
       runtime: "window-main",
+    connect: { providerMethods: ["p2pkh.transfer", "feepool.prepare", "feepool.commit"] },
       scopeKind: "owner-session",
-      provides: [P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
+      provides: [TRANSFER_REGISTRY_CAPABILITY, PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_SETTINGS_READER_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
       dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: P2PKH_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+        { capability: URI_ACTION_REGISTRY_CAPABILITY, optional: true, reason: "注册收款 URI 内部转账入口" },
         { capability: VAULT_SERVICE_CAPABILITY, reason: "需要 vault 提供私钥与 key 管理" },
-        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "active key 与 key-scoped storage" },
         { capability: WOC_CAPABILITY, reason: "读取历史与详情；广播只能走中心服务" },
-        { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "协议资产自己的受保护输入机制；普通 P2PKH 不读取" },
         { capability: ASSET_REGISTRY_CAPABILITY, reason: "注册 P2PKH AssetProvider" },
-        { capability: TRANSFER_REGISTRY_CAPABILITY, reason: "注册 P2PKH TransferProvider" },
-        { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 P2PKH 页面" },
-        { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入资产业务导航" },
-        { capability: HOME_REGISTRY_CAPABILITY, reason: "注册 P2PKH 首页 widget" },
+          { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入资产业务导航" },
         { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册 P2PKH 面包屑" },
-        { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 P2PKH resources" },
+        { capability: BSV_PRICE_READER_CAPABILITY, optional: true, reason: "余额卡片展示参考价格" },
+      { capability: CONTACTS_PICKER_CAPABILITY, optional: true },
+      { capability: CONTACTS_SERVICE_CAPABILITY, optional: true },
+      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "贡献本实例内部设置 UI" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取所属实例资源" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 P2PKH resources" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 key lifecycle events" },
         { capability: ASSET_DATA_NOTIFIER_CAPABILITY, optional: true, reason: "发布可选 asset data 变更" },
       ]),
@@ -638,16 +662,30 @@ const p2pkhPluginDefinition = {
     {
       id: "p2pkh.coordinator-worker",
       runtime: "shared-worker",
+      provides: [P2PKH_ASSET_READER_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY],
       scopeKind: "owner-session",
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: STORAGE_FILE_CLIENTS_CAPABILITY, reason: "使用本 Worker 单元声明的 Storage purpose" },
+        { capability: WOC_CAPABILITY, reason: "同步链上交易与 UTXO" },
+        { capability: VAULT_WORKER_CRYPTO_CAPABILITY, reason: "当前 Worker 身份的受控签名视图" },
+        { capability: WOC_WORKER_BROADCAST_CAPABILITY, reason: "Worker 广播 Provider；查询能力不含派发方法" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "读取本 Worker 当前 Vault 身份" },
+      ], "shared-worker"),
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
     },
   ],
-  i18n: p2pkhResources,
+  i18n: { namespace: p2pkhResources.namespace, resources: {
+    en: { "p2pkh.uri.action": "Transfer BSV", "p2pkh.uri.review": "Review the recipient and amount on the transfer page before signing.", "p2pkh.uri.open": "Open transfer", ...Object.fromEntries(Object.entries(identityResources.resources.en ?? {}).filter(([key]) => key.startsWith("p2pkh.identity."))), ...p2pkhResources.resources.en, ...transferResources.resources.en },
+    "zh-CN": { "p2pkh.uri.action": "转账 BSV", "p2pkh.uri.review": "请在转账页面核对收款人和金额，再确认签名。", "p2pkh.uri.open": "打开转账", ...Object.fromEntries(Object.entries(identityResources.resources["zh-CN"] ?? {}).filter(([key]) => key.startsWith("p2pkh.identity."))), ...p2pkhResources.resources["zh-CN"], ...transferResources.resources["zh-CN"] },
+  } },
   setup(ctx) {
+    ctx.provide(TRANSFER_REGISTRY_CAPABILITY, createInstanceRegistryService(createTransferRegistry(), TRANSFER_REGISTRY_CAPABILITY, undefined, ctx.scope));
+  ctx.provide(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, createInstanceRegistryService(createProtectedOutpointRegistry(), PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, undefined, ctx.scope));
+
     const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const woc = ctx.capability(WOC_CAPABILITY);
-    const coordinator = ctx.coordinator as (P2pkhCoordinatorControl & P2pkhBroadcastAssemblyControl) | undefined;
+    const coordinator = ctx.capability(P2PKH_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as (P2pkhCoordinatorControl & P2pkhBroadcastAssemblyControl) | undefined;
     if (!coordinator) throw new Error("P2PKH Coordinator control is unavailable");
     // p2pkhBroadcast 只留在装配层的局部闭包中；P2PKH 公共 Coordinator
     // capability 不再把 Worker 广播 RPC 传给插件/三方。
@@ -657,32 +695,37 @@ const p2pkhPluginDefinition = {
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
     const assetDataNotifier = ctx.optionalCapability(ASSET_DATA_NOTIFIER_CAPABILITY);
-    const storage = ctx.filesFor("");
+    const storage = ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "");
     const centralBroadcastService: CentralBroadcastService = createCentralBroadcastService({
       coordinator: { p2pkhBroadcast: assemblyBroadcast },
       subscribeTopic: (listener) => publicCoordinator.subscribeTopic("asset.data-changed", listener),
       getSnapshot: async (network) => {
-        const result = await publicCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex: keyspace.active().activePublicKeyHex ?? "", network });
+        const result = await publicCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex: walletState.snapshot().activePublicKeyHex ?? "", network });
         return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
       },
       refreshSnapshot: async (network) => {
-        const result = await publicCoordinator.p2pkhUtxosRefresh({ ownerPublicKeyHex: keyspace.active().activePublicKeyHex ?? "", network });
+        const result = await publicCoordinator.p2pkhUtxosRefresh({ ownerPublicKeyHex: walletState.snapshot().activePublicKeyHex ?? "", network });
         return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
       },
     });
     ctx.provide(CENTRAL_BROADCAST_CAPABILITY, centralBroadcastService);
 
     const service = createP2pkhService({
+      signal: ctx.scope.signal,
       vault,
       coordinator: publicCoordinator,
       messageBus,
-      keyspace,
+      walletState,
       storage,
       woc,
       centralBroadcastService,
       assetDataNotifier
     });
     ctx.provide(P2PKH_CAPABILITY, service);
+    ctx.provide(P2PKH_SETTINGS_READER_CAPABILITY, {
+      includeTestnet: () => service.getGlobalSettings().includeTestnet,
+      onChange: listener => service.onGlobalSettingsChange(listener),
+    });
     ctx.provide(BALANCE_BROADCAST_CAPABILITY, service.balanceBroadcaster);
     ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
@@ -695,24 +738,24 @@ const p2pkhPluginDefinition = {
       },
       claimStore: {
         async tryClaimInputs(input) {
-          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
           const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).tryClaimInputs(input);
         },
         async releaseLocalInputClaims(input) {
-          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
           const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).releaseLocalInputClaims(input.claimIds);
         }
       },
         submissionStore: {
           async getProtocolSubmission(input) {
-          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
           const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).getProtocolSubmission(input.id);
         },
         async putProtocolSubmission(record) {
-          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== record.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== record.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
           const bundle = await openP2pkhStateRepository(storage);
           return createP2pkhStateRepository(bundle).putProtocolSubmission(record);
         }
@@ -720,11 +763,11 @@ const p2pkhPluginDefinition = {
       protectedOutpoints,
       getKeyForOwner: async (ownerPublicKeyHex: string) => {
         // 单 Key 本地钱包：只有当前唯一 Key 能作为 owner。
-        const active = keyspace.active().activePublicKeyHex;
+        const active = walletState.snapshot().activePublicKeyHex;
         if (!active || active.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
           throw new Error(`P2PKH owner key not ready: ${ownerPublicKeyHex}`);
         }
-        return { publicKeyHex: keyspace.requireActiveKey().publicKeyHex };
+        return { publicKeyHex: requireUnlockedWalletIdentity(walletState.snapshot()).publicKeyHex };
       }
     }));
 
@@ -770,9 +813,9 @@ const p2pkhPluginDefinition = {
       id: "p2pkh.readiness",
       scope: "active-key",
       key: (_args, context) => ["p2pkh.readiness", context.activePublicKeyHex ?? "none"],
-      load: async () => (keyspace.active().activePublicKeyHex ? "ready" : "no-active-key"),
-      // 初始化状态不再是 keyspace 的一部分：ready 只取决于当前唯一 Key 投影。
-      subscribe: (_args, _ctx, invalidate) => keyspace.onActiveKeyChanged(invalidate),
+      load: async () => (walletState.snapshot().activePublicKeyHex ? "ready" : "no-active-key"),
+      // 初始化状态不再是 walletState 的一部分：ready 只取决于当前唯一 Key 投影。
+      subscribe: (_args, _ctx, invalidate) => walletState.subscribe(invalidate),
       invalidation: "immediate"
     });
 
@@ -858,7 +901,7 @@ const p2pkhPluginDefinition = {
       scope: "active-key",
       key: (_args, context) => ["p2pkh.wallet", context.activePublicKeyHex ?? "none", String(service.getGlobalSettings().includeTestnet)],
       load: async (_args, context) => loadWalletResource(context),
-      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveKeyChanged(invalidate), coordinator.subscribeTopic("background.snapshot", invalidate)]; return () => offs.forEach((off) => off()); },
+      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), walletState.subscribe(invalidate), coordinator.subscribeTopic("background.snapshot", invalidate)]; return () => offs.forEach((off) => off()); },
       invalidation: "microtask"
     });
     resources.register<{ history: P2pkhHistoryRecord[]; locals: P2pkhLocalTransaction[]; sync: P2pkhTransactionSyncState[] }, readonly string[]>({
@@ -885,13 +928,13 @@ const p2pkhPluginDefinition = {
         const publicKeyHex = context.activePublicKeyHex;
         if (!publicKeyHex) return {};
         const [identity, resourcesForKey] = await Promise.all([
-          Promise.resolve(keyspace.requireActiveKey()),
+          Promise.resolve(requireUnlockedWalletIdentity(walletState.snapshot())),
           service.listResources(args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined)
         ]);
         return { activePublicKeyHex: publicKeyHex, identity, resource: resourcesForKey[0] };
       },
       subscribe: (_args, _ctx, invalidate) => {
-        const off = keyspace.onActiveKeyChanged(invalidate);
+        const off = walletState.subscribe(invalidate);
         const offData = service.onDataChanged(invalidate);
         return () => { off(); offData(); };
       },
@@ -909,20 +952,18 @@ const p2pkhPluginDefinition = {
     });
 
     const assets = ctx.capability(ASSET_REGISTRY_CAPABILITY);
-    const assetProvider = createP2pkhAssetProvider({ service, messageBus, keyspace });
+    const assetProvider = createP2pkhAssetProvider({ service, messageBus, walletState });
     assets.register(assetProvider);
 
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
-    routes.register({
-      id: "p2pkh.transaction",
-      path: "/p2pkh/tx/:txid",
-      label: { key: "p2pkh.route.transaction", fallback: "P2PKH transaction" },
-      component: P2pkhTransactionDetailRoute
-    });
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
+    const TransactionDetail = bindP2pkhUi(ctx, P2pkhTransactionDetailRoute);
+    pages.register({ kind: "page", id: "p2pkh.transaction", path: "/p2pkh/tx/:txid",
+      label: { key: "p2pkh.route.transaction", fallback: "P2PKH transaction" }, render: () => createElement(TransactionDetail) });
 
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     const disposeNavigation = registerP2pkhNavigation({
-      routes,
+      pages,
+      context: ctx,
       business,
       includeTestnet: service.getGlobalSettings().includeTestnet,
       onIncludeTestnetChange: (handler) => service.onGlobalSettingsChange((settings) => handler(settings.includeTestnet))
@@ -930,17 +971,29 @@ const p2pkhPluginDefinition = {
     ctx.onDispose(disposeNavigation);
 
     const transferReg = ctx.capability(TRANSFER_REGISTRY_CAPABILITY);
-    const transferProvider = createP2pkhTransferProvider({ service, messageBus, keyspace });
-    transferReg.register(transferProvider);
+    const transferProvider = createP2pkhTransferProvider({ service, messageBus, walletState });
+    transferReg.register({ ...transferProvider, component: bindP2pkhUi(ctx, P2pkhTransferWidget) });
+    registerP2pkhTransferUi(ctx, { path: "/transfer", walletState, transferProvider, assetDataNotifier });
+    setupP2pkhUriActions(ctx);
+    const identityResources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
+    identityResources.register({ id: "p2pkh.identity-key", scope: "global", key: () => ["p2pkh.identity-key"], load: async () => walletState.snapshot(), subscribe: (_args, _context, invalidate) => walletState.subscribe(invalidate), invalidation: "immediate" });
+    identityResources.register({ id: "p2pkh.identity-testnet", scope: "global", key: () => ["p2pkh.identity-testnet"], load: async () => service.getGlobalSettings().includeTestnet, subscribe: (_args, _context, invalidate) => service.onGlobalSettingsChange(() => invalidate()), invalidation: "immediate" });
+    const Identity = bindP2pkhUi(ctx, IdentityHomeButton);
+    pages.register({ kind: "home", id: "p2pkh.identity", slot: "main", order: -990, label: "Identity", render: () => createElement(Identity) });
 
-    const home = ctx.capability(HOME_REGISTRY_CAPABILITY);
-    home.register({
+
+    const SettingsBlock = bindP2pkhUi(ctx, P2pkhSettingsBlock);
+    ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view.register({
+      id: "p2pkh.settings", label: { key: "p2pkh.settings.title", fallback: "P2PKH" }, kind: "settings-block", path: "/settings/bsv-chain", order: 10,
+      render: () => createElement(SettingsBlock),
+    });
+    ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view.register({
+      kind: "home",
       id: "p2pkh.balance",
-      title: { key: "p2pkh.balanceWidget.title", fallback: "P2PKH balance" },
-      component: P2pkhBalanceWidget,
+      label: { key: "p2pkh.balanceWidget.title", fallback: "P2PKH balance" },
+      render: () => createElement(bindP2pkhUi(ctx, P2pkhBalanceWidget)),
       order: 10,
       slot: "aside",
-      refreshHint: "realtime",
     });
 
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
@@ -981,7 +1034,7 @@ const p2pkhPluginDefinition = {
 
     // 硬切换 001：teardown 桥接到 service.dispose() 并取消 manifest 内挂载的
     // messageBus 订阅（key.created）；service 内部订阅由 service.dispose 收尾。
-    // providers 也必须 dispose，否则它们仍会被 messageBus / keyspace 持续回调。
+    // providers 也必须 dispose，否则它们仍会被 messageBus / walletState 持续回调。
     return () => {
       try {
         keyCreatedUnsub();
@@ -995,11 +1048,6 @@ const p2pkhPluginDefinition = {
       }
       try {
         transferProvider.dispose();
-      } catch {
-        // swallow
-      }
-      try {
-        home.unregister("p2pkh.balance");
       } catch {
         // swallow
       }

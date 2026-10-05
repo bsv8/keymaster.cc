@@ -1,4 +1,6 @@
-import type { BusinessFeatureRegistry, RouteRegistry } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindP2pkhUi } from "../P2pkhResourceContext.js";
+import type { BusinessFeatureRegistry, PageUiRegistration, PluginContext } from "@keymaster/contracts";
 import { router as runtimeRouter } from "@keymaster/runtime";
 import {
   P2pkhMainnetLocalTransactionsPage,
@@ -9,7 +11,8 @@ import {
 import { parseTransactionSource } from "./p2pkhTransactionView.js";
 
 export interface P2pkhNavigationDeps {
-  routes: RouteRegistry;
+  pages: PageUiRegistration;
+  context: PluginContext;
   business: BusinessFeatureRegistry;
   includeTestnet: boolean;
   onIncludeTestnetChange(handler: (includeTestnet: boolean) => void): () => void;
@@ -37,32 +40,39 @@ export function registerP2pkhNavigation(deps: P2pkhNavigationDeps): () => void {
       component: P2pkhTestnetLocalTransactionsPage
     }
   ] as const;
-  const initiallyIncluded = deps.includeTestnet;
+  const registered = new Set<string>();
+  const register = (route: (typeof testnetRoutes)[number] | { id: string; path: string; label: { key: string; fallback: string }; component: typeof P2pkhMainnetTransactionsPage }) => {
+    if (registered.has(route.id)) return;
+    const Component = bindP2pkhUi(deps.context, route.component);
+    deps.pages.register({ kind: "page", id: route.id, path: route.path, label: route.label, render: () => createElement(Component) });
+    registered.add(route.id);
+  };
+  const unregister = (id: string) => { if (registered.delete(id)) deps.pages.unregister(id); };
   const syncTestnetRoutes = (includeTestnet: boolean) => {
     if (includeTestnet) {
-      for (const route of testnetRoutes) if (!deps.routes.byId(route.id)) deps.routes.register(route);
+      for (const route of testnetRoutes) register(route);
       return;
     }
-    for (const route of testnetRoutes) if (deps.routes.byId(route.id)) deps.routes.unregister(route.id);
+    for (const route of testnetRoutes) unregister(route.id);
     const currentPath = navigate.currentPath();
     const onTestnetList = currentPath === "/p2pkh/testnet/transactions" || currentPath === "/p2pkh/testnet/local-transactions";
     const onTestnetDetail = currentPath.startsWith("/p2pkh/tx/") && typeof window !== "undefined" && new URLSearchParams(window.location.search).get("network") === "test";
     if (onTestnetList || onTestnetDetail) navigate.push("/p2pkh/mainnet/transactions");
   };
 
-  deps.routes.register({
+  register({
     id: "p2pkh.mainnet.transactions",
     path: "/p2pkh/mainnet/transactions",
     label: { key: "p2pkh.route.transactions", fallback: "P2PKH on-chain transactions" },
     component: P2pkhMainnetTransactionsPage
   });
-  deps.routes.register({
+  register({
     id: "p2pkh.mainnet.local-transactions",
     path: "/p2pkh/mainnet/local-transactions",
     label: { key: "p2pkh.route.localTransactions", fallback: "P2PKH local transactions" },
     component: P2pkhMainnetLocalTransactionsPage
   });
-  syncTestnetRoutes(initiallyIncluded);
+  syncTestnetRoutes(deps.includeTestnet);
   const offSettings = deps.onIncludeTestnetChange(syncTestnetRoutes);
 
   deps.business.registerFeature("p2pkh", "assets", {
@@ -92,11 +102,7 @@ export function registerP2pkhNavigation(deps: P2pkhNavigationDeps): () => void {
 
   return () => {
     offSettings();
-    if (initiallyIncluded) {
-      for (const route of testnetRoutes) if (!deps.routes.byId(route.id)) deps.routes.register(route);
-    } else {
-      for (const route of testnetRoutes) if (deps.routes.byId(route.id)) deps.routes.unregister(route.id);
-    }
+    for (const id of [...registered]) unregister(id);
   };
 }
 

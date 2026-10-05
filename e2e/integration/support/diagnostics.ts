@@ -7,7 +7,9 @@ export async function attachVisibleDiagnostic(page: Page, testInfo: TestInfo): P
   if (!(await details.isVisible().catch(() => false))) return;
   const summary = details.locator("summary");
   if (await summary.isVisible().catch(() => false)) await summary.click().catch(() => undefined);
-  const diagnostic = await details.locator("pre").textContent().catch(() => null);
+  const pre = details.locator("pre");
+  if (await pre.count() === 0) return;
+  const diagnostic = await pre.textContent({ timeout: 1_000 }).catch(() => null);
   if (diagnostic) await attachRedactedText(testInfo, "visible-diagnostic", redactText(diagnostic));
 }
 

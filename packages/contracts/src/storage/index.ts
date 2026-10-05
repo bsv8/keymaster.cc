@@ -6,4 +6,3 @@ export * from "./access.js";
 export * from "./runtime.js";
 export * from "./snapshot.js";
 export * from "./keys.js";
-export * from "./browse.js";

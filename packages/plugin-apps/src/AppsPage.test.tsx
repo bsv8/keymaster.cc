@@ -1,3 +1,8 @@
+import { walletStateFixtureSnapshot, walletStateFixtureAccess } from "@keymaster/runtime/test-support";
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
+import { type PluginConsumer } from "webloom-framework";
+import { ScopedPluginConsumerProvider as PluginConsumerProvider } from "@keymaster/runtime";
+import { I18N_SERVICE_CAPABILITY, defineRuntimeUnitDependencies } from "@keymaster/contracts";
 // packages/plugin-apps/src/AppsPage.test.tsx
 // AppsPage 页面级验收测试（施工单 2026-06-29 002 硬切换 + 用户反馈）。
 //
@@ -18,15 +23,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   LaunchAppViewError,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
   type LaunchAppViewInput,
   type LaunchAppViewResult,
   type KeyIdentity,
-  type KeyspaceService,
+  type VaultWalletState,
   type ProtocolService
 } from "@keymaster/contracts";
-import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
 import { AppsPage } from "./AppsPage.js";
 import { appsPlugin } from "./manifest.js";
 
@@ -76,28 +81,19 @@ interface MountHandle {
 
 const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
 
-function makeKeyspaceService(): KeyspaceService {
+function makeVaultWalletState(): VaultWalletState {
   const key: KeyIdentity = {
     publicKeyHex: TEST_PUB_HEX,
     label: "Key A",
     capabilities: ["p2pkh"],
     createdAt: new Date().toISOString()
   };
+  const snapshot = walletStateFixtureSnapshot({ activePublicKeyHex: TEST_PUB_HEX }, () => key);
   return {
-    listKeys: async () => [key],
-    getKey: async (publicKeyHex: string) => (publicKeyHex === TEST_PUB_HEX ? key : undefined),
-    active: () => ({ activePublicKeyHex: TEST_PUB_HEX }),
-    setActive: async () => undefined,
-    requireActiveKey: () => key,
-    onActiveChange: () => () => undefined,
-    openOwnerAppStore: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
-    registerStorageDeclaration: () => undefined,
-    listOwnerStorageDeclarations: () => [],
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
-  } as unknown as KeyspaceService;
+    snapshot: () => snapshot,
+    subscribe(handler) { handler(snapshot); return () => {}; }
+  };
+
 }
 
 function makeService(): ProtocolService & {
@@ -119,16 +115,22 @@ function makeService(): ProtocolService & {
   } as unknown as ProtocolService & { launchAppViewCalls: LaunchAppViewInput[] };
 }
 
-function mount(): MountHandle {
+async function mount(walletState = makeVaultWalletState()): Promise<MountHandle> {
   const service = makeService();
+  let consumer: PluginConsumer | undefined;
   const host = createPluginHost({
+    runtime: "window-main",
+    runtimeUnitImplementationRegistry: { get: () => ctx => { consumer = ctx.consumer; } },
     initialI18nResources: appsPlugin.i18n ? [appsPlugin.i18n] : []
   });
   host.provide(PROTOCOL_SERVICE_CAPABILITY, service);
-  host.provide(KEYSPACE_SERVICE_CAPABILITY, makeKeyspaceService());
+  host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState));
+  await host.register({ id: "apps-ui-fixture", name: "Apps UI fixture", units: [{ id: "apps-ui-fixture.window", runtime: "window-main", scopeKind: "root",
+    dependencies: defineRuntimeUnitDependencies([{ capability: I18N_SERVICE_CAPABILITY }, { capability: PROTOCOL_SERVICE_CAPABILITY }, { capability: VAULT_WALLET_STATE_CAPABILITY }]),
+  }] });
   const renderResult = render(
     <PluginHostProvider host={host}>
-      <AppsPage />
+      <PluginConsumerProvider consumer={consumer!}><AppsPage /></PluginConsumerProvider>
     </PluginHostProvider>
   );
   return {
@@ -139,8 +141,8 @@ function mount(): MountHandle {
 }
 
 describe("AppsPage - 渲染 ok 记录", () => {
-  it("渲染 justnote 卡片，含 Open App 按钮与 origin", () => {
-    mount();
+  it("渲染 justnote 卡片，含 Open App 按钮与 origin", async () => {
+    await mount();
     const card = screen.getByTestId("apps-card-justnote");
     expect(card).toBeTruthy();
     expect(card.textContent).toContain("Justnote");
@@ -153,7 +155,7 @@ describe("AppsPage - 渲染 ok 记录", () => {
 
 describe("AppsPage - 点击启动", () => {
   it("点击 Open App → 打开授权 modal，提交后调 launchAppView", async () => {
-    const handle = mount();
+    const handle = await mount();
     const button = screen.getByTestId("apps-open-justnote") as HTMLButtonElement;
     await act(async () => {
       fireEvent.click(button);
@@ -182,7 +184,7 @@ describe("AppsPage - 点击启动", () => {
   });
 
   it("启动成功：UI 不显示错误", async () => {
-    mount();
+    await mount();
     const button = screen.getByTestId("apps-open-justnote") as HTMLButtonElement;
     await act(async () => {
       fireEvent.click(button);
@@ -195,7 +197,7 @@ describe("AppsPage - 点击启动", () => {
 
 describe("AppsPage - 启动失败", () => {
   it("vault 未解锁：UI 显示 user-facing 文案（不暴露 err.message）", async () => {
-    const handle = mount();
+    const handle = await mount();
     // 覆盖 service 让其抛 LaunchAppViewError("vault_locked")。
     (handle.service as unknown as { launchAppView: () => Promise<LaunchAppViewResult> })
       .launchAppView = async () => {
@@ -226,7 +228,7 @@ describe("AppsPage - 启动失败", () => {
   });
 
   it("弹窗被浏览器拦截：UI 显示 'openSessionWindowBlocked' 文案", async () => {
-    const handle = mount();
+    const handle = await mount();
     (handle.service as unknown as { launchAppView: () => Promise<LaunchAppViewResult> })
       .launchAppView = async () => {
         throw new LaunchAppViewError(
@@ -255,7 +257,7 @@ describe("AppsPage - 启动失败", () => {
   });
 
   it("非 typed 错误：UI 走 internal 兜底文案", async () => {
-    const handle = mount();
+    const handle = await mount();
     (handle.service as unknown as { launchAppView: () => Promise<LaunchAppViewResult> })
       .launchAppView = async () => {
         throw new Error("totally unexpected internal error");
@@ -277,5 +279,29 @@ describe("AppsPage - 启动失败", () => {
       // 内部字符串不能漏到 UI
       expect(err.textContent).not.toMatch(/totally unexpected internal error/);
     });
+  });
+});
+
+
+describe("Apps 授权表单的会话边界", () => {
+  it.each(["sessionEpoch", "runGeneration", "walletGeneration"] as const)("同公钥的 %s 变化撤回密码并关闭表单", async field => {
+    let snapshot = walletStateFixtureSnapshot({ activePublicKeyHex: TEST_PUB_HEX });
+    const handlers = new Set<(value: ReturnType<typeof walletStateFixtureSnapshot>) => void>();
+    const state: VaultWalletState = {
+      snapshot: () => snapshot,
+      subscribe(handler) { handlers.add(handler); handler(snapshot); return () => { handlers.delete(handler); }; }
+    };
+    const handle = await mount(state);
+    await act(async () => { fireEvent.click(screen.getByTestId("apps-open-justnote")); });
+    const password = await screen.findByLabelText(/vault password/i);
+    await act(async () => { fireEvent.change(password, { target: { value: "old-session-password" } }); });
+    await act(async () => {
+      snapshot = { ...snapshot, [field]: "new-generation" };
+      for (const handler of [...handlers]) handler(snapshot);
+    });
+    expect(screen.queryByTestId("app-launch-modal")).toBeNull();
+    expect(handle.service.launchAppViewCalls).toHaveLength(0);
+    await act(async () => { fireEvent.click(screen.getByTestId("apps-open-justnote")); });
+    expect((await screen.findByLabelText(/vault password/i) as HTMLInputElement).value).toBe("");
   });
 });

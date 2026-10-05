@@ -1,13 +1,14 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { describe, expect, it, vi } from "vitest";
-import type { KeyspaceService, ProtocolSpendPreview, ProtocolSpendService } from "@keymaster/contracts";
+import type { VaultWalletState, ProtocolSpendPreview, ProtocolSpendService } from "@keymaster/contracts";
 import type { OrdinalMintHistoryRepository } from "./storage/ordinalMintHistoryRepository.js";
 import { createOrdinalMintService } from "./ordinalMintService.js";
 import type { P2pkhServiceFor1Sat } from "./ordinalsService.js";
 
 const ACTIVE_PK = "pk-active";
 
-function fakeKeyspace(): KeyspaceService {
-  return { active: () => ({ activePublicKeyHex: ACTIVE_PK }) } as unknown as KeyspaceService;
+function fakeWalletState(): VaultWalletState {
+  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: ACTIVE_PK }))()) } as unknown as VaultWalletState;
 }
 
 function fakeP2pkh(): P2pkhServiceFor1Sat {

@@ -4,6 +4,7 @@ import {
   changeLanguage,
   countManagedPlugins,
   openSettingsPage,
+  openPluginFunctionDependencies,
 } from "../../drivers/settingsDriver.js";
 import { reloadAndAssertSameKey, unlockWalletInPlace } from "../../drivers/vaultDriver.js";
 import { captureBrowserErrors, attachBrowserErrors } from "../../support/browserEvidence.js";
@@ -173,9 +174,61 @@ test(JOURNEY_ID + "：从正式菜单查看独立设置并热切换界面语言"
       await openSettingsPage(page, {
         label: /^Plugin settings$|^Plugins$|^插件设置$|^插件$/,
         path: /\/settings\/plugins$/u,
-        heading: /^Plugins$|^插件管理$/,
+        heading: /^Plugin dependencies$|^插件依赖关系$/,
       });
-      expect(await countManagedPlugins(page), "插件管理页必须由正式运行时提供可观察的插件状态").toBeGreaterThan(0);
+      expect(await countManagedPlugins(page), "插件依赖图必须显示完整发行目录").toBe(21);
+      await expect(page.getByText("enabled", { exact: true })).toHaveCount(0);
+      const pageLinks = page.locator('[data-dependency-provider="page"]');
+      await expect(pageLinks).toHaveCount(0);
+      await page.getByRole("checkbox", { name: /Show Page dependencies|显示 Page 依赖/u }).check();
+      expect(await pageLinks.count()).toBeGreaterThan(0);
+      await page.getByRole("checkbox", { name: /Show Page dependencies|显示 Page 依赖/u }).uncheck();
+      await expect(pageLinks).toHaveCount(0);
+      const vaultLinks = page.locator('[data-dependency-provider="vault"]');
+      await expect(vaultLinks).toHaveCount(0);
+      await page.getByRole("checkbox", { name: /Show Vault dependencies|显示 Vault 依赖/u }).check();
+      expect(await vaultLinks.count()).toBeGreaterThan(0);
+      await expect(pageLinks).toHaveCount(0);
+      await page.getByRole("checkbox", { name: /Show Vault dependencies|显示 Vault 依赖/u }).uncheck();
+      await expect(vaultLinks).toHaveCount(0);
+      // 长列表必须在弹框内部滚动，最后一项不能溢出或被裁切。
+      const assertScrollableDetails = async () => {
+        const details = await openPluginFunctionDependencies(page, "assets");
+        const body = details.locator(".ui-modal__body");
+        await expect.poll(() => body.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+        await body.evaluate(element => { element.scrollTop = element.scrollHeight; });
+        const lastCall = details.locator(".function-dependency").last();
+        await expect(lastCall).toBeInViewport();
+        const bounds = await details.locator(".ui-modal__panel").boundingBox();
+        expect(bounds).not.toBeNull();
+        expect(bounds!.y).toBeGreaterThanOrEqual(0);
+        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+        await details.getByRole("button", { name: /Close function dependencies|关闭函数依赖/u }).click();
+      };
+      await assertScrollableDetails();
+      const dialog = await openPluginFunctionDependencies(page, "protocol");
+      await dialog.getByRole("textbox", { name: /Search functions|搜索函数/u }).fill("verifyPassword");
+      await expect(dialog.getByText("verifyPassword()", { exact: true }).first()).toBeVisible();
+      await expect(dialog.getByText("vault.service", { exact: true }).last()).toBeVisible();
+      await dialog.getByRole("button", { name: /Called by|被哪些函数调用/u }).click();
+      await dialog.getByRole("textbox", { name: /Search functions|搜索函数/u }).fill("launchAppView");
+      await expect(dialog.getByText("launchAppView()", { exact: true }).first()).toBeVisible();
+      const detailsImage = testInfo.outputPath("plugin-functions.png");
+      await page.screenshot({ path: detailsImage });
+      await testInfo.attach("plugin-function-dependencies", { path: detailsImage, contentType: "image/png" });
+      await dialog.getByRole("button", { name: /Close function dependencies|关闭函数依赖/u }).click();
+      await expect(dialog).toHaveCount(0);
+      await page.getByRole("heading", { name: /^Plugin dependencies$|^插件依赖关系$/u }).scrollIntoViewIfNeeded();
+      const overviewImage = testInfo.outputPath("plugin-overview.png");
+      await page.screenshot({ path: overviewImage });
+      await testInfo.attach("plugin-dependency-overview", { path: overviewImage, contentType: "image/png" });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await assertScrollableDetails();
+      await expect(page.getByRole("group", { name: /Plugin dependency graph|插件依赖图/u })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      const narrowImage = testInfo.outputPath("plugin-overview-narrow.png");
+      await page.screenshot({ path: narrowImage });
+      await testInfo.attach("plugin-dependency-narrow", { path: narrowImage, contentType: "image/png" });
     });
   } finally {
     await attachBrowserErrors(testInfo, browserErrors, [password]);

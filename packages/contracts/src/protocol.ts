@@ -214,7 +214,7 @@ export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
  *   - invalid_origin          identity.get / intent.sign 的
  *                             `params.aud !== event.origin`。
  *   - user_rejected           用户在确认页或解锁页点"取消"。
- *   - active_key_unavailable  vault 已 unlocked，但 keyspace 没有 ready
+ *   - active_key_unavailable  vault 已 unlocked，但 walletState 没有 ready
  *                             active key（"情况 D"）。
  *   - decrypt_failed          cipher.decrypt 失败；origin 不匹配 / nonce
  *                             错误 / 密文被篡改 / 内层结构不合法，V1
@@ -1053,7 +1053,7 @@ export type ProtocolFailureReason =
  *   - **owner 唯一真值 = `ownerPublicKeyHex`**。`ownerKeyId` **不允许**
  *     出现在 session record / request record / result payload / fee pool
  *     key / service 分支判断里——它会制造第二套 owner 身份。Vault 内部
- *     借用句柄按需从 keyspace 解析，**不**落 session 持久化。
+ *     借用句柄按需从 walletState 解析，**不**落 session 持久化。
  *   - **不**持久化执行 runtime 来源：`runtimeBinding` 已从 session
  *     真值里删掉。同一 session 在窗口生命周期内可以从
  *     `bootstrap_runtime` 切到 `vault_runtime`——这是允许的；
@@ -1890,7 +1890,7 @@ export interface ProtocolCommandRecord {
    *   - 取自 `connectSession.ownerPublicKeyHex`（业务方法）或
    *     `connectLoginSelected`（connect.login）；
    *   - record 生命周期内**不**可变；
-   *   - **不**再读取当前 active key；后续写卡**不**再读 keyspace.active()。
+   *   - **不**再读取当前 active key；后续写卡**不**再读 walletState.snapshot()。
    *   - 这是 `ProtocolCommandRecord` 上的 owner 唯一真值；`ownerKeyId`
    *     **不**出现在 record / result payload 里。
    */
@@ -2244,7 +2244,7 @@ export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
  * `useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)` 拿到实例。
  *
  * 设计缘由：service 负责 transport + 校验 + 解锁 + 确认流调度 + 调用
- * vault / keyspace + 构造 envelope + 签名 / 加解密；UI 只负责渲染态。
+ * vault / walletState + 构造 envelope + 签名 / 加解密；UI 只负责渲染态。
  * service 完全不依赖 React，单元测试可直接调它。
  */
 /**

@@ -1,3 +1,5 @@
+import { sameWalletSession } from "@keymaster/contracts";
+import { useMsFileResources } from "./MsFileResourceContext.js";
 // packages/plugin-msfile/src/MsFileBucketPage.tsx
 // 桶存储文件页面：列出本桶 `msfiles/` 下由 MasterSeed 生成的种子、文件块
 // 和元数据，支持单文件上传、下载、预览、校验与删除。
@@ -18,8 +20,8 @@ import {
   createBrowserMsFileSeedSource,
   type MsFileBucketService,
 } from "./msfileBucketService.js";
-import { useOptionalCapability, useResourceSelector } from "webloom-framework/react";
-import { AppLink, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { AppLink, usePluginI18n, useResourceViewSelector } from "@keymaster/runtime";
 import { Button, DataTable, EmptyState, Modal } from "@keymaster/ui";
 import {
   createMsFileIsolatedHtmlBlobUrl,
@@ -34,10 +36,7 @@ const BUCKET_LIFECYCLE_RESOURCE_ID = "msfile.home.lifecycle";
 const PROGRESS_THROTTLE_MS = 120;
 const DOWNLOAD_URL_REVOKE_MS = 60_000;
 
-interface BucketLifecycleResource {
-  activePublicKeyHex?: string;
-  generation?: number;
-}
+type BucketLifecycleResource = import("@keymaster/contracts").VaultLifecycleSnapshot;
 
 interface BucketError {
   code: string;
@@ -132,7 +131,7 @@ function isCancellation(cause: unknown): boolean {
 }
 
 function BucketPageUnavailable() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   return (
     <section className="msfile-bucket msfile-bucket--unavailable" data-msfile-bucket="unavailable">
       <h3>{t("msfile.bucket.title", { defaultValue: "桶存储文件" })}</h3>
@@ -142,23 +141,22 @@ function BucketPageUnavailable() {
 }
 
 export function MsFileBucketPage() {
-  const host = usePluginHost();
-  const service = useOptionalCapability(MSFILE_BUCKET_SERVICE_CAPABILITY);
-  const hasLifecycleResource = host.resourceRegistry?.get(BUCKET_LIFECYCLE_RESOURCE_ID) !== undefined;
-  if (!service || !hasLifecycleResource || !host.resourceStore) return <BucketPageUnavailable />;
+  const reader = useMsFileResources();
+  const service = useOptionalPluginCapability(MSFILE_BUCKET_SERVICE_CAPABILITY);
+  if (!service) return <BucketPageUnavailable />;
   return <MsFileBucketPageContent service={service} />;
 }
 
 function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) {
-  const { t } = useI18n();
-  const host = usePluginHost();
-  const { vault } = useRuntimeStatus();
-  const lifecycle = useResourceSelector<BucketLifecycleResource, BucketLifecycleResource>(
-    host.resourceStore,
+  const { t } = usePluginI18n();
+  const reader = useMsFileResources();
+  const vault = useResourceViewSelector<import("@keymaster/contracts").VaultStatus, import("@keymaster/contracts").VaultStatus>(reader, "msfile.ui.vault-status", [], snapshot => snapshot.data ?? "locked");
+  const lifecycle = useResourceViewSelector<BucketLifecycleResource, BucketLifecycleResource>(
+    reader,
     BUCKET_LIFECYCLE_RESOURCE_ID,
     [],
-    (snapshot) => snapshot.data ?? {},
-    (a, b) => a.activePublicKeyHex === b.activePublicKeyHex && a.generation === b.generation,
+    (snapshot) => snapshot.data ?? { status: "booting", sessionEpoch: "boot", runGeneration: "boot", vaultLifecycleRevision: 0 },
+    (a, b) => sameWalletSession(a, b),
   );
 
   const [entries, setEntries] = useState<MsFileSeedEntry[]>([]);
@@ -363,7 +361,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
       opControllerRef.current?.abort();
       uploadControllerRef.current?.abort();
     };
-  }, [canOperate, lifecycle.activePublicKeyHex, lifecycle.generation, reload, reloadBitfsTasks, releasePreview]);
+  }, [canOperate, lifecycle.activePublicKeyHex, JSON.stringify([lifecycle.sessionEpoch, lifecycle.runGeneration, lifecycle.walletGeneration]), reload, reloadBitfsTasks, releasePreview]);
 
   useEffect(() => () => releasePreview(), [releasePreview]);
 
@@ -1010,7 +1008,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
  * 用户也可以直接进入 `/msfile/storage`。
  */
 export function MsFileBucketHomeWidget() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const [expanded, setExpanded] = useState(false);
   if (expanded) return <MsFileBucketPage />;
   return (

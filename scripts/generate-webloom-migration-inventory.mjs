@@ -1,0 +1,67 @@
+import { writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const output = resolve(root, "docs/proposals/webloom-0.6/实施附表.md");
+const server = await createServer({
+  root,
+  configFile: false,
+  server: { middlewareMode: true },
+  ssr: { noExternal: [/^@keymaster\//] },
+});
+const cell = (value) => String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
+const capability = (value) => `${value.id}@${value.version} (${value.kind})`;
+try {
+  const { WEB_PLUGIN_CATALOG } = await server.ssrLoadModule("/apps/web/src/pluginCatalog.ts");
+  const lines = [
+    "# WebLoom 0.6 施工单实施附表",
+    "",
+    "由 `node scripts/generate-webloom-migration-inventory.mjs` 从真实 Web 发行版 manifest 生成。",
+    "Poker 按用户要求整包移除，不再装配或提供 API；既有钱包数据保持原样。此表仅记录当前声明，不代表声明已完整、Worker 已实现或迁移已验收。实际调用、三个访问面、槽位、动态 UI、私有授权与旧数据基线仍需逐项核对。",
+    "Storage 的 `/settings/storage` 使用真实实例 consumer 与包内私有 Context。浏览契约、解析器和执行服务均归 Storage；Window → Worker 使用框架私有 RPC，公共 Coordinator 契约拒绝浏览消息。可信装配仅登记 storage.window → 默认槽位的授权，不输出授权凭据。Storage 浏览页、同路径状态块和既有持久存储授权条已通过 page 的三类注册入口挂载；读写指示灯使用私有 Context 的有界在途计数，并经 Page header 注册。物理 I/O 队列、数据执行器、授权复核、Worker 借用句柄与 K-V 维护已归 Storage 的 Worker 入口。Window/Worker 客户端均核验实际 consumer、Scope 与单元声明的 purpose。",
+    "bsv-price 的业务页和设置页已迁入 page，首页卡片绑定真实 consumer；价格 UI 使用实例语言/服务及仅本实例资源的 typed resource.owned-access 视图，包内私有 Context 持有视图。首页卡片也由 Page 登记与渲染，不公开可执行卡片列表。",
+    "Settings 和 Home 独立插件已删除。Page 自己注册首页、插件依赖图和广播网关容器；诊断 UI 经 Page consumer 与私有 Context 使用 typed runtime.diagnostics，仅取得诊断元数据与恢复操作。Scan 提供统一摄像头、图片与粘贴入口，P2PKH 提供首页身份/地址信息。URI 处理器用自己的 consumer 和 Scope 注册并进入所属业务 UI。Sat/WebRTC 设置块仍各用贡献实例 consumer；旧 system-status/system-settings 注册表已删除。",
+    "Apps 列表通过 page 注册，首页应用卡片绑定 Apps consumer；授权弹窗声明 WalletState 依赖。Home 首页通过 page 注册，身份和动作由本实例资源供给，首页卡片统一由 Page 渲染，P2PKH 测试网开关经可选只读设置能力读取；余额、联系人和文件卡片分别绑定贡献方 consumer 与本包资源 Context；卡片/业务投影已归入 Page，业务导航只登记入口信息。MSFile 的三个正式页面已经由 page 注册，其媒体子组件也使用实例资源视图。",
+    "Contacts 列表与动态详情页由 Page 注册，以真实 Contacts consumer 和私有资源 Context 执行；CRUD、在线状态与公钥动作读取本实例资源。公开编辑器与选择器均绑定 Contacts 实例，调用方只消费对应 UI 能力，不继承内部服务。包入口不再导出未绑定编辑器组件。公钥动作注册表归 Contacts；后台 Coordinator/Storage 客户端通过显式能力绑定，文件/K-V 客户端工厂由 Storage 显式能力提供并校验真实 consumer。",
+    "Message 列表及两个动态详情路径经 Page 注册，以本实例 consumer 与私有资源 Context 挂载。原始页面组件不再从包入口导出，也不再读取 Contacts/WebRTC 的资源定义；在线状态、WebRTC 会话/历史通过明确的可选服务生成 Message 自有投影。Contacts 提供仅 snapshot/subscribe 的只读 presence-reader，真值仍取自 Worker 并过滤到现有联系人，不把 Coordinator 控制暴露给 Message。可选提供方变更时订阅重绑，撤销时收回投影；发送/拨号的迟到完成不影响新会话。Message/Contacts 的后台客户端通过显式能力绑定；钱包生命周期及 KeyHold 仓储已归 Vault；App 受限绑定由 Storage 从真实 Connect 会话派生。",
+    "Workspace 已删除。Assets 拥有资产/Token 注册表、失效通知、持仓资源、资产总览/详情和首页卡片；Collectibles 拥有藏品与转移处理器注册表、列表/详情/转移资源和 UI；BSV 链设置容器与钱包导航类别归 Page，具体设置块仍归 P2PKH/WOC。转账 provider 注册表归 P2PKH，普通 /transfer 及 Widget、预览、签名和广播保持归属。Scan 持有 URI 匹配/分派，不消费联系人、钱包或文件服务；公共结果只有冻结摘要与短期实例标识，业务处理器和原始输入留在内部内存，撤销/释放时清理。Contacts、P2PKH、Message、MSFile 通过可选 uri.action.registry 自行贡献内部 UI，旧候选不能因同名处理器恢复而复活。",
+    "",
+    "| 插件 / 单元 | 执行环境 / 寿命 | 公共 / 私有提供声明 | 消费声明及来源 | 存储用途 | 静态 UI 路径 | Connect 明确发布 |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+  ];
+  for (const plugin of WEB_PLUGIN_CATALOG) {
+    for (const unit of plugin.units ?? []) {
+      const dependencies = (unit.dependencies ?? []).map((dependency) => {
+        const source = dependency.sourceRuntime ?? dependency.source ?? "未指定";
+        return `${capability(dependency.capability)} ← ${source}${dependency.optional ? " / 可选" : " / 必需"}`;
+      });
+      const storage = unit.storages ?? (unit.storage ? [unit.storage] : []);
+      const paths = (unit.business?.domains ?? []).flatMap((domain) => domain.features.map((feature) => feature.entry.path));
+      lines.push(`| ${[
+        `${plugin.id} / ${unit.id}`,
+        `${unit.runtime} / ${unit.scopeKind ?? "root"}`,
+        [...(unit.provides ?? []).map(value => `公共：${capability(value)}`), ...(unit.privateProvides ?? []).map(value => `私有：${capability(value)}`)].join("<br>") || "—",
+        dependencies.join("<br>") || "—",
+        storage.map((entry) => `${entry.moduleId}/${entry.purposeId} (${entry.model})`).join("<br>") || "—",
+        paths.join("<br>") || "—",
+        unit.connect?.providerMethods.join("<br>") || "不提供",
+      ].map(cell).join(" | ")} |`);
+    }
+  }
+  lines.push("", "## 已实现的接入证据（范围限定）", "",
+    "- page.window 无 Storage/Vault 反向依赖，page.ui.registry@1 签发贡献实例的框架注册视图，page.ui.renderer@1 只提供渲染出口。内部条目/consumer/私有 Context 不公开为可执行列表；路由、布局、header、设置块和首页卡片已接入。",
+    "- pageContributions.test.tsx 经过生产适配器验证三类 UI 的贡献 consumer、伪造身份/Scope 与跨实例注销拒绝、旧清理/晚到提交隔离，以及 page 撤销时缓存节点退出。",
+    "- Storage 私有调用：storage.window → default → storage.coordinator-worker，storage.private.browse@1；消费者和提供方均发布实际单元实例。授权登记只在 apps/web/src/assembly，运行票据由框架签发。",
+    "- storageBrowsePrivateCapability.test.ts 经过生产 Keymaster 适配器与正式 0.6 MessageChannel transport：其他插件私有解析、Storage 普通解析、公开远端直调均拒绝且 handler 不执行；真实私有调用成功，撤销中取消在途处理并隔离迟到结果。",
+    "- verify:webloom-runtime-slots 用隔离生产构建连接两个真实 SharedWorker 和两个页面：正反挂接顺序、同名本地冲突、单槽替换、旧卸载、单槽断开/恢复与另一页继续使用均通过；不表示钱包领域已物理分离。",
+    "- removeRetiredPluginIntent.test.ts 在真实 IndexedDB 中仅删除旧意图专用对象，KeyHold、业务配置、协议会话及恢复 journal 的字节保持不变；不是迁移前全量数据库兼容验收。",
+    "- check-boundaries-self-test.mjs 对静态、动态和相对路径的跨插件实现/Storage 私有导入植入攻击；正式源码门禁拒绝全部 14 项（含已迁移消费者 UI 的别名、namespace、动态与相对 Host 导入）。",
+    "", "静态描述由单一发行版来源物化；Vault 拥有 KeyHold 仓储、钱包生命周期、活动私钥、操作视图与公开 Key 投影。Connect 仅分派清单明确声明的 25 个方法；Storage 从真实 App 会话派生受限绑定。生产 Worker 就绪读取并订阅框架实际实例，领域测试夹具显式驱动其本地表。Worker 的 Storage、Vault、WoC、P2PKH、BSV21、STAS、1SatOrdinals、Contacts、SatSubscription 和 MSFile 已接入具体能力提供/消费；链高度、P2PKH、Token 与在线探测任务随实际单元 Scope 装配/撤销。Sat/MSFile 服务候选与持久化仓储在所属包创建，Contacts 仅消费固定 Ping/Pong Channel。Channel 的策略、Mux、关系状态、发布、入站路由和操作分派已归 SatSubscription；BitFS 账本、买卖恢复、会话、信令和控制分派归 MSFile；普通广播、设置及懒加载 Worker 转账归 P2PKH；钱包控制和秘密操作归 Vault。WoC 查询与 Worker 广播分开发布，P2PKH 显式消费广播和 Vault Worker crypto，Sat 以可选依赖懒加载 P2PKH Worker 转账。Background 拥有定时/空闲同步与任务执行，Vault 拥有自动锁和解锁执行，Contacts 拥有 presence 发布/RPC，P2PKH 拥有快照分派，Sat 拥有连接状态和订阅者。Vault 冷启动只接收 Storage 私有装配提供的固定 KeyHold 及原子初始化端口，不能列举其它目录；该 bootstrap 不等待解锁后的 Storage scope，避免初始化环。能力调用盘点由 TypeScript AST 生成，声明外调用导致脚本失败，泛型包装器另行列明。本次编码迁移与 Demo/Keymaster 本地联调已完成，用户排除线上测试。真实资金、公网付费协议、历史完整数据库实物样本及生产交接证据仍按原独立门禁保留，不由本地结果冒充。",
+  );
+  await writeFile(output, lines.join("\n") + "\n");
+  console.log(`Inventoried ${WEB_PLUGIN_CATALOG.length} catalog plugins: ${output}`);
+} finally {
+  await server.close();
+}

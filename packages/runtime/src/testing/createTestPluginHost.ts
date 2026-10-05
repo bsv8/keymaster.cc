@@ -4,10 +4,9 @@
 // Adapter 本身不会读取清单中的测试 setup，因此测试不会重新引入生产兼容回退。
 
 import type {
-  PluginHost,
   CreatePluginHostOptions,
 } from "../pluginHostContract.js";
-import { createKeymasterPluginHost } from "../keymasterHostAdapter.js";
+import { type FixtureHost as PluginHost, createFixtureHost as createKeymasterPluginHost } from "../testSupport/createFixtureHost.js";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   ASSET_REGISTRY_CAPABILITY,
@@ -20,16 +19,13 @@ import {
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
   HOME_REGISTRY_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
-  IMPORTER_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   NOTICE_REGISTRY_TYPED_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED,
   RESOURCE_REGISTRY_CAPABILITY,
   ROUTE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   SETTINGS_REGISTRY_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
-  SYSTEM_STATUS_REGISTRY_CAPABILITY,
   TOKEN_REGISTRY_CAPABILITY,
   TOPBAR_REGISTRY_CAPABILITY,
   TRANSFER_REGISTRY_CAPABILITY,
@@ -51,12 +47,7 @@ import type {
 } from "webloom-framework";
 
 type TestMeta = {
-  readonly kind?: PluginManifest["kind"];
-  readonly startup?: PluginManifest["startup"];
-  readonly defaultEnabled?: boolean;
-  readonly canDisable?: boolean;
-  readonly bootstrapStage?: PluginManifest["bootstrapStage"];
-  readonly displayGroup?: PluginManifest["displayGroup"];
+
   readonly providesCapabilities?: readonly (Capability | CapabilityDescriptor | string)[];
 };
 
@@ -110,16 +101,13 @@ const builtinCapabilities: readonly Capability[] = [
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
   HOME_REGISTRY_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
-  IMPORTER_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   NOTICE_REGISTRY_TYPED_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED,
   RESOURCE_REGISTRY_CAPABILITY,
   ROUTE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   SETTINGS_REGISTRY_CAPABILITY,
-  SYSTEM_SETTINGS_REGISTRY_CAPABILITY,
-  SYSTEM_STATUS_REGISTRY_CAPABILITY,
   TOKEN_REGISTRY_CAPABILITY,
   TOPBAR_REGISTRY_CAPABILITY,
   TRANSFER_REGISTRY_CAPABILITY,
@@ -242,12 +230,7 @@ function normalizeManifest(plugin: TestPluginManifest, runtime: RuntimeKind): Pl
     id: plugin.id,
     name: plugin.name,
     ...(plugin.description !== undefined ? { description: plugin.description } : {}),
-    kind: plugin.kind ?? meta?.kind ?? "business",
-    startup: plugin.startup ?? meta?.startup ?? "optional",
-    defaultEnabled: plugin.defaultEnabled ?? meta?.defaultEnabled ?? true,
-    canDisable: plugin.canDisable ?? meta?.canDisable ?? true,
-    bootstrapStage: plugin.bootstrapStage ?? meta?.bootstrapStage ?? "owner-apps-ready",
-    displayGroup: plugin.displayGroup ?? meta?.displayGroup ?? "business",
+
     ...(plugin.storage !== undefined ? { storage: plugin.storage } : {}),
     ...(plugin.config !== undefined ? { config: plugin.config } : {}),
     ...(plugin.i18n !== undefined ? { i18n: plugin.i18n } : {}),
@@ -263,7 +246,7 @@ export type TestPluginHost = Omit<PluginHost, "register" | "registerAll"> & {
 
 /** 创建带显式测试实现注册表的 Keymaster Host。 */
 export function createTestPluginHost(
-  options: CreatePluginHostOptions = {},
+  options: Parameters<typeof createKeymasterPluginHost>[0] = {},
 ): TestPluginHost {
   const setups = new Map<string, PluginSetup>();
   const suppliedRegistry = options.runtimeUnitImplementationRegistry;

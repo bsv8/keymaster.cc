@@ -35,14 +35,6 @@ export interface KeymasterScopeAttributes extends Readonly<Record<string, unknow
 
 /** Keymaster 注入 WebLoom Context 的领域扩展。 */
 export interface KeymasterContextExtension extends WebLoomPluginContextExtension {
-  /** Host 预绑定的领域 Storage 句柄。 */
-  readonly storage?: BorrowedKeyValueStore;
-  /** Resolve one of the current unit's declared storage purposes. */
-  readonly storageFor?: (purposeId: string) => BorrowedKeyValueStore;
-  /** Resolve one of the current unit's declared file purposes（model: "files"）. */
-  readonly filesFor?: (purposeId: string) => BorrowedOwnerFileStore;
-  /** 按 pluginId 收窄后的 Coordinator facade。 */
-  readonly coordinator?: unknown;
 }
 
 /** Keymaster 业务贡献的泛型绑定。 */

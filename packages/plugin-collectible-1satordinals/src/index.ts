@@ -5,5 +5,5 @@ export { createOrdinalMintHistoryRepository } from "./storage/ordinalMintHistory
 export { createOrdinalMintService } from "./ordinalMintService.js";
 export { createOrdinalTransferService } from "./ordinalTransferService.js";
 export { createOrdinalsSyncTask } from "./ordinalsSync.js";
-export { OrdinalMintPage } from "./OrdinalMintPage.js";
-export { createOrdinalTransferHandler, OrdinalTransferWidget } from "./OrdinalTransferWidget.js";
+
+export { createOrdinalTransferHandler } from "./OrdinalTransferWidget.js";

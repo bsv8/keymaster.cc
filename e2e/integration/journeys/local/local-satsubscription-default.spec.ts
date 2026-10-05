@@ -78,6 +78,10 @@ async function expectDefaultSupplierVisible(page: Page, label: string): Promise<
     path: /\/settings\/system-status$/u,
     heading: /^Broadcast gateway$|^广播网关$/u,
   });
+  // page 组合必须保留每个贡献实例的消费边界，并且每个设置块只渲染一次。
+  await expect(page.locator('[data-system-status-module="sat-subscription.system-status"]')).toHaveCount(1);
+  await expect(page.locator('[data-system-status-module="webrtc.system-status"]')).toHaveCount(1);
+  await expect(page.locator('[data-webrtc-settings="main"]')).toBeVisible({ timeout: 20_000 });
   const settings = page.locator(".sat-subscription-settings");
   await expect(settings, `${label} 必须显示 SatSubscription 设置区`).toBeVisible({ timeout: 20_000 });
   await expect(settings, `${label} 必须显示缺省 bsv8 供应商`).toContainText("bsv8", { timeout: 20_000 });

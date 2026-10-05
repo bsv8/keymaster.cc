@@ -1,3 +1,11 @@
+import { createPublicProtocolService } from "./publicProtocolService.js";
+import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindProtocolUi } from "./ProtocolResourceContext.js";
+import { PAGE_UI_REGISTRY_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-protocol/src/manifest.ts
 // 对外协议插件：popup 路由 + service capability + 协议页 i18n +
 // 命令流 platform K-V。
@@ -28,7 +36,7 @@
 
 import type {
   I18nPluginResources,
-  KeyspaceService,
+  VaultWalletState,
   PluginContext,
   PluginManifest,
   PluginSetup,
@@ -38,7 +46,7 @@ import type {
   ProtocolSessionSnapshot,
   ProtocolCommandFeedState,
   ProtocolService,
-  StorageRuntimeController,
+  StorageRuntimeStatusService,
   SessionCoordinatorClient,
   P2pkhProtocolAdapter
 } from "@keymaster/contracts";
@@ -53,7 +61,7 @@ import {
   PROTOCOL_COORDINATOR_CONTROL_CAPABILITY,
   STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   type ProtocolCoordinatorControl,
 } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
@@ -465,18 +473,16 @@ const protocolPluginDefinition = {
   id: PROTOCOL_PLUGIN_ID,
   name: "Protocol",
   description: "对外协议 V1：identity.get / intent.sign / cipher.encrypt / cipher.decrypt + p2pkh.transfer + feepool.prepare / feepool.commit。",
-  kind: "platform",
-  startup: "optional",
+
+
   // 协议 popup 是锁屏/未初始化时仍需可打开的系统入口；它只依赖
-  // Vault + Keyspace，在 vault-selection 阶段先注册。真正依赖 active
+  // Vault + WalletState，在 vault-selection 阶段先注册。真正依赖 active
   // owner 的 Connect App 仍由 connect-apps-ready 阶段装配。
-  bootstrapStage: "vault-selection",
-  defaultEnabled: true,
-  canDisable: false,
-  displayGroup: "platform",
+
   units: [{
     id: "protocol.window",
     runtime: "window-main",
+    connect: { providerMethods: ["connect.login", "connect.resume", "connect.logout", "connect.launch"] },
     scopeKind: "storage",
     provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY],
     storages: [
@@ -485,16 +491,22 @@ const protocolPluginDefinition = {
       PROTOCOL_STORAGE_DECLARATIONS.commandHistory
     ],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 Connect 弹窗" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "Protocol 自有资源" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       {
         capability: VAULT_SERVICE_CAPABILITY,
         reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
       },
-      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "协议需要 owner key 状态" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "协议需要 owner key 状态" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 protocol 资源" },
+      { capability: APP_STORAGE_CLIENTS_CAPABILITY, optional: true, reason: "Connect App 会话受限文件客户端" },
       { capability: STORAGE_RUNTIME_CONTROLLER_CAPABILITY, optional: true, reason: "可选 Storage 方法" },
       { capability: MSFILE_SERVICE_CAPABILITY, optional: true, reason: "可选 MSFile 方法" },
       { capability: BSV_PRICE_READER_CAPABILITY, optional: true, reason: "可选 BSV 价格展示方法 price.*" },
-      { capability: P2PKH_SERVICE_CAPABILITY, optional: true, reason: "owner-apps-ready 后可选 P2PKH 方法" },
+      { capability: P2PKH_SERVICE_CAPABILITY, optional: true, reason: "可选 P2PKH 方法" },
       { capability: APP_CATALOG_CAPABILITY, optional: true, reason: "可选 app catalog" },
     ]),
   }],
@@ -502,12 +514,12 @@ const protocolPluginDefinition = {
   async setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
     const vaultService = ctx.capability(VAULT_SERVICE_CAPABILITY);
-    const keyspaceService = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
-    const coordinatorClient = ctx.coordinator as ProtocolCoordinatorControl | undefined;
+    const walletStateService = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    const coordinatorClient = ctx.capability(PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as ProtocolCoordinatorControl | undefined;
     if (!coordinatorClient) throw new Error("Protocol Coordinator control is unavailable");
     ctx.provide(PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     const connectChannelRuntime = createConnectChannelRuntime(coordinatorClient);
-    let storageController: StorageRuntimeController | undefined;
+    let storageController: StorageRuntimeStatusService | undefined;
     try {
       storageController = ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
     } catch {
@@ -525,13 +537,8 @@ const protocolPluginDefinition = {
       msfileService = undefined;
     }
 
-    // Host 已在 setup 前绑定三个 purpose-scoped K-V 句柄；它们承载历史、
-    // 每站点配置和 session 必要真值。仓储 attach 在 setup 生命周期内 await，
-    // 任何绑定或回补写失败都必须让 setup 失败，不能静默降级。
-    //
-    // P2PKH 在 owner-apps-ready 阶段才装配。这里必须保存 resolver，而不是
-    // 在 vault-selection setup 时读取一次 undefined；每次 transfer/feepool
-    // 请求都重新取 capability，保证后加载的业务插件可见。
+    // Bind the three declared Storage purposes explicitly during setup.
+    // Keep optional services as resolvers so replacement instances are observed.
     const getP2pkhService = (): P2pkhProtocolAdapter | undefined => {
       try {
         return ctx.optionalCapability(P2PKH_SERVICE_CAPABILITY);
@@ -542,8 +549,13 @@ const protocolPluginDefinition = {
 
     const service = createProtocolService({
         vault: vaultService,
-        keyspace: keyspaceService,
+        walletState: walletStateService,
         storageController,
+        bindAppStorage: binding => {
+          const clients = ctx.optionalCapability(APP_STORAGE_CLIENTS_CAPABILITY);
+          if (!clients) throw new Error("Storage App clients unavailable");
+          return clients.bind(ctx.consumer, ctx.scope, binding);
+        },
         getStorageController: () => {
           try {
             return ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
@@ -581,18 +593,18 @@ const protocolPluginDefinition = {
         // 仅在 popup 挂载时解析一次；session 启动后不再变动。
         bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",
       });
-      ctx.provide(PROTOCOL_SERVICE_CAPABILITY, service);
+      ctx.provide(PROTOCOL_SERVICE_CAPABILITY, createPublicProtocolService(service, () => ctx.scope.assertActive()));
       const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
       resources.register<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }, readonly string[]>({
         id: "protocol.state",
         scope: "global",
         key: () => ["protocol.state"],
         load: async (_args, context) => {
-          const current = context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)!;
+          const current = context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY)!;
           return { snapshot: current.snapshot(), feed: current.feedSnapshot() };
         },
         subscribe: (_args, context, invalidate) => {
-          const current = context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
+          const current = context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY);
           const a = current?.subscribe(() => invalidate()) ?? (() => {});
           const b = current?.subscribeFeed(() => invalidate()) ?? (() => {});
           return () => { a(); b(); };
@@ -603,8 +615,8 @@ const protocolPluginDefinition = {
         id: "protocol.vault-status",
         scope: "global",
         key: () => ["protocol.vault-status"],
-        load: async (_args, context) => context.getCapability<VaultService>("vault.service")?.status() ?? "locked",
-        subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onLifecycleChange(() => invalidate()) ?? (() => {}),
+        load: async (_args, context) => context.optionalCapability(VAULT_SERVICE_CAPABILITY)?.status() ?? "locked",
+        subscribe: (_args, context, invalidate) => walletStateService.subscribe(() => invalidate()),
         invalidation: "immediate"
       });
       resources.register<{ waiting: boolean; timedOut: boolean }, readonly string[]>({
@@ -612,33 +624,37 @@ const protocolPluginDefinition = {
         scope: "global",
         key: () => ["protocol.app-bootstrap"],
         load: async (_args, context) => {
-          const current = context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)!;
+          const current = context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY)!;
           return { waiting: current.appClientWaitingForReady(), timedOut: current.appClientConnectTimedOut() };
         },
-        subscribe: (_args, context, invalidate) => context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
+        subscribe: (_args, context, invalidate) => context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
         invalidation: "immediate"
       });
 
       const storageRepository = openProtocolStorageRepository({
-        durablePolicy: ctx.storageFor(PROTOCOL_STORAGE_PURPOSES.durablePolicy),
-        sessions: ctx.storageFor(PROTOCOL_STORAGE_PURPOSES.sessions),
-        commandHistory: ctx.storageFor(PROTOCOL_STORAGE_PURPOSES.commandHistory)
+        durablePolicy: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.durablePolicy),
+        sessions: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.sessions),
+        commandHistory: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.commandHistory)
       });
       ctx.provide(PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, storageRepository);
       await service.attachProtocolStorageRepository(storageRepository);
 
-      // 注意：协议页**不**注册到 `route.registry`。
-      // 设计缘由：施工单 001 收口反馈——页面"单一 owner"意味着入口路径
-      // 也只有一条。`apps/web/src/App.tsx` 已经把
-      // `/protocol/v1/popup` 作为顶层特例在 LockedShell / UnlockedShell
-      // **之前**直接渲染 `ProtocolPopupPage`；若再在 route.registry 里
-      // 注册，会让 RouteRenderer 多一条可匹配路径，破坏"路径 → 组件"
-      // 的单映射。其它路径仍走 `RouteRenderer`，与协议路径互不干扰。
-      //
-      // 施工单 002 收尾反馈：`/settings/protocol` 这一**系统级**设置页
-      // 已被删除；fee pool 默认 fund 收回到 per-origin
-      // `ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`，
-      // 通过 popup 顶栏"站点配置"按钮内联配置。
+      resources.register({ id: "protocol.msfile-approvals", scope: "active-key", key: (_args, context) => ["protocol.msfile-approvals", context.activePublicKeyHex ?? "none"],
+        load: async () => ({ approvals: ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY)?.listPendingApprovals() ?? [] }),
+        subscribe: (_args, _context, invalidate) => {
+          let current = ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY);
+          let off = current?.subscribe(invalidate) ?? (() => {});
+          const offConsumer = ctx.consumer.subscribe(() => {
+            if (ctx.consumer.status !== "active") return;
+            const next = ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY);
+            if (next === current) return;
+            off(); current = next; off = next?.subscribe(invalidate) ?? (() => {}); invalidate();
+          });
+          return () => { offConsumer(); off(); };
+        }, invalidation: "immediate" });
+      const Popup = bindProtocolUi(ctx, ProtocolPopupPage);
+      const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
+      pages.register({ kind: "frame", slot: "protocol-popup", id: "protocol.popup", label: "Connect", render: () => createElement(Popup) });
 
       return () => {
         // 幂等 teardown：service 内部状态在 endSession 后清空。

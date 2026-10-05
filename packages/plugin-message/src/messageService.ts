@@ -1,3 +1,4 @@
+import { sameWalletSession } from "@keymaster/contracts";
 // 消息业务 service。
 //
 // 消息只通过 Channel 的固定 `bsv8.message.v1` 私信协议收发；历史按
@@ -11,7 +12,7 @@ import type {
   ChannelPrivateMessageEvent,
   ChannelRuntime,
   JSONValue,
-  KeyspaceService,
+  VaultWalletState,
   MessageContentType,
   MessageRecord
 } from "@keymaster/contracts";
@@ -68,7 +69,7 @@ type MessagePrivateContent = MessageTextContent | MessageAckContent;
 
 export interface MessageServiceDeps {
   channel: ChannelRuntime;
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   /** 绑定到 `<owner>/messages/` 的只读/追加文件句柄。 */
   files: BorrowedOwnerFileStore;
   /** Optional observer for storage failures in background receive handling. */
@@ -77,8 +78,7 @@ export interface MessageServiceDeps {
 
 interface OwnerOperation {
   publicKeyHex: string;
-  /** keyspace generation 可选；没有该字段的测试实现仍按 owner 隔离。 */
-  generation?: number;
+  session: Readonly<import("@keymaster/contracts").VaultLifecycleSnapshot>;
 }
 
 interface PeerIndexEntry extends MessageIndexEntry {
@@ -133,21 +133,21 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
   }
 
   function ownerPublicKeyHex(): string | undefined {
-    return deps.keyspace.active().activePublicKeyHex?.trim().toLowerCase();
+    return deps.walletState.snapshot().activePublicKeyHex?.trim().toLowerCase();
   }
 
   function captureOwner(): OwnerOperation | undefined {
-    const active = deps.keyspace.active();
+    const active = deps.walletState.snapshot();
     const publicKeyHex = active.activePublicKeyHex?.trim().toLowerCase();
-    return publicKeyHex ? { publicKeyHex, generation: active.generation } : undefined;
+    return publicKeyHex ? { publicKeyHex, session: active } : undefined;
   }
 
   function ownerGuard(owner: OwnerOperation): () => boolean {
     return () => {
       if (disposed) return false;
-      const active = deps.keyspace.active();
+      const active = deps.walletState.snapshot();
       return active.activePublicKeyHex?.trim().toLowerCase() === owner.publicKeyHex
-        && (owner.generation === undefined || active.generation === owner.generation);
+        && sameWalletSession(owner.session, active);
     };
   }
 
@@ -355,10 +355,7 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
     if (!owner) return;
     void deps.channel.subscriptionSet([`bsv8.inbox.${owner}`]).catch(() => undefined);
   };
-  subscribeOwnerInbox();
-  const offOwnerChanged = typeof deps.keyspace.onActiveKeyChanged === "function"
-    ? deps.keyspace.onActiveKeyChanged(() => subscribeOwnerInbox())
-    : undefined;
+  const offOwnerChanged = deps.walletState.subscribe(() => subscribeOwnerInbox());
 
   return {
     isReady: () => Boolean(!disposed && deps.channel.isReady() && ownerPublicKeyHex()),

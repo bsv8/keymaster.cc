@@ -1,3 +1,4 @@
+import type { InternalVaultService } from "./internalVaultService.js";
 // packages/plugin-vault/src/VaultResetWalletModal.tsx
 // 重置钱包确认框。
 //
@@ -14,17 +15,17 @@
 
 import { useEffect, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import { useI18n } from "@keymaster/runtime";
-import type { VaultService } from "@keymaster/contracts";
+import { usePluginI18n } from "@keymaster/runtime";
+
 
 export interface VaultResetWalletModalProps {
   open: boolean;
-  vault: VaultService;
+  vault: InternalVaultService;
   onClose(): void;
 }
 
 export function VaultResetWalletModal({ open, vault, onClose }: VaultResetWalletModalProps) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
   const [confirmation, setConfirmation] = useState("");
   const [label, setLabel] = useState("");

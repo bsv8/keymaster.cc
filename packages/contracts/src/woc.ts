@@ -281,3 +281,10 @@ export const WOC_CAPABILITY = defineCapability<WocService>({
   id: "woc.service",
   version: "1",
 });
+
+/** Local Worker broadcast port. It is never exposed through Connect or the query service. */
+export const WOC_WORKER_BROADCAST_CAPABILITY = defineCapability<WocWorkerBroadcastService>({
+  kind: "local",
+  id: "woc.worker-broadcast",
+  version: "1",
+});

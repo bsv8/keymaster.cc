@@ -1,3 +1,4 @@
+import { useInternalVault } from "./VaultInternalContext.js";
 // packages/plugin-vault/src/VaultCreatePage.tsx
 // 首启"新建钱包"页：与 apps/web LockedShell 的"新建钱包"卡片语义保持一致。
 //
@@ -10,13 +11,13 @@
 
 import { useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
+import { usePluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
 import { VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 export function VaultCreatePage() {
-  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
-  const { t } = useI18n();
+  const vault = useInternalVault();
+  const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");

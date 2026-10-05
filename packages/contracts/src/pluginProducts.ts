@@ -1,19 +1,24 @@
+// IDs and units are materialized by scripts/materialize-plugin-catalog.mjs.
 // 内置插件产品清单。
 //
 // 这是当前 Web 发行版的稳定产品边界，不是动态插件注册表。Coordinator
-// 只能接受清单中的产品意图；未来如果开放第三方插件，必须另建可信注册
+// 只接受清单中的产品身份；未来如果开放第三方插件，必须另建可信注册
 // 流程，不能把任意字符串直接加入这里或绕过 Worker 校验。
 
 import type { RuntimeKind } from "webloom-framework";
 import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
 
 /**
- * 当前 Web 发行版允许用户启停的产品级 pluginId。
+ * 当前 Web 发行版登记的稳定产品级 pluginId。
  *
  * 产品级 id 与运行单元 unitId 不同：Window / Worker 单元都归属于这里的
- * 一个产品，用户命令只操作产品意图。
+ * 一个产品。登记身份不授予能力，也不代表实例已经就绪。
  */
 export const BUILTIN_PLUGIN_PRODUCT_IDS = [
+  "page",
+  "assets",
+  "collectibles",
+  "scan",
   "storage",
   "vault",
   "window-p2p",
@@ -23,19 +28,12 @@ export const BUILTIN_PLUGIN_PRODUCT_IDS = [
   "contacts",
   "webrtc",
   "message",
-  "settings",
-  "key-import",
   "background",
-  "home",
   "woc",
   "p2pkh",
   "token-bsv21",
   "token-stas",
   "collectible-1satordinals",
-  "poker",
-  "importer-wif",
-  "importer-hex",
-  "importer-json-file",
   "bsv-price",
   "apps",
 ] as const;
@@ -46,14 +44,14 @@ export const BUILTIN_PLUGIN_PRODUCT_ID_SET: ReadonlySet<string> = new Set(BUILTI
 /**
  * Web 发行版的产品→运行单元静态契约。
  *
- * `productId` 是用户启停的产品；`unitId` 是框架实际装配的稳定运行
+ * `productId` 是插件归属的产品；`unitId` 是框架实际装配的稳定运行
  * 单元。一个产品可以只有一个 Window 单元；只有已经有真实 Coordinator
  * Worker 装配入口的产品，才在这里同时声明 Worker 单元。不要把这里的
  * 声明当成“目录里写了就已经有实现”，Worker 单元必须再由 Worker 目录
  * 和任务/服务装配代码互相校验。
  */
 export interface BuiltinPluginRuntimeUnitDeclaration {
-  /** 用户可启停的产品标识。 */
+  /** 稳定产品归属标识。 */
   productId: (typeof BUILTIN_PLUGIN_PRODUCT_IDS)[number];
   /** 稳定运行单元标识，不是一次启动生成的 instanceId。 */
   unitId: string;
@@ -66,10 +64,14 @@ export interface BuiltinPluginRuntimeUnitDeclaration {
 /**
  * 当前发行版所有产品的显式运行单元。
  *
- * 这份表故意使用扁平记录，便于发布脚本和非 TypeScript 工具读取；同一
+ * 这份表由真实发行版 manifest 生成，使用扁平记录，便于发布脚本和非 TypeScript 工具读取；同一
  * 产品的多条记录表示多个物理运行单元，而不是多个用户产品。
  */
 export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
+  { productId: "page", unitId: "page.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "assets", unitId: "assets.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "collectibles", unitId: "collectibles.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "scan", unitId: "scan.window", runtime: "window-main", scopeKind: "root" },
   { productId: "storage", unitId: "storage.window", runtime: "window-main", scopeKind: "storage" },
   { productId: "storage", unitId: "storage.coordinator-worker", runtime: "shared-worker", scopeKind: "storage" },
   { productId: "vault", unitId: "vault.window", runtime: "window-main", scopeKind: "root" },
@@ -85,10 +87,7 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "contacts", unitId: "contacts.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "webrtc", unitId: "webrtc.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "message", unitId: "message.window", runtime: "window-main", scopeKind: "owner-session" },
-  { productId: "settings", unitId: "settings.window", runtime: "window-main", scopeKind: "root" },
-  { productId: "key-import", unitId: "key-import.window", runtime: "window-main", scopeKind: "root" },
   { productId: "background", unitId: "background.window", runtime: "window-main", scopeKind: "owner-session" },
-  { productId: "home", unitId: "home.window", runtime: "window-main", scopeKind: "root" },
   { productId: "woc", unitId: "woc.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "woc", unitId: "woc.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.window", runtime: "window-main", scopeKind: "owner-session" },
@@ -99,10 +98,6 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "token-stas", unitId: "token-stas.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
-  { productId: "poker", unitId: "poker.window", runtime: "window-main", scopeKind: "owner-session" },
-  { productId: "importer-wif", unitId: "importer-wif.window", runtime: "window-main", scopeKind: "root" },
-  { productId: "importer-hex", unitId: "importer-hex.window", runtime: "window-main", scopeKind: "root" },
-  { productId: "importer-json-file", unitId: "importer-json-file.window", runtime: "window-main", scopeKind: "root" },
   { productId: "bsv-price", unitId: "bsv-price.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "root" },
 ] as const satisfies readonly BuiltinPluginRuntimeUnitDeclaration[];
@@ -147,26 +142,3 @@ export function assertBuiltinPluginRuntimeUnitCatalog(): void {
   const errors = validateBuiltinPluginRuntimeUnitCatalog();
   if (errors.length > 0) throw new Error(`内置产品运行单元目录无效: ${errors.join("；")}`);
 }
-
-/**
- * 不能被用户关闭的内置产品。
- *
- * 这份策略必须同时被 Window Host 和 Coordinator Worker 使用：Host 负责
- * UI/实例状态，Worker 负责真实服务、任务和最终 I/O。只在前端 manifest
- * 中声明 canDisable=false 不足以形成生产边界，因为调用方仍可直接向
- * SharedWorker 提交命令。
- */
-export const BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_IDS = [
-  "storage",
-  "vault",
-  "window-p2p",
-  "msfile",
-  "sat-subscription",
-  "protocol",
-  "message",
-  "settings",
-  "home",
-] as const;
-
-/** 供 Worker 在命令入口做 O(1) 的不可关闭产品校验。 */
-export const BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_ID_SET: ReadonlySet<string> = new Set(BUILTIN_ALWAYS_ON_PLUGIN_PRODUCT_IDS);

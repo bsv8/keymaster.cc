@@ -9,7 +9,7 @@
 //     能力实例变化时才更新。
 
 import { useCallback, useRef, useSyncExternalStore } from "react";
-import { useOptionalCapability } from "webloom-framework/react";
+import { useOptionalCapability, useOptionalPluginCapability } from "webloom-framework/react";
 import {
   BSV_PRICE_READER_CAPABILITY,
   type BsvPriceReader,
@@ -18,7 +18,12 @@ import {
 
 /** 当前展示价格；价格能力不可用时为 null（调用方按 0 展示）。 */
 export function useBsvPrice(): PriceValue | null {
-  const reader = useOptionalCapability(BSV_PRICE_READER_CAPABILITY);
+  return usePriceReader(useOptionalCapability(BSV_PRICE_READER_CAPABILITY));
+}
+export function usePluginBsvPrice(): PriceValue | null {
+  return usePriceReader(useOptionalPluginCapability(BSV_PRICE_READER_CAPABILITY));
+}
+function usePriceReader(reader: BsvPriceReader | undefined): PriceValue | null {
   const cache = useRef<{ reader: BsvPriceReader; value: PriceValue } | null>(null);
 
   const getSnapshot = useCallback((): PriceValue | null => {

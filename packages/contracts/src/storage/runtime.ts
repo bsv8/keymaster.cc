@@ -114,7 +114,9 @@ export interface StorageRuntimeController {
   delete(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDeleteResult>;
 }
 
-export const STORAGE_RUNTIME_CONTROLLER_CAPABILITY = defineCapability<StorageRuntimeController>({
+export type StorageRuntimeStatusService = Pick<StorageRuntimeController, "status" | "subscribe" | "summary" | "abortSession">;
+
+export const STORAGE_RUNTIME_CONTROLLER_CAPABILITY = defineCapability<StorageRuntimeStatusService>({
   kind: "local",
   id: "storage.runtime-controller",
   version: "1",

@@ -10,7 +10,7 @@ import type {
   ProtocolSpendService,
 } from "@keymaster/contracts";
 import { BitfsStreamRuntime } from "./bitfs/sellerStreamRuntime.js";
-import type { WindowWebRtcInterconnectContext } from "@keymaster/plugin-window-p2p/webrtc-interconnect";
+import type { WindowWebRtcInterconnectContext } from "@keymaster/contracts/window-p2p";
 import { BitfsWebRtcStreamRuntime, type BitfsWebRtcHost } from "./bitfs/webrtcStreamRuntime.js";
 import { MsFileSupplierRuntime } from "./supplierRuntime.js";
 import type {

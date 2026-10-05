@@ -6,7 +6,7 @@ import { defineCapability } from "webloom-framework";
 // 不依赖 libp2p，具体 lane 在自己的插件边界内把它收窄为正式 SDK 类型。
 
 /** 唯一的 Window P2P executor capability。 */
-export const WINDOW_P2P_EXECUTOR_CAPABILITY = defineCapability<WindowP2pExecutorLaneRegistry>({
+export const WINDOW_P2P_EXECUTOR_CAPABILITY = defineCapability<Pick<WindowP2pExecutorLaneRegistry, "register">>({
   kind: "local",
   id: "window-p2p.executor",
   version: "1",

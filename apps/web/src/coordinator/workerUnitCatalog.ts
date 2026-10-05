@@ -1,12 +1,13 @@
 // Coordinator Worker 领域运行单元目录。
 //
 // 这里登记的是已经真正由 SharedWorker 装配的领域单元，不是 24 个页面
-// 产品的伪迁移清单。产品 id 表示用户启停对象，unitId 表示稳定的 Worker
+// 产品的伪迁移清单。产品 id 表示插件归属，unitId 表示稳定的 Worker
 // 运行单元，taskId 和最终 I/O 审计入口则把实际执行边界连接起来。
 
 import type { FinalIoAuditOperation } from "./finalIoAudit.js";
-import type { KeymasterScopeKind, PluginManifest, PluginStorageDeclaration } from "@keymaster/contracts";
+import type { KeymasterScopeKind, PluginManifest, PluginStorageDeclaration, RuntimeUnitDependency } from "@keymaster/contracts";
 import {
+  BUILTIN_PLUGIN_DEFINITIONS,
   BUILTIN_PLUGIN_PRODUCT_IDS,
   BUILTIN_PLUGIN_PRODUCT_ID_SET,
   getBuiltinPluginRuntimeUnits,
@@ -14,7 +15,7 @@ import {
 } from "@keymaster/contracts";
 
 export interface CoordinatorWorkerUnitDescriptor {
-  /** 用户可启停的产品标识。 */
+  /** 插件的稳定产品标识。 */
   productId: string;
   /** 稳定的 Worker 运行单元标识，不是一次启动生成的实例标识。 */
   unitId: string;
@@ -25,8 +26,8 @@ export interface CoordinatorWorkerUnitDescriptor {
   /** 由该运行单元拥有的后台任务。 */
   taskIds: readonly string[];
   /**
-   * 本单元可用所依赖的全部对象：产品 id 与其它单元 id 合并在一份清单里，
-   * 统一按「是否可用」判定。原来的「产品级运行前置条件」不再是独立一层。
+   * 本单元实际使用的 Worker 服务所属单元。这里只接受稳定 unitId，
+   * 不接受产品 id，也不登记本单元作为自己的依赖。
    */
   dependsOn: readonly string[];
   /** 由该运行单元拥有的 Worker 服务；服务单元可以没有周期任务。 */
@@ -51,8 +52,6 @@ interface CoordinatorWorkerUnitRuntimeDetails {
   unitId: string;
   /** 由该运行单元拥有的后台任务。 */
   taskIds: readonly string[];
-  /** 本单元可用所依赖的全部对象；产品 id 与单元 id 合并为一份。 */
-  dependsOn: readonly string[];
   /** 由该运行单元拥有的 Worker 服务。 */
   serviceIds?: readonly string[];
   /** 由实际 Worker 实现打开的中央 purpose；声明对象由 contracts 目录解析。 */
@@ -74,7 +73,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "storage.coordinator-worker",
     taskIds: [],
-    dependsOn: [],
     serviceIds: ["storage.runtime-controller"],
     storagePurposes: [],
     finalIoAuditEntries: [],
@@ -82,15 +80,13 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "vault.coordinator-worker",
     taskIds: [],
-    dependsOn: [],
-    serviceIds: ["vault.keyspace", "vault.crypto"],
+    serviceIds: ["vault.walletState", "vault.crypto"],
     storagePurposes: [],
     finalIoAuditEntries: [],
   },
   {
     unitId: "window-p2p.coordinator-worker",
     taskIds: [],
-    dependsOn: [],
     serviceIds: ["window-p2p.executor-lease"],
     storagePurposes: [],
     finalIoAuditEntries: [],
@@ -98,19 +94,15 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "msfile.coordinator-worker",
     taskIds: [],
-    // 卖方需要收款运行时才能接单。这条依赖过去只藏在调用代码的一行 await
-    // 里，任何声明位置都没有，因此预热中的竞态被当成永久配置错误。
-    dependsOn: ["sat-subscription.coordinator-worker"],
     serviceIds: ["msfile.service"],
     // `<owner>/msfiles/` 文件根；`bitfs-journal` 保存不可逆协议证据；
-    // App 覆盖额度按 publisher 惰性打开，不在此列举。
-    storagePurposes: ["", "bitfs-journal"],
+    // App 管理设置使用平台 app-settings purpose。
+    storagePurposes: ["", "bitfs-journal", "app-settings"],
     finalIoAuditEntries: [],
   },
   {
     unitId: "sat-subscription.coordinator-worker",
     taskIds: [],
-    dependsOn: [],
     serviceIds: ["sat-subscription.service", "channel.subscription-mux"],
     // `<owner>/sat-subscription/` 文件根；设置文件固定为 setting.json。
     storagePurposes: [""],
@@ -119,7 +111,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "contacts.coordinator-worker",
     taskIds: ["contacts.presence-probe"],
-    dependsOn: ["background", "contacts"],
     serviceIds: ["contacts.service"],
     storagePurposes: ["address-book"],
     finalIoAuditEntries: [{ taskId: "contacts.presence-probe", operation: "contacts.presence-probe" }],
@@ -127,7 +118,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "p2pkh.coordinator-worker",
     taskIds: ["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"],
-    dependsOn: ["background", "p2pkh"],
     serviceIds: ["p2pkh.provider-registry", "p2pkh.asset-service"],
     storagePurposes: [""],
     finalIoAuditEntries: [
@@ -138,7 +128,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "token-bsv21.coordinator-worker",
     taskIds: ["token-bsv21.sync"],
-    dependsOn: ["background", "p2pkh", "token-bsv21", "woc"],
     serviceIds: ["token-bsv21.service"],
     storagePurposes: ["token-state"],
     finalIoAuditEntries: [{ taskId: "token-bsv21.sync", operation: "token-bsv21.sync" }],
@@ -146,7 +135,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "token-stas.coordinator-worker",
     taskIds: ["token-stas.sync"],
-    dependsOn: ["background", "p2pkh", "token-stas", "woc"],
     serviceIds: ["token-stas.service"],
     storagePurposes: ["token-state"],
     finalIoAuditEntries: [{ taskId: "token-stas.sync", operation: "token-stas.sync" }],
@@ -154,7 +142,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
   {
     unitId: "collectible-1satordinals.coordinator-worker",
     taskIds: ["collectible-1satordinals.sync"],
-    dependsOn: ["background", "p2pkh", "collectible-1satordinals", "woc"],
     serviceIds: ["collectible-1satordinals.service"],
     storagePurposes: [],
     finalIoAuditEntries: [{ taskId: "collectible-1satordinals.sync", operation: "collectible-1satordinals.sync" }],
@@ -164,12 +151,27 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     // 链高度同步读一次节点 `/chain/info` 就完成，没有本地写入；
     // 仍登记最终 I/O 审计入口，因为它和其它链上任务共用同一出口与配额。
     taskIds: ["chain.chain-height-sync"],
-    dependsOn: ["background", "woc"],
     serviceIds: ["woc.service", "woc.bsv21", "woc.stas", "woc.1satordinals"],
     storagePurposes: [],
     finalIoAuditEntries: [{ taskId: "chain.chain-height-sync", operation: "chain.height-sync" }],
   },
 ] as const satisfies readonly CoordinatorWorkerUnitRuntimeDetails[];
+
+/** Project required same-realm capabilities to their declared Worker owner.
+ * Optional services and peer capabilities are not startup dependencies.
+ */
+function declaredWorkerDependencies(unitId: string): string[] {
+  type Declaration = { id: string; runtime: string; dependencies: readonly RuntimeUnitDependency[]; provides: readonly { kind: string; id: string; version: string }[] };
+  const workers = BUILTIN_PLUGIN_DEFINITIONS.flatMap<Declaration>(product => product.units).filter(unit => unit.runtime === "shared-worker");
+  const declaration = workers.find(unit => unit.id === unitId);
+  if (!declaration) throw new Error(`Worker definition missing: ${unitId}`);
+  return declaration.dependencies.flatMap(dependency => {
+    if (dependency.optional || dependency.source === "peer" || dependency.sourceRuntime !== "shared-worker") return [];
+    const providers = workers.filter(unit => unit.provides.some(capability => capability.kind === dependency.capability.kind && capability.id === dependency.capability.id && capability.version === dependency.capability.version));
+    if (providers.length !== 1) throw new Error(`Worker dependency has ${providers.length} providers: ${unitId}/${dependency.capability.id}`);
+    return providers[0]!.id === unitId ? [] : [providers[0]!.id];
+  });
+}
 
 /**
  * 从唯一产品运行单元契约生成 Coordinator Worker 目录。
@@ -198,7 +200,7 @@ export const COORDINATOR_WORKER_UNIT_CATALOG: readonly CoordinatorWorkerUnitDesc
         }
         return { ...declaration };
       }),
-      dependsOn: [...(details.dependsOn ?? [])],
+      dependsOn: [...new Set(declaredWorkerDependencies(resolved.unitId))],
       ...(details.serviceIds ? { serviceIds: [...details.serviceIds] } : {}),
       finalIoAuditEntries: [...details.finalIoAuditEntries],
     };
@@ -224,23 +226,7 @@ export function getCoordinatorWorkerUnitForTask(taskId: string): CoordinatorWork
   return COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.taskIds.some((candidate) => candidate === taskId));
 }
 
-/**
- * 返回任务依赖清单中的**产品**部分；调用方只能追加运行时选中的 Provider。
- *
- * 单元依赖不参与任务的产品意图判定：任务能否入队只看插件开关，单元是否可用
- * 由统一判定实现递归求值。
- */
-export function getCoordinatorWorkerProductDependenciesForTask(taskId: string): readonly string[] {
-  const dependsOn = getCoordinatorWorkerUnitForTask(taskId)?.dependsOn ?? [];
-  return dependsOn.filter((dependency) => !isCoordinatorWorkerUnitId(dependency));
-}
-
-/** 依赖项是单元 id（非产品 id）时为真；以目录里真实登记的 unitId 为准。 */
-export function isCoordinatorWorkerUnitId(dependency: string): boolean {
-  return COORDINATOR_WORKER_UNIT_CATALOG.some((unit) => unit.unitId === dependency);
-}
-
-/** 返回单元的完整依赖清单（产品 id 与单元 id）。 */
+/** 返回单元的实际 Worker 单元依赖清单。 */
 export function getCoordinatorWorkerDependenciesForUnit(unitId: string): readonly string[] {
   return COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === unitId)?.dependsOn ?? [];
 }
@@ -373,12 +359,7 @@ export function validateCoordinatorWorkerUnitCatalog(
     }
     for (const dependency of dependsOn) {
       if (isCoordinatorWorkerUnitIdIn(catalog, dependency)) continue;
-      if (!BUILTIN_PLUGIN_PRODUCT_ID_SET.has(dependency)) {
-        errors.push(`单元引用未知依赖: ${unit.unitId} -> ${dependency}`);
-      }
-    }
-    if (unit.taskIds.length > 0 && !dependsOn.includes(unit.productId)) {
-      errors.push(`任务单元依赖必须包含自身产品: ${unit.unitId}`);
+      errors.push(`单元引用未知依赖: ${unit.unitId} -> ${dependency}`);
     }
     for (const serviceId of serviceIds) {
       if (services.has(serviceId)) errors.push(`重复 serviceId: ${serviceId}`);

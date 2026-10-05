@@ -35,8 +35,9 @@ vi.mock("@keymaster/runtime", async () => {
   return {
     ...actual,
     usePluginHost: () => ({ resourceStore: {} }),
-    useLocale: () => "zh-CN",
-    useI18n: () => ({
+    usePluginLocale: () => "zh-CN",
+    useResourceView: () => ({ data: useSyncExternalStore(activeTestService.service.subscribe, activeTestService.service.snapshot, activeTestService.service.snapshot) }),
+    usePluginI18n: () => ({
       t: (key: string, opts?: { defaultValue?: string }) =>
         ERROR_TEXT[key] ?? opts?.defaultValue ?? key,
       text: (input: unknown) =>
@@ -52,7 +53,7 @@ vi.mock("@keymaster/runtime", async () => {
 });
 
 vi.mock("webloom-framework/react", () => ({
-  useOptionalCapability: <T,>(): T | undefined =>
+  useOptionalPluginCapability: <T,>(): T | undefined =>
     activeTestService.service as unknown as T,
   useResource: () => {
     const service = activeTestService.service;
@@ -321,3 +322,5 @@ describe("BsvPriceSettingsPage", () => {
     expect(table?.querySelectorAll("[data-bsv-price-settings-quote-active='true']")).toHaveLength(1);
   });
 });
+
+vi.mock("./PriceResourceContext.js", () => ({ usePriceResources: () => ({}) }));

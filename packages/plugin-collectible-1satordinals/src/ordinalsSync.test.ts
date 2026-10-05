@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-collectible-1satordinals/src/ordinalsSync.test.ts
 // 1Sat Ordinals 后台同步任务回归测试：
 //   - 正常流程：service.sync + assetDataNotifier.emit；
@@ -6,17 +7,17 @@
 //   - 无 active key 时直接返回。
 
 import { describe, expect, it, vi } from "vitest";
-import type { AssetDataNotifier, KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
+import type { AssetDataNotifier, VaultWalletState, VaultService, WocService } from "@keymaster/contracts";
 import { createOrdinalsSyncTask } from "./ordinalsSync.js";
 import type { OrdinalMintHistoryRepository, OrdinalMintHistoryRecord } from "./storage/ordinalMintHistoryRepository.js";
 import type { OrdinalsServiceHandle } from "./ordinalsService.js";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
   let current = activePublicKeyHex;
   return {
-    active: () => ({ activePublicKeyHex: current }),
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: current }))()),
     setActive(hex: string | undefined) { current = hex; }
-  } as unknown as KeyspaceService & { setActive(hex: string | undefined): void };
+  } as unknown as VaultWalletState & { setActive(hex: string | undefined): void };
 }
 
 function fakeVault(): VaultService {
@@ -74,7 +75,7 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc({}),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -155,7 +156,7 @@ describe("createOrdinalsSyncTask", () => {
       service,
       woc: fakeWoc({ tx0: "unconfirmed" }),
       historyRepository,
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -232,7 +233,7 @@ describe("createOrdinalsSyncTask", () => {
       service,
       woc: fakeWoc({ tx0: "confirmed" }),
       historyRepository,
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -292,7 +293,7 @@ describe("createOrdinalsSyncTask", () => {
       service,
       woc: fakeWoc({}),
       historyRepository,
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -351,7 +352,7 @@ describe("createOrdinalsSyncTask", () => {
       service,
       woc: fakeWoc({}),
       historyRepository,
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -429,7 +430,7 @@ describe("createOrdinalsSyncTask", () => {
       service,
       woc: fakeWoc({ "tx-restore": "confirmed" }),
       historyRepository,
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -447,7 +448,7 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc(),
-      keyspace: fakeKeyspace("pk1"),
+      walletState: fakeWalletState("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -460,14 +461,14 @@ describe("createOrdinalsSyncTask", () => {
   it("active key 在 sync 后变化：不 emit", async () => {
     const service = fakeService();
     const notifier = fakeNotifier();
-    const ks = fakeKeyspace("pk-old") as KeyspaceService & { setActive(hex: string | undefined): void };
+    const ks = fakeWalletState("pk-old") as VaultWalletState & { setActive(hex: string | undefined): void };
     (service.sync as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       ks.setActive("pk-new");
     });
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc(),
-      keyspace: ks,
+      walletState: ks,
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
@@ -482,7 +483,7 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc(),
-      keyspace: fakeKeyspace(undefined),
+      walletState: fakeWalletState(undefined),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });

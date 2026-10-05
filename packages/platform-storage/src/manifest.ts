@@ -1,14 +1,22 @@
+import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY } from "@keymaster/contracts";
+import { StorageActivityIndicator } from "./ui/StorageActivityIndicator.js";
+import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { createAppStorageClients } from "./coordinator/appStorageClients.js";
+import { STORAGE_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { StorageUnavailableGuard } from "./ui/StorageUnavailableGuard.js";
+import { createElement } from "react";
+import { StoragePrivateProvider } from "./ui/StoragePrivateContext.js";
+import { I18N_SERVICE_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 // Storage 平台插件 manifest（单钱包本地存储）。
 //
 // 相对旧实现，这里没有任何存储配置面：没有桶目录、没有 Provider 选择、
 // 没有 endpoint/region/凭据表单、没有条件写能力探测、没有 multipart 上传。
-// setup 只做三件事：
+// setup 负责：
 //   1. 把 Worker 的存储控制 RPC 包成页面侧受限控制器并注册为 capability；
-//   2. 把只读浏览 RPC 包成浏览代理，并以平台能力形式注册给本页自己使用；
-//   3. 注册只读的 storage.status 资源与 /settings/storage 浏览页。
-//
-// 浏览能力是一个独立 capability，而不是 StorageRuntimeController 的方法：只有
-// 本插件的 window 单元提供它，普通插件、Connect App 与第三方拿不到根浏览权限。
+//   2. 把只读浏览 RPC 包成私有代理，由本实例的页面闭包持有；
+//   3. 通过 page 注册浏览页、只读状态块与既有持久存储授权条；
+//   4. 注册只读的 storage.status 资源。
 //
 // 钱包生命周期（创建/导入/解锁/锁定/改密/改名/导出 KeyHold/重置）的权威实现
 // 在 Worker 侧的 WalletLifecycleService 里，页面只通过控制 RPC 驱动它。
@@ -16,19 +24,20 @@ import type {
   I18nPluginResources,
   PluginManifest,
   PluginSetup,
-  StorageBrowseCoordinatorControl,
   StorageCoordinatorControl,
 } from "@keymaster/contracts";
 import {
   BREADCRUMB_REGISTRY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  STORAGE_BROWSE_SERVICE_CAPABILITY,
   STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY } from "./coordinator/storageBrowsePrivateCapability.js";
 import { StorageBrowseRpcProxy } from "./coordinator/storageBrowseRpcProxy.js";
+import { IndexedDbPersistenceBar } from "./ui/IndexedDbPersistenceBar.js";
+import { StorageStatusBlock } from "./ui/StorageStatusBlock.js";
 import { StorageBrowsePage } from "./ui/StorageBrowsePage.js";
 
 export const STORAGE_PLATFORM_PLUGIN_ID = "storage";
@@ -49,6 +58,9 @@ export const storageResources: I18nPluginResources = {
       "storage.status.uninitialized": "No wallet Key yet",
       "storage.status.locked": "Locked. Enter the Key password to unlock.",
       "storage.status.ready": "Ready",
+      "storage.activity.title": "Storage activity", "storage.activity.read": "Reading", "storage.activity.write": "Writing",
+      "storage.activity.reading": "Storage reading", "storage.activity.writing": "Storage writing",
+      "storage.activity.readIdle": "Storage reads idle", "storage.activity.writeIdle": "Storage writes idle",
       "storage.status.corrupt": "Local wallet data is incomplete and cannot be read.",
       "storage.status.unsupported": "Local data was written by a newer version and cannot be read here.",
       "storage.status.degraded": "Local storage is temporarily unavailable.",
@@ -139,6 +151,9 @@ export const storageResources: I18nPluginResources = {
       "storage.status.uninitialized": "还没有钱包 Key",
       "storage.status.locked": "已锁定，请输入 Key 密码解锁。",
       "storage.status.ready": "已就绪",
+      "storage.activity.title": "存储活动", "storage.activity.read": "读取", "storage.activity.write": "写入",
+      "storage.activity.reading": "正在读取存储", "storage.activity.writing": "正在写入存储",
+      "storage.activity.readIdle": "存储读取空闲", "storage.activity.writeIdle": "存储写入空闲",
       "storage.status.corrupt": "本地钱包数据不完整，无法读取。",
       "storage.status.unsupported": "本地数据由更新版本写入，当前版本无法读取。",
       "storage.status.degraded": "本地存储暂时不可用。",
@@ -230,55 +245,83 @@ const storagePlatformPluginDefinition = {
   id: STORAGE_PLATFORM_PLUGIN_ID,
   name: "Storage",
   description: "本 Origin 的单钱包本地存储与统一文件存储能力。",
-  kind: "platform" as const,
-  startup: "required" as const,
-  bootstrapStage: "storage-onboarding" as const,
-  defaultEnabled: true,
-  canDisable: false,
-  displayGroup: "platform" as const,
+
   units: [{
     id: STORAGE_BROWSE_UNIT_ID,
     runtime: "window-main" as const,
+    connect: { providerMethods: ["storage.list", "storage.directory.create", "storage.directory.delete", "storage.put", "storage.get", "storage.delete"] },
     scopeKind: "storage" as const,
     provides: [
-      capabilityDescriptor(STORAGE_RUNTIME_CONTROLLER_CAPABILITY),
-      // 浏览能力只由这个受信任单元提供；它没有出现在任何其它产品的 provides 里，
-      // 因此普通插件无法依赖到根浏览。
-      capabilityDescriptor(STORAGE_BROWSE_SERVICE_CAPABILITY),
+      capabilityDescriptor(STORAGE_RUNTIME_CONTROLLER_CAPABILITY), APP_STORAGE_CLIENTS_CAPABILITY,
     ],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为 /settings/storage 提供面包屑" },
     ]),
-    business: {
-      domains: [{
-        id: "storage",
-        label: { key: "storage.browse.business.label", fallback: "Storage browser" },
-        order: 910,
-        features: [{
-          id: "storage.browse",
-          label: { key: "storage.browse.business.label", fallback: "Storage browser" },
-          order: 10,
-          icon: "HardDrive",
-          // 解锁后才可达：锁定时 Coordinator 不发放浏览句柄，页面无从绕过。
-          entry: { path: "/settings/storage", component: StorageBrowsePage, visibleWhen: ({ unlocked }) => unlocked },
-        }],
-      }],
-    },
   }, {
     id: "storage.coordinator-worker",
     runtime: "shared-worker" as const,
     scopeKind: "storage" as const,
+    provides: [COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY],
+    privateProvides: [STORAGE_PRIVATE_BROWSE_CAPABILITY],
   }],
   i18n: storageResources,
   async setup(ctx) {
-    const coordinator = ctx.coordinator as (StorageCoordinatorControl & StorageBrowseCoordinatorControl) | undefined;
+    const coordinator = ctx.capability(STORAGE_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as StorageCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Storage Coordinator control is unavailable");
     const service = new StorageRpcProxy(coordinator);
     // 浏览代理与控制器共用同一个端口：Worker 按 clientId 归属会话，因此
     // 两者关闭顺序不需要额外协调。
-    const browse = new StorageBrowseRpcProxy({ coordinator });
-    ctx.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, service);
-    ctx.provide(STORAGE_BROWSE_SERVICE_CAPABILITY, browse);
+    const browse = new StorageBrowseRpcProxy({
+      client: () => ctx.privateCapability(STORAGE_PRIVATE_BROWSE_CAPABILITY),
+      sessionEpoch: () => coordinator.getSessionEpoch(),
+    });
+    ctx.provide(STORAGE_RUNTIME_CONTROLLER_CAPABILITY, Object.freeze({
+      status: () => service.status(), subscribe: (listener: () => void) => service.subscribe(listener),
+      summary: () => service.summary(), abortSession: (sessionId: string) => service.abortSession(sessionId),
+    }));
+    ctx.provide(APP_STORAGE_CLIENTS_CAPABILITY, createAppStorageClients(service, ctx.scope));
+    // 页面闭包只捕获本实例的私有服务；注册数据不携带服务对象。
+    const privateContents = (Component: import("react").ComponentType) => createElement(StoragePrivateProvider, {
+      service: browse, controller: service, children: createElement(Component),
+    });
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    pages.view.register({ kind: "frame", slot: "storage-guard", id: "storage.guard", label: "Storage",
+      render: location => createElement(StorageUnavailableGuard, { children: location.children }) });
+    pages.view.register({ id: "storage.browse", kind: "page", path: "/settings/storage",
+      label: { key: "storage.browse.business.label", fallback: "Storage browser" },
+      render: () => privateContents(StorageBrowsePage),
+    });
+    pages.view.register({ id: "storage.status", kind: "settings-block", path: "/settings/storage", order: 910,
+      label: { key: "storage.status.title", fallback: "Local storage" }, render: () => privateContents(StorageStatusBlock),
+    });
+    pages.view.register({ id: "storage.persistence", kind: "header", slot: "above-header", order: 0,
+      label: { key: "storage.status.title", fallback: "Local storage" }, render: () => privateContents(IndexedDbPersistenceBar),
+    });
+    pages.view.register({ id: "storage.activity", kind: "header", slot: "topbar", order: 5,
+      label: "Storage activity", render: () => privateContents(StorageActivityIndicator),
+    });
+    ctx.capability(BUSINESS_REGISTRY_CAPABILITY).register(ctx.pluginId, {
+      id: "storage",
+      label: { key: "storage.browse.business.label", fallback: "Storage browser" },
+      order: 910,
+      features: [{
+        id: "storage.browse",
+        label: { key: "storage.browse.business.label", fallback: "Storage browser" },
+        order: 10,
+        icon: "HardDrive",
+        entry: {
+          path: "/settings/storage",
+          routeId: "storage.browse",
+          visibleWhen: ({ unlocked }) => unlocked,
+        },
+      }],
+    });
+    ctx.scope.onRevoke(() => browse.dispose());
 
     const resourceRegistry = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     const resourceId = "storage.status";

@@ -8,7 +8,6 @@
 export type FinalIoAuditOperation =
   | "coordinator.bootstrap.recover"
   | "coordinator.settings.persist"
-  | "coordinator.plugin-intent.persist"
   | "vault.unlock"
   | "vault.digest.sign"
   | "vault.address.derive"
@@ -23,6 +22,7 @@ export type FinalIoAuditOperation =
   | "storage.connect.data"
   /** 只读存储浏览（设置 → 存储）的最终 I/O 边界。 */
   | "storage.browse"
+  | "storage.retired-plugin-intent.cleanup"
   | "msfile.data"
   | "msfile.control"
   | "sat.address.derive"

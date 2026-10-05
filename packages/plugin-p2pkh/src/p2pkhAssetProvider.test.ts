@@ -1,5 +1,6 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { describe, expect, it, vi } from "vitest";
-import type { BalanceBroadcaster, GlobalBalanceSnapshot, KeyspaceService } from "@keymaster/contracts";
+import type { BalanceBroadcaster, GlobalBalanceSnapshot, VaultWalletState } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type { P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhService } from "./p2pkhContracts.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
@@ -31,16 +32,16 @@ function createDeps(history: P2pkhHistoryRecord[], locals: P2pkhLocalTransaction
     onGlobalSettingsChange: () => () => undefined,
   } as unknown as P2pkhService;
   const messageBus = { subscribe: () => () => undefined } as unknown as MessageBus;
-  const keyspace = {
+  const walletState = {
     isInitializing: () => false,
-    active: () => ({ activePublicKeyHex: owner }),
-    onActiveKeyChanged: () => () => undefined,
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: owner }))()),
+    subscribe: () => () => undefined,
     onInitializationChange: () => () => undefined,
-  } as unknown as KeyspaceService;
+  } as unknown as VaultWalletState;
   return {
     service,
     messageBus,
-    keyspace,
+    walletState,
     emitDataChanged() {
       for (const listener of [...dataListeners]) listener();
     },

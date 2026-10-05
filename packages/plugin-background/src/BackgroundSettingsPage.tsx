@@ -1,3 +1,4 @@
+import { useBackgroundResources } from "./BackgroundResourceContext.js";
 // packages/plugin-background/src/BackgroundSettingsPage.tsx
 // 智能调度设置页：余额快照的智能刷新说明 + 各后台任务的同步管理。
 //
@@ -14,16 +15,15 @@
 // 方便，用户仍可在「自定义」里输入自己期望的间隔（10 秒～24 小时整秒）。
 
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { useOptionalCapability } from "webloom-framework/react";
+import { useOptionalPluginCapability } from "webloom-framework/react";
 import { Button, Modal, PageHeader } from "@keymaster/ui";
-import { useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import {
   BACKGROUND_MANAGED_SYNC_TASK_IDS,
   BACKGROUND_SERVICE_CAPABILITY,
   BACKGROUND_SYNC_MAX_CUSTOM_SECONDS,
   BACKGROUND_SYNC_MIN_CUSTOM_INTERVAL_MS,
   BACKGROUND_SYNC_PRESET_OPTIONS_MS,
-  CHAIN_HEIGHT_RESOURCE_ID,
   backgroundSyncDefaultIntervalMs,
   emptyChainHeightSnapshot,
   normalizeBackgroundSyncSecondsToMs,
@@ -114,7 +114,7 @@ function effectiveInterval(settings: BackgroundSyncSettings, taskId: string): nu
 }
 
 export function BackgroundSettingsPage() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   return (
     <div className="background-settings-page">
       <PageHeader
@@ -131,7 +131,7 @@ export function BackgroundSettingsPage() {
 function BackgroundSettingsContent() {
   // owner-session 在锁定过渡中会先撤销 capability；路由树卸载前若有一帧
   // 仍命中本页，不能把这个正常的 unavailable 状态升级成 React fatal。
-  const backgroundService = useOptionalCapability(BACKGROUND_SERVICE_CAPABILITY);
+  const backgroundService = useOptionalPluginCapability(BACKGROUND_SERVICE_CAPABILITY);
   if (!backgroundService) {
     return <div className="background-settings" role="status">后台任务服务正在切换，请稍候。</div>;
   }
@@ -140,9 +140,9 @@ function BackgroundSettingsContent() {
 
 /** capability 存在时才挂载 resource hook，避免资源定义已撤销时调用 ensure。 */
 function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundService: import("@keymaster/contracts").BackgroundService }) {
-  const host = usePluginHost();
-  const { t } = useI18n();
-  const store = host.resourceStore;
+  const resources = useBackgroundResources();
+  const { t } = usePluginI18n();
+  const store = resources;
 
   // 使用 Resource Store 读取同步管理设置（跨标签同步由 resource subscribe 处理）
   const settings = useOptionalResourceSelector<BackgroundSyncSettings, BackgroundSyncSettings>(
@@ -384,7 +384,7 @@ function CustomIntervalEditor({
   onSubmit: () => void;
   onCancel: () => void;
 }) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   if (taskId === null) return null;
   const taskLabel = t(`background.settings.task.${taskId}`, { defaultValue: taskId });
   return (
@@ -451,12 +451,12 @@ function CustomIntervalEditor({
  * 的订阅/退订，因此后台同步任务每成功一次，本区块就自动重渲染一次。
  */
 function ChainHeightReadout() {
-  const { t } = useI18n();
-  const host = usePluginHost();
+  const { t } = usePluginI18n();
+  const resources = useBackgroundResources();
   // 资源未注册时（例如 WOC 单元尚未装配）回落为空快照，不抛错。
   const chainHeight = useOptionalResourceSelector<ChainHeightSnapshot, ChainHeightSnapshot>(
-    host.resourceStore,
-    CHAIN_HEIGHT_RESOURCE_ID,
+    resources,
+    "background.chain-height",
     [],
     (snapshot) => snapshot.data ?? emptyChainHeightSnapshot(),
     emptyChainHeightSnapshot()

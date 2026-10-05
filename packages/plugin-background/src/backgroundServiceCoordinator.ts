@@ -127,11 +127,11 @@ export function createBackgroundServiceCoordinator(
       void coordinatorClient.backgroundTrigger(taskId, reason ?? "manual").then(
         (result) => {
           if (result.status !== "accepted" && result.status !== "ok") {
-            coordinatorClient.reportRecoverableCoordinatorFailure?.("background.trigger", result);
+            try { coordinatorClient.reportRecoverableCoordinatorFailure?.("background.trigger", result); } catch { /* Owning Scope may already be revoked. */ }
           }
         },
         (cause) => {
-          coordinatorClient.reportRecoverableCoordinatorFailure?.("background.trigger", cause);
+          try { coordinatorClient.reportRecoverableCoordinatorFailure?.("background.trigger", cause); } catch { /* A revoked driver cannot publish late diagnostics. */ }
         }
       );
     },

@@ -1,4 +1,4 @@
-import type { BorrowedOwnerFileStore, KeyspaceService, WocService } from "@keymaster/contracts";
+import type { BorrowedOwnerFileStore, VaultWalletState, WocService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import { createP2pkhTransactionSync } from "./p2pkhTransactionSync.js";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
@@ -10,7 +10,7 @@ import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/
  * Worker 在同一个 run 里显式调用（见 Worker 装配），失败互不影响。
  */
 export function createP2pkhCoordinatorTasks(input: {
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   storage: BorrowedOwnerFileStore;
   woc: WocService;
   isNetworkEnabled?: (network: "main" | "test") => boolean;

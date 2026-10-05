@@ -3,54 +3,14 @@
 // apps/web 通过 import 这个文件来装配插件，不直接 import 内部模块。
 
 export { protocolPlugin, protocolSetup, PROTOCOL_PLUGIN_ID } from "./manifest.js";
-export { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 export { ProtocolCommandFeed, type ProtocolCommandFeedProps } from "./ProtocolCommandFeed.js";
-export {
-  createProtocolService,
-  ProtocolServiceImpl,
-  type ProtocolServiceDeps
-} from "./protocolService.js";
-export {
-  openProtocolStorageRepository,
-  type ProtocolStorageStores
-} from "./storage/protocolStorageRepository.js";
-export {
-  PROTOCOL_STORAGE_DECLARATIONS,
-  PROTOCOL_STORAGE_PURPOSES
-} from "./storage/protocolStorageDeclarations.js";
+export { createProtocolService, ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
+export { openProtocolStorageRepository, type ProtocolStorageStores } from "./storage/protocolStorageRepository.js";
+export { PROTOCOL_STORAGE_DECLARATIONS, PROTOCOL_STORAGE_PURPOSES } from "./storage/protocolStorageDeclarations.js";
 export { ProtocolValidationError, parseRequestMessage, assertMainnetP2pkhAddress, assertCompressedPubkeyHex } from "./protocolValidation.js";
-export {
-  cborEncode,
-  cborDecode,
-  type CborValue,
-  type CborMap
-} from "./protocolCbor.js";
-export {
-  sha256Bytes,
-  signCompactSecp256k1,
-  verifyCompactSecp256k1,
-  deriveSiteKey,
-  aesGcmEncrypt,
-  aesGcmDecrypt,
-  CIPHER_CONTEXT_V1
-} from "./protocolCrypto.js";
-export {
-  buildClaimProjection,
-  buildClaimProjectionFromParams,
-  resolveClaims,
-  resolveBuiltinClaim,
-  type BuiltinClaimContext,
-  type ClaimResolver,
-  type CborProjectionEntry
-} from "./protocolClaims.js";
-export { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
-export {
-  APP_IDENTITY_DOMAIN_V1,
-  AppIdentityValidationError,
-  canonicalizeJson,
-  identityDigestBytes,
-  identityPayload,
-  isVerifiedAppIdentitySnapshot,
-  verifyAppIdentityProof
-} from "./appIdentity.js";
+export { cborEncode, cborDecode, type CborValue, type CborMap } from "./protocolCbor.js";
+export { sha256Bytes, signCompactSecp256k1, verifyCompactSecp256k1, deriveSiteKey, aesGcmEncrypt, aesGcmDecrypt, CIPHER_CONTEXT_V1 } from "./protocolCrypto.js";
+export { buildClaimProjection, buildClaimProjectionFromParams, resolveClaims, resolveBuiltinClaim, type BuiltinClaimContext, type ClaimResolver, type CborProjectionEntry } from "./protocolClaims.js";
+
+export { APP_IDENTITY_DOMAIN_V1, AppIdentityValidationError, canonicalizeJson, identityDigestBytes, identityPayload, isVerifiedAppIdentitySnapshot, verifyAppIdentityProof } from "./appIdentity.js";
 export type { FeepoolPendingOp } from "./feepoolOperations.js";

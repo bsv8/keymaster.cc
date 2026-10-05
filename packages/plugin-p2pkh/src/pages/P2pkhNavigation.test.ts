@@ -1,20 +1,25 @@
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
-import { BUSINESS_REGISTRY_CAPABILITY, ROUTE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+
+import { BUSINESS_REGISTRY_CAPABILITY, type BusinessFeatureRegistry, OWNED_RESOURCE_ACCESS_CAPABILITY, type PluginContext, type PageUiContribution } from "@keymaster/contracts";
 import { registerP2pkhNavigation } from "./P2pkhNavigation.js";
 
 function setup(includeTestnet: boolean, initialPath = "/p2pkh/mainnet/transactions") {
   window.history.replaceState({}, "", initialPath);
-  const host = createPluginHost({ disableConfigPersistence: true });
-  const routes = host.capabilities.get(ROUTE_REGISTRY_CAPABILITY);
-  const business = host.capabilities.get(BUSINESS_REGISTRY_CAPABILITY);
+  const host = createPluginHost({  });
+  const entries = new Map<string, PageUiContribution>();
+  const routes = { list: () => [...entries.values()].filter((e): e is Extract<PageUiContribution, { kind: "page" }> => e.kind === "page"), byPath: (path: string) => [...entries.values()].find(e => e.kind === "page" && e.path === path) };
+  const pages = { register: (entry: PageUiContribution) => { entries.set(entry.id, entry); }, unregister: (id: string) => { entries.delete(id); } };
+  const context = { capability: () => ({ bind: () => ({}) }) } as unknown as PluginContext;
+  const business = host.business as unknown as BusinessFeatureRegistry;
   if (!routes || !business) throw new Error("Host registries are unavailable");
   business.register("shell", { id: "assets", label: { key: "assets", fallback: "Assets" }, order: 1, features: [] });
   let onSettingsChange: ((include: boolean) => void) | undefined;
   const pushedPaths: string[] = [];
   const dispose = registerP2pkhNavigation({
-    routes,
+    pages,
+    context,
     business,
     includeTestnet,
     onIncludeTestnetChange(handler) {

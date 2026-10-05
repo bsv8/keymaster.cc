@@ -1,3 +1,5 @@
+import { useWalletState } from "@keymaster/runtime";
+import { sameWalletSession, type VaultLifecycleSnapshot, requireUnlockedWalletIdentity } from "@keymaster/contracts";
 // packages/plugin-apps/src/AppLaunchModal.tsx
 // appView 启动授权 modal：确认当前唯一 Key 的身份 + 输入 Vault 密码。
 //
@@ -7,11 +9,11 @@
 //     密码来创建独立 appView session；
 //   - modal 只收集输入，不直接调用 protocol service。
 
-import { useEffect, useState } from "react";
-import { useCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
+import { useEffect, useRef, useState } from "react";
+import { usePluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import { KEYSPACE_SERVICE_CAPABILITY, formatShortPublicKey, type KeyIdentity } from "@keymaster/contracts";
+import { VAULT_WALLET_STATE_CAPABILITY, formatShortPublicKey, type KeyIdentity } from "@keymaster/contracts";
 import type { AppCatalogEntry } from "./catalog.js";
 
 export interface AppLaunchModalProps {
@@ -31,34 +33,38 @@ export function AppLaunchModal({
   onClose,
   onConfirm
 }: AppLaunchModalProps) {
-  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
-  const { t } = useI18n();
+  const walletState = useWalletState();
+  const { t } = usePluginI18n();
   const [currentKey, setCurrentKey] = useState<KeyIdentity | null>(null);
   const [password, setPassword] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const close = useRef(onClose);
+  close.current = onClose;
+  const boundSession = useRef<Readonly<VaultLifecycleSnapshot>>();
+
+  // @resource-boundary allow: wallet-session-form-safety
   useEffect(() => {
     if (!open) return;
-    let cancelled = false;
+    const initial = walletState.snapshot();
+    boundSession.current = initial;
     setPassword("");
     setLoadError(null);
-    void (async () => {
-      try {
-        // 系统里只有一把 Key：读当前身份投影，失败即没有可用 Key。
-        const key = keyspace.requireActiveKey();
-        if (cancelled) return;
-        setCurrentKey(key);
-      } catch {
-        if (!cancelled) {
-          setCurrentKey(null);
-          setLoadError(t("apps.launch.error.noKeys", { defaultValue: "No Vault key is available." }));
-        }
+    try { setCurrentKey(requireUnlockedWalletIdentity(initial)); }
+    catch {
+      setCurrentKey(null);
+      setLoadError(t("apps.launch.error.noKeys", { defaultValue: "No Vault key is available." }));
+    }
+    // This subscription only withdraws credentials and closes this form.
+    return walletState.subscribe(state => {
+      if (!sameWalletSession(initial, state)) {
+        boundSession.current = undefined;
+        setPassword("");
+        setCurrentKey(null);
+        close.current();
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [keyspace, open, t]);
+    });
+  }, [walletState, open, t]);
 
   useEffect(() => {
     if (!open) {
@@ -68,7 +74,7 @@ export function AppLaunchModal({
   }, [open]);
 
   async function submit() {
-    if (!currentKey || !password || !entry) return;
+    if (!currentKey || !password || !entry || !boundSession.current || !sameWalletSession(boundSession.current, walletState.snapshot())) return;
     await onConfirm({ publicKeyHex: currentKey.publicKeyHex, password });
   }
 

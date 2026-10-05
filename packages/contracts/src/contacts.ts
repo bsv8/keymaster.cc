@@ -51,6 +51,7 @@ export interface ContactPublicKeyActionRegistry {
   register(action: ContactPublicKeyAction): void;
   unregister(id: string): void;
   list(): ContactPublicKeyAction[];
+  subscribe(listener: () => void): () => void;
   get(id: string): ContactPublicKeyAction | undefined;
   _ids(): string[];
 }
@@ -114,6 +115,15 @@ export interface ContactPresence {
 
 /** 当前 active key 下联系人在线状态的资源快照；不写入联系人实体。 */
 export type ContactPresenceMap = Readonly<Record<string, ContactPresence>>;
+
+/** 只读的联系人在线投影；不提供探测、验证 Pong 或 Coordinator 控制。 */
+export interface ContactsPresenceReader {
+  snapshot(): Promise<ContactPresenceMap>;
+  subscribe(listener: () => void): () => void;
+}
+export const CONTACTS_PRESENCE_READER_CAPABILITY = defineCapability<ContactsPresenceReader>({
+  kind: "local", id: "contacts.presence-reader", version: "1",
+});
 
 /** 联系人服务。 */
 export interface ContactsService {

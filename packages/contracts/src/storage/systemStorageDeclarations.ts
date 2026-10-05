@@ -15,13 +15,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "snapshot",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  coordinatorPluginIntent: Object.freeze({
-    moduleId: "coordinator",
-    purposeId: "plugin-intent",
-    authority: "platform-only",
-    model: "snapshot",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   protocolDurablePolicy: Object.freeze({
     moduleId: "protocol",
     purposeId: "durable-policy",
@@ -88,20 +81,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     purposeId: "",
     authority: "built-in-module",
     model: "files",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  pokerSettings: Object.freeze({
-    moduleId: "poker",
-    purposeId: "settings",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  pokerSessionHistory: Object.freeze({
-    moduleId: "poker",
-    purposeId: "session-history",
-    authority: "built-in-module",
-    model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
@@ -208,7 +187,6 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   contacts: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook]),
   message: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.messageHistory, CENTRAL_STORAGE_DECLARATIONS.messagesFiles]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
-  poker: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.pokerSettings, CENTRAL_STORAGE_DECLARATIONS.pokerSessionHistory]),
   protocol: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
     CENTRAL_STORAGE_DECLARATIONS.protocolSessions,

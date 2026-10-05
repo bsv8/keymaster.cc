@@ -1,3 +1,5 @@
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
+import type { StorageBrowseService } from "../runtime/storageBrowsePrivate.js";
 // 浏览页的交互测试（L01/U01）：刷新、删除、快速切换与目录标记。
 //
 // 这些行为都在 useEffect 与 Promise 竞态里，纯逻辑测试测不到，所以用假浏览
@@ -6,17 +8,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
-import {
-  STORAGE_BROWSE_SERVICE_CAPABILITY,
-  type StorageBrowseEntry,
-  type StorageBrowsePage,
-  type StorageBrowsePreview,
-  type StorageBrowseService,
-  type StoragePreviewFormat,
-} from "@keymaster/contracts";
-import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import type { PluginConsumer } from "webloom-framework";
+import { PluginConsumerProvider } from "webloom-framework/react";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { type StorageBrowseEntry, type StorageBrowsePage, type StorageBrowsePreview, type StoragePreviewFormat } from "../runtime/storageBrowseTypes.js";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
 // manifest 导出的 feature entry 也叫 StorageBrowsePage，这里显式改名避免同名冲突。
 import { StorageBrowsePage as StorageBrowsePageView } from "./StorageBrowsePage.js";
+import { StoragePrivateProvider } from "./StoragePrivateContext.js";
 import { BROWSE_DISPLAY_PAGE_SIZE } from "./storageBrowseDisplay.js";
 import { storageResources } from "../manifest.js";
 
@@ -135,11 +134,19 @@ function abortError(): Error {
   return error;
 }
 
-function renderPage(service: StorageBrowseService, wrap?: (node: ReactNode) => ReactNode) {
+async function renderPage(service: StorageBrowseService, wrap?: (node: ReactNode) => ReactNode) {
   // 带上真实文案资源：断言的是界面上的实际用词，而不是组件里的 defaultValue。
-  const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [storageResources] });
-  host.provide(STORAGE_BROWSE_SERVICE_CAPABILITY, service);
-  const tree = <PluginHostProvider host={host}><StorageBrowsePageView /></PluginHostProvider>;
+  let consumer: PluginConsumer | undefined;
+  const host = createPluginHost({
+    initialI18nResources: [storageResources],
+    runtimeUnitImplementationRegistry: { get: () => (ctx) => { consumer = ctx.consumer; } },
+  });
+  await host.register({ id: "storage-ui-test", name: "Storage UI test", units: [{
+    id: "storage-ui-test.window", runtime: "window-main", scopeKind: "root",
+    dependencies: [{ capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main" }],
+  }] });
+  if (!consumer) throw new Error("Storage UI test consumer was not issued");
+  const tree = <PluginHostProvider host={host}><PluginConsumerProvider consumer={consumer}><StoragePrivateProvider service={service}><StorageBrowsePageView /></StoragePrivateProvider></PluginConsumerProvider></PluginHostProvider>;
   return render(wrap ? wrap(tree) : tree);
 }
 
@@ -152,7 +159,7 @@ describe("StorageBrowsePage initial load", () => {
     // StrictMode 会在开发环境模拟一次 unmount/remount。卸载时的取消必须配上一个
     // 会重新发出的请求：否则开发环境下首屏永远停在「加载中」，而普通渲染看不出来。
     const fake = createFakeService();
-    renderPage(fake.service, (node) => <StrictMode>{node}</StrictMode>);
+    await renderPage(fake.service, (node) => <StrictMode>{node}</StrictMode>);
     await waitFor(() => expect(fake.listCalls.length).toBeGreaterThan(0));
     await fake.settleList([entry("notes.txt")]);
     expect(await screen.findByRole("button", { name: "notes.txt" })).toBeTruthy();
@@ -162,7 +169,7 @@ describe("StorageBrowsePage initial load", () => {
 describe("StorageBrowsePage refresh (U01)", () => {
   it("keeps the current directory and a still-valid selection across refresh", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([entry("notes.txt", { revision: "rev-7" })]);
 
@@ -184,7 +191,7 @@ describe("StorageBrowsePage refresh (U01)", () => {
 
   it("clears the stale preview and explains when the selected file was deleted", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([entry("notes.txt")]);
 
@@ -207,7 +214,7 @@ describe("StorageBrowsePage refresh (U01)", () => {
 
   it("keeps an updated file selected and re-reads it at its new revision (U01)", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([entry("notes.txt", { size: 12, revision: "rev-7", lastModified: "2026-10-01T00:00:00.000Z" })]);
 
@@ -231,7 +238,7 @@ describe("StorageBrowsePage refresh (U01)", () => {
 
   it("does not call a transient read failure a deletion (U01/L01)", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([entry("notes.txt")]);
 
@@ -263,7 +270,7 @@ describe("StorageBrowsePage refresh (U01)", () => {
 
   it("explains an unavailable store instead of silently dropping the check (L02)", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([entry("notes.txt")]);
 
@@ -286,7 +293,7 @@ describe("StorageBrowsePage refresh (U01)", () => {
 
   it("does not report a file on a later page as deleted (U01/F03)", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     // 深目录：还有后续页，选中的文件在第二页。
     await fake.settleList([entry("b.txt", { revision: "rev-3" })], "cursor-1");
@@ -314,7 +321,7 @@ describe("StorageBrowsePage refresh (U01)", () => {
 describe("StorageBrowsePage races (L01)", () => {
   it("never lets a late response overwrite the newly selected file", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([entry("a.txt"), entry("b.txt")]);
 
@@ -337,7 +344,7 @@ describe("StorageBrowsePage races (L01)", () => {
 describe("StorageBrowsePage directory marker (F04)", () => {
   it("shows the selected directory's own marker object in properties", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([
       entry("apps/.dir", { size: 0, contentType: "application/x-directory", revision: "rev-marker" }),
@@ -357,7 +364,7 @@ describe("StorageBrowsePage directory marker (F04)", () => {
 describe("StorageBrowsePage view switches (P01)", () => {
   it("resets the original-text view when the previewed file changes", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     await fake.settleList([entry("a.json"), entry("b.json")]);
 
@@ -379,7 +386,7 @@ describe("StorageBrowsePage view switches (P01)", () => {
 describe("StorageBrowsePage bounded rendering (F03/U01)", () => {
   it("pages through every loaded row without growing the rendered page", async () => {
     const fake = createFakeService();
-    renderPage(fake.service);
+    await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
     // 一页列举结果折叠出超过一个展示页的子项。补零让名称顺序与下标一致，
     // 否则字典序会把最后几项排进第一页，测不到分页本身。

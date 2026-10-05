@@ -13,3 +13,11 @@ export type { P2pkhServiceDeps } from "./p2pkhService.js";
 export type { P2pkhService } from "./p2pkhContracts.js";
 export { p2pkhAddressToScriptHex, parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
 export { calcTxidFromRawTxHex } from "./p2pkhSigner.js";
+
+export { createP2pkhWorkerTaskDefinitions } from "./p2pkhWorkerTasks.js";
+export { createP2pkhWorkerAssetReader } from "./p2pkhWorkerAssetReader.js";
+export { ensureWorkerP2pkhResources, refreshWorkerP2pkhResources } from "./p2pkhWorkerResources.js";
+export { executeWorkerP2pkhBroadcast } from "./workerBroadcastExecutor.js";
+export { createWorkerP2pkhSettings } from "./workerSettings.js";
+export { createWorkerTransferRuntime } from "./workerTransferRuntime.js";
+export { executeWorkerP2pkhSnapshot, readWorkerP2pkhResource } from "./workerSnapshotExecutor.js";

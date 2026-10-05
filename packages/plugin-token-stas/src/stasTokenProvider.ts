@@ -13,7 +13,7 @@
 
 import type {
   AssetDataNotifier,
-  KeyspaceService,
+  VaultWalletState,
   TokenActivity,
   TokenDetail,
   TokenProvider,
@@ -23,7 +23,7 @@ import type { StasRepository, StasTokenSnapshot } from "./storage/stasRepository
 
 export interface StasTokenProviderOptions {
   stateRepository: StasRepository;
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
   assetDataNotifier?: AssetDataNotifier;
 }
 
@@ -51,10 +51,10 @@ export function parseStasTokenId(tokenId: string): { issuer: string; symbol: str
 }
 
 export function createStasTokenProvider(options: StasTokenProviderOptions): TokenProvider {
-  if (!options || !options.stateRepository || !options.keyspace) {
-    throw new Error("createStasTokenProvider: stateRepository and keyspace are required");
+  if (!options || !options.stateRepository || !options.walletState) {
+    throw new Error("createStasTokenProvider: stateRepository and walletState are required");
   }
-  const { stateRepository, keyspace, assetDataNotifier } = options;
+  const { stateRepository, walletState, assetDataNotifier } = options;
   const listeners = new Set<() => void>();
 
   function notify() {
@@ -102,7 +102,7 @@ export function createStasTokenProvider(options: StasTokenProviderOptions): Toke
 
     async listTokens(): Promise<TokenSummary[]> {
       // 无 active key 时返回空（不抛错）
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!state.activePublicKeyHex) return [];
 
       // K-V 操作隐式使用当前 active key 的 namespace
@@ -137,7 +137,7 @@ export function createStasTokenProvider(options: StasTokenProviderOptions): Toke
 
     async getToken(tokenId): Promise<TokenDetail | undefined> {
       // 无 active key 时返回 undefined
-      const state = keyspace.active();
+      const state = walletState.snapshot();
       if (!state.activePublicKeyHex) return undefined;
 
       // 从 list 结果中按 tokenId 筛选并聚合

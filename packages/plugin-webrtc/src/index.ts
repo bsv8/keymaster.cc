@@ -11,91 +11,11 @@
 // 样式入口：本插件自带 `src/styles.css`；装配层在
 // `apps/web/src/styles/plugins.css` 显式 `@import` 引入。
 
-export {
-  webrtcPlugin,
-  webrtcSetup
-} from "./manifest.js";
-export {
-  WebrtcPage
-} from "./WebrtcPage.js";
-export {
-  WebrtcSettingsPage
-} from "./WebrtcSettingsPage.js";
-export {
-  createWebrtcService,
-  createBrowserWebrtcEnvironment,
-  MAX_WEBRTC_TRANSFER_BYTES,
-  type WebrtcService,
-  type WebrtcSessionSnapshot,
-  type WebrtcSessionPhase,
-  type WebrtcMode,
-  type WebrtcRemoteNotice,
-  type WebrtcRemoteNoticeKind,
-  type WebrtcBlockReason,
-  type WebrtcPeerPresenceState,
-  type WebrtcSubscriber,
-  type WebrtcEnvironment,
-  type RTCPeerConnectionLike,
-  type MediaStreamLike,
-  type StunDiagnosticResult,
-  type StartCallInput
-} from "./webrtcService.js";
-export {
-  createWebrtcHistoryService,
-  type WebrtcHistoryService,
-  type WebrtcHistoryItem
-} from "./webrtcHistoryService.js";
-export {
-  type WebrtcConfig,
-  type WebrtcConfigStore,
-  DEFAULT_STUN_SERVERS,
-  validateStunUrl,
-  validateStunServers,
-  coerceWebrtcConfig,
-  createMemoryWebrtcConfigStore
-} from "./webrtcConfig.js";
-export {
-  createFileWebrtcConfigStore
-} from "./storage/p2pSettingFileRepository.js";
-export {
-  P2P_SETTING_FILE_NAME,
-  P2P_SETTING_FORMAT,
-  P2P_SETTING_VERSION,
-  parseP2pSettingFile,
-  serializeP2pSettingFile
-} from "./storage/p2pSettingFileFormats.js";
-export {
-  WEBRTC_SIGNAL_SCHEMA,
-  DEFAULT_SIGNAL_TTL_MS,
-  parseSignalBody,
-  parseSignalValue,
-  newOfferSignal,
-  newAnswerSignal,
-  newIceSignal,
-  newEndOfCandidatesSignal,
-  signalType,
-  serializeSignal,
-  isSignalExpired,
-  isAcceptableRemoteSession,
-  isAcceptableRemoteSessionId,
-  tryParseSignal,
-  type WebrtcSignal,
-  type WebrtcSignalEnvelope,
-  type WebrtcSignalType,
-  type WebrtcInviteSignal,
-  type WebrtcAnswerSignal,
-  type WebrtcIceSignal,
-  type WebrtcEndOfCandidatesSignal,
-  type ParseSignalResult,
-  type WebrtcRejectReason,
-  type WebrtcHangupReason,
-  type WebrtcSuggestedMode,
-  type WebrtcTransferRejectReason
-} from "./webrtcSignal.js";
-export {
-  WEBRTC_SIGNAL_PROTOCOL,
-  WEBRTC_CALLS_ENABLED,
-  WEBRTC_PLUGIN_ID,
-  WEBRTC_SERVICE_CAPABILITY,
-  WEBRTC_SETTINGS_PATH
-} from "./constants.js";
+export { webrtcPlugin, webrtcSetup } from "./manifest.js";
+export { createWebrtcService, createBrowserWebrtcEnvironment, MAX_WEBRTC_TRANSFER_BYTES, type WebrtcService, type WebrtcSessionSnapshot, type WebrtcSessionPhase, type WebrtcMode, type WebrtcRemoteNotice, type WebrtcRemoteNoticeKind, type WebrtcBlockReason, type WebrtcPeerPresenceState, type WebrtcSubscriber, type WebrtcEnvironment, type RTCPeerConnectionLike, type MediaStreamLike, type StunDiagnosticResult, type StartCallInput } from "./webrtcService.js";
+export { createWebrtcHistoryService, type WebrtcHistoryService, type WebrtcHistoryItem } from "./webrtcHistoryService.js";
+export { type WebrtcConfig, type WebrtcConfigStore, DEFAULT_STUN_SERVERS, validateStunUrl, validateStunServers, coerceWebrtcConfig, createMemoryWebrtcConfigStore } from "./webrtcConfig.js";
+export { createFileWebrtcConfigStore } from "./storage/p2pSettingFileRepository.js";
+export { P2P_SETTING_FILE_NAME, P2P_SETTING_FORMAT, P2P_SETTING_VERSION, parseP2pSettingFile, serializeP2pSettingFile } from "./storage/p2pSettingFileFormats.js";
+export { WEBRTC_SIGNAL_SCHEMA, DEFAULT_SIGNAL_TTL_MS, parseSignalBody, parseSignalValue, newOfferSignal, newAnswerSignal, newIceSignal, newEndOfCandidatesSignal, signalType, serializeSignal, isSignalExpired, isAcceptableRemoteSession, isAcceptableRemoteSessionId, tryParseSignal, type WebrtcSignal, type WebrtcSignalEnvelope, type WebrtcSignalType, type WebrtcInviteSignal, type WebrtcAnswerSignal, type WebrtcIceSignal, type WebrtcEndOfCandidatesSignal, type ParseSignalResult, type WebrtcRejectReason, type WebrtcHangupReason, type WebrtcSuggestedMode, type WebrtcTransferRejectReason } from "./webrtcSignal.js";
+export { WEBRTC_SIGNAL_PROTOCOL, WEBRTC_CALLS_ENABLED, WEBRTC_PLUGIN_ID, WEBRTC_SERVICE_CAPABILITY, WEBRTC_SETTINGS_PATH } from "./constants.js";

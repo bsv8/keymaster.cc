@@ -1,7 +1,8 @@
+import { useP2pkhResources } from "../P2pkhResourceContext.js";
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader, formatSats } from "@keymaster/ui";
-import { useOptionalCapability } from "webloom-framework/react";
-import { router, useI18n, useOptionalResourceSelector, usePluginHost } from "@keymaster/runtime";
+import { useOptionalPluginCapability } from "webloom-framework/react";
+import { router, usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import type { P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionDetail } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { formatLocalTime, listPath, readPage, readTransactionId, readTransactionNetwork, readTransactionSource, readTransactionSubmissionId } from "./p2pkhTransactionView.js";
@@ -28,10 +29,10 @@ function OutputRow({ vout, value, scriptHex, owned }: { vout: number; value: num
 }
 
 export function P2pkhTransactionDetailPage() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
   // 一次渲染，必须按"暂不可用"降级而不是抛错。
-  const service = useOptionalCapability(P2PKH_CAPABILITY);
+  const service = useOptionalPluginCapability(P2PKH_CAPABILITY);
   if (!service) {
     return (
       <EmptyState
@@ -44,8 +45,8 @@ export function P2pkhTransactionDetailPage() {
 }
 
 function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService }) {
-  const host = usePluginHost();
-  const { t } = useI18n();
+  const resources = useP2pkhResources();
+  const { t } = usePluginI18n();
   const network = readTransactionNetwork();
   const page = readPage();
   const source = readTransactionSource();
@@ -53,14 +54,14 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
   const submissionId = readTransactionSubmissionId();
   const routeResourceId = `p2pkh:${network}`;
   const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    host.resourceStore,
+    resources,
     "p2pkh.settings",
     [],
     (snapshot) => snapshot.data ?? { includeTestnet: false },
     { includeTestnet: false }
   );
   const wallet = useOptionalResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(
-    host.resourceStore,
+    resources,
     "p2pkh.wallet",
     [],
     (snapshot) => snapshot.data

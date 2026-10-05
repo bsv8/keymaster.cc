@@ -8,14 +8,7 @@ import {
 
 type SignalSender = (envelope: WebRTCInterconnectEnvelope) => Promise<void> | void;
 
-export interface WindowWebRtcInterconnectContext {
-  readonly dialer: WebRTCInterconnectDialer;
-  register(connectionId: string, send: SignalSender): () => void;
-  deliver(envelope: WebRTCInterconnectEnvelope): void;
-  setStunServers(servers: readonly string[]): void;
-  onConnection(listener: (event: WebRTCInterconnectConnectionEvent) => void): () => void;
-  dispose(): void;
-}
+import type { WindowWebRtcInterconnectContext } from "@keymaster/contracts/window-p2p";
 
 class ExternalSignalingRouter implements WebRTCInterconnectSignalingAdapter {
   private readonly routes = new Map<string, SignalSender>();

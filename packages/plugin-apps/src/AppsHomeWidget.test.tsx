@@ -1,3 +1,8 @@
+import { walletStateFixtureSnapshot, walletStateFixtureAccess } from "@keymaster/runtime/test-support";
+import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
+import { type PluginConsumer } from "webloom-framework";
+import { ScopedPluginConsumerProvider as PluginConsumerProvider } from "@keymaster/runtime";
+import { I18N_SERVICE_CAPABILITY, defineRuntimeUnitDependencies } from "@keymaster/contracts";
 // packages/plugin-apps/src/AppsHomeWidget.test.tsx
 // AppsHomeWidget 首页 widget 验收测试（施工单 2026-06-29 002 硬切换 + 用户反馈）。
 //
@@ -16,15 +21,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   LaunchAppViewError,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
   type LaunchAppViewInput,
   type LaunchAppViewResult,
   type KeyIdentity,
-  type KeyspaceService,
+  type VaultWalletState,
   type ProtocolService
 } from "@keymaster/contracts";
-import { createKeymasterPluginHost as createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { appsPlugin } from "./manifest.js";
 
@@ -69,28 +74,19 @@ interface MountHandle {
 
 const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
 
-function makeKeyspaceService(): KeyspaceService {
+function makeVaultWalletState(): VaultWalletState {
   const key: KeyIdentity = {
     publicKeyHex: TEST_PUB_HEX,
     label: "Key A",
     capabilities: ["p2pkh"],
     createdAt: new Date().toISOString()
   };
+  const snapshot = walletStateFixtureSnapshot({ activePublicKeyHex: TEST_PUB_HEX }, () => key);
   return {
-    listKeys: async () => [key],
-    getKey: async (publicKeyHex: string) => (publicKeyHex === TEST_PUB_HEX ? key : undefined),
-    active: () => ({ activePublicKeyHex: TEST_PUB_HEX }),
-    setActive: async () => undefined,
-    requireActiveKey: () => key,
-    onActiveChange: () => () => undefined,
-    openOwnerAppStore: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
-    registerStorageDeclaration: () => undefined,
-    listOwnerStorageDeclarations: () => [],
-    prepareDeleteKey: async () => undefined,
-    deleteKey: async () => undefined,
-    isInitializing: () => false,
-    onInitializationChange: () => () => undefined
-  } as unknown as KeyspaceService;
+    snapshot: () => snapshot,
+    subscribe(handler) { handler(snapshot); return () => {}; }
+  };
+
 }
 
 function makeService(): ProtocolService & { launchAppViewCalls: LaunchAppViewInput[] } {
@@ -109,37 +105,43 @@ function makeService(): ProtocolService & { launchAppViewCalls: LaunchAppViewInp
   } as unknown as ProtocolService & { launchAppViewCalls: LaunchAppViewInput[] };
 }
 
-function mount(): MountHandle {
+async function mount(): Promise<MountHandle> {
   const service = makeService();
+  let consumer: PluginConsumer | undefined;
   const host = createPluginHost({
+    runtime: "window-main",
+    runtimeUnitImplementationRegistry: { get: () => ctx => { consumer = ctx.consumer; } },
     initialI18nResources: appsPlugin.i18n ? [appsPlugin.i18n] : []
   });
   host.provide(PROTOCOL_SERVICE_CAPABILITY, service);
-  host.provide(KEYSPACE_SERVICE_CAPABILITY, makeKeyspaceService());
+  host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(makeVaultWalletState()));
+  await host.register({ id: "apps-ui-fixture", name: "Apps UI fixture", units: [{ id: "apps-ui-fixture.window", runtime: "window-main", scopeKind: "root",
+    dependencies: defineRuntimeUnitDependencies([{ capability: I18N_SERVICE_CAPABILITY }, { capability: PROTOCOL_SERVICE_CAPABILITY }, { capability: VAULT_WALLET_STATE_CAPABILITY }]),
+  }] });
   const r = render(
     <PluginHostProvider host={host}>
-      <AppsHomeWidget />
+      <PluginConsumerProvider consumer={consumer!}><AppsHomeWidget /></PluginConsumerProvider>
     </PluginHostProvider>
   );
   return { service, host, unmount: r.unmount };
 }
 
 describe("AppsHomeWidget - 渲染", () => {
-  it("渲染 widget 标题与 justnote 行", () => {
-    mount();
+  it("渲染 widget 标题与 justnote 行", async () => {
+    await mount();
     expect(screen.getByTestId("apps-home-widget")).toBeTruthy();
     expect(screen.getByTestId("apps-home-row-justnote")).toBeTruthy();
   });
 
-  it("当前 V1 唯一 1 条记录：'View all apps' 入口不渲染", () => {
-    mount();
+  it("当前 V1 唯一 1 条记录：'View all apps' 入口不渲染", async () => {
+    await mount();
     expect(screen.queryByText(/view all apps/i)).toBeNull();
   });
 });
 
 describe("AppsHomeWidget - 点击启动", () => {
   it("点击 Open App → 打开授权 modal，提交后调 launchAppView", async () => {
-    const handle = mount();
+    const handle = await mount();
     const button = screen.getByTestId("apps-home-open-justnote") as HTMLButtonElement;
     await act(async () => {
       fireEvent.click(button);
@@ -168,7 +170,7 @@ describe("AppsHomeWidget - 点击启动", () => {
   });
 
   it("启动成功：UI 不显示错误", async () => {
-    mount();
+    await mount();
     const button = screen.getByTestId("apps-home-open-justnote") as HTMLButtonElement;
     await act(async () => {
       fireEvent.click(button);
@@ -181,7 +183,7 @@ describe("AppsHomeWidget - 点击启动", () => {
 
 describe("AppsHomeWidget - 启动失败", () => {
   it("vault 未解锁：UI 显示 user-facing 文案，不暴露 err.message", async () => {
-    const handle = mount();
+    const handle = await mount();
     (handle.service as unknown as { launchAppView: () => Promise<LaunchAppViewResult> })
       .launchAppView = async () => {
         throw new LaunchAppViewError(
@@ -209,7 +211,7 @@ describe("AppsHomeWidget - 启动失败", () => {
   });
 
   it("app 配置非法：UI 显示 user-facing 文案，不暴露 err.message", async () => {
-    const handle = mount();
+    const handle = await mount();
     (handle.service as unknown as { launchAppView: () => Promise<LaunchAppViewResult> })
       .launchAppView = async () => {
         throw new LaunchAppViewError(
@@ -236,7 +238,7 @@ describe("AppsHomeWidget - 启动失败", () => {
   });
 
   it("非 typed 错误：UI 走 internal 兜底文案", async () => {
-    const handle = mount();
+    const handle = await mount();
     (handle.service as unknown as { launchAppView: () => Promise<LaunchAppViewResult> })
       .launchAppView = async () => {
         throw new Error("internal leaked message");

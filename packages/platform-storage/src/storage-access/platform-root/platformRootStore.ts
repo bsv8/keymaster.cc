@@ -1,3 +1,4 @@
+import type { StorageBrowseWallet } from "../../runtime/storageBrowsePrivate.js";
 // 平台存储根：所有受限句柄的唯一装配点。
 //
 // 这里是唯一能把「中央声明 + 当前世代」组合成打开句柄的入口。业务插件和第三方
@@ -18,7 +19,6 @@ import type {
   SnapshotStore,
   StorageNamespaceBinding,
   StorageSnapshotJsonCompatible,
-  StorageBrowseWallet,
 } from "@keymaster/contracts";
 import {
   CENTRAL_STORAGE_DECLARATIONS,
@@ -39,6 +39,11 @@ const CENTRALLY_DECLARED: readonly PluginStorageDeclaration[] = Object.freeze([
   ...Object.values(CENTRAL_STORAGE_DECLARATIONS),
   ...Object.values(SYSTEM_STORAGE_DECLARATIONS).flat(),
 ]);
+
+/** 只供 Storage Worker 实现与可信装配使用，不发布给其他插件。 */
+export interface StoragePrivateRootStore extends PlatformRootStore {
+  openBrowseStore(): Promise<StorageBrowseWallet>;
+}
 
 export interface PlatformRootStoreOptions {
   /** 正式本地介质；只由 Coordinator 注入。 */
@@ -80,7 +85,7 @@ function centrallyDeclared(declaration: PluginStorageDeclaration): boolean {
 }
 
 /** 构造平台存储根。 */
-export function createPlatformRootStore(options: PlatformRootStoreOptions): PlatformRootStore {
+export function createPlatformRootStore(options: PlatformRootStoreOptions): StoragePrivateRootStore {
   /**
    * 世代栅栏：句柄绑定时的世代必须仍然是当前世代。
    *

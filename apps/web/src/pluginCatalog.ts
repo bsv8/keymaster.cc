@@ -1,76 +1,12 @@
-// Web 装配入口清单：这是应用选择加载哪些插件实现的唯一入口点。
-//
-// 新增或移除一个插件只需要在本文件增删一个 import 和一个条目；菜单、首页
-// 空间、路由和它们的排序都由插件自身 Window unit.business 声明，不在这里或
-// shell 里维护。产品 / 运行单元的静态描述以 contracts/pluginProducts.ts 为
-// 唯一来源，本文件只保存可执行 manifest 入口并做逐项契约校验；条目仍按
-// capability 依赖顺序排列，避免启动时出现暂缺 provider。
-
-import {
-  assertBuiltinPluginRuntimeUnitCatalog,
-  getBuiltinPluginRuntimeUnits,
-} from "@keymaster/contracts";
-import type { PluginManifest } from "@keymaster/contracts";
-import {
-  COORDINATOR_WORKER_UNIT_CATALOG,
-  validateCoordinatorWorkerUnitCatalog,
-} from "./coordinator/workerUnitCatalog.js";
-import { appsPlugin } from "@keymaster/plugin-apps";
-import { bsvPricePlugin } from "@keymaster/plugin-bsv-price";
-import { messagePlatformPlugin } from "@keymaster/plugin-message";
-import { webrtcPlugin } from "@keymaster/plugin-webrtc";
-import { backgroundPlugin } from "@keymaster/plugin-background";
-import { oneSatOrdinalsCollectiblePlugin } from "@keymaster/plugin-collectible-1satordinals";
-import { contactsPlugin } from "@keymaster/plugin-contacts";
-import { homePlugin } from "@keymaster/plugin-home";
-import { hexImporterPlugin } from "@keymaster/plugin-importer-hex";
-import { jsonFileImporterPlugin } from "@keymaster/plugin-importer-json-file";
-import { wifImporterPlugin } from "@keymaster/plugin-importer-wif";
-import { keyImportPlugin } from "@keymaster/plugin-key-import";
-import { msfilePlugin } from "@keymaster/plugin-msfile";
-import { satSubscriptionPlugin } from "@keymaster/plugin-sat-subscription";
-import { windowP2pPlugin } from "@keymaster/plugin-window-p2p";
-import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
-import { pokerPlugin } from "@keymaster/plugin-poker";
-import { protocolPlugin } from "@keymaster/plugin-protocol";
-import { storagePlatformPlugin } from "@keymaster/platform-storage";
-import { settingsPlugin } from "@keymaster/plugin-settings";
-import { bsv21TokenPlugin } from "@keymaster/plugin-token-bsv21";
-import { stasTokenPlugin } from "@keymaster/plugin-token-stas";
-import { vaultPlugin } from "@keymaster/plugin-vault";
-import { wocPlugin } from "@keymaster/plugin-woc";
-
-const WEB_PLUGIN_CATALOG_SOURCE: readonly PluginManifest[] = [
-  storagePlatformPlugin,
-  vaultPlugin,
-  windowP2pPlugin,
-  msfilePlugin,
-  satSubscriptionPlugin,
-  protocolPlugin,
-  contactsPlugin,
-  webrtcPlugin,
-  messagePlatformPlugin,
-  settingsPlugin,
-  keyImportPlugin,
-  backgroundPlugin,
-  homePlugin,
-  wocPlugin,
-  p2pkhPlugin,
-  bsv21TokenPlugin,
-  stasTokenPlugin,
-  oneSatOrdinalsCollectiblePlugin,
-  pokerPlugin,
-  wifImporterPlugin,
-  hexImporterPlugin,
-  jsonFileImporterPlugin,
-  bsvPricePlugin,
-  appsPlugin
-];
+// The release chooses implementations; static contracts are generated from those manifests.
+import { assertBuiltinPluginRuntimeUnitCatalog, getBuiltinPluginRuntimeUnits, type PluginManifest } from "@keymaster/contracts";
+import { COORDINATOR_WORKER_UNIT_CATALOG, validateCoordinatorWorkerUnitCatalog } from "./coordinator/workerUnitCatalog.js";
+import { WEB_PLUGIN_CATALOG_SOURCE } from "./pluginCatalogSource.js";
 
 /**
  * 应用目录的运行单元契约校验器。
  *
- * 这 24 个产品目前都由页面装配，不能继续让 Host 把“没有 units”解释成
+ * 发行版产品目前都由页面装配，不能继续让 Host 把“没有 units”解释成
  * 隐式历史实例。这里把每个产品明确落成一个 Window 运行单元；未来某个
  * 产品拆出 Coordinator Worker 单元时，必须在其 manifest 和 contracts 静态
  * 目录中同时声明；没有显式 units 的产品直接拒绝进入 Web 装配。

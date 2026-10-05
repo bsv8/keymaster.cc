@@ -4,7 +4,7 @@
 // K-V 解码和 1 MiB 截断都已经在 Worker 完成，这里拿到的 format 是可信结论。
 // 唯一在这里发生的解析是「怎么把已知是 JSON / Markdown 的文本画出来」。
 import { useMemo, useState } from "react";
-import type { StorageBrowsePreview } from "@keymaster/contracts";
+import type { StorageBrowsePreview } from "../runtime/storageBrowseTypes.js";
 import { Button } from "@keymaster/ui";
 import {
   buildJsonTree,

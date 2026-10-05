@@ -1,3 +1,5 @@
+import { walletStateFixtureSnapshot, walletStateFixtureAccess } from "@keymaster/runtime/test-support";
+import { bindTestContactsUi, createContactsTestHost as createPluginHost } from "./contactsUi.testSupport.js";
 // packages/plugin-contacts/src/ContactsEditor.test.tsx
 // 联系人编辑器回归测试。
 //
@@ -12,13 +14,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { useState } from "react";
 import {
   CONTACTS_SERVICE_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY,
-  type ActiveKeyState,
+  VAULT_WALLET_STATE_CAPABILITY,
+  type VaultLifecycleSnapshot,
   type Contact,
   type ContactsService,
-  type KeyspaceService,
+  type VaultWalletState,
 } from "@keymaster/contracts";
-import { PluginHostProvider, createKeymasterPluginHost as createPluginHost } from "@keymaster/runtime";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
 import type { PluginHost } from "@keymaster/runtime";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { contactsResources } from "./manifest.js";
@@ -26,24 +28,24 @@ import { contactsResources } from "./manifest.js";
 const INITIAL_KEY = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEXT_KEY = "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-type TestKeyspace = KeyspaceService & { setActive(publicKeyHex: string): void };
+type TestWalletState = VaultWalletState & { setActive(publicKeyHex: string): void };
 
-function makeFakeKeyspace(): TestKeyspace {
-  let active: ActiveKeyState = { activePublicKeyHex: INITIAL_KEY };
-  const listeners = new Set<(state: ActiveKeyState) => void>();
+function makeFakeWalletState(): TestWalletState {
+  let active: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: INITIAL_KEY });
+  const listeners = new Set<(state: VaultLifecycleSnapshot) => void>();
   const setActive = (publicKeyHex: string) => {
-    active = { activePublicKeyHex: publicKeyHex };
+    active = walletStateFixtureSnapshot({ activePublicKeyHex: publicKeyHex });
     for (const listener of listeners) listener(active);
   };
   return {
-    active: () => active,
-    requireActiveKey: () => ({
+    snapshot: () => walletStateFixtureSnapshot((() => active)(), () => ({
       publicKeyHex: INITIAL_KEY,
       label: "test",
       capabilities: [],
       createdAt: "2024-01-01T00:00:00.000Z"
-    }),
-    onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
+    })),
+
+    subscribe: (handler: (state: VaultLifecycleSnapshot) => void) => {
       listeners.add(handler);
       return () => {
         listeners.delete(handler);
@@ -52,7 +54,7 @@ function makeFakeKeyspace(): TestKeyspace {
     // 单 Key 钱包没有切换入口；这个私有钩子只用来模拟「当前唯一 Key 换成了
     // 另一个身份」，验证编辑中的联系人页面会丢弃草稿。
     setActive,
-  } as unknown as TestKeyspace;
+  } as unknown as TestWalletState;
 }
 
 function makeFakeContactsService() {
@@ -77,13 +79,13 @@ function makeFakeContactsService() {
   } as unknown as ContactsService;
 }
 
-function makeHost(service: ContactsService, keyspace: KeyspaceService): PluginHost {
+function makeHost(service: ContactsService, walletState: VaultWalletState): PluginHost {
   const host = createPluginHost({
-    disableConfigPersistence: true,
+
     initialI18nResources: [contactsResources]
   });
   host.provide(CONTACTS_SERVICE_CAPABILITY, service);
-  host.provide(KEYSPACE_SERVICE_CAPABILITY, keyspace);
+  host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess(walletState));
   return host;
 }
 
@@ -94,15 +96,16 @@ describe("ContactsEditor", () => {
 
   it("在打开期间切换 active key 时立即关闭并清空", async () => {
     const service = makeFakeContactsService();
-    const keyspace = makeFakeKeyspace();
-    const host = makeHost(service, keyspace);
+    const walletState = makeFakeWalletState();
+    const host = makeHost(service, walletState);
     const onSaved = vi.fn();
     const onClose = vi.fn();
 
+    const OwnedEditor = await bindTestContactsUi(host, ContactsEditor);
     function Wrapper() {
       const [open, setOpen] = useState(true);
       return (
-        <ContactsEditor
+        <OwnedEditor
           open={open}
           mode="create"
           onClose={() => {
@@ -132,7 +135,7 @@ describe("ContactsEditor", () => {
     });
 
     await act(async () => {
-      keyspace.setActive(NEXT_KEY);
+      walletState.setActive(NEXT_KEY);
     });
 
     await waitFor(() => {
@@ -144,4 +147,30 @@ describe("ContactsEditor", () => {
     expect(service.addContact).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
   });
+  it("ignores a save completion after the contributing editor instance is revoked", async () => {
+    const service = makeFakeContactsService();
+    let finish!: (contact: Contact) => void;
+    const pending = new Promise<Contact>(resolve => { finish = resolve; });
+    const add = vi.fn(() => pending);
+    service.addContact = add;
+    const host = makeHost(service, makeFakeWalletState());
+    const OwnedEditor = await bindTestContactsUi(host, ContactsEditor);
+    const onSaved = vi.fn();
+    render(<OwnedEditor open mode="create" onClose={() => {}} onSaved={onSaved} />);
+    await screen.findByRole("button", { name: "Save" });
+    const publicKeyHex = "03" + "cc".repeat(32);
+    fireEvent.change(screen.getByLabelText("Contact publicKeyHex"), { target: { value: publicKeyHex } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Pending contact" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(add).toHaveBeenCalledTimes(1);
+    await act(() => host.revoke("contacts-ui-fixture", "editor revoked"));
+    expect(screen.queryByLabelText("Contact publicKeyHex")).toBeNull();
+    await act(async () => {
+      finish({ publicKeyHex, name: "Pending contact", tags: [], createdAt: "now", updatedAt: "now" });
+      await pending;
+    });
+    expect(onSaved).not.toHaveBeenCalled();
+    await host.dispose();
+  });
+
 });

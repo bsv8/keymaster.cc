@@ -1,3 +1,5 @@
+import { useWalletState } from "@keymaster/runtime";
+import { useMessageResources } from "./MessageResourceContext.js";
 // 会话详情页。
 //
 // 设计缘由：
@@ -11,10 +13,10 @@
 // WebRTC 会话快照是实时状态，保留为本地订阅。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useOptionalCapability, useCapability, useResource, useResourceSelector } from "webloom-framework/react";
-import { useCurrentPath, useI18n, usePluginHost, useOptionalResourceSelector, router } from "@keymaster/runtime";
+import { useOptionalPluginCapability, usePluginCapability } from "webloom-framework/react";
+import { usePluginI18n, useResourceView, useResourceViewSelector, router } from "@keymaster/runtime";
 import { EmptyState, TextArea } from "@keymaster/ui";
-import { KEYSPACE_SERVICE_CAPABILITY, MESSAGE_SERVICE_CAPABILITY, WEBRTC_SERVICE_CAPABILITY, type ContactPresenceMap, type WebrtcHistoryItem, type WebrtcSessionSnapshot } from "@keymaster/contracts";
+import { VAULT_WALLET_STATE_CAPABILITY, MESSAGE_SERVICE_CAPABILITY, WEBRTC_SERVICE_CAPABILITY, type PageUiLocation, type ContactPresenceMap, type WebrtcHistoryItem, type WebrtcSessionSnapshot } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";
 import type { MessageDetailData } from "./manifest.js";
 import { buildMessageTimeline, type MessageTimelineItem } from "./messageTimeline.js";
@@ -47,28 +49,24 @@ const CALL_STATUS_KEYS: Record<string, string> = {
   failed: "message.page.detail.timeline.call.status.failed"
 };
 
-export function MessageDetailPage(): JSX.Element {
-  const i18n = useI18n();
-  const currentPath = useCurrentPath();
-  const peerPublicKeyHex = parsePeerPublicKeyHexFromPath(currentPath);
+export function MessageDetailPage({ location }: { location: PageUiLocation }): JSX.Element {
+  const i18n = usePluginI18n();
+  const peerPublicKeyHex = location.params.publicKeyHex ?? "";
   const normalizedPeerPublicKeyHex = normalizePublicKeyHexForMatch(peerPublicKeyHex);
-  const messageService = useOptionalCapability(MESSAGE_SERVICE_CAPABILITY);
-  const keyspace = useCapability(KEYSPACE_SERVICE_CAPABILITY);
-  const webrtc = useOptionalCapability(WEBRTC_SERVICE_CAPABILITY);
-  const host = usePluginHost();
-  const store = host.resourceStore;
-  const ownerPublicKeyHex = keyspace.active().activePublicKeyHex ?? null;
+  const messageService = useOptionalPluginCapability(MESSAGE_SERVICE_CAPABILITY);
+  const walletState = useWalletState();
+  const webrtc = useOptionalPluginCapability(WEBRTC_SERVICE_CAPABILITY);
+  const store = useMessageResources();
+  const ownerPublicKeyHex = walletState.snapshot().activePublicKeyHex ?? null;
 
   // 使用 Resource Store 读取消息和联系人数据
-  const detailData = useResourceSelector<MessageDetailData, MessageDetailData>(
+  const detailData = useResourceViewSelector<MessageDetailData, MessageDetailData>(
     store,
     "message.detail",
     [normalizedPeerPublicKeyHex],
     (snapshot) => snapshot.data ?? { messages: [], contact: null },
     (a, b) => {
-      if (a.messages.length !== b.messages.length) return false;
-      if (a.contact?.publicKeyHex !== b.contact?.publicKeyHex) return false;
-      return true;
+      return a.messages === b.messages && a.contact === b.contact;
     }
   );
   const messages = detailData.messages;
@@ -76,10 +74,10 @@ export function MessageDetailPage(): JSX.Element {
 
   // 通讯录在线状态（Ping/Pong 投影；离线时禁用 WebRTC 拨号，文本消息仍可发送）。
   // contacts 插件可能未装配时降级为 null（视为离线，门禁 fail-closed）。
-  const presenceByPublicKey = useOptionalResourceSelector<ContactPresenceMap, ContactPresenceMap>(
-    host.resourceStore, "contacts.presence", [],
-    (snapshot) => snapshot.data ?? {},
-    {}
+  const presenceByPublicKey = useResourceViewSelector<ContactPresenceMap, ContactPresenceMap>(
+    store, "message.contacts-presence", [],
+    (snapshot) => snapshot.status === "ready" ? snapshot.data ?? {} : {},
+    (a, b) => a === b
   );
   const peerPresence = normalizedPeerPublicKeyHex
     ? (presenceByPublicKey[normalizedPeerPublicKeyHex] ?? null)
@@ -88,13 +86,13 @@ export function MessageDetailPage(): JSX.Element {
   const isPeerOnline = peerPresenceState === "online";
 
   // WebRTC 相关状态（实时状态，保留为本地订阅）
-  const historyResource = useResource<WebrtcHistoryItem[]>(host.resourceStore, "webrtc.peer-history", [normalizedPeerPublicKeyHex]);
-  const history = historyResource.data ?? [];
+  const historyResource = useResourceView<WebrtcHistoryItem[]>(store, "message.webrtc-history", [normalizedPeerPublicKeyHex]);
+  const history = webrtc ? historyResource.data ?? [] : [];
   const [sendBody, setSendBody] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendBusy, setSendBusy] = useState(false);
-  const webrtcResource = useResource<WebrtcSessionSnapshot>(host.resourceStore, "webrtc.session", []);
-  const webrtcSnapshot = webrtcResource.data ?? (webrtc?.snapshot() ?? null);
+  const webrtcResource = useResourceView<WebrtcSessionSnapshot | null>(store, "message.webrtc-session", []);
+  const webrtcSnapshot = webrtc ? webrtcResource.data ?? webrtc.snapshot() : null;
   const [callActionBusy, setCallActionBusy] = useState(false);
   const [isLocalPrimary, setIsLocalPrimary] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -109,6 +107,25 @@ export function MessageDetailPage(): JSX.Element {
   // 两次进入 startCall；ref 做同步互斥，state 驱动按钮禁用。
   const dialInFlightRef = useRef(false);
   const [dialBusy, setDialBusy] = useState(false);
+  const currentWebrtc = useRef(webrtc);
+  currentWebrtc.current = webrtc;
+  const operationGeneration = useRef(0);
+  useEffect(() => {
+    operationGeneration.current += 1;
+    sendInFlightRef.current = false;
+    dialInFlightRef.current = false;
+    setSendBody("");
+    setSendError(null);
+    setSendBusy(false);
+    setDialBusy(false);
+    setCallActionBusy(false);
+    return () => { operationGeneration.current += 1; };
+  }, [ownerPublicKeyHex, normalizedPeerPublicKeyHex, messageService]);
+  useEffect(() => {
+    dialInFlightRef.current = false;
+    setDialBusy(false);
+    setCallActionBusy(false);
+  }, [webrtc]);
   const service = messageService;
 
   useEffect(() => {
@@ -246,19 +263,24 @@ export function MessageDetailPage(): JSX.Element {
       setSendError(i18n.t("message.page.send.empty"));
       return;
     }
+    const generation = operationGeneration.current;
     sendInFlightRef.current = true;
     setSendBusy(true);
     try {
       await service!.sendTextMessage({ recipientPublicKeyHex: normalizedPeerPublicKeyHex, body });
+      if (generation !== operationGeneration.current) return;
       setSendBody("");
       // mutation 主动失效，避免页面刷新依赖 provider 是否回推发送侧消息。
       store.invalidate("message.detail", [normalizedPeerPublicKeyHex]);
       store.invalidate("message.conversations", []);
     } catch (err) {
+      if (generation !== operationGeneration.current) return;
       setSendError(formatMessageDetailError(i18n, err, "message.page.detail.error.send_unknown"));
     } finally {
-      sendInFlightRef.current = false;
-      setSendBusy(false);
+      if (generation === operationGeneration.current) {
+        sendInFlightRef.current = false;
+        setSendBusy(false);
+      }
     }
   }
 
@@ -276,43 +298,52 @@ export function MessageDetailPage(): JSX.Element {
         : "message.page.detail.error.target_unknown"));
       return;
     }
+    const generation = operationGeneration.current;
     dialInFlightRef.current = true;
     setDialBusy(true);
     setSendError(null);
     try {
       await webrtc.startCall({ targetPublicKeyHex: normalizedPeerPublicKeyHex, mode });
     } catch (err) {
+      if (generation !== operationGeneration.current || currentWebrtc.current !== webrtc) return;
       setSendError(formatMessageDetailError(i18n, err));
     } finally {
-      dialInFlightRef.current = false;
-      setDialBusy(false);
+      if (generation === operationGeneration.current && currentWebrtc.current === webrtc) {
+        dialInFlightRef.current = false;
+        setDialBusy(false);
+      }
     }
   }
 
   async function sendAttachment(kind: "image" | "file", file: File) {
     if (!webrtc) return;
+    const generation = operationGeneration.current;
     try {
       if (kind === "image") {
         await webrtc.sendImage({ targetPublicKeyHex: normalizedPeerPublicKeyHex, file });
       } else {
         await webrtc.sendFile({ targetPublicKeyHex: normalizedPeerPublicKeyHex, file });
       }
-      host.resourceStore.invalidate("webrtc.peer-history", [normalizedPeerPublicKeyHex]);
+      if (generation !== operationGeneration.current || currentWebrtc.current !== webrtc) return;
+      store.invalidate("message.webrtc-history", [normalizedPeerPublicKeyHex]);
     } catch (err) {
+      if (generation !== operationGeneration.current || currentWebrtc.current !== webrtc) return;
       setSendError(formatMessageDetailError(i18n, err));
     }
   }
 
   async function runCallAction(action: () => Promise<void>) {
     if (!webrtc) return;
+    const generation = operationGeneration.current;
     setSendError(null);
     setCallActionBusy(true);
     try {
       await action();
     } catch (err) {
+      if (generation !== operationGeneration.current || currentWebrtc.current !== webrtc) return;
       setSendError(formatMessageDetailError(i18n, err));
     } finally {
-      setCallActionBusy(false);
+      if (generation === operationGeneration.current && currentWebrtc.current === webrtc) setCallActionBusy(false);
     }
   }
 
@@ -712,7 +743,7 @@ export function MessageDetailPage(): JSX.Element {
 function renderTimelineItem(
   item: MessageTimelineItem,
   handlers: {
-    i18n: ReturnType<typeof useI18n>;
+    i18n: ReturnType<typeof usePluginI18n>;
     ownerPublicKeyHex: string;
     peerPublicKeyHex: string;
     title: string;
@@ -793,7 +824,7 @@ function renderTimelineItem(
 function AttachmentRecord(props: {
   kind: "image" | "file";
   fromMe: boolean;
-  i18n: ReturnType<typeof useI18n>;
+  i18n: ReturnType<typeof usePluginI18n>;
   record: Extract<WebrtcHistoryItem, { itemType: "transfer" }>;
   loadBlob(blobKey: string): Promise<Blob | null>;
   onPreview(blobKey: string): Promise<void>;
@@ -910,7 +941,7 @@ function formatBytes(bytes: number): string {
 }
 
 function formatMessageDetailError(
-  i18n: ReturnType<typeof useI18n>,
+  i18n: ReturnType<typeof usePluginI18n>,
   err: unknown,
   fallbackKey = "message.page.detail.error.unknown"
 ): string {
@@ -997,24 +1028,9 @@ function resolveMessageDetailErrorKey(raw: string): string | null {
 /**
  * 通话状态只允许显示稳定文案，不直接暴露底层历史枚举值。
  */
-function formatCallStatus(i18n: ReturnType<typeof useI18n>, status: string): string {
+function formatCallStatus(i18n: ReturnType<typeof usePluginI18n>, status: string): string {
   const key = CALL_STATUS_KEYS[status];
   return key ? i18n.t(key) : i18n.t("message.page.detail.timeline.call.status.unknown");
-}
-
-function parsePeerPublicKeyHexFromPath(path: string): string {
-  const segments = path.split("/").filter(Boolean);
-  if (segments.length !== 2) {
-    return "";
-  }
-  if (segments[0] !== "messages" && segments[0] !== "message") {
-    return "";
-  }
-  try {
-    return decodeURIComponent(segments[1] ?? "");
-  } catch {
-    return segments[1] ?? "";
-  }
 }
 
 /**

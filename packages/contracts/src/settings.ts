@@ -14,48 +14,6 @@ import type { ComponentType } from "react";
 import type { I18nText } from "./i18n.js";
 
 /**
- * 系统设置页的可扩展项目。
- *
- * 插件通过 `system-settings.registry` 把自己的设置钩入 `/settings/system`。
- * group 是一个稳定的扩展点：相同 group id 的项目会归到同一组，分别按
- * group.order 与 item.order 排序。
- */
-export interface SystemSettingsItem {
-  /** 全局唯一、带插件命名空间的项目 id，例如 "woc.system-settings"。 */
-  id: string;
-  group: {
-    /** 稳定 group id，例如 "woc"。 */
-    id: string;
-    label: I18nText;
-    order: number;
-  };
-  /** 项目标题；同组有多个项目时用于区分。 */
-  label: I18nText;
-  description?: I18nText;
-  component: ComponentType;
-  /** 组内排序，越小越靠前。 */
-  order: number;
-  /**
-   * 被本系统设置项迁移替代的旧 settings.registry route id。
-   * shell 使用它从旧「设置」菜单隐藏重复入口，支持逐项迁移。
-   */
-  replacesSettingsRouteId?: string;
-  visibleWhen?: (ctx: { unlocked: boolean }) => boolean;
-}
-
-/** 由常驻系统模块注入到「设置 → 广播网关」的实时状态视图。 */
-export interface SystemStatusModule {
-  /** 全局唯一、带模块命名空间的 id。 */
-  id: string;
-  /** 模块原有的可直达状态路径，例如 `/system/sat-subscription`。 */
-  path: string;
-  label: I18nText;
-  description?: I18nText;
-  component: ComponentType;
-  order: number;
-}
-
-/**
  * Key 管理页的可扩展工作区。
  *
  * 可选插件可通过 `vault-settings.registry` 将与 Key 生命周期相关的操作嵌入
@@ -74,8 +32,8 @@ export interface VaultSettingsSection {
  * 设置详情页描述。
  *
  * 严格字段：
- *   - id：唯一 id，使用命名空间，例如 "poker.settings"。
- *   - path：路由路径，必须以 "/" 开头，例如 "/settings/poker"；
+ *   - id：唯一 id，使用命名空间，例如 "example.settings"。
+ *   - path：路由路径，必须以 "/" 开头，例如 "/settings/example"；
  *   - label：菜单 / 页面标题 / 面包屑首段之外的位置都可能用到；硬切换后是 I18nText。
  *   - description：可选页内描述（用于页面副标题等位置），不参与菜单。
  *   - component：渲染该设置详情页的 React 组件。
@@ -87,7 +45,7 @@ export interface VaultSettingsSection {
 export interface SettingsRoute {
   /** page id，使用命名空间。 */
   id: string;
-  /** 路由路径，必须以 "/" 开头，例如 "/settings/poker"。 */
+  /** 路由路径，必须以 "/" 开头，例如 "/settings/example"。 */
   path: string;
   /** 菜单 / 页面标题。硬切换后为 I18nText。 */
   label: I18nText;
@@ -105,6 +63,4 @@ export interface SettingsRoute {
 
 // SettingsRegistry 在 registries.ts 中统一声明。
 export type { SettingsRegistry } from "./registries.js";
-export type { SystemSettingsRegistry } from "./registries.js";
-export type { SystemStatusRegistry } from "./registries.js";
 export type { VaultSettingsRegistry } from "./registries.js";

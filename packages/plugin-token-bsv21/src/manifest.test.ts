@@ -16,12 +16,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // 可配置的 stateRepository.list 返回值
 let mockDbListResult: unknown[] = [];
+let mockPendingList: Promise<unknown[]> | undefined;
 
 vi.mock("./storage/bsv21StateRepository.js", () => ({
   createBsv21StateRepository: () => ({
     put: vi.fn(),
     replaceAll: vi.fn(),
-    list: vi.fn(() => Promise.resolve(mockDbListResult)),
+    list: vi.fn(() => mockPendingList ?? Promise.resolve(mockDbListResult)),
     close: vi.fn(),
   }),
 }));
@@ -46,7 +47,7 @@ vi.mock("./bsv21Sync.js", () => ({
     label: { key: "bsv21.task.sync", fallback: "BSV-21 同步" },
     description: { key: "bsv21.task.sync.description", fallback: "" },
     schedule: { group: "asset-holdings", defaultIntervalMs: 900_000, minIntervalMs: 300_000 },
-    defaultEnabled: true,
+
     keyScope: () => undefined,
     canRun: () => false,
     run: vi.fn(),
@@ -90,12 +91,15 @@ async function setupManifest() {
   const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void> = [];
 
   const ctx = {
+    scope: { state: "active" },
+    consumer: { status: "active" },
+    pluginId: "token-bsv21",
     // manifest 的 owner/App K-V 句柄注入由 Host 负责；本测试只验证事件绑定，
     // 因此使用不会被 mock Repository 实际访问的最小占位值。
-    storageFor: () => ({}) as never,
     provide: vi.fn(),
     capability: vi.fn((capability: { id: string }) => {
       switch (capability.id) {
+        case "storage.kv-clients": return { bind: () => ({}) };
         case "p2pkh.service":
           return {
             listResources: vi.fn().mockResolvedValue([]),
@@ -106,13 +110,13 @@ async function setupManifest() {
           return { listAddressTokens: vi.fn(), listAddressUnspentTokens: vi.fn(), getAddressTokenBalance: vi.fn(), getTokenById: vi.fn() };
         case "woc.service":
           return {};
-        case "keyspace.service":
-          return {
-            active: () => ({ activePublicKeyHex: "pk1" }),
-            onActiveKeyChanged: onActiveChangeFn,
+        case "vault.wallet-state":
+          return { bind: () => ({
+            snapshot: () => ({ activePublicKeyHex: "pk1" }),
+            subscribe: onActiveChangeFn,
             isInitializing: () => false,
             openOwnerAppStore: vi.fn(),
-          };
+          }) };
         case "token.registry":
           return { register: registerToken };
         case "background.registry":
@@ -151,13 +155,12 @@ async function setupManifest() {
             unregister: vi.fn(),
             list: vi.fn(() => []),
             isProtected: vi.fn(() => false),
-            unregisterByOwner: vi.fn(),
             _ids: vi.fn(() => []),
           };
         case "p2pkh.protocol-spend":
           return protocolSpend;
-        case "route.registry":
-          return { register: registerRoute, list: vi.fn(() => []), byPath: vi.fn(), byId: vi.fn() };
+        case "page.ui.registry":
+          return { bind: () => ({ view: { register: registerRoute } }) };
         case "business.registry":
           return {
             register: vi.fn(),
@@ -199,6 +202,7 @@ describe("bsv21TokenPlugin.setup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDbListResult = [];
+    mockPendingList = undefined;
   });
 
   it("为 BSV-21 转账保留独立可达路由与业务入口", async () => {
@@ -207,9 +211,9 @@ describe("bsv21TokenPlugin.setup", () => {
     expect(registerRoute).toHaveBeenCalledWith(expect.objectContaining({
       id: "bsv21.transfer",
       path: "/assets/bsv21/transfer",
-      component: expect.any(Function)
+      render: expect.any(Function)
     }));
-    expect(registerFeature).toHaveBeenCalledWith("token-bsv21-transfer", "assets", expect.objectContaining({
+    expect(registerFeature).toHaveBeenCalledWith("token-bsv21", "assets", expect.objectContaining({
       id: "assets.bsv21.transfer",
       entry: expect.objectContaining({ path: "/assets/bsv21/transfer", routeId: "bsv21.transfer" })
     }));
@@ -273,6 +277,20 @@ describe("bsv21TokenPlugin.setup", () => {
     await vi.waitFor(() => {
       expect(triggerFn).not.toHaveBeenCalled();
     });
+  });
+
+  it.each(["resolve", "reject"])("ignores a late %s after Scope enters stopping", async mode => {
+    let finish!: () => void;
+    mockPendingList = new Promise<unknown[]>((resolve, reject) => {
+      finish = () => mode === "resolve" ? resolve([]) : reject(new Error("owner revoked"));
+    });
+    const { ctx, triggerFn: trigger, dataNotifierListeners } = await setupManifest();
+    dataNotifierListeners.forEach(handler => handler({ providerId: "p2pkh", kinds: ["resource"], publicKeyHex: "pk1" }));
+    ctx.scope.state = "stopping";
+    finish();
+    await mockPendingList.catch(() => {});
+    await Promise.resolve();
+    expect(trigger).not.toHaveBeenCalled();
   });
 
   it("dispose 后事件不再触发", async () => {

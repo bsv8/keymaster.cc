@@ -6,7 +6,7 @@
 //   P02/P06 严格 UTF-8、截断边界回退、有界渲染
 
 import { describe, expect, it } from "vitest";
-import type { StorageBrowseEntry } from "@keymaster/contracts";
+import type { StorageBrowseEntry } from "../runtime/storageBrowseTypes.js";
 import {
   applyBrowsePage,
   emptyDirectoryState,

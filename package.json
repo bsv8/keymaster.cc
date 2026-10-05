@@ -5,16 +5,16 @@
   "type": "module",
   "packageManager": "pnpm@11.5.1",
   "config": {
-    "webloomFrameworkReleaseVersion": "0.5.0"
+    "webloomFrameworkReleaseVersion": "0.6.0"
   },
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-  "dev": "npm run dev -w @keymaster/web",
-  "build": "pnpm test:types && npm run build -w @keymaster/web && node scripts/check-web-production-artifacts.mjs",
-  "build:production": "node scripts/build-plugin-lifecycle.mjs",
+    "dev": "npm run dev -w @keymaster/web",
+    "build": "pnpm test:types && npm run build -w @keymaster/web && node scripts/check-web-production-artifacts.mjs",
+    "build:production": "node scripts/build-plugin-lifecycle.mjs",
     "smoke:msfile-media-sw": "node scripts/smoke-msfile-media-sw.mjs",
     "verify:msfile-read-concurrency-pressure": "node scripts/msfile-read-concurrency-pressure.mjs",
     "verify:final-io-audit": "node scripts/check-coordinator-final-io-audit.mjs",
@@ -26,12 +26,12 @@
     "typecheck": "tsc -b",
     "check:contracts": "node scripts/check-contracts.mjs",
     "test:contracts": "vitest run packages/contracts/src",
-    "test:types": "pnpm typecheck && pnpm check:contracts && pnpm test:contracts && pnpm lint:worker-boundaries",
+    "test:types": "pnpm check:plugin-catalog && pnpm typecheck && pnpm check:contracts && pnpm test:contracts && pnpm lint:worker-boundaries",
     "keys:balance": "node scripts/check-key-balances.mjs",
     "verify:woc-asset": "node scripts/verify-woc-asset-observation.mjs",
     "lint:storage-naming": "node scripts/check-storage-hard-switch.mjs",
     "lint:worker-boundaries": "node scripts/check-coordinator-worker-boundaries.mjs && node scripts/check-coordinator-worker-boundaries-self-test.mjs",
-    "lint:boundaries": "node scripts/check-storage-hard-switch.mjs && node scripts/check-boundaries.mjs && pnpm lint:worker-boundaries && node scripts/check-coordinator-final-io-audit.mjs",
+    "lint:boundaries": "node scripts/check-storage-hard-switch.mjs && node scripts/check-boundaries.mjs && node scripts/check-boundaries-self-test.mjs && pnpm lint:worker-boundaries && node scripts/check-coordinator-final-io-audit.mjs",
     "lint:webloom-release": "node scripts/check-webloom-release-boundary.mjs",
     "verify:webloom-registry": "node scripts/check-webloom-registry-consumer.mjs",
     "lint:react-boundaries": "node scripts/check-react-resource-boundaries.mjs",
@@ -65,7 +65,12 @@
     "test:e2e:report": "playwright show-report",
     "collect:testnet:key01": "pnpm typecheck:e2e && playwright test --config=e2e/playwright.maintenance.config.ts",
     "docs:connect:dev": "pnpm --filter @keymaster/connect-docs dev",
-    "docs:connect:build": "pnpm --filter @keymaster/connect-docs build"
+    "docs:connect:build": "pnpm --filter @keymaster/connect-docs build",
+    "verify:webloom-runtime-slots": "node scripts/run-webloom06-runtime-slots.mjs",
+    "generate:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs --write && node scripts/generate-plugin-function-dependencies.mjs",
+    "check:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs && node scripts/generate-plugin-function-dependencies.mjs --check",
+    "generate:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs",
+    "check:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs --check"
   },
   "devDependencies": {
     "@keymaster/contracts": "workspace:*",
@@ -86,7 +91,7 @@
     "typescript": "^5.5.4",
     "vite": "^5.4.2",
     "vitest": "3.2.4",
-    "webloom-framework": "0.5.0"
+    "webloom-framework": "0.6.0"
   },
   "dependencies": {
     "@bsv/sdk": "^1.10.4",

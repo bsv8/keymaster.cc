@@ -6,10 +6,10 @@
 //
 // 硬切换 005 收尾：删掉 all-mode 兼容。`mode: "all"` 不再是真值。
 //
-// 硬切换 008 收尾：keyspace 未就绪时**不提供** Offer。
+// 硬切换 008 收尾：walletState 未就绪时**不提供** Offer。
 // 设计缘由：未就绪时给 offer 会让用户看到一个假的"可转账"入口，
-// 一旦用户点进去，Widget 校验时 keyspace 仍可能未就绪导致未定义行为。
-// 业务上 keyspace 没就绪等同于"今天不能转账"，所以 listOffers 返回空。
+// 一旦用户点进去，Widget 校验时 walletState 仍可能未就绪导致未定义行为。
+// 业务上 walletState 没就绪等同于"今天不能转账"，所以 listOffers 返回空。
 //
 // 硬切换 001：listOffers 受 `includeTestnet` 控制。includeTestnet=false
 // 时不暴露 bsvtest offer。balance 显示改为 `{ total }`，不再用 confirmed。
@@ -17,7 +17,7 @@
 // 由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
 // service 内部 storage 监听回灌。
 
-import { BALANCE_NETWORK_KEYS, type KeyspaceService, type TransferOffer, type TransferOfferStatus, type TransferProvider } from "@keymaster/contracts";
+import { BALANCE_NETWORK_KEYS, type VaultWalletState, type TransferOffer, type TransferOfferStatus, type TransferProvider } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type { P2pkhAssetId, P2pkhService, P2pkhSyncStatus } from "./p2pkhContracts.js";
 import { P2PKH_ASSETS } from "./p2pkhContracts.js";
@@ -27,7 +27,7 @@ import { P2PKH_MSG } from "./p2pkhMessages.js";
 export interface P2pkhTransferProviderDeps {
   service: P2pkhService;
   messageBus: MessageBus;
-  keyspace: KeyspaceService;
+  walletState: VaultWalletState;
 }
 
 const ASSET_IDS: P2pkhAssetId[] = ["bsv", "bsvtest"];
@@ -50,7 +50,7 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
   unsubs.push(deps.service.onSyncStatusChange(() => notify()));
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
   trackSubscribe(P2PKH_MSG.SYNC, () => notify());
-  unsubs.push(deps.keyspace.onActiveKeyChanged(() => notify()));
+  unsubs.push(deps.walletState.subscribe(() => notify()));
   // 硬切换 001：global settings 变化也要触发重拉（testnet offer 显隐切换）。
   unsubs.push(deps.service.onGlobalSettingsChange(() => notify()));
 
@@ -65,14 +65,14 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
   }
 
   /**
-   * 是否可以提供转账 offer：必须有 active key 且 keyspace 已就绪。
+   * 是否可以提供转账 offer：必须有 active key 且 walletState 已就绪。
    * 硬切换 005 收尾：不再有 "all 模式" 兜底——`activePublicKeyHex` 缺失
    * 唯一指"无 active key"，由壳层守卫收敛到修复/管理态；本函数仍作为
    * listOffers 的 fail-closed 防御。
    */
   function isTransferable(): boolean {
     // 没有 "初始化中" 这一独立状态：可用与否只看当前唯一 Key 是否已投影。
-    return Boolean(deps.keyspace.active().activePublicKeyHex);
+    return Boolean(deps.walletState.snapshot().activePublicKeyHex);
   }
 
   /**
@@ -87,7 +87,7 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
   async function toOffer(assetId: P2pkhAssetId): Promise<TransferOffer> {
     const def = P2PKH_ASSETS[assetId];
     const snapshot = deps.service.balanceBroadcaster.getSnapshot();
-    const owner = deps.keyspace.active().activePublicKeyHex?.trim().toLowerCase();
+    const owner = deps.walletState.snapshot().activePublicKeyHex?.trim().toLowerCase();
     const balance = snapshot.publicKeyHex === owner
       ? snapshot.balances[BALANCE_NETWORK_KEYS[def.network]]
       : undefined;

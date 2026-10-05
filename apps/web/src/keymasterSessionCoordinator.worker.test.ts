@@ -80,6 +80,7 @@ import {
   __testSetCoordinatorPeerHandoffNotifier,
   __testAwaitCoordinatorPeerDrain,
   __testCloseCoordinatorBridgePeer,
+  __testHoldCoordinatorFifo,
   __testDispatchStorageMessage,
   __testFenceCoordinatorAuthority,
   __testHoldCoordinatorFinalIoLease,
@@ -97,6 +98,7 @@ import {
   __testInvalidateSession,
   __testLock,
   __testRegisterTask,
+  __testReadyWorkerUnit,
   __testResetState,
   __testRestartWorker,
   __testRunTask,
@@ -304,6 +306,8 @@ async function initializeTestWallet(input?: {
 }): Promise<TestWallet> {
   // 单 Key 模型下 initialize 需要真实装配的 lifecycle；不是每个 describe 的
   // beforeEach 都会先 bootstrap，这里按需补一次，已装配时是幂等的。
+  // initialize/unlock may schedule INIT before the test installs its custom reader.
+  __testSetChainHeightProvider(async () => 900_000);
   await __testBootstrapWalletStorage();
   const label = input?.label ?? "test-wallet";
   const password = input?.password ?? "test-wallet-password";
@@ -338,13 +342,15 @@ async function dispatchStorageControl<T>(control: CoordinatorStorageControl): Pr
 }
 
 /**
- * 准备一个已初始化且解锁的钱包，让 Coordinator 自有的持久快照（同步管理、
- * 插件意图）有 Root 可写。
+ * 准备一个已初始化且解锁的钱包，让 Coordinator 自有的持久快照（同步管理）有 Root 可写。
  *
  * 单 Key 模型只在冷启动为 ready 时安装平台 Root，未初始化钱包没有快照句柄；
  * 用 `__testSetVaultStatus` 伪造 unlocked 并不等于装配完成。
  */
 async function bootstrapReadyWallet(label: string): Promise<void> {
+  // 解锁会触发 INIT；必须在任务启动前替换节点读数，避免旧物理 HTTP
+  // 挂起使后续重新装配等待外网。各高度用例再覆盖自己的返回值。
+  __testSetChainHeightProvider(async () => 900_000);
   await initializeTestWallet({ label, password: "ready-pw" });
   const unlocked = await __testUnlock("ready-pw");
   expect(["ok", "accepted", "already-unlocked"]).toContain(unlocked.ack.status);
@@ -552,6 +558,20 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
 });
 
 describe("Session Coordinator worker", () => {
+  it("Root 重装从同一份本地真值恢复业务调度设置", async () => {
+    await __testBootstrapWalletStorage();
+    await initializeTestWallet({ label: "root-reload-wallet" });
+    await __testUpdateScheduleSettings({ taskIntervals: { "p2pkh.transactions-sync": 60_000 } });
+    expect(__testGetSnapshot()).toMatchObject({
+      scheduleSettings: { taskIntervals: { "p2pkh.transactions-sync": 60_000 } },
+    });
+    await __testBootstrapWalletStorage();
+    await __testReloadCoordinatorMeta();
+    expect(__testGetSnapshot()).toMatchObject({
+      scheduleSettings: { taskIntervals: { "p2pkh.transactions-sync": 60_000 } },
+    });
+  });
+
   // 本组用例各自装配自己的钱包，IndexedDB 是进程级共享的：没有这层隔离，
   // 上一个用例提交的 key.json 会让下一个 initialize 撞上 storage_conflict。
   beforeEach(async () => {
@@ -563,6 +583,23 @@ describe("Session Coordinator worker", () => {
     __testSetStorageSessionResolver(undefined);
     __testSetStorageRuntime(undefined);
     await __testResetWalletStore();
+  });
+
+  it("reads the committed Vault identity while an unrelated FIFO request is pending", async () => {
+    const wallet = await initializeTestWallet({ label: "identity-read" });
+    const messages: CoordinatorResponse[] = [];
+    __testAttachPort("identity-page", message => messages.push(message as CoordinatorResponse));
+    const release = __testHoldCoordinatorFifo();
+    try {
+      await __testDispatchStorageMessage("identity-page", {
+        kind: "vault.operation", clientId: "identity-page", requestId: "identity-read",
+        expectedSessionEpoch: __testGetSnapshot().sessionEpoch,
+        operation: { type: "getCurrentKey" },
+      });
+      expect(messages.find(message => message.requestId === "identity-read")).toMatchObject({
+        ack: { status: "ok" }, operationResult: { publicKeyHex: wallet.publicKeyHex },
+      });
+    } finally { release(); }
   });
 
   it("rejects forged client ownership and revoked/changed Storage grants", async () => {
@@ -728,207 +765,6 @@ describe("Session Coordinator worker", () => {
     expect(__testGetVaultStatus()).toBe("unlocked");
     expect(messages.some((message) => (message as { status?: string }).status === "degraded")).toBe(true);
     __testSetStorageStartupFailure(false);
-  });
-
-  it("persists plugin intent in the Coordinator and rejects the old authority after restart", async () => {
-    // plugin-intent 必须真正落盘：没有 Root 的伪造 unlocked 会让持久化失败。
-    await bootstrapReadyWallet("plugin-intent-persist");
-    const messages: unknown[] = [];
-    __testAttachPort("plugin-intent-port", (message) => messages.push(message));
-    const first = __testGetSnapshot();
-    const command = {
-      commandId: "plugin-intent-test:1",
-      authorityInstanceId: first.authorityInstanceId,
-      expectedRevision: first.pluginIntent?.revision ?? 0,
-      pluginId: "background",
-      desiredEnabled: true,
-    } as const;
-
-    await __testDispatchStorageMessage("plugin-intent-port", {
-      kind: "plugin.intent.submit",
-      clientId: "plugin-intent-port",
-      requestId: "plugin-intent-submit-1",
-      command,
-    });
-    const accepted = messages.find((message) => (message as { requestId?: string }).requestId === "plugin-intent-submit-1") as {
-      ack?: { status?: string };
-      operationResult?: { status?: string; persisted?: boolean; snapshot?: { revision?: number; desiredEnabled?: Record<string, boolean> } };
-    } | undefined;
-    expect(accepted?.ack).toEqual({ status: "ok" });
-    expect(accepted?.operationResult).toMatchObject({
-      status: "accepted",
-      persisted: true,
-      snapshot: { desiredEnabled: { background: true } },
-    });
-    expect(__testGetSnapshot().pluginIntent?.desiredEnabled.background).toBe(true);
-
-    // 模拟 Worker 重启：新的 authority 实例 + 从同一份本地真值重装 Root。
-    // 意图必须已经落盘，否则重启后无从恢复，也就没有「旧 authority 被拒绝」
-    // 这个回归点。
-    await __testRestartWorker();
-    const afterRestart = __testGetSnapshot();
-    expect(afterRestart.authorityInstanceId).not.toBe(first.authorityInstanceId);
-    messages.length = 0;
-    __testAttachPort("plugin-intent-port", (message) => messages.push(message));
-    await __testDispatchStorageMessage("plugin-intent-port", {
-      kind: "plugin.intent.submit",
-      clientId: "plugin-intent-port",
-      requestId: "plugin-intent-submit-old-authority",
-      command,
-    });
-    const stale = messages.find((message) => (message as { requestId?: string }).requestId === "plugin-intent-submit-old-authority") as {
-      operationResult?: { status?: string; expectedAuthorityInstanceId?: string };
-    } | undefined;
-    expect(stale?.operationResult).toMatchObject({
-      status: "stale-authority",
-      expectedAuthorityInstanceId: afterRestart.authorityInstanceId,
-    });
-
-    messages.length = 0;
-    await __testDispatchStorageMessage("plugin-intent-port", {
-      kind: "plugin.intent.submit",
-      clientId: "plugin-intent-port",
-      requestId: "plugin-intent-submit-unknown-product",
-      command: {
-        ...command,
-        commandId: "plugin-intent-test:unknown-product",
-        authorityInstanceId: afterRestart.authorityInstanceId,
-        expectedRevision: afterRestart.pluginIntent?.revision ?? 0,
-        pluginId: "not-registered-product",
-      },
-    });
-    const unknownProduct = messages.find((message) => (message as { requestId?: string }).requestId === "plugin-intent-submit-unknown-product") as {
-      ack?: { status?: string };
-      operationResult?: { status?: string; message?: string };
-    } | undefined;
-    expect(unknownProduct?.ack).toEqual({ status: "ok" });
-    expect(unknownProduct?.operationResult).toMatchObject({
-      status: "command-conflict",
-      message: "插件产品未在 Coordinator 内置清单注册",
-    });
-  });
-
-  it("Root 重装从同一份本地真值恢复 settings 和新的 plugin-intent controller", async () => {
-    // 单 Key 模型没有第二个桶可供「换空 snapshot」：重装 Root 必须读到同一份
-    // IndexedDB 记录。回归点是重装不丢设置，并重建 plugin-intent 控制器。
-    await __testBootstrapWalletStorage();
-    await initializeTestWallet({ label: "root-reload-wallet" });
-    await __testUpdateScheduleSettings({ taskIntervals: { "p2pkh.transactions-sync": 60_000 } });
-    const messages: unknown[] = [];
-    __testAttachPort("root-reload-intent-port", (message) => messages.push(message));
-    const before = __testGetSnapshot();
-    await __testDispatchStorageMessage("root-reload-intent-port", {
-      kind: "plugin.intent.submit",
-      clientId: "root-reload-intent-port",
-      requestId: "root-reload-intent-disable",
-      command: {
-        commandId: "root-reload-intent:disable",
-        authorityInstanceId: before.authorityInstanceId,
-        expectedRevision: before.pluginIntent?.revision ?? 0,
-        pluginId: "p2pkh",
-        desiredEnabled: false,
-      },
-    });
-    expect(__testGetSnapshot()).toMatchObject({
-      scheduleSettings: { taskIntervals: { "p2pkh.transactions-sync": 60_000 } },
-      pluginIntent: { desiredEnabled: { p2pkh: false } },
-    });
-
-    try {
-      // 模拟 Worker 重启后的 Root 重装：旧句柄全部作废，从本地真值重建。
-      await __testBootstrapWalletStorage();
-      await __testReloadCoordinatorMeta();
-      expect(__testGetSnapshot()).toMatchObject({
-        scheduleSettings: { taskIntervals: { "p2pkh.transactions-sync": 60_000 } },
-        pluginIntent: { desiredEnabled: { p2pkh: false } },
-      });
-    } finally {
-    }
-  });
-
-  it("blocks Coordinator tasks after product intent is persisted and resumes only after re-enable", async () => {
-    // 任务 reconcile 会写 plugin-intent，因此这里同样需要真实 Root。
-    await bootstrapReadyWallet("plugin-intent-task");
-    let runs = 0;
-    __testRegisterTask({
-      id: "p2pkh.transactions-sync",
-      pluginId: "p2pkh",
-      publicKeyHex: "a".repeat(64),
-      run: async () => { runs += 1; },
-    });
-    const messages: unknown[] = [];
-    __testAttachPort("plugin-intent-task-port", (message) => messages.push(message));
-    const submit = async (desiredEnabled: boolean, requestId: string, commandId: string) => {
-      const snapshot = __testGetSnapshot();
-      await __testDispatchStorageMessage("plugin-intent-task-port", {
-        kind: "plugin.intent.submit",
-        clientId: "plugin-intent-task-port",
-        requestId,
-        command: {
-          commandId,
-          authorityInstanceId: snapshot.authorityInstanceId,
-          expectedRevision: snapshot.pluginIntent?.revision ?? 0,
-          pluginId: "p2pkh",
-          desiredEnabled,
-        },
-      });
-      return [...messages].reverse().find((message) => (message as { requestId?: string }).requestId === requestId) as { operationResult?: { status?: string } } | undefined;
-    };
-
-    await expect(submit(false, "plugin-intent-task-disable", "plugin-intent-task:disable")).resolves.toMatchObject({ operationResult: { status: "accepted" } });
-    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === "p2pkh.transactions-sync")).toMatchObject({
-      state: "blocked",
-      blockedReason: { fallback: "Plugin disabled: p2pkh" },
-      unitId: "p2pkh.coordinator-worker",
-      instanceId: expect.any(String),
-    });
-    expect(__testGetSnapshot().coordinatorWorkerUnits?.some((unit) => unit.unitId === "p2pkh.coordinator-worker")).toBe(false);
-    await __testRunTask("p2pkh.transactions-sync");
-    expect(runs).toBe(0);
-    await expect(__testBackgroundRunNow("p2pkh.transactions-sync")).resolves.toMatchObject({
-      ack: { status: "blocked", reason: { fallback: "Plugin disabled: p2pkh" } },
-    });
-
-    await expect(submit(true, "plugin-intent-task-enable", "plugin-intent-task:enable")).resolves.toMatchObject({ operationResult: { status: "accepted" } });
-    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === "p2pkh.transactions-sync")).toMatchObject({ state: "idle" });
-    expect(__testGetSnapshot().coordinatorWorkerUnits).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        productId: "p2pkh",
-        unitId: "p2pkh.coordinator-worker",
-        state: "ready",
-        instanceId: expect.any(String),
-      }),
-    ]));
-    const enabledSnapshot = __testGetSnapshot();
-    const enabledUnit = enabledSnapshot.coordinatorWorkerUnits?.find((unit) => unit.unitId === "p2pkh.coordinator-worker");
-    const enabledTask = enabledSnapshot.taskSnapshots.find((task) => task.id === "p2pkh.transactions-sync");
-    expect(enabledUnit?.instanceId).toBe(enabledTask?.instanceId);
-    await __testRunTask("p2pkh.transactions-sync");
-    expect(runs).toBe(1);
-  });
-
-  it("refuses disabling a Coordinator product marked always-on", async () => {
-    const messages: unknown[] = [];
-    __testAttachPort("plugin-intent-always-on-port", (message) => messages.push(message));
-    const snapshot = __testGetSnapshot();
-    await __testDispatchStorageMessage("plugin-intent-always-on-port", {
-      kind: "plugin.intent.submit",
-      clientId: "plugin-intent-always-on-port",
-      requestId: "plugin-intent-always-on",
-      command: {
-        commandId: "plugin-intent-always-on:disable",
-        authorityInstanceId: snapshot.authorityInstanceId,
-        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
-        pluginId: "sat-subscription",
-        desiredEnabled: false,
-      },
-    });
-    const response = [...messages].reverse().find((message) => (message as { requestId?: string }).requestId === "plugin-intent-always-on") as { operationResult?: { status?: string; message?: string } } | undefined;
-    expect(response?.operationResult).toEqual({
-      status: "command-conflict",
-      commandId: "plugin-intent-always-on:disable",
-      message: "该插件产品属于系统必需组件，不能关闭",
-    });
   });
 
   it("does not persist a temporary final-I/O lease across Worker restart", async () => {
@@ -1158,8 +994,11 @@ describe("Session Coordinator worker", () => {
     for (const unit of __testGetSnapshot().coordinatorWorkerUnits ?? []) {
       expect(unit.state === "ready").toBe(unit.reasons.length === 0);
       if (unit.state === "ready") expect(unit.reasons).toEqual([]);
-      // 有任务的单元必须把自身产品写进依赖清单；服务单元不需要。
-      if (unit.taskIds.length > 0) expect(unit.dependsOn).toContain(unit.productId);
+      // 依赖只含真实单元，不以产品开关或自身产品代替服务。
+      expect(unit.dependsOn).not.toContain(unit.productId);
+      for (const dependency of unit.dependsOn) {
+        expect(COORDINATOR_WORKER_UNIT_CATALOG.some(item => item.unitId === dependency)).toBe(true);
+      }
     }
   });
 
@@ -1320,13 +1159,33 @@ describe("Session Coordinator worker", () => {
     expect(disabled?.nextRunAt).toBeUndefined();
   });
 
+  it("任务缺真实提供方单元时阻断，提供方就绪后恢复", async () => {
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    let runs = 0;
+    __testRegisterTask({ id: "p2pkh.transactions-sync", publicKeyHex: "a".repeat(64),
+      run: async () => { runs++; } });
+    await __testRunTask("p2pkh.transactions-sync");
+    expect(runs).toBe(0);
+    expect(__testGetSnapshot().taskSnapshots.find(task => task.id === "p2pkh.transactions-sync")?.blockedReason)
+      .toMatchObject({ fallback: expect.stringContaining("woc.coordinator-worker") });
+    __testReadyWorkerUnit("storage.coordinator-worker");
+    __testReadyWorkerUnit("vault.coordinator-worker");
+    __testReadyWorkerUnit("woc.coordinator-worker");
+    await __testRunTask("p2pkh.transactions-sync");
+    expect(runs).toBe(1);
+  });
+
   it("关闭的 managed 任务不响应自动触发，但手动「立即同步一次」仍然有效", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testReadyWorkerUnit("storage.coordinator-worker");
+    __testReadyWorkerUnit("vault.coordinator-worker");
+    __testReadyWorkerUnit("woc.coordinator-worker");
+    __testReadyWorkerUnit("p2pkh.coordinator-worker");
     let runs = 0;
     __testRegisterTask({
       id: "token-stas.sync",
       pluginId: "token-stas",
-      publicKeyHex: "a".repeat(64),
+      publicKeyHex: __testGetActivePublicKeyHex()!,
       syncPolicy: "managed",
       intervalMs: 0,
       run: async () => { runs += 1; },
@@ -1344,12 +1203,16 @@ describe("Session Coordinator worker", () => {
 
   it("WoC 空闲满 2 秒后触发 smart 任务；WoC 变忙会重新计时", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testReadyWorkerUnit("storage.coordinator-worker");
+    __testReadyWorkerUnit("vault.coordinator-worker");
+    __testReadyWorkerUnit("woc.coordinator-worker");
+    __testReadyWorkerUnit("p2pkh.coordinator-worker");
     __testSetSmartSyncDebounceMs(5);
     let runs = 0;
     __testRegisterTask({
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
-      publicKeyHex: "a".repeat(64),
+      publicKeyHex: __testGetActivePublicKeyHex()!,
       syncPolicy: "smart",
       run: async () => { runs += 1; },
     });
@@ -1377,12 +1240,16 @@ describe("Session Coordinator worker", () => {
 
   it("smart 任务完成后，若 WoC 空闲则重新开始计时", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testReadyWorkerUnit("storage.coordinator-worker");
+    __testReadyWorkerUnit("vault.coordinator-worker");
+    __testReadyWorkerUnit("woc.coordinator-worker");
+    __testReadyWorkerUnit("p2pkh.coordinator-worker");
     __testSetSmartSyncDebounceMs(60);
     let runs = 0;
     __testRegisterTask({
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
-      publicKeyHex: "a".repeat(64),
+      publicKeyHex: __testGetActivePublicKeyHex()!,
       syncPolicy: "smart",
       run: async () => { runs += 1; },
     });
@@ -1411,6 +1278,10 @@ describe("Session Coordinator worker", () => {
 
   it("锁定时 smart 任务完成不会重新挂起智能调度计时", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testReadyWorkerUnit("storage.coordinator-worker");
+    __testReadyWorkerUnit("vault.coordinator-worker");
+    __testReadyWorkerUnit("woc.coordinator-worker");
+    __testReadyWorkerUnit("p2pkh.coordinator-worker");
     __testSetSmartSyncDebounceMs(5);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -1418,7 +1289,7 @@ describe("Session Coordinator worker", () => {
     __testRegisterTask({
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
-      publicKeyHex: "a".repeat(64),
+      publicKeyHex: __testGetActivePublicKeyHex()!,
       syncPolicy: "smart",
       run: async () => { runs += 1; await gate; },
     });
@@ -1473,11 +1344,15 @@ describe("Session Coordinator worker", () => {
 
   it("解锁 / 初始化立即同步：smart 任务与未关闭的 managed 任务各跑一次", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testReadyWorkerUnit("storage.coordinator-worker");
+    __testReadyWorkerUnit("vault.coordinator-worker");
+    __testReadyWorkerUnit("woc.coordinator-worker");
+    __testReadyWorkerUnit("p2pkh.coordinator-worker");
     // 立即同步只跑一轮；把智能调度计时拉长，避免后台循环影响断言。
     __testSetSmartSyncDebounceMs(10_000);
     const runs = new Map<string, number>();
     const register = (id: string, pluginId: string, syncPolicy: "smart" | "managed", intervalMs?: number) => {
-      __testRegisterTask({ id, pluginId, publicKeyHex: "a".repeat(64), syncPolicy, intervalMs, run: async () => { runs.set(id, (runs.get(id) ?? 0) + 1); } });
+      __testRegisterTask({ id, pluginId, publicKeyHex: __testGetActivePublicKeyHex()!, syncPolicy, intervalMs, run: async () => { runs.set(id, (runs.get(id) ?? 0) + 1); } });
     };
     register("p2pkh.utxo-snapshot", "p2pkh", "smart");
     register("p2pkh.transactions-sync", "p2pkh", "managed", 60_000);
@@ -1488,50 +1363,6 @@ describe("Session Coordinator worker", () => {
     expect(runs.get("p2pkh.utxo-snapshot")).toBe(1);
     expect(runs.get("p2pkh.transactions-sync")).toBe(1);
     expect(runs.get("contacts.presence-probe")).toBeUndefined();
-  });
-
-  it("aborts P2PKH submissions when the broadcast provider is missing (not-dispatched)", async () => {
-    // P2PKH 文件按当前唯一 Key 归属：owner 必须是钱包真实身份，不能随手伪造。
-    const owner = validPublisherKey(7);
-    await bootstrapWalletOwnedBy(owner, 7, "p2pkh-missing-provider");
-    const submissionId = `stale-${Date.now()}`;
-    await __testSeedP2pkhLocalSubmission({
-      ownerPublicKeyHex: owner,
-      submission: { id: submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "ab".repeat(32), rawTxHex: "00", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: ["cd".repeat(32) + ":0"], ownOutputs: [], createdAt: "now", updatedAt: "now", attempts: [] },
-      claims: [{ id: `${submissionId}:claim`, submissionId, resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: "cd".repeat(32), vout: 0, value: 1, state: "active", createdAt: "now", updatedAt: "now" }]
-    });
-    // 禁用 woc 会从 registry 撤掉唯一的广播供应商，广播前无可用 provider。
-    __testSetP2pkhBroadcastProvider(undefined);
-    const portId = "p2pkh-missing-provider-port";
-    const messages: unknown[] = [];
-    __testAttachPort(portId, (message) => messages.push(message));
-    const submitIntent = async (desiredEnabled: boolean, commandId: string): Promise<void> => {
-      const snapshot = __testGetSnapshot();
-      await __testDispatchStorageMessage(portId, {
-        kind: "plugin.intent.submit",
-        clientId: portId,
-        requestId: commandId,
-        command: {
-          commandId,
-          authorityInstanceId: snapshot.authorityInstanceId,
-          expectedRevision: snapshot.pluginIntent?.revision ?? 0,
-          pluginId: "woc",
-          desiredEnabled,
-        },
-      });
-      expect([...messages].reverse().find((message) => (message as { requestId?: string }).requestId === commandId)).toMatchObject({
-        operationResult: { status: "accepted" },
-      });
-    };
-    await submitIntent(false, "p2pkh-missing-provider:disable");
-    try {
-      const response = await __testP2pkhBroadcast({ ownerPublicKeyHex: owner, network: "main", submissionId });
-      expect(response.operationResult).toMatchObject({ status: "not-dispatched", reason: "broadcast-provider-unavailable" });
-      expect((await __testListP2pkhLocalTransactions(owner)).some((row) => (row as { id?: string }).id === submissionId)).toBe(false);
-    } finally {
-      await submitIntent(true, "p2pkh-missing-provider:enable");
-      __testSetP2pkhBroadcastProvider(undefined);
-    }
   });
 
   it("isolates a submitting P2PKH submission when the broadcast provider fails", async () => {
@@ -1886,44 +1717,6 @@ describe("区块链高度同步与 chain.height 广播", () => {
     const response = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 9_000 } });
     expect(response.ack).toMatchObject({ status: "validation-error" });
   });
-
-  it("禁用 WOC 产品后链高度同步在入口处阻塞", async () => {
-    await bootstrapReadyWallet("chain-woc-blocked");
-    let reads = 0;
-    __testSetChainHeightProvider(async () => { reads += 1; return 900_300; });
-    await __testRegisterRealCoordinatorTasks();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    reads = 0;
-    // 已解锁钱包注册任务时 INIT 会先同步过一次高度。本用例断言的是「禁用后
-    // 入口阻塞」，必须先把内存读数清回无读数态，否则读到的是禁用前的结果。
-    __testResetChainHeight();
-
-    const messages: unknown[] = [];
-    __testAttachPort("chain-height-intent-port", (message) => messages.push(message));
-    const snapshot = __testGetSnapshot();
-    await __testDispatchStorageMessage("chain-height-intent-port", {
-      kind: "plugin.intent.submit",
-      clientId: "chain-height-intent-port",
-      requestId: "chain-height-intent-disable-woc",
-      command: {
-        commandId: "chain-height-intent:disable-woc",
-        authorityInstanceId: snapshot.authorityInstanceId,
-        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
-        pluginId: "woc",
-        desiredEnabled: false,
-      },
-    });
-    expect(messages.find((message) => (message as { requestId?: string }).requestId === "chain-height-intent-disable-woc"))
-      .toMatchObject({ operationResult: { status: "accepted" } });
-    expect(__testGetSnapshot().pluginIntent?.desiredEnabled.woc).toBe(false);
-    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === CHAIN_HEIGHT_SYNC_TASK_ID))
-      .toMatchObject({ state: "blocked", blockedReason: { fallback: "Plugin disabled: woc" } });
-
-    await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(reads).toBe(0);
-    expect(__testGetChainHeight().available).toBe(false);
-  });
 });
 
 describe("单 Key 冷启动与初始化门禁", () => {
@@ -2084,6 +1877,24 @@ describe("单 Key 重置后的授权生命周期", () => {
 
   afterEach(async () => {
     await __testResetWalletStore();
+  });
+
+  it("真实 Storage controller 的会话撤销会完成，不递归重入", async () => {
+    await initializeTestWallet({ label: "abort-session" });
+    const response = await __testDispatchStorageAbort("nonexistent-session", "port-storage-abort");
+    expect(response.ack.status).toBe("ok");
+    const summary = await dispatchStorageControl<{ walletGeneration?: string }>({ type: "summary" });
+    expect(summary.walletGeneration).toBeTruthy();
+  });
+
+  it("初始化与重新解锁后摘要保留当前钱包世代，供 Connect App 绑定", async () => {
+    const wallet = await initializeTestWallet({ label: "connect-summary" });
+    const initial = await dispatchStorageControl<{ walletGeneration?: string }>({ type: "summary" });
+    expect(initial.walletGeneration).toBe(wallet.walletGeneration);
+    await dispatchStorageControl({ type: "lock" });
+    await dispatchStorageControl({ type: "unlock", password: "test-wallet-password" });
+    const unlocked = await dispatchStorageControl<{ walletGeneration?: string }>({ type: "summary" });
+    expect(unlocked.walletGeneration).toBe(wallet.walletGeneration);
   });
 
   it("重置后回到未初始化，并产生新的钱包身份世代", async () => {
@@ -3066,48 +2877,6 @@ describe("单元可用性：ensure* 的结构化不可用契约", () => {
     await __testResetWalletStore();
   });
 
-  async function disableProduct(productId: string, portId: string): Promise<void> {
-    __testAttachPort(portId, () => undefined);
-    const snapshot = __testGetSnapshot();
-    const requestId = `${portId}:disable:${productId}`;
-    await __testDispatchStorageMessage(portId, {
-      kind: "plugin.intent.submit",
-      clientId: portId,
-      requestId,
-      command: {
-        commandId: requestId,
-        authorityInstanceId: snapshot.authorityInstanceId,
-        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
-        pluginId: productId,
-        desiredEnabled: false,
-      },
-    });
-    expect(__testGetSnapshot().pluginIntent?.desiredEnabled[productId]).toBe(false);
-  }
-
-  it("插件被停用时抛 CoordinatorUnitUnavailableError，reasons 逐条给出 code 与英文文案", async () => {
-    await initializeTestWallet({ label: "availability-key", password: "vault-pw" });
-    await __testUnlock("vault-pw");
-    // 用 p2pkh 而不是 sat-subscription：后者是系统必需产品，产品意图不允许关闭，
-    // 走「插件被停用」这条路构造不出来。
-    await disableProduct("p2pkh", "availability-port");
-
-    const error = await __testEnsureSatP2pkhService().then(() => undefined, (reason: unknown) => reason);
-    expect(isCoordinatorUnitUnavailableError(error)).toBe(true);
-    const reasons = (error as CoordinatorUnitUnavailableError).reasons;
-    expect(reasons).toHaveLength(1);
-    expect(reasons[0]).toMatchObject({
-      code: "plugin-disabled",
-      dependencyId: "p2pkh",
-    });
-    // 兜底文案必须是英文，且带稳定 key 供界面翻译。
-    expect(reasons[0]!.text).toEqual({
-      key: "coordinator.unitUnavailable.pluginDisabled",
-      fallback: "Plugin disabled: p2pkh",
-      values: { product: "p2pkh" },
-    });
-  });
-
   it("Vault 锁定时同样抛结构化错误，原因是 owner 会话不可用", async () => {
     await initializeTestWallet({ label: "availability-locked", password: "vault-pw" });
     await __testUnlock("vault-pw");
@@ -3129,18 +2898,24 @@ describe("单元可用性：ensure* 的结构化不可用契约", () => {
     // `await` 形式；通知式的 `reconcileCoordinatorRuntime()`（不等、只通知框架
     // 重判）是合法机制，`ensureStorageRuntime` 仍在用。
     const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
-    for (const name of ["ensureMsfileRuntime", "ensureSatRuntime", "ensureStorageRuntime", "ensureSatP2pkhService"]) {
+    for (const name of ["ensureMsfileRuntime", "ensureSatRuntime", "ensureStorageRuntime"]) {
       const body = extractFunctionBody(source, name);
       expect(body, `${name} 不得再 await reconcile 后祈祷就绪`).not.toContain("await reconcileCoordinatorRuntime()");
     }
   });
 
   it("能由构造前置条件判定的 ensure* 走统一判定", () => {
+    // P2PKH 的惰性实例已由插件拥有；可信装配注入统一判定，插件在每次
+    // 构造及异步恢复后调用该判定。检查装配与插件两端，防止搬迁后丢掉门禁。
+    const p2pkh = readFileSync(new URL("../../../packages/plugin-p2pkh/src/workerTransferRuntime.ts", import.meta.url), "utf8");
+    expect(p2pkh).toContain("deps.assertActive();");
+    const assembly = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
+    expect(assembly).toMatch(/createWorkerTransferRuntime\([\s\S]*?assertActive:[\s\S]*?assertCoordinatorUnitConstructible/);
     // storage 单元是例外且必须如此：构造前置条件里含「中央存储根已就绪」，而
     // ensureStorageRuntime 正是建立存储根的那一方，对它断言会自锁。因此这里
     // 只覆盖另外三个。
     const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
-    for (const name of ["ensureMsfileRuntime", "ensureSatRuntime", "ensureSatP2pkhService"]) {
+    for (const name of ["ensureMsfileRuntime", "ensureSatRuntime"]) {
       expect(extractFunctionBody(source, name), `${name} 必须走统一可用性判定`)
         .toContain("assertCoordinatorUnitConstructible");
     }
@@ -3160,27 +2935,6 @@ describe("单元可用性：对外单元名单的可见性", () => {
     await __testResetWalletStore();
   });
 
-  it("用户关掉本单元自己的产品时不进名单（那是选择，不是故障）", async () => {
-    await initializeTestWallet({ label: "units-visibility", password: "vault-pw" });
-    await __testUnlock("vault-pw");
-    __testAttachPort("units-visibility-port", () => undefined);
-    const snapshot = __testGetSnapshot();
-    await __testDispatchStorageMessage("units-visibility-port", {
-      kind: "plugin.intent.submit",
-      clientId: "units-visibility-port",
-      requestId: "units-visibility:disable",
-      command: {
-        commandId: "units-visibility:disable",
-        authorityInstanceId: snapshot.authorityInstanceId,
-        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
-        pluginId: "p2pkh",
-        desiredEnabled: false,
-      },
-    });
-    expect(__testGetSnapshot().pluginIntent?.desiredEnabled.p2pkh).toBe(false);
-    expect(__testGetSnapshot().coordinatorWorkerUnits?.some((unit) => unit.unitId === "p2pkh.coordinator-worker")).toBe(false);
-  });
-
   it("名单里的每一条都带 state 与 reasons，且契约校验接受缺省实例标识", async () => {
     await initializeTestWallet({ label: "units-shape", password: "vault-pw" });
     await __testUnlock("vault-pw");
@@ -3194,5 +2948,64 @@ describe("单元可用性：对外单元名单的可见性", () => {
       // 实例标识允许缺省：正在启动、或从未启动的单元还没有它。给了就必须合法。
       if (unit.instanceId !== undefined) expect(unit.instanceId.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// These tests run the production Worker setup, not the Window adapter's issuer.
+import { createPluginHost as createNativeWorkerHost } from "webloom-framework/advanced";
+import { type PluginContext as NativePluginContext } from "webloom-framework";
+import { VAULT_WALLET_STATE_CAPABILITY, type VaultWalletState } from "@keymaster/contracts";
+import { __testCoordinatorRuntimePlugin } from "./keymasterSessionCoordinator.worker.js";
+
+describe("正式 Worker setup 的钱包状态绑定", () => {
+  it("accepts its issued Worker consumer, rejects forged identities and cleans both instance boundaries", async () => {
+    __testResetState(); __testSetVaultStatus("unlocked", "02" + "ab".repeat(32));
+    const provider = __testCoordinatorRuntimePlugin("vault");
+    const consumer = __testCoordinatorRuntimePlugin("window-p2p");
+    let context!: NativePluginContext;
+    let view!: VaultWalletState;
+    const host = createNativeWorkerHost({ runtime: "shared-worker", runtimeUnitImplementationRegistry: { get: id => id === "vault" ? provider.setup : async ctx => {
+        await consumer.setup!(ctx);
+        context = ctx;
+        view = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
+      } } });
+    try {
+      await host.registerAll([provider.manifest, consumer.manifest]);
+      expect(host.state("window-p2p").kind).toBe("enabled");
+      expect(view.snapshot()).toMatchObject({ status: "unlocked", activePublicKeyHex: "02" + "ab".repeat(32) });
+      const access = context.capability(VAULT_WALLET_STATE_CAPABILITY);
+      expect(() => access.bind({ ...context.consumer }, context.scope)).toThrow(/issued/);
+      expect(() => access.bind(context.consumer, host.scope("vault")!)).toThrow(/issued/);
+      const received: string[] = [];
+      const off = view.subscribe(snapshot => received.push(snapshot.status));
+      // A pending task outlives its revoked owner Scope until its Promise settles.
+      // Snapshot generation must clear its identity without bypassing the view's guard.
+      const taskView = view;
+      __testRegisterTask({ id: "revoked-owner-projection", publicKeyHex: "02" + "ab".repeat(32), keyScope: () => ({ publicKeyHex: taskView.snapshot().activePublicKeyHex! }), run: async () => {} });
+      await host.revoke("window-p2p", "consumer removed");
+      expect(__testGetSnapshot().taskSnapshots.find(task => task.id === "revoked-owner-projection")?.keyScope).toBeUndefined();
+      expect((await __testLock()).ack.status).toBe("accepted");
+      expect(__testGetSnapshot().vaultStatus).toBe("locked");
+      __testSetVaultStatus("locked");
+      expect(received).toEqual(["unlocked"]);
+      expect(() => view.snapshot()).toThrow(); off(); off();
+      __testSetVaultStatus("unlocked", "02" + "ab".repeat(32));
+      await host.retry("window-p2p");
+      const current = view;
+      await host.revoke("vault", "provider removed");
+      expect(() => current.snapshot()).toThrow();
+      expect(() => current.subscribe(() => {})).toThrow();
+    } finally { await host.dispose(); __testResetState(); }
+  });
+
+  it("rejects the production setup when its wallet-state dependency is removed", async () => {
+    __testResetState(); __testSetVaultStatus("unlocked", "02" + "ab".repeat(32));
+    const consumer = __testCoordinatorRuntimePlugin("window-p2p");
+    const provider = __testCoordinatorRuntimePlugin("vault");
+    const host = createNativeWorkerHost({ runtime: "shared-worker", runtimeUnitImplementationRegistry: { get: id => id === "vault" ? provider.setup : consumer.setup } });
+    try {
+      await host.registerAll([provider.manifest, { ...consumer.manifest, units: consumer.manifest.units!.map(unit => ({ ...unit, dependencies: [] })) }]);
+      expect(host.state("window-p2p").kind).toBe("failed");
+    } finally { await host.dispose(); __testResetState(); }
   });
 });

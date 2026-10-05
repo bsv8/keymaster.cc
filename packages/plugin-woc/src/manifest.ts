@@ -1,5 +1,12 @@
+import { WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
+import { WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { WocSettingsBlock } from "./pages/WocSettingsPage.js";
+import { WocResourceProvider } from "./WocResourceContext.js";
+import { OWNED_RESOURCE_ACCESS_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-woc/src/manifest.ts
-// WOC 插件清单：注册 woc.service；设置区由 Web 装配层的 BSV 链页面承载。
+// WOC 插件清单：注册 woc.service；设置通过 Page 贡献给 Page 的 BSV 链页面。
 //
 // 设计缘由（硬切换 008 收尾）：
 //   - actor 必须挂到 runtime messageBus 才能与其它插件在同一总线上。
@@ -93,12 +100,7 @@ const wocPluginDefinition = {
   id: "woc",
   name: "WOC",
   description: "WhatsOnChain API 代理：唯一 WOC 入口、全局限流、优先级队列、429 backoff、多标签页协调。",
-  kind: "platform",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "platform",
+
   units: [{
     id: "woc.window",
     runtime: "window-main",
@@ -112,6 +114,9 @@ const wocPluginDefinition = {
       capabilityDescriptor(CHAIN_HEIGHT_READER_CAPABILITY),
     ],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY }, { capability: OWNED_RESOURCE_ACCESS_CAPABILITY },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: RUNTIME_MESSAGE_BUS, sourceRuntime: "window-main", reason: "注册 WOC actor handlers（target=woc）" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册链高度资源（跨标签同步）" },
     ]),
@@ -119,10 +124,11 @@ const wocPluginDefinition = {
     id: "woc.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
+    provides: [WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY],
   }],
   i18n: wocResources,
   async setup(ctx) {
-    const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
+    const coordinator = ctx.capability(WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as P2pkhCoordinatorControl | undefined;
     if (!coordinator) throw new Error("WOC Coordinator control is unavailable");
     ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
@@ -183,6 +189,15 @@ const wocPluginDefinition = {
       invalidation: "immediate"
     });
 
+    resources.register<WocConfig, readonly string[]>({ id: "woc.ui.config", scope: "global", key: () => ["woc.ui.config"],
+      load: async () => service.getConfig(), subscribe: (_args, _context, invalidate) => service.onConfigChange(invalidate), invalidation: "immediate" });
+    resources.register<import("@keymaster/contracts").WocQueueSnapshot, readonly string[]>({ id: "woc.ui.queue", scope: "global", key: () => ["woc.ui.queue"],
+      load: async () => service.getQueueSnapshot(), subscribe: (_args, _context, invalidate) => service.onQueueChange(invalidate), invalidation: "immediate" });
+    const reader = ctx.capability(OWNED_RESOURCE_ACCESS_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view.register({
+      id: "woc.settings", label: { key: "woc.settings.title", fallback: "WOC" }, kind: "settings-block", path: "/settings/bsv-chain", order: 20,
+      render: () => createElement(WocResourceProvider, { reader, children: createElement(WocSettingsBlock) }),
+    });
     return () => {
       // 硬切换 001：bridge 到 service.dispose()。
       // actor detach + 取消 messageBus handle 都在 dispose 内。

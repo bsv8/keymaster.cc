@@ -22,7 +22,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@keymaster/runtime", () => ({
-  useI18n: () => ({
+  usePluginI18n: () => ({
     t: (_key: string, options?: { defaultValue?: string }) => options?.defaultValue ?? ""
   }),
   usePluginHost: () => ({ resourceStore: { invalidate: vi.fn(() => { state.invalidated += 1; }) } }),
@@ -41,7 +41,7 @@ vi.mock("webloom-framework/react", () => ({
     if (key.id === SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY.id) return state.spi as unknown as T;
     throw new Error(`unexpected capability: ${key}`);
   },
-  useOptionalCapability: <T,>(key: { id?: string }): T => {
+  useOptionalPluginCapability: <T,>(key: { id?: string }): T => {
     if (key.id === SAT_SUBSCRIPTION_SERVICE_CAPABILITY.id) return state.admin as unknown as T;
     if (key.id === SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY.id) return state.spi as unknown as T;
     throw new Error(`unexpected capability: ${key}`);
@@ -307,7 +307,7 @@ describe("SatSubscriptionSettings", () => {
 
     // 下一页：透传 nextCursor，且必须复用同一 fromMs/toMs/limit（否则服务端拒收 cursor）。
     const nextButton = screen.getByRole("button", { name: "下一页" });
-    expect(nextButton.hasAttribute("disabled")).toBe(false);
+    expect(nextButton.hasAttribute("registered")).toBe(false);
     fireEvent.click(nextButton);
     await waitFor(() => expect(screen.getByTestId("ss-billing-record-supplier-a-charge-2")).toBeTruthy());
     expect(state.admin.getBilling).toHaveBeenCalledWith(expect.objectContaining({ cursor: "cursor-2", limit: 5 }));
@@ -319,7 +319,7 @@ describe("SatSubscriptionSettings", () => {
 
     // 上一页：回到首页游标并重新查询，仍复用同一会话时间范围。
     const prevButton = screen.getByRole("button", { name: "上一页" });
-    expect(prevButton.hasAttribute("disabled")).toBe(false);
+    expect(prevButton.hasAttribute("registered")).toBe(false);
     fireEvent.click(prevButton);
     await waitFor(() => expect(screen.getByTestId("ss-billing-record-supplier-a-charge-1")).toBeTruthy());
     const callsAfterPrev = billingCalls();
@@ -334,3 +334,5 @@ describe("SatSubscriptionSettings", () => {
     await waitFor(() => expect(state.admin.getBilling).toHaveBeenCalledWith(expect.objectContaining({ cursor: "", limit: 2 })));
   });
 });
+
+vi.mock("./SatResourceContext.js", () => ({ useSatResources: () => ({ invalidate: vi.fn(() => { state.invalidated += 1; }) }) }));

@@ -518,3 +518,8 @@
 }
 
 .storage-browse__marker-title { margin: 0; font-size: 12px; font-weight: 600; }
+
+.storage-activity { display: inline-flex; gap: 4px; align-items: center; padding: 0 4px; }
+.storage-activity__read, .storage-activity__write { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .2; }
+.storage-activity__read.is-active { background: #22c55e; opacity: 1; }
+.storage-activity__write.is-active { background: #f59e0b; opacity: 1; }

@@ -1,6 +1,6 @@
 import { TOKEN_REGISTRY_CAPABILITY, type BsvNetwork, type TokenRegistry, type TransferOffer, type TransferOfferStatus, type TransferProvider, type TransferWidgetProps } from "@keymaster/contracts";
-import { useCapability, useOptionalCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
+import { usePluginCapability, useOptionalPluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader, Select, TextInput } from "@keymaster/ui";
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { sha256 } from "@noble/hashes/sha256";
@@ -62,7 +62,7 @@ export function createBsv21TransferProvider(input: { tokenRegistry: TokenRegistr
  * 普通 BSV 范围时把代币转账能力从界面上删除。
  */
 export function Bsv21TransferPage() {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   const [network, setNetwork] = useState<BsvNetwork>("main");
   const offer: TransferOffer = {
     id: `bsv21.${network}`,
@@ -107,10 +107,10 @@ interface FormState {
 }
 
 function Bsv21TransferWidget(props: TransferWidgetProps) {
-  const { t } = useI18n();
+  const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由/弹窗组件在锁定瞬间仍可能
   // 完成一次渲染，必须按"暂不可用"降级而不是抛错。
-  const service = useOptionalCapability(BSV21_TRANSFER_SERVICE_CAPABILITY);
+  const service = useOptionalPluginCapability(BSV21_TRANSFER_SERVICE_CAPABILITY);
   if (!service) {
     return (
       <p className="bsv21-transfer-widget__unavailable">
@@ -127,8 +127,8 @@ function Bsv21TransferWidgetInner({
   recipientPublicKeyHex,
   service
   }: TransferWidgetProps & { service: Bsv21TransferService }) {
-  const { t } = useI18n();
-  const registry = useCapability(TOKEN_REGISTRY_CAPABILITY);
+  const { t } = usePluginI18n();
+  const registry = usePluginCapability(TOKEN_REGISTRY_CAPABILITY);
   const [tokens, setTokens] = useState<Array<{ tokenId: string; label: string; balance: string }>>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

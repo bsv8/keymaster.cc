@@ -1,3 +1,14 @@
+import { createPublicMsFileService } from "./publicMsFileService.js";
+import { setupMsFileUriActions } from "./setupUriActions.js";
+import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { WOC_WORKER_BROADCAST_CAPABILITY, WOC_CAPABILITY } from "@keymaster/contracts";
+import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindMsFileUi, MsFileResourceProvider } from "./MsFileResourceContext.js";
+import { OWNED_RESOURCE_ACCESS_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-msfile/src/manifest.ts
 // MSFile 插件清单：提供 `msfile.service`（页面侧 proxy）与设置菜单下的
 // /settings/local-files 本地文件页。设置真值、分 purpose K-V 与网络都在 Coordinator SharedWorker。
@@ -7,10 +18,9 @@ import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import {
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
-  type KeyspaceService,
-  KEYSPACE_SERVICE_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
+  type VaultWalletState,
+  VAULT_WALLET_STATE_CAPABILITY,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
   MSFILE_COORDINATOR_CONTROL_CAPABILITY,
@@ -765,48 +775,55 @@ const msfilePluginDefinition = {
   id: MSFILE_PLUGIN_ID,
   name: "MSFile",
   description: "MSFile Proxy V1 客户端能力：多供应商 Stat/Read、价格授权与供应商配置。",
-  kind: "platform",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
   // 默认加载只负责让设置入口和首页模块稳定出现；未配置全局金额或
   // 供应商时，组件仍在发起 Stat/Read 前 fail closed。
-  defaultEnabled: true,
-  canDisable: false,
-  displayGroup: "platform",
+
   units: [{
     id: "msfile.window",
     runtime: "window-main",
+    connect: { providerMethods: ["msfile.stat", "msfile.seed.read", "msfile.block.read"] },
     scopeKind: "owner-session",
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY],
     // 桶存储页面直接读写 `<owner>/msfiles/` 文件根（seeds/storage/meta）；
     // 句柄由 Host 绑定、真实 I/O 仍由 Coordinator Worker 执行。
     storages: [CENTRAL_STORAGE_DECLARATIONS.msfilesFiles],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
       { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, optional: true, reason: "BitFS 专款交易只通过 P2PKH 受控 signer 预签；P2PKH 未启用时买方准备保持不可用" },
       { capability: WEBRTC_SERVICE_CAPABILITY, optional: true, reason: "BitFS SDP DataChannel 复用用户当前 WebRTC STUN 配置" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册本地文件设置页面包屑" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册首页文件获取投影和本地文件设置入口" },
-      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
-      { capability: VAULT_SERVICE_CAPABILITY, reason: "首页文件读取只允许在 Vault unlocked 时进行" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取所属实例资源" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 MSFile resources" },
-      { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 MSFile 文件入口" },
+      { capability: URI_ACTION_REGISTRY_CAPABILITY, optional: true, reason: "注册 MSFile Seed URI 内部文件 UI" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 MSFile 文件入口" },
     ]),
   }, {
     id: "msfile.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
-    // 设置与供应商是 `<owner>/msfiles/setting.json`；App 覆盖额度按 publisher
-    // 打开 `<owner>/app.<publisher>/settings.json`（绑定需要 publisher，不能
-    // 通过 filesFor(purposeId) 预绑定，因此不出现在这里）。
+    // 文件设置与协议证据归 MSFile；App 管理设置使用既有平台 purpose。
     storages: [
       CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,
       CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,
+      CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles,
     ],
+    provides: [MSFILE_SERVICE_CAPABILITY],
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件设置、协议证据与 App 管理设置的受限句柄" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件服务所属钱包身份" },
+      { capability: SAT_SUBSCRIPTION_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", reason: "卖方与 Channel 服务依赖同一供应商运行态" },
+      { capability: WOC_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "BitFS 资金恢复查询；缺席时文件设置仍可用" },
+      { capability: WOC_WORKER_BROADCAST_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "BitFS exact outbox 广播；缺席时不得派发" },
+    ]),
   }],
   i18n: resources,
   setup(ctx: PluginContext) {
-    const coordinator = ctx.coordinator as MsFileCoordinatorControl | undefined;
+    const coordinator = ctx.capability(MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as MsFileCoordinatorControl | undefined;
     if (!coordinator) throw new Error("MSFile Coordinator control is unavailable");
     ctx.provide(MSFILE_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
@@ -819,13 +836,16 @@ const msfilePluginDefinition = {
       () => webRtcService?.getStunServers?.() ?? ["stun:stun.l.google.com:19302"],
     ));
     const service = new MsFileServiceProxy(coordinator);
-    ctx.provide(MSFILE_SERVICE_CAPABILITY, service);
+    ctx.provide(MSFILE_SERVICE_CAPABILITY, createPublicMsFileService(service, () => ctx.scope.assertActive()));
     // 桶存储服务复用同一 owner 文件根；MasterSeed 算法来自官方 SDK。
     // 块写入经 Coordinator 直写，避免页面 storage 数据面的端口并发上限。
-    const bucketService = createMsFileBucketService({ store: ctx.filesFor(""), coordinator });
+    const bucketService = createMsFileBucketService({ store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""), coordinator });
     ctx.provide(MSFILE_BUCKET_SERVICE_CAPABILITY, bucketService);
 
     const resources_ = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
+    const walletStateForUi = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    resources_.register({ id: "msfile.ui.vault-status", scope: "global", key: () => ["msfile.ui.vault-status"],
+      load: async () => walletStateForUi.snapshot().status, subscribe: (_args, _context, invalidate) => walletStateForUi.subscribe(invalidate), invalidation: "immediate" });
     registerMsFileMediaResource(resources_, service);
     const resourceId = "msfile.status";
     resources_.register<
@@ -881,20 +901,19 @@ const msfilePluginDefinition = {
     // Resource Store 会在 active key 切换时销毁旧记录并取消其加载。
     const lifecycleResourceId = "msfile.home.lifecycle";
     resources_.register<
-      { activePublicKeyHex?: string; generation?: number },
+      import("@keymaster/contracts").VaultLifecycleSnapshot,
       readonly string[]
     >({
       id: lifecycleResourceId,
       scope: "active-key",
       key: (_args, context) => [lifecycleResourceId, context.activePublicKeyHex ?? "none"],
       load: async (_args, context) => {
-        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-        const active = keyspace?.active();
-        return { activePublicKeyHex: active?.activePublicKeyHex, generation: active?.generation };
+        const walletState = walletStateForUi;
+        return walletState.snapshot();
       },
       subscribe: (_args, context, invalidate) => {
-        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-        return keyspace?.onActiveKeyChanged(() => invalidate()) ?? (() => undefined);
+        const walletState = walletStateForUi;
+        return walletState.subscribe(() => invalidate());
       },
       invalidation: "immediate"
     });
@@ -902,28 +921,35 @@ const msfilePluginDefinition = {
     // business.registry 支持在 home 域尚未加载时追加入口；home 插件加载后
     // 会自动显示这个投影。entry 同时是该业务特征的正式页面入口，便于
     // 用户从侧栏或直接访问 /msfile/files；首页模块复用同一个组件和状态机。
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    const reader = ctx.capability(OWNED_RESOURCE_ACCESS_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    setupMsFileUriActions(ctx);
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const entryRouteId = "msfile.home.file";
-    routes.register({
+    pages.view.register({
       id: entryRouteId,
       path: "/msfile/files",
       label: { key: "msfile.home.title", fallback: "Get a file by Seed" },
-      component: MsFileHomeFileWidget,
+      kind: "page",
+      render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileHomeFileWidget) }),
     });
     const bucketRouteId = "msfile.bucket.storage";
-    routes.register({
+    pages.view.register({
       id: bucketRouteId,
       path: "/msfile/storage",
       label: { key: "msfile.bucket.title", fallback: "Bucket storage files" },
-      component: MsFileBucketPage,
+      kind: "page",
+      render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileBucketPage) }),
     });
     const settingsRouteId = "msfile.settings";
-    routes.register({
+    pages.view.register({
       id: settingsRouteId,
       path: "/settings/local-files",
       label: { key: "msfile.settings.menu", fallback: "Local files" },
-      component: MsFileSettings,
+      kind: "page",
+      render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileSettings) }),
     });
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(bindMsFileUi(ctx, MsFileHomeFileWidget)) });
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(bindMsFileUi(ctx, MsFileBucketHomeWidget)) });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
       id: "home.msfile-file",
@@ -935,13 +961,6 @@ const msfilePluginDefinition = {
         routeId: entryRouteId,
         visibleWhen: ({ unlocked }) => unlocked
       },
-      home: [{
-        id: "msfile.file-fetch",
-        space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 },
-        order: 10,
-        component: MsFileHomeFileWidget,
-        visibleWhen: ({ unlocked }) => unlocked
-      }]
     });
     // 桶存储文件：正式页面入口 `/msfile/storage`，首页 MSFile 空间复用同一组件。
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
@@ -954,14 +973,6 @@ const msfilePluginDefinition = {
         routeId: bucketRouteId,
         visibleWhen: ({ unlocked }) => unlocked
       },
-      home: [{
-        id: "msfile.bucket-storage",
-        space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 },
-        order: 20,
-        // 首页入口默认折叠，不读取桶；点开才加载 meta 列表。
-        component: MsFileBucketHomeWidget,
-        visibleWhen: ({ unlocked }) => unlocked
-      }]
     });
 
     business.registerFeature(MSFILE_PLUGIN_ID, "settings", {

@@ -1,3 +1,8 @@
+import { P2PKH_ASSET_READER_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { bindOrdinalUi } from "./bindOrdinalUi.js";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-collectible-1satordinals/src/manifest.ts
 // plugin-collectible-1satordinals 清单：注册 1Sat Ordinals CollectibleProvider。
 //
@@ -6,7 +11,7 @@
 //     的 BSV 地址未花费 UTXO 集合；plugin-p2pkh 内部维护 UTXO 真值。
 //   - woc.1satordinals.service：按 outpoint 反查 inscription 的入口。
 //   - collectible.registry：注册 1Sat CollectibleProvider。
-//   - keyspace.service：拿当前 active key。
+//   - vault.wallet-state：拿当前 active key。
 //
 // 缺失依赖时 plugin 被 host 标为 blocked。
 
@@ -17,7 +22,7 @@ import type {
   BusinessFeatureRegistry,
   CollectibleRegistry,
   I18nPluginResources,
-  KeyspaceService,
+  VaultWalletState,
   PluginManifest,
   PluginSetup,
   ProtectedOutpointRegistry,
@@ -32,11 +37,10 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   BACKGROUND_TRIGGER_REASON,
-  KEYSPACE_SERVICE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
   COLLECTIBLE_REGISTRY_CAPABILITY,
   COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
-  ROUTE_REGISTRY_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
@@ -144,12 +148,7 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
   id: "collectible-1satordinals",
   name: "1Sat Ordinals",
   description: "1Sat Ordinals collectible provider：通过当前 active key 的 P2PKH 未花费 UTXO 反查 WOC 1Sat endpoint，把命中的 outpoint 注入 collectible.registry。",
-  kind: "business",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: true,
-  displayGroup: "business",
+
   units: [
     {
       id: "collectible-1satordinals.window",
@@ -158,19 +157,21 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
       provides: [ORDINAL_MINT_SERVICE_CAPABILITY, ORDINAL_TRANSFER_SERVICE_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory,
       dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: WOC_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
         { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的未花费 UTXO 集合" },
         { capability: WOC_1SAT_ORDINALS_CAPABILITY, reason: "按 outpoint 反查 1Sat inscription" },
-        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "监听 active key 变化" },
         { capability: COLLECTIBLE_REGISTRY_CAPABILITY, reason: "注册 1Sat CollectibleProvider" },
         { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册 1Sat 后台同步任务" },
         { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发 1Sat 即时同步" },
-        { capability: VAULT_SERVICE_CAPABILITY, reason: "1Sat sync task canRun 门禁" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
         { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布 1Sat 数据变更通知" },
         { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "注册 1Sat 受保护 outpoint" },
         { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, reason: "签名 1Sat mint / transfer 交易" },
         { capability: COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY, reason: "注册 1Sat collectible transfer handler" },
-        { capability: ROUTE_REGISTRY_CAPABILITY, reason: "注册 1Sat 创建页" },
+        { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 1Sat 创建页" },
         { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册 1Sat 业务入口" },
       ]),
     },
@@ -178,6 +179,9 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
       id: "collectible-1satordinals.coordinator-worker",
       runtime: "shared-worker",
       scopeKind: "owner-session",
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: VAULT_WALLET_STATE_CAPABILITY }, { capability: P2PKH_ASSET_READER_CAPABILITY }, { capability: WOC_1SAT_ORDINALS_CAPABILITY }, { capability: WOC_CAPABILITY },
+      ], "shared-worker"),
     },
   ],
   i18n: oneSatResources,
@@ -185,41 +189,42 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
     const p2pkh = ctx.capability(P2PKH_CAPABILITY);
     const wocOneSat = ctx.capability(WOC_1SAT_ORDINALS_CAPABILITY);
     const woc = ctx.capability(WOC_CAPABILITY);
-    const keyspace = ctx.capability(KEYSPACE_SERVICE_CAPABILITY);
+    const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const collectibleRegistry = ctx.capability(COLLECTIBLE_REGISTRY_CAPABILITY);
     const backgroundRegistry = ctx.capability(BACKGROUND_REGISTRY_CAPABILITY);
     const backgroundService = ctx.capability(BACKGROUND_SERVICE_CAPABILITY);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const assetDataNotifier = ctx.capability(ASSET_DATA_NOTIFIER_CAPABILITY);
-    const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
+    const vault = { status: () => walletState.snapshot().status };
     const protectedOutpoints = ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
     const protocolSpend = ctx.capability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
     const collectibleTransferRegistry = ctx.capability(COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY);
-    const routes = ctx.capability(ROUTE_REGISTRY_CAPABILITY);
+    const OwnedOrdinalMintPage = bindOrdinalUi(ctx, OrdinalMintPage);
+    const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
 
-    const service = createOrdinalsService({ keyspace, p2pkh, wocOneSat });
+    const service = createOrdinalsService({ walletState, p2pkh, wocOneSat });
     const provider = createOrdinalsCollectibleProvider({ service });
     const spendProtection = createOrdinalsSpendProtectionProvider({ service });
-    const historyRepository = createOrdinalMintHistoryRepository(ctx.storageFor("mint-history"));
-    const syncTask = createOrdinalsSyncTask({ service, woc, historyRepository, keyspace, vault, assetDataNotifier });
+    const historyRepository = createOrdinalMintHistoryRepository(ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "mint-history"));
+    const syncTask = createOrdinalsSyncTask({ service, woc, historyRepository, walletState, vault, assetDataNotifier });
     const mintService = createOrdinalMintService({
       p2pkh,
       protocolSpend,
-      getActiveOwnerPublicKeyHex: () => keyspace.active().activePublicKeyHex,
+      getActiveOwnerPublicKeyHex: () => walletState.snapshot().activePublicKeyHex,
       historyRepository
     });
     const transferService = createOrdinalTransferService({
       ordinals: service,
       p2pkh,
       protocolSpend,
-      getActiveOwnerPublicKeyHex: () => keyspace.active().activePublicKeyHex
+      getActiveOwnerPublicKeyHex: () => walletState.snapshot().activePublicKeyHex
     });
     const transferHandler = createOrdinalTransferHandler();
     collectibleRegistry.register(provider);
     backgroundRegistry.register(syncTask);
     protectedOutpoints.register(spendProtection);
-    collectibleTransferRegistry.register(transferHandler);
+    collectibleTransferRegistry.register({ ...transferHandler, component: bindOrdinalUi(ctx, transferHandler.component) });
     ctx.provide(ORDINAL_MINT_SERVICE_CAPABILITY, mintService);
     ctx.provide(ORDINAL_TRANSFER_SERVICE_CAPABILITY, transferService);
 
@@ -227,7 +232,7 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
       backgroundService.trigger("collectible-1satordinals.sync", reason);
     }
 
-    const offActiveChange = keyspace.onActiveKeyChanged(() => {
+    const offActiveChange = walletState.subscribe(() => {
       // 不直接触发：由 P2PKH resource-ready 统一驱动。
     });
 
@@ -238,7 +243,7 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
     const offP2pkhResource = assetDataNotifier.subscribe((event) => {
       if (event.providerId !== "p2pkh") return;
       if (!event.kinds.includes("resource")) return;
-      const activeHex = keyspace.active().activePublicKeyHex;
+      const activeHex = walletState.snapshot().activePublicKeyHex;
       if (!activeHex || event.publicKeyHex !== activeHex) return;
       triggerSync(BACKGROUND_TRIGGER_REASON.FIRST_SYNC);
     });
@@ -247,11 +252,11 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
       triggerSync("settings-change");
     });
 
-    routes.register({
+    pages.register({ kind: "page",
       id: "oneSat.mint",
       path: "/collectibles/1satordinals/mint",
       label: { key: "oneSat.route.mint", fallback: "Create 1Sat Ordinal" },
-      component: OrdinalMintPage
+      render: () => createElement(OwnedOrdinalMintPage)
     });
 
     business.registerFeature("collectible-1satordinals", "assets", {
@@ -271,7 +276,6 @@ const oneSatOrdinalsCollectiblePluginDefinition = {
       offUnlocked();
       offP2pkhResource();
       offSettingsChange?.();
-      protectedOutpoints.unregisterByOwner("collectible-1satordinals");
       service.dispose();
       void service;
       void provider;

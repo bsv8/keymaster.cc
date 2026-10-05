@@ -13,10 +13,9 @@
 //   - `address` 与 `network` 只是兼容展示字段，不是身份真值；业务插件需要
 //     地址时从 P2PKH resource 派生，网络由具体 plugin / resource 持有。
 
-import { defineCapability } from "webloom-framework";
+import { defineCapability, type LifecycleScope, type PluginConsumer } from "webloom-framework";
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
 import type { CoordinatorCommandResult } from "./sessionCoordinator.js";
-import type { WalletInitializePlan, WalletKeySummary } from "./storage/wallet.js";
 
 export type BsvNetwork = "main" | "test";
 
@@ -68,7 +67,16 @@ export const VAULT_SERVICE_CAPABILITY = defineCapability<VaultService>({
  */
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
+export interface KeyIdentity {
+  publicKeyHex: string;
+  label: string;
+  capabilities: string[];
+  createdAt: string;
+}
+
 export interface VaultLifecycleSnapshot {
+  /** 已解锁 Key 的公开元数据；与公钥同一提交点，锁定时省略。 */
+  activeKeyIdentity?: KeyIdentity;
   status: VaultStatus;
   /** 唯一钱包 Key 的公钥；未初始化或锁定时省略。 */
   activePublicKeyHex?: string;
@@ -112,60 +120,27 @@ export interface VaultLocalSecretService {
  *
  * 这是单 Key 产品的唯一钱包入口：没有 Key 列表、没有 `getKey`、没有
  * `deleteKey`、没有备份导入导出、没有 active 切换。替换身份只能走
- * `resetWallet` 之后的重新创建或导入。
+ * Vault 内部重置 UI 之后的重新创建或导入。
  */
 export interface VaultService {
   /** 当前状态。 */
   status(): VaultStatus;
-  /** 订阅状态变化，返回取消订阅函数。 */
-  onLifecycleChange(handler: (snapshot: VaultLifecycleSnapshot) => void): () => void;
-  /** 当前 session 快照；无 session 时返回 null。 */
-  getLifecycleSnapshot(): VaultLifecycleSnapshot;
 
   /**
    * 唯一钱包 Key 的公开信息；未初始化或尚未解密时返回 undefined。
    *
    * 不存在 `listKeys` / `getKey`：系统里只有一把 Key，调用方按
-   * `getLifecycleSnapshot().activePublicKeyHex` 或本方法取公开信息即可。
+   * 只读钱包状态能力 或本方法取公开信息即可。
    */
   getCurrentKey(): Promise<KeyRef | undefined>;
 
   /** 本 Origin 是否已有钱包 Key（无论锁定与否）。 */
   hasVault(): Promise<boolean>;
 
-  /**
-   * 创建或导入唯一钱包 Key。
-   *
-   * 这是唯一的初始化入口，取代旧的多步 `createVault` +
-   * `createVaultWithInitialKey` / `createVaultWithImportedKey`。KeyHold、
-   * `.keymaster/meta` 与必要初始系统数据在同一个 IndexedDB 事务内提交；
-   * 只有事务完成才报告成功，取消或失败不留下半成品。
-   *
-   * 已有 Key 的钱包必须 fail closed：调用方要更换身份必须先 `resetWallet`。
-   */
-  initialize(plan: WalletInitializePlan): Promise<WalletKeySummary>;
-
   /** 用 Key 密码解锁唯一 Key。 */
   unlock(password: string): Promise<CoordinatorCommandResult>;
   /** 锁定，丢弃内存中的明文并撤销所有授权。 */
   lock(): Promise<CoordinatorCommandResult>;
-  /**
-   * 修改 Key 密码。
-   *
-   * 成功后旧密码立即失效，会话世代变化，Vault 保持可用状态；失败必须保持
-   * 旧数据可用，不写入半成品记录。
-   */
-  changePassword(input: { oldPassword: string; newPassword: string }): Promise<void>;
-  /** 只修改唯一 Key 的显示名称。 */
-  renameKey(label: string): Promise<void>;
-  /**
-   * 原样导出加密 KeyHold 文档。
-   *
-   * 这**不是**完整钱包备份：它只含 `key.json`，不含联系人、消息、设置等
-   * 本地业务数据。导出内容保持既有加密格式与密码学实现。
-   */
-  exportKeyHold(): Promise<Uint8Array>;
-
   /**
    * 校验 Key 密码，不改变 Vault 状态。
    *
@@ -173,16 +148,6 @@ export interface VaultService {
    * 一套密码校验逻辑。未初始化状态必须 fail closed。
    */
   verifyPassword(password: string): Promise<void>;
-
-  /**
-   * 重置钱包：明确告知会删除当前 Key 和新结构中的全部本地钱包数据。
-   *
-   * 先撤销会话、grant 与任务权限，再原子清空钱包数据；失败不报告完成，旧
-   * 授权也不因失败自动恢复。成功后回到 `uninitialized`。
-   *
-   * 这不撤销链上交易或服务端已经接受的操作。
-   */
-  resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }>;
 
   /** 硬切换 001：宿主 teardown 时调用。幂等：可重复调用；可容忍部分资源已清。 */
   dispose?(): void;
@@ -204,4 +169,29 @@ export interface VaultService {
   disposeAppViewSession(sessionId: string, reason?: string): void;
   /** 销毁全部 appView session。 */
   disposeAllAppViewSessions(reason?: string): void;
+}
+
+
+/** 只读已提交的钱包状态，不授予签名或存储权限。 */
+export interface VaultWalletState {
+  snapshot(): Readonly<VaultLifecycleSnapshot>;
+  /** 同步交付基线；之后交付变化。退订幂等且撤权后仍可调用。 */
+  subscribe(handler: (snapshot: Readonly<VaultLifecycleSnapshot>) => void): () => void;
+}
+export interface VaultWalletStateAccess {
+  bind(consumer: PluginConsumer, scope: LifecycleScope): VaultWalletState;
+}
+export const VAULT_WALLET_STATE_CAPABILITY = defineCapability<VaultWalletStateAccess>({ kind: "local", id: "vault.wallet-state", version: "1" });
+
+/** 身份读取不是授权；操作还必须使用 Vault/Storage 发放的句柄。 */
+export function requireUnlockedWalletIdentity(snapshot: Readonly<VaultLifecycleSnapshot>): KeyIdentity {
+  if (snapshot.status !== "unlocked" || !snapshot.activePublicKeyHex) throw new Error("Active key is unavailable");
+  const identity = snapshot.activeKeyIdentity;
+  return identity ? { ...identity, capabilities: [...identity.capabilities] }
+    : { publicKeyHex: snapshot.activePublicKeyHex, label: "", capabilities: [], createdAt: "" };
+}
+/** 同一公钥再次解锁、Worker 重启、钱包重置都属于不同会话。 */
+export function sameWalletSession(a: Readonly<VaultLifecycleSnapshot>, b: Readonly<VaultLifecycleSnapshot>): boolean {
+  return a.status === b.status && a.activePublicKeyHex === b.activePublicKeyHex
+    && a.sessionEpoch === b.sessionEpoch && a.runGeneration === b.runGeneration && a.walletGeneration === b.walletGeneration;
 }

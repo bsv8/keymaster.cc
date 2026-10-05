@@ -19,6 +19,8 @@ export interface RuntimeIdentityTransition {
   ownerPublicKeyHex?: string | null;
   /** 当前会话世代；unlock、lock、切 Key、Worker 接管都会变化。 */
   sessionEpoch: string;
+  /** Worker 运行世代；重启时重建依赖身份的实例。 */
+  runGeneration?: string;
   /** 当前钱包身份世代；重置或初始化后变化，此时重建 storage Scope 绑定实例。 */
   walletGeneration?: string;
 }

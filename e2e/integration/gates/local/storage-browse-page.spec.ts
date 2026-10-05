@@ -49,6 +49,12 @@ test(JOURNEY_ID + "：解锁后存储浏览页经真实 Worker 列出目录", as
     await test.step("打开存储浏览页并离开加载态", async () => {
       await openUnlockedStorageBrowse(page, password);
       await expect(page.locator(".storage-browse-page")).toBeVisible({ timeout: 60_000 });
+      // 同一路径的设置块及 header 由 page 以 Storage consumer 挂载；page 未声明 i18n，
+      // 若把布局 consumer 传给内容，这三类真实 UI 会在能力解析时失败。
+      await expect(page.getByRole("heading", { name: /^Local storage$|^本地存储$/u })).toBeVisible();
+      if (!(await page.evaluate(() => navigator.storage.persisted()))) {
+        await expect(page.getByTestId("indexeddb-persistence-bar")).toBeVisible();
+      }
 
       // 根目录一定至少列出钱包自己的对象。空态与加载态必须能区分开。
       await expect(page.locator(".storage-browse__list")).toBeVisible({ timeout: 60_000 });

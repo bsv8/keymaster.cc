@@ -28,8 +28,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "@keymaster/ui";
-import { useCapability } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
+import { usePluginCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
 import {
   PROTOCOL_SERVICE_CAPABILITY,
   type ProtocolOriginSettingsRecord,
@@ -98,8 +98,8 @@ function normalizeConfirmTimeoutSeconds(raw: string): { display: string; value: 
 }
 
 export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTrayInlineProps) {
-  const service = useCapability(PROTOCOL_SERVICE_CAPABILITY);
-  const { t } = useI18n();
+  const service = usePluginCapability(PROTOCOL_SERVICE_CAPABILITY);
+  const { t } = usePluginI18n();
   /**
    * `record` 是当前已持久化真值。所有"显示真值"与"失败回滚目标"都走它。
    * `null` 表示初始 getOriginSettings 还没回来。

@@ -102,7 +102,7 @@ function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
 }
 
 export class MsFileServiceProxy implements MsFileService {
-  private current: StateEvent = {
+  #current: StateEvent = {
     topic: "msfile.state",
     sessionEpoch: "boot",
     status: "unavailable",
@@ -113,18 +113,20 @@ export class MsFileServiceProxy implements MsFileService {
     sellerRuntimeStatus: "disabled",
     pendingApprovals: [],
   };
-  private readonly listeners = new Set<() => void>();
-  private readonly grants = new Map<string, Promise<string>>();
-  private readonly statCache = new Map<string, CachedStatResult>();
-  private readonly unsubscribeState: () => void;
+  readonly #listeners = new Set<() => void>();
+  readonly #grants = new Map<string, Promise<string>>();
+  readonly #statCache = new Map<string, CachedStatResult>();
+  readonly #unsubscribeState: () => void;
 
-  constructor(private readonly coordinator: MsFileCoordinatorControl) {
-    this.unsubscribeState = coordinator.subscribeTopic("msfile.state", (event: StateEvent) => {
-      if (event.sessionEpoch !== this.current.sessionEpoch) {
-        this.grants.clear();
-        this.statCache.clear();
+  readonly #coordinator: MsFileCoordinatorControl;
+  constructor(coordinator: MsFileCoordinatorControl) {
+    this.#coordinator = coordinator;
+    this.#unsubscribeState = coordinator.subscribeTopic("msfile.state", (event: StateEvent) => {
+      if (event.sessionEpoch !== this.#current.sessionEpoch) {
+        this.#grants.clear();
+        this.#statCache.clear();
       }
-      if (event.supplierGeneration !== this.current.supplierGeneration) this.statCache.clear();
+      if (event.supplierGeneration !== this.#current.supplierGeneration) this.#statCache.clear();
       // 兼容旧 Worker 的 baseline：四项并发设置必须以完整快照进入页面。
       const concurrency = normalizeMsFileReadConcurrencySettings(event)
         ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
@@ -136,32 +138,32 @@ export class MsFileServiceProxy implements MsFileService {
         sellerSettings: event.sellerSettings ?? { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
         sellerRuntimeStatus: event.sellerRuntimeStatus ?? "disabled",
       };
-      const changed = !isSameStateEvent(this.current, next);
-      this.current = next;
+      const changed = !isSameStateEvent(this.#current, next);
+      this.#current = next;
       // 变更驱动：内容相同的重复事件不得让资源订阅者失效回读。
       if (changed) {
-        for (const listener of this.listeners) listener();
+        for (const listener of this.#listeners) listener();
       }
     });
   }
 
   status(): MsFileServiceStatus {
-    return this.current.status;
+    return this.#current.status;
   }
 
   subscribe(listener: () => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
   }
 
   dispose(): void {
-    this.unsubscribeState();
-    this.listeners.clear();
-    this.statCache.clear();
+    this.#unsubscribeState();
+    this.#listeners.clear();
+    this.#statCache.clear();
   }
 
-  private control<T>(control: CoordinatorMsFileControl): Promise<T> {
-    return this.coordinator.msfileControl(control).then((result) => unwrap<T>(result));
+  #control<T>(control: CoordinatorMsFileControl): Promise<T> {
+    return this.#coordinator.msfileControl(control).then((result) => unwrap<T>(result));
   }
 
   /**
@@ -170,12 +172,12 @@ export class MsFileServiceProxy implements MsFileService {
    * 快照后，代理必须立即反映同一份权威配置，不能依赖恰好到达的 topic
    * 事件来决定页面是否可用。
    */
-  private applySettingsSnapshot(snapshot: MsFileSettingsSnapshot): void {
+  #applySettingsSnapshot(snapshot: MsFileSettingsSnapshot): void {
     const status: MsFileServiceStatus = snapshot.globalSettings || snapshot.suppliers.length > 0
       ? "ready"
       : "unconfigured";
     const next: StateEvent = {
-      ...this.current,
+      ...this.#current,
       status,
       supplierGeneration: snapshot.supplierGeneration,
       globalSettings: snapshot.globalSettings,
@@ -186,29 +188,29 @@ export class MsFileServiceProxy implements MsFileService {
       sellerSettings: snapshot.sellerSettings,
       sellerRuntimeStatus: snapshot.sellerRuntimeStatus,
     };
-    const changed = !isSameStateEvent(this.current, next);
-    this.current = next;
+    const changed = !isSameStateEvent(this.#current, next);
+    this.#current = next;
     if (changed) {
-      for (const listener of this.listeners) listener();
+      for (const listener of this.#listeners) listener();
     }
   }
 
-  private grantFor(ctx: MsFileConnectAppContext): Promise<string> {
+  #grantFor(ctx: MsFileConnectAppContext): Promise<string> {
     const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
-    const existing = this.grants.get(key);
+    const existing = this.#grants.get(key);
     if (existing) return existing;
-    const pending = this.coordinator
+    const pending = this.#coordinator
       .msfileGrant(ctx)
       .then((result) => unwrap<string>(result))
       .catch((error) => {
-        this.grants.delete(key);
+        this.#grants.delete(key);
         throw error;
       });
-    this.grants.set(key, pending);
+    this.#grants.set(key, pending);
     return pending;
   }
 
-  private async dataFor<T>(
+  async #dataFor<T>(
     ctx: MsFileConnectAppContext | null,
     build: (grantId?: string) => CoordinatorMsFileData,
     transfer: ArrayBuffer[] = [],
@@ -217,29 +219,29 @@ export class MsFileServiceProxy implements MsFileService {
     if (signal?.aborted) throw new MsFileServiceError("msfile_unavailable");
     if (ctx === null) {
       // 受信任内部插件：无 grant，直接走数据面（worker 只按全局额度执行）。
-      return this.coordinator.msfileData(build(undefined), transfer, signal).then((result) => unwrap<T>(result));
+      return this.#coordinator.msfileData(build(undefined), transfer, signal).then((result) => unwrap<T>(result));
     }
-    const grantId = await this.grantFor(ctx);
+    const grantId = await this.#grantFor(ctx);
     if (signal?.aborted) throw new MsFileServiceError("msfile_unavailable");
-    return this.coordinator.msfileData(build(grantId), transfer, signal).then((result) => unwrap<T>(result));
+    return this.#coordinator.msfileData(build(grantId), transfer, signal).then((result) => unwrap<T>(result));
   }
 
   async getSettingsSnapshot(): Promise<MsFileSettingsSnapshot> {
-    const snapshot = await this.control<MsFileSettingsSnapshot>({ type: "settings.get" });
-    this.applySettingsSnapshot(snapshot);
+    const snapshot = await this.#control<MsFileSettingsSnapshot>({ type: "settings.get" });
+    this.#applySettingsSnapshot(snapshot);
     return snapshot;
   }
 
   getReadConcurrencySettings(): Promise<MsFileReadConcurrencySettings> {
-    return this.control<MsFileReadConcurrencySettings>({ type: "settings.readConcurrency.get" });
+    return this.#control<MsFileReadConcurrencySettings>({ type: "settings.readConcurrency.get" });
   }
 
   updateReadConcurrencySettings(input: MsFileReadConcurrencySettings): Promise<void> {
-    return this.control({ type: "settings.readConcurrency.update", input }).then(() => undefined);
+    return this.#control({ type: "settings.readConcurrency.update", input }).then(() => undefined);
   }
 
   resetReadConcurrencySettings(): Promise<void> {
-    return this.control({ type: "settings.readConcurrency.reset" }).then(() => undefined);
+    return this.#control({ type: "settings.readConcurrency.reset" }).then(() => undefined);
   }
 
   getMediaBlockReadConcurrency(): Promise<number> {
@@ -247,21 +249,21 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
-    return this.control({ type: "settings.global.update", input }).then(() => undefined);
+    return this.#control({ type: "settings.global.update", input }).then(() => undefined);
   }
 
   updateSellerSettings(input: MsFileSellerSettings): Promise<void> {
-    return this.control({ type: "settings.seller.update", input }).then(() => undefined);
+    return this.#control({ type: "settings.seller.update", input }).then(() => undefined);
   }
 
   /** 读取 Worker 持久化的 BitFS 自动购买策略。 */
   getBitfsBuyerSettings(): Promise<MsFileBitfsBuyerSettings> {
-    return this.control({ type: "settings.bitfsBuyer.get" });
+    return this.#control({ type: "settings.bitfsBuyer.get" });
   }
 
   /** 保存 Worker 持久化的 BitFS 自动购买策略。 */
   updateBitfsBuyerSettings(input: MsFileBitfsBuyerSettings): Promise<void> {
-    return this.control({ type: "settings.bitfsBuyer.update", input }).then(() => undefined);
+    return this.#control({ type: "settings.bitfsBuyer.update", input }).then(() => undefined);
   }
 
   updateMediaBlockReadConcurrency(value: number): Promise<void> {
@@ -270,81 +272,81 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   upsertSupplier(input: unknown): Promise<void> {
-    return this.control({
+    return this.#control({
       type: "supplier.upsert",
       supplier: input as MsFileSupplierConfig,
-      expectedGeneration: this.current.supplierGeneration,
+      expectedGeneration: this.#current.supplierGeneration,
     }).then(() => undefined);
   }
 
   deleteSupplier(supplierPublicKeyHex: string): Promise<void> {
-    return this.control({ type: "supplier.delete", supplierPublicKeyHex, expectedGeneration: this.current.supplierGeneration }).then(() => undefined);
+    return this.#control({ type: "supplier.delete", supplierPublicKeyHex, expectedGeneration: this.#current.supplierGeneration }).then(() => undefined);
   }
 
   probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult> {
     if (signal?.aborted) return Promise.reject(new MsFileServiceError("msfile_unavailable"));
-    return this.control<MsFileSupplierProbeResult>({ type: "supplier.probe", supplierPublicKeyHex });
+    return this.#control<MsFileSupplierProbeResult>({ type: "supplier.probe", supplierPublicKeyHex });
   }
 
   updateAppPriceOverride(input: MsFileAppPriceOverrideUpdate): Promise<void> {
-    return this.control({ type: "app-policy.update", input }).then(() => undefined);
+    return this.#control({ type: "app-policy.update", input }).then(() => undefined);
   }
 
   clearAppPriceOverride(key: MsFileAppIdentityKey): Promise<void> {
-    return this.control({ type: "app-policy.clear", key }).then(() => undefined);
+    return this.#control({ type: "app-policy.clear", key }).then(() => undefined);
   }
 
   listAppAuthorizations(): Promise<MsFileAppAuthorizationView[]> {
-    return this.control<MsFileAppAuthorizationView[]>({ type: "app-authorizations.list" });
+    return this.#control<MsFileAppAuthorizationView[]>({ type: "app-authorizations.list" });
   }
 
   listPendingApprovals(): MsFilePendingApprovalView[] {
-    return this.current.pendingApprovals;
+    return this.#current.pendingApprovals;
   }
 
   resolveApproval(approvalId: string, decision: MsFileApprovalDecision): Promise<void> {
-    return this.control({ type: "approval.resolve", approvalId, decision }).then(() => undefined);
+    return this.#control({ type: "approval.resolve", approvalId, decision }).then(() => undefined);
   }
 
   /** 发布或复用本 Seed 的 ChannelProtocol 需求；此操作只广播需求，不动资金。 */
   publishBitfsDemand(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.publish", seedHashHex });
+    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.publish", seedHashHex });
   }
 
   /** 读取当前需求编号和已经验签的报价摘要。 */
   getBitfsDemand(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.snapshot", seedHashHex });
+    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.snapshot", seedHashHex });
   }
 
   /** 用户选中已验签报价后启动购买；返回当前买方会话进度摘要。 */
   startBitfsPurchase(seedHashHex: string, sessionId: string, maxFullBlockPriceSatoshis?: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.start", seedHashHex, sessionId, ...(maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis }) });
+    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.start", seedHashHex, sessionId, ...(maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis }) });
   }
 
   /** 在还没有付款签名时取消购买，并返回关池回收进度。 */
   cancelBitfsPurchase(seedHashHex: string, sessionId: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.cancel", seedHashHex, sessionId });
+    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.cancel", seedHashHex, sessionId });
   }
 
   /** 停止本地接收该需求后续报价。 */
   cancelBitfsDemand(seedHashHex: string): Promise<void> {
-    return this.control({ type: "bitfs.demand.cancel", seedHashHex }).then(() => undefined);
+    return this.#control({ type: "bitfs.demand.cancel", seedHashHex }).then(() => undefined);
   }
 
   abortSession(connectSessionId: string): Promise<void> {
-    for (const key of [...this.grants.keys()]) {
-      if (key.startsWith(`${connectSessionId}|`)) this.grants.delete(key);
+    for (const key of [...this.#grants.keys()]) {
+      if (key.startsWith(`${connectSessionId}|`)) this.#grants.delete(key);
     }
-    return this.coordinator.msfileSessionAbort(connectSessionId).then((result) => {
+    return this.#coordinator.msfileSessionAbort(connectSessionId).then((result) => {
       if (result.status !== "ok" && result.status !== "accepted") throw new MsFileServiceError("msfile_unavailable");
     });
   }
 
   stat(input: MsFileStatInput): Promise<MsFileStatResult> {
     if (input.signal?.aborted) return Promise.reject(new MsFileServiceError("msfile_unavailable"));
-    const sessionEpoch = this.current.sessionEpoch;
-    const supplierGeneration = this.current.supplierGeneration;
-    const cached = this.statCache.get(input.seedHashHex);
+    const sessionEpoch = this.#current.sessionEpoch;
+    const supplierGeneration = this.#current.supplierGeneration;
+    const cached = this.#statCache.get(input.seedHashHex);
     if (
       cached
       && cached.expiresAt > Date.now()
@@ -353,22 +355,22 @@ export class MsFileServiceProxy implements MsFileService {
     ) {
       return Promise.resolve(cloneStatResult(cached.value));
     }
-    if (cached) this.statCache.delete(input.seedHashHex);
-    return this.dataFor<MsFileStatResult>(null, () => ({ type: "stat", seedHashHex: input.seedHashHex }), [], input.signal)
+    if (cached) this.#statCache.delete(input.seedHashHex);
+    return this.#dataFor<MsFileStatResult>(null, () => ({ type: "stat", seedHashHex: input.seedHashHex }), [], input.signal)
       .then((result) => {
         if (!result.sources.some((entry) => entry.status === "network-error")
-          && this.current.sessionEpoch === sessionEpoch
-          && this.current.supplierGeneration === supplierGeneration) {
-          this.statCache.set(input.seedHashHex, {
+          && this.#current.sessionEpoch === sessionEpoch
+          && this.#current.supplierGeneration === supplierGeneration) {
+          this.#statCache.set(input.seedHashHex, {
             value: cloneStatResult(result),
             expiresAt: Date.now() + MSFILE_STAT_PROXY_CACHE_TTL_MS,
             sessionEpoch,
             supplierGeneration,
           });
-          while (this.statCache.size > MSFILE_STAT_PROXY_CACHE_MAX_ENTRIES) {
-            const oldest = this.statCache.keys().next().value as string | undefined;
+          while (this.#statCache.size > MSFILE_STAT_PROXY_CACHE_MAX_ENTRIES) {
+            const oldest = this.#statCache.keys().next().value as string | undefined;
             if (oldest === undefined) break;
-            this.statCache.delete(oldest);
+            this.#statCache.delete(oldest);
           }
         }
         return result;
@@ -376,7 +378,7 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult> {
-    return this.dataFor<MsFileReadResult>(
+    return this.#dataFor<MsFileReadResult>(
       null,
       () => ({ type: "read-seed", sourceId: input.sourceId, seedHashHex: input.seedHashHex }),
       [],
@@ -385,7 +387,7 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   readBlock(input: MsFileReadBlockInput): Promise<MsFileReadResult> {
-    return this.dataFor<MsFileReadResult>(
+    return this.#dataFor<MsFileReadResult>(
       null,
       () => ({ type: "read-block", sourceId: input.sourceId, seedHashHex: input.seedHashHex, blockHashHex: input.blockHashHex }),
       [],
@@ -395,12 +397,12 @@ export class MsFileServiceProxy implements MsFileService {
 
   readonly connect = {
     stat: (ctx: MsFileConnectAppContext, input: { seedHashHex: string; signal?: AbortSignal }): Promise<MsFileStatResult> =>
-      this.dataFor<MsFileStatResult>(ctx, (grantId) => ({ type: "stat", grantId, seedHashHex: input.seedHashHex }), [], input.signal),
+      this.#dataFor<MsFileStatResult>(ctx, (grantId) => ({ type: "stat", grantId, seedHashHex: input.seedHashHex }), [], input.signal),
     readSeed: (
       ctx: MsFileConnectAppContext,
       input: { sourceId: string; seedHashHex: string; signal?: AbortSignal }
     ): Promise<MsFileReadResult> =>
-      this.dataFor<MsFileReadResult>(
+      this.#dataFor<MsFileReadResult>(
         ctx,
         (grantId) => ({ type: "read-seed", grantId, sourceId: input.sourceId, seedHashHex: input.seedHashHex }),
         [],
@@ -410,7 +412,7 @@ export class MsFileServiceProxy implements MsFileService {
       ctx: MsFileConnectAppContext,
       input: { sourceId: string; seedHashHex: string; blockHashHex: string; signal?: AbortSignal }
     ): Promise<MsFileReadResult> =>
-      this.dataFor<MsFileReadResult>(
+      this.#dataFor<MsFileReadResult>(
         ctx,
         (grantId) => ({ type: "read-block", grantId, sourceId: input.sourceId, seedHashHex: input.seedHashHex, blockHashHex: input.blockHashHex }),
         [],

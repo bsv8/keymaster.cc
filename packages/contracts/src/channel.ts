@@ -231,3 +231,7 @@ export const CONNECT_CHANNEL_RUNTIME_CAPABILITY = defineCapability<ConnectChanne
   id: "channel.connect-runtime",
   version: "1",
 });
+
+/** Fixed Contacts presence lane; it cannot choose a system caller or publish application messages. */
+export type ContactsPresenceChannel = Pick<ChannelRuntime, "isReady" | "publishPrivate" | "subscriptionSet">;
+export const CONTACTS_PRESENCE_CHANNEL_CAPABILITY = defineCapability<ContactsPresenceChannel>({ kind: "local", id: "channel.contacts-presence", version: "1" });

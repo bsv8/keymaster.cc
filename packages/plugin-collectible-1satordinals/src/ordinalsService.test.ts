@@ -1,3 +1,4 @@
+import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // packages/plugin-collectible-1satordinals/src/ordinalsService.test.ts
 // ordinalsService 回归测试：覆盖最易错的 outpoint 格式映射与 404 语义——
 //   1. WOC 查询键必须是 "txid_vout"（下划线），用户可见 outpoint 是
@@ -8,7 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import type {
-  KeyspaceService,
+  VaultWalletState,
   Woc1SatOrdinalsContent,
   Woc1SatOrdinalsInscription,
   Woc1SatOrdinalsService
@@ -21,8 +22,8 @@ import {
 
 const ACTIVE_PK = "pk-active";
 
-function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
-  return { active: () => ({ activePublicKeyHex }) } as unknown as KeyspaceService;
+function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
+  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))()) } as unknown as VaultWalletState;
 }
 
 function fakeP2pkh(utxos: P2pkhUtxoFor1Sat[], includeTestnet = false): P2pkhServiceFor1Sat {
@@ -59,7 +60,7 @@ describe("createOrdinalsService", () => {
   it("无 active key 时返回空列表", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(undefined),
+      walletState: fakeWalletState(undefined),
       p2pkh: fakeP2pkh([{ txid: "aa", vout: 0, value: 1000, address: "addr" }]),
       wocOneSat: fakeWoc(new Set(), queried)
     });
@@ -70,7 +71,7 @@ describe("createOrdinalsService", () => {
   it("WOC 查询键用 txid_vout（下划线），展示 outpoint 用 txid:vout（冒号）", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([{ txid: "deadbeef", vout: 2, value: 1000, address: "addr-A" }]),
       wocOneSat: fakeWoc(new Set(["main:deadbeef_2"]), queried)
     });
@@ -85,7 +86,7 @@ describe("createOrdinalsService", () => {
   it("includeTestnet=true 时同时扫描 main / test", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([{ txid: "deadbeef", vout: 2, value: 1000, address: "addr-A" }], true),
       wocOneSat: fakeWoc(new Set(["main:deadbeef_2"]), queried)
     });
@@ -100,7 +101,7 @@ describe("createOrdinalsService", () => {
   it("返回的 hit 会携带 observation / canonicalTxid", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([{ txid: "c0ffee", vout: 1, value: 1000, address: "addr-A" }]),
       wocOneSat: {
         getOutpointInscription: (network, outpoint) => {
@@ -119,7 +120,7 @@ describe("createOrdinalsService", () => {
   it("getOutpointInscription 返回 null（404）的 UTXO 被跳过", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([
         { txid: "hit", vout: 0, value: 1000, address: "addr-A" },
         { txid: "miss", vout: 1, value: 1000, address: "addr-A" }
@@ -140,7 +141,7 @@ describe("createOrdinalsService", () => {
   it("getOutpoint 解析 txid:vout，命中返回 hit", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([]),
       wocOneSat: fakeWoc(new Set(["main:cafe_3"]), queried)
     });
@@ -152,7 +153,7 @@ describe("createOrdinalsService", () => {
   it("getOutpoint 会回落到 testnet 查询", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([], true),
       wocOneSat: fakeWoc(new Set(["test:testhit_4"]), queried)
     });
@@ -167,7 +168,7 @@ describe("createOrdinalsService", () => {
   it("getOutpoint 非法格式返回 null，不查询 WOC", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([]),
       wocOneSat: fakeWoc(new Set(), queried)
     });
@@ -180,7 +181,7 @@ describe("createOrdinalsService", () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const listeners: Array<() => void> = [];
     const svc = createOrdinalsService({
-      keyspace: fakeKeyspace(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh([{ txid: "deadbeef", vout: 2, value: 1000, address: "addr-A" }]),
       wocOneSat: fakeWoc(new Set(["main:deadbeef_2"]), queried)
     });

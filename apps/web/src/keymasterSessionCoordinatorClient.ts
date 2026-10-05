@@ -29,7 +29,6 @@ import type {
   SessionCoordinatorClient,
   CoordinatorStorageControl,
   CoordinatorStorageData,
-  CoordinatorStorageBrowseData,
   CoordinatorSatOperation,
   CoordinatorChannelOperation,
   ContactPresenceMap,
@@ -60,18 +59,7 @@ import type {
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { parseCoordinatorResponseFor, toCoordinatorRpcRequest } from "@keymaster/contracts";
-import {
-  connectSharedWorker,
-  definePlugin,
-  type HandlerCallContext,
-  type RuntimeDrainResult,
-  type RuntimeHandle,
-  type RuntimePluginDefinition,
-  type WindowApp,
-  type PluginIntentCommand,
-  type PluginIntentSnapshot,
-  type PluginIntentSubmissionResult,
-} from "webloom-framework";
+import { connectSharedWorker, definePlugin, type HandlerCallContext, type RuntimeDrainResult, type RuntimeHandle, type RuntimePluginDefinition, type WindowApp } from "webloom-framework";
 import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?sharedworker&url";
 
 /**
@@ -124,7 +112,6 @@ function sameCoordinatorSessionBinding(left: CoordinatorSessionBinding | null | 
 function coordinatorKindMayHaveSideEffects(kind: CoordinatorClientRequest["kind"]): boolean {
   switch (kind) {
     case "contacts.presence.snapshot":
-    case "plugin.intent.snapshot":
     case "p2pkh.provider-config.get":
       return false;
     default:
@@ -265,8 +252,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private satRevisionCache = -1;
   private channelRevisionCache = -1;
   private contactsPresenceRevisionCache = -1;
-  private pluginIntentRevisionCache = -1;
-  private pluginIntentAuthorityInstanceId = "authority:boot";
   /**
    * Worker 单元事件可能先于同一 session.state 到达；先按 sessionEpoch
    * 暂存，避免为了丢弃旧世代而误丢当前世代的合法快照。集合有界，
@@ -374,7 +359,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "worker.units"]);
       await this.lockSolePageOnFirstConnect();
 
       if (this.shutdownRequested || attempt !== this.connectionAttempt || this.runtimeHandle !== runtime) {
@@ -541,7 +526,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.bootstrapSnapshotCache.sessionEpoch = response.sessionEpoch;
     if (snapshot) {
       if (typeof snapshot.authorityInstanceId === "string" && snapshot.authorityInstanceId.length > 0) {
-        this.adoptPluginIntentAuthority(snapshot.authorityInstanceId);
       }
       this.bootstrapSnapshotCache = {
         ...this.bootstrapSnapshotCache,
@@ -551,39 +535,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           ? { coordinatorWorkerUnits: snapshot.coordinatorWorkerUnits.map((unit) => ({ ...unit, serviceIds: [...unit.serviceIds], taskIds: [...unit.taskIds] })) }
           : {}),
       };
-      if (snapshot.pluginIntent) this.cachePluginIntentSnapshot(snapshot.pluginIntent, snapshot.authorityInstanceId);
     }
-  }
-
-  private adoptPluginIntentAuthority(authorityInstanceId: string): void {
-    if (!authorityInstanceId || authorityInstanceId === this.pluginIntentAuthorityInstanceId) return;
-    this.pluginIntentAuthorityInstanceId = authorityInstanceId;
-    this.pluginIntentRevisionCache = -1;
-  }
-
-  private cachePluginIntentSnapshot(snapshot: PluginIntentSnapshot, authorityInstanceId = this.pluginIntentAuthorityInstanceId): void {
-    if (
-      !snapshot
-      || !Number.isSafeInteger(snapshot.revision)
-      || snapshot.revision < 0
-      || !snapshot.desiredEnabled
-      || typeof snapshot.desiredEnabled !== "object"
-      || Array.isArray(snapshot.desiredEnabled)
-      || !snapshot.desiredRevision
-      || typeof snapshot.desiredRevision !== "object"
-      || Array.isArray(snapshot.desiredRevision)
-    ) return;
-    if (authorityInstanceId !== this.pluginIntentAuthorityInstanceId) return;
-    if (snapshot.revision < this.pluginIntentRevisionCache) return;
-    this.pluginIntentRevisionCache = snapshot.revision;
-    this.bootstrapSnapshotCache = {
-      ...this.bootstrapSnapshotCache,
-      pluginIntent: {
-        revision: snapshot.revision,
-        desiredEnabled: { ...snapshot.desiredEnabled },
-        desiredRevision: { ...snapshot.desiredRevision },
-      },
-    };
   }
 
   private deferWorkerUnitEvent(event: CoordinatorWorkerUnitStateEvent): void {
@@ -629,7 +581,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.satRevisionCache = -1;
     this.channelRevisionCache = -1;
     this.contactsPresenceRevisionCache = -1;
-    this.pluginIntentRevisionCache = -1;
     this.pendingWorkerUnitEvents.clear();
   }
 
@@ -868,37 +819,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "storage.cancel", clientId: this.clientId, requestId: this.generateRequestId(), targetRequestId });
   }
 
-  async storageBrowseOpen(): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").StorageBrowseSession>> {
-    // 不带任何身份字段：请求所属运行单元由 Coordinator 从已验证的 peer 上下文判定。
-    const request = { kind: "storage.browse.open" as const, clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind) as import("@keymaster/contracts").StorageBrowseSession, sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-  }
-
-  async storageBrowseData(data: CoordinatorStorageBrowseData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
-    const request = { kind: "storage.browse.data" as const, clientId: this.clientId, requestId: this.generateRequestId(), data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    let onAbort: (() => void) | undefined;
-    try {
-      if (signal?.aborted) return { status: "transport-error", message: "Storage browse request cancelled", retryable: false };
-      // 取消复用 storage.cancel：它按 targetRequestId 中止 Worker 侧在途读取，
-      // 浏览不需要第二套取消语义。
-      onAbort = () => { void this.storageCancel(request.requestId); };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      const response = await this.sendRequest(request);
-      if (signal?.aborted) return { status: "transport-error", message: "Storage browse request cancelled", retryable: false };
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-    finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
-  }
-
-  async storageBrowseClose(browseSessionId: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "storage.browse.close", clientId: this.clientId, requestId: this.generateRequestId(), browseSessionId });
-  }
-
   async storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
@@ -1036,51 +956,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         sessionEpoch: response.sessionEpoch,
       };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-  }
-
-  /** 读取 SharedWorker 唯一插件启停意图；这里的 snapshot 不等于运行实例状态。 */
-  async pluginIntentSnapshot(): Promise<CoordinatorValueResult<PluginIntentSnapshot>> {
-    const request = {
-      kind: "plugin.intent.snapshot" as const,
-      clientId: this.clientId,
-      requestId: this.generateRequestId(),
-    };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      const snapshot = requiredCoordinatorOperationResult(response, request.kind);
-      this.cachePluginIntentSnapshot(snapshot);
-      return { status: "ok", value: snapshot, sessionEpoch: response.sessionEpoch };
-    } catch (cause) {
-      return this.normalizeTransportFailure(request.kind, cause);
-    }
-  }
-
-  /** 提交绝对启停意图；accepted/duplicate 只表示 Worker 已持久化。 */
-  async pluginIntentSubmit(command: PluginIntentCommand): Promise<PluginIntentSubmissionResult> {
-    const request = {
-      kind: "plugin.intent.submit",
-      clientId: this.clientId,
-      requestId: this.generateRequestId(),
-      command,
-    } as const;
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") {
-        return {
-          status: "transport-error",
-          message: "message" in response.ack && typeof response.ack.message === "string"
-            ? response.ack.message
-            : `Coordinator rejected ${request.kind}`,
-          retryable: response.ack.status !== "validation-error",
-        };
-      }
-      const result = requiredCoordinatorOperationResult(response, request.kind);
-      if ("snapshot" in result && result.snapshot) this.cachePluginIntentSnapshot(result.snapshot);
-      return result;
-    } catch (cause) {
-      return this.normalizeTransportFailure(request.kind, cause);
-    }
   }
 
   async msfileGrant(context: import("@keymaster/contracts").MsFileConnectAppContext): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
@@ -1481,6 +1356,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
+        activeKeyIdentity: event.vaultStatus === "unlocked" ? event.activeKeyIdentity : undefined,
         // session.state 是权威全量投影：运行世代与钱包身份世代都随它一起推进。
         // 漏掉这两项会让页面继续按旧世代签发存储授权，reset 之后仍写入旧钱包。
         runGeneration: event.runGeneration,
@@ -1535,8 +1411,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         coordinatorWorkerUnits: event.units.map((unit) => ({ ...unit, serviceIds: [...unit.serviceIds], taskIds: [...unit.taskIds] })),
         coordinatorWorkerUnitSnapshotRevision: event.workerUnitRevision,
       };
-    } else if (event.topic === "plugin.intent") {
-      this.cachePluginIntentSnapshot(event.snapshot, event.authorityInstanceId);
     } else if (event.topic === "contacts.presence") {
       this.contactsPresenceOwnerPublicKeyHex = event.activePublicKeyHex;
       this.contactsPresenceSnapshotCache = Object.fromEntries(Object.entries(event.presence).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
@@ -1559,7 +1433,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (topic === "sat.events") return this.satRevisionCache;
     if (topic === "channel.events") return this.channelRevisionCache;
     if (topic === "contacts.presence") return this.contactsPresenceRevisionCache;
-    if (topic === "plugin.intent") return this.pluginIntentRevisionCache;
+
     if (topic === "worker.units") return this.bootstrapSnapshotCache.coordinatorWorkerUnitSnapshotRevision ?? -1;
     return this.assetDataRevisionCache;
   }
@@ -1573,7 +1447,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "sat.events") return event.satRevision;
     if (event.topic === "channel.events") return event.channelRevision;
     if (event.topic === "contacts.presence") return event.presenceRevision;
-    if (event.topic === "plugin.intent") return event.pluginIntentRevision;
+
     if (event.topic === "worker.units") return event.workerUnitRevision;
     return event.assetDataRevision;
   }
@@ -1587,7 +1461,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     else if (event.topic === "sat.events") this.satRevisionCache = event.satRevision;
     else if (event.topic === "channel.events") this.channelRevisionCache = event.channelRevision;
     else if (event.topic === "contacts.presence") this.contactsPresenceRevisionCache = event.presenceRevision;
-    else if (event.topic === "plugin.intent") this.pluginIntentRevisionCache = event.pluginIntentRevision;
     else if (event.topic === "worker.units") this.bootstrapSnapshotCache.coordinatorWorkerUnitSnapshotRevision = event.workerUnitRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
   }
@@ -1687,17 +1560,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && Boolean(event.presence)
         && !Array.isArray(event.presence);
     }
-    if (event.topic === "plugin.intent") {
-      return event.type === "plugin.intent.changed"
-        && typeof event.authorityInstanceId === "string"
-        && event.authorityInstanceId === this.bootstrapSnapshotCache.authorityInstanceId
-        && Number.isSafeInteger(event.pluginIntentRevision)
-        && event.pluginIntentRevision >= 0
-        && Boolean(event.snapshot)
-        && event.snapshot.revision === event.pluginIntentRevision
-        && !Array.isArray(event.snapshot.desiredEnabled)
-        && !Array.isArray(event.snapshot.desiredRevision);
-    }
+
     if (event.topic === "worker.units") {
       const unitKeys = new Set<string>();
       return event.type === "coordinator.worker-units.changed"

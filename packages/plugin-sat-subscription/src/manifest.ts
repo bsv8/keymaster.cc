@@ -1,3 +1,10 @@
+import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY } from "@keymaster/contracts";
+import { CONTACTS_PRESENCE_CHANNEL_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY } from "@keymaster/contracts";
+import { SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
+import { createElement } from "react";
+import { SatResourceProvider } from "./SatResourceContext.js";
+import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // SatSubscription 平台插件清单。
 //
 // SatSubscription 只提供 SSP/SPI 管理能力；Channel runtime 的唯一实例在
@@ -14,7 +21,6 @@ import type {
   SatSubscriptionSpiService,
   SatSubscriptionSettingsSnapshot,
   SessionCoordinatorClient,
-  SystemStatusRegistry,
   WindowP2pExecutorLaneRegistry
 } from "@keymaster/contracts";
 import {
@@ -24,14 +30,15 @@ import {
   SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
   SAT_COORDINATOR_CONTROL_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SYSTEM_STATUS_REGISTRY_CAPABILITY,
+  OWNED_RESOURCE_ACCESS_CAPABILITY,
+  PAGE_UI_REGISTRY_CAPABILITY,
   type SatCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 
 export { SAT_SUBSCRIPTION_PLUGIN_ID } from "@keymaster/contracts";
-import { SatSubscriptionSettings } from "./SatSubscriptionSettings.js";
+import { SatSubscriptionStatusBlock } from "./SatSubscriptionSettings.js";
 import { SatWindowP2pLane } from "./satWindowLane.js";
 import { createSatWorkerAdminService, createSatWorkerChannelRuntime, createSatWorkerSpiService } from "./satWorkerProxy.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
@@ -175,15 +182,11 @@ const satSubscriptionPluginDefinition = {
   name: "SatSubscription",
   description: "SSP multi-supplier subscriptions and SPI management.",
   i18n: resources,
-  kind: "platform",
-  startup: "optional",
-  bootstrapStage: "owner-apps-ready",
-  defaultEnabled: true,
-  canDisable: false,
-  displayGroup: "platform",
+
   units: [{
     id: "sat-subscription.window",
     runtime: "window-main",
+    connect: { providerMethods: ["channel.publish", "channel.subscription_set"] },
     scopeKind: "owner-session",
     provides: [
       SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
@@ -192,18 +195,27 @@ const satSubscriptionPluginDefinition = {
       SAT_COORDINATOR_CONTROL_CAPABILITY
     ],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
+      { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
+      { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 仅消费本实例的网关资源" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "广播网关业务读取统一经过 Resource Store" },
-      { capability: SYSTEM_STATUS_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 广播网关" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 广播网关" },
     ]),
   }, {
     id: "sat-subscription.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
     storage: CENTRAL_STORAGE_DECLARATIONS.satSubscriptionFiles,
+    provides: [SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, CONTACTS_PRESENCE_CHANNEL_CAPABILITY],
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "供应商状态的受限文件客户端" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "供应商会话所属身份" },
+      { capability: P2PKH_WORKER_TRANSFER_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "首次充值才解析 P2PKH 的受控 Worker 转账服务" },
+    ]),
   }],
   setup(ctx: PluginContext) {
-    const coordinator = ctx.coordinator as SatCoordinatorControl | undefined;
+    const coordinator = ctx.capability(SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as SatCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Sat Coordinator control is unavailable");
     ctx.provide(SAT_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
@@ -235,9 +247,7 @@ const satSubscriptionPluginDefinition = {
       ],
       load: async (_args, context) => {
         if (!context.activePublicKeyHex) return emptySettingsSnapshot();
-        const service = context.getCapability<SatSubscriptionAdminService>(
-          SAT_SUBSCRIPTION_SERVICE_CAPABILITY
-        );
+        const service = context.optionalCapability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
         if (!service) throw new Error("SatSubscription admin service is unavailable");
         return service.getSettingsSnapshot();
       },
@@ -249,20 +259,20 @@ const satSubscriptionPluginDefinition = {
     const spi = createSatWorkerSpiService(coordinator);
     ctx.provide(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, spi);
 
-    const status = ctx.capability(SYSTEM_STATUS_REGISTRY_CAPABILITY);
+    const status = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    const reader = ctx.capability(OWNED_RESOURCE_ACCESS_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const statusId = "sat-subscription.system-status";
-    status.register({
+    status.view.register({
       id: statusId,
       path: SAT_SUBSCRIPTION_ROUTE_PATH,
       label: { key: "sat.settings.title", fallback: "SatSubscription" },
-      description: { key: "sat.settings.description", fallback: "SSP / Channel / SPI" },
-      component: SatSubscriptionSettings,
+      kind: "settings-block",
+      render: () => createElement(SatResourceProvider, { reader, children: createElement(SatSubscriptionStatusBlock) }),
       order: 25
     });
 
     ctx.onDispose(async () => {
       offLane();
-      status.unregister(statusId);
     });
   }
 } satisfies PluginManifest & { setup: PluginSetup };

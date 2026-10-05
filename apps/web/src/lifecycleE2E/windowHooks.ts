@@ -1,3 +1,5 @@
+import { issuedConsumerForScope } from "@keymaster/runtime/assembly";
+import { VAULT_WALLET_STATE_CAPABILITY, VAULT_SERVICE_CAPABILITY, type VaultLifecycleSnapshot, type ActiveKeyCrypto } from "@keymaster/contracts";
 // KMP-001 / KMP-002：仅由 VITE_MSFILE_E2E=1 的隔离构建加载。
 //
 // 这里验证真实浏览器链，不提供 fake transport：Window 页面使用生产
@@ -12,7 +14,6 @@ import {
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   systemStorageDeclarationForPurpose,
-  VAULT_COORDINATOR_CONTROL_CAPABILITY,
 } from "@keymaster/contracts";
 import type { VaultCoordinatorControl } from "@keymaster/contracts";
 import type { RuntimeHandle, RuntimeStatusSnapshot } from "webloom-framework";
@@ -146,6 +147,10 @@ async function waitForStorageReady(client: ReturnType<typeof getCoordinatorClien
 }
 
 export interface LifecycleProductionE2EHooks {
+  walletStateSnapshot(): Readonly<VaultLifecycleSnapshot>;
+  cacheWalletCrypto(): Promise<void>;
+  cachedWalletCryptoFresh(): Promise<boolean>;
+
   /** 创建 / 解锁临时 Vault，并等待真实服务目录 ready。 */
   bootstrap(): Promise<{
     ownerPublicKeyHex: string;
@@ -234,9 +239,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
   // 首次浏览器上下文可能还没有选择 Storage；此时正式 Host 按设计只装配
   // Storage onboarding，Vault capability 尚不存在。测试钩子不能把这个
   // 可恢复阶段改成 fatal，直接复用同一 Coordinator client 的窄 Vault 面。
-  const coordinator = host.capabilities.has(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    ? host.capabilities.get(VAULT_COORDINATOR_CONTROL_CAPABILITY)
-    : client;
+  const coordinator = client;
 
   const bootstrap = async () => {
     const storageStatus = await client.storageControl({ type: "status" });
@@ -492,15 +495,29 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     bootstrap: client.getBootstrapSnapshot(),
     plugins: host.installed().map((pluginId) => {
       const state = host.state(pluginId);
-      return { id: pluginId, kind: state.kind, desiredEnabled: state.desiredEnabled, blockedBy: state.blockedBy };
+      return { id: pluginId, kind: state.kind,  blockedBy: state.blockedBy };
     }),
-    homeIds: host.home._ids(),
-    homeProjectionIds: host.business.listHomeProjections().map((projection) => projection.id),
     capabilityIds: host.capabilities.registrations().map((entry) => `${entry.capability.kind}:${entry.capability.id}@${entry.capability.version}`),
     bsvPriceState: host.state("bsv-price"),
   });
 
+  const walletStateSnapshot = () => {
+    const scope = host.scope("vault"); if (!scope) throw new Error("Vault is unavailable");
+    return host.capabilities.get(VAULT_WALLET_STATE_CAPABILITY).bind(issuedConsumerForScope(scope), scope).snapshot();
+  };
+  let cachedCrypto: ActiveKeyCrypto | undefined;
+  const cacheWalletCrypto = async () => {
+    const key = walletStateSnapshot().activePublicKeyHex; if (!key) throw new Error("Wallet is locked");
+    cachedCrypto?.dispose(); cachedCrypto = await host.capabilities.get(VAULT_SERVICE_CAPABILITY).createActiveKeyCrypto(key);
+    await cachedCrypto.deriveP2pkhAddress({ publicKeyHex: key, network: "main" });
+  };
+  const cachedWalletCryptoFresh = async () => {
+    if (!cachedCrypto) throw new Error("No cached crypto handle");
+    try { const key = cachedCrypto.getIdentity().publicKeyHex; await cachedCrypto.signDigest({ publicKeyHex: key, digest: new Uint8Array(32).buffer, format: "compact" }); return true; } catch { return false; }
+  };
+
   window.__lifecycleProductionE2E = {
+    walletStateSnapshot, cacheWalletCrypto, cachedWalletCryptoFresh,
     bootstrap,
     ownerStorageRoundTrip,
     deriveAddress,

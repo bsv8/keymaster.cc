@@ -15,7 +15,7 @@ import process from "node:process";
 const root = process.cwd();
 const matrixPath = path.join(root, "docs/集成测试/覆盖矩阵.yaml");
 const markdownPath = path.join(root, "docs/集成测试/覆盖矩阵.md");
-const catalogPath = path.join(root, "apps/web/src/pluginCatalog.ts");
+const catalogPath = path.join(root, "apps/web/src/pluginCatalogSource.ts");
 const integrationRoot = path.join(root, "e2e/integration");
 
 const REQUIRED_FIELDS = [
@@ -64,18 +64,15 @@ function parseMatrix() {
 function catalogPackages() {
   const source = read(catalogPath);
   const imports = new Map();
-  for (const match of source.matchAll(/import\s*\{\s*([A-Za-z0-9_]+)\s*\}\s*from\s*["'](@keymaster\/[^"']+)["']/g)) {
-    imports.set(match[1], match[2]);
+  for (const match of source.matchAll(/import\s*\{([^}]+)\}\s*from\s*["'](@keymaster\/[^"']+)["']/g)) {
+    for (const name of match[1].split(",").map(value => value.trim()).filter(Boolean)) imports.set(name, match[2]);
   }
-  const sourceMatch = source.match(/const\s+WEB_PLUGIN_CATALOG_SOURCE[\s\S]*?=\s*\[[\s\S]*?\n\];/);
-  if (!sourceMatch) fail("无法定位 WEB_PLUGIN_CATALOG_SOURCE");
-  const selected = [];
-  for (const [alias, packageName] of imports) {
-    if (new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(sourceMatch[0])) {
-      selected.push({ alias, packageName });
-    }
-  }
-  if (selected.length === 0) fail("没有从 pluginCatalog.ts 读取到正式插件");
+  const selected = [...source.matchAll(/\{\s*manifest:\s*([A-Za-z0-9_]+),\s*setup:/g)].map(match => {
+    const packageName = imports.get(match[1]);
+    if (!packageName) fail(`Missing catalog manifest import: ${match[1]}`);
+    return { alias: match[1], packageName };
+  });
+  if (selected.length === 0) fail("没有从 pluginCatalogSource.ts 读取到正式插件");
   return selected;
 }
 
@@ -149,11 +146,18 @@ function staticManifestPluginId(packageName) {
 }
 
 function staticManifestRoutes(packageName) {
-  const { text } = packageManifest(packageName);
+  const { file, text: manifestText } = packageManifest(packageName);
+  // 路由装配可拆入同包 setup 模块，仍按实际调用的静态源码检查归属。
+  const setupSources = [...manifestText.matchAll(/import\s*\{([^}]+)\}\s*from\s*["'](\.[^"']+)["']/g)]
+    .filter(match => match[1].split(",").some(name => /^setup\w+$/.test(name.trim()) && manifestText.includes(`${name.trim()}(ctx)`)))
+    .map(match => [".ts", ".tsx"].map(extension => path.resolve(path.dirname(file), match[2].replace(/\.js$/, extension))).find(candidate => fs.existsSync(candidate)))
+    .filter(Boolean).map(read);
+  const text = [manifestText, ...setupSources].join("\n");
   const constants = staticStringConstants(packageName);
   return unique([...text.matchAll(/\bpath:\s*(?:["']([^"']+)["']|([A-Z][A-Z0-9_]*))/g)]
     .map((match) => match[1] ?? constants.get(match[2]))
-    .filter((value) => typeof value === "string" && value.startsWith("/")));
+    .filter((value) => typeof value === "string" && value.startsWith("/"))
+    .concat([...text.matchAll(/\["[^"]+",\s*"(\/[^"\s]+)",\s*\{/g)].map(match => match[1])));
 }
 
 function scenarioSpecFiles() {

@@ -10,9 +10,9 @@
 //      之后把旧内容重新画回来。
 //   3. 只读：整个页面没有任何写调用；展开、选中与预览开关只存在于组件内存。
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { STORAGE_BROWSE_SERVICE_CAPABILITY, type StorageBrowsePreview } from "@keymaster/contracts";
-import { useI18n, useLocale } from "@keymaster/runtime";
-import { useOptionalCapability } from "webloom-framework/react";
+import type { StorageBrowsePreview } from "../runtime/storageBrowseTypes.js";
+import { usePluginI18n as useI18n, usePluginLocale as useLocale } from "@keymaster/runtime";
+import { useStoragePrivateBrowse } from "./StoragePrivateContext.js";
 import { Button, PageHeader } from "@keymaster/ui";
 import {
   applyBrowsePage,
@@ -60,7 +60,7 @@ function initialDirectories(): Directories {
 export function StorageBrowsePage() {
   const { t } = useI18n();
   const locale = useLocale();
-  const service = useOptionalCapability(STORAGE_BROWSE_SERVICE_CAPABILITY);
+  const service = useStoragePrivateBrowse();
 
   const [directories, dispatch] = useReducer(directoriesReducer, undefined, initialDirectories);
   const [currentDirectory, setCurrentDirectory] = useState(BROWSE_ROOT_DIRECTORY);

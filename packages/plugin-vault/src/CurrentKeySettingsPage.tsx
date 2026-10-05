@@ -1,3 +1,5 @@
+import type { InternalVaultService } from "./internalVaultService.js";
+import { useInternalVault } from "./VaultInternalContext.js";
 // packages/plugin-vault/src/CurrentKeySettingsPage.tsx
 // 唯一钱包 Key 的管理页。
 //
@@ -11,22 +13,21 @@
 
 import { useEffect, useState } from "react";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
-import { useI18n } from "@keymaster/runtime";
-import { useCapability } from "webloom-framework/react";
+import { usePluginI18n } from "@keymaster/runtime";
+import { usePluginCapability } from "webloom-framework/react";
 import {
   VAULT_SERVICE_CAPABILITY,
   formatShortPublicKey,
   type VaultLifecycleSnapshot,
-  type VaultService,
 } from "@keymaster/contracts";
 import { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
 import { VaultKeyHoldExportModal } from "./VaultKeyHoldExportModal.js";
 import { VaultResetWalletModal } from "./VaultResetWalletModal.js";
 
 export function CurrentKeySettingsPage() {
-  const vault = useCapability(VAULT_SERVICE_CAPABILITY);
-  const { t } = useI18n();
-  const [snapshot, setSnapshot] = useState<VaultLifecycleSnapshot>(() => vault.getLifecycleSnapshot());
+  const vault = useInternalVault();
+  const { t } = usePluginI18n();
+  const [snapshot, setSnapshot] = useState<VaultLifecycleSnapshot>(() => vault.walletSnapshot());
   const [label, setLabel] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renamingBusy, setRenamingBusy] = useState(false);
@@ -35,7 +36,7 @@ export function CurrentKeySettingsPage() {
   const [changingPassword, setChangingPassword] = useState(false);
   const [resetting, setResetting] = useState(false);
 
-  useEffect(() => vault.onLifecycleChange(setSnapshot), [vault]);
+  useEffect(() => vault.subscribeWalletState(setSnapshot), [vault]);
 
   const publicKeyHex = snapshot.activePublicKeyHex;
   // 显示名由 vault 单独读取：lifecycle 事件只带公钥，避免每个会话事件都
@@ -193,7 +194,7 @@ export function CurrentKeySettingsPage() {
       {changingPassword ? (
         <VaultChangePasswordModal
           open
-          vault={vault as VaultService}
+          vault={vault as InternalVaultService}
           onClose={() => setChangingPassword(false)}
         />
       ) : null}
@@ -201,7 +202,7 @@ export function CurrentKeySettingsPage() {
       {resetting ? (
         <VaultResetWalletModal
           open
-          vault={vault as VaultService}
+          vault={vault as InternalVaultService}
           onClose={() => setResetting(false)}
         />
       ) : null}
