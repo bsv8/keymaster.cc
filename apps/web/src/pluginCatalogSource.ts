@@ -26,6 +26,7 @@ import {
 } from "@keymaster/plugin-collectible-1satordinals";
 import { contactsPlugin, contactsSetup } from "@keymaster/plugin-contacts";
 import { msfilePlugin, msfileSetup } from "@keymaster/plugin-msfile";
+import { forumPlugin, forumSetup } from "@keymaster/plugin-forum";
 import { satSubscriptionPlugin, satSubscriptionSetup } from "@keymaster/plugin-sat-subscription";
 import { windowP2pPlugin, windowP2pSetup } from "@keymaster/plugin-window-p2p";
 import { p2pkhPlugin, p2pkhSetup } from "@keymaster/plugin-p2pkh";
@@ -50,6 +51,7 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: vaultPlugin, setup: vaultSetup },
   { manifest: windowP2pPlugin, setup: windowP2pSetup },
   { manifest: msfilePlugin, setup: msfileSetup },
+  { manifest: forumPlugin, setup: forumSetup },
   { manifest: satSubscriptionPlugin, setup: satSubscriptionSetup },
   { manifest: protocolPlugin, setup: protocolSetup },
   { manifest: contactsPlugin, setup: contactsSetup },

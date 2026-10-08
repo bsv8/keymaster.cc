@@ -3,8 +3,26 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+/**
+ * 单独执行的测试文件。
+ *
+ * 入选标准是「单个测试的墙钟时间接近或超过 vitest 默认的 5s 上限」，而不是
+ * 文件有多大：这些用例做真实 secp256k1 签名与交易序列化，空载已经要几秒，和
+ * 其它 CPU 密集用例并发时会稳定超时。隔离执行让它们的时限只取决于自身工作量，
+ * 而不是同一批里恰好还有谁在跑。
+ */
 const heavyFiles = new Set([
-  "apps/web/src/keymasterSessionCoordinator.worker.test.ts"
+  "apps/web/src/keymasterSessionCoordinator.worker.test.ts",
+  // BitFS 买卖与恢复路径：每轮都对 Kind 5/7/13 做真实双签。
+  "packages/plugin-msfile/src/bitfs/buyerPoolState.test.ts",
+  "packages/plugin-msfile/src/bitfs/buyerLocalState.test.ts",
+  "packages/plugin-msfile/src/bitfs/buyerTaskRecovery.test.ts",
+  "packages/plugin-msfile/src/bitfs/workerFundingRuntime.test.ts",
+  "packages/plugin-msfile/src/bitfs/sellerRuntime.test.ts",
+  "packages/plugin-msfile/src/bitfs/sellerProtocol.test.ts",
+  "packages/plugin-msfile/src/bitfs/sellerStreamRuntime.test.ts",
+  "packages/plugin-msfile/src/bitfs/webrtcStreamRuntime.test.ts",
+  "packages/plugin-msfile/src/bitfs/wocChain.test.ts",
 ]);
 const batchSize = 12;
 

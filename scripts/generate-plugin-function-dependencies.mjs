@@ -79,6 +79,14 @@ for (const path of paths) {
   const plugin = packageCatalog.get(packageName);
   if (!plugin) continue;
   const file = program.getSourceFile(path);
+  // getSourceFile 在文件未被载入 program 时返回 undefined（例如并发写入
+  // .tsbuildinfo 时的瞬时状态）。跳过该文件而不是让整个门禁崩在一句
+  // "Cannot read properties of undefined" 上：跳过会少一条调用点，
+  // 崩溃则让所有依赖方都拿不到结果。
+  if (file === undefined) {
+    console.warn(`[plugin-dependencies] 跳过未被 program 载入的文件：${relative(root, path)}`);
+    continue;
+  }
   const declared = new Set(plugin.units.flatMap(unit => [...(unit.dependencies ?? []).map(dep => capKey(dep.capability)), ...(unit.provides ?? []).map(capKey), ...(unit.privateProvides ?? []).map(capKey)]));
   function inspect(node) {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {

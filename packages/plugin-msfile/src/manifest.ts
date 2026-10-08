@@ -22,6 +22,7 @@ import {
   type VaultWalletState,
   VAULT_WALLET_STATE_CAPABILITY,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  MSFILE_CONTENT_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
   MSFILE_COORDINATOR_CONTROL_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
@@ -37,6 +38,8 @@ import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
 import { MsFileBucketHomeWidget, MsFileBucketPage } from "./MsFileBucketPage.js";
 import { MSFILE_BUCKET_SERVICE_CAPABILITY, createMsFileBucketService } from "./msfileBucketService.js";
+import { createMsFileContentService } from "./msfileContentService.js";
+import { createMsFileRemoteContentFetcher } from "./msfileRemoteContentFetcher.js";
 import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
 import { MsFileP2pLane } from "./msfileLane.js";
 
@@ -783,7 +786,7 @@ const msfilePluginDefinition = {
     runtime: "window-main",
     connect: { providerMethods: ["msfile.stat", "msfile.seed.read", "msfile.block.read"] },
     scopeKind: "owner-session",
-    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY],
+    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY, MSFILE_CONTENT_CAPABILITY],
     // 桶存储页面直接读写 `<owner>/msfiles/` 文件根（seeds/storage/meta）；
     // 句柄由 Host 绑定、真实 I/O 仍由 Coordinator Worker 执行。
     storages: [CENTRAL_STORAGE_DECLARATIONS.msfilesFiles],
@@ -841,6 +844,16 @@ const msfilePluginDefinition = {
     // 块写入经 Coordinator 直写，避免页面 storage 数据面的端口并发上限。
     const bucketService = createMsFileBucketService({ store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""), coordinator });
     ctx.provide(MSFILE_BUCKET_SERVICE_CAPABILITY, bucketService);
+    // 跨插件内容能力：复用同一 owner 文件根，因此 Forum 之类的阅读型插件拿到的
+    // 是已验证内容而不是仓储句柄；正文真值仍然只有 MSFile 一份。
+    const contentService = createMsFileContentService({
+      store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""),
+      service,
+      // 远程获取复用既有 BitFS 买方通道：stat → 发布需求 → 已验签报价 → 购买。
+      // 不注入这个 fetcher 时本地缺失的内容永远无法取得，只能报「无可用渠道」。
+      remote: createMsFileRemoteContentFetcher({ service }),
+    });
+    ctx.provide(MSFILE_CONTENT_CAPABILITY, contentService);
 
     const resources_ = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     const walletStateForUi = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);

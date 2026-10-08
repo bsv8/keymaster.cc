@@ -1,0 +1,24 @@
+{
+  "name": "@keymaster/plugin-forum",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/plugin-msfile": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "@multiformats/multiaddr": "13.0.3",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^1.8.0",
+    "bitcoin-libp2p": "0.3.1",
+    "key-roundtrip": "0.1.0",
+    "webloom-framework": "0.6.0"
+  }
+}

@@ -1,0 +1,178 @@
+/* Forum 插件样式。
+   页面使用既有 CSS 变量，不引入独立设计体系。 */
+
+.forum-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.forum-page-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.forum-config-card {
+  border: 1px solid var(--km-border, #d0d7de);
+  border-radius: 8px;
+  padding: 0.875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.forum-config-card h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.forum-config-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.forum-config-fields dt {
+  color: var(--km-text-muted, #57606a);
+}
+
+.forum-config-fields dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+
+.forum-node-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.forum-node-row,
+.forum-post {
+  border: 1px solid var(--km-border, #d0d7de);
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.forum-node-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.forum-txid,
+.forum-seed-hash {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--km-text-muted, #57606a);
+  overflow-wrap: anywhere;
+}
+
+.forum-prices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.forum-chain-status {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--km-text-muted, #57606a);
+}
+
+.forum-status {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.forum-status-error {
+  color: var(--km-danger, #cf222e);
+}
+
+.forum-hint,
+.forum-empty {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--km-text-muted, #57606a);
+}
+
+.forum-markdown {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  line-height: 1.6;
+}
+
+.forum-markdown pre {
+  margin: 0;
+  padding: 0.75rem;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--km-surface-muted, #f6f8fa);
+}
+
+.forum-image-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px dashed var(--km-border, #d0d7de);
+  border-radius: 6px;
+  font-size: 0.8125rem;
+}
+
+.forum-attachments,
+.forum-fees {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+}
+
+.forum-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.forum-content-unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.forum-publish {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.forum-publish textarea {
+  width: 100%;
+  font-family: ui-monospace, monospace;
+  font-size: 0.875rem;
+}
+
+.forum-task {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--km-border, #d0d7de);
+  border-radius: 8px;
+}

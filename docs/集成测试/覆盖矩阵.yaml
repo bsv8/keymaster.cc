@@ -179,6 +179,17 @@
       "plugin_id": "scan",
       "package": "@keymaster/plugin-scan",
       "routes": []
+    },
+    {
+      "plugin_id": "forum",
+      "package": "@keymaster/plugin-forum",
+      "routes": [
+        "/forum",
+        "/forum/:configId",
+        "/forum/:configId/board/:boardTxid",
+        "/forum/:configId/post/:txid",
+        "/forum/:configId/publish/:txid"
+      ]
     }
   ],
   "formal_protocols": [
@@ -954,6 +965,85 @@
           "@keymaster/plugin-sat-subscription"
         ]
       }
+    },
+    {
+      "business_domain": "论坛浏览与阅读",
+      "cleanup_policy": "关闭 BrowserContext 丢弃本地配置与投影；不删除 MSFile 内容",
+      "evidence": "2026-10-05：协议互操作由 TS↔Go 黄金向量单元测试证明（CBOR hex 与 RFC 6979 DER 与服务端 internal/protocol 测试向量逐字节一致）；分页纪律、根信任、Markdown 安全、报价验证与最终 raw 自检均有单元测试。真实论坛服务、真实浏览器与真实广播均未执行，保持未验证",
+      "expected_result": "按服务端顺序逐页浏览并展开回复树；正文经 MSFile 获取后出现在 MSFile 存储，Forum 不留正文副本",
+      "failure_paths": [
+        "SNAPSHOT_INVALIDATED 连续发生：停止自动循环并提供刷新入口",
+        "INVALID_CURSOR：清理该游标并报错，不无限重试",
+        "正文损坏、块缺失、来源不可达：状态分别为验证失败/未获取/不可达，节点与回复结构仍展示",
+        "锁定、切 Key、Scope 撤销时中止连接与新签名，迟到结果不写入新会话"
+      ],
+      "gate_level": "local-integration",
+      "requirement_id": "KM-FORUM-001",
+      "resource_profile": "local-browser + 外部论坛服务",
+      "scenario_ids": [],
+      "source_refs": {
+        "packages": [
+          "@keymaster/plugin-forum",
+          "@keymaster/plugin-msfile"
+        ],
+        "routes": [
+          "/forum",
+          "/forum/:configId",
+          "/forum/:configId/board/:boardTxid",
+          "/forum/:configId/post/:txid",
+          "/forum/:configId/publish/:txid"
+        ]
+      },
+      "starting_state": "钱包已解锁，论坛配置已保存且创世根已验证",
+      "status": "部分覆盖",
+      "technical_truths": [
+        "roundtrip 请求的 from 是当前 Key、operatorSig 签名身份与 vout 1 的 clientpublickey 三者相同",
+        "客户端校验完整 roundtrip 响应的签名、from、to 与 reply_to，不以 HTTP 200 判断成功",
+        "forumSig 从当前声明的名称、价格与全部 input outpoint 顺序重建，采用四项数组规则，旧三项形式被拒绝",
+        "两个输出都点名同一个论坛公钥才建立信任；更新公钥必须重新验证根，地址不替代身份",
+        "确定性 CBOR、单次 SHA-256、严格 DER low-S 与最短无符号大端链上整数逐条对齐服务端实现",
+        "游标绑定 forum/op/parent/pageGeneration；有游标时不再传 snapshot_height；SNAPSHOT_INVALIDATED 替换整组页",
+        "正文真值只在 MSFile；只有 verified 状态允许送入 renderer，不完整文件不作为完整 Markdown 返回"
+      ],
+      "user_goal": "分页浏览板块、帖子与回复，并阅读已验证正文",
+      "user_role": "已配置论坛连接的用户"
+    },
+    {
+      "business_domain": "论坛签名发布",
+      "cleanup_policy": "专用资金按记录显式回收；发布任务证据保留在本地仓储",
+      "evidence": "2026-10-05：输出布局、零/非零父价格、零索引费、indexSig 覆盖校验、费用明细与矿工费复核均有单元测试；P2PKH 专用资金准备与真实广播、真实 Go 索引器观测均未执行，保持未验证",
+      "expected_result": "在确认费用后广播符合协议的交易；广播、链上观测与 Forum 索引三套状态分别展示",
+      "failure_paths": [
+        "资金不足：要求重新准备专用资金，剩余资金可显式回收",
+        "报价或父状态变化：回到费用确认，迟到报价不覆盖当前任务",
+        "广播响应丢失或重启：引用持久 submission ID 对账，不二次付款",
+        "get_node 查无节点：显示等待发现，不伪造拒绝原因；changetip 的事件接受证据不可查询"
+      ],
+      "gate_level": "p2pkh",
+      "requirement_id": "KM-FORUM-002",
+      "resource_profile": "真实资金与真实广播",
+      "scenario_ids": [],
+      "source_refs": {
+        "packages": [
+          "@keymaster/plugin-forum",
+          "@keymaster/plugin-p2pkh"
+        ],
+        "routes": [
+          "/forum/:configId/publish/:txid"
+        ]
+      },
+      "starting_state": "钱包已解锁，父节点已解析，正文已冻结进 MSFile",
+      "status": "部分覆盖",
+      "technical_truths": [
+        "reply 恰好 2 或 3 个输出且没有找零；父价为零时省略 vout 2，不生成零值打赏",
+        "索引费为零仍保留 vout 0，固定输出位置不因金额为零而改变",
+        "changetip 恰好 2 个输出；它是价格事件，不创建回复树节点",
+        "广播前用将要上链的输出重建并验证 indexSig，而不是用请求参数",
+        "专用资金 UTXO 由普通 P2PKH 资金准备交易产生；矿工费预算按 DER 输入长度上界估算，完成签名后复核",
+        "广播结果未知时只对账原交易，不自动构建重复付款；已派发或未知的输入不提前释放"
+      ],
+      "user_goal": "回复板块/帖子、修改自己节点的未来回复价，并跟踪索引结果",
+      "user_role": "论坛节点的作者"
     }
   ]
 }

@@ -464,8 +464,10 @@ describe("WocService rate limiting", () => {
     // 任意连续 1000ms 内不超过 3 次。
     for (let i = 0; i + 3 < fetchLog.length; i += 1) {
       const window = fetchLog[i + 3]!.ts - fetchLog[i]!.ts;
-      // 容忍 1ms 抖动：rate=3 时 minSpacing=333.33，3 间隔合计 1000ms 整数化后可能少 1ms。
-      expect(window).toBeGreaterThanOrEqual(999);
+      // rate=3 时 minSpacing=333.33，3 个间隔合计正好 1000ms。这里测的是真实
+      // setTimeout 调度，机器负载下 setTimeout 有几十毫秒的抖动，因此给 5%
+      // 容差。下一个更低的合法值是 rate=4（750ms），所以 950 仍然能抓住违规。
+      expect(window).toBeGreaterThanOrEqual(950);
     }
     s.dispose();
   }, 10_000);

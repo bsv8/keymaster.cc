@@ -24,5 +24,6 @@
 @import "@keymaster/plugin-webrtc/styles.css";
 @import "@keymaster/plugin-bsv-price/styles.css";
 @import "@keymaster/plugin-msfile/styles.css";
+@import "@keymaster/plugin-forum/styles.css";
 @import "@keymaster/plugin-p2pkh/styles.css";
 @import "@keymaster/platform-storage/styles.css";

@@ -116,6 +116,17 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
+   * Forum 配置、根验证证据、索引缓存、阅读位置、展示投影与发布任务。
+   * 文件模型；正文本体不在这里，只存已冻结内容的 seed hash。
+   */
+  forumFiles: Object.freeze({
+    moduleId: "forum",
+    purposeId: "",
+    authority: "built-in-module",
+    model: "files",
+    schemaVersion: 1,
+  } satisfies PluginStorageDeclaration),
+  /**
    * P2P（WebRTC）设置文件根（空 purpose = 模块根）。布局：`p2p/setting.json`。
    */
   p2pFiles: Object.freeze({
@@ -185,6 +196,7 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   "bsv-price": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.bsvPrice]),
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
   contacts: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook]),
+  forum: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.forumFiles]),
   message: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.messageHistory, CENTRAL_STORAGE_DECLARATIONS.messagesFiles]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
   protocol: Object.freeze([

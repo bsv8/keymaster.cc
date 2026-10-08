@@ -29,6 +29,10 @@
 
 提案不是当前行为；完成后应把稳定结论合并回对应主题文档，并由 Git 历史保留施工过程。
 
+- [Vault 软硬件统一需求](./proposals/rockey/Vault软硬件统一需求.md)与[施工单](./proposals/rockey/Vault软硬件统一施工单.md)：未实施。统一软件 Worker 与 Rockey ESP32 后端，保留同 Key 身份和数据，定义注销、USB、操作白名单、设备会话撤权及三按钮长文授权；共同协议草案与固件需求在同级 Rockey 仓库维护。
+
+- [Forum 客户端需求](./proposals/forum/Forum客户端需求.md)与[施工单](./proposals/forum/Forum客户端施工单.md)：**部分实施，未验收**。论坛索引与分页浏览、MSFile 正文获取和统一存储、Markdown 展示、作者签名发布、专用资金与索引恢复。协议层有 TS↔Go 黄金向量互操作证据；FT05（自有特殊输出识别、保护与归集）未实现；真实服务端、浏览器、广播与索引观测保持未验证（见 `集成测试/覆盖矩阵.yaml` 的 `KM-FORUM-001`/`KM-FORUM-002`）。
+
 - [单 Key 钱包状态收口施工单](./proposals/webloom-0.6/单Key钱包状态收口施工单.md)：待实施。将 Keyspace 身份读取/变化通知收进 Vault 只读状态能力，迁移消费者后删除旧 API，保留会话与钱包世代失效规则。
 
 - [BitFS 本地 MSFile 与卖方模式需求](./proposals/msfile/BitFS本地代理与卖方模式需求.md)

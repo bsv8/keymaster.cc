@@ -53,6 +53,9 @@
       "path": "./packages/plugin-msfile"
     },
     {
+      "path": "./packages/plugin-forum"
+    },
+    {
       "path": "./packages/plugin-sat-subscription"
     },
     {

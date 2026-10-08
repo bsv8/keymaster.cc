@@ -62,6 +62,8 @@ import {
   VAULT_WALLET_STATE_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
+  P2PKH_FUNDING_CAPABILITY,
+  P2PKH_SUBMISSION_OBSERVER_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   TRANSFER_REGISTRY_CAPABILITY,
@@ -79,6 +81,7 @@ type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
 import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 import { p2pkhAddressCodec } from "./p2pkhAddressCodec.js";
+import { createProtocolFundingService } from "./p2pkhProtocolFunding.js";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
@@ -635,7 +638,7 @@ const p2pkhPluginDefinition = {
       runtime: "window-main",
     connect: { providerMethods: ["p2pkh.transfer", "feepool.prepare", "feepool.commit"] },
       scopeKind: "owner-session",
-      provides: [TRANSFER_REGISTRY_CAPABILITY, PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_SETTINGS_READER_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
+      provides: [TRANSFER_REGISTRY_CAPABILITY, PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_SETTINGS_READER_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_FUNDING_CAPABILITY, P2PKH_SUBMISSION_OBSERVER_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
       dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
@@ -770,6 +773,79 @@ const p2pkhPluginDefinition = {
         return { publicKeyHex: requireUnlockedWalletIdentity(walletState.snapshot()).publicKeyHex };
       }
     }));
+
+    // 专用资金：协议插件用它拆出金额已知的单输入 UTXO，避免协议交易直接花大额余额。
+    const fundingRecords = new Map<string, import("@keymaster/contracts").ProtocolDedicatedFunding>();
+    ctx.provide(P2PKH_FUNDING_CAPABILITY, createProtocolFundingService({
+      protocolSpend: () => ctx.capability(P2PKH_PROTOCOL_SPEND_CAPABILITY),
+      protectedOutpoints,
+      store: {
+        get: async (fundingId) => fundingRecords.get(fundingId),
+        put: async (record) => { fundingRecords.set(record.fundingId, record); },
+        delete: async (fundingId) => { fundingRecords.delete(fundingId); },
+      },
+      allocate: async (request) => {
+        const allocation = await service.allocateUtxos({
+          amountSatoshis: request.amountSatoshis,
+          feeReserveSatoshis: request.feeReserveSatoshis,
+          assetId: request.assetId,
+        });
+        return {
+          selected: allocation.selected.map((utxo) => ({
+            txid: utxo.txid, vout: utxo.vout, value: utxo.value, address: utxo.address,
+          })),
+          totalInputSatoshis: allocation.totalInputSatoshis,
+        };
+      },
+      observeChain: async (network, txid) => {
+        if (woc === undefined) return "unknown";
+        const observation = await woc.getTransactionObservation(network, txid);
+        // 钱包侧看到确认只说明链上成立，不代表 Forum 已确认索引。
+        if (observation.observation === "confirmed") return "confirmed";
+        if (observation.observation === "unconfirmed") return "mempool";
+        return "unknown";
+      },
+      deriveChangeAddress: async (ownerPublicKeyHex, network) => {
+        const active = walletState.snapshot().activePublicKeyHex;
+        if (active?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
+          throw new Error(`P2PKH funding owner key not ready: ${ownerPublicKeyHex}`);
+        }
+        const { address } = await vault.createActiveKeyCrypto(ownerPublicKeyHex)
+          .then((crypto) => crypto.deriveP2pkhAddress({ publicKeyHex: ownerPublicKeyHex, network }));
+        return address;
+      },
+    }));
+
+    // 协议提交观测：恢复路径据此只对账**同一个**提交，不重建、不二次派发。
+    ctx.provide(P2PKH_SUBMISSION_OBSERVER_CAPABILITY, {
+      async observeProtocolSubmission(input) {
+        if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) {
+          throw new Error("P2PKH submission observer owner is not active");
+        }
+        const bundle = await openP2pkhStateRepository(storage);
+        const record = await createP2pkhStateRepository(bundle).getProtocolSubmission(input.submissionId);
+        // 记录不存在：可能还没落盘，也可能是别的提交。两种都不猜，按 unknown 处理。
+        if (record === undefined) return "unknown";
+        // 四元组必须全部对上，否则说明调用方拿错了提交。
+        if (record.canonicalTxid !== input.txid || record.network !== input.network
+          || record.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) return "unknown";
+        switch (record.status) {
+          case "prepared":
+            return "not-dispatched";
+          case "broadcast-pending-woc":
+          case "woc-observed-unconfirmed":
+            return "observed-unconfirmed";
+          case "woc-confirmed":
+            return "observed-confirmed";
+          case "woc-dropped":
+            return "dropped";
+          case "rejected":
+            return "rejected";
+          default:
+            return "unknown";
+        }
+      },
+    });
 
     // 注册资源定义（硬切换 003）
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);

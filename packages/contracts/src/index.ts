@@ -57,6 +57,8 @@ export * from "./channel.js";
 export * from "./price.js";
 export * from "./message.js";
 export * from "./msfile.js";
+export * from "./msfileContent.js";
+export * from "./forum.js";
 export * from "./applicationBootstrap.js";
 export * from "./keymasterLifecycle.js";
 export * from "./pluginProducts.js";

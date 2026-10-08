@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { BUILTIN_PLUGIN_PRODUCT_IDS } from "@keymaster/contracts";
 import { buildDependencyGraph, FUNCTION_DEPENDENCIES, layoutDependencyGraph } from "./dependencyGraph.js";
 
 describe("plugin dependency facts", () => {
   it("keeps every product and matches method calls to declared cross-plugin edges", () => {
     const graph = buildDependencyGraph();
-    expect(graph.nodes).toHaveLength(21);
+    // 节点集合必须与中央产品目录一一对应：数量与 id 都不允许漂移，
+    // 这样新增产品时这条断言自动跟随目录，而不是靠改魔法数字。
+    expect([...graph.nodes.map(node => node.id)].sort()).toEqual([...BUILTIN_PLUGIN_PRODUCT_IDS].sort());
     const pairs = new Set(graph.edges.map(edge => `${edge.consumer}:${edge.provider}`));
     for (const call of FUNCTION_DEPENDENCIES) {
       expect(pairs.has(`${call.consumer}:${call.provider}`), JSON.stringify(call)).toBe(true);

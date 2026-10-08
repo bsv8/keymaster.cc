@@ -655,6 +655,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "msfile.bucket.service",
             "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "msfile.content",
+            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -879,6 +884,177 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "moduleId": "app",
             "purposeId": "app-settings",
             "authority": "platform-only",
+            "model": "files",
+            "schemaVersion": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "forum",
+    "name": "Forum",
+    "units": [
+      {
+        "id": "forum.window",
+        "runtime": "window-main",
+        "scopeKind": "owner-session",
+        "provides": [
+          {
+            "kind": "local",
+            "id": "forum.service",
+            "version": "1"
+          }
+        ],
+        "privateProvides": [],
+        "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "storage.file-clients",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "论坛配置与发布任务的受限文件句柄"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.service",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "受控 active key 签名与 owner 身份"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.wallet-state",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "锁定/切 Key 时中止连接与新签名"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "msfile.content",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "正文与附件的统一获取、验证与读取"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "p2pkh.protocol-spend",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "无找零构建与统一广播",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "p2pkh.protocol-funding",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "专用资金 UTXO 的选币、准备交易与保护登记",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "p2pkh.submission-observer",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "恢复时对账同一个持久提交，不重建不二次派发",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "woc.service",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "按 (network, txid) 取创世根 raw 与链上/广播对账证据",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "window-p2p.executor",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "WSS 与 WebRTC Direct 走唯一 Window Host 的 forum lane",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "resource.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "注册论坛资源投影"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "resource.owned-access",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "UI 读取所属实例资源"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "page.ui.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "注册论坛页面"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "breadcrumb.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "论坛页面包屑"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "business.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "首页业务导航入口"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "i18n.service",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "界面文案"
+          }
+        ],
+        "permissions": [],
+        "storages": [
+          {
+            "moduleId": "forum",
+            "purposeId": "",
+            "authority": "built-in-module",
             "model": "files",
             "schemaVersion": 1
           }
@@ -2038,6 +2214,16 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "local",
             "id": "p2pkh.protocol-spend",
+            "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "p2pkh.protocol-funding",
+            "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "p2pkh.submission-observer",
             "version": "1"
           },
           {

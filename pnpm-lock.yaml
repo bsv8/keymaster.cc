@@ -421,6 +421,39 @@ importers:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
 
+  packages/plugin-forum:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/plugin-msfile':
+        specifier: '*'
+        version: link:../plugin-msfile
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@multiformats/multiaddr':
+        specifier: 13.0.3
+        version: 13.0.3
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      bitcoin-libp2p:
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      key-roundtrip:
+        specifier: 0.1.0
+        version: 0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      webloom-framework:
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
+
   packages/plugin-message:
     dependencies:
       '@keymaster/contracts':
@@ -2897,6 +2930,10 @@ packages:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
     hasBin: true
+
+  key-roundtrip@0.1.0:
+    resolution: {integrity: sha512-btjsUn65wEKfas8okJeM2uqdSb8R4ZXW7lmIksfjNW8RrrLthrMnb2nXhk+ozCnL8RLxWa9JMLr9KDlW/SSTSQ==}
+    engines: {node: '>=20.19.0'}
 
   keyhold@2.1.0:
     resolution: {integrity: sha512-MsphUUVSp9VcpNuO5m7Ug4kd1yhUSr8HUBgZ22EzM0PwwzA1SU8fbf0omgy2apBW7yiVY5yX/7ITd2ow5BDvSQ==}
@@ -6572,6 +6609,18 @@ snapshots:
   jsesc@3.1.0: {}
 
   json5@2.2.3: {}
+
+  key-roundtrip@0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+    dependencies:
+      '@libp2p/interface': 3.3.0
+      '@noble/curves': 2.0.1
+      '@noble/hashes': 2.0.1
+      bitcoin-libp2p: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native
+      - supports-color
+      - utf-8-validate
 
   keyhold@2.1.0:
     dependencies:
