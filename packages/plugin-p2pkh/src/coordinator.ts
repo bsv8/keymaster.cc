@@ -21,3 +21,5 @@ export { executeWorkerP2pkhBroadcast } from "./workerBroadcastExecutor.js";
 export { createWorkerP2pkhSettings } from "./workerSettings.js";
 export { createWorkerTransferRuntime } from "./workerTransferRuntime.js";
 export { executeWorkerP2pkhSnapshot, readWorkerP2pkhResource } from "./workerSnapshotExecutor.js";
+
+export { createWorkerProtocolRuntime, readWorkerProtocolProtection } from "./workerProtocolRuntime.js";

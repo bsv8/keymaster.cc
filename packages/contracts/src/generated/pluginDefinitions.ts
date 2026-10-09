@@ -812,6 +812,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "msfile.service",
             "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "msfile.content",
+            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -910,79 +915,21 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "dependencies": [
           {
             "capability": {
-              "kind": "local",
-              "id": "storage.file-clients",
+              "kind": "stream",
+              "id": "forum.worker-attachment",
               "version": "1"
             },
-            "sourceRuntime": "window-main",
-            "reason": "论坛配置与发布任务的受限文件句柄"
+            "sourceRuntime": "shared-worker",
+            "reason": "已验证附件分块交付给 Window 展示"
           },
           {
             "capability": {
-              "kind": "local",
-              "id": "vault.service",
+              "kind": "rpc",
+              "id": "forum.worker-service",
               "version": "1"
             },
-            "sourceRuntime": "window-main",
-            "reason": "受控 active key 签名与 owner 身份"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.wallet-state",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "锁定/切 Key 时中止连接与新签名"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "msfile.content",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "正文与附件的统一获取、验证与读取"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "p2pkh.protocol-spend",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "无找零构建与统一广播",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "p2pkh.protocol-funding",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "专用资金 UTXO 的选币、准备交易与保护登记",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "p2pkh.submission-observer",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "恢复时对账同一个持久提交，不重建不二次派发",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "woc.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "按 (network, txid) 取创世根 raw 与链上/广播对账证据",
-            "optional": true
+            "sourceRuntime": "shared-worker",
+            "reason": "唯一 owner-session Forum 任务与发布权威；不可用时阻止发布"
           },
           {
             "capability": {
@@ -991,8 +938,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
               "version": "1"
             },
             "sourceRuntime": "window-main",
-            "reason": "WSS 与 WebRTC Direct 走唯一 Window Host 的 forum lane",
-            "optional": true
+            "reason": "注册 Forum lane，共用唯一网络 Host"
           },
           {
             "capability": {
@@ -1047,6 +993,87 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "window-main",
             "reason": "界面文案"
+          }
+        ],
+        "permissions": [],
+        "storages": []
+      },
+      {
+        "id": "forum.coordinator-worker",
+        "runtime": "shared-worker",
+        "scopeKind": "owner-session",
+        "provides": [
+          {
+            "kind": "local",
+            "id": "forum.worker-network",
+            "version": "1"
+          },
+          {
+            "kind": "rpc",
+            "id": "forum.worker-service",
+            "version": "1"
+          },
+          {
+            "kind": "stream",
+            "id": "forum.worker-attachment",
+            "version": "1"
+          }
+        ],
+        "privateProvides": [],
+        "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "storage.file-clients",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Forum 配置、缓存与发布任务的唯一仓储"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.wallet-state",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "owner-session 身份与世代"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.worker-crypto",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Worker 内规范业务签名"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "msfile.content",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "正文附件统一由 MSFile 获取与保存"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "p2pkh.worker-protocol",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "钱包权威的协议资金、签名、广播与同提交观测"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "woc.service",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "根 raw 和链上观测"
           }
         ],
         "permissions": [],
@@ -2444,6 +2471,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "local",
             "id": "p2pkh.worker-transfer",
+            "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "p2pkh.worker-protocol",
             "version": "1"
           }
         ],

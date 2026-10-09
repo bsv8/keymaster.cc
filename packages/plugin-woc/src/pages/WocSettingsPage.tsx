@@ -56,6 +56,10 @@ function WocSettingsPageInner({
       if (!alive || result.status !== "ok") return;
       const requestsPerSecond = typeof result.value.requestsPerSecond === "number" ? result.value.requestsPerSecond : service.getConfig().requestsPerSecond;
       setDraft({ baseUrl: DEFAULT_WOC_CONFIG.baseUrl, requestsPerSecond });
+    }).catch((cause) => {
+      // The owner may revoke this scoped request after navigation. A late
+      // failure belongs to the unmounted page, not the global fatal boundary.
+      if (alive) setError(cause instanceof Error ? cause.message : String(cause));
     });
     return () => { alive = false; };
   }, [coordinator, service]);

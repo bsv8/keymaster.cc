@@ -143,26 +143,47 @@ export async function signP2pkhTx(
   publicKeyHex: string
 ): Promise<string> {
   const pub = hexToBytes(publicKeyHex);
+  // P2PKH 只是「脚本自带公钥」这一种形状：scriptCode 由地址重建，解锁脚本推签名与公钥。
+  return signMixedInputs(
+    unsigned,
+    utxos.map((utxo) => ({
+      scriptCode: addressToP2pkhScript(utxo.address),
+      value: utxo.value,
+      pushPublicKeyInUnlock: true,
+    })),
+    signDigest,
+    { publicKey: pub }
+  );
+}
 
-  const signedInputs: TxInput[] = unsigned.inputs.map((i) => ({ ...i, scriptSig: new Uint8Array(0) }));
-
-  for (let i = 0; i < unsigned.inputs.length; i++) {
-    const utxo = utxos[i]!;
-    const scriptCode = addressToP2pkhScript(utxo.address);
-    const sighash = calcBip143Sighash(unsigned, i, scriptCode, utxo.value);
-    const der = await signDigest(sighash);
-    const sigWithType = concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
-    signedInputs[i] = {
-      ...signedInputs[i]!,
-      scriptSig: concatBytes(
-        new Uint8Array([sigWithType.length]),
-        sigWithType,
-        new Uint8Array([pub.length]),
-        pub
-      )
-    };
+/**
+ * 逐笔形状混合签名。
+ *
+ * 每笔输入独立给出 scriptCode 与解锁策略，然后**逐笔**签名：
+ * 先整体按一种形状签、再覆盖其中几笔，会让被覆盖的那些笔用错 scriptCode 算出
+ * sighash，产出一笔本地看起来完全正常、网络必然拒绝的交易。
+ */
+export async function signMixedInputs(
+  unsigned: UnsignedTx,
+  inputs: readonly { scriptCode: Uint8Array; value: number; pushPublicKeyInUnlock: boolean }[],
+  signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
+  options: { readonly publicKey: Uint8Array }
+): Promise<string> {
+  if (inputs.length !== unsigned.inputs.length) {
+    throw new Error("Signable inputs must match the transaction inputs");
   }
-
+  const pub = options.publicKey;
+  const signedInputs: TxInput[] = unsigned.inputs.map((i) => ({ ...i, scriptSig: new Uint8Array(0) }));
+  for (let i = 0; i < unsigned.inputs.length; i++) {
+    const input = inputs[i]!;
+    const sighash = calcBip143Sighash(unsigned, i, input.scriptCode, input.value);
+    const sigWithType = concatBytes(await signDigest(sighash), new Uint8Array([SIGHASH_ALL_FORKID]));
+    // 裸公钥脚本的解锁脚本只有签名；P2PKH 还要把公钥推上去。
+    const unlock = input.pushPublicKeyInUnlock
+      ? concatBytes(new Uint8Array([sigWithType.length]), sigWithType, new Uint8Array([pub.length]), pub)
+      : concatBytes(new Uint8Array([sigWithType.length]), sigWithType);
+    signedInputs[i] = { ...signedInputs[i]!, scriptSig: unlock };
+  }
   return bytesToHex(serializeTx({ ...unsigned, inputs: signedInputs }));
 }
 

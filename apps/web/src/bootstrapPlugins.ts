@@ -515,6 +515,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   let pageHost: PluginHost | undefined;
   let pageWindowApp: WindowApp | undefined;
   let pageLifecycleClosed = false;
+  let runtimeReadyOff: (() => void) | undefined;
   const disposePageLifecycle = (): void => {
     if (pageLifecycleClosed) return;
     pageLifecycleClosed = true;
@@ -524,6 +525,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // 页面继续使用旧代理。Worker 资源由 SharedWorker Host 的 dispose 收口。
     // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
     // 仍在后台尽力执行，不能反过来阻塞新 Worker 的接管判定。
+    runtimeReadyOff?.();
+    runtimeReadyOff = undefined;
     coordinatorClient.shutdown();
     const cleanup = pageHost?.dispose("pagehide");
     if (cleanup) {
@@ -634,7 +637,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     stage: "coordinator",
     operation: "synchronize-runtime-identity",
   }, () => host.transitionRuntimeIdentity(runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot())));
-  const coordinatorRuntime = runWithBootstrapErrorContext({
+  let coordinatorRuntime = runWithBootstrapErrorContext({
     stage: "transport",
     operation: "get-coordinator-runtime-handle"
   }, () => {
@@ -646,6 +649,11 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     stage: "transport",
     operation: "attach-coordinator-runtime"
   }, () => attachKeymasterRemoteRuntime(host, coordinatorRuntime));
+  runtimeReadyOff = coordinatorClient.subscribeRuntimeReady(runtime => {
+    if (runtime === coordinatorRuntime) return;
+    attachKeymasterRemoteRuntime(host, runtime);
+    coordinatorRuntime = runtime;
+  });
   const storageStatus = await withBootstrapErrorContext({
     stage: "storage-status",
     operation: "read-storage-status"
@@ -981,6 +989,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       && coordinatorClient.getRuntimeHandle() === runtimeAtStart,
     );
     if (!isCurrentConnection()) return;
+    // Reconnect creates a new RuntimeHandle even when the owner is unchanged.
+    // The adapter must follow that connection: refreshing its old, disconnected
+    // handle leaves restored Worker services invisible to Window consumers.
+    if (runtimeAtStart !== coordinatorRuntime) {
+      attachKeymasterRemoteRuntime(host, runtimeAtStart!);
+      coordinatorRuntime = runtimeAtStart!;
+    }
     try {
       await withBootstrapErrorContext({
         stage: "coordinator",

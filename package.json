@@ -44,6 +44,8 @@
     "test:e2e:multi-tab-refresh-smoke": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.integration.config.ts e2e/integration/journeys/local/multi-tab-recovery.spec.ts --project=local-integration",
     "test:e2e:integration": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.integration.config.ts --project=local-integration",
     "test:e2e:integration:list": "playwright test --config=e2e/playwright.integration.config.ts --project=local-integration --list",
+    "test:e2e:forum": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.forum.config.ts --project=forum",
+    "test:e2e:forum-purchase": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.forum-purchase.config.ts --project=forum-purchase",
     "test:e2e:msfile": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.msfile.config.ts --project=msfile",
     "test:e2e:msfile:list": "playwright test --config=e2e/playwright.msfile.config.ts --project=msfile --list",
     "test:e2e:satsubscription": "pnpm check:integration-coverage && pnpm typecheck:e2e && node scripts/run-satsubscription-e2e.mjs",

@@ -6,15 +6,18 @@
 //   - 广播、链上、索引三套状态分开显示，查无节点时展示「等待发现」而不是
 //     编造一个拒绝原因。
 
-import { createElement, useCallback, useEffect, useState, type ReactNode } from "react";
-import { useTranslation } from "react-i18next";
+import { createElement, useCallback, useEffect, useState, type ReactNode, type MouseEvent } from "react";
+import { router, usePluginI18n } from "@keymaster/runtime";
 import {
   FORUM_PAGE_SIZE_DEFAULT,
   FORUM_PAGE_SIZE_MAX,
   forumAmountToBigInt,
+  type ForumAttachmentContent,
   type ForumConfig,
+  type ForumContentState,
   type ForumListOperation,
   type ForumNodeView,
+  type ForumPublicationReachability,
   type ForumPublishTask,
   type ForumReadingView,
   type ForumRootVerification,
@@ -25,8 +28,17 @@ import { ForumBusinessError } from "./domain/indexClient.js";
 import { renderForumMarkdown, type ForumRenderNode } from "./markdown/markdown.js";
 import { useForum } from "./ForumResourceContext.js";
 
+/** Internal navigation keeps the owner session alive; ordinary href still
+ * supports copying the address and opening a new tab with modifier keys. */
+function internalForumLink(href: string, label: string, className = "forum-link"): ReactNode {
+  return createElement("a", { href, className, onClick: (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault(); router.push(href);
+  } }, label);
+}
+
 export function ForumHomePage(): ReactNode {
-  const { t } = useTranslation("forum");
+  const { t } = usePluginI18n();
   const { forum } = useForum();
   const [configs, setConfigs] = useState<readonly ForumConfig[]>([]);
   const [roots, setRoots] = useState<ReadonlyMap<string, ForumRootVerification>>(new Map());
@@ -66,7 +78,15 @@ export function ForumHomePage(): ReactNode {
     t("forum.page.subtitle"),
     error,
     createElement(ForumConfigForm, { onSaved: onConfigSaved }),
-    configs.map((config) => createElement(ForumConfigCard, { key: config.id, config, root: roots.get(config.id) })),
+    configs.map((config) =>
+      createElement(ForumConfigCard, {
+        key: config.id,
+        config,
+        root: roots.get(config.id),
+        // 验证成功后立刻更新首页持有的证据：浏览入口不必等刷新页面。
+        onRootVerified: (root) => setRoots((prev) => new Map(prev).set(config.id, root)),
+      }),
+    ),
   );
 }
 
@@ -78,7 +98,7 @@ export function ForumHomePage(): ReactNode {
  * 连接才发现地址形态不对。
  */
 function ForumConfigForm(props: { onSaved(configId: string): void }): ReactNode {
-  const { t } = useTranslation("forum");
+  const { t } = usePluginI18n();
   const { forum } = useForum();
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState("");
@@ -146,8 +166,17 @@ function randomSuffix(): string {
   return `f${Date.now().toString(36)}`;
 }
 
-function ForumConfigCard(props: { readonly config: ForumConfig; readonly root: ForumRootVerification | undefined }): ReactNode {
-  const { t } = useTranslation("forum");
+/**
+ * 导出供渲染测试：配置卡片的行为（浏览入口是否出现、验证后是否更新）需要断言
+ * DOM 与回调。
+ */
+export function ForumConfigCard(props: {
+  readonly config: ForumConfig;
+  readonly root: ForumRootVerification | undefined;
+  /** 根验证成功后把新证据上报，让首页更新而不必刷新。 */
+  readonly onRootVerified?: (root: ForumRootVerification) => void;
+}): ReactNode {
+  const { t } = usePluginI18n();
   const { forum } = useForum();
   const [status, setStatus] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
@@ -156,7 +185,9 @@ function ForumConfigCard(props: { readonly config: ForumConfig; readonly root: F
     setBusy(true);
     setStatus(undefined);
     try {
-      await forum.verifyRoot(props.config.id);
+      // 验证成功后把证据交回首页：否则浏览链接要等刷新页面才出现，
+      // 「新增配置 → 验证 → 进入论坛」这条链路会断在最后一步。
+      props.onRootVerified?.(await forum.verifyRoot(props.config.id));
       setStatus(t("forum.config.verified"));
     } catch (error) {
       // 根验证失败必须显示原因：没有信任锚就没有任何后续操作的依据。
@@ -186,6 +217,11 @@ function ForumConfigCard(props: { readonly config: ForumConfig; readonly root: F
         : `${t("forum.config.verified")} · ${props.root.forumName} · ${props.root.tipPrice} sat · ${props.root.baseline}`,
     ),
     createElement("button", { type: "button", disabled: busy, onClick: () => void verify() }, t("forum.config.verifyRoot")),
+    // 根未验证时不给浏览入口：没有信任锚就没有任何后续操作的依据，
+    // 让用户点进去只会看到一个「配置不存在」的加载占位。
+    props.root === undefined
+      ? null
+      : internalForumLink(forumBoardsPath(props.config.id), t("forum.config.browse")),
     status === undefined ? null : createElement("p", { className: "forum-status" }, status),
   );
 }
@@ -223,14 +259,26 @@ export function ForumPostsPage(props: { readonly configId: string; readonly boar
 }
 
 export function ForumPostPage(props: { readonly configId: string; readonly txid: string }): ReactNode {
-  const { t } = useTranslation("forum");
+  const { t } = usePluginI18n();
   const { forum } = useForum();
   const [view, setView] = useState<ForumReadingView | undefined>();
   const [node, setNode] = useState<ForumNodeView | undefined>();
+  const [forumTxid, setForumTxid] = useState<string>("");
   const [error, setError] = useState<string | undefined>();
   const [reading, setReading] = useState(false);
 
-  // 先读节点：正文 hash、作者与三种价格都来自它。
+  // 先读配置：回复树的创世根与分页绑定都需要它，不能拿 configId 顶替。
+  useEffect(() => {
+    let cancelled = false;
+    void forum.getConfig(props.configId).then((value) => {
+      if (!cancelled) setForumTxid(value?.forumTxid ?? "");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [forum, props.configId]);
+
+  // 再读节点：正文 hash、作者与三种价格都来自它。
   useEffect(() => {
     const controller = new AbortController();
     let cancelled = false;
@@ -312,18 +360,25 @@ export function ForumPostPage(props: { readonly configId: string; readonly txid:
             reading ? t("forum.read.fetching") : t("forum.read.open"),
           ),
     error === undefined ? null : createElement("p", { className: "forum-status forum-status-error" }, error),
-    view === undefined ? null : createElement(ForumReadingBody, { view, onOpenAttachment: (hash) => void openAttachment(hash) }),
+    view === undefined
+      ? null
+      : createElement(ForumReadingBody, {
+          view,
+          onOpenAttachment: (hash) => void openAttachment(hash),
+          // 附件读取走同一个服务入口：字节的完整性由 MSFile 对账，Forum 不自己读存储。
+          loadAttachment: (hash) => forum.readAttachmentContent(props.configId, hash),
+        }),
     node === undefined
       ? null
-      : createElement(ForumReplyTree, { configId: props.configId, parentTxid: node.txid }),
-    node === undefined || node.parentTxid === null
-      ? null
-      : createElement(
-          "nav",
-          { className: "forum-post-actions" },
-          createElement("a", { className: "forum-link", href: forumPublishPath(node.parentTxid, node.txid) }, t("forum.reply.title")),
-          createElement("a", { className: "forum-link", href: forumPublishPath(node.parentTxid, node.txid) }, t("forum.changetip.title")),
-        ),
+      : createElement(ForumReplyTree, { configId: props.configId, forumTxid, parentTxid: node.txid }),
+    // 发布入口针对**当前节点**：回复是回它，改价是改它。
+    // 改价的作者校验由服务端执行（只有作者能改价），界面不自己编一个「你是作者」的结论。
+    createElement(
+      "nav",
+      { className: "forum-post-actions" },
+      internalForumLink(forumPublishPath(props.configId, props.txid), t("forum.reply.title")),
+      internalForumLink(forumPublishPath(props.configId, props.txid), t("forum.changetip.title")),
+    ),
   );
 }
 
@@ -332,8 +387,8 @@ export function ForumPostPage(props: { readonly configId: string; readonly txid:
  *
  * 只有用户点开时才请求，因此默认不会为整棵树触发正文获取；服务端顺序原样保留。
  */
-function ForumReplyTree(props: { readonly configId: string; readonly parentTxid: string }): ReactNode {
-  const { t } = useTranslation("forum");
+function ForumReplyTree(props: { readonly configId: string; readonly forumTxid: string; readonly parentTxid: string }): ReactNode {
+  const { t } = usePluginI18n();
   const { forum } = useForum();
   const [open, setOpen] = useState(false);
   const binding = useForumListBinding(
@@ -344,11 +399,12 @@ function ForumReplyTree(props: { readonly configId: string; readonly parentTxid:
             configId: props.configId,
             operation: "list_replies",
             parentTxid: props.parentTxid,
-            forumTxid: props.configId,
+            // 创世根来自配置而不是 configId：它参与分页坐标的绑定。
+            forumTxid: props.forumTxid,
           },
-          loader: forumListLoader(forum, props.configId, "list_replies", props.configId, props.parentTxid, FORUM_PAGE_SIZE_DEFAULT),
+          loader: forumListLoader(forum, props.configId, "list_replies", props.forumTxid, props.parentTxid, FORUM_PAGE_SIZE_DEFAULT),
         }),
-      [forum, props.configId, props.parentTxid],
+      [forum, props.configId, props.forumTxid, props.parentTxid],
     ),
   );
   const { view, items } = useForumListSnapshot(binding);
@@ -364,7 +420,13 @@ function ForumReplyTree(props: { readonly configId: string; readonly parentTxid:
     "section",
     { className: "forum-replies" },
     createElement("h3", null, t("forum.list.replies")),
-    createElement("ul", { className: "forum-node-list" }, items.map((item) => createElement(ForumNodeRow, { key: item.txid, node: item }))),
+    createElement(
+      "ul",
+      { className: "forum-node-list" },
+      items.map((item) =>
+        createElement(ForumNodeRow, { key: item.txid, configId: props.configId, operation: "list_replies", node: item }),
+      ),
+    ),
     view.needsManualRefresh || view.status === "failed"
       ? createElement("button", { type: "button", onClick: () => void binding.reload("manual") }, t("forum.list.refresh"))
       : createElement("button", { type: "button", disabled: view.exhausted, onClick: () => void binding.loadMore() }, t("forum.list.loadMore")),
@@ -378,7 +440,7 @@ function ForumListPage(props: {
   readonly parentTxid: string;
   readonly title: string;
 }): ReactNode {
-  const { t } = useTranslation("forum");
+  const { t } = usePluginI18n();
   const { forum } = useForum();
   // binding 的身份就是这组坐标；换父节点或换配置都会得到新的 binding，
   // 因此旧游标不可能被续接到新视图上。
@@ -403,9 +465,16 @@ function ForumListPage(props: {
     "section",
     { className: "forum-list" },
     createElement("h2", null, t(props.title)),
+    internalForumLink(forumPublishPath(props.config.id, props.parentTxid), t("forum.reply.submit")),
     items.length === 0 && view.status !== "loading" ? createElement("p", { className: "forum-empty" }, "…") : null,
     // 严格保留服务端顺序：这里不做任何本地重排。
-    createElement("ul", { className: "forum-node-list" }, items.map((item) => createElement(ForumNodeRow, { key: item.txid, node: item }))),
+    createElement(
+      "ul",
+      { className: "forum-node-list" },
+      items.map((item) =>
+        createElement(ForumNodeRow, { key: item.txid, configId: props.config.id, operation: props.operation, node: item }),
+      ),
+    ),
     view.needsManualRefresh || view.status === "failed"
       ? createElement("button", { type: "button", onClick: () => void binding.reload("manual") }, t("forum.list.refresh"))
       : createElement(
@@ -417,14 +486,27 @@ function ForumListPage(props: {
     view.stale ? createElement("p", { className: "forum-hint" }, t("forum.list.stale")) : null,
     view.errorCode === undefined
       ? null
-      : createElement("p", { className: "forum-status forum-status-error" }, t(`forum.error.${view.errorCode}`, view.errorCode)),
+      : createElement("p", { className: "forum-status forum-status-error" }, t(`forum.error.${view.errorCode}`, { defaultValue: view.errorCode })),
   );
 }
 
 
-function ForumNodeRow(props: { readonly node: ForumNodeView }): ReactNode {
-  const { t } = useTranslation("forum");
-  const { node } = props;
+/**
+ * 列表里的一行节点。
+ *
+ * `configId` 与当前列表操作必须显式传进来：路由里的第一个参数是**本地配置 ID**，
+ * 不是交易 txid。用 txid 填进去会让 `getConfig` 按父交易 hash 查配置，结果通常是
+ * 「配置不存在」或永远停在加载占位。
+ */
+function ForumNodeRow(props: {
+  readonly configId: string;
+  readonly operation: ForumListOperation;
+  readonly node: ForumNodeView;
+}): ReactNode {
+  const { t } = usePluginI18n();
+  const { configId, operation, node } = props;
+  // 板块行的入口是板块帖子列表，不是板块自己的节点详情：板块本身没有正文。
+  const openPath = operation === "list_boards" ? forumPostsPath(configId, node.txid) : forumPostPath(configId, node.txid);
   return createElement(
     "li",
     { className: "forum-node-row" },
@@ -432,38 +514,43 @@ function ForumNodeRow(props: { readonly node: ForumNodeView }): ReactNode {
     createElement(
       "div",
       { className: "forum-node-actions" },
-      // 进入节点：读正文、展开回复、发布回复或改价。
-      createElement("a", { className: "forum-link", href: forumNodePath(node.parentTxid, node.txid) }, t("forum.read.open")),
-      node.parentTxid === null
-        ? null
-        : createElement("a", { className: "forum-link", href: forumPublishPath(node.parentTxid, node.txid) }, t("forum.reply.title")),
+      // 进入节点：读正文、展开回复。
+      internalForumLink(openPath, t("forum.read.open")),
+      // 发布回复针对**这个节点**，所以 publish 的目标参数是 node.txid 而不是它的父。
+      internalForumLink(forumPublishPath(configId, node.txid), t("forum.reply.title")),
+      // 回复树由帖子页承载；板块页则直接展开它的帖子列表。
+      node.hasChildren && operation === "list_boards"
+        ? internalForumLink(forumPostsPath(configId, node.txid), t("forum.list.posts"), "forum-hint")
+        : null,
     ),
-    node.hasChildren && node.parentTxid !== null
-      ? createElement("a", { className: "forum-hint", href: forumRepliesPath(node.parentTxid, node.txid) }, t("forum.list.replies"))
-      : null,
   );
 }
 
 /**
- * 节点详情路径。
+ * 路由路径。
  *
- * 根节点没有父节点，用创世根 txid 作为它的父；非根节点用自己的 parent_txid。
- * 路径统一由这里生成，避免各处手写字符串导致某一处漏掉前缀。
+ * 第一段永远是本地 `configId`：`/forum/:configId/...` 的 `getConfig` 会按它查配置。
+ * 交易 txid 只出现在后续的 `:txid` / `:boardTxid` 位置。
  */
-function forumNodePath(parentTxid: string | null, txid: string): string {
-  return parentTxid === null ? `/forum/${txid}/post/${txid}` : `/forum/${parentTxid}/post/${txid}`;
+/** 板块列表（论坛首页下的第一层）。 */
+export function forumBoardsPath(configId: string): string {
+  return `/forum/${encodeURIComponent(configId)}`;
 }
 
-function forumRepliesPath(parentTxid: string, txid: string): string {
-  return `/forum/${parentTxid}/board/${txid}`;
+export function forumPostsPath(configId: string, boardTxid: string): string {
+  return `/forum/${encodeURIComponent(configId)}/board/${boardTxid}`;
 }
 
-function forumPublishPath(parentTxid: string, txid: string): string {
-  return `/forum/${parentTxid}/publish/${txid}`;
+export function forumPostPath(configId: string, txid: string): string {
+  return `/forum/${encodeURIComponent(configId)}/post/${txid}`;
+}
+
+export function forumPublishPath(configId: string, txid: string): string {
+  return `/forum/${encodeURIComponent(configId)}/publish/${txid}`;
 }
 
 function ForumNodeHeader(props: { readonly node: ForumNodeView }): ReactNode {
-  const { t } = useTranslation("forum");
+  const { t } = usePluginI18n();
   const { node } = props;
   return createElement(
     "header",
@@ -482,8 +569,38 @@ function ForumNodeHeader(props: { readonly node: ForumNodeView }): ReactNode {
   );
 }
 
-function ForumReadingBody(props: { readonly view: ForumReadingView; onOpenAttachment?(seedHashHex: string): void }): ReactNode {
-  const { t } = useTranslation("forum");
+/** 图片 MIME 白名单：只有这些类型才内联渲染，其余一律走下载出口。 */
+const INLINE_IMAGE_TYPES: ReadonlySet<string> = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/avif",
+]);
+
+/**
+ * MIME 规范化后判断是否可以内联渲染。
+ *
+ * 去掉参数（`image/png; charset=binary`）、去空白、转小写后查白名单：元数据里
+ * 带的参数不应让一张正常 PNG 掉进下载分支。
+ */
+export function isInlineImageMime(mediaType: string | undefined): boolean {
+  return INLINE_IMAGE_TYPES.has(normalizeMime(mediaType));
+}
+
+/** 取 `type/subtype`，去掉参数并规范大小写。 */
+function normalizeMime(mediaType: string | undefined): string {
+  return (mediaType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+/** 导出供渲染测试：附件是否真的内联展示需要断言 DOM 结果。 */
+export function ForumReadingBody(props: {
+  readonly view: ForumReadingView;
+  onOpenAttachment?(seedHashHex: string): void;
+  /** 读取已验证附件字节；缺席时附件只显示状态，没有图片与下载出口。 */
+  loadAttachment?(seedHashHex: string): Promise<ForumAttachmentContent | undefined>;
+}): ReactNode {
+  const { t } = usePluginI18n();
   const { view } = props;
   if (view.markdown === undefined) {
     // 正文不可达或校验失败时，节点与回复结构仍然展示。
@@ -510,18 +627,115 @@ function ForumReadingBody(props: { readonly view: ForumReadingView; onOpenAttach
           // 附件失败不阻塞正文：每个附件独立显示自己的状态。
           view.attachments.map((attachment) =>
             createElement(
-              "li",
-              { key: attachment.seedHashHex, className: "forum-attachment" },
-              createElement("code", null, attachment.seedHashHex),
-              createElement("span", { className: "forum-status" }, t(`forum.read.${contentStateKey(attachment.state)}`)),
-              // 附件有独立的获取/重试入口；失败不阻塞正文。
-              props.onOpenAttachment === undefined
-                ? null
-                : createElement("button", { type: "button", onClick: () => props.onOpenAttachment?.(attachment.seedHashHex) }, t("forum.read.open")),
+              ForumAttachmentItem,
+              {
+                key: attachment.seedHashHex,
+                state: attachment.state,
+                seedHashHex: attachment.seedHashHex,
+                loadAttachment: props.loadAttachment,
+                onRetry: props.onOpenAttachment,
+              },
             ),
           ),
         ),
   );
+}
+
+/**
+ * 一个附件：状态 + 真实内容出口。
+ *
+ * 只有真的读到字节才给图片或下载按钮；读到之前就显示「未获取」。这是把
+ * 「获取状态」升级成「实际可读」的落点，也是 F05 未完成部分的边界。
+ */
+function ForumAttachmentItem(props: {
+  readonly state: ForumContentState;
+  readonly seedHashHex: string;
+  readonly loadAttachment?: (seedHashHex: string) => Promise<ForumAttachmentContent | undefined>;
+  readonly onRetry?: (seedHashHex: string) => void;
+}): ReactNode {
+  const { t } = usePluginI18n();
+  const [content, setContent] = useState<ForumAttachmentContent | undefined>();
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    if (props.loadAttachment === undefined) return;
+    setBusy(true);
+    try {
+      setContent(await props.loadAttachment(props.seedHashHex));
+    } catch {
+      setContent(undefined);
+    } finally {
+      setBusy(false);
+    }
+  }, [props]);
+
+  // 已验证的附件自动读一次：状态是 verified 就该能看见，而不是让用户再点一次。
+  useEffect(() => {
+    if (props.state !== "verified" || props.loadAttachment === undefined) return;
+    void load();
+  }, [props.state, props.loadAttachment, load]);
+
+  // 直接查白名单。`mime === "image/"` 这种比较永远为假，会让所有正常图片都掉进
+  // 下载分支——「内联展示」形同虚设。
+  const inlineImage = content !== undefined && isInlineImageMime(content.mediaType);
+
+  return createElement(
+    "li",
+    { className: "forum-attachment" },
+    createElement("code", null, props.seedHashHex),
+    createElement("span", { className: "forum-status" }, t(`forum.read.${contentStateKey(props.state)}`)),
+    inlineImage
+      ? createElement("img", { className: "forum-attachment-image", src: attachmentObjectUrl(content), alt: content?.fileName ?? props.seedHashHex })
+      : content === undefined
+        ? null
+        // 非图片或不在白名单内的类型：只给下载出口，不内联渲染。
+        : createElement("a", { className: "forum-link", href: attachmentObjectUrl(content), download: content?.fileName ?? undefined }, t("forum.read.download")),
+    props.onRetry === undefined || props.state === "verified"
+      ? null
+      : createElement("button", { type: "button", disabled: busy, onClick: () => void load() }, t("forum.read.open")),
+  );
+}
+
+/**
+ * 把附件字节变成对象 URL。
+ *
+ * 只对已验证的字节生成；`URL.revokeObjectURL` 由组件卸载时回收，避免长期阅读
+ * 同一页面时把每个附件的副本留在内存里。
+ */
+function attachmentObjectUrl(content: ForumAttachmentContent): string {
+  const mime = normalizeMime(content.mediaType) || "application/octet-stream";
+  const byteLength = content.bytes.byteLength;
+  const key = `${content.seedHashHex}|${mime}|${byteLength}`;
+  const holder = objectUrlCache.get(key);
+  if (holder !== undefined) return holder.url;
+  // 复制到一个自有 ArrayBuffer：Blob 只接受 ArrayBuffer-backed 的视图，而跨
+  // Runtime 传过来的 Uint8Array 可能是 SharedArrayBuffer 视图。
+  const buffer = new ArrayBuffer(byteLength);
+  new Uint8Array(buffer).set(content.bytes);
+  const url = URL.createObjectURL(new Blob([buffer], { type: mime }));
+  cacheObjectUrl(content.seedHashHex, mime, byteLength, url);
+  return url;
+}
+
+/**
+ * 对象 URL 缓存。
+ *
+ * 键包含字节数与 MIME：同一个 hash 在不同会话里可能被重新编码或换来源，
+ * 命中旧的 URL 会让界面显示上一份内容——那是「读到字节」之外的第二份真值。
+ * 容量有界，超出时回收最早的条目，离开页面不会把这些副本留在内存里。
+ */
+const objectUrlCache = new Map<string, { url: string }>();
+const OBJECT_URL_CACHE_LIMIT = 32;
+
+function cacheObjectUrl(seedHashHex: string, mime: string, byteLength: number, url: string): void {
+  const key = `${seedHashHex}|${mime}|${byteLength}`;
+  while (objectUrlCache.size >= OBJECT_URL_CACHE_LIMIT) {
+    const oldest = objectUrlCache.keys().next();
+    if (oldest.done === true) break;
+    const stale = objectUrlCache.get(oldest.value);
+    if (stale !== undefined) URL.revokeObjectURL(stale.url);
+    objectUrlCache.delete(oldest.value);
+  }
+  objectUrlCache.set(key, { url });
 }
 
 function contentStateKey(state: ForumReadingView["content"]["state"]): string {
@@ -580,13 +794,14 @@ function renderNode(node: ForumRenderNode, key: number): ReactNode {
 }
 
 export function ForumPublishPage(props: { readonly configId: string; readonly targetTxid: string }): ReactNode {
-  const { t } = useTranslation("forum");
+  const { t } = usePluginI18n();
   const { forum } = useForum();
   const [kind, setKind] = useState<"reply" | "changetip">("reply");
   const [markdown, setMarkdown] = useState("");
   const [tipPrice, setTipPrice] = useState("0");
   const [task, setTask] = useState<ForumPublishTask | undefined>();
   const [budget, setBudget] = useState<ForumPublishTask["budget"]>();
+  const [publication, setPublication] = useState<ForumPublicationReachability | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
@@ -646,6 +861,14 @@ export function ForumPublishPage(props: { readonly configId: string; readonly ta
         disabled: busy || forumAmountToBigInt(tipPrice) === undefined,
         onClick: () =>
           void step(async () => {
+            // 先记录发布可达性：链上发布不依赖渠道，但「读者能不能取到」必须被记录，
+            // 否则界面只能显示「已发布」而读者实际取不到。
+            if (kind === "reply") {
+              const prepared = await forum.preparePublishContent(props.configId, markdown);
+              setPublication(prepared.publication);
+            } else {
+              setPublication(undefined);
+            }
             const prepared = await forum.preparePublish({
               configId: props.configId,
               kind,
@@ -674,6 +897,15 @@ export function ForumPublishPage(props: { readonly configId: string; readonly ta
             }`,
           ),
           task.txid === undefined ? null : createElement("code", { className: "forum-txid" }, task.txid),
+          // 可达性与广播/链上/索引是**第四套**状态：正文已上链不等于读者取得到。
+          // 渠道缺失时明确提示，而不是让「已发布」掩盖它。
+          publication === undefined
+            ? null
+            : createElement(
+                "p",
+                { className: publication.reachable ? "forum-publication" : "forum-status forum-status-error" },
+                `${t("forum.publish.reachability")}: ${publication.reachable ? t("forum.publish.reachable") : t("forum.publish.unreachable")} · ${publication.detail}`,
+              ),
           budget === undefined
             ? null
             : createElement(

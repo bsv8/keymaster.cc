@@ -55,7 +55,7 @@ function boundedLimit(value: number | undefined): number | undefined {
   return Math.max(1, Math.min(1_000, Math.floor(value)));
 }
 
-interface CursorPage<T> { items: T[]; nextCursor?: string; }
+export interface CursorPage<T> { items: T[]; nextCursor?: string; }
 
 /** 内存游标分页：cursor 是不透明 last-key；列表顺序稳定时可用。 */
 function pageRows<T>(rows: readonly T[], keyOf: (row: T) => string, cursor: string | undefined, limit: number): CursorPage<T> {

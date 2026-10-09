@@ -41,6 +41,8 @@ export interface RawEntry {
 export interface RawWalletObjectEntry {
   readonly path: string;
   readonly text: string;
+  /** Optional exact bytes for public protocol archives; UTF-8 is lossy for raw transactions. */
+  readonly bytesBase64?: string;
 }
 
 export const PUBLIC_KEY_PATTERN = /^(02|03)[0-9a-f]{64}$/u;
@@ -97,8 +99,8 @@ export async function readRawLocalStorage(page: Page): Promise<RawEntry[]> {
  * 这是本地钱包的正式物理真值。主键就是 path 本身，因此没有桶或 owner
  * 分组；对象值按 UTF-8 文本返回，调用方只校验公开结构。
  */
-export async function readRawWalletObjects(page: Page, pathPattern?: string): Promise<RawWalletObjectEntry[]> {
-  return page.evaluate(({ databaseName, storeName, schemaVersion, pattern }) => new Promise<Array<{ path: string; text: string }>>((resolve, reject) => {
+export async function readRawWalletObjects(page: Page, pathPattern?: string, includeBinary = false): Promise<RawWalletObjectEntry[]> {
+  return page.evaluate(({ databaseName, storeName, schemaVersion, pattern, includeBinary }) => new Promise<Array<{ path: string; text: string; bytesBase64?: string }>>((resolve, reject) => {
     const pathFilter = pattern ? new RegExp(pattern, "u") : undefined;
     const request = indexedDB.open(databaseName, schemaVersion);
     request.onupgradeneeded = () => {
@@ -115,7 +117,7 @@ export async function readRawWalletObjects(page: Page, pathPattern?: string): Pr
       }
       const transaction = database.transaction(storeName, "readonly");
       const cursor = transaction.objectStore(storeName).openCursor();
-      const entries: Array<{ path: string; text: string }> = [];
+      const entries: Array<{ path: string; text: string; bytesBase64?: string }> = [];
       cursor.onerror = () => { database.close(); reject(new Error("读取 IndexedDB 钱包对象失败")); };
       cursor.onsuccess = () => {
         const position = cursor.result;
@@ -130,11 +132,15 @@ export async function readRawWalletObjects(page: Page, pathPattern?: string): Pr
           return;
         }
         const record = position.value as { bytes?: Uint8Array };
-        entries.push({ path: objectPath, text: new TextDecoder("utf-8", { fatal: false }).decode(record.bytes ?? new Uint8Array()) });
+        const bytes = record.bytes ?? new Uint8Array();
+        let binary = "";
+        if (includeBinary) for (const byte of bytes) binary += String.fromCharCode(byte);
+        entries.push({ path: objectPath, text: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+          ...(includeBinary ? { bytesBase64: btoa(binary) } : {}) });
         position.continue();
       };
     };
-  }), { databaseName: WALLET_DATABASE_NAME, storeName: WALLET_OBJECT_STORE, schemaVersion: WALLET_SCHEMA_VERSION, pattern: pathPattern ?? null });
+  }), { databaseName: WALLET_DATABASE_NAME, storeName: WALLET_OBJECT_STORE, schemaVersion: WALLET_SCHEMA_VERSION, pattern: pathPattern ?? null, includeBinary });
 }
 
 /** 删除钱包里的单个对象；只用于验证"raw 缺失"这类失败展示。 */

@@ -38,6 +38,7 @@ import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
 import { MsFileBucketHomeWidget, MsFileBucketPage } from "./MsFileBucketPage.js";
 import { MSFILE_BUCKET_SERVICE_CAPABILITY, createMsFileBucketService } from "./msfileBucketService.js";
+import { createMsFileSellerPublicationEvidence } from "./msfilePublicationEvidence.js";
 import { createMsFileContentService } from "./msfileContentService.js";
 import { createMsFileRemoteContentFetcher } from "./msfileRemoteContentFetcher.js";
 import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
@@ -815,7 +816,7 @@ const msfilePluginDefinition = {
       CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,
       CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles,
     ],
-    provides: [MSFILE_SERVICE_CAPABILITY],
+    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_CONTENT_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件设置、协议证据与 App 管理设置的受限句柄" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件服务所属钱包身份" },
@@ -852,6 +853,9 @@ const msfilePluginDefinition = {
       // 远程获取复用既有 BitFS 买方通道：stat → 发布需求 → 已验签报价 → 购买。
       // 不注入这个 fetcher 时本地缺失的内容永远无法取得，只能报「无可用渠道」。
       remote: createMsFileRemoteContentFetcher({ service }),
+      // 发布渠道：判据在 msfilePublicationEvidence 里，manifest 只是装配它。
+      // 卖方运行单元就绪时本地内容才真的能被读者取到，与上面的下载来源无关。
+      publication: createMsFileSellerPublicationEvidence(service),
     });
     ctx.provide(MSFILE_CONTENT_CAPABILITY, contentService);
 

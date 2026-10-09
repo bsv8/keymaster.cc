@@ -122,7 +122,7 @@ export async function waitForTestnetUtxoSnapshot(page: Page, minOutputs = 1, tim
 }
 
 /** 在钱包页点击“刷新 UTXO”，并等待页面快照输出数精确变化。 */
-export async function refreshTestnetUtxoSnapshot(page: Page, expectedOutputs: number, timeoutMs = 120_000): Promise<void> {
+export async function refreshTestnetUtxoSnapshot(page: Page, expectedOutputs: number, timeoutMs = 120_000, recoverSession?: () => Promise<void>): Promise<void> {
   if (!/\/p2pkh\/testnet\/transactions(?:\?.*)?$/u.test(page.url())) await openTestnetWalletPage(page);
   const refresh = page.getByRole("button", { name: /刷新 UTXO|Refresh UTXOs?/u });
   await expect(refresh).toBeVisible({ timeout: 30_000 });
@@ -140,10 +140,11 @@ export async function refreshTestnetUtxoSnapshot(page: Page, expectedOutputs: nu
   };
   let lastClick = 0;
   await expect.poll(async () => {
+    await recoverSession?.();
     const now = Date.now();
     if (now - lastClick > 10_000) {
       lastClick = now;
-      await refresh.click().catch(() => undefined);
+      await refresh.click({ timeout: 5000 }).catch(() => undefined);
     }
     return readOutputs();
   }, {

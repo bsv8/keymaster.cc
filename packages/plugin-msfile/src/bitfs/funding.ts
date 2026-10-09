@@ -239,6 +239,28 @@ export interface BitfsFundingLedger {
   listProtectedOutpoints(filter?: { ownerPublicKeyHex?: string; network?: BsvNetwork }): Promise<ProtectedOutpoint[]>;
 }
 
+/** Register the same verified recovery transaction despite unrelated snapshot
+ * reconciliation changing the account revision. Only this local CAS operation
+ * retries: no signing, network dispatch or replacement transaction occurs.
+ * Every attempt re-reads the account and retains the ledger's pool/plan guards.
+ */
+export async function prepareBitfsPoolRecoveryWithCurrentRevision(
+  ledger: BitfsFundingLedger,
+  input: Omit<Parameters<BitfsFundingLedger["preparePoolRecovery"]>[0], "expectedRevision">,
+  assertActive: () => void,
+): Promise<BitfsFundingAccount> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    assertActive();
+    const account = await ledger.getAccount(input);
+    assertActive();
+    try { return await ledger.preparePoolRecovery({ ...input, expectedRevision: account.revision }); }
+    catch (error) {
+      if (!(error instanceof BitfsFundingError) || error.code !== "revision_conflict" || attempt === 3) throw error;
+    }
+  }
+  throw new Error("BitFS recovery registration did not settle");
+}
+
 /** 创建使用条件写与 Worker 内串行队列的专款账本。 */
 export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFundingLedger {
   if (!store) throw new TypeError("BitFS 专款账本需要文件存储");
@@ -620,19 +642,24 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
           if (!match) continue;
           const loaded = await readAccount(file.path, owner, match[1]!, network);
           if (!loaded) continue;
-          for (const transaction of loaded.account.transactions) {
-            if (transaction.state !== "observed" || transaction.inputsReconciled === true) continue;
-            if (transaction.inputOutpoints.some((outpoint) => unspent.has(outpoint))) continue;
+          const candidates = new Set(loaded.account.transactions.filter(transaction => transaction.state === "observed"
+            && transaction.inputsReconciled !== true && !transaction.inputOutpoints.some(outpoint => unspent.has(outpoint))).map(transaction => transaction.txid));
+          if (candidates.size > 0) {
+            // Reconcile this account once, inside its mutation queue. Reusing
+            // one loaded revision for several writes conflicts with our own
+            // first write; a close registration may also be interleaved. This
+            // monotonic observation merges with current state, while put still
+            // uses the current file revision and validates the entire account.
             await mutate({
               ownerPublicKeyHex: owner,
               seedHashHex: loaded.account.seedHashHex,
               network,
-              expectedRevision: loaded.account.revision,
               nowMs: input.nowMs,
               change(current) {
-                const latest = current.transactions.find((item) => item.txid === transaction.txid);
-                if (!latest || latest.state !== "observed" || latest.inputsReconciled === true) return current;
-                return { ...current, transactions: replaceTransaction(current.transactions, { ...latest, inputsReconciled: true }) };
+                return { ...current, transactions: current.transactions.map(transaction =>
+                  candidates.has(transaction.txid) && transaction.state === "observed" && transaction.inputsReconciled !== true
+                    && !transaction.inputOutpoints.some(outpoint => unspent.has(outpoint))
+                    ? { ...transaction, inputsReconciled: true } : transaction) };
               },
             });
           }

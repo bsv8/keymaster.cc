@@ -45,12 +45,16 @@ export function P2pkhSettingsPage() {
 
   async function applySettings(next: P2pkhGlobalSettings) {
     if (!service) return;
+    const previous = settings;
     setSettings(next);
     setError(null);
     try {
       await service.applyGlobalSettings(next);
     } catch (err) {
-      setSettings(service.getGlobalSettings());
+      // A settings write can outlive this owner Scope. Reading that revoked
+      // service in the error path throws again and turns recovery into a fatal
+      // unhandled rejection; restore the captured UI value instead.
+      setSettings(previous);
       setError(err instanceof Error ? err.message : String(err));
     }
   }

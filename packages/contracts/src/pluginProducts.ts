@@ -82,6 +82,7 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "msfile", unitId: "msfile.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "msfile", unitId: "msfile.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "forum", unitId: "forum.window", runtime: "window-main", scopeKind: "owner-session" },
+  { productId: "forum", unitId: "forum.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "sat-subscription", unitId: "sat-subscription.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "sat-subscription", unitId: "sat-subscription.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "protocol", unitId: "protocol.window", runtime: "window-main", scopeKind: "storage" },

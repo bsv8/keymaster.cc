@@ -180,6 +180,59 @@ export interface ForumContentStatus {
   readonly localCopy: boolean;
 }
 
+/**
+ * 已验证附件的字节视图。
+ *
+ * 字节是 `Uint8Array` 而不是 data URL：界面按 `mediaType` 决定是渲染图片还是
+ * 触发下载，Forum 不在这里替调用方选一种表示方式。
+ */
+export interface ForumAttachmentContent {
+  readonly seedHashHex: string;
+  readonly bytes: Uint8Array;
+  readonly byteLength: string;
+  readonly mediaType?: string;
+  readonly fileName?: string;
+}
+
+/**
+ * 发布可达性证据（Forum 侧视图）。
+ *
+ * `reachable` 为 false 时**不代表发布失败**：链上交易照样成立，只是读者取不到
+ * 内容。界面因此要把这两件事分开显示，不能合成一个「成功/失败」。
+ */
+export interface ForumPublicationReachability {
+  readonly seedHashHex: string;
+  readonly reachable: boolean;
+  /** 证据来源标识；为空表示没有任何读者可用的渠道。 */
+  readonly sourceIds: readonly string[];
+  /** 稳定可展示的原因说明。 */
+  readonly detail: string;
+  /** 观测时刻，毫秒。 */
+  readonly observedAtMs: number;
+}
+
+/** 自有 Forum 输出的坐标；归集与保护都以它为单位。 */
+export interface ForumSelfOutputOutpoint {
+  readonly txid: string;
+  readonly vout: number;
+}
+
+/**
+ * 自有 Forum 输出（data 或 tip）。
+ *
+ * 归集与保护都以它为单位：`lockingScriptHex` 必须逐字节保留，因为归集时它就是
+ * 签名用的 scriptCode。
+ */
+export interface ForumSelfOutput {
+  readonly txid: string;
+  readonly vout: number;
+  readonly value: number;
+  readonly kind: "data" | "tip";
+  readonly scriptKind: string;
+  readonly lockingScriptHex: string;
+  readonly ownerPublicKeyHex: string;
+}
+
 /** 标题/摘要投影。必须绑定内容 hash 与解析版本，可重建，不作为内容真值。 */
 export interface ForumContentProjection {
   readonly seedHashHex: string;
@@ -379,20 +432,98 @@ export interface ForumService {
   openAndFetch(configId: string, seedHashHex: string, options?: { signal?: AbortSignal }): Promise<ForumReadingView>;
   /** 读取一个附件；附件失败不阻塞正文。 */
   readAttachment(configId: string, seedHashHex: string, options?: { signal?: AbortSignal }): Promise<ForumContentStatus>;
+  /**
+   * 读取已验证附件的字节，用于图片展示与下载出口。
+   *
+   * 与 `readAttachment` 的区别：那个只返回状态，这个返回真实字节。没有它时界面
+   * 只能显示「附件已获取」而无法展示内容——「已获取」不是「读者看得见」。
+   * 返回的字节已经与 hash 对账，调用方不得绕过它自行读 MSFile 存储。
+   */
+  readAttachmentContent(
+    configId: string,
+    seedHashHex: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ForumAttachmentContent | undefined>;
+  /**
+   * 查询正文当前的发布可达性证据。
+   *
+   * 发布前必须问一次：链上 data 输出指向一个 seed hash，而读者能否取得那份内容
+   * 取决于 MSFile 有没有发布渠道。渠道缺失时这不是发布失败（链上交易照样成立），
+   * 但界面必须能如实呈现「已上链但读者取不到」，而不是显示「已发布」。
+   */
+  publicationReachability(
+    configId: string,
+    seedHashHex: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ForumPublicationReachability>;
 
   /* 发布 */
   /** 冻结正文到 MSFile 并返回其 seed hash。 */
   freezeContent(configId: string, markdown: string, options?: { signal?: AbortSignal }): Promise<{ readonly seedHashHex: string; readonly bytes: string }>;
+  /**
+   * 冻结正文并记录发布准备状态。
+   *
+   * 与 `freezeContent` 的区别：这里额外问一次发布可达性，把「正文已冻结」与
+   * 「读者能取到」两件事分别记录。渠道缺失时**不阻止**冻结——链上发布不依赖它——
+   * 但状态里必须留有 `publication` 供界面如实展示。
+   */
+  preparePublishContent(
+    configId: string,
+    markdown: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ readonly seedHashHex: string; readonly bytes: string; readonly publication: ForumPublicationReachability }>;
   /** 结构化 operatorSig：Worker 内重建规范字节，页面不能提交任意 digest。 */
   preparePublish(input: ForumPublishPrepareInput): Promise<ForumPublishTask>;
   /** 取报价并验 indexSig；parent_tip_price 从本次响应取得。 */
   quotePublish(taskId: string, options?: { signal?: AbortSignal }): Promise<ForumPublishTask>;
-  /** 展示费用项并记录用户确认的预算版本。 */
-  confirmBudget(taskId: string): Promise<ForumBudgetConfirmation>;
+  /** 展示费用项并记录用户确认的预算版本。费用必须由当前报价算出，不能读旧预算。 */
+  confirmBudget(taskId: string, options?: { signal?: AbortSignal }): Promise<ForumBudgetConfirmation>;
   /** 资金准备后重新询价并构建无找零 raw。 */
   buildAndSubmit(taskId: string, options?: { signal?: AbortSignal }): Promise<ForumPublishTask>;
   /** 广播未知时对账原交易，不自动构建重复付款。 */
   reconcile(taskId: string, options?: { signal?: AbortSignal }): Promise<ForumPublishTask>;
+  /* 自有输出与回收（FT05 / 显式回收） */
+  /**
+   * 列出候选交易里属于当前 owner 的 Forum data / tip 输出。
+   *
+   * 判据逐字节：锁定脚本必须以当前 owner 的压缩公钥开头并以 `OP_CHECKSIG` 结尾，
+   * 且能被 data/tip 解析器接受。「长度像」「前缀像」都不算。
+   */
+  listSelfOutputs(input: {
+    network: BsvNetwork;
+    txids: readonly string[];
+    signal?: AbortSignal;
+  }): Promise<readonly ForumSelfOutput[]>;
+  /** 登记保护；识别与登记都必须成功，否则普通转账可能把它们花掉。 */
+  protectSelfOutputs(outputs: readonly ForumSelfOutput[], network: BsvNetwork): Promise<number>;
+  /** 解除保护。 */
+  unprotectSelfOutputs(outputs: readonly ForumSelfOutput[]): Promise<void>;
+  /**
+   * 归集自有输出：扫回 owner 的 P2PKH 地址。
+   *
+   * 显式动作，不做任何自动触发——花费 data 输出不删除帖子，索引跟随交易有效性。
+   * 广播结果未知时拒绝当成成功：原交易必须先对账。
+   */
+  sweepSelfOutputs(input: {
+    network: BsvNetwork;
+    /**
+     * 只点名坐标，不带金额、脚本或归属。
+     *
+     * 归集要签名、要按金额分账，因此金额与锁定脚本必须在**归集当时**从链上重新取，
+     * 不能沿用调用方上一次 `list` 拿到的字段——那份数据可能来自不同的网络、不同的
+     * 时刻，甚至被调用方改过。
+     */
+    outpoints: readonly ForumSelfOutputOutpoint[];
+    feeRateSatoshisPerKb?: number;
+    signal?: AbortSignal;
+  }): Promise<{ txid: string; rawTxHex: string; sweptSatoshis: string }>;
+  /**
+   * 显式回收某个发布任务的专用资金。
+   *
+   * 仅回收可证明未派发且不再使用的资金，包括被替代资金及已取消任务。
+   * 未知状态保留资金记录、保护和历史提交证据。
+   */
+  recoverFunding(taskId: string): Promise<{ txid: string; recoveredSatoshis: string }>;
   /** 只释放明确未派发的输入占用；未知或已派发不得调用。 */
   cancelUndispatched(taskId: string): Promise<void>;
   listPublishTasks(configId?: string): Promise<readonly ForumPublishTask[]>;

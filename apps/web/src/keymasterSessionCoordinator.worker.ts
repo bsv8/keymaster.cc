@@ -1,4 +1,7 @@
-import { createPublicMsFileService } from "@keymaster/plugin-msfile/coordinator";
+import { createForumWorkerService, executeForumWorkerRequest, streamForumAttachment } from "@keymaster/plugin-forum/coordinator";
+import { createMsFileContentService, createMsFileRemoteContentFetcher, createMsFileSellerPublicationEvidence } from "@keymaster/plugin-msfile/coordinator";
+import { readWorkerProtocolProtection } from "@keymaster/plugin-p2pkh/coordinator";
+import { createMsFileWorkerBitfsService } from "@keymaster/plugin-msfile/coordinator";
 import { createVaultBootstrapStorage } from "@keymaster/platform-storage/assembly";
 import { executeWorkerUnlock } from "@keymaster/plugin-vault/coordinator";
 import { executeWorkerP2pkhSnapshot, readWorkerP2pkhResource } from "@keymaster/plugin-p2pkh/coordinator";
@@ -6,7 +9,20 @@ import { createSatWorkerTransport } from "@keymaster/plugin-sat-subscription/coo
 import { createWorkerPresenceProjection } from "@keymaster/plugin-contacts/coordinator";
 import { createWorkerAutoLock } from "@keymaster/plugin-vault/coordinator";
 import { createWorkerBackgroundRuntime, type TaskRuntime } from "@keymaster/plugin-background/coordinator";
-import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, type P2pkhWorkerTransfer, type VaultWorkerCrypto } from "@keymaster/contracts";
+import {
+  FORUM_WORKER_LANE_ID,
+  FORUM_WORKER_MAX_FRAME_BYTES,
+  FORUM_WORKER_NETWORK_CAPABILITY,
+  FORUM_WORKER_SERVICE_CAPABILITY,
+  FORUM_WORKER_ATTACHMENT_CAPABILITY,
+  MSFILE_CONTENT_CAPABILITY,
+  FORUM_WORKER_ROUNDTRIP_KIND,
+  VAULT_WORKER_CRYPTO_CAPABILITY,
+  P2PKH_WORKER_TRANSFER_CAPABILITY,
+  P2PKH_WORKER_PROTOCOL_CAPABILITY,
+  type P2pkhWorkerTransfer,
+  type VaultWorkerCrypto,
+} from "@keymaster/contracts";
 import { createWorkerTransferRuntime } from "@keymaster/plugin-p2pkh/coordinator";
 import { WOC_WORKER_BROADCAST_CAPABILITY, type WocWorkerBroadcastService, type WocServiceHandle } from "@keymaster/contracts";
 import { createWorkerWocViews } from "@keymaster/plugin-woc/coordinator";
@@ -78,10 +94,12 @@ import { MSFILE_MAX_BLOCK_BYTES, MSFILE_MAX_SEED_BYTES, MSFILE_READ_CONCURRENCY_
 import { bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, executeVaultOperation as executeOwnedVaultOperation, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
-import { createMessageBus, definePlugin, startSharedWorkerApp, type UpgradeGate, type UpgradeIoLease, type UpgradeSession, type HandlerCallContext, type PeerController } from "webloom-framework";
+import { WebLoomError, createMessageBus, definePlugin, startSharedWorkerApp, type UpgradeGate, type UpgradeIoLease, type UpgradeSession, type HandlerCallContext, type PeerController } from "webloom-framework";
+import { canCoalesceStorageActivity } from "./coordinator/storageActivityCoalescing.js";
 import { createUpgradeGate } from "webloom-framework/advanced";
 
 import { createFinalIoAudit, type FinalIoAuditOperation } from "./coordinator/finalIoAudit.js";
+import { createForumWorkerNetwork } from "./coordinator/forumWorkerNetwork.js";
 import { acquireCoordinatorAuthorityLock, type CoordinatorAuthorityLock } from "./coordinator/coordinatorAuthorityLock.js";
 import {
   assertCoordinatorWorkerUnitCatalog,
@@ -2260,8 +2278,8 @@ interface CoordinatorTopicStreamQueue {
   error?: unknown;
 }
 
-function topicStreamOverflowError(): Error & { code: string } {
-  return Object.assign(new Error("Coordinator topic stream queue overflow"), { code: "stream_overflow" });
+function topicStreamOverflowError(): Error {
+  return new WebLoomError("stream_overflow", "Coordinator topic stream queue overflow", "execute");
 }
 
 function createCoordinatorTopicStreamQueue(peerId: string, topics: readonly CoordinatorTopic[]): CoordinatorTopicStreamQueue {
@@ -2293,7 +2311,17 @@ function enqueueCoordinatorTopicEvent(queue: CoordinatorTopicStreamQueue, event:
     waiter.resolve({ done: false, value: event });
     return;
   }
+  if (canCoalesceStorageActivity(queue.values.at(-1), event)) {
+    // A burst of file reads must not evict publication/session events merely
+    // to report every intermediate read counter. Keep the latest adjacent
+    // counter snapshot; authority changes and other topics keep their order.
+    queue.values[queue.values.length - 1] = event;
+    return;
+  }
   if (queue.values.length >= COORDINATOR_TOPIC_QUEUE_LIMIT) {
+    const counts: Partial<Record<CoordinatorTopic, number>> = {};
+    for (const queued of queue.values) counts[queued.topic] = (counts[queued.topic] ?? 0) + 1;
+    console.warn("[coordinator] Topic queue overflow", JSON.stringify(counts));
     closeCoordinatorTopicStreamQueue(queue, topicStreamOverflowError());
     return;
   }
@@ -2339,6 +2367,8 @@ interface CoordinatorPeerState {
   serviceExposure?: { revoke(): void };
   /** 当前 owner/session 世代对应的 WebLoom service exposure；旋转后旧 proxy 必须失效。 */
   serviceExposureIdentity?: string;
+  forumExposure?: { revoke(): void };
+  forumExposureIdentity?: string;
   sessionBinding?: CoordinatorSessionBinding;
   openCommitOrder?: number;
   bridgeRequests: Set<CoordinatorBridgeRequest>;
@@ -2518,6 +2548,9 @@ function fenceCoordinatorPeerSession(
   state.serviceExposure?.revoke();
   state.serviceExposure = undefined;
   state.serviceExposureIdentity = undefined;
+  state.forumExposure?.revoke();
+  state.forumExposure = undefined;
+  state.forumExposureIdentity = undefined;
   if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream, coordinatorSessionStaleError("Coordinator topic stream was revoked"));
   state.topicStream = undefined;
   for (const pending of state.bridgeRequests) pending.controller.abort();
@@ -3231,6 +3264,7 @@ const workerTransferRuntime = createWorkerTransferRuntime({
     return response.ack.status === "ok" ? { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch } : response.ack;
   },
   subscribeUtxo: subscribeWorkerUtxoSeq,
+  query: () => p2pkhWorkerWocQuery ?? p2pkhWocService,
   retryOptions: () => testSatBroadcastRetryOverrides,
 });
 const ensureSatP2pkhService = workerTransferRuntime.ensure;
@@ -5047,7 +5081,25 @@ function cloneWindowP2pOperationWire(operation: WindowP2pExecutorOperation): Win
  */
 function windowP2pExecutorBridgeBytesForOperation(operation: WindowP2pExecutorOperation): number {
   if (operation.type !== "lane" || !operation.operation || typeof operation.operation !== "object") return 0;
-  const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown; frame?: unknown };
+  const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown; frame?: unknown; requestBytesHex?: unknown };
+  // Forum roundtrip 的负载是 hex 字符串，不是 Wire/frame 字段。
+  //
+  // 不计量等于它在 bridge 上免费：并发几个 1 MiB 的 Forum 请求就能把 bridge 预算
+  // 撑爆，而预算被撑爆时挤掉的是 SSP/SPI 的真实业务流量。
+  //
+  // 计量按**bridge 上的实际表示**算：hex 串在结构化克隆里是 UTF-16，因此每个字节
+  // 占 2 个 code unit；响应同样是 hex，并且要按最大帧一次性预留到结果到达。
+  if (typeof laneOperation.kind === "string" && laneOperation.kind === FORUM_WORKER_ROUNDTRIP_KIND) {
+    const requestHex = typeof laneOperation.requestBytesHex === "string" ? laneOperation.requestBytesHex : "";
+    // 畸形或缺失的 hex 也照样按**最大可能**计费：计量若会因为「形状不合法」而归零，
+    // 那条路径就变成免费通道——而它仍然会被 postMessage 过去。
+    if (requestHex.length === 0) return FORUM_WORKER_MAX_FRAME_BYTES * 2 * 2;
+    // 每个 hex 字符占一个 UTF-16 code unit，即两个预算字节。
+    const requestBytes = requestHex.length * 2;
+    // 响应侧按 Forum 帧上限预留（含 hex 与 UTF-16 两层放大）。
+    const responseBytes = FORUM_WORKER_MAX_FRAME_BYTES * 2 * 2;
+    return requestBytes + responseBytes;
+  }
   if ((laneOperation.type === "requestSsp" || laneOperation.type === "requestSpi") && laneOperation.wire instanceof Uint8Array) {
     return laneOperation.wire.byteLength + MAX_WIRE_BYTES;
   }
@@ -6315,11 +6367,21 @@ const p2pkhWorkerSettings = createWorkerP2pkhSettings({
 const loadP2pkhSettingForOwner = p2pkhWorkerSettings.load;
 const resetP2pkhSettingsRuntime = p2pkhWorkerSettings.reset;
 
-function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
-  return ensureOwnedP2pkhResources(createWorkerModuleFileStore("p2pkh", ""), ownerPublicKeyHex, includeTestnet);
+/** Resource tables are keyed by the borrowed store object. All production
+ * snapshot paths must use the same handle owned by the current P2PKH unit;
+ * a second handle to the same files has an empty, separate resource table. */
+function currentP2pkhDomainStorage(): BorrowedModuleFileStore {
+  if (testDomainUnitReadiness) return createWorkerModuleFileStore("p2pkh", "");
+  if (!p2pkhWorkerPorts) throw new Error("P2PKH Worker instance is unavailable");
+  p2pkhWorkerPorts.assertActive();
+  return p2pkhWorkerPorts.storage;
 }
 
-async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal, storage: BorrowedModuleFileStore = createWorkerModuleFileStore("p2pkh", ""), assertActive: () => void = () => undefined): Promise<{ main?: number; test?: number }> {
+function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
+  return ensureOwnedP2pkhResources(currentP2pkhDomainStorage(), ownerPublicKeyHex, includeTestnet);
+}
+
+async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal, storage: BorrowedModuleFileStore = currentP2pkhDomainStorage(), assertActive: () => void = () => undefined): Promise<{ main?: number; test?: number }> {
   const owner = coordinatorState.activePublicKeyHex;
   const snapshots = p2pkhUtxoSnapshots;
   const epoch = coordinatorState.sessionEpoch;
@@ -6367,21 +6429,29 @@ async function handleP2pkhProviderConfigUpdate(requestId: string, request: Extra
 /** 读取 owner + network 对应的 P2PKH resource（不存在返回 undefined）。 */
 async function p2pkhResourceForOwner(ownerPublicKeyHex: string, network: "main" | "test") {
   if (createWorkerWalletState().snapshot().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-  return readWorkerP2pkhResource(createWorkerModuleFileStore("p2pkh", ""), { ownerPublicKeyHex, network });
+  return readWorkerP2pkhResource(currentP2pkhDomainStorage(), { ownerPublicKeyHex, network });
 }
 async function executeP2pkhSnapshot(requestId: string, request: { ownerPublicKeyHex: string; network: "main" | "test" }, refresh: boolean): Promise<CoordinatorResponse> {
   if (!isCoordinatorProductRegistered("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
   const epoch = coordinatorState.sessionEpoch;
   const snapshots = p2pkhUtxoSnapshots;
+  // A manual refresh can precede the smart background task. Materialize the
+  // deterministic address resources in this same domain store before lookup.
+  if (refresh) await ensureWorkerP2pkhResources(request.ownerPublicKeyHex, coordinatorMeta.p2pkhSettings?.includeTestnet === true);
   return executeWorkerP2pkhSnapshot(requestId, request, refresh, {
-    storage: createWorkerModuleFileStore("p2pkh", ""), snapshots,
+    storage: currentP2pkhDomainStorage(), snapshots,
     epoch: () => coordinatorState.sessionEpoch,
     assertFresh: () => {
       if (coordinatorState.sessionEpoch !== epoch || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase() || p2pkhUtxoSnapshots !== snapshots) throw new Error("P2PKH snapshot session became stale");
       if (!testDomainUnitReadiness) p2pkhWorkerPorts?.assertActive();
     },
     reconcile: (input, snapshot) => reconcileMsfileBitfsFundingInputs(input.ownerPublicKeyHex, input.network, snapshot),
-    filter: (input, snapshot) => filterP2pkhSnapshotByBitfsFunds(input.ownerPublicKeyHex, input.network, snapshot),
+    filter: async (input, snapshot) => {
+      const filtered = await filterP2pkhSnapshotByBitfsFunds(input.ownerPublicKeyHex, input.network, snapshot);
+      const protection = await listWorkerProtocolProtection(input);
+      const keys = new Set(protection.map(row => `${row.txid}:${row.vout}`));
+      return { ...filtered, items: filtered.items.filter(row => !keys.has(`${row.txid}:${row.vout}`)) };
+    },
     publish: event => { publishTopicEvent("asset.data-changed", event); },
   });
 }
@@ -6398,6 +6468,13 @@ const handleP2pkhUtxosRefresh = (requestId: string, request: Extract<Coordinator
  * 让调用方（转账 prepare/submit）明确拒绝继续，而不是使用过期快照。
  */
 
+
+async function listWorkerProtocolProtection(input: { ownerPublicKeyHex: string; network: "main" | "test" }) {
+  const epoch = coordinatorState.sessionEpoch;
+  const rows = await readWorkerProtocolProtection(createWorkerModuleFileStore("p2pkh", ""), input.ownerPublicKeyHex, input.network);
+  if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== epoch || coordinatorState.activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("Protocol protection session revoked");
+  return [...rows, ...(workerTransferRuntime.protectedOutpoints()?.list({ publicKeyHex: input.ownerPublicKeyHex, network: input.network }) ?? [])];
+}
 
 async function handleP2pkhBroadcast(
   requestId: string,
@@ -6442,6 +6519,7 @@ async function handleP2pkhBroadcastUnsafe(
     snapshots,
     resource: p2pkhResourceForOwner,
     listProtectedOutpoints: (input) => currentMsfileBitfsFundingLedger().listProtectedOutpoints(input),
+    listProtocolProtectedOutpoints: listWorkerProtocolProtection,
     abortNotDispatched: abortNotDispatchedP2pkhSubmission,
     refresh: refreshP2pkhUtxoSnapshots,
     publishChanged: (event) => { publishTopicEvent("asset.data-changed", event); },
@@ -6746,8 +6824,28 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
   }
 }
 
+/** Forum has its own exposure group: enabling it must not rotate storage/crypto grants. */
+function reconcileForumSessionExposure(state: CoordinatorPeerState): void {
+  const forum = coordinatorRuntimeApp?.state().units.find(unit => unit.unitId === "forum.coordinator-worker" && unit.state === "enabled");
+  const identity = state.sessionOpen && state.status === "open" && state.peer.scope.state === "active"
+    && coordinatorSessionServicesReady() && forum?.instanceId
+    ? `${coordinatorSessionExposureIdentity()}\u0000${forum.instanceId}` : undefined;
+  if (state.forumExposure && state.forumExposureIdentity === identity) return;
+  state.forumExposure?.revoke();
+  state.forumExposure = undefined;
+  state.forumExposureIdentity = undefined;
+  if (!identity) return;
+  state.forumExposure = state.peer.exposeGroup([FORUM_WORKER_SERVICE_CAPABILITY, FORUM_WORKER_ATTACHMENT_CAPABILITY].map(capability => ({
+    capability, options: { grantId: coordinatorSessionGrantId(state, capability.id) },
+  })));
+  state.forumExposureIdentity = identity;
+}
+
 function reconcileCoordinatorSessionExposures(): void {
-  for (const state of coordinatorPeers.values()) reconcileCoordinatorSessionExposure(state);
+  for (const state of coordinatorPeers.values()) {
+    reconcileCoordinatorSessionExposure(state);
+    reconcileForumSessionExposure(state);
+  }
 }
 
 async function openCoordinatorSession(
@@ -6830,6 +6928,7 @@ async function openCoordinatorSession(
       state.sessionBinding = { ...attempt.binding };
       state.sessionOpen = true;
       state.status = "open";
+      reconcileForumSessionExposure(state);
       state.openCommitOrder = ++coordinatorSessionCommitOrder;
       // session.open 的 exposeGroup 已经提交，证明这个 peer 的反向
       // LocalStorage capability 可用。刷新时旧文档可能来不及把物理断线送达
@@ -6923,6 +7022,9 @@ function coordinatorTopicStream(
         if (next.done) return;
         yield next.value;
       }
+    } catch (error) {
+      console.warn("[coordinator] Topic stream stopped", error instanceof Error ? error.message : "unknown stream error");
+      throw error;
     } finally {
       call.signal.removeEventListener("abort", onAbort);
       if (state.topicStream === queue) state.topicStream = undefined;
@@ -6985,7 +7087,7 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
     unitId: unit.unitId,
     runtime: "shared-worker",
     provides: declaration.provides.map(capability => {
-      const implementation = [VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY, CONTACTS_PRESENCE_CHANNEL_CAPABILITY, MSFILE_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, COORDINATOR_CRYPTO_RPC_CAPABILITY, WOC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY]
+      const implementation = [VAULT_WORKER_CRYPTO_CAPABILITY, FORUM_WORKER_NETWORK_CAPABILITY, FORUM_WORKER_SERVICE_CAPABILITY, FORUM_WORKER_ATTACHMENT_CAPABILITY, MSFILE_CONTENT_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY, CONTACTS_PRESENCE_CHANNEL_CAPABILITY, MSFILE_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, COORDINATOR_CRYPTO_RPC_CAPABILITY, WOC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY]
         .find(candidate => candidate.kind === capability.kind && candidate.id === capability.id && candidate.version === capability.version);
       if (!implementation) throw new Error(`Worker capability implementation missing: ${capability.id}`);
       return implementation;
@@ -7014,8 +7116,72 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
         if (!ownerPublicKeyHex) throw msfileError("msfile_unavailable", "MSFile requires an active owner");
         const ownedRuntime = await ensureMsfileRuntime(context.instanceId, { ownerPublicKeyHex, settings: files.bind(context.consumer, context.scope, ""), appSettings: files.bind(context.consumer, context.scope, "app-settings") }, () => context.scope.assertActive());
         context.scope.onRevoke(() => { if (msfileRuntime === ownedRuntime) releaseMsfileRuntime("unit-revoked"); });
-        context.provide(MSFILE_SERVICE_CAPABILITY, createPublicMsFileService(ownedRuntime, () => context.scope.assertActive()));
+        const boundEpoch = coordinatorState.sessionEpoch;
+        const assertMsfileOwner = () => {
+          context.scope.assertActive();
+          if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || coordinatorState.sessionEpoch !== boundEpoch) {
+            throw msfileError("msfile_unavailable", "MSFile owner session revoked");
+          }
+        };
+        const publicService = createMsFileWorkerBitfsService(ownedRuntime, async control => {
+          assertMsfileOwner();
+          const operation = isMsfileMutationControl(control) ? "write" : "read";
+          const result = await withCoordinatorFinalIoLease(operation, context.scope.signal,
+            signal => executeMsfileControl({ kind: "msfile.control", clientId: context.instanceId,
+              requestId: crypto.randomUUID(), expectedSessionEpoch: boundEpoch, control }, signal),
+            { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "msfile.control", durableLease: operation === "write" });
+          assertMsfileOwner();
+          if (result.ack.status !== "ok") throw msfileError("msfile_unavailable", "MSFile BitFS control failed: " + result.ack.status);
+          return result.operationResult as import("@keymaster/contracts").MsFileBitfsDemandSnapshot | undefined;
+        }, assertMsfileOwner);
+        context.provide(MSFILE_SERVICE_CAPABILITY, publicService);
+        context.provide(MSFILE_CONTENT_CAPABILITY, createMsFileContentService({
+          store: files.bind(context.consumer, context.scope, ""), service: publicService,
+          remote: createMsFileRemoteContentFetcher({ service: publicService }), publication: createMsFileSellerPublicationEvidence(publicService),
+        }));
         ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, context.instanceId);
+      } else if (unit.unitId === "forum.coordinator-worker") {
+        const network = createForumWorkerNetwork(requestWindowP2pExecutorOperation, context.scope,
+          cancel => context.scope.onRevoke(() => cancel(new Error("Forum Worker unit revoked"))));
+        context.provide(FORUM_WORKER_NETWORK_CAPABILITY, network);
+        const walletState = context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope);
+        const identity = walletState.snapshot();
+        const owner = identity.activePublicKeyHex;
+        if (!owner) throw new Error("Forum requires an active owner");
+        let owned: Awaited<ReturnType<typeof createForumWorkerService>> | undefined;
+        let starting: Promise<Awaited<ReturnType<typeof createForumWorkerService>>> | undefined;
+        const assertActive = () => { context.scope.assertActive(); const now = walletState.snapshot(); if (now.status !== "unlocked" || now.activePublicKeyHex !== owner || now.sessionEpoch !== identity.sessionEpoch) throw new Error("Forum owner session revoked"); };
+        context.scope.onRevoke(() => { owned?.dispose(); owned = undefined; });
+        const ensure = async () => {
+          assertActive();
+          if (owned) return owned;
+          starting ??= createForumWorkerService({ owner, epoch: identity.sessionEpoch, assertActive, network, signal: context.scope.signal,
+            storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""),
+            content: context.capability(MSFILE_CONTENT_CAPABILITY), crypto: context.capability(VAULT_WORKER_CRYPTO_CAPABILITY),
+            wallet: context.capability(P2PKH_WORKER_PROTOCOL_CAPABILITY), query: context.capability(WOC_CAPABILITY),
+          });
+          const pending = starting;
+          try { const candidate = await pending; try { assertActive(); } catch (error) { candidate.dispose(); throw error; } owned = candidate; return candidate; }
+          finally { if (starting === pending) starting = undefined; }
+        };
+        context.handle(FORUM_WORKER_SERVICE_CAPABILITY, async (request, call) => {
+          const peer = requireCoordinatorSessionPeer(call);
+          const assertCallActive = () => { assertActive(); if (requireCoordinatorSessionPeer(call) !== peer) throw new Error("Forum peer replaced"); };
+          try { call.signal.throwIfAborted(); const runtime = await ensure(); return executeForumWorkerRequest(runtime.service, request, AbortSignal.any([call.signal, context.scope.signal]), assertCallActive); }
+          catch (error) { return { ok: false as const, code: "forum-worker-unavailable", message: error instanceof Error ? error.message : String(error) }; }
+        });
+        context.handle(FORUM_WORKER_ATTACHMENT_CAPABILITY, async function* (request, call) {
+          const peer = requireCoordinatorSessionPeer(call);
+          const assertCallActive = () => { assertActive(); if (requireCoordinatorSessionPeer(call) !== peer) throw new Error("Forum peer replaced"); };
+          call.signal.throwIfAborted();
+          const runtime = await ensure();
+          yield* streamForumAttachment(runtime.service, request, AbortSignal.any([call.signal, context.scope.signal]), assertCallActive);
+        });
+        const activated = activateCoordinatorWorkerUnitForRuntime(unit.unitId, context.instanceId);
+        if (activated.instanceId !== context.instanceId) {
+          throw new Error(`Coordinator Worker unit instance mismatch: ${unit.unitId}`);
+        }
+        ready = coordinatorWorkerUnitRegistry.ready(activated.unitId, activated.instanceId);
       } else if (unit.unitId === "sat-subscription.coordinator-worker") {
         const p2pkhAccess = async () => {
           const binding = context.optionalCapability(P2PKH_WORKER_TRANSFER_CAPABILITY);
@@ -7114,6 +7280,9 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
             });
           },
         }));
+        context.provide(P2PKH_WORKER_PROTOCOL_CAPABILITY, Object.freeze({
+          async getService() { context.scope.assertActive(); const service = await workerTransferRuntime.ensureProtocol(); context.scope.assertActive(); return service; },
+        }));
         context.provide(P2PKH_ASSET_READER_CAPABILITY, createP2pkhWorkerAssetReader({ walletState: context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope), storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""), snapshots: () => p2pkhUtxoSnapshots, includeTestnet: () => coordinatorMeta.p2pkhSettings?.includeTestnet === true }));
       }
       if (unit.productId === "p2pkh" && !testDomainUnitReadiness) {
@@ -7180,6 +7349,8 @@ coordinatorRuntimeApp = startSharedWorkerApp({
     COORDINATOR_TOPIC_STREAM_CAPABILITY,
   ],
   peerExposureAllowlist: [
+    FORUM_WORKER_SERVICE_CAPABILITY,
+    FORUM_WORKER_ATTACHMENT_CAPABILITY,
     STORAGE_PRIVATE_BROWSE_CAPABILITY,
     COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
     COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
@@ -7213,6 +7384,7 @@ coordinatorRuntimeApp.subscribe(state => {
     .map(unit => `${unit.unitId}:${unit.instanceId}`).sort().join("|");
   if (readyInstances === lastFrameworkReadyInstances) return;
   lastFrameworkReadyInstances = readyInstances;
+  reconcileCoordinatorSessionExposures();
   synchronizeCoordinatorTaskUnitInstances();
   publishCoordinatorWorkerUnitSnapshot();
   scheduleCoordinatorRuntimeReconcile();
@@ -8180,6 +8352,65 @@ export async function __testWindowP2pResponseBridgePressure(input: { attempts?: 
     peakItems,
     releasedBytes: windowP2pBridgeBudget.snapshot().bytes,
     releasedItems: windowP2pBridgeBudget.snapshot().items,
+  };
+}
+
+/**
+ * 测试 Forum roundtrip 在 bridge 预算中心里的计量与排队。
+ *
+ * 用生产计量函数与生产预算，不启动真实 Host 或网络：单帧上限只挡住「一个请求太大」，
+ * 挡不住「很多个合法请求同时在途」，后者要靠这里的总预算。
+ */
+export async function __testForumRoundtripBridgePressure(input: { attempts?: number; requestBytes?: number } = {}): Promise<{
+  attempts: number;
+  requestBytes: number;
+  reservedBytesPerOperation: number;
+  accepted: number;
+  queued: number;
+  peakBytes: number;
+  peakItems: number;
+  releasedBytes: number;
+  releasedItems: number;
+}> {
+  const attempts = input.attempts ?? 64;
+  const requestBytes = input.requestBytes ?? 1024;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || !Number.isSafeInteger(requestBytes) || requestBytes < 1 || requestBytes > FORUM_WORKER_MAX_FRAME_BYTES) {
+    throw new RangeError("forum bridge pressure input must be positive safe integers within the frame limit");
+  }
+  const operation = {
+    type: "lane" as const,
+    laneId: FORUM_WORKER_LANE_ID,
+    operation: {
+      kind: FORUM_WORKER_ROUNDTRIP_KIND,
+      address: "/ip4/127.0.0.1/tcp/8080/p2p/12D3KooW",
+      forumPublicKeyHex: "02" + "11".repeat(32),
+      // hex 在 bridge 上是 UTF-16：请求字节数翻倍进入预算。
+      requestBytesHex: "00".repeat(requestBytes),
+    },
+  } satisfies WindowP2pExecutorOperation;
+  const reservedBytes = windowP2pExecutorBridgeBytesForOperation(operation);
+  const controllers = Array.from({ length: attempts }, () => new AbortController());
+  const reservations = controllers.map((controller) => reserveWindowP2pExecutorBridgeBytes(reservedBytes, controller.signal).then(() => undefined, () => undefined));
+  await Promise.resolve();
+  const snapshot = windowP2pBridgeBudget.snapshot();
+  const accepted = snapshot.items;
+  const queued = snapshot.queued;
+  const peakBytes = snapshot.bytes;
+  const peakItems = accepted + queued;
+  for (const controller of controllers) controller.abort();
+  for (let index = 0; index < accepted; index += 1) releaseWindowP2pExecutorBridgeBytes(reservedBytes);
+  await Promise.all(reservations);
+  const after = windowP2pBridgeBudget.snapshot();
+  return {
+    attempts,
+    requestBytes,
+    reservedBytesPerOperation: reservedBytes,
+    accepted,
+    queued,
+    peakBytes,
+    peakItems,
+    releasedBytes: after.bytes,
+    releasedItems: after.items,
   };
 }
 

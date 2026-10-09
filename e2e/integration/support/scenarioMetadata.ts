@@ -469,3 +469,35 @@ export const DEPLOYMENT_APPVIEW_CONNECT_SCENARIO = {
   ],
   resourceProfile: "deployment",
 } as const satisfies IntegrationScenarioMetadata;
+
+
+/** Forum local authority wiring; external index, payment and publication remain separate gates. */
+export const LOCAL_FORUM_WORKER_SCENARIO = {
+  id: "J-LOCAL-FORUM-WORKER",
+  level: "local-integration",
+  requirementIds: ["KM-FORUM-001"],
+  startingState: "全新 Chromium context，两页共用一个本地钱包与 owner-session Worker；不配置真实论坛服务或资金。",
+  successCriteria: [
+    "真实 Forum 页面通过 Worker RPC 保存配置，第二个标签页读到同一份配置。",
+    "锁定使两页停止访问旧 owner 服务；同 Key 解锁后配置仍存在且页面能恢复。",
+    "未验证根始终显示为未验证，不发生真实报价或广播。",
+  ],
+  resourceProfile: "local-browser",
+} as const satisfies IntegrationScenarioMetadata;
+
+export const REAL_FORUM_SMOKE_SCENARIO = {
+  id: "J-REAL-FORUM-SMOKE", level: "p2pkh", requirementIds: ["KM-FORUM-001", "KM-FORUM-002"],
+  startingState: "真实 Go Forum、隔离 PostgreSQL、已确认 testnet 创世根和现有测试资金；全新 Chromium 钱包。",
+  successCriteria: ["Keymaster 验证根、取得真实报价并广播一条回复。", "Go 索引器从真实链发现交易，Keymaster 展示节点和经 MSFile 保存的正文。"],
+  resourceProfile: "testnet",
+} as const satisfies IntegrationScenarioMetadata;
+
+export const REAL_FORUM_PURCHASE_SCENARIO = {
+  id: "J-REAL-FORUM-PURCHASE", level: "bitfs", requirementIds: ["KM-FORUM-001", "KM-MSFILE-001", "KM-SATSUB-001"],
+  startingState: "正式 Go 程序生成并真实广播本轮 testnet 论坛根、隔离 PostgreSQL 与免费白名单 SatSubscription；买卖双方使用独立 Chromium 进程与不同钱包。",
+  successCriteria: [
+    "卖方通过论坛发布正文，真实 Go 索引；买方本地没有该 MSFile 正文。",
+    "买方通过论坛阅读动作发起真实 BitFS 购买，双方保存协议与付款证据，费用池关池。",
+    "买方 MSFile 保存的正文与卖方逐字节一致，论坛展示正文，卖方离线后仍可本地阅读。",
+  ], resourceProfile: "testnet",
+} as const satisfies IntegrationScenarioMetadata;

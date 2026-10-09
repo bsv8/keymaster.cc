@@ -295,3 +295,91 @@ describe("runtime instance revocation", () => {
     expect(publish).not.toHaveBeenCalled();
   });
 });
+
+describe("选币门禁等待保护恢复", () => {
+  it("allocateUtxos 在保护恢复完成前不放行", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const txid = "12".repeat(32);
+    const coordinator = coordinatorWithSnapshot([
+      { txid, vout: 0, value: 5000, height: 100, status: "confirmed", isSpentInMempoolTx: false },
+    ]);
+    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage as never));
+    await repository.putAddress(resource);
+
+    let openRestore!: () => void;
+    const restoreDone = new Promise<void>((resolve) => { openRestore = resolve; });
+    const gateOrder: string[] = [];
+    const service = createP2pkhService({
+      vault,
+      walletState: walletState(),
+      messageBus,
+      storage: storage as never,
+      coordinator: coordinator as never,
+      awaitProtectionRestore: async () => {
+        gateOrder.push("gate-start");
+        await restoreDone;
+        gateOrder.push("gate-done");
+      },
+    });
+
+    let allocationError: unknown;
+    const pending = service.allocateUtxos({ assetId: "bsv", amountSatoshis: 100 }).then(
+      (allocation) => { allocationError = undefined; return allocation; },
+      (error: unknown) => { allocationError = error; return undefined; },
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // 门禁还没放行，因此选币不会先一步完成。
+    expect(gateOrder).toEqual(["gate-start"]);
+    expect(allocationError).toBeUndefined();
+
+    openRestore();
+    const allocation = await pending;
+    expect(allocationError).toBeUndefined();
+    expect(allocation?.selected).toHaveLength(1);
+    // 恢复先于选币完成。
+    expect(gateOrder).toEqual(["gate-start", "gate-done"]);
+    service.dispose?.();
+  });
+
+  it("恢复失败时选币失败，而不是在没有保护的情况下放行", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const coordinator = coordinatorWithSnapshot([
+      { txid: "34".repeat(32), vout: 0, value: 5000, height: 100, status: "confirmed", isSpentInMempoolTx: false },
+    ]);
+    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage as never));
+    await repository.putAddress(resource);
+    const service = createP2pkhService({
+      vault,
+      walletState: walletState(),
+      messageBus,
+      storage: storage as never,
+      coordinator: coordinator as never,
+      awaitProtectionRestore: async () => {
+        throw new Error("dedicated funding records are unreadable");
+      },
+    });
+    // fail closed：宁可这次转账失败，也不要在没有保护登记时放行。
+    await expect(service.allocateUtxos({ assetId: "bsv", amountSatoshis: 100 })).rejects.toThrow(/unreadable/u);
+    service.dispose?.();
+  });
+
+  it("门禁缺席时不改变既有行为", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const txid = "56".repeat(32);
+    const coordinator = coordinatorWithSnapshot([
+      { txid, vout: 0, value: 5000, height: 100, status: "confirmed", isSpentInMempoolTx: false },
+    ]);
+    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage as never));
+    await repository.putAddress(resource);
+    const service = createP2pkhService({
+      vault,
+      walletState: walletState(),
+      messageBus,
+      storage: storage as never,
+      coordinator: coordinator as never,
+    });
+    const allocation = await service.allocateUtxos({ assetId: "bsv", amountSatoshis: 100 });
+    expect(allocation.selected).toHaveLength(1);
+    service.dispose?.();
+  });
+});

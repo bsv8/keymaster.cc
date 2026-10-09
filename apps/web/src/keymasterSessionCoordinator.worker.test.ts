@@ -1,3 +1,4 @@
+import { STORAGE_FILE_CLIENTS_CAPABILITY, MSFILE_CONTENT_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, WOC_CAPABILITY } from "@keymaster/contracts";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bytesToHex } from "@keymaster/plugin-vault/coordinator";
@@ -9,6 +10,7 @@ import {
   __testPublishSatState,
   __testWindowP2pInboundBridgePressure,
   __testWindowP2pResponseBridgePressure,
+  __testForumRoundtripBridgePressure,
   __testStartSatInboundHandler,
   __testCancelSatInboundHandler,
   __testRevokeWindowP2pExecutorLease,
@@ -2954,7 +2956,12 @@ describe("单元可用性：对外单元名单的可见性", () => {
 // These tests run the production Worker setup, not the Window adapter's issuer.
 import { createPluginHost as createNativeWorkerHost } from "webloom-framework/advanced";
 import { type PluginContext as NativePluginContext } from "webloom-framework";
-import { VAULT_WALLET_STATE_CAPABILITY, type VaultWalletState } from "@keymaster/contracts";
+import {
+  FORUM_WORKER_NETWORK_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
+  type ForumWorkerNetwork,
+  type VaultWalletState,
+} from "@keymaster/contracts";
 import { __testCoordinatorRuntimePlugin } from "./keymasterSessionCoordinator.worker.js";
 
 describe("正式 Worker setup 的钱包状态绑定", () => {
@@ -3007,5 +3014,192 @@ describe("正式 Worker setup 的钱包状态绑定", () => {
       await host.registerAll([provider.manifest, { ...consumer.manifest, units: consumer.manifest.units!.map(unit => ({ ...unit, dependencies: [] })) }]);
       expect(host.state("window-p2p").kind).toBe("failed");
     } finally { await host.dispose(); __testResetState(); }
+  });
+});
+
+// Forum owner-session Worker 单元（第 1 阶段：受限网络能力）的装配与生命周期。
+describe("Forum Worker 单元的受限网络装配", () => {
+  const OWNER = "02" + "ab".repeat(32);
+  const VALID_REQUEST = {
+    kind: "forum.roundtrip" as const,
+    address: "/ip4/127.0.0.1/tcp/8080/p2p/12D3KooW",
+    forumPublicKeyHex: `02${"11".repeat(32)}`,
+    requestBytesHex: "0102ff",
+  };
+
+  beforeEach(() => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", OWNER);
+  });
+
+  afterEach(() => {
+    __testSetVaultStatus("locked");
+    __testResetState();
+  });
+
+  const dependencies = {
+    id: "forum-worker-test-dependencies", name: "Forum Worker test dependencies",
+    units: [{ id: "forum-worker-test-dependencies.worker", runtime: "shared-worker" as const, scopeKind: "owner-session" as const,
+      provides: [STORAGE_FILE_CLIENTS_CAPABILITY, MSFILE_CONTENT_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, WOC_CAPABILITY],
+    }],
+    setup(ctx: NativePluginContext) {
+      ctx.provide(STORAGE_FILE_CLIENTS_CAPABILITY, { bind: () => { throw new Error("Unused in network-only lifecycle fixture"); } } as never);
+      ctx.provide(MSFILE_CONTENT_CAPABILITY, {} as never);
+      ctx.provide(P2PKH_WORKER_PROTOCOL_CAPABILITY, { getService: async () => { throw new Error("Unused in network-only lifecycle fixture"); } });
+      ctx.provide(WOC_CAPABILITY, {} as never);
+    },
+  };
+
+  /** 造一个只消费 Forum 受限网络能力的最小 Worker 插件，用来验证能力真的被发布。 */
+  function consumerOfForumNetwork(capture: (network: ForumWorkerNetwork) => void) {
+    return {
+      id: "forum-network-consumer",
+      name: "Forum network consumer",
+      units: [{
+        id: "forum-network-consumer.worker",
+        runtime: "shared-worker" as const,
+        scopeKind: "owner-session" as const,
+        dependencies: [{ capability: FORUM_WORKER_NETWORK_CAPABILITY, sourceRuntime: "shared-worker" as const }],
+      }],
+      setup: async (ctx: NativePluginContext) => {
+        capture(ctx.capability(FORUM_WORKER_NETWORK_CAPABILITY) as ForumWorkerNetwork);
+      },
+    };
+  }
+
+  it("发布受限网络能力；没有 Window executor 租约时明确失败而不是退回 Window 本地权威", async () => {
+    const vault = __testCoordinatorRuntimePlugin("vault");
+    const forum = __testCoordinatorRuntimePlugin("forum");
+    let network: ForumWorkerNetwork | undefined;
+    const consumer = consumerOfForumNetwork((value) => { network = value; });
+    const host = createNativeWorkerHost({
+      runtime: "shared-worker",
+      runtimeUnitImplementationRegistry: { get: id => (id === "vault" ? vault.setup : id === "forum" ? forum.setup : id === dependencies.id ? dependencies.setup : consumer.setup) },
+    });
+    try {
+      await host.registerAll([vault.manifest, dependencies, forum.manifest, consumer]);
+      if (host.state("forum").kind !== "enabled") throw new Error(`forum unit failed: ${JSON.stringify(host.state("forum"))}`);
+      expect(host.state("forum").kind).toBe("enabled");
+      expect(host.state(consumer.id).kind).toBe("enabled");
+      expect(__testGetSnapshot().coordinatorWorkerUnits?.find(unit => unit.unitId === "forum.coordinator-worker"))
+        .toMatchObject({ productId: "forum", serviceIds: ["forum.network", "forum.service"] });
+
+      // 能力确实可用（对象已发布），但此刻没有 Window executor 租约：
+      // 必须以 ok:false 明确失败，而不是悄悄走别的网络路径。
+      expect(network).toBeDefined();
+      const outcome = await network!.roundtrip({ ...VALID_REQUEST });
+      expect(outcome).toMatchObject({ ok: false, code: "forum-worker-network" });
+      // 形状不合法的请求连 bridge 都不碰。
+      expect(await network!.roundtrip({ ...VALID_REQUEST, forumPublicKeyHex: "11" }))
+        .toMatchObject({ ok: false, code: "forum-worker-request" });
+    } finally {
+      await host.dispose();
+    }
+  });
+
+  it("撤销后被保留的旧能力引用不能再借 bridge 发请求；重建实例后可正常发送", async () => {
+    const vault = __testCoordinatorRuntimePlugin("vault");
+    const forum = __testCoordinatorRuntimePlugin("forum");
+    const generations: ForumWorkerNetwork[] = [];
+    const host = createNativeWorkerHost({
+      runtime: "shared-worker",
+      runtimeUnitImplementationRegistry: {
+        get: id => {
+          if (id === "vault") return vault.setup;
+          if (id === dependencies.id) return dependencies.setup;
+          if (id !== "forum") return async (ctx: NativePluginContext) => {
+            generations.push(ctx.capability(FORUM_WORKER_NETWORK_CAPABILITY) as ForumWorkerNetwork);
+          };
+          return forum.setup;
+        },
+      },
+    });
+    try {
+      await host.registerAll([vault.manifest, dependencies, forum.manifest]);
+      expect(host.state("forum").kind).toBe("enabled");
+      expect(generations).toHaveLength(0); // 还没有消费方；先装一个。
+
+      const consumer = consumerOfForumNetwork(() => undefined);
+      await host.registerAll([consumer]);
+      expect(host.state(consumer.id).kind).toBe("enabled");
+      const [retained] = generations;
+      expect(retained).toBeDefined();
+
+      // 撤销提供方单元：单元状态必须离开 enabled。
+      await host.revoke("forum", "unit removed");
+      expect(host.state("forum").kind).not.toBe("enabled");
+
+      // 关键：被保留下来的旧引用仍不能借到新租约发请求——它绑定的是已失效的那次 scope。
+      expect(await retained!.roundtrip({ ...VALID_REQUEST }))
+        .toMatchObject({ ok: false, code: "forum-worker-revoked" });
+    } finally {
+      await host.dispose();
+    }
+  });
+});
+
+// Forum roundtrip 必须真正进入 Worker bridge 的总预算（阶段 1 的预算边界）。
+describe("Forum roundtrip 的 bridge 预算", () => {
+  beforeEach(() => {
+    __testResetState();
+  });
+
+  afterEach(() => {
+    __testResetState();
+  });
+
+  it("按 hex 的实际 bridge 表示计量请求，并为最大响应一次性预留", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 1024 });
+    // 请求 1024 字节以 hex 字符串过桥：UTF-16 下是 2048 个 code unit。
+    const requestPortion = 1024 * 4;
+    expect(result.reservedBytesPerOperation).toBe(requestPortion + (1024 * 1024 + 16) * 4);
+    // 响应侧必须按最大帧预留：只算请求就等于让响应把预算撑破。
+    expect(result.reservedBytesPerOperation).toBeGreaterThan(requestPortion + 1024 * 1024);
+    expect(result.accepted).toBe(1);
+  });
+
+  it("1 MiB 请求不再是 0 字节（旧实现只认 wire/frame 字段）", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 1024 * 1024 });
+    expect(result.reservedBytesPerOperation).toBeGreaterThan(0);
+    expect(result.reservedBytesPerOperation).toBeGreaterThanOrEqual(1024 * 1024 * 2);
+  });
+
+  it("并发大帧请求会被总预算挡住一部分，其余排队而不是全部准入", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 64, requestBytes: 1024 * 1024 });
+    // 单帧上限挡不住「很多个合法请求同时在途」：总预算必须真的起作用。
+    expect(result.peakItems).toBe(64);
+    expect(result.accepted).toBeGreaterThan(0);
+    expect(result.accepted).toBeLessThan(64);
+    expect(result.queued).toBe(64 - result.accepted);
+    expect(result.peakBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    // 预算满之后不能出现负占用或超发。
+    expect(result.peakBytes).toBe(result.accepted * result.reservedBytesPerOperation);
+  });
+
+  it("取消并释放后预算归零，不留下泄漏", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 8, requestBytes: 64 * 1024 });
+    expect(result.releasedBytes).toBe(0);
+    expect(result.releasedItems).toBe(0);
+  });
+
+  it("预算满时新的请求排队而不是被直接丢弃", async () => {
+    const first = await __testForumRoundtripBridgePressure({ attempts: 64, requestBytes: 1024 * 1024 });
+    expect(first.queued).toBeGreaterThan(0);
+    // 排队项仍在 items+queued 里被记账：丢失排队项等于「请求凭空消失」。
+    expect(first.peakItems).toBe(first.attempts);
+  });
+
+  it("畸形或缺失 hex 也按最大可能计费（计量不能因为形状不合法而归零）", async () => {
+    const valid = await __testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 1 });
+    // 畸形帧仍然会被 postMessage 过去，因此不能比合法小帧更便宜。
+    // 空 hex 只按响应侧上限计；1 字节请求是它的上界减去 2 个 code unit。
+    const responseReservation = (1024 * 1024 + 16) * 4;
+    expect(valid.reservedBytesPerOperation).toBeGreaterThan(responseReservation);
+    expect(valid.reservedBytesPerOperation).toBeLessThanOrEqual(responseReservation + 4);
+  });
+
+  it("超过单帧上限的输入直接拒绝，不进入预算", async () => {
+    await expect(__testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 2 * 1024 * 1024 }))
+      .rejects.toThrow(RangeError);
   });
 });

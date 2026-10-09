@@ -55,7 +55,10 @@ export function createInstanceRegistry<T extends object>(target: T, capability: 
         return (...args: unknown[]) => {
           providerScope?.assertActive(); scope.assertActive();
           const index = rule.idArgument ?? 0;
-          const definition = args[index] as { id?: string };
+          // Class contributions (for example P2P lanes) obtain their public id
+          // from the projection. Fence the registered identity, not the class's
+          // absent `id`, or every lane collides at "undefined:undefined".
+          const definition = (options.projectRegistration ? options.projectRegistration(args[index]) : args[index]) as { id?: string };
           const key = `${rule.unregisterMethod}:${definition?.id}`;
           const token = { active: true };
           const disposed = new Set<unknown>();
@@ -82,7 +85,7 @@ export function createInstanceRegistry<T extends object>(target: T, capability: 
               return result;
             }]));
           };
-          const callArgs = [...args]; callArgs[index] = decorate(options.projectRegistration ? options.projectRegistration(definition) : definition);
+          const callArgs = [...args]; callArgs[index] = decorate(definition);
           const result = value(...callArgs);
           const previous = entries.get(key); if (previous) previous.active = false;
           entries.set(key, token);

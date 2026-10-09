@@ -147,6 +147,9 @@ importers:
       '@keymaster/plugin-contacts':
         specifier: '*'
         version: link:../../packages/plugin-contacts
+      '@keymaster/plugin-forum':
+        specifier: '*'
+        version: link:../../packages/plugin-forum
       '@keymaster/plugin-message':
         specifier: '*'
         version: link:../../packages/plugin-message

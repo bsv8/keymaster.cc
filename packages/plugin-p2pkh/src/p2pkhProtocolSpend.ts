@@ -14,8 +14,14 @@ import type {
   VaultService
 } from "@keymaster/contracts";
 import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
-import type { P2pkhProtocolSubmission } from "./p2pkhContracts.js";
-import { calcTxidFromRawTxHex, rawTxHexByteLength, signP2pkhTx, type UnsignedTx } from "./p2pkhSigner.js";
+import type { P2pkhProtocolSubmission, P2pkhUtxo } from "./p2pkhContracts.js";
+import {
+  calcTxidFromRawTxHex,
+  rawTxHexByteLength,
+  signMixedInputs,
+  signP2pkhTx,
+  type UnsignedTx,
+} from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
 
 // value 必须随协议 claim 一起写入，供协议资产自身的审计与恢复使用；
@@ -155,6 +161,27 @@ function normalizePositiveInteger(value: number, label: string): number {
   return value;
 }
 
+/**
+ * 输出金额闸门。
+ *
+ * 无找零模式允许零值输出：固定位置的协议输出里，索引费为零时 vout 0 的值就是 0，
+ * 位置本身是协议的一部分。零值只在调用方显式声明后才允许，其余路径继续 fail closed。
+ */
+function normalizeOutputValue(value: number, label: string, allowZeroValueOutputs: boolean): number {
+  if (allowZeroValueOutputs) {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+      throw new Error(`${label} must be a non-negative integer`);
+    }
+    return value;
+  }
+  return normalizePositiveInteger(value, label);
+}
+
+/** 无找零模式的预算闸门：必须是正的安全整数。 */
+function normalizeMinerFeeBudget(value: number): number {
+  return normalizePositiveInteger(value, "noChangeRule.maxMinerFeeSatoshis");
+}
+
 function assertUnprotectedInputs(
   registry: ProtectedOutpointRegistry | undefined,
   input: ProtocolSpendPrepareInput
@@ -226,9 +253,102 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       let protectedClaimIds: string[] = [];
       let inputClaimIds: string[] = [];
       const submissionId = crypto.randomUUID();
+      // 放在 try 之前：签名闭包要读它，而闭包定义在 owner 解析之前。
+      const resolvedOwner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
+
+      /**
+       * 签名 + 占用输入 + 落盘预签名记录。
+       *
+       * 两条路径（按费率迭代的找零模式与无找零模式）共用这一段：它们只在费用怎么
+       * 算出来上不同，签名、输入占用与写前日志的顺序必须完全一致。
+       */
+      const signAndRecord = async (plan: {
+        inputs: P2pkhUtxo[];
+        outputs: ProtocolSpendOutput[];
+        changeAddress: string | undefined;
+        changeSatoshis: number;
+        feeSatoshis: number;
+        /** 裸公钥单签输入的锁定脚本；按输入顺序给出，缺省项按 P2PKH 处理。 */
+        lockingScripts?: readonly (string | undefined)[];
+      }): Promise<ProtocolSpendPreview> => {
+        const unsigned = buildUnsignedTx(plan.inputs, plan.outputs, plan.changeAddress, plan.changeSatoshis);
+        const activeCrypto = await deps.vault.createActiveKeyCrypto(resolvedOwner.publicKeyHex);
+        const signDigest = async (digest: Uint8Array): Promise<Uint8Array> => {
+          const res = await activeCrypto.signDigest({
+            publicKeyHex: resolvedOwner.publicKeyHex,
+            digest: new Uint8Array(digest).buffer,
+            format: "der"
+          });
+          if (res.format !== "der") {
+            throw new Error(`signDigest format mismatch: got ${res.format}`);
+          }
+          return new Uint8Array(res.signature);
+        };
+        // 混用两种输入形状时按笔分别签名：两者的 scriptCode 与解锁脚本都不同，
+        // 用错一种会让交易在网络上被拒，而本地一切正常。
+        const lockingScripts = plan.lockingScripts ?? [];
+        const hasBare = lockingScripts.some((script) => script !== undefined);
+        const rawTxHex = hasBare
+          ? await signMixedInputs(
+            unsigned,
+            plan.inputs.map((utxo, index) => ({
+              // 缺省项按 P2PKH：从地址重建脚本；给了锁定脚本就用它逐字节当 scriptCode。
+              scriptCode: lockingScripts[index] === undefined
+                ? addressToP2pkhScript(utxo.address)
+                : hexToBytes(lockingScripts[index]),
+              value: utxo.value,
+              // 逐笔决定：裸公钥脚本的解锁脚本里没有公钥，P2PKH 有。
+              // 统一按一种形状推，会让另一种的 scriptSig 多出无用数据。
+              pushPublicKeyInUnlock: lockingScripts[index] === undefined,
+            })),
+            signDigest,
+            { publicKey: hexToBytes(resolvedOwner.publicKeyHex) },
+          )
+          : await signP2pkhTx(unsigned, plan.inputs, signDigest, resolvedOwner.publicKeyHex);
+        const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
+        inputClaimIds = (await deps.claimStore.tryClaimInputs({
+          submissionId,
+          resourceId: resourceIdFor(input.network),
+          publicKeyHex: resolvedOwner.publicKeyHex,
+          network: input.network,
+          inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
+          expectedCanonicalTxid: calcTxidFromRawTxHex(rawTxHex)
+        })).claimIds;
+        if (deps.submissionStore) {
+          await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
+            submissionId,
+            resourceId: resourceIdFor(input.network),
+            publicKeyHex: resolvedOwner.publicKeyHex,
+            network: input.network,
+            canonicalTxid: calcTxidFromRawTxHex(rawTxHex),
+            inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+            protectedClaimIds,
+            localInputClaimIds: inputClaimIds,
+            status: "prepared"
+          }));
+        }
+        const utxoBinding = await deps.getUtxoBinding?.({ ownerPublicKeyHex: resolvedOwner.publicKeyHex, network: input.network });
+        return {
+          ownerPublicKeyHex: resolvedOwner.publicKeyHex,
+          requestingPluginId: input.requestingPluginId,
+          network: input.network,
+          inputs: plan.inputs,
+          outputs: plan.outputs,
+          ...(plan.changeAddress === undefined ? {} : { changeAddress: plan.changeAddress }),
+          changeSatoshis: plan.changeSatoshis,
+          estimatedFeeSatoshis: plan.feeSatoshis,
+          serializedSizeBytes,
+          txid: calcTxidFromRawTxHex(rawTxHex),
+          rawTxHex,
+          protectedClaimIds,
+          inputClaimIds,
+          submissionId,
+          ...(utxoBinding === undefined ? {} : { utxoBinding, utxoSeq: utxoBinding.seq })
+        };
+      };
+
       try {
         assertUnprotectedInputs(deps.protectedOutpoints, input);
-        const resolvedOwner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
         if (deps.protectedOutpoints) {
           const hasProtectedInputs = input.inputs.some((u) => deps.protectedOutpoints?.isProtected({
             txid: u.txid,
@@ -248,6 +368,14 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             })).claimIds;
           }
         }
+        const noChangeRule = input.noChangeRule;
+        if (noChangeRule !== undefined && input.changeAddress !== undefined) {
+          // 受控无找零与找零互斥：同时给出就意味着调用方自己也不确定要哪种布局，
+          // 这里拒绝而不是猜一个。
+          throw new Error("Protocol spend accepts either changeAddress or noChangeRule, not both");
+        }
+        const allowZeroValueOutputs = noChangeRule?.allowZeroValueOutputs === true;
+        if (noChangeRule !== undefined) normalizeMinerFeeBudget(noChangeRule.maxMinerFeeSatoshis);
         const inputs = input.inputs.map((u) => ({
           id: `${u.txid}:${u.vout}`,
           resourceId: "protocol-spend",
@@ -262,12 +390,35 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           address: u.address
         }));
         const outputs = input.outputs.map((o) => ({
-          value: normalizePositiveInteger(o.value, "Output value"),
+          value: normalizeOutputValue(o.value, "Output value", allowZeroValueOutputs),
           scriptHex: o.scriptHex,
           label: o.label
         }));
         const totalInput = inputs.reduce((sum, u) => sum + u.value, 0);
         const fixedOutput = outputs.reduce((sum, o) => sum + o.value, 0);
+        if (noChangeRule !== undefined) {
+          // 无找零：余额差必须精确成为矿工费，不能是 0（那是无效交易），
+          // 也不能超过用户确认的预算。这条路径不需要按费率迭代：没有找零输出，
+          // 交易大小不再反过来改变费用。
+          const feeSatoshis = totalInput - fixedOutput;
+          if (feeSatoshis <= 0) {
+            throw new Error(`Protocol spend failed: insufficient inputs (${totalInput}) for outputs (${fixedOutput})`);
+          }
+          if (feeSatoshis > noChangeRule.maxMinerFeeSatoshis) {
+            throw new Error(
+              `Protocol spend requires a larger miner fee (${feeSatoshis}) than the confirmed budget (${noChangeRule.maxMinerFeeSatoshis})`
+            );
+          }
+          return signAndRecord({
+            inputs,
+            outputs,
+            changeAddress: undefined,
+            changeSatoshis: 0,
+            feeSatoshis,
+            // 裸公钥脚本的输入必须按自己的 scriptCode 签：传给签名器。
+            lockingScripts: input.inputs.map((u) => u.lockingScriptHex),
+          });
+        }
         let feeSatoshis = 1;
         for (let round = 0; round < 12; round++) {
           const changeSatoshis = totalInput - fixedOutput - feeSatoshis;
@@ -297,46 +448,19 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           );
           const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
           const nextFee = Math.max(1, Math.ceil((serializedSizeBytes * input.feeRateSatoshisPerKb) / 1000));
-          if (nextFee === feeSatoshis || (nextFee <= feeSatoshis && !input.changeAddress)) {
-            inputClaimIds = (await deps.claimStore.tryClaimInputs({
-              submissionId,
-              resourceId: resourceIdFor(input.network),
-              publicKeyHex: resolvedOwner.publicKeyHex,
-              network: input.network,
-              inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
-              expectedCanonicalTxid: calcTxidFromRawTxHex(rawTxHex)
-            })).claimIds;
-            if (deps.submissionStore) {
-              await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
-                submissionId,
-                resourceId: resourceIdFor(input.network),
-                publicKeyHex: resolvedOwner.publicKeyHex,
-                network: input.network,
-                canonicalTxid: calcTxidFromRawTxHex(rawTxHex),
-                inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
-                protectedClaimIds,
-                localInputClaimIds: inputClaimIds,
-                status: "prepared"
-              }));
-            }
-            const utxoBinding = await deps.getUtxoBinding?.({ ownerPublicKeyHex: resolvedOwner.publicKeyHex, network: input.network });
-            return {
-              ownerPublicKeyHex: resolvedOwner.publicKeyHex,
-              requestingPluginId: input.requestingPluginId,
-              network: input.network,
+          // Changing change changes the signature digest and DER length. Exact
+          // equality can alternate forever between adjacent fee values. A fee
+          // already covering the signed size is sufficient; never lower it and
+          // re-enter that cycle. Output values and no-change budgets stay fixed.
+          if (nextFee <= feeSatoshis) {
+            return signAndRecord({
               inputs,
               outputs,
               changeAddress: input.changeAddress,
               changeSatoshis,
-              estimatedFeeSatoshis: feeSatoshis,
-              serializedSizeBytes,
-              txid: calcTxidFromRawTxHex(rawTxHex),
-              rawTxHex,
-              protectedClaimIds,
-              inputClaimIds,
-              submissionId,
-              ...(utxoBinding === undefined ? {} : { utxoBinding, utxoSeq: utxoBinding.seq })
-            };
+              feeSatoshis,
+              lockingScripts: input.inputs.map((u) => u.lockingScriptHex),
+            });
           }
           feeSatoshis = nextFee;
         }

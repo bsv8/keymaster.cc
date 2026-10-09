@@ -3,6 +3,17 @@ import { createP2pkhFileRepository } from "./p2pkhFileRepository.js";
 import { createMemoryOwnerFileStore } from "./testSupport/memoryOwnerFileStore.js";
 
 describe("P2PKH 文件仓储", () => {
+  it("恢复保护读取全部资金分页，后页损坏记录也不会漏过", async () => {
+    const store = createMemoryOwnerFileStore();
+    const writer = createP2pkhFileRepository(store);
+    for (let i = 0; i < 3; i++) await writer.writeProtocolFunding({ fundingId: `forum:${i}`, ownerPublicKeyHex: "02" + "aa".repeat(32), network: "test", txid: "bb".repeat(32), vout: i, rawTxHex: "00", valueSatoshis: "100", address: "address", updatedAtMs: 1 });
+    await store.put("funding/zz-broken.json", new TextEncoder().encode("{}"));
+    const paged = createP2pkhFileRepository({ ...store, list: input => store.list({ ...input, limit: 1 }) });
+    const result = await paged.listProtocolFunding();
+    expect(result.records.map(row => row.vout)).toEqual([0, 1, 2]);
+    expect(result.unreadable).toEqual(["zz-broken"]);
+  });
+
   it("设置缺省与部分覆盖", async () => {
     const store = createMemoryOwnerFileStore();
     const repository = createP2pkhFileRepository(store as never);

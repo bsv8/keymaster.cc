@@ -580,6 +580,9 @@ export function createKeymasterPluginHost(
 
   coreHost = createWebLoomPluginHost({
     runtime: hostRuntime,
+    // Owner-session RPC providers appear only after unlock. Validate their declared
+    // remote dependency now; Host activation still requires the actual remote service.
+    externalRuntimeDependencies: hostRuntime === "window-main",
     privateCapabilities: options.privateCapabilities,
     runtimeSlotBindings: options.runtimeSlotBindings,
     rootAttributes: attributesFromRuntimeIdentity(runtimeIdentity),

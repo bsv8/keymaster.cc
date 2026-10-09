@@ -265,23 +265,195 @@ describe("同 hash 多消费者", () => {
   });
 });
 
+describe("远程附件的获取后验证", () => {
+  /** 2 MiB 的 PNG：超过正文 1 MiB 上限，但在附件 32 MiB 上限之内。 */
+  function bigPng(): Uint8Array {
+    return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, ...new Array<number>(2 * 1024 * 1024 - 4).fill(0x22)]);
+  }
+
+  it("同一份 2 MiB 内容：正文口径判 too-large，附件口径验证通过", async () => {
+    const store = createInMemoryOwnerFileStore();
+    const png = bigPng();
+    // 内容先在 store 里（模拟远程通道已经落盘），此处只验证两条读取口径的差别。
+    const landed = await createMsFileContentService({ store }).importContent({
+      bytes: png,
+      fileName: "big.png",
+      mediaType: "image/png",
+    });
+
+    const service = createMsFileContentService({
+      store,
+      maxContentBytes: 1024 * 1024,
+      maxAttachmentBytes: 32 * 1024 * 1024,
+    });
+    // 正文口径：超出 1 MiB，如实报超限。
+    const asBody = await service.ensureContent({ seedHashHex: landed.seedHashHex });
+    expect(asBody.failureCode).toBe("too-large");
+
+    // 附件口径：同一份字节验证通过，附件入口读得到。
+    const asAttachment = await service.ensureContent({ seedHashHex: landed.seedHashHex, asAttachment: true });
+    expect(asAttachment.state).toBe("verified");
+    expect(asAttachment.verifiedBytes).toBe(String(png.byteLength));
+    expect((await service.openVerifiedAttachment(landed.seedHashHex))?.byteLength).toBe(String(png.byteLength));
+  });
+
+  it("远程通道落盘后的下载后校验走附件限额", async () => {
+    const png = bigPng();
+    // 先算出这份字节的 seed hash：远程通道写的就是同一份内容。
+    const scratch = createInMemoryOwnerFileStore();
+    const pngSeedHashHex = (await createMsFileContentService({ store: scratch }).importContent({
+      bytes: png,
+      fileName: "big.png",
+      mediaType: "image/png",
+    })).seedHashHex;
+
+    const store = createInMemoryOwnerFileStore();
+    const service = createMsFileContentService({
+      store,
+      maxContentBytes: 1024 * 1024,
+      maxAttachmentBytes: 32 * 1024 * 1024,
+      remote: {
+        listSourceIds: () => ["local-bitfs"],
+        // 真实远程通道的效果：把字节按 MSFile 布局写进同一个 store。
+        async fetch() {
+          await createMsFileContentService({ store }).importContent({ bytes: png, fileName: "big.png", mediaType: "image/png" });
+          return true;
+        },
+      },
+    });
+
+    const status = await service.ensureContent({ seedHashHex: pngSeedHashHex, allowPurchase: true, asAttachment: true });
+    // 下载后校验若仍用正文上限，这里会得到 too-large。
+    expect(status.state).toBe("verified");
+    expect(status.verifiedBytes).toBe(String(png.byteLength));
+    expect((await service.openVerifiedAttachment(pngSeedHashHex))?.byteLength).toBe(String(png.byteLength));
+  });
+
+  it("下载后校验用正文口径时确实会拦住同一份大附件", async () => {
+    const png = bigPng();
+    const scratch = createInMemoryOwnerFileStore();
+    const pngSeedHashHex = (await createMsFileContentService({ store: scratch }).importContent({
+      bytes: png,
+      fileName: "big.png",
+      mediaType: "image/png",
+    })).seedHashHex;
+
+    const store = createInMemoryOwnerFileStore();
+    const service = createMsFileContentService({
+      store,
+      maxContentBytes: 1024 * 1024,
+      maxAttachmentBytes: 32 * 1024 * 1024,
+      remote: {
+        listSourceIds: () => ["local-bitfs"],
+        async fetch() {
+          await createMsFileContentService({ store }).importContent({ bytes: png, fileName: "big.png", mediaType: "image/png" });
+          return true;
+        },
+      },
+    });
+    // 对照组：不带 asAttachment 时走正文限额，完整落盘也会被判超限。
+    const status = await service.ensureContent({ seedHashHex: pngSeedHashHex, allowPurchase: true });
+    expect(status.failureCode).toBe("too-large");
+  });
+});
+
+describe("附件读取", () => {
+  // PNG 头 + 16 字节负载 = 32 字节，便于把正文上限设在两者之间。
+  const png = Uint8Array.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    ...new Array<number>(16).fill(0x11),
+  ]);
+
+  it("导入的附件可读出真实字节，并带 mediaType 与文件名", async () => {
+    const service = createMsFileContentService({ store: createInMemoryOwnerFileStore() });
+    const imported = await service.importContent({ bytes: png, fileName: "chart.png", mediaType: "image/png" });
+    const content = await service.openVerifiedAttachment(imported.seedHashHex);
+    expect(content).toBeDefined();
+    expect([...(content!.bytes)]).toEqual([...png]);
+    expect(content!.mediaType).toBe("image/png");
+    expect(content!.fileName).toBe("chart.png");
+    expect(content!.byteLength).toBe(String(png.byteLength));
+  });
+
+  it("附件字节上限独立于正文的 1 MiB", async () => {
+    // 同一份存储上建两个服务：正文限额很小的那个读不了这份 32 字节的 PNG，
+    // 附件限额宽松的那个读得了。两条限额不是同一个上限。
+    const store = createInMemoryOwnerFileStore();
+    const writer = createMsFileContentService({ store });
+    const imported = await writer.importContent({ bytes: png, fileName: "chart.png", mediaType: "image/png" });
+
+    const narrow = createMsFileContentService({ store, maxContentBytes: 16, maxAttachmentBytes: 4096 });
+    await expect(narrow.openVerifiedContent(imported.seedHashHex)).rejects.toBeInstanceOf(MsFileContentTooLargeError);
+    expect(await narrow.openVerifiedAttachment(imported.seedHashHex)).toBeDefined();
+  });
+
+  it("超过附件上限时返回 undefined 而不是截断", async () => {
+    const store = createInMemoryOwnerFileStore();
+    const imported = await createMsFileContentService({ store }).importContent({
+      bytes: png,
+      fileName: "chart.png",
+      mediaType: "image/png",
+    });
+    const limited = createMsFileContentService({ store, maxContentBytes: 4096, maxAttachmentBytes: 4 });
+    // 附件超限返回 undefined，不返回截断内容，也不把完整内容误报成损坏。
+    expect(await limited.openVerifiedAttachment(imported.seedHashHex)).toBeUndefined();
+    expect((await limited.getContentStatus(imported.seedHashHex)).state).toBe("verified");
+  });
+
+  it("未导入或非法 hash 返回 undefined", async () => {
+    const service = createMsFileContentService({ store: createInMemoryOwnerFileStore() });
+    expect(await service.openVerifiedAttachment("ab".repeat(32))).toBeUndefined();
+    expect(await service.openVerifiedAttachment("nope")).toBeUndefined();
+  });
+});
+
 describe("发布可达性", () => {
-  it("本地已存不等于读者可取得：没有渠道时 published 为 false", async () => {
+  it("本地已存不等于读者可取得：没有发布证据时 published 为 false", async () => {
     const service = createMsFileContentService({ store: createInMemoryOwnerFileStore() });
     const seedHashHex = await importText(service, "local only");
     const reach = await service.publicationReachability(seedHashHex);
     expect(reach.published).toBe(false);
-    expect(reach.detail).toContain("供应渠道");
-    expect(reach.detail).toContain("尚未实现");
+    expect(reach.detail).toContain("发布渠道尚未实现");
   });
 
-  it("本地已存且存在渠道时 published 为 true", async () => {
+  it("只有下载来源不算发布证据：本地已存但只有买方通道时仍为 false", async () => {
+    // 下载来源证明「我能取到」，不证明「别的读者能取到」。这两件事必须分开表达。
     const service = createMsFileContentService({
       store: createInMemoryOwnerFileStore(),
       remote: { listSourceIds: () => ["remote-proxy:02".padEnd(64, "a")], fetch: async () => true },
     });
+    const seedHashHex = await importText(service, "download-only");
+    const reach = await service.publicationReachability(seedHashHex);
+    expect(reach.published).toBe(false);
+    // 下载来源仍然如实列出，方便诊断「内容为什么不可达」。
+    expect(reach.sourceIds).toEqual(["remote-proxy:02".padEnd(64, "a")]);
+    expect(reach.detail).toContain("发布渠道尚未实现");
+  });
+
+  it("有发布证据时才报 published 为 true", async () => {
+    const service = createMsFileContentService({
+      store: createInMemoryOwnerFileStore(),
+      remote: { listSourceIds: () => ["remote-proxy:02".padEnd(64, "a")], fetch: async () => true },
+      publication: {
+        async publicationEvidence() {
+          return { published: true, sourceIds: ["seller:local-bitfs"], detail: "卖方模式已开池，读者可经 BitFS 获取" };
+        },
+      },
+    });
     const seedHashHex = await importText(service, "published");
-    expect((await service.publicationReachability(seedHashHex)).published).toBe(true);
+    const reach = await service.publicationReachability(seedHashHex);
+    expect(reach.published).toBe(true);
+    expect(reach.sourceIds).toEqual(["seller:local-bitfs"]);
+  });
+
+  it("发布证据缺席时不会因为本地完整而伪造发布成功", async () => {
+    const service = createMsFileContentService({
+      store: createInMemoryOwnerFileStore(),
+      remote: { listSourceIds: () => ["remote-proxy:02".padEnd(64, "a")], fetch: async () => true },
+    });
+    const seedHashHex = await importText(service, "no-evidence");
+    expect((await service.publicationReachability(seedHashHex)).published).toBe(false);
   });
 
   it("内容尚未完整保存时不是已发布", async () => {

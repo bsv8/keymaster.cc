@@ -17,6 +17,7 @@
     "@keymaster/plugin-bsv-price": "*",
     "@keymaster/plugin-collectible-1satordinals": "*",
     "@keymaster/plugin-contacts": "*",
+    "@keymaster/plugin-forum": "*",
     "@keymaster/plugin-message": "*",
     "@keymaster/plugin-msfile": "*",
     "@keymaster/plugin-p2pkh": "*",

@@ -22,6 +22,7 @@ import {
   type VerifiedQuote,
 } from "go-bitfs";
 import type { BitfsFundingLedger, BitfsFundingTransactionView, PreparedBitfsFunding } from "./funding.js";
+import { prepareBitfsPoolRecoveryWithCurrentRevision } from "./funding.js";
 import type { BitfsBroadcastOutcome, BitfsTransactionBroadcaster, BitfsTransactionJournal } from "./broadcast.js";
 import { createJournaledBitfsBuyerSigner } from "./signerJournal.js";
 import { bitfsWorkflowFacts, deriveBitfsPoolLockingScript } from "./sdk.js";
@@ -754,18 +755,17 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
       }
       if (ledgerPool.state === "open") {
         deps.assertCurrentContext();
-        account = await deps.ledger.preparePoolRecovery({
+        account = await prepareBitfsPoolRecoveryWithCurrentRevision(deps.ledger, {
           ownerPublicKeyHex: owner,
           seedHashHex: seed,
           network,
-          expectedRevision: account.revision,
           poolId: session.sessionId,
           purpose: "close",
           txid,
           spendingOutpoint: parsed.inputs[0]!,
           outputs: ownerOutputs,
           nowMs: deps.nowMs(),
-        });
+        }, deps.assertCurrentContext);
         ledgerPool = account.pools.find((item) => item.poolId === session.sessionId);
       }
       if (!ledgerPool || ledgerPool.state !== "recovery-pending" || ledgerPool.recoveryTxid !== txid) {

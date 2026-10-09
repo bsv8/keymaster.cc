@@ -169,6 +169,7 @@ function scenarioSpecFiles() {
  * 验收或 Go supplier 被默认 local-core 误运行，也避免一个 spec 被重复收集。
  */
 const EXECUTION_PROFILES = [
+  { name: "forum", pattern: /^journeys\/forum\/[^/]+\.spec\.ts$/u },
   { name: "local-core", pattern: /^(?:journeys\/local|gates\/local)\/[^/]+\.spec\.ts$/u },
   { name: "dev-http", pattern: /^gates\/dev-http\/[^/]+\.spec\.ts$/u },
   { name: "lifecycle", pattern: /^gates\/lifecycle\/[^/]+\.spec\.ts$/u },

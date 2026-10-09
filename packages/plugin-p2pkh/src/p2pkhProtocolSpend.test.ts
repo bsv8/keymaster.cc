@@ -194,6 +194,16 @@ afterEach(async () => {
 });
 
 describe("createP2pkhProtocolSpendService", () => {
+  it("accepts a sufficient fee when DER length changes with the change output", async () => {
+    const { service, owner } = makeService();
+    for (let fixture = 1; fixture <= 24; fixture++) {
+      const preview = await service.prepare({ ownerPublicKeyHex: owner.publicKeyHex, requestingPluginId: "msfile", network: "main",
+        inputs: [{ txid: fixture.toString(16).padStart(64, "0"), vout: 0, value: 5000, address: owner.address }],
+        outputs: [{ scriptHex: "51", value: 202 }], changeAddress: owner.address, feeRateSatoshisPerKb: 1000 });
+      expect(preview.estimatedFeeSatoshis).toBeGreaterThanOrEqual(preview.serializedSizeBytes);
+      expect(preview.changeSatoshis + preview.estimatedFeeSatoshis + 202).toBe(5000);
+    }
+  });
   it("prepares and submits arbitrary output plans", async () => {
     const { service, owner, claimStore } = makeService();
     const preview = await service.prepare({
@@ -526,5 +536,126 @@ describe("createP2pkhProtocolSpendService", () => {
       claimIds: preview.inputClaimIds ?? []
     });
     expect(claimStore.list()).toHaveLength(0);
+  });
+});
+
+/**
+ * 受控无找零构建。
+ *
+ * 协议固定输出交易没有找零输出，余额差必须精确成为矿工费；同时固定位置的
+ * 零值输出（索引费为 0 的 vout 0）是协议的一部分，不能被当成非法金额拒掉。
+ */
+describe("受控无找零构建", () => {
+  it("余额差精确成为矿工费，且不超过确认的预算", async () => {
+    const { service, owner } = makeService();
+    const preview = await service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "88".repeat(32), vout: 0, value: 1_100, address: owner.address }],
+      outputs: [
+        { value: 100, scriptHex: "6a", label: "forum-vout-0" },
+        { value: 1, scriptHex: "6a", label: "forum-vout-1" },
+        { value: 500, scriptHex: "6a", label: "forum-vout-2" },
+      ],
+      feeRateSatoshisPerKb: 1,
+      noChangeRule: { maxMinerFeeSatoshis: 600, allowZeroValueOutputs: true },
+    });
+    // 1100 - 601 = 499 sat 全部成为矿工费，没有找零输出。
+    expect(preview.changeSatoshis).toBe(0);
+    expect(preview.changeAddress).toBeUndefined();
+    expect(preview.estimatedFeeSatoshis).toBe(499);
+    expect(preview.outputs).toHaveLength(3);
+  });
+
+  it("矿工费超过确认预算时拒绝构造", async () => {
+    const { service, owner } = makeService();
+    await expect(service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "99".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      outputs: [{ value: 1_000, scriptHex: "6a" }],
+      feeRateSatoshisPerKb: 1,
+      noChangeRule: { maxMinerFeeSatoshis: 10, allowZeroValueOutputs: true },
+    })).rejects.toThrow(/larger miner fee/);
+  });
+
+  it("输入不足以覆盖固定输出时拒绝构造", async () => {
+    const { service, owner } = makeService();
+    await expect(service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "aa".repeat(32), vout: 0, value: 100, address: owner.address }],
+      outputs: [{ value: 1_000, scriptHex: "6a" }],
+      feeRateSatoshisPerKb: 1,
+      noChangeRule: { maxMinerFeeSatoshis: 600, allowZeroValueOutputs: true },
+    })).rejects.toThrow(/insufficient inputs/);
+  });
+
+  it("允许零值输出：索引费为零时 vout 0 仍然保留", async () => {
+    const { service, owner } = makeService();
+    const preview = await service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "bb".repeat(32), vout: 0, value: 500, address: owner.address }],
+      outputs: [
+        { value: 0, scriptHex: "6a", label: "forum-vout-0" },
+        { value: 1, scriptHex: "6a", label: "forum-vout-1" },
+      ],
+      feeRateSatoshisPerKb: 1,
+      noChangeRule: { maxMinerFeeSatoshis: 600, allowZeroValueOutputs: true },
+    });
+    expect(preview.outputs.map((output) => output.value)).toEqual([0, 1]);
+    expect(preview.estimatedFeeSatoshis).toBe(499);
+  });
+
+  it("没有显式声明时仍然拒绝零值输出", async () => {
+    const { service, owner } = makeService();
+    await expect(service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "cc".repeat(32), vout: 0, value: 500, address: owner.address }],
+      outputs: [{ value: 0, scriptHex: "6a" }],
+      feeRateSatoshisPerKb: 1,
+      noChangeRule: { maxMinerFeeSatoshis: 600 },
+    })).rejects.toThrow(/Output value/);
+  });
+
+  it("未声明无找零规则时保留原来的余款拒绝", async () => {
+    const { service, owner } = makeService();
+    await expect(service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "dd".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      outputs: [{ value: 1_000, scriptHex: "6a" }],
+      feeRateSatoshisPerKb: 1,
+    })).rejects.toThrow(/requires changeAddress/);
+  });
+
+  it("无找零规则与 changeAddress 互斥", async () => {
+    const { service, owner } = makeService();
+    await expect(service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "ee".repeat(32), vout: 0, value: 1_100, address: owner.address }],
+      outputs: [{ value: 1_000, scriptHex: "6a" }],
+      feeRateSatoshisPerKb: 1,
+      changeAddress: owner.address,
+      noChangeRule: { maxMinerFeeSatoshis: 600, allowZeroValueOutputs: true },
+    })).rejects.toThrow(/not both/);
+  });
+
+  it("无找零模式也照样占用输入并落盘预签名", async () => {
+    const { service, owner, claimStore } = makeService();
+    const preview = await service.prepare({
+      ownerPublicKeyHex: owner.publicKeyHex,
+      network: "main",
+      inputs: [{ txid: "ef".repeat(32), vout: 0, value: 1_100, address: owner.address }],
+      outputs: [{ value: 1_000, scriptHex: "6a" }],
+      feeRateSatoshisPerKb: 1,
+      noChangeRule: { maxMinerFeeSatoshis: 600, allowZeroValueOutputs: true },
+    });
+    expect(preview.inputClaimIds).toHaveLength(1);
+    expect(preview.submissionId).toBeTruthy();
+    expect(claimStore.list()).toHaveLength(1);
   });
 });

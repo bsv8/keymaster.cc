@@ -38,3 +38,7 @@ export function createFixtureHost(options: CreatePluginHostOptions & { storageBi
 
 export { SHELL_TEST_RESOURCES } from "./shellTestResources.js";
 export { walletStateFixtureSnapshot, walletStateFixtureAccess } from "./walletStateFixture.js";
+
+// 真实注册表实现的再导出：插件测试要验证「保护确实生效」时必须用生产同一个实现，
+// 自己写一个 map 当注册表只能验证 map 自己。
+export { createProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";

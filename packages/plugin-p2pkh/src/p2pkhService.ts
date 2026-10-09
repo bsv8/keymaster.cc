@@ -178,6 +178,21 @@ export interface P2pkhServiceDeps {
   /** SharedWorker 内部兼容面，仅供 sat top-up 装配；页面 manifest 不注入。 */
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
   assetDataNotifier?: AssetDataNotifier;
+  /**
+   * 选币前的门禁：等待受保护输出登记恢复完成。
+   *
+   * 专用资金的保护是**内存态**，重启后需要从磁盘记录重建。在这个恢复完成之前放行
+   * 选币，一次普通转账就可能把仍属于用户的专用 UTXO 当成可用余额花掉。因此每个
+   * 会消费 UTXO 的入口都必须先过这道门禁；拒绝（抛错）比放行安全。
+   */
+  awaitProtectionRestore?(): Promise<void>;
+}
+
+/** 门禁缺席时按「没有待恢复的保护」处理：不阻塞既有行为。 */
+function protectionGate(deps: P2pkhServiceDeps): () => Promise<void> {
+  return async () => {
+    await deps.awaitProtectionRestore?.();
+  };
 }
 
 export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { balanceBroadcaster: BalanceBroadcaster } {
@@ -358,6 +373,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     assetDataNotifier: deps.assetDataNotifier,
     getStore: (publicKeyHex) => ensureRepositoryForOwner(publicKeyHex),
     loadSpendableUtxos: async ({ ownerPublicKeyHex, resource, purpose }) => {
+      // 转账与其它花 UTXO 的入口共用同一道门禁。
+      await protectionGate(deps)();
       // 准备/提交前刷新一次 `unspent/all`；刷新失败即拒绝继续，
       // 不允许用可能已过期的快照签署交易。
       const transferPurpose = purpose ?? "prepare";
@@ -548,6 +565,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   function refreshBalanceSnapshot(): Promise<void> {
+    // A balance publication invalidates several consumers at once. Their
+    // reads share the current refresh instead of each issuing more Worker
+    // calls; the owner/session fence in the implementation still rejects late
+    // results and subsequent data-change events can start a fresh refresh.
+    if (balanceRefreshInFlight) return balanceRefreshInFlight;
     const promise = refreshBalanceSnapshotImpl();
     balanceRefreshInFlight = promise;
     void promise.then(
@@ -901,6 +923,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         : { ...EMPTY_BALANCE_BREAKDOWN };
     },
     async allocateUtxos(request) {
+      // 选币门禁：保护登记恢复完成之前不放行。
+      await protectionGate(deps)();
       if (!request.assetId || !(request.assetId in P2PKH_ASSETS)) {
         throw new Error("P2PKH provider requires an assetId");
       }

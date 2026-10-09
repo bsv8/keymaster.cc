@@ -1,3 +1,6 @@
+import { createInstanceRegistryService } from "@keymaster/runtime";
+import { createFixtureHost } from "@keymaster/runtime/test-support";
+import { WINDOW_P2P_EXECUTOR_CAPABILITY, type PluginContext, type WindowP2pExecutorLane, type WindowP2pExecutorLaneContext } from "@keymaster/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { createWindowP2pLaneRegistry } from "./laneRegistry.js";
 
@@ -76,4 +79,41 @@ describe("Window P2P lane registry", () => {
     const registry = createWindowP2pLaneRegistry();
     expect(() => registry.register({ ...lane(""), laneId: "" })).toThrow(/invalid/);
   });
+});
+
+it("keeps projected P2P lane identities independent across registration, stop and removal", async () => {
+  const registry = createWindowP2pLaneRegistry();
+  const cap = WINDOW_P2P_EXECUTOR_CAPABILITY;
+  const service = createInstanceRegistryService({ register: registry.register.bind(registry) }, cap, {
+    name: cap.id, registrations: [{ method: "register" }], cleanupMethods: ["stop"],
+    projectRegistration(input) {
+      const lane = input as WindowP2pExecutorLane;
+      return { id: lane.laneId, laneId: lane.laneId, start: lane.start.bind(lane), stop: lane.stop.bind(lane), handle: lane.handle.bind(lane) };
+    },
+  });
+  let context!: PluginContext;
+  class Lane {
+    constructor(readonly laneId: string) {}
+    start() {} stop() {}
+    async handle() { return this.laneId; }
+  }
+  const host = createFixtureHost({ runtime: "window-main", capabilities: [{ capability: cap, value: service }], runtimeUnitImplementationRegistry: { get: () => ctx => { context = ctx; } } });
+  try {
+    await host.register({ id: "lanes", name: "Lanes", units: [{ id: "lanes.window", runtime: "window-main", scopeKind: "root", dependencies: [{ capability: cap, sourceRuntime: "window-main" }] }] });
+    const bound = context.capability(cap);
+    const removeMsfile = bound.register(new Lane("msfile"));
+    bound.register(new Lane("sat-subscription")); bound.register(new Lane("forum"));
+    const laneContext = { host: {}, ownerSessionEpoch: "epoch", emit() {} } as WindowP2pExecutorLaneContext;
+    await registry.attach(laneContext);
+    for (const id of ["msfile", "sat-subscription", "forum"]) await expect(registry.dispatch(id, {}, new AbortController().signal)).resolves.toBe(id);
+    // Host detach stops execution, but does not revoke live registrations.
+    await registry.detach(); await registry.attach(laneContext);
+    await expect(registry.dispatch("msfile", {}, new AbortController().signal)).resolves.toBe("msfile");
+    removeMsfile();
+    await expect(registry.dispatch("msfile", {}, new AbortController().signal)).rejects.toThrow("unavailable");
+    await expect(registry.dispatch("sat-subscription", {}, new AbortController().signal)).resolves.toBe("sat-subscription");
+    await expect(registry.dispatch("forum", {}, new AbortController().signal)).resolves.toBe("forum");
+    await host.revoke("lanes", "test");
+    await expect(registry.dispatch("forum", {}, new AbortController().signal)).rejects.toThrow();
+  } finally { await host.dispose(); }
 });

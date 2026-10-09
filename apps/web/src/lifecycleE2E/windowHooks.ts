@@ -14,6 +14,9 @@ import {
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   systemStorageDeclarationForPurpose,
+  FORUM_SERVICE_CAPABILITY,
+  WOC_CAPABILITY,
+  type ForumPublishTask,
 } from "@keymaster/contracts";
 import type { VaultCoordinatorControl } from "@keymaster/contracts";
 import type { RuntimeHandle, RuntimeStatusSnapshot } from "webloom-framework";
@@ -147,6 +150,10 @@ async function waitForStorageReady(client: ReturnType<typeof getCoordinatorClien
 }
 
 export interface LifecycleProductionE2EHooks {
+  /** Restore actual exported public WAL through production owner file grants. */
+  restoreForumSmokeRecords(records: Array<{ path: string; text: string }>): Promise<void>;
+  /** Resume the same task/funding; production service rechecks quote/raw/claims. */
+  resumeForumSmoke(taskId: string, markdown: string, endpoint: string): Promise<ForumPublishTask>;
   walletStateSnapshot(): Readonly<VaultLifecycleSnapshot>;
   cacheWalletCrypto(): Promise<void>;
   cachedWalletCryptoFresh(): Promise<boolean>;
@@ -490,7 +497,9 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
   };
 
   const runtimeDiagnostics = () => ({
+    remoteRuntime: client.getRuntimeHandle()?.state(),
     connectionState: client.getConnectionState(),
+    recoverableDiagnostics: client.getRecoverableDiagnostics(),
     connected: client.getIsConnected(),
     bootstrap: client.getBootstrapSnapshot(),
     plugins: host.installed().map((pluginId) => {
@@ -499,6 +508,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     }),
     capabilityIds: host.capabilities.registrations().map((entry) => `${entry.capability.kind}:${entry.capability.id}@${entry.capability.version}`),
     bsvPriceState: host.state("bsv-price"),
+    forumState: host.state("forum"),
   });
 
   const walletStateSnapshot = () => {
@@ -517,6 +527,51 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
   };
 
   window.__lifecycleProductionE2E = {
+    async restoreForumSmokeRecords(records) {
+      const owner = client.getBootstrapSnapshot().activePublicKeyHex;
+      if (!owner || client.getBootstrapSnapshot().vaultStatus !== "unlocked") throw new Error("Recovery requires unlocked owner");
+      if (!Array.isArray(records) || records.length > 100 || JSON.stringify(records).length > 2 * 1024 * 1024) throw new Error("Recovery evidence exceeds bounds");
+      for (const record of records) {
+        if (!/^(?:forum\/(?:publish|funding|configs|roots)\/|p2pkh\/(?:funding|protocol)\/)[^/]+\.json$/u.test(record.path)) throw new Error("Recovery path is outside Forum WAL");
+        const document = JSON.parse(record.text) as { data?: { ownerPublicKeyHex?: string }; record?: { ownerPublicKeyHex?: string }; submission?: { publicKeyHex?: string } };
+        const recordedOwner = document.data?.ownerPublicKeyHex ?? document.record?.ownerPublicKeyHex ?? document.submission?.publicKeyHex;
+        if (recordedOwner !== undefined && recordedOwner !== owner) throw new Error("Recovery owner mismatch");
+      }
+      const authority = createStorageBindingAuthority(client);
+      for (const moduleId of ["p2pkh", "forum"] as const) {
+        const declaration = systemStorageDeclarationForPurpose(moduleId, "");
+        if (!declaration) throw new Error("Recovery file declaration unavailable");
+        const files = await authority.openOwnerFileStore({ pluginId: moduleId, declaration });
+        try {
+          for (const record of records.filter(item => item.path.startsWith(`${moduleId}/`))) {
+            const path = record.path.slice(moduleId.length + 1);
+            const existing = await files.get(path);
+            if (existing) {
+              if (new TextDecoder().decode(existing.bytes) !== record.text) throw new Error("Recovery would overwrite different evidence");
+            } else await files.put(path, new TextEncoder().encode(record.text), { ifNoneMatch: true });
+          }
+        } finally { await files.close(); }
+      }
+    },
+    async resumeForumSmoke(taskId, markdown, endpoint) {
+      const forum = host.capabilities.get(FORUM_SERVICE_CAPABILITY);
+      const task = await forum.getPublishTask(taskId);
+      if (!task || task.ownerPublicKeyHex !== client.getBootstrapSnapshot().activePublicKeyHex) throw new Error("Recovery task owner mismatch");
+      const config = await forum.getConfig(task.forumConfigId);
+      if (!config || config.network !== "test") throw new Error("Recovery is testnet only");
+      if (task.submissionId === undefined && task.funding !== undefined) {
+        // An older exported task can predate a successful dispatch. Do not let
+        // that stale archive cause production funding recovery to prepare a
+        // replacement and pay for the same publication again.
+        const spent = await host.capabilities.get(WOC_CAPABILITY).getSpentOutput(task.network, task.funding.txid, task.funding.vout);
+        if (spent !== null) throw new Error("Retained funding was spent; recover newer submission evidence instead");
+      }
+      await forum.saveConfig({ ...config, endpoints: [{ kind: "https", url: endpoint }] });
+      await forum.verifyRoot(config.id);
+      const content = await forum.freezeContent(config.id, markdown);
+      if (content.seedHashHex !== task.replyMasterSeedHash) throw new Error("Recovery content does not match frozen hash");
+      return forum.buildAndSubmit(taskId);
+    },
     walletStateSnapshot, cacheWalletCrypto, cachedWalletCryptoFresh,
     bootstrap,
     ownerStorageRoundTrip,

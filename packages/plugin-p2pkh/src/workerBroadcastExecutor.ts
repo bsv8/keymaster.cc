@@ -1,6 +1,7 @@
 import type { BorrowedModuleFileStore, CoordinatorClientRequest, CoordinatorResponse, VaultWalletState, P2pkhTransactionBroadcastProvider } from "@keymaster/contracts";
 import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
+import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 import { parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
 import type { P2pkhUtxoSnapshotResource, P2pkhUtxoSnapshotStore } from "./p2pkhUtxoSnapshot.js";
 
@@ -14,6 +15,7 @@ export interface WorkerBroadcastDependencies {
   snapshots: P2pkhUtxoSnapshotStore | undefined;
   resource(owner: string, network: "main" | "test"): Promise<P2pkhUtxoSnapshotResource | undefined>;
   listProtectedOutpoints(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<readonly { txid: string; vout: number }[]>;
+  listProtocolProtectedOutpoints?(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<readonly { txid: string; vout: number }[]>;
   abortNotDispatched(request: BroadcastRequest, reason: string): Promise<void>;
   refresh(): Promise<{ main?: number; test?: number }>;
   publishChanged(event: { type: "asset.data-changed"; providerId: string; publicKeyHex: string; kinds: string[]; utxoSeqs?: { main?: number; test?: number } }): void;
@@ -114,6 +116,28 @@ export async function executeWorkerP2pkhBroadcast(
     };
   }
 
+  // Protocol exemptions are proven from wallet records and claims, never a caller flag.
+  const protocolProtection = await deps.listProtocolProtectedOutpoints?.({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network }) ?? [];
+  deps.assertFresh();
+  const protocolKeys = new Set(protocolProtection.map(row => `${row.txid}:${row.vout}`));
+  if (parsedInputOutpointKeys.some(key => protocolKeys.has(key))) {
+    const evidence = createWorkerProtocolEvidence(deps.storage());
+    const protocol = await evidence.getProtocolSubmission(request.submissionId);
+    const claims = await evidence.listLocalInputClaims();
+    const inputKeys = protocol?.inputs.map(row => `${row.txid}:${row.vout}`) ?? [];
+    const authorized = protocol?.status === "prepared" && protocol.canonicalTxid === local.txid
+      && protocol.publicKeyHex.toLowerCase() === request.ownerPublicKeyHex.toLowerCase() && protocol.network === request.network
+      && inputKeys.length === parsedInputOutpointKeys.length && inputKeys.every((key, index) => key === parsedInputOutpointKeys[index])
+      && parsedInputOutpointKeys.every(key => claims.some(claim => claim.submissionId === protocol.id && protocol.localInputClaimIds.includes(claim.id)
+        && claim.publicKeyHex.toLowerCase() === request.ownerPublicKeyHex.toLowerCase() && claim.network === request.network && claim.state === "active"
+        && `${claim.txid}:${claim.vout}` === key));
+    deps.assertFresh();
+    if (!authorized) {
+      await deps.abortNotDispatched(request, "protocol-funds-protected");
+      return { requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "protocol-funds-protected" } };
+    }
+  }
+
   // 唯一的 Worker 门禁：在同一无 await 的同步块内完成绑定核对、输入归属
   // 校验和消费。纯代币输入没有命中钱包快照时保持 untouched，不要求序号。
   snapshotResource = await deps.resource(request.ownerPublicKeyHex, request.network);
@@ -145,6 +169,13 @@ export async function executeWorkerP2pkhBroadcast(
   const startedAt = new Date().toISOString();
   try {
     deps.assertFresh();
+    const evidence = createWorkerProtocolEvidence(deps.storage());
+    const protocol = await evidence.getProtocolSubmission(request.submissionId);
+    if (protocol) {
+      if (protocol.status !== "prepared" || protocol.canonicalTxid !== local.txid || protocol.publicKeyHex.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase() || protocol.network !== request.network) throw Object.assign(new Error("Protocol submission is not dispatchable"), { code: "definitive-not-dispatched" });
+      await evidence.putProtocolSubmission({ ...protocol, status: "unknown", updatedAt: new Date().toISOString() });
+      deps.assertFresh();
+    }
     const result = await provider.broadcast({ network: request.network, canonicalTxid: local.txid, rawTxHex: local.rawTxHex });
     if (result.canonicalTxid !== local.txid) {
       // 中文：Provider 已返回，但 txid 与本地原始交易不一致。它不是“未派发”，
